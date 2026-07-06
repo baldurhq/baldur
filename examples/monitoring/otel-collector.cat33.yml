@@ -1,0 +1,85 @@
+# Metrics-only OpenTelemetry Collector for the Cat 3.3-OTEL scenario.
+#
+# Scope: this scenario validates OTEL-BACKEND metric accuracy through the live
+# collector -> Mimir leg. It deliberately omits the trace/log/tail-sampling
+# pipelines of examples/monitoring/otel-collector.yml — only metrics matter
+# here, so the stack stays light (collector + Mimir, no Tempo/Loki).
+#
+# Metric path under test (see docs/runbooks/observability-stack-setup.md
+# "Known boundary — metrics are scrape-only"): even on the otel_collector
+# profile, Baldur exposes metrics via the shared prometheus_client REGISTRY at
+# /api/baldur/prometheus/. The collector's PROMETHEUS RECEIVER scrapes that
+# exposition (pull) and the prometheusremotewrite exporter forwards the series
+# to Mimir. There is no OTLP metric push. The OTLP receiver below exists only
+# so the app's trace SDK (enabled by the otel_collector profile) has a sink and
+# does not spam connection-refused — trace spans are discarded to debug.
+
+receivers:
+  # Trace sink only — keeps the app's OTLP trace exporter quiet. Not asserted.
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+  # The metric path under test: scrape the scenario testbed django_app's
+  # Baldur prometheus exposition. 5s interval keeps the test observation
+  # window short (vs the 15s reference-stack interval).
+  #
+  # Target uses the `django-app` network ALIAS (no underscore), not the compose
+  # service name `django_app`: Django rejects a Host header containing an
+  # underscore with DisallowedHost (RFC 1034/1035, NOT bypassed by
+  # ALLOWED_HOSTS=["*"]), so a scrape against `django_app:8000` 400s. The alias
+  # is defined on the django_app service in docker-compose.cat33otel.yml.
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: 'baldur-testbed-django'
+          static_configs:
+            - targets: ['django-app:8000']
+          metrics_path: /api/baldur/prometheus/
+          scrape_interval: 5s
+          scrape_timeout: 4s
+
+processors:
+  memory_limiter:
+    limit_mib: 256
+    check_interval: 1s
+    spike_limit_mib: 64
+  batch:
+    send_batch_size: 1000
+    timeout: 2s
+
+exporters:
+  prometheusremotewrite:
+    endpoint: http://mimir:9009/api/v1/push
+    headers:
+      X-Scope-OrgID: anonymous
+    tls:
+      insecure: true
+    # Preserve resource attributes as series labels so the scraped Baldur
+    # series reach Mimir under their original metric/label identity.
+    resource_to_telemetry_conversion:
+      enabled: true
+
+  debug:
+    verbosity: basic
+
+service:
+  pipelines:
+    metrics:
+      receivers: [prometheus]
+      processors: [memory_limiter, batch]
+      exporters: [prometheusremotewrite, debug]
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug]
+    # Logs sink — the app's OTLP log exporter (enabled by the otel_collector
+    # profile) pushes here; discarded to debug. Without this pipeline the
+    # collector returns UNIMPLEMENTED and the app logs a recurring export error.
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug]

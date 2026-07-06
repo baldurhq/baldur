@@ -1,0 +1,31 @@
+# Redis Sentinel config template — used by docker-compose.test.yml.
+#
+# Each sentinel container's startup script substitutes
+# __SENTINEL_ANNOUNCE_PORT__ with its host-mapped port (26379/26380/26381)
+# and writes the result to /tmp/sentinel.conf before starting redis-sentinel.
+#
+# Topology:
+#   - Master at host.docker.internal:16380 (port-mapped from redis-master:6379)
+#   - Replica at host.docker.internal:16381 (port-mapped from redis-replica:6379)
+#   - Quorum = 2 of 3 sentinels for failover decisions
+#
+# Tuned for fast test failover:
+#   down-after-milliseconds 2000  (default 30000)
+#   failover-timeout 5000         (default 180000)
+
+port 26379
+
+# Allow sentinel monitor / announce-ip to use hostnames instead of literal IPs.
+# Required because we use host.docker.internal which is a hostname.
+sentinel resolve-hostnames yes
+sentinel announce-hostnames yes
+
+sentinel monitor mymaster host.docker.internal 16380 2
+sentinel down-after-milliseconds mymaster 2000
+sentinel failover-timeout mymaster 5000
+sentinel parallel-syncs mymaster 1
+
+# Announce so other sentinels and external clients can reach this sentinel
+# from outside the docker network.
+sentinel announce-ip host.docker.internal
+sentinel announce-port __SENTINEL_ANNOUNCE_PORT__

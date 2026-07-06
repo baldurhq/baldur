@@ -1,0 +1,1 @@
+"""Session adapter package."""

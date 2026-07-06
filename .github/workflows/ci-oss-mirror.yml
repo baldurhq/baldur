@@ -1,0 +1,46 @@
+name: OSS Mirror CI
+
+# Route B (monorepo): workflow_dispatch only — this file must NEVER auto-run on
+# the private repo's billed Actions. publish_mirror.sh rewrites the trigger to
+# push + pull_request when projecting to the PUBLIC mirror, where Actions are
+# free. The mirror is the only environment where the OSS suite runs with the PRO
+# tier absent, so it catches OSS-standalone breakage (e.g. a test that only
+# passes because a PRO provider registration leaked into the session) that the
+# pro-installed monorepo runs structurally cannot see.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      # Mirrors the monorepo ci.yml unit-test lane's proven install: [dev] pulls
+      # the pytest plugins the root pytest.ini addopts require (timeout, xdist,
+      # rerunfailures, django, asyncio, mock); Django + Celery are pinned
+      # explicitly because they are framework extras, not dev deps.
+      - name: Install baldur (OSS) + test deps
+        run: |
+          pip install -e ".[dev,prometheus]"
+          pip install "django==5.2.*" "celery==5.4.*"
+      # The OSS unit + architecture suites. tests/ is renamed to tests/ in
+      # the published mirror, so the paths here are the post-rename ones. The
+      # PRO-render architecture gates auto-skip without the PRO package present.
+      # -n auto: parallelize across runner cores (pytest-xdist comes with [dev]).
+      # The serial default did not fit the job timeout for the OSS suite; the
+      # monorepo ci.yml lane runs parallel too.
+      - name: Run OSS unit + architecture suites (PRO tier absent)
+        run: pytest tests/unit/ tests/architecture/ -n auto --reruns 1 --reruns-delay 2
+        env:
+          DJANGO_SETTINGS_MODULE: tests.testapp.settings

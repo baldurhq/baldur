@@ -1,0 +1,27 @@
+# Service Wiring Allowlist
+# Services listed here are intentionally unwired and will not trigger CI failure.
+# Every entry MUST include a reason and ticket reference.
+
+allowlist:
+  # Host app defines saga workflows; library provides orchestration infrastructure only
+  - name: saga
+    reason: "Saga Definition은 호스트 앱에서 등록. 라이브러리는 오케스트레이션 인프라만 제공."
+    ticket: "317"
+
+  # Multi-Region only — inactive in single-region deployments
+  - name: isolation
+    reason: "Regional Isolation은 Multi-Region 배포 시에만 활성화."
+    ticket: "317"
+    condition: "BALDUR_MULTIREGION_ENABLED=True일 때만 검증"
+
+  # Test-only service — invoked from load test views, not from baldur entrypoints
+  - name: stress_test_service
+    reason: "DB Connection Pool 스트레스 테스트 전용. 프로덕션 미사용."
+    ticket: "318"
+
+# On-demand tasks — not registered in Celery Beat (invoked via .delay()/.apply_async())
+on_demand_tasks:
+  - name: "baldur.runbook.resume_pipeline"
+    reason: "Runbook 실행 재개 — 사용자 요청 시에만 호출"
+  - name: "baldur.saga.*"
+    reason: "Saga 오케스트레이션 — 워크플로우 진행 시에만 호출"

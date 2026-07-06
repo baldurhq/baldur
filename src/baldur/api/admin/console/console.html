@@ -1,0 +1,2576 @@
+<!DOCTYPE html>
+<!--
+  Baldur Admin Web Console (impl doc 536).
+
+  Self-contained: inline <style> and <script> only — no third-party scripts,
+  no external assets (429 zero-new-runtime-dependency constraint). Served by
+  the stdlib admin server at GET /. The handler (console/handler.py) substitutes
+  three per-request placeholders before serving:
+    - the v1.0 PRO panel-visibility map (D8/D9), into window.__BALDUR_PANELS__
+    - the non-gating entitlement status string (D8)
+    - the per-request CSP nonce on every <script> tag (D12)
+
+  All API JSON is rendered with textContent (never innerHTML) — DOM-XSS safe.
+  A global error boundary keeps one panel's failure from blanking the console.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Baldur Admin Console</title>
+  <style>
+    :root {
+      /* Instrument principle (v5): achromatic chrome, state-only color, dawn
+         brand micro-marks. Hue is reserved for state severity + the three dawn
+         marks (wordmark tick, :focus-visible ring, PRO badge). */
+      --ink: #0b0d10; --ink2: #14171c; --ink3: #1b1f26; --line: #252a33;
+      --bone: #e7eaee; --ash: #97a0ab; --ash2: #76808e;
+      --dawn: #e8a33d;
+      --ember: #f4584f; --moss: #5fd085; --amber: #f3cb4d;
+      --ember-tint: rgba(244,88,79,.12); --moss-tint: rgba(95,208,133,.10);
+      --amber-tint: rgba(243,203,77,.10);
+      --mono: ui-monospace, "Cascadia Code", "SF Mono", Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--ink); color: var(--bone);
+      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    header {
+      display: flex; align-items: center; gap: 16px; padding: 12px 20px;
+      background: var(--ink2); border-bottom: 1px solid var(--line);
+      position: sticky; top: 0; z-index: 10;
+    }
+    header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+    /* Wordmark: "Baldur" + 8px dawn square tick + secondary "Admin Console". */
+    .wordmark { display: flex; align-items: center; gap: 8px; }
+    .wordmark b { font-weight: 700; color: var(--bone); }
+    .wordmark .tick { width: 8px; height: 8px; background: var(--dawn); border-radius: 1px; }
+    .wordmark .wm-sub { font-weight: 400; font-size: 13px; color: var(--ash); }
+    header .spacer { flex: 1; }
+    .key-entry { display: flex; align-items: center; gap: 6px; }
+    .key-entry input {
+      background: var(--ink); border: 1px solid var(--line); color: var(--bone);
+      border-radius: 6px; padding: 6px 10px; width: 220px; font: inherit;
+    }
+    /* Buttons are the outline family: transparent + hairline border, hue only on
+       recover (moss) / destructive (ember). The modal Confirm is the one fill —
+       the dialog's primary affordance must dominate Cancel without spending hue. */
+    button {
+      background: transparent; color: var(--bone); border: 1px solid var(--line);
+      border-radius: 6px; padding: 6px 12px; font: inherit; cursor: pointer;
+    }
+    button:hover { background: var(--ink3); }
+    button.danger { color: var(--ember); border-color: rgba(244,88,79,.4); }
+    button.danger:hover { background: var(--ember-tint); }
+    button.primary {
+      background: var(--bone); color: var(--ink); border-color: var(--bone);
+      font-weight: 600;
+    }
+    button.primary:hover { background: var(--bone); filter: brightness(0.9); }
+    /* One global focus locator (dawn mark #2): visible on every focusable
+       element, not just the spine chips. */
+    :focus-visible { outline: 2px solid var(--dawn); outline-offset: 2px; }
+    #banner {
+      display: none; padding: 8px 20px; background: var(--amber-tint); color: var(--amber);
+      border-bottom: 1px solid var(--line); font-size: 13px;
+    }
+    #grid {
+      display: grid; gap: 16px; padding: 20px;
+      /* Fixed column count per width band (not auto-fill): the count is constant
+         within each band, so panel wrapping is deterministic and the wide
+         (span-2) panels tile with no empty cell. Bands are the natural 320px-min
+         column thresholds: 4 cols need 4*320 + 3*16 gap + 2*20 pad = 1368px. */
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    @media (min-width: 1040px) { #grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+    @media (min-width: 1368px) {
+      #grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+      /* DLQ + Canary always occupy two columns at full width, so their position
+         never shifts when a backlog / rollout appears. The PANELS order places
+         them at a row end (dashboard / cb·system·DLQ / emrg·bulkhead·canary) so
+         the second column tiles cleanly. span-2 lives only in the 4-col band;
+         at 3/2/1 cols they fall back to one column (tables scroll horizontally). */
+      #grid .panel[data-panel-id="dlq"],
+      #grid .panel[data-panel-id="canary"] { grid-column: span 2; }
+    }
+    @media (max-width: 719px) { #grid { grid-template-columns: minmax(0, 1fr); } }
+    .panel {
+      background: var(--ink2); border: 1px solid var(--line);
+      border-radius: 10px; overflow: hidden; display: flex; flex-direction: column;
+    }
+    .panel-head {
+      display: flex; align-items: center; gap: 8px; padding: 10px 14px;
+      border-bottom: 1px solid var(--line);
+    }
+    .panel-head h2 { font-size: 14px; margin: 0; font-weight: 600; flex: 1; }
+    /* Neutral chip: achromatic by default (color-budget rule a). A severity
+       class adds state color + a CSS-drawn glyph; warn/danger additionally get
+       the lit-chip tint. Booleans / non-status tokens stay quiet ash. */
+    .tag {
+      font-size: 11px; padding: 1px 7px; border-radius: 10px;
+      background: transparent; color: var(--ash); border: 1px solid var(--line);
+      text-transform: uppercase;
+      /* Status badges must never break mid-word (e.g. a table cell with
+         overflow-wrap:anywhere would otherwise split "PENDING"). */
+      white-space: nowrap;
+    }
+    /* PRO tier badge: dawn outline (brand mark #3), OSS badge removed. */
+    .tag.pro    { color: var(--dawn); border-color: rgba(232,163,61,.45); }
+    .tag.ok     { color: var(--moss); }
+    .tag.warn   { color: var(--amber); background: var(--amber-tint); border-color: rgba(243,203,77,.3); }
+    .tag.danger { color: var(--ember); background: var(--ember-tint); border-color: rgba(244,88,79,.3); }
+    /* State = color + shape: 9px glyph — filled dot (ok), half (warn), hollow
+       ring (danger) — so severity survives colorblindness. */
+    .tag.ok::before, .tag.warn::before, .tag.danger::before {
+      content: ""; display: inline-block; width: 9px; height: 9px;
+      border-radius: 50%; margin-right: 5px; vertical-align: -1px;
+    }
+    .tag.ok::before     { background: currentColor; }
+    .tag.warn::before   { background: linear-gradient(90deg, currentColor 0 50%, transparent 50%); }
+    .tag.danger::before { border: 2px solid currentColor; }
+    .panel-body { padding: 12px 14px; }
+    pre {
+      margin: 0; max-height: 240px; overflow: auto; font-size: 12px;
+      color: var(--ash); white-space: pre-wrap; word-break: break-word;
+    }
+    /* Structured key-value render (D1) — reuses the scrollable pre container. */
+    .kv-row { display: flex; gap: 8px; align-items: baseline; padding: 1px 0; }
+    .kv-key { color: var(--ash); flex-shrink: 0; }
+    .kv-val { color: var(--bone); word-break: break-word; }
+    /* Null-field collapse: an object's null-valued fields fold to one clamped
+       "not set — a · b (+N more)" line (single-line ellipsis, click to expand
+       into individual rows). Deflates the null noise + panel-height variance. */
+    .null-clamp {
+      display: block; max-width: 100%; padding: 1px 0; border: none;
+      background: transparent; color: var(--ash2); font: inherit; text-align: left;
+      cursor: pointer;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .null-clamp:hover { color: var(--ash); background: transparent; }
+    .kv-null { color: var(--ash2); }
+    /* DLQ drill-down (D2/D3/D5). */
+    .panel-drilldown { padding: 10px 14px 12px; border-top: 1px solid var(--line); }
+    .drill-title { font-size: 12px; color: var(--ash); margin-bottom: 6px; }
+    table.dlq-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    table.dlq-table th {
+      text-align: left; color: var(--ash); font-weight: 600; padding: 4px 6px;
+    }
+    table.dlq-table td {
+      padding: 4px 6px; border-top: 1px solid var(--line);
+      /* Break long unbreakable ids (Redis composite host:pid:hash:N) so the
+         cell wraps instead of widening the table past the panel and clipping
+         the right-hand columns. */
+      overflow-wrap: anywhere;
+    }
+    tr.dlq-row { cursor: pointer; }
+    tr.dlq-row:hover { background: var(--ink3); }
+    .dlq-pager { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+    .dlq-pager button:disabled { opacity: 0.4; cursor: default; }
+    .dlq-detail { margin-top: 12px; }
+    /* Bounded, internally-scrollable list box — a list (DLQ entries, canary
+       active rollouts, canary/DLQ history) can accumulate many rows, and a
+       wrapped long id makes each row multi-line, so cap the height and scroll
+       inside instead of growing the panel off the bottom of the page (mirrors
+       the pre max-height pattern). Wraps the table only; a pager, if any, stays
+       outside so it remains visible. */
+    .list-scroll { max-height: 260px; overflow-y: auto; }
+    .dlq-detail-head {
+      display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+      margin-bottom: 6px;
+    }
+    /* DLQ filter row (#540 follow-up). */
+    .dlq-filter { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; }
+    .dlq-filter select, .dlq-filter input {
+      background: var(--ink); border: 1px solid var(--line); color: var(--bone);
+      border-radius: 6px; padding: 4px 8px; font: inherit; font-size: 12px;
+    }
+    .dlq-filter input { width: 130px; }
+    /* Per-panel freshness + header auto-refresh toggle. */
+    .updated { font-size: 11px; color: var(--ash); }
+    .autorefresh {
+      display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--ash);
+    }
+    .panel-actions {
+      display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 14px;
+      border-top: 1px solid var(--line);
+    }
+    .notice { color: var(--ember); font-size: 12px; }
+    .spinner { color: var(--ash); font-size: 12px; }
+    /* Modal */
+    #overlay {
+      display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+      align-items: center; justify-content: center; z-index: 100;
+    }
+    #modal {
+      background: var(--ink2); border: 1px solid var(--line);
+      border-radius: 12px; padding: 20px; width: 420px; max-width: 92vw;
+    }
+    #modal h3 { margin: 0 0 10px; font-size: 15px; }
+    #modal p { color: var(--ash); font-size: 13px; }
+    #modal .unlock-hint, #modal .action-warn {
+      background: var(--amber-tint); color: var(--amber); padding: 8px 10px;
+      border-radius: 6px; font-size: 12px; margin: 10px 0;
+    }
+    #modal input, #modal textarea, #modal select {
+      width: 100%; background: var(--ink); border: 1px solid var(--line);
+      color: var(--bone); border-radius: 6px; padding: 8px; font: inherit;
+      margin: 6px 0;
+    }
+    #modal textarea { min-height: 70px; font-family: monospace; font-size: 12px; }
+    /* Structured body-field form (bodyFields): a persistent label + help line
+       per field so the explanation stays visible while typing, plus enum
+       <select>s that prevent mistyped levels. */
+    #modal .field-label { color: var(--bone); font-size: 13px; margin: 10px 0 2px; }
+    #modal .field-help { color: var(--ash); font-size: 12px; margin: 0; }
+    #modal .field-check {
+      display: flex; align-items: center; gap: 6px;
+      color: var(--bone); font-size: 13px; margin: 8px 0;
+    }
+    #modal .field-check input { width: auto; margin: 0; }
+    #modal .modal-actions {
+      display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px;
+    }
+    #modal .modal-result { font-size: 12px; margin-top: 10px; white-space: pre-wrap; }
+
+    /* ===== Triage redesign: status spine + per-panel health weighting ===== */
+    body { font-feature-settings: "tnum" 1; }
+
+    /* Status spine: one aggregate health bar under the header. */
+    .spine {
+      display: flex; align-items: center; gap: 18px; padding: 16px 20px;
+      border-bottom: 1px solid var(--line); background: var(--ink2);
+    }
+    .spine.state-ok     { background: linear-gradient(180deg, var(--moss-tint), transparent); }
+    .spine.state-warn   { background: linear-gradient(180deg, var(--amber-tint), transparent); }
+    .spine.state-danger { background: linear-gradient(180deg, var(--ember-tint), transparent); }
+    .spine-led {
+      width: 16px; height: 16px; border-radius: 50%; flex: 0 0 auto;
+      box-shadow: 0 0 0 4px rgba(255,255,255,.04);
+    }
+    .state-ok     .spine-led { background: var(--moss); }
+    .state-warn   .spine-led { background: var(--amber); }
+    .state-danger .spine-led { background: var(--ember); animation: spine-pulse 1.3s ease-in-out infinite; }
+    @keyframes spine-pulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(244,88,79,.55); }
+      50%      { box-shadow: 0 0 0 10px rgba(244,88,79,0); }
+    }
+    @media (prefers-reduced-motion: reduce) { .state-danger .spine-led { animation: none; } }
+    .spine-main  { display: flex; flex-direction: column; gap: 3px; }
+    .spine-state { font: 600 19px/1 var(--mono); letter-spacing: .07em; }
+    .state-ok     .spine-state { color: var(--moss); }
+    .state-warn   .spine-state { color: var(--amber); }
+    .state-danger .spine-state { color: var(--ember); }
+    .spine-sub   { font-size: 12px; color: var(--ash); }
+    .spine-chips { display: flex; gap: 8px; flex-wrap: wrap; margin-left: auto; }
+    .spine-chip  {
+      cursor: pointer; font: 12px/1 var(--mono); padding: 6px 11px; border-radius: 8px;
+      border: 1px solid var(--line); background: var(--ink); color: var(--bone);
+      display: flex; gap: 7px; align-items: center;
+    }
+    .spine-chip .dot   { width: 7px; height: 7px; border-radius: 50%; }
+    .spine-chip.danger { border-color: rgba(244,88,79,.4); }
+    .spine-chip.danger .dot { background: transparent; border: 2px solid var(--ember); }
+    .spine-chip.warn .dot   { background: linear-gradient(90deg, var(--amber) 0 50%, transparent 50%); }
+    .spine-chip:hover  { border-color: var(--ash); }
+
+    /* Panel health weighting: trouble is marked with an inset stripe + a header
+       tint; calm panels stay fully legible (no opacity dimming — that is
+       legibility loss, not attention routing). */
+    #grid .panel[data-health="warn"]     { box-shadow: inset 4px 0 0 var(--amber); }
+    #grid .panel[data-health="warn"] .panel-head   { background: linear-gradient(90deg, var(--amber-tint), transparent); }
+    #grid .panel[data-health="danger"]   { box-shadow: inset 4px 0 0 var(--ember); border-color: rgba(244,88,79,.4); }
+    #grid .panel[data-health="danger"] .panel-head { background: linear-gradient(90deg, var(--ember-tint), transparent); }
+    .panel.flash { outline: 2px solid var(--dawn); outline-offset: 2px; }
+
+    /* Dashboard hero: full-width at-a-glance readout. */
+    #grid .panel.hero { grid-column: 1 / -1; opacity: 1; }
+    .hero-top  { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+    .hero-pill {
+      font: 600 12px/1 var(--mono); letter-spacing: .09em; padding: 7px 13px;
+      border-radius: 20px; text-transform: uppercase;
+    }
+    .hero-pill.ok     { background: var(--moss-tint);  color: var(--moss); }
+    .hero-pill.warn   { background: var(--amber-tint); color: var(--amber); }
+    .hero-pill.danger { background: var(--ember-tint); color: var(--ember); }
+    .hero-pill.ok::before, .hero-pill.warn::before, .hero-pill.danger::before {
+      content: ""; display: inline-block; width: 9px; height: 9px;
+      border-radius: 50%; margin-right: 7px; vertical-align: -1px;
+    }
+    .hero-pill.ok::before     { background: currentColor; }
+    .hero-pill.warn::before   { background: linear-gradient(90deg, currentColor 0 50%, transparent 50%); }
+    .hero-pill.danger::before { border: 2px solid currentColor; }
+    .hero-ts   { font: 11px/1 var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--ash); }
+    .hero-tiles{ display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; }
+    .tile { background: var(--ink); border: 1px solid var(--line); border-radius: 9px; padding: 13px 15px; }
+    .tile .lbl { font: 600 10px/1 var(--mono); letter-spacing: .13em; text-transform: uppercase; color: var(--ash2); }
+    .tile .num { font: 600 30px/1.1 var(--mono); margin-top: 9px; color: var(--bone); }
+    .tile.warn .num   { color: var(--amber); }
+    .tile.danger .num { color: var(--ember); }
+    .tile.ok .num     { color: var(--moss); }
+    .tile .sub { font-size: 11px; color: var(--ash); margin-top: 4px; }
+    .hero-foot { margin-top: 13px; font: 12px/1.4 var(--mono); color: var(--ash); }
+    .hero-foot b { color: var(--bone); font-weight: 600; }
+
+    /* Circuit Breakers: per-service rows. The fails count is the panel's most
+       operationally important number — promote it (bold primary), and fix the
+       state-chip column width so chips align across rows. */
+    .cb-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid var(--line); }
+    .cb-row:first-child { border-top: none; }
+    .cb-name  { font: 13px/1 var(--mono); color: var(--bone); flex: 1; }
+    .cb-right { display: flex; align-items: center; gap: 12px; margin-left: auto; }
+    .cb-fail  { font: 13px/1 var(--mono); color: var(--ash); }
+    .cb-fail b { font-size: 14px; font-weight: 600; color: var(--bone); }
+    .cb-right .tag { display: inline-block; min-width: 74px; text-align: center; }
+
+    /* DLQ stats: mini tiles per status. */
+    .mini-tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+    .mini-tile { background: var(--ink); border: 1px solid var(--line); border-radius: 7px; padding: 8px 10px; }
+    .mini-tile .lbl  { font: 600 9px/1 var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--ash2); }
+    .mini-tile .mnum { font: 600 20px/1.1 var(--mono); margin-top: 6px; color: var(--bone); }
+    .mini-tile.warn .mnum   { color: var(--amber); }
+    .mini-tile.danger .mnum { color: var(--ember); }
+    .mini-tile.ok .mnum     { color: var(--moss); }
+    .dlq-rec { margin-top: 9px; font: 11px/1 var(--mono); color: var(--ash); }
+    .dlq-armed { margin-top: 9px; display: flex; align-items: center;
+      flex-wrap: wrap; gap: 6px; }
+    .dlq-armed-more { font: 11px/1.4 var(--mono); color: var(--ash); }
+
+    /* Action buttons colored by consequence (moss = recover, ember = destructive
+       reserved, neutral = routine) — outline family, tint fill on hover.
+       Permission gating (typed-confirm) is separate. */
+    .panel-actions button.btn-recover { color: var(--moss); border-color: rgba(95,208,133,.4); }
+    .panel-actions button.btn-recover:hover { background: var(--moss-tint); }
+    .panel-actions button.btn-danger  { color: var(--ember); border-color: rgba(244,88,79,.4); }
+    .panel-actions button.btn-danger:hover { background: var(--ember-tint); }
+
+    /* Tables (DLQ + Canary share .dlq-table): keep code-like ids on one line and
+       scroll the bounded list box horizontally instead of stacking them. */
+    table.dlq-table td { white-space: nowrap; overflow-wrap: normal; }
+    table.dlq-table td:first-child { font-family: var(--mono); }
+    .list-scroll { overflow-x: auto; }
+    /* The DLQ + Canary span-2 width rule lives with the #grid band definitions
+       above (it applies only in the 4-col band). It is unconditional there — the
+       panels hold a fixed two-column slot whether or not they currently have a
+       backlog / rollout, so their position is stable as content comes and goes. */
+  </style>
+</head>
+<body>
+  <header>
+    <h1 class="wordmark"><b>Baldur</b><span class="tick"></span><span class="wm-sub">Admin Console</span></h1>
+    <span class="spacer"></span>
+    <label class="autorefresh">
+      <input type="checkbox" id="autorefresh-toggle" /> Auto-refresh
+    </label>
+    <div class="key-entry">
+      <label for="admin-key" class="spinner">Admin key</label>
+      <input id="admin-key" type="password" autocomplete="off"
+             placeholder="paste key (non-localhost)" />
+      <button id="save-key">Save</button>
+    </div>
+  </header>
+
+  <div id="banner"></div>
+  <div id="grid"></div>
+
+  <div id="overlay">
+    <div id="modal" role="dialog" aria-modal="true">
+      <h3 id="modal-title"></h3>
+      <div id="modal-content"></div>
+      <div class="modal-actions">
+        <button id="modal-cancel">Cancel</button>
+        <button id="modal-confirm" class="primary">Confirm</button>
+      </div>
+      <div id="modal-result" class="modal-result"></div>
+    </div>
+  </div>
+
+  <!-- Server-injected bootstrap data (D8/D9/D12). -->
+  <script nonce="__BALDUR_CSP_NONCE__">
+    window.__BALDUR_PANELS__ = __BALDUR_PANELS_JSON__;
+    window.__BALDUR_ENTITLEMENT__ = "__BALDUR_ENTITLEMENT__";
+  </script>
+
+  <script nonce="__BALDUR_CSP_NONCE__">
+  "use strict";
+  // --- Global error boundary (D3) -----------------------------------------
+  // Safe DOM rendering stops XSS but not a TypeError from an unexpected data
+  // shape, which in vanilla JS can blank the whole page. Catch uncaught errors
+  // and rejections, show a non-fatal notice, and keep the rest interactive.
+  function showGlobalError(where, message) {
+    var banner = document.getElementById("banner");
+    banner.style.display = "block";
+    banner.textContent =
+      "Console internal error" + (where ? " (" + where + ")" : "") +
+      ": " + message + " — other panels remain usable.";
+  }
+  window.addEventListener("error", function (e) {
+    showGlobalError("", (e && e.message) || "script error");
+  });
+  window.addEventListener("unhandledrejection", function (e) {
+    var r = e && e.reason;
+    showGlobalError("", (r && r.message) || String(r) || "promise rejection");
+  });
+
+  // --- Key storage (D12) ---------------------------------------------------
+  var KEY_STORE = "baldur_admin_key";
+  function getKey() { return sessionStorage.getItem(KEY_STORE) || ""; }
+  function setKey(v) {
+    if (v) { sessionStorage.setItem(KEY_STORE, v); }
+    else { sessionStorage.removeItem(KEY_STORE); }
+  }
+
+  // --- Fetch with key + abort timeout (D11/D12) ----------------------------
+  // The console is used precisely when the system may be wedged, so every
+  // request carries an AbortController timeout — a stalled downstream would
+  // otherwise hang the browser indefinitely on the default fetch timeout.
+  var FETCH_TIMEOUT_MS = 5000;
+  function adminFetch(path, opts) {
+    opts = opts || {};
+    var controller = new AbortController();
+    var timer = setTimeout(function () { controller.abort(); }, FETCH_TIMEOUT_MS);
+    var headers = Object.assign({}, opts.headers || {});
+    var key = getKey();
+    if (key) { headers["X-Baldur-Admin-Key"] = key; }
+    return fetch(path, Object.assign({}, opts, {
+      headers: headers, signal: controller.signal
+    })).finally(function () { clearTimeout(timer); });
+  }
+
+  // --- Panel definitions ---------------------------------------------------
+  // pro:true panels are gated on window.__BALDUR_PANELS__[id] (registry
+  // presence). Action risk mirrors the server route's permission level (D10):
+  //   risk "operator" -> simple confirm; risk "admin" -> typed confirmation
+  //   + BALDUR_ADMIN_UNLOCK=1 hint.
+  var PANELS = [
+    { id: "dashboard", title: "Dashboard", pro: false,
+      status: "/dashboard/summary", bodyRender: "dashboard" },
+    { id: "circuit_breaker", title: "Circuit Breakers", pro: false,
+      status: "/control/status", bodyRender: "circuit_breaker",
+      actions: [
+        { label: "Reset breaker", path: "/control/reset/{service_name}",
+          method: "POST", risk: "admin", param: "service_name" },
+        { label: "Block (force open)", path: "/control/block/{service_name}",
+          method: "POST", risk: "admin", param: "service_name",
+          bodyFields: [
+            { key: "reason", label: "Reason (optional)", type: "text",
+              placeholder: "why this breaker is being forced open",
+              help: "Recorded in the audit trail. Blank = a default note." },
+            { key: "ttl_minutes", label: "Auto-clear after (minutes, optional)",
+              type: "number", placeholder: "90",
+              help: "Block lifts automatically after N minutes. "
+                + "Blank = server default (90)." }
+          ] },
+        { label: "Allow (force closed)", path: "/control/allow/{service_name}",
+          method: "POST", risk: "admin", param: "service_name",
+          bodyFields: [
+            { key: "reason", label: "Reason (optional)", type: "text",
+              placeholder: "why traffic is being forced through despite failures",
+              help: "Recorded in the audit trail. Blank = a default note." }
+          ] }
+      ] },
+    { id: "system", title: "System Control", pro: false, status: "/system/status",
+      actions: [
+        { label: "Enable automation", path: "/system/enable", method: "POST",
+          risk: "admin" },
+        { label: "Disable (kill switch)", path: "/system/disable", method: "POST",
+          risk: "admin",
+          bodyField: { key: "reason", label: "Reason (required)", required: true,
+            placeholder: "why automation is being stopped "
+              + "(recorded in the audit trail)" } },
+        { label: "Dry-run: enable", path: "/system/dry-run/enable", method: "POST",
+          risk: "admin" },
+        { label: "Dry-run: disable", path: "/system/dry-run/disable",
+          method: "POST", risk: "admin", body: true,
+          bodyDefault: '{"confirm": true}' }
+      ] },
+    { id: "dlq", title: "Dead Letter Queue", pro: true, status: "/dlq/cleanup/stats",
+      bodyRender: "dlq_stats", drilldown: "dlq",
+      actions: [
+        { label: "Replay", path: "/dlq/replay", method: "POST", risk: "operator",
+          bodyField: { key: "reason", label: "Reason (optional)",
+            placeholder: "why this replay "
+              + "(recorded in the resolution note + audit trail; optional)" } },
+        { label: "Archive", path: "/dlq/cleanup/archive", method: "POST",
+          risk: "operator",
+          bodyFields: [
+            { key: "older_than_days",
+              label: "Archive resolved entries older than (days)",
+              type: "number", default: 30,
+              help: "Resolved entries older than this become ARCHIVED. "
+                + "Set 0 to archive all resolved entries now." }
+          ] },
+        { label: "Purge", path: "/dlq/cleanup/purge", method: "POST",
+          risk: "admin",
+          bodyFields: [
+            { key: "confirm", label: "Confirm permanent deletion",
+              type: "checkbox", default: true,
+              caption: "Yes - permanently delete archived entries (irreversible)" },
+            { key: "older_than_days", label: "Purge archived older than (days)",
+              type: "number", default: 90,
+              help: "Deletes ARCHIVED entries resolved more than N days ago "
+                + "(0 = purge all archived now). Ignored when IDs are given below." },
+            { key: "ids", label: "Or exact entry IDs (comma-separated)",
+              type: "text", placeholder: "host:pid:hash:0, host:pid:hash:1",
+              help: "Deletes these specific archived entries. "
+                + "Overrides the age filter above." }
+          ] }
+      ] },
+    { id: "emergency", title: "Emergency", pro: true, status: "/emergency/status",
+      actions: [
+        { label: "Trigger", path: "/emergency/trigger", method: "POST",
+          risk: "admin",
+          bodyFields: [
+            { key: "level", label: "Level", type: "select", default: "LEVEL_3",
+              help: "Severity. L1 blocks non-essential, L2 throttles standard "
+                + "to 10%, L3 caps critical at 50%.",
+              options: [
+                { value: "LEVEL_1", label: "LEVEL_1 — minor (non-essential blocked)" },
+                { value: "LEVEL_2", label: "LEVEL_2 — moderate (standard at 10%)" },
+                { value: "LEVEL_3", label: "LEVEL_3 — severe (critical at 50%)" }
+              ] },
+            { key: "reason", label: "Reason (required)", type: "text", required: true,
+              placeholder: "e.g. payment gateway outage",
+              help: "Recorded in the audit trail." },
+            { key: "duration_minutes", label: "Duration (minutes, optional)",
+              type: "number", placeholder: "30",
+              help: "Auto-release after N minutes. Blank = stays until manual release." },
+            { key: "override_kill_switch", label: "Override kill switch",
+              type: "checkbox",
+              caption: "Activate even while the kill switch is engaged",
+              help: "Leave off unless you intend to bypass the global kill switch." }
+          ] },
+        { label: "Release", path: "/emergency/release", method: "POST",
+          risk: "admin",
+          bodyFields: [
+            { key: "reason", label: "Reason (optional)", type: "text",
+              placeholder: "why emergency is being lifted",
+              help: "Recorded in the audit trail." },
+            { key: "force", label: "Force release", type: "checkbox",
+              caption: "Bypass the recovery gate",
+              help: "If recovery rules block the release, force it through. Use with care." }
+          ] },
+        { label: "Gradual recovery", path: "/emergency/gradual-recovery",
+          method: "POST", risk: "admin",
+          bodyFields: [
+            { key: "target_level", label: "Target level", type: "select",
+              default: "NORMAL",
+              help: "Ramp traffic back up toward this level in stages instead of "
+                + "all at once (requires an active emergency).",
+              options: [
+                { value: "NORMAL", label: "NORMAL — full recovery (all traffic restored)" },
+                { value: "LEVEL_1", label: "LEVEL_1 — partial: standard restored, non-essential stays blocked" },
+                { value: "LEVEL_2", label: "LEVEL_2 — partial: standard still at 10%, non-essential blocked" }
+              ] }
+          ] },
+        { label: "Stop recovery", path: "/emergency/stop-recovery",
+          method: "POST", risk: "admin",
+          bodyFields: [
+            { key: "reason", label: "Reason (optional)", type: "text",
+              placeholder: "why recovery is being halted",
+              help: "Recorded in the audit trail." }
+          ] }
+      ] },
+    { id: "bulkhead", title: "Bulkheads", pro: true, status: "/bulkheads" },
+    { id: "canary", title: "Canary Rollouts", pro: true,
+      status: "/canary/rollouts?include_completed=true", bodyRender: "canary_summary",
+      drilldown: "canary",
+      actions: [
+        // create reads a nested payload (config_type + new_values + stages[]);
+        // the bodyDefault opens a complete, valid, copy-paste-ready template so
+        // the raw-JSON body modal is the whole form. config_type must be a real
+        // runtime-config domain slug (retry, circuit_breaker, dlq, ...) and each
+        // new_values key a field of that domain — the create handler rejects an
+        // unknown type/field (or an empty config_type / new_values / stages)
+        // with a 400. A started/promoted rollout applies these values through
+        // the runtime-config manager (the same surface as a console config
+        // edit), and rollback restores the pre-rollout values. All canary routes
+        // are server-side ADMIN (recovery.py), so every control is risk:"admin".
+        { label: "Create rollout", path: "/canary/rollouts", method: "POST",
+          risk: "admin", body: true,
+          bodyDefault: JSON.stringify({
+            config_type: "retry",
+            new_values: { max_attempts: 5 },
+            stages: [
+              { name: "canary-10pct", clusters: ["cluster-a"], percentage: 10,
+                duration_minutes: 5, auto_promote: false }
+            ]
+          }, null, 2) },
+        // panic-rollback is a GLOBAL kill-switch — it reverts EVERY active
+        // rollout, not one (canary.py loops get_active_rollouts). The label
+        // states the ALL-active scope so the operator understands it before
+        // typing CONFIRM (the generic admin modal shows only static copy) (D2/#6).
+        { label: "Panic rollback — reverts ALL active canary rollouts",
+          path: "/canary/panic-rollback", method: "POST", risk: "admin",
+          body: true, bodyDefault: '{"reason": "", "emergency_code": ""}' }
+      ] },
+    { id: "throttle", title: "Throttle", pro: true,
+      status: "/throttle/status" },
+    { id: "governance", title: "Governance", pro: true,
+      status: "/governance/approvals" },
+    { id: "meta_watchdog", title: "Meta-Watchdog", pro: true,
+      status: "/meta-watchdog/status", bodyRender: "meta_watchdog",
+      actions: [
+        { label: "Force check", path: "/meta-watchdog/force-check",
+          method: "POST", risk: "operator" },
+        { label: "Escalation test", path: "/meta-watchdog/escalation-test",
+          method: "POST", risk: "operator",
+          warn: "This sends a REAL notification to all configured "
+            + "Slack/PagerDuty channels." }
+      ] },
+    // Runtime Config editor (662). PRO-only (gated on runtime_config_manager).
+    // status + the Reset action both stay under /config so the panel's status
+    // domain == action domain (G44). All per-section editing happens in the
+    // drilldown (PUT /config/{slug}); the panel-level action is global reset.
+    { id: "runtime_config", title: "Runtime Config", pro: true,
+      status: "/config/editable", bodyRender: "runtime_config",
+      drilldown: "runtime_config",
+      actions: [
+        { label: "Reset all to defaults", path: "/config/reset",
+          method: "POST", risk: "admin" }
+      ] }
+  ];
+
+  function panelVisible(p) {
+    if (!p.pro) { return true; }
+    var map = window.__BALDUR_PANELS__ || {};
+    return map[p.id] === true;
+  }
+
+  // --- Rendering helpers (safe DOM only — D3) ------------------------------
+  function el(tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls) { e.className = cls; }
+    if (text != null) { e.textContent = text; }  // textContent: never parses HTML
+    return e;
+  }
+
+  // --- Relative-time formatting (#540 follow-up) ---------------------------
+  // Operator-friendly "just now / 5s / 3m / 2h / 1d ago"; the raw ISO stays
+  // available via a title attribute where used (no precision lost).
+  function relAgo(tMs) {
+    var s = Math.max(0, Math.floor((Date.now() - tMs) / 1000));
+    if (s < 5) { return "just now"; }
+    if (s < 60) { return s + "s ago"; }
+    var m = Math.floor(s / 60);
+    if (m < 60) { return m + "m ago"; }
+    var h = Math.floor(m / 60);
+    if (h < 24) { return h + "h ago"; }
+    return Math.floor(h / 24) + "d ago";
+  }
+  function relAgoIso(iso) {
+    if (!iso) { return ""; }
+    var t = Date.parse(iso);
+    return isNaN(t) ? String(iso) : relAgo(t);
+  }
+
+  // --- Structured render (D1) ----------------------------------------------
+  // Replaces the raw JSON.stringify dump with scannable key->value rows. Status
+  // coloring is conservative and value-driven: only a recognized status token
+  // becomes an ok/warn/danger badge, so arbitrary strings never get a
+  // misleading color. Booleans render as a neutral tag (can_purge:true is not
+  // semantically "good"). Nesting recurses until MAX_RENDER_DEPTH, beyond which
+  // a value collapses to a compact JSON leaf — bounds DOM/recursion against
+  // arbitrary nested user payloads (DLQ snapshot_data/request_data/etc.).
+  var MAX_RENDER_DEPTH = 4;
+  var SEVERITY_TOKENS = {
+    danger: ["open", "unhealthy", "down", "error", "failed", "failure",
+             "critical", "rejected", "unavailable", "permanently_failed"],
+    warn: ["half_open", "degraded", "warning", "warn", "requires_review",
+           "reviewing", "replaying", "expired"],
+    ok: ["closed", "healthy", "ok", "up", "success", "succeeded", "resolved",
+         "replayed", "active", "enabled", "ready"]
+  };
+  function severityOf(value) {
+    if (typeof value !== "string") { return null; }
+    var v = value.toLowerCase();
+    if (SEVERITY_TOKENS.danger.indexOf(v) !== -1) { return "danger"; }
+    if (SEVERITY_TOKENS.warn.indexOf(v) !== -1) { return "warn"; }
+    if (SEVERITY_TOKENS.ok.indexOf(v) !== -1) { return "ok"; }
+    return null;
+  }
+
+  function renderLeaf(value) {
+    if (value !== null && typeof value === "object") {
+      // Over the depth cap (or an empty container): compact JSON leaf.
+      return el("span", "kv-val", JSON.stringify(value));
+    }
+    if (typeof value === "boolean") {
+      return el("span", "tag", value ? "true" : "false");  // neutral, no severity
+    }
+    var sev = severityOf(value);
+    if (sev) { return el("span", "tag " + sev, String(value)); }
+    return el("span", "kv-val", value === null ? "null" : String(value));
+  }
+
+  // Null-field collapse (D4): an object's null-valued fields fold to ONE clamp
+  // row — "not set — a · b (+N more)" — instead of one "null" row each, so
+  // System Control's 7 null fields don't read as noise (and panel height stops
+  // varying with the null count).
+  function nullClampText(nullKeys) {
+    // 1 null -> "not set — a"; 2 -> "not set — a · b"; 3+ appends "(+N more)".
+    // The tail is emitted only when N>0, so "(+0 more)" never renders.
+    var shown = nullKeys.slice(0, 2).join(" · ");
+    var extra = nullKeys.length - 2;
+    return "not set — " + shown + (extra > 0 ? " (+" + extra + " more)" : "");
+  }
+  // Expand state persists on the panel-body element (bodyEl._nullsOpen), keyed by
+  // object path, so a manual ↻ / 15s auto-refresh (which wipe bodyEl's children
+  // but keep the element) don't collapse a row the operator just expanded —
+  // same mechanism as the updatedEl._t freshness stamp.
+  function appendNullCollapse(container, depth, path, nullKeys, nullsOpen) {
+    var open = !!(nullsOpen && nullsOpen[path]);
+    var toggle = el("button", "null-clamp");   // a <button> -> gets the dawn focus ring
+    toggle.setAttribute("type", "button");
+    if (depth > 0) { toggle.style.paddingLeft = (depth * 14) + "px"; }
+    var expanded = el("div");
+    if (depth > 0) { expanded.style.paddingLeft = (depth * 14) + "px"; }
+    nullKeys.forEach(function (k) {
+      var r = el("div", "kv-row");
+      r.appendChild(el("span", "kv-key", k));
+      r.appendChild(el("span", "kv-val kv-null", "null"));
+      expanded.appendChild(r);
+    });
+    function sync() {
+      toggle.textContent = (open ? "▾ " : "▸ ") + nullClampText(nullKeys);
+      // aria-expanded voices the state the ▸/▾ glyph only shows visually.
+      toggle.setAttribute("aria-expanded", open ? "true" : "false");
+      expanded.style.display = open ? "" : "none";
+    }
+    toggle.addEventListener("click", function () {
+      open = !open;
+      if (nullsOpen) { nullsOpen[path] = open; }
+      sync();
+    });
+    container.appendChild(toggle);
+    container.appendChild(expanded);
+    sync();
+  }
+
+  function renderStructured(container, data, depth, path, nullsOpen) {
+    path = path || "";
+    if (data === null || typeof data !== "object") {
+      container.appendChild(renderLeaf(data));
+      return;
+    }
+    var isArray = Array.isArray(data);
+    var keys = isArray
+      ? data.map(function (v, i) { return i; })
+      : Object.keys(data);
+    var nullKeys = [];  // null-valued scalar fields at this object level
+    keys.forEach(function (k) {
+      var value = data[k];
+      var label = isArray ? "[" + k + "]" : k;
+      if (value === null) { nullKeys.push(label); return; }  // fold into clamp row
+      var nested = typeof value === "object";
+      var size = nested
+        ? (Array.isArray(value) ? value.length : Object.keys(value).length) : 0;
+      var row = el("div", "kv-row");
+      if (depth > 0) { row.style.paddingLeft = (depth * 14) + "px"; }
+      row.appendChild(el("span", "kv-key", label));
+      if (nested && size && depth < MAX_RENDER_DEPTH) {
+        container.appendChild(row);  // key header row, then indented children
+        var childPath = isArray ? path + label : (path ? path + "." + label : label);
+        renderStructured(container, value, depth + 1, childPath, nullsOpen);
+      } else {
+        row.appendChild(renderLeaf(value));  // scalar / empty / over-cap leaf
+        container.appendChild(row);
+      }
+    });
+    if (nullKeys.length) {
+      appendNullCollapse(container, depth, path, nullKeys, nullsOpen);
+    }
+  }
+
+  function renderData(bodyEl, data) {
+    bodyEl.textContent = "";
+    var box = el("pre");  // reuse the scrollable pre container (max-height/overflow)
+    // Persist null-collapse expand state across body re-renders (D4).
+    if (!bodyEl._nullsOpen) { bodyEl._nullsOpen = {}; }
+    renderStructured(box, data, 0, "", bodyEl._nullsOpen);
+    bodyEl.appendChild(box);
+  }
+
+  // --- Meta-Watchdog body render (component health + worker drill-down) -----
+  // The /meta-watchdog/status endpoint returns one status row per healing
+  // subsystem, but the daemon_workers probe is a CATCH-ALL: it folds ~25
+  // background workers (emergency / canary / bulkhead / throttle / audit / …)
+  // into a single row, so one dead worker turns the whole row red with no hint
+  // of WHICH worker failed. This renderer shows each component with its status +
+  // reason, and makes any component carrying a per-worker map (daemon_workers'
+  // details.workers) expandable — non-healthy workers first and badge-colored —
+  // so the culprit is identifiable at a glance. Auto-expands an unhealthy
+  // daemon_workers row so the failing worker shows without a click.
+  function workerSeverity(status) {
+    var s = String(status || "").toLowerCase();
+    if (s === "dead" || s === "stale") { return "danger"; }
+    if (s === "stopping") { return "warn"; }
+    if (s === "healthy") { return "ok"; }
+    return null;
+  }
+
+  function renderMetaWatchdog(bodyEl, data) {
+    bodyEl.textContent = "";
+    if (data === null || typeof data !== "object") {
+      renderData(bodyEl, data);  // unexpected shape -> generic fallback
+      return;
+    }
+    var box = el("div", "list-scroll");  // bounded + internally scrollable
+
+    var overall = String(data.overall_status || "unknown");
+    var ovSev = severityOf(overall);
+    var ovRow = el("div", "kv-row");
+    ovRow.appendChild(el("span", "kv-key", "overall_status"));
+    ovRow.appendChild(
+      el("span", ovSev ? "tag " + ovSev : "tag", overall.toUpperCase()));
+    box.appendChild(ovRow);
+
+    var components = data.components || {};
+    var detailMap = data.component_details || {};
+    Object.keys(components).forEach(function (name) {
+      var status = String(components[name]);
+      var sev = severityOf(status);
+      var det = detailMap[name] || {};
+      var workers = det.details && det.details.workers;
+
+      var row = el("div", "kv-row");
+      row.appendChild(el("span", "kv-key", name));
+      row.appendChild(el("span", sev ? "tag " + sev : "tag", status.toUpperCase()));
+      box.appendChild(row);
+
+      // reason / error context line (indented), when present.
+      var note = det.reason || det.error;
+      if (note) {
+        var noteRow = el("div", "kv-row");
+        noteRow.style.paddingLeft = "14px";
+        noteRow.appendChild(el("span", "kv-val", note));
+        box.appendChild(noteRow);
+      }
+
+      // Expandable per-worker list for a component carrying details.workers.
+      if (workers && typeof workers === "object") {
+        var wnames = Object.keys(workers);
+        var unhealthy = wnames.filter(function (w) {
+          return String((workers[w] || {}).status).toUpperCase() !== "HEALTHY";
+        });
+        // Non-healthy first, then alphabetical, so a failing worker surfaces.
+        wnames.sort(function (a, b) {
+          var ah = String((workers[a] || {}).status).toUpperCase() === "HEALTHY";
+          var bh = String((workers[b] || {}).status).toUpperCase() === "HEALTHY";
+          if (ah !== bh) { return ah ? 1 : -1; }
+          return a < b ? -1 : (a > b ? 1 : 0);
+        });
+
+        var sub = el("div");
+        sub.style.paddingLeft = "14px";
+        wnames.forEach(function (w) {
+          var info = workers[w] || {};
+          var wstatus = String(info.status || "unknown");
+          var wsev = workerSeverity(wstatus);
+          var wrow = el("div", "kv-row");
+          wrow.appendChild(el("span", "kv-key", w));
+          wrow.appendChild(
+            el("span", wsev ? "tag " + wsev : "tag", wstatus.toUpperCase()));
+          if (info.heartbeat_age_seconds != null) {
+            wrow.appendChild(
+              el("span", "kv-val", Math.round(info.heartbeat_age_seconds) + "s"));
+          }
+          sub.appendChild(wrow);
+        });
+
+        var open = status.toUpperCase() !== "HEALTHY";  // auto-expand on trouble
+        var toggle = el("button", null, "");
+        toggle.setAttribute("type", "button");
+        function syncToggle() {
+          toggle.textContent = (open ? "▾ " : "▸ ") + wnames.length
+            + " workers" + (unhealthy.length
+              ? " (" + unhealthy.length + " unhealthy)" : "");
+          // aria-expanded voices the state the ▸/▾ glyph only shows visually.
+          toggle.setAttribute("aria-expanded", open ? "true" : "false");
+          sub.style.display = open ? "" : "none";
+        }
+        toggle.addEventListener("click", function () { open = !open; syncToggle(); });
+        var toggleRow = el("div");
+        toggleRow.style.paddingLeft = "14px";
+        toggleRow.appendChild(toggle);
+        box.appendChild(toggleRow);
+        box.appendChild(sub);
+        syncToggle();
+      }
+    });
+
+    if (data.last_check) {
+      var lc = el("div", "kv-row");
+      lc.appendChild(el("span", "kv-key", "last_check"));
+      lc.appendChild(el("span", "kv-val", relAgoIso(data.last_check)));
+      box.appendChild(lc);
+    }
+    var escRow = el("div", "kv-row");
+    escRow.appendChild(el("span", "kv-key", "escalations"));
+    escRow.appendChild(el("span", "kv-val",
+      String(data.escalation_count == null ? 0 : data.escalation_count)));
+    box.appendChild(escRow);
+
+    bodyEl.appendChild(box);
+  }
+
+  // --- Triage redesign: status spine + per-panel health weighting ----------
+  // Aggregates every visible panel's status into one spine
+  // (SAFE/DEGRADED/CRITICAL), floats troubled panels up while healthy ones
+  // recede, and renders the dashboard/CB/DLQ status bodies as scannable
+  // readouts. Severity reuses the existing severityOf() token map; loadPanel
+  // updates the spine as each panel's status resolves.
+  var HEALTH = {};
+  var SEV_RANK = { danger: 3, warn: 2, ok: 1, none: 0 };
+
+  function scanSeverity(value) {
+    var worst = "none";
+    (function walk(x, depth) {
+      if (depth > 6) { return; }
+      if (typeof x === "string") {
+        var s = severityOf(x);
+        if (s && SEV_RANK[s] > SEV_RANK[worst]) { worst = s; }
+        return;
+      }
+      if (x && typeof x === "object") {
+        Object.keys(x).forEach(function (k) { walk(x[k], depth + 1); });
+      }
+    })(value, 0);
+    return worst;
+  }
+  function cbSeverity(data) {
+    var services = (data && data.services) || [];
+    if (!services.length) { return "none"; }
+    var worst = "ok";
+    services.forEach(function (s) {
+      var sv = severityOf(s && s.state);
+      if (sv && SEV_RANK[sv] > SEV_RANK[worst]) { worst = sv; }
+    });
+    return worst;
+  }
+  function dlqSeverity(data) {
+    var bs = (data && data.by_status) || {};
+    if ((bs.permanently_failed || 0) + (bs.rejected || 0) > 0) { return "danger"; }
+    // A disarmed on-recovery auto-replay loop is the same silent-degradation class
+    // the backlog counts warn on — surface it on the status spine.
+    var ar = (data && data.auto_replay) || null;
+    if (ar && ar.armed === false) { return "warn"; }
+    if ((bs.pending || 0) + (bs.requires_review || 0) + (bs.reviewing || 0)
+        + (bs.replaying || 0) > 0) { return "warn"; }
+    return "ok";
+  }
+  // Per-panel severity: bespoke where the status shape carries no severity token
+  // (dashboard health_status, CB service states, DLQ by_status counts), generic
+  // token scan otherwise.
+  function panelSeverity(p, data) {
+    if (p.id === "dashboard") { return severityOf(data && data.health_status) || "ok"; }
+    if (p.id === "circuit_breaker") { return cbSeverity(data); }
+    if (p.id === "dlq") { return dlqSeverity(data); }
+    if (p.id === "canary") { return canarySeverity(data); }
+    if (p.id === "runtime_config") { return runtimeConfigSeverity(data); }
+    return scanSeverity(data);
+  }
+  // Runtime Config panel health: a queued (pending) change is the only signal
+  // worth surfacing — config editing is otherwise a calm, deliberate surface,
+  // so the generic token scan (which would dredge severity words out of field
+  // values / warning_message copy) is bypassed.
+  function runtimeConfigSeverity(data) {
+    var pending = (data && data.pending_changes) || [];
+    return (Array.isArray(pending) && pending.length) ? "warn" : "ok";
+  }
+  function panelTitle(id) {
+    for (var i = 0; i < PANELS.length; i++) {
+      if (PANELS[i].id === id) { return PANELS[i].title; }
+    }
+    return id;
+  }
+  function statePill(stateStr) {
+    var s = severityOf(stateStr);
+    return el("span", s ? "tag " + s : "tag", String(stateStr).toUpperCase());
+  }
+
+  // Dashboard hero — health pill + big tabular stat tiles + 24h activity line.
+  function heroTile(lbl, num, sub, sev) {
+    var t = el("div", "tile" + (sev ? " " + sev : ""));
+    t.appendChild(el("div", "lbl", lbl));
+    t.appendChild(el("div", "num", String(num)));
+    if (sub) { t.appendChild(el("div", "sub", sub)); }
+    return t;
+  }
+  function renderDashboardHero(bodyEl, data) {
+    bodyEl.textContent = "";
+    var hs = String((data && data.health_status) || "unknown");
+    var sev = severityOf(hs) || "ok";
+    var ov = (data && data.overview) || {};
+    var ra = (data && data.recent_activity) || {};
+    var top = el("div", "hero-top");
+    top.appendChild(el("div", "hero-pill " + sev, hs));
+    top.appendChild(el("div", "hero-ts", "self-healing engine"));
+    bodyEl.appendChild(top);
+    var tiles = el("div", "hero-tiles");
+    tiles.appendChild(heroTile("Pending", ov.pending == null ? "–" : ov.pending,
+      "awaiting heal", ov.pending > 0 ? "warn" : "ok"));
+    tiles.appendChild(heroTile("Failed", ov.failed == null ? "–" : ov.failed,
+      "unrecovered", ov.failed > 0 ? "danger" : "ok"));
+    tiles.appendChild(heroTile("Resolved", ov.resolved == null ? "–" : ov.resolved,
+      "healed total", "ok"));
+    tiles.appendChild(heroTile("Resolution",
+      ov.resolution_rate_percent == null
+        ? "–"
+        : Number(ov.resolution_rate_percent).toFixed(2) + "%",
+      "success rate", null));
+    bodyEl.appendChild(tiles);
+    var foot = el("div", "hero-foot");
+    foot.appendChild(document.createTextNode("last 24h "));
+    foot.appendChild(el("b", null, "+" + (ra.new_failures_24h == null ? 0 : ra.new_failures_24h)));
+    foot.appendChild(document.createTextNode(" new · "));
+    foot.appendChild(el("b", null, String(ra.resolved_24h == null ? 0 : ra.resolved_24h)));
+    foot.appendChild(document.createTextNode(" resolved"));
+    bodyEl.appendChild(foot);
+  }
+  // Circuit Breakers — one row per service (name + failures + state pill).
+  function renderCircuitBreakers(bodyEl, data) {
+    bodyEl.textContent = "";
+    var services = (data && data.services) || [];
+    if (!Array.isArray(services) || !services.length) { renderData(bodyEl, data); return; }
+    // list-scroll bounds the row list (max-height + overflow-y) so many services
+    // scroll inside the panel instead of growing it unbounded — same pattern as
+    // the DLQ / Canary / Meta-Watchdog lists.
+    var box = el("div", "cb-list list-scroll");
+    services.forEach(function (svc) {
+      svc = svc || {};
+      var row = el("div", "cb-row");
+      row.appendChild(el("span", "cb-name",
+        svc.service_name == null ? "?" : String(svc.service_name)));
+      var right = el("span", "cb-right");
+      if (svc.failure_count) {
+        // Promote the count (bold primary), keep " fails" as a quiet suffix.
+        var fail = el("span", "cb-fail");
+        fail.appendChild(el("b", null, String(svc.failure_count)));
+        fail.appendChild(document.createTextNode(" fails"));
+        right.appendChild(fail);
+      }
+      right.appendChild(statePill(svc.state == null ? "?" : svc.state));
+      row.appendChild(right);
+      box.appendChild(row);
+    });
+    bodyEl.appendChild(box);
+  }
+  // DLQ stats — Total + one mini-tile per non-zero status, colored by severity.
+  function miniTile(lbl, num, sev) {
+    var t = el("div", "mini-tile" + (sev ? " " + sev : ""));
+    t.appendChild(el("div", "lbl", lbl));
+    t.appendChild(el("div", "mnum", String(num)));
+    return t;
+  }
+  // On-recovery auto-replay armed/disarmed badge. Headlines the first missing link
+  // and lists the remaining missing_links so the operator fixes them in one
+  // pass instead of a "fix one, discover the next" loop. Stored strings render
+  // through the el() textContent contract (never innerHTML).
+  function renderAutoReplayBadge(bodyEl, ar) {
+    if (!ar || ar.armed === undefined) { return; }
+    var wrap = el("div", "dlq-armed");
+    if (ar.armed === true) {
+      wrap.appendChild(el("span", "tag ok", "auto-replay armed"));
+    } else if (ar.armed === null) {
+      wrap.appendChild(el("span", "tag", "auto-replay: probe failed"));
+    } else {
+      wrap.appendChild(el("span", "tag warn",
+        "auto-replay disarmed: " + (ar.missing_link || "unknown")));
+      var more = (ar.missing_links || []).slice(1);
+      if (more.length) {
+        wrap.appendChild(el("span", "dlq-armed-more",
+          " · also missing: " + more.join(", ")));
+      }
+    }
+    bodyEl.appendChild(wrap);
+  }
+
+  function renderDlqStats(bodyEl, data) {
+    bodyEl.textContent = "";
+    var d = data || {};
+    var bs = d.by_status || {};
+    var tiles = el("div", "mini-tiles");
+    tiles.appendChild(miniTile("Total", d.total == null ? "–" : d.total, null));
+    Object.keys(bs).forEach(function (k) {
+      if (!bs[k]) { return; }  // skip zero counts
+      tiles.appendChild(miniTile(k.replace(/_/g, " "), bs[k], severityOf(k)));
+    });
+    bodyEl.appendChild(tiles);
+    renderAutoReplayBadge(bodyEl, d.auto_replay);
+    var rec = d.recommendations || {};
+    var parts = [];
+    if (rec.can_archive) { parts.push("archive recommended"); }
+    if (rec.can_purge) { parts.push("purge available"); }
+    if (parts.length) { bodyEl.appendChild(el("div", "dlq-rec", parts.join(" · "))); }
+  }
+
+  // Canary summary — lifecycle bucket counts (active / created / terminal) instead
+  // of a raw-JSON dump that duplicates the drilldown, and widen the panel when it
+  // has rollouts so the active / history drilldown tables don't clip (same intent
+  // as the DLQ backlog span-2). Body fetches include_completed=true so terminal
+  // rollouts are counted and the history-only case still widens.
+  function canaryBucket(state) {
+    var s = String(state == null ? "" : state).toLowerCase();
+    if (s === "created") { return "created"; }
+    if (s === "completed" || s === "rolled_back" || s === "cancelled"
+        || s === "failed") { return "terminal"; }
+    return "active";  // canary, promoting, paused, …
+  }
+  function renderCanarySummary(bodyEl, data) {
+    bodyEl.textContent = "";
+    var rollouts = (data && data.rollouts) || [];
+    if (!Array.isArray(rollouts)) { renderData(bodyEl, data); return; }
+    var n = { active: 0, created: 0, terminal: 0 };
+    rollouts.forEach(function (r) { n[canaryBucket(r && r.state)]++; });
+    var tiles = el("div", "mini-tiles");
+    tiles.appendChild(miniTile("Active", n.active, null));
+    tiles.appendChild(miniTile("Created", n.created, null));
+    tiles.appendChild(miniTile("Terminal", n.terminal, null));
+    bodyEl.appendChild(tiles);
+    var panel = bodyEl.closest(".panel");
+    if (panel) { panel.dataset.populated = rollouts.length ? "1" : "0"; }
+  }
+  // Canary panel health: failed -> danger, paused -> warn, normal active -> ok;
+  // terminal states (completed/rolled_back/cancelled) don't elevate so a clean
+  // history doesn't keep the spine degraded.
+  function canarySeverity(data) {
+    var rollouts = (data && data.rollouts) || [];
+    var worst = "none";
+    rollouts.forEach(function (r) {
+      var st = r && r.state;
+      var s = String(st == null ? "" : st).toLowerCase();
+      var sv = (s === "failed") ? "danger"
+        : (s === "paused") ? "warn"
+        : (s === "canary" || s === "promoting" || s === "created") ? "ok"
+        : null;
+      if (sv && SEV_RANK[sv] > SEV_RANK[worst]) { worst = sv; }
+    });
+    return worst;
+  }
+
+  // Runtime Config summary (662) — audit-status badge + editable-domain count +
+  // pending-change count as mini tiles. The drill-down below carries the actual
+  // per-domain field editor; this body is the at-a-glance header.
+  function renderRuntimeConfig(bodyEl, data) {
+    bodyEl.textContent = "";
+    var d = data || {};
+    var cfg = d.config || {};
+    var pending = d.pending_changes || [];
+    var auditRow = el("div", "kv-row");
+    auditRow.appendChild(el("span", "kv-key", "audit trail"));
+    auditRow.appendChild(d.audit_enabled
+      ? el("span", "tag ok", "ON")
+      : el("span", "tag warn", "OFF"));
+    bodyEl.appendChild(auditRow);
+    if (!d.audit_enabled) {
+      // Single source of the audit-off warning (the editor drill-down no longer
+      // repeats it); keep it actionable — the env var + runbook to turn it on.
+      bodyEl.appendChild(el("div", "dlq-rec",
+        "Audit Trail is OFF — change reasons are not durably retained. "
+        + "Enable it (BALDUR_AUDIT_ENABLED=1) per the audit-trail-activation runbook."));
+    }
+    var tiles = el("div", "mini-tiles");
+    tiles.appendChild(miniTile("Domains", Object.keys(cfg).length, null));
+    tiles.appendChild(miniTile("Pending", pending.length,
+      pending.length ? "warn" : null));
+    bodyEl.appendChild(tiles);
+  }
+
+  // Tag a panel with its health and refresh the spine. Severity is shown IN
+  // PLACE — colored left border + brightness (CSS [data-health]) plus the status
+  // spine / clickable offender chips — and panels are NOT reordered. Fixed grid
+  // positions preserve the operator's spatial memory; this matches the mainstream
+  // convention (Grafana / Datadog / Sidekiq keep the layout stable and route
+  // severity into a dedicated summary region — here, the spine + jump-to chips).
+  // The dashboard still leads: it is first in source order and full-width (.hero).
+  function setPanelHealth(p, bodyEl, sev) {
+    HEALTH[p.id] = sev;
+    var panel = bodyEl.closest(".panel");
+    if (panel) {
+      panel.dataset.health = sev;
+    }
+    renderSpine();
+  }
+  function renderSpine() {
+    var spine = document.getElementById("spine");
+    if (!spine) { return; }
+    var ids = Object.keys(HEALTH);
+    var worst = "none";
+    ids.forEach(function (id) {
+      if (SEV_RANK[HEALTH[id]] > SEV_RANK[worst]) { worst = HEALTH[id]; }
+    });
+    var state = worst === "none" ? "ok" : worst;
+    spine.className = "spine state-" + state;
+    var offenders = ids.filter(function (id) {
+      return HEALTH[id] === "danger" || HEALTH[id] === "warn";
+    }).sort(function (a, b) { return SEV_RANK[HEALTH[b]] - SEV_RANK[HEALTH[a]]; });
+    var nDanger = offenders.filter(function (id) { return HEALTH[id] === "danger"; }).length;
+    var nWarn = offenders.length - nDanger;
+    spine.querySelector(".spine-state").textContent =
+      state === "danger" ? "CRITICAL" : state === "warn" ? "DEGRADED" : "SAFE";
+    var sub = spine.querySelector(".spine-sub");
+    if (state === "ok") {
+      sub.textContent = "all systems nominal · " + ids.length + " panels healthy";
+    } else {
+      var parts = [];
+      if (nDanger) { parts.push(nDanger + " critical"); }
+      if (nWarn) { parts.push(nWarn + " degraded"); }
+      sub.textContent = parts.join(" · ") + " — needs attention";
+    }
+    var chips = spine.querySelector(".spine-chips");
+    chips.textContent = "";
+    offenders.forEach(function (id) {
+      var chip = el("button", "spine-chip " + HEALTH[id]);
+      chip.setAttribute("type", "button");
+      chip.appendChild(el("span", "dot"));
+      chip.appendChild(el("span", null, panelTitle(id)));
+      chip.addEventListener("click", function () {
+        var target = document.querySelector('.panel[data-panel-id="' + id + '"]');
+        if (target) {
+          target.scrollIntoView({ behavior: "smooth", block: "center" });
+          target.classList.add("flash");
+          setTimeout(function () { target.classList.remove("flash"); }, 1200);
+        }
+      });
+      chips.appendChild(chip);
+    });
+  }
+  function buildSpine() {
+    if (document.getElementById("spine")) { return; }
+    var spine = el("div", "spine state-ok");
+    spine.id = "spine";
+    spine.appendChild(el("div", "spine-led"));
+    var main = el("div", "spine-main");
+    main.appendChild(el("div", "spine-state", "SAFE"));
+    main.appendChild(el("div", "spine-sub", "…"));
+    spine.appendChild(main);
+    spine.appendChild(el("div", "spine-chips"));
+    var grid = document.getElementById("grid");
+    grid.parentNode.insertBefore(spine, grid);
+  }
+
+  // Action button color encodes consequence, not permission (a.risk still drives
+  // the typed-confirm modal): green = recover toward healthy, red = destructive
+  // or safety-override (reserved), gray = routine.
+  var BTN_RECOVER = {
+    "Reset breaker": 1, "Enable automation": 1, "Release": 1,
+    "Gradual recovery": 1, "Replay": 1, "Create rollout": 1
+  };
+  var BTN_DANGER = {
+    "Block (force open)": 1, "Allow (force closed)": 1, "Disable (kill switch)": 1,
+    "Trigger": 1, "Purge": 1,
+    "Panic rollback — reverts ALL active canary rollouts": 1
+  };
+  function btnClass(action) {
+    if (BTN_RECOVER[action.label]) { return "btn-recover"; }
+    if (BTN_DANGER[action.label]) { return "btn-danger"; }
+    return null;
+  }
+
+  function loadPanel(p, bodyEl, updatedEl) {
+    bodyEl.textContent = "";
+    bodyEl.appendChild(el("div", "spinner", "Loading…"));
+    adminFetch(p.status)
+      .then(function (resp) {
+        return resp.text().then(function (txt) {
+          var parsed;
+          try { parsed = JSON.parse(txt); } catch (_e) { parsed = txt; }
+          if (!resp.ok) {
+            bodyEl.textContent = "";
+            bodyEl.appendChild(el("div", "notice",
+              "HTTP " + resp.status + (resp.status === 401
+                ? " — set the admin key" : resp.status === 403
+                ? " — insufficient permission" : "")));
+            setPanelHealth(p, bodyEl, "none");
+            return;
+          }
+          // A panel may declare a bespoke body renderer (bodyRender: "<key>")
+          // for a shape the generic key->value dump renders poorly — e.g. the
+          // Meta-Watchdog status, whose daemon_workers catch-all folds ~25
+          // background workers into one row. Falls back to the generic renderer.
+          var bodyRenderer = (p.bodyRender && BODY_RENDERERS[p.bodyRender])
+            || renderData;
+          bodyRenderer(bodyEl, parsed);
+          // Stamp freshness only on a good load (displayed data is "as of" now).
+          if (updatedEl) {
+            updatedEl._t = Date.now();
+            updatedEl.textContent = "updated just now";
+          }
+          setPanelHealth(p, bodyEl, panelSeverity(p, parsed));
+        });
+      })
+      .catch(function (err) {
+        // Per-panel isolation: only this panel degrades.
+        bodyEl.textContent = "";
+        var msg = (err && err.name === "AbortError")
+          ? "server slow/unresponsive — verify via curl"
+          : "fetch failed: " + ((err && err.message) || err);
+        bodyEl.appendChild(el("div", "notice", msg));
+        setPanelHealth(p, bodyEl, "none");
+      });
+  }
+
+  // --- Shared drill-down fetch wrapper (550 D3) ----------------------------
+  // Fetch a path into a target element with a spinner, JSON parse, HTTP-status
+  // notice, and an abort-timeout fallback, then hand the parsed body to onJson.
+  // Module-level (hoisted out of renderDlqDrilldown) so every drill-down —
+  // DLQ and canary — shares one fetch/error-render wrapper. Captures only the
+  // top-level adminFetch / el; all inputs arrive as params.
+  function fetchInto(targetEl, path, onJson) {
+    targetEl.textContent = "";
+    targetEl.appendChild(el("div", "spinner", "Loading…"));
+    adminFetch(path)
+      .then(function (resp) {
+        return resp.text().then(function (txt) {
+          var parsed;
+          try { parsed = JSON.parse(txt); } catch (_e) { parsed = null; }
+          targetEl.textContent = "";
+          if (!resp.ok) {
+            targetEl.appendChild(el("div", "notice",
+              "HTTP " + resp.status + (resp.status === 401
+                ? " — set the admin key" : resp.status === 403
+                ? " — insufficient permission" : "")));
+            return;
+          }
+          onJson(parsed);
+        });
+      })
+      .catch(function (err) {
+        targetEl.textContent = "";
+        var msg = (err && err.name === "AbortError")
+          ? "server slow/unresponsive — verify via curl"
+          : "fetch failed: " + ((err && err.message) || err);
+        targetEl.appendChild(el("div", "notice", msg));
+      });
+  }
+
+  // --- DLQ drill-down (D2/D3/D5) -------------------------------------------
+  // Bespoke list -> detail -> per-row action over already-existing endpoints
+  // (/dlq/list, /dlq/{pk}, /dlq/{pk}/retry, /dlq/{pk}/resolve). No generic
+  // table schema (single consumer). Filters are drift-free pick-from-list,
+  // sourced from the backend-faceted /dlq/facets endpoint (#542): status↔domain
+  // cross-filter where each facet excludes its own selection so the dimension
+  // being chosen keeps all of its options for switching.
+  var DLQ_PAGE_SIZE = 10;
+  function renderDlqDrilldown(container) {
+    var state = { page: 1, status: "", domain: "" };
+    container.appendChild(el("div", "drill-title", "Entries (newest first)"));
+
+    // Filter row (#542). Both are pick-from-list (no typing/Enter), both
+    // backed by /dlq/facets. Programmatic <option>/.value mutation does NOT
+    // dispatch a change event, so repopulating the other dropdown on a facet
+    // change cannot recurse — no event-loop guard needed.
+    var filterRow = el("div", "dlq-filter");
+    var statusSel = el("select");
+    var domainSel = el("select");
+
+    function populateSelect(sel, allLabel, facetMap, activeVal) {
+      sel.textContent = "";
+      var allOpt = el("option", null, allLabel);
+      allOpt.value = "";
+      sel.appendChild(allOpt);
+      var keys = Object.keys(facetMap || {}).sort();
+      var hasActive = false;
+      keys.forEach(function (k) {
+        if (k === activeVal) { hasActive = true; }
+        var opt = el("option", null, k + " (" + facetMap[k] + ")");
+        opt.value = k;
+        sel.appendChild(opt);
+      });
+      // Preserve an active selection even when its scoped count is 0 — the
+      // operator's filter is never silently dropped.
+      if (activeVal && !hasActive) {
+        var zeroOpt = el("option", null, activeVal + " (0)");
+        zeroOpt.value = activeVal;
+        sel.appendChild(zeroOpt);
+      }
+      sel.value = activeVal || "";
+    }
+
+    function refreshFacets() {
+      var q = "/dlq/facets";
+      var params = [];
+      if (state.status) {
+        params.push("status=" + encodeURIComponent(state.status));
+      }
+      if (state.domain) {
+        params.push("domain=" + encodeURIComponent(state.domain));
+      }
+      if (params.length) { q += "?" + params.join("&"); }
+      adminFetch(q)
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (facets) {
+          if (!facets) { return; }
+          populateSelect(statusSel, "all status",
+            facets.by_status || {}, state.status);
+          populateSelect(domainSel, "all domains",
+            facets.by_domain || {}, state.domain);
+        })
+        .catch(function () { /* leave dropdowns as-is on failure */ });
+    }
+
+    statusSel.addEventListener("change", function () {
+      state.status = statusSel.value; state.page = 1;
+      refreshFacets(); load();
+    });
+    domainSel.addEventListener("change", function () {
+      state.domain = domainSel.value; state.page = 1;
+      refreshFacets(); load();
+    });
+    populateSelect(statusSel, "all status", {}, "");
+    populateSelect(domainSel, "all domains", {}, "");
+    filterRow.appendChild(statusSel);
+    filterRow.appendChild(domainSel);
+    container.appendChild(filterRow);
+
+    refreshFacets();
+
+    var listBox = el("div");
+    var detailBox = el("div", "dlq-detail");
+    container.appendChild(listBox);
+    container.appendChild(detailBox);
+
+    function showDetail(pk) {
+      fetchInto(detailBox, "/dlq/" + encodeURIComponent(pk), function (entry) {
+        var head = el("div", "dlq-detail-head");
+        head.appendChild(el("span", "drill-title", "Entry " + pk));
+        var reload = function () { detailBox.textContent = ""; load(); };
+        var retryBtn = el("button", null, "Retry");
+        retryBtn.addEventListener("click", function () {
+          openActionModal({
+            label: "Retry DLQ entry " + pk,
+            path: "/dlq/" + encodeURIComponent(pk) + "/retry",
+            method: "POST", risk: "operator",
+            bodyField: { key: "reason", label: "Reason (optional)",
+              placeholder: "why this retry "
+                + "(recorded in the resolution note + audit trail; optional)" },
+            onDone: reload
+          });
+        });
+        var resolveBtn = el("button", null, "Resolve");
+        resolveBtn.addEventListener("click", function () {
+          openActionModal({
+            label: "Resolve DLQ entry " + pk,
+            path: "/dlq/" + encodeURIComponent(pk) + "/resolve",
+            method: "POST", risk: "operator",
+            bodyField: {
+              key: "notes",
+              label: "Resolution note",
+              placeholder: "why/how this was resolved "
+                + "(optional; defaults to your name)"
+            },
+            onDone: reload
+          });
+        });
+        head.appendChild(retryBtn);
+        head.appendChild(resolveBtn);
+        detailBox.appendChild(head);
+        var detailBody = el("div");
+        renderData(detailBody, entry);  // reuse D1 structured renderer
+        detailBox.appendChild(detailBody);
+      });
+    }
+
+    function renderList(data) {
+      var results = (data && data.results) || [];
+      var pg = (data && data.pagination) || {};
+      if (!results.length) {
+        listBox.appendChild(el("div", "spinner", "No DLQ entries."));
+      } else {
+        var table = el("table", "dlq-table");
+        var headRow = el("tr");
+        ["id", "domain", "status", "retries", "created"].forEach(function (h) {
+          headRow.appendChild(el("th", null, h));
+        });
+        table.appendChild(headRow);
+        results.forEach(function (row) {
+          var tr = el("tr", "dlq-row");
+          tr.appendChild(el("td", null, String(row.id)));
+          tr.appendChild(el("td", null, row.domain == null ? "" : String(row.domain)));
+          var statusTd = el("td");
+          var sev = severityOf(row.status);
+          statusTd.appendChild(
+            el("span", sev ? "tag " + sev : "tag", String(row.status)));
+          tr.appendChild(statusTd);
+          tr.appendChild(el("td", null,
+            row.retry_count == null ? "" : String(row.retry_count)));
+          var createdTd = el("td", null, relAgoIso(row.created_at));
+          if (row.created_at) { createdTd.title = String(row.created_at); }
+          tr.appendChild(createdTd);
+          tr.addEventListener("click", function () { showDetail(row.id); });
+          table.appendChild(tr);
+        });
+        var scroll = el("div", "list-scroll");
+        scroll.appendChild(table);
+        listBox.appendChild(scroll);
+      }
+      var pager = el("div", "dlq-pager");
+      var prev = el("button", null, "‹ Prev");
+      prev.disabled = !pg.has_previous;
+      prev.addEventListener("click", function () {
+        if (pg.has_previous) { state.page -= 1; load(); }
+      });
+      var next = el("button", null, "Next ›");
+      next.disabled = !pg.has_next;
+      next.addEventListener("click", function () {
+        if (pg.has_next) { state.page += 1; load(); }
+      });
+      pager.appendChild(prev);
+      pager.appendChild(next);
+      pager.appendChild(el("span", "spinner", "Page " + (pg.page || state.page) +
+        (pg.total_pages ? " / " + pg.total_pages : "")));
+      listBox.appendChild(pager);
+    }
+
+    function load() {
+      var q = "/dlq/list?page=" + state.page + "&page_size=" + DLQ_PAGE_SIZE;
+      if (state.status) { q += "&status=" + encodeURIComponent(state.status); }
+      if (state.domain) { q += "&domain=" + encodeURIComponent(state.domain); }
+      fetchInto(listBox, q, renderList);
+    }
+
+    load();
+  }
+
+  // --- Canary drill-down (550 D3/D5) ---------------------------------------
+  // list -> row -> detail over the already-registered canary endpoints
+  // (/canary/rollouts, /canary/rollouts/{id}, /.../{action}, /.../metrics).
+  // The detail view carries the six lifecycle buttons with rollout_id baked
+  // into each path (no hand-typed id) + a read-only Metrics view. Button
+  // state-appropriateness is enforced SERVER-side (clear 400 from
+  // _execute_action) and NOT replicated in JS — the CanaryState transition
+  // machine stays single-sourced in the backend (avoids frontend drift).
+  //
+  // Six canary lifecycle actions (D2). The modal input shape is derived from
+  // each handler's body reads (canary.py _execute_action): start/pause/resume/
+  // cancel read no body (bare ADMIN confirm); promote reads a boolean `force`
+  // (raw-JSON body so a typed false stays the boolean False — a bodyField would
+  // string-wrap it into a truthy "false", D2 correction); rollback reads an
+  // optional `reason`. All six are server-side ADMIN, so each is risk:"admin".
+  var CANARY_LIFECYCLE = [
+    { suffix: "/start", label: "Start" },
+    { suffix: "/promote", label: "Promote", body: true,
+      bodyDefault: '{"force": false}' },
+    { suffix: "/pause", label: "Pause" },
+    { suffix: "/resume", label: "Resume" },
+    { suffix: "/rollback", label: "Rollback",
+      bodyField: { key: "reason", label: "Rollback reason",
+        placeholder: "why this rollout is being rolled back "
+          + "(optional; server default applies if blank)" } },
+    { suffix: "/cancel", label: "Cancel" }
+  ];
+
+  function renderCanaryDrilldown(container) {
+    container.appendChild(el("div", "drill-title", "Active rollouts"));
+    // Findability filter (mirrors History): config_type substring search + a
+    // non-terminal state dropdown. Active is bounded (one rollout per config_type)
+    // so it usually stays short; the filter is shown only when at least one active
+    // rollout exists, kept here for consistency and the occasional busy period.
+    var activeFilter = el("div", "dlq-filter");
+    activeFilter.style.display = "none";
+    var activeSearch = el("input");
+    activeSearch.setAttribute("placeholder", "search config_type");
+    var activeStateSel = el("select");
+    [["", "all states"], ["created", "created"], ["canary", "canary"],
+     ["promoting", "promoting"], ["paused", "paused"]].forEach(function (o) {
+      var opt = el("option", null, o[1]);
+      opt.value = o[0];
+      activeStateSel.appendChild(opt);
+    });
+    activeFilter.appendChild(activeSearch);
+    activeFilter.appendChild(activeStateSel);
+
+    var listBox = el("div");
+    var detailBox = el("div", "dlq-detail");
+    container.appendChild(activeFilter);
+    container.appendChild(listBox);
+    container.appendChild(detailBox);
+
+    var activeRows = [];  // last fetched active rollouts (filtered client-side)
+
+    // Which rollout's detail is currently expanded — lets a row click toggle:
+    // click an open row again (active or history) to collapse its detail.
+    var currentDetailId = null;
+    function toggleDetail(rolloutId) {
+      if (currentDetailId === rolloutId) {
+        detailBox.textContent = "";
+        currentDetailId = null;
+      } else {
+        currentDetailId = rolloutId;
+        showDetail(rolloutId);
+      }
+    }
+
+    function showDetail(rolloutId) {
+      fetchInto(detailBox, "/canary/rollouts/" + encodeURIComponent(rolloutId),
+        function (payload) {
+          // Detail responds { status, rollout: {...} } — unwrap to the rollout.
+          var rollout = (payload && payload.rollout) || {};
+          var base = "/canary/rollouts/" + encodeURIComponent(rolloutId);
+          // After an action, re-render BOTH the list AND this detail view so the
+          // state tag + lifecycle buttons reflect the new state in place. The
+          // canary lifecycle is multi-step (start -> promote -> ...), so merely
+          // clearing the detail would collapse the operator's context after every
+          // action and read as 'state didn't change' even though it did.
+          var reload = function () { load(); showDetail(rolloutId); };
+
+          var head = el("div", "dlq-detail-head");
+          head.appendChild(el("span", "drill-title", "Rollout " + rolloutId));
+          // Prominent current state — the six lifecycle buttons are all shown;
+          // an invalid transition is rejected server-side (clear 400), so the
+          // state is the operator's context (no JS transition machine, D3).
+          var sev = severityOf(rollout.state);
+          head.appendChild(el("span", sev ? "tag " + sev : "tag",
+            rollout.state == null ? "unknown" : String(rollout.state)));
+          detailBox.appendChild(head);
+
+          var btnRow = el("div", "dlq-detail-head");
+          // Lifecycle buttons only for a non-terminal rollout. On a terminal one
+          // (completed / rolled_back / cancelled / failed) every transition is
+          // server-rejected, so showing the buttons would offer only dead 400s —
+          // the state tag, Metrics, and detail data are the relevant context.
+          if (!rollout.is_terminal) {
+            CANARY_LIFECYCLE.forEach(function (a) {
+              var btn = el("button", "danger", a.label);
+              btn.addEventListener("click", function () {
+                // rollout_id pre-baked into the path; carry the per-action body
+                // shape (a.body/a.bodyField/a.bodyDefault) through Object.assign.
+                openActionModal(Object.assign({}, a, {
+                  label: a.label + " rollout " + rolloutId,
+                  path: base + a.suffix, method: "POST", risk: "admin",
+                  onDone: reload
+                }));
+              });
+              btnRow.appendChild(btn);
+            });
+          }
+          // Read-only metrics (D5): decision-support for the promote/rollback
+          // buttons that live in this same detail view. Toggle (same pattern as
+          // History): click to fetch + show, click again to collapse; re-fetches
+          // fresh on each open so the button doubles as refresh.
+          var metricsBox = el("div", "dlq-detail");
+          metricsBox.style.display = "none";
+          var metricsShown = false;
+          var metricsBtn = el("button", null, "Metrics");
+          metricsBtn.addEventListener("click", function () {
+            metricsShown = !metricsShown;
+            if (metricsShown) {
+              metricsBtn.textContent = "Hide metrics";
+              metricsBox.style.display = "";
+              fetchInto(metricsBox, base + "/metrics", function (m) {
+                renderData(metricsBox, m);  // reuse D1 structured renderer
+              });
+            } else {
+              metricsBtn.textContent = "Metrics";
+              metricsBox.textContent = "";
+              metricsBox.style.display = "none";
+            }
+          });
+          btnRow.appendChild(metricsBtn);
+          detailBox.appendChild(btnRow);
+
+          var detailBody = el("div");
+          renderData(detailBody, rollout);
+          detailBox.appendChild(detailBody);
+          detailBox.appendChild(metricsBox);
+        });
+    }
+
+    function renderActiveTable() {
+      // List responds { status, count, rollouts: [...] }. Filter the fetched set
+      // client-side (config_type substring + non-terminal state); the filter row
+      // is shown only when there is at least one active rollout.
+      var q = activeSearch.value.trim().toLowerCase();
+      var st = activeStateSel.value;
+      activeFilter.style.display = activeRows.length ? "" : "none";
+      listBox.textContent = "";
+      if (!activeRows.length) {
+        listBox.appendChild(el("div", "spinner", "No active rollouts."));
+        return;
+      }
+      var rows = activeRows.filter(function (r) {
+        if (st && String(r.state) !== st) { return false; }
+        if (q && String(r.config_type || "").toLowerCase().indexOf(q) === -1) {
+          return false;
+        }
+        return true;
+      });
+      if (!rows.length) {
+        listBox.appendChild(
+          el("div", "spinner", "No active rollouts match the filter."));
+        return;
+      }
+      var table = el("table", "dlq-table");
+      var headRow = el("tr");
+      ["id", "config_type", "state", "stage", "progress"].forEach(function (h) {
+        headRow.appendChild(el("th", null, h));
+      });
+      table.appendChild(headRow);
+      rows.forEach(function (row) {
+        var tr = el("tr", "dlq-row");
+        tr.appendChild(el("td", null, String(row.id)));
+        tr.appendChild(el("td", null,
+          row.config_type == null ? "" : String(row.config_type)));
+        var stateTd = el("td");
+        var sev = severityOf(row.state);
+        stateTd.appendChild(
+          el("span", sev ? "tag " + sev : "tag", String(row.state)));
+        tr.appendChild(stateTd);
+        var idx = row.current_stage_index;
+        var stageLabel = (row.current_stage == null ? "—"
+          : String(row.current_stage))
+          + (idx == null ? "" : " (" + (idx + 1) + "/"
+            + (row.total_stages == null ? "?" : row.total_stages) + ")");
+        tr.appendChild(el("td", null, stageLabel));
+        tr.appendChild(el("td", null, row.progress_percentage == null
+          ? "" : String(row.progress_percentage) + "%"));
+        tr.addEventListener("click", function () { toggleDetail(row.id); });
+        table.appendChild(tr);
+      });
+      var scroll = el("div", "list-scroll");
+      scroll.appendChild(table);
+      listBox.appendChild(scroll);
+    }
+
+    function renderList(data) {
+      activeRows = (data && data.rollouts) || [];
+      renderActiveTable();
+    }
+    activeSearch.addEventListener("input", renderActiveTable);
+    activeStateSel.addEventListener("change", renderActiveTable);
+
+    function load() {
+      fetchInto(listBox, "/canary/rollouts", renderList);
+    }
+
+    // --- History (terminal rollouts) -------------------------------------
+    // The active list (get_active_rollouts) drops terminal rollouts, so without
+    // this an operator could not see the outcome of a rollback / cancel /
+    // completed rollout in the console. Surfaces GET /canary/history on demand;
+    // rows reuse showDetail (the final state + reason + Metrics stay retrievable
+    // by id; the detail hides lifecycle buttons once a rollout is terminal).
+    container.appendChild(el("div", "drill-title", "History (terminal rollouts)"));
+    // Findability filter. The history endpoint has no offset paging, so fetch the
+    // most-recent N and filter that set client-side: a config_type substring
+    // search + a final-state dropdown, both applied instantly to the fetched rows.
+    var histFilter = el("div", "dlq-filter");
+    histFilter.style.display = "none";
+    var histSearch = el("input");
+    histSearch.setAttribute("placeholder", "search config_type");
+    var histStateSel = el("select");
+    [["", "all states"], ["completed", "completed"], ["rolled_back", "rolled_back"],
+     ["cancelled", "cancelled"], ["failed", "failed"]].forEach(function (o) {
+      var opt = el("option", null, o[1]);
+      opt.value = o[0];
+      histStateSel.appendChild(opt);
+    });
+    histFilter.appendChild(histSearch);
+    histFilter.appendChild(histStateSel);
+
+    var historyBox = el("div", "dlq-detail list-scroll");
+    var historyRows = [];  // most-recent N fetched from /canary/history
+
+    function renderHistoryTable() {
+      var q = histSearch.value.trim().toLowerCase();
+      var st = histStateSel.value;
+      var rows = historyRows.filter(function (r) {
+        if (st && String(r.state) !== st) { return false; }
+        if (q && String(r.config_type || "").toLowerCase().indexOf(q) === -1) {
+          return false;
+        }
+        return true;
+      });
+      historyBox.textContent = "";
+      if (!rows.length) {
+        historyBox.appendChild(el("div", "spinner", historyRows.length
+          ? "No terminal rollouts match the filter."
+          : "No terminal rollouts yet."));
+        return;
+      }
+      var table = el("table", "dlq-table");
+      var headRow = el("tr");
+      ["id", "config_type", "final state", "stage", "when"].forEach(function (h) {
+        headRow.appendChild(el("th", null, h));
+      });
+      table.appendChild(headRow);
+      rows.forEach(function (row) {
+        var tr = el("tr", "dlq-row");
+        tr.appendChild(el("td", null, String(row.id)));
+        tr.appendChild(el("td", null,
+          row.config_type == null ? "" : String(row.config_type)));
+        var stateTd = el("td");
+        var sev = severityOf(row.state);
+        stateTd.appendChild(
+          el("span", sev ? "tag " + sev : "tag", String(row.state)));
+        tr.appendChild(stateTd);
+        var idx = row.current_stage_index;
+        var stageLabel = (row.current_stage == null ? "—"
+          : String(row.current_stage))
+          + (idx == null ? "" : " (" + (idx + 1) + "/"
+            + (row.total_stages == null ? "?" : row.total_stages) + ")");
+        tr.appendChild(el("td", null, stageLabel));
+        tr.appendChild(el("td", null, relAgoIso(row.created_at)));
+        tr.addEventListener("click", function () { toggleDetail(row.id); });
+        table.appendChild(tr);
+      });
+      historyBox.appendChild(table);
+    }
+
+    function renderHistory(data) {
+      historyRows = (data && data.history) || [];
+      renderHistoryTable();
+    }
+    histSearch.addEventListener("input", renderHistoryTable);
+    histStateSel.addEventListener("change", renderHistoryTable);
+
+    // Toggle: collapsed by default, click to expand (and AUTO-fetch fresh each
+    // open, so showing doubles as refresh; click again to collapse so the panel
+    // returns to its compact height). Fetches up to 100 (the endpoint has no
+    // offset paging); the filter then narrows that set client-side.
+    historyBox.style.display = "none";
+    var historyShown = false;
+    var historyBtn = el("button", null, "Show history");
+    historyBtn.addEventListener("click", function () {
+      historyShown = !historyShown;
+      if (historyShown) {
+        historyBtn.textContent = "Hide history";
+        historyBox.style.display = "";
+        histFilter.style.display = "";
+        fetchInto(historyBox, "/canary/history?limit=100", renderHistory);
+      } else {
+        historyBtn.textContent = "Show history";
+        historyBox.textContent = "";
+        historyBox.style.display = "none";
+        histFilter.style.display = "none";
+      }
+    });
+    container.appendChild(historyBtn);
+    container.appendChild(histFilter);
+    container.appendChild(historyBox);
+
+    load();
+  }
+
+  // --- Runtime Config editor drill-down (662 D6) ---------------------------
+  // Per-domain field editor over the editable projection (GET /config/editable):
+  // domain list -> per-domain field form -> diff-confirmed PUT /config/{slug}.
+  // Pending changes list with per-change cancel; an audit-off warning when the
+  // change reason would not be durably retained. All paths stay under /config so
+  // the panel's status domain == its action domains (G44).
+  var RC_STRATEGIES = ["immediate", "delayed", "graceful"];
+  // Config domain (underscore) -> URL section slug (hyphen): the PUT routes are
+  // registered as /config/circuit-breaker, /config/rate-limit, etc.
+  function rcSlug(domain) { return domain.replace(/_/g, "-"); }
+
+  function renderRuntimeConfigDrilldown(container) {
+    var pendingBox = el("div", "dlq-detail");
+    // The editable-section list is an editor index (one row per config domain),
+    // not at-a-glance monitoring signal, and runs long. Keep it collapsed behind
+    // a toggle so the panel defaults to its compact summary height (the Canary
+    // "Show history" precedent). Pending changes stay visible (actionable); the
+    // audit-trail status + warning live once, in the panel body summary.
+    var sectionsBtn = el("button", null, "Edit config sections");
+    var sectionsTitle = el("div", "drill-title", "Editable config sections");
+    var listBox = el("div");
+    var formBox = el("div", "dlq-detail");
+    container.appendChild(pendingBox);
+    container.appendChild(sectionsBtn);
+    container.appendChild(sectionsTitle);
+    container.appendChild(listBox);
+    container.appendChild(formBox);
+
+    var openDomain = null;
+    var nDomains = 0;
+    var sectionsShown = false;
+    // 685 D6: domain -> owning canary rollout id, from GET /config/editable.
+    // A page-load snapshot; a lock taken after load surfaces via the 409 banner.
+    var rolloutLocks = {};
+    function syncSections() {
+      sectionsBtn.textContent = (sectionsShown ? "Hide" : "Edit")
+        + " config sections (" + nDomains + ")";
+      var disp = sectionsShown ? "" : "none";
+      sectionsTitle.style.display = disp;
+      listBox.style.display = disp;
+      formBox.style.display = disp;
+    }
+    sectionsBtn.addEventListener("click", function () {
+      sectionsShown = !sectionsShown;
+      if (!sectionsShown) { formBox.textContent = ""; openDomain = null; }
+      syncSections();
+    });
+    syncSections();
+    function reload() { formBox.textContent = ""; openDomain = null; load(); }
+
+    function renderPending(data) {
+      pendingBox.textContent = "";
+      var pending = (data && data.pending_changes) || [];
+      if (!pending.length) { return; }
+      pendingBox.appendChild(el("div", "drill-title",
+        "Pending changes (" + pending.length + ")"));
+      pending.forEach(function (pc) {
+        var row = el("div", "cb-row");
+        row.appendChild(el("span", "cb-name",
+          String(pc.config_type || "?") + " · " + String(pc.id || "")));
+        var cancelBtn = el("button", "btn-danger", "Cancel");
+        cancelBtn.addEventListener("click", function () {
+          openActionModal({
+            label: "Cancel pending change " + pc.id,
+            path: "/config/pending/" + encodeURIComponent(pc.id) + "/cancel",
+            method: "POST", risk: "admin", onDone: reload
+          });
+        });
+        var right = el("span", "cb-right");
+        right.appendChild(cancelBtn);
+        row.appendChild(right);
+        pendingBox.appendChild(row);
+      });
+    }
+
+    function buildFieldInput(field) {
+      var input;
+      if (field.widget === "checkbox") {
+        input = el("input"); input.type = "checkbox";
+        if (field.value) { input.checked = true; }
+      } else if (field.widget === "select") {
+        input = el("select");
+        (field.options || []).forEach(function (o) {
+          var opt = el("option", null, o); opt.value = o;
+          if (o === field.value) { opt.selected = true; }
+          input.appendChild(opt);
+        });
+      } else if (field.widget === "number") {
+        input = el("input"); input.type = "number";
+        if (field.value != null) { input.value = field.value; }
+        // Advisory HTML min/max (662 D6) — sourced from the same table the
+        // server clamps to, so the bound never misleads.
+        if (field.min != null) { input.min = field.min; }
+        if (field.max != null) { input.max = field.max; }
+      } else {
+        input = el("input"); input.type = "text";
+        if (field.value != null) { input.value = field.value; }
+      }
+      input.setAttribute("autocomplete", "off");
+      return input;
+    }
+
+    function readFieldValue(field, input) {
+      if (field.widget === "checkbox") { return input.checked; }
+      if (field.widget === "number") {
+        var raw = String(input.value).trim();
+        if (raw === "") { return null; }
+        var n = Number(raw);
+        return isNaN(n) ? null : n;  // typed number, never a string (avoids clamp)
+      }
+      return input.value;  // select / text
+    }
+
+    function showForm(domain, entry) {
+      formBox.textContent = "";
+      var lockOwner = rolloutLocks[domain];
+      var fields = entry.fields || {};
+      var defStrategy = (entry.default_strategy
+        && entry.default_strategy.strategy) || "immediate";
+      formBox.appendChild(el("div", "drill-title", "Edit " + domain));
+      // 685 D6: a domain under an active canary rollout is frozen. Show a banner
+      // pointing to the escape hatch and hard-disable Apply below — there is no
+      // override param, so a submit is a guaranteed 409.
+      if (lockOwner) {
+        formBox.appendChild(el("div", "action-warn",
+          "Under an active canary rollout (" + lockOwner + "). Editing is "
+          + "blocked until it finishes — roll back or cancel it from the "
+          + "Canary Rollouts panel, or wait."));
+      }
+
+      var inputs = {};
+      Object.keys(fields).forEach(function (name) {
+        var field = fields[name];
+        formBox.appendChild(el("p", "field-label", name));
+        var input = buildFieldInput(field);
+        formBox.appendChild(input);
+        if (field.widget === "number" && field.clamps) {
+          formBox.appendChild(el("p", "field-help",
+            "range " + field.min + "–" + field.max
+            + "; out-of-range will be clamped to a safe default"));
+        }
+        inputs[name] = { input: input, field: field };
+      });
+
+      formBox.appendChild(el("p", "field-label", "Apply strategy"));
+      var stratSel = el("select");
+      RC_STRATEGIES.forEach(function (s) {
+        var o = el("option", null, s); o.value = s;
+        if (s === defStrategy) { o.selected = true; }
+        stratSel.appendChild(o);
+      });
+      formBox.appendChild(stratSel);
+      formBox.appendChild(el("p", "field-help",
+        "default strategy for this section: " + defStrategy));
+      var secsInput = el("input"); secsInput.type = "number";
+      secsInput.setAttribute("placeholder", "seconds (delayed/graceful)");
+      secsInput.style.display = (defStrategy === "immediate") ? "none" : "";
+      formBox.appendChild(secsInput);
+      stratSel.addEventListener("change", function () {
+        secsInput.style.display = (stratSel.value === "immediate") ? "none" : "";
+      });
+
+      formBox.appendChild(el("p", "field-label", "Reason (optional)"));
+      var reasonInput = el("input"); reasonInput.type = "text";
+      reasonInput.setAttribute("placeholder", "why this change (audit trail)");
+      formBox.appendChild(reasonInput);
+
+      var notice = el("div", "notice");
+      notice.style.display = "none";
+      var applyBtn = el("button", "btn-recover", "Apply changes");
+      if (lockOwner) {
+        // Hard-disable under a rollout lock (685 D6): the banner above explains
+        // the block and the escape hatch; no click handler is wired.
+        applyBtn.disabled = true;
+        applyBtn.title = "Domain locked by canary rollout " + lockOwner;
+      } else {
+      applyBtn.addEventListener("click", function () {
+        notice.style.display = "none";
+        var payload = {};
+        var diffRows = [];
+        Object.keys(inputs).forEach(function (name) {
+          var item = inputs[name];
+          var newVal = readFieldValue(item.field, item.input);
+          var oldVal = item.field.value;
+          if (String(oldVal) !== String(newVal)) {
+            payload[name] = newVal;
+            diffRows.push({ key: name, from: oldVal, to: newVal });
+          }
+        });
+        if (!diffRows.length) {
+          notice.textContent = "No changes to apply.";
+          notice.style.display = "";
+          return;
+        }
+        payload.apply_strategy = stratSel.value;
+        if (stratSel.value !== "immediate") {
+          var secs = parseInt(String(secsInput.value).trim(), 10);
+          if (!isNaN(secs)) {
+            if (stratSel.value === "delayed") { payload.delay_seconds = secs; }
+            else { payload.grace_timeout_seconds = secs; }
+          }
+        }
+        var reason = reasonInput.value.trim();
+        if (reason) { payload.reason = reason; }
+        openActionModal({
+          label: "Apply changes to " + domain,
+          path: "/config/" + rcSlug(domain),
+          method: "PUT", risk: "admin",
+          diffRows: diffRows,
+          rawBody: JSON.stringify(payload),
+          onDone: reload
+        });
+      });
+      }
+      var btnRow = el("div", "dlq-detail-head");
+      btnRow.appendChild(applyBtn);
+      formBox.appendChild(btnRow);
+      formBox.appendChild(notice);
+    }
+
+    function renderList(data) {
+      var cfg = (data && data.config) || {};
+      listBox.textContent = "";
+      var domains = Object.keys(cfg).sort();
+      nDomains = domains.length;
+      syncSections();
+      if (!domains.length) {
+        listBox.appendChild(el("div", "spinner", "No editable config sections."));
+        return;
+      }
+      var box = el("div", "list-scroll");
+      domains.forEach(function (domain) {
+        var entry = cfg[domain] || {};
+        var nFields = Object.keys(entry.fields || {}).length;
+        var row = el("div", "cb-row dlq-row");
+        row.appendChild(el("span", "cb-name", domain));
+        var right = el("span", "cb-right");
+        // 685 D6: flag a domain frozen by an active canary rollout.
+        if (rolloutLocks[domain]) {
+          right.appendChild(el("span", "tag warn", "locked"));
+        }
+        right.appendChild(el("span", "cb-fail", nFields + " fields"));
+        row.appendChild(right);
+        row.addEventListener("click", function () {
+          if (openDomain === domain) {
+            formBox.textContent = ""; openDomain = null;
+          } else {
+            openDomain = domain; showForm(domain, entry);
+          }
+        });
+        box.appendChild(row);
+      });
+      listBox.appendChild(box);
+    }
+
+    function load() {
+      fetchInto(listBox, "/config/editable", function (data) {
+        rolloutLocks = (data && data.rollout_locks) || {};
+        renderPending(data || {});
+        renderList(data || {});
+      });
+    }
+
+    load();
+  }
+
+  // String-keyed drill-down dispatch (550 D3) — resolved after both drill-down
+  // functions are declared. A panel's `drilldown: "<key>"` selects its
+  // renderer; buildPanel looks it up rather than calling one hardcoded function.
+  var DRILLDOWNS = {
+    dlq: renderDlqDrilldown,
+    canary: renderCanaryDrilldown,
+    runtime_config: renderRuntimeConfigDrilldown
+  };
+
+  // Bespoke panel-body renderers (bodyRender: "<key>"), resolved by loadPanel
+  // when the generic key->value dump renders a status shape poorly.
+  var BODY_RENDERERS = {
+    dashboard: renderDashboardHero,
+    circuit_breaker: renderCircuitBreakers,
+    dlq_stats: renderDlqStats,
+    canary_summary: renderCanarySummary,
+    meta_watchdog: renderMetaWatchdog,
+    runtime_config: renderRuntimeConfig
+  };
+
+  // --- Action modal (D10) --------------------------------------------------
+  var pendingAction = null;
+  function openActionModal(action) {
+    pendingAction = action;
+    var overlay = document.getElementById("overlay");
+    var title = document.getElementById("modal-title");
+    var content = document.getElementById("modal-content");
+    var result = document.getElementById("modal-result");
+    var confirmBtn = document.getElementById("modal-confirm");
+    var cancelBtn = document.getElementById("modal-cancel");
+
+    title.textContent = action.label;
+    content.textContent = "";
+    result.textContent = "";
+    result.className = "modal-result";
+    // Reset the post-success dismiss state a prior run may have left behind.
+    confirmBtn.style.display = "";
+    confirmBtn.disabled = false;  // D7: clear a leftover in-flight/success guard
+    cancelBtn.textContent = "Cancel";
+
+    var isAdmin = action.risk === "admin";
+    confirmBtn.className = isAdmin ? "danger" : "primary";
+
+    if (action.warn) {
+      // Real-world side-effect caption (e.g. escalation-test actually pages
+      // every configured Slack/PagerDuty channel). Orthogonal to the risk tier:
+      // risk answers "what does the server require?", warn answers "what real
+      // effect does this have?" — so it renders regardless of operator/admin.
+      content.appendChild(el("div", "action-warn", action.warn));
+    }
+
+    // Per-field [current] -> [proposed] diff preview (662 D6): when the action
+    // carries diffRows + a pre-built rawBody (the Runtime Config editor apply),
+    // show the exact changes so a fat-finger edit is caught before the PUT.
+    // Replaces the generic "Reversible …" copy for this confirm.
+    if (action.diffRows && action.diffRows.length) {
+      content.appendChild(el("p", "field-label", "Changes"));
+      action.diffRows.forEach(function (d) {
+        content.appendChild(el("p", "field-label", d.key));
+        content.appendChild(el("p", "field-help",
+          String(d.from) + "  →  " + String(d.to)));
+      });
+    }
+
+    if (action.param) {
+      content.appendChild(el("p", null, "Target " + action.param + ":"));
+      var paramInput = el("input");
+      paramInput.id = "modal-param";
+      paramInput.setAttribute("autocomplete", "off");
+      content.appendChild(paramInput);
+    }
+    if (action.bodyField) {
+      // Single known field (e.g. resolve "notes"): a plain labelled input with
+      // an explanatory placeholder, not a raw-JSON textarea. The value is
+      // wrapped into { key: value } at submit; empty -> server default.
+      content.appendChild(el("p", null, action.bodyField.label || "Note:"));
+      var fieldInput = el("textarea");
+      fieldInput.id = "modal-bodyfield";
+      fieldInput.style.fontFamily = "inherit";  // prose, not code
+      if (action.bodyField.placeholder) {
+        fieldInput.placeholder = action.bodyField.placeholder;
+      }
+      content.appendChild(fieldInput);
+    } else if (action.body) {
+      content.appendChild(el("p", null, "Request body (JSON, optional):"));
+      var bodyInput = el("textarea");
+      bodyInput.id = "modal-body";
+      bodyInput.value = action.bodyDefault || "{}";  // D4: hint expected shape
+      content.appendChild(bodyInput);
+    } else if (action.bodyFields) {
+      // Structured form: one persistent label + help line per field, with enum
+      // fields as <select> so a level cannot be mistyped. The help text stays
+      // visible while typing (unlike a placeholder) — a first-time operator
+      // needs the explanation in front of them during an incident.
+      action.bodyFields.forEach(function (f) {
+        content.appendChild(el("p", "field-label", f.label));
+        if (f.help) { content.appendChild(el("p", "field-help", f.help)); }
+        if (f.type === "checkbox") {
+          var wrap = el("label", "field-check");
+          var cb = el("input");
+          cb.type = "checkbox";
+          cb.id = "modal-bf-" + f.key;
+          if (f.default) { cb.checked = true; }
+          wrap.appendChild(cb);
+          wrap.appendChild(document.createTextNode(f.caption || f.label));
+          content.appendChild(wrap);
+          return;
+        }
+        var input;
+        if (f.type === "select") {
+          input = el("select");
+          f.options.forEach(function (opt) {
+            var o = el("option", null, opt.label || opt.value);
+            o.value = opt.value;
+            if (opt.value === f.default) { o.selected = true; }
+            input.appendChild(o);
+          });
+        } else {
+          input = el("input");
+          input.type = (f.type === "number") ? "number" : "text";
+          if (f.placeholder) { input.placeholder = f.placeholder; }
+          if (f.default != null) { input.value = f.default; }
+        }
+        input.id = "modal-bf-" + f.key;
+        input.setAttribute("autocomplete", "off");
+        content.appendChild(input);
+      });
+    }
+
+    if (isAdmin) {
+      // Destructive: typed confirmation + UNLOCK awareness. The server already
+      // 403s without BALDUR_ADMIN_UNLOCK=1 (auth double-gate) — explain it.
+      var hint = el("div", "unlock-hint",
+        "Destructive ADMIN action. Type CONFIRM below to send it — a " +
+        "client-side check to prevent accidental clicks, NOT the server unlock. " +
+        "Separately, the server runs ADMIN operations only when launched with " +
+        "BALDUR_ADMIN_UNLOCK=1 (default off); otherwise it returns 403.");
+      content.appendChild(hint);
+      var typed = el("input");
+      typed.id = "modal-typed";
+      typed.setAttribute("autocomplete", "off");
+      typed.placeholder = "type CONFIRM";
+      content.appendChild(typed);
+    } else {
+      content.appendChild(el("p", null,
+        "Reversible OPERATOR action. Proceed?"));
+    }
+    overlay.style.display = "flex";
+  }
+
+  function closeModal() {
+    document.getElementById("overlay").style.display = "none";
+    pendingAction = null;
+  }
+
+  function runPendingAction() {
+    var action = pendingAction;
+    if (!action) { return; }
+    var result = document.getElementById("modal-result");
+    var confirmBtn = document.getElementById("modal-confirm");
+
+    if (action.risk === "admin") {
+      var typed = document.getElementById("modal-typed");
+      if (!typed || typed.value.trim() !== "CONFIRM") {
+        result.className = "modal-result notice";
+        result.textContent = "Type CONFIRM to run a destructive action.";
+        return;
+      }
+    }
+
+    var path = action.path;
+    if (action.param) {
+      var pv = (document.getElementById("modal-param") || {}).value;
+      if (!pv) {
+        result.className = "modal-result notice";
+        result.textContent = "Provide a " + action.param + ".";
+        return;
+      }
+      path = path.replace("{" + action.param + "}", encodeURIComponent(pv.trim()));
+    }
+
+    var opts = { method: action.method };
+    if (action.rawBody != null) {
+      // Pre-built JSON payload (Runtime Config editor apply, 662 D6): the form
+      // was rendered by the drill-down, the diff preview shown above; send the
+      // already-serialized body verbatim (no modal input to read).
+      opts.body = action.rawBody;
+      opts.headers = { "Content-Type": "application/json" };
+    } else if (action.bodyField) {
+      var fieldEl = document.getElementById("modal-bodyfield");
+      var fieldVal = fieldEl ? fieldEl.value.trim() : "";
+      if (action.bodyField.required && !fieldVal) {
+        // D8: server 400s on an empty required field — abort inline so the
+        // operator learns it is mandatory at the field, not from the HTTP 400.
+        result.className = "modal-result notice";
+        result.textContent =
+          "Provide a " + (action.bodyField.label || action.bodyField.key) + ".";
+        return;
+      }
+      if (fieldVal) {
+        var payload = {};
+        payload[action.bodyField.key] = fieldVal;
+        opts.body = JSON.stringify(payload);
+        opts.headers = { "Content-Type": "application/json" };
+      }
+      // Empty: omit the body so the server applies its default note.
+    } else if (action.body) {
+      var raw = (document.getElementById("modal-body") || {}).value || "{}";
+      try { JSON.parse(raw); } catch (_e) {
+        result.className = "modal-result notice";
+        result.textContent = "Body is not valid JSON.";
+        return;
+      }
+      opts.body = raw;
+      opts.headers = { "Content-Type": "application/json" };
+    } else if (action.bodyFields) {
+      var payload = {};
+      for (var i = 0; i < action.bodyFields.length; i++) {
+        var f = action.bodyFields[i];
+        var node = document.getElementById("modal-bf-" + f.key);
+        if (!node) { continue; }
+        if (f.type === "checkbox") { payload[f.key] = node.checked; continue; }
+        var fv = (node.value == null ? "" : String(node.value)).trim();
+        if (f.required && !fv) {
+          // Mirror the server 400 at the field so the operator learns it is
+          // mandatory here, not from the HTTP error.
+          result.className = "modal-result notice";
+          result.textContent = "Provide a " + f.label + ".";
+          return;
+        }
+        if (!fv) { continue; }  // optional + empty -> omit so the server default applies
+        if (f.type === "number") {
+          var n = parseInt(fv, 10);
+          if (isNaN(n)) {
+            result.className = "modal-result notice";
+            result.textContent = f.label + " must be a number.";
+            return;
+          }
+          payload[f.key] = n;
+        } else {
+          payload[f.key] = fv;
+        }
+      }
+      opts.body = JSON.stringify(payload);
+      opts.headers = { "Content-Type": "application/json" };
+    }
+
+    // D7 double-submit guard: all pre-flight validations have passed, so block
+    // re-entry while the request is outstanding — escalation-test pages a real
+    // channel per click (D2), so a double-fire would page twice. Re-enabled in
+    // the failure branches below; the success branch hides the button instead.
+    confirmBtn.disabled = true;
+    result.className = "modal-result spinner";
+    result.textContent = "Running…";
+    adminFetch(path, opts)
+      .then(function (resp) {
+        return resp.text().then(function (txt) {
+          if (resp.ok) {
+            // Success: switch the modal to a dismiss-only state — the operator
+            // reads the result then closes deliberately, and a second Confirm
+            // click cannot re-run the action (pendingAction cleared + button
+            // hidden).
+            pendingAction = null;
+            document.getElementById("modal-confirm").style.display = "none";
+            document.getElementById("modal-cancel").textContent = "Close";
+            result.className = "modal-result";
+            result.textContent = "";
+            result.appendChild(el("div", null, "✓ Success (HTTP " + resp.status + ")"));
+            // Render a JSON response as a severity-colored, bounded kv tree so a
+            // health-shaped result (e.g. force-check's overall_status + per-
+            // component statuses) reads as a colored verdict, not a raw blob.
+            // Non-JSON / empty bodies fall back to plain text.
+            var okParsed = null;
+            if (txt) { try { okParsed = JSON.parse(txt); } catch (_e) { okParsed = null; } }
+            if (okParsed !== null && typeof okParsed === "object") {
+              var okBox = el("div", "list-scroll");
+              renderStructured(okBox, okParsed, 0);
+              result.appendChild(okBox);
+            } else if (txt) {
+              result.appendChild(el("div", "kv-val", txt));
+            }
+            // Refresh the owning surface (panel stats / drill-down / row context)
+            // so the new numbers show behind the modal without a manual reload.
+            if (typeof action.onDone === "function") {
+              try { action.onDone(); } catch (_e) { /* must not break modal */ }
+            }
+            return;
+          }
+          result.className = "modal-result notice";
+          if (resp.status === 403) {
+            result.textContent =
+              "403 Forbidden — ADMIN operations need BALDUR_ADMIN_UNLOCK=1 " +
+              "and a valid admin key.";
+          } else if (resp.status === 401) {
+            result.textContent = "401 — set the admin key in the header bar.";
+          } else if (resp.status === 409) {
+            // 685 D6 stale-page convergence: a lock acquired after page load
+            // leaves a stale-enabled Apply; the PUT 409s with ROLLOUT_CONFLICT.
+            // Render the lock banner (naming the owning rollout from the message)
+            // instead of a generic error, matching the pre-load affordance.
+            var lockMsg = null;
+            try {
+              var pj = JSON.parse(txt);
+              if (pj && pj.error_code === "ROLLOUT_CONFLICT") { lockMsg = pj.error; }
+            } catch (_e) { lockMsg = null; }
+            result.textContent = lockMsg
+              ? ("Blocked by an active canary rollout.\n" + lockMsg + "\n"
+                 + "Roll back or cancel the rollout from the Canary Rollouts "
+                 + "panel, or wait.")
+              : ("HTTP 409\n" + txt);
+          } else {
+            result.textContent = "HTTP " + resp.status + "\n" + txt;
+          }
+          confirmBtn.disabled = false;  // D7: re-arm for a corrected retry
+        });
+      })
+      .catch(function (err) {
+        result.className = "modal-result notice";
+        result.textContent = (err && err.name === "AbortError")
+          ? "server slow/unresponsive — verify via curl"
+          : "request failed: " + ((err && err.message) || err);
+        confirmBtn.disabled = false;  // D7: re-arm after a network failure
+      });
+  }
+
+  // --- Build the page ------------------------------------------------------
+  // Body-only refreshers (one per built panel) for the header auto-refresh
+  // toggle; reset on every refreshAll() rebuild.
+  var panelRefreshers = [];
+  var autoRefreshTimer = null;
+  function buildPanel(p) {
+    var panel = el("div", "panel");
+    panel.dataset.panelId = p.id;  // spine chip targeting + DLQ width selector
+    if (p.id === "dashboard") { panel.classList.add("hero"); }
+    var head = el("div", "panel-head");
+    head.appendChild(el("h2", null, p.title));
+    if (p.pro) { head.appendChild(el("span", "tag pro", "PRO")); }
+    var updated = el("span", "updated", "");
+    head.appendChild(updated);
+    var refresh = el("button", null, "↻");
+    refresh.title = "Refresh";
+    head.appendChild(refresh);
+    panel.appendChild(head);
+
+    var body = el("div", "panel-body");
+    panel.appendChild(body);
+
+    // Refresh the whole panel surface: status body + (if present) the drill-down.
+    // Wired to ↻ and to each action's post-success onDone so bulk actions
+    // (Replay/Archive/Purge) also update the numbers behind the modal.
+    var drill = null;
+    var drillFn = p.drilldown ? DRILLDOWNS[p.drilldown] : null;
+    function refreshPanel() {
+      loadPanel(p, body, updated);
+      if (drill && drillFn) {
+        drill.textContent = "";
+        drillFn(drill);
+      }
+    }
+    refresh.addEventListener("click", refreshPanel);
+    // Body-only refresher for the header auto-refresh toggle — never rebuilds an
+    // open drill-down, so it won't disrupt active triage.
+    panelRefreshers.push(function () { loadPanel(p, body, updated); });
+
+    if (p.actions && p.actions.length) {
+      var actions = el("div", "panel-actions");
+      p.actions.forEach(function (a) {
+        var btn = el("button", btnClass(a), a.label);
+        // Copy the action so the post-success panel refresh is attached without
+        // mutating the shared PANELS config.
+        btn.addEventListener("click", function () {
+          openActionModal(Object.assign({}, a, { onDone: refreshPanel }));
+        });
+        actions.appendChild(btn);
+      });
+      panel.appendChild(actions);
+    }
+
+    // Bespoke drill-down hook (550 D3): the generic shape stays the single
+    // source of truth (PANELS); a panel's `drilldown: "<key>"` selects its
+    // one-off table/detail renderer from the DRILLDOWNS dispatch table.
+    if (drillFn) {
+      drill = el("div", "panel-drilldown");
+      panel.appendChild(drill);
+      drillFn(drill);
+    }
+
+    loadPanel(p, body, updated);
+    return panel;
+  }
+
+  function init() {
+    // Informational entitlement banner (D8) — non-gating.
+    if (window.__BALDUR_ENTITLEMENT__ === "invalid") {
+      var banner = document.getElementById("banner");
+      banner.style.display = "block";
+      banner.textContent =
+        "PRO license expired or invalid — PRO features keep running until the " +
+        "next restart, then deactivate. Renew on the billing surface.";
+    }
+
+    var keyInput = document.getElementById("admin-key");
+    keyInput.value = getKey();
+    document.getElementById("save-key").addEventListener("click", function () {
+      setKey(keyInput.value.trim());
+      refreshAll();
+    });
+
+    document.getElementById("modal-cancel").addEventListener("click", closeModal);
+    document.getElementById("modal-confirm").addEventListener("click",
+      runPendingAction);
+
+    // Keep "updated Xs ago" labels ticking without refetching (display only).
+    setInterval(function () {
+      var spans = document.getElementsByClassName("updated");
+      for (var i = 0; i < spans.length; i++) {
+        if (spans[i]._t) {
+          spans[i].textContent = "updated " + relAgo(spans[i]._t);
+        }
+      }
+    }, 5000);
+
+    // Header auto-refresh toggle: body-only refresh of every panel on an
+    // interval (off by default; admin traffic is <1 RPS).
+    var auto = document.getElementById("autorefresh-toggle");
+    auto.addEventListener("change", function () {
+      if (autoRefreshTimer) {
+        clearInterval(autoRefreshTimer);
+        autoRefreshTimer = null;
+      }
+      if (auto.checked) {
+        autoRefreshTimer = setInterval(function () {
+          panelRefreshers.forEach(function (fn) { fn(); });
+        }, 15000);
+      }
+    });
+
+    buildSpine();
+    refreshAll();
+  }
+
+  function refreshAll() {
+    var grid = document.getElementById("grid");
+    grid.textContent = "";
+    panelRefreshers = [];  // repopulated by buildPanel below
+    HEALTH = {};           // repopulated as each panel's status resolves
+    renderSpine();         // reset the spine to SAFE until panels report
+    PANELS.filter(panelVisible).forEach(function (p) {
+      grid.appendChild(buildPanel(p));
+    });
+  }
+
+  init();
+  </script>
+</body>
+</html>

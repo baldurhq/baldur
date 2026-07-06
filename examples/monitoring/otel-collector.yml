@@ -1,0 +1,244 @@
+# OpenTelemetry Collector configuration — generalized for consumer apps
+#
+# Changes from the baldur-internal config:
+#   - service.name: parameterized via OTEL_RESOURCE_ATTRIBUTES env var
+#   - Scrape targets: consumer app endpoints (adjust to your setup)
+#   - Tail Sampling: errors/CB/DLQ 100%, normal traffic 1% (per doc 325 section 7.2)
+#   - Retry max_elapsed_time: increased to 5m (per doc 325 section 7.4)
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+  file_storage:
+    directory: /var/lib/otelcol/buffer
+    timeout: 1s
+    # create_directory lets the extension auto-create the buffer + compaction
+    # dirs on a fresh volume; without it the collector aborts at startup with
+    # "directory must exist: .../buffer/compaction".
+    create_directory: true
+    compaction:
+      directory: /var/lib/otelcol/buffer/compaction
+      on_start: true
+      on_rebound: true
+      rebound_needed_threshold_mib: 50
+      rebound_trigger_threshold_mib: 10
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+  prometheus:
+    config:
+      scrape_configs:
+        # Scrape the demo app's Baldur Prometheus exposition. The framework
+        # exposes prometheus_client pull metrics at /api/baldur/prometheus/
+        # (NOT /metrics, which returns control-API JSON). The target is the
+        # demo-app service name resolved over the compose network.
+        - job_name: 'baldur-demo'
+          static_configs:
+            - targets: ['demo-app:8000']
+          metrics_path: /api/baldur/prometheus/
+          scrape_interval: 15s
+          scrape_timeout: 10s
+
+processors:
+  memory_limiter:
+    # Kept below the 512M container limit (docker-compose.yml) so the limiter
+    # soft-throttles before the container OOM-kills. 256/64 sat at the old
+    # container ceiling and refused spans + scrapes under load; 450/128 leaves
+    # headroom so the dashboards stay populated.
+    limit_mib: 450
+    check_interval: 1s
+    spike_limit_mib: 128
+
+  batch:
+    send_batch_size: 1000
+    timeout: 10s
+    send_batch_max_size: 1500
+
+  resource:
+    attributes:
+      - key: deployment.environment
+        value: development
+        action: upsert
+      - key: region
+        from_attribute: REGION
+        action: upsert
+      - key: cluster_id
+        from_attribute: CLUSTER_ID
+        action: upsert
+
+  # Tail Sampling (per doc 325 section 7.2)
+  # Recommended pattern A: Head Sampling OFF (app sends 100%), Tail Sampling here.
+  tail_sampling:
+    decision_wait: 10s
+    num_traces: 100000
+    policies:
+      # Error spans: 100% collection
+      - name: errors-always
+        type: status_code
+        status_code: {status_codes: [ERROR]}
+      # Baldur critical component spans: 100% collection
+      - name: baldur-critical
+        type: string_attribute
+        string_attribute:
+          key: baldur.component
+          values: [circuit_breaker, dlq, saga, retry]
+      # High-latency requests (500ms+): 100% collection
+      - name: high-latency
+        type: latency
+        latency: {threshold_ms: 500}
+      # Remaining traffic: 1% probabilistic sampling
+      - name: probabilistic-default
+        type: probabilistic
+        probabilistic: {sampling_percentage: 1}
+
+  # Sensitive data masking — trace attributes
+  attributes/traces:
+    actions:
+      - key: password
+        action: delete
+      - key: token
+        action: delete
+      - key: api_key
+        action: delete
+      - key: secret
+        action: delete
+      - key: authorization
+        action: delete
+
+  # Sensitive data masking — log attributes
+  attributes/logs:
+    actions:
+      - key: password
+        action: delete
+      - key: passwd
+        action: delete
+      - key: token
+        action: delete
+      - key: access_token
+        action: delete
+      - key: refresh_token
+        action: delete
+      - key: api_key
+        action: delete
+      - key: secret
+        action: delete
+      - key: authorization
+        action: delete
+      - key: trace_id
+        from_attribute: traceId
+        action: upsert
+      - key: span_id
+        from_attribute: spanId
+        action: upsert
+
+  # Value-based redaction (last line of defense)
+  redaction:
+    allow_all_keys: true
+    blocked_values:
+      - "10\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}"
+      - "192\\.168\\.\\d{1,3}\\.\\d{1,3}"
+      - "172\\.(1[6-9]|2[0-9]|3[0-1])\\.\\d{1,3}\\.\\d{1,3}"
+      - "/home/[^\\s]+"
+      - "/var/[^\\s]+"
+      - "C:\\\\[^\\s]+"
+      - "Bearer\\s+[A-Za-z0-9\\-_.]+"
+      - "eyJ[A-Za-z0-9\\-_]+\\.[A-Za-z0-9\\-_]+\\.[A-Za-z0-9\\-_]+"
+      - "sk-[A-Za-z0-9]{20,}"
+      - "pk-[A-Za-z0-9]{20,}"
+    summary: debug
+
+exporters:
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+    timeout: 5s
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 10s
+      max_elapsed_time: 300s  # 5 minutes (per doc 325 section 7.4)
+    sending_queue:
+      enabled: true
+      num_consumers: 10
+      queue_size: 5000
+      storage: file_storage
+
+  prometheusremotewrite:
+    endpoint: http://mimir:9009/api/v1/push
+    headers:
+      X-Scope-OrgID: anonymous
+    tls:
+      insecure: true
+    timeout: 5s
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 10s
+      max_elapsed_time: 300s
+    remote_write_queue:
+      enabled: true
+      num_consumers: 10
+      queue_size: 5000
+    wal:
+      directory: /var/lib/otelcol/wal
+      buffer_size: 300
+      truncate_frequency: 60s
+    resource_to_telemetry_conversion:
+      enabled: true
+
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+    tls:
+      insecure: true
+    timeout: 5s
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 10s
+      max_elapsed_time: 300s
+    sending_queue:
+      enabled: true
+      num_consumers: 10
+      queue_size: 5000
+      storage: file_storage
+
+  debug:
+    verbosity: basic
+
+service:
+  extensions: [health_check, file_storage]
+
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, tail_sampling, batch, resource, attributes/traces, redaction]
+      exporters: [otlp/tempo, debug]
+
+    metrics:
+      receivers: [otlp, prometheus]
+      processors: [memory_limiter, batch, resource, redaction]
+      exporters: [prometheusremotewrite, debug]
+
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch, resource, attributes/logs, redaction]
+      exporters: [otlphttp/loki, debug]
+
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: "0.0.0.0"
+                port: 8888

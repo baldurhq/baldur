@@ -1,0 +1,187 @@
+# V1.0 Launch Manifest — authoritative tier/default-enable contract.
+#
+# Single source of truth mapping every Pydantic `*enabled*` / `enable_*`
+# boolean field under `src/baldur/settings/` to its v1.0 launch tier and the
+# expected `Field(default=...)` value at v1.0 launch.
+#
+# Enforced by `tests/unit/architecture/test_v1_default_enable.py` (per impl
+# doc 527 D5). New `*enabled*` boolean fields require a manifest entry —
+# enumeration is strict. Default drift between code and manifest fails CI.
+#
+# Schema (per entry):
+#   module:   settings module filename, e.g. `compliance.py`
+#   class:    Pydantic class name owning the field (BaseSettings or nested
+#             BaseModel sub-config)
+#   field:    bool field name
+#   default:  expected Pydantic `Field(default=...)` value at v1.0 launch
+#   tier:     Core | v1.0 | Deferred | Dormant
+#   env_var:  operator-facing env-var name computed from `env_prefix` +
+#             field name (uppercase). Nested BaseModel fields use the
+#             `env_nested_delimiter="__"` separator from `settings/base.py`.
+#
+# Tier semantics:
+#   Core    — OSS infrastructure / always-on resilience primitives. Default
+#             reflects current OSS launch state (may be True or False).
+#   v1.0    — PRO v1.0 launch-set feature (per `memory/pro-launch-strategy.md`
+#             Revision 5, 2026-04-18). Default reflects v1.0 launch state.
+#   Deferred — PRO feature built but held out of the v1.0 launch set (per
+#             `memory/pro-launch-strategy.md` Revision 5, 2026-04-18).
+#             Defaults False at v1.0 launch. Each feature is promoted
+#             individually when prioritized — its own impl doc flips its
+#             default (tracked in OOS_INDEX.md). There is no single bulk
+#             "v1.1" release event; the deferred set is a reprioritizable
+#             backlog, not a dated release.
+#   Dormant — AI-tuning / Compliance-Security cluster per
+#             `memory/tier-reclassification-2026-03-28.md`. Defaults False at
+#             v1.0 launch. No marketing surface; no runbooks; opt-in only.
+#
+# Override path: any operator can flip a default at runtime via the
+# `env_var` shown. `bootstrap.py` emits one WARNING per process per
+# Deferred/Dormant field with a True resolved value (suppress via
+# `BALDUR_SUPPRESS_TIER_WARNING=true`).
+
+entries:
+
+  # ── Core (OSS infrastructure + adapter opt-ins) ──
+  - {module: "admin.py", class: "AdminServerSettings", field: "enabled", default: true, tier: "Core", env_var: "BALDUR_ADMIN_ENABLED"}
+  - {module: "admin.py", class: "AdminServerSettings", field: "console_enabled", default: true, tier: "Core", env_var: "BALDUR_ADMIN_CONSOLE_ENABLED"}
+  - {module: "arq_task.py", class: "ArqTaskSettings", field: "enabled", default: false, tier: "Core", env_var: "BALDUR_ARQ_TASK_ENABLED"}
+  - {module: "audit.py", class: "AuditSettings", field: "enabled", default: false, tier: "Core", env_var: "BALDUR_AUDIT_ENABLED"}
+  - {module: "audit.py", class: "AuditSettings", field: "buffer_redis_enabled", default: false, tier: "Core", env_var: "BALDUR_AUDIT_BUFFER_REDIS_ENABLED"}
+  - {module: "audit.py", class: "AuditSettings", field: "fallback_enabled", default: true, tier: "Core", env_var: "BALDUR_AUDIT_FALLBACK_ENABLED"}
+  - {module: "audit.py", class: "AuditSettings", field: "load_shedding_enabled", default: true, tier: "Core", env_var: "BALDUR_AUDIT_LOAD_SHEDDING_ENABLED"}
+  - {module: "audit.py", class: "AuditSettings", field: "metrics_enabled", default: true, tier: "Core", env_var: "BALDUR_AUDIT_METRICS_ENABLED"}
+  - {module: "bridge.py", class: "BridgeSettings", field: "tenacity_enabled", default: false, tier: "Core", env_var: "BALDUR_BRIDGE_TENACITY_ENABLED"}
+  - {module: "canary_interlock.py", class: "CanaryInterlockSettings", field: "refresher_enabled", default: true, tier: "Core", env_var: "BALDUR_CANARY_INTERLOCK_REFRESHER_ENABLED"}
+  - {module: "canary_watchdog.py", class: "CanaryWatchdogSettings", field: "enable_auto_promote", default: true, tier: "Core", env_var: "BALDUR_CANARY_WATCHDOG_ENABLE_AUTO_PROMOTE"}
+  - {module: "canary_watchdog.py", class: "CanaryWatchdogSettings", field: "enable_auto_rollback", default: true, tier: "Core", env_var: "BALDUR_CANARY_WATCHDOG_ENABLE_AUTO_ROLLBACK"}
+  - {module: "canary_watchdog.py", class: "CanaryWatchdogSettings", field: "notification_enabled", default: true, tier: "Core", env_var: "BALDUR_CANARY_WATCHDOG_NOTIFICATION_ENABLED"}
+  - {module: "capacity_reservation.py", class: "CapacityReservationSettings", field: "enabled", default: false, tier: "Core", env_var: "BALDUR_CAPACITY_RESERVATION_ENABLED"}
+  - {module: "cell_topology.py", class: "CellTopologySettings", field: "bulkhead_isolation_enabled", default: false, tier: "Core", env_var: "BALDUR_CELL_TOPOLOGY_BULKHEAD_ISOLATION_ENABLED"}
+  - {module: "cell_topology.py", class: "CellTopologySettings", field: "enabled", default: false, tier: "Core", env_var: "BALDUR_CELL_TOPOLOGY_ENABLED"}
+  - {module: "cell_topology.py", class: "CellTopologySettings", field: "evacuation_enabled", default: false, tier: "Core", env_var: "BALDUR_CELL_TOPOLOGY_EVACUATION_ENABLED"}
+  - {module: "cell_topology.py", class: "CellTopologySettings", field: "metrics_enabled", default: true, tier: "Core", env_var: "BALDUR_CELL_TOPOLOGY_METRICS_ENABLED"}
+  - {module: "cell_topology.py", class: "CellTopologySettings", field: "tagging_enabled", default: false, tier: "Core", env_var: "BALDUR_CELL_TOPOLOGY_TAGGING_ENABLED"}
+  - {module: "channel_target.py", class: "ChannelTargetSettings", field: "pagerduty_enabled", default: false, tier: "Core", env_var: "BALDUR_CHANNEL_TARGET_PAGERDUTY_ENABLED"}
+  - {module: "chaos.py", class: "ChaosSettings", field: "auto_rollback_enabled", default: true, tier: "Core", env_var: "BALDUR_CHAOS_AUTO_ROLLBACK_ENABLED"}
+  - {module: "chaos.py", class: "ChaosSettings", field: "cross_process_detection_enabled", default: false, tier: "Core", env_var: "BALDUR_CHAOS_CROSS_PROCESS_DETECTION_ENABLED"}
+  - {module: "chaos.py", class: "ChaosSettings", field: "enabled", default: false, tier: "Core", env_var: "BALDUR_CHAOS_ENABLED"}
+  - {module: "circuit_breaker.py", class: "CircuitBreakerSettings", field: "enabled", default: true, tier: "Core", env_var: "BALDUR_CB_ENABLED"}
+  - {module: "circuit_breaker.py", class: "CircuitBreakerSettings", field: "cluster_state_propagation_enabled", default: false, tier: "v1.0", env_var: "BALDUR_CB_CLUSTER_STATE_PROPAGATION_ENABLED"}
+  - {module: "circuit_breaker.py", class: "CircuitBreakerSettings", field: "self_ddos_protection_enabled", default: true, tier: "Core", env_var: "BALDUR_CB_SELF_DDOS_PROTECTION_ENABLED"}
+  - {module: "config_shadow.py", class: "ConfigShadowSettings", field: "gate_enabled", default: true, tier: "Core", env_var: "BALDUR_CONFIG_SHADOW_GATE_ENABLED"}
+  - {module: "config_shadow.py", class: "ConfigShadowSettings", field: "live_evaluation_enabled", default: false, tier: "Core", env_var: "BALDUR_CONFIG_SHADOW_LIVE_EVALUATION_ENABLED"}
+  - {module: "daemon_worker.py", class: "DaemonWorkerSettings", field: "respawn_enabled", default: false, tier: "Core", env_var: "BALDUR_DAEMON_WORKER_RESPAWN_ENABLED"}
+  - {module: "daily_report.py", class: "DailyReportSettings", field: "enabled", default: false, tier: "Core", env_var: "BALDUR_DAILY_REPORT_ENABLED"}
+  - {module: "distributed_lock.py", class: "DistributedLockSettings", field: "local_fallback_enabled", default: false, tier: "Core", env_var: "BALDUR_DISTRIBUTED_LOCK_LOCAL_FALLBACK_ENABLED"}
+  - {module: "dlq.py", class: "DLQSettings", field: "enabled", default: true, tier: "Core", env_var: "BALDUR_DLQ_ENABLED"}
+  - {module: "dlq.py", class: "DLQSettings", field: "entry_payload_compression_enabled", default: true, tier: "Core", env_var: "BALDUR_DLQ_ENTRY_PAYLOAD_COMPRESSION_ENABLED"}
+  - {module: "dlq_outbox.py", class: "DLQOutboxSettings", field: "enabled", default: true, tier: "Core", env_var: "BALDUR_DLQ_OUTBOX_ENABLED"}
+  - {module: "governance.py", class: "GovernanceSettings", field: "break_glass_enabled", default: false, tier: "Core", env_var: "BALDUR_GOVERNANCE_BREAK_GLASS_ENABLED"}
+  - {module: "hedging.py", class: "HedgingSettings", field: "enabled", default: true, tier: "Core", env_var: "BALDUR_HEDGING_ENABLED"}
+  - {module: "idempotency.py", class: "IdempotencySettings", field: "enabled", default: true, tier: "Core", env_var: "BALDUR_IDEMPOTENCY_ENABLED"}
+  - {module: "jitter.py", class: "JitterSettings", field: "enabled", default: true, tier: "Core", env_var: "BALDUR_JITTER_ENABLED"}
+  - {module: "kafka_audit.py", class: "KafkaAuditSettings", field: "enable_idempotence", default: true, tier: "Core", env_var: "BALDUR_KAFKA_AUDIT_ENABLE_IDEMPOTENCE"}
+  - {module: "kafka_audit.py", class: "KafkaAuditSettings", field: "partition_salt_enabled", default: true, tier: "Core", env_var: "BALDUR_KAFKA_AUDIT_PARTITION_SALT_ENABLED"}
+  - {module: "l2_storage.py", class: "L2StorageSettings", field: "enabled", default: false, tier: "Core", env_var: "BALDUR_L2_STORAGE_ENABLED"}
+  - {module: "metrics.py", class: "MetricsSettings", field: "enabled", default: true, tier: "Core", env_var: "BALDUR_METRICS_ENABLED"}
+  - {module: "metrics.py", class: "MetricsSettings", field: "jitter_enabled", default: true, tier: "Core", env_var: "BALDUR_METRICS_JITTER_ENABLED"}
+  - {module: "namespace.py", class: "NamespaceSettings", field: "namespace_enabled", default: false, tier: "Core", env_var: "BALDUR_NAMESPACE_NAMESPACE_ENABLED"}
+  - {module: "openapi.py", class: "OpenAPISettings", field: "enabled", default: true, tier: "Core", env_var: "BALDUR_OPENAPI_ENABLED"}
+  - {module: "otel.py", class: "OpenTelemetrySettings", field: "adaptive_sampling_enabled", default: true, tier: "Core", env_var: "OTEL_ADAPTIVE_SAMPLING_ENABLED"}
+  - {module: "otel.py", class: "OpenTelemetrySettings", field: "django_instrument_enabled", default: true, tier: "Core", env_var: "OTEL_DJANGO_INSTRUMENT_ENABLED"}
+  - {module: "pipeline.py", class: "PipelineSettings", field: "adaptive_enabled", default: false, tier: "Core", env_var: "BALDUR_PIPELINE_ADAPTIVE_ENABLED"}
+  - {module: "protect.py", class: "ProtectSettings", field: "enabled", default: true, tier: "Core", env_var: "BALDUR_PROTECT_ENABLED"}
+  - {module: "rate_limit.py", class: "RateLimitSettings", field: "decorator_enabled", default: true, tier: "Core", env_var: "BALDUR_RATE_LIMIT_DECORATOR_ENABLED"}
+  - {module: "rate_limit_throttle_integration.py", class: "RateLimitThrottleIntegrationSettings", field: "enabled", default: true, tier: "Core", env_var: "BALDUR_RATE_LIMIT_THROTTLE_INTEGRATION_ENABLED"}
+  - {module: "recovery_circuit_breaker.py", class: "RecoveryCircuitBreakerSettings", field: "re_escalation_enabled", default: true, tier: "Core", env_var: "BALDUR_RECOVERY_CB_RE_ESCALATION_ENABLED"}
+  - {module: "replay_automation.py", class: "ReplayAutomationSettings", field: "adaptive_enabled", default: false, tier: "Core", env_var: "BALDUR_REPLAY_AUTOMATION_ADAPTIVE_ENABLED"}
+  - {module: "replay_automation.py", class: "ReplayAutomationSettings", field: "priority_enabled", default: false, tier: "Core", env_var: "BALDUR_REPLAY_AUTOMATION_PRIORITY_ENABLED"}
+  - {module: "replay_automation.py", class: "ReplayAutomationSettings", field: "on_recovery_enabled", default: true, tier: "Core", env_var: "BALDUR_REPLAY_AUTOMATION_ON_RECOVERY_ENABLED"}
+  - {module: "replay_automation.py", class: "ReplayAutomationSettings", field: "traffic_aware_enabled", default: false, tier: "Core", env_var: "BALDUR_REPLAY_AUTOMATION_TRAFFIC_AWARE_ENABLED"}
+  - {module: "resilient_recorder.py", class: "ResilientRecorderSettings", field: "enable_background_flush", default: true, tier: "Core", env_var: "BALDUR_RESILIENT_RECORDER_ENABLE_BACKGROUND_FLUSH"}
+  - {module: "resilient_recorder.py", class: "ResilientRecorderSettings", field: "enable_syslog_fallback", default: true, tier: "Core", env_var: "BALDUR_RESILIENT_RECORDER_ENABLE_SYSLOG_FALLBACK"}
+  - {module: "resource_guard.py", class: "ResourceGuardSettings", field: "resource_check_enabled", default: true, tier: "Core", env_var: "BALDUR_RESOURCE_GUARD_RESOURCE_CHECK_ENABLED"}
+  - {module: "retry.py", class: "RetrySettings", field: "enabled", default: true, tier: "Core", env_var: "BALDUR_RETRY_ENABLED"}
+  - {module: "settings_dependency.py", class: "SettingsDependencySettings", field: "auto_fix_enabled", default: false, tier: "Core", env_var: "BALDUR_DEPENDENCY_AUTO_FIX_ENABLED"}
+  - {module: "settings_dependency.py", class: "SettingsDependencySettings", field: "enabled", default: true, tier: "Core", env_var: "BALDUR_DEPENDENCY_ENABLED"}
+  - {module: "settings_recommendation.py", class: "SettingsRecommendationSettings", field: "enabled", default: false, tier: "Core", env_var: "BALDUR_RECOMMENDATION_ENABLED"}
+  - {module: "throttle.py", class: "ThrottleSettings", field: "recovery_dampening_enabled", default: true, tier: "Core", env_var: "BALDUR_THROTTLE_RECOVERY_DAMPENING_ENABLED"}
+
+  # ── v1.0 (PRO launch-set Revision 5, retained True per D3) ──
+  - {module: "admission_control.py", class: "AdmissionControlSettings", field: "enabled", default: true, tier: "v1.0", env_var: "BALDUR_ADMISSION_CONTROL_ENABLED"}
+  - {module: "bulkhead.py", class: "BulkheadSettings", field: "metrics_enabled", default: true, tier: "v1.0", env_var: "BALDUR_BULKHEAD_METRICS_ENABLED"}
+  - {module: "event_journal.py", class: "EventJournalSettings", field: "enabled", default: true, tier: "v1.0", env_var: "BALDUR_EVENT_JOURNAL_ENABLED"}
+  - {module: "forensic.py", class: "ForensicSettings", field: "audit_enabled", default: true, tier: "v1.0", env_var: "BALDUR_FORENSIC_AUDIT_ENABLED"}
+  - {module: "meta_watchdog.py", class: "MetaWatchdogSettings", field: "enabled", default: true, tier: "v1.0", env_var: "BALDUR_META_WATCHDOG_ENABLED"}
+  - {module: "meta_watchdog.py", class: "MetaWatchdogSettings", field: "escalation_enabled", default: true, tier: "v1.0", env_var: "BALDUR_META_WATCHDOG_ESCALATION_ENABLED"}
+  - {module: "notification.py", class: "NotificationSettings", field: "enabled", default: true, tier: "v1.0", env_var: "BALDUR_NOTIFICATION_ENABLED"}
+  - {module: "precomputed_cache.py", class: "PrecomputedCacheSettings", field: "enabled", default: true, tier: "v1.0", env_var: "BALDUR_PRECOMPUTED_CACHE_ENABLED"}
+  - {module: "precomputed_cache.py", class: "PrecomputedCacheSettings", field: "jitter_enabled", default: true, tier: "v1.0", env_var: "BALDUR_PRECOMPUTED_CACHE_JITTER_ENABLED"}
+  - {module: "precomputed_cache.py", class: "PrecomputedCacheSettings", field: "l3_cb_enabled", default: true, tier: "v1.0", env_var: "BALDUR_PRECOMPUTED_CACHE_L3_CB_ENABLED"}
+  - {module: "system_metrics_cache.py", class: "SystemMetricsCacheSettings", field: "enabled", default: true, tier: "v1.0", env_var: "BALDUR_SYSTEM_METRICS_CACHE_ENABLED"}
+
+  # ── Deferred (held out of v1.0 launch per pro-launch-strategy.md Revision 5; default False; promoted individually) ──
+  - {module: "auto_tuning.py", class: "AutoTuningSettings", field: "enabled", default: false, tier: "Deferred", env_var: "BALDUR_AUTO_TUNING_ENABLED"}
+  - {module: "backpressure.py", class: "BackpressureSettings", field: "backpressure_enabled", default: false, tier: "Deferred", env_var: "BALDUR_BACKPRESSURE_BACKPRESSURE_ENABLED"}
+  - {module: "backpressure.py", class: "BackpressureSettings", field: "graceful_degradation_enabled", default: false, tier: "Deferred", env_var: "BALDUR_BACKPRESSURE_GRACEFUL_DEGRADATION_ENABLED"}
+  - {module: "backpressure.py", class: "BackpressureSettings", field: "hpa_enabled", default: false, tier: "Deferred", env_var: "BALDUR_BACKPRESSURE_HPA_ENABLED"}
+  - {module: "backpressure.py", class: "BackpressureSettings", field: "metrics_enabled", default: false, tier: "Deferred", env_var: "BALDUR_BACKPRESSURE_METRICS_ENABLED"}
+  - {module: "backpressure.py", class: "BackpressureSettings", field: "redis_sync_enabled", default: false, tier: "Deferred", env_var: "BALDUR_BACKPRESSURE_REDIS_SYNC_ENABLED"}
+  - {module: "circuit_breaker_advanced.py", class: "CircuitBreakerAdvancedSettings", field: "enabled", default: false, tier: "Deferred", env_var: "BALDUR_CB_ADVANCED_ENABLED"}
+  - {module: "circuit_breaker_advanced.py", class: "CircuitBreakerAdvancedSettings", field: "load_shedding_enabled", default: false, tier: "Deferred", env_var: "BALDUR_CB_ADVANCED_LOAD_SHEDDING_ENABLED"}
+  - {module: "circuit_mesh.py", class: "CircuitMeshSettings", field: "enable_damped_propagation", default: false, tier: "Deferred", env_var: "BALDUR_CIRCUIT_MESH_ENABLE_DAMPED_PROPAGATION"}
+  - {module: "circuit_mesh.py", class: "CircuitMeshSettings", field: "enable_fast_recovery", default: false, tier: "Deferred", env_var: "BALDUR_CIRCUIT_MESH_ENABLE_FAST_RECOVERY"}
+  - {module: "circuit_mesh.py", class: "CircuitMeshSettings", field: "enable_preemptive_fallback", default: false, tier: "Deferred", env_var: "BALDUR_CIRCUIT_MESH_ENABLE_PREEMPTIVE_FALLBACK"}
+  - {module: "circuit_mesh.py", class: "CircuitMeshSettings", field: "enable_ttl_heartbeat", default: false, tier: "Deferred", env_var: "BALDUR_CIRCUIT_MESH_ENABLE_TTL_HEARTBEAT"}
+  - {module: "circuit_mesh.py", class: "CircuitMeshSettings", field: "enabled", default: false, tier: "Deferred", env_var: "BALDUR_CIRCUIT_MESH_ENABLED"}
+  - {module: "corruption_shield.py", class: "CorruptionShieldSettings", field: "emergency_escalation_enabled", default: false, tier: "Deferred", env_var: "BALDUR_CORRUPTION_SHIELD_EMERGENCY_ESCALATION_ENABLED"}
+  - {module: "corruption_shield.py", class: "CorruptionShieldSettings", field: "enabled", default: false, tier: "Deferred", env_var: "BALDUR_CORRUPTION_SHIELD_ENABLED"}
+  - {module: "corruption_shield.py", class: "CorruptionShieldSettings", field: "l1_enabled", default: false, tier: "Deferred", env_var: "BALDUR_CORRUPTION_SHIELD_L1_ENABLED"}
+  - {module: "corruption_shield.py", class: "CorruptionShieldSettings", field: "l2_enabled", default: false, tier: "Deferred", env_var: "BALDUR_CORRUPTION_SHIELD_L2_ENABLED"}
+  - {module: "corruption_shield.py", class: "CorruptionShieldSettings", field: "l3_enabled", default: false, tier: "Deferred", env_var: "BALDUR_CORRUPTION_SHIELD_L3_ENABLED"}
+  - {module: "error_budget.py", class: "ErrorBudgetSettings", field: "enabled", default: false, tier: "Deferred", env_var: "BALDUR_ERROR_BUDGET_ENABLED"}
+  - {module: "error_budget.py", class: "ErrorBudgetSettings", field: "escalation_enabled", default: false, tier: "Deferred", env_var: "BALDUR_ERROR_BUDGET_ESCALATION_ENABLED"}
+  - {module: "error_budget.py", class: "ErrorBudgetSettings", field: "failsafe_alert_enabled", default: false, tier: "Deferred", env_var: "BALDUR_ERROR_BUDGET_FAILSAFE_ALERT_ENABLED"}
+  - {module: "error_budget.py", class: "ErrorBudgetSettings", field: "heartbeat_enabled", default: false, tier: "Deferred", env_var: "BALDUR_ERROR_BUDGET_HEARTBEAT_ENABLED"}
+  - {module: "error_budget.py", class: "ErrorBudgetSettings", field: "recovery_alert_enabled", default: false, tier: "Deferred", env_var: "BALDUR_ERROR_BUDGET_RECOVERY_ALERT_ENABLED"}
+  - {module: "error_budget_gate.py", class: "ErrorBudgetGateSettings", field: "circuit_breaker_enabled", default: false, tier: "Deferred", env_var: "BALDUR_ERROR_BUDGET_GATE_CIRCUIT_BREAKER_ENABLED"}
+  - {module: "error_budget_gate.py", class: "ErrorBudgetGateSettings", field: "enabled", default: false, tier: "Deferred", env_var: "BALDUR_ERROR_BUDGET_GATE_ENABLED"}
+  - {module: "error_budget_gate.py", class: "ErrorBudgetGateSettings", field: "fail_open_rate_limit_enabled", default: false, tier: "Deferred", env_var: "BALDUR_ERROR_BUDGET_GATE_FAIL_OPEN_RATE_LIMIT_ENABLED"}
+  - {module: "error_budget_gate.py", class: "ErrorBudgetGateSettings", field: "regional_thresholds_enabled", default: false, tier: "Deferred", env_var: "BALDUR_ERROR_BUDGET_GATE_REGIONAL_THRESHOLDS_ENABLED"}
+  - {module: "error_budget_gate.py", class: "ErrorBudgetGateSettings", field: "tier_thresholds_enabled", default: false, tier: "Deferred", env_var: "BALDUR_ERROR_BUDGET_GATE_TIER_THRESHOLDS_ENABLED"}
+  - {module: "error_budget_propagation.py", class: "ErrorBudgetPropagationSettings", field: "enabled", default: false, tier: "Deferred", env_var: "BALDUR_ERROR_BUDGET_PROPAGATION_ENABLED"}
+  - {module: "finops.py", class: "FinOpsSettings", field: "enabled", default: false, tier: "Deferred", env_var: "BALDUR_FINOPS_ENABLED"}
+  - {module: "leader_election.py", class: "LeaderElectionSettings", field: "enabled", default: false, tier: "Deferred", env_var: "BALDUR_LEADER_ELECTION_ENABLED"}
+  - {module: "leader_election.py", class: "LeaderElectionSettings", field: "self_fencing_enabled", default: false, tier: "Deferred", env_var: "BALDUR_LEADER_ELECTION_SELF_FENCING_ENABLED"}
+  - {module: "meta_watchdog.py", class: "MetaWatchdogSettings", field: "recovery_enabled", default: false, tier: "Deferred", env_var: "BALDUR_META_WATCHDOG_RECOVERY_ENABLED"}
+  - {module: "meta_watchdog.py", class: "MetaWatchdogSettings", field: "self_cb_enabled", default: false, tier: "Deferred", env_var: "BALDUR_META_WATCHDOG_SELF_CB_ENABLED"}
+  - {module: "pool_monitor.py", class: "PoolMonitorSettings", field: "enabled", default: false, tier: "Deferred", env_var: "BALDUR_POOL_MONITOR_ENABLED"}
+  - {module: "postmortem.py", class: "PostmortemSettings", field: "auto_enabled", default: false, tier: "Deferred", env_var: "BALDUR_POSTMORTEM_AUTO_ENABLED"}
+  - {module: "postmortem.py", class: "PostmortemSettings", field: "cascade_event_integration_enabled", default: false, tier: "Deferred", env_var: "BALDUR_POSTMORTEM_CASCADE_EVENT_INTEGRATION_ENABLED"}
+  - {module: "postmortem.py", class: "PostmortemSettings", field: "deep_links_enabled", default: false, tier: "Deferred", env_var: "BALDUR_POSTMORTEM_DEEP_LINKS_ENABLED"}
+  - {module: "postmortem.py", class: "PostmortemSettings", field: "deployment_correlator_enabled", default: false, tier: "Deferred", env_var: "BALDUR_POSTMORTEM_DEPLOYMENT_CORRELATOR_ENABLED"}
+  - {module: "postmortem.py", class: "PostmortemSettings", field: "incident_group_enabled", default: false, tier: "Deferred", env_var: "BALDUR_POSTMORTEM_INCIDENT_GROUP_ENABLED"}
+  - {module: "postmortem.py", class: "PostmortemSettings", field: "notification_aggregation_enabled", default: false, tier: "Deferred", env_var: "BALDUR_POSTMORTEM_NOTIFICATION_AGGREGATION_ENABLED"}
+  - {module: "postmortem.py", class: "PostmortemSettings", field: "notification_enabled", default: false, tier: "Deferred", env_var: "BALDUR_POSTMORTEM_NOTIFICATION_ENABLED"}
+  - {module: "postmortem.py", class: "PostmortemSettings", field: "snapshot_logs_enabled", default: false, tier: "Deferred", env_var: "BALDUR_POSTMORTEM_SNAPSHOT_LOGS_ENABLED"}
+  - {module: "postmortem.py", class: "PostmortemSettings", field: "snapshot_prometheus_enabled", default: false, tier: "Deferred", env_var: "BALDUR_POSTMORTEM_SNAPSHOT_PROMETHEUS_ENABLED"}
+  - {module: "postmortem.py", class: "PostmortemSettings", field: "versioning_enabled", default: false, tier: "Deferred", env_var: "BALDUR_POSTMORTEM_VERSIONING_ENABLED"}
+  - {module: "runbook.py", class: "RunbookSettings", field: "enabled", default: false, tier: "Deferred", env_var: "BALDUR_RUNBOOK_ENABLED"}
+  - {module: "saga.py", class: "SagaSettings", field: "enabled", default: false, tier: "Deferred", env_var: "BALDUR_SAGA_ENABLED"}
+
+  # ── Dormant (AI-tuning + Compliance/Security cluster per tier-reclassification-2026-03-28.md) ──
+  - {module: "compliance.py", class: "ComplianceSettings", field: "enabled", default: false, tier: "Dormant", env_var: "BALDUR_COMPLIANCE_ENABLED"}
+  - {module: "compliance.py", class: "ComplianceSettings", field: "evidence_collection_enabled", default: false, tier: "Dormant", env_var: "BALDUR_COMPLIANCE_EVIDENCE_COLLECTION_ENABLED"}
+  - {module: "correlation_engine.py", class: "CorrelationEngineSettings", field: "enabled", default: false, tier: "Dormant", env_var: "BALDUR_CORRELATION_ENGINE_ENABLED"}
+  - {module: "correlation_engine.py", class: "CorrelationEngineSettings", field: "learning_integration_enabled", default: false, tier: "Dormant", env_var: "BALDUR_CORRELATION_ENGINE_LEARNING_INTEGRATION_ENABLED"}
+  - {module: "correlation_engine.py", class: "CorrelationEngineSettings", field: "postmortem_integration_enabled", default: false, tier: "Dormant", env_var: "BALDUR_CORRELATION_ENGINE_POSTMORTEM_INTEGRATION_ENABLED"}
+  - {module: "correlation_engine.py", class: "CorrelationEngineSettings", field: "state_persistence_enabled", default: false, tier: "Dormant", env_var: "BALDUR_CORRELATION_ENGINE_STATE_PERSISTENCE_ENABLED"}
+  - {module: "drift_threshold.py", class: "DriftThresholdSettings", field: "alert_enabled", default: false, tier: "Dormant", env_var: "BALDUR_DRIFT_THRESHOLD_ALERT_ENABLED"}
+  - {module: "drift_threshold.py", class: "DriftThresholdSettings", field: "enabled", default: false, tier: "Dormant", env_var: "BALDUR_DRIFT_THRESHOLD_ENABLED"}
+  - {module: "ml_models.py", class: "ARIMAConfig", field: "enabled", default: false, tier: "Dormant", env_var: "BALDUR_ML_MODELS_ARIMA__ENABLED"}
+  - {module: "ml_models.py", class: "BayesianOptimizerConfig", field: "enabled", default: false, tier: "Dormant", env_var: "BALDUR_ML_MODELS_BAYESIAN__ENABLED"}
+  - {module: "ml_models.py", class: "GradientBoostConfig", field: "enabled", default: false, tier: "Dormant", env_var: "BALDUR_ML_MODELS_GRADIENT_BOOST__ENABLED"}
+  - {module: "ml_models.py", class: "IsolationForestConfig", field: "enabled", default: false, tier: "Dormant", env_var: "BALDUR_ML_MODELS_ISOLATION_FOREST__ENABLED"}
+  - {module: "ml_models.py", class: "MLModelsSettings", field: "enabled", default: false, tier: "Dormant", env_var: "BALDUR_ML_MODELS_ENABLED"}
+  - {module: "predictive_forecaster.py", class: "PredictiveForecasterSettings", field: "enabled", default: false, tier: "Dormant", env_var: "BALDUR_PREDICTIVE_FORECASTER_ENABLED"}

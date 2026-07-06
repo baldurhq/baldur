@@ -1,0 +1,316 @@
+site_name: Baldur
+site_description: Self-healing reliability layer for Python applications.
+site_url: https://baldur.sh/
+repo_url: https://github.com/gotoUSA/baldur-python
+repo_name: gotoUSA/baldur-python
+
+# Footer notice on every page. Links to the legal pages so Privacy / Terms are
+# reachable site-wide (payment-processor production review requires them to be
+# clearly accessible to visitors). Material renders this as raw HTML.
+copyright: >
+  &copy; 2026 MH WORKS &middot;
+  <a href="/privacy/">Privacy Policy</a> &middot;
+  <a href="/terms/">Terms of Service</a>
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - search.suggest
+  palette:
+    - scheme: default
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - scheme: slate
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+# NOTE: the baldur.sh landing (dark brand, hero, console screenshot) is a
+# standalone static page under web/root/, merged into the built site/ post-build
+# by the overlay hook (web/hooks.py). It is NOT configured here. The overlay
+# mkdocs.home.yml (INHERIT: this file) adds the custom_dir chrome (source.html),
+# brand.css, and the merge hook, so this base config stays mirror-safe: the
+# public OSS mirror builds plain Material docs with no custom_dir / extra_css /
+# hooks and no dependency on anything under web/. Build baldur.sh with:
+#   mkdocs build -f mkdocs.home.yml --strict
+
+plugins:
+  - search
+  # mkdocstrings is wired now (no autodoc pages yet) so Wave 7B's API
+  # reference layers on without a second plugin/extras bump.
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            # Signature: typed, legible, on its own line
+            show_signature: true
+            show_signature_annotations: true
+            separate_signature: true
+            # Source: hide button (theme repo_url already provides GitHub access);
+            # avoids long source dumps inside reference pages
+            show_source: false
+            # Members: preserve declaration order so authoring-time semantic
+            # groupings (services/__init__.py `# === Core Services ===`,
+            # interfaces/__init__.py `# === Repository Interfaces ===`)
+            # render in the intended sequence
+            members_order: source
+            # Headings: H2 per symbol, H1 from page title; drop the fully-
+            # qualified path noise from H1 (e.g., `baldur.adapters.django`
+            # renders as `django`)
+            heading_level: 2
+            show_root_heading: true
+            show_root_full_path: false
+            show_bases: true
+            merge_init_into_class: true
+            # Args/Returns rendered as compact tables (Material idiom)
+            docstring_section_style: table
+            # Defense-in-depth against private-symbol leakage. G16 D12
+            # already gates `Status: Public` __all__ from carrying `_`-prefixed
+            # entries; this filter blocks nested classes too.
+            filters: ["!^_"]
+            # Hide inherited Protocol/ABC members — they are documented on
+            # their own interface page
+            inherited_members: false
+  # Generates llms.txt for AI-search surfaces (docs-hosting-strategy.md §5).
+  # markdown_description adds LLM-workload framing into llms.txt only (the `>`
+  # blockquote stays site_description); full_output emits a full-text concat of
+  # only the `sections` pages (leak-safe — excluded trees never enter sections).
+  - llmstxt:
+      markdown_description: >-
+        Baldur puts circuit breaker, retry, fallback, and dead-letter queue behind one
+        decorator (`@baldur.protected`) for production Python and LLM workloads.
+        Framework-agnostic core with Django, FastAPI, and Flask adapters; zero-config
+        in-memory by default, Redis-backed for multi-worker.
+      full_output: llms-full.txt
+      sections:
+        Docs:
+          - index.md: "What Baldur is and the one-decorator quickstart."
+          - what-is-baldur.md: "Orientation: what Baldur is, what it does when a call fails, where it sits in your stack."
+          - getting-started/index.md: "Install Baldur and protect your first call."
+          - getting-started/django.md: "Wire Baldur into a Django project."
+          - getting-started/fastapi.md: "Wire Baldur into a FastAPI app."
+          - getting-started/flask.md: "Wire Baldur into a Flask app."
+          - getting-started/celery.md: "Protect Celery tasks and run Baldur's scheduled maintenance on Celery beat."
+          - getting-started/ai-assistants.md: "Teach an AI assistant the @baldur.protected idiom via baldur init-ai."
+          - compatibility.md: "Supported Python, Django, FastAPI, Flask, Celery, and Redis versions, and what CI tests on every commit."
+          - troubleshooting.md: "Fixes for the most common Baldur install, circuit-breaker, DLQ, notification, and operations issues."
+        API Reference:
+          - reference/index.md: "API Reference overview and module map."
+          - reference/baldur/*.md
+          - reference/decorators.md: "Preset & gate decorators: @dlq_protect, @idempotent, @rate_limit, @domain_tag (the @protected primitive is top-level)."
+          - reference/interfaces/*.md
+          - reference/services/*.md
+          - reference/adapters/django.md: "Django adapter API."
+          - reference/adapters/fastapi.md: "FastAPI adapter API."
+          - reference/adapters/flask.md: "Flask adapter API."
+          - reference/adapters/sql.md: "SQL/Postgres adapter API."
+          - reference/adapters/gunicorn.md: "Gunicorn integration API."
+          - reference/adapters/cache/*.md
+          - reference/adapters/memory/*.md
+          - reference/api-admin.md: "Admin REST API surface."
+          - reference/exceptions.md: "Exception hierarchy (BaldurError and subclasses)."
+          - reference/env-vars.md: "BALDUR_* environment-variable settings reference."
+
+markdown_extensions:
+  # attr_list enables the Material `.md-button` class on the pricing CTA.
+  - attr_list
+  # md_in_html lets the home page's feature grid wrap markdown in a
+  # `<div class="grid cards" markdown>` (Material's card-grid idiom).
+  - md_in_html
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        # Render ```mermaid fences as themed SVG (Material bundles Mermaid.js).
+        # Concept-guide state diagrams use this instead of hand-drawn ASCII art.
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  # Embeds the actual example-app source into the quickstart pages (531 D11).
+  # base_path is the repo root so ``examples/**`` resolves; check_paths makes a
+  # moved/deleted snippet target fail ``mkdocs build --strict`` (no silent drift).
+  - pymdownx.snippets:
+      base_path: ["."]
+      check_paths: true
+
+# ---------------------------------------------------------------------------
+# Publish scope = fail-closed allowlist (531 D3).
+#
+# WHY fail-closed: ``mkdocs gh-deploy`` over the full ``docs/`` tree would build
+# and publish internal trees (impl/, laws/, self_healing/, maintainer/) to
+# GitHub Pages — leaking internal docs AND failing ``--strict`` on their 100+
+# cross-references and ``file:line`` citations. This block excludes everything
+# by default, then re-includes only the public subset, so a NEW internal tree
+# stays excluded automatically (it cannot leak by omission).
+#
+# TO PUBLISH A NEW PAGE (two steps, both required):
+#   1. add ``!/<dir>/`` (or ``!/<file>.md``) to the allowlist below, AND
+#   2. register the page under ``nav:``.
+# This mkdocs publish set (baldur.sh) is a SUBSET of the GitHub OSS-mirror
+# source set finalized in the ``scripts/publish_mirror.sh`` allowlist — they are
+# NOT identical. The mirror ships ``docs/runbooks/`` as repo SOURCE (operator
+# runbooks), but those pages are not wired into this nav, so they never build to
+# baldur.sh. Both sets exclude the private trees (``impl/`` / ``laws/`` /
+# ``self_healing/`` / ``maintainer/``) AND ``docs/features/`` (the catalog
+# exposes the PRO roadmap + tier classifications — internal to both). Of the doc
+# trees, ``reference/`` IS re-included (public). The published doc trees are
+# exactly the five re-included below: ``index.md`` / ``getting-started/`` /
+# ``concepts/`` / ``reference/`` / ``assets/``.
+#
+# ``!/assets/`` re-includes built static assets. MkDocs re-runs ``set_exclusions``
+# over theme + plugin files AFTER ``add_files_from_theme`` (mkdocs/commands/build.py),
+# so without this line the ``/*`` denylist flips Material's
+# ``assets/stylesheets/*.min.css`` and ``assets/javascripts/*.min.js`` to EXCLUDED
+# and ``copy_static_files`` silently drops them — every page renders unstyled while
+# ``build --strict`` still exits 0 (OOS #546-3). ``assets/`` is a build-output path,
+# not a ``docs/`` source tree, so this is orthogonal to the 7.5G-1 mirror allowlist.
+# ---------------------------------------------------------------------------
+exclude_docs: |
+  /*
+  !/index.md
+  !/what-is-baldur.md
+  !/troubleshooting.md
+  !/compatibility.md
+  !/support.md
+  !/pricing.md
+  !/privacy.md
+  !/terms.md
+  !/getting-started/
+  !/concepts/
+  !/reference/
+  !/assets/
+  # robots.txt carries the Sitemap: directive so crawlers auto-discover the
+  # generated sitemap.xml (search-engine discovery aid, not a publish gate).
+  !/robots.txt
+  # CNAME pins the GitHub Pages custom domain. ``gh-deploy --force`` overwrites
+  # the gh-pages branch on every deploy, so the custom domain must live as a repo
+  # file (copied to the site root) rather than be set once in repo settings.
+  !/CNAME
+  # _*-prefixed concept files (e.g. _TEMPLATE.md) are authoring scaffolding,
+  # never published — re-exclude after the /concepts/ re-include (last match wins).
+  /concepts/_*.md
+
+validation:
+  nav:
+    # --strict turns this into an error: any public (non-excluded) .md that is
+    # not wired into nav fails the build.
+    omitted_files: warn
+  links:
+    absolute_links: ignore
+
+# index.md is the marketing landing, reached via the logo / site title —
+# intentionally NOT a nav entry, so "Home" is not listed as a sibling of the
+# documentation pages. Exempt it from the omitted-from-nav check (otherwise
+# --strict aborts on the resulting warning).
+not_in_nav: |
+  /index.md
+
+nav:
+  - "What is Baldur?": what-is-baldur.md
+  - Pricing: pricing.md
+  - Getting Started:
+      - getting-started/index.md
+      - Django: getting-started/django.md
+      - FastAPI: getting-started/fastapi.md
+      - Flask: getting-started/flask.md
+      - Celery: getting-started/celery.md
+      - AI assistants: getting-started/ai-assistants.md
+  - Concepts:
+      - Foundations:
+          - What is self-healing?: concepts/foundations/self-healing.md
+          - "Composing with @baldur.protected": concepts/foundations/composition.md
+          - "Storage backends: in-memory, Redis, SQL": concepts/foundations/storage-backends.md
+          - OSS vs PRO tier model: concepts/foundations/tier-model.md
+          - "OSS vs PRO: capability matrix": concepts/oss-vs-pro.md
+          - Baldur and your service mesh: concepts/foundations/service-mesh.md
+          - Rate limiting in Baldur: concepts/foundations/rate-limiting.md
+          - Daily Report: concepts/foundations/daily-report.md
+          - Dashboard Service: concepts/foundations/dashboard-service.md
+          - Web Console: concepts/foundations/web-console.md
+      - OSS Features:
+          - Circuit Breaker: concepts/oss/circuit-breaker.md
+          - Retry: concepts/oss/retry.md
+          - Idempotency: concepts/oss/idempotency.md
+          - Health Check: concepts/oss/health-check.md
+          - Graceful Shutdown: concepts/oss/graceful-shutdown.md
+          - Metrics: concepts/oss/metrics.md
+          - System Control: concepts/oss/system-control.md
+          - Precomputed Cache: concepts/oss/precomputed-cache.md
+      - PRO Features:
+          - DLQ + Replay: concepts/pro/dlq-replay.md
+          - Audit Trail: concepts/pro/audit.md
+          - Emergency Mode: concepts/pro/emergency-mode.md
+          - Governance: concepts/pro/governance.md
+          - Unified Notification: concepts/pro/unified-notification.md
+          - Bulkhead: concepts/pro/bulkhead.md
+          - Canary Recovery: concepts/pro/canary-recovery.md
+          - Adaptive Throttle: concepts/pro/throttle.md
+          - Meta-Watchdog: concepts/pro/meta-watchdog.md
+          - Release Notes: concepts/pro/release-notes.md
+  - Compatibility: compatibility.md
+  - Troubleshooting: troubleshooting.md
+  - Support: support.md
+  - Legal:
+      - Privacy Policy: privacy.md
+      - Terms of Service: terms.md
+  - API Reference:
+      - reference/index.md
+      - baldur:
+          - Facade & bootstrap: reference/baldur/facade.md
+          - Types & service access: reference/baldur/types.md
+          - Exceptions: reference/baldur/exceptions.md
+      - reference/decorators.md
+      - Interfaces:
+          - Repository data model: reference/interfaces/repository_models.md
+          - Core state repositories: reference/interfaces/repositories.md
+          - Incident & archive repositories: reference/interfaces/repository_archives.md
+          - Statistics & journal: reference/interfaces/statistics_and_journal.md
+          - Cache, locking & rate limiting: reference/interfaces/cache_and_rate_limit.md
+          - Task queue: reference/interfaces/task_queue.md
+          - Web framework: reference/interfaces/web_framework.md
+          - Config, runtime & state stores: reference/interfaces/config_and_state.md
+          - Health, pools & quorum: reference/interfaces/health_and_pools.md
+          - Eventing, notification & audit: reference/interfaces/eventing_and_notification.md
+          - Policy & ML strategy: reference/interfaces/policy_and_ml.md
+          - Singleton protocols: reference/interfaces/singletons.md
+      - Services:
+          - Service access: reference/services/access.md
+          - Circuit breaker & rate limiting: reference/services/circuit_breaker.md
+          - Idempotency: reference/services/idempotency.md
+          - Retry: reference/services/retry.md
+          - Security & notification: reference/services/security.md
+          - Control API & metrics: reference/services/control_and_metrics.md
+      - Framework adapters:
+          - reference/adapters/django.md
+          - reference/adapters/fastapi.md
+          - reference/adapters/flask.md
+          - reference/adapters/sql.md
+          - reference/adapters/gunicorn.md
+      - Adapter primitives (advanced):
+          - In-memory repositories:
+              - Core state repositories: reference/adapters/memory/repositories.md
+              - Layered, incident & archive: reference/adapters/memory/repository_archives.md
+              - Drift & shadow logging: reference/adapters/memory/drift_and_shadow.md
+              - Domain state stores: reference/adapters/memory/domain_state_stores.md
+          - Cache backends:
+              - RedisCacheAdapter: reference/adapters/cache/redis.md
+              - InMemoryCacheAdapter: reference/adapters/cache/memory.md
+              - MetricsAwareCacheAdapter: reference/adapters/cache/metrics.md
+      - reference/api-admin.md
+      - reference/exceptions.md
+      - reference/env-vars.md
+      - PRO (subscriber):
+          - reference/pro/index.md
+          - Dead-letter queue: reference/pro/dlq.md
+          - Replay queue: reference/pro/replay.md
+          - Emergency mode: reference/pro/emergency-mode.md
+          - Bulkhead: reference/pro/bulkhead.md
+          - Adaptive throttle: reference/pro/throttle.md
+          - Canary rollout: reference/pro/canary.md
+          - Unified notification: reference/pro/unified-notification.md
+          - Security notification: reference/pro/security-notification.md

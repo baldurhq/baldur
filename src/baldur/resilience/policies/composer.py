@@ -1,0 +1,1014 @@
+"""
+Policy Composer — 여러 ResiliencePolicy를 선언적으로 조합하는 엔진.
+
+Guard(사전 검증) → Policy 체인(중첩 래핑) → Hook(이벤트 관찰) → Sink(최종 실패 처리)
+순서로 파이프라인을 구성한다.
+
+동기/비동기 분리:
+- PolicyComposer: 동기 ResiliencePolicy만 허용
+- AsyncPolicyComposer: 비동기 AsyncResiliencePolicy만 허용
+  기존 SemaphoreBulkhead/AsyncSemaphoreBulkhead,
+  BulkheadPolicy/AsyncBulkheadPolicy 분리 선례와 동일 패턴.
+
+편의 함수:
+- compose(): 동기 Policy 조합
+- compose_async(): 비동기 Policy 조합
+
+Hook 관찰 범위 — 2계층 구조:
+- Composer Hook: 파이프라인 전체(End-to-End) 결과만 관찰
+- Policy 내부: 자체 로직 또는 없음 (Retry 각 시도 등은 Policy가 처리)
+
+Sink 처리:
+- 동기(Blocking)으로 수행 (FailureSink Protocol 준수)
+- DLQ 저장은 로컬 DB write이므로 수 ms 수준
+
+FallbackPolicy 중복 실행 방지:
+- Composer 체인 내에서는 execute() 대신 _apply_fallback() 호출
+- func 실행 1회만 보장
+"""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from collections.abc import Awaitable, Callable
+from typing import Any, Generic, TypeVar
+
+import structlog
+
+from baldur.core.exceptions import TimeoutPolicyError
+from baldur.core.execution_mode import get_execution_mode
+from baldur.interfaces.resilience_policy import (
+    AsyncFailureSink,
+    AsyncPolicyGuard,
+    AsyncPolicyHook,
+    AsyncResiliencePolicy,
+    FailureSink,
+    GuardResult,
+    PolicyContext,
+    PolicyGuard,
+    PolicyHook,
+    PolicyOutcome,
+    PolicyRejectedException,
+    PolicyResult,
+    ResiliencePolicy,
+)
+
+logger = structlog.get_logger()
+
+T = TypeVar("T")
+
+
+# =============================================================================
+# Sync→async offload adapters (D2/D3)
+#
+# AsyncPolicyComposer normalizes every guard/hook/sink to its async Protocol at
+# add-time: a native-async impl passes through (awaited with zero thread hop),
+# a sync impl is wrapped in one of these thin adapters that satisfy the async
+# Protocol by offloading the sync call off the event loop via
+# ``asyncio.to_thread``. ``execute`` then uniformly ``await``s every channel.
+# The sink adapter is the live production consumer of ``AsyncFailureSink`` (the
+# sync DLQ store, #446) — so the async Protocol surface is fully symmetric AND
+# every member has a real implementation (claim↔wiring integrity).
+# =============================================================================
+
+
+class _SyncGuardToAsyncAdapter:
+    """Wrap a sync :class:`PolicyGuard` as an :class:`AsyncPolicyGuard`."""
+
+    def __init__(self, guard: PolicyGuard) -> None:
+        self._guard = guard
+
+    @property
+    def name(self) -> str:
+        return self._guard.name
+
+    async def check(self, context: PolicyContext | None = None) -> GuardResult:
+        return await asyncio.to_thread(self._guard.check, context=context)
+
+
+class _SyncHookToAsyncAdapter:
+    """Wrap a sync :class:`PolicyHook` as an :class:`AsyncPolicyHook`."""
+
+    def __init__(self, hook: PolicyHook) -> None:
+        self._hook = hook
+
+    async def on_execute(
+        self, policy_name: str, attempt: int, context: PolicyContext | None = None
+    ) -> None:
+        await asyncio.to_thread(
+            self._hook.on_execute, policy_name, attempt, context=context
+        )
+
+    async def on_success(
+        self,
+        policy_name: str,
+        result: PolicyResult,
+        context: PolicyContext | None = None,
+    ) -> None:
+        await asyncio.to_thread(
+            self._hook.on_success, policy_name, result, context=context
+        )
+
+    async def on_failure(
+        self,
+        policy_name: str,
+        error: Exception,
+        attempt: int,
+        context: PolicyContext | None = None,
+    ) -> None:
+        await asyncio.to_thread(
+            self._hook.on_failure, policy_name, error, attempt, context=context
+        )
+
+    async def on_retry(
+        self,
+        policy_name: str,
+        attempt: int,
+        delay: float,
+        context: PolicyContext | None = None,
+    ) -> None:
+        await asyncio.to_thread(
+            self._hook.on_retry, policy_name, attempt, delay, context=context
+        )
+
+    async def on_reject(
+        self, guard_name: str, reason: str, context: PolicyContext | None = None
+    ) -> None:
+        await asyncio.to_thread(
+            self._hook.on_reject, guard_name, reason, context=context
+        )
+
+
+class _SyncSinkToAsyncAdapter:
+    """Wrap a sync :class:`FailureSink` as an :class:`AsyncFailureSink`.
+
+    The live production consumer of ``AsyncFailureSink``: the DLQ store stays
+    sync (#446), so on the async path it is offloaded here. When a native async
+    DLQ store lands it implements ``AsyncFailureSink`` directly and passes
+    through normalization with no composer change.
+    """
+
+    def __init__(self, sink: FailureSink) -> None:
+        self._sink = sink
+
+    async def handle_failure(
+        self,
+        error: Exception,
+        context: PolicyContext | None,
+        policy_result: PolicyResult,
+    ) -> str | None:
+        return await asyncio.to_thread(
+            self._sink.handle_failure,
+            error=error,
+            context=context,
+            policy_result=policy_result,
+        )
+
+
+def _normalize_guard(guard: PolicyGuard | AsyncPolicyGuard) -> AsyncPolicyGuard:
+    """Pass a native-async guard through; wrap a sync guard for offload.
+
+    Discriminates on ``iscoroutinefunction(guard.check)`` rather than
+    ``isinstance(guard, AsyncPolicyGuard)`` — a ``runtime_checkable`` Protocol
+    only checks method *presence*, and a sync guard also has a ``check`` method,
+    so the coroutine-ness of the method is the reliable async signal.
+    """
+    if asyncio.iscoroutinefunction(guard.check):
+        return guard  # type: ignore[return-value]
+    return _SyncGuardToAsyncAdapter(guard)  # type: ignore[arg-type]
+
+
+def _normalize_hook(hook: PolicyHook | AsyncPolicyHook) -> AsyncPolicyHook:
+    """Pass a native-async hook through; wrap a sync hook for offload."""
+    if asyncio.iscoroutinefunction(hook.on_success):
+        return hook  # type: ignore[return-value]
+    return _SyncHookToAsyncAdapter(hook)  # type: ignore[arg-type]
+
+
+def _normalize_sink(sink: FailureSink | AsyncFailureSink) -> AsyncFailureSink:
+    """Pass a native-async sink through; wrap a sync sink for offload."""
+    if asyncio.iscoroutinefunction(sink.handle_failure):
+        return sink  # type: ignore[return-value]
+    return _SyncSinkToAsyncAdapter(sink)  # type: ignore[arg-type]
+
+
+class _FallbackApplied(BaseException):
+    """Composer-internal signal for Fallback application.
+
+    Inherits BaseException (not Exception) so that RetryPolicy's
+    ``except Exception`` does not catch this signal. This ensures
+    _FallbackApplied propagates directly to Composer's final handler
+    regardless of policy ordering. Same pattern as Python's GeneratorExit.
+
+    Intentionally NOT reused for inner-policy metadata propagation (which
+    uses the closure-variable mechanism). Fallback semantics exclude
+    inner-policy failure-counting (CB.record_failure); metadata propagation
+    is the opposite — the call genuinely failed and CB should count it, so
+    the raw Exception must remain catchable by inner ``except Exception``
+    handlers like services/circuit_breaker/policy.py.
+    """
+
+    def __init__(self, result: PolicyResult) -> None:
+        self.result = result
+        super().__init__("Fallback applied")
+
+
+def _build_failure_result(
+    outcome: PolicyOutcome,
+    error: Exception,
+    executed_policies: list[str],
+    metadata: dict[str, Any],
+) -> PolicyResult:
+    """Build the terminal failure-path PolicyResult.
+
+    Centralizes outer catch-branch construction so every failure terminal
+    (REJECTED / TIMEOUT / FAILURE) propagates ``executed_policies`` and the
+    accumulated ``chain_metadata`` from inner-policy ``PolicyResult.metadata``.
+    Symmetric to the success-path returns inside the chain executors.
+    """
+    return PolicyResult(
+        value=None,
+        outcome=outcome,
+        error=error,
+        executed_policies=list(reversed(executed_policies)),
+        metadata=dict(metadata),
+    )
+
+
+def _merge_chain_metadata(
+    chain_metadata: dict[str, Any],
+    incoming: dict[str, Any] | None,
+    policy_name: str,
+) -> None:
+    """Merge an inner policy's metadata into the chain accumulator.
+
+    Last-write-wins on collision; emits ``policy_chain.metadata_collision``
+    warning so the first real collision is operationally observable. The
+    long-term migration to namespaced metadata is tracked in 466 OOS F8.
+    """
+    if not incoming:
+        return
+    for k, v in incoming.items():
+        if k in chain_metadata and chain_metadata[k] != v:
+            logger.warning(
+                "policy_chain.metadata_collision",
+                key=k,
+                old=chain_metadata[k],
+                new=v,
+                policy=policy_name,
+            )
+        chain_metadata[k] = v
+
+
+def _trace_structural_control(policy_name: str, result: PolicyResult) -> None:
+    """Surface a live structural control in the observe-only (dry-run) trace.
+
+    Complement to ``intervention_suppressed``: under observe-only the automatic
+    *healing* interventions (CB / retry / DLQ) suppress their side-effects, but a
+    *structural* control — e.g. a bulkhead concurrency ceiling — stays live by
+    design. Its reject answers *current real resource occupancy*, not a
+    simulatable failure-history decision, so suppressing it would admit calls past
+    the ceiling and uncap concurrency, turning observe-only into a self-inflicted
+    overload. The reject/timeout is therefore enforced even under dry-run; this
+    logs it so the live block is visible in the trace alongside the suppressed
+    interventions instead of a silent gap. Observation only — the control itself
+    is unchanged. The non-success outcome is checked first, so the success path
+    never resolves the execution mode.
+    """
+    if result.outcome not in (PolicyOutcome.REJECTED, PolicyOutcome.TIMEOUT):
+        return
+    if get_execution_mode().should_execute:
+        return
+    logger.info(
+        "execution_mode.structural_control_enforced",
+        policy=policy_name,
+        outcome=result.outcome.value,
+        state=(result.metadata or {}).get("state"),
+    )
+
+
+# =============================================================================
+# PolicyComposer — 동기 Policy 조합 엔진
+# =============================================================================
+
+
+class PolicyComposer(Generic[T]):
+    """
+    동기 Policy 조합 엔진.
+
+    여러 ResiliencePolicy를 선언적으로 조합하여 단일 실행 파이프라인으로 구성한다.
+    Guard/Hook/Sink를 연결하여 인프라 레이어와 통합한다.
+
+    실행 순서:
+    1. Guards 검증 (Kill Switch, ErrorBudgetGate 등)
+    2. Policies 순차 래핑 (추가 순서 = 바깥→안쪽 실행 순서)
+    3. Hooks 호출 (Audit, Metrics 등) — 파이프라인 전체 결과만 관찰
+    4. 실패 시 Sink 처리 (DLQ 등) — 동기 Blocking
+
+    타입 안전성:
+    - ResiliencePolicy(동기)만 추가 가능
+    - AsyncResiliencePolicy 추가 시 런타임 TypeError 발생
+    """
+
+    def __init__(self) -> None:
+        self._policies: list[ResiliencePolicy] = []
+        self._guards: list[PolicyGuard] = []
+        self._hooks: list[PolicyHook] = []
+        self._sinks: list[FailureSink] = []
+
+    # === Builder API ===
+
+    def add(self, policy: ResiliencePolicy) -> PolicyComposer[T]:
+        """Policy 추가. 추가 순서가 바깥→안쪽 실행 순서."""
+        if isinstance(policy, AsyncResiliencePolicy) and not isinstance(
+            policy, ResiliencePolicy
+        ):
+            raise TypeError(
+                f"Cannot add async policy '{policy.name}' to sync PolicyComposer. "
+                f"Use AsyncPolicyComposer or compose_async() instead."
+            )
+        self._policies.append(policy)
+        return self
+
+    def add_guard(self, guard: PolicyGuard) -> PolicyComposer[T]:
+        """Guard 추가. 모든 Policy 실행 전 검증."""
+        self._guards.append(guard)
+        return self
+
+    def add_hook(self, hook: PolicyHook) -> PolicyComposer[T]:
+        """Hook 추가. Policy 실행 이벤트 관찰."""
+        self._hooks.append(hook)
+        return self
+
+    def add_sink(self, sink: FailureSink) -> PolicyComposer[T]:
+        """FailureSink 추가. 최종 실패 처리."""
+        self._sinks.append(sink)
+        return self
+
+    # === Execution ===
+
+    def execute(
+        self,
+        func: Callable[..., T],
+        *args: Any,
+        context: PolicyContext | None = None,
+        **kwargs: Any,
+    ) -> PolicyResult[T]:
+        """
+        조합된 Policy 파이프라인 실행.
+
+        실행 흐름:
+        1. Guard 검증 → 하나라도 거부 시 REJECTED
+        2. Policy 체인 실행 (바깥→안쪽 중첩)
+        3. Hook 호출 (on_success / on_failure / on_reject)
+        4. 실패 시 Sink 처리 — 동기 Blocking
+
+        Args:
+            func: 실행할 함수
+            *args: 함수 위치 인자
+            context: 실행 컨텍스트 (Guard/Hook/Sink에 전파).
+                     None이면 Guard는 전역 상태만 체크하고,
+                     Sink는 비즈니스 식별자 없이 저장한다.
+            **kwargs: 함수 키워드 인자
+
+        Returns:
+            PolicyResult[T]: 통합 결과. 예외를 던지지 않는다.
+        """
+        start_time = time.perf_counter()
+
+        # Step 1: Guard 검증
+        for guard in self._guards:
+            try:
+                guard_result = guard.check(context=context)
+                if not guard_result.allowed:
+                    self._notify_hooks_reject(
+                        guard.name, guard_result.reason or "", context=context
+                    )
+                    return PolicyResult(
+                        value=None,
+                        outcome=PolicyOutcome.REJECTED,
+                        # Propagate the guard's own metadata (e.g. the
+                        # idempotency decision + key) so the facade can build a
+                        # precise reject exception. Composer-owned keys win on
+                        # collision.
+                        metadata={
+                            **guard_result.metadata,
+                            "rejected_by": guard.name,
+                            "reason": guard_result.reason,
+                        },
+                    )
+            except Exception as e:
+                # Fail-Open: Guard 실패 시 통과 허용
+                logger.warning(
+                    "policy_composer.guard_execution_failed",
+                    guard_name=guard.name,
+                    error=str(e),
+                    mode="fail-open",
+                )
+
+        # Step 2: Policy 체인 실행
+        result = self._execute_policy_chain(func, *args, context=context, **kwargs)
+
+        # Step 3: Hook 호출 — 파이프라인 전체 결과만 관찰
+        duration_ms = (time.perf_counter() - start_time) * 1000
+        result.total_duration_ms = duration_ms
+
+        if result.success:
+            self._notify_hooks_success(result, context=context)
+        else:
+            self._notify_hooks_failure(result, context=context)
+
+            # Step 4: Sink 처리 — 동기 Blocking
+            if result.outcome == PolicyOutcome.FAILURE:
+                self._process_sinks(result, context, args, kwargs)
+
+        return result
+
+    # === Policy Chain ===
+
+    def _execute_policy_chain(  # noqa: C901
+        self,
+        func: Callable[..., T],
+        *args: Any,
+        context: PolicyContext | None = None,
+        **kwargs: Any,
+    ) -> PolicyResult[T]:
+        """
+        Policy 체인을 중첩 실행.
+
+        policies = [P1, P2, P3]일 때:
+        P1.execute(lambda: P2.execute(lambda: P3.execute(func)))
+
+        FallbackPolicy 특별 처리:
+        - execute() 대신 _apply_fallback() 호출 (func 중복 실행 방지)
+        - _apply_fallback()은 Composer 전용 내부 API
+        """
+        from baldur.resilience.policies.fallback import FallbackPolicy
+
+        if not self._policies:
+            # Policy 없음 → 직접 실행
+            try:
+                value = func(*args, **kwargs)
+                return PolicyResult(value=value, outcome=PolicyOutcome.SUCCESS)
+            except Exception as e:
+                return PolicyResult(value=None, outcome=PolicyOutcome.FAILURE, error=e)
+
+        # 중첩 함수 구성 (역순으로 감싸기)
+        def wrapped() -> T:
+            return func(*args, **kwargs)
+
+        executed_policies: list[str] = []
+        # Closure-shared metadata accumulator. Each inner policy_wrapper
+        # merges its PolicyResult.metadata here BEFORE returning the success
+        # value or re-raising the error. The four terminal branches below
+        # build the outer PolicyResult with metadata=chain_metadata.
+        chain_metadata: dict[str, Any] = {}
+
+        for policy in reversed(self._policies):
+            outer_fn = wrapped
+            current_policy = policy
+
+            if isinstance(current_policy, FallbackPolicy):
+                # FallbackPolicy: _apply_fallback() 기반 조건부 래퍼
+                # func 1회만 실행 보장 (inner() 결과 재사용)
+                # _FallbackApplied 시그널로 SUCCESS_WITH_FALLBACK outcome 전파
+                fb_policy_narrowed: FallbackPolicy = current_policy
+
+                def fallback_wrapper(
+                    inner: Callable = outer_fn, fb: FallbackPolicy = fb_policy_narrowed
+                ) -> T:
+                    try:
+                        return inner()
+                    except _FallbackApplied:
+                        raise  # 하위 FallbackPolicy의 시그널을 그대로 전파
+                    except Exception as e:
+                        # predicate 확인 → _apply_fallback 직접 호출
+                        check_result = PolicyResult(
+                            value=None, outcome=PolicyOutcome.FAILURE, error=e
+                        )
+                        if fb._predicate(check_result):
+                            fb_result = fb._apply_fallback(
+                                original_error=e,
+                                context=context,
+                            )
+                            if fb_result.success:
+                                raise _FallbackApplied(fb_result) from e
+                        raise
+
+                wrapped = fallback_wrapper
+            else:
+                # 일반 Policy: execute()로 래핑
+                def policy_wrapper(
+                    inner: Callable = outer_fn, p: ResiliencePolicy = current_policy
+                ) -> T:
+                    result = p.execute(inner, context=context)
+                    # Merge BEFORE the success branch so both success-return
+                    # and failure-raise paths contribute to chain_metadata.
+                    _merge_chain_metadata(chain_metadata, result.metadata, p.name)
+                    _trace_structural_control(p.name, result)
+                    if result.success:
+                        return result.value  # type: ignore[return-value]
+                    if result.error:
+                        raise result.error
+                    raise PolicyRejectedException(
+                        f"Policy '{p.name}' rejected: {result.outcome}"
+                    )
+
+                wrapped = policy_wrapper
+
+            executed_policies.append(current_policy.name)
+
+        # 최종 실행
+        try:
+            value = wrapped()
+            return PolicyResult(
+                value=value,
+                outcome=PolicyOutcome.SUCCESS,
+                executed_policies=list(reversed(executed_policies)),
+                metadata=dict(chain_metadata),
+            )
+        except _FallbackApplied as fa:
+            # FallbackPolicy가 적용된 경우 — SUCCESS_WITH_FALLBACK outcome 전파.
+            # chain_metadata is empty on this path (Fallback bypasses
+            # policy_wrapper merge); fb_result.metadata carries the keys.
+            fb_result: PolicyResult = fa.result
+            return PolicyResult(
+                value=fb_result.value,
+                outcome=fb_result.outcome,
+                error=fb_result.error,
+                executed_policies=list(reversed(executed_policies)),
+                metadata=fb_result.metadata,
+            )
+        except PolicyRejectedException as e:
+            return _build_failure_result(
+                PolicyOutcome.REJECTED, e, executed_policies, chain_metadata
+            )
+        except TimeoutPolicyError as e:
+            return _build_failure_result(
+                PolicyOutcome.TIMEOUT, e, executed_policies, chain_metadata
+            )
+        except Exception as e:
+            return _build_failure_result(
+                PolicyOutcome.FAILURE, e, executed_policies, chain_metadata
+            )
+
+    # === Hook Notification ===
+
+    def _notify_hooks_success(
+        self, result: PolicyResult, context: PolicyContext | None = None
+    ) -> None:
+        """성공 시 모든 Hook의 on_success 호출 (Fail-Open)."""
+        for hook in self._hooks:
+            try:
+                hook.on_success("composer", result, context=context)
+            except Exception as e:
+                logger.warning(
+                    "hook.failed_fail_open",
+                    error=e,
+                )
+
+    def _notify_hooks_failure(
+        self, result: PolicyResult, context: PolicyContext | None = None
+    ) -> None:
+        """실패 시 모든 Hook의 on_failure 호출 (Fail-Open)."""
+        for hook in self._hooks:
+            try:
+                hook.on_failure(
+                    "composer",
+                    result.error or Exception("Unknown"),
+                    result.total_attempts,
+                    context=context,
+                )
+            except Exception as e:
+                logger.warning(
+                    "hook.failed_fail_open",
+                    error=e,
+                )
+
+    def _notify_hooks_reject(
+        self, guard_name: str, reason: str, context: PolicyContext | None = None
+    ) -> None:
+        """거부 시 모든 Hook의 on_reject 호출 (Fail-Open)."""
+        for hook in self._hooks:
+            try:
+                hook.on_reject(guard_name, reason, context=context)
+            except Exception as e:
+                logger.warning(
+                    "hook.failed_fail_open",
+                    error=e,
+                )
+
+    # === Sink Processing ===
+
+    def _process_sinks(
+        self,
+        result: PolicyResult,
+        context: PolicyContext | None,
+        args: tuple,
+        kwargs: dict,
+    ) -> None:
+        """모든 Sink에 최종 실패를 전달 (동기 Blocking)."""
+        if result.error is None:
+            return
+
+        for sink in self._sinks:
+            try:
+                sink_id = sink.handle_failure(
+                    error=result.error,
+                    context=context,
+                    policy_result=result,
+                )
+                if sink_id is not None:
+                    result.metadata["sink_id"] = sink_id
+            except Exception as e:
+                logger.warning(
+                    "sink.failed",
+                    error=e,
+                )
+
+
+# =============================================================================
+# AsyncPolicyComposer — 비동기 Policy 조합 엔진
+# =============================================================================
+
+
+class AsyncPolicyComposer(Generic[T]):
+    """
+    Async Policy composition engine.
+
+    Only AsyncResiliencePolicy is accepted, blocking sync/async mixing at the
+    type level. Provides the same Guard/Hook/Sink integration as
+    PolicyComposer, asynchronously.
+
+    Each guard/hook/sink is normalized to its async Protocol at ``add_*`` time
+    (D2): a native-async impl (its method is a coroutine) passes through and is
+    awaited with zero thread hop; a sync impl is wrapped in a thin
+    ``to_thread``-offload adapter that satisfies the async Protocol. ``execute``
+    then uniformly ``await``s all three channels — one coherent mechanism instead
+    of per-channel ``to_thread`` calls. Empty channels are skipped, so a
+    channel-less pipeline pays zero thread hops. The idempotency guard/hook run
+    natively (no thread hop); the sync DLQ sink is wrapped in the
+    ``AsyncFailureSink`` offload adapter (D3).
+    """
+
+    def __init__(self) -> None:
+        self._policies: list[AsyncResiliencePolicy] = []
+        self._guards: list[AsyncPolicyGuard] = []
+        self._hooks: list[AsyncPolicyHook] = []
+        self._sinks: list[AsyncFailureSink] = []
+
+    # === Builder API ===
+
+    def add(self, policy: AsyncResiliencePolicy) -> AsyncPolicyComposer[T]:
+        """비동기 Policy 추가. 추가 순서가 바깥→안쪽 실행 순서."""
+        self._policies.append(policy)
+        return self
+
+    def add_guard(
+        self, guard: PolicyGuard | AsyncPolicyGuard
+    ) -> AsyncPolicyComposer[T]:
+        """Guard 추가 (add-time normalize: native async pass-through / sync wrap)."""
+        self._guards.append(_normalize_guard(guard))
+        return self
+
+    def add_hook(self, hook: PolicyHook | AsyncPolicyHook) -> AsyncPolicyComposer[T]:
+        """Hook 추가 (add-time normalize: native async pass-through / sync wrap)."""
+        self._hooks.append(_normalize_hook(hook))
+        return self
+
+    def add_sink(self, sink: FailureSink | AsyncFailureSink) -> AsyncPolicyComposer[T]:
+        """FailureSink 추가 (add-time normalize: native async pass-through / sync wrap)."""
+        self._sinks.append(_normalize_sink(sink))
+        return self
+
+    # === Execution ===
+
+    async def execute(
+        self,
+        func: Callable[..., Awaitable[T]],
+        *args: Any,
+        context: PolicyContext | None = None,
+        **kwargs: Any,
+    ) -> PolicyResult[T]:
+        """
+        Execute the async Policy pipeline.
+
+        Every guard/hook/sink was normalized to its async Protocol at add-time,
+        so each channel is ``await``ed uniformly here: a native-async channel
+        (e.g. the async idempotency guard/hook) runs with ZERO thread hop; a
+        wrapped sync channel (e.g. the sync DLQ sink) offloads via
+        ``asyncio.to_thread`` inside its adapter. Empty channels are skipped, so
+        a channel-less pipeline pays zero thread hops. Intra-request
+        happens-before ordering (guard → chain → hook/sink) is preserved.
+
+        A ``CancelledError`` raised at any ``await`` is a ``BaseException`` and
+        escapes the fail-open ``except Exception``, so cancellation still
+        propagates. Across concurrent ``execute`` calls two native guard
+        ``check``s may run interleaved; exactly-once dedup rests on the
+        idempotency acquire being atomic (``AsyncIdempotencyGate`` rejects a
+        non-atomic adapter at construction), not on loop-serialization.
+
+        Args:
+            func: the async function to execute
+            *args: positional arguments for the function
+            context: execution context (propagated to Guard/Hook/Sink)
+            **kwargs: keyword arguments for the function
+
+        Returns:
+            PolicyResult[T]: the composite result. Never raises.
+        """
+        # verified-by: test_atomic_guard_preserves_exactly_once_under_concurrent_execute
+        start_time = time.perf_counter()
+
+        # Guard checks — awaited natively. A native async guard (idempotency)
+        # drives the awaitable dedup gate with no thread hop; a wrapped sync
+        # guard offloads inside its adapter.
+        for guard in self._guards:
+            try:
+                guard_result = await guard.check(context=context)
+                if not guard_result.allowed:
+                    if self._hooks:
+                        await self._notify_hooks_reject(
+                            guard.name,
+                            guard_result.reason or "",
+                            context=context,
+                        )
+                    return PolicyResult(
+                        value=None,
+                        outcome=PolicyOutcome.REJECTED,
+                        # Sync-symmetric metadata propagation.
+                        metadata={
+                            **guard_result.metadata,
+                            "rejected_by": guard.name,
+                            "reason": guard_result.reason,
+                        },
+                    )
+            except Exception as e:
+                # Fail-open: log symmetrically with the sync loop's
+                # guard_execution_failed — a guard bypass must not be silent
+                # (LOGGING_STANDARDS §3.2).
+                logger.warning(
+                    "policy_composer.guard_execution_failed",
+                    guard_name=guard.name,
+                    error=str(e),
+                    mode="fail-open",
+                )
+
+        # Async Policy chain execution
+        result = await self._execute_async_chain(func, *args, context=context, **kwargs)
+
+        # Hook notification — observes only the end-to-end pipeline result.
+        duration_ms = (time.perf_counter() - start_time) * 1000
+        result.total_duration_ms = duration_ms
+
+        if result.success:
+            if self._hooks:
+                await self._notify_hooks_success(result, context=context)
+        else:
+            if self._hooks:
+                await self._notify_hooks_failure(result, context=context)
+
+            # Sink processing — only on the FAILURE terminal.
+            if result.outcome == PolicyOutcome.FAILURE and self._sinks:
+                await self._process_sinks(result, context, args, kwargs)
+
+        return result
+
+    # === Async Policy Chain ===
+
+    async def _execute_async_chain(  # noqa: C901
+        self,
+        func: Callable[..., Awaitable[T]],
+        *args: Any,
+        context: PolicyContext | None = None,
+        **kwargs: Any,
+    ) -> PolicyResult[T]:
+        """
+        비동기 Policy 체인을 중첩 실행.
+
+        AsyncFallbackPolicy 특별 처리:
+        - execute() 대신 _apply_fallback() 호출 (func 중복 실행 방지)
+        """
+        from baldur.resilience.policies.fallback import AsyncFallbackPolicy
+
+        if not self._policies:
+            try:
+                value = await func(*args, **kwargs)
+                return PolicyResult(value=value, outcome=PolicyOutcome.SUCCESS)
+            except Exception as e:
+                return PolicyResult(value=None, outcome=PolicyOutcome.FAILURE, error=e)
+
+        # 비동기 중첩 함수 구성 (역순으로 감싸기)
+        async def initial_fn() -> T:
+            return await func(*args, **kwargs)
+
+        wrapped: Callable[[], Awaitable[T]] = initial_fn
+        executed_policies: list[str] = []
+        # Closure-shared metadata accumulator (sync-symmetric — see G1/G2).
+        chain_metadata: dict[str, Any] = {}
+
+        for policy in reversed(self._policies):
+            outer_fn = wrapped
+            current_policy = policy
+
+            if isinstance(current_policy, AsyncFallbackPolicy):
+                fb_policy_narrowed: AsyncFallbackPolicy = current_policy
+
+                async def fallback_wrapper(
+                    inner: Callable = outer_fn,
+                    fb: AsyncFallbackPolicy = fb_policy_narrowed,
+                ) -> T:
+                    try:
+                        return await inner()
+                    except _FallbackApplied:
+                        raise  # 하위 AsyncFallbackPolicy의 시그널을 그대로 전파
+                    except Exception as e:
+                        check_result = PolicyResult(
+                            value=None, outcome=PolicyOutcome.FAILURE, error=e
+                        )
+                        if fb._predicate(check_result):
+                            fb_result = await fb._apply_fallback(
+                                original_error=e,
+                                context=context,
+                            )
+                            if fb_result.success:
+                                raise _FallbackApplied(fb_result) from e
+                        raise
+
+                wrapped = fallback_wrapper
+            else:
+
+                async def async_policy_wrapper(
+                    inner: Callable = outer_fn,
+                    p: AsyncResiliencePolicy = current_policy,
+                ) -> T:
+                    result = await p.execute(inner, context=context)
+                    _merge_chain_metadata(chain_metadata, result.metadata, p.name)
+                    _trace_structural_control(p.name, result)
+                    if result.success:
+                        return result.value  # type: ignore[return-value]
+                    if result.error:
+                        raise result.error
+                    raise PolicyRejectedException(
+                        f"Policy '{p.name}' rejected: {result.outcome}"
+                    )
+
+                wrapped = async_policy_wrapper
+
+            executed_policies.append(current_policy.name)
+
+        # 최종 실행
+        try:
+            value = await wrapped()
+            return PolicyResult(
+                value=value,
+                outcome=PolicyOutcome.SUCCESS,
+                executed_policies=list(reversed(executed_policies)),
+                metadata=dict(chain_metadata),
+            )
+        except _FallbackApplied as fa:
+            # AsyncFallbackPolicy가 적용된 경우 — SUCCESS_WITH_FALLBACK outcome 전파.
+            # D5 parity fix: forward fb_result.metadata (sync sibling already does).
+            fb_result: PolicyResult = fa.result
+            return PolicyResult(
+                value=fb_result.value,
+                outcome=fb_result.outcome,
+                error=fb_result.error,
+                executed_policies=list(reversed(executed_policies)),
+                metadata=fb_result.metadata,
+            )
+        except PolicyRejectedException as e:
+            return _build_failure_result(
+                PolicyOutcome.REJECTED, e, executed_policies, chain_metadata
+            )
+        except TimeoutPolicyError as e:
+            return _build_failure_result(
+                PolicyOutcome.TIMEOUT, e, executed_policies, chain_metadata
+            )
+        except Exception as e:
+            return _build_failure_result(
+                PolicyOutcome.FAILURE, e, executed_policies, chain_metadata
+            )
+
+    # === Hook Notification (async — awaits each normalized channel) ===
+
+    async def _notify_hooks_success(
+        self, result: PolicyResult, context: PolicyContext | None = None
+    ) -> None:
+        """성공 시 모든 Hook의 on_success await (Fail-Open per hook)."""
+        for hook in self._hooks:
+            try:
+                await hook.on_success("composer", result, context=context)
+            except Exception as e:
+                logger.warning(
+                    "hook.failed_fail_open",
+                    error=e,
+                )
+
+    async def _notify_hooks_failure(
+        self, result: PolicyResult, context: PolicyContext | None = None
+    ) -> None:
+        """실패 시 모든 Hook의 on_failure await (Fail-Open per hook)."""
+        for hook in self._hooks:
+            try:
+                await hook.on_failure(
+                    "composer",
+                    result.error or Exception("Unknown"),
+                    result.total_attempts,
+                    context=context,
+                )
+            except Exception as e:
+                logger.warning(
+                    "hook.failed_fail_open",
+                    error=e,
+                )
+
+    async def _notify_hooks_reject(
+        self, guard_name: str, reason: str, context: PolicyContext | None = None
+    ) -> None:
+        """거부 시 모든 Hook의 on_reject await (Fail-Open per hook)."""
+        for hook in self._hooks:
+            try:
+                await hook.on_reject(guard_name, reason, context=context)
+            except Exception as e:
+                logger.warning(
+                    "hook.failed_fail_open",
+                    error=e,
+                )
+
+    # === Sink Processing (async — awaits each normalized channel) ===
+
+    async def _process_sinks(
+        self,
+        result: PolicyResult,
+        context: PolicyContext | None,
+        args: tuple,
+        kwargs: dict,
+    ) -> None:
+        """모든 Sink에 최종 실패를 전달 (Fail-Open per sink)."""
+        if result.error is None:
+            return
+
+        for sink in self._sinks:
+            try:
+                sink_id = await sink.handle_failure(
+                    error=result.error,
+                    context=context,
+                    policy_result=result,
+                )
+                if sink_id is not None:
+                    result.metadata["sink_id"] = sink_id
+            except Exception as e:
+                logger.warning(
+                    "sink.failed",
+                    error=e,
+                )
+
+
+# =============================================================================
+# 편의 함수
+# =============================================================================
+
+
+def compose(*policies: ResiliencePolicy) -> PolicyComposer:
+    """
+    동기 Policy를 선언적으로 조합하는 편의 함수.
+
+    policies 순서 = 바깥→안쪽 실행 순서:
+    - compose(Retry, CB, Bulkhead).execute(func)
+    - = Retry(CB(Bulkhead(func)))
+
+    Usage::
+
+        result = compose(
+            RetryPolicy(max_retries=3),
+            CircuitBreakerPolicy(service_name="payment"),
+            BulkheadPolicy(bulkhead=semaphore),
+            FallbackPolicy(default_value={"status": "degraded"}),
+        ).execute(lambda: call_payment_api())
+    """
+    composer: PolicyComposer = PolicyComposer()
+    for policy in policies:
+        composer.add(policy)
+    return composer
+
+
+def compose_async(*policies: AsyncResiliencePolicy) -> AsyncPolicyComposer:
+    """
+    비동기 Policy를 선언적으로 조합하는 편의 함수.
+
+    policies 순서 = 바깥→안쪽 실행 순서.
+    동기 compose()와 동일한 선언적 패턴을 비동기로 제공한다.
+
+    Usage::
+
+        result = await compose_async(
+            AsyncBulkheadPolicy(async_bulkhead=bulkhead),
+            AsyncFallbackPolicy(default_value={"degraded": True}),
+        ).execute(async_func)
+    """
+    composer: AsyncPolicyComposer = AsyncPolicyComposer()
+    for policy in policies:
+        composer.add(policy)
+    return composer

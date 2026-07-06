@@ -1,0 +1,38 @@
+# Prometheus Adapter configuration for HPA custom metrics
+#
+# Enables HPA to scale based on application-specific metrics
+# collected by Prometheus.
+#
+# Install: helm install prometheus-adapter prometheus-community/prometheus-adapter -f prometheus-adapter.yaml
+
+rules:
+  # Django HTTP RPS metric for HPA
+  - seriesQuery: 'http_server_request_duration_seconds_count{namespace!="",pod!=""}'
+    resources:
+      overrides:
+        namespace: {resource: "namespace"}
+        pod: {resource: "pod"}
+    name:
+      matches: "^(.*)_seconds_count$"
+      as: "django_http_requests_per_second"
+    metricsQuery: 'sum(rate(<<.Series>>{<<.LabelMatchers>>}[2m])) by (<<.GroupBy>>)'
+
+  # Baldur queue depth metric for worker HPA
+  - seriesQuery: 'baldur_queue_depth{namespace!="",pod!=""}'
+    resources:
+      overrides:
+        namespace: {resource: "namespace"}
+        pod: {resource: "pod"}
+    name:
+      as: "baldur_queue_depth"
+    metricsQuery: 'sum(<<.Series>>{<<.LabelMatchers>>}) by (<<.GroupBy>>)'
+
+  # Baldur throttle RTT p99 for adaptive scaling
+  - seriesQuery: 'baldur_throttle_rtt_seconds{namespace!="",pod!=""}'
+    resources:
+      overrides:
+        namespace: {resource: "namespace"}
+        pod: {resource: "pod"}
+    name:
+      as: "baldur_throttle_rtt_p99"
+    metricsQuery: 'histogram_quantile(0.99, sum(rate(<<.Series>>{<<.LabelMatchers>>}[2m])) by (le, <<.GroupBy>>)) * 1000'

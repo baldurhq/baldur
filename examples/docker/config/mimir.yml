@@ -1,0 +1,56 @@
+# Grafana Mimir — metrics long-term storage (Prometheus-compatible)
+# Single-tenant mode for local development sandbox.
+
+multitenancy_enabled: false
+
+server:
+  http_listen_port: 9009
+  grpc_listen_port: 9095
+  log_level: info
+
+distributor:
+  pool:
+    health_check_ingesters: true
+
+ingester:
+  ring:
+    replication_factor: 1
+    kvstore:
+      store: inmemory
+
+blocks_storage:
+  backend: filesystem
+  filesystem:
+    dir: /var/mimir/blocks
+  tsdb:
+    dir: /var/mimir/tsdb
+
+compactor:
+  data_dir: /var/mimir/compactor
+  sharding_ring:
+    kvstore:
+      store: inmemory
+
+limits:
+  max_label_names_per_series: 30
+  max_global_series_per_user: 0
+  compactor_blocks_retention_period: 168h  # 7 days
+
+frontend:
+  log_queries_longer_than: 10s
+
+store_gateway:
+  sharding_ring:
+    replication_factor: 1
+    kvstore:
+      store: inmemory
+
+alertmanager_storage:
+  backend: filesystem
+  filesystem:
+    dir: /var/mimir/alertmanager
+
+ruler_storage:
+  backend: filesystem
+  filesystem:
+    dir: /var/mimir/ruler

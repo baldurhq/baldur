@@ -1,0 +1,47 @@
+name: CodeQL
+
+# Deep SAST (security gate §4.3 #5) — complements bandit (security.yml). CodeQL is
+# free for PUBLIC repos only, so like ci-oss-mirror.yml this ships as
+# workflow_dispatch in the private monorepo (Route B: it must NEVER auto-run on the
+# private repo's billed Actions / a repo without Advanced Security).
+# publish_mirror.sh step 1b rewrites the trigger to push + pull_request + a weekly
+# schedule when projecting to the PUBLIC mirror, where Actions are free and CodeQL
+# applies.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "27 4 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (python)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@8aad20d150bbac5944a9f9d289da16a4b0d87c1e  # v4.36.2
+        with:
+          languages: python
+          build-mode: none
+          # Scan the shipped library only. Test code (tests/) deliberately
+          # constructs adversarial inputs and asserts on raw outputs, so CodeQL
+          # findings there are fixtures/assertions, not product vulnerabilities;
+          # examples/ are demo apps. Restricting extraction to src/ keeps the
+          # alert set scoped to the actual library surface.
+          config: |
+            paths:
+              - src
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e  # v4.36.2
+        with:
+          category: "/language:python"

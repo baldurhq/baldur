@@ -1,0 +1,121 @@
+name: Quickstart
+
+# 531 D10 — per-framework user-flow gate: build the OSS wheel, install it with
+# the framework extra into a clean venv, then run the documented quickstart
+# smoke test. This tests user-flow EXECUTION; packaging (must_import /
+# must_not_import) is owned separately by the 6B-1 smoke-install matrix.
+#
+# Path filter: only build when an input that affects the quickstart changes.
+# CAVEAT: these jobs MUST NOT be configured as *required* status checks under
+# branch protection — a path-filtered PR that touches none of these paths would
+# otherwise sit in permanent "expected — never ran" pending and block merge.
+on:
+  # Route B (local-first CI): auto-run on push/PR disabled to avoid billed
+  # Actions minutes on this private repo. Run manually
+  # (`gh workflow run quickstart.yml`) for the per-framework user-flow gate.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quickstart:
+    name: quickstart-${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # run_cmd / url mirror each getting-started page's documented "Run it"
+        # step verbatim (server invocation + curl target). --reload/autoreload
+        # are dropped so the single backgrounded PID is cleanly killable; the
+        # server binding + route are exactly what the docs tell a user to run.
+        include:
+          - name: django
+            app: django
+            extras: django
+            run_cmd: "python manage.py runserver --noreload"
+            url: "http://127.0.0.1:8000/demo/"
+          - name: fastapi
+            app: fastapi
+            extras: fastapi
+            run_cmd: "uvicorn app:app --host 127.0.0.1 --port 8000"
+            url: "http://127.0.0.1:8000/demo"
+          - name: flask
+            app: flask
+            extras: flask
+            run_cmd: "flask run"
+            url: "http://127.0.0.1:5000/demo"
+          # Mixed-deps: Django installed-but-unconfigured ALONGSIDE the FastAPI
+          # app. A fastapi-only install cannot reproduce the framework-
+          # independence leak (django absent -> the import guard fires); this row
+          # installs both, so a regression to eager-importing baldur.api.django
+          # from the framework-free path would pull the Django API + spawn the
+          # doomed pool-CB refresh thread. The server.log assertion below catches
+          # it. Reuses the fastapi example app (app/url/run_cmd identical).
+          - name: fastapi-django-installed
+            app: fastapi
+            extras: "fastapi,django"
+            run_cmd: "uvicorn app:app --host 127.0.0.1 --port 8000"
+            url: "http://127.0.0.1:8000/demo"
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      - name: Build OSS wheel
+        run: |
+          pip install build
+          python -m build --wheel
+      - name: Install wheel + framework extra into a clean venv
+        run: |
+          python -m venv /tmp/qs
+          /tmp/qs/bin/python -m pip install --upgrade pip
+          WHEEL=$(ls dist/baldur_framework-*.whl)
+          # Only pytest is added beyond the framework extra — its deps
+          # (pluggy/iniconfig/packaging) share no surface with the framework,
+          # so they cannot perturb the installed Django/FastAPI/Flask version.
+          /tmp/qs/bin/python -m pip install "${WHEEL}[${{ matrix.extras }}]" pytest
+      - name: Run quickstart smoke test
+        # -o addopts="" neutralizes the repo-root pytest.ini addopts
+        # (--timeout / --dist) whose plugins are absent in the clean venv.
+        run: |
+          /tmp/qs/bin/python -m pytest \
+            examples/quickstart_${{ matrix.app }}/test_smoke.py \
+            -o addopts=""
+      - name: Run the documented server and curl the route
+        # Closes the gap test_smoke.py cannot: it uses an in-process test
+        # client, so the documented real-server flow (`runserver`/`uvicorn`/
+        # `flask run` + curl) — including the framework extra actually shipping
+        # a runnable server — is otherwise unverified. Boot the documented
+        # command, poll for readiness, then assert the documented JSON body.
+        working-directory: examples/quickstart_${{ matrix.app }}
+        env:
+          URL: ${{ matrix.url }}
+        run: |
+          set -euo pipefail
+          /tmp/qs/bin/${{ matrix.run_cmd }} > server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            curl -fsS "$URL" >/dev/null 2>&1 && break
+            if [ "$i" -eq 30 ]; then echo "server never became ready:"; cat server.log; exit 1; fi
+            sleep 1
+          done
+          body=$(curl -fsS "$URL")
+          echo "Response: $body"
+          echo "$body" | /tmp/qs/bin/python -c \
+            "import sys, json; d = json.load(sys.stdin); assert d == {'status': 'ok', 'service': 'demo'}, d; print('documented response matches')"
+          # Framework-independence leak guard: a clean boot must NOT log the
+          # Django-API import-time refresh thread failing. The fastapi-django-
+          # installed matrix row makes this load-bearing (django installed-but-
+          # unconfigured + a non-Django app); it is cheap insurance on every row.
+          # The server is still alive here (the EXIT trap kills it on step end),
+          # but server.log already holds the full boot — the readiness poll above
+          # waited seconds, well past the ~500ms the leak needs to surface.
+          if grep -E 'ImproperlyConfigured|background_refresh_failing_consecutively' server.log; then
+            echo "framework-independence leak detected in server.log (a non-Django app loaded the Django API)"
+            exit 1
+          fi
+          echo "server.log clean of framework-independence leak markers"

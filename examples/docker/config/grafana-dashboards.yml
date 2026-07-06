@@ -1,0 +1,16 @@
+# Grafana dashboard provisioning
+# Auto-loads dashboards from /var/lib/grafana/dashboards/ on startup.
+
+apiVersion: 1
+
+providers:
+  - name: 'Baldur Dashboards'
+    orgId: 1
+    folder: 'Baldur'
+    folderUid: 'baldur'
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards

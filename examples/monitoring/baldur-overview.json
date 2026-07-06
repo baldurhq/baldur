@@ -1,0 +1,232 @@
+{
+  "__inputs_doc__": "Datasource UIDs below match docker/config/grafana-datasources.yml provisioned UIDs (mimir, tempo, loki). For manual Grafana Import, run scripts/sanitize-dashboards.sh to convert UIDs to __inputs template variables.",
+  "__tier_doc__": "OSS overview. Every Prometheus query here resolves against a series populated on the OSS @baldur.protected path (Circuit Breaker, Retry Outcomes) or the Django HTTP metrics middleware (latency). PRO-only series (DLQ, throttle, canary, emergency, notification, watchdog, bulkhead) live in baldur-operations.json so an OSS-only stack renders no mystery-empty panels. The Retry Outcomes panel populates from the inline synchronous @baldur.protected(retry=True) path: every terminal retry outcome (success / exhausted / single-attempt failure) records to baldur_retry_outcomes_total, so it is live on any protected retry traffic — not only the Celery/DLQ retry paths.",
+  "__requires": [
+    {"type": "grafana", "id": "grafana", "name": "Grafana", "version": "10.0.0"},
+    {"type": "datasource", "id": "prometheus", "name": "Prometheus"},
+    {"type": "datasource", "id": "tempo", "name": "Tempo"},
+    {"type": "panel", "id": "timeseries", "name": "Time series"},
+    {"type": "panel", "id": "stat", "name": "Stat"},
+    {"type": "panel", "id": "table", "name": "Table"}
+  ],
+  "id": null,
+  "uid": "baldur-overview",
+  "title": "Baldur Overview (OSS)",
+  "description": "OSS-tier observability reference: Circuit Breaker state, HTTP latency, recent error traces, Retry outcomes, Idempotency gate decisions, Health Check status, System Control kill-switch, and Graceful Shutdown. All series populate on OSS paths with no PRO tier.",
+  "tags": ["baldur", "oss"],
+  "timezone": "utc",
+  "editable": true,
+  "schemaVersion": 39,
+  "version": 1,
+  "panels": [
+    {
+      "id": 1,
+      "title": "Circuit Breaker State",
+      "type": "stat",
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "mimir"},
+      "description": "Each service's circuit breaker: CLOSED = healthy (calls pass through), OPEN = tripped (calls fast-fail to protect a failing dependency), HALF-OPEN = probing recovery. An OPEN breaker means Baldur is actively shielding that dependency.",
+      "targets": [
+        {
+          "expr": "baldur_circuit_breaker_state",
+          "legendFormat": "{{ service }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {"type": "value", "options": {"0": {"text": "CLOSED", "color": "green"}}},
+            {"type": "value", "options": {"1": {"text": "OPEN", "color": "red"}}},
+            {"type": "value", "options": {"2": {"text": "HALF-OPEN", "color": "yellow"}}}
+          ]
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "HTTP Latency P95 / P99",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 16, "x": 8, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "mimir"},
+      "description": "Per-request HTTP latency at the 95th and 99th percentiles, in milliseconds. Rising P95/P99 means your slowest requests are getting slower — read it against your latency SLO. Empty for a plain-Python service with no HTTP surface.",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(baldur_http_request_duration_seconds_bucket[5m])) by (le)) * 1000",
+          "legendFormat": "P95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(baldur_http_request_duration_seconds_bucket[5m])) by (le)) * 1000",
+          "legendFormat": "P99"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "custom": {
+            "thresholdsStyle": {"mode": "line"}
+          },
+          "thresholds": {
+            "steps": [
+              {"value": 0, "color": "green"},
+              {"value": 300, "color": "yellow"},
+              {"value": 500, "color": "red"}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Recent Traces (Errors)",
+      "type": "table",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 8},
+      "datasource": {"type": "tempo", "uid": "tempo"},
+      "description": "The most recent error-status request traces. Click a row to open the full span timeline in Tempo and see where the request failed.",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "tempo", "uid": "tempo"},
+          "queryType": "traceql",
+          "query": "{ status = error }",
+          "limit": 20
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Retry Outcomes",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 16},
+      "datasource": {"type": "prometheus", "uid": "mimir"},
+      "description": "Rate of retry outcomes: success (a retry eventually worked), exhausted (every retry failed and the error surfaced), single-attempt failure (failed with no retry). Rising 'exhausted' means retries are no longer absorbing the failures.",
+      "targets": [
+        {
+          "expr": "sum by (outcome) (rate(baldur_retry_outcomes_total[5m]))",
+          "legendFormat": "{{ outcome }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        }
+      }
+    },
+    {
+      "id": 6,
+      "title": "Idempotency Gate Decisions",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+      "datasource": {"type": "prometheus", "uid": "mimir"},
+      "description": "Rate of idempotency-gate decisions: continue (first time — run the work), skip (already done — deduplicated), abort (in flight elsewhere). Rising skip/abort means the gate is catching duplicate work before it runs twice.",
+      "targets": [
+        {
+          "expr": "sum by (decision) (rate(baldur_idempotency_gate_decision_total[5m]))",
+          "legendFormat": "{{ decision }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "ops"}
+      }
+    },
+    {
+      "id": 7,
+      "title": "Health Check Status & Results",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+      "datasource": {"type": "prometheus", "uid": "mimir"},
+      "description": "Aggregate health per check: 0 = healthy, 1 = degraded, 2 = unhealthy, 3 = error — plus the rate of check results. Anything above 0 means a dependency check is failing.",
+      "targets": [
+        {
+          "expr": "baldur_health_check_status",
+          "legendFormat": "status: {{ check_type }}"
+        },
+        {
+          "expr": "sum by (result) (rate(baldur_health_check_results_total[5m]))",
+          "legendFormat": "result rate: {{ result }}"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "System Control (Kill Switch)",
+      "type": "stat",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32},
+      "datasource": {"type": "prometheus", "uid": "mimir"},
+      "description": "The global System Control kill switch: 1 = enabled, 0 = disabled, plus the cumulative number of times it has been toggled.",
+      "targets": [
+        {
+          "expr": "baldur_system_control_enabled",
+          "legendFormat": "enabled"
+        },
+        {
+          "expr": "sum(baldur_system_control_state_changes_total)",
+          "legendFormat": "state changes"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "enabled"},
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {"type": "value", "options": {"0": {"text": "DISABLED", "color": "red"}}},
+                  {"type": "value", "options": {"1": {"text": "ENABLED", "color": "green"}}}
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 9,
+      "title": "Graceful Shutdown",
+      "type": "stat",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32},
+      "datasource": {"type": "prometheus", "uid": "mimir"},
+      "description": "Shutdown phase (0 = running, 1 = draining, 2 = terminating, 3 = terminated) plus how many in-flight requests were drained vs. force-aborted on shutdown. Sits at 0/running normally and moves only during a SIGTERM drain; the drained/aborted counts tell you whether a restart lost in-flight work.",
+      "targets": [
+        {
+          "expr": "baldur_shutdown_phase",
+          "legendFormat": "phase"
+        },
+        {
+          "expr": "sum(baldur_shutdown_drained_requests_total)",
+          "legendFormat": "drained"
+        },
+        {
+          "expr": "sum(baldur_shutdown_aborted_requests_total)",
+          "legendFormat": "aborted"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "phase"},
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {"type": "value", "options": {"0": {"text": "RUNNING", "color": "green"}}},
+                  {"type": "value", "options": {"1": {"text": "DRAINING", "color": "yellow"}}},
+                  {"type": "value", "options": {"2": {"text": "TERMINATING", "color": "orange"}}},
+                  {"type": "value", "options": {"3": {"text": "TERMINATED", "color": "red"}}}
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "aborted"},
+            "properties": [
+              {"id": "noValue", "value": "0"}
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

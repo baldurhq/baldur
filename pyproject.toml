@@ -1,0 +1,364 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "baldur-framework"
+dynamic = ["version"]
+description = "Baldur Reliability Layer for Python Applications"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+authors = [
+    { name = "Baldur Contributors" },
+]
+keywords = [
+    "circuit-breaker",
+    "dead-letter-queue",
+    "dlq",
+    "fault-tolerance",
+    "resilience",
+    "retry",
+    "baldur",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Framework :: Django",
+    "Framework :: Django :: 4.2",
+    "Framework :: Django :: 5.2",
+    "Framework :: Django :: 6.0",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Distributed Computing",
+]
+dependencies = [
+    "pydantic>=2.6.0",
+    "pydantic-settings>=2.2.0",
+    "psutil>=5.9.0",
+    "PyYAML>=6.0",
+    "requests>=2.33.0",
+    "structlog>=24.1.0",
+    "typer>=0.12",
+    "sqlparse>=0.5.4",  # security: pinned over Django transitive (GHSA-27jp-wm6q-gp25)
+]
+
+[project.scripts]
+baldur = "baldur.cli:app"
+
+[project.optional-dependencies]
+django = [
+    "django>=4.2",
+    "djangorestframework>=3.14",
+    "django-db-connection-pool>=1.2.0",
+    "django-redis>=5.4",
+    "djangorestframework-simplejwt>=5.3",
+]
+fastapi = [
+    "fastapi>=0.100",
+    "starlette>=0.27",
+    # ASGI server — the getting-started quickstart documents `uvicorn app:app`
+    # as the run command, so the extra ships it for a self-contained install
+    # (parity with Django's runserver / Flask's built-in dev server). `[standard]`
+    # pulls watchfiles so the documented `--reload` flag works.
+    "uvicorn[standard]>=0.23",
+    # TestClient backing — Starlette's `TestClient` is built on httpx, and the
+    # getting-started quickstart smoke test (531 D5) exercises it. httpx was
+    # demoted from core deps once cell-health Prometheus probes moved to the
+    # stdlib `safe_urlopen` helper, so it now lives where it is actually needed.
+    "httpx>=0.24.0",
+]
+flask = [
+    "flask>=2.3",
+]
+# `cryptography` backs Fernet-encrypted audit masking (with a graceful plaintext
+# fallback when absent) and PRO entitlement signature verification. This is NOT
+# the "forensic context capture" feature (services/forensic_context.py +
+# BALDUR_FORENSIC_*), which is pure-Python and needs no extra — hence the
+# accurate `crypto` name rather than the misleading former `forensic`.
+crypto = [
+    "cryptography>=46.0.7",
+]
+celery = [
+    "celery>=5.3",
+    "redis>=4.2",
+]
+prometheus = [
+    "prometheus-client>=0.17",
+]
+opentelemetry = [
+    "opentelemetry-api>=1.20.0",
+    "opentelemetry-sdk>=1.20.0",
+    "opentelemetry-exporter-otlp>=1.20.0",
+    "opentelemetry-exporter-prometheus>=0.41b0",
+    "opentelemetry-instrumentation-celery>=0.41b0",
+    "opentelemetry-instrumentation-django>=0.41b0",
+    "opentelemetry-instrumentation-logging>=0.41b0",
+    "opentelemetry-instrumentation-requests>=0.41b0",
+]
+openapi = [
+    "drf-spectacular>=0.27",
+]
+fast-json = [
+    "orjson>=3.9.0",
+]
+caching = [
+    "cachetools>=5.0.0",
+    "pymemcache>=4.0",
+]
+tenacity = [
+    "tenacity>=8.0.0",
+]
+disk-buffer = [
+    "lmdb>=1.4.0",
+]
+arq = [
+    "arq>=0.26",
+    "redis>=4.2",
+    "croniter>=2.0",
+]
+async-queue = [
+    "arq>=0.26",
+    "redis>=4.2",
+    "croniter>=2.0",
+]
+rq = [
+    "rq>=1.16",
+    "rq-scheduler>=0.13",
+]
+postgres = [
+    "psycopg2-binary>=2.9",
+    "django>=4.2",
+]
+chaos = [
+    "croniter>=1.3",
+]
+export = [
+    "pyarrow>=14.0",
+]
+databases = [
+    "sqlalchemy>=2.0",
+]
+redis = [
+    "redis>=4.2",
+]
+# Documentation host (531 D3) — MkDocs Material + GitHub Pages. ``mkdocstrings``
+# is included now so Wave 7B's API reference layers on without a second extras
+# bump; ``mkdocs-llmstxt`` generates the ``llms.txt`` AI-search surface.
+# ``pymdownx.snippets`` (used to embed example-app source into the quickstart
+# docs, D11) ships with ``mkdocs-material[recommended]`` — no separate pin.
+# The ``blog`` plugin (docs-hosting-strategy.md) is deferred until blog content
+# (the tenacity / LLM drafts) lands with its own ``docs/blog/`` tree — enabling
+# it now would fail ``mkdocs build --strict`` (no posts dir) and conflicts with
+# 531 D3's fail-closed allowlist, which publishes only index + getting-started.
+docs = [
+    "mkdocs-material[recommended]>=9.5",
+    "mkdocstrings[python]>=0.24",
+    "mkdocs-llmstxt>=0.1",
+]
+# Dormant-tier extras (kubernetes/kafka/aws/ml-*/dormant) live in
+# ``pyproject-pro.toml`` per doc 528 D4. Public OSS install surface
+# advertises only OSS extras; users who need K8s/Kafka/AWS/ML integrations
+# should install ``baldur-pro[<extra>]``.
+all = [
+    "baldur-framework[django,fastapi,flask,celery,arq,prometheus,opentelemetry,fast-json,caching,disk-buffer,crypto,rq,postgres,chaos,export,databases,tenacity,redis,openapi]",
+]
+dev = [
+    "baldur-framework[all]",
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "pytest-django>=4.5",
+    "pytest-asyncio>=0.21",
+    "pytest-benchmark>=4.0",
+    "freezegun>=1.2",
+    "factory-boy>=3.3",
+    "pytest-mock>=3.10",
+    "pytest-timeout>=2.2",
+    "pytest-xdist>=3.5",
+    "pytest-rerunfailures>=14.0",
+    # Property-based testing — generates adversarial inputs for correctness
+    # invariants (e.g. idempotency key injectivity) that example tests miss.
+    "hypothesis>=6.0",
+    "locust>=2.0",
+    "toxiproxy-python>=0.1",
+    "black>=26.3.1",
+    "isort>=5.12",
+    "mypy>=1.0",
+    "ruff>=0.1",
+    "pre-commit>=4.0",
+    # Type stubs (P5 / doc 526) — surface real signature mismatches that
+    # ignore_missing_imports was hiding.
+    "django-stubs[compatible-mypy]>=6.0",
+    "types-requests",
+    "types-PyYAML",
+    "types-cachetools",
+    "types-croniter",
+]
+
+[project.urls]
+Homepage = "https://github.com/gotoUSA/baldur-python"
+Documentation = "https://github.com/gotoUSA/baldur-python#readme"
+Repository = "https://github.com/gotoUSA/baldur-python"
+Issues = "https://github.com/gotoUSA/baldur-python/issues"
+
+[tool.hatch.version]
+path = "src/baldur/__init__.py"
+
+# 599 D13 — the sdist is part of the public `dist/*` upload set, so it must
+# ship ONLY the OSS package. The previous `/src` include leaked the entire
+# private source tree into the sdist.
+# V1_LAUNCH_MANIFEST.yaml is now package-native under `src/baldur/_data/`, so it
+# ships with `/src/baldur` in both the sdist and the wheel and needs no extra
+# packaging directives.
+# `scripts/verify_oss_wheel.py` guards the private-tree regression at publish time.
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src/baldur",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/baldur"]
+
+# pytest 설정은 pytest.ini에서 관리 (standalone repo)
+
+[tool.coverage.run]
+source = ["src/baldur"]
+branch = true
+omit = [
+    "*/tests/*",
+    "*/__pycache__/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+]
+
+[tool.black]
+line-length = 88
+target-version = ["py311", "py312", "py313"]
+include = '\.pyi?$'
+
+[tool.isort]
+profile = "black"
+line_length = 88
+known_first_party = ["baldur"]
+sections = ["FUTURE", "STDLIB", "THIRDPARTY", "FIRSTPARTY", "LOCALFOLDER"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+strict_optional = true
+# django-stubs plugin (P5 / doc 526) — resolves Django model.objects.X attribute
+# checks and admin Callable.short_description on type-stub-aware mypy runs.
+plugins = ["mypy_django_plugin.main"]
+# mypy_path lets the plugin import tests.testapp.settings, which lives outside
+# the src/ layout. Without this, django-settings-module resolution fails.
+mypy_path = "."
+# django-manager-missing is a known noisy class on custom AUTH_USER_MODEL setups
+# (tests/testapp/TestUser) — the reverse-relation managers baldur declares
+# (baldur_failed_operations / baldur_resolved_operations) exist at runtime but
+# the plugin can't see them on the test user model.
+disable_error_code = ["django-manager-missing"]
+
+[tool.django-stubs]
+django_settings_module = "tests.testapp.settings"
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # Pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+    "G",   # flake8-logging-format — no f-strings in logging (e.g. G004)
+    "LOG", # flake8-logging — detect direct stdlib logging use
+    "C901",    # mccabe — function cyclomatic-complexity cap (grandfathered, G41 budget)
+    "PLR0912", # pylint — too-many-branches (grandfathered, G41 budget)
+    "PLR0915", # pylint — too-many-statements (grandfathered, G41 budget)
+    "ERA", # eradicate — commented-out code
+    "TRY", # tryceratops — error-handling anti-patterns
+    "RET", # flake8-return — return-flow simplification
+    "SIM", # flake8-simplify — guard-clause / boolean / context-manager simplification
+    "PT",  # flake8-pytest-style — test smells (tests/ only in practice)
+]
+ignore = [
+    "E501",  # line too long (handled by black)
+    "E402",  # module-level import not at top — project uses intentional lazy imports
+    "B027",  # empty method in abstract base class — intentional optional hook pattern
+    "UP042", # str-enum — project mandates (str, Enum) for JSON serialization (CLAUDE.md), not StrEnum
+    "TRY003", # long inline exception messages — collides with the BaldurError inline-message convention
+    "TRY300", # else-after-return in try — early-return-in-try is a mainstream idiom; adopting forces pure churn
+    "SIM105", # contextlib.suppress — per-call frame overhead on resilience hot paths; not worth the churn
+    "TRY301", # raise-within-try — fail-safe guard idiom (raise caught by a local except → safe fallback); recurring in resilience code, so the rule taxes every future legitimate use (same churn-vs-idiom rationale as TRY300/SIM105). TRY002/004/201/203 stay adopted
+    "ERA001", # commented-out-code — its "parses as Python?" heuristic false-positives on this codebase's documentation idioms (section labels, dict/tuple type-shape comments, formula docs, inline usage examples); ~115 occurrences are all legitimate docs, not dead code, so the rule taxes the documentation style. Dead-code removal stays a /review concern
+]
+
+[tool.ruff.lint.per-file-ignores]
+# files that legitimately use stdlib logging directly — exempt from LOG
+"src/baldur/settings/structlog_config.py" = ["LOG", "G"]
+"src/baldur/config.py" = ["LOG"]
+# Package __init__ files re-export public API without explicit __all__
+"**/__init__.py" = ["F401"]
+# Legacy aliases intentionally re-export same-named getters from baldur.settings.root
+"src/baldur/settings/__init__.py" = ["F401", "F811"]
+# Tests can use blind Exception / bugbear shortcuts / f-string logging; long
+# sequential test bodies are legitimately not god-functions (complexity is src-scoped);
+# PT011 (raises-too-broad) mirrors the existing B017 blind-raises ignore (exception-
+# specificity mechanization deferred — OOS_INDEX #601). ERA/TRY/RET/SIM are
+# src-scoped prose-quality families: in tests they fire on idioms (nested `with
+# patch()`, mock factories raising stdlib exceptions, Given/When/Then comments
+# mis-read as dead code), so tests are gated by the rest of PT (test-specific
+# smells) + base rules only.
+# PT019 (fixture-param-without-value) is ignored too: the `_`-prefix here is
+# overloaded across three patterns — `@patch`-injected unused mock args (the
+# universal pytest-mock idiom; `usefixtures` references a non-existent fixture
+# and breaks the test), value-returning `_`-fixtures consumed in the body
+# (removing the param → NameError), and genuine side-effect-only fixtures (the
+# only `usefixtures`-fixable case). The rule cannot tell them apart, so it is a
+# ~2/3 false-positive generator on this `@patch`-heavy suite.
+# PT012 (pytest.raises block should be a single simple statement) is ignored:
+# every occurrence is the context-manager-restores-on-exception idiom
+# (`with pytest.raises(X): with <cm>: ...; raise`, where the compound `with`
+# inside is required and recurring) or a mock-setup-then-single-call where the
+# setup provably cannot raise the expected type — so the rule's ambiguity
+# concern never applies, while taxing every CM-rollback test.
+"tests/**/*.py" = [
+    "B017", "B018", "G004", "C901", "PLR0912", "PLR0915", "PT011", "PT012", "PT019",
+    "ERA", "TRY", "RET", "SIM",
+]
+# examples/tests/ holds the E2E scenario suite (Cat 1-7). Same long-sequential-
+# body rationale as tests/** above — the tests/** glob simply predates this
+# location (scenario E2E tests live alongside the examples app, not under
+# tests/), so these grandfathered complexity/idiom exemptions never reached
+# them. PT smells the project still enforces on tests/** (e.g. PT018) stay
+# enforced here too.
+"examples/tests/**/*.py" = [
+    "B017", "B018", "G004", "C901", "PLR0912", "PLR0915", "PT011", "PT012", "PT019",
+    "ERA", "TRY", "RET", "SIM",
+]
+# PEP 562 __getattr__ modules: names in __all__ are resolved lazily
+"src/baldur/audit/persistence/disk_buffer.py" = ["F822"]
+"src/baldur/tasks/cleanup_tasks.py" = ["F822"]
+"src/baldur/tasks/daily_report.py" = ["F822"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["baldur"]

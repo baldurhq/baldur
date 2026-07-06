@@ -1,0 +1,73 @@
+# Grafana datasource provisioning
+# Connects Grafana to Mimir (metrics), Tempo (traces), and Loki (logs).
+# Prometheus is not included in Phase 1 — Mimir serves as the primary metrics source.
+
+apiVersion: 1
+
+datasources:
+  # Mimir — metrics (Prometheus-compatible, receives OTEL remote write)
+  - name: Mimir
+    uid: mimir
+    type: prometheus
+    access: proxy
+    url: http://mimir:9009/prometheus
+    isDefault: true
+    editable: true
+    jsonData:
+      timeInterval: "15s"
+      httpMethod: POST
+      exemplarTraceIdDestinations:
+        - name: trace_id
+          datasourceUid: tempo
+          urlDisplayLabel: "View Trace in Tempo"
+
+  # Tempo — distributed traces
+  - name: Tempo
+    uid: tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    isDefault: false
+    editable: true
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: loki
+        spanStartTimeShift: "-1h"
+        spanEndTimeShift: "1h"
+        filterByTraceID: true
+        filterBySpanID: false
+      tracesToMetrics:
+        datasourceUid: mimir
+        spanStartTimeShift: "-1h"
+        spanEndTimeShift: "1h"
+        tags:
+          - key: "service.name"
+            value: "service_name"
+        queries:
+          - name: "Request Rate"
+            query: 'sum(rate(http_server_request_duration_seconds_count{service_name="${__span.tags.service.name}"}[5m]))'
+          - name: "Error Rate"
+            query: 'sum(rate(http_server_request_duration_seconds_count{service_name="${__span.tags.service.name}", http_status_code=~"5.."}[5m]))'
+      serviceMap:
+        datasourceUid: mimir
+      nodeGraph:
+        enabled: true
+      lokiSearch:
+        datasourceUid: loki
+
+  # Loki — logs
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    isDefault: false
+    editable: true
+    jsonData:
+      derivedFields:
+        - datasourceUid: tempo
+          matcherRegex: '"trace_id":"([a-f0-9]{32})"'
+          name: TraceID
+          url: "${__value.raw}"
+          urlDisplayLabel: "View Trace"
+      maxLines: 1000

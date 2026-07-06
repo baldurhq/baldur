@@ -1,0 +1,877 @@
+{
+  "__inputs_doc__": "Datasource UIDs below match docker/config/grafana-datasources.yml provisioned UIDs (mimir, tempo, loki). For manual Grafana Import, run scripts/sanitize-dashboards.sh to convert UIDs to __inputs template variables.",
+  "__tier_doc__": "PRO superset monitoring board (full operational view — Grafana is read-only; the acting control surface is the HTML admin console, not this board). Section 'OSS Core' mirrors baldur-overview.json's panels (same series, same queries) so a PRO operator sees resilience + operations on one screen instead of switching boards; section 'PRO Operations' holds the PRO-only series. baldur-overview.json stays the OSS-only public board (no PRO series → G43 overview-excludes). This board still holds every PRO prefix → G43 operations-holds stays green. NOTE: the OSS-core panel definitions are duplicated from baldur-overview.json; keep them in sync on edit (G43 catches metric-name drift, not layout drift).",
+  "__requires": [
+    {
+      "type": "grafana",
+      "id": "grafana",
+      "name": "Grafana",
+      "version": "10.0.0"
+    },
+    {
+      "type": "datasource",
+      "id": "prometheus",
+      "name": "Prometheus"
+    },
+    {
+      "type": "panel",
+      "id": "timeseries",
+      "name": "Time series"
+    },
+    {
+      "type": "panel",
+      "id": "stat",
+      "name": "Stat"
+    },
+    {
+      "type": "datasource",
+      "id": "tempo",
+      "name": "Tempo"
+    },
+    {
+      "type": "panel",
+      "id": "table",
+      "name": "Table"
+    }
+  ],
+  "id": null,
+  "uid": "baldur-operations",
+  "title": "Baldur Full Board (PRO)",
+  "description": "PRO-tier full monitoring board: the full operational picture on one board — the OSS resilience core (Circuit Breaker, HTTP latency, Retry, Idempotency, Health Check, System Control, Graceful Shutdown, error traces) PLUS the PRO operations surfaces (DLQ, Adaptive Throttle, Canary, Emergency Mode, Unified Notification, Meta-Watchdog, Bulkhead). The OSS core panels populate on any stack; the PRO panels require the PRO tier. The lean OSS-only board is baldur-overview.json (shipped to OSS users, kept PRO-free).",
+  "tags": [
+    "baldur",
+    "pro"
+  ],
+  "timezone": "utc",
+  "editable": true,
+  "schemaVersion": 39,
+  "version": 1,
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "OSS Core — Resilience (OSS tier)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "id": 2,
+      "title": "Circuit Breaker State",
+      "type": "stat",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mimir"
+      },
+      "description": "Each service's circuit breaker: CLOSED = healthy (calls pass through), OPEN = tripped (calls fast-fail to protect a failing dependency), HALF-OPEN = probing recovery. An OPEN breaker means Baldur is actively shielding that dependency.",
+      "targets": [
+        {
+          "expr": "baldur_circuit_breaker_state",
+          "legendFormat": "{{ service }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "CLOSED",
+                  "color": "green"
+                }
+              }
+            },
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "OPEN",
+                  "color": "red"
+                }
+              }
+            },
+            {
+              "type": "value",
+              "options": {
+                "2": {
+                  "text": "HALF-OPEN",
+                  "color": "yellow"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "HTTP Latency P95 / P99",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 16,
+        "x": 8,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mimir"
+      },
+      "description": "Per-request HTTP latency at the 95th and 99th percentiles, in milliseconds. Rising P95/P99 means your slowest requests are getting slower — read it against your latency SLO. Empty for a plain-Python service with no HTTP surface.",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(baldur_http_request_duration_seconds_bucket[5m])) by (le)) * 1000",
+          "legendFormat": "P95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(baldur_http_request_duration_seconds_bucket[5m])) by (le)) * 1000",
+          "legendFormat": "P99"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "value": 0,
+                "color": "green"
+              },
+              {
+                "value": 300,
+                "color": "yellow"
+              },
+              {
+                "value": 500,
+                "color": "red"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Recent Traces (Errors)",
+      "type": "table",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 9
+      },
+      "datasource": {
+        "type": "tempo",
+        "uid": "tempo"
+      },
+      "description": "The most recent error-status request traces. Click a row to open the full span timeline in Tempo and see where the request failed.",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "tempo", "uid": "tempo"},
+          "queryType": "traceql",
+          "query": "{ status = error }",
+          "limit": 20
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Retry Outcomes",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mimir"
+      },
+      "description": "Rate of retry outcomes: success (a retry eventually worked), exhausted (every retry failed and the error surfaced), single-attempt failure (failed with no retry). Rising 'exhausted' means retries are no longer absorbing the failures.",
+      "targets": [
+        {
+          "expr": "sum by (outcome) (rate(baldur_retry_outcomes_total[5m]))",
+          "legendFormat": "{{ outcome }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        }
+      }
+    },
+    {
+      "id": 6,
+      "title": "Idempotency Gate Decisions",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 25
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mimir"
+      },
+      "description": "Rate of idempotency-gate decisions: continue (first time — run the work), skip (already done — deduplicated), abort (in flight elsewhere). Rising skip/abort means the gate is catching duplicate work before it runs twice.",
+      "targets": [
+        {
+          "expr": "sum by (decision) (rate(baldur_idempotency_gate_decision_total[5m]))",
+          "legendFormat": "{{ decision }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        }
+      }
+    },
+    {
+      "id": 7,
+      "title": "Health Check Status & Results",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 25
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mimir"
+      },
+      "description": "Aggregate health per check: 0 = healthy, 1 = degraded, 2 = unhealthy, 3 = error — plus the rate of check results. Anything above 0 means a dependency check is failing.",
+      "targets": [
+        {
+          "expr": "baldur_health_check_status",
+          "legendFormat": "status: {{ check_type }}"
+        },
+        {
+          "expr": "sum by (result) (rate(baldur_health_check_results_total[5m]))",
+          "legendFormat": "result rate: {{ result }}"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "System Control (Kill Switch)",
+      "type": "stat",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 33
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mimir"
+      },
+      "description": "The global System Control kill switch: 1 = enabled, 0 = disabled, plus the cumulative number of times it has been toggled.",
+      "targets": [
+        {
+          "expr": "baldur_system_control_enabled",
+          "legendFormat": "enabled"
+        },
+        {
+          "expr": "sum(baldur_system_control_state_changes_total)",
+          "legendFormat": "state changes"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "enabled"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "DISABLED",
+                        "color": "red"
+                      }
+                    }
+                  },
+                  {
+                    "type": "value",
+                    "options": {
+                      "1": {
+                        "text": "ENABLED",
+                        "color": "green"
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 9,
+      "title": "Graceful Shutdown",
+      "type": "stat",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 33
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mimir"
+      },
+      "description": "Shutdown phase (0 = running, 1 = draining, 2 = terminating, 3 = terminated) plus how many in-flight requests were drained vs. force-aborted on shutdown. Sits at 0/running normally and moves only during a SIGTERM drain; the drained/aborted counts tell you whether a restart lost in-flight work.",
+      "targets": [
+        {
+          "expr": "baldur_shutdown_phase",
+          "legendFormat": "phase"
+        },
+        {
+          "expr": "sum(baldur_shutdown_drained_requests_total)",
+          "legendFormat": "drained"
+        },
+        {
+          "expr": "sum(baldur_shutdown_aborted_requests_total)",
+          "legendFormat": "aborted"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "phase"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "RUNNING",
+                        "color": "green"
+                      }
+                    }
+                  },
+                  {
+                    "type": "value",
+                    "options": {
+                      "1": {
+                        "text": "DRAINING",
+                        "color": "yellow"
+                      }
+                    }
+                  },
+                  {
+                    "type": "value",
+                    "options": {
+                      "2": {
+                        "text": "TERMINATING",
+                        "color": "orange"
+                      }
+                    }
+                  },
+                  {
+                    "type": "value",
+                    "options": {
+                      "3": {
+                        "text": "TERMINATED",
+                        "color": "red"
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "aborted"
+            },
+            "properties": [
+              {
+                "id": "noValue",
+                "value": "0"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 10,
+      "type": "row",
+      "title": "PRO Operations (PRO tier)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 41
+      },
+      "panels": []
+    },
+    {
+      "id": 11,
+      "title": "DLQ Pending Count",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 42
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mimir"
+      },
+      "description": "How many failed operations are currently waiting in the Dead Letter Queue. A rising count means failures are piling up faster than they're being replayed or cleared.",
+      "targets": [
+        {
+          "expr": "sum(baldur_dlq_pending_count)",
+          "legendFormat": "Pending"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "title": "DLQ Items Rate",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 42
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mimir"
+      },
+      "description": "Rate of new items landing in the DLQ, by domain. A spike shows which workload is failing into the queue.",
+      "targets": [
+        {
+          "expr": "sum(rate(baldur_dlq_items_total[5m])) by (domain)",
+          "legendFormat": "{{ domain }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        }
+      }
+    },
+    {
+      "id": 15,
+      "title": "Adaptive Throttle (limit & denials)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 50
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mimir"
+      },
+      "description": "Each service's adaptive concurrency limit and the rate of requests it's denying, by reason. A falling limit with rising denials means the throttle is shedding load to protect the service.",
+      "targets": [
+        {
+          "expr": "baldur_throttle_limit",
+          "legendFormat": "{{ service }} limit"
+        },
+        {
+          "expr": "sum(rate(baldur_throttle_denied_total[5m])) by (service, reason)",
+          "legendFormat": "{{ service }} denied: {{ reason }}"
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "title": "Emergency Mode",
+      "type": "stat",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 50
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mimir"
+      },
+      "description": "Current emergency level (0 = normal, 1–3 = escalating severity), whether emergency mode is active, and how many times it has activated. Any non-zero level means Baldur has escalated into degraded-operation mode.",
+      "targets": [
+        {
+          "expr": "baldur_emergency_mode_level",
+          "legendFormat": "level"
+        },
+        {
+          "expr": "baldur_emergency_mode_active",
+          "legendFormat": "active"
+        },
+        {
+          "expr": "sum(baldur_emergency_mode_activations_total)",
+          "legendFormat": "activations"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "level"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "NORMAL",
+                        "color": "green"
+                      }
+                    }
+                  },
+                  {
+                    "type": "value",
+                    "options": {
+                      "1": {
+                        "text": "LEVEL_1",
+                        "color": "yellow"
+                      }
+                    }
+                  },
+                  {
+                    "type": "value",
+                    "options": {
+                      "2": {
+                        "text": "LEVEL_2",
+                        "color": "orange"
+                      }
+                    }
+                  },
+                  {
+                    "type": "value",
+                    "options": {
+                      "3": {
+                        "text": "LEVEL_3",
+                        "color": "red"
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "active"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "INACTIVE",
+                        "color": "green"
+                      }
+                    }
+                  },
+                  {
+                    "type": "value",
+                    "options": {
+                      "1": {
+                        "text": "ACTIVE",
+                        "color": "red"
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 18,
+      "title": "Unified Notification (sent & suppressed)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 58
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mimir"
+      },
+      "description": "Notification delivery rate by channel and result (sent / failed), plus the rate suppressed by cooldown, rate-limit, or dedup. High suppression means alerts are being throttled before they go out. Empty until the first notification — normal when quiet.",
+      "targets": [
+        {
+          "expr": "sum by (channel, result) (rate(baldur_notification_sent_total[5m]))",
+          "legendFormat": "sent: {{ channel }}/{{ result }}"
+        },
+        {
+          "expr": "sum(rate(baldur_notification_suppressed_total[5m]))",
+          "legendFormat": "suppressed/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "suppressed/s"
+            },
+            "properties": [
+              {
+                "id": "noValue",
+                "value": "0"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 19,
+      "title": "Meta-Watchdog (probes & recovery)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 58
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mimir"
+      },
+      "description": "The self-monitoring watchdog: how often it probes each component and what it finds (ok / stuck), recovery attempts and their result, and recoveries blocked by governance. Watch for 'stuck' probes and blocked recoveries.",
+      "targets": [
+        {
+          "expr": "sum by (component, status) (rate(baldur_watchdog_probe_total[5m]))",
+          "legendFormat": "probe: {{ component }}/{{ status }}"
+        },
+        {
+          "expr": "sum by (result) (rate(baldur_watchdog_recovery_total[5m]))",
+          "legendFormat": "recovery: {{ result }}"
+        },
+        {
+          "expr": "sum(rate(baldur_watchdog_recovery_governance_blocked_total[5m]))",
+          "legendFormat": "governance blocked/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "governance blocked/s"
+            },
+            "properties": [
+              {
+                "id": "noValue",
+                "value": "0"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 20,
+      "title": "Bulkhead (utilization & rejections)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 66
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mimir"
+      },
+      "description": "Each bulkhead's utilization (% of its concurrency budget in use) and rejection rate. Utilization near 100% with rising rejections means that bulkhead is saturated and isolating its load from the rest of the system.",
+      "targets": [
+        {
+          "expr": "baldur_bulkhead_utilization_percent",
+          "legendFormat": "util: {{ bulkhead_name }}"
+        },
+        {
+          "expr": "sum(rate(baldur_bulkhead_rejected_total[5m]))",
+          "legendFormat": "rejected/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "util: {{ bulkhead_name }}"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "rejected/s"
+            },
+            "properties": [
+              {
+                "id": "noValue",
+                "value": "0"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 21,
+      "title": "Throttle Saturation & Adjustments",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 66
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mimir"
+      },
+      "description": "Per-service throttle headroom — current limit ÷ max limit (1.0 = wide open, lower = more throttled) — plus how often the limit is adjusted and by what: emergency mode, circuit breaker, or error budget.",
+      "targets": [
+        {
+          "expr": "baldur_throttle_saturation_ratio",
+          "legendFormat": "saturation: {{ service }}"
+        },
+        {
+          "expr": "sum by (level) (rate(baldur_throttle_emergency_adjustments_total[5m]))",
+          "legendFormat": "emergency adj: L{{ level }}"
+        },
+        {
+          "expr": "sum by (service) (rate(baldur_throttle_cb_adjustments_total[5m]))",
+          "legendFormat": "cb adj: {{ service }}"
+        },
+        {
+          "expr": "sum by (budget_status) (rate(baldur_throttle_error_budget_adjustments_total[5m]))",
+          "legendFormat": "budget adj: {{ budget_status }}"
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "title": "Canary Rollout Lifecycle",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 74
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mimir"
+      },
+      "description": "The canary rollout lifecycle in one view: rollouts started and completed, stage advancements, rollbacks, and promotions blocked by governance. Rollbacks or blocks mean a canary failed its checks.",
+      "targets": [
+        {
+          "expr": "sum(rate(baldur_canary_rollout_started_total[5m]))",
+          "legendFormat": "started/s"
+        },
+        {
+          "expr": "sum(rate(baldur_canary_rollout_completed_total[5m]))",
+          "legendFormat": "completed/s"
+        },
+        {
+          "expr": "sum by (stage_name) (rate(baldur_canary_stage_advanced_total[5m]))",
+          "legendFormat": "stage: {{ stage_name }}"
+        },
+        {
+          "expr": "sum(rate(baldur_canary_rollback_total[5m]))",
+          "legendFormat": "rollback/s"
+        },
+        {
+          "expr": "sum(rate(baldur_canary_governance_blocked_total[5m])) by (block_reason)",
+          "legendFormat": "blocked: {{ block_reason }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "rollback/s"
+            },
+            "properties": [
+              {
+                "id": "noValue",
+                "value": "0"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

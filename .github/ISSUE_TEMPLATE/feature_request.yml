@@ -1,0 +1,33 @@
+name: Feature request
+description: Suggest an enhancement or new capability.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        We triage by impact. The "stakes" field below genuinely drives
+        prioritization — please be concrete about what a failure costs you.
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use case
+      description: What are you trying to do? Describe the real scenario, not the proposed API.
+    validations:
+      required: true
+  - type: textarea
+    id: stakes
+    attributes:
+      label: What does the current gap cost you?
+      description: >
+        When this is missing and something goes wrong, what is the impact?
+        (e.g. a lost task = a lost order, a double charge, a manual recovery.)
+        Concrete stakes help us prioritize over raw popularity.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution (optional)
+      description: If you have an idea for the shape of the feature, sketch it here.
+    validations:
+      required: false

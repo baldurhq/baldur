@@ -1,0 +1,55 @@
+name: Build OSS (baldur)
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# Minimal default token scope; each job escalates to the write/id-token scope
+# it needs (build -> contents: write for the release, publish-pypi -> id-token).
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      - run: pip install build
+      - run: python -m build
+      # 599 D13 publish-time artifact guard — the tag-triggered publish path
+      # runs no tests, so a tag cut from a red commit or a pyproject
+      # build-config drift would otherwise publish private-tier code silently.
+      # Blocking: verifies every artifact in dist/ (wheel + sdist).
+      - name: Verify OSS artifacts contain no private-tier code
+        run: python scripts/verify_oss_wheel.py dist
+      - uses: softprops/action-gh-release@7c4723f7a335432393329f8f1c564994ce50185d  # v3
+        with:
+          files: dist/*
+
+  publish-pypi:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        with:
+          python-version: "3.12"
+      - run: pip install build
+      - run: python -m build
+      # 599 D13 — same blocking guard as the build job: this job rebuilds its
+      # own dist/, so it must re-verify the exact artifact set it publishes.
+      - name: Verify OSS artifacts contain no private-tier code
+        run: python scripts/verify_oss_wheel.py dist
+      - uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # release/v1

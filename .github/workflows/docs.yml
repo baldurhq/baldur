@@ -1,0 +1,56 @@
+name: Docs
+
+# Build the MkDocs site (scoped, fail-closed allowlist per 531 D3).
+# NOTE: the live site is served by Cloudflare Pages (deployed with
+# `wrangler pages deploy site`), because GitHub Pages is unavailable for this
+# private repo on the current plan. This workflow is kept only as a manual
+# mkdocs --strict link/build check.
+on:
+  # Route B (local-first CI): disabled on push/PR to avoid billed Actions
+  # minutes. Run manually (`gh workflow run docs.yml`) for the strict build check.
+  workflow_dispatch:
+
+# Minimal default token scope; the deploy job escalates to contents: write.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      - run: pip install -e ".[docs]"
+      # --strict fails on broken cross-links and on a missing/renamed snippet
+      # target (pymdownx.snippets check_paths, 531 D11).
+      - run: mkdocs build --strict
+      # build --strict is structurally blind to theme assets silently dropped by
+      # an over-broad exclude_docs denylist (OOS #546-3). Fail loudly if Material's
+      # stylesheet/script bundle did not land in the built site.
+      - name: Assert Material theme assets emitted
+        run: |
+          ls site/assets/stylesheets/main.*.min.css
+          ls site/assets/stylesheets/palette.*.min.css
+          ls site/assets/javascripts/bundle.*.min.js
+
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      - run: pip install -e ".[docs]"
+      # gh-deploy publishes only the allowlisted pages, so the deployed site is
+      # leak-safe after the repo goes public at launch.
+      - run: mkdocs gh-deploy --force

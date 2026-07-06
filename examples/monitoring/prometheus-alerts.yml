@@ -1,0 +1,213 @@
+# Baldur Prometheus Alert Rules
+#
+# Import into your Prometheus configuration:
+#   rule_files:
+#     - "baldur-alerts.yml"
+
+groups:
+  # =========================================================================
+  # DLQ (Dead Letter Queue) Alerts
+  # =========================================================================
+  - name: dlq_alerts
+    interval: 30s
+    rules:
+      - alert: DLQHighPendingCount
+        expr: sum(baldur_dlq_pending_count) > 50
+        for: 5m
+        labels:
+          severity: warning
+          category: dlq
+        annotations:
+          summary: "DLQ pending count elevated"
+          description: "DLQ has {{ $value }} pending items. (threshold: 50)"
+          runbook_url: "https://docs.example.com/runbooks/dlq-high-pending"
+          dashboard_url: "/d/baldur-operations/baldur-operations"
+
+      - alert: DLQCriticalPendingCount
+        expr: sum(baldur_dlq_pending_count) > 100
+        for: 3m
+        labels:
+          severity: critical
+          category: dlq
+        annotations:
+          summary: "DLQ pending count critical"
+          description: "DLQ has {{ $value }} pending items. Immediate investigation required."
+          runbook_url: "https://docs.example.com/runbooks/dlq-critical"
+          dashboard_url: "/d/baldur-operations/baldur-operations"
+
+      - alert: DLQSpikeDetected
+        expr: |
+          (
+            sum(baldur_dlq_pending_count)
+            /
+            sum(baldur_dlq_pending_count offset 5m)
+          ) > 2
+        for: 2m
+        labels:
+          severity: warning
+          category: dlq
+        annotations:
+          summary: "DLQ spike detected"
+          description: "DLQ pending items increased {{ $value | printf \"%.1f\" }}x in 5 minutes."
+
+  # =========================================================================
+  # Circuit Breaker Alerts
+  # =========================================================================
+  - name: circuit_breaker_alerts
+    interval: 15s
+    rules:
+      - alert: CircuitBreakerOpen
+        expr: baldur_circuit_breaker_state == 1
+        for: 1m
+        labels:
+          severity: critical
+          category: circuit_breaker
+        annotations:
+          summary: "Circuit Breaker OPEN"
+          description: "{{ $labels.service }} Circuit Breaker is in OPEN state. Possible external service failure."
+          runbook_url: "https://docs.example.com/runbooks/circuit-breaker-open"
+          dashboard_url: "/d/baldur-overview/baldur-overview"
+
+      - alert: CircuitBreakerHalfOpen
+        expr: baldur_circuit_breaker_state == 2
+        for: 5m
+        labels:
+          severity: warning
+          category: circuit_breaker
+        annotations:
+          summary: "Circuit Breaker Half-Open for 5+ minutes"
+          description: "{{ $labels.service }} has been in Half-Open state for over 5 minutes."
+
+      - alert: CircuitBreakerTrippingRepeatedly
+        expr: increase(baldur_circuit_breaker_trips_total[15m]) > 3
+        for: 1m
+        labels:
+          severity: warning
+          category: circuit_breaker
+        annotations:
+          summary: "Circuit Breaker tripping repeatedly"
+          description: "{{ $labels.service }} circuit breaker tripped to OPEN {{ $value | printf \"%.0f\" }} time(s) in 15 minutes."
+
+  # =========================================================================
+  # Retry Alerts
+  # =========================================================================
+  - name: retry_alerts
+    interval: 30s
+    rules:
+      - alert: RetrySuccessRateLow
+        expr: |
+          (
+            sum(rate(baldur_retry_outcomes_total{outcome="success"}[5m])) by (domain)
+            /
+            sum(rate(baldur_retry_outcomes_total[5m])) by (domain)
+          ) < 0.8
+        for: 5m
+        labels:
+          severity: warning
+          category: retry
+        annotations:
+          summary: "Retry success rate low"
+          description: "{{ $labels.domain }} retry success rate is {{ $value | printf \"%.1f\" }}%. (threshold: 80%)"
+
+      - alert: RetryRateHigh
+        expr: sum(rate(baldur_retry_outcomes_total[5m])) > 10
+        for: 5m
+        labels:
+          severity: warning
+          category: retry
+        annotations:
+          summary: "Retry rate high"
+          description: "{{ $value | printf \"%.2f\" }} retries/sec observed."
+
+  # =========================================================================
+  # Latency SLA Alerts
+  # =========================================================================
+  - name: latency_sla_alerts
+    interval: 15s
+    rules:
+      - alert: LatencyP95SlaCritical
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(http_server_request_duration_seconds_bucket[5m])) by (le, service_name)
+          ) * 1000 > 500
+        for: 1m
+        labels:
+          severity: critical
+          category: sla
+        annotations:
+          summary: "SLA Critical: P95 Latency exceeded"
+          description: "{{ $labels.service_name }} P95 latency is {{ $value | printf \"%.0f\" }}ms. (threshold: 500ms)"
+          dashboard_url: "/d/baldur-overview/baldur-overview"
+
+      - alert: LatencyP95Warning
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(http_server_request_duration_seconds_bucket[5m])) by (le, service_name)
+          ) * 1000 > 300
+        for: 3m
+        labels:
+          severity: warning
+          category: sla
+        annotations:
+          summary: "Latency warning: P95 response time increasing"
+          description: "{{ $labels.service_name }} P95 latency is {{ $value | printf \"%.0f\" }}ms. (threshold: 300ms)"
+
+      - alert: LatencyP99High
+        expr: |
+          histogram_quantile(0.99,
+            sum(rate(http_server_request_duration_seconds_bucket[5m])) by (le, service_name)
+          ) * 1000 > 1000
+        for: 5m
+        labels:
+          severity: warning
+          category: sla
+        annotations:
+          summary: "P99 Latency high"
+          description: "{{ $labels.service_name }} P99 latency is {{ $value | printf \"%.0f\" }}ms. (threshold: 1000ms)"
+
+  # =========================================================================
+  # Canary Rollout Alerts
+  # =========================================================================
+  - name: canary_alerts
+    interval: 30s
+    rules:
+      - alert: CanaryGovernanceBypassUsed
+        expr: increase(baldur_canary_governance_bypass_total[15m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+          category: canary
+        annotations:
+          summary: "Canary governance Break Glass used"
+          description: "{{ $labels.requested_by }} bypassed the canary governance gate {{ $value | printf \"%.0f\" }} time(s) in 15m. Auto-recovery resumes legitimately trip this; a post-incident review may be required."
+
+  # =========================================================================
+  # System Alerts
+  # =========================================================================
+  - name: system_alerts
+    interval: 1m
+    rules:
+      - alert: BaldurMetricsDown
+        expr: up{job="django"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          category: system
+        annotations:
+          summary: "Baldur metrics collection failed"
+          description: "Cannot scrape metrics from Django application. Check service health."
+
+      - alert: RequestThroughputDrop
+        expr: |
+          (
+            sum(rate(baldur_http_requests_total[5m]))
+            /
+            sum(rate(baldur_http_requests_total[5m] offset 1h))
+          ) < 0.5
+        for: 5m
+        labels:
+          severity: warning
+          category: system
+        annotations:
+          summary: "Request throughput dropped"
+          description: "Throughput is {{ $value | printf \"%.1f\" }}x compared to 1 hour ago."

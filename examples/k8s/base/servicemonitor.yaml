@@ -1,0 +1,21 @@
+# Prometheus ServiceMonitor for baldur pods
+#
+# Requires: Prometheus Operator installed in the cluster.
+
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: baldur
+  labels:
+    app: baldur
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: baldur
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s
+      honorLabels: true

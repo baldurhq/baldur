@@ -1,0 +1,1001 @@
+# Architectural fitness function baselines.
+#
+# Each top-level key matches the `rule_key` argument used by a per-rule test
+# in `tests/architecture/`. Entries are { file, symbol?, count?, reason,
+# ticket, target_remove_by? } records:
+#   - `file`: POSIX-style path relative to project root.
+#   - `symbol` (optional): the drift-stable enclosing-scope qualname (CPython
+#     `__qualname__` semantics — `<module>`, `Class.method`,
+#     `outer.<locals>.inner`). When present, the match keys on (file, symbol),
+#     NOT a line number, so unrelated edits above a baselined symbol no longer
+#     break the gate (impl doc 534). When absent, the whole file is allowlisted
+#     for this rule (infinite allowance).
+#   - `count` (optional, default 1): the allowed number of violation
+#     occurrences for that (file, symbol). A new occurrence pushing the live
+#     count past this threshold regresses; this closes the multi-site blind
+#     spot the pre-534 line keying carried.
+#   - `reason`: free-text explaining why the violation is accepted.
+#   - `ticket`: tracking reference (OOS row, impl doc, etc.).
+#   - `target_remove_by` (optional): planned removal milestone.
+#
+# Entries within each rule's list SHOULD be sorted by (file, symbol) ascending
+# for stable diffs and minimal merge conflicts.
+#
+# Improvements (entries that no longer match a real violation) are silently
+# accepted; per-rule tests print an INFO message asking for a baseline refresh.
+
+time_handling:
+  - {file: src/baldur/adapters/celery/tasks/monitoring.py, symbol: check_and_report_sla_breaches, reason: pre-existing datetime.now() - pending migration to utc_now(), ticket: '506'}
+  - {file: src/baldur/adapters/django/management/commands/security_review.py, symbol: Command.handle, reason: pre-existing datetime.now() - pending migration to utc_now(), ticket: '506'}
+  - {file: src/baldur/adapters/queues/rq_adapter.py, symbol: RQTaskAdapter.schedule_periodic, reason: pre-existing datetime.now() - pending migration to utc_now(), ticket: '506'}
+  - {file: src/baldur/adapters/queues/sync_adapter.py, symbol: SyncTaskAdapter._execute_task, count: 5, reason: pre-existing datetime.now() - pending migration to utc_now(), ticket: '506'}
+  - {file: src/baldur/services/event_bus/bus/_emergency_postmortem.py, symbol: _generate_emergency_postmortem_data, reason: pre-existing datetime.now() - pending migration to utc_now(), ticket: '506'}
+  - {file: src/baldur/services/healing_events_store.py, symbol: _get_today_key, reason: pre-existing datetime.now() - pending migration to utc_now(), ticket: '506'}
+  - {file: src/baldur/services/healing_events_store.py, symbol: add_healing_event_redis, reason: pre-existing datetime.now() - pending migration to utc_now(), ticket: '506'}
+  - {file: src/baldur/services/healing_events_store.py, symbol: get_healing_events_count_redis, reason: pre-existing datetime.now() - pending migration to utc_now(), ticket: '506'}
+  - {file: src/baldur/services/healing_events_store.py, symbol: get_healing_events_redis, reason: pre-existing datetime.now() - pending migration to utc_now(), ticket: '506'}
+
+health_check_naming:
+  - {file: src/baldur/adapters/audit/redis_buffer.py, symbol: RedisAuditBuffer.is_healthy, reason: 'pre-existing: RedisAuditBuffer.is_healthy must be @property (cached state query, no I/O)', ticket: '506'}
+  - {file: src/baldur/adapters/health_checker.py, symbol: PortableHealthChecker.is_healthy, reason: 'pre-existing: PortableHealthChecker.is_healthy must be @property (cached state query, no I/O)', ticket: '506'}
+  - {file: src/baldur/audit/persistence/disk_space_monitor.py, symbol: DiskSpaceMonitor.is_healthy, reason: 'pre-existing: DiskSpaceMonitor.is_healthy must be @property (cached state query, no I/O)', ticket: '506'}
+  - {file: src/baldur/audit/self_audit.py, symbol: SelfAuditLogger.is_healthy, reason: 'pre-existing: SelfAuditLogger.is_healthy must be @property (cached state query, no I/O)', ticket: '506'}
+
+startup_wiring:
+  - {file: src/baldur/adapters/celery/signal_hooks.py, symbol: setup_baldur_signals, reason: 'pre-existing: setup_baldur_signals() not invoked from entry point - dynamic dispatch or wiring gap', ticket: '506'}
+  - {file: src/baldur/audit/audit_watchdog.py, symbol: start_watchdog, reason: 'pre-existing: start_watchdog() not invoked from entry point - dynamic dispatch or wiring gap', ticket: '506'}
+  - {file: src/baldur/audit/sync_worker.py, symbol: start_sync_worker, reason: 'pre-existing: start_sync_worker() not invoked from entry point - dynamic dispatch or wiring gap', ticket: '506'}
+  - {file: src/baldur/context/celery_propagation.py, symbol: setup_celery_causation_propagation, reason: 'pre-existing: setup_celery_causation_propagation() not invoked from entry point - dynamic dispatch or wiring gap', ticket: '506'}
+  - {file: src/baldur/observability/baggage.py, symbol: setup_baggage_propagation, reason: 'pre-existing: setup_baggage_propagation() not invoked from entry point - dynamic dispatch or wiring gap', ticket: '506'}
+  - {file: src/baldur/services/cell_topology/health.py, symbol: setup_cell_health_scheduler, reason: 'pre-existing: setup_cell_health_scheduler() not invoked from entry point - dynamic dispatch or wiring gap', ticket: '506'}
+  - {file: src/baldur/services/circuit_breaker/canary_recovery.py, symbol: start_canary_recovery, reason: 'pre-existing: start_canary_recovery() not invoked from entry point - dynamic dispatch or wiring gap', ticket: '506'}
+  - {file: src/baldur/services/circuit_breaker/recovery_strategy.py, symbol: start_service_recovery, reason: 'pre-existing: start_service_recovery() not invoked from entry point - dynamic dispatch or wiring gap', ticket: '506'}
+  - {file: src/baldur/services/dlq_outbox/outbox.py, symbol: setup_dlq_outbox, reason: 'pre-existing: setup_dlq_outbox() not invoked from entry point - dynamic dispatch or wiring gap', ticket: '506'}
+
+singleton_pair:
+  - {file: src/baldur/adapters/memory/layered_repository/__init__.py, symbol: reset_layered_repository_executor, reason: 'pre-existing: reset_layered_repository_executor without get_layered_repository_executor', ticket: '506'}
+  - {file: src/baldur/api/django/audit_middleware.py, symbol: get_audit_middleware_from_settings, reason: 'pre-existing: get_audit_middleware_from_settings without reset_audit_middleware_from_settings', ticket: '506'}
+  - {file: src/baldur/api/django/rate_limit/middleware.py, symbol: reset_rate_limit_state, reason: 'pre-existing: reset_rate_limit_state without get_rate_limit_state', ticket: '506'}
+  - {file: src/baldur/api/middleware/rate_limit.py, symbol: reset_rate_limit_state, reason: 'pre-existing: reset_rate_limit_state without get_rate_limit_state', ticket: '506'}
+  - {file: src/baldur/audit/__init__.py, symbol: reset_loaded_symbols, reason: 'pre-existing: reset_loaded_symbols without get_loaded_symbols', ticket: '506'}
+  - {file: src/baldur/audit/async_audit_lifecycle.py, symbol: reset_lifecycle_state, reason: 'pre-existing: reset_lifecycle_state without get_lifecycle_state', ticket: '506'}
+  - {file: src/baldur/audit/cascade_auditor/_wal_recovery.py, symbol: reset_wal_writer, reason: 'pre-existing: reset_wal_writer without get_wal_writer', ticket: '506'}
+  - {file: src/baldur/bootstrap.py, symbol: reset_init_state, reason: 'pre-existing: reset_init_state without get_init_state', ticket: '506'}
+  - {file: src/baldur/coordination/factory.py, symbol: reset_leader_electors, reason: 'pre-existing: reset_leader_electors without get_leader_electors', ticket: '506'}
+  - {file: src/baldur/coordination/scheduler.py, symbol: reset_schedulers, reason: 'pre-existing: reset_schedulers without get_schedulers', ticket: '506'}
+  - {file: src/baldur/coordination/shutdown_integration.py, symbol: reset_registered_electors, reason: 'pre-existing: reset_registered_electors without get_registered_electors', ticket: '506'}
+  - {file: src/baldur/metrics/event_handlers.py, symbol: reset_event_handler_cache, reason: 'pre-existing: reset_event_handler_cache without get_event_handler_cache', ticket: '506'}
+  - {file: src/baldur/metrics/recorders/circuit_breaker.py, symbol: reset_blocked_recorder, reason: 'pre-existing: reset_blocked_recorder without get_blocked_recorder', ticket: '506'}
+  - {file: src/baldur/observability/__init__.py, symbol: reset_opentelemetry, reason: 'pre-existing: reset_opentelemetry without get_opentelemetry', ticket: '506'}
+  - {file: src/baldur/observability/log_processors.py, symbol: reset_rate_limit_state, reason: 'pre-existing: reset_rate_limit_state without get_rate_limit_state', ticket: '506'}
+  - {file: src/baldur/observability/log_processors.py, symbol: reset_strict_validation_cache, reason: 'pre-existing: reset_strict_validation_cache without get_strict_validation_cache', ticket: '506'}
+  - {file: src/baldur/observability/structlog_config.py, symbol: reset_structlog_config, reason: 'pre-existing: reset_structlog_config without get_structlog_config', ticket: '506'}
+  - {file: src/baldur/protect_facade.py, symbol: reset_protect_caches, reason: 'pre-existing: reset_protect_caches without get_protect_caches', ticket: '506'}
+  - {file: src/baldur/services/dlq_outbox/outbox.py, symbol: reset_dlq_outbox, reason: 'pre-existing: reset_dlq_outbox without get_dlq_outbox', ticket: '506'}
+  - {file: src/baldur/services/precomputed_cache/multi_tier.py, symbol: reset_drift_stats, reason: 'pre-existing: reset_drift_stats without get_drift_stats', ticket: '506'}
+  - {file: src/baldur/settings/layered_provider.py, symbol: get_layered_settings, reason: 'pre-existing: get_layered_settings without reset_layered_settings', ticket: '506'}
+  - {file: src/baldur/tasks/base.py, symbol: reset_cooldowns, reason: 'pre-existing: reset_cooldowns without get_cooldowns', ticket: '506'}
+
+all_declaration:
+  - {file: "src/baldur/adapters/alert/file_adapter.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/alert/null_adapter.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/alert/stdout_adapter.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/audit/django_adapter.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/audit/file_adapter.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/audit/kafka_adapter.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/audit/kafka_consumer.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/audit/null_adapter.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/audit/redis_buffer.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/audit/singleton.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/audit/stdout_adapter.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/audit/worm_adapters.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/cache/memcached_adapter.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/cache/memory_adapter.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/cache/metrics_decorator.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/cache/redis_adapter.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/celery/tasks/cell_evacuation.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/celery/tasks/config_shadow.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/celery/tasks/dlq_replay.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/celery/tasks/monitoring.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/celery/tasks/persistence.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/celery/tasks/postmortem.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/celery/tasks/sla_notification.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/config_applier/composite.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/config_applier/throttle.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/deployment/base.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/deployment/kubernetes.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/deployment/mock.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/django/admin.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/django/auto_config.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/django/management/commands/baldur_config.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/django/management/commands/check_baldur_config.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/django/management/commands/security_review.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/django/migrations/0001_initial.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/django/migrations/0002_add_dlq_and_security_models.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/django/security_incident.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/django/signal_hooks.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/django/statistics.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/gunicorn/hooks.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/ipc/cb_state_cache.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/ipc/cb_state_snapshot.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/ipc/exceptions.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/ipc/request_handler.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/kafka/config.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/kafka/consumer.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/kafka/event_bus.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/kafka/metrics.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/kafka/producer.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/kafka/retry.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/kafka/schemas.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/memory/base.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/memory/drift_reconciliation.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/memory/event_journal.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/memory/failed_operation.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/memory/layered_repository/audit_helpers.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/memory/layered_repository/base.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/memory/layered_repository/drift_operations.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/memory/layered_repository/error_handling.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/memory/layered_repository/l2_load.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/memory/layered_repository/l2_sync.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/memory/layered_repository/monitoring.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/memory/layered_repository/repository_operations.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/memory/security_incident.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/memory/shadow_logger.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/postgres/repository.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/queues/arq_adapter.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/queues/celery_adapter.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/queues/rq_adapter.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/queues/sync_adapter.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/rate_limit/database_adapter.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/rate_limit/memory_adapter.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/rate_limit/redis_adapter.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/redis/circuit_breaker.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/redis/dlq.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/redis/event_journal.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/resilient/backend.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/statistics/null.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/traffic_routing/k8s_ingress_adapter.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/traffic_routing/logging_adapter.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/admin/routes/analysis.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/admin/routes/audit_resilience.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/admin/routes/chaos.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/admin/routes/circuit_breaker.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/admin/routes/config_data.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/admin/routes/continuous_audit.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/admin/routes/core.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/admin/routes/daily_report.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/admin/routes/dlq.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/admin/routes/emergency.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/admin/routes/error_budget.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/admin/routes/governance.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/admin/routes/health.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/admin/routes/l2_storage.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/admin/routes/operations.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/admin/routes/recovery.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/admin/routes/runtime_config.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/admin/routes/security_review.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/admin/routes/system_control.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/admission_control.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/audit_middleware.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/cell/middleware.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/middleware/access_logging.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/middleware/actor_context.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/middleware/backpressure.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/middleware/baldur.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/middleware/drain_aware.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/middleware/health_bridge.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/middleware/ip_ban.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/middleware/permissions.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/middleware/recovery_logger.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/middleware/request_tracking.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/permissions.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/pool_circuit_breaker.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/serializers/chaos.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/serializers/config/advanced_configs.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/serializers/config/base.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/serializers/config/core_configs.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/serializers/config/pending_configs.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/serializers/config/security_configs.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/serializers/config/slo_configs.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/serializers/config/storage_configs.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/serializers/control.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/serializers/pydantic_integration.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/stress_views.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/throttle_adapter.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/tiering/middleware.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/scaling/tiering/circuit_breaker.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/scaling/tiering/defaults.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/scaling/tiering/enums.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/scaling/tiering/models.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/scaling/tiering/registry.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/scaling/tiering/validator.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/audit.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/auto_tuning.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/canary.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/cascade.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/chaos.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/compliance.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/config_history.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/control.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/dlq.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/dna.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/emergency.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/error_budget.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/governance.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/grafana_webhook.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/health.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/l2_storage.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/meta_watchdog.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/postmortem.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/recovery.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/reports.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/runtime_config.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/stress.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/system_control.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/tiering.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/xtest.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/views/bulkhead.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/views/canary.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/views/dashboard.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/views/grafana_webhook.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/views/l2_storage_utils.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/views/meta_watchdog.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/views/recovery.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/views/rollback.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/views/xtest/base.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/views/xtest/dlq.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/views/xtest/idempotency.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/views/xtest/integration.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/views/xtest/rate_limit.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/views/xtest/replay.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/views/xtest/retry.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/api/django/views/xtest/scenarios/base.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/async_audit_lifecycle.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/audit_watchdog.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/cascade_chain.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/cascade_config.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/cascade_event.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/cascade_exceptions.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/cascade_load_shedding.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/cascade_metrics.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/cascade_notifications.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/checkpoint_manager.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/checksum.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/cleanup_utils.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/config.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/constants.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/continuous_audit.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/env_snapshot.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/event_buffer.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/export.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/hash_chain_safety.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/integrity/cross_cluster_linker.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/integrity/merkle_spot_checker.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/kafka_checkpoint.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/loki_labels.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/masking.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/performance/async_writer.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/performance/batch_query.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/performance/batch_writer.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/performance/lua_atomic.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/performance/lua_registry.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/performance/manager.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/performance/sampling.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/performance/watchdog.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/persistence/config.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/persistence/migration.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/persistence/mmap_buffer.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/redis_batch_lua.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/resilience/buffer_protocol.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/resilient_recorder.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/retention_cleaner.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/ring_buffer.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/self_audit.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/signed_manifest.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/sync_worker.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/trace.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/audit/verify_audit_integrity.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/celery_tasks/chaos_tasks.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/celery_tasks/circuit_breaker_tasks.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/celery_tasks/dlq_tasks.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/celery_tasks/drift_detection_tasks.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/celery_tasks/forecaster_tasks.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/celery_tasks/metrics_tasks.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/cli/app.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/cli/commands/admin.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/cli/commands/cb.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/cli/commands/check_config.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/cli/commands/dlq.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/cli/commands/report.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/cli/commands/scheduler.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/cli/commands/security_review.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/config_tracker.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/context/actor_context.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/context/causation_context.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/context/celery_cell_propagation.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/context/celery_context_utils.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/context/cell_context.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/coordination/base.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/coordination/dlq_consumer.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/coordination/factory.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/coordination/metrics.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/coordination/scheduler.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/coordination/shutdown_integration.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/core/apply_strategy.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/core/backoff.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/core/cb_namespace.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/core/cert_monitor.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/core/cluster_identity.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/core/connection_health.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/core/constants.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/core/dependency_graph.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/core/di_fallback.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/core/fallback_strategy.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/core/file_utils.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/core/pool_watchdog.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/core/process_utils.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/core/request_context.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/core/resource_monitor.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/core/retry.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/core/retry_hooks.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/core/safe_defaults.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/core/state_backend.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/core/test_mode_context.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/core/tiered_redis.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/core/time_provider.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/core/timezone.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/core/tls_handler.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/decorators/domain_tag.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/interfaces/alert_adapter.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/interfaces/audit_adapter.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/interfaces/cache_provider.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/interfaces/config_provider.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/interfaces/event_journal.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/interfaces/messaging_common.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/interfaces/rate_limit_storage.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/interfaces/repositories.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/interfaces/resilience_policy.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/interfaces/statistics.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/interfaces/traffic_routing.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/interfaces/web_framework.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/meta/audit_probe.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/meta/dependency_analyzer.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/meta/escalation.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/meta/fallback_escalation.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/meta/health_probe.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/meta/probes/gil_contention.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/meta/recovery_adapter.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/meta/state_store.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/meta/stuck_detector.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/metrics/audit_buffer_metrics.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/metrics/otel_backend.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/metrics/prometheus.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/metrics/registry.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/models/blast_radius.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/models/cascade_event_archive.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/models/governance.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/models/recovery_session_archive.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/observability/baggage.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/observability/log_processors.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/observability/sampler.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/observability/structlog_config.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/resilience/policies/composer.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/resilience/policies/fallback.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/resilience/policies/guards/backpressure.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/resilience/policies/guards/error_budget.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/resilience/policies/guards/full_stop.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/resilience/policies/guards/governance.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/resilience/policies/guards/kill_switch.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/resilience/policies/guards/load_shedding.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/resilience/policies/hedging.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/resilience/policies/hooks/audit.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/resilience/policies/hooks/event_bus.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/resilience/policies/hooks/metrics.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/resilience/policies/hooks/sampled_audit.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/resilience/policies/presets.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/scaling/deadline_context.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/scaling/graceful_degradation.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/scaling/hpa_exporter.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/scaling/metrics.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/scaling/queue_provider.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/scaling/rate_controller.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/scaling/traffic_gate.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/scripts/demo_zero_data_loss.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/server.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/adaptive_replay.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/backoff_calculator/budget.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/backoff_calculator/calculator.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/backoff_calculator/global_state.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/backoff_calculator/models.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/blast_radius/models.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/blast_radius/service.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/capacity_reservation/event_calendar.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/capacity_reservation/pre_warmer.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/capacity_reservation/service.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/cell_topology/health.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/cell_topology/models.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/cell_topology/policy.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/cell_topology/registry.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/cell_topology/tagger.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/chaos_context.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/circuit_breaker/actionable_alert_urls.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/circuit_breaker/adaptive_threshold.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/circuit_breaker/blast_radius_integration.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/circuit_breaker/canary_recovery.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/circuit_breaker/convenience.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/circuit_breaker/exceptions.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/circuit_breaker/freeze_mode.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/circuit_breaker/load_shedding/dashboard.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/circuit_breaker/load_shedding/error_rate.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/circuit_breaker/load_shedding/manager.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/circuit_breaker/load_shedding/shedding_middleware.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/circuit_breaker/load_shedding/shedding_models.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/circuit_breaker/manual_control.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/circuit_breaker/models.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/circuit_breaker/panic_threshold.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/circuit_breaker/policy.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/circuit_breaker/protection.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/circuit_breaker/recovery_strategy.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/circuit_breaker/service.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/circuit_breaker/service_config.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/circuit_breaker/stale_cache_integration.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/config/propagation_health.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/config/propagator.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/config_history/keys.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/config_history/models.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/config_history/service.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/config_shadow/evaluators/circuit_breaker.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/config_shadow/evaluators/error_budget.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/config_shadow/evaluators/live_canary.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/config_shadow/metrics_provider.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/config_shadow/models.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/config_shadow/service.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/control_api_service/models.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/control_api_service/risk.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/control_api_service/service.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/dashboard_service/models.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/dashboard_service/service.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/dlq_outbox/outbox.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/dlq_outbox/worker.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/event_bus/integrity_gate.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/event_journal/subscriber.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/execution_services/chaos_service.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/execution_services/config_apply_service.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/execution_services/models.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/idempotency/anti_flapping.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/idempotency/models.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/idempotency/service.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/isolation/regional_gate.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/metrics/definitions.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/metrics/recorders.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/metrics/updaters.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/pending_config.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/precomputed_cache/compute_functions.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/precomputed_cache/constants.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/precomputed_cache/l1_cache.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/precomputed_cache/l2_cache.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/precomputed_cache/multi_tier.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/precomputed_cache/worker.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/rate_limit/distributed_channel.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/rate_limit_coordinator/coordinator.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/rate_limit_coordinator/helpers.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/rate_limit_coordinator/models.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/regional_emergency/atomic_query.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/regional_emergency/cascade_detector.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/regional_emergency/escalation_audit.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/regional_emergency/health_penalty.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/regional_emergency/partition_reconciliation.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/regional_emergency/tracker.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/replay_service/handlers.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/replay_service/models.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/replay_service/service.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/retry_handler/decorators.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/retry_handler/guards.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/retry_handler/models.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/retry_handler/policy.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/retry_handler/sinks.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/rollback/models.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/rollback/service.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/security/helpers.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/security/hooks.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/security/models.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/security/orchestrator.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/security/policies.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/security/service.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/security/session_registry.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/security/types.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/security_notification/email_handler.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/security_notification/models.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/security_notification/pagerduty_handler.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/security_notification/service.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/security_notification/slack_handler.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/security_notification/sms_handler.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/stress_test_service/models.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/stress_test_service/service.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/services/system_metrics_cache.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/admission_control.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/airgap.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/anti_flapping.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/api_rate_limit.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/api_view.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/apply_strategy.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/arq_task.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/audit.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/audit_integrity.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/audit_sync.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/audit_watchdog.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/auto_config.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/auto_rollback.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/backoff.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/backpressure.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/base.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/batch.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/bridge.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/bulkhead.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/canary.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/canary_governance.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/canary_watchdog.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/capacity_reservation.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/cascade_retention.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/celery_task.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/cell_topology.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/chaos.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/chaos_blast_radius.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/chaos_experiment.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/circuit_breaker.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/circuit_breaker_advanced.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/circuit_mesh.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/cleanup.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/config_shadow.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/correlation.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/correlation_engine.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/corruption_shield.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/critical_worker.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/daemon_worker.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/daily_report.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/dashboard.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/decision_engine.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/detection.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/distributed_lock.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/dlq.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/dlq_outbox.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/domain_sensitivity.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/drift_detection.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/drift_threshold.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/emergency_mode.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/error_budget.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/error_budget_gate.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/error_budget_propagation.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/event_buffer.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/event_journal.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/finops.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/forensic.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/gate_fault.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/governance.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/graceful_degradation.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/groups.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/hash_chain.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/health_check.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/hedging.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/http_client.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/idempotency.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/intelligence_task.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/jitter.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/kafka_producer.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/l2_storage.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/layered_provider.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/leader_election.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/learning.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/logging_settings.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/meta_watchdog.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/metrics.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/namespace.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/notification.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/notification_channel.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/otel.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/pipeline.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/pool_monitor.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/precomputed_cache.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/predictive_forecaster.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/propagation.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/protect.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/rate_limit.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/rate_limit_throttle_integration.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/recovery_circuit_breaker.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/recovery_coordinator.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/recovery_shutdown.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/recovery_tasks.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/redis_key_guard.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/regional_emergency.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/regional_recovery_policy.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/replay_automation.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/resilient_recorder.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/resilient_storage.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/resource_guard.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/resource_monitor.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/retry.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/ring_buffer.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/root.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/runbook.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/runtime_feedback.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/safe_gauge.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/safety_bounds.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/saga.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/sampling.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/scale.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/secrets.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/security.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/sla.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/slack_channel.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/slo.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/state_cache.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/steady_state.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/stress_test.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/system_control.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/system_metrics_cache.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/thread_management.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/settings/throttle.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/slo.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/tasks/backpressure_mixin.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/tasks/base.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/tasks/canary_watchdog.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/tasks/cascade_cleanup_tasks.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/tasks/chaos_scheduler.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/tasks/config_apply.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/tasks/drift_detection.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/tasks/governance.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/tasks/integrity_tasks.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/tasks/notification_policy.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/utils/duration.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/utils/network.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/utils/postmortem_actions.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/utils/postmortem_root_cause.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/utils/template.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+
+state_backend_ttl:
+  - {file: src/baldur/adapters/redis/dlq_compression.py, symbol: RedisDLQCompression._record_compression_audit, reason: 'pre-existing: receiver heuristic FP - not actually a StateBackend (e.g., metric gauge)', ticket: '506'}
+  - {file: src/baldur/metrics/otel_backend.py, symbol: _GaugeStoreShimChild.set, reason: 'receiver heuristic FP - _store is a _GaugeStore metric value store, not a StateBackend', ticket: '646'}
+  - {file: src/baldur/metrics/otel_backend.py, symbol: _OTELCBRecorder.set_state, reason: 'pre-existing: receiver heuristic FP - not actually a StateBackend (e.g., metric gauge)', ticket: '506'}
+  - {file: src/baldur/metrics/otel_backend.py, symbol: _OTELDLQRecorder.set_pending_count, reason: 'pre-existing: receiver heuristic FP - not actually a StateBackend (e.g., metric gauge)', ticket: '506'}
+  - {file: src/baldur/metrics/otel_backend.py, symbol: _OTELDLQRecorder.set_size_ratio, reason: 'pre-existing: receiver heuristic FP - not actually a StateBackend (e.g., metric gauge)', ticket: '506'}
+  - {file: src/baldur/metrics/otel_backend.py, symbol: _OTELDLQRecorder.set_status_count, reason: 'pre-existing: receiver heuristic FP - not actually a StateBackend (e.g., metric gauge)', ticket: '506'}
+  - {file: src/baldur/metrics/otel_backend.py, symbol: _OTELInfraRecorder.set_active_connections, reason: 'pre-existing: receiver heuristic FP - not actually a StateBackend (e.g., metric gauge)', ticket: '506'}
+  - {file: src/baldur/metrics/otel_backend.py, symbol: _OTELInfraRecorder.set_capacity_active_events, reason: 'pre-existing: receiver heuristic FP - not actually a StateBackend (e.g., metric gauge)', ticket: '506'}
+  - {file: src/baldur/metrics/otel_backend.py, symbol: _OTELInfraRecorder.set_capacity_pool_multiplier, reason: 'pre-existing: receiver heuristic FP - not actually a StateBackend (e.g., metric gauge)', ticket: '506'}
+  - {file: src/baldur/metrics/otel_backend.py, symbol: _OTELInfraRecorder.set_capacity_rate_multiplier, reason: 'pre-existing: receiver heuristic FP - not actually a StateBackend (e.g., metric gauge)', ticket: '506'}
+  - {file: src/baldur/metrics/otel_backend.py, symbol: _OTELInfraRecorder.set_error_rate, reason: 'pre-existing: receiver heuristic FP - not actually a StateBackend (e.g., metric gauge)', ticket: '506'}
+  - {file: src/baldur/metrics/otel_backend.py, symbol: _OTELInfraRecorder.set_latency_percentile, reason: 'pre-existing: receiver heuristic FP - not actually a StateBackend (e.g., metric gauge)', ticket: '506'}
+  - {file: src/baldur/metrics/otel_backend.py, symbol: _OTELInfraRecorder.set_mesh_overrides_active, reason: 'pre-existing: receiver heuristic FP - not actually a StateBackend (e.g., metric gauge)', ticket: '506'}
+  - {file: src/baldur/metrics/otel_backend.py, symbol: _OTELInfraRecorder.set_request_queue_depth, reason: 'pre-existing: receiver heuristic FP - not actually a StateBackend (e.g., metric gauge)', ticket: '506'}
+  - {file: src/baldur/metrics/otel_backend.py, symbol: _OTELInfraRecorder.set_worker_utilization, reason: 'pre-existing: receiver heuristic FP - not actually a StateBackend (e.g., metric gauge)', ticket: '506'}
+  - {file: src/baldur/metrics/otel_backend.py, symbol: _OTELRetryRecorder.set_success_rate, reason: 'pre-existing: receiver heuristic FP - not actually a StateBackend (e.g., metric gauge)', ticket: '506'}
+  - {file: src/baldur/metrics/recorders/watchdog.py, symbol: WatchdogMetricRecorder.set_self_cb_state, reason: 'pre-existing: receiver heuristic FP - not actually a StateBackend (e.g., metric gauge)', ticket: '506'}
+  - {file: src/baldur/services/capacity_reservation/event_calendar.py, symbol: EventCalendar._persist, reason: 'pre-existing: receiver heuristic FP - not actually a StateBackend (e.g., metric gauge)', ticket: '506'}
+  - {file: src/baldur/services/pending_config.py, symbol: PendingConfigService.create_pending_change, reason: '666 per-key pending storage: transient change keys with explicit lifecycle (apply/cancel delete + cleanup_expired); no fixed TTL because the scheduled delay is operator-variable', ticket: '666'}
+  - {file: src/baldur/services/pending_config.py, symbol: PendingConfigService._migrate_legacy_blob, reason: '666 one-time legacy-blob migration: hydrates per-key change entries (same lifecycle as create_pending_change); no fixed TTL', ticket: '666'}
+  - {file: src/baldur/services/system_control.py, symbol: SystemControlManager._save_state, reason: 'pre-existing: receiver heuristic FP - not actually a StateBackend (e.g., metric gauge)', ticket: '506'}
+
+env_factory_bodies:
+  - {file: "src/baldur/adapters/airgap/factory.py", reason: "pre-existing: OOS #453 named offender - pending BaldurRuntime migration", ticket: "506"}
+  - {file: "src/baldur/adapters/audit/singleton.py", reason: "pre-existing: OOS #453 named offender - pending BaldurRuntime migration", ticket: "506"}
+  - {file: "src/baldur/adapters/metrics/factory.py", reason: "pre-existing: OOS #453 named offender - pending BaldurRuntime migration", ticket: "506"}
+  - {file: "src/baldur/audit/checkpoint/__init__.py", reason: "pre-existing: OOS #453 named offender - pending BaldurRuntime migration", ticket: "506"}
+
+optional_imports:
+  - {file: "src/baldur/adapters/airgap/factory.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/audit/kafka_consumer.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/cache/memcached_adapter.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/celery/baldur_task.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/celery/beat_schedule.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/celery/signal_handlers.py", reason: "511 D13: no-op setup_logging handler — celery.signals import gated by celery extras", ticket: "511"}
+  - {file: "src/baldur/adapters/celery/signal_hooks.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/celery/tasks/cell_evacuation.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/celery/tasks/config_shadow.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/celery/tasks/dlq_replay.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/celery/tasks/monitoring.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/celery/tasks/persistence.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/celery/tasks/postmortem.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/celery/tasks/sla_notification.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/database/django_health.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/deployment/__init__.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/django/admin.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/django/apps.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/django/auto_config.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/django/management/commands/baldur_config.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/django/management/commands/check_baldur_config.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/django/management/commands/security_review.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/django/migrations/0001_initial.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/django/migrations/0002_add_dlq_and_security_models.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/django/models/_abstract_audit_log.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/django/models/_abstract_failed_external_request.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/django/repositories/cascade_event.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/django/repositories/postmortem.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/django/repositories/recovery_session.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/django/security_incident.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/django/session_adapter.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/django/signal_hooks.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/django/startup/env_auditor.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/django/startup/metric_hydrator.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/django/startup/rbac_initializer.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/django/statistics.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/flask/middleware.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/kafka/consumer.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/kafka/schemas.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/metrics/django_adapter.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/postgres/sessions.py", reason: "515 D4: function-body django import only reached via registry-gated 'django' provider (factory/adapters.py discover_pg_admin_adapters)", ticket: "515"}
+  - {file: "src/baldur/adapters/prometheus_adapter.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/queues/arq_adapter.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/queues/celery_adapter.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/queues/rq_adapter.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/redis/connection_factory.py", reason: "513 D1: redis moved from core deps to [redis] extra — imports are function-local inside RedisConnectionFactory methods, only reached when redis adapter is explicitly selected", ticket: "513"}
+  - {file: "src/baldur/adapters/sqlalchemy_pool.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/adapter.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/admission_control.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/audit_middleware.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/base.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/cell/middleware.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/exceptions/handler.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/middleware/actor_context.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/middleware/backpressure.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/middleware/baldur.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/middleware/drain_aware.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/middleware/health_bridge.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/middleware/ip_ban.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/permissions.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/pool_circuit_breaker.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/rate_limit/middleware.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/rate_limit/redis_health_checker.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/reauthentication.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/serializers/chaos.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/serializers/config/advanced_configs.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/serializers/config/base.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/serializers/config/core_configs.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/serializers/config/pending_configs.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/serializers/config/security_configs.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/serializers/config/slo_configs.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/serializers/config/storage_configs.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/serializers/control.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/serializers/features.py", reason: "django subtree assumes DRF; same accepted state as sibling serializers", ticket: "530"}
+  - {file: "src/baldur/api/django/serializers/metric_sync.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/serializers/pydantic_integration.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/stress_views.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/throttle_adapter.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/tiering/middleware.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/scaling/tiering/circuit_breaker.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/audit.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/auto_tuning.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/canary.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/cascade.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/chaos.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/compliance.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/config_history.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/control.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/dlq.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/dna.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/emergency.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/error_budget.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/features.py", reason: "django subtree assumes django.urls; same accepted state as sibling url modules", ticket: "530"}
+  - {file: "src/baldur/api/django/urls/governance.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/grafana_webhook.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/health.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/l2_storage.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/meta_watchdog.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/postmortem.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/recovery.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/reports.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/runtime_config.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/schema.py", reason: "django subtree assumes django.urls; drf-spectacular import is already conditional", ticket: "530"}
+  - {file: "src/baldur/api/django/urls/stress.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/system_control.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/tiering.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/urls/xtest.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/views/bulkhead.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/views/xtest/base.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/views/xtest/circuit_breaker.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/views/xtest/dlq.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/views/xtest/error_budget.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/views/xtest/idempotency.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/views/xtest/integration.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/views/xtest/observability.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/views/xtest/rate_limit.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/views/xtest/replay.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/views/xtest/retry.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/views/xtest/scenarios/base.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/views/xtest/scenarios/regional.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/views/xtest/snapshot.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/api/django/views/xtest/throttle_simulation.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/audit/redis_batch_lua.py", reason: "513 D1: redis moved from core deps to [redis] extra — module itself is lazy-imported only via adapters/audit/redis_buffer.py method-local import, never on default OSS paths", ticket: "513"}
+  - {file: "src/baldur/bootstrap.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/bridges/tenacity/policy.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/celery_tasks/audit_flush_tasks.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/celery_tasks/chaos_tasks.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/celery_tasks/circuit_breaker_tasks.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/celery_tasks/dlq_tasks.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/celery_tasks/drift_detection_tasks.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/celery_tasks/forecaster_tasks.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/celery_tasks/metrics_tasks.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/context/celery_cell_propagation.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/context/celery_propagation.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/meta/recovery_adapter.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/metrics/endpoint_normalizer.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/metrics/recorders/daemon_worker.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/settings/system_control.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/tasks/canary_watchdog.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/tasks/chaos_scheduler.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/tasks/cleanup_tasks.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/tasks/compliance_tasks.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/tasks/config_apply.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/tasks/intelligence_tasks.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/tasks/traffic_aware_replay.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+
+no_print:
+  - {file: src/baldur/adapters/alert/stdout_adapter.py, symbol: StdoutAlertAdapter.resolve, count: 2, reason: pre-existing print() - pending migration to structlog, ticket: '506'}
+  - {file: src/baldur/adapters/alert/stdout_adapter.py, symbol: StdoutAlertAdapter.send, reason: pre-existing print() - pending migration to structlog, ticket: '506'}
+  - {file: src/baldur/adapters/audit/stdout_adapter.py, symbol: StdoutAuditLogAdapter.log, reason: pre-existing print() - pending migration to structlog, ticket: '506'}
+  - {file: src/baldur/audit/continuous_audit.py, symbol: ContinuousAuditRecorder._record_with_integrity, reason: pre-existing print() - pending migration to structlog, ticket: '506'}
+  - {file: src/baldur/audit/export.py, symbol: main, count: 6, reason: pre-existing print() - pending migration to structlog, ticket: '506'}
+  - {file: src/baldur/audit/resilience/syslog_fallback.py, symbol: SyslogFallback._write_to_syslog, reason: pre-existing print() - pending migration to structlog, ticket: '506'}
+  - {file: src/baldur/audit/resilient_recorder.py, symbol: ResilientContinuousAuditRecorder._write_to_stderr, reason: pre-existing print() - pending migration to structlog, ticket: '506'}
+  - {file: src/baldur/audit/self_audit.py, symbol: SelfAuditLogger.log, reason: pre-existing print() - pending migration to structlog, ticket: '506'}
+  - {file: src/baldur/audit/signed_manifest.py, symbol: main, count: 4, reason: pre-existing print() - pending migration to structlog, ticket: '506'}
+  - {file: src/baldur/audit/verify_audit_integrity.py, symbol: main, count: 4, reason: pre-existing print() - pending migration to structlog, ticket: '506'}
+
+env_prefix_naming:
+  # BaldurSettings (root.py) is the root configuration object — uses empty
+  # env_prefix so root-level env vars like BALDUR_CLUSTER_ID can be read
+  # without a per-domain prefix. Permanent waiver.
+  - {file: "src/baldur/settings/root.py", reason: "508 D9 permanent waiver: BaldurSettings is the root settings, empty env_prefix is intentional", ticket: "508"}
+  # OpenTelemetrySettings follows the OpenTelemetry SDK env var standard
+  # (OTEL_* via validation_alias on each field), not BALDUR_*. Empty
+  # env_prefix is intentional. Permanent waiver.
+  - {file: "src/baldur/settings/otel.py", reason: "508 D9 permanent waiver: OpenTelemetry SDK standard env vars (OTEL_*) via validation_alias, not BALDUR_*", ticket: "508"}
+  # 508 S4 (D9 batch 2) closed — all 28 module/prefix divergences renamed +
+  # kafka.py -> kafka_audit.py file rename completed. Baseline empty for D9.
+
+package_status_marker:
+  # 508 S6 batch 3 closed — all sub-packages now carry Status: markers.
+# Generated: 35 module-level sites, 358 total imports (post-518-a)
+
+pro_import_boundary:
+  # 519 PR 3 (d) types track: 23 module-level rows flipped to OSS canonical
+  # (baldur.models.*, baldur.interfaces.*) or PEP 562 lazy (BulkheadPolicy /
+  # ThrottlePolicy via resilience/policies/__init__.py __getattr__). The 4
+  # hedging rows below stay PRO-side per PR 3 deviation — see Implementation
+  # Deviations from Doc (519 OSS/PRO callsite migration post-GA)
+  # ("Hedging C-d1 rule 1 misapplied").
+  - {file: src/baldur/resilience/policies/hedging.py, symbol: <module>, count: 5, reason: '519 PR 3 deviation + 526 P6 sub-PR 3: 5 module-level baldur_pro hedging imports (1 TYPE_CHECKING-only HedgingResult narrowing used in cast() + 4 PR-3 runtime-type deviations where C-d1 rule 1 ''TYPE_CHECKING-only marker'' does not match the actual call sites). See Implementation Deviations from Doc (519)', ticket: 519-d-deviation, category: types, target_remove_by: post-v1.1}
+  # 519 PR 3 removed:
+  #   - adapters/memory/layered_repository/base.py:29 — Bulkhead → baldur.interfaces.bulkhead Protocol
+  #   - api/django/throttle_adapter.py:24 — ThrottleConfig → baldur.settings.throttle.ThrottleSettings alias
+  #   - core/__init__.py:100 — pool_monitor 6 types → baldur.interfaces.pool_monitor (5 existing + ConnectionPoolMonitor new Protocol)
+  #   - core/pool_watchdog.py:23 — same set of pool_monitor types
+  #   - interfaces/statistics.py:75 — CleanupStats → baldur.models.dlq (D-d2 relocate)
+  #   - meta/shutdown.py:18 — SelfHealerWatchdog → baldur.interfaces.meta_watchdog.SelfhealerWatchdog
+  #   - resilience/policies/__init__.py:84 — BulkheadPolicy → PEP 562 __getattr__ (C-d1 rule 4)
+  #   - resilience/policies/__init__.py:95 — ThrottlePolicy TYPE_CHECKING removed (PEP 562 lazy already present)
+  #   - services/circuit_breaker/adaptive_threshold.py:35 — EmergencyModeManager TYPE_CHECKING → baldur.interfaces.emergency.EmergencyManager
+  #   - services/circuit_breaker/panic_threshold.py:40 — same
+  #   - services/config_shadow/evaluators/live_canary.py:21 — PassCriteria → baldur.models.canary (D-d2 relocate)
+  #   - services/correlation_engine/emergency_decision.py:44 — EmergencyLevel → baldur.models.emergency (D-d1 already OSS)
+  #   - services/regional_emergency/__init__.py:69 — ScopedEmergencyState → baldur.models.emergency (D-d2 relocate)
+  #   - services/regional_emergency/cascade_detector.py:39 — EmergencyScope → baldur.models.emergency (D-d2 relocate)
+  #   - services/regional_emergency/health_penalty.py:37 — EmergencyScope → same
+  #   - services/regional_emergency/tracker.py:40 — EmergencyScope → same
+  #   - services/regional_emergency/tracker.py:44 — ScopedEmergencyState → same
+  #   - services/runbook/approval_gate.py:49 — UnifiedNotificationManager → baldur.interfaces.notification (new Protocol)
+  #   - services/runbook/execution_models.py:23 — BlockReason/GovernanceCheckResult → baldur.models.governance (D-d1 already OSS)
+  #   - services/runbook/executor.py:63 — DistributedRecoveryLock → baldur.interfaces.runbook (new Protocol)
+  #   - services/runbook/executor.py:69 — IdempotencyRecord → baldur.interfaces.runbook (new Protocol)
+  #   - services/settings_recommendation/service.py:47 — CanaryRolloutService → baldur.interfaces.canary (existing Protocol)
+  #   - tasks/canary_watchdog.py:45 — CanaryRollout → baldur.interfaces.canary (new Protocol)
+
+# G15b global count snapshot (module-level + in-function combined)
+# 519 G1+G2: -2 statements (StepResult relocated to baldur.models.saga, primitives.py + runbook_registry.py flipped)
+# 519 PR 2 (c) track: 5 module-level + ~120 in-function statements migrated to ProviderRegistry.<slot>.safe_get() — count dropped 338 -> 213
+# 519 PR 3 (d) types track: 23 module-level + ~30 in-function statements migrated to baldur.models.* / baldur.interfaces.* / PEP 562 lazy — count dropped 213 -> 161. 4 hedging rows retained per deviation (see Implementation Deviations from Doc).
+pro_import_boundary_count: 161
+
+# G17c — OSS->Dormant import-boundary global-count snapshot (528 D10-v2).
+# Target = 0. Current sites (in-function lazy imports of baldur_dormant
+# adapters): server.py:_reset_kafka, services/event_bus/redis_bus.py:
+# _publish_to_kafka_fallback, services/rate_limit/distributed_channel.py:
+# _ensure_kafka_bus, scripts/demo_zero_data_loss.py. These will retire as
+# OSS callers migrate fully to ProviderRegistry.kafka_eventbus /
+# audit_kafka_adapter resolution.
+# 599 D10 batch C — +2: beat_schedule private-lane imports for the relocated
+# compliance check + learning insight task modules (saga/finops lane pattern).
+dormant_import_boundary_count: 7
+
+# G19 — tests/ may not module-level-import baldur_pro / baldur_dormant
+# without a `pytest.importorskip("baldur_pro")` (or "baldur_dormant") call
+# or a `pytestmark = pytest.mark.requires_pro` declaration at module top.
+# Per impl doc 528 Stage 5, expected violation count is zero after Stage 4
+# Step 1's bulk-edit (`scripts/add_requires_pro_marker.py`) lands. Survivors
+# would carry `ticket: 528-followup` per the rule registry note.
+oss_test_pro_marker: []
+
+# G20 - no tests/ file may import a baldur_pro / baldur_dormant PRIVATE
+# symbol (`_foo`, excluding `__all__`/dunders), a private-module path
+# (`...adaptive._helpers...`), or a wildcard (`import *`) from a gated
+# top-level (impl doc 533 D5/D6). ENFORCED-EMPTY: a baseline entry would
+# whitelist a private import in a file that *stays* under tests/ - but
+# tests/ ships wholesale at 7.5G-1, so the entry would publish the exact
+# PRO-internal leak 533 exists to prevent. A genuinely un-splittable
+# private-importer is MOVED to tests/pro/ (or rewritten to the public API),
+# never baselined (533 D7). The G20 test meta-asserts this key stays empty.
+oss_test_pro_private_import: []
+
+# G21 - no tests/ TEST file may classify as pure_pro / support_only per
+# the import-graph classifier (scripts/classify_pro_importing_tests.py, the
+# single source of truth shared with this gate - impl doc 533 D12). Such a
+# file's SUT is PRO and it ships at the next mirror build (G2 recurs).
+# ENFORCED-EMPTY for the same reason as G20: a baseline entry would whitelist
+# the leak it documents. A new pure_pro/support_only test is MOVED to
+# tests/pro/, never baselined. The G21 test meta-asserts this key stays empty.
+oss_test_pro_classification: []
+
+# G22 - `_current_domain.set(...)` may only be called from the canonical owner
+# `src/baldur/decorators/domain_tag.py` (impl doc 545 D5 chokepoint 5). Every
+# other caller MUST go through `set_domain_context()` so the OTel-baggage /
+# Celery legacy-header restore path inherits the validation + fallback that
+# 545 D1 added. A bypass entry here would mean a known regression that
+# reintroduces the unbounded-domain bug 545 closes — fix the call site
+# instead.
+domain_set_direct_call: []
+
+# G30 - every operator-tunable BALDUR_* var on a gated surface
+# (docs/reference/env-vars.md + docs/concepts/**/*.md) MUST resolve to a real
+# (env_prefix, field) via longest-prefix match, and every concept-guide
+# Configuration "Default" cell MUST equal the field default (impl doc 568).
+# ENFORCED-EMPTY: a phantom var is a silent operator no-op — it is FIXED
+# (renamed to the real BALDUR_<PREFIX>_<FIELD> or removed), never baselined.
+env_vars_allowlist_resolves: []
+
+# G31 - a strong-guarantee docstring keyword (impl doc 575 D1: exactly-once /
+# at-least-once / at-most-once / zero[- ]data[- ]loss / linearizable / wait-free,
+# matched case-insensitively) MUST carry an adjacent `# verified-by: <test_ref>`
+# comment whose test resolves to a real `def` under tests/ (D2/D2-exists).
+# NEAR-EMPTY (D6): each pre-existing claim is triaged into link / soften /
+# baseline-genuine-test-debt; outcome (3) — claim is true but a rigorous proving
+# test is real work — is the ONLY path to an entry. "Haven't looked yet" is not.
+assurance_claim: []
+
+# G32 - a long-form `*_enabled` / `enable_*` settings flag whose every consumer
+# read is an echo-into-a-report-dict, or which has no read at all, is DEAD: an
+# advertised guarantee no production path gates on (impl doc 575 D4,
+# claim-wiring bug class). The 13 flags G32 originally surfaced beyond #574's
+# already-removed set were burned down by impl doc 580 (12 removed outright; the
+# echo-only scaling.rate_limit_enabled removed + its SOC2 attestation truthed).
+# ENFORCED-EMPTY: a NEW dead flag is fixed by removing it (or wiring a real
+# behavioral consumer) at source, never baselined.
+flag_consumer_reachability: []
+
+# G33 (impl doc 576) — the direct-read BALDUR_* registry constant
+# (KNOWN_DIRECT_READ_ENV_VARS) must equal the os.environ literal-read set
+# discovered across src/baldur. ENFORCED-EMPTY: a drift is fixed by pasting the
+# printed add/remove diff into the constant, never baselined.
+direct_read_env_registry: []
+
+# G34 (impl doc 578) — no `<module>.logger = structlog.get_logger()` rebind may
+# remain anywhere under tests/. The structlog `capture_logs` xdist flake is now
+# contained suite-wide by the root conftest `_restore_canonical_structlog_config`
+# autouse fixture (578 D2); a re-scattered per-file rebind guard is dead
+# duplication. ENFORCED-EMPTY: a module-logger reassignment has no legitimate use
+# outside a flake guard — delete it, never baseline it.
+structlog_capture_guard: []
+
+# G36 (impl doc 589) — a FEATURE_CATALOG.md entry with Product Status `Parked`
+# AND Code Role != `internal-support` must have NO functional importer that lives
+# under a SOLD (OSS/PRO product-feature) entry's Module subtree. ENFORCED-EMPTY:
+# a surviving SOLD importer is fixed by reclassifying the entry to
+# `internal-support` (it IS a live shared module) or removing the coupling, never
+# baselined. `internal-support` is the escape hatch (the triage assigns it to
+# exactly the entries a sold feature imports).
+no_false_dormant: []
+
+# G37 (impl doc 589) — FEATURE_CATALOG.md must not drift from code/settings: no
+# obsolete legacy env-var prefix, every cited BALDUR_* resolves to a real settings
+# field/direct-read/wildcard prefix, every **Module**: path exists, every product
+# entry exposes all three axes. ENFORCED-EMPTY: a drift is fixed (rename the var,
+# correct the path, complete the axes), never baselined.
+catalog_tier_drift: []

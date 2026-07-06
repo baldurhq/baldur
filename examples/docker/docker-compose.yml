@@ -1,0 +1,186 @@
+# Grafana observability sample stack for baldur.
+#
+# Usage: docker compose -f examples/docker/docker-compose.yml up -d
+#
+# Self-contained: the demo-app service feeds the Baldur Overview (OSS) dashboard
+# with real data (no external app needed). After the stack is up, drive traffic
+# with `bash examples/docker/generate-demo-traffic.sh`, then open Grafana at
+# http://localhost:3000 (Baldur folder).
+#
+# To point your OWN app at this stack instead of the demo, connect with:
+#   DATABASE_URL=postgres://baldur_user:baldur_pass@localhost:5432/baldur_db
+#   BALDUR_REDIS_URL=redis://localhost:6379/0
+#   OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+#   OTEL_TRACES_SAMPLER=always_on
+
+services:
+  # Demo app — self-contained Django service that feeds the Baldur Overview
+  # (OSS) dashboard. /demo/ (happy path -> CB CLOSED + latency) and /flaky/
+  # (intermittent fault, retry=True -> retries + CB trip + error traces).
+  # Exposes the Prometheus exposition at /api/baldur/prometheus/ (scraped by
+  # the collector) and exports OTEL traces to the collector -> Tempo.
+  # Host port 8080 keeps the Grafana stack's ports disjoint from the testbed
+  # stack (examples/docker-compose.yml uses 8000).
+  demo-app:
+    build:
+      context: ./demo_app
+      dockerfile: Dockerfile
+    environment:
+      DJANGO_SETTINGS_MODULE: settings
+      PYTHONPATH: /repo
+      OTEL_ENABLED: "true"
+      OTEL_SERVICE_NAME: baldur-demo
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_TRACES_SAMPLER: always_on
+      DEMO_FLAKY_FAILURE_RATE: "0.6"
+      # Opt-in demo metric-simulation endpoints (/pro/, /shutdown-sim/), OFF by
+      # default so the shipped OSS demo stays tier-honest. Enable for dashboard
+      # verification with: DEMO_SIMULATE_METRICS=1 docker compose ... up -d
+      DEMO_SIMULATE_METRICS: "${DEMO_SIMULATE_METRICS:-0}"
+    volumes:
+      - ../../:/repo
+    ports:
+      - "8080:8000"
+    depends_on:
+      otel-collector:
+        condition: service_started
+
+  # Redis — Cache / Celery Broker
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # PostgreSQL — Database
+  db:
+    image: postgres:15-alpine
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_DB=baldur_db
+      - POSTGRES_USER=baldur_user
+      - POSTGRES_PASSWORD=baldur_pass
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U baldur_user -d baldur_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # OpenTelemetry Collector — telemetry collection
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.144.0
+    user: "0"  # Required: the file_storage buffer/wal volumes are root-owned; the non-root collector user cannot mkdir the compaction dir without this (same pattern as loki below)
+    command: ["--config=/etc/otelcol/otel-collector.yml"]
+    volumes:
+      - ../monitoring/otel-collector.yml:/etc/otelcol/otel-collector.yml:ro
+      - otel_buffer:/var/lib/otelcol/buffer
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "8888:8888"   # Collector metrics
+      - "13133:13133" # Health check
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          # 256M sat right at the memory_limiter ceiling, so the tail-sampling
+          # buffer (100k traces) tipped it over under sustained traffic and the
+          # limiter silently refused both spans AND metric scrapes — dashboards
+          # went stale with no visible signal. 512M gives real headroom.
+          memory: 512M
+        reservations:
+          cpus: "0.1"
+          memory: 256M
+    depends_on:
+      tempo:
+        condition: service_healthy
+      mimir:
+        condition: service_healthy
+      loki:
+        condition: service_healthy
+
+  # Grafana Tempo — distributed tracing storage
+  tempo:
+    image: grafana/tempo:2.3.1
+    command: ["-config.file=/etc/tempo/tempo.yml"]
+    volumes:
+      - ./config/tempo.yml:/etc/tempo/tempo.yml:ro
+      - tempo_data:/var/tempo
+    ports:
+      - "3200:3200"
+      - "9095:9095"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3200/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # Grafana Mimir — metrics long-term storage
+  mimir:
+    image: grafana/mimir:2.11.0
+    command: ["-config.file=/etc/mimir/mimir.yml"]
+    volumes:
+      - ./config/mimir.yml:/etc/mimir/mimir.yml:ro
+      - mimir_data:/var/mimir
+    ports:
+      - "9009:9009"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9009/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # Grafana Loki — log storage
+  loki:
+    image: grafana/loki:2.9.4
+    user: "0"  # Required: Loki 2.9.x has volume permission issues without root in Docker
+    command: ["-config.file=/etc/loki/loki.yml"]
+    volumes:
+      - ./config/loki.yml:/etc/loki/loki.yml:ro
+      - loki_data:/var/loki
+    ports:
+      - "3100:3100"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3100/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # Grafana — dashboards (pre-provisioned)
+  grafana:
+    image: grafana/grafana:10.2.3
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+    volumes:
+      - ./config/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+      - ./config/grafana-dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml:ro
+      - ../monitoring/baldur-overview.json:/var/lib/grafana/dashboards/baldur-overview.json:ro
+      - ../monitoring/baldur-operations.json:/var/lib/grafana/dashboards/baldur-operations.json:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - mimir
+      - tempo
+      - loki
+
+volumes:
+  postgres_data:
+  otel_buffer:
+  tempo_data:
+  mimir_data:
+  loki_data:
+  grafana_data:

@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Usage questions / how-to
+    url: mailto:support@baldur.sh
+    about: Configuration and how-to help — please email rather than open an issue.
+  - name: Security vulnerability
+    url: mailto:support@baldur.sh
+    about: Do NOT open a public issue. Email with [SECURITY] in the subject (see SECURITY.md).
+  - name: PRO / pricing / licensing
+    url: mailto:support@baldur.sh
+    about: Commercial inquiries.
