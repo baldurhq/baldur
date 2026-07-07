@@ -10,6 +10,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-07-07
+
 ### Added
 
 - Async resilience parity — `aprotect()` / `@aprotected` now apply the circuit breaker and retry, which the async path previously did not support at all (an explicit `circuit_breaker=True` or `retry=` raised `NotImplementedError`). Composition matches the sync facade — circuit breaker → timeout → retry → fallback — so the timeout bounds the whole retry sequence and one exhausted retry sequence counts as a single circuit-breaker failure; an exhausted async retry now also routes to the Dead Letter Queue. Sync and async `protect(name=…)` share one breaker per name, so failures accumulate across both call styles.

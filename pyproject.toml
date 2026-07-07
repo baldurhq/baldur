@@ -202,10 +202,10 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/gotoUSA/baldur-python"
-Documentation = "https://github.com/gotoUSA/baldur-python#readme"
-Repository = "https://github.com/gotoUSA/baldur-python"
-Issues = "https://github.com/gotoUSA/baldur-python/issues"
+Homepage = "https://github.com/baldurhq/baldur"
+Documentation = "https://github.com/baldurhq/baldur#readme"
+Repository = "https://github.com/baldurhq/baldur"
+Issues = "https://github.com/baldurhq/baldur/issues"
 
 [tool.hatch.version]
 path = "src/baldur/__init__.py"
