@@ -192,6 +192,10 @@ dev = [
     "mypy>=1.0",
     "ruff>=0.1",
     "pre-commit>=4.0",
+    # Security scanning — wired in .github/workflows/security.yml
+    "bandit>=1.7",
+    "pip-audit>=2.7",
+    "pip-licenses>=5.0",
     # Type stubs (P5 / doc 526) — surface real signature mismatches that
     # ignore_missing_imports was hiding.
     "django-stubs[compatible-mypy]>=6.0",

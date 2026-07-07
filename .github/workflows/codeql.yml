@@ -1,6 +1,6 @@
 name: CodeQL
 
-# Deep SAST (security gate §4.3 #5) — complements bandit (security.yml). CodeQL is
+# Deep SAST — complements the bandit / pip-audit scans in security.yml. CodeQL is
 # free for PUBLIC repos only, so like ci-oss-mirror.yml this ships as
 # workflow_dispatch in the private monorepo (Route B: it must NEVER auto-run on the
 # private repo's billed Actions / a repo without Advanced Security).
