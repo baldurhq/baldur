@@ -1,0 +1,29 @@
+# Commit-time gates. The ruff version is pinned to match the CI lint job so
+# local == CI; install once per clone with `pre-commit install`
+# (default_install_hook_types wires both the pre-commit and commit-msg stages).
+#
+# The leak guard scans staged content and the commit message before a commit is
+# created -- the earliest point a leak can be stopped. The CI job
+# .github/workflows/leak-scan.yml re-runs the identical scan on every push/PR,
+# so `--no-verify` cannot bypass it.
+default_install_hook_types: [pre-commit, commit-msg]
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.10
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+  - repo: local
+    hooks:
+      - id: leak-guard-content
+        name: leak guard (staged content)
+        entry: python scripts/check_leak_guard.py
+        language: system
+        types: [text]
+        stages: [pre-commit]
+      - id: leak-guard-commit-msg
+        name: leak guard (commit message)
+        entry: python scripts/check_leak_guard.py --commit-msg
+        language: system
+        stages: [commit-msg]
