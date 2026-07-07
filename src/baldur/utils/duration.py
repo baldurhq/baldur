@@ -70,7 +70,12 @@ def calculate_time_diff_seconds(
     start_dt = parse_iso_timestamp(start_ts)
     end_dt = parse_iso_timestamp(end_ts)
     if start_dt and end_dt:
-        diff = (end_dt - start_dt).total_seconds()
+        try:
+            diff = (end_dt - start_dt).total_seconds()
+        except TypeError:
+            # One timestamp is offset-naive and the other offset-aware; the two
+            # cannot be compared, so the difference is undefined.
+            return None
         return diff if diff >= 0 else None
     return None
 
@@ -87,7 +92,9 @@ def find_first_event_by_type(timeline: list, event_keywords: list[str]) -> dict 
         일치하는 첫 번째 이벤트, 없으면 None
     """
     for event in timeline:
-        event_type = event.get("event_type", "").lower()
+        if not isinstance(event, dict):
+            continue
+        event_type = str(event.get("event_type", "")).lower()
         for keyword in event_keywords:
             if keyword in event_type:
                 return event
@@ -106,7 +113,9 @@ def find_last_event_by_type(timeline: list, event_keywords: list[str]) -> dict |
         일치하는 마지막 이벤트, 없으면 None
     """
     for event in reversed(timeline):
-        event_type = event.get("event_type", "").lower()
+        if not isinstance(event, dict):
+            continue
+        event_type = str(event.get("event_type", "")).lower()
         for keyword in event_keywords:
             if keyword in event_type:
                 return event
@@ -146,7 +155,7 @@ def calculate_incident_duration(
     started_at = open_event.get("timestamp") if open_event else None
 
     # OPEN 이벤트가 없으면 첫 번째 이벤트 사용
-    if not started_at and timeline:
+    if not started_at and timeline and isinstance(timeline[0], dict):
         started_at = timeline[0].get("timestamp")
 
     # 첫 번째 HALF_OPEN 이벤트 찾기
