@@ -16,6 +16,11 @@ venv/
 env/
 .Python
 
+# Local secrets — copy .env.template to .env and never commit the real values
+.env
+.env.*
+!.env.template
+
 # Test & tooling caches
 .pytest_cache/
 .mypy_cache/
