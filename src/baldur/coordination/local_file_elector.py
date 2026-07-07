@@ -74,7 +74,10 @@ def _resolve_namespace() -> str:
         pass
 
     seed = f"{sys.argv[0] if sys.argv else ''}|{os.getcwd()}"
-    return hashlib.sha1(seed.encode("utf-8", "replace")).hexdigest()[:12]
+    # Non-security: short deterministic fingerprint for a per-service lock filename.
+    return hashlib.sha1(
+        seed.encode("utf-8", "replace"), usedforsecurity=False
+    ).hexdigest()[:12]
 
 
 def _default_lock_path(resource_name: str) -> Path:
