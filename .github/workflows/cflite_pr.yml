@@ -1,0 +1,31 @@
+name: ClusterFuzzLite PR fuzzing
+
+# Short fuzzing run scoped to code changed in the PR (mode: code-change).
+# Fails the PR if a harness discovers a crashing input.
+on:
+  pull_request:
+    branches: [main]
+
+permissions: read-all
+
+jobs:
+  PR:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: cflite-pr-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - name: Build Fuzzers
+        id: build
+        uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1  # v1
+        with:
+          language: python
+          sanitizer: address
+      - name: Run Fuzzers
+        id: run
+        uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1  # v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fuzz-seconds: 300
+          mode: code-change
+          sanitizer: address
