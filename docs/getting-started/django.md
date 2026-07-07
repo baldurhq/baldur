@@ -72,7 +72,7 @@ pytest examples/quickstart_django/test_smoke.py
 ```
 
 Browse the full runnable app:
-[`examples/quickstart_django/`](https://github.com/gotoUSA/baldur-python/tree/main/examples/quickstart_django).
+[`examples/quickstart_django/`](https://github.com/baldurhq/baldur/tree/main/examples/quickstart_django).
 
 ## Going to production
 

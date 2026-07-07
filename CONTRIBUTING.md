@@ -70,7 +70,7 @@ You contribute under your **own** identity — name and email of your choosing
 ## Development setup
 
 ```bash
-git clone https://github.com/gotoUSA/baldur-python.git
+git clone https://github.com/baldurhq/baldur.git
 cd baldur-python
 python -m venv .venv && . .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -e ".[dev]"

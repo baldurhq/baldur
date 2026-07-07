@@ -63,7 +63,7 @@ pytest examples/quickstart_fastapi/test_smoke.py
 ```
 
 Browse the full runnable app:
-[`examples/quickstart_fastapi/`](https://github.com/gotoUSA/baldur-python/tree/main/examples/quickstart_fastapi).
+[`examples/quickstart_fastapi/`](https://github.com/baldurhq/baldur/tree/main/examples/quickstart_fastapi).
 
 ## Going to production
 

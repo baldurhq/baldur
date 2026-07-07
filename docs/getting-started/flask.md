@@ -63,7 +63,7 @@ pytest examples/quickstart_flask/test_smoke.py
 ```
 
 Browse the full runnable app:
-[`examples/quickstart_flask/`](https://github.com/gotoUSA/baldur-python/tree/main/examples/quickstart_flask).
+[`examples/quickstart_flask/`](https://github.com/baldurhq/baldur/tree/main/examples/quickstart_flask).
 
 ## Going to production
 

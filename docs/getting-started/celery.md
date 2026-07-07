@@ -91,7 +91,7 @@ celery -A myproject worker -l info
 
 Each job lane is opt-out through an `include_*` flag, and multi-service
 deployments can isolate queues with `queue_prefix=`. The
-[multi-worker coherence runbook](https://github.com/gotoUSA/baldur-python/blob/main/docs/runbooks/multi-worker-coherence.md)
+[multi-worker coherence runbook](https://github.com/baldurhq/baldur/blob/main/docs/runbooks/multi-worker-coherence.md)
 walks through the single-host-lock vs. distributed-beat decision.
 
 ## See Baldur's events

@@ -1,8 +1,8 @@
 site_name: Baldur
 site_description: Self-healing reliability layer for Python applications.
 site_url: https://baldur.sh/
-repo_url: https://github.com/gotoUSA/baldur-python
-repo_name: gotoUSA/baldur-python
+repo_url: https://github.com/baldurhq/baldur
+repo_name: baldurhq/baldur
 
 # Footer notice on every page. Links to the legal pages so Privacy / Terms are
 # reachable site-wide (payment-processor production review requires them to be

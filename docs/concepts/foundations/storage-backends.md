@@ -97,4 +97,4 @@ not move your application's data here.
 
 - [Getting Started](../../getting-started/index.md) — every quickstart ends with the Redis production step
 - [Environment Variables](../../reference/env-vars.md) — the `Storage` section lists `BALDUR_REDIS_URL`, `BALDUR_SQL_DSN`, and the per-feature Redis overrides
-- [Data consistency boundaries runbook](https://github.com/gotoUSA/baldur-python/blob/main/docs/runbooks/data-consistency-boundaries.md) — which data belongs in Baldur vs. an ACID database, and how each feature behaves when a backend is unavailable
+- [Data consistency boundaries runbook](https://github.com/baldurhq/baldur/blob/main/docs/runbooks/data-consistency-boundaries.md) — which data belongs in Baldur vs. an ACID database, and how each feature behaves when a backend is unavailable

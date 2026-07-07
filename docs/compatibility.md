@@ -72,7 +72,7 @@ minimums and are expected to work, but are not run in CI.
 
 Baldur follows a latest-minor support model: the current minor release line
 receives patches, and the previous minor reaches end of life the day a new minor
-ships. See [`SECURITY.md`](https://github.com/gotoUSA/baldur-python/blob/main/SECURITY.md)
+ships. See [`SECURITY.md`](https://github.com/baldurhq/baldur/blob/main/SECURITY.md)
 for the full policy.
 
 ## Not in this matrix

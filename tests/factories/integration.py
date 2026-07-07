@@ -6,7 +6,7 @@ Integration Test용 실제 서비스 연결 Factory.
     docker-compose up -d 로 서비스가 실행 중이어야 합니다.
 
 ⚠️  전역 tests 폴더는 통합 테스트 전용입니다.
-    baldur Unit Test는 별도 repo에서 진행: https://github.com/gotoUSA/baldur-python
+    baldur Unit Test는 별도 repo에서 진행: https://github.com/baldurhq/baldur
 
 Usage:
     from tests.factories.integration import (

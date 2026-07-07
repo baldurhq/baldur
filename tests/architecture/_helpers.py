@@ -73,7 +73,7 @@ DEFAULT_SRC_ROOTS: tuple[Path, ...] = (
     PROJECT_ROOT / "src" / "baldur_pro",
 )
 REFERENCE_DIR = PROJECT_ROOT / "docs" / "reference"
-RULE_REGISTRY_DOC = "https://github.com/gotoUSA/baldur-python/blob/main/ARCHITECTURE.md"
+RULE_REGISTRY_DOC = "https://github.com/baldurhq/baldur/blob/main/ARCHITECTURE.md"
 
 
 class _MkdocsSafeLoader(yaml.SafeLoader):
