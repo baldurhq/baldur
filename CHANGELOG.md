@@ -10,6 +10,10 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+### Security
+
+- The Pydantic-backed config serializers no longer echo a non-validation exception's message in their validation-error response; only pydantic validation failures surface their field-level detail, and any other error propagates as a 500 instead of leaking its message.
+
 ## [1.1.0] - 2026-07-07
 
 ### Added

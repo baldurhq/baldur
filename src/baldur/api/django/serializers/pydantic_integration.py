@@ -12,7 +12,7 @@ DRF Serializer 자동 생성 및 Pydantic 모델 통합.
 from collections.abc import Callable
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from rest_framework import serializers
 
 # =============================================================================
@@ -240,8 +240,9 @@ class PydanticSerializerMixin:
                 exclude_unset=True,
                 exclude=self._exclude_fields,
             )
-        except Exception as e:
-            # Pydantic ValidationError → DRF ValidationError
+        except ValidationError as e:
+            # Surface only the pydantic validation message; any other exception
+            # propagates (500) instead of leaking its detail to the client.
             raise serializers.ValidationError(str(e)) from e
 
     def validate_with_pydantic_partial(
@@ -293,7 +294,7 @@ class PydanticSerializerMixin:
 
             # 실제로 변경된 필드만 반환
             return {k: v for k, v in validated.model_dump().items() if k in data}
-        except Exception as e:
+        except ValidationError as e:
             raise serializers.ValidationError(str(e)) from e
 
 
@@ -350,7 +351,7 @@ def create_pydantic_serializer(
                 return validated_model.model_dump(
                     exclude_unset=True, exclude=self._exclude_fields
                 )
-            except Exception as e:
+            except ValidationError as e:
                 raise serializers.ValidationError(str(e)) from e
 
         return data
