@@ -18,13 +18,18 @@ permissions:
 
 jobs:
   test:
+    name: test (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
           cache: "pip"
       # Mirrors the monorepo ci.yml unit-test lane's proven install: [dev] pulls
       # the pytest plugins the root pytest.ini addopts require (timeout, xdist,

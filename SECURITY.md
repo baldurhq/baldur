@@ -99,9 +99,9 @@ Baldur implements the following security measures:
 
 This project uses automated dependency scanning:
 
-- **pip-audit**: Weekly security audits in CI
-- **bandit**: Static analysis of source code in CI
-- **license-check**: Viral copyleft (GPL / AGPL / LGPL) gate in CI
+- **pip-audit**: Weekly dependency vulnerability audits in CI (`security.yml`)
+- **bandit**: Static security analysis of the shipped library in CI (`security.yml`), complementing CodeQL
+- **license-check**: Strong-copyleft (GPL / AGPL) dependency gate in CI (`security.yml`); LGPL / MPL libraries are permitted
 - **Dependabot**: Automated dependency update PRs
 
 ## Secure Deployment

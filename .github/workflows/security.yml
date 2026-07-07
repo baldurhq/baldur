@@ -1,0 +1,74 @@
+name: Security scanning
+
+# Complements CodeQL (deep SAST, codeql.yml) and Dependabot:
+#   - bandit        static security analysis of the shipped library (push / PR)
+#   - license-check strong-copyleft (GPL / AGPL) dependency gate (push / PR)
+#   - pip-audit     dependency CVE audit on a weekly schedule (+ push to main)
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "37 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bandit:
+    name: bandit (SAST)
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        with:
+          python-version: "3.12"
+      - run: pip install bandit
+      # Gate on high-severity, high-confidence findings; CodeQL covers the
+      # deeper query set. Lower-severity bandit heuristics (e.g. B608 on
+      # parameterized SQL) are noisy on this codebase and are not gated here.
+      - name: Bandit high-severity scan (src)
+        run: bandit -r src/baldur --severity-level high --confidence-level high
+
+  license-check:
+    name: license (strong-copyleft gate)
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        with:
+          python-version: "3.12"
+      - name: Install package + license tooling
+        run: |
+          pip install ".[all]"
+          pip install pip-licenses
+      # LGPL / MPL dependencies (e.g. psycopg2, orjson) are permitted — using
+      # them as libraries does not impose relicensing. Only strong copyleft
+      # (GPL / AGPL), which would, fails the build.
+      - name: Fail on GPL / AGPL dependencies
+        run: |
+          pip-licenses --fail-on \
+            "GNU General Public License v2 (GPLv2);GNU General Public License v2 or later (GPLv2+);GNU General Public License v3 (GPLv3);GNU General Public License v3 or later (GPLv3+);GNU General Public License (GPL);GNU Affero General Public License v3;GNU Affero General Public License v3 or later (AGPLv3+)"
+
+  pip-audit:
+    name: pip-audit (dependency CVE audit)
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        with:
+          python-version: "3.12"
+      - name: Install package + audit tooling
+        run: |
+          pip install ".[all]"
+          pip install pip-audit
+      - name: Audit dependencies for known vulnerabilities
+        run: pip-audit
