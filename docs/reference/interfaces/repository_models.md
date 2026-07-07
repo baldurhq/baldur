@@ -1,7 +1,7 @@
 # baldur.interfaces — Repository Data Model
 
 The enums and data classes shared across the repository interfaces — the status
-and domain enums, plus the operation/state/incident/postmortem DTOs.
+and domain enums, plus the operation/state/incident DTOs.
 
 ## Enums
 
@@ -26,5 +26,3 @@ and domain enums, plus the operation/state/incident/postmortem DTOs.
 ::: baldur.interfaces.CircuitBreakerStateData
 
 ::: baldur.interfaces.SecurityIncidentData
-
-::: baldur.interfaces.PostmortemData

@@ -551,8 +551,8 @@ class FailedOperationRepository(ABC):
 
         Counts every status (no status scope): an entry created in the window
         that was later resolved/archived still consumed budget when it failed,
-        so the windowed inflow count must not be status-scoped. Powers the
-        Error Budget windowed inflow source.
+        so the windowed inflow count must not be status-scoped. Powers a
+        windowed inflow-rate source for downstream health analysis.
         """
         ...
 

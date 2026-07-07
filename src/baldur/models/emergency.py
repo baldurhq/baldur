@@ -2,7 +2,7 @@
 Emergency Domain Types.
 
 Shared emergency domain types used by both emergency_mode (single-instance
-lifecycle) and regional_emergency (multi-region namespace isolation).
+lifecycle) and regional_emergency (region-scoped namespace isolation).
 
 Keeping these in models/ breaks the dependency of regional_emergency on
 emergency_mode for basic type definitions.

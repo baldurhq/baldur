@@ -453,8 +453,8 @@ class IdempotencyKey:
         """
         Create an idempotency key for a recovery action.
 
-        Prevents duplicate execution of the same recovery action across regions
-        in a Multi-Region Active-Active environment.
+        Prevents duplicate execution of the same recovery action across
+        instances in an active-active deployment.
 
         Args:
             action_type: Action type ("cb_reset", "pod_restart", "dlq_retry", etc.)

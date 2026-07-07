@@ -13,6 +13,11 @@ service.
 ## Service access
 
 ::: baldur.ProviderRegistry
+    options:
+      filters:
+        - "!^_"
+        - "!(?i)postmortem"
+        - "!(?i)traffic"
 
 ::: baldur.get_circuit_breaker_service
 

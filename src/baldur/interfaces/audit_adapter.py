@@ -687,14 +687,14 @@ class AuditLogAdapter(ABC):
 
 
 class NoOpKafkaAuditAdapter(AuditLogAdapter):
-    """Kafka-shaped audit NoOp returned by ``audit_kafka_adapter`` slot.
+    """Broker-shaped audit NoOp returned by the broker-audit registry slot.
 
-    When ``baldur_dormant`` is not installed, the
-    ``ProviderRegistry.audit_kafka_adapter`` slot returns this adapter so
-    OSS callers can request the Kafka audit path unconditionally without
-    needing to check for the underlying broker. ``log()`` silently drops
-    the entry (logging at DEBUG so operational tracing remains possible);
-    ``query()`` returns an empty list — there is no backing topic.
+    When the private package is not installed, the broker-audit registry slot
+    returns this adapter so OSS callers can request the broker audit path
+    unconditionally without needing to check for the underlying broker.
+    ``log()`` silently drops the entry (logging at DEBUG so operational tracing
+    remains possible); ``query()`` returns an empty list — there is no backing
+    topic.
     """
 
     def log(self, entry: AuditEntry) -> None:
@@ -723,15 +723,15 @@ class NoOpKafkaAuditAdapter(AuditLogAdapter):
 
 
 class NoOpWormAdapter(AuditLogAdapter):
-    """WORM-shaped audit NoOp returned by ``audit_worm_adapter`` slot.
+    """Write-once-audit NoOp returned by the immutable-audit registry slot.
 
-    The real WORM adapters (S3 Object Lock, Loki, sidecar) live in the
-    Dormant package. When the Dormant package is absent,
-    this NoOp answers the registry slot so callers don't need to guard
-    against missing providers. ``log()`` drops entries silently; the
-    compliance/non-repudiation property the real WORM adapters provide
-    is *not* met — operators relying on it must install
-    ``baldur-pro[dormant,aws]`` explicitly.
+    The real immutable-audit adapters (object-store retention lock, log sink,
+    sidecar) live in the private package. When that package is absent, this
+    NoOp answers the registry slot so callers don't need to guard against
+    missing providers. ``log()`` drops entries silently; the compliance /
+    non-repudiation property the real adapters provide is *not* met —
+    operators relying on it must install the private write-once extra
+    explicitly.
     """
 
     def log(self, entry: AuditEntry) -> None:
@@ -756,9 +756,9 @@ class NoOpWormAdapter(AuditLogAdapter):
         return []
 
     def verify(self) -> bool:
-        """Verify the WORM store integrity (NoOp: trivially True).
+        """Verify the write-once store integrity (NoOp: trivially True).
 
-        Real implementations check Object Lock retention, hash-chain
+        Real implementations check retention-lock state, hash-chain
         continuity, etc. The NoOp returns True because there is nothing
         stored to violate.
         """

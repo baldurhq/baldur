@@ -347,17 +347,6 @@ enable call. Disabling requires a reason and records who/why/when; re-enabling c
 Note that while disabled, even manual circuit-breaker actions are held back unless you
 explicitly override them.
 
-### Scheduled & leader tasks
-
-**A scheduled or leader-elected task never runs. `(PRO)`**
-*Cause:* leader election is **disabled by default**, which means *never-leader*: a gate that
-only the leader should pass becomes a silent no-op when no leader is ever elected. The Redis
-leader elector also ships in the PRO package.
-*Fix:* if you need a single-runner task across a fleet, run PRO and configure leader election
-(`BALDUR_LEADER_ELECTION_REDIS_URL`, a PRO override). For a single-process deployment you
-don't need leader election at all — the task runs unconditionally. Don't rely on the
-leader gate to partition work until election is actually enabled.
-
 ### PRO operational controls
 
 **Emergency mode won't stand down / won't recover. `(PRO)`**

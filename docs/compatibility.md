@@ -80,5 +80,5 @@ for the full policy.
 - **PostgreSQL** — the `baldur-framework[postgres]` extra exists for the SQL
   adapter, but the v1.0 integration suite does not provision a PostgreSQL
   service, so no version is listed here as tested.
-- **Kafka, Kubernetes, and cloud adapters** — these are not part of the v1.0
-  productized surface and are not covered by this matrix.
+- **Message-queue, orchestration, and cloud-provider adapters** — these are not
+  part of the v1.0 productized surface and are not covered by this matrix.

@@ -42,6 +42,4 @@ anomaly detection, forecasting, and classification.
 
 ::: baldur.interfaces.BatchClassifiable
 
-::: baldur.interfaces.OptimizationStrategy
-
 ::: baldur.interfaces.StrategyLifecycle

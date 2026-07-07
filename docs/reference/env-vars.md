@@ -76,7 +76,6 @@ BALDUR_REDIS_URL=redis://localhost:6379
 BALDUR_REDIS_PASSWORD=<secret>            # Redis instance / Sentinel master password
 BALDUR_REDIS_SENTINEL_PASSWORD=<secret>   # Sentinel-node password (separate from master)
 BALDUR_REDIS_USERNAME=<acl-user>          # Redis 6.0+ ACL username
-BALDUR_LEADER_ELECTION_REDIS_URL=...  # (PRO — Redis leader elector ships in baldur_pro)
 BALDUR_SQL_DSN=postgresql://user:pass@host:5432/db
 ```
 
@@ -87,13 +86,10 @@ BALDUR_SQL_DSN=postgresql://user:pass@host:5432/db
 authenticated connections.
 
 `BALDUR_REDIS_URL` is the canonical Redis routing input for the cache, circuit
-breaker, DLQ, leader elector, audit-flush, resilient storage, tiered-LOCAL, and
-the Redis quorum witness. A per-feature override (`BALDUR_LEADER_ELECTION_REDIS_URL`,
-`BALDUR_RESILIENT_STORAGE_REDIS_URL`, `BALDUR_TIERED_REDIS_LOCAL_URL`,
-`BALDUR_MULTIREGION_QUORUM_REDIS_URL`, `AUDIT_HASH_CHAIN_REDIS_URL`) wins where
-set; otherwise the consumer falls back to `BALDUR_REDIS_URL`.
-`BALDUR_LEADER_ELECTION_REDIS_URL` is **(PRO)** — the Redis leader elector
-ships only in `baldur_pro`, so this override is a no-op in an OSS install.
+breaker, DLQ, audit-flush, resilient storage, and tiered-LOCAL. A per-feature
+override (`BALDUR_RESILIENT_STORAGE_REDIS_URL`, `BALDUR_TIERED_REDIS_LOCAL_URL`,
+`AUDIT_HASH_CHAIN_REDIS_URL`) wins where set; otherwise the consumer falls back
+to `BALDUR_REDIS_URL`.
 
 Redis credentials are configured **separately** from `BALDUR_REDIS_URL` and are
 never embedded in it — keeping passwords out of the URL avoids leaking them into

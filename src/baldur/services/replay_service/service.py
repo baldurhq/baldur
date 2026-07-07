@@ -290,8 +290,8 @@ class ReplayService(EventEmitterMixin):
         """Core replay logic: acquire -> handler -> complete -> audit -> event.
 
         Handlers MUST ensure idempotency. Partial failure rollback is the
-        handler's responsibility; for multi-step compensation, consider
-        triggering a Saga instead.
+        handler's responsibility; for multi-step compensation, consider a
+        dedicated compensation flow instead.
 
         Args:
             dlq_id: DLQ entry to replay.
@@ -644,7 +644,7 @@ class ReplayService(EventEmitterMixin):
         Safety Checks (via check_all_governance):
         1. Kill Switch - system-wide deactivation check
         2. Emergency Level - blocked at LEVEL_2+ to protect resources
-        3. ErrorBudgetGate - automation blocked when the error budget is exhausted
+        3. Error budget - automation blocked when the budget is exhausted
 
         Audit Logging:
         - Blocks are automatically recorded in the AuditLog
@@ -722,7 +722,7 @@ class ReplayService(EventEmitterMixin):
         Safety Checks (via check_all_governance):
         1. Kill Switch - system-wide deactivation check
         2. Emergency Level - blocked at LEVEL_2+ to protect resources
-        3. ErrorBudgetGate - automation blocked when the error budget is exhausted
+        3. Error budget - automation blocked when the budget is exhausted
 
         Adaptive Mode:
         - When adaptive_enabled=True in RuntimeConfig, batch size is dynamic

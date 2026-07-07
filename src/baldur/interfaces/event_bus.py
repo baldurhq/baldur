@@ -4,16 +4,16 @@ Two distinct contracts live here:
 
 1. ``EventBusProtocol`` — the in-process / Redis event bus contract used by
    OSS services (``BaldurEventBus``, ``RedisEventBus``). Stable, OSS-tier.
-2. ``KafkaEventBusProtocol`` / ``ConsumedEventProtocol`` — OSS-side typing
-   targets for the Kafka adapter family that lives in ``baldur_dormant``.
-   Callers that type-hint against these Protocols
-   stay compile-clean on a clean-OSS install where ``baldur_dormant`` is
-   not present. The Protocol module is named ``event_bus`` (not ``kafka``)
-   to keep backend-neutral naming in the OSS interface layer.
+2. The broker-backed event-bus typing Protocols and their value-shape
+   companion — OSS-side typing targets for the streaming adapter family that
+   ships only in the private distribution. Callers that type-hint against
+   these Protocols stay compile-clean on a clean-OSS install where the private
+   package is absent. The Protocol module is named ``event_bus`` (backend-
+   neutral) rather than after any concrete broker.
 
-OSS NoOp defaults — ``NoOpKafkaEventBus`` — let callers route through
-``ProviderRegistry.kafka_eventbus.get()`` unconditionally without
-``is not None`` guards even when ``baldur_dormant`` is absent.
+The OSS NoOp default lets callers route through the broker event-bus registry
+slot unconditionally without ``is not None`` guards even when the private
+package is absent.
 """
 
 from __future__ import annotations
@@ -94,12 +94,11 @@ class EventBusProtocol(Protocol):
 
 @runtime_checkable
 class ConsumedEventProtocol(Protocol):
-    """Value-shape Protocol for events consumed from a Kafka topic.
+    """Value-shape Protocol for events consumed from a streaming topic.
 
-    Mirrors the field set on the Dormant ``ConsumedEvent`` class. Pure
-    attribute Protocol — no methods. Used by OSS
-    callers that pattern-match on event payload shape without importing
-    the Dormant concrete class.
+    Mirrors the field set on the private concrete consumed-event class. Pure
+    attribute Protocol — no methods. Used by OSS callers that pattern-match on
+    event payload shape without importing the private concrete class.
     """
 
     topic: str
@@ -113,11 +112,10 @@ class ConsumedEventProtocol(Protocol):
 
 @runtime_checkable
 class KafkaEventBusProtocol(Protocol):
-    """Protocol for the Kafka-backed event bus (Producer + Consumer combo).
+    """Protocol for the broker-backed event bus (Producer + Consumer combo).
 
-    Implementations: the Dormant ``KafkaEventBus`` class. The OSS-facing
-    surface is publish/subscribe + lifecycle
-    methods (start/stop/close/flush).
+    Implemented by the private concrete event-bus class. The OSS-facing
+    surface is publish/subscribe + lifecycle methods (start/stop/close/flush).
     """
 
     def publish(
@@ -149,13 +147,13 @@ class KafkaEventBusProtocol(Protocol):
 
 
 class NoOpKafkaEventBus:
-    """No-op fallback for the ``kafka_eventbus`` registry slot (OSS-safe).
+    """No-op fallback for the broker event-bus registry slot (OSS-safe).
 
-    Returned by ``ProviderRegistry.kafka_eventbus.get()`` when
-    ``baldur_dormant`` is not installed. publish/subscribe silently no-op
-    so OSS callers can use the registry result unconditionally; nothing
-    is ever sent to a broker. Logs at DEBUG to surface accidental wiring
-    on clean-OSS installs (typical Baldur pattern: NoOp logs are quiet).
+    Returned by the registry slot's ``get()`` when the private package is not
+    installed. publish/subscribe silently no-op so OSS callers can use the
+    registry result unconditionally; nothing is ever sent to a broker. Logs at
+    DEBUG to surface accidental wiring on clean-OSS installs (typical Baldur
+    pattern: NoOp logs are quiet).
 
     Satisfies the "NoOp default registration requirement".
     """

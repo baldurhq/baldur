@@ -273,8 +273,8 @@ nav:
           - Cache, locking & rate limiting: reference/interfaces/cache_and_rate_limit.md
           - Task queue: reference/interfaces/task_queue.md
           - Web framework: reference/interfaces/web_framework.md
-          - Config, runtime & state stores: reference/interfaces/config_and_state.md
-          - Health, pools & quorum: reference/interfaces/health_and_pools.md
+          - Config & state stores: reference/interfaces/config_and_state.md
+          - PostgreSQL admin: reference/interfaces/health_and_pools.md
           - Eventing, notification & audit: reference/interfaces/eventing_and_notification.md
           - Policy & ML strategy: reference/interfaces/policy_and_ml.md
           - Singleton protocols: reference/interfaces/singletons.md

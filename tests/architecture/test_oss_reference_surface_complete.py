@@ -74,6 +74,56 @@ _REFERENCE_SURFACE_ALLOWLIST: frozenset[tuple[str, str]] = frozenset(
     }
 )
 
+# Reviewed OSS<->private boundary symbols DE-PUBLISHED from the rendered
+# reference: they stay in ``__all__`` as stable import seams that the private
+# packages type-hint against and implement, but naming them on the public site
+# would disclose either a private-tier adapter no public user can enable or a
+# post-launch feature not in the v1.0 shipped set. Removal from ``__all__`` was
+# rejected — it demotes the seam to unguaranteed-internal under the private
+# tier's pinned-floor build. Reversible: when a feature ships, delete its entry
+# here and restore its ``:::`` directive (the graduation reversal is a
+# maintainer checklist).
+_UNRENDERED_BOUNDARY_SYMBOLS: frozenset[tuple[str, str]] = frozenset(
+    {
+        # Private-tier boundary — implementations ship only in the private,
+        # non-installable distribution.
+        ("baldur.interfaces", "KafkaEventBusProtocol"),
+        ("baldur.interfaces", "ConsumedEventProtocol"),
+        ("baldur.interfaces", "NoOpKafkaEventBus"),
+        ("baldur.interfaces", "NoOpKafkaAuditAdapter"),
+        ("baldur.interfaces", "NoOpWormAdapter"),
+        ("baldur.interfaces", "QuorumLease"),
+        ("baldur.interfaces", "QuorumWitnessProtocol"),
+        ("baldur.interfaces", "RoutingChange"),
+        ("baldur.interfaces", "TrafficRoutingAdapter"),
+        ("baldur.interfaces", "LearningServiceProtocol"),
+        # Post-launch feature boundary — registered under an active license but
+        # not in the v1.0 launch set / not SemVer-marketed.
+        ("baldur.interfaces", "RuntimeConfigManager"),
+        ("baldur.interfaces", "ConnectionPoolMonitor"),
+        ("baldur.interfaces", "PoolInfoProvider"),
+        ("baldur.interfaces", "ConnectionInfo"),
+        ("baldur.interfaces", "LeakReport"),
+        ("baldur.interfaces", "NoOpPoolStatsProvider"),
+        ("baldur.interfaces", "PoolHealthStatus"),
+        ("baldur.interfaces", "PoolStats"),
+        ("baldur.interfaces", "PoolStatsProvider"),
+        ("baldur.interfaces", "OptimizationStrategy"),
+        ("baldur.interfaces", "ChaosExperimentStore"),
+        ("baldur.interfaces", "ChaosScheduler"),
+        ("baldur.interfaces", "BlastRadiusManager"),
+        ("baldur.interfaces", "ReportGenerator"),
+        ("baldur.interfaces", "SafetyGuard"),
+        ("baldur.interfaces", "ErrorBudgetGate"),
+        ("baldur.interfaces", "ErrorBudgetService"),
+        ("baldur.interfaces", "PostmortemRepository"),
+        ("baldur.interfaces", "PostmortemData"),
+        # In-memory adapters for the de-published state stores.
+        ("baldur.adapters.memory", "InMemoryPostmortemRepository"),
+        ("baldur.adapters.memory", "InMemoryChaosExperimentStore"),
+    }
+)
+
 # Permanent large OSS packages that must ALWAYS be in the obligated set. These
 # named anchors close the D3 "delete every page of a package → it silently drops
 # from discovery → vacuous pass" hole for the two surfaces a reader is most
@@ -207,6 +257,9 @@ def _uncovered_symbols(
             continue  # obligated via a symbol but the package itself won't import
         names = set(getattr(module, "__all__", ()))
         allowed = {leaf for (pkg, leaf) in allowlist if pkg == package}
+        allowed |= {
+            leaf for (pkg, leaf) in _UNRENDERED_BOUNDARY_SYMBOLS if pkg == package
+        }
         missing = names - covered.get(package, set()) - allowed
         if missing:
             gaps[package] = missing
@@ -278,6 +331,28 @@ class TestOssReferenceSurfaceComplete:
                 f"allowlist entry ({package!r}, {leaf!r}) is not in "
                 f"{package}.__all__ — a stale or mistyped allowlist entry would "
                 "silently mask a real coverage gap."
+            )
+
+    def test_unrendered_boundary_symbols_are_valid(self):
+        """Every de-published boundary entry names a real ``__all__`` symbol.
+
+        The set is not pinned to an exact membership (it shrinks as features
+        graduate), but each entry MUST still name a live ``__all__`` symbol: a
+        stale entry (leaf renamed
+        or dropped from ``__all__``) would silently suppress a real coverage
+        gap, and an entry whose symbol was never in ``__all__`` is a typo.
+        """
+        assert _UNRENDERED_BOUNDARY_SYMBOLS, (
+            "G25: _UNRENDERED_BOUNDARY_SYMBOLS is empty — the de-publish "
+            "allowlist vanished, so every boundary symbol's ::: removal would "
+            "regress the completeness gate."
+        )
+        for package, leaf in _UNRENDERED_BOUNDARY_SYMBOLS:
+            module = _safe_import(package)
+            assert module is not None, f"boundary package {package!r} must import"
+            assert leaf in set(getattr(module, "__all__", ())), (
+                f"boundary entry ({package!r}, {leaf!r}) is not in "
+                f"{package}.__all__ — a stale/mistyped entry masks a real gap."
             )
 
 

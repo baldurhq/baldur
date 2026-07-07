@@ -1,18 +1,11 @@
 # baldur.interfaces — Eventing, Notification & Audit
 
-The unified event-bus protocol (with its Kafka-shaped sub-protocols and NoOp
-defaults), the notification and alert adapter contracts, the audit-log adapter
-surface, and the traffic-routing adapter for multi-region failover.
+The unified event-bus protocol and its NoOp defaults, the notification and alert
+adapter contracts, and the audit-log adapter surface.
 
 ## Event bus
 
 ::: baldur.interfaces.EventBusProtocol
-
-::: baldur.interfaces.ConsumedEventProtocol
-
-::: baldur.interfaces.KafkaEventBusProtocol
-
-::: baldur.interfaces.NoOpKafkaEventBus
 
 ## Notification
 
@@ -39,13 +32,3 @@ surface, and the traffic-routing adapter for multi-region failover.
 ::: baldur.interfaces.AuditEntry
 
 ::: baldur.interfaces.AuditLogAdapter
-
-::: baldur.interfaces.NoOpKafkaAuditAdapter
-
-::: baldur.interfaces.NoOpWormAdapter
-
-## Traffic routing
-
-::: baldur.interfaces.RoutingChange
-
-::: baldur.interfaces.TrafficRoutingAdapter

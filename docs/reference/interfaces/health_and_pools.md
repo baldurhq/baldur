@@ -1,7 +1,7 @@
-# baldur.interfaces — Health, Pools & Quorum
+# baldur.interfaces — PostgreSQL Admin
 
-Connection-pool and PostgreSQL-admin providers (stats, leak reports, health
-status) and the quorum-witness protocol that prevents multi-region split-brain.
+The PostgreSQL-admin provider contract — connection statistics and
+advisory-lock results.
 
 ## PostgreSQL admin
 
@@ -10,27 +10,3 @@ status) and the quorum-witness protocol that prevents multi-region split-brain.
 ::: baldur.interfaces.ConnectionStats
 
 ::: baldur.interfaces.AdvisoryLockResult
-
-## Pool monitoring
-
-::: baldur.interfaces.PoolInfoProvider
-
-::: baldur.interfaces.ConnectionInfo
-
-::: baldur.interfaces.LeakReport
-
-::: baldur.interfaces.NoOpPoolStatsProvider
-
-::: baldur.interfaces.PoolHealthStatus
-
-::: baldur.interfaces.PoolStats
-
-::: baldur.interfaces.PoolStatsProvider
-
-::: baldur.interfaces.ConnectionPoolMonitor
-
-## Quorum
-
-::: baldur.interfaces.QuorumLease
-
-::: baldur.interfaces.QuorumWitnessProtocol

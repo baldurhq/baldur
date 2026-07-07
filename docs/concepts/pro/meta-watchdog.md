@@ -58,14 +58,14 @@ stateDiagram-v2
     Unhealthy --> Healthy: recovers on its own
 ```
 
-**In v1.0, Meta-Watchdog detects and escalates — it does not self-recover.** This is a deliberate choice, not a missing feature. Handing a system the authority to restart its own internals is only safe once the failure modes are well understood, so v1.0 ships the part that is unambiguously safe (*find the problem and tell a human*) and a real person decides what to do. Autonomous recovery is held back behind off-by-default gates until that bar is met.
+**In v1.0, Meta-Watchdog detects and escalates — it does not self-recover.** This is a deliberate choice, not a missing feature. Handing a system the authority to restart its own internals is only safe once the failure modes are well understood, so v1.0 ships the part that is unambiguously safe (*find the problem and tell a human*) and a real person decides what to do. Baldur does not restart its own internals autonomously; it detects the problem and escalates to a human.
 
 **Verifying your alerts before you need them.** Because the worst time to discover a misconfigured webhook is during a real incident, an operator can fire an on-demand self-test — `baldur escalation test` on the command line, or the equivalent admin endpoint — which sends a clearly-labelled test notification through every configured channel and reports, per channel, whether it was delivered. It confirms your paging path is live without waiting for something to actually break.
 
 | What you observe | When it happens |
 |------------------|-----------------|
 | A critical page titled `Baldur <component> Failure` | a healing subsystem stays unhealthy or frozen across several probes |
-| The alert states manual intervention is required and no recovery was attempted | v1.0 detect-and-escalate mode (autonomous recovery is deferred) |
+| The alert states manual intervention is required and no recovery was attempted | v1.0 detect-and-escalate mode — it does not auto-recover |
 | A single alert for one incident, not one per worker | cluster-wide and per-process de-duplication |
 | A durable journal entry and a metric increment for each escalation | every time it pages |
 | A test alert through every configured channel, with per-channel delivery results | you run the escalation self-test |

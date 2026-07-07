@@ -8,8 +8,6 @@ Provides:
 - BaldurConfig: Django AppConfig for Baldur system
 - create_baldur_groups: RBAC group creation signal handler
 - AbstractFailedOperation: Domain-free abstract model for DLQ entries
-- AbstractPostmortemRecord: Domain-free abstract model for Postmortem records
-- BasePostmortemRecordAdmin: Base Admin class for Postmortem records
 - BaseDLQEntryAdmin: Base Admin class for DLQ (FailedOperation) entries
 - BaseCircuitBreakerStateAdmin: Base Admin class for Circuit Breaker states
 - DjangoStatisticsAdapter: Statistics adapter using Django ORM

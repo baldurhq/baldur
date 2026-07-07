@@ -6,6 +6,8 @@ at-least-once operations.
 ::: baldur.services.IdempotencyService
 
 ::: baldur.services.IdempotencyKey
+    options:
+      filters: ["!^_", "!^for_chaos"]
 
 ::: baldur.services.IdempotencyDomain
 

@@ -11,3 +11,5 @@ Progressive canary rollouts with safety interlocks: `CanaryRolloutService`,
     `entitlement.pro_registration_skipped`.
 
 ::: baldur_pro.services.canary
+    options:
+      filters: ["!^_", "!(?i)chaos"]

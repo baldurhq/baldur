@@ -284,7 +284,7 @@ class DLQReplayError(DLQError):
 
 
 class ResilienceError(BaldurError):
-    """Base exception for resilience pattern errors (bulkhead, hedging, retry)."""
+    """Base exception for resilience pattern errors (bulkhead, retry, and related)."""
 
     pass
 
@@ -493,8 +493,8 @@ class SettingsValidationError(ConfigurationError):
 class StepExecutionError(BaldurError):
     """Base exception for step execution engine errors.
 
-    Shared by Saga, Runbook, and other step-based execution engines.
-    Domain-specific subclasses live in each service module.
+    Shared by the step-based execution engines. Domain-specific subclasses
+    live in each service module.
     """
 
     pass
@@ -543,8 +543,7 @@ class StepTimeoutError(StepExecutionError):
 class CompensationError(StepExecutionError):
     """Raised when step compensation fails.
 
-    Domain-specific subclasses (SagaCompensationError, RunbookCompensationError)
-    add service-specific extra_context.
+    Domain-specific subclasses add service-specific extra_context.
     """
 
     pass
@@ -553,7 +552,7 @@ class CompensationError(StepExecutionError):
 class ConcurrencyConflictError(BaldurError):
     """Raised on optimistic concurrency control (OCC) conflicts.
 
-    Covers version CAS failures in Saga, Runbook, and other engines.
+    Covers version CAS failures across the step-execution engines.
     """
 
     def __init__(
@@ -586,7 +585,7 @@ class ConcurrencyConflictError(BaldurError):
 class ConfigVersionConflictError(ConcurrencyConflictError):
     """Raised when a runtime-config write conflicts with a concurrent version.
 
-    The 3rd optimistic-lock consumer (after Saga and Runbook), it carries the
+    An optimistic-lock consumer for runtime-config writes, it carries the
     config section (``config_type``) plus the inherited
     ``expected_version`` / ``actual_version`` so the REST layer can map it to
     HTTP 409 and hand the client a usable retry token. Lives in OSS core so the

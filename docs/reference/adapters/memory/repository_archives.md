@@ -2,13 +2,11 @@
 
 The layered (L1+L2) circuit-breaker variant — Memory + Redis/DB for
 high-throughput distributed access — plus the in-memory security-incident,
-postmortem, archive, and event-journal repositories.
+archive, and event-journal repositories.
 
 ::: baldur.adapters.memory.LayeredCircuitBreakerStateRepository
 
 ::: baldur.adapters.memory.InMemorySecurityIncidentRepository
-
-::: baldur.adapters.memory.InMemoryPostmortemRepository
 
 ::: baldur.adapters.memory.InMemoryCascadeEventArchiveRepository
 

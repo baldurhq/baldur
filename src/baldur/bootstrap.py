@@ -751,7 +751,7 @@ def _register_shutdown_handlers() -> None:  # noqa: C901, PLR0912, PLR0915
 
     Equivalent to ``_register_shutdown_handlers`` in ``apps.py``. Each handler
     factory is wrapped in a try/except ImportError to allow optional
-    dependencies (e.g. kafka, private-distribution modules) to be missing.
+    dependencies (e.g. private-distribution modules) to be missing.
     """
     try:
         from baldur.core.shutdown_coordinator import (
@@ -1049,12 +1049,12 @@ def _locate_v1_launch_manifest() -> Any | None:
 
 
 def _emit_tier_setting_warnings() -> None:  # noqa: C901
-    """Emit one WARNING per process per Deferred/Dormant env-var override.
+    """Emit one WARNING per process per non-launch-set tier env-var override.
 
     Reads the ``V1_LAUNCH_MANIFEST.yaml`` file and walks every entry whose
-    tier is ``Deferred`` or ``Dormant``. For each entry whose operator-facing
-    ``env_var`` is set to a truthy value, emits one structlog WARNING.
-    Suppressed wholesale by ``BALDUR_SUPPRESS_TIER_WARNING=true``.
+    tier is held out of the v1.0 launch set. For each entry whose
+    operator-facing ``env_var`` is set to a truthy value, emits one structlog
+    WARNING. Suppressed wholesale by ``BALDUR_SUPPRESS_TIER_WARNING=true``.
 
     Failure modes (yaml unavailable, manifest unreachable, malformed entry)
     silently degrade — startup must never fail on a diagnostic.
@@ -2497,8 +2497,8 @@ def _register_sql_statistics_if_available() -> None:
 def _start_capacity_reservation_if_enabled() -> None:
     """Initialize + start the CapacityReservationService scheduler when enabled.
 
-    Dormant feature (FEATURE_CATALOG #37) — defaults to disabled. Settings
-    flag is the only gate; no autostart on import.
+    Non-productized feature (not in the v1.0 launch set) — defaults to
+    disabled. Settings flag is the only gate; no autostart on import.
 
     Framework-agnostic wiring: this starter owns both ``initialize()`` (DI +
     EventCalendar/PreWarmer construction + state restore) and ``start()`` (the

@@ -54,8 +54,9 @@ these Public sub-packages or by resolving singletons via the OSS-Public
 | `baldur_pro.services.audit` | Internal | Registry-fronted internal log emitters |
 | `baldur_pro.services.governance` | Internal | Registry-fronted via `ProviderRegistry.governance` (OSS-Public). Subscriber access is `ProviderRegistry.governance.get()`, not direct imports |
 
-The remaining PRO sub-packages stay `Status: Internal` — see § PRO
-Non-Launch-Set Internal Inventory below.
+Any `baldur_pro.services.*` sub-package **not** listed as `Status: Public`
+above stays `Status: Internal` and is **not** SemVer-covered in v1.x — see
+§ PRO Internal Sub-Package Surface below.
 
 ---
 
@@ -139,12 +140,12 @@ public surface. Everything else stays in `baldur.core.exceptions`.
 | Exception | When raised | Typical catch pattern | Recovery hint |
 |-----------|-------------|----------------------|---------------|
 | `BaldurError` | Catch-all base | `except BaldurError` | Last-resort logging + alert |
-| `AdapterError` | Adapter base (Redis/SQL/Kafka misuse) | `except AdapterError` | Reconnect; fall back to in-memory |
+| `AdapterError` | Adapter base (Redis/SQL misuse) | `except AdapterError` | Reconnect; fall back to in-memory |
 | `AdapterNotFoundError` | `ProviderRegistry.resolve(...)` finds no match | Bootstrap path | Wire the missing adapter |
 | `CircuitBreakerError` | CB-base — domain-specific subclasses | `except CircuitBreakerError` | Do NOT retry — `non_retryable_exceptions()` includes this |
 | `DLQError` | DLQ-base | `except DLQError` | Inspect DLQ entry; manual replay if needed |
 | `DLQReplayError` | `ReplayService.replay(...)` could not complete | `except DLQReplayError` | Mark for manual review; surface in admin |
-| `ResilienceError` | Resilience-pattern base (retry/timeout/rate-limit/hedging) | `except ResilienceError` | Domain-specific fallback |
+| `ResilienceError` | Resilience-pattern base (retry/timeout/rate-limit) | `except ResilienceError` | Domain-specific fallback |
 | `RetryExhaustedError` | All retry attempts failed | `except RetryExhaustedError` | Send to DLQ; alert on SLA breach |
 | `TimeoutPolicyError` | `protect(timeout=...)` exceeded | `except TimeoutPolicyError` | Cancel downstream; degrade |
 | `RateLimitExceeded` | `@rate_limit` rejected the call | `except RateLimitExceeded` | Surface a 429 to caller; honor `reset_at` |
@@ -270,34 +271,24 @@ user-raised contracts and the owning sub-packages are `Status: Internal`.
 
 ---
 
-## PRO Non-Launch-Set Internal Inventory
+## PRO Internal Sub-Package Surface
 
-The PRO sub-packages listed here are `Status: Internal` for v1.0. They are
-**user-reachable today** (e.g., `from baldur_pro.services.hedging import
-HedgingPolicy`), but the nested-path symbols are **NOT SemVer-covered** in
-v1.x. Renames, package moves, and facade collapses inside these sub-packages
-do not constitute breaking changes for v1.x subscribers. A post-v1.0 freeze
-pass graduates launch-ready surfaces to `Status: Public`.
-
-| Sub-package | Category |
-|-------------|----------|
-| `services.coordination` | Deferred (post-v1.0) |
-| `services.error_budget` | Deferred (post-v1.0) |
-| `services.error_budget_gate` | Deferred (post-v1.0) |
-| `services.meta_watchdog` | Deferred (post-v1.0) |
-| `services.chaos` | Deferred (post-v1.0) |
-| `services.hedging` | Deferred (post-v1.0) |
-| `services.auto_tuning` | Deferred (post-v1.0) |
-| `services.pool_monitor` | Deferred (post-v1.0) |
-| `services.runtime_config` | Deferred (post-v1.0) |
-| `services.corruption_shield` | Deferred (post-v1.0) |
-| `services.postmortem` | Deferred (post-v1.0) |
-| `services.saga` | Deferred (post-v1.0) |
-| `services.dlq_outbox` | OSS-extension infrastructure (PRO durable outbox layer) |
+Any `baldur_pro.services.*` sub-package **not** listed as `Status: Public` in
+the PRO Addendum above is `Status: Internal` for v1.0. An Internal sub-package
+may be **user-reachable today** (nested-path imports resolve), but its
+nested-path symbols are **NOT SemVer-covered** in v1.x: renames, package moves,
+and facade collapses inside them do not constitute breaking changes for v1.x
+subscribers. A post-v1.0 freeze pass graduates launch-ready surfaces to
+`Status: Public`.
 
 Subscriber code MUST consume governance via `ProviderRegistry.governance`
 and audit emitters indirectly through public service surfaces; reaching
 directly into Internal sub-packages is not SemVer-covered.
+
+Some `baldur.interfaces.__all__` Protocols are typing seams for internal
+OSS↔private boundaries — OSS code type-hints against them and resolves the
+concrete implementations through `ProviderRegistry`. They are intentionally
+not rendered on this reference and carry no v1.x SemVer surface of their own.
 
 ---
 
@@ -397,7 +388,7 @@ specifiers) are NOT renamed yet and may shift again in a later v1.x release.
 Concrete affected event-name prefixes include (non-exhaustive):
 
 - `audit.*` (audit pipeline)
-- `coordination.*` (leader election, DLQ consumer)
+- `coordination.*` (DLQ consumer)
 - `metrics.*` (Prometheus emission)
-- `services.*.*` (CB, replay, saga, governance, ...)
-- `adapters.*` (Kafka, Redis, SQL)
+- `services.*.*` (CB, replay, governance, ...)
+- `adapters.*` (Redis, SQL)

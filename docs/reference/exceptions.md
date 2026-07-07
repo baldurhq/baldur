@@ -11,7 +11,7 @@ the nested import path.
 | Exception | When raised | Recovery hint |
 |-----------|-------------|---------------|
 | `BaldurError` | Catch-all base | Last-resort logging + alert |
-| `AdapterError` | Adapter base (Redis/SQL/Kafka misuse) | Reconnect; fall back to in-memory |
+| `AdapterError` | Adapter base (Redis/SQL misuse) | Reconnect; fall back to in-memory |
 | `AdapterNotFoundError` | `ProviderRegistry.resolve(...)` finds no match | Wire the missing adapter |
 | `CircuitBreakerError` | CB-base — domain-specific subclasses | Do NOT retry — non-retryable |
 | `DLQError` | DLQ-base | Inspect DLQ entry; manual replay if needed |

@@ -103,8 +103,8 @@ does that OPEN fan out — so it makes the cluster react together once a breaker
 trips, it does not make that first trip arrive any sooner. It is opt-in — set
 `BALDUR_CB_CLUSTER_STATE_PROPAGATION_ENABLED=true` on each worker. This
 coordinates the *same* breaker across workers; coordinating
-*different* breakers, so an open downstream breaker tightens the upstream ones, is
-a separate PRO capability (Circuit Mesh).
+*different* breakers — so an open downstream breaker tightens the upstream ones —
+is outside the scope of the OSS circuit breaker.
 
 ## Configuration
 

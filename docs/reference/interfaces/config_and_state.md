@@ -1,8 +1,8 @@
-# baldur.interfaces — Config, Runtime & Domain State Stores
+# baldur.interfaces — Config & Domain State Stores
 
 The configuration-provider interface and its defaults, the database-health and
-session-invalidation providers, the runtime-config manager, and the per-domain
-state-store contracts (canary / chaos / config history / cross-cluster).
+session-invalidation providers, and the per-domain state-store contracts
+(canary / config history / cross-cluster).
 
 ## Configuration provider
 
@@ -20,15 +20,9 @@ state-store contracts (canary / chaos / config history / cross-cluster).
 
 ::: baldur.interfaces.SessionInvalidationProvider
 
-## Runtime config
-
-::: baldur.interfaces.RuntimeConfigManager
-
 ## Domain state stores
 
 ::: baldur.interfaces.CanaryRolloutStore
-
-::: baldur.interfaces.ChaosExperimentStore
 
 ::: baldur.interfaces.ConfigHistoryStore
 
