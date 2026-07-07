@@ -24,6 +24,21 @@ from baldur.utils.serialization import fast_dumps_str, fast_loads
 logger = structlog.get_logger()
 
 
+def _record_corrupted_line(file_path: Path, line_no: int) -> None:
+    """Log + meter a skipped corrupt JSONL line (invalid JSON or non-object)."""
+    logger.warning(
+        "jsonl_reader.corrupted_line_skipped",
+        file=str(file_path),
+        line_no=line_no,
+    )
+    try:
+        from baldur.metrics.drift_metrics import record_wal_corrupted_line
+
+        record_wal_corrupted_line()
+    except ImportError:
+        pass
+
+
 class CommitMarker(TypedDict):
     _marker: Literal["COMMIT"]
     wal_sequence: int
@@ -111,28 +126,26 @@ class JSONLReader:
         if not file_path.exists():
             return
 
-        with open(file_path, encoding="utf-8") as f:
+        # errors="replace": a non-UTF-8 byte in a corrupt WAL file degrades to
+        # U+FFFD (the line then fails JSON parse and is skipped) rather than
+        # raising UnicodeDecodeError mid-iteration and aborting the whole read.
+        with open(file_path, encoding="utf-8", errors="replace") as f:
             for line_no, line in enumerate(f, 1):
                 line = line.strip()
                 if not line:
                     continue
                 try:
-                    yield fast_loads(line)
+                    entry = fast_loads(line)
                 except ValueError:
-                    logger.warning(
-                        "jsonl_reader.corrupted_line_skipped",
-                        file=str(file_path),
-                        line_no=line_no,
-                    )
-                    try:
-                        from baldur.metrics.drift_metrics import (
-                            record_wal_corrupted_line,
-                        )
-
-                        record_wal_corrupted_line()
-                    except ImportError:
-                        pass
+                    _record_corrupted_line(file_path, line_no)
                     continue
+                # A valid-JSON but non-object line (scalar/array) violates the
+                # WAL record contract — treat it as corrupt rather than yielding
+                # a value that downstream `.get()` consumers would choke on.
+                if not isinstance(entry, dict):
+                    _record_corrupted_line(file_path, line_no)
+                    continue
+                yield entry
 
     @staticmethod
     def parse_with_committed_filter(

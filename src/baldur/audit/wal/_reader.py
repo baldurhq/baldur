@@ -31,6 +31,11 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
+# Upper bound on a single WAL record's declared length. A length prefix larger
+# than this is treated as corruption rather than driving an unbounded f.read()
+# (a ~4 GB malloc → OOM), regardless of recovery mode.
+_MAX_RECORD_SIZE_BYTES = 10 * 1024 * 1024
+
 
 def _wal_glob_pattern(file_prefix: str, mode: Literal["runtime", "startup"]) -> str:
     """Glob pattern for WAL files.
@@ -133,11 +138,17 @@ class WALReaderMixin:
 
                     length = struct.unpack(">I", length_bytes)[0]
 
-                    # Best-effort: 비정상적인 길이 감지 (10MB 초과 = 손상)
-                    if best_effort and length > 10 * 1024 * 1024:
-                        if not self._handle_corrupted_record_length(f):
-                            break
-                        continue
+                    # An oversized length prefix (corruption/attack) must never
+                    # drive an unbounded f.read() → multi-GB malloc → OOM.
+                    if length > _MAX_RECORD_SIZE_BYTES:
+                        if best_effort:
+                            # Try to resync to the next valid record.
+                            if not self._handle_corrupted_record_length(f):
+                                break
+                            continue
+                        # Strict mode stops at the corruption boundary.
+                        self._corrupted_entries += 1
+                        break
 
                     # 체크섬 읽기
                     checksum_bytes = f.read(8)
@@ -213,7 +224,9 @@ class WALReaderMixin:
                 data=entry_dict["data"],
                 checksum=checksum,
             )
-        except (ValueError, KeyError):
+        except (ValueError, KeyError, TypeError):
+            # TypeError: decoded payload was a valid-JSON scalar/array, not an
+            # object — subscripting it must be treated as a corrupt record.
             self._corrupted_entries += 1
             return None
 
@@ -608,7 +621,7 @@ class WALReaderMixin:
                         break
                     length = struct.unpack(">I", length_bytes)[0]
 
-                    if length > 10 * 1024 * 1024:  # 10MB 이상 — 손상으로 간주
+                    if length > _MAX_RECORD_SIZE_BYTES:  # oversized → corruption
                         break
 
                     f.read(8)  # checksum — 스킵
@@ -617,8 +630,9 @@ class WALReaderMixin:
                         break
 
                     try:
-                        seq = fast_loads(data_bytes).get("seq", 0)
-                        if seq > max_seq:
+                        parsed = fast_loads(data_bytes)
+                        seq = parsed.get("seq", 0) if isinstance(parsed, dict) else 0
+                        if isinstance(seq, int) and seq > max_seq:
                             max_seq = seq
                     except ValueError:
                         pass

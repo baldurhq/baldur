@@ -13,6 +13,11 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 ### Security
 
 - The Pydantic-backed config serializers no longer echo a non-validation exception's message in their validation-error response; only pydantic validation failures surface their field-level detail, and any other error propagates as a 500 instead of leaking its message.
+- WAL crash-recovery no longer trusts a record's on-disk length prefix in strict mode: a corrupt or oversized length (up to ~4 GB) could previously drive an unbounded read and OOM the worker mid-recovery. Oversized records are now capped and treated as corruption in both strict and best-effort modes.
+
+### Fixed
+
+- The audit WAL and incident-duration parsers now tolerate malformed persisted input instead of raising an uncaught exception: non-object JSONL lines, a non-UTF-8 byte in a JSONL WAL file, non-object binary records, non-dict timeline entries / non-string `event_type` values, and a mixed offset-naive/offset-aware timestamp pair are all skipped (or resolved to an undefined result) rather than aborting recovery or a postmortem duration calculation.
 
 ## [1.1.0] - 2026-07-07
 
