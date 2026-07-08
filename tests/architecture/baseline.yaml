@@ -928,7 +928,7 @@ oss_test_pro_private_import: []
 # G21 - no tests/ TEST file may classify as pure_pro / support_only per
 # the import-graph classifier (scripts/classify_pro_importing_tests.py, the
 # single source of truth shared with this gate - impl doc 533 D12). Such a
-# file's SUT is PRO and it ships at the next mirror build (G2 recurs).
+# file's SUT is PRO and it ships at the next public push (G2 recurs).
 # ENFORCED-EMPTY for the same reason as G20: a baseline entry would whitelist
 # the leak it documents. A new pure_pro/support_only test is MOVED to
 # tests/pro/, never baselined. The G21 test meta-asserts this key stays empty.

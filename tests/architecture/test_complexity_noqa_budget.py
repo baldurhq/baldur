@@ -19,13 +19,13 @@ after a refactor drops the count below an untouched budget, the slack
 forces every reduction to ratchet the budget, so the closed-leak guarantee holds
 over time.
 
-**Per-root budget (OSS-mirror-robust).** The budget is a per-root map, not a
-single scalar: the published mirror ships ``src/baldur`` but not the private
+**Per-root budget (OSS-only-checkout robust).** The budget is a per-root map, not a
+single scalar: the public repo ships ``src/baldur`` but not the private
 ``baldur_pro`` / ``baldur_dormant`` trees, so a single all-``src`` exact count
 would fail on an OSS-only checkout (precedent: G20/G21/G38/G39 are all
-mirror-robust). Each present root is checked against its own budget; an absent
-root is skipped, so the gate holds identically on the monorepo (all three roots)
-and the mirror (``baldur`` only). Each refactor lowers exactly the budget of the
+OSS-only-checkout robust). Each present root is checked against its own budget; an absent
+root is skipped, so the gate holds identically on the private repo (all three roots)
+and the public repo (``baldur`` only). Each refactor lowers exactly the budget of the
 root it touched.
 
 **Unit = noqa LINES, not violations.** ``--add-noqa`` emits one line per ``def``

@@ -34,7 +34,7 @@ _RULE_KEY = "flag_consumer_reachability"
 _RULE_ANCHOR = "#g32-flag-consumer-reachability"
 
 # Source root used by the live consumer-set scan. On a public-OSS-only checkout
-# (the mirror) a private tier is absent, so the cross-tier consumer set is
+# (the public repo) a private tier is absent, so the cross-tier consumer set is
 # incomplete and flag deadness is unknowable — the live analysis then skips.
 _SRC = PROJECT_ROOT / "src"
 _GATED_TIERS = ("baldur_pro", "baldur_dormant")
@@ -79,7 +79,7 @@ class TestFlagConsumerReachability:
             pytest.skip(
                 "G32 consumer-set scan needs every tier present; a private tier is "
                 "absent (OSS-only checkout) so cross-tier flag deadness is "
-                "unknowable. The monorepo run (full tier visibility) is the "
+                "unknowable. The private-repo run (full tier visibility) is the "
                 "authoritative G32 gate."
             )
         fields = [
@@ -317,8 +317,8 @@ class TestFlagIsDeadContract:
 class TestG32TierAbsentSkip:
     """663 D3 — the live consumer-set scan skips when a private tier is absent.
 
-    PRO/Dormant-absent (the mirror) the cross-tier consumer set is incomplete, so
-    flag deadness is unknowable; the monorepo run (full tier visibility) is the
+    PRO/Dormant-absent (the public repo) the cross-tier consumer set is incomplete, so
+    flag deadness is unknowable; the private-repo run (full tier visibility) is the
     authoritative gate. The synthetic classifier suites keep running regardless.
     """
 
@@ -341,7 +341,7 @@ class TestG32TierAbsentSkip:
     def test_runs_when_both_tiers_present(self, monkeypatch, tmp_path):
         # Both tiers present -> the guard does NOT skip. The heavy consumer-set
         # scan is stubbed to empty so this isolates the guard's pass-through
-        # branch (the real analysis is the monorepo gate's job, and running it
+        # branch (the real analysis is the private-repo gate's job, and running it
         # PRO-absent would false-positive cross-tier flags as dead). A clean empty
         # population yields no violations and the method returns without raising.
         for tier in ("baldur", "baldur_pro", "baldur_dormant"):

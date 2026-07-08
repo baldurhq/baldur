@@ -112,12 +112,12 @@ def _module_exists(dotted: list[str]) -> bool:
 def _root_present(target: list[str]) -> bool:
     """True when the target's top-level first-party root exists on disk.
 
-    On a public-OSS-only checkout (the mirror) ``baldur_pro`` / ``baldur_dormant``
+    On a public-OSS-only checkout (the public repo) ``baldur_pro`` / ``baldur_dormant``
     are absent; a deferred ``from baldur_pro… import …`` carried by OSS ``baldur``
     source is then a legitimately-absent cross-tier import, not a broken path, so
     its existence check is skipped. ``baldur`` is always present, so ``baldur.*``
     targets are always checked — a genuinely-broken published-source import path
-    still fails the gate on the mirror. (In the monorepo every root is present, so
+    still fails the gate in the public repo. (In the private repo every root is present, so
     this guard is a no-op and a missing PRO submodule is still flagged.)
     """
     return (_SRC / target[0]).is_dir()
@@ -215,20 +215,20 @@ class TestFirstPartyImportTargets:
 
 
 class TestG38AbsentRootSkip:
-    """663 D2 — an absent first-party root is skipped (not flagged) on the mirror.
+    """663 D2 — an absent first-party root is skipped (not flagged) in the public repo.
 
     On a public-OSS-only checkout ``baldur_pro`` / ``baldur_dormant`` are absent;
     a deferred cross-tier ``from baldur_pro… import …`` carried by OSS source is a
     legitimately-absent import, not a broken path. ``baldur`` is always present so
     its targets are always checked — a genuinely-broken published-source import
-    path still fails the gate on the mirror.
+    path still fails the gate in the public repo.
     """
 
     _MOD = "tests.architecture.test_first_party_import_targets"
 
     @staticmethod
     def _baldur_only_src(tmp_path):
-        # A src/ holding ONLY baldur (the mirror layout) — no private tiers.
+        # A src/ holding ONLY baldur (the public layout) — no private tiers.
         (tmp_path / "baldur").mkdir()
         return tmp_path
 
@@ -245,7 +245,7 @@ class TestG38AbsentRootSkip:
         assert _root_present(["baldur_dormant", "adapters", "kafka"]) is False
 
     def test_present_private_root_is_checked(self, monkeypatch, tmp_path):
-        # When the private tier IS present (the monorepo), the guard is a no-op:
+        # When the private tier IS present (the private repo), the guard is a no-op:
         # the root reads present, so a missing submodule under it is still flagged.
         (tmp_path / "baldur").mkdir()
         (tmp_path / "baldur_pro").mkdir()

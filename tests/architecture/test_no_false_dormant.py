@@ -150,13 +150,13 @@ def imports_match(targets: set[str], prefix: str) -> bool:
 # Catalog-derived sets.
 # ---------------------------------------------------------------------------
 def _entries():
-    # FEATURE_CATALOG.md is monorepo-only (publish FORBIDDEN_PATHS), so it is
-    # absent on the public OSS mirror. Every live G36 test routes through this
+    # FEATURE_CATALOG.md is private-repo-only (not published to the public repo), so it is
+    # absent in the public OSS repo. Every live G36 test routes through this
     # chokepoint, so the in-body skip here covers them all; the synthetic
-    # anti-vacuous fixtures keep running on the mirror. G36 is fully covered by
-    # the monorepo run.
+    # anti-vacuous fixtures keep running in the public repo. G36 is fully covered by
+    # the private-repo run.
     if not CATALOG_PATH.exists():
-        pytest.skip("FEATURE_CATALOG.md is monorepo-only (FORBIDDEN_PATHS)")
+        pytest.skip("FEATURE_CATALOG.md is private-repo-only (not published)")
     text = CATALOG_PATH.read_text(encoding="utf-8")
     entries = parse_catalog_entries(text)
     assert entries, "G36: FEATURE_CATALOG.md yielded no entries — parser broken"
@@ -397,8 +397,8 @@ class TestG36CatalogAbsentSkip:
     """663 D4 — the module-level _entries() chokepoint skips when the catalog is absent.
 
     Every live G36 test routes through ``_entries()``, so the in-body skip there
-    covers them all; the synthetic import-classifier fixtures keep running on the
-    mirror. G36 is fully covered by the monorepo run.
+    covers them all; the synthetic import-classifier fixtures keep running in the
+    public repo. G36 is fully covered by the private-repo run.
     """
 
     def test_entries_skips_when_catalog_absent(self, monkeypatch, tmp_path):
