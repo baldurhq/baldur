@@ -4,14 +4,14 @@ CLAUDE.md § Test Location Rules + impl doc 533 D12. The 533 ``git mv`` is
 one-time: G19 guards only marker presence and G20 only the private-import axis.
 Neither stops a *new* ``pure_pro`` / ``support_only`` test — one whose
 production-import graph shows its system-under-test is PRO — from being added
-to ``tests/`` and shipping at the next mirror build (the path-level
+to ``tests/`` and shipping at the next public push (the path-level
 allowlist publishes ``tests/`` wholesale, so G2 recurs). G21 closes that
 axis permanently.
 
 Single source of truth (533 D12): G21 reuses the rewritten classifier's
 per-file verdict function ``scripts.classify_pro_importing_tests.classify_file``
 — there is no second copy to drift. The function is pure AST/string analysis
-that never imports ``baldur_pro``, so it runs in the public mirror where
+that never imports ``baldur_pro``, so it runs in the public repo where
 ``scripts/`` is published wholesale and the PRO package source is absent.
 
 Scope (matches the move plan): TEST files only (``test_*.py``). conftest.py /
@@ -86,7 +86,7 @@ class TestOssTestProClassification:
                         None,
                         f"classifies as '{verdict.verdict}' "
                         f"(pro_imports={verdict.pro_count}, oss_imports={verdict.oss_count}) "
-                        "— SUT is PRO, leaks at the mirror build",
+                        "— SUT is PRO, leaks when published to the public repo",
                     )
                 )
 
@@ -94,12 +94,12 @@ class TestOssTestProClassification:
         assert not violations, (
             f"G21: tests/ contains {len(violations)} test file(s) whose "
             "import-graph SUT is PRO (pure_pro / support_only). These ship at "
-            "the next mirror build. Move them to tests/pro/.\n" + "\n".join(violations)
+            "the next public push. Move them to tests/pro/.\n" + "\n".join(violations)
         )
 
     def test_baseline_is_enforced_empty(self):
         # 533 D12: a G21 baseline entry would whitelist a pure_pro/support_only
-        # test that stays under tests/ and ships at the mirror build — the
+        # test that stays under tests/ and ships when published to the public repo — the
         # exact leak G21 prevents. Remediation is move, never baseline.
         assert load_baseline(_RULE_KEY) == {}, (
             f"G21: baseline key '{_RULE_KEY}' must stay empty (533 D12). A "

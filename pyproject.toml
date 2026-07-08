@@ -365,4 +365,9 @@ ignore = [
 "src/baldur/tasks/daily_report.py" = ["F822"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["baldur"]
+# baldur_pro / baldur_dormant are the private-tier packages the requires_pro /
+# requires_dormant boundary tests import (guarded by pytest.importorskip). Those
+# tests were import-ordered treating all three as first-party, so classify them
+# the same way here — otherwise ruff wants a tree-wide reorder of tests it only
+# runs when the private packages happen to be installed.
+known-first-party = ["baldur", "baldur_pro", "baldur_dormant"]

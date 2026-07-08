@@ -155,8 +155,12 @@ jobs:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: baldur_test
+        # Host port 15432 matches tests/integration/conftest.py's
+        # DatabaseTestConfig.DEFAULT_PORT — the postgres integration tests open a
+        # psycopg2 connection to localhost:15432 directly (they do not honor
+        # BALDUR_SQL_DSN), mirroring a host-side docker-compose.test.yml run.
         ports:
-          - 5432:5432
+          - 15432:5432
         options: >-
           --health-cmd pg_isready
           --health-interval 5s
@@ -175,16 +179,23 @@ jobs:
       # OTEL tests need a full Grafana stack (collector, Tempo, Mimir, Loki) not
       # provisioned here, so the otel dir is ignored (requires_otel tests
       # elsewhere auto-skip without TEST_OTEL_AVAILABLE).
+      # test_dlq_compression_workflow asserts DLQ-compression *output*, which is
+      # produced by the PRO compression module (baldur.dlq.helpers.compress_entries
+      # fail-opens to None when it is absent). With the PRO tier absent here the
+      # OSS path yields 0 summaries, so the file is ignored (it runs in the local
+      # Docker matrix where the PRO tier is installed) — same "absent dependency"
+      # rationale as the otel dir above.
       - name: Run integration suite (redis + postgres)
         run: |
           pytest tests/integration/ --tb=short \
             -m "not slow and not dormant and not requires_monorepo and not broken and not flaky_quarantine" \
-            --ignore=tests/integration/otel
+            --ignore=tests/integration/otel \
+            --ignore=tests/integration/test_dlq_compression_workflow.py
         env:
           DJANGO_SETTINGS_MODULE: tests.testapp.settings
           REDIS_URL: redis://localhost:6379/1
           BALDUR_REDIS_URL: redis://localhost:6379/0
-          BALDUR_SQL_DSN: postgresql://postgres:postgres@localhost:5432/baldur_test
+          BALDUR_SQL_DSN: postgresql://postgres:postgres@localhost:15432/baldur_test
           TEST_REDIS_AVAILABLE: "true"
           TEST_DB_AVAILABLE: "true"
 

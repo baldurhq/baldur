@@ -1,6 +1,6 @@
 """G50 — tests/ may not reference a gated tier at RUNTIME without an importorskip.
 
-The public OSS mirror ships ``src/baldur/`` only — BOTH private tiers
+The public OSS repo ships ``src/baldur/`` only — BOTH private tiers
 ``baldur_pro`` AND ``baldur_dormant`` are absent. Two reference forms break a
 test there but slip past the existing boundary gates (impl doc 659 G4):
 
@@ -11,9 +11,9 @@ test there but slip past the existing boundary gates (impl doc 659 G4):
       runs only when the test runs, so it does not break collection (G19 keys on
       module-level imports) but errors that test.
 
-The skip mechanism that works on the mirror is ``pytest.importorskip(...)`` (the
-``requires_pro`` MARKER alone does NOT skip — the mirror runs every test). Because
-both tiers are absent together on the mirror, an ``importorskip`` for *either*
+The skip mechanism that works in the public repo is ``pytest.importorskip(...)`` (the
+``requires_pro`` MARKER alone does NOT skip — the public repo runs every test). Because
+both tiers are absent together in the public repo, an ``importorskip`` for *either*
 gated package fires there and skips the test before any gated reference runs.
 
 **Detection (per-file).** A file is flagged when it contains a gated runtime ref
@@ -27,12 +27,12 @@ ref executes PRO-absent depends on the fixture graph — a test skips via a fixt
 it requests, a helper runs only through guarded callers — which is not statically
 decidable across files. So G50 is a coarse-but-robust ratchet: it catches the
 common regression (a new file with gated refs and zero guard) with near-zero
-false positives, and delegates per-test precision to the committed repro harness
-``scripts/reproduce_oss_absent.py`` and the mirror CI (SC#1 / SC#5). A file that
+false positives, and delegates per-test precision to the public repo's native
+``ci`` workflow, which runs `tests/oss/` PRO-absent. A file that
 already carries a guard but adds a new unguarded ref is caught there, not here.
 
 ENFORCED-EMPTY baseline (659 D7): an entry would whitelist a tests/oss file that
-breaks on the mirror — the exact regression this gate blocks. Remediation is to
+breaks in the public repo — the exact regression this gate blocks. Remediation is to
 guard the seam (or relocate a PRO-SUT file to tests/pro/), never to baseline.
 
 Architectural fitness function rule registry:
@@ -122,7 +122,7 @@ def _handler_catches(handler: ast.ExceptHandler) -> bool:
 
 def _soft_lines(tree: ast.AST) -> set[int]:
     """Lines inside a ``try`` BODY whose handlers catch ImportError/Exception — a
-    gated import/patch there degrades gracefully, so it does not break the mirror."""
+    gated import/patch there degrades gracefully, so it does not break the public repo."""
     soft: set[int] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Try) and any(
@@ -229,7 +229,7 @@ class TestOssTestProRuntimeRefs:
         assert not violations, (
             f"G50: {len(violations)} unguarded gated runtime reference(s) in "
             "tests/. A patch('baldur_pro/baldur_dormant…') target or a "
-            "function-body gated import breaks on the public mirror (both private "
+            "function-body gated import breaks in the public repo (both private "
             "tiers absent). Add `pytest.importorskip('baldur_pro')` (per-test, a "
             "class autouse fixture, a fixture, or module top) — or relocate a "
             "PRO-SUT file to tests/pro/.\n" + "\n".join(violations)
@@ -237,7 +237,7 @@ class TestOssTestProRuntimeRefs:
 
     def test_baseline_is_enforced_empty(self):
         assert load_baseline(_RULE_KEY) == {}, (
-            f"G50: baseline key '{_RULE_KEY}' must stay empty. A mirror break in "
+            f"G50: baseline key '{_RULE_KEY}' must stay empty. A public-repo break in "
             "tests/ is guarded or relocated, never baselined."
         )
 
@@ -278,7 +278,7 @@ class TestG50Scanner:
 
     def test_in_file_importorskip_guards_all_refs(self, tmp_path: Path):
         # Per-file rule: any reachable importorskip marks the file guarded — a
-        # sibling guard counts. Per-test precision is delegated to the repro/mirror.
+        # sibling guard counts. Per-test precision is delegated to the public repo's native CI.
         src = (
             "import pytest\n"
             "from unittest.mock import patch\n"
