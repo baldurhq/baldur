@@ -24,7 +24,11 @@ from datetime import datetime
 
 import structlog
 
-from baldur.api.handlers._common import resolve_actor
+from baldur.api.handlers._common import (
+    dataclass_field_names,
+    reject_unknown_config_keys,
+    resolve_actor,
+)
 from baldur.interfaces.web_framework import RequestContext, ResponseContext
 from baldur.utils.time import utc_now
 
@@ -329,12 +333,21 @@ def reconciliation_config_update(ctx: RequestContext) -> ResponseContext:
         return ResponseContext.bad_request("No changes provided")
 
     service = _service()
+    rejection = reject_unknown_config_keys(
+        body,
+        dataclass_field_names(service.get_config()),
+        config_label="reconciliation",
+    )
+    if rejection is not None:
+        return rejection
+
     config = service.update_config(**body)
 
     return ResponseContext.json(
         {
             "status": "success",
             "message": "Reconciliation config updated",
+            "updated_fields": sorted(body.keys()),
             "data": config.to_dict(),
             "timestamp": utc_now().isoformat(),
         }

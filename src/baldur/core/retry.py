@@ -122,7 +122,10 @@ def retry_with_backoff(
             last_exception = e
             wait = 0.0
             if attempt < config.max_retries - 1:
-                wait = config.backoff.calculate(attempt)
+                # calculate() is 1-indexed (attempt=1 -> base_delay); the loop is
+                # 0-indexed, so the first retry must pass attempt+1 to honor the
+                # configured base_delay instead of base_delay/multiplier.
+                wait = config.backoff.calculate(attempt + 1)
                 total_wait += wait
 
             ctx = RetryContext(

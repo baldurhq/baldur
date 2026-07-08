@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import threading
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from typing import TYPE_CHECKING
 
 import structlog
@@ -45,41 +45,90 @@ _L2_TTL_PADDING_SECONDS = 60
 
 
 class MemoryRateLimitTracker:
-    """Thread-safe in-memory rate limit event tracker (L1)."""
+    """Thread-safe in-memory rate limit event tracker (L1).
 
-    def __init__(self):
+    Each per-service timestamp series is a ``deque`` trimmed on every write
+    (``record_*``) so memory is bounded by the retention window regardless of
+    whether reads are served from here or from L2. Writes append the current
+    timestamp then front-trim expired entries — O(1) amortized (one append plus
+    ~one ``popleft`` at steady state); reads are non-destructive counts. Before
+    this, pruning happened only inside the reads, and in the normal Redis-backed
+    mode reads are routed to L2, so the L1 series grew without bound at request
+    rate.
+    """
+
+    def __init__(self, retention_seconds: float | None = None):
+        """Initialise the tracker.
+
+        Args:
+            retention_seconds: Write-side trim window. When ``None`` it is
+                resolved lazily from circuit-breaker settings on first record,
+                reusing the exact bound L2 already applies
+                (``max(cascade_window, self_ddos_window,
+                _MIN_L2_RETENTION_SECONDS)``) so L1 and L2 retain identically.
+        """
         self._lock = threading.Lock()
-        self._rate_limit_events: dict[str, list[float]] = defaultdict(list)
-        self._request_events: dict[str, list[float]] = defaultdict(list)
+        self._rate_limit_events: dict[str, deque[float]] = defaultdict(deque)
+        self._request_events: dict[str, deque[float]] = defaultdict(deque)
         self._backoff_levels: dict[str, int] = defaultdict(int)
+        self._retention_seconds = retention_seconds
+
+    def _retention(self) -> float:
+        """Return the write-side trim window, resolving it lazily (and caching).
+
+        Idempotent — always resolves to the same value — so the unlocked
+        first-writer race is benign.
+        """
+        retention = self._retention_seconds
+        if retention is None:
+            from baldur.settings.circuit_breaker import get_circuit_breaker_settings
+
+            settings = get_circuit_breaker_settings()
+            retention = max(
+                settings.rate_limit_cascade_window_seconds,
+                settings.self_ddos_window_seconds,
+                _MIN_L2_RETENTION_SECONDS,
+            )
+            self._retention_seconds = retention
+        return retention
+
+    @staticmethod
+    def _append_and_trim(events: deque[float], now: float, cutoff: float) -> None:
+        """Append ``now`` then drop entries at/older than ``cutoff`` from the front."""
+        events.append(now)
+        while events and events[0] <= cutoff:
+            events.popleft()
 
     def record_rate_limit(self, service_name: str) -> None:
         """Record a 429 rate limit response."""
+        now = time.time()
+        cutoff = now - self._retention()
         with self._lock:
-            self._rate_limit_events[service_name].append(time.time())
+            self._append_and_trim(self._rate_limit_events[service_name], now, cutoff)
 
     def record_request(self, service_name: str) -> None:
         """Record a request attempt."""
+        now = time.time()
+        cutoff = now - self._retention()
         with self._lock:
-            self._request_events[service_name].append(time.time())
+            self._append_and_trim(self._request_events[service_name], now, cutoff)
 
     def get_rate_limit_count(self, service_name: str, window_seconds: int) -> int:
-        """Get the number of rate limits in the time window."""
+        """Get the number of rate limits in the time window.
+
+        Non-destructive: the write-side trim bounds memory, so the read only
+        counts. Valid because every caller's ``window_seconds`` is <= the
+        retention window, so no in-window entry has been trimmed.
+        """
         cutoff = time.time() - window_seconds
         with self._lock:
-            self._rate_limit_events[service_name] = [
-                t for t in self._rate_limit_events[service_name] if t > cutoff
-            ]
-            return len(self._rate_limit_events[service_name])
+            return sum(1 for t in self._rate_limit_events[service_name] if t > cutoff)
 
     def get_request_count(self, service_name: str, window_seconds: int) -> int:
-        """Get the number of requests in the time window."""
+        """Get the number of requests in the time window (non-destructive count)."""
         cutoff = time.time() - window_seconds
         with self._lock:
-            self._request_events[service_name] = [
-                t for t in self._request_events[service_name] if t > cutoff
-            ]
-            return len(self._request_events[service_name])
+            return sum(1 for t in self._request_events[service_name] if t > cutoff)
 
     def get_backoff_level(self, service_name: str) -> int:
         """Get current backoff level for a service."""

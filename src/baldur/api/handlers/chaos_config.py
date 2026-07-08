@@ -18,6 +18,10 @@ from __future__ import annotations
 
 import structlog
 
+from baldur.api.handlers._common import (
+    dataclass_field_names,
+    reject_unknown_config_keys,
+)
 from baldur.interfaces.web_framework import RequestContext, ResponseContext
 
 logger = structlog.get_logger()
@@ -73,9 +77,23 @@ def safety_guard_config_update(ctx: RequestContext) -> ResponseContext:
         return ResponseContext.bad_request("Request body is required")
 
     guard = _safety_guard()
+    rejection = reject_unknown_config_keys(
+        body,
+        dataclass_field_names(guard.get_config()),
+        config_label="safety_guard",
+    )
+    if rejection is not None:
+        return rejection
+
     updated = guard.update_config(**body)
     logger.info("chaos_api.safetyguard_config_updated")
-    return ResponseContext.json({"status": "success", "data": updated.to_dict()})
+    return ResponseContext.json(
+        {
+            "status": "success",
+            "updated_fields": sorted(body.keys()),
+            "data": updated.to_dict(),
+        }
+    )
 
 
 def chaos_blast_radius_policy_get(ctx: RequestContext) -> ResponseContext:
@@ -92,9 +110,23 @@ def chaos_blast_radius_policy_update(ctx: RequestContext) -> ResponseContext:
         return ResponseContext.bad_request("Request body is required")
 
     manager = _blast_radius_manager()
+    rejection = reject_unknown_config_keys(
+        body,
+        dataclass_field_names(manager.get_policy()),
+        config_label="blast_radius",
+    )
+    if rejection is not None:
+        return rejection
+
     updated = manager.update_policy(**body)
     logger.info("chaos_api.blastradius_policy_updated")
-    return ResponseContext.json({"status": "success", "data": updated.to_dict()})
+    return ResponseContext.json(
+        {
+            "status": "success",
+            "updated_fields": sorted(body.keys()),
+            "data": updated.to_dict(),
+        }
+    )
 
 
 def scheduler_config_get(ctx: RequestContext) -> ResponseContext:
@@ -111,9 +143,23 @@ def scheduler_config_update(ctx: RequestContext) -> ResponseContext:
         return ResponseContext.bad_request("Request body is required")
 
     scheduler = _scheduler()
+    rejection = reject_unknown_config_keys(
+        body,
+        dataclass_field_names(scheduler.get_config()),
+        config_label="scheduler",
+    )
+    if rejection is not None:
+        return rejection
+
     updated = scheduler.update_config(**body)
     logger.info("chaos_api.scheduler_config_updated")
-    return ResponseContext.json({"status": "success", "data": updated.to_dict()})
+    return ResponseContext.json(
+        {
+            "status": "success",
+            "updated_fields": sorted(body.keys()),
+            "data": updated.to_dict(),
+        }
+    )
 
 
 def report_config_get(ctx: RequestContext) -> ResponseContext:
@@ -130,6 +176,20 @@ def report_config_update(ctx: RequestContext) -> ResponseContext:
         return ResponseContext.bad_request("Request body is required")
 
     generator = _report_generator()
+    rejection = reject_unknown_config_keys(
+        body,
+        dataclass_field_names(generator.get_config()),
+        config_label="report",
+    )
+    if rejection is not None:
+        return rejection
+
     updated = generator.update_config(**body)
     logger.info("chaos_api.report_config_updated")
-    return ResponseContext.json({"status": "success", "data": updated.to_dict()})
+    return ResponseContext.json(
+        {
+            "status": "success",
+            "updated_fields": sorted(body.keys()),
+            "data": updated.to_dict(),
+        }
+    )

@@ -475,12 +475,15 @@ class TestDiskBufferAdapter:
         assert len(processed) == 1
 
     def test_adapter_stats(self, disk_buffer):
-        """어댑터 통계 테스트."""
+        """Adapter stats report the AuditBufferProtocol keys authoritatively."""
         from baldur.audit.persistence.disk_buffer import DiskBufferAdapter
 
         adapter = DiskBufferAdapter(disk_buffer)
         adapter.add({"event": "stats_test"})
 
         stats = adapter.get_stats()
-        assert "total_buffered" in stats
-        assert stats["total_buffered"] == 1
+        assert stats["total_added"] == 1
+        assert stats["total_dropped"] == 0
+        # Backend (LMDB) stats are namespaced, not splatted at top level.
+        assert "backend" in stats
+        assert "total_buffered" not in stats
