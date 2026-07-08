@@ -27,8 +27,8 @@ ref executes PRO-absent depends on the fixture graph — a test skips via a fixt
 it requests, a helper runs only through guarded callers — which is not statically
 decidable across files. So G50 is a coarse-but-robust ratchet: it catches the
 common regression (a new file with gated refs and zero guard) with near-zero
-false positives, and delegates per-test precision to the committed repro harness
-``scripts/reproduce_oss_absent.py`` and the mirror CI (SC#1 / SC#5). A file that
+false positives, and delegates per-test precision to the public repo's native
+``ci`` workflow, which runs `tests/oss/` PRO-absent. A file that
 already carries a guard but adds a new unguarded ref is caught there, not here.
 
 ENFORCED-EMPTY baseline (659 D7): an entry would whitelist a tests/oss file that
@@ -278,7 +278,7 @@ class TestG50Scanner:
 
     def test_in_file_importorskip_guards_all_refs(self, tmp_path: Path):
         # Per-file rule: any reachable importorskip marks the file guarded — a
-        # sibling guard counts. Per-test precision is delegated to the repro/mirror.
+        # sibling guard counts. Per-test precision is delegated to the public repo's native CI.
         src = (
             "import pytest\n"
             "from unittest.mock import patch\n"
