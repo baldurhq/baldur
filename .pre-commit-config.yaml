@@ -11,9 +11,16 @@ repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.10
     hooks:
+      # Scoped to src/ + tests/ so the hook genuinely mirrors the CI lint job
+      # (`ruff check src/ tests/`). scripts/ are dev utilities outside the linted
+      # surface — CI never checks them and they carry pre-existing
+      # complexity/idiom violations by design; an unscoped hook would block a
+      # scripts/ commit on violations the CI gate does not enforce.
       - id: ruff-check
         args: [--fix]
+        files: '^(src|tests)/'
       - id: ruff-format
+        files: '^(src|tests)/'
   - repo: local
     hooks:
       - id: leak-guard-content

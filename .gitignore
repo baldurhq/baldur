@@ -32,6 +32,9 @@ htmlcov/
 coverage.xml
 *.cover
 
+# Generated gate artifacts (verify_wiring.py --json writes this alongside stdout)
+wiring_report.json
+
 # Docs build output
 site/
 

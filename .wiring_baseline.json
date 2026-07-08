@@ -1,0 +1,53 @@
+{
+  "allowlisted": 1,
+  "connected": 23,
+  "dep_graph_warnings": [
+    "Orphan 'capacity_reservation' not in ServiceDependencyGraph — consider adding to _initialize_orphan_services()"
+  ],
+  "eventbus_subscribers": 6,
+  "indirect": 1,
+  "middleware_wiring": {},
+  "missing_feature_flags": [
+    "backoff_calculator",
+    "blast_radius",
+    "capacity_reservation",
+    "cell_topology",
+    "circuit_breaker",
+    "config",
+    "config_history",
+    "config_shadow",
+    "control_api_service",
+    "daily_report",
+    "dashboard_service",
+    "dlq_outbox",
+    "event_journal",
+    "execution_services",
+    "feature_manifest",
+    "idempotency",
+    "isolation",
+    "metrics",
+    "precomputed_cache",
+    "rate_limit",
+    "rate_limit_coordinator",
+    "regional_emergency",
+    "replay_service",
+    "retry_handler",
+    "security",
+    "security_notification",
+    "settings_recommendation",
+    "stress_test_service"
+  ],
+  "orphan": 1,
+  "orphans": [
+    {
+      "name": "capacity_reservation",
+      "path": "services/capacity_reservation/",
+      "suggested_entry_points": [
+        "appconfig",
+        "celery_beat"
+      ]
+    }
+  ],
+  "pass": false,
+  "total_services": 28
+}
