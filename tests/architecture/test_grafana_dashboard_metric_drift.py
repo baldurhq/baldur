@@ -41,7 +41,7 @@ import pytest
 from tests.architecture._promql import unregistered_tokens
 from tests.architecture.conftest import PROJECT_ROOT
 
-# prometheus_client backs the registry snapshot; the OSS monorepo installs it,
+# prometheus_client backs the registry snapshot; the private repo installs it,
 # but skip cleanly on a stripped checkout rather than erroring at import.
 pytest.importorskip("prometheus_client")
 

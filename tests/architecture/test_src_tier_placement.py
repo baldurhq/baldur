@@ -1,8 +1,8 @@
 """G39 — Deferred/Dormant-tier implementations MUST NOT live under ``src/baldur``.
 
 Impl doc 599 D13. Both public surfaces ship ``src/baldur`` wholesale — the PyPI
-wheel (``pyproject.toml`` wheel target) and the planned public GitHub mirror
-(release checklist 7.5G-1) — so a Deferred/Dormant-tier implementation that
+wheel (``pyproject.toml`` wheel target) and the public GitHub repo
+(``baldurhq/baldur``) — so a Deferred/Dormant-tier implementation that
 lands under ``src/baldur`` becomes public at first publish, and graduating a
 Deferred feature to a paid PRO feature afterwards gives the implementation
 away. Doc 599 physically relocated the ten mover subtrees to

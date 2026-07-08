@@ -18,8 +18,8 @@ that doc's ``Test Assessment`` section:
   resolution, ``src_root`` filter, unimportable/empty skip
   (TestResolveAllChainFilesContract) — impl doc 557
 - ``_locate_project_root`` marker-climb + ``OSS_TESTS_ROOT`` layout-agnostic
-  resolution under both the monorepo (``tests/architecture/``) and the
-  renamed public-mirror (``tests/architecture/``) layouts
+  resolution under both the private repo (``tests/architecture/``) and the
+  renamed public repo (``tests/architecture/``) layouts
   (TestLayoutAgnosticRoots) — impl doc 642 D2
 - ``oss_src_root`` find_spec-hit vs in-tree fallback branches + injectability
   (TestOssSrcRoot), ``consumer_src_roots`` 3-root composition tracking
@@ -684,20 +684,20 @@ def _load_helpers_copy(helpers_path: Path, label: str):
 class TestLayoutAgnosticRoots:
     """`_locate_project_root` + `OSS_TESTS_ROOT` resolve in both layouts (642 D2).
 
-    The published mirror renames ``tests/`` -> ``tests/`` (``--path-rename``),
+    The public repo renames ``tests/`` -> ``tests/`` (``--path-rename``),
     so ``_helpers.py`` moves from ``tests/architecture/`` (root four levels up)
     to ``tests/architecture/`` (root three levels up). The pre-642 code hardcoded
     a fixed ``parents[3]`` PROJECT_ROOT and ``PROJECT_ROOT/"tests"/"oss"`` walk
-    root: in the renamed mirror that climbed one level too high (the whole
+    root: in the renamed public-repo layout that climbed one level too high (the whole
     ``architecture/`` suite vacuous-passed) and walked a nonexistent dir (G19/20/21
     silently no-op'd). The fix climbs to the ``pyproject.toml`` marker for
     PROJECT_ROOT and derives ``OSS_TESTS_ROOT`` from ``parents[1]``; both must hold
-    under the monorepo AND the mirror layout (the gates run in both).
+    under the private repo AND the public layout (the gates run in both).
     """
 
     SOURCE_HELPERS = Path(arch_helpers.__file__).resolve()
 
-    @pytest.fixture(params=["monorepo", "mirror"])
+    @pytest.fixture(params=["private", "public"])
     def shim_layout(
         self, request: pytest.FixtureRequest, tmp_path: Path
     ) -> tuple[str, Path, Path, Path]:
@@ -710,14 +710,14 @@ class TestLayoutAgnosticRoots:
         """
         layout: str = request.param
         root = tmp_path / "repo"
-        if layout == "monorepo":
+        if layout == "private":
             arch_dir = root / "tests" / "oss" / "architecture"
             expected_tests_root = root / "tests" / "oss"
-        else:  # mirror — tests/ renamed to tests/
+        else:  # public — tests/ renamed to tests/
             arch_dir = root / "tests" / "architecture"
             expected_tests_root = root / "tests"
         arch_dir.mkdir(parents=True)
-        # pyproject.toml marker — present in both layouts (it ships to the mirror).
+        # pyproject.toml marker — present in both layouts (it ships to the public repo).
         (root / "pyproject.toml").write_text(
             '[project]\nname = "shim"\n', encoding="utf-8"
         )
@@ -750,7 +750,7 @@ class TestLayoutAgnosticRoots:
     def test_oss_tests_root_resolves_to_tests_root_in_both_layouts(
         self, shim_layout: tuple[str, Path, Path, Path]
     ):
-        # OSS_TESTS_ROOT == tests/oss (monorepo) / tests (mirror) — parents[1].
+        # OSS_TESTS_ROOT == tests/oss (private) / tests (public) — parents[1].
         layout, _root, expected_tests_root, helpers_copy = shim_layout
         module = _load_helpers_copy(helpers_copy, layout)
         assert module.OSS_TESTS_ROOT == expected_tests_root.resolve()
@@ -759,7 +759,7 @@ class TestLayoutAgnosticRoots:
         self, shim_layout: tuple[str, Path, Path, Path]
     ):
         # SC #6 anti-vacuous: the gates walk OSS_TESTS_ROOT — it MUST point at a
-        # real, non-empty dir in both layouts (the mirror bug was an empty scan).
+        # real, non-empty dir in both layouts (the public-layout bug was an empty scan).
         layout, _root, _expected_tests_root, helpers_copy = shim_layout
         module = _load_helpers_copy(helpers_copy, layout)
         assert module.OSS_TESTS_ROOT.exists()
@@ -775,15 +775,17 @@ class TestLayoutAgnosticRoots:
         module = _load_helpers_copy(helpers_copy, layout)
         assert (module.PROJECT_ROOT / "src" / "baldur").is_dir()
 
-    def test_mirror_layout_old_hardcoded_walk_root_would_be_vacuous(
+    def test_public_layout_old_hardcoded_walk_root_would_be_vacuous(
         self, shim_layout: tuple[str, Path, Path, Path]
     ):
-        # Regression contrast: in the mirror, the pre-642 hardcoded
+        # Regression contrast: in the public layout, the pre-642 hardcoded
         # PROJECT_ROOT/"tests"/"oss" walk root does NOT exist (a vacuous pass),
         # while OSS_TESTS_ROOT does. This is exactly the silent no-op the fix kills.
         layout, _root, _expected_tests_root, helpers_copy = shim_layout
-        if layout != "mirror":
-            pytest.skip("contrast is mirror-specific (monorepo path still exists)")
+        if layout != "public":
+            pytest.skip(
+                "contrast is public-layout-specific (private layout path still exists)"
+            )
         module = _load_helpers_copy(helpers_copy, layout)
         old_hardcoded = module.PROJECT_ROOT / "tests" / "oss"
         assert not old_hardcoded.exists()
@@ -798,7 +800,7 @@ class TestOssSrcRoot:
     so the consumer-reachability scan finds ``baldur`` whether it is in-tree
     (``src/baldur``) or an installed dependency (the private-repo case, where OSS
     is a pip dependency). The fallback branch (no spec / no search locations)
-    never runs in the monorepo — where ``baldur`` is always importable — so it is
+    never runs in the private repo — where ``baldur`` is always importable — so it is
     exercised here by patching ``find_spec``. The resolver is intentionally
     patchable so a test can point the scan at a fixture tree without a real
     install.
@@ -894,7 +896,7 @@ class TestOssSrcRoot:
         )
 
     def test_live_resolution_points_at_real_baldur_package(self):
-        # Un-patched: in the monorepo `baldur` is importable, so the find_spec-hit
+        # Un-patched: in the private repo `baldur` is importable, so the find_spec-hit
         # branch returns the real package dir (named `baldur`, holding __init__.py).
         root = arch_helpers.oss_src_root()
         assert root.name == "baldur"

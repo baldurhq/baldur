@@ -1,14 +1,13 @@
 """Unit test for the tests/pro/ collection guard (533 D13).
 
 ``tests/pro/conftest.py`` skips the whole private subtree when ``baldur_pro`` is
-absent, so a monorepo checkout without the PRO package collects clean instead of
+absent, so a private-repo checkout without the PRO package collects clean instead of
 crashing with ``ModuleNotFoundError`` on the ~340 moved files. This test loads
 that conftest by file path and exercises ``pytest_ignore_collect`` under both
 availability branches (533 D13 Test Assessment row).
 
-The conftest under test lives in the private tree (not in the 7.5G-1 mirror
-allowlist), so in a public OSS checkout the file is absent — the module-level
-skipif keeps this test mirror-safe. The test references ``baldur_pro`` only as a
+The conftest under test lives in the private tree (not published to the public repo), so in a public OSS checkout the file is absent — the module-level
+skipif keeps this test public-repo-safe. The test references ``baldur_pro`` only as a
 ``find_spec`` string, never importing a PRO symbol, so it leaks no PRO shape.
 """
 
@@ -25,7 +24,7 @@ _PRO_CONFTEST = PROJECT_ROOT / "tests" / "pro" / "conftest.py"
 
 pytestmark = pytest.mark.skipif(
     not _PRO_CONFTEST.exists(),
-    reason="tests/pro/conftest.py absent (public OSS mirror checkout); guard is private-tree only",
+    reason="tests/pro/conftest.py absent (public OSS repo checkout); guard is private-tree only",
 )
 
 

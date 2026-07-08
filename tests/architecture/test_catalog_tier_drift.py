@@ -33,7 +33,7 @@ catalog's four mechanically-checkable surfaces honest.
 **OSS-only-checkout robust.** A `**Module**:` path that is absent under
 `src/baldur` AND whose only possible private homes (`baldur_pro` /
 `baldur_dormant`) are not present in the checkout is SKIPPED rather than flagged
-(G19 precedent) — the public mirror collects this gate but ships no private
+(G19 precedent) — the public repo collects this gate but ships no private
 source tree.
 
 The catalog parser is the SHARED `_helpers` parser (also used by G36), so the
@@ -67,12 +67,12 @@ from tests.architecture.conftest import collect_violations, iter_inline_code_spa
 _RULE_KEY = "catalog_tier_drift"
 _RULE_ANCHOR = "#g37-catalog-tier-drift"
 
-# FEATURE_CATALOG.md is a monorepo-only artifact (publish FORBIDDEN_PATHS), so
-# it is absent on the public OSS mirror. G37 is fully covered by the monorepo
+# FEATURE_CATALOG.md is a private-repo-only artifact (not published to the public repo), so
+# it is absent in the public OSS repo. G37 is fully covered by the private-repo
 # run; an in-body skip (not a module-level skipif marker) keeps the skip path
-# monkeypatch-testable and the synthetic anti-vacuous fixtures running on the
-# mirror.
-_CATALOG_ABSENT_REASON = "FEATURE_CATALOG.md is monorepo-only (FORBIDDEN_PATHS)"
+# monkeypatch-testable and the synthetic anti-vacuous fixtures running in the
+# public repo.
+_CATALOG_ABSENT_REASON = "FEATURE_CATALOG.md is private-repo-only (not published)"
 
 
 def _skip_if_catalog_absent() -> None:
@@ -355,11 +355,11 @@ class TestModulePathStatus:
         assert catalog_module_path_status("services/circuit_breaker/") == "ok"
 
     def test_existing_pro_path_ok(self):
-        # baldur_pro is installed in the monorepo checkout → "ok". On the public
-        # OSS mirror baldur_pro is physically absent, so the helper conservatively
+        # baldur_pro is installed in the private-repo checkout → "ok". In the public
+        # OSS repo baldur_pro is physically absent, so the helper conservatively
         # returns "skip" (a private-tier path is unverifiable there). The test
         # tracks the helper's documented OSS-only-checkout semantics on both
-        # layouts rather than vacuous-passing or hard-failing on the mirror.
+        # layouts rather than vacuous-passing or hard-failing in the public repo.
         pro_present = CATALOG_SRC_ROOTS["baldur_pro"].exists()
         assert catalog_module_path_status("services/dlq/") == (
             "ok" if pro_present else "skip"
@@ -368,7 +368,7 @@ class TestModulePathStatus:
     def test_missing_path_is_missing(self):
         # The stale path 589 fixes — absent everywhere. "missing" is only
         # determinable when a private root is present (so absence-everywhere can be
-        # confirmed); on the OSS mirror both private roots are absent and the
+        # confirmed); in the public OSS repo both private roots are absent and the
         # helper returns "skip" instead.
         any_private_present = any(
             CATALOG_SRC_ROOTS[k].exists() for k in ("baldur_pro", "baldur_dormant")
@@ -381,10 +381,10 @@ class TestModulePathStatus:
 class TestG37CatalogAbsentSkip:
     """663 D4 — every live catalog read site skips when FEATURE_CATALOG.md is absent.
 
-    The catalog is a monorepo-only artifact (publish FORBIDDEN_PATHS); G37 is fully
-    covered by the monorepo run. The in-body skip (not a module-level ``skipif``)
+    The catalog is a private-repo-only artifact (not published to the public repo); G37 is fully
+    covered by the private-repo run. The in-body skip (not a module-level ``skipif``)
     is what keeps this monkeypatch-testable and the synthetic anti-vacuous fixtures
-    running on the mirror. ``_entries()`` is the chokepoint for two methods; the
+    running in the public repo. ``_entries()`` is the chokepoint for two methods; the
     other two read the catalog directly, so all three guard sites are checked.
     """
 

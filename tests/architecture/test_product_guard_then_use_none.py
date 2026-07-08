@@ -11,7 +11,7 @@ exists and the file still imports cleanly. It is the claim-wiring fail-open clas
 This gate is the product-side counterpart to the test-side G50. It is enforced
 on the **OSS-core surface only**, with a documented two-mechanism exclusion set
 (659 D8 / Risk R2 — the accepted cost of bounding the "C/middle" scope to the
-surface where a G1-style regression actually reaches the mirror via a legitimate
+surface where a G1-style regression actually reaches the public repo via a legitimate
 OSS code path):
 
   1. **PRO-feature entry-point directories** (``api/``, ``tasks/``,
@@ -319,7 +319,7 @@ def _scan_scope(
 
 def scan_source(source: str, filename: str = "<planted>") -> list[tuple[int, str, str]]:
     """Return HARD ``(lineno, name, kind)`` guard-then-use-None hits. Pure AST;
-    never imports a gated package, so it runs unchanged in the public mirror."""
+    never imports a gated package, so it runs unchanged in the public repo."""
     try:
         tree = ast.parse(source, filename=filename)
     except SyntaxError:

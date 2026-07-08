@@ -43,26 +43,26 @@ import yaml
 def _locate_project_root() -> Path:
     """Climb from this file to the nearest ancestor holding ``pyproject.toml``.
 
-    Layout-agnostic: ``tests/architecture/`` in the monorepo (root four
-    levels up) and ``tests/architecture/`` in the published mirror (root three
+    Layout-agnostic: ``tests/architecture/`` in the private repo (root four
+    levels up) and ``tests/architecture/`` in the public repo (root three
     levels up, after the ``tests/`` -> ``tests/`` rename) both resolve
-    correctly. Replaces a fixed ``parents[3]``, which in the renamed mirror
+    correctly. Replaces a fixed ``parents[3]``, which in the renamed public-repo layout
     climbed one level too high — making ``PROJECT_ROOT/"src"/"baldur"``
     misresolve and silently vacuous-passing every ``architecture/`` gate.
-    ``pyproject.toml`` ships to the mirror (it is in the publish allowlist), so
+    ``pyproject.toml`` ships to the public repo, so
     the marker is present in both layouts.
     """
     here = Path(__file__).resolve()
     for candidate in here.parents:
         if (candidate / "pyproject.toml").is_file():
             return candidate
-    # Defensive fallback to the monorepo depth when no marker is found.
+    # Defensive fallback to the private-repo depth when no marker is found.
     return here.parents[3]
 
 
 PROJECT_ROOT = _locate_project_root()
 # The OSS test root, resolved relative to this module (which lives in
-# ``architecture/``): ``tests/oss`` in the monorepo, ``tests`` in the mirror
+# ``architecture/``): ``tests/oss`` in the private repo, ``tests`` in the public repo
 # after ``--path-rename tests/:tests/``. The three PRO-leak gates
 # (G19/G20/G21) walk this instead of the hardcoded ``PROJECT_ROOT/"tests"/"oss"``
 # so they scan a non-empty file set in BOTH layouts (no vacuous pass).
@@ -573,7 +573,7 @@ def directive_targets(reference_dir: Path = REFERENCE_DIR) -> Iterator[str]:
 # They are kept GENERIC here — ``resolve_all_chain_files`` takes the package
 # tuple + src root as PARAMETERS and this module never names or statically
 # imports a private (``baldur_pro`` / ``baldur_dormant``) package — so the
-# file stays mirror-safe and OSS-collectable while a private gate under
+# file stays public-repo-safe and OSS-collectable while a private gate under
 # ``tests/pro/architecture/`` injects its own ``baldur_pro.services.*`` tuple.
 # ---------------------------------------------------------------------------
 
@@ -643,7 +643,7 @@ def find_doc_ids(text: str, allowlist: frozenset[str] = DOC_ID_ALLOWLIST) -> lis
 # ``baldur_pro.services.bulkhead`` is NOT a doc-ID), so ``baldur_pro`` detection
 # is additive and local to the prose surface here. Like the existing
 # ``baldur_dormant`` literal above, every additive pattern is a regex STRING
-# (not an import), so this file stays mirror-safe and OSS-collectable.
+# (not an import), so this file stays public-repo-safe and OSS-collectable.
 #
 # The ④-b class (a public-looking internal symbol — no underscore, not in
 # ``__all__``) is intentionally NOT mechanized: a zero-false-positive gate
@@ -784,7 +784,7 @@ def resolve_all_chain_files(
 
     Generic by construction: ``packages`` and ``src_root`` are injected, so
     this helper names no specific (public or private) package and stays
-    mirror-safe. Callers supply their own rendered-package tuple and root.
+    public-repo-safe. Callers supply their own rendered-package tuple and root.
     """
     files: set[Path] = set()
     for package_name in packages:
