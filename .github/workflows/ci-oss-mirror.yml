@@ -155,8 +155,12 @@ jobs:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: baldur_test
+        # Host port 15432 matches tests/integration/conftest.py's
+        # DatabaseTestConfig.DEFAULT_PORT — the postgres integration tests open a
+        # psycopg2 connection to localhost:15432 directly (they do not honor
+        # BALDUR_SQL_DSN), mirroring a host-side docker-compose.test.yml run.
         ports:
-          - 5432:5432
+          - 15432:5432
         options: >-
           --health-cmd pg_isready
           --health-interval 5s
@@ -184,7 +188,7 @@ jobs:
           DJANGO_SETTINGS_MODULE: tests.testapp.settings
           REDIS_URL: redis://localhost:6379/1
           BALDUR_REDIS_URL: redis://localhost:6379/0
-          BALDUR_SQL_DSN: postgresql://postgres:postgres@localhost:5432/baldur_test
+          BALDUR_SQL_DSN: postgresql://postgres:postgres@localhost:15432/baldur_test
           TEST_REDIS_AVAILABLE: "true"
           TEST_DB_AVAILABLE: "true"
 
