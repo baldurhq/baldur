@@ -331,8 +331,9 @@ class TestRetryWithBackoffWaitDurationBehavior:
 
         # Then sleep got the calculated values (not just the right count)
         assert mock_sleep.call_args_list == [call(3.0), call(5.0)]
-        # and calculate was queried with the 0-based attempt index
-        assert backoff.calculate.call_args_list == [call(0), call(1)]
+        # and calculate was queried with the 1-indexed attempt number (first
+        # retry -> attempt=1), honoring the backoff strategy's contract.
+        assert backoff.calculate.call_args_list == [call(1), call(2)]
 
     def test_on_retry_context_carries_wait_time_and_elapsed_total(self):
         """RetryContext given to on_retry carries the wait and cumulative elapsed."""

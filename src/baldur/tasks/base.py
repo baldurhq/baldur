@@ -32,6 +32,7 @@ Usage:
 
 from __future__ import annotations
 
+import threading
 from datetime import datetime
 from typing import Any, ClassVar
 
@@ -80,8 +81,12 @@ class BaseNotifyingTask:
     # Class-level policy (override in subclass)
     notification_policy: NotificationPolicy = NotificationPolicy()
 
-    # Class-level cooldown state (shared across instances)
+    # Class-level cooldown state (shared across instances and worker threads).
+    # Guarded by ``_alert_lock`` for all writes; the read-only gate reads a
+    # single GIL-atomic reference. The reserve-then-send pattern below closes
+    # the check-then-act window that let two threads both page for one event.
     _last_alert_times: ClassVar[dict[str, datetime]] = {}
+    _alert_lock: ClassVar[threading.Lock] = threading.Lock()
 
     # Task metadata (set by Celery if used as base)
     name: str = "unknown"
@@ -164,7 +169,8 @@ class BaseNotifyingTask:
         """Post-execution hook for result notifications."""
         policy = self.notification_policy
 
-        # Check if notification should be sent
+        # Check if notification should be sent (non-cooldown gates + a
+        # read-only cooldown pre-check for an early-out).
         if not self._should_notify(result):
             return
 
@@ -172,14 +178,29 @@ class BaseNotifyingTask:
         effective_timing = self._get_effective_timing()
 
         if policy.aggregate and effective_timing != NotificationTiming.REALTIME:
-            # Add to daily report
+            # Aggregation does not consume the alert cooldown — every result
+            # must land in the daily report — so no reservation here.
             self._add_to_daily_report(result)
-        else:
-            # Send immediate notification
-            self._send_notification(result)
+            self._record_audit_trail(result)
+            return
 
-        # Record to Audit Trail
-        self._record_audit_trail(result)
+        # Immediate send: reserve the cooldown slot atomically so two worker
+        # threads that both passed the read-only pre-check above cannot both
+        # page for the same event. A failed send rolls the reservation back so
+        # a transient error does not start a cooldown that suppresses the retry.
+        alert_key = f"{self.name}:{self._get_alert_key(result)}"
+        reserved, previous = self._reserve_alert_slot(alert_key)
+        if not reserved:
+            logger.debug(
+                "celery_task.alert_suppressed_cooldown",
+                alert_key=alert_key,
+            )
+            return
+
+        if self._send_notification(result):
+            self._record_audit_trail(result)
+        else:
+            self._rollback_alert_slot(alert_key, previous)
 
     def _should_notify(self, result: dict[str, Any]) -> bool:
         """
@@ -255,7 +276,12 @@ class BaseNotifyingTask:
             return False
 
     def _can_send_alert(self, alert_key: str) -> bool:
-        """Check if alert can be sent based on cooldown."""
+        """Read-only cooldown gate.
+
+        Reads a single GIL-atomic reference (the ``dict.get``) so it is safe
+        without the lock; the atomic reserve below is the authoritative gate
+        for the immediate-send path.
+        """
         last_time = self._last_alert_times.get(alert_key)
         if last_time is None:
             return True
@@ -263,12 +289,65 @@ class BaseNotifyingTask:
         elapsed = (utc_now() - last_time).total_seconds()
         return elapsed >= self.notification_policy.cooldown_seconds
 
+    def _reserve_alert_slot(self, alert_key: str) -> tuple[bool, datetime | None]:
+        """Atomically reserve the cooldown slot for ``alert_key``.
+
+        Under ``_alert_lock``: evict expired keys, re-check the cooldown, and —
+        if allowed — write a tentative timestamp (the reservation) so a
+        concurrent worker sees the cooldown immediately. Returns
+        ``(reserved, previous_timestamp)``; ``previous_timestamp`` lets a failed
+        send roll the reservation back via :meth:`_rollback_alert_slot`.
+        """
+        now = utc_now()
+        cooldown = self.notification_policy.cooldown_seconds
+        with self._alert_lock:
+            self._evict_expired_locked(now, cooldown)
+            previous = self._last_alert_times.get(alert_key)
+            if previous is not None and (now - previous).total_seconds() < cooldown:
+                return False, previous
+            self._last_alert_times[alert_key] = now
+            return True, previous
+
+    def _rollback_alert_slot(self, alert_key: str, previous: datetime | None) -> None:
+        """Undo a reservation after a failed send so the cooldown does not start."""
+        with self._alert_lock:
+            if previous is None:
+                self._last_alert_times.pop(alert_key, None)
+            else:
+                self._last_alert_times[alert_key] = previous
+
+    def _evict_expired_locked(self, now: datetime, cooldown: float) -> None:
+        """Drop cooldown entries past their window (caller holds ``_alert_lock``).
+
+        Bounds the shared class-level dict — a key would otherwise be retained
+        forever after its first alert. An entry older than ``cooldown`` no
+        longer blocks a new alert, so removing it is behavior-preserving.
+        """
+        if cooldown <= 0:
+            return
+        expired = [
+            key
+            for key, ts in self._last_alert_times.items()
+            if (now - ts).total_seconds() >= cooldown
+        ]
+        for key in expired:
+            del self._last_alert_times[key]
+
     def _record_alert_sent(self, alert_key: str) -> None:
         """Record that an alert was sent for cooldown tracking."""
-        self._last_alert_times[alert_key] = utc_now()
+        now = utc_now()
+        with self._alert_lock:
+            self._evict_expired_locked(now, self.notification_policy.cooldown_seconds)
+            self._last_alert_times[alert_key] = now
 
-    def _send_notification(self, result: dict[str, Any]) -> None:
-        """Send notification via unified notification manager."""
+    def _send_notification(self, result: dict[str, Any]) -> bool:
+        """Send notification via unified notification manager.
+
+        The cooldown slot is reserved by the caller before this runs, so no
+        recording happens here. Returns ``True`` when the notification is
+        dispatched and ``False`` on failure, so the caller can roll the
+        reservation back.
+        """
         try:
             message = self._get_summary_message(result)
             severity = self._get_severity(result)
@@ -287,21 +366,19 @@ class BaseNotifyingTask:
                 },
             )
 
-            # Record for cooldown
-            alert_key = f"{self.name}:{self._get_alert_key(result)}"
-            self._record_alert_sent(alert_key)
-
             logger.info(
                 "celery_task.notification_sent",
                 task_name=self.name,
                 severity=severity,
             )
+            return True
 
         except Exception as e:
             logger.exception(
                 "celery_task.send_notification_failed",
                 error=e,
             )
+            return False
 
     def _send_pre_notification(self, *args: Any, **kwargs: Any) -> None:
         """Send pre-execution notification for high-risk tasks."""
@@ -545,12 +622,14 @@ class BaseNotifyingTask:
 
 def reset_cooldowns() -> None:
     """Reset all alert cooldowns (for testing)."""
-    BaseNotifyingTask._last_alert_times.clear()
+    with BaseNotifyingTask._alert_lock:
+        BaseNotifyingTask._last_alert_times.clear()
 
 
 def get_cooldown_status() -> dict[str, str]:
     """Get current cooldown status (for debugging)."""
-    return {
-        key: value.isoformat()
-        for key, value in BaseNotifyingTask._last_alert_times.items()
-    }
+    with BaseNotifyingTask._alert_lock:
+        return {
+            key: value.isoformat()
+            for key, value in BaseNotifyingTask._last_alert_times.items()
+        }

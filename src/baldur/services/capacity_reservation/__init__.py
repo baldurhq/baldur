@@ -19,6 +19,9 @@ from baldur.services.capacity_reservation.pre_warmer import (
     SafetyValveMetricsProvider,
     WarmUpResult,
 )
+from baldur.services.capacity_reservation.safety_valve_provider import (
+    SystemMetricsSafetyValveProvider,
+)
 from baldur.services.capacity_reservation.service import (
     CapacityReservationService,
 )
@@ -33,5 +36,6 @@ __all__ = [
     "PreWarmer",
     "SafetyValveMetricsProvider",
     "ScheduledEvent",
+    "SystemMetricsSafetyValveProvider",
     "WarmUpResult",
 ]

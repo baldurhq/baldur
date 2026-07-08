@@ -10,6 +10,10 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+### Changed
+
+- Admin config-write endpoints now reject an unrecognized field with `400 Bad Request` instead of silently dropping it or returning `500`. Previously, PATCHing a chaos safety limit or an error-budget config with a mistyped key returned `200 success` while applying nothing — the typo was invisible and discoverable only by diffing the echoed config. Now any unknown key rejects the whole body with `400` (listing `unknown_fields` and `allowed_fields`), nothing is applied, and an all-valid body applies fully and echoes `updated_fields`. **Breaking:** a client that sends an unrecognized field to one of these admin endpoints now receives `400` where it previously received `200` (a silent no-op) or `500`.
+
 ### Security
 
 - The Pydantic-backed config serializers no longer echo a non-validation exception's message in their validation-error response; only pydantic validation failures surface their field-level detail, and any other error propagates as a 500 instead of leaking its message.
@@ -17,6 +21,10 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ### Fixed
 
+- The first retry now waits the configured `base_delay` instead of `base_delay / multiplier`. The async retry policy and the core retry primitive fed a 0-indexed attempt into the backoff strategy's 1-indexed contract, so the first retry against a struggling dependency fired hotter than configured; the synchronous retry path was already correct. All three paths now produce one consistent delay curve from the same policy.
+- The disk-backed audit buffer now reports its true dropped-entry count in `get_stats()`. A trailing dict-splat let the storage layer's hardcoded `total_dropped: 0` overwrite the adapter's real drop counter, so an operator watching buffer stats saw zero drops even while entries were being dropped — a false health signal in a durability component. Backend/storage internals are now nested under a `backend` key instead of leaking across the buffer-stats boundary.
+- The in-memory circuit-breaker rate-limit tracker no longer grows without bound while Redis is healthy. It appended a timestamp on every request but pruned expired entries only inside its reads, and in the normal Redis-backed mode reads are served from Redis — so the in-memory series grew at request rate (tens of MB/day per tracked service at a few hundred RPS). It now trims each series on write, bounding memory to the same retention window the Redis tier already applies.
+- The capacity-reservation safety valve now actually engages when the feature is enabled. Its hard-limit CPU / error-rate backstop had no metrics source wired (the check permanently reported no breach) and no graceful-degradation handle (the CRITICAL override was a no-op even with a source), so the advertised backstop never fired. It is now backed by the existing system-metrics cache and the aggregate circuit-breaker failure rate, and wired to graceful degradation. Under the default `dry_run` it logs the would-be CRITICAL transition instead of applying it.
 - The audit WAL and incident-duration parsers now tolerate malformed persisted input instead of raising an uncaught exception: non-object JSONL lines, a non-UTF-8 byte in a JSONL WAL file, non-object binary records, non-dict timeline entries / non-string `event_type` values, and a mixed offset-naive/offset-aware timestamp pair are all skipped (or resolved to an undefined result) rather than aborting recovery or a postmortem duration calculation.
 
 ## [1.1.0] - 2026-07-07

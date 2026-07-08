@@ -23,7 +23,7 @@ import time as _time
 
 import structlog
 
-from baldur.api.handlers._common import resolve_actor
+from baldur.api.handlers._common import reject_unknown_kwargs, resolve_actor
 from baldur.interfaces.web_framework import RequestContext, ResponseContext
 
 logger = structlog.get_logger()
@@ -197,9 +197,23 @@ def stop_conditions_config_update(ctx: RequestContext) -> ResponseContext:
         return ResponseContext.bad_request("Request body is required")
 
     manager = _runtime_config_manager()
+    rejection = reject_unknown_kwargs(
+        body,
+        manager.update_chaos_stop_conditions_config,
+        config_label="stop_conditions",
+    )
+    if rejection is not None:
+        return rejection
+
     updated = manager.update_chaos_stop_conditions_config(**body)
     logger.info("chaos_api.stop_conditions_config_updated")
-    return ResponseContext.json({"status": "success", "data": updated})
+    return ResponseContext.json(
+        {
+            "status": "success",
+            "updated_fields": sorted(body.keys()),
+            "data": updated,
+        }
+    )
 
 
 def ttl_config_get(ctx: RequestContext) -> ResponseContext:
@@ -217,9 +231,23 @@ def ttl_config_update(ctx: RequestContext) -> ResponseContext:
         return ResponseContext.bad_request("Request body is required")
 
     manager = _runtime_config_manager()
+    rejection = reject_unknown_kwargs(
+        body,
+        manager.update_chaos_ttl_config,
+        config_label="ttl",
+    )
+    if rejection is not None:
+        return rejection
+
     updated = manager.update_chaos_ttl_config(**body)
     logger.info("chaos_api.ttl_config_updated")
-    return ResponseContext.json({"status": "success", "data": updated})
+    return ResponseContext.json(
+        {
+            "status": "success",
+            "updated_fields": sorted(body.keys()),
+            "data": updated,
+        }
+    )
 
 
 def dry_run_config_get(ctx: RequestContext) -> ResponseContext:
@@ -237,9 +265,23 @@ def dry_run_config_update(ctx: RequestContext) -> ResponseContext:
         return ResponseContext.bad_request("Request body is required")
 
     manager = _runtime_config_manager()
+    rejection = reject_unknown_kwargs(
+        body,
+        manager.update_chaos_dry_run_config,
+        config_label="dry_run",
+    )
+    if rejection is not None:
+        return rejection
+
     updated = manager.update_chaos_dry_run_config(**body)
     logger.info("chaos_api.dry_run_config_updated")
-    return ResponseContext.json({"status": "success", "data": updated})
+    return ResponseContext.json(
+        {
+            "status": "success",
+            "updated_fields": sorted(body.keys()),
+            "data": updated,
+        }
+    )
 
 
 def kill_all(ctx: RequestContext) -> ResponseContext:

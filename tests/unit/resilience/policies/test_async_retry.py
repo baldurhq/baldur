@@ -273,7 +273,7 @@ class TestAsyncRetryPolicyBackoffBehavior:
 
     @pytest.mark.asyncio
     async def test_backoff_calculate_called_with_attempt_and_context(self):
-        """backoff.calculate(attempt, context=context) 호출을 검증한다."""
+        """Verify backoff.calculate(attempt, context=context) uses the 1-indexed contract."""
 
         async def always_fail():
             raise ConnectionError("fail")
@@ -289,10 +289,11 @@ class TestAsyncRetryPolicyBackoffBehavior:
         ):
             await policy.execute(always_fail, context=ctx)
 
-        # attempt=0 (first failure), context should have retry_attempt=1
+        # 1-indexed contract: the first retry passes attempt=1 (not 0) so the
+        # configured base_delay is honored instead of base_delay/multiplier.
         mock_backoff.calculate.assert_called_once()
         call_args = mock_backoff.calculate.call_args
-        assert call_args.args[0] == 0  # attempt index
+        assert call_args.args[0] == 1  # attempt number (1-indexed)
         assert call_args.kwargs["context"] is not None
         assert call_args.kwargs["context"].extra["retry_attempt"] == 1
 

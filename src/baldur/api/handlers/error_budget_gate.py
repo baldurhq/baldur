@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import structlog
 
+from baldur.api.handlers._common import reject_unknown_config_keys
 from baldur.interfaces.web_framework import RequestContext, ResponseContext
 
 logger = structlog.get_logger()
@@ -73,28 +74,32 @@ def gate_config_get(ctx: RequestContext) -> ResponseContext:
 
 
 def gate_config_update(ctx: RequestContext) -> ResponseContext:
-    """PUT /config/gate/ — update configuration."""
-    body = ctx.json_body or {}
-    updates = {k: v for k, v in body.items() if k in _ALLOWED_CONFIG_FIELDS}
+    """PUT /config/gate/ — update configuration.
 
-    if not updates:
-        return ResponseContext.json(
-            {
-                "status": "error",
-                "error": "No valid configuration fields provided",
-                "allowed_fields": sorted(_ALLOWED_CONFIG_FIELDS),
-            },
-            status_code=400,
-        )
+    Strict all-or-nothing: any key outside the curated allowlist rejects the
+    whole body with 400 (a typo riding a valid key was previously dropped
+    silently while the response echoed success). The allowlist stays a
+    deliberate static subset of the settings fields — deriving it from the
+    settings would silently widen the public API.
+    """
+    body = ctx.json_body or {}
+    if not body:
+        return ResponseContext.bad_request("Request body is required")
+
+    rejection = reject_unknown_config_keys(
+        body, _ALLOWED_CONFIG_FIELDS, config_label="error_budget_gate"
+    )
+    if rejection is not None:
+        return rejection
 
     gate = _get_gate()
-    config = gate.update_config(**updates)
+    config = gate.update_config(**body)
 
     return ResponseContext.json(
         {
             "status": "success",
-            "message": f"Updated {len(updates)} configuration field(s)",
-            "updated_fields": list(updates.keys()),
+            "message": f"Updated {len(body)} configuration field(s)",
+            "updated_fields": sorted(body.keys()),
             "config": config.to_dict(),
         }
     )

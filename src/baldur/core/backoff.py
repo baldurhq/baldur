@@ -24,9 +24,16 @@ class BackoffStrategy(ABC):
         """
         Calculate the delay for the given attempt number.
 
+        Contract: ``attempt`` is **1-indexed** — the first retry passes
+        ``attempt=1``, so every strategy yields ``base_delay`` (or its constant
+        equivalent) on the first retry: exponential uses ``multiplier ** (attempt
+        - 1)``, linear uses ``increment * (attempt - 1)``, and decorrelated resets
+        at ``attempt == 1``. A 0-indexed caller must add 1 before calling, or the
+        first retry fires hotter than configured (``base_delay / multiplier``).
+
         Args:
-            attempt: The current attempt number (1-indexed)
-            context: Policy 실행 컨텍스트 (tier_id, domain 등 활용 가능)
+            attempt: The current attempt number (1-indexed; first retry is 1)
+            context: Policy execution context (tier_id, domain, etc.)
 
         Returns:
             The delay in seconds before the next retry
@@ -59,14 +66,14 @@ class ExponentialBackoff(BackoffStrategy):
     @classmethod
     def from_settings(cls, settings=None, **overrides) -> ExponentialBackoff:
         """
-        Settings 기반 인스턴스 생성.
+        Create an instance from settings.
 
         Args:
-            settings: BackoffSettings 인스턴스 (None이면 자동 로드)
-            **overrides: 개별 필드 오버라이드
+            settings: BackoffSettings instance (auto-loaded when None)
+            **overrides: per-field overrides
 
         Returns:
-            ExponentialBackoff: Settings 기반 인스턴스
+            ExponentialBackoff: settings-derived instance
         """
         from baldur.settings.backoff import get_backoff_settings
 
@@ -113,14 +120,14 @@ class LinearBackoff(BackoffStrategy):
     @classmethod
     def from_settings(cls, settings=None, **overrides) -> LinearBackoff:
         """
-        Settings 기반 인스턴스 생성.
+        Create an instance from settings.
 
         Args:
-            settings: BackoffSettings 인스턴스 (None이면 자동 로드)
-            **overrides: 개별 필드 오버라이드
+            settings: BackoffSettings instance (auto-loaded when None)
+            **overrides: per-field overrides
 
         Returns:
-            LinearBackoff: Settings 기반 인스턴스
+            LinearBackoff: settings-derived instance
         """
         from baldur.settings.backoff import get_backoff_settings
 
@@ -165,14 +172,14 @@ class ConstantBackoff(BackoffStrategy):
     @classmethod
     def from_settings(cls, settings=None, **overrides) -> ConstantBackoff:
         """
-        Settings 기반 인스턴스 생성.
+        Create an instance from settings.
 
         Args:
-            settings: BackoffSettings 인스턴스 (None이면 자동 로드)
-            **overrides: 개별 필드 오버라이드
+            settings: BackoffSettings instance (auto-loaded when None)
+            **overrides: per-field overrides
 
         Returns:
-            ConstantBackoff: Settings 기반 인스턴스
+            ConstantBackoff: settings-derived instance
         """
         from baldur.settings.backoff import get_backoff_settings
 
@@ -217,14 +224,14 @@ class DecorrelatedJitterBackoff(BackoffStrategy):
     @classmethod
     def from_settings(cls, settings=None, **overrides) -> DecorrelatedJitterBackoff:
         """
-        Settings 기반 인스턴스 생성.
+        Create an instance from settings.
 
         Args:
-            settings: BackoffSettings 인스턴스 (None이면 자동 로드)
-            **overrides: 개별 필드 오버라이드
+            settings: BackoffSettings instance (auto-loaded when None)
+            **overrides: per-field overrides
 
         Returns:
-            DecorrelatedJitterBackoff: Settings 기반 인스턴스
+            DecorrelatedJitterBackoff: settings-derived instance
         """
         from baldur.settings.backoff import get_backoff_settings
 

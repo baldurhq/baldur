@@ -735,10 +735,11 @@ class DiskPersistentBuffer:
     def get_stats(self) -> dict[str, Any]:
         """Return buffer statistics."""
         if self._env is None:
+            # No "total_dropped" here: this LMDB layer never drops (bounded only
+            # by disk). Drop accounting belongs to the adapter that fronts it.
             return {
                 "count": 0,
                 "total_added": self._stats.get("total_puts", 0),
-                "total_dropped": 0,
                 "capacity": None,
                 "usage_percent": None,
                 **self._stats,
@@ -750,10 +751,11 @@ class DiskPersistentBuffer:
             stat = txn.stat()
 
         current = stat["entries"]
+        # No "total_dropped" here: this LMDB layer never drops (bounded only by
+        # disk). Drop accounting belongs to the adapter that fronts it.
         return {
             "count": current,
             "total_added": self._stats.get("total_puts", 0),
-            "total_dropped": 0,
             "capacity": None,
             "usage_percent": None,
             **self._stats,

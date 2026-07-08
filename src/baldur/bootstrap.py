@@ -2531,12 +2531,31 @@ def _start_capacity_reservation_if_enabled() -> None:
             logger.debug("capacity_reservation.start_skipped", reason="disabled")
             return
 
+        from baldur.scaling.graceful_degradation import get_graceful_degradation
+        from baldur.services.capacity_reservation.safety_valve_provider import (
+            SystemMetricsSafetyValveProvider,
+        )
         from baldur.services.capacity_reservation.service import (
             CapacityReservationService,
         )
+        from baldur.settings.system_metrics_cache import (
+            get_system_metrics_cache_settings,
+        )
+
+        # The safety valve reads CPU from the SystemMetricsCache; if that cache
+        # is disabled the provider raises on every read and the valve is inert.
+        # Surface that at start time so the conditionality is visible.
+        if not get_system_metrics_cache_settings().enabled:
+            logger.warning("capacity_reservation.safety_valve_metrics_source_disabled")
 
         service = CapacityReservationService()
-        service.initialize()
+        # Wire the safety valve: without a metrics_provider check_safety_valve()
+        # is a permanent no-op, and without graceful_degradation the CRITICAL
+        # override cannot apply (the two-layer false guarantee this closes).
+        service.initialize(
+            metrics_provider=SystemMetricsSafetyValveProvider(),
+            graceful_degradation=get_graceful_degradation(),
+        )
         service.start()
         logger.info("baldur.capacity_reservation_started")
     except ImportError:

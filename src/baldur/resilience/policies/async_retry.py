@@ -227,7 +227,10 @@ class AsyncRetryPolicy:
                     )
 
                 if attempt < self._max_retries:
-                    delay = self._backoff.calculate(attempt, context=context)
+                    # calculate() is 1-indexed (attempt=1 -> base_delay); this loop
+                    # is 0-indexed, so pass attempt+1 to honor the configured
+                    # base_delay on the first retry (not base_delay/multiplier).
+                    delay = self._backoff.calculate(attempt + 1, context=context)
 
                     logger.debug(
                         "retry.async_attempt_failed",

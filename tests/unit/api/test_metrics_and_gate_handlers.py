@@ -192,12 +192,9 @@ class TestGateConfigUpdateBehavior:
     def _require_pro(self):
         pytest.importorskip("baldur_pro")
 
-    def test_only_whitelisted_fields_forwarded(self):
-        """Unknown fields must be silently filtered out."""
+    def test_mixed_valid_and_unknown_fields_rejected(self):
+        """A typo riding valid keys rejects the whole body with 400 (nothing applied)."""
         gate = MagicMock()
-        returned = MagicMock()
-        returned.to_dict.return_value = {"enabled": False}
-        gate.update_config.return_value = returned
 
         with patch(
             "baldur_pro.services.error_budget_gate.get_error_budget_gate",
@@ -214,11 +211,9 @@ class TestGateConfigUpdateBehavior:
                 )
             )
 
-        _, kwargs = gate.update_config.call_args
-        assert "unknown_field" not in kwargs
-        assert kwargs["enabled"] is False
-        assert kwargs["critical_threshold_percent"] == 5.0
-        assert resp.status_code == 200
+        assert resp.status_code == 400
+        assert "unknown_field" in resp.body["unknown_fields"]
+        gate.update_config.assert_not_called()
 
     def test_no_valid_fields_returns_400(self):
         """Body with only unknown fields -> 400 without invoking gate."""

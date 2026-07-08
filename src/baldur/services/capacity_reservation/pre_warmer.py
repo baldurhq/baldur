@@ -297,7 +297,21 @@ class PreWarmer:
             return False
 
     def emergency_override(self) -> None:
-        """Safety Valve 발동 — 이벤트 모드를 즉시 해제하고 CRITICAL 전환."""
+        """Safety Valve fired — immediately exit event mode and go CRITICAL.
+
+        Under ``dry_run`` (the default) this only logs and skips the real
+        CRITICAL transition, consistent with the setting's "only logs without
+        applying" contract; organic overload is already handled by the
+        backpressure system.
+        """
+        if self._settings.dry_run:
+            logger.warning(
+                "capacity_reservation.safety_valve_dry_run",
+                cpu_threshold=self._settings.safety_valve_cpu_threshold,
+                error_rate_threshold=(self._settings.safety_valve_error_rate_threshold),
+            )
+            return
+
         if self._graceful_degradation is not None:
             try:
                 from baldur.settings.backpressure import BackpressureLevel

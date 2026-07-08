@@ -107,19 +107,25 @@ class DiskBufferAdapter:
         return self._disk_buffer.flush_to(handler)
 
     def get_stats(self) -> dict[str, Any]:
-        """Return adapter statistics."""
-        stats = self._disk_buffer.get_stats()
-        current = self.count()
+        """Return adapter statistics.
+
+        The adapter owns drop accounting — the wrapped buffer never drops, the
+        adapter does (see :meth:`add`) — so every top-level protocol key is
+        computed here. The wrapped buffer's own, implementation-specific stats
+        are nested under ``"backend"`` so they can never shadow a protocol key
+        (previously a trailing ``**stats`` splat overwrote the real
+        ``total_dropped`` with the backend's hardcoded ``0``).
+        """
         return {
             # Common keys (AuditBufferProtocol)
-            "count": current,
+            "count": self.count(),
             "total_added": self._total_buffered,
             "total_dropped": self._total_dropped,
             "capacity": None,
             "usage_percent": None,
-            # Implementation-specific keys
-            **stats,
-            "total_buffered": self._total_buffered,
+            # Backend (DiskPersistentBuffer) stats, namespaced so LMDB internals
+            # never leak across the protocol boundary or shadow a protocol key.
+            "backend": self._disk_buffer.get_stats(),
         }
 
     def count(self) -> int:

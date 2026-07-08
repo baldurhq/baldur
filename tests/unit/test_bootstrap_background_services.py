@@ -24,7 +24,7 @@ seam relocated to baldur_pro.register_pro_services).
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 from baldur.bootstrap import (
     _start_capacity_reservation_if_enabled,
@@ -87,7 +87,12 @@ class TestStartCapacityReservationIfEnabled:
 
         # The starter owns both initialize() and start(): start() raises without
         # a prior initialize(), so they must be co-located and ordered.
-        assert mock_service.method_calls == [call.initialize(), call.start()]
+        assert [c[0] for c in mock_service.method_calls] == ["initialize", "start"]
+        # The safety valve is wired: initialize() receives a metrics provider and
+        # a graceful-degradation handle (without them the valve is a no-op).
+        _, init_kwargs = mock_service.initialize.call_args
+        assert init_kwargs["metrics_provider"] is not None
+        assert init_kwargs["graceful_degradation"] is not None
 
     def test_import_error_swallowed(self):
         with patch(
