@@ -1,12 +1,13 @@
-name: OSS Mirror CI
+name: baldur CI
 
-# Route B (monorepo): workflow_dispatch only — this file must NEVER auto-run on
-# the private repo's billed Actions. publish_mirror.sh rewrites the trigger to
-# push + pull_request when projecting to the PUBLIC mirror, where Actions are
-# free. The mirror is the only environment where the OSS suite runs with the PRO
-# tier absent, so it catches OSS-standalone breakage (e.g. a test that only
-# passes because a PRO provider registration leaked into the session) that the
-# pro-installed monorepo runs structurally cannot see.
+# The OSS core's public CI. Runs the full OSS gate surface on GitHub's free
+# minutes: the Python x Django version matrix, lint (ruff + mypy regression
+# diff), the v1.0 per-module coverage gate, integration (redis + postgres),
+# the wiring regression gate, the optional-deps import surface, and the
+# clean-venv packaging smoke. The PRO tier is absent by construction here, so
+# this is the environment that catches OSS-standalone breakage (e.g. a test
+# that only passes because a PRO provider registration leaked into the
+# session).
 on:
   push:
     branches: [main]
@@ -16,36 +17,254 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
-    name: test (py${{ matrix.python-version }})
+  unit-test:
+    name: unit-test (py${{ matrix.python-version }}/dj${{ matrix.django-version }})
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     strategy:
+      # fail-fast disabled so a single failing cell still shows the other
+      # cells' verdicts — the axis (Python vs Django) of the failure is what
+      # matters to diagnose. concurrency.cancel-in-progress still drops stale
+      # builds on rapid push, so runner leakage is bounded.
       fail-fast: false
+      # Sparse diagonal: each supported Python {3.11,3.12,3.13} and Django
+      # {4.2,5.2,6.0} version is exercised exactly once — covering both axes'
+      # bounds without the full cross. Most of the unit suite is framework-
+      # agnostic, so cross-version interaction cells rarely surface unique
+      # failures; compat bugs live at the version bounds, which the diagonal
+      # hits. Celery pinned to 5.4 (4.x EOL); optional-deps-test carries the rest.
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        include:
+          - python-version: "3.11"
+            django-version: "4.2"
+          - python-version: "3.12"
+            django-version: "5.2"
+          - python-version: "3.13"
+            django-version: "6.0"
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
         with:
           python-version: ${{ matrix.python-version }}
-          cache: "pip"
-      # Mirrors the monorepo ci.yml unit-test lane's proven install: [dev] pulls
-      # the pytest plugins the root pytest.ini addopts require (timeout, xdist,
-      # rerunfailures, django, asyncio, mock); Django + Celery are pinned
-      # explicitly because they are framework extras, not dev deps.
+      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-py${{ matrix.python-version }}-dj${{ matrix.django-version }}-cel5.4-${{ hashFiles('pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-py${{ matrix.python-version }}-dj${{ matrix.django-version }}-
+            ${{ runner.os }}-py${{ matrix.python-version }}-
+      # [dev] pulls the pytest plugins the root pytest.ini addopts require
+      # (timeout, xdist, rerunfailures, django, asyncio, mock); Django + Celery
+      # are pinned explicitly because they are framework extras, not dev deps.
       - name: Install baldur (OSS) + test deps
         run: |
           pip install -e ".[dev,prometheus]"
-          pip install "django==5.2.*" "celery==5.4.*"
-      # The OSS unit + architecture suites. tests/ is renamed to tests/ in
-      # the published mirror, so the paths here are the post-rename ones. The
-      # PRO-render architecture gates auto-skip without the PRO package present.
-      # -n auto: parallelize across runner cores (pytest-xdist comes with [dev]).
-      # The serial default did not fit the job timeout for the OSS suite; the
-      # monorepo ci.yml lane runs parallel too.
+          pip install "django==${{ matrix.django-version }}.*" "celery==5.4.*"
+      # -n auto parallelizes across runner cores (pytest-xdist comes with [dev]).
       - name: Run OSS unit + architecture suites (PRO tier absent)
         run: pytest tests/unit/ tests/architecture/ -n auto --reruns 1 --reruns-delay 2
         env:
           DJANGO_SETTINGS_MODULE: tests.testapp.settings
+
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      # The django-stubs mypy plugin needs django importable, so install the
+      # project + dev toolchain before mypy. ruff/mypy are pinned so the
+      # committed baselines are not invalidated by implicit version drift on
+      # ubuntu-latest; bump in lockstep with a baseline refresh.
+      - run: pip install -e ".[dev]" "ruff==0.15.10" "mypy==1.19.1"
+      - run: ruff check src/ tests/
+      - run: ruff format --check src/ tests/
+      # Persist ~/.mypy_cache across runs so the blocking gate's full-module
+      # scan stays fast. mypy's incremental mode invalidates by source hash, so
+      # a stale cache cannot mask a regression.
+      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        with:
+          path: ~/.mypy_cache
+          key: mypy-${{ runner.os }}-${{ hashFiles('pyproject.toml', '.mypy_baseline.json', '.mypy_baseline_tests.json') }}
+          restore-keys: mypy-${{ runner.os }}-
+      # mypy is a blocking regression gate: errors are frozen in
+      # .mypy_baseline.json (captured on ubuntu-latest with the pinned mypy);
+      # the script only fails on NEW errors so burn-down stays unblocked.
+      - name: mypy regression diff (src/baldur)
+        run: |
+          mypy src/baldur/ --show-error-codes > /tmp/mypy-now.txt || true
+          python scripts/check_mypy_baseline.py /tmp/mypy-now.txt
+      # Test-infrastructure type gate: tests/factories/ is the shared fixture
+      # surface reused across the suite, so fixture type drift is caught via its
+      # own frozen baseline without blocking the src burn-down.
+      - name: mypy regression diff (test infra)
+        run: |
+          mypy tests/factories/ --show-error-codes --follow-imports=silent > /tmp/mypy-tests.txt || true
+          python scripts/check_mypy_baseline.py /tmp/mypy-tests.txt --baseline .mypy_baseline_tests.json
+
+  coverage-gate:
+    # The v1.0 per-module coverage gate (scripts/check_v1_coverage_gate.py)
+    # measures the 5 OSS launch-surface file targets over the unit suite.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      - run: |
+          pip install -e ".[dev,prometheus]"
+          pip install "django==5.2.*" "celery==5.4.*"
+      - run: |
+          mkdir -p dist
+          pytest tests/unit/ -n auto --tb=short \
+            --reruns 1 --reruns-delay 2 \
+            --cov=src/baldur \
+            --cov-report=term-missing \
+            --cov-report=json:dist/cov-v1.json
+        env:
+          DJANGO_SETTINGS_MODULE: tests.testapp.settings
+      - name: v1.0 per-module coverage gate
+        run: python scripts/check_v1_coverage_gate.py dist/cov-v1.json
+
+  integration-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: baldur_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      - run: pip install -e ".[dev]"
+      # The -m expression must re-state pytest.ini's default deselections: a
+      # command-line -m REPLACES addopts' -m, so dropping them would pull in the
+      # slow/requires_monorepo gates and the broken/flaky-quarantined tests.
+      # OTEL tests need a full Grafana stack (collector, Tempo, Mimir, Loki) not
+      # provisioned here, so the otel dir is ignored (requires_otel tests
+      # elsewhere auto-skip without TEST_OTEL_AVAILABLE).
+      - name: Run integration suite (redis + postgres)
+        run: |
+          pytest tests/integration/ --tb=short \
+            -m "not slow and not dormant and not requires_monorepo and not broken and not flaky_quarantine" \
+            --ignore=tests/integration/otel
+        env:
+          DJANGO_SETTINGS_MODULE: tests.testapp.settings
+          REDIS_URL: redis://localhost:6379/1
+          BALDUR_REDIS_URL: redis://localhost:6379/0
+          BALDUR_SQL_DSN: postgresql://postgres:postgres@localhost:5432/baldur_test
+          TEST_REDIS_AVAILABLE: "true"
+          TEST_DB_AVAILABLE: "true"
+
+  wiring-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      - run: pip install -e ".[dev]"
+      # Wiring regression gate — passes the current floor and fails on any
+      # regression (new orphan, fewer connected, new dep-graph warning).
+      # Refresh .wiring_baseline.json after intentional improvements.
+      - name: Wiring regression diff
+        run: |
+          # verify_wiring exits 1 when orphans exist (an accepted baseline
+          # state, not a regression); the real gate is check_wiring_baseline,
+          # which diffs the report against the committed floor. `|| true` keeps
+          # report generation from failing the job on the baseline orphans.
+          python scripts/verify_wiring.py --json > /tmp/wiring_now.json || true
+          python scripts/check_wiring_baseline.py /tmp/wiring_now.json
+      # Side-effect import gate — any new import from a side-effect-carrying
+      # module without # noqa: F401 fails.
+      - name: Side-effect import gate
+        run: python scripts/find_side_effect_imports.py
+
+  optional-deps-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      - run: pip install -e ".[dev,chaos,export,databases]"
+      - run: pytest tests/unit/ -n auto --tb=short --reruns 1 --reruns-delay 2
+        env:
+          DJANGO_SETTINGS_MODULE: tests.testapp.settings
+
+  smoke-install:
+    # Exercise scripts/smoke_install.py end-to-end: it builds the OSS wheel and
+    # installs it into isolated venvs with each cell's extras spec, asserting
+    # entry-point imports, extras-dep presence, sibling-framework absence, and
+    # runtime call-path shapes.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      - run: pip install build
+      - run: python scripts/smoke_install.py
+      - name: Upload smoke report on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: smoke-install-report
+          path: dist/smoke_install_report.json
+          if-no-files-found: ignore
+
+  ci-gate:
+    needs: [unit-test, lint, coverage-gate, integration-test, wiring-check, optional-deps-test, smoke-install]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any required job failed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python - <<'PY'
+          import json, os, sys
+          r = json.loads(os.environ['RESULTS'])
+          bad = [k for k, v in r.items() if v['result'] not in ('success', 'skipped')]
+          if bad:
+              sys.exit(f'Required jobs failed: {bad}')
+          print('All required jobs passed or were intentionally skipped.')
+          PY

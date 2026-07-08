@@ -30,9 +30,18 @@ jobs:
       # Blocking: verifies every artifact in dist/ (wheel + sdist).
       - name: Verify OSS artifacts contain no private-tier code
         run: python scripts/verify_oss_wheel.py dist
+      # Third-party license inventory: resolve the [all] dependency closure from
+      # installed metadata and render THIRD_PARTY_LICENSES.md, shipped as a
+      # release asset alongside the wheel + sdist (attribution obligation).
+      - name: Generate third-party license notice
+        run: |
+          pip install -e ".[all]"
+          python scripts/generate_notices.py
       - uses: softprops/action-gh-release@7c4723f7a335432393329f8f1c564994ce50185d  # v3
         with:
-          files: dist/*
+          files: |
+            dist/*
+            THIRD_PARTY_LICENSES.md
 
   publish-pypi:
     needs: build
