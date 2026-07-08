@@ -20,7 +20,7 @@ symbol" class — no underscore, not in ``__all__`` — and a bare *unqualified*
 private symbol pasted into a fenced example block are NOT mechanized here. A
 zero-false-positive gate cannot distinguish them from public symbols, env vars,
 literals, or legitimate OSS locals without importing the private ``__all__``,
-which a mirror-safe ``tests/`` gate cannot do (G19/G20). The verification
+which a public-repo-safe ``tests/`` gate cannot do (G19/G20). The verification
 skill (``CONCEPT_GUIDE_STANDARDS.md`` §9) owns that residual as a
 quote-and-match judgment.
 
@@ -121,8 +121,8 @@ def _assert_concepts_dir_discoverable(concepts_dir: Path) -> None:
     """Layer-2 anti-vacuous guard — the concepts-dir glob MUST find a guide.
 
     A broken glob path resolves zero files, which would let the leak scan pass
-    vacuously forever. The monorepo anchors on ``_TEMPLATE.md``; the public OSS
-    mirror strips the template (publish EXCLUDE_PATHS) but ships the published
+    vacuously forever. The private repo anchors on ``_TEMPLATE.md``; the public
+    repo omits the template (not published) but ships the published
     (``_``-unprefixed) guides, so the anchor is ``_TEMPLATE.md`` present OR ≥1
     published guide present. A truly broken glob (both empty) still fails loudly,
     so ``test_broken_concepts_dir_discovery_fails_loudly`` still holds. (Asserting
@@ -299,19 +299,19 @@ class TestInlineCodeSpanExtractor:
 class TestG29DiscoveryAnchor:
     """663 D5 — the discovery anchor is ``_TEMPLATE.md`` OR a published guide.
 
-    The monorepo anchors on the template; the public OSS mirror strips it (publish
-    EXCLUDE_PATHS) but ships the ``_``-unprefixed published guides. A truly broken
+    The private repo anchors on the template; the public repo omits it (not
+    published) but ships the ``_``-unprefixed published guides. A truly broken
     glob (neither present) still fails loudly, so the anti-vacuous guarantee holds
     in both layouts.
     """
 
     def test_template_only_is_discoverable(self, tmp_path):
-        # The monorepo land-time layout: only _TEMPLATE.md present.
+        # The private repo land-time layout: only _TEMPLATE.md present.
         (tmp_path / "_TEMPLATE.md").write_text("# template\n", encoding="utf-8")
         _assert_concepts_dir_discoverable(tmp_path)  # must not raise
 
     def test_published_guide_only_is_discoverable(self, tmp_path):
-        # The mirror layout: template stripped, >=1 published (_-unprefixed) guide.
+        # The public layout: template stripped, >=1 published (_-unprefixed) guide.
         guide_dir = tmp_path / "foundations"
         guide_dir.mkdir()
         (guide_dir / "intro.md").write_text("# intro\n", encoding="utf-8")

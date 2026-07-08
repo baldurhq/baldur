@@ -1,13 +1,12 @@
 """G20 — tests/ may not import a baldur_pro / baldur_dormant private
 symbol, private-module path, or wildcard.
 
-CLAUDE.md § Test Location Rules + impl doc 533 D5/D6/D8. The 7.5G-1 release
-step builds the public OSS mirror with a path-level allowlist that publishes
+CLAUDE.md § Test Location Rules + impl doc 533 D5/D6/D8. The public OSS repo ships
 ``tests/`` wholesale (renamed to ``tests/``). A test that imports a PRO
 internal therefore leaks that internal's name and shape to public observers —
 the marker/``importorskip`` gate of G19 solves collectability but does nothing
 for the leak. 533 relocates the PRO-internal-importing tests to ``tests/pro/``
-(absent from the mirror); G20 is the permanent ratchet so a new one cannot be
+(absent from the public repo); G20 is the permanent ratchet so a new one cannot be
 re-introduced with zero CI signal.
 
 What is flagged (for ``baldur_pro`` / ``baldur_dormant`` only):
@@ -15,7 +14,7 @@ What is flagged (for ``baldur_pro`` / ``baldur_dormant`` only):
   1. A private imported symbol — ``from baldur_pro.x import _foo`` where the
      name starts with ``_`` and is not a dunder (``__all__`` and ``__x__`` are
      excluded; some ``_``-prefixed names are deliberately public via
-     ``__all__`` but in the mirror the PRO source is absent so G20 cannot read
+     ``__all__`` but in the public repo the PRO source is absent so G20 cannot read
      ``__all__`` — it forbids all underscore symbols, 533 D5).
   2. A private-module path — any dotted component of the source module is
      ``_``-prefixed and non-dunder, e.g.
@@ -29,7 +28,7 @@ import-graph only. It does NOT track attribute access on an aliased module
 (``import baldur_pro as bp; bp._secret``) or
 ``importlib.import_module("baldur_pro...._x")`` — both are runtime
 expressions, not imports. The backstop is the release-time raw-text grep over
-the mirrored tree (533 SC #7).
+the published tree (533 SC #7).
 
 Scope direction: ``tests/`` -> (``baldur_pro`` | ``baldur_dormant``). All
 ``.py`` files are scanned (including conftests) — a staying conftest leaking a
@@ -157,7 +156,7 @@ class TestOssTestProPrivateImports:
         assert not violations, (
             f"G20: tests/ contains {len(violations)} private / wildcard "
             "import(s) of baldur_pro / baldur_dormant. These leak PRO internals "
-            "to the public mirror (tests/ ships wholesale at 7.5G-1). Move "
+            "to the public repo (tests/ ships wholesale to the public repo). Move "
             "the file (or its PRO-internal test methods) to tests/pro/, or "
             "rewrite to the public API.\n" + "\n".join(violations)
         )

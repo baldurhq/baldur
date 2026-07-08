@@ -58,7 +58,7 @@ import textwrap
 
 import pytest
 
-# prometheus_client backs the registry snapshot; the OSS monorepo installs it,
+# prometheus_client backs the registry snapshot; the private repo installs it,
 # but skip cleanly on a stripped checkout rather than erroring at import.
 pytest.importorskip("prometheus_client")
 
