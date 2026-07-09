@@ -335,9 +335,9 @@ class RedisCacheAdapter(CacheProviderInterface):
         client: Any | None = None,
         key_prefix: str | None = None,
         default_ttl: timedelta | None = None,
-        socket_timeout: float = 5.0,
-        socket_connect_timeout: float = 5.0,
-        retry_on_timeout: bool = True,
+        socket_timeout: float | None = None,
+        socket_connect_timeout: float | None = None,
+        retry_on_timeout: bool | None = None,
     ) -> None:
         """
         Initialize Redis cache adapter.
@@ -360,9 +360,13 @@ class RedisCacheAdapter(CacheProviderInterface):
                   per-instance isolation that must NOT shift with
                   TestModeContext.
             default_ttl: Default TTL for set operations
-            socket_timeout: Socket timeout for operations
-            socket_connect_timeout: Socket connection timeout
-            retry_on_timeout: Retry on timeout errors
+            socket_timeout: Socket read timeout in seconds. When None (default),
+                resolves from RedisSettings.socket_timeout via the connection
+                factory (same source as the async adapter).
+            socket_connect_timeout: Socket connect timeout in seconds. When None
+                (default), resolves from RedisSettings.socket_connect_timeout.
+            retry_on_timeout: Retry-on-timeout flag. When None (default),
+                resolves from RedisSettings.retry_on_timeout.
         """
         self._key_prefix = key_prefix
         self._default_ttl = default_ttl
