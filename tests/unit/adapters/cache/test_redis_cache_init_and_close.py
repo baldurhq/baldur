@@ -137,6 +137,60 @@ class TestRedisCacheAdapterNoArgUrlBehavior:
 
 
 # ---------------------------------------------------------------------------
+# Socket-timeout / retry delegation — settings parity with the async adapter
+# ---------------------------------------------------------------------------
+
+
+class TestRedisCacheAdapterTimeoutDelegationBehavior:
+    """The ctor delegates socket-timeout/retry resolution to the connection
+    factory (which backfills from ``RedisSettings``) rather than hardcoding.
+
+    Regression guard: the sync ctor previously defaulted
+    ``socket_timeout``/``socket_connect_timeout`` to a literal ``5.0`` and
+    ``retry_on_timeout`` to ``True``, so ``BALDUR_REDIS_*`` socket tuning never
+    reached the sync path (only the async twin honored the settings). Passing
+    ``None`` through lets the factory resolve every value from ``RedisSettings``.
+    """
+
+    def test_default_construction_delegates_timeouts_as_none(self):
+        """Unset timeout kwargs reach the factory as ``None`` (settings-resolved)."""
+        factory = MagicMock()
+        factory.create.return_value = MagicMock()
+
+        with patch(
+            "baldur.adapters.redis.connection_factory.get_redis_connection_factory",
+            return_value=factory,
+        ):
+            RedisCacheAdapter(url="redis://host:6379/0")
+
+        create_kwargs = factory.create.call_args[1]
+        assert create_kwargs["socket_timeout"] is None
+        assert create_kwargs["socket_connect_timeout"] is None
+        assert create_kwargs["retry_on_timeout"] is None
+
+    def test_explicit_timeouts_forwarded_to_factory(self):
+        """Explicit ctor timeouts still take precedence over settings resolution."""
+        factory = MagicMock()
+        factory.create.return_value = MagicMock()
+
+        with patch(
+            "baldur.adapters.redis.connection_factory.get_redis_connection_factory",
+            return_value=factory,
+        ):
+            RedisCacheAdapter(
+                url="redis://host:6379/0",
+                socket_timeout=2.0,
+                socket_connect_timeout=1.0,
+                retry_on_timeout=False,
+            )
+
+        create_kwargs = factory.create.call_args[1]
+        assert create_kwargs["socket_timeout"] == 2.0
+        assert create_kwargs["socket_connect_timeout"] == 1.0
+        assert create_kwargs["retry_on_timeout"] is False
+
+
+# ---------------------------------------------------------------------------
 # close() — D16 connection pool drain
 # ---------------------------------------------------------------------------
 

@@ -60,7 +60,7 @@ class RedisConnectionFactory:
         decode_responses: bool = False,
         socket_timeout: float | None = None,
         socket_connect_timeout: float | None = None,
-        retry_on_timeout: bool = True,
+        retry_on_timeout: bool | None = None,
         max_connections: int | None = None,
         **kwargs: Any,
     ) -> Any:
@@ -76,7 +76,8 @@ class RedisConnectionFactory:
                 explicit value to override.
             socket_connect_timeout: Connection timeout in seconds. When None,
                 defaults from RedisSettings.socket_connect_timeout.
-            retry_on_timeout: Retry on timeout errors
+            retry_on_timeout: Retry on timeout errors. When None, defaults from
+                RedisSettings.retry_on_timeout.
             max_connections: Connection pool max connections
             **kwargs: Additional redis-py options
 
@@ -88,15 +89,19 @@ class RedisConnectionFactory:
             Blocking consumers (pub/sub ``listen()``) that need no read timeout
             must build their own client directly rather than via this factory.
         """
-        # Default the read/connect timeouts from settings when unset so every
-        # topology (standalone/cluster here, sentinel below) enforces a bounded
-        # read timeout. Without this, an unset socket_timeout fell through to
-        # redis-py's no-timeout default and a connected-but-hung Redis blocked
-        # the caller until the OS TCP timeout.
+        # Default the read/connect timeouts and retry flag from settings when
+        # unset so every topology (standalone/cluster here, sentinel below)
+        # enforces a bounded read timeout. Without this, an unset socket_timeout
+        # fell through to redis-py's no-timeout default and a connected-but-hung
+        # Redis blocked the caller until the OS TCP timeout; and an unset
+        # retry_on_timeout was dropped by the None-filter below, silently
+        # reverting to redis-py's own default instead of RedisSettings.
         if socket_timeout is None:
             socket_timeout = self._settings.socket_timeout
         if socket_connect_timeout is None:
             socket_connect_timeout = self._settings.socket_connect_timeout
+        if retry_on_timeout is None:
+            retry_on_timeout = self._settings.retry_on_timeout
 
         common_kwargs: dict[str, Any] = {
             "decode_responses": decode_responses,

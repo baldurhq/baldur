@@ -402,6 +402,53 @@ class TestSocketTimeoutDefaultBehavior:
 
 
 # ===========================================================================
+# Behavior: retry_on_timeout default from settings
+# ===========================================================================
+
+
+class TestRetryOnTimeoutDefaultBehavior:
+    """retry_on_timeout backfills from RedisSettings when unset.
+
+    Without the backfill an unset retry_on_timeout was dropped by the None
+    filter and silently reverted to redis-py's own default instead of the
+    configured RedisSettings.retry_on_timeout (the sync-adapter parity gap).
+    """
+
+    @patch("redis.from_url", autospec=True)
+    def test_none_retry_on_timeout_defaults_from_settings(self, mock_from_url, factory):
+        """retry_on_timeout=None resolves to the RedisSettings default."""
+        factory.create("redis://host:6379/0", retry_on_timeout=None)
+
+        call_kwargs = mock_from_url.call_args[1]
+        assert call_kwargs["retry_on_timeout"] == RedisSettings().retry_on_timeout
+
+    @patch("redis.from_url", autospec=True)
+    def test_unset_retry_on_timeout_defaults_from_settings(
+        self, mock_from_url, factory
+    ):
+        """A client built without retry_on_timeout inherits the settings default."""
+        factory.create("redis://host:6379/0")
+
+        call_kwargs = mock_from_url.call_args[1]
+        assert call_kwargs["retry_on_timeout"] == RedisSettings().retry_on_timeout
+
+    @patch("redis.from_url", autospec=True)
+    def test_custom_settings_retry_on_timeout_propagates(self, mock_from_url):
+        """A non-default RedisSettings.retry_on_timeout flows to the client."""
+        custom = RedisConnectionFactory(settings=RedisSettings(retry_on_timeout=False))
+        custom.create("redis://host:6379/0")
+
+        assert mock_from_url.call_args[1]["retry_on_timeout"] is False
+
+    @patch("redis.from_url", autospec=True)
+    def test_explicit_retry_on_timeout_overrides_settings(self, mock_from_url, factory):
+        """An explicit retry_on_timeout=False overrides the settings default (True)."""
+        factory.create("redis://host:6379/0", retry_on_timeout=False)
+
+        assert mock_from_url.call_args[1]["retry_on_timeout"] is False
+
+
+# ===========================================================================
 # Behavior: Host:port parsing
 # ===========================================================================
 

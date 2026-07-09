@@ -78,8 +78,8 @@ class AsyncRedisCacheAdapter(AsyncCacheProviderInterface):
                 aware) so async keys match the sync adapter's keys; ``""`` adds
                 no prefix; a literal string is a static override.
             socket_timeout: Socket read timeout. ``None`` reads
-                ``RedisSettings.socket_timeout`` so the async client's socket
-                behavior matches the sync adapter.
+                ``RedisSettings.socket_timeout`` — the same source the sync
+                adapter resolves from, so both clients share one configuration.
             socket_connect_timeout: Socket connect timeout. ``None`` reads
                 ``RedisSettings.socket_connect_timeout``.
             retry_on_timeout: Retry-on-timeout flag. ``None`` reads
