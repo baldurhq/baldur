@@ -28,6 +28,7 @@ from baldur.api.handlers.error_budget_gate import (
 )
 from baldur.api.handlers.health import pool_health_check, simple_health_ping
 from baldur.api.handlers.metrics import baldur_metrics, prometheus_text_metrics
+from baldur.factory.registry import ProviderRegistry
 from baldur.interfaces.web_framework import HttpMethod, RequestContext
 
 
@@ -150,9 +151,8 @@ class TestGateHealthBehavior:
     def test_healthy_returns_200(self):
         gate = MagicMock()
         gate.get_health_status.return_value = {"healthy": True}
-        with patch(
-            "baldur_pro.services.error_budget_gate.get_error_budget_gate",
-            return_value=gate,
+        with patch.object(
+            ProviderRegistry.error_budget_gate, "safe_get", return_value=gate
         ):
             resp = gate_health(_make_ctx())
         assert resp.status_code == 200
@@ -160,9 +160,8 @@ class TestGateHealthBehavior:
     def test_unhealthy_returns_503(self):
         gate = MagicMock()
         gate.get_health_status.return_value = {"healthy": False}
-        with patch(
-            "baldur_pro.services.error_budget_gate.get_error_budget_gate",
-            return_value=gate,
+        with patch.object(
+            ProviderRegistry.error_budget_gate, "safe_get", return_value=gate
         ):
             resp = gate_health(_make_ctx())
         assert resp.status_code == 503
@@ -178,9 +177,8 @@ class TestGateConfigGetBehavior:
         config = MagicMock()
         config.to_dict.return_value = {"enabled": True}
         gate.get_config.return_value = config
-        with patch(
-            "baldur_pro.services.error_budget_gate.get_error_budget_gate",
-            return_value=gate,
+        with patch.object(
+            ProviderRegistry.error_budget_gate, "safe_get", return_value=gate
         ):
             resp = gate_config_get(_make_ctx())
         assert resp.body["status"] == "success"
@@ -196,9 +194,8 @@ class TestGateConfigUpdateBehavior:
         """A typo riding valid keys rejects the whole body with 400 (nothing applied)."""
         gate = MagicMock()
 
-        with patch(
-            "baldur_pro.services.error_budget_gate.get_error_budget_gate",
-            return_value=gate,
+        with patch.object(
+            ProviderRegistry.error_budget_gate, "safe_get", return_value=gate
         ):
             resp = gate_config_update(
                 _make_ctx(
@@ -218,9 +215,8 @@ class TestGateConfigUpdateBehavior:
     def test_no_valid_fields_returns_400(self):
         """Body with only unknown fields -> 400 without invoking gate."""
         gate = MagicMock()
-        with patch(
-            "baldur_pro.services.error_budget_gate.get_error_budget_gate",
-            return_value=gate,
+        with patch.object(
+            ProviderRegistry.error_budget_gate, "safe_get", return_value=gate
         ):
             resp = gate_config_update(_make_ctx(method="PUT", json_body={"unknown": 1}))
         assert resp.status_code == 400
@@ -234,9 +230,8 @@ class TestGateResetBehavior:
 
     def test_unknown_component_returns_400(self):
         gate = MagicMock()
-        with patch(
-            "baldur_pro.services.error_budget_gate.get_error_budget_gate",
-            return_value=gate,
+        with patch.object(
+            ProviderRegistry.error_budget_gate, "safe_get", return_value=gate
         ):
             resp = gate_reset(
                 _make_ctx(method="POST", json_body={"component": "nonsense"})
@@ -250,9 +245,8 @@ class TestGateResetBehavior:
     def test_all_resets_every_component(self):
         """component='all' -> clear_cache + reset_rate_limiter + reset_fault_detector + reset_alert_cooldowns."""
         gate = MagicMock()
-        with patch(
-            "baldur_pro.services.error_budget_gate.get_error_budget_gate",
-            return_value=gate,
+        with patch.object(
+            ProviderRegistry.error_budget_gate, "safe_get", return_value=gate
         ):
             resp = gate_reset(_make_ctx(method="POST", json_body={"component": "all"}))
         gate.clear_cache.assert_called_once()
@@ -270,9 +264,8 @@ class TestGateResetBehavior:
     def test_default_component_is_all(self):
         """Empty body -> defaults to component='all'."""
         gate = MagicMock()
-        with patch(
-            "baldur_pro.services.error_budget_gate.get_error_budget_gate",
-            return_value=gate,
+        with patch.object(
+            ProviderRegistry.error_budget_gate, "safe_get", return_value=gate
         ):
             resp = gate_reset(_make_ctx(method="POST", json_body=None))
         gate.clear_cache.assert_called_once()
@@ -281,9 +274,8 @@ class TestGateResetBehavior:
     def test_specific_component_resets_only_that_one(self):
         """component='cache' -> only clear_cache, not others."""
         gate = MagicMock()
-        with patch(
-            "baldur_pro.services.error_budget_gate.get_error_budget_gate",
-            return_value=gate,
+        with patch.object(
+            ProviderRegistry.error_budget_gate, "safe_get", return_value=gate
         ):
             resp = gate_reset(
                 _make_ctx(method="POST", json_body={"component": "cache"})
