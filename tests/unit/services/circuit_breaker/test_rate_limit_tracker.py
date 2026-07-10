@@ -87,7 +87,7 @@ class TestRateLimitTracker:
         # Mock time to simulate passage
         with patch("time.time") as mock_time:
             mock_time.return_value = 1000.0
-            tracker._memory._rate_limit_events["test_service2"] = [1000.0]
+            tracker._memory.record_rate_limit("test_service2")
 
             count = tracker.get_rate_limit_count("test_service2", 60)
             assert count == 1
@@ -920,8 +920,8 @@ class TestRateLimitTrackerBoundedBehavior:
         # Then: only the entries inside the retention window survive.
         # Last write t=1000598.8, cutoff=1000538.8; the write-side trim pops
         # entries at/below the cutoff, leaving exactly the 50 newest.
-        assert len(tracker._memory._request_events["svc"]) == 50
-        assert len(tracker._memory._rate_limit_events["svc"]) == 50
+        assert len(tracker._memory._request_counter._events["svc"]) == 50
+        assert len(tracker._memory._rate_limit_counter._events["svc"]) == 50
 
     def test_l1_bounded_in_memory_only_mode_for_never_read_service(self):
         """A recorded-but-never-read service stays bounded without any L2."""
@@ -939,7 +939,7 @@ class TestRateLimitTrackerBoundedBehavior:
                 tracker.record_request("svc")
 
         # Last write t=5199, cutoff=5169; entries at/below 5169 trimmed -> 30 left.
-        assert len(tracker._request_events["svc"]) == 30
+        assert len(tracker._request_counter._events["svc"]) == 30
 
     def test_reads_are_non_destructive(self):
         """get_*_count only counts; repeated reads return the same value."""
@@ -960,7 +960,7 @@ class TestRateLimitTrackerBoundedBehavior:
             second = tracker.get_rate_limit_count("svc", 60)
 
         assert first == second == 2
-        assert len(tracker._rate_limit_events["svc"]) == 2
+        assert len(tracker._rate_limit_counter._events["svc"]) == 2
 
 
 class TestRateLimitTrackerContract:
@@ -973,7 +973,7 @@ class TestRateLimitTrackerContract:
 
         tracker = MemoryRateLimitTracker(retention_seconds=42.0)
 
-        assert tracker._retention() == 42.0
+        assert tracker._resolve_retention() == 42.0
 
     def test_default_retention_matches_the_l2_bound_expression(self):
         """Lazy default reuses max(cascade_window, self_ddos_window, floor) - the
@@ -991,4 +991,4 @@ class TestRateLimitTrackerContract:
             _MIN_L2_RETENTION_SECONDS,
         )
 
-        assert MemoryRateLimitTracker()._retention() == expected
+        assert MemoryRateLimitTracker()._resolve_retention() == expected

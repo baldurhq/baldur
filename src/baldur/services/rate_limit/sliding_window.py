@@ -5,15 +5,15 @@ Thread-safe, framework-free sliding-window counter. Both the Django
 hybrid middleware (L1 emergency fallback) and the framework-free
 middleware consume this single implementation.
 
-Window-coupling invariant: ``_cleanup_expired`` prunes all stored keys
-using the window supplied at cleanup time. Callers that share a
-``SlidingWindowLimiter`` instance must use a consistent
-``window_seconds`` across calls. Separate singletons (D7) satisfy this
-structurally; the warn-only mismatch detector (D2) catches accidents.
+Window-coupling invariant: the periodic stale-key sweep prunes all
+stored keys using the window supplied at check time. Callers that share
+a ``SlidingWindowLimiter`` instance must use a consistent
+``window_seconds`` across calls. Separate singletons satisfy this
+structurally; the warn-only mismatch detector catches accidents.
 
-Consolidated from ``api/django/rate_limit/local_limiter.LocalMemoryRateLimiter``
-and ``api/middleware/rate_limit._SlidingWindowLimiter``
-per ``431``.
+Delegates the window arithmetic to the shared
+``SlidingWindowCounter`` primitive; this wrapper keeps the public
+``RateLimitState`` decision shape and the window-mismatch warning.
 """
 
 from __future__ import annotations
@@ -21,8 +21,9 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from collections import defaultdict
 from dataclasses import dataclass
+
+from baldur.core.rate_limiting import SlidingWindowCounter
 
 __all__ = ["RateLimitState", "SlidingWindowLimiter"]
 
@@ -48,10 +49,9 @@ class SlidingWindowLimiter:
     """
 
     def __init__(self, cleanup_interval: float = 60.0) -> None:
-        self._requests: dict[str, list[float]] = defaultdict(list)
+        self._cleanup_interval = cleanup_interval
+        self._counter = SlidingWindowCounter(cleanup_interval=cleanup_interval)
         self._lock = threading.Lock()
-        self._last_cleanup: float = time.time()
-        self._cleanup_interval: float = cleanup_interval
         self._last_seen_window: int | None = None
 
     def check(
@@ -62,36 +62,21 @@ class SlidingWindowLimiter:
     ) -> RateLimitState:
         """Record a hit and return the rate-limit decision."""
         now = time.time()
-        window_start = now - window_seconds
         reset_at = int(now + window_seconds)
 
         with self._lock:
             self._warn_on_window_mismatch(window_seconds)
 
-            if now - self._last_cleanup > self._cleanup_interval:
-                self._cleanup_expired(now, window_seconds)
-                self._last_cleanup = now
-
-            timestamps = [ts for ts in self._requests[key] if ts > window_start]
-            current_count = len(timestamps)
-
-            if current_count >= max_requests:
-                self._requests[key] = timestamps
-                return RateLimitState(
-                    limit=max_requests,
-                    remaining=0,
-                    reset_at=reset_at,
-                    allowed=False,
-                )
-
-            timestamps.append(now)
-            self._requests[key] = timestamps
-            return RateLimitState(
-                limit=max_requests,
-                remaining=max_requests - current_count - 1,
-                reset_at=reset_at,
-                allowed=True,
-            )
+        allowed, current_count = self._counter.try_acquire(
+            key, max_requests, window_seconds
+        )
+        remaining = max_requests - current_count if allowed else 0
+        return RateLimitState(
+            limit=max_requests,
+            remaining=remaining,
+            reset_at=reset_at,
+            allowed=allowed,
+        )
 
     def peek(
         self,
@@ -101,10 +86,7 @@ class SlidingWindowLimiter:
     ) -> RateLimitState:
         """Read the latest state without recording a new hit."""
         now = time.time()
-        window_start = now - window_seconds
-        with self._lock:
-            timestamps = [ts for ts in self._requests.get(key, []) if ts > window_start]
-        current_count = len(timestamps)
+        current_count = self._counter.count(key, window_seconds)
         return RateLimitState(
             limit=max_requests,
             remaining=max(0, max_requests - current_count),
@@ -132,25 +114,20 @@ class SlidingWindowLimiter:
 
     def get_all_clients(self) -> list[str]:
         """Return all currently tracked client keys."""
-        with self._lock:
-            return list(self._requests.keys())
+        return self._counter.keys()
 
     def reset_client(self, key: str) -> bool:
         """Reset rate-limit state for a specific client."""
-        with self._lock:
-            if key in self._requests:
-                del self._requests[key]
-                return True
-            return False
+        return self._counter.reset(key)
 
     def reset(self) -> None:
         """Clear all state and the last-seen window tracker."""
+        self._counter.reset_all()
         with self._lock:
-            self._requests.clear()
             self._last_seen_window = None
 
     def _warn_on_window_mismatch(self, window_seconds: int) -> None:
-        """D2: Warn if a different window is used on the same instance."""
+        """Warn if a different window is used on the same instance."""
         if self._last_seen_window is None:
             self._last_seen_window = window_seconds
         elif self._last_seen_window != window_seconds:
@@ -162,16 +139,3 @@ class SlidingWindowLimiter:
                 },
             )
             self._last_seen_window = window_seconds
-
-    def _cleanup_expired(self, now: float, window_seconds: int) -> None:
-        """Remove entries outside the current window to bound memory."""
-        window_start = now - window_seconds
-        expired = []
-        for key, timestamps in self._requests.items():
-            kept = [ts for ts in timestamps if ts > window_start]
-            if kept:
-                self._requests[key] = kept
-            else:
-                expired.append(key)
-        for key in expired:
-            del self._requests[key]
