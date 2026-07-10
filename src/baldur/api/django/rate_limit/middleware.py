@@ -35,6 +35,7 @@ from baldur.api.django.rate_limit.redis_health_checker import RedisHealthChecker
 from baldur.api.django.rate_limit.shadow_audit import ShadowAuditLogger
 from baldur.api.middleware.rate_limit import build_rate_limit_headers
 from baldur.services.rate_limit import RateLimitState, SlidingWindowLimiter
+from baldur.utils.network import extract_client_ip
 from baldur.utils.singleton import make_singleton_factory
 
 if TYPE_CHECKING:
@@ -202,11 +203,8 @@ class HybridRateLimitMiddleware:
         return f"ratelimit:control_api:{ip}:{user_id}"
 
     def _get_client_ip(self, request: HttpRequest) -> str:
-        """Extract client IP from request."""
-        x_forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR")
-        if x_forwarded_for:
-            return str(x_forwarded_for.split(",")[0].strip())
-        return str(request.META.get("REMOTE_ADDR", "unknown"))
+        """Extract client IP (canonical resolution: XFF -> X-Real-IP -> REMOTE_ADDR)."""
+        return cast(str, extract_client_ip(request, default="unknown"))
 
     def _check_redis_limit(
         self,

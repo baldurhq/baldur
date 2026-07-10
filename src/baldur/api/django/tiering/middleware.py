@@ -14,6 +14,7 @@ import structlog
 from baldur.scaling.tiering.defaults import BACKPRESSURE_TIER_RULES
 from baldur.scaling.tiering.registry import get_tier_registry
 from baldur.settings.backpressure import BackpressureLevel
+from baldur.utils.network import extract_client_ip
 
 logger = structlog.get_logger()
 
@@ -176,12 +177,8 @@ class TieringMiddleware:
             return self.get_response(request)
 
     def _get_client_ip(self, request) -> str | None:
-        """Extract client IP from request."""
-        x_forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR")
-        if x_forwarded_for:
-            return str(x_forwarded_for.split(",")[0].strip())
-        remote_addr = request.META.get("REMOTE_ADDR")
-        return str(remote_addr) if remote_addr is not None else None
+        """Extract client IP (canonical resolution: XFF -> X-Real-IP -> REMOTE_ADDR)."""
+        return extract_client_ip(request)
 
     def _get_user_id(self, request) -> int | None:
         """Extract user ID from request."""
