@@ -16,10 +16,11 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import structlog
 
+from baldur.utils.network import extract_client_ip
 from baldur.utils.time import utc_now
 
 if TYPE_CHECKING:
@@ -210,12 +211,8 @@ class SensitiveEndpointAccessLogger:
         return entry
 
     def _get_client_ip(self, request: HttpRequest) -> str:
-        """Extract client IP from request, considering proxies."""
-        x_forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR")
-        if x_forwarded_for:
-            # Take the first IP (original client)
-            return str(x_forwarded_for.split(",")[0].strip())
-        return str(request.META.get("REMOTE_ADDR", ""))
+        """Extract client IP (canonical resolution: XFF -> X-Real-IP -> REMOTE_ADDR)."""
+        return cast(str, extract_client_ip(request, default=""))
 
     def _write_log(self, entry: AccessLogEntry) -> None:
         """

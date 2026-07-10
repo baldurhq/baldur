@@ -14,7 +14,7 @@ Usage in DRF views:
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, cast
 
 import structlog
 
@@ -23,6 +23,7 @@ from baldur.interfaces.throttle import AdaptiveThrottle
 
 # ThrottleConfig is an alias for ThrottleSettings — OSS canonical home.
 from baldur.settings.throttle import ThrottleSettings as ThrottleConfig
+from baldur.utils.network import extract_client_ip
 
 logger = structlog.get_logger()
 
@@ -111,15 +112,7 @@ class AdaptiveDRFThrottle:
 
         Uses X-Forwarded-For, X-Real-IP, or REMOTE_ADDR.
         """
-        xff = request.META.get("HTTP_X_FORWARDED_FOR")
-        if xff:
-            return str(xff.split(",")[0].strip())
-
-        return str(
-            request.META.get("HTTP_X_REAL_IP")
-            or request.META.get("REMOTE_ADDR")
-            or "unknown"
-        )
+        return cast(str, extract_client_ip(request, default="unknown"))
 
     def wait(self) -> float | None:
         """

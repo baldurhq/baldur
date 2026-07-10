@@ -46,6 +46,7 @@ import structlog
 
 from baldur.api.middleware import check_admission, check_deadline, record_rtt_sample
 from baldur.interfaces.web_framework import HttpMethod, RequestContext
+from baldur.utils.network import extract_client_ip
 
 logger = structlog.get_logger()
 
@@ -173,12 +174,8 @@ class AdmissionControlMiddleware:
             clear_deadline()
 
     def _get_client_ip(self, request) -> str | None:
-        """Extract client IP from X-Forwarded-For or REMOTE_ADDR."""
-        x_forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR")
-        if x_forwarded_for:
-            return str(x_forwarded_for.split(",")[0].strip())
-        remote_addr = request.META.get("REMOTE_ADDR")
-        return str(remote_addr) if remote_addr is not None else None
+        """Extract client IP (canonical resolution: XFF -> X-Real-IP -> REMOTE_ADDR)."""
+        return extract_client_ip(request)
 
     def _to_django_response(self, response_ctx):
         """Convert a framework-free ``ResponseContext`` to a Django response."""
