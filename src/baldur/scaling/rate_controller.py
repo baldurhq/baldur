@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from baldur.core.rate_limiting import TokenBucket
 from baldur.scaling.config import (
     BackpressureLevel,
     BackpressureSettings,
@@ -75,98 +76,9 @@ class RateControllerState:
     """Tier별 처리 항목 수 (critical / standard / non_essential)."""
 
 
-class TokenBucket:
-    """
-    Token Bucket 알고리즘 구현.
-
-    Rate Limit을 구현하기 위한 토큰 버킷.
-    토큰이 일정 속도로 충전되고, 요청 시 토큰을 소비합니다.
-    """
-
-    def __init__(
-        self,
-        rate: float,
-        capacity: float | None = None,
-    ):
-        """
-        Args:
-            rate: 초당 토큰 생성율
-            capacity: 최대 토큰 수 (None이면 rate와 동일)
-        """
-        self._rate = rate
-        self._capacity = capacity or rate
-        self._tokens = self._capacity
-        self._last_update = time.time()
-        self._lock = threading.Lock()
-
-    def set_rate(self, rate: float) -> None:
-        """Rate 변경."""
-        with self._lock:
-            self._rate = rate
-
-    def get_rate(self) -> float:
-        """현재 Rate 반환."""
-        with self._lock:
-            return self._rate
-
-    def consume(self, tokens: int = 1) -> bool:
-        """
-        토큰 소비 시도.
-
-        Args:
-            tokens: 소비할 토큰 수
-
-        Returns:
-            소비 성공 여부
-        """
-        with self._lock:
-            now = time.time()
-            elapsed = now - self._last_update
-            self._last_update = now
-
-            # 토큰 충전 (시간 경과에 따라)
-            self._tokens = min(
-                self._capacity,
-                self._tokens + elapsed * self._rate,
-            )
-
-            # 토큰 소비 시도
-            if self._tokens >= tokens:
-                self._tokens -= tokens
-                return True
-            return False
-
-    def get_token_ratio(self) -> float:
-        """현재 토큰 잔량 비율 반환 (0.0 ~ 1.0).
-
-        충전량을 반영하되 _last_update는 갱신하지 않는다 (읽기 전용).
-        """
-        with self._lock:
-            now = time.time()
-            elapsed = now - self._last_update
-            current = min(self._capacity, self._tokens + elapsed * self._rate)
-            return current / self._capacity if self._capacity > 0 else 0.0
-
-    def wait_for_token(self, timeout: float = 1.0) -> bool:
-        """
-        토큰을 대기하며 획득 시도.
-
-        주의:
-            time.sleep()을 사용하므로 asyncio 환경에서는
-            이벤트 루프를 블로킹합니다.
-
-        Args:
-            timeout: 최대 대기 시간 (초)
-
-        Returns:
-            토큰 획득 성공 여부
-        """
-        start = time.time()
-        while time.time() - start < timeout:
-            if self.consume():
-                return True
-            time.sleep(0.01)
-        return False
+# TokenBucket has moved to baldur.core.rate_limiting (shared primitives home)
+# and is re-exported at module import above so this module's public name and
+# scaling.__all__ stay stable. New consumers import from the primitives home.
 
 
 # Starvation Relief 설정 상수

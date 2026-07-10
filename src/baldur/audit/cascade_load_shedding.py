@@ -1,21 +1,21 @@
 """
-Cascade Load Shedding - 고부하 시 이벤트 드롭 관리.
+Cascade Load Shedding - drop events under high load.
 
-Audit 시스템이 고부하 상황에서 시스템 전체 장애로 번지지 않도록
-우선순위 기반 Load Shedding을 적용합니다.
+Applies priority-based load shedding so a high-load situation in the audit
+system does not cascade into a full system outage.
 
 Features:
-- 우선순위 기반 이벤트 드롭 (LOW → MEDIUM 순)
-- 버퍼 사용률 기반 자동 조절
-- CRITICAL 이벤트는 절대 드롭하지 않음
-- 메트릭 기록
+- Priority-based event dropping (LOW -> MEDIUM order)
+- Automatic adjustment based on buffer utilization
+- CRITICAL events are never dropped
+- Metrics recording
 
 Usage:
     from baldur.audit.cascade_load_shedding import CascadeLoadShedding
 
     shedding = CascadeLoadShedding()
 
-    # 이벤트 기록 전 확인
+    # Check before recording an event
     decision = shedding.should_accept(
         trigger_type="METRICS_UPDATED",
         buffer_size=8000,
@@ -23,21 +23,16 @@ Usage:
     )
 
     if decision["accepted"]:
-        # 이벤트 기록
+        # record the event
         auditor.record(...)
     else:
-        # 드롭 또는 로컬 폴백
+        # drop or fall back locally
         shedding.record_dropped(trigger_type)
-
-Reference:
-    docs/baldur/middleware_system/76_CASCADE_EVENT_AUDIT.md
-    services/circuit_breaker/load_shedding.py (패턴 참조)
 """
 
 from __future__ import annotations
 
 import threading
-import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -51,28 +46,35 @@ from baldur.audit.cascade_event import (
     CascadeEventPriority,
     get_priority_for_trigger,
 )
+from baldur.core.rate_limiting import SlidingWindowCounter
 from baldur.utils.time import utc_now
 
 logger = structlog.get_logger()
 
+# Single-key window: this manager tracks one global event rate, not per-key.
+_RATE_WINDOW_KEY = "cascade"
+
+# Fallback rate window (seconds) when audit settings cannot be read.
+_DEFAULT_RATE_WINDOW_SECONDS = 1.0
+
 
 # =============================================================================
-# Metrics (Prometheus 호환)
+# Metrics (Prometheus-compatible)
 # =============================================================================
 
 
 @dataclass
 class LoadSheddingMetrics:
-    """Load Shedding 메트릭."""
+    """Load shedding metrics."""
 
     accepted_count: int = 0
-    """수락된 이벤트 수."""
+    """Number of accepted events."""
 
     dropped_count: int = 0
-    """드롭된 이벤트 수."""
+    """Number of dropped events."""
 
     fallback_count: int = 0
-    """폴백으로 처리된 이벤트 수."""
+    """Number of events handled via fallback."""
 
     dropped_by_priority: dict[str, int] = field(
         default_factory=lambda: {
@@ -82,13 +84,13 @@ class LoadSheddingMetrics:
             "CRITICAL": 0,
         }
     )
-    """우선순위별 드롭 수."""
+    """Drop count per priority."""
 
     last_shedding_time: str | None = None
-    """마지막 Load Shedding 발생 시각."""
+    """Timestamp of the last load-shedding event."""
 
     def to_dict(self) -> dict[str, Any]:
-        """딕셔너리 변환."""
+        """Convert to a dictionary."""
         return {
             "accepted_count": self.accepted_count,
             "dropped_count": self.dropped_count,
@@ -108,44 +110,43 @@ class LoadSheddingMetrics:
 
 class CascadeLoadShedding:
     """
-    Cascade Event Load Shedding 관리자.
+    Cascade event load-shedding manager.
 
-    버퍼 사용률에 따라 우선순위가 낮은 이벤트를 드롭합니다.
-    CRITICAL 이벤트는 절대 드롭하지 않습니다.
+    Drops lower-priority events based on buffer utilization. CRITICAL events
+    are never dropped.
 
     Shedding Policy:
-        - 정상 (< warning_threshold): 모든 이벤트 수락
-        - 경고 (warning ~ critical): LOW 우선순위 드롭
-        - 임계 (>= critical_threshold): LOW + MEDIUM 드롭
-        - CRITICAL 이벤트: 항상 수락 (로컬 폴백 사용)
-
-    Code reference:
-        test_lazy_import.py#L105-117 (get_load_shedding_manager 패턴)
-        services/circuit_breaker/load_shedding.py
+        - Normal (< warning_threshold): accept all events
+        - Warning (warning ~ critical): drop LOW priority
+        - Critical (>= critical_threshold): drop LOW + MEDIUM
+        - CRITICAL events: always accepted (via local fallback)
     """
 
     def __init__(self, config: AuditBackpressureConfig | None = None):
         """
         Args:
-            config: Backpressure 설정 (None이면 기본값)
+            config: Backpressure config (defaults are used when None).
         """
         self.config = config or get_audit_backpressure_config()
         self._metrics = LoadSheddingMetrics()
         self._lock = threading.RLock()
 
-        # Rate limiting
-        self._event_timestamps: list[float] = []
+        # Rate limiting — a single-key sliding window with write-side retention
+        # so memory stays bounded by the rate window.
         self._rate_window_seconds = self._get_rate_window_seconds()
+        self._rate_window = SlidingWindowCounter(
+            retention_seconds=self._rate_window_seconds
+        )
 
     @staticmethod
     def _get_rate_window_seconds() -> float:
-        """Settings에서 rate_window_seconds 조회."""
+        """Read rate_window_seconds from settings."""
         try:
             from baldur.settings.audit import get_audit_settings
 
             return get_audit_settings().cascade_rate_window_seconds
         except Exception:
-            return 1.0  # 기본값
+            return _DEFAULT_RATE_WINDOW_SECONDS
 
     def should_accept(
         self,
@@ -155,21 +156,21 @@ class CascadeLoadShedding:
         priority: CascadeEventPriority | None = None,
     ) -> dict[str, Any]:
         """
-        이벤트 수락 여부 결정.
+        Decide whether to accept an event.
 
         Args:
-            trigger_type: 트리거 타입
-            buffer_size: 현재 버퍼 크기
-            buffer_capacity: 버퍼 최대 용량
-            priority: 우선순위 (None이면 trigger_type에서 추론)
+            trigger_type: Trigger type
+            buffer_size: Current buffer size
+            buffer_capacity: Maximum buffer capacity
+            priority: Priority (inferred from trigger_type when None)
 
         Returns:
-            결정 결과:
-            - accepted: 수락 여부
-            - priority: 이벤트 우선순위
-            - buffer_ratio: 버퍼 사용률
-            - reason: 결정 사유
-            - use_fallback: 로컬 폴백 사용 권장 여부
+            Decision result:
+            - accepted: whether the event is accepted
+            - priority: event priority
+            - buffer_ratio: buffer utilization
+            - reason: decision reason
+            - use_fallback: whether local fallback is recommended
         """
         if not self.config.load_shedding_enabled:
             return {
@@ -180,17 +181,17 @@ class CascadeLoadShedding:
                 "use_fallback": False,
             }
 
-        # 우선순위 결정
+        # Determine priority
         event_priority = priority or get_priority_for_trigger(trigger_type)
 
-        # 버퍼 사용률 계산
+        # Buffer utilization
         buffer_ratio = buffer_size / max(1, buffer_capacity)
 
-        # Rate limiting 확인
+        # Rate-limit check
         rate_exceeded = self._check_rate_limit()
 
         with self._lock:
-            # CRITICAL은 항상 수락 (폴백 권장)
+            # CRITICAL is always accepted (fallback recommended)
             if event_priority == CascadeEventPriority.CRITICAL:
                 self._metrics.accepted_count += 1
                 return {
@@ -202,9 +203,9 @@ class CascadeLoadShedding:
                     >= self.config.buffer_critical_threshold,
                 }
 
-            # 버퍼 상태에 따른 결정
+            # Decision based on buffer state
             if buffer_ratio >= self.config.buffer_critical_threshold:
-                # 임계 상태: MEDIUM 이하 드롭
+                # Critical state: drop MEDIUM and below
                 if event_priority <= CascadeEventPriority.MEDIUM:
                     return self._drop_event(
                         event_priority, buffer_ratio, "buffer_critical"
@@ -217,11 +218,11 @@ class CascadeLoadShedding:
             ):
                 return self._drop_event(event_priority, buffer_ratio, "buffer_warning")
 
-            # Rate limit 초과 시
+            # Rate limit exceeded
             if rate_exceeded and event_priority <= CascadeEventPriority.LOW:
                 return self._drop_event(event_priority, buffer_ratio, "rate_exceeded")
 
-            # 수락
+            # Accept
             self._metrics.accepted_count += 1
             self._record_event_time()
 
@@ -241,7 +242,7 @@ class CascadeLoadShedding:
         buffer_ratio: float,
         reason: str,
     ) -> dict[str, Any]:
-        """이벤트 드롭 처리."""
+        """Handle an event drop."""
         self._metrics.dropped_count += 1
         self._metrics.dropped_by_priority[priority.name] += 1
         self._metrics.last_shedding_time = utc_now().isoformat()
@@ -263,25 +264,17 @@ class CascadeLoadShedding:
 
     def _check_rate_limit(self) -> bool:
         """
-        Rate limit 초과 여부 확인.
+        Check whether the rate limit is exceeded.
 
         Returns:
-            True면 초당 최대 이벤트 수 초과
+            True if the per-second maximum event count is exceeded.
         """
-        now = time.time()
-        cutoff = now - self._rate_window_seconds
-
-        with self._lock:
-            # 오래된 타임스탬프 제거
-            self._event_timestamps = [
-                ts for ts in self._event_timestamps if ts > cutoff
-            ]
-
-            return len(self._event_timestamps) >= self.config.max_events_per_second
+        count = self._rate_window.count(_RATE_WINDOW_KEY, self._rate_window_seconds)
+        return count >= self.config.max_events_per_second
 
     def _record_event_time(self) -> None:
-        """이벤트 시간 기록 (rate limiting용)."""
-        self._event_timestamps.append(time.time())
+        """Record an event timestamp (for rate limiting)."""
+        self._rate_window.record(_RATE_WINDOW_KEY)
 
     def record_dropped(
         self,
@@ -289,11 +282,11 @@ class CascadeLoadShedding:
         priority: CascadeEventPriority | None = None,
     ) -> None:
         """
-        드롭된 이벤트 기록 (메트릭용).
+        Record a dropped event (for metrics).
 
         Args:
-            trigger_type: 트리거 타입
-            priority: 우선순위
+            trigger_type: Trigger type
+            priority: Priority
         """
         event_priority = priority or get_priority_for_trigger(trigger_type)
 
@@ -302,12 +295,12 @@ class CascadeLoadShedding:
             self._metrics.dropped_by_priority[event_priority.name] += 1
 
     def record_fallback(self) -> None:
-        """폴백 처리 기록."""
+        """Record a fallback handling."""
         with self._lock:
             self._metrics.fallback_count += 1
 
     def get_metrics(self) -> dict[str, Any]:
-        """현재 메트릭 반환."""
+        """Return the current metrics."""
         with self._lock:
             return self._metrics.to_dict()
 
@@ -317,14 +310,14 @@ class CascadeLoadShedding:
         buffer_capacity: int,
     ) -> dict[str, Any]:
         """
-        현재 Load Shedding 상태 반환.
+        Return the current load-shedding status.
 
         Args:
-            buffer_size: 현재 버퍼 크기
-            buffer_capacity: 버퍼 최대 용량
+            buffer_size: Current buffer size
+            buffer_capacity: Maximum buffer capacity
 
         Returns:
-            상태 정보 딕셔너리
+            Status dictionary
         """
         buffer_ratio = buffer_size / max(1, buffer_capacity)
 
@@ -353,10 +346,10 @@ class CascadeLoadShedding:
         }
 
     def reset_metrics(self) -> None:
-        """메트릭 초기화."""
+        """Reset metrics."""
         with self._lock:
             self._metrics = LoadSheddingMetrics()
-            self._event_timestamps = []
+            self._rate_window.reset_all()
 
 
 # =============================================================================
@@ -369,7 +362,7 @@ _shedding_lock = threading.Lock()
 
 
 def get_cascade_load_shedding() -> CascadeLoadShedding:
-    """CascadeLoadShedding 싱글톤 반환."""
+    """Return the CascadeLoadShedding singleton."""
     global _load_shedding
 
     if _load_shedding is not None:
@@ -382,7 +375,7 @@ def get_cascade_load_shedding() -> CascadeLoadShedding:
 
 
 def reset_cascade_load_shedding() -> None:
-    """CascadeLoadShedding 싱글톤 리셋. 테스트 용도."""
+    """Reset the CascadeLoadShedding singleton (for testing)."""
     global _load_shedding
     with _shedding_lock:
         _load_shedding = None
