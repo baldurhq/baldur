@@ -878,3 +878,117 @@ class TestResetRateLimitTrackerBehavior:
             t.join()
 
         assert all(r is results[0] for r in results)
+
+
+class TestRateLimitTrackerBoundedBehavior:
+    """Write-side trim bounds L1 memory (the leak fired when reads were L2-routed)."""
+
+    def _tracker_with_healthy_redis(self, retention_seconds: float):
+        """Hybrid tracker with a healthy L2 stub and an injected L1 retention."""
+        from unittest.mock import MagicMock
+
+        from baldur.services.circuit_breaker.rate_limit_tracker import (
+            MemoryRateLimitTracker,
+            RateLimitTracker,
+        )
+
+        tracker = RateLimitTracker()
+        tracker._memory = MemoryRateLimitTracker(retention_seconds=retention_seconds)
+        tracker._redis = MagicMock()
+        tracker._redis_initialized = True
+        return tracker
+
+    def test_l1_stays_bounded_with_healthy_l2_and_no_reads(self):
+        """Write-only load (reads served by L2) keeps the L1 series inside retention.
+
+        Before the write-side trim, this scenario grew the L1 lists without
+        bound at request rate: pruning lived only in the L1 reads, and the
+        hybrid read path never reaches L1 while Redis is healthy.
+        """
+        from unittest.mock import patch as mock_patch
+
+        retention = 60.0
+        tracker = self._tracker_with_healthy_redis(retention_seconds=retention)
+
+        # Given: 500 writes spread over ~10x the retention window, never read
+        with mock_patch("time.time") as mock_time:
+            for i in range(500):
+                mock_time.return_value = 1_000_000.0 + i * 1.2
+                tracker.record_request("svc")
+                tracker.record_rate_limit("svc")
+
+        # Then: only the entries inside the retention window survive.
+        # Last write t=1000598.8, cutoff=1000538.8; the write-side trim pops
+        # entries at/below the cutoff, leaving exactly the 50 newest.
+        assert len(tracker._memory._request_events["svc"]) == 50
+        assert len(tracker._memory._rate_limit_events["svc"]) == 50
+
+    def test_l1_bounded_in_memory_only_mode_for_never_read_service(self):
+        """A recorded-but-never-read service stays bounded without any L2."""
+        from unittest.mock import patch as mock_patch
+
+        from baldur.services.circuit_breaker.rate_limit_tracker import (
+            MemoryRateLimitTracker,
+        )
+
+        tracker = MemoryRateLimitTracker(retention_seconds=30.0)
+
+        with mock_patch("time.time") as mock_time:
+            for i in range(200):
+                mock_time.return_value = 5_000.0 + i * 1.0
+                tracker.record_request("svc")
+
+        # Last write t=5199, cutoff=5169; entries at/below 5169 trimmed -> 30 left.
+        assert len(tracker._request_events["svc"]) == 30
+
+    def test_reads_are_non_destructive(self):
+        """get_*_count only counts; repeated reads return the same value."""
+        from unittest.mock import patch as mock_patch
+
+        from baldur.services.circuit_breaker.rate_limit_tracker import (
+            MemoryRateLimitTracker,
+        )
+
+        tracker = MemoryRateLimitTracker(retention_seconds=120.0)
+
+        with mock_patch("time.time", return_value=2_000.0):
+            tracker.record_rate_limit("svc")
+            tracker.record_rate_limit("svc")
+
+        with mock_patch("time.time", return_value=2_010.0):
+            first = tracker.get_rate_limit_count("svc", 60)
+            second = tracker.get_rate_limit_count("svc", 60)
+
+        assert first == second == 2
+        assert len(tracker._rate_limit_events["svc"]) == 2
+
+
+class TestRateLimitTrackerContract:
+    """L1 retention resolution: injected value, or the exact L2 retention bound."""
+
+    def test_injected_retention_is_respected(self):
+        from baldur.services.circuit_breaker.rate_limit_tracker import (
+            MemoryRateLimitTracker,
+        )
+
+        tracker = MemoryRateLimitTracker(retention_seconds=42.0)
+
+        assert tracker._retention() == 42.0
+
+    def test_default_retention_matches_the_l2_bound_expression(self):
+        """Lazy default reuses max(cascade_window, self_ddos_window, floor) - the
+        same bound the L2 backend applies, so L1 and L2 retain identically."""
+        from baldur.services.circuit_breaker.rate_limit_tracker import (
+            _MIN_L2_RETENTION_SECONDS,
+            MemoryRateLimitTracker,
+        )
+        from baldur.settings.circuit_breaker import get_circuit_breaker_settings
+
+        settings = get_circuit_breaker_settings()
+        expected = max(
+            settings.rate_limit_cascade_window_seconds,
+            settings.self_ddos_window_seconds,
+            _MIN_L2_RETENTION_SECONDS,
+        )
+
+        assert MemoryRateLimitTracker()._retention() == expected
