@@ -321,6 +321,13 @@ class TestClientIpAdoptionDrift:
 class TestTimeSourceAdoptionDrift:
     """G57 — no reference to the retired ``baldur.core.timezone`` module."""
 
+    def test_module_file_does_not_reappear(self):
+        assert not (_SRC_ROOT / "core" / "timezone.py").exists(), (
+            "G57: core/timezone.py reappeared — the retired parallel "
+            "now-module must not return; baldur.utils.time.utc_now is the "
+            "single time source"
+        )
+
     def test_no_core_timezone_reference(self):
         hits = scan_tree(_SRC_ROOT, scan_timezone_source, _TIMEZONE_ALLOWED_ORIGIN)
         assert not hits, (

@@ -1,7 +1,7 @@
 """Seam test: baldur.utils.time.utc_now() reads through the global TimeProvider (D7).
 
 Migrated from test_clock_skew.py's TestTimezoneIntegration cases and retargeted at the
-canonical utc_now() (baldur.core.timezone was removed). reset_time_provider() runs in a
+canonical utc_now() (the parallel now-module was removed). reset_time_provider() runs in a
 finally block so a failing test cannot leak a MockTimeProvider into other xdist workers.
 """
 

@@ -14,6 +14,10 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 - Admin config-write endpoints now reject an unrecognized field with `400 Bad Request` instead of silently dropping it or returning `500`. Previously, PATCHing a chaos safety limit or an error-budget config with a mistyped key returned `200 success` while applying nothing — the typo was invisible and discoverable only by diffing the echoed config. Now any unknown key rejects the whole body with `400` (listing `unknown_fields` and `allowed_fields`), nothing is applied, and an all-valid body applies fully and echoes `updated_fields`. **Breaking:** a client that sends an unrecognized field to one of these admin endpoints now receives `400` where it previously received `200` (a silent no-op) or `500`.
 
+### Removed
+
+- `baldur.core.timezone` — the parallel time module (its only consumed symbol was `now`). **Breaking:** import `baldur.utils.time.utc_now` instead; default behavior is identical (timezone-aware UTC), and `utc_now()` now honors a custom clock source set via `baldur.core.time_provider.set_time_provider`. The module's unused conversion helpers (`make_aware`, `localtime`, `set_default_timezone`, and friends) are removed with it.
+
 ### Security
 
 - The Pydantic-backed config serializers no longer echo a non-validation exception's message in their validation-error response; only pydantic validation failures surface their field-level detail, and any other error propagates as a 500 instead of leaking its message.

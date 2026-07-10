@@ -11,7 +11,7 @@ Detection pattern (AST `ast.Call`):
   ``import datetime``.
 
 Exempt modules (defined the abstractions): ``utils/time.py``,
-``core/timezone.py``, ``core/time_provider.py``.
+``core/time_provider.py``.
 
 Rule registry: ``ARCHITECTURE.md#g5-time-handling``
 """
@@ -35,7 +35,6 @@ _FORBIDDEN_ATTRS = frozenset({"now", "utcnow"})
 
 _EXEMPT_SUFFIXES = (
     "utils/time.py",
-    "core/timezone.py",
     "core/time_provider.py",
 )
 
