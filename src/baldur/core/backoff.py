@@ -45,6 +45,21 @@ class BackoffStrategy(ABC):
         """Reset the backoff calculator to its initial state."""
         pass
 
+    def delays(self, n: int) -> list[float]:
+        """Return the first ``n`` retry delays as a list.
+
+        Convenience over :meth:`calculate` for callers that need the whole
+        interval schedule up front (e.g. an RQ ``Retry(interval=[...])`` list).
+        Delays are 1-indexed like :meth:`calculate`, so ``delays(3)`` returns the
+        delays for attempts 1, 2 and 3.
+
+        Note:
+            Stateful strategies (e.g. decorrelated jitter) advance their internal
+            state once per element — identical to calling :meth:`calculate` ``n``
+            times in sequence.
+        """
+        return [self.calculate(i) for i in range(1, n + 1)]
+
 
 @dataclass
 class ExponentialBackoff(BackoffStrategy):

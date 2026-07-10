@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from baldur.core.backoff import ExponentialBackoff
 from baldur.settings.batch import get_batch_settings
 
 if TYPE_CHECKING:
@@ -194,7 +195,9 @@ class AsyncHealingLogger:
     # Error-alert-related
     _alert_config: FlushErrorAlertConfig = FlushErrorAlertConfig()
     _error_timestamps: deque = deque(maxlen=100)
-    _last_alert_time: float = 0
+    # Per-alert-key last-send timestamps (reserve-under-lock; see _check_and_send_alert).
+    _last_alert_time: dict[str, float] = {}
+    _FLUSH_ERROR_ALERT_KEY = "flush_error"
 
     # Settings come from BatchSettings
     IMMEDIATE_SEVERITIES = {EventSeverity.CRITICAL}
@@ -740,12 +743,15 @@ class AsyncHealingLogger:
             cls._check_and_send_alert()
 
             if attempt < cls._retry_policy.max_retries:
-                # Schedule a retry
-                delay = min(
-                    cls._retry_policy.initial_delay_seconds
-                    * (cls._retry_policy.backoff_multiplier**attempt),
-                    cls._retry_policy.max_delay_seconds,
+                # Schedule a retry (canonical exponential backoff + jitter; the
+                # loop is 0-indexed so pass attempt + 1 to the 1-indexed strategy).
+                backoff = ExponentialBackoff(
+                    base_delay=cls._retry_policy.initial_delay_seconds,
+                    multiplier=cls._retry_policy.backoff_multiplier,
+                    max_delay=cls._retry_policy.max_delay_seconds,
+                    jitter=True,
                 )
+                delay = backoff.calculate(attempt + 1)
                 next_retry = time.time() + delay
 
                 with cls._lock:
@@ -837,24 +843,37 @@ class AsyncHealingLogger:
 
     @classmethod
     def _check_and_send_alert(cls) -> None:
-        """Check the error threshold and send an alert."""
+        """Check the error threshold and send an alert.
+
+        The cooldown slot is reserved *under the lock* before the (unlocked)
+        send, closing the check-then-act window the previous global scalar left
+        open — two concurrent flush errors can no longer both pass the check and
+        double-page. If the send fails the reservation is rolled back so the next
+        error can re-attempt immediately.
+        """
+        key = cls._FLUSH_ERROR_ALERT_KEY
         now = time.time()
 
-        # Cooldown check
-        if now - cls._last_alert_time < cls._alert_config.cooldown_seconds:
-            return
+        with cls._lock:
+            last = cls._last_alert_time.get(key, 0.0)
+            if now - last < cls._alert_config.cooldown_seconds:
+                return
+            window_start = now - cls._alert_config.window_seconds
+            recent_errors = sum(1 for ts in cls._error_timestamps if ts >= window_start)
+            if recent_errors < cls._alert_config.threshold_count:
+                return
+            prev = cls._last_alert_time.get(key, 0.0)
+            cls._last_alert_time[key] = now
 
-        # Count errors within the time window
-        window_start = now - cls._alert_config.window_seconds
-        recent_errors = sum(1 for ts in cls._error_timestamps if ts >= window_start)
-
-        if recent_errors >= cls._alert_config.threshold_count:
-            cls._send_flush_error_alert(recent_errors)
-            cls._last_alert_time = now
+        if not cls._send_flush_error_alert(recent_errors):
+            with cls._lock:
+                # Roll back only if no other thread advanced the slot meanwhile.
+                if cls._last_alert_time.get(key) == now:
+                    cls._last_alert_time[key] = prev
 
     @classmethod
-    def _send_flush_error_alert(cls, error_count: int) -> None:
-        """Send an alert via UnifiedNotificationManager."""
+    def _send_flush_error_alert(cls, error_count: int) -> bool:
+        """Send an alert via UnifiedNotificationManager. Returns True on success."""
         try:
             from baldur.models.notification import (
                 NotificationPayload,
@@ -898,14 +917,17 @@ class AsyncHealingLogger:
                 "async_healing_logger.flush_error_alert_sent",
                 error_count=error_count,
             )
+            return True
 
         except ImportError:
             logger.warning("async_healing_logger.unifiednotificationmanager_available")
+            return False
         except Exception as e:
             logger.exception(
                 "async_healing_logger.send_alert_failed",
                 error=e,
             )
+            return False
 
     # -------------------------------------------------------------------------
     # Immediate Flush
@@ -955,7 +977,7 @@ class AsyncHealingLogger:
             cls._critical_executor = None
             cls._pending_retries = []
             cls._error_timestamps = deque(maxlen=100)
-            cls._last_alert_time = 0
+            cls._last_alert_time = {}
             cls._flush_requested.clear()
             cls._flush_done.clear()
             cls._stats = {

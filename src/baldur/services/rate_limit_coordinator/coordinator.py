@@ -11,15 +11,14 @@ Key Features:
     - 100% coverage with database fallback
 
 Design Philosophy:
-    "어떤 고객 환경이든 100% Self-DDoS 차단"
-    - Redis 있으면 사용 (최고 성능)
-    - 없으면 Database 사용 (100% 호환)
-    - DB도 없으면 InMemory (단일 프로세스)
+    "100% Self-DDoS prevention in any customer environment"
+    - Use Redis if available (best performance)
+    - Fall back to Database otherwise (100% compatible)
+    - Fall back to InMemory if no DB (single process)
 """
 
 from __future__ import annotations
 
-import random
 import threading
 import time
 from collections.abc import Callable
@@ -28,6 +27,7 @@ from typing import Any, TypeVar
 import structlog
 
 from baldur.adapters.rate_limit import get_rate_limit_storage
+from baldur.core.backoff import ExponentialBackoff
 from baldur.interfaces.rate_limit_storage import (
     RateLimitState,
     RateLimitStorageInterface,
@@ -44,6 +44,10 @@ from .models import RateLimitCoordinatorConfig, RateLimitResult
 logger = structlog.get_logger()
 
 T = TypeVar("T")
+
+# Minimum cooldown floor (seconds) applied after backoff+jitter so a 429 always
+# yields a non-trivial wait even when jitter drives the computed delay toward zero.
+_MIN_COOLDOWN_SECONDS: float = 0.1
 
 
 class RateLimitCoordinator:
@@ -96,15 +100,15 @@ class RateLimitCoordinator:
         self._config = config or RateLimitCoordinatorConfig.from_settings()
         self._local_lock = threading.Lock()
 
-        # EventBus 디바운싱 상태 (동일 key에 대한 이벤트 중복 발행 방지)
+        # EventBus debouncing state (prevents duplicate event emission per key)
         self._last_event_emit_times: dict[str, float] = {}
         self._debounce_lock = threading.Lock()
 
-        # Canary 상태 추적 (Cooldown 직후 첫 요청 정찰 모드)
+        # Canary state tracking (scout mode for the first request after cooldown)
         self._canary_in_progress: dict[str, bool] = {}
         self._canary_lock = threading.Lock()
 
-        # Cooldown 종료 이벤트 타이머 추적 (취소용)
+        # Cooldown-end event timer tracking (for cancellation)
         self._cooldown_timers: dict[str, threading.Timer] = {}
         self._timer_lock = threading.Lock()
 
@@ -143,13 +147,13 @@ class RateLimitCoordinator:
 
     def _should_emit_event(self, key: str) -> bool:
         """
-        디바운싱 확인 - 동일 key에 대해 윈도우 내 중복 이벤트 방지.
+        Check debouncing - prevent duplicate events within the window per key.
 
         Args:
             key: Rate limit key
 
         Returns:
-            이벤트 발행 여부
+            Whether the event should be emitted
         """
         now = time.time()
 
@@ -173,13 +177,13 @@ class RateLimitCoordinator:
 
     def _schedule_cooldown_end_event(self, key: str, cooldown_until: float) -> None:
         """
-        Cooldown 종료 시점에 RATE_LIMIT_COOLDOWN_END 이벤트 예약.
+        Schedule a RATE_LIMIT_COOLDOWN_END event at the cooldown-end time.
 
-        Threading Timer 사용으로 비동기 발행.
+        Uses a threading Timer for asynchronous emission.
 
         Args:
             key: Rate limit key
-            cooldown_until: Cooldown 종료 시각 (Unix timestamp)
+            cooldown_until: Cooldown end time (Unix timestamp)
         """
         delay = cooldown_until - time.time()
         if delay <= 0:
@@ -199,11 +203,11 @@ class RateLimitCoordinator:
                 rate_limit_key=key,
             )
 
-            # 타이머 정리
+            # Timer cleanup
             with self._timer_lock:
                 self._cooldown_timers.pop(key, None)
 
-        # 기존 타이머 취소
+        # Cancel existing timer
         with self._timer_lock:
             existing_timer = self._cooldown_timers.get(key)
             if existing_timer:
@@ -220,14 +224,14 @@ class RateLimitCoordinator:
 
     def _check_canary_mode(self, key: str, state: RateLimitState) -> bool:
         """
-        Canary 모드 확인 - Cooldown 종료 직후 첫 요청인지 확인.
+        Check canary mode - whether this is the first request after cooldown.
 
         Args:
             key: Rate limit key
-            state: 현재 Rate limit 상태
+            state: Current rate limit state
 
         Returns:
-            is_canary 여부
+            Whether this is a canary request
         """
         if state.consecutive_429s == 0:
             return False
@@ -244,7 +248,7 @@ class RateLimitCoordinator:
         return False
 
     def _clear_canary_state(self, key: str) -> None:
-        """Canary 상태 해제."""
+        """Clear canary state."""
         with self._canary_lock:
             if key in self._canary_in_progress:
                 del self._canary_in_progress[key]
@@ -262,7 +266,7 @@ class RateLimitCoordinator:
         Wait if currently in cooldown period.
 
         Call this BEFORE making an external request.
-        Cooldown 종료 직후 첫 요청은 is_canary=True로 표시.
+        The first request right after cooldown is marked is_canary=True.
 
         Args:
             key: Rate limit key (e.g., "payment_api", "external_service")
@@ -292,7 +296,7 @@ class RateLimitCoordinator:
                 is_canary=False,
             )
 
-        # Cooldown 종료 직후 - Canary 모드 확인
+        # Right after cooldown ends - check canary mode
         is_canary = self._check_canary_mode(key, state)
 
         return RateLimitResult(
@@ -331,20 +335,22 @@ class RateLimitCoordinator:
         else:
             base_delay = self._config.default_retry_after
 
-        # Exponential backoff: base * (multiplier ^ consecutive)
-        delay = base_delay * (self._config.backoff_multiplier ** (consecutive - 1))
-        delay = min(delay, self._config.max_delay)
-
-        # Add jitter to prevent thundering herd
-        jitter_range = delay * (self._config.jitter_percent / 100.0)
-        jitter = random.uniform(-jitter_range, jitter_range)
-        delay = max(0.1, delay + jitter)
+        # Exponential backoff with jitter, composed from the canonical strategy
+        # (jitter_factor == jitter_percent / 100 keeps the symmetric-uniform semantics).
+        backoff = ExponentialBackoff(
+            base_delay=base_delay,
+            multiplier=self._config.backoff_multiplier,
+            max_delay=self._config.max_delay,
+            jitter=True,
+            jitter_factor=self._config.jitter_percent / 100.0,
+        )
+        delay = max(_MIN_COOLDOWN_SECONDS, backoff.calculate(consecutive))
 
         # Set global cooldown
         cooldown_until = time.time() + delay
         self._storage.set_cooldown(key, cooldown_until)
 
-        # EventBus 연동 (디바운싱 적용)
+        # EventBus integration (debouncing applied)
         if self._should_emit_event(key):
             _emit_rate_limit_event(
                 "RATE_LIMIT_429",
@@ -359,7 +365,7 @@ class RateLimitCoordinator:
                 priority_name="HIGH",
             )
 
-            # Prometheus 메트릭 기록
+            # Record Prometheus metrics
             _record_rate_limit_metrics(
                 key=key,
                 status_code=status_code,
@@ -367,10 +373,10 @@ class RateLimitCoordinator:
                 consecutive_429s=consecutive,
             )
 
-            # Cooldown 종료 이벤트 스케줄링
+            # Schedule cooldown-end event
             self._schedule_cooldown_end_event(key, cooldown_until)
 
-        # 317: Kafka 분산 채널을 통해 클러스터 전체에 429 이벤트 전파
+        # 317: Broadcast the 429 event cluster-wide via the Kafka distributed channel
         self._broadcast_to_cluster(key, consecutive, cooldown_until, delay)
 
         logger.warning(
@@ -390,7 +396,7 @@ class RateLimitCoordinator:
         cooldown_until: float,
         calculated_delay: float,
     ) -> None:
-        """317: Kafka 분산 채널로 429 이벤트 비동기 전파 (Fail-Open)."""
+        """317: Async broadcast of the 429 event via the Kafka channel (Fail-Open)."""
         try:
             from baldur.services.rate_limit.distributed_channel import (
                 get_distributed_rate_limit_channel,
@@ -419,7 +425,7 @@ class RateLimitCoordinator:
         Args:
             key: Rate limit key
         """
-        # Canary 상태 해제
+        # Clear canary state
         self._clear_canary_state(key)
 
         state = self._storage.get_state(key)
