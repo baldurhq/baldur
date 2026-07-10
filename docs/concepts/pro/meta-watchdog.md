@@ -79,7 +79,7 @@ Meta-Watchdog is **on by default** under PRO. The most common knobs:
 | `BALDUR_META_WATCHDOG_ENABLED` | `true` | Master switch — set to `false` to silence the watchdog entirely |
 | `BALDUR_META_WATCHDOG_ESCALATION_ENABLED` | `true` | Whether detections page a human |
 | `BALDUR_META_WATCHDOG_PROBE_INTERVAL_SECONDS` | `30` | How often it probes every subsystem |
-| `BALDUR_META_WATCHDOG_PAGERDUTY_ROUTING_KEY` | _(none)_ | PagerDuty Events API routing key for critical pages |
+| `BALDUR_META_WATCHDOG_SLACK_WEBHOOK_URL` | _(none)_ | Slack incoming-webhook URL pages are delivered to — while unset, pages are logged but nothing is posted |
 
 The full set of tuning options lives in the [environment variable reference](../../reference/env-vars.md).
 
