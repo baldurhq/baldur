@@ -82,6 +82,14 @@ class TestTokenBucket:
         # 타임아웃
         assert bucket.wait_for_token(timeout=0.01) is False
 
+    def test_reexport_is_the_relocated_core_primitive(self):
+        """The name re-exported from scaling.rate_controller is the relocated
+        core primitive itself, so the public import path and its clock/refill
+        behavior stay identical (behavior is covered in core/test_rate_limiting)."""
+        from baldur.core.rate_limiting import TokenBucket as CoreTokenBucket
+
+        assert TokenBucket is CoreTokenBucket
+
 
 class TestRateControllerState:
     """RateControllerState 테스트."""
