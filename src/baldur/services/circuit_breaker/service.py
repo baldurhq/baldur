@@ -24,10 +24,10 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from baldur.audit.helpers import log_cb_state_change_audit
-from baldur.core.timezone import now
 from baldur.dlq.helpers import store_to_dlq
 from baldur.metrics.recorders.circuit_breaker import record_blocked
 from baldur.services.event_bus.emitter import EventEmitterMixin
+from baldur.utils.time import utc_now
 
 from .config import (
     CircuitBreakerConfig,
@@ -182,7 +182,7 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
             return self.config
 
         override = self._threshold_overrides[service_name]
-        if now() > override.expires_at:
+        if utc_now() > override.expires_at:
             self._threshold_overrides.pop(service_name)
             return self.config
 
@@ -305,7 +305,7 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
         # OPEN with recovery_timeout NOT yet elapsed: short-circuit reject.
         if state.state == CircuitState.OPEN:
             elapsed = (
-                (now() - state.opened_at).total_seconds()
+                (utc_now() - state.opened_at).total_seconds()
                 if state.opened_at is not None
                 else 0.0
             )
@@ -349,7 +349,7 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
                 data={
                     "service_name": service_name,
                     "previous_state": "open",
-                    "timestamp": now().isoformat(),
+                    "timestamp": utc_now().isoformat(),
                     "trigger": "auto",
                 },
             )
@@ -717,7 +717,7 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
                     data={
                         "service_name": service_name,
                         "previous_state": "half_open",
-                        "timestamp": now().isoformat(),
+                        "timestamp": utc_now().isoformat(),
                         "trigger": "half_open_failure",
                     },
                 )
@@ -740,7 +740,7 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
             self.repository.update_state(
                 service_name=service_name,
                 state="open",
-                opened_at=now(),
+                opened_at=utc_now(),
             )
 
             # Log with snapshot
@@ -780,7 +780,7 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
                 data={
                     "service_name": service_name,
                     "previous_state": "closed",
-                    "timestamp": now().isoformat(),
+                    "timestamp": utc_now().isoformat(),
                     "trigger": "auto",
                 },
             )
@@ -872,7 +872,7 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
         """
         snapshot = {
             "service_name": service_name,
-            "timestamp": now().isoformat(),
+            "timestamp": utc_now().isoformat(),
             "circuit_breaker": {
                 "failure_count": state.failure_count,
                 "success_count": state.success_count,
@@ -1138,7 +1138,7 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
                 data={
                     "service_name": service_name,
                     "previous_state": "half_open",
-                    "timestamp": now().isoformat(),
+                    "timestamp": utc_now().isoformat(),
                     "trigger": "auto",
                     "trigger_replay": True,
                 },
@@ -1177,7 +1177,7 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
                 if state.opened_at is None:
                     continue
 
-                elapsed = (now() - state.opened_at).total_seconds()
+                elapsed = (utc_now() - state.opened_at).total_seconds()
 
                 effective_cfg = self.get_effective_config(state.service_name)
                 if elapsed >= effective_cfg.recovery_timeout:

@@ -27,7 +27,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from baldur.core.timezone import now as tz_now
+from baldur.utils.time import utc_now as tz_now
 
 
 @pytest.fixture

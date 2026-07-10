@@ -101,10 +101,10 @@ class DailyReportCollector:
 
     def get_report(self, date: datetime | None = None) -> DailyAutonomousReport:
         """Get aggregated report for a specific date (default: yesterday)."""
-        from baldur.core.timezone import now
+        from baldur.utils.time import utc_now
 
         if date is None:
-            date = now() - timedelta(days=1)
+            date = utc_now() - timedelta(days=1)
 
         date_key = date.strftime("%Y-%m-%d")
         report = DailyAutonomousReport(date=date)

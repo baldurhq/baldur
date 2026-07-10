@@ -476,7 +476,7 @@ class VerifyReconciliationAccuracyTask(BaseNotifyingTask):
         try:
             from datetime import timedelta
 
-            from baldur.core.timezone import now as get_now
+            from baldur.utils.time import utc_now as get_now
 
             try:
                 from baldur_pro.services.error_budget.reconciliation import (
@@ -541,7 +541,7 @@ class VerifyReconciliationAccuracyTask(BaseNotifyingTask):
         """
         from datetime import timedelta
 
-        from baldur.core.timezone import now as get_now
+        from baldur.utils.time import utc_now as get_now
 
         try:
             # look up the actual error count (Prometheus or DLQ)

@@ -29,9 +29,9 @@ Usage:
     )
 
     if result.executed:
-        # 실제 실행됨
+        # Actually executed
     else:
-        # Shadow/Evaluation 모드로 로깅만 됨
+        # Shadow/Evaluation mode: logged only
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ from baldur.core.decision_logger import (
     log_intervention_evaluated,
 )
 from baldur.core.execution_mode import ExecutionMode, get_execution_mode
-from baldur.core.timezone import now
+from baldur.utils.time import utc_now
 
 logger = structlog.get_logger()
 
@@ -182,7 +182,7 @@ class ActionExecutor:
             ActionResult with execution details
         """
         current_mode = self.mode
-        timestamp = now()
+        timestamp = utc_now()
 
         # Log entering decision zone
         DecisionLogger(service_name=action.target)

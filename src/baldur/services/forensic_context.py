@@ -19,7 +19,7 @@ from typing import Any
 
 import structlog
 
-from baldur.core.timezone import now
+from baldur.utils.time import utc_now
 
 logger = structlog.get_logger()
 
@@ -55,7 +55,7 @@ def capture_forensic_context(
         context: dict[str, Any] = {
             "task_id": task_id,
             "task_name": task_name,
-            "captured_at": now().isoformat(),
+            "captured_at": utc_now().isoformat(),
         }
 
         # Capture order context if available

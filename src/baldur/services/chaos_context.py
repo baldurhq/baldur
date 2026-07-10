@@ -18,7 +18,7 @@ from typing import Any, Protocol
 
 import structlog
 
-from baldur.core.timezone import now
+from baldur.utils.time import utc_now
 
 logger = structlog.get_logger()
 
@@ -99,7 +99,7 @@ class ChaosExperimentContext:
     experiment_type: str = ChaosExperimentType.LATENCY_INJECTION.value
 
     # Experiment timing
-    started_at: str = field(default_factory=lambda: now().isoformat())
+    started_at: str = field(default_factory=lambda: utc_now().isoformat())
     expected_duration_seconds: int = 300  # 5 minutes default
     expires_at: str = ""
 
@@ -191,20 +191,20 @@ class ChaosExperimentContext:
             return False
         try:
             expires = datetime.fromisoformat(self.expires_at.replace("Z", "+00:00"))
-            return now() > expires
+            return utc_now() > expires
         except Exception:
             return False
 
     def mark_completed(self, note: str = "") -> None:
         """Mark experiment as completed."""
         self.status = ChaosExperimentStatus.COMPLETED.value
-        self.resolved_at = now().isoformat()
+        self.resolved_at = utc_now().isoformat()
         self.resolution_note = note or "Experiment completed successfully"
 
     def mark_aborted(self, note: str = "") -> None:
         """Mark experiment as aborted."""
         self.status = ChaosExperimentStatus.ABORTED.value
-        self.resolved_at = now().isoformat()
+        self.resolved_at = utc_now().isoformat()
         self.resolution_note = note or "Experiment aborted"
 
 
@@ -353,7 +353,7 @@ def resolve_chaos_experiment(
     operation.status = operation.Status.RESOLVED
     operation.resolution_type = operation.ResolutionType.AUTO_REPLAY
     operation.resolution_note = f"[CHAOS Experiment] {note or 'Experiment completed'}"
-    operation.resolved_at = now()
+    operation.resolved_at = utc_now()
 
     operation.save(
         update_fields=[

@@ -25,12 +25,12 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from baldur.core.timezone import now
 from baldur.interfaces.statistics import (
     RecentActivity,
     StatusCounts,
 )
 from baldur.settings.dashboard import get_dashboard_settings
+from baldur.utils.time import utc_now
 
 from .models import AlertInfo, DashboardSummary, Distribution
 
@@ -188,7 +188,7 @@ class DashboardService:
                 return self._dict_to_summary(cached)
 
         # Fetch fresh data
-        current_time = now()
+        current_time = utc_now()
 
         # Get all component data
         status_counts = self.get_status_counts()

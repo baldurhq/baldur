@@ -362,7 +362,7 @@ class TestExecuteExperimentRegistrationBehavior:
         self, scheduler, mock_schedule
     ):
         """_execute_experiment registers instance before execute and unregisters in finally."""
-        from baldur.core.timezone import now
+        from baldur.utils.time import utc_now
 
         mock_experiment = MagicMock()
         mock_result = MagicMock()
@@ -385,7 +385,7 @@ class TestExecuteExperimentRegistrationBehavior:
                 mock_schedule,
                 "sched-001",
                 "exp-001",
-                now(),
+                utc_now(),
                 force=True,
             )
 

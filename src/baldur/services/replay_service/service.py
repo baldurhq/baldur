@@ -28,11 +28,11 @@ import structlog
 
 from baldur.audit.helpers import log_dlq_replay_audit, log_dlq_replay_blocked_audit
 from baldur.audit.trace import extract_origin_trace
-from baldur.core.timezone import now
 from baldur.interfaces.repositories import ResolutionTrigger
 from baldur.services.event_bus.emitter import EventEmitterMixin
 from baldur.settings import get_config
 from baldur.settings.replay_automation import get_replay_automation_settings
+from baldur.utils.time import utc_now
 
 from .handlers import _truncate_gate, get_replay_handler
 from .models import BatchReplayResult, ReplayResult
@@ -472,7 +472,7 @@ class ReplayService(EventEmitterMixin):
                 error_details={
                     "type": type(e).__name__,
                     "message": str(e)[:500],
-                    "occurred_at": now().isoformat(),
+                    "occurred_at": utc_now().isoformat(),
                     "escalated_to": "requires_review",
                 },
             )

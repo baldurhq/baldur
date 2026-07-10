@@ -138,7 +138,7 @@ class TestAutoHalfOpenEmissionContract:
         with patch.object(service, "_emit_event", side_effect=capture_emit):
             from datetime import timedelta
 
-            from baldur.core.timezone import now as tz_now
+            from baldur.utils.time import utc_now as tz_now
 
             mock_state.opened_at = tz_now() - timedelta(
                 seconds=service.config.recovery_timeout + 1

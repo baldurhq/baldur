@@ -16,12 +16,12 @@ from __future__ import annotations
 
 import structlog
 
-from baldur.core.timezone import now
 from baldur.services.chaos_context import (
     ChaosExperimentContext,
     ChaosExperimentStatus,
     is_chaos_experiment,
 )
+from baldur.utils.time import utc_now
 
 logger = structlog.get_logger()
 
@@ -44,7 +44,7 @@ def resolve_expired_chaos_experiments() -> int:
         return 0
 
     resolved_count = 0
-    current_time = now()
+    current_time = utc_now()
 
     try:
         # Query pending/failed operations that might be chaos experiments.

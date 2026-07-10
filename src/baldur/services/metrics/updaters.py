@@ -254,15 +254,15 @@ def track_recovery_time(
             # perform recovery operation
             pass
     """
-    from baldur.core.timezone import now
+    from baldur.utils.time import utc_now
 
-    start = now()
+    start = utc_now()
     try:
         yield
     finally:
         from baldur.metrics.prometheus import get_metrics
 
-        end = now()
+        end = utc_now()
         get_metrics().retry.record_recovery_time(domain, resolution_type, start, end)
 
 

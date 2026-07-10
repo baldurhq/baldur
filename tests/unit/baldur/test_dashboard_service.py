@@ -290,7 +290,7 @@ class TestDashboardServiceGetSummary:
     @patch("baldur.services.dashboard_service.DashboardService.get_recent_activity")
     @patch("baldur.services.dashboard_service.DashboardService.get_distribution")
     @patch("baldur.services.dashboard_service.DashboardService.get_alerts")
-    @patch("baldur.services.dashboard_service.now")
+    @patch("baldur.services.dashboard_service.service.utc_now")
     def test_get_summary_integration(
         self,
         mock_now,

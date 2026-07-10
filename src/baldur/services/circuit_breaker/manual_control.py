@@ -17,7 +17,7 @@ from baldur.audit.helpers import (
 )
 from baldur.core.decision_logger import DecisionLogger, ReasonCode
 from baldur.core.execution_mode import get_execution_mode
-from baldur.core.timezone import now
+from baldur.utils.time import utc_now
 
 from .config import CircuitBreakerResult, CircuitState
 
@@ -214,15 +214,15 @@ class ManualControlMixin:
                     pass  # Metrics not available
 
                 # EventBus emission — Manual OPEN
-                from baldur.core.timezone import now
                 from baldur.services.event_bus import EventType
+                from baldur.utils.time import utc_now
 
                 self._emit_event(
                     EventType.CIRCUIT_BREAKER_OPENED,
                     data={
                         "service_name": service_name,
                         "previous_state": previous_state,
-                        "timestamp": now().isoformat(),
+                        "timestamp": utc_now().isoformat(),
                         "trigger": "manual",
                     },
                 )
@@ -410,15 +410,15 @@ class ManualControlMixin:
         self._emit_state_change_metric(service_name, previous_state, new_state)
 
         # EventBus emission — Manual CLOSE
-        from baldur.core.timezone import now
         from baldur.services.event_bus import EventType
+        from baldur.utils.time import utc_now
 
         self._emit_event(
             EventType.CIRCUIT_BREAKER_CLOSED,
             data={
                 "service_name": service_name,
                 "previous_state": previous_state,
-                "timestamp": now().isoformat(),
+                "timestamp": utc_now().isoformat(),
                 "trigger": "manual",
                 "trigger_replay": trigger_replay,
             },
@@ -540,15 +540,15 @@ class ManualControlMixin:
                         pass  # Metrics not available
 
                     # EventBus emission — Manual RESET (emits CLOSED)
-                    from baldur.core.timezone import now
                     from baldur.services.event_bus import EventType
+                    from baldur.utils.time import utc_now
 
                     self._emit_event(
                         EventType.CIRCUIT_BREAKER_CLOSED,
                         data={
                             "service_name": service_name,
                             "previous_state": previous_state,
-                            "timestamp": now().isoformat(),
+                            "timestamp": utc_now().isoformat(),
                             "trigger": "manual_reset",
                             "trigger_replay": True,
                         },
@@ -594,7 +594,7 @@ class ManualControlMixin:
         try:
             # Get all states and filter manually controlled ones
             all_states = self.repository.get_all_states()
-            current_time = now()
+            current_time = utc_now()
 
             for state in all_states:
                 if (
@@ -668,7 +668,7 @@ class ManualControlMixin:
                 )
 
             # Extend TTL
-            current_time = now()
+            current_time = utc_now()
             if state.manual_override_expires_at:
                 new_expires_at = state.manual_override_expires_at + timedelta(
                     minutes=additional_minutes

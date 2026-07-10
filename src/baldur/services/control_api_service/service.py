@@ -15,7 +15,7 @@ from baldur.core.constants import (
     ControlAPIActions,
     ControlAPIEnvironments,
 )
-from baldur.core.timezone import now
+from baldur.utils.time import utc_now
 
 from .models import ControlRequest, ControlResponse
 from .risk import assess_risk_level, classify_reason
@@ -252,11 +252,11 @@ class ControlAPIService:
         effective_until = None
         if request.ttl_minutes:
             effective_until = (
-                now() + timedelta(minutes=request.ttl_minutes)
+                utc_now() + timedelta(minutes=request.ttl_minutes)
             ).isoformat()
         elif request.environment == ControlAPIEnvironments.OPS:
             # Default 90 minutes in ops
-            effective_until = (now() + timedelta(minutes=90)).isoformat()
+            effective_until = (utc_now() + timedelta(minutes=90)).isoformat()
 
         if result.success:
             return ControlResponse(
@@ -288,7 +288,7 @@ class ControlAPIService:
         effective_until = None
         if request.ttl_minutes:
             effective_until = (
-                now() + timedelta(minutes=request.ttl_minutes)
+                utc_now() + timedelta(minutes=request.ttl_minutes)
             ).isoformat()
 
         if result.success:
@@ -387,7 +387,7 @@ class ControlAPIService:
         }
 
         if request.ttl_minutes:
-            failure_config["expires_at"] = now() + timedelta(
+            failure_config["expires_at"] = utc_now() + timedelta(
                 minutes=request.ttl_minutes
             )
 
@@ -573,7 +573,7 @@ class ControlAPIService:
         return {
             "services": states,
             "environment": environment,
-            "timestamp": now().isoformat(),
+            "timestamp": utc_now().isoformat(),
         }
 
     def get_service_status(self, service_name: str) -> dict:
@@ -613,7 +613,7 @@ class ControlAPIService:
             return False
 
         # Check expiration
-        if config.get("expires_at") and now() > config["expires_at"]:
+        if config.get("expires_at") and utc_now() > config["expires_at"]:
             del self._failure_injections[service_name]
             return False
 
@@ -653,13 +653,13 @@ class ControlAPIService:
 
         start_time = time.time()
 
-        from baldur.core.timezone import now as get_now
         from baldur.factory import ProviderRegistry
         from baldur.metrics.registry import get_registered_domains
         from baldur.services.metrics.updaters import (
             update_dlq_pending_gauges,
             update_retry_success_rates,
         )
+        from baldur.utils.time import utc_now as get_now
 
         current_time = get_now()
         current_time - timedelta(minutes=5)
