@@ -1,19 +1,19 @@
 """
 X-Test-Mode Retry Handler Views
 
-Retry Handler의 Exponential Backoff, DLQ 라우팅, Rate Limit 인식 동작을
-X-Test-Mode 환경에서 관찰할 수 있는 API.
+API for observing the Retry Handler's Exponential Backoff, DLQ routing,
+and Rate Limit awareness behavior in an X-Test-Mode environment.
 
 Endpoints:
-- GET  /api/baldur/xtest/retry/backoff-preview/ - Backoff 시퀀스 미리보기
-- POST /api/baldur/xtest/retry/simulate/ - 재시도 시나리오 시뮬레이션
-- GET  /api/baldur/xtest/retry/rate-limit-status/ - Rate Limit 인식 상태
-- GET  /api/baldur/xtest/retry/config/ - 현재 Retry 설정 조회
+- GET  /api/baldur/xtest/retry/backoff-preview/ - Preview the backoff sequence
+- POST /api/baldur/xtest/retry/simulate/ - Simulate a retry scenario
+- GET  /api/baldur/xtest/retry/rate-limit-status/ - Rate limit awareness status
+- GET  /api/baldur/xtest/retry/config/ - Query the current retry configuration
 
 Security:
-- X-Test-Mode: chaos-monkey 헤더 필수
-- DEBUG 또는 CHAOS_ENABLED 환경 변수 필요
-- production 환경에서는 완전 차단
+- X-Test-Mode: chaos-monkey header required
+- DEBUG or CHAOS_ENABLED environment variable required
+- Completely blocked in production environments
 """
 
 import time
@@ -26,6 +26,7 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from baldur.core.backoff import ExponentialBackoff
 from baldur.dlq.helpers import store_to_dlq
 
 from .base import XTestModeMixin, collect_system_snapshot
@@ -34,21 +35,21 @@ logger = structlog.get_logger()
 
 
 # =============================================================================
-# Backoff 계산 미리보기 View
+# Backoff Calculation Preview View
 # =============================================================================
 
 
 class BackoffPreviewView(XTestModeMixin, APIView):
     """
-    Backoff 시퀀스 미리보기 API.
+    Backoff sequence preview API.
 
     GET /api/baldur/xtest/retry/backoff-preview/
 
     Query Parameters:
-        max_attempts: 최대 재시도 횟수 (기본: 설정값)
-        backoff_base: 백오프 기본값 (기본: 4)
-        backoff_max: 최대 대기 시간 (기본: 180)
-        jitter_percent: 지터 퍼센트 (기본: 25)
+        max_attempts: Maximum retry attempts (default: settings value)
+        backoff_base: Backoff base value (default: 4)
+        backoff_max: Maximum wait time (default: 180)
+        jitter_percent: Jitter percentage (default: 25)
 
     Response:
         {
@@ -75,7 +76,7 @@ class BackoffPreviewView(XTestModeMixin, APIView):
         if denied:
             return denied
 
-        # 쿼리 파라미터 파싱
+        # Parse query parameters
         try:
             max_attempts = int(request.query_params.get("max_attempts", 0))
             backoff_base = int(request.query_params.get("backoff_base", 0))
@@ -91,7 +92,7 @@ class BackoffPreviewView(XTestModeMixin, APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # 기본값 로드 (설정에서)
+        # Load defaults (from settings)
         from baldur.services.backoff_calculator import (
             BackoffConfig,
             ThrottleAwareBackoffCalculator,
@@ -100,7 +101,7 @@ class BackoffPreviewView(XTestModeMixin, APIView):
 
         default_config = RetryConfig.from_settings()
 
-        # 요청 파라미터로 오버라이드
+        # Override with request parameters
         final_max_attempts = (
             max_attempts if max_attempts > 0 else default_config.max_attempts
         )
@@ -121,10 +122,10 @@ class BackoffPreviewView(XTestModeMixin, APIView):
         )
         calculator = ThrottleAwareBackoffCalculator(config)
 
-        # 지터 없는 시퀀스
+        # Sequence without jitter
         delays = calculator.get_delays_sequence(final_max_attempts, with_jitter=False)
 
-        # 지터 적용 범위 계산
+        # Calculate jitter-applied ranges
         delays_with_jitter = []
         for attempt in range(1, final_max_attempts + 1):
             base_delay = calculator.calculate(attempt, with_jitter=False)
@@ -164,7 +165,7 @@ class BackoffPreviewView(XTestModeMixin, APIView):
             "snapshot": snapshot,
         }
 
-        # WAL Audit 기록
+        # Record WAL audit entry
         self.log_xtest_audit(
             request=request,
             action="backoff_preview",
@@ -185,7 +186,7 @@ class BackoffPreviewView(XTestModeMixin, APIView):
 
 
 def _validate_failure_count(failure_count: Any) -> tuple[int | None, str | None]:
-    """failure_count 유효성 검증. (값, 에러메시지) 반환."""
+    """Validate failure_count. Returns (value, error_message)."""
     if failure_count is None:
         return None, "failure_count is required"
     try:
@@ -203,7 +204,7 @@ def _build_retry_sequence(
     calculator,
 ) -> tuple[list[dict[str, Any]], int, str]:
     """
-    재시도 시퀀스 구성.
+    Build the retry sequence.
 
     Returns:
         tuple: (retry_sequence, total_attempts, final_action)
@@ -218,7 +219,7 @@ def _build_retry_sequence(
         total_attempts = attempt
 
         if attempt <= failure_count:
-            # 실패 시뮬레이션
+            # Simulate failure
             result = "FAILURE"
 
             if attempt < config.max_attempts:
@@ -240,7 +241,7 @@ def _build_retry_sequence(
                 )
                 final_action = RetryAction.DLQ.value
         else:
-            # 성공 시뮬레이션
+            # Simulate success
             retry_sequence.append(
                 {
                     "attempt": attempt,
@@ -259,7 +260,7 @@ def _determine_final_action(
     config,
 ) -> tuple[str, bool]:
     """
-    최종 액션 결정.
+    Determine the final action.
 
     Returns:
         tuple: (final_action, dlq_routed)
@@ -278,22 +279,22 @@ def _determine_final_action(
 
 
 # =============================================================================
-# 재시도 시뮬레이션 View
+# Retry Simulation View
 # =============================================================================
 
 
 class RetrySimulateView(XTestModeMixin, APIView):
     """
-    재시도 시나리오 시뮬레이션 API.
+    Retry scenario simulation API.
 
     POST /api/baldur/xtest/retry/simulate/
 
     Request:
         {
-            "failure_count": 5,         // 연속 실패 횟수 (필수)
-            "max_attempts": 3,          // 최대 재시도 (선택)
-            "domain": "external",       // 도메인 (DLQ 연동용, 선택)
-            "simulate_dlq": false       // DLQ 저장 시뮬레이션 (선택)
+            "failure_count": 5,         // Consecutive failure count (required)
+            "max_attempts": 3,          // Maximum retries (optional)
+            "domain": "external",       // Domain (for DLQ integration, optional)
+            "simulate_dlq": false       // Simulate DLQ storage (optional)
         }
 
     Response:
@@ -317,7 +318,7 @@ class RetrySimulateView(XTestModeMixin, APIView):
         if denied:
             return denied
 
-        # 요청 파라미터 파싱 및 검증
+        # Parse and validate request parameters
         failure_count, error_msg = _validate_failure_count(
             request.data.get("failure_count")
         )
@@ -336,7 +337,7 @@ class RetrySimulateView(XTestModeMixin, APIView):
         domain = request.data.get("domain", "xtest_simulation")
         simulate_dlq = request.data.get("simulate_dlq", False)
 
-        # 설정 로드
+        # Load configuration
         from baldur.services.backoff_calculator import (
             BackoffConfig,
             ThrottleAwareBackoffCalculator,
@@ -357,15 +358,15 @@ class RetrySimulateView(XTestModeMixin, APIView):
         )
         calculator = ThrottleAwareBackoffCalculator(backoff_config)
 
-        # 시뮬레이션 실행
+        # Run the simulation
         retry_sequence, total_attempts, _ = _build_retry_sequence(
             failure_count, config, calculator
         )
 
-        # 최종 액션 결정
+        # Determine the final action
         final_action, dlq_routed = _determine_final_action(retry_sequence, config)
 
-        # DLQ 시뮬레이션
+        # DLQ simulation
         dlq_id = None
         if dlq_routed and simulate_dlq:
             dlq_id = self._simulate_dlq_entry(
@@ -398,7 +399,7 @@ class RetrySimulateView(XTestModeMixin, APIView):
             "snapshot": snapshot,
         }
 
-        # WAL Audit 기록
+        # Record WAL audit entry
         self.log_xtest_audit(
             request=request,
             action="simulate",
@@ -416,7 +417,7 @@ class RetrySimulateView(XTestModeMixin, APIView):
     def _simulate_dlq_entry(
         self, domain: str, failure_count: int, max_attempts: int
     ) -> str | None:
-        """DLQ 테스트 항목 생성 (X-Test-Mode 마커 포함)."""
+        """Create a DLQ test entry (with X-Test-Mode marker)."""
         try:
             # impl doc 486 D2 G4 — xtest needs the real ``dlq_id`` for the
             # simulation harness; opt into sync dispatch explicitly.
@@ -451,18 +452,18 @@ class RetrySimulateView(XTestModeMixin, APIView):
 
 
 # =============================================================================
-# Rate Limit 인식 상태 View
+# Rate Limit Awareness Status View
 # =============================================================================
 
 
 class RetryRateLimitStatusView(XTestModeMixin, APIView):
     """
-    Rate Limit 인식 상태 조회 API.
+    Rate limit awareness status query API.
 
     GET /api/baldur/xtest/retry/rate-limit-status/
 
     Query Parameters:
-        domain: 도메인 (rate_limit_key) (선택)
+        domain: Domain (rate_limit_key) (optional)
 
     Response:
         {
@@ -499,7 +500,7 @@ class RetryRateLimitStatusView(XTestModeMixin, APIView):
             config = RateLimitCoordinatorConfig.from_settings()
             state = coordinator.get_state(domain)
 
-            # 상태 정보 구성
+            # Build state information
             state_info = {
                 "consecutive_429s": state.consecutive_429s,
                 "is_in_cooldown": state.is_in_cooldown,
@@ -515,17 +516,23 @@ class RetryRateLimitStatusView(XTestModeMixin, APIView):
                 ),
             }
 
-            # 권장 대기 시간 계산
+            # Compute the recommended wait time
             recommended_delay: float = 0.0
             if state.is_in_cooldown:
                 recommended_delay = state.remaining_cooldown
             elif state.consecutive_429s > 0:
-                # 연속 429가 있으면 다음 예상 백오프 계산
-                recommended_delay = min(
-                    config.base_delay
-                    * (config.backoff_multiplier**state.consecutive_429s),
-                    config.max_delay,
+                # With consecutive 429s, estimate the next expected backoff by
+                # composing the canonical strategy jitterlessly. calculate() is
+                # 1-indexed, so the delay after one more 429 is attempt
+                # consecutive_429s + 1 (== base * multiplier**consecutive_429s,
+                # capped at max_delay).
+                backoff = ExponentialBackoff(
+                    base_delay=config.base_delay,
+                    multiplier=config.backoff_multiplier,
+                    max_delay=config.max_delay,
+                    jitter=False,
                 )
+                recommended_delay = backoff.calculate(state.consecutive_429s + 1)
 
             snapshot = collect_system_snapshot()
 
@@ -554,7 +561,7 @@ class RetryRateLimitStatusView(XTestModeMixin, APIView):
                 "snapshot": snapshot,
             }
 
-            # WAL Audit 기록
+            # Record WAL audit entry
             self.log_xtest_audit(
                 request=request,
                 action="query_rate_limit_status",
@@ -587,13 +594,13 @@ class RetryRateLimitStatusView(XTestModeMixin, APIView):
 
 
 # =============================================================================
-# RetryConfig 조회 View
+# RetryConfig Query View
 # =============================================================================
 
 
 class XTestRetryConfigView(XTestModeMixin, APIView):
     """
-    현재 적용된 Retry 설정 조회 API (X-Test-Mode).
+    API for querying the currently applied retry configuration (X-Test-Mode).
 
     Renamed from RetryConfigView to XTestRetryConfigView to avoid
     name collision with views.config.RetryConfigView.
@@ -601,7 +608,7 @@ class XTestRetryConfigView(XTestModeMixin, APIView):
     GET /api/baldur/xtest/retry/config/
 
     Query Parameters:
-        domain: 도메인별 설정 조회 (선택)
+        domain: Query per-domain configuration (optional)
 
     Response:
         {
@@ -630,7 +637,7 @@ class XTestRetryConfigView(XTestModeMixin, APIView):
 
         domain = request.query_params.get("domain", "default")
 
-        # 설정 소스 확인 및 로드
+        # Check and load the configuration source
         source = "default"
         domain_overrides: dict[str, Any] = {}
 
@@ -648,20 +655,20 @@ class XTestRetryConfigView(XTestModeMixin, APIView):
 
         if source == "default":
             try:
-                # core config 시도
+                # Try core config
                 from baldur.settings import get_config
 
                 core_config = get_config()
                 if hasattr(core_config, "retry"):
                     source = "settings"
 
-                # 도메인별 오버라이드 확인
+                # Check per-domain overrides
                 if hasattr(core_config, "domain_configs"):
                     domain_overrides = core_config.domain_configs
             except Exception:
                 pass
 
-        # RetryConfig 로드
+        # Load RetryConfig
         from baldur.services.retry_handler import RetryConfig
 
         config = RetryConfig.from_settings(domain)
@@ -698,7 +705,7 @@ class XTestRetryConfigView(XTestModeMixin, APIView):
             "snapshot": snapshot,
         }
 
-        # WAL Audit 기록
+        # Record WAL audit entry
         self.log_xtest_audit(
             request=request,
             action="query_config",
