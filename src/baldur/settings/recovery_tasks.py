@@ -1,11 +1,11 @@
 """
 Recovery Tasks Settings - Pydantic v2.
 
-Celery 복구 태스크별 재시도 전략 설정입니다.
+Per-recovery-task Celery retry strategy settings.
 
-각 복구 태스크(check_recovery_trigger, execute_recovery_step,
-monitor_active_recovery, cleanup_stale_sessions, run_health_checks)의
-max_retries, default_retry_delay를 개별적으로 설정할 수 있습니다.
+Lets each recovery task (check_recovery_trigger, execute_recovery_step,
+monitor_active_recovery, cleanup_stale_sessions, run_health_checks) configure
+its max_retries and default_retry_delay independently.
 
 Environment Variables:
     BALDUR_RECOVERY_TASKS_CHECK_TRIGGER_MAX_RETRIES=3
@@ -18,6 +18,8 @@ Environment Variables:
     BALDUR_RECOVERY_TASKS_CLEANUP_STALE_RETRY_DELAY=15
     BALDUR_RECOVERY_TASKS_HEALTH_CHECK_MAX_RETRIES=1
     BALDUR_RECOVERY_TASKS_HEALTH_CHECK_RETRY_DELAY=60
+    BALDUR_RECOVERY_TASKS_RESUME_BACKOFF_BASE_SECONDS=30
+    BALDUR_RECOVERY_TASKS_RESUME_BACKOFF_MAX_SECONDS=300
 """
 
 import structlog
@@ -32,23 +34,24 @@ logger = structlog.get_logger()
 
 class RecoveryTasksSettings(BaseSettings):
     """
-    복구 태스크별 Celery 재시도 설정.
+    Per-recovery-task Celery retry settings.
 
-    각 태스크마다 독립적인 max_retries, default_retry_delay 설정을 지원합니다.
-    Celery 데코레이터에서 동적으로 적용하거나, 런타임 self.retry() 호출 시 사용합니다.
+    Supports an independent max_retries / default_retry_delay per task, applied
+    dynamically from the Celery decorator or at runtime on a ``self.retry()``
+    call.
 
-    태스크 목록:
-    - check_recovery_trigger: 복구 트리거 조건 확인
-    - execute_recovery_step: 복구 단계 실행
-    - monitor_active_recovery: 활성 복구 세션 모니터링
-    - cleanup_stale_sessions: 방치된 복구 세션 정리
-    - run_health_checks: 헬스 체크 실행
+    Tasks:
+    - check_recovery_trigger: check the recovery trigger conditions
+    - execute_recovery_step: run a recovery step
+    - monitor_active_recovery: monitor active recovery sessions
+    - cleanup_stale_sessions: clean up abandoned recovery sessions
+    - run_health_checks: run health checks
     """
 
     model_config = make_settings_config("BALDUR_RECOVERY_TASKS_")
 
     # ==========================================================================
-    # check_recovery_trigger 태스크 설정
+    # check_recovery_trigger task settings
     # ==========================================================================
     check_trigger_max_retries: int = Field(
         default=3,
@@ -64,7 +67,7 @@ class RecoveryTasksSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # execute_recovery_step 태스크 설정
+    # execute_recovery_step task settings
     # ==========================================================================
     execute_step_max_retries: int = Field(
         default=3,
@@ -80,7 +83,7 @@ class RecoveryTasksSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # monitor_active_recovery 태스크 설정
+    # monitor_active_recovery task settings
     # ==========================================================================
     monitor_recovery_max_retries: int = Field(
         default=3,
@@ -96,7 +99,7 @@ class RecoveryTasksSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # cleanup_stale_sessions 태스크 설정
+    # cleanup_stale_sessions task settings
     # ==========================================================================
     cleanup_stale_max_retries: int = Field(
         default=2,
@@ -112,7 +115,7 @@ class RecoveryTasksSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # run_health_checks 태스크 설정
+    # run_health_checks task settings
     # ==========================================================================
     health_check_max_retries: int = Field(
         default=1,
@@ -128,7 +131,8 @@ class RecoveryTasksSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # 태스크 실행 간격 설정 (CeleryTaskSettings와 중복이나 복구 전용으로 분리)
+    # Task execution interval settings (overlaps CeleryTaskSettings but kept
+    # separate for the recovery domain)
     # ==========================================================================
     trigger_check_interval: int = Field(
         default=60,
@@ -149,15 +153,31 @@ class RecoveryTasksSettings(BaseSettings):
         description="Stale session check interval (minutes)",
     )
 
+    # ==========================================================================
+    # Recovery-resume exponential backoff (execute_recovery_step resume path)
+    # ==========================================================================
+    resume_backoff_base_seconds: int = Field(
+        default=30,
+        ge=1,
+        le=600,
+        description="Recovery-resume exponential backoff base delay (seconds)",
+    )
+    resume_backoff_max_seconds: int = Field(
+        default=300,
+        ge=1,
+        le=3600,
+        description="Recovery-resume exponential backoff maximum delay cap (seconds)",
+    )
+
     @field_validator("check_trigger_max_retries", "execute_step_max_retries")
     @classmethod
     def _warn_critical_task_retries(cls, v: int) -> int:
-        """중요 태스크 재시도 최소 1회 보장."""
+        """Ensure critical tasks retry at least once."""
         return warn_below(1, "recovery_tasks_settings.critical_task_low_consider")(v)
 
     @model_validator(mode="after")
     def validate_retry_delays(self) -> "RecoveryTasksSettings":
-        """재시도 지연이 너무 짧으면 경고."""
+        """Warn on very short retry delays and enforce base <= max backoff."""
         delays = [
             ("check_trigger", self.check_trigger_retry_delay),
             ("execute_step", self.execute_step_retry_delay),
@@ -170,6 +190,10 @@ class RecoveryTasksSettings(BaseSettings):
                     task_name=name,
                     delay=delay,
                 )
+        if self.resume_backoff_base_seconds > self.resume_backoff_max_seconds:
+            raise ValueError(
+                "resume_backoff_base_seconds must not exceed resume_backoff_max_seconds"
+            )
         return self
 
 
@@ -179,14 +203,14 @@ class RecoveryTasksSettings(BaseSettings):
 
 
 def get_recovery_tasks_settings() -> "RecoveryTasksSettings":
-    """캐시된 RecoveryTasksSettings 인스턴스 반환."""
+    """Return the cached RecoveryTasksSettings instance."""
     from baldur.settings.root import get_config
 
     return get_config().services_group.recovery_tasks
 
 
 def reset_recovery_tasks_settings() -> None:
-    """캐시 초기화 (테스트용)."""
+    """Reset the cache (for tests)."""
     from baldur.settings.root import get_config
 
     try:

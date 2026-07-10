@@ -1,13 +1,13 @@
 """
-Background Sync Worker - WAL → 중앙 저장소 동기화.
+Background Sync Worker - WAL → central store synchronization.
 
-Fail-Open + WAL 기반 누락 0 보장 구현의 핵심 컴포넌트.
+Core component of the Fail-Open + WAL-based zero-loss guarantee.
 
-동작 원리:
-1. WAL에서 미동기화 엔트리 조회 (synced=False)
-2. 중앙 저장소에 기록 시도
-3. 성공 시 WAL 엔트리 정리 (cleanup_processed)
-4. 실패 시 재시도 (exponential backoff)
+How it works:
+1. Read unsynced entries from the WAL (synced=False)
+2. Attempt to write them to the central store
+3. On success, clean up the WAL entries (cleanup_processed)
+4. On failure, retry (exponential backoff)
 
 Usage:
     from baldur.audit.sync_worker import AuditSyncWorker, SyncWorkerConfig
@@ -18,7 +18,7 @@ Usage:
     )
     worker.start()
 
-    # 종료 시
+    # On shutdown
     worker.stop()
 """
 
@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from baldur.core.backoff import ExponentialBackoff
 from baldur.interfaces.audit_adapter import AuditEntry
 
 if TYPE_CHECKING:
@@ -43,29 +44,29 @@ logger = structlog.get_logger()
 
 @dataclass
 class SyncWorkerConfig:
-    """Sync Worker 설정."""
+    """Sync Worker configuration."""
 
-    # 동기화 주기 (초)
+    # Synchronization interval (seconds)
     sync_interval_seconds: float = 1.0
 
-    # 배치 크기
+    # Batch size
     batch_size: int = 100
 
-    # 재시도 설정
+    # Retry settings
     max_retries: int = 3
     retry_delay_seconds: float = 1.0
     retry_backoff_multiplier: float = 2.0
     max_retry_delay_seconds: float = 30.0
 
-    # 오래된 엔트리 정리 기준 (초)
-    cleanup_after_seconds: float = 3600.0  # 1시간
+    # Threshold for cleaning up stale entries (seconds)
+    cleanup_after_seconds: float = 3600.0  # 1 hour
 
-    # 메트릭 리포팅 주기 (초)
+    # Metrics reporting interval (seconds)
     metrics_interval_seconds: float = 60.0
 
-    # 체크포인트 저장 설정
-    checkpoint_save_interval_batches: int = 10  # N 배치마다 저장
-    checkpoint_save_interval_seconds: float = 30.0  # 최대 저장 간격
+    # Checkpoint save settings
+    checkpoint_save_interval_batches: int = 10  # save every N batches
+    checkpoint_save_interval_seconds: float = 30.0  # max save interval
 
     # Consecutive failing batches where the B-contiguous cursor cannot advance
     # (a permanently-failing head entry) before a CRITICAL cursor_stalled alert.
@@ -78,14 +79,14 @@ class SyncWorkerConfig:
         **overrides,
     ) -> SyncWorkerConfig:
         """
-        Settings에서 SyncWorkerConfig 인스턴스 생성.
+        Create a SyncWorkerConfig instance from settings.
 
         Args:
-            settings: AuditSyncSettings 인스턴스 (없으면 싱글톤 사용)
-            **overrides: 개별 필드 오버라이드
+            settings: AuditSyncSettings instance (uses the singleton if omitted)
+            **overrides: individual field overrides
 
         Returns:
-            SyncWorkerConfig: Settings 기반 인스턴스
+            SyncWorkerConfig: instance derived from settings
         """
         from baldur.settings.audit_sync import get_audit_sync_settings
 
@@ -128,7 +129,7 @@ class SyncWorkerConfig:
 
 @dataclass
 class SyncStats:
-    """동기화 통계."""
+    """Synchronization statistics."""
 
     total_synced: int = 0
     total_failed: int = 0
@@ -138,14 +139,14 @@ class SyncStats:
     last_error: str | None = None
     current_lag_entries: int = 0
 
-    # 성능 통계
+    # Performance statistics
     avg_sync_duration_ms: float = 0.0
     _sync_durations: list[float] = field(default_factory=list)
 
     def record_sync_duration(self, duration_ms: float) -> None:
-        """동기화 소요 시간 기록."""
+        """Record the time taken for a synchronization."""
         self._sync_durations.append(duration_ms)
-        # 최근 100개만 유지
+        # Keep only the most recent 100
         if len(self._sync_durations) > 100:
             self._sync_durations = self._sync_durations[-100:]
         self.avg_sync_duration_ms = sum(self._sync_durations) / len(
@@ -153,7 +154,7 @@ class SyncStats:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        """딕셔너리 변환."""
+        """Convert to a dictionary."""
         return {
             "total_synced": self.total_synced,
             "total_failed": self.total_failed,
@@ -170,9 +171,10 @@ class AuditSyncWorker:
     """
     Background Sync Worker.
 
-    WAL에 기록된 audit 이벤트를 중앙 저장소로 동기화하는 백그라운드 워커.
+    Background worker that synchronizes audit events written to the WAL to the
+    central store.
 
-    Thread-safe하며, 단일 인스턴스로 운영.
+    Thread-safe, operated as a single instance.
     """
 
     _instance: AuditSyncWorker | None = None
@@ -190,11 +192,11 @@ class AuditSyncWorker:
         Initialize Sync Worker.
 
         Args:
-            wal: WriteAheadLog 인스턴스 (None이면 audit_helpers에서 가져옴)
-            central_adapter: 중앙 저장소 어댑터 (AuditLogAdapter)
-            config: 워커 설정
-            on_sync_complete: 동기화 완료 콜백 (synced_count, failed_count)
-            on_sync_error: 동기화 에러 콜백
+            wal: WriteAheadLog instance (obtained from audit_helpers if None)
+            central_adapter: central store adapter (AuditLogAdapter)
+            config: worker configuration
+            on_sync_complete: sync-complete callback (synced_count, failed_count)
+            on_sync_error: sync-error callback
         """
         self._wal = wal
         self._central_adapter = central_adapter
@@ -224,7 +226,7 @@ class AuditSyncWorker:
         self._stall_cycles: int = 0
         self._cursor_stall_alerted: bool = False
 
-        # 체크포인트 저장 관련
+        # Checkpoint saving state
         self._batches_since_checkpoint: int = 0
         self._last_checkpoint_time: float = time.time()
 
@@ -254,18 +256,18 @@ class AuditSyncWorker:
 
     @classmethod
     def reset_instance(cls) -> None:
-        """Reset singleton (테스트용)."""
+        """Reset singleton (for testing)."""
         with cls._instance_lock:
             if cls._instance:
                 cls._instance.stop()
             cls._instance = None
 
     def _get_wal(self) -> Any:
-        """WAL 인스턴스 가져오기."""
+        """Get the WAL instance."""
         if self._wal is not None:
             return self._wal
 
-        # audit_helpers에서 가져오기
+        # Obtain from audit_helpers
         try:
             from baldur_pro.services.audit import _get_wal
 
@@ -278,11 +280,11 @@ class AuditSyncWorker:
             return None
 
     def _get_adapter(self) -> Any:
-        """중앙 저장소 어댑터 가져오기."""
+        """Get the central store adapter."""
         if self._central_adapter is not None:
             return self._central_adapter
 
-        # ProviderRegistry에서 가져오기
+        # Obtain from ProviderRegistry
         try:
             from baldur.factory import ProviderRegistry
 
@@ -296,11 +298,11 @@ class AuditSyncWorker:
 
     def start(self) -> bool:
         """
-        워커 시작.
+        Start the worker.
 
         Returns:
-            True: 시작 성공
-            False: 이미 실행 중
+            True: started successfully
+            False: already running
         """
         from baldur.meta.daemon_worker import DaemonWorkerHandle
         from baldur.metrics.recorders.daemon_worker import register_daemon_worker
@@ -345,10 +347,10 @@ class AuditSyncWorker:
 
     def stop(self, timeout: float = 1.0) -> None:
         """
-        워커 중지.
+        Stop the worker.
 
         Args:
-            timeout: 종료 대기 시간 (초)
+            timeout: time to wait for shutdown (seconds)
         """
         from baldur.metrics.recorders.daemon_worker import unregister_daemon_worker
 
@@ -376,13 +378,13 @@ class AuditSyncWorker:
         logger.info("sync_worker.stopped")
 
     def _run_loop(self) -> None:
-        """메인 동기화 루프."""
+        """Main synchronization loop."""
         last_metrics_time = time.time()
 
         while not self._stop_event.is_set():
             iter_start = time.monotonic()
             try:
-                # 동기화 수행
+                # Perform synchronization
                 synced, failed = self._sync_batch()
 
                 if synced > 0 or failed > 0:
@@ -392,7 +394,7 @@ class AuditSyncWorker:
                         failed=failed,
                     )
 
-                # 메트릭 리포팅
+                # Metrics reporting
                 now = time.time()
                 if now - last_metrics_time >= self._config.metrics_interval_seconds:
                     self._report_metrics()
@@ -413,7 +415,7 @@ class AuditSyncWorker:
                 self._handle.observe_iteration(time.monotonic() - iter_start)
                 self._handle.heartbeat()
 
-            # 다음 사이클까지 대기
+            # Wait until the next cycle
             self._stop_event.wait(timeout=self._config.sync_interval_seconds)
 
     def _process_batch_entries(
@@ -452,7 +454,7 @@ class AuditSyncWorker:
         return synced_count, failed_count
 
     def _post_sync_cleanup(self, synced_count: int, wal: Any) -> None:
-        """동기화 완료 후 정리 및 체크포인트 저장."""
+        """Post-sync cleanup and checkpoint save."""
         if synced_count <= 0:
             return
 
@@ -481,7 +483,7 @@ class AuditSyncWorker:
     def _update_sync_stats(
         self, synced_count: int, failed_count: int, duration_ms: float
     ) -> None:
-        """동기화 통계 업데이트 및 콜백 호출."""
+        """Update synchronization statistics and invoke the callback."""
         with self._lock:
             self._stats.total_synced += synced_count
             self._stats.total_failed += failed_count
@@ -551,7 +553,7 @@ class AuditSyncWorker:
 
     def _sync_batch(self) -> tuple[int, int]:
         """
-        배치 동기화 수행.
+        Perform batch synchronization.
 
         Returns:
             (synced_count, failed_count)
@@ -733,7 +735,12 @@ class AuditSyncWorker:
         # contiguous cursor.
         audit_entry = AuditEntry.from_wal_dict(entry.data)
 
-        delay = self._config.retry_delay_seconds
+        backoff = ExponentialBackoff(
+            base_delay=self._config.retry_delay_seconds,
+            multiplier=self._config.retry_backoff_multiplier,
+            max_delay=self._config.max_retry_delay_seconds,
+            jitter=True,
+        )
         last_error: Exception | None = None
 
         for attempt in range(self._config.max_retries + 1):
@@ -761,18 +768,14 @@ class AuditSyncWorker:
                 if attempt < self._config.max_retries:
                     with self._lock:
                         self._stats.total_retries += 1
-                    time.sleep(delay)
-                    delay = min(
-                        delay * self._config.retry_backoff_multiplier,
-                        self._config.max_retry_delay_seconds,
-                    )
+                    time.sleep(backoff.calculate(attempt + 1))
 
         # All retries exhausted
         if last_error:
             raise last_error
 
     def _report_metrics(self) -> None:
-        """메트릭 리포팅."""
+        """Report metrics."""
         try:
             from baldur.audit.resilience import AuditMetrics
 
@@ -781,7 +784,7 @@ class AuditSyncWorker:
             with self._lock:
                 stats = self._stats.to_dict()
 
-            # 커스텀 메트릭 기록
+            # Record custom metric
             metrics.record_write(
                 "sync_worker", success=True, duration_ms=stats["avg_sync_duration_ms"]
             )
@@ -798,7 +801,7 @@ class AuditSyncWorker:
             )
 
     def _get_checkpoint_strategy(self) -> CheckpointStorageStrategy | None:
-        """CheckpointStorageStrategy 인스턴스 가져오기."""
+        """Get the CheckpointStorageStrategy instance."""
         if self._checkpoint_strategy is not None:
             return self._checkpoint_strategy
 
@@ -815,11 +818,11 @@ class AuditSyncWorker:
             return None
 
     def set_checkpoint_strategy(self, strategy: CheckpointStorageStrategy) -> None:
-        """CheckpointStorageStrategy 주입 (테스트/커스터마이징용)."""
+        """Inject a CheckpointStorageStrategy (for testing/customization)."""
         self._checkpoint_strategy = strategy
 
     def _save_checkpoint(self) -> None:
-        """체크포인트 즉시 저장 (CheckpointStorageStrategy 사용)."""
+        """Save the checkpoint immediately (using CheckpointStorageStrategy)."""
         strategy = self._get_checkpoint_strategy()
         if strategy is None:
             logger.warning(
@@ -848,7 +851,7 @@ class AuditSyncWorker:
 
     def sync_now(self) -> tuple[int, int]:
         """
-        즉시 동기화 수행 (테스트/디버그용).
+        Perform synchronization immediately (for testing/debugging).
 
         Returns:
             (synced_count, failed_count)
@@ -856,12 +859,12 @@ class AuditSyncWorker:
         return self._sync_batch()
 
     def get_stats(self) -> dict[str, Any]:
-        """동기화 통계 조회."""
+        """Query synchronization statistics."""
         with self._lock:
             return self._stats.to_dict()
 
     def get_lag(self) -> int:
-        """현재 동기화 지연 엔트리 수."""
+        """Current number of entries lagging behind synchronization."""
         wal = self._get_wal()
         if wal is None:
             return 0
@@ -876,7 +879,7 @@ class AuditSyncWorker:
 
     @property
     def is_running(self) -> bool:
-        """워커 실행 중 여부."""
+        """Whether the worker is running."""
         return self._running
 
 
@@ -891,9 +894,9 @@ def start_sync_worker(
     config: SyncWorkerConfig | None = None,
 ) -> AuditSyncWorker:
     """
-    Sync Worker 시작 헬퍼 함수.
+    Helper function to start the Sync Worker.
 
-    싱글톤 인스턴스를 가져오고 시작합니다.
+    Gets the singleton instance and starts it.
     """
     worker = AuditSyncWorker.get_instance(
         wal=wal,
@@ -905,7 +908,7 @@ def start_sync_worker(
 
 
 def stop_sync_worker() -> None:
-    """Sync Worker 중지 헬퍼 함수."""
+    """Helper function to stop the Sync Worker."""
     try:
         worker = AuditSyncWorker.get_instance()
         worker.stop()
@@ -914,7 +917,7 @@ def stop_sync_worker() -> None:
 
 
 def get_sync_stats() -> dict[str, Any] | None:
-    """Sync Worker 통계 조회 헬퍼 함수."""
+    """Helper function to query Sync Worker statistics."""
     try:
         worker = AuditSyncWorker.get_instance()
         return worker.get_stats()

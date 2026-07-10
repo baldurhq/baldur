@@ -13,6 +13,7 @@ from typing import Any, TypeVar
 
 import structlog
 
+from baldur.core.backoff import ExponentialBackoff
 from baldur.interfaces.task_queue import (
     TaskOptions,
     TaskQueueInterface,
@@ -22,6 +23,10 @@ from baldur.interfaces.task_queue import (
 
 logger = structlog.get_logger()
 F = TypeVar("F", bound=Callable)
+
+# Celery ``retry_backoff=True`` convention mirrored for RQ: 1 s base, doubling.
+_RQ_RETRY_BASE_SECONDS: float = 1.0
+_RQ_RETRY_MULTIPLIER: float = 2.0
 
 
 class RQTaskAdapter(TaskQueueInterface):
@@ -165,7 +170,8 @@ class RQTaskAdapter(TaskQueueInterface):
             autoretry_for: Exception types to auto-retry
             retry_backoff: Use exponential backoff for retries
             retry_backoff_max: Not used in RQ (interface compatibility)
-            retry_jitter: Not used in RQ (interface compatibility)
+            retry_jitter: Jitter retry intervals (honored on the enqueue path;
+                not forwarded from this decorator)
             rate_limit: Not directly supported in RQ
             time_limit: Not used in RQ (interface compatibility)
             soft_time_limit: Not used in RQ (interface compatibility)
@@ -301,7 +307,6 @@ class RQTaskAdapter(TaskQueueInterface):
                 **job_options,
             )
 
-        from baldur.core.backoff import ExponentialBackoff
         from baldur.core.retry import RetryConfig, retry_with_backoff
 
         outcome = retry_with_backoff(
@@ -330,17 +335,27 @@ class RQTaskAdapter(TaskQueueInterface):
         raise outcome.exception  # type: ignore[misc]
 
     def _get_retry_intervals(self, options: TaskOptions) -> list[int]:
-        """Calculate retry intervals with exponential backoff."""
+        """Calculate retry intervals with exponential backoff.
+
+        Honors ``options.retry_jitter``: when set, each enqueue draws its own
+        jittered interval list so storm retries desynchronize at the RQ server.
+        The canonical strategy jitters *after* capping, so each interval is
+        re-clamped to ``retry_backoff_max`` and rounded to whole seconds (RQ
+        ``Retry(interval=...)`` takes int seconds).
+        """
         if options.retry_backoff:
-            # Exponential backoff: 1, 2, 4, 8, 16, ... capped at max
-            intervals = []
-            delay = 1
-            for _ in range(options.max_retries):
-                intervals.append(min(delay, options.retry_backoff_max))
-                delay *= 2
-            return intervals
-        # Fixed 1 second intervals
-        return [1] * options.max_retries
+            backoff = ExponentialBackoff(
+                base_delay=_RQ_RETRY_BASE_SECONDS,
+                multiplier=_RQ_RETRY_MULTIPLIER,
+                max_delay=options.retry_backoff_max,
+                jitter=options.retry_jitter,
+            )
+            return [
+                min(int(round(delay)), options.retry_backoff_max)
+                for delay in backoff.delays(options.max_retries)
+            ]
+        # Fixed base-second intervals
+        return [int(_RQ_RETRY_BASE_SECONDS)] * options.max_retries
 
     def enqueue_many(
         self,

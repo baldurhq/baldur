@@ -15,12 +15,13 @@ use core/backoff.py strategies (ExponentialBackoff, LinearBackoff, etc.).
 
 from __future__ import annotations
 
-import random
 import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import structlog
+
+from baldur.core.backoff import ExponentialBackoff
 
 from .global_state import GlobalThrottleStateManager
 from .models import (
@@ -44,16 +45,16 @@ logger = structlog.get_logger()
 
 class ThrottleAwareBackoffCalculator:
     """
-    AdaptiveThrottle 상태를 인식하는 Backoff 계산기.
+    Backoff calculator that is aware of AdaptiveThrottle state.
 
-    시스템 부하 상태에 따라 동적으로 재시도 간격을 조정합니다.
-    Full Stop 시 즉시 DLQ 이동을 위한 신호를 반환합니다.
+    Dynamically adjusts retry intervals based on system load state.
+    On Full Stop, returns a signal for immediate DLQ movement.
 
     For BackoffStrategy interface, use ThrottleAwareBackoffStrategy adapter
     from strategy_adapter.py.
     """
 
-    # 상태별 Backoff 배율
+    # Per-state Backoff multipliers
     BACKOFF_MULTIPLIERS: dict[str, float] = {
         "normal": 1.0,
         "sla_warning": 1.5,
@@ -73,15 +74,16 @@ class ThrottleAwareBackoffCalculator:
         error_budget_check_enabled: bool = True,
     ):
         """
-        초기화.
+        Initialize.
 
         Args:
-            config: Backoff 설정
-            throttle_getter: AdaptiveThrottle 인스턴스 getter (DI용)
-            enable_push_cache: EventBus 푸시 캐싱 활성화 여부
-            use_global_state: Redis 기반 글로벌 상태 사용 여부
-            service_name: 서비스명 (ThrottleRegistry 연동용)
-            error_budget_check_enabled: Error Budget 체크 활성화 여부 (테스트용)
+            config: Backoff configuration
+            throttle_getter: AdaptiveThrottle instance getter (for DI)
+            enable_push_cache: Whether to enable EventBus push caching
+            use_global_state: Whether to use Redis-based global state
+            service_name: Service name (for ThrottleRegistry integration)
+            error_budget_check_enabled: Whether to enable Error Budget check
+                (for testing)
         """
         self.config = config or BackoffConfig.from_settings()
         self._throttle_getter = throttle_getter
@@ -91,12 +93,12 @@ class ThrottleAwareBackoffCalculator:
         self._error_budget_check_enabled = error_budget_check_enabled
         self._throttle_subscribed: bool = False
 
-        # 푸시 기반 캐시 (기본 활성화)
+        # Push-based cache (enabled by default)
         self._state_cache = PushBasedThrottleStateCache()
         if enable_push_cache:
             self._subscribe_throttle_events()
 
-        # 글로벌 상태 관리자
+        # Global state manager
         self._global_state_manager = (
             GlobalThrottleStateManager() if use_global_state else None
         )
@@ -114,15 +116,18 @@ class ThrottleAwareBackoffCalculator:
         if attempt < 1:
             return self.config.min_delay
 
-        delay = self.config.base**attempt
-        delay = min(delay, self.config.max_delay)
-
-        if with_jitter and self.config.jitter_percent > 0:
-            jitter_factor = self.config.jitter_percent / 100.0
-            jitter = delay * jitter_factor * (random.random() * 2 - 1)
-            delay = int(delay + jitter)
-
-        return max(self.config.min_delay, delay)
+        # Compose the canonical exponential curve. base_delay == multiplier ==
+        # config.base yields base * base ** (attempt - 1) == base ** attempt, the
+        # historical formula; cap and symmetric jitter come from the shared
+        # strategy. Truncate to int seconds and clamp to min_delay (public contract).
+        backoff = ExponentialBackoff(
+            base_delay=self.config.base,
+            multiplier=self.config.base,
+            max_delay=self.config.max_delay,
+            jitter=with_jitter,
+            jitter_factor=self.config.jitter_percent / 100.0,
+        )
+        return max(self.config.min_delay, int(backoff.calculate(attempt)))
 
     def get_delays_sequence(
         self, max_attempts: int, with_jitter: bool = False
@@ -134,7 +139,7 @@ class ThrottleAwareBackoffCalculator:
         ]
 
     def _subscribe_throttle_events(self) -> None:
-        """Throttle 상태 변경 이벤트 구독 (기본 활성화)."""
+        """Subscribe to Throttle state change events (enabled by default)."""
         if self._throttle_subscribed:
             return
 
@@ -154,7 +159,7 @@ class ThrottleAwareBackoffCalculator:
                 "throttle_aware_backoff.eventbus_subscription_failed",
                 error=e,
             )
-            self._enable_push_cache = False  # 폴백: 직접 조회 모드
+            self._enable_push_cache = False  # Fallback: direct query mode
 
     def close(self) -> None:
         """Unsubscribe all EventBus handlers and release resources.
@@ -182,7 +187,7 @@ class ThrottleAwareBackoffCalculator:
             self._throttle_subscribed = False
 
     def _on_throttle_changed(self, event: Any) -> None:
-        """Throttle limit 변경 시 캐시 업데이트."""
+        """Update cache when Throttle limit changes."""
         data = event.data if hasattr(event, "data") else event
         reason = data.get("reason", "")
 
@@ -208,13 +213,13 @@ class ThrottleAwareBackoffCalculator:
             self._state_cache.reason = "normal"
 
     def _on_sla_warning(self, event: Any) -> None:
-        """SLA Warning 이벤트 처리."""
+        """Handle SLA Warning event."""
         self._state_cache.last_updated = time.time()
         self._state_cache.multiplier = 1.5
         self._state_cache.reason = "sla_warning"
 
     def _on_sla_critical(self, event: Any) -> None:
-        """SLA Critical 이벤트 처리."""
+        """Handle SLA Critical event."""
         self._state_cache.last_updated = time.time()
         self._state_cache.multiplier = 2.0
         self._state_cache.reason = "sla_critical"
@@ -248,11 +253,11 @@ class ThrottleAwareBackoffCalculator:
         self._state_cache.reason = f"emergency_level_{level}" if level > 0 else "normal"
 
     def _get_throttle(self) -> Any | None:
-        """서비스별 AdaptiveThrottle 인스턴스 획득 (Fail-Open)."""
+        """Obtain per-service AdaptiveThrottle instance (Fail-Open)."""
         if self._throttle_getter:
             return self._throttle_getter()
 
-        # 서비스별 Throttle 사용 시도
+        # Try per-service Throttle
         if self._service_name != "default":
             try:
                 from baldur_pro.services.throttle.registry import get_throttle_registry
@@ -273,7 +278,7 @@ class ThrottleAwareBackoffCalculator:
             return None
 
     def _get_throttle_state(self) -> ThrottleState | None:
-        """현재 Throttle 상태 스냅샷 획득."""
+        """Obtain a snapshot of the current Throttle state."""
         throttle = self._get_throttle()
         if throttle is None:
             # Throttle absent — query Emergency Manager directly for partial state
@@ -321,11 +326,11 @@ class ThrottleAwareBackoffCalculator:
             return None
 
     def _get_throttle_state_cached(self) -> tuple[float, str]:
-        """캐시된 상태 반환 (stale 시 직접 조회 폴백)."""
+        """Return cached state (fall back to direct query when stale)."""
         if self._enable_push_cache and not self._state_cache.is_stale():
             return self._state_cache.multiplier, self._state_cache.reason
 
-        # 폴백: 직접 조회
+        # Fallback: direct query
         state = self._get_throttle_state()
         if state is None:
             return 1.0, "throttle_unavailable"
@@ -336,9 +341,10 @@ class ThrottleAwareBackoffCalculator:
 
     def _check_error_budget_critical_or_warning(self) -> bool:
         """
-        ErrorBudgetGate CRITICAL 또는 WARNING 상태 확인.
+        Check whether ErrorBudgetGate is in CRITICAL or WARNING state.
 
-        차단 직전 단계에서도 재시도 빈도를 낮추는 Soft-Landing 전략.
+        Soft-Landing strategy that reduces retry frequency even in the
+        stage just before blocking.
         """
         if not self._error_budget_check_enabled:
             return False
@@ -356,7 +362,7 @@ class ThrottleAwareBackoffCalculator:
                 return False
             result = gate.check()
 
-            # WARNING 또는 BLOCKED 상태면 배율 적용
+            # Apply multiplier when in WARNING or BLOCKED state
             return result.status in (GateStatus.WARNING, GateStatus.BLOCKED)
         except ImportError:
             return False
@@ -368,12 +374,12 @@ class ThrottleAwareBackoffCalculator:
             return False
 
     def _calculate_multiplier(self, state: ThrottleState) -> float:
-        """상태 기반 Backoff 배율 계산."""
-        # Full Stop: 최대 배율 (재시도 차단에 가까움)
+        """Calculate Backoff multiplier based on state."""
+        # Full Stop: maximum multiplier (close to blocking retries)
         if state.full_stop_active:
-            return float("inf")  # 무한대 → execute()에서 즉시 DLQ 이동
+            return float("inf")  # infinity → immediate DLQ movement in execute()
 
-        # Error Budget Critical/Warning 우선 검사
+        # Error Budget Critical/Warning takes priority
         if self._check_error_budget_critical_or_warning():
             return self.BACKOFF_MULTIPLIERS["error_budget_critical"]
 
@@ -385,7 +391,7 @@ class ThrottleAwareBackoffCalculator:
         if state.emergency_level > 0:
             return self.BACKOFF_MULTIPLIERS["emergency_1_2"]
 
-        # Error Budget Reduction Active (별도 flag)
+        # Error Budget Reduction Active (separate flag)
         if state.error_budget_reduction_active:
             return self.BACKOFF_MULTIPLIERS["error_budget_critical"]
 
@@ -397,11 +403,11 @@ class ThrottleAwareBackoffCalculator:
         if state.sla_warning_active:
             return self.BACKOFF_MULTIPLIERS["sla_warning"]
 
-        # 정상 상태
+        # Normal state
         return self.BACKOFF_MULTIPLIERS["normal"]
 
     def _determine_reason(self, state: ThrottleState) -> str:
-        """상태에서 reason 문자열 결정."""
+        """Determine the reason string from the state."""
         if state.full_stop_active:
             return "full_stop_active"
         if state.emergency_level >= 3:
@@ -419,12 +425,12 @@ class ThrottleAwareBackoffCalculator:
     def _calculate_global_multiplier(
         self, state: GlobalThrottleState
     ) -> tuple[float, str]:
-        """글로벌 상태 기반 배율 계산."""
-        # 클러스터 과반수가 SLA Critical이면 2.0x
+        """Calculate multiplier based on global state."""
+        # 2.0x if a majority of the cluster is SLA Critical
         if state.cluster_sla_critical_count > state.reporting_pod_count / 2:
             return 2.0, "cluster_sla_critical"
 
-        # 클러스터 평균 Emergency Level 기반
+        # Based on cluster average Emergency Level
         if state.cluster_emergency_level >= 3:
             return 4.0, "cluster_emergency_level_3"
         if state.cluster_emergency_level > 0:
@@ -433,13 +439,13 @@ class ThrottleAwareBackoffCalculator:
         return 1.0, "cluster_normal"
 
     def _get_effective_multiplier(self) -> tuple[float, str]:
-        """로컬 또는 글로벌 상태 기반 배율 계산."""
+        """Calculate multiplier based on local or global state."""
         if self._use_global_state and self._global_state_manager:
             global_state = self._global_state_manager.get_global_state()
             if global_state:
                 return self._calculate_global_multiplier(global_state)
 
-        # 폴백: 로컬 상태
+        # Fallback: local state
         return self._get_throttle_state_cached()
 
     def _record_backoff_metrics(
@@ -450,7 +456,7 @@ class ThrottleAwareBackoffCalculator:
         multiplier: float,
         reason: str,
     ) -> None:
-        """Prometheus 메트릭 기록."""
+        """Record Prometheus metrics."""
         try:
             from baldur.services.metrics.definitions import (
                 retry_backoff_adjusted_seconds,
@@ -482,15 +488,15 @@ class ThrottleAwareBackoffCalculator:
         with_jitter: bool = True,
     ) -> tuple[int, float, str]:
         """
-        Throttle 상태를 고려한 Backoff 계산.
+        Calculate Backoff considering Throttle state.
 
         Args:
-            attempt: 재시도 횟수
-            with_jitter: Jitter 적용 여부
+            attempt: Number of retry attempts
+            with_jitter: Whether to apply Jitter
 
         Returns:
-            (adjusted_delay, multiplier, reason) 튜플.
-            delay=-1은 Full Stop 즉시 DLQ 이동 신호.
+            (adjusted_delay, multiplier, reason) tuple.
+            delay=-1 signals Full Stop immediate DLQ movement.
         """
         base_delay = self.calculate(attempt, with_jitter)
 
@@ -500,7 +506,7 @@ class ThrottleAwareBackoffCalculator:
 
         multiplier = self._calculate_multiplier(state)
 
-        # Full Stop 시 무한대 → 특수 처리
+        # On Full Stop, infinity → special handling
         if multiplier == float("inf"):
             self._record_backoff_metrics(
                 domain=self._service_name,
@@ -513,7 +519,7 @@ class ThrottleAwareBackoffCalculator:
 
         adjusted_delay = int(base_delay * multiplier)
 
-        # 시스템 타임아웃 기준 cap (임의적 2배 대신)
+        # Cap based on system timeout (instead of an arbitrary 2x)
         if adjusted_delay > SYSTEM_TIMEOUT_SECONDS:
             logger.warning(
                 "throttle_aware_backoff.delay_capped",
@@ -524,7 +530,7 @@ class ThrottleAwareBackoffCalculator:
 
         reason = self._determine_reason(state)
 
-        # 메트릭 기록
+        # Record metrics
         self._record_backoff_metrics(
             domain=self._service_name,
             original_delay=base_delay,
