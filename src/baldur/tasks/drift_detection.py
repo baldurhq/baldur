@@ -20,8 +20,8 @@ from typing import Any, Protocol
 
 import structlog
 
-from baldur.core.timezone import now
 from baldur.notification.helpers import notify_sla
+from baldur.utils.time import utc_now
 
 logger = structlog.get_logger()
 
@@ -110,14 +110,14 @@ class SLADriftDetector:
 
             results: dict[str, Any] = {
                 "success": True,
-                "checked_at": now().isoformat(),
+                "checked_at": utc_now().isoformat(),
                 "domains_checked": [],
                 "warnings": [],
                 "metrics": {},
             }
 
             # Time windows for analysis - looked up from Settings
-            current_time = now()
+            current_time = utc_now()
             analysis_window = timedelta(hours=self._get_analysis_window_hours())
             window_start = current_time - analysis_window
 
@@ -158,7 +158,7 @@ class SLADriftDetector:
             return {
                 "success": False,
                 "error": str(e),
-                "checked_at": now().isoformat(),
+                "checked_at": utc_now().isoformat(),
             }
 
     @staticmethod
@@ -408,7 +408,7 @@ class ChaosExperimentCleaner:
 
             return {
                 "success": True,
-                "cleaned_at": now().isoformat(),
+                "cleaned_at": utc_now().isoformat(),
                 "resolved_count": resolved_count,
             }
 
@@ -420,7 +420,7 @@ class ChaosExperimentCleaner:
             return {
                 "success": False,
                 "error": str(e),
-                "cleaned_at": now().isoformat(),
+                "cleaned_at": utc_now().isoformat(),
             }
 
 
@@ -480,7 +480,7 @@ class DecisionRecorder:
             )
 
             decision_record = {
-                "decided_at": now().isoformat(),
+                "decided_at": utc_now().isoformat(),
                 "decided_by": decided_by,
                 "decision": decision,
                 "notes": notes,

@@ -4,41 +4,52 @@ Time Utilities with Timezone Awareness.
 Provides timezone-aware datetime utilities for the baldur system.
 All time operations should use these utilities to ensure consistency.
 
+``utc_now()`` reads the current time through the global ``TimeProvider`` seam
+(``core.time_provider``), so tests can drive it deterministically via
+``set_time_provider(MockTimeProvider(...))``. The default ``SystemTimeProvider``
+returns ``datetime.now(UTC)``, so production behavior is unchanged.
+
 Note:
     datetime.utcnow() is deprecated in Python 3.12.
-    Always use datetime.now(timezone.utc) instead.
+    Always use datetime.now(timezone.utc) (or this module) instead.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+from baldur.core.time_provider import get_time_provider
+
 
 def utc_now() -> datetime:
     """
-    현재 UTC 시간 반환 (timezone-aware).
+    Return the current UTC time (timezone-aware).
+
+    Reads through the global TimeProvider so tests can substitute a
+    MockTimeProvider; the default SystemTimeProvider returns
+    ``datetime.now(UTC)``.
 
     Returns:
-        현재 UTC 시간 (timezone-aware datetime)
+        The current UTC time (timezone-aware datetime).
 
     Example:
         >>> now = utc_now()
         >>> print(now.tzinfo)  # UTC
     """
-    return datetime.now(UTC)
+    return get_time_provider().utcnow()
 
 
 def ensure_aware(dt: datetime) -> datetime:
     """
-    naive datetime을 UTC로 변환합니다.
+    Convert a naive datetime to UTC.
 
-    이미 timezone-aware인 경우 그대로 반환합니다.
+    If it is already timezone-aware, return it unchanged.
 
     Args:
-        dt: 변환할 datetime
+        dt: The datetime to convert.
 
     Returns:
-        timezone-aware datetime (UTC)
+        A timezone-aware datetime (UTC).
 
     Example:
         >>> from datetime import datetime
@@ -53,13 +64,13 @@ def ensure_aware(dt: datetime) -> datetime:
 
 def to_iso_string(dt: datetime | None) -> str | None:
     """
-    datetime을 ISO 8601 문자열로 변환합니다.
+    Convert a datetime to an ISO 8601 string.
 
     Args:
-        dt: 변환할 datetime (None 가능)
+        dt: The datetime to convert (may be None).
 
     Returns:
-        ISO 8601 형식 문자열 또는 None
+        An ISO 8601 formatted string, or None.
 
     Example:
         >>> now = utc_now()
@@ -73,13 +84,13 @@ def to_iso_string(dt: datetime | None) -> str | None:
 
 def from_iso_string(iso_str: str) -> datetime:
     """
-    ISO 8601 문자열을 datetime으로 변환합니다.
+    Convert an ISO 8601 string to a datetime.
 
     Args:
-        iso_str: ISO 8601 형식 문자열
+        iso_str: An ISO 8601 formatted string.
 
     Returns:
-        timezone-aware datetime
+        A timezone-aware datetime.
 
     Example:
         >>> dt = from_iso_string("2024-01-15T10:30:00+00:00")
@@ -91,14 +102,14 @@ def from_iso_string(iso_str: str) -> datetime:
 
 def elapsed_seconds(start: datetime, end: datetime | None = None) -> float:
     """
-    두 시간 사이의 경과 시간을 초 단위로 반환합니다.
+    Return the elapsed time between two datetimes in seconds.
 
     Args:
-        start: 시작 시간
-        end: 종료 시간 (None이면 현재 시간)
+        start: The start time.
+        end: The end time (defaults to now).
 
     Returns:
-        경과 시간 (초)
+        The elapsed time in seconds.
 
     Example:
         >>> start = utc_now()
@@ -112,18 +123,18 @@ def elapsed_seconds(start: datetime, end: datetime | None = None) -> float:
 
 def is_expired(dt: datetime, ttl_seconds: float) -> bool:
     """
-    주어진 시간이 TTL을 초과했는지 확인합니다.
+    Check whether a datetime has exceeded its TTL.
 
     Args:
-        dt: 확인할 시간
-        ttl_seconds: TTL (초)
+        dt: The datetime to check.
+        ttl_seconds: The TTL in seconds.
 
     Returns:
-        만료 여부
+        True if expired.
 
     Example:
         >>> created_at = utc_now() - timedelta(hours=2)
-        >>> expired = is_expired(created_at, ttl_seconds=3600)  # 1시간
+        >>> expired = is_expired(created_at, ttl_seconds=3600)  # 1 hour
         >>> print(expired)  # True
     """
     return elapsed_seconds(dt) > ttl_seconds
@@ -131,27 +142,27 @@ def is_expired(dt: datetime, ttl_seconds: float) -> bool:
 
 def add_seconds(dt: datetime, seconds: float) -> datetime:
     """
-    datetime에 초를 더합니다.
+    Add seconds to a datetime.
 
     Args:
-        dt: 기준 시간
-        seconds: 더할 초
+        dt: The base datetime.
+        seconds: The seconds to add.
 
     Returns:
-        새로운 datetime
+        A new datetime.
     """
     return ensure_aware(dt) + timedelta(seconds=seconds)
 
 
 def format_duration(seconds: float) -> str:
     """
-    초를 사람이 읽기 쉬운 형태로 포맷합니다.
+    Format seconds into a human-readable string.
 
     Args:
-        seconds: 초 단위 시간
+        seconds: A duration in seconds.
 
     Returns:
-        포맷된 문자열 (예: "2h 30m 15s")
+        A formatted string (e.g. "2h 30m 15s").
 
     Example:
         >>> print(format_duration(9015))  # "2h 30m 15s"

@@ -348,13 +348,13 @@ def _run_execute_experiment(sched, mock_be, experiment_id="chaos-test123456"):
         mock_exp.execute.return_value = mock_result
         mock_create.return_value = mock_exp
 
-        from baldur.core.timezone import now
+        from baldur.utils.time import utc_now
 
         sched._execute_experiment(
             schedule=mock_schedule,
             schedule_id="sched-001",
             experiment_id=experiment_id,
-            started_at=now(),
+            started_at=utc_now(),
             force=True,
         )
 
@@ -447,14 +447,14 @@ class TestExecuteExperimentFinallyDualDeleteBehavior:
             mock_exp.execute.side_effect = RuntimeError("Experiment failed")
             mock_create.return_value = mock_exp
 
-            from baldur.core.timezone import now
+            from baldur.utils.time import utc_now
 
             with pytest.raises(RuntimeError, match="Experiment failed"):
                 sched._execute_experiment(
                     schedule=mock_schedule,
                     schedule_id="sched-001",
                     experiment_id="chaos-fail999888",
-                    started_at=now(),
+                    started_at=utc_now(),
                     force=True,
                 )
 
@@ -552,14 +552,14 @@ class TestExecuteExperimentFinallyBackendFailureBehavior:
             mock_exp.execute.return_value = mock_result
             mock_create.return_value = mock_exp
 
-            from baldur.core.timezone import now
+            from baldur.utils.time import utc_now
 
             # Should NOT raise — finally block swallows backend failure
             sched._execute_experiment(
                 schedule=mock_schedule,
                 schedule_id="sched-001",
                 experiment_id="chaos-be-fail111",
-                started_at=now(),
+                started_at=utc_now(),
                 force=True,
             )
 
@@ -592,7 +592,7 @@ class TestExecuteExperimentFinallyBackendFailureBehavior:
             mock_exp.execute.side_effect = RuntimeError("Experiment crashed")
             mock_create.return_value = mock_exp
 
-            from baldur.core.timezone import now
+            from baldur.utils.time import utc_now
 
             # Original RuntimeError must propagate, NOT ConnectionError from finally
             with pytest.raises(RuntimeError, match="Experiment crashed"):
@@ -600,7 +600,7 @@ class TestExecuteExperimentFinallyBackendFailureBehavior:
                     schedule=mock_schedule,
                     schedule_id="sched-001",
                     experiment_id="chaos-be-fail222",
-                    started_at=now(),
+                    started_at=utc_now(),
                     force=True,
                 )
 

@@ -841,7 +841,8 @@ class TestFailureInjectionState:
             "expires_at": past,
         }
         with patch(
-            "baldur.services.control_api_service.now", return_value=datetime.now()
+            "baldur.services.control_api_service.service.utc_now",
+            return_value=datetime.now(),
         ):
             assert service.is_failure_injection_active("payment") is False
         assert "payment" not in service._failure_injections

@@ -139,9 +139,9 @@ def _create_individual_postmortem(  # noqa: PLR0915
         )
 
         # Generate incident ID
-        from baldur.core.timezone import now
+        from baldur.utils.time import utc_now
 
-        incident_id = f"AUTO-{service_name}-{now().strftime('%Y%m%d-%H%M%S')}"
+        incident_id = f"AUTO-{service_name}-{utc_now().strftime('%Y%m%d-%H%M%S')}"
 
         # Generate the Post-mortem
         postmortem = _generate_postmortem_data(

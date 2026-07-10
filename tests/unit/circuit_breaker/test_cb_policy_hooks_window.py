@@ -709,7 +709,7 @@ class TestEvaluateAdmissionGates:
 
         # elapsed = now(t0 + 60) - opened_at(t0) == recovery_timeout(60) exactly.
         with patch(
-            "baldur.services.circuit_breaker.service.now",
+            "baldur.services.circuit_breaker.service.utc_now",
             return_value=t0 + timedelta(seconds=60),
         ):
             decision = svc.should_allow_with_state("svc")

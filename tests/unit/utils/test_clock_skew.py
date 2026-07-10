@@ -389,46 +389,6 @@ class TestGlobalTimeProvider:
             reset_time_provider()
 
 
-class TestTimezoneIntegration:
-    """Tests for timezone.py integration with TimeProvider."""
-
-    def test_timezone_now_uses_time_provider(self):
-        """timezone.now() uses global TimeProvider."""
-        from baldur.core.time_provider import (
-            MockTimeProvider,
-            reset_time_provider,
-            set_time_provider,
-        )
-        from baldur.core.timezone import now
-
-        try:
-            fixed = datetime(2024, 12, 25, 0, 0, 0, tzinfo=UTC)
-            set_time_provider(MockTimeProvider(fixed_time=fixed))
-
-            result = now()
-            assert result == fixed
-        finally:
-            reset_time_provider()
-
-    def test_timezone_utcnow_uses_time_provider(self):
-        """timezone.utcnow() uses global TimeProvider."""
-        from baldur.core.time_provider import (
-            MockTimeProvider,
-            reset_time_provider,
-            set_time_provider,
-        )
-        from baldur.core.timezone import utcnow
-
-        try:
-            fixed = datetime(2024, 12, 25, 12, 0, 0, tzinfo=UTC)
-            set_time_provider(MockTimeProvider(fixed_time=fixed))
-
-            result = utcnow()
-            assert result == fixed
-        finally:
-            reset_time_provider()
-
-
 class TestIdempotencyServiceTimeProvider:
     """Tests for IdempotencyService with TimeProvider injection."""
 
