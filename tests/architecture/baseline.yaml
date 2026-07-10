@@ -343,7 +343,6 @@ all_declaration:
   - {file: "src/baldur/core/test_mode_context.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/core/tiered_redis.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/core/time_provider.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
-  - {file: "src/baldur/core/timezone.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/core/tls_handler.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/decorators/domain_tag.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/interfaces/alert_adapter.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
