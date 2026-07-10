@@ -1,12 +1,12 @@
 """
 Rate-aware Backpressure Controller.
 
-동적으로 처리율을 조절하여 과부하를 방지합니다.
-AIMD (Additive Increase, Multiplicative Decrease) 패턴 적용.
+Dynamically adjusts throughput to prevent overload.
+Applies the AIMD (Additive Increase, Multiplicative Decrease) pattern.
 
-주의:
-    이 모듈은 동기(Threading) 환경용입니다.
-    asyncio 환경에서는 이벤트 루프를 블로킹할 수 있습니다.
+Note:
+    This module is for synchronous (threading) environments.
+    It may block the event loop under asyncio.
 """
 
 from __future__ import annotations
@@ -36,10 +36,12 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 
-# Priority별 토큰 비율 임계치 (Watermark).
-# 현재 토큰 잔량 비율이 이 값 미만이면 해당 priority의 요청을 거부한다.
-# 하위 호환: 기존 import 유지. 동적 변경은 BackpressureSettings 필드를 통해 수행.
-# should_process() 내부에서는 settings에서 매번 읽어 동적 변경을 반영한다.
+# Per-priority token-ratio threshold (watermark).
+# When the current token-remaining ratio is below this value, requests of that
+# priority are rejected.
+# Backward compatibility: keep the existing import. Dynamic changes are done via
+# BackpressureSettings fields. should_process() reads from settings on every call
+# to reflect dynamic changes.
 PRIORITY_WATERMARKS: dict[str, float] = {
     "critical": 0.0,
     "standard": 0.3,
@@ -49,31 +51,31 @@ PRIORITY_WATERMARKS: dict[str, float] = {
 
 @dataclass
 class RateControllerState:
-    """Rate Controller 현재 상태."""
+    """Current Rate Controller state."""
 
     current_rate: float
-    """현재 처리율 (항목/초)."""
+    """Current throughput (items/second)."""
 
     target_rate: float
-    """목표 처리율."""
+    """Target throughput."""
 
     level: BackpressureLevel
-    """Backpressure 레벨."""
+    """Backpressure level."""
 
     queue_size: int
-    """현재 큐 크기."""
+    """Current queue size."""
 
     processed_count: int
-    """처리된 항목 수."""
+    """Number of processed items."""
 
     dropped_count: int
-    """버려진 항목 수."""
+    """Number of dropped items."""
 
     dropped_by_tier: dict[str, int] | None = None
-    """Tier별 거부 항목 수 (critical / standard / non_essential)."""
+    """Dropped item count per tier (critical / standard / non_essential)."""
 
     processed_by_tier: dict[str, int] | None = None
-    """Tier별 처리 항목 수 (critical / standard / non_essential)."""
+    """Processed item count per tier (critical / standard / non_essential)."""
 
 
 # TokenBucket has moved to baldur.core.rate_limiting (shared primitives home)
@@ -81,22 +83,22 @@ class RateControllerState:
 # scaling.__all__ stay stable. New consumers import from the primitives home.
 
 
-# Starvation Relief 설정 상수
+# Starvation Relief configuration constants
 STARVATION_RELIEF_SECONDS = 300.0
-"""연속 거부 시간(초) 초과 시 watermark 완화. 기본 5분."""
+"""Relax the watermark after this many seconds of continuous rejection. Default 5 minutes."""
 
 STARVATION_RELIEF_WATERMARK = 0.3
-"""완화 시 적용할 watermark (standard tier와 동일 수준)."""
+"""Watermark applied when relaxing (same level as the standard tier)."""
 
 
 class RateController:
     """
     Rate-aware Backpressure Controller.
 
-    기능:
-    - 큐 크기 기반 Backpressure 레벨 계산
-    - 동적 Rate 조절 (AIMD 패턴)
-    - 전략 기반 처리 (Throttle, Drop, Reject)
+    Features:
+    - Queue-size-based backpressure level calculation
+    - Dynamic rate adjustment (AIMD pattern)
+    - Strategy-based handling (Throttle, Drop, Reject)
 
     Usage:
         controller = RateController()
@@ -105,7 +107,7 @@ class RateController:
         if controller.should_process():
             process_item()
         else:
-            # Backpressure 활성화됨
+            # Backpressure is active
             pass
 
         controller.stop()
@@ -119,9 +121,9 @@ class RateController:
     ):
         """
         Args:
-            settings: Backpressure 설정
-            queue_size_provider: 큐 크기 제공 함수
-            metrics: Prometheus per-tier 메트릭 인스턴스 (None이면 Prometheus 미발행)
+            settings: Backpressure settings
+            queue_size_provider: Queue-size provider function
+            metrics: Prometheus per-tier metrics instance (None -> Prometheus not emitted)
         """
         self._settings = settings or get_backpressure_settings()
         self._queue_size_provider = queue_size_provider or (lambda: 0)
@@ -132,7 +134,7 @@ class RateController:
         self._level = BackpressureLevel.NONE
         self._token_bucket = TokenBucket(self._current_rate)
 
-        # 통계
+        # Statistics
         self._processed_count = 0
         self._dropped_count = 0
         self._dropped_by_tier: dict[str, int] = {
@@ -146,7 +148,7 @@ class RateController:
             "non_essential": 0,
         }
 
-        # 백그라운드 조절 스레드
+        # Background adjustment thread
         self._running = False
         self._worker: threading.Thread | None = None
         self._handle: DaemonWorkerHandle | None = None  # impl 489 D9
@@ -156,7 +158,7 @@ class RateController:
         self._last_flushed_dropped = 0
         self._last_flushed_by_tier: dict[str, int] = {}
 
-        # Starvation Relief: tier별 마지막 허용 시각 (monotonic)
+        # Starvation Relief: last-allowed time per tier (monotonic)
         self._tier_last_allowed: dict[str, float] = {
             "critical": time.monotonic(),
             "standard": time.monotonic(),
@@ -171,7 +173,7 @@ class RateController:
         self._sla_subscribed: bool = False
 
     def get_state(self) -> RateControllerState:
-        """현재 상태 반환."""
+        """Return the current state."""
         with self._lock:
             return RateControllerState(
                 current_rate=self._current_rate,
@@ -186,30 +188,32 @@ class RateController:
 
     def should_process(self, priority: str = "standard") -> bool:  # noqa: C901, PLR0912
         """
-        처리 여부 결정 (priority 기반 Watermark 적용).
+        Decide whether to process (priority-based watermark applied).
 
-        현재 토큰 잔량 비율이 priority별 watermark 미만이면
-        토큰 소비를 시도하지 않고 즉시 거부한다.
-        이를 통해 토큰이 적을 때 critical 요청을 우선 보호한다.
+        When the current token-remaining ratio is below the per-priority
+        watermark, the request is rejected immediately without attempting token
+        consumption. This prioritizes protecting critical requests when tokens
+        are scarce.
 
         Args:
-            priority: 요청 priority tier.
+            priority: Request priority tier.
                 "critical" | "standard" | "non_essential".
-                기본값 "standard"는 기존 호출부와 하위 호환.
+                The default "standard" is backward compatible with existing callers.
 
         Returns:
-            True면 처리, False면 Backpressure로 거부
+            True to process, False to reject via backpressure
         """
         if not self._settings.backpressure_enabled:
             return True
 
-        # Watermark 확인: settings에서 동적으로 읽어 런타임 변경 반영
+        # Watermark check: read dynamically from settings to reflect runtime changes
         watermarks = self._settings.get_priority_watermarks()
         watermark = watermarks.get(priority, 0.3)
         token_ratio = self._token_bucket.get_token_ratio()
 
         if token_ratio < watermark:
-            # Starvation Relief: N분간 연속 거부된 tier는 watermark 임시 완화
+            # Starvation Relief: temporarily relax the watermark for a tier
+            # rejected continuously for N minutes
             relief_applied = False
             if priority in self._tier_last_allowed:
                 elapsed = time.monotonic() - self._tier_last_allowed[priority]
@@ -237,12 +241,12 @@ class RateController:
                 )
                 return False
 
-        # Token Bucket에서 토큰 소비 시도 (단일 버킷)
+        # Attempt token consumption from the token bucket (single bucket)
         if self._token_bucket.consume():
             self._record_process(priority)
             return True
 
-        # 토큰 부족 시 전략에 따른 처리
+        # Handle per strategy when tokens are insufficient
         logger.debug(
             "rate_controller.request_rejected",
             tier=priority,
@@ -256,7 +260,7 @@ class RateController:
             return False
 
         if strategy == BackpressureStrategy.THROTTLE:
-            # 잠시 대기 후 재시도
+            # Wait briefly and retry
             if self._token_bucket.wait_for_token(timeout=0.1):
                 self._record_process(priority)
                 return True
@@ -264,11 +268,11 @@ class RateController:
             return False
 
         if strategy == BackpressureStrategy.DROP_OLDEST:
-            # DROP_OLDEST는 호출자가 처리
+            # DROP_OLDEST is handled by the caller
             return True
 
         if strategy == BackpressureStrategy.QUEUE:
-            # QUEUE는 호출자가 처리
+            # QUEUE is handled by the caller
             return True
 
         return True
@@ -298,13 +302,13 @@ class RateController:
             self._metrics.inc_processed_by_tier(priority)
 
     def _check_starvation_relief_allowed(self) -> bool:
-        """Starvation Relief 활성화 전 시스템 안정성 확인.
+        """Check system stability before activating Starvation Relief.
 
-        RecoveryGate와 동일한 기준(CPU < 80%, error_rate < 5%)을 사용하여
-        과부하 상태에서 Relief가 트래픽을 증가시키는 것을 방지한다.
+        Uses the same criteria as RecoveryGate (CPU < 80%, error_rate < 5%) to
+        prevent Relief from increasing traffic while overloaded.
 
         Returns:
-            True면 Relief 허용, False면 차단
+            True to allow Relief, False to block it
         """
         try:
             from baldur_pro.services.emergency_mode.recovery_gate import (
@@ -320,18 +324,18 @@ class RateController:
                 )
             return allowed
         except Exception:
-            # RecoveryGate 사용 불가 시 안전하게 Relief 차단
+            # Safely block Relief when RecoveryGate is unavailable
             return False
 
     def _get_resource_pressure_multiplier(self) -> float:
-        """CPU 사용률 기반 Rate 감쇠 배율.
+        """CPU-utilization-based rate attenuation multiplier.
 
-        SystemMetricsCache에서 캐시된 CPU 사용률을 읽어
-        임계치에 따라 Rate 배율을 결정한다.
-        캐시 읽기는 ~0ms (Lock-free, GIL atomic 참조 교체).
+        Reads the cached CPU utilization from SystemMetricsCache and determines
+        the rate multiplier by threshold.
+        The cache read is ~0ms (lock-free, GIL-atomic reference swap).
 
         Returns:
-            1.0 (정상), 0.5 (CPU >= high_threshold), 0.1 (CPU >= critical_threshold)
+            1.0 (normal), 0.5 (CPU >= high_threshold), 0.1 (CPU >= critical_threshold)
         """
         try:
             from baldur.services.system_metrics_cache import (
@@ -349,10 +353,10 @@ class RateController:
 
     def _adjust_rate(self) -> None:
         """
-        Rate 조절 (AIMD 패턴).
+        Rate adjustment (AIMD pattern).
 
-        - 과부하 시: 레벨별 차등 감소 (Multiplicative Decrease)
-        - 정상화 시: 점진적 증가 (Additive Increase)
+        - Under overload: level-differentiated decrease (Multiplicative Decrease)
+        - On normalization: gradual increase (Additive Increase)
         """
         queue_size = self._queue_size_provider()
         queue_level = self._settings.get_level_for_queue_size(queue_size)
@@ -369,20 +373,20 @@ class RateController:
             new_level = max(queue_level, self._external_level)
             self._level = new_level
 
-        # AIMD 패턴: 레벨별 Rate 배율 적용
+        # AIMD pattern: apply the per-level rate multiplier
         if new_level == BackpressureLevel.NONE:
-            # 정상: 점진적 증가 (Additive Increase)
+            # Normal: gradual increase (Additive Increase)
             new_rate = self._current_rate * self._settings.rate_increase_factor
         else:
-            # 과부하: 레벨별 차등 감소 (Multiplicative Decrease)
+            # Overload: level-differentiated decrease (Multiplicative Decrease)
             multiplier = self._settings.get_rate_multiplier(new_level)
             new_rate = self._settings.max_rate_per_second * multiplier
 
-        # CPU 사용률 기반 추가 감쇠 적용
+        # Apply additional CPU-utilization-based attenuation
         resource_multiplier = self._get_resource_pressure_multiplier()
         new_rate *= resource_multiplier
 
-        # 범위 제한
+        # Clamp to range
         new_rate = max(
             self._settings.min_rate_per_second,
             min(self._settings.max_rate_per_second, new_rate),
@@ -467,7 +471,7 @@ class RateController:
             raise
 
     def start(self) -> None:
-        """Rate 조절 시작."""
+        """Start rate adjustment."""
         from baldur.meta.daemon_worker import DaemonWorkerHandle
         from baldur.metrics.recorders.daemon_worker import register_daemon_worker
 
@@ -546,7 +550,7 @@ class RateController:
             )
 
     def stop(self) -> None:
-        """Rate 조절 중지 및 EventBus 구독 해제."""
+        """Stop rate adjustment and unsubscribe from the EventBus."""
         # Unsubscribe EventBus handlers first
         if self._sla_subscribed:
             try:
