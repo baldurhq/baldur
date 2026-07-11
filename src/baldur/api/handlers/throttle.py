@@ -30,5 +30,6 @@ def throttle_status(ctx: RequestContext) -> ResponseContext:
             "Adaptive throttle is unavailable (baldur_pro required)"
         )
     stats = throttle.get_stats()
-    stats["timestamp"] = utc_now().isoformat()
-    return ResponseContext.json(stats)
+    # Build the response as the handler's own dict; never write into the
+    # provider's return value (its ownership belongs to the provider).
+    return ResponseContext.json({**stats, "timestamp": utc_now().isoformat()})
