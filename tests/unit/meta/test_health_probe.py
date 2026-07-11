@@ -21,6 +21,7 @@ from baldur.meta.health_probe import (
     RecoveryPipelineProbe,
     RedisProbe,
 )
+from baldur.settings.health_check import get_health_check_settings
 from baldur.utils.time import utc_now
 from tests.factories.time_helpers import freeze_time
 
@@ -86,6 +87,26 @@ class TestCircuitBreakerProbe:
         assert isinstance(result, ProbeResult)
         assert result.component == "circuit_breaker"
         assert result.latency_ms >= 0
+
+    def test_probe_open_breakers_over_threshold_degraded(self):
+        """Canonical lowercase "open" states are counted; over threshold → DEGRADED."""
+        threshold = get_health_check_settings().probe_cb_open_threshold
+        mock_service = MagicMock()
+
+        with freeze_time(_FROZEN_INSTANT):
+            opened_at = utc_now() - timedelta(seconds=10)
+            mock_service.get_all_states.return_value = [
+                {"state": "open", "opened_at": opened_at} for _ in range(threshold + 1)
+            ]
+            with patch(
+                "baldur.services.circuit_breaker.get_circuit_breaker_service",
+                return_value=mock_service,
+            ):
+                result = CircuitBreakerProbe().probe()
+
+        assert result.status == HealthStatus.DEGRADED
+        assert result.details["open_count"] == threshold + 1
+        assert result.details["stuck_count"] == 0
 
 
 class TestDLQProbe:
@@ -430,7 +451,7 @@ class TestCircuitBreakerStuckDetection:
 
         with freeze_time(_FROZEN_INSTANT):
             opened_at = utc_now() - timedelta(seconds=threshold + offset_seconds)
-            cb_states = [{"state": "OPEN", "opened_at": opened_at}]
+            cb_states = [{"state": "open", "opened_at": opened_at}]
 
             count = CircuitBreakerProbe._count_stuck_open_breakers(cb_states)
 
@@ -439,17 +460,19 @@ class TestCircuitBreakerStuckDetection:
     @pytest.mark.parametrize(
         "state",
         [
-            {"state": "CLOSED", "opened_at": _AGED_AWARE},
-            {"state": "HALF_OPEN", "opened_at": _AGED_AWARE},
-            {"state": "OPEN", "opened_at": None},
-            {"state": "OPEN"},
-            {"state": "OPEN", "opened_at": _AGED_NAIVE},
-            {"state": "OPEN", "opened_at": "2020-01-01"},
-            {"state": "OPEN", "opened_at": 1577836800},
+            {"state": "closed", "opened_at": _AGED_AWARE},
+            {"state": "half_open", "opened_at": _AGED_AWARE},
+            {"state": "OPEN", "opened_at": _AGED_AWARE},
+            {"state": "open", "opened_at": None},
+            {"state": "open"},
+            {"state": "open", "opened_at": _AGED_NAIVE},
+            {"state": "open", "opened_at": "2020-01-01"},
+            {"state": "open", "opened_at": 1577836800},
         ],
         ids=[
             "closed_ignored",
             "half_open_ignored",
+            "uppercase_not_canonical",
             "opened_at_none",
             "opened_at_missing",
             "opened_at_naive",
@@ -458,7 +481,7 @@ class TestCircuitBreakerStuckDetection:
         ],
     )
     def test_count_stuck_open_breakers_ignores_invalid_states(self, state):
-        """Non-OPEN states and None/naive/garbage opened_at are skipped (fail-safe)."""
+        """Non-open states and None/naive/garbage opened_at are skipped (fail-safe)."""
         assert CircuitBreakerProbe._count_stuck_open_breakers([state]) == 0
 
     def test_count_stuck_open_breakers_mixed_states_counts_only_aged_open(self):
@@ -468,9 +491,9 @@ class TestCircuitBreakerStuckDetection:
         with freeze_time(_FROZEN_INSTANT):
             now = utc_now()
             cb_states = [
-                {"state": "OPEN", "opened_at": now - timedelta(seconds=threshold + 30)},
-                {"state": "OPEN", "opened_at": now - timedelta(seconds=10)},
-                {"state": "CLOSED", "opened_at": None},
+                {"state": "open", "opened_at": now - timedelta(seconds=threshold + 30)},
+                {"state": "open", "opened_at": now - timedelta(seconds=10)},
+                {"state": "closed", "opened_at": None},
             ]
 
             count = CircuitBreakerProbe._count_stuck_open_breakers(cb_states)
@@ -478,15 +501,15 @@ class TestCircuitBreakerStuckDetection:
         assert count == 1
 
     def test_probe_sustained_open_breaker_returns_unhealthy(self):
-        """A breaker held OPEN past the threshold revives stuck_count → UNHEALTHY."""
-        # Given — one breaker OPEN well past the stuck threshold
+        """A breaker held open past the threshold revives stuck_count → UNHEALTHY."""
+        # Given — one breaker open well past the stuck threshold
         threshold = get_meta_watchdog_settings().stuck_threshold_seconds
         mock_service = MagicMock()
 
         with freeze_time(_FROZEN_INSTANT):
             opened_at = utc_now() - timedelta(seconds=threshold + 60)
             mock_service.get_all_states.return_value = [
-                {"state": "OPEN", "opened_at": opened_at}
+                {"state": "open", "opened_at": opened_at}
             ]
 
             # When — the probe runs against the mocked CB service
@@ -498,6 +521,7 @@ class TestCircuitBreakerStuckDetection:
 
         # Then — the revived stuck_count branch drives UNHEALTHY
         assert result.status == HealthStatus.UNHEALTHY
+        assert result.details["open_count"] == 1
         assert result.details["stuck_count"] == 1
         assert "stuck" in result.reason.lower()
 
@@ -508,7 +532,7 @@ class TestCircuitBreakerStuckDetection:
         with freeze_time(_FROZEN_INSTANT):
             opened_at = utc_now() - timedelta(seconds=10)
             mock_service.get_all_states.return_value = [
-                {"state": "OPEN", "opened_at": opened_at}
+                {"state": "open", "opened_at": opened_at}
             ]
             with patch(
                 "baldur.services.circuit_breaker.get_circuit_breaker_service",
