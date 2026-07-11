@@ -7,7 +7,7 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Generic, TypeVar
 
 from baldur.core.singleflight import Singleflight
@@ -186,8 +186,14 @@ class TTLCacheBase(Generic[K, V]):
             return count
 
     def get_stats(self) -> CacheStats:
-        """Get cache statistics."""
-        return self._stats
+        """Get a snapshot of cache statistics.
+
+        Returns a copy taken under the instance lock, so the caller can
+        neither observe a torn mid-update read nor corrupt internal
+        accounting by mutating the returned object.
+        """
+        with self._lock:
+            return replace(self._stats)
 
     @property
     def size(self) -> int:
@@ -209,9 +215,12 @@ class TTLCacheBase(Generic[K, V]):
 
     def _cleanup_expired(self) -> int:
         """Remove all expired entries. Returns count of removed entries."""
-        now = time.time()
-        expired = [key for key, entry in self._cache.items() if now >= entry.expires_at]
-        for key in expired:
-            del self._cache[key]
-        self._stats.expirations += len(expired)
-        return len(expired)
+        with self._lock:
+            now = time.time()
+            expired = [
+                key for key, entry in self._cache.items() if now >= entry.expires_at
+            ]
+            for key in expired:
+                del self._cache[key]
+            self._stats.expirations += len(expired)
+            return len(expired)

@@ -290,10 +290,46 @@ class TestTTLCacheStatsBehavior:
         assert stats.invalidations == 2  # 1 from invalidate + 1 from invalidate_all
 
     def test_get_stats_returns_stats_object(self):
-        """get_stats() returns the CacheStats instance."""
+        """get_stats() returns a CacheStats instance."""
         cache: TTLCacheBase[str, int] = TTLCacheBase(ttl_seconds=30.0)
         stats = cache.get_stats()
         assert isinstance(stats, CacheStats)
+
+    def test_get_stats_returns_snapshot_not_internal_object(self):
+        """get_stats() is not the live internal stats object (copy-on-return)."""
+        cache: TTLCacheBase[str, int] = TTLCacheBase(ttl_seconds=30.0)
+        assert cache.get_stats() is not cache._stats
+
+    def test_mutating_returned_stats_is_isolated_from_cache(self):
+        """Caller mutation of the returned snapshot never corrupts accounting."""
+        cache: TTLCacheBase[str, int] = TTLCacheBase(ttl_seconds=30.0)
+        with freeze_time("2026-03-19 10:00:00"):
+            cache.set("key", 1)
+            cache.get("key")
+            cache.get("missing")
+
+        snapshot = cache.get_stats()
+        snapshot.hits = 999
+        snapshot.misses = 999
+        snapshot.invalidations = 999
+
+        fresh = cache.get_stats()
+        assert fresh.hits == 1
+        assert fresh.misses == 1
+        assert fresh.invalidations == 0
+
+    def test_snapshot_is_frozen_in_time_after_further_operations(self):
+        """A held snapshot does not change as the cache keeps operating."""
+        cache: TTLCacheBase[str, int] = TTLCacheBase(ttl_seconds=30.0)
+        with freeze_time("2026-03-19 10:00:00"):
+            cache.set("key", 1)
+            cache.get("key")
+            snapshot = cache.get_stats()
+            cache.get("key")
+            cache.get("key")
+
+        assert snapshot.hits == 1
+        assert cache.get_stats().hits == 3
 
 
 # =============================================================================
