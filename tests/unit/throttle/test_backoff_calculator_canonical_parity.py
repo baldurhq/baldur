@@ -21,7 +21,7 @@ def _calc(base=4, max_delay=180, jitter_percent=25, min_delay=1):
     return ThrottleAwareBackoffCalculator(config=cfg, enable_push_cache=False)
 
 
-class TestBackoffCalculatorCanonicalParity:
+class TestBackoffCalculatorCanonicalParityBehavior:
     @pytest.mark.parametrize(
         ("attempt", "expected"),
         [(1, 4), (2, 16), (3, 64), (4, 180)],  # 4**4=256 -> capped at 180

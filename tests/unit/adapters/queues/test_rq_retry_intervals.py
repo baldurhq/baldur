@@ -15,7 +15,7 @@ def _intervals(options: TaskOptions) -> list[int]:
     return RQTaskAdapter._get_retry_intervals(None, options)
 
 
-class TestRQRetryIntervals:
+class TestRQRetryIntervalsBehavior:
     def test_jitterless_curve_matches_celery_doubling(self):
         opts = TaskOptions(
             retry_backoff=True, max_retries=5, retry_backoff_max=600, retry_jitter=False
