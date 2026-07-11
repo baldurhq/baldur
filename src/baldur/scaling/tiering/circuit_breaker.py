@@ -12,6 +12,8 @@ import time
 
 import structlog
 
+from baldur.interfaces.repositories import CircuitBreakerStateEnum
+
 logger = structlog.get_logger()
 
 
@@ -45,7 +47,7 @@ class TieringCircuitBreaker:
 
     def _init(self):
         """Initialize circuit breaker state."""
-        self._state: str = "CLOSED"
+        self._state: str = CircuitBreakerStateEnum.CLOSED.value
         self._failure_count = 0
         self._slow_count = 0
         self._last_failure_time: float | None = None
@@ -55,12 +57,12 @@ class TieringCircuitBreaker:
     def is_open(self) -> bool:
         """Check if circuit is open (tiering should be bypassed)."""
         with self._state_lock:
-            if self._state == "OPEN":
+            if self._state == CircuitBreakerStateEnum.OPEN.value:
                 if (
                     self._last_failure_time
                     and time.time() - self._last_failure_time > self.HALF_OPEN_DELAY_SEC
                 ):
-                    self._state = "HALF_OPEN"
+                    self._state = CircuitBreakerStateEnum.HALF_OPEN.value
                     logger.info("tiering_cb.transitioning")
                     return False
                 return True
@@ -75,8 +77,8 @@ class TieringCircuitBreaker:
     def record_success(self, latency_ms: float):
         """Record successful tiering evaluation."""
         with self._state_lock:
-            if self._state == "HALF_OPEN":
-                self._state = "CLOSED"
+            if self._state == CircuitBreakerStateEnum.HALF_OPEN.value:
+                self._state = CircuitBreakerStateEnum.CLOSED.value
                 logger.info("tiering_cb.closed_recovered")
 
             self._failure_count = 0
@@ -101,7 +103,7 @@ class TieringCircuitBreaker:
 
     def _trip(self, reason: str):
         """Open the circuit breaker."""
-        self._state = "OPEN"
+        self._state = CircuitBreakerStateEnum.OPEN.value
         self._last_failure_time = time.time()
         logger.critical(
             "tiering_cb.open",
@@ -117,9 +119,9 @@ class TieringCircuitBreaker:
             log_config_change(
                 config_type="tiering_circuit_breaker",
                 config_key="circuit_state",
-                old_value="CLOSED",
+                old_value=CircuitBreakerStateEnum.CLOSED.value,
                 new_value={
-                    "state": "OPEN",
+                    "state": CircuitBreakerStateEnum.OPEN.value,
                     "reason": reason,
                     "failure_count": self._failure_count,
                     "slow_count": self._slow_count,
@@ -137,7 +139,7 @@ class TieringCircuitBreaker:
     def reset(self):
         """Reset circuit breaker (for testing)."""
         with self._state_lock:
-            self._state = "CLOSED"
+            self._state = CircuitBreakerStateEnum.CLOSED.value
             self._failure_count = 0
             self._slow_count = 0
             self._last_failure_time = None

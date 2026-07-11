@@ -31,6 +31,8 @@ import structlog
 from django.db import connections
 from django.http import JsonResponse
 
+from baldur.interfaces.repositories import CircuitBreakerStateEnum
+
 # Drift Detection metrics
 from baldur.metrics.drift_metrics import (
     record_pool_cb_background_restart,
@@ -46,20 +48,20 @@ class PoolCircuitBreaker:
     """
     Circuit Breaker based on pool status.
 
-    States:
-    - CLOSED: normal - all requests allowed
-    - OPEN: exhausted - all requests rejected immediately (503)
-    - HALF_OPEN: recovery testing - only some requests allowed
+    States (canonical ``CircuitBreakerStateEnum`` values):
+    - ``closed``: normal - all requests allowed
+    - ``open``: exhausted - all requests rejected immediately (503)
+    - ``half_open``: recovery testing - only some requests allowed
     """
 
     # Singleton instance
     _instance = None
     _lock = threading.Lock()
 
-    # State constants
-    CLOSED = "CLOSED"  # Normal
-    OPEN = "OPEN"  # Blocking
-    HALF_OPEN = "HALF_OPEN"  # Recovery testing
+    # State constants (canonical CircuitBreakerStateEnum values)
+    CLOSED = CircuitBreakerStateEnum.CLOSED.value  # Normal
+    OPEN = CircuitBreakerStateEnum.OPEN.value  # Blocking
+    HALF_OPEN = CircuitBreakerStateEnum.HALF_OPEN.value  # Recovery testing
 
     def __new__(cls):
         if cls._instance is None:
@@ -1052,10 +1054,13 @@ def circuit_breaker_status(request):
             error=e,
         )
 
-    # If either CB is OPEN, report OPEN
+    # If either CB is open, report the non-closed state
     combined_state = stats["state"]
-    if cb_service_state in ("open", "OPEN", "half_open", "HALF_OPEN"):
-        combined_state = cb_service_state.upper()
+    if cb_service_state in (
+        CircuitBreakerStateEnum.OPEN.value,
+        CircuitBreakerStateEnum.HALF_OPEN.value,
+    ):
+        combined_state = cb_service_state
 
     return JsonResponse(
         {
@@ -1092,7 +1097,7 @@ def circuit_breaker_reset(request):
 
     return JsonResponse(
         {
-            "message": "Circuit Breaker reset to CLOSED",
+            "message": "Circuit Breaker reset to closed",
             "state": cb.state,
         }
     )
