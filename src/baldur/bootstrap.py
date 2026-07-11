@@ -184,6 +184,7 @@ def init(
         _start_audit_pipeline_if_enabled()
         _start_dlq_outbox_if_enabled()
         _configure_error_budget_if_enabled()
+        _register_metrics_provider_if_configured()
         _refresh_auto_replay_arming_gauge()
         _record_env_snapshot()
         _start_default_scheduler(task_backend=task_backend)
@@ -2041,6 +2042,51 @@ def _configure_error_budget_if_enabled() -> None:
         get_failed_operation_stats=dlq_failed_operation_stats
     )
     logger.info("error_budget.stats_wired", source="dlq")
+
+
+# =============================================================================
+# Step 6d — Register the remote-Prometheus time-series metrics provider
+# =============================================================================
+
+
+def _register_metrics_provider_if_configured() -> None:
+    """Register the remote-Prometheus metrics provider when a URL is configured.
+
+    Gated by ``PrometheusSettings.url`` (BALDUR_PROMETHEUS_URL). Unset = off: no
+    provider is registered and manual DI via ``set_metrics_provider`` stays
+    available. There is deliberately no separate enable flag — an unset URL is
+    the off switch.
+
+    Fail-open: a malformed url/headers raises a pydantic ``ValidationError`` at
+    settings load; it is surfaced non-silently as a WARNING and boot continues.
+    This is an optional feature (unset URL = off), so it uses the same
+    catch-warn-skip posture as the other settings-gated optional steps rather
+    than the fail-loud posture reserved for required connection adapters.
+
+    Registration alone changes no promotion behaviour — the live-evaluation gate
+    short-circuits on its own enable flag before the provider is consulted.
+    """
+    try:
+        from baldur.settings.prometheus import get_prometheus_settings
+
+        settings = get_prometheus_settings()
+    except Exception as e:
+        logger.warning("prometheus_provider.registration_failed", error=e)
+        return
+
+    if not settings.url:
+        logger.debug("prometheus_provider.registration_skipped", reason="url_unset")
+        return
+
+    try:
+        from baldur.services.config_shadow.providers.prometheus import (
+            setup_prometheus_metrics_provider,
+        )
+
+        setup_prometheus_metrics_provider(settings=settings)
+        logger.debug("prometheus_provider.registered", url=settings.url)
+    except Exception as e:
+        logger.warning("prometheus_provider.registration_failed", error=e)
 
 
 # =============================================================================

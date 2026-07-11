@@ -155,3 +155,35 @@ BALDUR_META_WATCHDOG_ESCALATION_ENABLED=true
 BALDUR_META_WATCHDOG_PROBE_INTERVAL_SECONDS=30
 BALDUR_META_WATCHDOG_SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
 ```
+
+## Metrics source (canary live evaluation)
+
+Connects Baldur to a Prometheus (or PromQL-compatible) metrics backend so the
+canary live-evaluation gate can compare canary vs. stable traffic over the
+evaluation window. Leave `BALDUR_PROMETHEUS_URL` unset and nothing is wired —
+behavior is unchanged. Set it and `baldur.init()` registers the provider
+automatically (an unset URL is the off switch — there is no separate enable
+flag). `HEADERS` carries auth/tenancy credentials and is never logged.
+`METRIC_NAMING` selects the query templates: `baldur` targets the built-in
+`baldur_http_*` RED metrics, `otel` targets the OpenTelemetry HTTP-server
+semantic-convention metrics. In a multi-service cluster set
+`EXTRA_LABEL_SELECTORS` so queries are scoped to the target service instead of
+aggregating the whole Prometheus. The remaining overrides let you point at a
+third-party exporter's metric/label names.
+
+```bash
+BALDUR_PROMETHEUS_URL=http://prometheus:9090
+BALDUR_PROMETHEUS_HEADERS='{"Authorization": "Bearer <token>", "X-Scope-OrgID": "tenant-a"}'
+BALDUR_PROMETHEUS_TLS_VERIFY=true
+BALDUR_PROMETHEUS_TLS_CA_CERT=/etc/ssl/certs/prometheus-ca.pem
+BALDUR_PROMETHEUS_TIMEOUT_SECONDS=5.0
+BALDUR_PROMETHEUS_RETRY_TOTAL=1
+BALDUR_PROMETHEUS_RETRY_BACKOFF_FACTOR=0.5
+BALDUR_PROMETHEUS_METRIC_NAMING=baldur
+BALDUR_PROMETHEUS_EXTRA_LABEL_SELECTORS='{"namespace": "prod"}'
+BALDUR_PROMETHEUS_SERVICE_LABEL=
+BALDUR_PROMETHEUS_REQUESTS_TOTAL_METRIC=
+BALDUR_PROMETHEUS_DURATION_HISTOGRAM_METRIC=
+BALDUR_PROMETHEUS_STATUS_CODE_LABEL=
+BALDUR_PROMETHEUS_ERROR_STATUS_REGEX=5..
+```

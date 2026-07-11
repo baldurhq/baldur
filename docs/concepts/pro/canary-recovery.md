@@ -150,7 +150,8 @@ actually tightens a stage, the clamped fields are logged so the stricter verdict
 
 Metric-gated promotion compares the canary clusters against the stable fleet over the evaluation
 window and blocks promotion when the criteria fail. It is an opt-in gate: it comes online once a
-time-series metrics source is connected to Baldur and live evaluation is switched on; until then,
+time-series metrics source is connected — point `BALDUR_PROMETHEUS_URL` at your Prometheus (or any
+PromQL-compatible backend) and switch live evaluation on — until then,
 promotion is governed by stage duration, the governance gate, and — when Error Budget is enabled —
 the error-budget drain check above (the per-rollout metrics view fills in from the same source). A blocked or unhealthy rollout does not advance — which hands it to the
 watchdog below.
@@ -247,6 +248,8 @@ action lands in the audit trail with actor and reason. Finished rollouts are ret
 |---------|---------|------------------|
 | `BALDUR_LICENSE_KEY` |  | PRO entitlement (unset in OSS mode) — Canary Recovery activates when Baldur initializes with a valid license |
 | `BALDUR_REDIS_URL` | `redis://localhost:6379/0` | where rollout state, the per-config-type lock, and the active-rollout set are stored |
+| `BALDUR_PROMETHEUS_URL` |  | metrics source for live evaluation — unset leaves the metric gate dormant; set it to your Prometheus (or PromQL-compatible) endpoint and `baldur.init()` registers the provider automatically |
+| `BALDUR_PROMETHEUS_METRIC_NAMING` | `baldur` | query-template naming preset: `baldur` (built-in `baldur_http_*` RED metrics) or `otel` (OpenTelemetry HTTP semantic conventions). Full connection/scoping knobs (`BALDUR_PROMETHEUS_*`) are in the env-vars reference |
 
 Everything that shapes an individual rollout — stages, clusters, observation times,
 auto-promote, pass criteria — is part of the rollout you create, in the API call, not an
