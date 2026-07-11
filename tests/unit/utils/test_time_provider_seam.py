@@ -17,7 +17,7 @@ from baldur.core.time_provider import (
 from baldur.utils.time import utc_now
 
 
-class TestUtcNowHonorsTimeProvider:
+class TestUtcNowHonorsTimeProviderBehavior:
     def test_utc_now_uses_global_time_provider(self):
         fixed = datetime(2024, 12, 25, 12, 0, 0, tzinfo=UTC)
         try:

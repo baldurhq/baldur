@@ -9,7 +9,7 @@ from baldur.core.backoff import (
 )
 
 
-class TestBackoffDelays:
+class TestBackoffDelaysBehavior:
     def test_exponential_delays_are_one_indexed(self):
         strat = ExponentialBackoff(
             base_delay=1.0, multiplier=2.0, max_delay=60.0, jitter=False

@@ -41,7 +41,7 @@ def _flood_recent_errors(cls, n: int) -> None:
         cls._error_timestamps.append(now)
 
 
-class TestAlertCooldownConcurrency:
+class TestAlertCooldownConcurrencyBehavior:
     def test_single_send_per_window_under_threads(self, alert_state, monkeypatch):
         cls = alert_state
         cls._alert_config = FlushErrorAlertConfig(
