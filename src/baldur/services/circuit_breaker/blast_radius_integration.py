@@ -158,7 +158,13 @@ class BlastRadiusIntegration:
 
     @property
     def dependency_graph(self) -> ServiceDependencyGraph:
-        """Access the service dependency graph."""
+        """Access the service dependency graph.
+
+        The returned graph is the live, internally synchronized
+        instance: registrations and multi-step traversals may run
+        concurrently, and traversal methods return fresh lists (no live
+        internal state escapes the graph).
+        """
         return self._dependency_graph
 
     # =========================================================================
@@ -236,8 +242,7 @@ class BlastRadiusIntegration:
             criticality: criticality level
         """
         self._service_criticality[service_id] = criticality
-        if service_id in self._dependency_graph._dependencies:
-            self._dependency_graph._dependencies[service_id].criticality = criticality
+        self._dependency_graph.set_criticality(service_id, criticality)
 
     def clear_dependencies(self) -> None:
         """Clear all dependency information."""
