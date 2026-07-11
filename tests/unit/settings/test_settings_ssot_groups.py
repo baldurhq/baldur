@@ -95,9 +95,9 @@ class TestGroupClassCountContract:
         """MetricsGroup: detection, drift_detection, drift_threshold, metrics, safe_gauge, system_metrics_cache."""
         assert self._count_cached_properties(MetricsGroup) == 6
 
-    def test_scaling_group_has_9_properties(self):
-        """ScalingGroup has 9 cached_property accessors."""
-        assert self._count_cached_properties(ScalingGroup) == 9
+    def test_scaling_group_has_10_properties(self):
+        """ScalingGroup has 10 cached_property accessors (incl. rate_limit_backoff)."""
+        assert self._count_cached_properties(ScalingGroup) == 10
 
     def test_resilience_group_has_5_properties(self):
         """ResilienceGroup: bulkhead, hedging, resilient_recorder, resilient_storage, resource_monitor."""
