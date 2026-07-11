@@ -834,7 +834,7 @@ class DiskPersistentBuffer:
                 if (
                     self._settings.group_commit_enabled
                     and self._group_writer is not None
-                    and self._group_writer.pending
+                    and self._group_writer.pending_count > 0
                 ):
                     try:
                         self._group_writer.flush_all()
