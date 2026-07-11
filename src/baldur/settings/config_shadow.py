@@ -80,8 +80,10 @@ class ConfigShadowSettings(BaseSettings):
     live_evaluation_enabled: bool = Field(
         default=False,
         description=(
-            "Enable live canary evaluation on promote(). "
-            "Switch to True after TimeSeriesMetricsProvider implementation is registered."
+            "Enable live canary evaluation on promote(). Requires a "
+            "time-series metrics provider registered via "
+            "set_metrics_provider(); without one the check logs a WARNING "
+            "and skips."
         ),
     )
 

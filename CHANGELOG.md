@@ -10,6 +10,10 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+### Added
+
+- `baldur.services.config_shadow` now exports its time-series metrics-provider DI seam: `get_metrics_provider()`, `set_metrics_provider()`, `reset_metrics_provider()`, and the new `is_metrics_provider_registered()`. Registration is tracked explicitly — `set_metrics_provider()` marks a provider registered (a deliberately registered `MockTimeSeriesProvider` counts, so tests/staging can opt in), `reset_metrics_provider()` clears the mark, and the lazily-created Mock fallback does **not** count — so consumers that must not compute verdicts on synthetic data can gate on `is_metrics_provider_registered()` before evaluating.
+
 ### Changed
 
 - `ServiceConfig` and its nested recovery config (`RecoveryStrategy`, `CanaryRecoveryStageConfig`) are now immutable (frozen dataclasses), and `RecoveryStrategy.canary_stages` is stored as a tuple (a caller-supplied list is accepted and coerced). Mutating a registered or manager-returned config silently rewrote load-shedding/recovery behavior with no validation, no audit event, and no log — an unaudited side-door around the registration path. A mutation attempt now raises `dataclasses.FrozenInstanceError`; to change a service's configuration, build a new instance (`dataclasses.replace(...)`) and re-register it. **Breaking:** construct-then-mutate code must switch to constructor arguments or `dataclasses.replace`.
