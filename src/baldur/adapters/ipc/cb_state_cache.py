@@ -32,7 +32,7 @@ from typing import Any
 
 import structlog
 
-from baldur.core.ttl_cache import CacheStats, TTLCacheBase
+from baldur.core.ttl_cache import TTLCacheBase
 
 logger = structlog.get_logger()
 
@@ -210,11 +210,6 @@ class IPCStateCache(TTLCacheBase[str, Any]):
             service_name,
             lambda: factory() if callable(factory) else factory,
         )
-
-    @property
-    def stats(self) -> CacheStats:
-        """Cache statistics."""
-        return self._stats
 
     def get_stats_dict(self) -> dict[str, Any]:
         """Cache statistics as a dictionary."""

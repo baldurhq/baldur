@@ -18,13 +18,13 @@ from unittest.mock import MagicMock
 import pytest
 
 from baldur.adapters.ipc.cb_state_cache import (
-    CacheStats,
     CBStateCache,
     IPCCacheEntry,
     IPCStateCache,
     get_cb_state_cache,
     reset_cb_state_cache,
 )
+from baldur.core.ttl_cache import CacheStats
 
 
 class TestIPCCacheEntry:
