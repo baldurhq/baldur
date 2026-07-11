@@ -360,14 +360,8 @@ class TestRateLimitSettings:
 
         settings = RateLimitSettings()
 
-        # Retry backoff settings (lines 144-149)
-        assert settings.base_delay == 1.0
-        assert settings.max_delay == 60.0
-        assert settings.jitter_percent == 30.0
-        assert settings.default_retry_after == 5.0
-        assert settings.backoff_multiplier == 2.0
-
-        # Control API rate limiting (lines 152-156)
+        # Control API rate limiting (the outbound 429-backoff family moved
+        # to RateLimitBackoffSettings)
         assert settings.control_api_rate_limit == 100
         assert settings.control_api_window_seconds == 60
         assert settings.emergency_rate_limit == 10
@@ -384,16 +378,6 @@ class TestRateLimitSettings:
 
         assert settings.control_api_rate_limit == 200
         assert settings.emergency_rate_limit == 20
-
-    def test_validation_base_delay_range(self):
-        """base_delay 범위 (0.1-60.0) 검증."""
-        from baldur.settings.rate_limit import RateLimitSettings
-
-        with pytest.raises(ValidationError):
-            RateLimitSettings(base_delay=0.05)
-
-        with pytest.raises(ValidationError):
-            RateLimitSettings(base_delay=61.0)
 
     def test_validation_emergency_rate_limit(self):
         """emergency_rate_limit 범위 (1-100) 검증."""
@@ -564,11 +548,8 @@ class TestSettingsConsistencyWithLegacy:
         legacy = RateLimitConfig()
         pydantic = RateLimitSettings()
 
-        assert pydantic.base_delay == legacy.base_delay
-        assert pydantic.max_delay == legacy.max_delay
-        assert pydantic.jitter_percent == legacy.jitter_percent
-        assert pydantic.default_retry_after == legacy.default_retry_after
-        assert pydantic.backoff_multiplier == legacy.backoff_multiplier
+        # Quota family only — the backoff family moved to
+        # RateLimitBackoffSettings and is no longer on RateLimitSettings.
         assert pydantic.control_api_rate_limit == legacy.control_api_rate_limit
         assert pydantic.control_api_window_seconds == legacy.control_api_window_seconds
         assert pydantic.emergency_rate_limit == legacy.emergency_rate_limit
