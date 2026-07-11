@@ -19,6 +19,7 @@ from baldur.services.config_shadow.metrics_provider import (
     MockTimeSeriesProvider,
     TimeSeriesMetricsProvider,
     get_metrics_provider,
+    is_metrics_provider_registered,
     reset_metrics_provider,
     set_metrics_provider,
 )
@@ -256,3 +257,43 @@ class TestMetricsProviderSingletonBehavior:
         custom = MockTimeSeriesProvider()
         set_metrics_provider(custom)
         assert get_metrics_provider() is custom
+
+
+class TestMetricsProviderRegistrationBehavior:
+    """is_metrics_provider_registered() explicit-registration tracking."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_singleton(self):
+        reset_metrics_provider()
+        yield
+        reset_metrics_provider()
+
+    def test_not_registered_by_default(self):
+        """No registration mark before any set_metrics_provider() call."""
+        assert is_metrics_provider_registered() is False
+
+    def test_lazy_mock_default_does_not_count_as_registered(self):
+        """get_metrics_provider()'s lazy Mock fallback is not a registration."""
+        get_metrics_provider()
+
+        assert is_metrics_provider_registered() is False
+
+    def test_set_marks_registered(self):
+        """set_metrics_provider() marks the provider registered."""
+        set_metrics_provider(MockTimeSeriesProvider())
+
+        assert is_metrics_provider_registered() is True
+
+    def test_deliberately_registered_mock_counts(self):
+        """An explicitly registered Mock counts (tests/staging registration)."""
+        set_metrics_provider(MockTimeSeriesProvider())
+
+        assert is_metrics_provider_registered() is True
+        assert isinstance(get_metrics_provider(), MockTimeSeriesProvider)
+
+    def test_reset_clears_registration_mark(self):
+        """reset_metrics_provider() clears the registration mark."""
+        set_metrics_provider(MockTimeSeriesProvider())
+        reset_metrics_provider()
+
+        assert is_metrics_provider_registered() is False

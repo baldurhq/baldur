@@ -1,9 +1,10 @@
 """
 Time Series Metrics Provider.
 
-시뮬레이션 시 과거 Raw 데이터 조회를 위한 Protocol 및 Mock 구현.
-기존 MetricsProvider(core/auto_rollback_guard.py)는 "현재값"만 반환하므로
-과거 시간 범위의 시계열이 필요한 Config Shadow용으로 별도 정의.
+Protocol and Mock implementation for querying historical raw data during
+simulation. The existing MetricsProvider (core/auto_rollback_guard.py)
+returns only current values; Config Shadow needs time-series over a past
+time range, so it defines its own provider contract here.
 """
 
 from __future__ import annotations
@@ -12,20 +13,30 @@ import threading
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
+__all__ = [
+    "MockTimeSeriesProvider",
+    "TimeSeriesMetricsProvider",
+    "get_metrics_provider",
+    "is_metrics_provider_registered",
+    "reset_metrics_provider",
+    "set_metrics_provider",
+]
+
 
 @runtime_checkable
 class TimeSeriesMetricsProvider(Protocol):
-    """시계열 메트릭 제공자.
+    """Time-series metrics provider.
 
-    추세 데이터(시계열 List)와 판정용 집계값(Scalar)을 분리하여 제공한다.
+    Serves trend data (time-series lists) and verdict-grade aggregates
+    (scalars) as separate method families.
 
     Implementations:
-    - MockTimeSeriesProvider: 테스트 및 개발용
-    - PrometheusTimeSeriesProvider: Prometheus PromQL 기반 (향후)
-    - DatadogTimeSeriesProvider: Datadog Metrics API 기반 (향후)
+    - MockTimeSeriesProvider: tests and development
+    - Remote range-query providers (e.g. Prometheus, Datadog), registered
+      via ``set_metrics_provider()``
     """
 
-    # --- 시계열 메서드 (추세 분석 / UI 대시보드용) ---
+    # --- Time-series methods (trend analysis / UI dashboards) ---
 
     def query_error_rate(
         self,
@@ -35,17 +46,17 @@ class TimeSeriesMetricsProvider(Protocol):
         step_seconds: int = 60,
         labels: dict[str, str] | None = None,
     ) -> list[tuple[datetime, float]]:
-        """시간 범위의 에러율 시계열을 반환한다.
+        """Return the error-rate time series for a time range.
 
         Args:
-            service_name: 대상 서비스
-            start: 조회 시작 시각 (UTC)
-            end: 조회 종료 시각 (UTC)
-            step_seconds: 시계열 간격 (기본 60초)
-            labels: K8s 복합 레이블 (예: {"track": "canary", "namespace": "prod"})
+            service_name: Target service.
+            start: Query start time (UTC).
+            end: Query end time (UTC).
+            step_seconds: Series resolution (default 60 seconds).
+            labels: Compound K8s labels (e.g. {"track": "canary", "namespace": "prod"}).
 
         Returns:
-            (timestamp, error_rate) 튜플 리스트. error_rate는 0.0 ~ 1.0.
+            List of (timestamp, error_rate) tuples. error_rate is 0.0 ~ 1.0.
         """
         ...
 
@@ -57,10 +68,10 @@ class TimeSeriesMetricsProvider(Protocol):
         step_seconds: int = 60,
         labels: dict[str, str] | None = None,
     ) -> list[tuple[datetime, float]]:
-        """시간 범위의 요청률(RPS) 시계열을 반환한다."""
+        """Return the request-rate (RPS) time series for a time range."""
         ...
 
-    # --- 스칼라 집계 메서드 (Evaluator 판정용) ---
+    # --- Scalar aggregate methods (evaluator verdicts) ---
 
     def query_error_rate_aggregated(
         self,
@@ -69,13 +80,13 @@ class TimeSeriesMetricsProvider(Protocol):
         end: datetime,
         labels: dict[str, str] | None = None,
     ) -> float:
-        """윈도우 전체의 가중치 기반 에러율 스칼라.
+        """Weighted error-rate scalar over the whole window.
 
-        내부적으로 sum(rate(errors)) / sum(rate(requests)) 형태의
-        PromQL/Datadog 쿼리를 실행한다.
+        Internally runs a sum(rate(errors)) / sum(rate(requests)) style
+        PromQL/Datadog query.
 
         Returns:
-            가중치 기반 에러율 (0.0 ~ 1.0)
+            Weighted error rate (0.0 ~ 1.0).
         """
         ...
 
@@ -86,7 +97,7 @@ class TimeSeriesMetricsProvider(Protocol):
         end: datetime,
         labels: dict[str, str] | None = None,
     ) -> int:
-        """윈도우 전체의 총 요청 수."""
+        """Total request count over the whole window."""
         ...
 
     def query_latency_aggregated(
@@ -97,30 +108,31 @@ class TimeSeriesMetricsProvider(Protocol):
         percentile: float = 0.99,
         labels: dict[str, str] | None = None,
     ) -> float:
-        """윈도우 전체의 Latency Percentile 스칼라 (밀리초).
+        """Latency percentile scalar over the whole window (milliseconds).
 
-        내부적으로 histogram_quantile(percentile, ...) 형태의
-        PromQL을 실행한다. Percentile은 평균할 수 없으므로
-        반드시 Provider 수준에서 한 번에 계산해야 한다.
+        Internally runs a histogram_quantile(percentile, ...) style PromQL
+        query. Percentiles cannot be averaged, so the provider must compute
+        them in a single pass.
 
         Args:
-            percentile: 0.95 (P95) 또는 0.99 (P99)
+            percentile: 0.95 (P95) or 0.99 (P99).
 
         Returns:
-            해당 percentile의 latency (밀리초)
+            Latency at the given percentile (milliseconds).
         """
         ...
 
 
 class MockTimeSeriesProvider:
-    """테스트용 시계열 메트릭 제공자.
+    """Time-series metrics provider for tests.
 
-    임의의 시계열 데이터를 주입하여 시뮬레이터 로직을 검증한다.
-    프로덕션에서는 Prometheus/Datadog 어댑터로 교체.
+    Inject arbitrary time-series data to verify simulator logic. In
+    production, replace with a real source registered via
+    ``set_metrics_provider()``.
 
-    키 구성:
-    - labels=None: "{service}:{metric}" (기존 호환)
-    - labels 지정 시: "{service}:{metric}:{k}={v},..." (label-aware)
+    Key layout:
+    - labels=None: "{service}:{metric}" (backward compatible)
+    - with labels: "{service}:{metric}:{k}={v},..." (label-aware)
     """
 
     def __init__(self, data: dict[str, list[tuple[datetime, float]]] | None = None):
@@ -153,7 +165,7 @@ class MockTimeSeriesProvider:
             return self._scalars[labeled_key]
         return self._scalars.get(f"{service_name}:{metric}", default)
 
-    # --- 시계열 메서드 (labels 파라미터 추가, 기본값 None) ---
+    # --- Time-series methods (labels parameter, default None) ---
 
     def query_error_rate(
         self,
@@ -181,7 +193,7 @@ class MockTimeSeriesProvider:
             key = f"{service_name}:request_rate"
         return [(ts, val) for ts, val in self._data.get(key, []) if start <= ts < end]
 
-    # --- 스칼라 집계 메서드 ---
+    # --- Scalar aggregate methods ---
 
     def query_error_rate_aggregated(
         self,
@@ -217,14 +229,17 @@ class MockTimeSeriesProvider:
 
 
 _metrics_provider: TimeSeriesMetricsProvider | None = None
+_metrics_provider_registered = False
 _metrics_provider_lock = threading.Lock()
 
 
 def get_metrics_provider() -> TimeSeriesMetricsProvider:
-    """TimeSeriesMetricsProvider 싱글톤 반환.
+    """Return the TimeSeriesMetricsProvider singleton.
 
-    프로덕션에서는 PrometheusTimeSeriesProvider 등으로 교체.
-    기본값은 MockTimeSeriesProvider.
+    Falls back to a lazily-created MockTimeSeriesProvider when no provider
+    has been registered. The lazy Mock default does NOT count as registered —
+    consumers that must not evaluate on synthetic data gate on
+    ``is_metrics_provider_registered()`` first.
     """
     global _metrics_provider
     if _metrics_provider is None:
@@ -235,12 +250,30 @@ def get_metrics_provider() -> TimeSeriesMetricsProvider:
 
 
 def set_metrics_provider(provider: TimeSeriesMetricsProvider) -> None:
-    """TimeSeriesMetricsProvider 등록 (DI용)."""
-    global _metrics_provider
-    _metrics_provider = provider
+    """Register a time-series metrics provider (DI seam).
+
+    Registration is explicit: any provider passed here counts as registered,
+    including a deliberately registered MockTimeSeriesProvider (tests,
+    staging).
+    """
+    global _metrics_provider, _metrics_provider_registered
+    with _metrics_provider_lock:
+        _metrics_provider = provider
+        _metrics_provider_registered = True
 
 
 def reset_metrics_provider() -> None:
-    """싱글톤 리셋 (테스트용)."""
-    global _metrics_provider
-    _metrics_provider = None
+    """Reset the singleton and clear the registration mark (for tests)."""
+    global _metrics_provider, _metrics_provider_registered
+    with _metrics_provider_lock:
+        _metrics_provider = None
+        _metrics_provider_registered = False
+
+
+def is_metrics_provider_registered() -> bool:
+    """Whether a provider was explicitly registered via set_metrics_provider().
+
+    The lazy Mock default created by ``get_metrics_provider()`` does not
+    count as registered.
+    """
+    return _metrics_provider_registered
