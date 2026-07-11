@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from baldur.interfaces.repositories import CircuitBreakerStateEnum
 from baldur.meta.config import MetaWatchdogSettings, get_meta_watchdog_settings
 from baldur.utils.time import utc_now
 
@@ -113,12 +114,12 @@ class HealthProbe(ABC):
 
 class CircuitBreakerProbe(HealthProbe):
     """
-    Circuit Breaker 건강 프로브.
+    Circuit breaker health probe.
 
-    확인 항목:
-    - CB 상태 (CLOSED/OPEN/HALF_OPEN)
-    - 최근 실패율
-    - Stuck 여부 (OPEN 상태에서 너무 오래 머무름)
+    Checks:
+    - CB states (the canonical ``CircuitBreakerStateEnum`` values)
+    - open-breaker count against the configured threshold
+    - stuck breakers (held open past the stuck threshold)
     """
 
     @property
@@ -141,7 +142,11 @@ class CircuitBreakerProbe(HealthProbe):
                 cb_service = get_circuit_breaker_service()
                 # CB 서비스 상태 확인
                 cb_states = cb_service.get_all_states()
-                open_count = sum(1 for s in cb_states if s.get("state") == "OPEN")
+                open_count = sum(
+                    1
+                    for s in cb_states
+                    if s.get("state") == CircuitBreakerStateEnum.OPEN.value
+                )
                 all_states["cb_service_available"] = "true"
                 all_states["open_cb_count"] = str(open_count)
 
@@ -212,7 +217,7 @@ class CircuitBreakerProbe(HealthProbe):
         probe_now = utc_now()
         stuck_count = 0
         for s in cb_states:
-            if s.get("state") != "OPEN":
+            if s.get("state") != CircuitBreakerStateEnum.OPEN.value:
                 continue
             opened_at = s.get("opened_at")
             if not isinstance(opened_at, datetime):
