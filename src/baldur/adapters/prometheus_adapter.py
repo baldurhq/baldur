@@ -5,6 +5,10 @@ Provides a thin adapter for querying Prometheus metrics,
 with graceful degradation when prometheus_client or a Prometheus
 server is unavailable.
 
+Reads the *in-process* ``prometheus_client`` registry (no network). For
+*remote* PromQL over HTTP against a Prometheus server or PromQL-compatible
+backend, use ``baldur.adapters.metrics.prometheus_query_client`` instead.
+
 Usage:
     from baldur.adapters.prometheus_adapter import get_prometheus_adapter
 

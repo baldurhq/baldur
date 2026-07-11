@@ -111,6 +111,7 @@ if TYPE_CHECKING:
     from baldur.settings.postmortem import PostmortemSettings
     from baldur.settings.precomputed_cache import PrecomputedCacheSettings
     from baldur.settings.predictive_forecaster import PredictiveForecasterSettings
+    from baldur.settings.prometheus import PrometheusSettings
     from baldur.settings.propagation import PropagationSettings
     from baldur.settings.rate_limit import RateLimitSettings
     from baldur.settings.rate_limit_backoff import RateLimitBackoffSettings
@@ -669,6 +670,12 @@ class MetricsGroup:
         from baldur.settings.metrics import MetricsSettings
 
         return MetricsSettings()
+
+    @cached_property
+    def prometheus(self) -> PrometheusSettings:
+        from baldur.settings.prometheus import PrometheusSettings
+
+        return PrometheusSettings()
 
     @cached_property
     def safe_gauge(self) -> SafeGaugeSettings:

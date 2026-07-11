@@ -32,8 +32,10 @@ class TimeSeriesMetricsProvider(Protocol):
 
     Implementations:
     - MockTimeSeriesProvider: tests and development
-    - Remote range-query providers (e.g. Prometheus, Datadog), registered
-      via ``set_metrics_provider()``
+    - PrometheusTimeSeriesProvider: remote PromQL range/instant queries against
+      Prometheus or a PromQL-compatible backend (auto-registered from
+      ``BALDUR_PROMETHEUS_URL`` at startup, or via ``set_metrics_provider()``)
+    - Other remote range-query providers registered via ``set_metrics_provider()``
     """
 
     # --- Time-series methods (trend analysis / UI dashboards) ---
