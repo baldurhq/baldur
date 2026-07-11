@@ -488,7 +488,7 @@ class BaldurMiddleware:
         return False
 
     def _is_cb_open(self, request: HttpRequest | None = None) -> bool:
-        """Check if any relevant CircuitBreaker is in OPEN or HALF_OPEN state.
+        """Check if any relevant CircuitBreaker is in open or half_open state.
 
         Checks three independent sources (D5):
         1. Database CB — shared resource; affects all requests when open.
@@ -502,7 +502,7 @@ class BaldurMiddleware:
                 if db_state and db_state.lower() in ("open", "half_open"):
                     logger.debug(
                         "baldur_middleware.cb_service",
-                        state=db_state.upper(),
+                        state=db_state,
                         cb_service_name=self.CB_DATABASE_DOMAIN,
                     )
                     return True
@@ -518,7 +518,7 @@ class BaldurMiddleware:
                         ):
                             logger.debug(
                                 "baldur_middleware.cb_service",
-                                state=domain_state.upper(),
+                                state=domain_state,
                                 cb_service_name=domain,
                             )
                             return True
@@ -529,7 +529,7 @@ class BaldurMiddleware:
                 )
 
                 pool_state = pool_circuit_breaker.state
-                if pool_state in ("OPEN", "HALF_OPEN"):
+                if pool_state in ("open", "half_open"):
                     logger.debug(
                         "baldur_middleware.poolcb",
                         pool_state=pool_state,

@@ -694,7 +694,7 @@ class TestBaldurMiddlewareRecordCbFailureBehavior:
         # When
         with patch(_POOL_CB_PATH) as mock_pool:
             mock_pool._failure_count = 0
-            mock_pool.state = "CLOSED"
+            mock_pool.state = "closed"
             mw._record_cb_failure(BaldurMiddleware.CB_DATABASE_DOMAIN, {})
 
         # Then
@@ -801,19 +801,19 @@ class TestBaldurMiddlewareIsCbOpenBehavior:
         """Build a CircuitBreakerService mock with per-domain state."""
         mock_cb = MagicMock(spec=CircuitBreakerService)
         mock_cb.is_enabled = True
-        mock_cb.get_state.side_effect = lambda name: state_map.get(name, "CLOSED")
+        mock_cb.get_state.side_effect = lambda name: state_map.get(name, "closed")
         return mock_cb
 
     def test_database_cb_open_returns_true_regardless_of_request_path(self):
         """Database CB OPEN → True for any request path (shared resource, D5)."""
         # Given
-        mock_cb = self._make_cb_service({"database": "OPEN"})
+        mock_cb = self._make_cb_service({"database": "open"})
         mw = _make_middleware(cb_service=mock_cb)
         mw.DOMAIN_MAPPING = {"/payments/": "payment"}
 
         # When
         with patch(_POOL_CB_PATH) as mock_pool:
-            mock_pool.state = "CLOSED"
+            mock_pool.state = "closed"
             result = mw._is_cb_open(FakeRequest(path="/api/payments/"))
 
         # Then
@@ -825,7 +825,7 @@ class TestBaldurMiddlewareIsCbOpenBehavior:
         mw = _make_middleware(cb_service=mock_cb)
 
         with patch(_POOL_CB_PATH) as mock_pool:
-            mock_pool.state = "CLOSED"
+            mock_pool.state = "closed"
             result = mw._is_cb_open(FakeRequest())
 
         assert result is True
@@ -833,13 +833,13 @@ class TestBaldurMiddlewareIsCbOpenBehavior:
     def test_domain_cb_open_returns_true_for_matching_request(self):
         """Domain CB OPEN → True only for requests on that domain (D5)."""
         # Given — database CB closed, payment CB open
-        mock_cb = self._make_cb_service({"database": "CLOSED", "payment": "OPEN"})
+        mock_cb = self._make_cb_service({"database": "closed", "payment": "open"})
         mw = _make_middleware(cb_service=mock_cb)
         mw.DOMAIN_MAPPING = {"/payments/": "payment"}
 
         # When
         with patch(_POOL_CB_PATH) as mock_pool:
-            mock_pool.state = "CLOSED"
+            mock_pool.state = "closed"
             result = mw._is_cb_open(FakeRequest(path="/api/payments/charge/"))
 
         # Then
@@ -848,13 +848,13 @@ class TestBaldurMiddlewareIsCbOpenBehavior:
     def test_domain_cb_open_with_no_request_skips_domain_check(self):
         """Domain CB OPEN but request=None → False (domain check requires request, D5)."""
         # Given — database CB closed, payment CB open
-        mock_cb = self._make_cb_service({"database": "CLOSED", "payment": "OPEN"})
+        mock_cb = self._make_cb_service({"database": "closed", "payment": "open"})
         mw = _make_middleware(cb_service=mock_cb)
         mw.DOMAIN_MAPPING = {"/payments/": "payment"}
 
         # When
         with patch(_POOL_CB_PATH) as mock_pool:
-            mock_pool.state = "CLOSED"
+            mock_pool.state = "closed"
             result = mw._is_cb_open(request=None)
 
         # Then — domain CB skipped because request is None
@@ -863,12 +863,12 @@ class TestBaldurMiddlewareIsCbOpenBehavior:
     def test_domain_equal_to_database_domain_not_double_checked(self):
         """Path that infers to 'database' domain skips the redundant second get_state call (D5)."""
         # Given — DOMAIN_MAPPING maps path to 'database'
-        mock_cb = self._make_cb_service({"database": "CLOSED"})
+        mock_cb = self._make_cb_service({"database": "closed"})
         mw = _make_middleware(cb_service=mock_cb)
         mw.DOMAIN_MAPPING = {"/internal/db/": "database"}
 
         with patch(_POOL_CB_PATH) as mock_pool:
-            mock_pool.state = "CLOSED"
+            mock_pool.state = "closed"
             result = mw._is_cb_open(FakeRequest(path="/internal/db/query/"))
 
         # get_state should have been called exactly once (for database, not again for database)
@@ -877,13 +877,36 @@ class TestBaldurMiddlewareIsCbOpenBehavior:
 
     def test_all_cbs_closed_returns_false(self):
         """All CBs closed → False (normal operating state)."""
-        mock_cb = self._make_cb_service({"database": "CLOSED", "payment": "CLOSED"})
+        mock_cb = self._make_cb_service({"database": "closed", "payment": "closed"})
         mw = _make_middleware(cb_service=mock_cb)
         mw.DOMAIN_MAPPING = {"/payments/": "payment"}
 
         with patch(_POOL_CB_PATH) as mock_pool:
-            mock_pool.state = "CLOSED"
+            mock_pool.state = "closed"
             result = mw._is_cb_open(FakeRequest(path="/api/payments/"))
+
+        assert result is False
+
+    @pytest.mark.parametrize("pool_state", ["open", "half_open"])
+    def test_pool_cb_blocking_state_returns_true(self, pool_state):
+        """Pool CB open/half_open → True even when all service CBs are closed."""
+        mock_cb = self._make_cb_service({"database": "closed"})
+        mw = _make_middleware(cb_service=mock_cb)
+
+        with patch(_POOL_CB_PATH) as mock_pool:
+            mock_pool.state = pool_state
+            result = mw._is_cb_open(FakeRequest())
+
+        assert result is True
+
+    def test_pool_cb_uppercase_state_not_canonical(self):
+        """An UPPERCASE pool state no longer matches — live states are lowercase."""
+        mock_cb = self._make_cb_service({"database": "closed"})
+        mw = _make_middleware(cb_service=mock_cb)
+
+        with patch(_POOL_CB_PATH) as mock_pool:
+            mock_pool.state = "OPEN"
+            result = mw._is_cb_open(FakeRequest())
 
         assert result is False
 
@@ -999,3 +1022,23 @@ class TestBaldurMiddlewareCallCbDomainRoutingBehavior:
 
         # Then
         mw._is_cb_open.assert_called_once_with(request)
+
+
+# =============================================================================
+# Pool CB state casing — Contract
+# =============================================================================
+
+
+class TestPoolCircuitBreakerStateCasingContract:
+    """Pool CB state constants carry the canonical lowercase enum values."""
+
+    @pytest.mark.parametrize(
+        ("constant_name", "canonical_value"),
+        [("CLOSED", "closed"), ("OPEN", "open"), ("HALF_OPEN", "half_open")],
+    )
+    def test_state_constants_are_canonical_lowercase(
+        self, constant_name, canonical_value
+    ):
+        from baldur.api.django.pool_circuit_breaker import PoolCircuitBreaker
+
+        assert getattr(PoolCircuitBreaker, constant_name) == canonical_value
