@@ -171,7 +171,7 @@ class TestFlushDiskBufferSignalPathBehavior:
         # Given — 3 pending group-commit entries
         mock_buffer = MagicMock()
         mock_buffer._settings.group_commit_enabled = True
-        mock_buffer._group_writer.pending = [object(), object(), object()]
+        mock_buffer._group_writer.pending_count = 3
         mock_buffer._env = MagicMock()
         shutdown_module._disk_buffer_instance = mock_buffer
 
@@ -202,7 +202,7 @@ class TestFlushDiskBufferSignalPathBehavior:
         """A flush failure is swallowed (signal context); returns 0."""
         mock_buffer = MagicMock()
         mock_buffer._settings.group_commit_enabled = True
-        mock_buffer._group_writer.pending = [object()]
+        mock_buffer._group_writer.pending_count = 1
         mock_buffer.flush_group_commit.side_effect = RuntimeError("flush failed")
         shutdown_module._disk_buffer_instance = mock_buffer
 

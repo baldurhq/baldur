@@ -71,9 +71,15 @@ class GroupCommitWriter:
     # ── Internal helpers ──────────────────────────────────
 
     @property
-    def pending(self) -> list[dict[str, Any]]:
-        """Return the pending buffer (for close-time inspection)."""
-        return self._group_buffer
+    def pending_count(self) -> int:
+        """Number of buffered entries awaiting flush.
+
+        ``len`` on a list is GIL-atomic, so this is safe to read from
+        signal context without holding the buffer lock. Exposes only the
+        count — never the live buffer — so callers cannot drop or
+        reorder pre-durability audit entries.
+        """
+        return len(self._group_buffer)
 
     def _generate_key(self) -> bytes:
         """Generate a unique key (timestamp + sequence)."""

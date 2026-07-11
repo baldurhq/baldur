@@ -85,7 +85,7 @@ class TestGroupCommitFlushReentrancyBehavior:
         # Given — 3 entries pending in the group buffer
         keys = [group_commit_buffer.put({"seq": i}) for i in range(3)]
         assert group_commit_buffer._group_writer is not None
-        assert len(group_commit_buffer._group_writer.pending) == 3
+        assert group_commit_buffer._group_writer.pending_count == 3
 
         calls = {"serializations": 0, "reentry_returned": False}
 
@@ -114,7 +114,7 @@ class TestGroupCommitFlushReentrancyBehavior:
         assert group_commit_buffer.get_stats()["group_commit_flushes"] == 1
         for key in keys:
             assert group_commit_buffer.get(key) is not None
-        assert group_commit_buffer._group_writer.pending == []
+        assert group_commit_buffer._group_writer.pending_count == 0
 
     def test_guard_resets_after_flush_allowing_subsequent_flushes(
         self, group_commit_buffer

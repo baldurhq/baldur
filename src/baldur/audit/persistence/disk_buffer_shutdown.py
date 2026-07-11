@@ -131,7 +131,7 @@ def _flush_disk_buffer() -> int:
         # 1. Force flush group commit buffer
         if _disk_buffer_instance._settings.group_commit_enabled:
             if _disk_buffer_instance._group_writer is not None:
-                flushed_count = len(_disk_buffer_instance._group_writer.pending)
+                flushed_count = _disk_buffer_instance._group_writer.pending_count
             _disk_buffer_instance.flush_group_commit()
 
         # 2. LMDB fsync (data safety guarantee)
