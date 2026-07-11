@@ -206,12 +206,14 @@ class CircuitBreakerProbe(HealthProbe):
 
         A breaker is "stuck" when it has been OPEN for at least
         ``stuck_threshold_seconds`` without a re-open transition (which resets
-        ``opened_at``). ``opened_at`` is already returned by
-        ``get_all_states()``; per-state guards skip ``None`` / malformed
-        timestamps so one bad entry cannot mask the rest (fail-safe). Both
-        ``utc_now()`` and the service's ``opened_at`` are tz-aware, so the
-        subtraction is valid; a non-aware/garbage value falls through the
-        guards to be ignored rather than raising.
+        ``opened_at``). ``get_all_states()`` serializes ``opened_at`` with
+        ``.isoformat()``, so the probe receives an ISO string in production; it
+        is parsed back to a tz-aware ``datetime`` here. A ``datetime`` is also
+        accepted as-is for direct callers. ``None`` / unparseable / tz-naive /
+        otherwise-malformed timestamps fall through the per-state guards and are
+        skipped so one bad entry cannot mask the rest (fail-safe): a tz-naive
+        value makes the aware-minus-naive subtraction raise ``TypeError``, which
+        is caught and skipped.
         """
         stuck_threshold = get_meta_watchdog_settings().stuck_threshold_seconds
         probe_now = utc_now()
@@ -220,6 +222,11 @@ class CircuitBreakerProbe(HealthProbe):
             if s.get("state") != CircuitBreakerStateEnum.OPEN.value:
                 continue
             opened_at = s.get("opened_at")
+            if isinstance(opened_at, str):
+                try:
+                    opened_at = datetime.fromisoformat(opened_at)
+                except ValueError:
+                    continue
             if not isinstance(opened_at, datetime):
                 continue
             try:

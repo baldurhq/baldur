@@ -451,7 +451,10 @@ class TestCircuitBreakerStuckDetection:
 
         with freeze_time(_FROZEN_INSTANT):
             opened_at = utc_now() - timedelta(seconds=threshold + offset_seconds)
-            cb_states = [{"state": "open", "opened_at": opened_at}]
+            # get_all_states() serializes opened_at to an ISO string — feed the
+            # production shape, not a datetime object (a datetime masked the
+            # str-vs-datetime skip that kept stuck_count permanently 0).
+            cb_states = [{"state": "open", "opened_at": opened_at.isoformat()}]
 
             count = CircuitBreakerProbe._count_stuck_open_breakers(cb_states)
 
@@ -460,13 +463,13 @@ class TestCircuitBreakerStuckDetection:
     @pytest.mark.parametrize(
         "state",
         [
-            {"state": "closed", "opened_at": _AGED_AWARE},
-            {"state": "half_open", "opened_at": _AGED_AWARE},
-            {"state": "OPEN", "opened_at": _AGED_AWARE},
+            {"state": "closed", "opened_at": _AGED_AWARE.isoformat()},
+            {"state": "half_open", "opened_at": _AGED_AWARE.isoformat()},
+            {"state": "OPEN", "opened_at": _AGED_AWARE.isoformat()},
             {"state": "open", "opened_at": None},
             {"state": "open"},
-            {"state": "open", "opened_at": _AGED_NAIVE},
-            {"state": "open", "opened_at": "2020-01-01"},
+            {"state": "open", "opened_at": _AGED_NAIVE.isoformat()},
+            {"state": "open", "opened_at": "not-a-timestamp"},
             {"state": "open", "opened_at": 1577836800},
         ],
         ids=[
@@ -475,13 +478,19 @@ class TestCircuitBreakerStuckDetection:
             "uppercase_not_canonical",
             "opened_at_none",
             "opened_at_missing",
-            "opened_at_naive",
-            "opened_at_string",
-            "opened_at_int",
+            "opened_at_naive_string",
+            "opened_at_unparseable_string",
+            "opened_at_non_string",
         ],
     )
     def test_count_stuck_open_breakers_ignores_invalid_states(self, state):
-        """Non-open states and None/naive/garbage opened_at are skipped (fail-safe)."""
+        """Non-open states and None/naive/unparseable opened_at are skipped (fail-safe).
+
+        opened_at uses the production shape (``get_all_states()`` emits ISO
+        strings): a tz-naive string is skipped because the aware-minus-naive
+        subtraction raises, an unparseable string is skipped at the parse, and a
+        non-string/non-datetime value is skipped by the type guard.
+        """
         assert CircuitBreakerProbe._count_stuck_open_breakers([state]) == 0
 
     def test_count_stuck_open_breakers_mixed_states_counts_only_aged_open(self):
@@ -491,8 +500,14 @@ class TestCircuitBreakerStuckDetection:
         with freeze_time(_FROZEN_INSTANT):
             now = utc_now()
             cb_states = [
-                {"state": "open", "opened_at": now - timedelta(seconds=threshold + 30)},
-                {"state": "open", "opened_at": now - timedelta(seconds=10)},
+                {
+                    "state": "open",
+                    "opened_at": (now - timedelta(seconds=threshold + 30)).isoformat(),
+                },
+                {
+                    "state": "open",
+                    "opened_at": (now - timedelta(seconds=10)).isoformat(),
+                },
                 {"state": "closed", "opened_at": None},
             ]
 
@@ -508,8 +523,11 @@ class TestCircuitBreakerStuckDetection:
 
         with freeze_time(_FROZEN_INSTANT):
             opened_at = utc_now() - timedelta(seconds=threshold + 60)
+            # Production shape: get_all_states() returns opened_at as an ISO
+            # string. Asserting UNHEALTHY on a datetime object masked that the
+            # probe never parsed the string, so stuck_count stayed 0.
             mock_service.get_all_states.return_value = [
-                {"state": "open", "opened_at": opened_at}
+                {"state": "open", "opened_at": opened_at.isoformat()}
             ]
 
             # When — the probe runs against the mocked CB service
@@ -532,7 +550,7 @@ class TestCircuitBreakerStuckDetection:
         with freeze_time(_FROZEN_INSTANT):
             opened_at = utc_now() - timedelta(seconds=10)
             mock_service.get_all_states.return_value = [
-                {"state": "open", "opened_at": opened_at}
+                {"state": "open", "opened_at": opened_at.isoformat()}
             ]
             with patch(
                 "baldur.services.circuit_breaker.get_circuit_breaker_service",
