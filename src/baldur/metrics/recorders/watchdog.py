@@ -44,6 +44,7 @@ _ALLOWED_COMPONENTS: frozenset[str] = frozenset(
         "circuit_breaker",
         "recovery_pipeline",
         "audit_system",
+        "daemon_workers",
         "chaos_scheduler",
         "notification_channels",
         "precomputed_cache",
