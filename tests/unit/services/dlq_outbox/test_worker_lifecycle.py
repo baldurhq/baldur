@@ -245,6 +245,11 @@ class TestDLQOutboxWorkerCrashCaptureBehavior:
         writer = make_sync_writer(collected_writes)
         _, _, worker = build_outbox(writer, flush_interval_seconds=0.01)
         worker.start()
+        # Quiesce the spawned loop before patching _writer_loop to raise: the
+        # crash-capture wrapper is exercised directly below, so a live loop
+        # thread would only race to hit the patch (an unhandled thread
+        # exception) or linger past the test. stop() leaves the handle intact.
+        worker.stop(timeout=1.0)
         handle = worker.handle
         assert handle is not None
         assert handle.last_crash_reason is None
@@ -261,10 +266,6 @@ class TestDLQOutboxWorkerCrashCaptureBehavior:
         # Then
         assert handle.last_crash_reason == "ValueError: boom"
 
-        # Cleanup — actual loop is no longer running.
-        worker._is_running = False
-        worker.stop(timeout=1.0)
-
     def test_runtime_error_populates_last_crash_reason(
         self, build_outbox, make_sync_writer, collected_writes
     ):
@@ -273,6 +274,9 @@ class TestDLQOutboxWorkerCrashCaptureBehavior:
         writer = make_sync_writer(collected_writes)
         _, _, worker = build_outbox(writer, flush_interval_seconds=0.01)
         worker.start()
+        # Quiesce the spawned loop before patching _writer_loop to raise (see
+        # the ValueError case above for the rationale). stop() keeps the handle.
+        worker.stop(timeout=1.0)
         handle = worker.handle
         assert handle is not None
 
@@ -286,9 +290,6 @@ class TestDLQOutboxWorkerCrashCaptureBehavior:
         # Then
         assert handle.last_crash_reason == "RuntimeError: flushed"
 
-        worker._is_running = False
-        worker.stop(timeout=1.0)
-
     @pytest.mark.parametrize("exc_cls", [KeyboardInterrupt, SystemExit])
     def test_keyboard_interrupt_and_system_exit_reraise_without_recording(
         self, exc_cls, build_outbox, make_sync_writer, collected_writes
@@ -298,6 +299,9 @@ class TestDLQOutboxWorkerCrashCaptureBehavior:
         writer = make_sync_writer(collected_writes)
         _, _, worker = build_outbox(writer, flush_interval_seconds=0.01)
         worker.start()
+        # Quiesce the spawned loop before patching _writer_loop to raise (see
+        # the ValueError case above for the rationale). stop() keeps the handle.
+        worker.stop(timeout=1.0)
         handle = worker.handle
         assert handle is not None
         assert handle.last_crash_reason is None
@@ -312,9 +316,6 @@ class TestDLQOutboxWorkerCrashCaptureBehavior:
         # Then — signal-driven shutdown is NOT a crash; payload stays clean.
         assert handle.last_crash_reason is None
 
-        worker._is_running = False
-        worker.stop(timeout=1.0)
-
     def test_baseexception_subclass_other_than_signals_is_captured(
         self, build_outbox, make_sync_writer, collected_writes
     ):
@@ -326,6 +327,9 @@ class TestDLQOutboxWorkerCrashCaptureBehavior:
         writer = make_sync_writer(collected_writes)
         _, _, worker = build_outbox(writer, flush_interval_seconds=0.01)
         worker.start()
+        # Quiesce the spawned loop before patching _writer_loop to raise (see
+        # the ValueError case above for the rationale). stop() keeps the handle.
+        worker.stop(timeout=1.0)
         handle = worker.handle
         assert handle is not None
 
@@ -336,9 +340,6 @@ class TestDLQOutboxWorkerCrashCaptureBehavior:
             worker._writer_loop_with_crash_capture()
 
         assert handle.last_crash_reason == "WeirdAbort: odd"
-
-        worker._is_running = False
-        worker.stop(timeout=1.0)
 
 
 # =============================================================================
