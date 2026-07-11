@@ -24,7 +24,15 @@ class AdaptiveThrottle(Protocol):
 
     def get_emergency_level(self) -> Any: ...
 
-    def get_stats(self) -> dict[str, Any]: ...
+    def get_stats(self) -> dict[str, Any]:
+        """Return a caller-owned snapshot of the throttle runtime state.
+
+        Ownership contract: implementations must not hand out live
+        internal state — the returned mapping (including nested maps)
+        is a fresh snapshot the caller may mutate freely without
+        affecting the provider.
+        """
+        ...
 
     # OSS-side callers (DRF AdaptiveDRFThrottle bridge) use these three.
     # Returned objects expose `.allowed`, `.limit`, `.current_count`,
