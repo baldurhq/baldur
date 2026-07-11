@@ -12,10 +12,12 @@ Tests:
     - Redis backward compatibility
 """
 
-from datetime import datetime, timedelta
+from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+from baldur.utils.time import utc_now
 
 
 class TestWatchdogResult:
@@ -249,10 +251,10 @@ class TestZombieExemption:
             new_values={},
             state=CanaryState.PAUSED,
             pause_triggered_by="error_budget",
-            created_at=datetime.utcnow() - timedelta(minutes=60),  # 60 min elapsed
+            created_at=utc_now() - timedelta(minutes=60),  # 60 min elapsed
         )
 
-        now = datetime.utcnow()
+        now = utc_now()
         result = watchdog._check_zombie(rollout, now)
 
         assert result is None  # not a Zombie
@@ -269,10 +271,10 @@ class TestZombieExemption:
             new_values={},
             state=CanaryState.PAUSED,
             pause_triggered_by="governance",
-            created_at=datetime.utcnow() - timedelta(minutes=60),
+            created_at=utc_now() - timedelta(minutes=60),
         )
 
-        now = datetime.utcnow()
+        now = utc_now()
         result = watchdog._check_zombie(rollout, now)
 
         assert result is None  # not a Zombie
@@ -289,10 +291,10 @@ class TestZombieExemption:
             new_values={},
             state=CanaryState.PAUSED,
             pause_triggered_by="manual",
-            created_at=datetime.utcnow() - timedelta(minutes=60),
+            created_at=utc_now() - timedelta(minutes=60),
         )
 
-        now = datetime.utcnow()
+        now = utc_now()
         result = watchdog._check_zombie(rollout, now)
 
         assert result is not None  # is a Zombie
@@ -310,10 +312,10 @@ class TestZombieExemption:
             new_values={},
             state=CanaryState.PAUSED,
             pause_triggered_by="metrics",
-            created_at=datetime.utcnow() - timedelta(minutes=60),
+            created_at=utc_now() - timedelta(minutes=60),
         )
 
-        now = datetime.utcnow()
+        now = utc_now()
         result = watchdog._check_zombie(rollout, now)
 
         assert result is not None  # is a Zombie
@@ -330,10 +332,10 @@ class TestZombieExemption:
             new_values={},
             state=CanaryState.PAUSED,
             # no pause_triggered_by (legacy data)
-            created_at=datetime.utcnow() - timedelta(minutes=60),
+            created_at=utc_now() - timedelta(minutes=60),
         )
 
-        now = datetime.utcnow()
+        now = utc_now()
         result = watchdog._check_zombie(rollout, now)
 
         assert result is not None  # is a Zombie
