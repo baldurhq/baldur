@@ -1,21 +1,19 @@
 """
 Rate Limit Settings - Pydantic v2.
 
-Single Source of Truth for rate limit coordination configuration.
+Single Source of Truth for the inbound HTTP quota configuration: Control-API
+rate limiting, framework-middleware rate limiting, the @rate_limit decorator
+toggle, and rate-limit storage dials.
 
-Replaces:
-- core/config.py:RateLimitConfig (lines 137-163)
-- core/safe_defaults.py:SAFE_DEFAULTS["rate_limit"]
-- core/safe_defaults.py:VALIDATION_RULES["rate_limit"]
+Outbound 429-backoff coordination dials live in
+``baldur.settings.rate_limit_backoff`` (``BALDUR_RATE_LIMIT_BACKOFF_``),
+which enumerates that family.
 
 Environment Variables:
-    BALDUR_RATE_LIMIT_BASE_DELAY=1.0
-    BALDUR_RATE_LIMIT_MAX_DELAY=60.0
     BALDUR_RATE_LIMIT_CONTROL_API_RATE_LIMIT=100
+    BALDUR_RATE_LIMIT_EMERGENCY_RATE_LIMIT=10
+    BALDUR_RATE_LIMIT_MIDDLEWARE_RATE_LIMIT=0
     ... etc
-
-Reference:
-- docs/baldur/middleware_system/40_PYDANTIC_CONFIG_MIGRATION.md
 """
 
 from pydantic import Field, field_validator
@@ -23,63 +21,28 @@ from pydantic_settings import BaseSettings
 
 from baldur.settings.base import make_settings_config
 from baldur.settings.field_types import (
-    STANDARD_BACKOFF_MULTIPLIER,
-    STANDARD_BASE_DELAY,
-    BackoffMultiplier,
     HugeCount,
     IntervalDuration,
     LargeCount,
     MediumCount,
-    Percentage,
-    ShortDuration,
 )
 from baldur.settings.validators import warn_above
 
 
 class RateLimitSettings(BaseSettings):
     """
-    Rate Limit coordination configuration with validation.
+    Inbound rate-limit (HTTP quota) configuration with validation.
 
-    Includes both retry backoff settings and Control API rate limiting.
-
-    All defaults match core/config.py:RateLimitConfig
-    All validation rules match core/safe_defaults.py:VALIDATION_RULES["rate_limit"]
+    Covers Control-API rate limiting, framework-middleware rate limiting,
+    the @rate_limit decorator toggle, and storage dials. Outbound
+    429-backoff dials live in ``RateLimitBackoffSettings``
+    (``BALDUR_RATE_LIMIT_BACKOFF_``).
     """
 
     model_config = make_settings_config("BALDUR_RATE_LIMIT_")
 
     # ==========================================================================
-    # Retry Backoff Settings (for 429 handling)
-    # From core/config.py lines 144-149
-    # Validation rules from core/safe_defaults.py lines 254-261
-    # ==========================================================================
-    base_delay: ShortDuration = Field(
-        default=STANDARD_BASE_DELAY,
-        description="Base delay in seconds",
-    )
-    max_delay: float = Field(
-        default=60.0,
-        ge=1.0,
-        le=300.0,
-        description="Maximum delay cap in seconds",
-    )
-    jitter_percent: Percentage = Field(
-        default=30.0,
-        description="±% random jitter",
-    )
-    default_retry_after: ShortDuration = Field(
-        default=5.0,
-        description="Default delay if no Retry-After header",
-    )
-    backoff_multiplier: BackoffMultiplier = Field(
-        default=STANDARD_BACKOFF_MULTIPLIER,
-        description="Cooldown multiplier for consecutive 429s",
-    )
-
-    # ==========================================================================
     # Control API Rate Limiting (HybridRateLimitMiddleware)
-    # From core/config.py lines 152-156
-    # Validation rules from core/safe_defaults.py lines 258-260
     # ==========================================================================
     control_api_rate_limit: HugeCount = Field(
         default=100,

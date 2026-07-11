@@ -113,6 +113,7 @@ if TYPE_CHECKING:
     from baldur.settings.predictive_forecaster import PredictiveForecasterSettings
     from baldur.settings.propagation import PropagationSettings
     from baldur.settings.rate_limit import RateLimitSettings
+    from baldur.settings.rate_limit_backoff import RateLimitBackoffSettings
     from baldur.settings.rate_limit_throttle_integration import (
         RateLimitThrottleIntegrationSettings,
     )
@@ -710,6 +711,12 @@ class ScalingGroup:
         from baldur.settings.rate_limit import RateLimitSettings
 
         return RateLimitSettings()
+
+    @cached_property
+    def rate_limit_backoff(self) -> RateLimitBackoffSettings:
+        from baldur.settings.rate_limit_backoff import RateLimitBackoffSettings
+
+        return RateLimitBackoffSettings()
 
     @cached_property
     def rate_limit_throttle_integration(self) -> RateLimitThrottleIntegrationSettings:
