@@ -16,10 +16,15 @@ from dataclasses import dataclass, field
 # =============================================================================
 
 
-@dataclass
+@dataclass(frozen=True)
 class ServiceConfig:
     """
     Service configuration - the user specifies criticality directly.
+
+    Immutable: every field change must route through a fresh instance
+    (``dataclasses.replace``) and re-registration, so shedding/recovery
+    behavior can only change via the validated, logged registration
+    path — never by mutating a handed-out config object.
 
     Attributes:
         service_id: Unique service identifier
@@ -160,10 +165,13 @@ class LoadSheddingPolicy:
 # =============================================================================
 
 
-@dataclass
+@dataclass(frozen=True)
 class CanaryRecoveryStageConfig:
     """
     Individual Canary stage.
+
+    Immutable: stage parameters cannot be edited on a handed-out
+    strategy; build a new stage tuple instead.
 
     Attributes:
         traffic_percent: Allowed traffic ratio (0~100)
@@ -194,13 +202,17 @@ class CanaryRecoveryStageConfig:
             )
 
 
-@dataclass
+@dataclass(frozen=True)
 class RecoveryStrategy:
     """
     HALF_OPEN → CLOSED recovery strategy.
 
     Instead of sending 100% traffic immediately in the HALF_OPEN state,
     traffic is increased gradually to prevent a Thundering Herd.
+
+    Immutable (deep): the strategy and its stages cannot be edited on a
+    handed-out config; recovery behavior only changes through a fresh
+    instance passed to the registration path.
 
     Attributes:
         type: Strategy type ("immediate" | "canary")
@@ -212,9 +224,10 @@ class RecoveryStrategy:
     # Strategy type
     type: str = "canary"  # "immediate" | "canary"
 
-    # Canary stage configuration (default 4 stages)
-    canary_stages: list[CanaryRecoveryStageConfig] = field(
-        default_factory=lambda: [
+    # Canary stage configuration (default 4 stages); any caller-supplied
+    # sequence is coerced to a tuple in __post_init__
+    canary_stages: tuple[CanaryRecoveryStageConfig, ...] = field(
+        default_factory=lambda: (
             CanaryRecoveryStageConfig(
                 traffic_percent=10.0,
                 duration_seconds=5,
@@ -239,7 +252,7 @@ class RecoveryStrategy:
                 required_success_rate=90.0,
                 description="Stage 4: full recovery",
             ),
-        ]
+        )
     )
 
     # Action on stage failure
@@ -249,7 +262,11 @@ class RecoveryStrategy:
     strict_mode: bool = False  # If True, every stage requires a 100% success rate
 
     def __post_init__(self) -> None:
-        """Validate recovery strategy values."""
+        """Validate recovery strategy values; coerce stages to a tuple."""
+        # object.__setattr__ is the frozen-dataclass idiom for
+        # __post_init__ normalization (a plain assignment would raise).
+        object.__setattr__(self, "canary_stages", tuple(self.canary_stages))
+
         valid_types = {"immediate", "canary"}
         if self.type not in valid_types:
             raise ValueError(f"Invalid type: {self.type}. Valid values: {valid_types}")
