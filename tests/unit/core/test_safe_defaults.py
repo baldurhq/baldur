@@ -75,7 +75,7 @@ class TestGetSafeDefault:
         [
             ("dlq", "max_replay_attempts", 2),
             ("retry", "backoff_strategy", "exponential"),
-            ("rate_limit", "base_delay", 1.0),
+            ("rate_limit", "control_api_rate_limit", 100),
             ("security", "injection_ban_hours", 24),
             ("chaos", "enabled", False),
             ("slo", "default_target", 0.999),
@@ -210,10 +210,10 @@ class TestIsValidValue:
         """Float range validation
         float 범위 검증이 올바르게 동작하는지 확인.
         """
-        assert is_valid_value("rate_limit", "base_delay", 0.1) is True
-        assert is_valid_value("rate_limit", "base_delay", 60.0) is True
-        assert is_valid_value("rate_limit", "base_delay", 0.05) is False
-        assert is_valid_value("rate_limit", "base_delay", 61.0) is False
+        assert is_valid_value("retry", "base_delay", 0.1) is True
+        assert is_valid_value("retry", "base_delay", 60.0) is True
+        assert is_valid_value("retry", "base_delay", 0.05) is False
+        assert is_valid_value("retry", "base_delay", 61.0) is False
 
 
 # =============================================================================

@@ -120,27 +120,37 @@ class RetryConfigSerializer(ApplyStrategyMixin):
 
 class RateLimitConfigSerializer(ApplyStrategyMixin):
     """
-    Serializer for Rate Limit configuration.
+    Serializer for Rate Limit (inbound quota) configuration.
 
-    Safe Default 폴백 적용.
+    Validates the inbound quota family only; the outbound 429-backoff dials
+    are not runtime-editable. Applies Safe Default fallback.
     """
 
     _config_type = "rate_limit"
 
-    base_delay = serializers.FloatField(required=False, min_value=0.1, max_value=60.0)
-    max_delay = serializers.FloatField(required=False, min_value=1.0, max_value=300.0)
-    jitter_percent = serializers.FloatField(
-        required=False, min_value=0.0, max_value=100.0
+    control_api_rate_limit = serializers.IntegerField(
+        required=False, min_value=1, max_value=10000
     )
-    default_retry_after = serializers.FloatField(
-        required=False, min_value=0.1, max_value=60.0
+    control_api_window_seconds = serializers.IntegerField(
+        required=False, min_value=1, max_value=3600
     )
-    backoff_multiplier = serializers.FloatField(
-        required=False, min_value=1.0, max_value=10.0
+    emergency_rate_limit = serializers.IntegerField(
+        required=False, min_value=1, max_value=100
     )
+    emergency_window_seconds = serializers.IntegerField(
+        required=False, min_value=1, max_value=3600
+    )
+    middleware_rate_limit = serializers.IntegerField(
+        required=False, min_value=0, max_value=10000
+    )
+    middleware_window_seconds = serializers.IntegerField(
+        required=False, min_value=1, max_value=3600
+    )
+    decorator_enabled = serializers.BooleanField(required=False)
+    redis_ttl = serializers.IntegerField(required=False, min_value=60, max_value=86400)
 
     def validate(self, attrs):
-        """검증 + Safe Default 폴백."""
+        """Validate, then apply Safe Default fallback."""
         validated = super().validate(attrs)
         return self.validate_with_safe_fallback(validated)
 

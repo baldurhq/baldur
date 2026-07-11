@@ -64,13 +64,10 @@ SAFE_DEFAULTS: dict[str, dict[str, Any]] = {
         "jitter": True,
         "jitter_percent": 25,
     },
-    # Rate Limit - reasonable limits
+    # Rate Limit - reasonable limits (inbound quota family only; the outbound
+    # 429-backoff dials live in RateLimitBackoffSettings and are not
+    # console-editable)
     "rate_limit": {
-        "base_delay": 1.0,
-        "max_delay": 60.0,
-        "jitter_percent": 30.0,
-        "default_retry_after": 5.0,
-        "backoff_multiplier": 2.0,
         "control_api_rate_limit": 100,
         "control_api_window_seconds": 60,
         "emergency_rate_limit": 10,
@@ -242,11 +239,6 @@ VALIDATION_RULES: dict[str, dict[str, tuple[Any, Any]]] = {
         "jitter_percent": (0, 100),
     },
     "rate_limit": {
-        "base_delay": (0.1, 60.0),
-        "max_delay": (1.0, 300.0),
-        "jitter_percent": (0.0, 100.0),
-        "default_retry_after": (0.1, 60.0),
-        "backoff_multiplier": (1.0, 10.0),
         "control_api_rate_limit": (1, 10000),
         "emergency_rate_limit": (1, 100),
     },

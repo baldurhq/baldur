@@ -392,6 +392,11 @@ from baldur.settings.rate_limit import (
     get_rate_limit_settings,
     reset_rate_limit_settings,
 )
+from baldur.settings.rate_limit_backoff import (
+    RateLimitBackoffSettings,
+    get_rate_limit_backoff_settings,
+    reset_rate_limit_backoff_settings,
+)
 
 # Week 1 CRITICAL Settings (92_CONFIG_IMPLEMENTATION_GUIDE.md)
 from baldur.settings.recovery_circuit_breaker import (
@@ -591,10 +596,14 @@ __all__ = [
     "RetrySettings",
     "get_retry_settings",
     "reset_retry_settings",
-    # Rate Limit
+    # Rate Limit (inbound quota)
     "RateLimitSettings",
     "get_rate_limit_settings",
     "reset_rate_limit_settings",
+    # Rate Limit Backoff (outbound 429 coordination)
+    "RateLimitBackoffSettings",
+    "get_rate_limit_backoff_settings",
+    "reset_rate_limit_backoff_settings",
     # Runbook Executor (272_RUNBOOK_ARCHITECTURE_OVERVIEW.md)
     "RunbookSettings",
     "get_runbook_settings",

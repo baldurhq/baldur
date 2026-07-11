@@ -32,15 +32,16 @@ class RateLimitCoordinatorConfig:
 
     @classmethod
     def from_settings(cls) -> RateLimitCoordinatorConfig:
-        """Load configuration from core config."""
-        rate_limit = get_config().scaling.rate_limit
+        """Load configuration from the rate-limit backoff settings."""
+        backoff = get_config().scaling.rate_limit_backoff
 
         return cls(
-            base_delay=rate_limit.base_delay,
-            max_delay=rate_limit.max_delay,
-            jitter_percent=rate_limit.jitter_percent,
-            default_retry_after=rate_limit.default_retry_after,
-            backoff_multiplier=rate_limit.backoff_multiplier,
+            base_delay=backoff.base_delay,
+            max_delay=backoff.max_delay,
+            jitter_percent=backoff.jitter_percent,
+            default_retry_after=backoff.default_retry_after,
+            backoff_multiplier=backoff.backoff_multiplier,
+            debounce_window_seconds=backoff.debounce_window_seconds,
         )
 
 
@@ -53,4 +54,4 @@ class RateLimitResult:
     was_rate_limited: bool = False
     consecutive_429s: int = 0
     is_canary: bool = False
-    """Cooldown 직후 첫 요청 - 복구 정찰 요청 모드."""
+    """First request right after a cooldown — recovery scout mode."""
