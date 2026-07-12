@@ -144,6 +144,13 @@ class PrometheusQueryClient:
             backoff_factor=self._retry_backoff_factor,
             status_forcelist=_RETRY_STATUS_FORCELIST,
             allowed_methods=_RETRY_ALLOWED_METHODS,
+            # Retry ONLY the status_forcelist 5xx. Left at its default (True),
+            # respect_retry_after_header makes urllib3 also retry 413/429/503
+            # whenever the response carries a Retry-After header — regardless of
+            # status_forcelist — and sleep for the server-dictated duration,
+            # which would both widen the retry set beyond transient 5xx and let
+            # a rate-limiting backend multiply the per-call timeout bound.
+            respect_retry_after_header=False,
         )
         session = requests.Session()
         adapter = HTTPAdapter(max_retries=retry)
