@@ -23,11 +23,13 @@ domain-mapping settings move to ``settings/``.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import math
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
 from baldur.interfaces.web_framework import ResponseContext
+from baldur.utils.time import utc_now
 
 if TYPE_CHECKING:
     from baldur.interfaces.web_framework import RequestContext
@@ -44,6 +46,32 @@ __all__ = [
 # Status codes that count as upstream/server failures (matches the default
 # in ``baldur.settings.middleware.MiddlewareSettings.cb_status_codes``).
 _DEFAULT_CB_FAILURE_CODES = frozenset({500, 502, 503, 504})
+
+# Minimum Retry-After advertised on a CB rejection — a smaller value would
+# invite clients to hammer a dependency the breaker just judged unhealthy.
+_RETRY_AFTER_FLOOR_SECONDS = 1
+
+
+def _compute_retry_after(service: Any, service_name: str, state_data: Any) -> int:
+    """Remaining recovery window in whole seconds (floored to >= 1).
+
+    OPEN with a known ``opened_at``: ``recovery_timeout - elapsed``, so the
+    client backs off until the breaker can transition to HALF_OPEN.
+    HALF_OPEN (or a missing ``opened_at``): the full effective
+    ``recovery_timeout`` as the conservative bound. Falls back to the base
+    config when the override-aware lookup fails.
+    """
+    try:
+        recovery_timeout = float(
+            service.get_effective_config(service_name).recovery_timeout
+        )
+    except Exception:
+        recovery_timeout = float(service.config.recovery_timeout)
+    remaining = recovery_timeout
+    opened_at = getattr(state_data, "opened_at", None)
+    if opened_at is not None and state_data.state.lower() == "open":
+        remaining = recovery_timeout - (utc_now() - opened_at).total_seconds()
+    return max(_RETRY_AFTER_FLOOR_SECONDS, math.ceil(remaining))
 
 
 def _try_get_cb_service():
@@ -103,7 +131,8 @@ def check_cb_open(
     try:
         if not service.is_enabled:
             return None
-        state = service.get_state(service_name)
+        state_data = service.get_or_create_state(service_name)
+        state = state_data.state
     except Exception as exc:
         logger.warning(
             "middleware.cb_state_check_failed",
@@ -131,7 +160,7 @@ def check_cb_open(
             "code": "CIRCUIT_BREAKER_OPEN",
         },
         headers={
-            "Retry-After": "30",
+            "Retry-After": str(_compute_retry_after(service, service_name, state_data)),
             "X-Baldur-Circuit-Breaker": state.lower(),
         },
     )
