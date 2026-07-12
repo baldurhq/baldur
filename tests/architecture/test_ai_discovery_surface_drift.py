@@ -1,4 +1,4 @@
-"""Fitness function: the AI-discovery surface must not teach a stale API.
+"""G64 — the AI-discovery surface must not teach a stale API.
 
 The AI-discovery surface ships two artifacts that *teach* Baldur's API to LLMs:
 
@@ -23,6 +23,8 @@ the suite instead of silently shipping a misleading discovery surface.
 Scope is OSS-only: it imports ``baldur`` (never ``baldur_pro``), so a PRO-only
 symbol named in an OSS description is correctly flagged as unresolved — the OSS
 docs site must not advertise PRO-tier symbols as part of the OSS API.
+
+Rule registry: ``ARCHITECTURE.md#g64-ai-discovery-surface-drift``
 """
 
 from __future__ import annotations
