@@ -888,7 +888,7 @@ pro_import_boundary:
   #   - services/settings_recommendation/service.py:47 — CanaryRolloutService → baldur.interfaces.canary (existing Protocol)
   #   - tasks/canary_watchdog.py:45 — CanaryRollout → baldur.interfaces.canary (new Protocol)
 
-# G15b global count snapshot (module-level + in-function combined)
+# G17b global count snapshot (module-level + in-function combined)
 # 519 G1+G2: -2 statements (StepResult relocated to baldur.models.saga, primitives.py + runbook_registry.py flipped)
 # 519 PR 2 (c) track: 5 module-level + ~120 in-function statements migrated to ProviderRegistry.<slot>.safe_get() — count dropped 338 -> 213
 # 519 PR 3 (d) types track: 23 module-level + ~30 in-function statements migrated to baldur.models.* / baldur.interfaces.* / PEP 562 lazy — count dropped 213 -> 161. 4 hedging rows retained per deviation (see Implementation Deviations from Doc).
