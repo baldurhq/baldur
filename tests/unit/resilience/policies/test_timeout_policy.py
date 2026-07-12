@@ -148,6 +148,24 @@ class TestTimeoutPolicyBehavior:
         with pytest.raises(ValueError, match="business error"):
             sync_policy.execute(failing_fn)
 
+    def test_execute_user_timeout_error_propagates_unmodified(self, sync_policy):
+        """fn raising stdlib TimeoutError is a business exception, not a policy timeout.
+
+        On Python >= 3.11 ``concurrent.futures.TimeoutError`` aliases builtin
+        ``TimeoutError``, so without completion-state disambiguation an
+        instantly-raised user TimeoutError was misreported as
+        ``TimeoutPolicyError("Call timed out after 5.0s")``.
+        """
+        user_error = TimeoutError("upstream deadline from fn")
+
+        def failing_fn():
+            raise user_error
+
+        with pytest.raises(TimeoutError) as exc_info:
+            sync_policy.execute(failing_fn)
+        assert exc_info.value is user_error
+        assert not isinstance(exc_info.value, TimeoutPolicyError)
+
     def test_execute_passes_args_and_kwargs(self, sync_policy):
         """Arguments and keyword arguments are forwarded to fn."""
 
@@ -442,6 +460,26 @@ class TestAsyncTimeoutPolicyBehavior:
 
         with pytest.raises(ValueError, match="async business error"):
             await async_policy.execute(failing_fn)
+
+    @pytest.mark.asyncio
+    async def test_execute_user_timeout_error_propagates_unmodified(self, async_policy):
+        """Coroutine raising stdlib TimeoutError is a business exception.
+
+        On Python >= 3.11 ``asyncio.TimeoutError`` aliases builtin
+        ``TimeoutError``, so without task-state disambiguation an
+        instantly-raised user TimeoutError was misreported as a policy
+        timeout. A real policy timeout leaves the inner task cancelled;
+        a coroutine-raised one leaves it finished with that exception.
+        """
+        user_error = TimeoutError("upstream deadline from coroutine")
+
+        async def failing_fn():
+            raise user_error
+
+        with pytest.raises(TimeoutError) as exc_info:
+            await async_policy.execute(failing_fn)
+        assert exc_info.value is user_error
+        assert not isinstance(exc_info.value, TimeoutPolicyError)
 
     @pytest.mark.asyncio
     async def test_execute_cancelled_error_propagates(self, async_policy):
