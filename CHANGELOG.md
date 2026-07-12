@@ -12,92 +12,82 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ### Added
 
-- A first-party remote-Prometheus time-series metrics provider (`PrometheusTimeSeriesProvider`) that implements the `TimeSeriesMetricsProvider` protocol over the Prometheus HTTP query API (`/api/v1/query`, `/api/v1/query_range`) — so live metric evaluation works out of the box against Prometheus or any PromQL-compatible backend (Grafana Mimir, VictoriaMetrics, Thanos, Grafana Cloud) instead of requiring a hand-written adapter. Set `BALDUR_PROMETHEUS_URL` and `baldur.init()` registers it automatically; leaving it unset changes nothing. Configuration lives under a new `BALDUR_PROMETHEUS_*` settings family (`PrometheusSettings`): auth/tenancy headers (`BALDUR_PROMETHEUS_HEADERS`, credential-masked), TLS verification (`BALDUR_PROMETHEUS_TLS_VERIFY` / `BALDUR_PROMETHEUS_TLS_CA_CERT`), per-request timeout, a bounded transient-5xx retry, a metric-naming preset (`baldur` for the built-in `baldur_http_*` RED metrics, `otel` for OpenTelemetry semantic-convention HTTP metrics), and static label selectors (`BALDUR_PROMETHEUS_EXTRA_LABEL_SELECTORS`) to scope queries in multi-service clusters. Percentiles are computed server-side via `histogram_quantile` (never averaged), and a query/network failure surfaces as `PrometheusQueryError` so the caller can fail open rather than block. A shared `PrometheusQueryClient` (`baldur.adapters.metrics.prometheus_query_client`) backs it with connection keep-alive and the auth/TLS/retry handling.
-- `baldur.services.config_shadow` now exports its time-series metrics-provider DI seam: `get_metrics_provider()`, `set_metrics_provider()`, `reset_metrics_provider()`, and the new `is_metrics_provider_registered()`. Registration is tracked explicitly — `set_metrics_provider()` marks a provider registered (a deliberately registered `MockTimeSeriesProvider` counts, so tests/staging can opt in), `reset_metrics_provider()` clears the mark, and the lazily-created Mock fallback does **not** count — so consumers that must not compute verdicts on synthetic data can gate on `is_metrics_provider_registered()` before evaluating.
+- Remote-Prometheus time-series metrics provider (`BALDUR_PROMETHEUS_URL`).
+- `config_shadow` time-series metrics-provider DI seam.
 
 ### Changed
 
-- The outbound 429-backoff dials move out of `BALDUR_RATE_LIMIT_` into their own settings family, `BALDUR_RATE_LIMIT_BACKOFF_` (`RateLimitBackoffSettings`, exported from `baldur.settings` with `get_rate_limit_backoff_settings()` / `reset_rate_limit_backoff_settings()`). One prefix previously carried two unrelated responsibility families — outbound 429-backoff shaping (how the rate-limit coordinator delays after a downstream 429) vs inbound HTTP quota enforcement — so an operator reading the env surface could mis-map one family onto the other. There is no alias or legacy-variable detection (early-access clean break); re-set any of the renamed variables under the new prefix. **Breaking** migration table:
-
-  | Old | New |
-  |-----|-----|
-  | `BALDUR_RATE_LIMIT_BASE_DELAY` | `BALDUR_RATE_LIMIT_BACKOFF_BASE_DELAY` |
-  | `BALDUR_RATE_LIMIT_MAX_DELAY` | `BALDUR_RATE_LIMIT_BACKOFF_MAX_DELAY` |
-  | `BALDUR_RATE_LIMIT_JITTER_PERCENT` | `BALDUR_RATE_LIMIT_BACKOFF_JITTER_PERCENT` |
-  | `BALDUR_RATE_LIMIT_DEFAULT_RETRY_AFTER` | `BALDUR_RATE_LIMIT_BACKOFF_DEFAULT_RETRY_AFTER` |
-  | `BALDUR_RATE_LIMIT_BACKOFF_MULTIPLIER` | `BALDUR_RATE_LIMIT_BACKOFF_BACKOFF_MULTIPLIER` |
-
-  An old variable left set is now inert (defaults are unchanged and sane, so behavior only differs if you had explicitly tuned one). The new family also absorbs the coordinator's event-debounce window as `BALDUR_RATE_LIMIT_BACKOFF_DEBOUNCE_WINDOW_SECONDS` (previously an inline constant). `BALDUR_RATE_LIMIT_*` keeps only the inbound quota dials (`CONTROL_API_*`, `EMERGENCY_*`, `MIDDLEWARE_*`, `DECORATOR_ENABLED`, `REDIS_TTL`, `MEMORY_CLEANUP_INTERVAL_OPS`), and the admin rate-limit config endpoint now validates exactly that quota field set — the backoff dials were never actually runtime-applied through it.
-- `ServiceConfig` and its nested recovery config (`RecoveryStrategy`, `CanaryRecoveryStageConfig`) are now immutable (frozen dataclasses), and `RecoveryStrategy.canary_stages` is stored as a tuple (a caller-supplied list is accepted and coerced). Mutating a registered or manager-returned config silently rewrote load-shedding/recovery behavior with no validation, no audit event, and no log — an unaudited side-door around the registration path. A mutation attempt now raises `dataclasses.FrozenInstanceError`; to change a service's configuration, build a new instance (`dataclasses.replace(...)`) and re-register it. **Breaking:** construct-then-mutate code must switch to constructor arguments or `dataclasses.replace`.
-- `TTLCacheBase.get_stats()` (inherited by its subclasses, e.g. the IPC circuit-breaker state cache) now returns a point-in-time snapshot of the cache statistics taken under the cache lock, instead of the live internal object. Previously a caller could observe a torn hits/misses pair mid-update, and mutating the returned object silently corrupted the cache's own accounting for every other reader. Mutating the returned snapshot is now harmless. **Note:** code that held the returned object as a live view must call `get_stats()` again for fresh values.
-- The Django pool circuit breaker and the tiering circuit breaker now emit the canonical lowercase state values (`closed` / `open` / `half_open`), matching every other circuit-breaker surface — a dashboard or log query keyed on `open` previously missed both silently. Renamed surfaces: the pool CB status API payload (`circuit_breaker.state`, `pool_circuit_breaker.state` — the combined state is no longer upper-cased), the 503 rejection payload's `circuit_state` field, the rejection-audit `circuit_state`, the `pool_circuit_breaker.state` log event's `old_state`/`new_state` values, the middleware CB debug-log `state` values, and the tiering CB's `circuit_state` audit payload. **Breaking:** dashboards or log/audit queries keyed on the UPPERCASE forms must re-key to lowercase.
-- Admin config-write endpoints now reject an unrecognized field with `400 Bad Request` instead of silently dropping it or returning `500`. Previously, PATCHing a chaos safety limit or an error-budget config with a mistyped key returned `200 success` while applying nothing — the typo was invisible and discoverable only by diffing the echoed config. Now any unknown key rejects the whole body with `400` (listing `unknown_fields` and `allowed_fields`), nothing is applied, and an all-valid body applies fully and echoes `updated_fields`. **Breaking:** a client that sends an unrecognized field to one of these admin endpoints now receives `400` where it previously received `200` (a silent no-op) or `500`.
+- Outbound 429-backoff env vars move to `BALDUR_RATE_LIMIT_BACKOFF_*`. **Breaking**
+- `ServiceConfig` and its recovery config are now immutable. **Breaking**
+- `TTLCacheBase.get_stats()` returns a locked snapshot, not the live object.
+- Circuit-breaker state values are now lowercase. **Breaking**
+- Admin config-write endpoints reject unknown fields with `400`. **Breaking**
 
 ### Removed
 
-- `IPCStateCache.stats` — the property handed out the live internal statistics object, bypassing the snapshot semantics above. **Breaking:** use `get_stats()` (snapshot object) or `get_stats_dict()` (dict, includes size/TTL/hit-rate) instead.
-- `baldur.core.timezone` — the parallel time module (its only consumed symbol was `now`). **Breaking:** import `baldur.utils.time.utc_now` instead; default behavior is identical (timezone-aware UTC), and `utc_now()` now honors a custom clock source set via `baldur.core.time_provider.set_time_provider`. The module's unused conversion helpers (`make_aware`, `localtime`, `set_default_timezone`, and friends) are removed with it.
+- `IPCStateCache.stats` — use `get_stats()`. **Breaking**
+- `baldur.core.timezone` — use `baldur.utils.time.utc_now`. **Breaking**
 
 ### Security
 
-- The Pydantic-backed config serializers no longer echo a non-validation exception's message in their validation-error response; only pydantic validation failures surface their field-level detail, and any other error propagates as a 500 instead of leaking its message.
-- WAL crash-recovery no longer trusts a record's on-disk length prefix in strict mode: a corrupt or oversized length (up to ~4 GB) could previously drive an unbounded read and OOM the worker mid-recovery. Oversized records are now capped and treated as corruption in both strict and best-effort modes.
+- Config serializers no longer leak non-validation exception messages.
+- WAL crash-recovery caps oversized record length prefixes (OOM guard).
 
 ### Fixed
 
-- A protected function that itself raises the builtin `TimeoutError` is no longer misreported as a policy timeout. On Python 3.11+ `concurrent.futures.TimeoutError` and `asyncio.TimeoutError` are aliases of the builtin, so `TimeoutPolicy` / `AsyncTimeoutPolicy` converted a user-raised `TimeoutError` into `TimeoutPolicyError("Call timed out after Ns")` — an instantly-failing call looked like a wall-clock timeout, skewing timeout metrics and retry/fallback classification. Both policies now disambiguate on the worker future / task completion state: an error raised by the function propagates unmodified (a business failure), and only a genuine deadline expiry reports TIMEOUT.
-- The circuit-breaker 503 from the framework-free middleware helpers now advertises an accurate `Retry-After`. The header was hardcoded to `30` regardless of configuration, so a client honoring it either retried while the breaker was still open (longer recovery windows) or waited far past recovery (shorter ones). It is now computed from the breaker's remaining recovery window (opened-at plus the effective, override-aware recovery timeout), conservatively using the full window in HALF_OPEN, with a one-second floor.
-- Rate limiting, request tiering, admission control, and DRF throttling now resolve the real client IP behind an `X-Real-IP`-only reverse proxy (the nginx convention) instead of collapsing every client onto the proxy's `REMOTE_ADDR`. Five request-identity call sites read only `X-Forwarded-For` → `REMOTE_ADDR` and skipped `X-Real-IP`, so behind a proxy that sets only `X-Real-IP` all clients shared one rate-limit / tier / admission bucket while the permission and audit subsystems (which already resolved the real client) disagreed on request origin. Every site now delegates to the canonical extractor (`X-Forwarded-For` → `X-Real-IP` → `REMOTE_ADDR`), and the DRF throttle adapter additionally strips whitespace from `X-Real-IP`. **Note:** per-request rate-limit / tier / admission keys change for deployments fronted by an X-Real-IP-only proxy — clients that were previously bucketed together are now keyed by their real IP.
-- Several internal retry loops now jitter their backoff delays to spread retries instead of firing them in lockstep. The audit WAL-drain sync worker and the async healing-log batch flush previously retried on a fixed exponential schedule with no jitter, so many workers hitting the same struggling dependency retried in sync (a thundering herd); both now jitter each delay. Separately, the RQ task adapter now honors `TaskOptions.retry_jitter` (default on) when building retry intervals — each enqueue draws its own jittered interval list — where it previously ignored the flag and emitted a fixed `1, 2, 4, …` schedule. Base delay, multiplier and caps are unchanged.
-- The synchronous `RedisCacheAdapter` now honors the `BALDUR_REDIS_*` socket-timeout and retry settings. Its constructor hardcoded `socket_timeout` / `socket_connect_timeout` to 5 s and `retry_on_timeout` to true, so an operator tuning `BALDUR_REDIS_SOCKET_TIMEOUT` / `_CONNECT_TIMEOUT` / `_RETRY_ON_TIMEOUT` saw the async adapter obey while the sync paths (health probe, resilient storage backend, rate-limit tracker) silently kept the 5 s / retry-on defaults — the async adapter's docstring even claimed parity with the sync one. The sync adapter now resolves all three from `RedisSettings` when unset, matching the async adapter, and the connection factory backfills `retry_on_timeout` from settings alongside the socket timeouts. Default behavior is unchanged (the settings defaults equal the former hardcoded values); only an explicitly tuned env var now reaches the sync client.
-- The first retry now waits the configured `base_delay` instead of `base_delay / multiplier`. The async retry policy and the core retry primitive fed a 0-indexed attempt into the backoff strategy's 1-indexed contract, so the first retry against a struggling dependency fired hotter than configured; the synchronous retry path was already correct. All three paths now produce one consistent delay curve from the same policy.
-- The disk-backed audit buffer now reports its true dropped-entry count in `get_stats()`. A trailing dict-splat let the storage layer's hardcoded `total_dropped: 0` overwrite the adapter's real drop counter, so an operator watching buffer stats saw zero drops even while entries were being dropped — a false health signal in a durability component. Backend/storage internals are now nested under a `backend` key instead of leaking across the buffer-stats boundary.
-- The in-memory circuit-breaker rate-limit tracker no longer grows without bound while Redis is healthy. It appended a timestamp on every request but pruned expired entries only inside its reads, and in the normal Redis-backed mode reads are served from Redis — so the in-memory series grew at request rate (tens of MB/day per tracked service at a few hundred RPS). It now trims each series on write, bounding memory to the same retention window the Redis tier already applies.
-- The capacity-reservation safety valve now actually engages when the feature is enabled. Its hard-limit CPU / error-rate backstop had no metrics source wired (the check permanently reported no breach) and no graceful-degradation handle (the CRITICAL override was a no-op even with a source), so the advertised backstop never fired. It is now backed by the existing system-metrics cache and the aggregate circuit-breaker failure rate, and wired to graceful degradation. Under the default `dry_run` it logs the would-be CRITICAL transition instead of applying it.
-- The audit WAL and incident-duration parsers now tolerate malformed persisted input instead of raising an uncaught exception: non-object JSONL lines, a non-UTF-8 byte in a JSONL WAL file, non-object binary records, non-dict timeline entries / non-string `event_type` values, and a mixed offset-naive/offset-aware timestamp pair are all skipped (or resolved to an undefined result) rather than aborting recovery or a postmortem duration calculation.
+- A protected builtin `TimeoutError` is no longer misreported as a policy timeout.
+- Circuit-breaker `503` now sends an accurate `Retry-After` (was hardcoded).
+- Real client IP resolves behind `X-Real-IP`-only proxies.
+- Internal retry backoff is now jittered; RQ honors `retry_jitter`.
+- Sync `RedisCacheAdapter` honors `BALDUR_REDIS_*` socket/retry settings.
+- First retry waits `base_delay`, not `base_delay / multiplier`.
+- Audit buffer reports its true dropped-entry count in `get_stats()`.
+- In-memory circuit-breaker rate-limit tracker no longer grows unbounded.
+- Capacity-reservation safety valve now engages when enabled.
+- Audit and incident-duration parsers skip malformed persisted input.
 
 ## [1.1.0] - 2026-07-07
 
 ### Added
 
-- Async resilience parity — `aprotect()` / `@aprotected` now apply the circuit breaker and retry, which the async path previously did not support at all (an explicit `circuit_breaker=True` or `retry=` raised `NotImplementedError`). Composition matches the sync facade — circuit breaker → timeout → retry → fallback — so the timeout bounds the whole retry sequence and one exhausted retry sequence counts as a single circuit-breaker failure; an exhausted async retry now also routes to the Dead Letter Queue. Sync and async `protect(name=…)` share one breaker per name, so failures accumulate across both call styles.
-- `@circuit_breaker` is now async-safe. Applied to an `async def`, it awaits the call and records the real success or failure; previously it wrapped the un-awaited coroutine and recorded a false "success", so an async function got no protection with no signal.
-- `@retry` — a single retry decorator that works on both synchronous and `async` functions, detecting the call style automatically. On exhaustion it raises a clear "max retries exceeded" error in both cases.
-- Async tenacity-bridged retry — `aprotect(name, fn, retry=<TenacityBridgePolicy>)` (and `@aprotected(retry=…)`) now works; the tenacity bridge is auto-converted to run under `tenacity.AsyncRetrying`, where it previously raised `NotImplementedError`. Build one `TenacityBridgePolicy` from your tenacity `stop`/`wait`/`retry` strategy and use it on either the sync or the async facade.
-- `baldur.protect()` metrics (`baldur_protect_duration_seconds`, `baldur_protect_attempts`, `baldur_protect_fallback_total`) now carry a `mode` label (`sync` / `async`) so a service protected via both `protect()` and `aprotect()` is separable — e.g. a mode-specific latency SLO comparing the async path against the sync path. The extra label adds no cardinality for a service used through only one facade.
-- Idempotency observability — a new metric `baldur_idempotency_gate_takeover_total{reason}` counts how often the idempotency gate takes over a previously-failed or stale (crashed-mid-execution) claim, split by `reason` (`failed` / `stale`). A rising rate signals an undersized execution window or workers dying silently mid-operation, giving operators a direct signal for tuning the idempotency execution TTL.
+- Async `aprotect()` / `@aprotected` now apply the circuit breaker and retry.
+- `@circuit_breaker` is now async-safe.
+- `@retry` — one retry decorator for sync and async functions.
+- `aprotect(retry=…)` now works via the async tenacity bridge.
+- `protect()` metrics now carry a `mode` label (`sync` / `async`).
+- New `baldur_idempotency_gate_takeover_total` metric.
 
 ### Changed
 
-- `@aprotected("name")` and `aprotect(name, fn)` now apply the circuit breaker by default (an unset `circuit_breaker` resolves to on), matching `@protected` / `protect`. **Breaking:** async callers that relied on the circuit breaker being off by default must now pass `circuit_breaker=False` explicitly.
+- `@aprotected` / `aprotect` now apply the circuit breaker by default. **Breaking**
 
 ### Removed
 
-- `BALDUR_SECURITY_RATE_LIMIT_WINDOW_SECONDS`, `BALDUR_SECURITY_RATE_LIMIT_MAX_REQUESTS`, and `BALDUR_SECURITY_FAILED_LOGIN_THRESHOLD` — removed these environment variables and their backing `SecuritySettings` / `SecurityConfig` fields (`rate_limit_window_seconds`, `rate_limit_max_requests`, `failed_login_threshold`). No detection layer ever read them — there was no request-rate counter and no failed-login counter — so setting any of them never had any effect. **Breaking:** the three fields are gone from the `SecurityConfig` constructor and the settings JSON schema; re-basing anything keyed on them is not needed because nothing behaved on them. Inbound abuse detection / rate limiting is gateway or host-app territory (detect there and call `handle_security_violation()`); the security violation **response** path — temporary/permanent IP bans, suspicious-IP escalation, and `handle_security_violation()` itself — is unchanged.
-- `@with_retry` and `@retried_async` decorators — superseded by the unified `@retry`. **Breaking:** replace `@with_retry(domain=…, max_attempts=N)` and `@retried_async(max_retries=M, …)` with `@retry(domain=…, max_attempts=…)`. The async attempt count changed meaning: `@retried_async`'s `max_retries=M` (additional attempts) maps to `@retry(max_attempts=M+1)` (total attempts).
-- `BALDUR_SCALING_LOAD_SHEDDING_ENABLED` — removed this environment variable and its backing `ScalingSettings`. It was inert (no code read it), so setting it never had any effect; the active request-path load-shedding gate is the default-off backpressure controller.
-- `TrafficGate(settings=...)` — removed the inert `settings` constructor parameter and its dead backing field. It was accepted but never read (the gate's behavior is driven entirely by its `RateController`), so passing it never had any effect. Construct `TrafficGate(rate_controller=..., load_shedding=...)` or use `get_traffic_gate()`.
-- `BALDUR_API_RATE_LIMIT_DEFAULT_LIMIT`, `BALDUR_API_RATE_LIMIT_DEFAULT_WINDOW_SECONDS`, `BALDUR_API_RATE_LIMIT_EMERGENCY_LIMIT`, and `BALDUR_API_RATE_LIMIT_EMERGENCY_WINDOW_SECONDS` — the Control-API (`/api/baldur/*`) rate limiter now reads its per-minute limit / window / emergency values from a single canonical family, `BALDUR_RATE_LIMIT_CONTROL_API_RATE_LIMIT` / `BALDUR_RATE_LIMIT_CONTROL_API_WINDOW_SECONDS` / `BALDUR_RATE_LIMIT_EMERGENCY_RATE_LIMIT` / `BALDUR_RATE_LIMIT_EMERGENCY_WINDOW_SECONDS`, identically with and without a PRO license. **Breaking:** re-set any of the removed variables under its `BALDUR_RATE_LIMIT_*` name. Previously the removed family took effect only in the free tier and was silently shadowed once PRO was present — the same documented variable behaved differently by tier. The emergency limit's accepted maximum also narrows from 1000 to 100, matching the conservative-emergency intent.
-- `TLSResilientClient` / `SimpleTLSResilientClient` — removed the abstract TLS-resilient HTTP-client wrapper pair from `baldur.core`. Nothing in the framework constructed, accepted, or wired one, so it provided no behavior — it only implied a TLS-retry capability that never ran. TLS error classification (`TLSErrorClassifier`, `TLSErrorType`, `TLSErrorInfo`, certificate monitoring) is unaffected.
-- `KafkaProducerProtocol` / `KafkaConsumerProtocol` — removed from `baldur.interfaces`. No code type-hinted, implemented, or resolved them (the documented registry lookup path never existed), so they were inert typing surface. The registry-wired `KafkaEventBusProtocol` and `ConsumedEventProtocol` are unaffected.
-- `baldur.interfaces.runbook` (`DistributedRecoveryLock` / `IdempotencyRecord` type markers) — removed. The module pointed at a consumer that no longer exists; the real runbook executor now annotates the concrete coordination classes directly, matching the saga orchestrator's established pattern.
+- Inert `BALDUR_SECURITY_*` rate-limit / failed-login env vars. **Breaking**
+- `@with_retry` / `@retried_async` — use `@retry`. **Breaking**
+- Inert `BALDUR_SCALING_LOAD_SHEDDING_ENABLED` env var.
+- Inert `TrafficGate(settings=...)` parameter. **Breaking**
+- `BALDUR_API_RATE_LIMIT_*` — use `BALDUR_RATE_LIMIT_*`. **Breaking**
+- Unused `TLSResilientClient` / `SimpleTLSResilientClient`. **Breaking**
+- Unused `KafkaProducerProtocol` / `KafkaConsumerProtocol`. **Breaking**
+- Unused `baldur.interfaces.runbook` type markers. **Breaking**
 
 ### Fixed
 
-- The Web Console Meta-Watchdog panel no longer fails right after startup. The throttle stuck-probe reported its "not enough samples yet" state as an infinite variance value, which is not representable in JSON, so `GET /meta-watchdog/status` returned HTTP 500 on the first watchdog tick(s) after boot — exactly the window in which an operator checks a fresh deployment. The probe now reports the insufficient-sample state as `null`.
-- Emergency-mode auto-expiry and the governance approval-metric refresh now run out-of-box. Their scheduled jobs were routed to a `governance` Celery queue that Baldur never declares and no shipped worker consumes, so on a standard worker setup they were scheduled but never executed — an operator-set emergency mode never auto-expired and the approval gauge went stale, with no signal. They now route to the shared `maintenance` and `metrics` queues the standard workers already serve.
-- Control-API rate limit now actually enforces its configured per-minute cap. The Redis-backed sliding window for the `/api/baldur/*` admin API keyed each request by its whole-second timestamp, so every request within the same second collapsed into a single window entry — the count could never reach the default 100 req/min while Redis was healthy, leaving the admin API effectively unthrottled (only the Redis-down emergency fallback enforced anything). Each admitted request is now recorded distinctly and only when under the limit, so bursting past the configured limit correctly returns HTTP 429.
-- Control-API 429 responses now include `X-RateLimit-Limit`, matching both the framework-level rate-limit 429 and the Control-API's own success responses — a client reading it to self-pace no longer has to special-case `/api/baldur/*` 429s. The advertised limit is the one actually enforced on the request, including the Redis-down emergency fallback, which previously reported the normal limit while enforcing the stricter emergency one (and mislabeled its Prometheus mode).
-- Scheduled maintenance now runs out-of-box on a single host. The built-in jobs (applying delayed config changes, circuit-breaker recovery checks, DLQ archival, expired-config cleanup, SLA-drift detection, daily report) previously stayed dormant unless you separately enabled distributed leader election or wired Celery beat — a plain single-host install ran none of them. One process per host now elects itself via a local lock and runs them; multi-host single-execution still needs distributed leader election or Celery beat (see the multi-worker-coherence runbook).
-- FastAPI and Flask apps no longer load the Django integration at import time. Previously, if Django happened to be installed but unconfigured (a common transitive dependency), a non-Django app would pull in the entire Django API on startup and spawn a background thread that logged repeated errors on every tick; the Django layer is now imported lazily, only when actually used.
-- Constructing a PRO-tier resilience preset or policy (`ha_pipeline`, `HedgingPolicy`, `AsyncHedgingPolicy`) without a PRO license now raises a clear error naming the required tier, instead of an opaque `'NoneType' object is not callable`.
-- Async `aprotect()` no longer stalls the event loop on blocking side-effect I/O, and its deduplication round-trip is now awaitable-native. When `aprotect(idempotency_key=…)` runs against a shared (Redis) cache — the setup where cross-worker deduplication is meaningful — the deduplication round-trip previously ran directly on the asyncio event loop, serializing concurrent requests and collapsing async throughput toward single-threaded under load. The deduplication acquire and completion/failure mark now run as native `await` calls over an async Redis client (`redis.asyncio`), keeping the loop free to serve other requests without a worker-thread hop — and without the shared thread-pool ceiling that would otherwise bound concurrent deduplications under a Redis-latency spike. Exactly-once deduplication and failure capture are unchanged. (The Dead Letter Queue store on the failure path still runs off the loop, since that store is synchronous.)
-- Idempotency retry-path double-execute closed. When a keyed operation guarded by `protect(idempotency_key=…)` / `aprotect(…)` / `@idempotent` had a previous attempt that failed or crashed mid-execution, two concurrent retries against a shared (Redis) cache could both re-acquire the key and run the guarded function twice. The take-over of a failed or stale claim is now a single atomic operation, so exactly one retry proceeds and the rest are blocked — restoring the at-most-once guarantee on the retry path (the first acquire already held it).
-- Idempotency now honors `fail_open_on_cache_error` during a cache outage. When Redis was unreachable during an idempotency check, `protect(idempotency_key=…)`, `aprotect(…)`, and `@idempotent` previously ignored the opt-in and always blocked the request, misreporting the outage as a duplicate. The outage now surfaces correctly: with fail-open off (the default) the call raises `IdempotencyUnavailableError` — a distinct "could not verify" signal rather than a false "already processed" — and with fail-open on (`BALDUR_IDEMPOTENCY_FAIL_OPEN_ON_CACHE_ERROR=true`, or the facade's per-call `idempotency_fail_open=True`) the guarded function runs.
+- Web Console Meta-Watchdog panel no longer errors right after startup.
+- Emergency-mode auto-expiry and governance metric refresh now run out-of-box.
+- Control-API rate limit now enforces its per-minute cap.
+- Control-API `429` responses now include `X-RateLimit-Limit`.
+- Scheduled maintenance jobs now run out-of-box on a single host.
+- FastAPI and Flask apps no longer import the Django integration eagerly.
+- Building a PRO preset without a license now raises a clear tier error.
+- Async `aprotect()` deduplication is now awaitable-native (no loop stall).
+- Idempotency no longer double-executes on the retry path.
+- Idempotency now honors `fail_open_on_cache_error` during a cache outage.
 
 ### Security
 
-- Pool Circuit Breaker — the HTTP 503 returned when the database connection pool is exhausted no longer echoes the raw database/driver exception text in its response body (the detail is still logged server-side), preventing internal database information from leaking to API callers.
+- Pool circuit-breaker `503` no longer leaks raw database error text.
 
 ## [1.0.0] - 2026-06-23
 
@@ -106,13 +96,13 @@ changes are intentionally omitted.
 
 ### Added
 
-- Circuit Breaker — stops calling a failing dependency after repeated failures and automatically probes for recovery.
-- Retry — automatically re-runs a failed operation with growing backoff between attempts.
-- Idempotency — blocks duplicate runs of must-happen-once operations (card charge, email, shipment) when retries, double-clicks, or duplicate webhooks replay the same request.
-- Graceful Shutdown — drains in-flight requests and flushes subsystems on a shutdown signal before the process exits.
-- Health Check — ready-made liveness and readiness endpoints that signal Kubernetes and load balancers when a pod should receive traffic.
-- System Control — runtime kill switch that halts every automated intervention, plus an observe-only dry-run mode; no redeploy needed and the setting persists across restarts and servers.
-- Web Console — built-in zero-config browser UI to view self-healing state and run control actions (DLQ replay, circuit-breaker reset, emergency, canary) from one page.
-- Metrics — auto-recorded Prometheus-format metrics for the self-healing layer, with a cardinality guard that prevents label explosion.
-- Dashboard — one read-only call that aggregates the full self-healing picture (failures, recoveries, current health) into a single snapshot for monitoring screens.
-- Precomputed Cache — serves Baldur's own status endpoints (health, connection-pool) from a background-warmed cache.
+- Circuit Breaker — stop calling a failing dependency and auto-probe for recovery.
+- Retry — re-run a failed operation with growing backoff.
+- Idempotency — block duplicate runs of must-happen-once operations.
+- Graceful Shutdown — drain in-flight requests before the process exits.
+- Health Check — ready-made liveness and readiness endpoints.
+- System Control — runtime kill switch plus an observe-only dry-run mode.
+- Web Console — zero-config browser UI for self-healing state and controls.
+- Metrics — auto-recorded Prometheus metrics with a cardinality guard.
+- Dashboard — one-call snapshot of the full self-healing picture.
+- Precomputed Cache — serve Baldur's status endpoints from a warmed cache.
