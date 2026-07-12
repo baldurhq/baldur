@@ -330,6 +330,24 @@ class TestPrometheusQueryClientRetryContract:
         retry = client._session.get_adapter("https://x").max_retries
         assert set(retry.status_forcelist) == {502, 503, 504}
 
+    def test_retry_after_header_does_not_widen_retry_set_beyond_5xx(self):
+        """A 413/429 carrying Retry-After must NOT be retried.
+
+        urllib3's respect_retry_after_header defaults to True, which would make
+        is_retry() return True for the RETRY_AFTER_STATUS_CODES {413, 429, 503}
+        whenever a Retry-After header is present — regardless of status_forcelist
+        — widening the retry set beyond transient 5xx and letting a rate-limiting
+        backend multiply the per-call timeout via the server-dictated sleep. The
+        client pins it False so only the status_forcelist 5xx are retried.
+        """
+        client = PrometheusQueryClient(url=_BASE_URL, retry_total=1)
+        retry = client._session.get_adapter("https://x").max_retries
+        assert retry.respect_retry_after_header is False
+        assert retry.is_retry("GET", 429, has_retry_after=True) is False
+        assert retry.is_retry("GET", 413, has_retry_after=True) is False
+        # The status_forcelist 5xx are still retried.
+        assert retry.is_retry("GET", 503, has_retry_after=False) is True
+
     def test_connect_and_read_are_not_retried(self):
         """connect/read pinned to 0 — a down/slow Prometheus waits for next gate."""
         client = PrometheusQueryClient(url=_BASE_URL, retry_total=2)
