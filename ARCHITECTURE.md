@@ -79,6 +79,9 @@ ones:
 - **Metrics** — Prometheus metric names are `baldur_`-prefixed; event names are
   string literals of the form `{component}.{entity}_{action}`.
 - **No `print()`** in library code — use structured logging.
+- **Changelog terseness** — every `CHANGELOG.md` entry is a single line within a
+  length bound; implementation mechanics and migration tables move to the
+  concept guides.
 
 ## Where to look
 
