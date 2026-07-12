@@ -14,6 +14,7 @@ real ``get_circuit_breaker_service`` singleton.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 from baldur.api.middleware import circuit_breaker as cb_module
@@ -27,6 +28,7 @@ from baldur.interfaces.web_framework import (
     ResponseContext,
 )
 from baldur.services.circuit_breaker.service import CircuitBreakerService
+from baldur.utils.time import utc_now
 
 
 def _make_request(path: str = "/api/pay/") -> RequestContext:
@@ -37,10 +39,19 @@ def _mock_cb(
     *,
     is_enabled: bool = True,
     state: str = "closed",
+    opened_at: datetime | None = None,
+    recovery_timeout: float = 60.0,
 ) -> MagicMock:
     service = MagicMock(spec=CircuitBreakerService)
     service.is_enabled = is_enabled
-    service.get_state.return_value = state
+    state_data = MagicMock()
+    state_data.state = state
+    state_data.opened_at = opened_at
+    service.get_or_create_state.return_value = state_data
+    config = MagicMock()
+    config.recovery_timeout = recovery_timeout
+    service.get_effective_config.return_value = config
+    service.config = config
     return service
 
 
@@ -119,12 +130,48 @@ class TestCheckCbOpenBehavior:
         with patch.object(cb_module, "_try_get_cb_service", return_value=None):
             assert check_cb_open(_make_request(), service_name="payment") is None
 
-    def test_returns_none_when_get_state_raises(self):
+    def test_returns_none_when_state_lookup_raises(self):
         """Unexpected CB backend error → fail-open."""
         service = _mock_cb()
-        service.get_state.side_effect = RuntimeError("backend exploded")
+        service.get_or_create_state.side_effect = RuntimeError("backend exploded")
         with patch.object(cb_module, "_try_get_cb_service", return_value=service):
             assert check_cb_open(_make_request(), service_name="payment") is None
+
+    def test_retry_after_reflects_remaining_recovery_window(self):
+        """OPEN 20s into a 60s recovery window → Retry-After ~= 40s."""
+        opened = utc_now() - timedelta(seconds=20)
+        with patch.object(
+            cb_module,
+            "_try_get_cb_service",
+            return_value=_mock_cb(
+                state="open", opened_at=opened, recovery_timeout=60.0
+            ),
+        ):
+            response = check_cb_open(_make_request(), service_name="payment")
+        assert 39 <= int(response.headers["Retry-After"]) <= 41
+
+    def test_retry_after_floors_at_one_when_recovery_due(self):
+        """Recovery window already elapsed → floor of 1, never 0 or negative."""
+        opened = utc_now() - timedelta(seconds=120)
+        with patch.object(
+            cb_module,
+            "_try_get_cb_service",
+            return_value=_mock_cb(
+                state="open", opened_at=opened, recovery_timeout=60.0
+            ),
+        ):
+            response = check_cb_open(_make_request(), service_name="payment")
+        assert int(response.headers["Retry-After"]) == 1
+
+    def test_retry_after_uses_full_window_when_half_open(self):
+        """HALF_OPEN (no opened_at) → conservative full recovery window."""
+        with patch.object(
+            cb_module,
+            "_try_get_cb_service",
+            return_value=_mock_cb(state="half_open", recovery_timeout=45.0),
+        ):
+            response = check_cb_open(_make_request(), service_name="payment")
+        assert int(response.headers["Retry-After"]) == 45
 
 
 # =============================================================================
