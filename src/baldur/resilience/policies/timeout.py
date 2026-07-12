@@ -147,6 +147,14 @@ class TimeoutPolicy:
                 executed_policies=["timeout"],
             )
         except FuturesTimeoutError as e:
+            # On Python >= 3.11 ``concurrent.futures.TimeoutError`` is an
+            # alias of builtin ``TimeoutError``, so ``func`` raising
+            # ``TimeoutError`` itself also lands here. A completed future
+            # whose stored exception is the caught object means the error
+            # came FROM ``func`` — propagate it unmodified like any other
+            # business exception instead of reporting a policy timeout.
+            if future.done() and future.exception() is e:
+                raise
             future.cancel()
             err = TimeoutPolicyError(self._timeout_seconds)
             err.__cause__ = e
@@ -185,9 +193,11 @@ class AsyncTimeoutPolicy:
         context: PolicyContext | None = None,
         **kwargs: Any,
     ) -> PolicyResult[T]:
+        task: asyncio.Task[T] | None = None
         try:
             coro = func(*args, **kwargs)
-            value = await asyncio.wait_for(coro, timeout=self._timeout_seconds)  # type: ignore[arg-type]
+            task = asyncio.ensure_future(coro)  # type: ignore[arg-type]
+            value = await asyncio.wait_for(task, timeout=self._timeout_seconds)
             return PolicyResult(
                 value=value,
                 outcome=PolicyOutcome.SUCCESS,
@@ -196,6 +206,20 @@ class AsyncTimeoutPolicy:
         except asyncio.CancelledError:
             raise
         except TimeoutError as e:
+            # On Python >= 3.11 ``asyncio.TimeoutError`` is an alias of
+            # builtin ``TimeoutError``, so the coroutine raising
+            # ``TimeoutError`` itself also lands here. A finished,
+            # non-cancelled task whose stored exception is the caught object
+            # means the error came FROM the coroutine — propagate it
+            # unmodified like any other business exception. A real policy
+            # timeout leaves the task cancelled by ``asyncio.wait_for``.
+            if (
+                task is not None
+                and task.done()
+                and not task.cancelled()
+                and task.exception() is e
+            ):
+                raise
             err = TimeoutPolicyError(self._timeout_seconds)
             err.__cause__ = e
             return PolicyResult(
