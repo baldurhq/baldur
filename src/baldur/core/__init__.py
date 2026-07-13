@@ -134,6 +134,10 @@ if TYPE_CHECKING:
         TrackedRequest,
     )
     from baldur.core.singleflight import Singleflight
+    from baldur.core.stale_cache import (
+        StaleCacheEntry,
+        StaleCacheStore,
+    )
     from baldur.core.state_cache import CBStateCache
     from baldur.core.step_execution_engine import (
         CompensationFailure,
@@ -371,6 +375,8 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "TLSErrorInfo": ("baldur.core.tls_handler", "TLSErrorInfo"),
     "TLSErrorSeverity": ("baldur.core.tls_handler", "TLSErrorSeverity"),
     "TLSErrorType": ("baldur.core.tls_handler", "TLSErrorType"),
+    "StaleCacheEntry": ("baldur.core.stale_cache", "StaleCacheEntry"),
+    "StaleCacheStore": ("baldur.core.stale_cache", "StaleCacheStore"),
     "CacheStats": ("baldur.core.ttl_cache", "CacheStats"),
     "TTLCacheBase": ("baldur.core.ttl_cache", "TTLCacheBase"),
     "ConnectionInfo": ("baldur.interfaces.pool_monitor", "ConnectionInfo"),
@@ -540,6 +546,9 @@ __all__ = [
     # TTL Cache (#362 Functional Deduplication)
     "TTLCacheBase",
     "CacheStats",
+    # Serve-stale cache (in-process, per-worker)
+    "StaleCacheEntry",
+    "StaleCacheStore",
     # Singleflight (#594 Cache-Miss Stampede Protection)
     "Singleflight",
     # Degraded Mode Protocol (#362)

@@ -266,7 +266,7 @@ class PanicThresholdMonitor:
         Returns:
             PanicThresholdResult: trigger result
         """
-        halted_systems = ["replay", "canary_recovery", "auto_open", "auto_close"]
+        halted_systems = ["replay", "auto_open", "auto_close"]
         action_taken = "emergency_level_3_escalation"
 
         logger.critical(

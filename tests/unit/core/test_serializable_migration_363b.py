@@ -8,7 +8,7 @@ Representative classes selected across different type patterns:
 - Nested list of objects (StopConditionCheckResult → StopConditionViolation)
 - asdict() replacement (DriftThresholdConfig, EmergencyState, ConfigVersion,
   IncidentGroupEntry)
-- Optional Enum (CanaryRecoveryDecision)
+- Optional Enum field pattern
 - IntEnum fields (EmergencyState — EmergencyLevel)
 - set field (CanaryFeatureFlag → SampleConditional pattern)
 

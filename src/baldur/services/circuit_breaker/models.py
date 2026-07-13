@@ -31,7 +31,6 @@ class ServiceConfig:
         criticality: Importance level ("critical" | "high" | "medium" | "low")
         shed_priority: Load Shedding priority (higher sheds first, 0=never shed)
         min_traffic_percentage: Minimum guaranteed traffic (0~100%)
-        recovery_strategy: Per-service Recovery strategy override
         failure_threshold: Per-service CB failure threshold override
         window_seconds: Per-service CB observation window override
 
@@ -53,9 +52,6 @@ class ServiceConfig:
 
     # Minimum guaranteed traffic (0~100%)
     min_traffic_percentage: float = 5.0
-
-    # Per-service Recovery strategy override
-    recovery_strategy: RecoveryStrategy | None = None
 
     # Per-service CB config override
     failure_threshold: int | None = None
@@ -158,125 +154,6 @@ class LoadSheddingPolicy:
             ),
         ]
     )
-
-
-# =============================================================================
-# Canary Recovery
-# =============================================================================
-
-
-@dataclass(frozen=True)
-class CanaryRecoveryStageConfig:
-    """
-    Individual Canary stage.
-
-    Immutable: stage parameters cannot be edited on a handed-out
-    strategy; build a new stage tuple instead.
-
-    Attributes:
-        traffic_percent: Allowed traffic ratio (0~100)
-        duration_seconds: How long this stage lasts (0=advance immediately)
-        required_success_rate: Success rate required to advance to the next stage
-        description: stage description
-    """
-
-    traffic_percent: float  # Allowed traffic ratio (0~100)
-    duration_seconds: int  # How long this stage lasts (0=advance immediately)
-    required_success_rate: float  # Success rate required to advance to the next stage
-    description: str = ""  # stage description
-
-    def __post_init__(self) -> None:
-        """Validate canary stage values."""
-        if not (0.0 <= self.traffic_percent <= 100.0):
-            raise ValueError(
-                f"traffic_percent must be between 0 and 100, got {self.traffic_percent}"
-            )
-        if self.duration_seconds < 0:
-            raise ValueError(
-                f"duration_seconds must be non-negative, got {self.duration_seconds}"
-            )
-        if not (0.0 <= self.required_success_rate <= 100.0):
-            raise ValueError(
-                f"required_success_rate must be between 0 and 100, "
-                f"got {self.required_success_rate}"
-            )
-
-
-@dataclass(frozen=True)
-class RecoveryStrategy:
-    """
-    HALF_OPEN → CLOSED recovery strategy.
-
-    Instead of sending 100% traffic immediately in the HALF_OPEN state,
-    traffic is increased gradually to prevent a Thundering Herd.
-
-    Immutable (deep): the strategy and its stages cannot be edited on a
-    handed-out config; recovery behavior only changes through a fresh
-    instance passed to the registration path.
-
-    Attributes:
-        type: Strategy type ("immediate" | "canary")
-        canary_stages: Canary stage configuration (default 4 stages)
-        on_stage_failure: Action on stage failure ("restart" | "abort")
-        strict_mode: Strict mode for core services such as payments (requires 100% success rate)
-    """
-
-    # Strategy type
-    type: str = "canary"  # "immediate" | "canary"
-
-    # Canary stage configuration (default 4 stages); any caller-supplied
-    # sequence is coerced to a tuple in __post_init__
-    canary_stages: tuple[CanaryRecoveryStageConfig, ...] = field(
-        default_factory=lambda: (
-            CanaryRecoveryStageConfig(
-                traffic_percent=10.0,
-                duration_seconds=5,
-                required_success_rate=95.0,
-                description="Stage 1: observe for 5s at 10% traffic",
-            ),
-            CanaryRecoveryStageConfig(
-                traffic_percent=30.0,
-                duration_seconds=5,
-                required_success_rate=95.0,
-                description="Stage 2: observe for 5s at 30% traffic",
-            ),
-            CanaryRecoveryStageConfig(
-                traffic_percent=60.0,
-                duration_seconds=5,
-                required_success_rate=90.0,
-                description="Stage 3: observe for 5s at 60% traffic",
-            ),
-            CanaryRecoveryStageConfig(
-                traffic_percent=100.0,
-                duration_seconds=0,
-                required_success_rate=90.0,
-                description="Stage 4: full recovery",
-            ),
-        )
-    )
-
-    # Action on stage failure
-    on_stage_failure: str = "restart"  # "restart" | "abort"
-
-    # Strict mode for core services such as payments
-    strict_mode: bool = False  # If True, every stage requires a 100% success rate
-
-    def __post_init__(self) -> None:
-        """Validate recovery strategy values; coerce stages to a tuple."""
-        # object.__setattr__ is the frozen-dataclass idiom for
-        # __post_init__ normalization (a plain assignment would raise).
-        object.__setattr__(self, "canary_stages", tuple(self.canary_stages))
-
-        valid_types = {"immediate", "canary"}
-        if self.type not in valid_types:
-            raise ValueError(f"Invalid type: {self.type}. Valid values: {valid_types}")
-
-        valid_failure_actions = {"restart", "abort"}
-        if self.on_stage_failure not in valid_failure_actions:
-            raise ValueError(
-                f"Invalid on_stage_failure: {self.on_stage_failure}. "
-                f"Valid values: {valid_failure_actions}"
-            )
 
 
 # =============================================================================
@@ -432,7 +309,6 @@ class CircuitBreakerAdvancedConfig:
         services: Registered service list (required user setting)
         load_shedding: Load Shedding policy
         adaptive_threshold: Adaptive Threshold policy
-        default_recovery: Default Recovery strategy
         default_open_strategy: Default Open strategy
         blast_radius_integration: Enable Blast Radius integration
         blast_radius_block_on_critical: Block auto-OPEN on CRITICAL
@@ -450,9 +326,6 @@ class CircuitBreakerAdvancedConfig:
     adaptive_threshold: AdaptiveThresholdPolicy = field(
         default_factory=AdaptiveThresholdPolicy
     )
-
-    # Default Recovery strategy
-    default_recovery: RecoveryStrategy = field(default_factory=RecoveryStrategy)
 
     # Default Open strategy
     default_open_strategy: OpenStrategy = field(default_factory=OpenStrategy)

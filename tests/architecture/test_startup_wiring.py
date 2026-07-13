@@ -7,7 +7,7 @@ adapter's startup path. Defined-but-uncalled setup functions are bugs.
 Detection (per D5):
 1. Walk ``src/baldur/`` + ``src/baldur_pro/`` and collect every module-level
    ``def setup_*(...) | def start_*(...)`` definition. Class methods named
-   ``start_*`` are NOT in scope (e.g. ``RecoveryStrategy.start_recovery``).
+   ``start_*`` are NOT in scope (only module-level ``def``s).
 2. Walk the entry-point paths — ``src/baldur/adapters/{django,flask,fastapi}/``
    and ``src/baldur/cli/`` — and resolve ``ast.Call`` references through
    ``from ... import name`` aliases.

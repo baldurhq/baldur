@@ -20,7 +20,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 ### Changed
 
 - Outbound 429-backoff env vars move to `BALDUR_RATE_LIMIT_BACKOFF_*`. **Breaking**
-- `ServiceConfig` and its recovery config are now immutable. **Breaking**
+- `ServiceConfig` is now immutable. **Breaking**
 - `TTLCacheBase.get_stats()` returns a locked snapshot, not the live object.
 - Circuit-breaker state values are now lowercase. **Breaking**
 - Admin config-write endpoints reject unknown fields with `400`. **Breaking**
@@ -30,6 +30,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ### Removed
 
+- Circuit-breaker canary-recovery cluster and its public API. **Breaking**
+- `StaleCacheStore` moved to `baldur.core.stale_cache`. **Breaking**
 - `IPCStateCache.stats` — use `get_stats()`. **Breaking**
 - `baldur.core.timezone` — use `baldur.utils.time.utc_now`. **Breaking**
 - `baldur.settings.audit_settings` alias — use `from baldur.settings import audit`. **Breaking**

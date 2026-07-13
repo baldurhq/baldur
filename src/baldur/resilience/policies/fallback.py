@@ -642,7 +642,7 @@ class AsyncFallbackPolicy(Generic[T]):
 
 
 # =============================================================================
-# partition_aware_chain — PartitionState Provider 기반 동적 fallback chain
+# partition_aware_chain — dynamic fallback chain driven by a PartitionState provider
 # =============================================================================
 
 
@@ -652,23 +652,21 @@ def partition_aware_chain(
     db_fn: Callable[[], T] | None = None,
 ) -> list[Callable[[], T]]:
     """
-    PartitionState Provider 기반 동적 fallback chain 생성.
+    Build a dynamic fallback chain driven by a PartitionState provider.
 
-    각 fallback lambda가 실행되는 시점에 state_provider()를 호출하여
-    최신 PartitionState를 조회한다. 이로써 생성 시점의 상태 고정(Stale) 문제를 방지한다.
-
-    기존 PartitionAwareFallback의 PartitionState 직접 주입 + update_partition_state()
-    수동 갱신 방식을 대체한다.
+    Each fallback lambda calls ``state_provider()`` at the moment it runs, so it
+    reads the latest PartitionState instead of a value captured at construction
+    time (which would go stale).
 
     Args:
-        state_provider: 실행 시점마다 최신 PartitionState를 반환하는 공급자 함수.
-                        예: lambda: connection_health_monitor.get_state()
-        cache_fn: 캐시에서 데이터를 조회하는 함수.
-        db_fn: DB에서 데이터를 조회하는 함수.
+        state_provider: Supplier returning the current PartitionState on every
+            call. Example: ``lambda: connection_health_monitor.get_state()``.
+        cache_fn: Function that reads the value from cache.
+        db_fn: Function that reads the value from the database.
 
     Returns:
-        FallbackPolicy.fallback_chain에 전달할 callable 리스트.
-        각 callable은 실행 시점에 PartitionState 가용성을 실시간 체크한다.
+        A list of callables to pass as ``FallbackPolicy.fallback_chain``. Each
+        callable re-checks PartitionState availability at execution time.
 
     Usage::
 
@@ -681,34 +679,39 @@ def partition_aware_chain(
             default_value={"status": "degraded"},
         )
 
-    CB 독립 캐시 조회 패턴::
+    CB-independent cache lookup::
 
-        FallbackPolicy는 CircuitBreaker 상태와 독립적으로 모든 예외에서 작동한다.
-        (fallback.py execute()는 try/except Exception으로 모든 예외를 잡아
-        _apply_fallback()에 위임하며, CB 상태를 확인하지 않는다.)
+        FallbackPolicy runs on *every* exception, independently of circuit
+        breaker state (execute() catches Exception and delegates to
+        _apply_fallback() without consulting CB state). Pairing it with a
+        serve-stale cache lets a transient failure fall back to slightly stale
+        data. Use ``StaleCacheStore`` (baldur.core.stale_cache) through its
+        public API on both sides -- populate on the success path, read in the
+        fallback ``cache_fn`` (raising on a miss so the chain falls through to
+        ``db_fn``)::
 
-        반면 StaleCacheStore의 should_allow_with_fallback()은 cb_state를 필수로 받아
-        CLOSED 상태에서는 캐시를 사용하지 않는다.
+            from baldur.core.stale_cache import StaleCacheStore
 
-        partition_aware_chain()의 cache_fn으로 StaleCacheStore 조회를 넣으면
-        CB CLOSED 상태에서의 일시적 실패에도 캐시 조회가 가능하다:
+            store = StaleCacheStore()
+            key = StaleCacheStore.build_stale_cache_key("product", "123")
 
-        from baldur.services.circuit_breaker.stale_cache_integration import (
-            CanaryWithStaleCacheService,
-            get_canary_stale_cache_service,
-        )
+            def read_stale():
+                entry = store.get(key)
+                if entry is None:
+                    raise LookupError("no stale entry")
+                return entry.value
 
-        stale_service = get_canary_stale_cache_service()
-        cache_key = CanaryWithStaleCacheService.build_stale_cache_key("product", "123")
+            FallbackPolicy(
+                fallback_chain=partition_aware_chain(
+                    state_provider=lambda: health_monitor.get_state(),
+                    cache_fn=read_stale,
+                    db_fn=lambda: Product.objects.get(id=123),
+                ),
+                default_value={"status": "degraded"},
+            )
 
-        FallbackPolicy(
-            fallback_chain=partition_aware_chain(
-                state_provider=lambda: health_monitor.get_state(),
-                cache_fn=lambda: stale_service._cache.get(cache_key).value,
-                db_fn=lambda: Product.objects.get(id=123),
-            ),
-            default_value={"status": "degraded"},
-        )
+            # On the success path, keep the cache warm:
+            #   store.set(key, product, ttl_seconds=300)
     """
     chain: list[Callable[[], T]] = []
 

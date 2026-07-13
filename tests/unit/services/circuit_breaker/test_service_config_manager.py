@@ -3,7 +3,7 @@ Circuit Breaker ServiceConfigManager tests.
 
 Test Coverage:
 - ServiceConfigManager: service registration, criticality lookup, Load Shedding target selection
-- ServiceConfig immutability: frozen dataclass (top-level + nested recovery config)
+- ServiceConfig immutability: frozen dataclass
 """
 
 from dataclasses import FrozenInstanceError, replace
@@ -11,8 +11,6 @@ from dataclasses import FrozenInstanceError, replace
 import pytest
 
 from baldur.services.circuit_breaker.models import (
-    CanaryRecoveryStageConfig,
-    RecoveryStrategy,
     ServiceConfig,
 )
 
@@ -299,37 +297,6 @@ class TestServiceConfigImmutabilityBehavior:
         with pytest.raises(FrozenInstanceError):
             config.criticality = "low"
 
-    def test_nested_recovery_strategy_field_assignment_raises(self):
-        """The nested recovery strategy is frozen with it (deep freeze)."""
-        config = ServiceConfig(
-            service_id="payment-api",
-            criticality="critical",
-            recovery_strategy=RecoveryStrategy(type="canary", strict_mode=True),
-        )
-
-        with pytest.raises(FrozenInstanceError):
-            config.recovery_strategy.strict_mode = False
-
-    def test_canary_stage_field_assignment_raises(self):
-        """Individual canary stages are frozen too."""
-        strategy = RecoveryStrategy()
-
-        with pytest.raises(FrozenInstanceError):
-            strategy.canary_stages[0].traffic_percent = 100.0
-
-    def test_caller_supplied_stage_list_is_coerced_to_tuple(self):
-        """A caller-supplied stage list is accepted and stored as a tuple."""
-        stage = CanaryRecoveryStageConfig(
-            traffic_percent=50.0,
-            duration_seconds=1,
-            required_success_rate=90.0,
-        )
-
-        strategy = RecoveryStrategy(canary_stages=[stage])
-
-        assert isinstance(strategy.canary_stages, tuple)
-        assert strategy.canary_stages == (stage,)
-
     def test_manager_returned_config_cannot_alter_shedding_behavior(self):
         """A mutation attempt on a manager-returned config raises, and
         shedding selection keeps reflecting the registered values."""
@@ -514,83 +481,6 @@ class TestServiceConfigLoadShedding:
         assert manager.is_sheddable("payment-api") is False
         assert manager.is_sheddable("review-api") is True
         assert manager.is_sheddable("nonexistent") is False
-
-
-class TestServiceConfigRecoveryStrategy:
-    """ServiceConfigManager Recovery strategy tests."""
-
-    def setup_method(self):
-        """Reset the singleton before each test."""
-        from baldur.services.circuit_breaker.service_config import (
-            reset_service_config_manager,
-        )
-
-        reset_service_config_manager()
-
-    def teardown_method(self):
-        """Clean up after each test."""
-        from baldur.services.circuit_breaker.service_config import (
-            reset_service_config_manager,
-        )
-
-        reset_service_config_manager()
-
-    def test_get_recovery_strategy_default(self):
-        """Returns the default Recovery strategy."""
-        from baldur.services.circuit_breaker.service_config import (
-            get_service_config_manager,
-        )
-
-        manager = get_service_config_manager()
-        manager.register_service(
-            ServiceConfig(
-                service_id="test-api",
-                criticality="medium",
-            )
-        )
-
-        strategy = manager.get_recovery_strategy("test-api")
-
-        assert strategy.type == "canary"  # default
-
-    def test_get_recovery_strategy_service_override(self):
-        """Per-service Recovery strategy override."""
-        from baldur.services.circuit_breaker.service_config import (
-            get_service_config_manager,
-        )
-
-        manager = get_service_config_manager()
-        manager.register_service(
-            ServiceConfig(
-                service_id="payment-api",
-                criticality="critical",
-                recovery_strategy=RecoveryStrategy(type="canary", strict_mode=True),
-            )
-        )
-
-        strategy = manager.get_recovery_strategy("payment-api")
-
-        assert strategy.type == "canary"
-        assert strategy.strict_mode is True
-
-    def test_set_default_recovery_strategy(self):
-        """Set the default Recovery strategy."""
-        from baldur.services.circuit_breaker.service_config import (
-            get_service_config_manager,
-        )
-
-        manager = get_service_config_manager()
-        manager.set_default_recovery_strategy(RecoveryStrategy(type="immediate"))
-        manager.register_service(
-            ServiceConfig(
-                service_id="test-api",
-                criticality="medium",
-            )
-        )
-
-        strategy = manager.get_recovery_strategy("test-api")
-
-        assert strategy.type == "immediate"
 
 
 class TestServiceConfigThresholdOverride:

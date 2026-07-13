@@ -25,12 +25,12 @@ snapshot on every cluster the rollout touched. It is a configuration write, not 
 recovery takes effect without restarting anything.
 
 !!! note "Not the same as the circuit breaker's recovery"
-    The OSS [circuit breaker](../oss/circuit-breaker.md) also has a "canary"
-    step — a staged half-open traffic ramp it uses to ease one dependency back
-    into service after tripping. That is a different feature: it acts on
+    The OSS [circuit breaker](../oss/circuit-breaker.md) also *recovers* after
+    tripping, but it is not a canary: it admits a bounded number of concurrent
+    half-open probe calls and reverts to OPEN on the first failure. That acts on
     in-process traffic to a single dependency, not on fleet-wide configuration.
     Canary Recovery here is about rolling a **configuration change** out across
-    your fleet and rolling it back. See [OSS vs PRO](../oss-vs-pro.md#a-note-on-naming-two-kinds-of-canary).
+    your fleet and rolling it back. See [OSS vs PRO](../oss-vs-pro.md#a-note-on-naming-canary).
 
 ## Why it matters
 
