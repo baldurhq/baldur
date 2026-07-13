@@ -85,6 +85,12 @@ def _mock_cb(*, state: str = "closed", is_enabled: bool = True) -> MagicMock:
     service = MagicMock(spec=CircuitBreakerService)
     service.is_enabled = is_enabled
     service.get_state.return_value = state
+    # The CB middleware reads the full state object (state + opened_at for the
+    # Retry-After window) via get_or_create_state, not the bare get_state string.
+    state_data = service.get_or_create_state.return_value
+    state_data.state = state
+    state_data.opened_at = None
+    service.get_effective_config.return_value.recovery_timeout = 30.0
     return service
 
 

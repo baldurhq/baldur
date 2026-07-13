@@ -81,7 +81,9 @@ _ROOT_BUDGETS: dict[str, int] = {
     # 672: +1 — AsyncIdempotencyGate._check_and_acquire gained a C901 noqa,
     # mirroring its sync twin IdempotencyGate._check_and_acquire (same
     # status-branch shape: CONTINUE/SKIP/ABORT + stale/failed retry paths).
-    "baldur": 109,
+    # 706: -1 — canary_recovery.py deletion dropped its CanaryRecoveryManager
+    # C901 noqa (the unwired canary-recovery cluster was removed).
+    "baldur": 108,
     # 666: -1 — _update_config_with_meta refactored into _versioned_write +
     # _merge_changes + _post_write helpers, dropping its complexity noqa.
     "baldur_pro": 41,
