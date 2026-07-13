@@ -32,12 +32,12 @@ Usage:
 
 from __future__ import annotations
 
-import threading
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, ClassVar
 
 import structlog
 
+from baldur.core.rate_limiting import CooldownGate
 from baldur.notification.helpers import notify
 from baldur.tasks.notification_policy import (
     NotificationPolicy,
@@ -81,12 +81,11 @@ class BaseNotifyingTask:
     # Class-level policy (override in subclass)
     notification_policy: NotificationPolicy = NotificationPolicy()
 
-    # Class-level cooldown state (shared across instances and worker threads).
-    # Guarded by ``_alert_lock`` for all writes; the read-only gate reads a
-    # single GIL-atomic reference. The reserve-then-send pattern below closes
-    # the check-then-act window that let two threads both page for one event.
-    _last_alert_times: ClassVar[dict[str, datetime]] = {}
-    _alert_lock: ClassVar[threading.Lock] = threading.Lock()
+    # Class-level cooldown gate (shared across instances and worker threads,
+    # per-key ``f"{name}:{alert_key}"``). The reserve-then-send pattern closes
+    # the check-then-act window that let two threads both page for one event; a
+    # failed send releases the reservation.
+    _alert_gate: ClassVar[CooldownGate] = CooldownGate()
 
     # Task metadata (set by Celery if used as base)
     name: str = "unknown"
@@ -189,7 +188,9 @@ class BaseNotifyingTask:
         # page for the same event. A failed send rolls the reservation back so
         # a transient error does not start a cooldown that suppresses the retry.
         alert_key = f"{self.name}:{self._get_alert_key(result)}"
-        reserved, previous = self._reserve_alert_slot(alert_key)
+        reserved, token = self._alert_gate.try_reserve(
+            alert_key, self.notification_policy.cooldown_seconds
+        )
         if not reserved:
             logger.debug(
                 "celery_task.alert_suppressed_cooldown",
@@ -199,8 +200,8 @@ class BaseNotifyingTask:
 
         if self._send_notification(result):
             self._record_audit_trail(result)
-        else:
-            self._rollback_alert_slot(alert_key, previous)
+        elif token is not None:
+            self._alert_gate.release(alert_key, token)
 
     def _should_notify(self, result: dict[str, Any]) -> bool:
         """
@@ -276,69 +277,15 @@ class BaseNotifyingTask:
             return False
 
     def _can_send_alert(self, alert_key: str) -> bool:
-        """Read-only cooldown gate.
+        """Read-only cooldown pre-check.
 
-        Reads a single GIL-atomic reference (the ``dict.get``) so it is safe
-        without the lock; the atomic reserve below is the authoritative gate
-        for the immediate-send path.
+        Delegates to the shared gate's lock-free :meth:`CooldownGate.is_suppressed`;
+        the atomic :meth:`CooldownGate.try_reserve` on the immediate-send path is
+        the authoritative gate.
         """
-        last_time = self._last_alert_times.get(alert_key)
-        if last_time is None:
-            return True
-
-        elapsed = (utc_now() - last_time).total_seconds()
-        return elapsed >= self.notification_policy.cooldown_seconds
-
-    def _reserve_alert_slot(self, alert_key: str) -> tuple[bool, datetime | None]:
-        """Atomically reserve the cooldown slot for ``alert_key``.
-
-        Under ``_alert_lock``: evict expired keys, re-check the cooldown, and —
-        if allowed — write a tentative timestamp (the reservation) so a
-        concurrent worker sees the cooldown immediately. Returns
-        ``(reserved, previous_timestamp)``; ``previous_timestamp`` lets a failed
-        send roll the reservation back via :meth:`_rollback_alert_slot`.
-        """
-        now = utc_now()
-        cooldown = self.notification_policy.cooldown_seconds
-        with self._alert_lock:
-            self._evict_expired_locked(now, cooldown)
-            previous = self._last_alert_times.get(alert_key)
-            if previous is not None and (now - previous).total_seconds() < cooldown:
-                return False, previous
-            self._last_alert_times[alert_key] = now
-            return True, previous
-
-    def _rollback_alert_slot(self, alert_key: str, previous: datetime | None) -> None:
-        """Undo a reservation after a failed send so the cooldown does not start."""
-        with self._alert_lock:
-            if previous is None:
-                self._last_alert_times.pop(alert_key, None)
-            else:
-                self._last_alert_times[alert_key] = previous
-
-    def _evict_expired_locked(self, now: datetime, cooldown: float) -> None:
-        """Drop cooldown entries past their window (caller holds ``_alert_lock``).
-
-        Bounds the shared class-level dict — a key would otherwise be retained
-        forever after its first alert. An entry older than ``cooldown`` no
-        longer blocks a new alert, so removing it is behavior-preserving.
-        """
-        if cooldown <= 0:
-            return
-        expired = [
-            key
-            for key, ts in self._last_alert_times.items()
-            if (now - ts).total_seconds() >= cooldown
-        ]
-        for key in expired:
-            del self._last_alert_times[key]
-
-    def _record_alert_sent(self, alert_key: str) -> None:
-        """Record that an alert was sent for cooldown tracking."""
-        now = utc_now()
-        with self._alert_lock:
-            self._evict_expired_locked(now, self.notification_policy.cooldown_seconds)
-            self._last_alert_times[alert_key] = now
+        return not self._alert_gate.is_suppressed(
+            alert_key, self.notification_policy.cooldown_seconds
+        )
 
     def _send_notification(self, result: dict[str, Any]) -> bool:
         """Send notification via unified notification manager.
@@ -622,14 +569,12 @@ class BaseNotifyingTask:
 
 def reset_cooldowns() -> None:
     """Reset all alert cooldowns (for testing)."""
-    with BaseNotifyingTask._alert_lock:
-        BaseNotifyingTask._last_alert_times.clear()
+    BaseNotifyingTask._alert_gate.reset_all()
 
 
 def get_cooldown_status() -> dict[str, str]:
     """Get current cooldown status (for debugging)."""
-    with BaseNotifyingTask._alert_lock:
-        return {
-            key: value.isoformat()
-            for key, value in BaseNotifyingTask._last_alert_times.items()
-        }
+    return {
+        key: datetime.fromtimestamp(ts, tz=UTC).isoformat()
+        for key, ts in BaseNotifyingTask._alert_gate.snapshot().items()
+    }

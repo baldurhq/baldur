@@ -1,44 +1,42 @@
-"""Concurrency + reserve/rollback tests for the AsyncHealingLogger flush-error alert
-cooldown (D4).
+"""Concurrency + reserve/release tests for the AsyncHealingLogger flush-error
+alert cooldown.
 
-The cooldown moved from an unlocked global scalar to a per-alert-key map guarded by
-the class lock, with the slot reserved *under the lock* before the (unlocked) send and
-rolled back if the send fails. These tests pin the race-safety and the fail-open
-rollback behavior.
+The flush-error window count and the alert cooldown compose the shared
+``SlidingWindowCounter`` / ``CooldownGate`` primitives: the slot is reserved
+atomically before the (unlocked) send and released if the send fails. These
+tests pin the race-safety and the fail-open release behavior.
 """
 
 from __future__ import annotations
 
 import threading
-import time
 
 import pytest
 
+from baldur.core.rate_limiting import CooldownGate, SlidingWindowCounter
 from baldur.utils.async_logger import AsyncHealingLogger, FlushErrorAlertConfig
 
 
 @pytest.fixture
 def alert_state():
-    """Isolate the class-level alert cooldown state (xdist-safe teardown)."""
+    """Isolate the class-level alert gate + error window (xdist-safe teardown)."""
     cls = AsyncHealingLogger
-    saved_last = dict(cls._last_alert_time)
+    saved_gate = cls._alert_gate
+    saved_window = cls._error_window
     saved_config = cls._alert_config
-    saved_ts = list(cls._error_timestamps)
 
-    cls._last_alert_time = {}
-    cls._error_timestamps.clear()
+    cls._alert_gate = CooldownGate()
+    cls._error_window = SlidingWindowCounter()
     yield cls
 
-    cls._last_alert_time = saved_last
+    cls._alert_gate = saved_gate
+    cls._error_window = saved_window
     cls._alert_config = saved_config
-    cls._error_timestamps.clear()
-    cls._error_timestamps.extend(saved_ts)
 
 
 def _flood_recent_errors(cls, n: int) -> None:
-    now = time.time()
     for _ in range(n):
-        cls._error_timestamps.append(now)
+        cls._error_window.record(cls._FLUSH_ERROR_ALERT_KEY)
 
 
 class TestAlertCooldownConcurrencyBehavior:

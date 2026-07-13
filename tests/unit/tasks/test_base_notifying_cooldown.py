@@ -1,32 +1,42 @@
 """Concurrency safety of the BaseNotifyingTask alert cooldown.
 
-Regression coverage for the unlocked check-then-act race: ``_last_alert_times``
-is a ClassVar dict shared across task instances and worker threads, and the
-old flow checked the cooldown, sent, then recorded — so two threads could both
-pass the check and both page for one event. The immediate-send path now
-reserves the slot atomically under a class-level lock before sending, rolls
-the reservation back on a failed send, and lazily evicts expired keys on every
-reserve so the shared dict stays bounded.
+Regression coverage for the unlocked check-then-act race: the shared
+``CooldownGate`` ClassVar is shared across task instances and worker threads,
+and the immediate-send path reserves the slot atomically before sending,
+releases the reservation on a failed send, and evicts each entry by its own
+stored window so keys with different cooldowns never shorten one another.
 
 Test targets:
     - tasks.base.BaseNotifyingTask._on_post_execute: at-most-one send per
-      cooldown window per key under concurrency; rollback-on-failure.
-    - _reserve_alert_slot / _rollback_alert_slot / _evict_expired_locked:
-      reservation state transitions and lazy TTL eviction.
+      cooldown window per key under concurrency; release-on-failure.
+    - the shared CooldownGate reserve / release / per-window eviction driving
+      that path.
 """
 
 from __future__ import annotations
 
 import threading
-from datetime import timedelta
 
 import pytest
 
+from baldur.core.rate_limiting import CooldownGate
 from baldur.tasks.base import BaseNotifyingTask
 from baldur.tasks.notification_policy import NotificationPolicy, NotificationTiming
-from baldur.utils.time import utc_now
 
 _COOLDOWN_SECONDS = 300
+
+
+class _FakeClock:
+    """Deterministic injectable clock; ``advance`` steps time forward."""
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self._t = start
+
+    def __call__(self) -> float:
+        return self._t
+
+    def advance(self, seconds: float) -> None:
+        self._t += seconds
 
 
 class _RecordingTask(BaseNotifyingTask):
@@ -65,11 +75,13 @@ class _RecordingTask(BaseNotifyingTask):
 
 
 @pytest.fixture(autouse=True)
-def _isolate_cooldown_state():
-    """Reset the shared ClassVar cooldown dict around each test (xdist isolation)."""
-    BaseNotifyingTask._last_alert_times.clear()
-    yield
-    BaseNotifyingTask._last_alert_times.clear()
+def cooldown_gate():
+    """Swap a fresh fake-clock gate into the shared ClassVar (xdist isolation)."""
+    saved = BaseNotifyingTask._alert_gate
+    clock = _FakeClock()
+    BaseNotifyingTask._alert_gate = CooldownGate(clock=clock)
+    yield clock
+    BaseNotifyingTask._alert_gate = saved
 
 
 def _meaningful_result() -> dict:
@@ -78,7 +90,7 @@ def _meaningful_result() -> dict:
 
 
 class TestBaseNotifyingCooldownBehavior:
-    """Reserve-under-lock closes the duplicate-page window; rollback reopens it."""
+    """Reserve-under-lock closes the duplicate-page window; release reopens it."""
 
     def test_concurrent_post_execute_sends_at_most_one_alert(self):
         """N racing threads produce exactly one send for one alert key."""
@@ -111,51 +123,60 @@ class TestBaseNotifyingCooldownBehavior:
 
         assert len(task.sent) == 1
 
-    def test_failed_send_rolls_back_so_the_retry_can_send(self):
+    def test_failed_send_releases_so_the_retry_can_send(self):
         """A failed send must not start a cooldown that suppresses the retry."""
         task = _RecordingTask(send_results=[False, True])
 
-        task._on_post_execute(_meaningful_result())  # send fails, slot rolled back
+        task._on_post_execute(_meaningful_result())  # send fails, slot released
         task._on_post_execute(_meaningful_result())  # retry must go through
 
         assert len(task.sent) == 2
         # Only the delivered send records an audit entry.
         assert len(task.audited) == 1
 
-    def test_rollback_restores_the_previous_expired_timestamp(self):
-        """Rollback puts back the pre-reservation value, not an empty slot."""
-        task = _RecordingTask(send_results=[False])
-        alert_key = f"{task.name}:default"
-        expired = utc_now() - timedelta(seconds=_COOLDOWN_SECONDS * 2)
-        BaseNotifyingTask._last_alert_times[alert_key] = expired
+    def test_release_is_token_conditional(self, cooldown_gate):
+        """A stale release must not clobber a successor's live reservation."""
+        gate = BaseNotifyingTask._alert_gate
+        _, first_token = gate.try_reserve("k", _COOLDOWN_SECONDS)
+        cooldown_gate.advance(_COOLDOWN_SECONDS + 1)  # first reservation expires
+        _, second_token = gate.try_reserve("k", _COOLDOWN_SECONDS)  # successor
 
-        reserved, previous = task._reserve_alert_slot(alert_key)
-        assert reserved is True
-        task._rollback_alert_slot(alert_key, previous)
+        assert gate.release("k", first_token) is False  # stale -> no-op
+        assert gate.is_suppressed("k", _COOLDOWN_SECONDS) is True  # successor live
+        assert gate.release("k", second_token) is True
 
-        # The reservation is undone; an expired previous no longer blocks a send.
-        assert task._can_send_alert(alert_key) is True
+    def test_expired_keys_are_evicted_on_reserve(self, cooldown_gate):
+        """Reserving any key lazily drops other keys past their own window."""
+        gate = BaseNotifyingTask._alert_gate
+        gate.try_reserve("other_task:stale", _COOLDOWN_SECONDS)
+        cooldown_gate.advance(_COOLDOWN_SECONDS + 1)  # stale now past its window
 
-    def test_expired_keys_are_evicted_on_reserve(self):
-        """Reserving any key lazily drops other keys past their cooldown window."""
         task = _RecordingTask()
-        stale_key = "other_task:stale"
-        expired = utc_now() - timedelta(seconds=_COOLDOWN_SECONDS * 2)
-        BaseNotifyingTask._last_alert_times[stale_key] = expired
+        task._on_post_execute(_meaningful_result())  # reserves, evicting stale
 
-        task._on_post_execute(_meaningful_result())
-
-        assert stale_key not in BaseNotifyingTask._last_alert_times
+        assert "other_task:stale" not in gate.keys()
 
     def test_fresh_keys_survive_eviction(self):
         """Eviction only drops entries past the window; fresh entries stay."""
-        task = _RecordingTask()
-        fresh_key = "other_task:fresh"
-        BaseNotifyingTask._last_alert_times[fresh_key] = utc_now()
+        gate = BaseNotifyingTask._alert_gate
+        gate.try_reserve("other_task:fresh", _COOLDOWN_SECONDS)
 
+        task = _RecordingTask()
         task._on_post_execute(_meaningful_result())
 
-        assert fresh_key in BaseNotifyingTask._last_alert_times
+        assert "other_task:fresh" in gate.keys()
+
+    def test_short_cooldown_reserve_preserves_long_cooldown_entry(self, cooldown_gate):
+        """G6 regression: a short-cooldown reserve on the shared gate must not
+        strip a different key's still-in-window long-cooldown entry."""
+        gate = BaseNotifyingTask._alert_gate
+        gate.try_reserve("long:key", 300.0)
+        cooldown_gate.advance(10.0)  # long entry still well within its window
+
+        gate.try_reserve("short:key", 5.0)  # eviction is per-entry, not per-call
+
+        assert "long:key" in gate.keys()
+        assert gate.is_suppressed("long:key", 300.0) is True
 
     def test_aggregated_path_does_not_consume_the_cooldown(self):
         """Aggregation must not reserve — every result lands in the daily report."""
@@ -183,4 +204,4 @@ class TestBaseNotifyingCooldownBehavior:
 
         assert len(task.reported) == 2
         assert task.sent == []
-        assert f"{task.name}:default" not in BaseNotifyingTask._last_alert_times
+        assert f"{task.name}:default" not in BaseNotifyingTask._alert_gate.keys()

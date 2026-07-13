@@ -1,10 +1,12 @@
-"""In-process rate-limiting algorithm primitives.
+"""In-process rate-limiting and cooldown primitives.
 
-Shared, framework-free implementations of the two rate-limiting algorithms
-that were otherwise hand-reimplemented across every policy owner: an
-exact-timestamp sliding-window counter and a token bucket. Every in-process
-window/bucket policy composes these instead of forking the prune/refill
-arithmetic, so a window-boundary or refill fix lands in exactly one place.
+Shared, framework-free implementations of the in-process rate-limiting and
+cooldown primitives that were otherwise hand-reimplemented across every policy
+owner: an exact-timestamp sliding-window counter, a token bucket, and a
+single-slot cooldown / debounce gate. Every in-process window / bucket /
+cooldown policy composes these instead of forking the prune / refill / cooldown
+arithmetic, so a window-boundary, refill, or cooldown-semantics fix lands in
+exactly one place.
 
 Both primitives take an injectable ``clock`` (default ``time.time``) so a
 consumer can opt into ``time.monotonic`` and tests need not patch the global
@@ -27,7 +29,7 @@ import time
 from collections import defaultdict
 from collections.abc import Callable
 
-__all__ = ["SlidingWindowCounter", "TokenBucket"]
+__all__ = ["CooldownGate", "SlidingWindowCounter", "TokenBucket"]
 
 # Poll interval for TokenBucket.wait_for_token — how often it retries a consume
 # while blocking. A named constant rather than an inline literal at the call site.
@@ -93,6 +95,11 @@ class SlidingWindowCounter:
         ``max_events``, and records the event ONLY when allowed (so memory is
         bounded to ~``max_events`` per key). Returns ``(allowed, count)`` where
         ``count`` includes the new event when allowed.
+
+        Note:
+            For a single-slot cooldown with a rollback token (reserve, act,
+            release-on-failure), use :class:`CooldownGate` — ``try_acquire``
+            returns ``(allowed, count)`` and has no per-reservation rollback.
         """
         with self._lock:
             now = self._now()
@@ -298,3 +305,128 @@ class TokenBucket:
                 return True
             time.sleep(_WAIT_POLL_INTERVAL_SECONDS)
         return False
+
+
+class CooldownGate:
+    """Thread-safe, multi-key single-slot cooldown / debounce gate.
+
+    Suppresses a repeated action for ``cooldown_seconds`` after it last fired,
+    per key. Where :class:`SlidingWindowCounter` counts many events in a window,
+    ``CooldownGate`` tracks exactly one reservation per key and returns a
+    rollback token, so a failed action can release its slot without leaving a
+    cooldown that suppresses the retry — the "reserve, act, release-on-failure"
+    pattern every hand-rolled alert / debounce fork re-implemented.
+
+    Each key maps to ``(reserved_ts, window_at_reserve)``. Eviction judges every
+    entry against its OWN stored window, so a short-cooldown caller can never
+    strip a longer-cooldown caller's still-in-window reservation. The cooldown
+    decision itself uses the call-time ``cooldown_seconds``, so a settings
+    reload shortens or extends suppression immediately.
+
+    ``cooldown_seconds <= 0`` disables the gate: every reserve succeeds and the
+    cooldown check is skipped (matching the notification hub's ``cooldown <= 0``
+    untracked precedent).
+
+    The gate is mechanism-only (no logging / metrics / audit). Each public
+    method takes the single instance lock once and never calls another public
+    method on the same instance (lock symmetry); :meth:`is_suppressed` is a
+    lock-free GIL-atomic read.
+    """
+
+    def __init__(self, *, clock: Callable[[], float] | None = None) -> None:
+        # key -> (reserved_ts, window_seconds_at_reserve)
+        self._entries: dict[str, tuple[float, float]] = {}
+        self._lock = threading.Lock()
+        # None => wall-clock ``time.time`` resolved at call time (patchable in
+        # tests); inject a callable to opt into a deterministic clock.
+        self._clock = clock
+
+    def _now(self) -> float:
+        """Return the current time from the injected clock or wall clock."""
+        clock = self._clock
+        return clock() if clock is not None else time.time()
+
+    def try_reserve(
+        self, key: str, cooldown_seconds: float
+    ) -> tuple[bool, float | None]:
+        """Atomically reserve the cooldown slot for ``key`` under one lock.
+
+        Evicts every entry past its own stored window, then — when
+        ``cooldown_seconds > 0`` and ``key`` is still within the CALL's cooldown
+        — returns ``(False, None)``. Otherwise writes ``(now, cooldown_seconds)``
+        and returns ``(True, now)``. The returned timestamp is the rollback
+        token for :meth:`release`.
+        """
+        with self._lock:
+            now = self._now()
+            self._evict_expired(now)
+            if cooldown_seconds > 0:
+                entry = self._entries.get(key)
+                if entry is not None and now - entry[0] < cooldown_seconds:
+                    return False, None
+            self._entries[key] = (now, cooldown_seconds)
+            return True, now
+
+    def release(self, key: str, token: float) -> bool:
+        """Release a reservation iff its stored timestamp equals ``token``.
+
+        A successor's live reservation (a different timestamp) is never
+        clobbered, so a slow failed action cannot delete a rival's fresh slot.
+        Returns whether an entry was removed.
+        """
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is not None and entry[0] == token:
+                del self._entries[key]
+                return True
+            return False
+
+    def is_suppressed(self, key: str, cooldown_seconds: float) -> bool:
+        """Lock-free read: is ``key`` within its cooldown right now?
+
+        Reads a single GIL-atomic ``dict.get`` reference (the lock-symmetry
+        read-only exemption); the authoritative gate is :meth:`try_reserve`.
+        ``cooldown_seconds <= 0`` is never suppressed.
+        """
+        if cooldown_seconds <= 0:
+            return False
+        entry = self._entries.get(key)
+        if entry is None:
+            return False
+        return self._now() - entry[0] < cooldown_seconds
+
+    def snapshot(self) -> dict[str, float]:
+        """Return a locked copy mapping key -> reserved timestamp."""
+        with self._lock:
+            return {key: ts for key, (ts, _window) in self._entries.items()}
+
+    def keys(self) -> list[str]:
+        """Return a snapshot of the currently reserved keys."""
+        with self._lock:
+            return list(self._entries.keys())
+
+    def reset(self, key: str) -> bool:
+        """Drop the reservation for ``key``; return whether it existed."""
+        with self._lock:
+            if key in self._entries:
+                del self._entries[key]
+                return True
+            return False
+
+    def reset_all(self) -> None:
+        """Drop every reservation."""
+        with self._lock:
+            self._entries.clear()
+
+    def _evict_expired(self, now: float) -> None:
+        """Drop entries past their own stored window (caller holds the lock).
+
+        Per-entry window comparison: a short-cooldown reserve cannot evict a
+        longer-cooldown caller's still-in-window entry, so keys with different
+        cooldowns sharing one gate never shorten one another.
+        """
+        expired = [
+            key for key, (ts, window) in self._entries.items() if now - ts >= window
+        ]
+        for key in expired:
+            del self._entries[key]

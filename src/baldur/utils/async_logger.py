@@ -19,7 +19,6 @@ from __future__ import annotations
 import queue
 import threading
 import time
-from collections import deque
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -29,6 +28,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from baldur.core.backoff import ExponentialBackoff
+from baldur.core.rate_limiting import CooldownGate, SlidingWindowCounter
 from baldur.settings.batch import get_batch_settings
 
 if TYPE_CHECKING:
@@ -192,11 +192,11 @@ class AsyncHealingLogger:
     _retry_policy: BatchRetryPolicy = BatchRetryPolicy()
     _pending_retries: list[tuple[list[dict], int, float]] = []
 
-    # Error-alert-related
+    # Error-alert-related. The error-count window and the alert cooldown compose
+    # the shared primitives instead of a hand-rolled deque + last-send map.
     _alert_config: FlushErrorAlertConfig = FlushErrorAlertConfig()
-    _error_timestamps: deque = deque(maxlen=100)
-    # Per-alert-key last-send timestamps (reserve-under-lock; see _check_and_send_alert).
-    _last_alert_time: dict[str, float] = {}
+    _error_window: SlidingWindowCounter = SlidingWindowCounter()
+    _alert_gate: CooldownGate = CooldownGate()
     _FLUSH_ERROR_ALERT_KEY = "flush_error"
 
     # Settings come from BatchSettings
@@ -737,7 +737,9 @@ class AsyncHealingLogger:
         except Exception as e:
             with cls._lock:
                 cls._stats["flush_errors"] += 1
-                cls._error_timestamps.append(time.time())
+            cls._error_window.record_and_count(
+                cls._FLUSH_ERROR_ALERT_KEY, cls._alert_config.window_seconds
+            )
 
             # Alert check
             cls._check_and_send_alert()
@@ -845,31 +847,34 @@ class AsyncHealingLogger:
     def _check_and_send_alert(cls) -> None:
         """Check the error threshold and send an alert.
 
-        The cooldown slot is reserved *under the lock* before the (unlocked)
-        send, closing the check-then-act window the previous global scalar left
-        open — two concurrent flush errors can no longer both pass the check and
-        double-page. If the send fails the reservation is rolled back so the next
-        error can re-attempt immediately.
+        The cooldown slot is reserved atomically via the shared ``CooldownGate``
+        before the (unlocked) send, closing the check-then-act window the
+        previous global scalar left open — two concurrent flush errors can no
+        longer both pass the check and double-page. If the send fails the
+        reservation is released so the next error can re-attempt immediately.
+
+        The window count and the reserve are separate atomic steps: the
+        ``recent_errors`` value carried in the alert may include errors recorded
+        between the count and the reserve, but ``try_reserve`` remains the single
+        page-once authority, so the exactly-one-page-per-cooldown guarantee holds.
         """
         key = cls._FLUSH_ERROR_ALERT_KEY
-        now = time.time()
+        config = cls._alert_config
 
-        with cls._lock:
-            last = cls._last_alert_time.get(key, 0.0)
-            if now - last < cls._alert_config.cooldown_seconds:
-                return
-            window_start = now - cls._alert_config.window_seconds
-            recent_errors = sum(1 for ts in cls._error_timestamps if ts >= window_start)
-            if recent_errors < cls._alert_config.threshold_count:
-                return
-            prev = cls._last_alert_time.get(key, 0.0)
-            cls._last_alert_time[key] = now
+        # Read-only pre-filter: early-out while the cooldown is active.
+        if cls._alert_gate.is_suppressed(key, config.cooldown_seconds):
+            return
 
-        if not cls._send_flush_error_alert(recent_errors):
-            with cls._lock:
-                # Roll back only if no other thread advanced the slot meanwhile.
-                if cls._last_alert_time.get(key) == now:
-                    cls._last_alert_time[key] = prev
+        recent_errors = cls._error_window.count(key, config.window_seconds)
+        if recent_errors < config.threshold_count:
+            return
+
+        reserved, token = cls._alert_gate.try_reserve(key, config.cooldown_seconds)
+        if not reserved:
+            return
+
+        if not cls._send_flush_error_alert(recent_errors) and token is not None:
+            cls._alert_gate.release(key, token)
 
     @classmethod
     def _send_flush_error_alert(cls, error_count: int) -> bool:
@@ -951,7 +956,9 @@ class AsyncHealingLogger:
         except Exception as e:
             with cls._lock:
                 cls._stats["flush_errors"] += 1
-                cls._error_timestamps.append(time.time())
+            cls._error_window.record_and_count(
+                cls._FLUSH_ERROR_ALERT_KEY, cls._alert_config.window_seconds
+            )
             logger.warning(
                 "async_healing_logger.immediate_flush_failed",
                 error=e,
@@ -976,8 +983,8 @@ class AsyncHealingLogger:
             cls._wal_policy = WALPolicy.CRITICAL_ONLY
             cls._critical_executor = None
             cls._pending_retries = []
-            cls._error_timestamps = deque(maxlen=100)
-            cls._last_alert_time = {}
+            cls._error_window = SlidingWindowCounter()
+            cls._alert_gate = CooldownGate()
             cls._flush_requested.clear()
             cls._flush_done.clear()
             cls._stats = {

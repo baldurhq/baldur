@@ -48,6 +48,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - In-memory circuit-breaker rate-limit tracker no longer grows unbounded.
 - Capacity-reservation safety valve now engages when enabled.
 - Audit and incident-duration parsers skip malformed persisted input.
+- Notifying-task alert cooldowns no longer shorten each other across subclasses.
+- Rate-limit debounce state is now bounded (was an unbounded per-key map).
 
 ## [1.1.0] - 2026-07-07
 

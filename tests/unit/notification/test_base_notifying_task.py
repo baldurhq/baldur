@@ -13,7 +13,8 @@ BaseNotifyingTask 단위 테스트
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+import time
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
@@ -268,34 +269,34 @@ class TestBaseNotifyingTask:
         assert task._should_notify(result) is True
 
     def test_should_notify_cooldown(self):
-        """쿨다운 동안 알림 억제."""
+        """Alert is suppressed during the cooldown."""
         task = BaseNotifyingTask()
         task.name = "test_task"
         task.notification_policy = NotificationPolicy(
             cooldown_seconds=300,
         )
 
-        # 첫 번째 알림
+        # First alert
         result = {"count": 5}
         assert task._should_notify(result) is True
 
-        # 쿨다운 시간 기록
-        task._record_alert_sent("test_task:default")
+        # Reserve the cooldown slot
+        BaseNotifyingTask._alert_gate.try_reserve("test_task:default", 300.0)
 
-        # 두 번째 알림 (쿨다운 중)
+        # Second alert (within cooldown)
         assert task._should_notify(result) is False
 
     def test_cooldown_expired(self):
-        """쿨다운 만료 후 알림 허용."""
+        """Alert is allowed once the cooldown has expired."""
         task = BaseNotifyingTask()
         task.name = "test_task"
         task.notification_policy = NotificationPolicy(
-            cooldown_seconds=1,  # 1초
+            cooldown_seconds=1,  # 1 second
         )
 
-        # 과거 시간으로 기록
-        past_time = datetime.now(UTC) - timedelta(seconds=10)
-        BaseNotifyingTask._last_alert_times["test_task:default"] = past_time
+        # Seed a reservation aged past the 1s cooldown.
+        with patch("time.time", return_value=time.time() - 10):
+            BaseNotifyingTask._alert_gate.try_reserve("test_task:default", 1.0)
 
         result = {"count": 5}
         assert task._should_notify(result) is True
@@ -627,23 +628,23 @@ class TestHelperFunctions:
         reset_cooldowns()
 
     def test_reset_cooldowns(self):
-        """쿨다운 초기화."""
-        # 쿨다운 설정
-        BaseNotifyingTask._last_alert_times["test:key"] = datetime.now(UTC)
-        assert len(BaseNotifyingTask._last_alert_times) > 0
+        """Cooldown reset clears every reservation."""
+        # Reserve a cooldown slot
+        BaseNotifyingTask._alert_gate.try_reserve("test:key", 300.0)
+        assert BaseNotifyingTask._alert_gate.keys()
 
-        # 초기화
+        # Reset
         reset_cooldowns()
-        assert len(BaseNotifyingTask._last_alert_times) == 0
+        assert BaseNotifyingTask._alert_gate.keys() == []
 
     def test_get_cooldown_status(self):
-        """쿨다운 상태 조회."""
-        now = datetime.now(UTC)
-        BaseNotifyingTask._last_alert_times["test:key"] = now
+        """Cooldown status query returns an isoformat timestamp per key."""
+        reserved, token = BaseNotifyingTask._alert_gate.try_reserve("test:key", 300.0)
+        assert reserved is True
 
         status = get_cooldown_status()
         assert "test:key" in status
-        assert status["test:key"] == now.isoformat()
+        assert status["test:key"] == datetime.fromtimestamp(token, tz=UTC).isoformat()
 
 
 # =============================================================================
@@ -729,9 +730,9 @@ class TestIntegrationScenarios:
 
         result = task.run()
 
-        # 첫 번째 알림 허용
+        # First alert allowed
         assert task._should_notify(result) is True
-        task._record_alert_sent("frequent_task:default")
+        BaseNotifyingTask._alert_gate.try_reserve("frequent_task:default", 60.0)
 
-        # 두 번째 알림 억제 (쿨다운 중)
+        # Second alert suppressed (within cooldown)
         assert task._should_notify(result) is False
