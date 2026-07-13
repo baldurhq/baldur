@@ -122,6 +122,15 @@ def standard_pipeline(
     ``CircuitBreakerError`` is in Retry's non_retryable default, so CB-open
     errors stop retry immediately (1 attempt), then Fallback activates.
 
+    Shared contract with the ``protect()`` facade: both satisfy the single
+    published composition contract — retry runs first, CB-open degrades to the
+    fallback, and the breaker counts failures absorbed by the fallback. The one
+    observable difference is CB counting granularity: this preset places the CB
+    **innermost** (inside Retry), so it records one failure per attempt; the
+    facade (``protect()``) places the CB **outside** Retry, so one exhausted
+    retry-sequence is a single CB failure. Choose the preset for per-attempt CB
+    accounting, the facade for per-sequence.
+
     Args:
         service_name: Service identifier (used for metrics/logging and CB)
         max_retries: Maximum retry attempts

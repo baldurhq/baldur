@@ -201,12 +201,16 @@ class _FallbackApplied(BaseException):
     _FallbackApplied propagates directly to Composer's final handler
     regardless of policy ordering. Same pattern as Python's GeneratorExit.
 
-    Intentionally NOT reused for inner-policy metadata propagation (which
-    uses the closure-variable mechanism). Fallback semantics exclude
-    inner-policy failure-counting (CB.record_failure); metadata propagation
-    is the opposite — the call genuinely failed and CB should count it, so
-    the raw Exception must remain catchable by inner ``except Exception``
-    handlers like services/circuit_breaker/policy.py.
+    Placement-relative failure counting: the signal only bypasses the
+    failure counting of policies that sit OUTSIDE the fallback stage. When
+    the facade places Fallback outermost, CB/Timeout/Retry all sit inside
+    the fallback wrapper, so each records its own failure (CB.record_failure
+    via its normal ``except Exception`` path) BEFORE the wrapper absorbs the
+    error — the absorbed failure is fully counted. Only a policy layered
+    outside the fallback would have its counting bypassed; the facade layers
+    none. Metadata propagation deliberately uses the separate closure-variable
+    mechanism (not this signal), so inner policies stay observable to their
+    own ``except Exception`` handlers like services/circuit_breaker/policy.py.
     """
 
     def __init__(self, result: PolicyResult) -> None:
@@ -214,17 +218,54 @@ class _FallbackApplied(BaseException):
         super().__init__("Fallback applied")
 
 
+def _classify_exception_outcome(error: BaseException) -> PolicyOutcome:
+    """Classify a chain exception into its terminal PolicyOutcome.
+
+    Single source shared by (i) the composer terminal catch ladders, (ii) the
+    fallback wrappers' synthesized predicate input, and (iii) the standalone
+    ``FallbackPolicy.execute`` predicate input. A ``PolicyRejectedException``
+    (including ``CircuitBreakerOpenError`` / ``BulkheadFullError``) maps to
+    REJECTED; a ``TimeoutPolicyError`` to TIMEOUT; anything else to FAILURE.
+    The two matched branches are disjoint, so their relative order is
+    irrelevant.
+    """
+    if isinstance(error, PolicyRejectedException):
+        return PolicyOutcome.REJECTED
+    if isinstance(error, TimeoutPolicyError):
+        return PolicyOutcome.TIMEOUT
+    return PolicyOutcome.FAILURE
+
+
+def _fallback_source(metadata: dict[str, Any]) -> str | None:
+    """Derive the served fallback's source label from its result metadata.
+
+    ``fallback_fn`` / ``default_value`` paths carry an explicit
+    ``fallback_source``; a chain entry carries only its ``fallback_index``,
+    rendered here as ``chain[<i>]``.
+    """
+    src = metadata.get("fallback_source")
+    if src is not None:
+        return src
+    idx = metadata.get("fallback_index")
+    if idx is not None:
+        return f"chain[{idx}]"
+    return None
+
+
 def _build_failure_result(
     outcome: PolicyOutcome,
     error: Exception,
     executed_policies: list[str],
     metadata: dict[str, Any],
+    total_attempts: int = 1,
 ) -> PolicyResult:
     """Build the terminal failure-path PolicyResult.
 
     Centralizes outer catch-branch construction so every failure terminal
-    (REJECTED / TIMEOUT / FAILURE) propagates ``executed_policies`` and the
-    accumulated ``chain_metadata`` from inner-policy ``PolicyResult.metadata``.
+    (REJECTED / TIMEOUT / FAILURE) propagates ``executed_policies``, the
+    accumulated ``chain_metadata`` from inner-policy ``PolicyResult.metadata``,
+    and the chain-wide ``total_attempts`` (max across executed stages, so a
+    retry-exhausted failure reports the real attempt count instead of 1).
     Symmetric to the success-path returns inside the chain executors.
     """
     return PolicyResult(
@@ -233,6 +274,7 @@ def _build_failure_result(
         error=error,
         executed_policies=list(reversed(executed_policies)),
         metadata=dict(metadata),
+        total_attempts=total_attempts,
     )
 
 
@@ -454,25 +496,30 @@ class PolicyComposer(Generic[T]):
             except Exception as e:
                 return PolicyResult(value=None, outcome=PolicyOutcome.FAILURE, error=e)
 
-        # 중첩 함수 구성 (역순으로 감싸기)
+        # Build the nested execution (wrap in reverse order).
         def wrapped() -> T:
             return func(*args, **kwargs)
 
         executed_policies: list[str] = []
         # Closure-shared metadata accumulator. Each inner policy_wrapper
         # merges its PolicyResult.metadata here BEFORE returning the success
-        # value or re-raising the error. The four terminal branches below
-        # build the outer PolicyResult with metadata=chain_metadata.
+        # value or re-raising the error. The terminal branches below build the
+        # outer PolicyResult with metadata=chain_metadata.
         chain_metadata: dict[str, Any] = {}
+        # Closure-shared attempt accumulator (max across executed stages). Only
+        # the retry stage reports total_attempts > 1; every other stage reports
+        # 1, so ``max`` yields the real attempt count and every terminal reads a
+        # truthful value regardless of fallback presence.
+        chain_attempts = 1
 
         for policy in reversed(self._policies):
             outer_fn = wrapped
             current_policy = policy
 
             if isinstance(current_policy, FallbackPolicy):
-                # FallbackPolicy: _apply_fallback() 기반 조건부 래퍼
-                # func 1회만 실행 보장 (inner() 결과 재사용)
-                # _FallbackApplied 시그널로 SUCCESS_WITH_FALLBACK outcome 전파
+                # FallbackPolicy: conditional wrapper on top of _apply_fallback().
+                # Guarantees func runs once (reuses inner()'s outcome) and
+                # signals SUCCESS_WITH_FALLBACK via _FallbackApplied.
                 fb_policy_narrowed: FallbackPolicy = current_policy
 
                 def fallback_wrapper(
@@ -481,11 +528,15 @@ class PolicyComposer(Generic[T]):
                     try:
                         return inner()
                     except _FallbackApplied:
-                        raise  # 하위 FallbackPolicy의 시그널을 그대로 전파
+                        raise  # propagate an inner FallbackPolicy's signal as-is
                     except Exception as e:
-                        # predicate 확인 → _apply_fallback 직접 호출
+                        # Check the predicate against the TRUE classified outcome
+                        # (REJECTED for CB-open, TIMEOUT for a timeout), then call
+                        # _apply_fallback directly with the absorbed error.
                         check_result = PolicyResult(
-                            value=None, outcome=PolicyOutcome.FAILURE, error=e
+                            value=None,
+                            outcome=_classify_exception_outcome(e),
+                            error=e,
                         )
                         if fb._predicate(check_result):
                             fb_result = fb._apply_fallback(
@@ -498,14 +549,16 @@ class PolicyComposer(Generic[T]):
 
                 wrapped = fallback_wrapper
             else:
-                # 일반 Policy: execute()로 래핑
+                # Regular Policy: wrap via execute().
                 def policy_wrapper(
                     inner: Callable = outer_fn, p: ResiliencePolicy = current_policy
                 ) -> T:
+                    nonlocal chain_attempts
                     result = p.execute(inner, context=context)
                     # Merge BEFORE the success branch so both success-return
                     # and failure-raise paths contribute to chain_metadata.
                     _merge_chain_metadata(chain_metadata, result.metadata, p.name)
+                    chain_attempts = max(chain_attempts, result.total_attempts)
                     _trace_structural_control(p.name, result)
                     if result.success:
                         return result.value  # type: ignore[return-value]
@@ -519,7 +572,7 @@ class PolicyComposer(Generic[T]):
 
             executed_policies.append(current_policy.name)
 
-        # 최종 실행
+        # Final execution.
         try:
             value = wrapped()
             return PolicyResult(
@@ -527,30 +580,40 @@ class PolicyComposer(Generic[T]):
                 outcome=PolicyOutcome.SUCCESS,
                 executed_policies=list(reversed(executed_policies)),
                 metadata=dict(chain_metadata),
+                total_attempts=chain_attempts,
             )
         except _FallbackApplied as fa:
-            # FallbackPolicy가 적용된 경우 — SUCCESS_WITH_FALLBACK outcome 전파.
-            # chain_metadata is empty on this path (Fallback bypasses
-            # policy_wrapper merge); fb_result.metadata carries the keys.
+            # Fallback applied — propagate SUCCESS_WITH_FALLBACK. Under the
+            # facade's fallback-outermost order the inner stages populate
+            # chain_metadata (attempt counts, CB state) before the fallback
+            # absorbs; merge it under fb_result.metadata (fallback keys win).
             fb_result: PolicyResult = fa.result
+            original_error = fa.__cause__
+            logger.warning(
+                "policy_chain.fallback_applied",
+                error_type=(
+                    type(original_error).__name__
+                    if original_error is not None
+                    else None
+                ),
+                error=str(original_error) if original_error is not None else None,
+                fallback_source=_fallback_source(fb_result.metadata),
+            )
             return PolicyResult(
                 value=fb_result.value,
                 outcome=fb_result.outcome,
                 error=fb_result.error,
                 executed_policies=list(reversed(executed_policies)),
-                metadata=fb_result.metadata,
-            )
-        except PolicyRejectedException as e:
-            return _build_failure_result(
-                PolicyOutcome.REJECTED, e, executed_policies, chain_metadata
-            )
-        except TimeoutPolicyError as e:
-            return _build_failure_result(
-                PolicyOutcome.TIMEOUT, e, executed_policies, chain_metadata
+                metadata={**chain_metadata, **fb_result.metadata},
+                total_attempts=chain_attempts,
             )
         except Exception as e:
             return _build_failure_result(
-                PolicyOutcome.FAILURE, e, executed_policies, chain_metadata
+                _classify_exception_outcome(e),
+                e,
+                executed_policies,
+                chain_metadata,
+                chain_attempts,
             )
 
     # === Hook Notification ===
@@ -805,8 +868,10 @@ class AsyncPolicyComposer(Generic[T]):
 
         wrapped: Callable[[], Awaitable[T]] = initial_fn
         executed_policies: list[str] = []
-        # Closure-shared metadata accumulator (sync-symmetric — see G1/G2).
+        # Closure-shared accumulators (sync-symmetric): metadata merge + the
+        # max-across-stages attempt count. See the sync twin for the rationale.
         chain_metadata: dict[str, Any] = {}
+        chain_attempts = 1
 
         for policy in reversed(self._policies):
             outer_fn = wrapped
@@ -822,10 +887,14 @@ class AsyncPolicyComposer(Generic[T]):
                     try:
                         return await inner()
                     except _FallbackApplied:
-                        raise  # 하위 AsyncFallbackPolicy의 시그널을 그대로 전파
+                        raise  # propagate an inner AsyncFallbackPolicy's signal
                     except Exception as e:
+                        # Predicate against the TRUE classified outcome (REJECTED
+                        # for CB-open, TIMEOUT for a timeout), then _apply_fallback.
                         check_result = PolicyResult(
-                            value=None, outcome=PolicyOutcome.FAILURE, error=e
+                            value=None,
+                            outcome=_classify_exception_outcome(e),
+                            error=e,
                         )
                         if fb._predicate(check_result):
                             fb_result = await fb._apply_fallback(
@@ -843,8 +912,10 @@ class AsyncPolicyComposer(Generic[T]):
                     inner: Callable = outer_fn,
                     p: AsyncResiliencePolicy = current_policy,
                 ) -> T:
+                    nonlocal chain_attempts
                     result = await p.execute(inner, context=context)
                     _merge_chain_metadata(chain_metadata, result.metadata, p.name)
+                    chain_attempts = max(chain_attempts, result.total_attempts)
                     _trace_structural_control(p.name, result)
                     if result.success:
                         return result.value  # type: ignore[return-value]
@@ -858,7 +929,7 @@ class AsyncPolicyComposer(Generic[T]):
 
             executed_policies.append(current_policy.name)
 
-        # 최종 실행
+        # Final execution.
         try:
             value = await wrapped()
             return PolicyResult(
@@ -866,29 +937,39 @@ class AsyncPolicyComposer(Generic[T]):
                 outcome=PolicyOutcome.SUCCESS,
                 executed_policies=list(reversed(executed_policies)),
                 metadata=dict(chain_metadata),
+                total_attempts=chain_attempts,
             )
         except _FallbackApplied as fa:
-            # AsyncFallbackPolicy가 적용된 경우 — SUCCESS_WITH_FALLBACK outcome 전파.
-            # D5 parity fix: forward fb_result.metadata (sync sibling already does).
+            # Fallback applied — propagate SUCCESS_WITH_FALLBACK. Merge the inner
+            # chain_metadata under fb_result.metadata (sync-symmetric; fallback
+            # keys win) and log the degraded-mode WARNING once here.
             fb_result: PolicyResult = fa.result
+            original_error = fa.__cause__
+            logger.warning(
+                "policy_chain.fallback_applied",
+                error_type=(
+                    type(original_error).__name__
+                    if original_error is not None
+                    else None
+                ),
+                error=str(original_error) if original_error is not None else None,
+                fallback_source=_fallback_source(fb_result.metadata),
+            )
             return PolicyResult(
                 value=fb_result.value,
                 outcome=fb_result.outcome,
                 error=fb_result.error,
                 executed_policies=list(reversed(executed_policies)),
-                metadata=fb_result.metadata,
-            )
-        except PolicyRejectedException as e:
-            return _build_failure_result(
-                PolicyOutcome.REJECTED, e, executed_policies, chain_metadata
-            )
-        except TimeoutPolicyError as e:
-            return _build_failure_result(
-                PolicyOutcome.TIMEOUT, e, executed_policies, chain_metadata
+                metadata={**chain_metadata, **fb_result.metadata},
+                total_attempts=chain_attempts,
             )
         except Exception as e:
             return _build_failure_result(
-                PolicyOutcome.FAILURE, e, executed_policies, chain_metadata
+                _classify_exception_outcome(e),
+                e,
+                executed_policies,
+                chain_metadata,
+                chain_attempts,
             )
 
     # === Hook Notification (async — awaits each normalized channel) ===

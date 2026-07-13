@@ -15,6 +15,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - Remote-Prometheus time-series metrics provider (`BALDUR_PROMETHEUS_URL`).
 - `config_shadow` time-series metrics-provider DI seam.
 - Result-predicate retry (`retry_on_result`) and a `BALDUR_RETRY_MAX_ELAPSED` wall-clock budget.
+- `protect()` fallback callables may take the triggering error: `fallback(error)`.
 
 ### Changed
 
@@ -25,6 +26,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - Admin config-write endpoints reject unknown fields with `400`. **Breaking**
 - `import baldur` is now lightweight — hot-path barrels load lazily (251→8 modules).
 - Retry `outcome="exhausted"` now excludes non-retryable/budget/deadline aborts.
+- `protect()` fallback runs after retry; timeout/CB-open covered, CB still trips. **Breaking**
 
 ### Removed
 
@@ -40,6 +42,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ### Fixed
 
+- `protect_with_meta().attempts` reflects the real retry count with a fallback set (was `1`).
 - A protected builtin `TimeoutError` is no longer misreported as a policy timeout.
 - Circuit-breaker `503` now sends an accurate `Retry-After` (was hardcoded).
 - Real client IP resolves behind `X-Real-IP`-only proxies.

@@ -696,7 +696,7 @@ def _build_async_idempotency_stage(
 
 def _build_sync_composer(
     name: str,
-    fallback: Callable[[], T] | None,
+    fallback: Callable[[], T] | Callable[[Exception], T] | None,
     dlq: bool,
     retry_cfg: RetryPolicyConfig | None,
     circuit_breaker: bool,
@@ -705,11 +705,14 @@ def _build_sync_composer(
     retry_settings_derived: bool = False,
     idempotency_stage: tuple[Any, Any] | None = None,
 ) -> PolicyComposer[T]:
-    """Assemble sync policy chain: CB → Timeout → Retry → Fallback, with optional DLQ sink.
+    """Assemble sync policy chain: Fallback → CB → Timeout → Retry, with optional DLQ sink.
 
-    Policy add-order is outer→inner execution order. CB sits outermost so a
-    trip short-circuits before retry consumes budget. Timeout wraps the entire
-    retry+fallback chain to enforce wall-clock bounds.
+    Policy add-order is outer→inner execution order. Fallback sits OUTERMOST so
+    it is the last resort covering every inner outcome — a plain failure, retry
+    exhaustion, a timeout, and a CB-open rejection all route to it. CB sits
+    inside the fallback (so absorbed failures still count toward the breaker) but
+    outside Retry (so one exhausted retry-sequence is a single CB failure).
+    Timeout wraps the retry stage to bound the whole sequence.
 
     ``retry_policy`` (when non-None) replaces the native ``RetryPolicy``
     construction — ``retry_cfg`` MUST be None in that case (caller supplies
@@ -767,6 +770,8 @@ def _build_sync_composer(
         guard, hook = idempotency_stage
         composer.add_guard(guard)
         composer.add_hook(hook)
+    if fallback is not None:
+        composer.add(FallbackPolicy(fallback_fn=fallback))
     if circuit_breaker:
         composer.add(_get_or_build_cb_policy(name))
     if timeout_seconds is not None:
@@ -777,8 +782,6 @@ def _build_sync_composer(
         composer.add(retry_policy)
     elif retry_cfg is not None:
         composer.add(RetryPolicy(config=retry_cfg))
-    if fallback is not None:
-        composer.add(FallbackPolicy(fallback_fn=fallback))
     if dlq:
         composer.add_sink(_DLQ_SINK)
         _warn_if_dlq_backing_absent()
@@ -823,7 +826,7 @@ def _guard_async_unsupported(
 
 def _build_async_composer(
     name: str,
-    fallback: Callable[[], Awaitable[T]] | None,
+    fallback: Callable[[], Awaitable[T]] | Callable[[Exception], Awaitable[T]] | None,
     dlq: bool,
     retry_cfg: RetryPolicyConfig | None,
     circuit_breaker: bool,
@@ -831,10 +834,13 @@ def _build_async_composer(
     retry_policy: ResiliencePolicy[T] | None = None,
     idempotency_stage: tuple[Any, Any] | None = None,
 ) -> AsyncPolicyComposer[T]:
-    """Assemble async policy chain: CB → Timeout → Retry → Fallback, with optional DLQ sink.
+    """Assemble async policy chain: Fallback → CB → Timeout → Retry, with optional DLQ sink.
 
-    Sync-mirrored add-order (outer→inner execution): CB sits outermost so one
-    exhausted retry-sequence counts as a single CB failure — matching the sync
+    Sync-mirrored add-order (outer→inner execution): Fallback sits OUTERMOST as
+    the last resort covering every inner outcome (plain failure, retry
+    exhaustion, timeout, CB-open). CB sits inside the fallback (absorbed failures
+    still count toward the breaker) but outside Retry so one exhausted
+    retry-sequence counts as a single CB failure — matching the sync
     ``_build_sync_composer`` semantics — and Timeout wraps the whole retry
     chain to bound the entire sequence (a global, not per-attempt, timeout).
 
@@ -861,6 +867,8 @@ def _build_async_composer(
         guard, hook = idempotency_stage
         composer.add_guard(guard)
         composer.add_hook(hook)
+    if fallback is not None:
+        composer.add(AsyncFallbackPolicy(fallback_fn=fallback))
     if circuit_breaker:
         composer.add(AsyncCircuitBreakerPolicy(_get_or_build_cb_policy(name)))
     if timeout_seconds is not None:
@@ -889,8 +897,6 @@ def _build_async_composer(
         from baldur.resilience.policies.async_retry import AsyncRetryPolicy
 
         composer.add(AsyncRetryPolicy.from_policy_config(retry_cfg))
-    if fallback is not None:
-        composer.add(AsyncFallbackPolicy(fallback_fn=fallback))
     if dlq:
         composer.add_sink(_DLQ_SINK)
         _warn_if_dlq_backing_absent()
@@ -1024,7 +1030,7 @@ def protect(  # verified-by: test_concurrent_duplicates_run_side_effect_exactly_
     name: str,
     fn: Callable[[], T],
     *,
-    fallback: Callable[[], T] | None = None,
+    fallback: Callable[[], T] | Callable[[Exception], T] | None = None,
     dlq: bool | None = None,
     retry: bool | RetryPolicyConfig | ResiliencePolicy[T] | None = None,
     circuit_breaker: bool | None = None,
@@ -1037,10 +1043,12 @@ def protect(  # verified-by: test_concurrent_duplicates_run_side_effect_exactly_
 ) -> T:
     """Run ``fn`` under Baldur's composed resilience pipeline and return its value.
 
-    Composition order (outer→inner): CircuitBreaker → Retry → Fallback. Final
-    failures optionally flow through ``DLQSink``. ``fn`` runs at most
-    ``retry.max_attempts`` times; on all-failed without fallback the original
-    exception is re-raised.
+    Composition order (outer→inner): Fallback → CircuitBreaker → Timeout →
+    Retry. ``fn`` runs the full ``retry.max_attempts`` before the fallback
+    serves; the fallback is the last resort covering retry exhaustion, a
+    timeout, AND a CB-open rejection. On all-failed WITHOUT a fallback the
+    original exception is re-raised; final failures optionally flow through
+    ``DLQSink``.
 
     Args:
         name: Service identifier. Used as the Circuit Breaker key, Retry
@@ -1048,8 +1056,12 @@ def protect(  # verified-by: test_concurrent_duplicates_run_side_effect_exactly_
         fn: Zero-argument callable to protect. Must be idempotent when
             ``retry`` is enabled — or supply ``idempotency_key=`` to dedup
             duplicate executions.
-        fallback: Optional zero-argument callable invoked when ``fn`` raises
-            and the pipeline decides to fall back. Its return value is returned.
+        fallback: Optional callable invoked when the protected call fails and
+            the pipeline falls back; its return value is returned. Accepts
+            either zero arguments (``fallback()``) or one positional
+            (``fallback(error)`` — the absorbed exception, so it can branch on
+            failure type and re-raise to decline). Runs OUTSIDE the timeout
+            clock, so keep it cheap and local.
         dlq: When True, final failures flow into the DLQ repository resolved
             via ``ProviderRegistry``. ``None`` uses ``ProtectSettings.default_dlq``.
         retry: ``True`` uses ``RetryPolicyConfig.from_settings(domain=name)``;
@@ -1159,7 +1171,7 @@ def protect_with_meta(
     name: str,
     fn: Callable[[], T],
     *,
-    fallback: Callable[[], T] | None = None,
+    fallback: Callable[[], T] | Callable[[Exception], T] | None = None,
     dlq: bool | None = None,
     retry: bool | RetryPolicyConfig | ResiliencePolicy[T] | None = None,
     circuit_breaker: bool | None = None,
@@ -1250,7 +1262,9 @@ async def aprotect(  # verified-by: test_concurrent_duplicates_run_side_effect_e
     name: str,
     fn: Callable[[], Awaitable[T]],
     *,
-    fallback: Callable[[], Awaitable[T]] | None = None,
+    fallback: Callable[[], Awaitable[T]]
+    | Callable[[Exception], Awaitable[T]]
+    | None = None,
     dlq: bool | None = None,
     retry: bool | RetryPolicyConfig | ResiliencePolicy[T] | None = None,
     circuit_breaker: bool | None = None,
@@ -1271,9 +1285,11 @@ async def aprotect(  # verified-by: test_concurrent_duplicates_run_side_effect_e
     ``circuit_breaker`` and ``retry`` apply on the async path exactly as in
     ``protect()``: ``None`` resolves against ``ProtectSettings.default_*`` (CB on
     by default, retry off), an explicit ``True`` / ``RetryPolicyConfig`` opts in.
-    Composition order mirrors sync — CB (outermost) → Timeout → Retry → Fallback
-    — so one exhausted retry-sequence is a single CB failure and the timeout
-    bounds the whole sequence (a global, not per-attempt, timeout). Async
+    Composition order mirrors sync — Fallback (outermost) → CB → Timeout →
+    Retry — so retry runs its full ``max_attempts`` before the fallback serves,
+    one exhausted retry-sequence is a single CB failure, and the timeout bounds
+    the whole sequence (a global, not per-attempt, timeout). The fallback is the
+    last resort covering retry exhaustion, timeout, AND CB-open. Async
     ``dlq=True`` routes an exhausted failure to the DLQ sink (the async retry
     stage arms ``should_dlq``).
 
@@ -1338,7 +1354,9 @@ async def aprotect_with_meta(
     name: str,
     fn: Callable[[], Awaitable[T]],
     *,
-    fallback: Callable[[], Awaitable[T]] | None = None,
+    fallback: Callable[[], Awaitable[T]]
+    | Callable[[Exception], Awaitable[T]]
+    | None = None,
     dlq: bool | None = None,
     retry: bool | RetryPolicyConfig | ResiliencePolicy[T] | None = None,
     circuit_breaker: bool | None = None,
@@ -1530,7 +1548,7 @@ def _precompute_signature_cache(
 def protected(
     name: str,
     *,
-    fallback: Callable[[], Any] | None = None,
+    fallback: Callable[[], Any] | Callable[[Exception], Any] | None = None,
     dlq: bool | None = None,
     retry: bool | RetryPolicyConfig | ResiliencePolicy[Any] | None = None,
     circuit_breaker: bool | None = None,
@@ -1633,7 +1651,9 @@ def protected(
 def aprotected(
     name: str,
     *,
-    fallback: Callable[[], Awaitable[Any]] | None = None,
+    fallback: Callable[[], Awaitable[Any]]
+    | Callable[[Exception], Awaitable[Any]]
+    | None = None,
     dlq: bool | None = None,
     retry: bool | RetryPolicyConfig | ResiliencePolicy[Any] | None = None,
     circuit_breaker: bool | None = None,

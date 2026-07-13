@@ -23,6 +23,8 @@ RetryPolicy가 기존 RetryHandler를 재사용하지 않은 선례와 동일하
 
 from __future__ import annotations
 
+import functools
+import inspect
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
@@ -34,6 +36,7 @@ from baldur.interfaces.resilience_policy import (
     PolicyResult,
     ResiliencePolicy,
 )
+from baldur.resilience.policies.composer import _classify_exception_outcome
 
 __GENERIC = (
     Generic  # placeholder so ruff doesn't strip the import before class defs use it
@@ -49,6 +52,57 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 T = TypeVar("T")
+
+# Bounded so a per-call lambda fallback (the composer is NOT cached when a
+# fallback is set) cannot grow the cache without bound; module-level callables
+# — the common case — stay resident and pay the signature walk once process-wide.
+_FALLBACK_ARITY_CACHE_SIZE = 1024
+
+
+@functools.lru_cache(maxsize=_FALLBACK_ARITY_CACHE_SIZE)
+def _fallback_accepts_error(fn: Callable[..., Any]) -> bool:
+    """Return True if the fallback callable takes the caught error positionally.
+
+    Resolved once per callable identity (memoized). Call shapes:
+
+    - zero required positional (and no ``*args``) → legacy ``fb()``;
+    - exactly one required positional, or ``*args``, or ``**kwargs``-only →
+      error-accepting ``fb(error)``;
+    - >= 2 required positional → ``ValueError`` at construction (fail loud, not a
+      runtime ``TypeError`` mid-incident);
+    - signature-uninspectable (C builtins, exotic ``__call__``, ``Mock``) →
+      legacy ``fb()`` — any signature-parse failure degrades safely to zero-arg
+      rather than raising mid-construction.
+    """
+    try:
+        sig = inspect.signature(fn)
+    except (ValueError, TypeError):
+        return False
+
+    required_positional = 0
+    has_var_positional = False
+    has_var_keyword = False
+    for param in sig.parameters.values():
+        if param.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        ):
+            if param.default is inspect.Parameter.empty:
+                required_positional += 1
+        elif param.kind is inspect.Parameter.VAR_POSITIONAL:
+            has_var_positional = True
+        elif param.kind is inspect.Parameter.VAR_KEYWORD:
+            has_var_keyword = True
+
+    if required_positional >= 2:
+        raise ValueError(
+            f"Fallback callable {getattr(fn, '__name__', fn)!r} declares "
+            f"{required_positional} required positional parameters; a fallback "
+            f"takes either zero arguments or one (the caught error)."
+        )
+    if required_positional == 1:
+        return True
+    return has_var_positional or has_var_keyword
 
 
 # =============================================================================
@@ -100,19 +154,34 @@ class FallbackPolicy(ResiliencePolicy[T], Generic[T]):
     ):
         """
         Args:
-            fallback_fn: 단일 fallback 함수.
-            default_value: 기본값 (모든 fallback 실패 시).
-            fallback_chain: 순차 시도할 fallback 함수 리스트.
-            predicate: Fallback 활성화 조건 (기본: outcome이 SUCCESS가 아닌 모든 경우).
-            strategy: 기존 FallbackStrategy 구현체 래핑 (과도기 Shim).
-                      SimpleFallback, PartitionAwareFallback 등을 래핑할 수 있으나,
-                      primary_fn 중복 실행, ABC 계약 위반 등 구조적 문제로
-                      완벽한 하위 호환을 보장하지 않는다.
-                      네이티브 fallback_chain + predicate 사용을 권장한다.
+            fallback_fn: Single fallback callable. Takes either zero arguments
+                (legacy ``fb()``) or one positional (``fb(error)`` — the caught
+                exception); arity is detected once at construction.
+            default_value: Default value (used when every fallback fails).
+            fallback_chain: Ordered list of fallback callables to try in turn.
+                Each entry follows the same zero-arg / one-arg contract.
+            predicate: Fallback activation condition (default: any non-SUCCESS
+                outcome).
+            strategy: Wraps an existing FallbackStrategy implementation
+                (transitional shim). Can wrap SimpleFallback,
+                PartitionAwareFallback, etc., but does not guarantee full
+                backward compatibility due to structural issues (primary_fn
+                double-execution, ABC contract violations). Prefer the native
+                fallback_chain + predicate.
+
+        Raises:
+            ValueError: A fallback callable declares >= 2 required positional
+                parameters (fail loud at construction, not mid-incident).
         """
         self._fallback_fn = fallback_fn
+        self._fallback_fn_accepts_error = (
+            _fallback_accepts_error(fallback_fn) if fallback_fn is not None else False
+        )
         self._default_value = default_value
         self._fallback_chain = fallback_chain or []
+        self._chain_accepts_error = [
+            _fallback_accepts_error(fb) for fb in self._fallback_chain
+        ]
         self._predicate = predicate or self._default_predicate
         self._strategy = strategy
 
@@ -134,16 +203,18 @@ class FallbackPolicy(ResiliencePolicy[T], Generic[T]):
         **kwargs: Any,
     ) -> PolicyResult[T]:
         """
-        단독 사용 — func 실행 후 실패 시 Fallback 체인 순차 시도.
+        Standalone use — run func, and on failure try the fallback chain.
 
-        ResiliencePolicy Protocol 구현.
-        CircuitBreakerPolicy, BulkheadPolicy, RetryPolicy와
-        동일한 시그니처(execute(func, *args, context=, **kwargs))를 따른다.
+        Implements the ResiliencePolicy Protocol with the same signature
+        (execute(func, *args, context=, **kwargs)) as CircuitBreakerPolicy,
+        BulkheadPolicy, and RetryPolicy.
 
-        실행 순서:
-        1. func() 실행
-        2. 성공 → PolicyResult(SUCCESS) 즉시 반환
-        3. 실패 → _apply_fallback(error) 위임
+        Execution order:
+        1. Run func().
+        2. Success → return PolicyResult(SUCCESS) immediately.
+        3. Failure → consult the predicate against the classified outcome; if it
+           declines, return a FAILURE result carrying the original error;
+           otherwise delegate to _apply_fallback(error).
         """
         try:
             result = func(*args, **kwargs)
@@ -154,6 +225,19 @@ class FallbackPolicy(ResiliencePolicy[T], Generic[T]):
                 metadata={"fallback_used": False},
             )
         except Exception as primary_error:
+            check_result: PolicyResult[T] = PolicyResult(
+                value=None,
+                outcome=_classify_exception_outcome(primary_error),
+                error=primary_error,
+            )
+            if not self._predicate(check_result):
+                return PolicyResult(
+                    value=None,
+                    outcome=PolicyOutcome.FAILURE,
+                    error=primary_error,
+                    executed_policies=["fallback"],
+                    metadata={"fallback_used": False},
+                )
             return self._apply_fallback(
                 original_error=primary_error,
                 context=context,
@@ -165,41 +249,50 @@ class FallbackPolicy(ResiliencePolicy[T], Generic[T]):
         context: PolicyContext | None = None,
     ) -> PolicyResult[T]:
         """
-        Composer 전용 — func 재실행 없이 Fallback 체인만 시도.
+        Composer-only — try the fallback chain without re-running func.
 
-        PolicyComposer._execute_policy_chain()의 fallback_wrapper에서 호출된다.
-        이전 Policy 체인에서 이미 실패한 상황이므로 func를 다시 실행하지 않는다.
+        Called from PolicyComposer._execute_policy_chain()'s fallback_wrapper.
+        The prior policy chain has already failed, so func is not re-run.
 
-        CircuitBreakerPolicy, RetryPolicy, BulkheadPolicy는
-        execute()만으로 단독/Composer 양쪽 모두 동작하지만,
-        FallbackPolicy만 "단독 시 func 실행 + Composer 시 func 미실행"이 필요하다.
+        CircuitBreakerPolicy, RetryPolicy, and BulkheadPolicy work both
+        standalone and inside the composer via execute() alone; only
+        FallbackPolicy needs "run func standalone, skip func inside the
+        composer".
 
-        실행 순서:
-        1. strategy Shim 시도 (설정된 경우, 과도기)
-        2. fallback_chain 순차 시도
-        3. fallback_fn 시도
-        4. default_value 반환
-        5. 모든 실패 → PolicyResult(FAILURE)
+        Execution order:
+        1. Try the strategy shim (if configured, transitional).
+        2. Try the fallback_chain in turn.
+        3. Try fallback_fn.
+        4. Return default_value.
+        5. All failed → PolicyResult(FAILURE).
+
+        Each error-accepting fallback (arity detected at construction) receives
+        ``original_error`` positionally so it can branch on the failure type.
 
         Args:
-            original_error: 이전 Policy 체인에서 발생한 원본 예외.
-            context: PolicyContext (Guard/Hook/Sink 전파용).
+            original_error: The original exception from the prior policy chain.
+            context: PolicyContext (propagated to Guard/Hook/Sink).
 
         Returns:
-            PolicyResult[T]: Fallback 결과. 예외를 던지지 않는다.
+            PolicyResult[T]: The fallback result. Never raises.
         """
-        # Step 1: strategy Shim 시도 (과도기 — 기존 FallbackStrategy 래핑)
-        # strategy가 성공적 fallback을 반환하면 즉시 사용한다.
-        # strategy가 FAIL_FAST(FAILURE)를 반환하면 네이티브 경로로 진행한다.
+        # Step 1: strategy shim (transitional — wraps an existing
+        # FallbackStrategy). If the shim returns a successful fallback, use it
+        # immediately; a FAIL_FAST (FAILURE) result falls through to the native
+        # path below.
         if self._strategy is not None:
             shim_result = self._execute_strategy_shim(original_error)
             if shim_result is not None and shim_result.success:
                 return shim_result
 
-        # Step 2: fallback_chain 순차 시도
+        # Step 2: try the fallback_chain in turn.
         for i, fallback in enumerate(self._fallback_chain):
             try:
-                result = fallback()
+                result = (
+                    fallback(original_error)
+                    if self._chain_accepts_error[i]
+                    else fallback()
+                )
                 return PolicyResult(
                     value=result,
                     outcome=PolicyOutcome.SUCCESS_WITH_FALLBACK,
@@ -218,10 +311,14 @@ class FallbackPolicy(ResiliencePolicy[T], Generic[T]):
                 )
                 continue
 
-        # Step 3: fallback_fn 시도
+        # Step 3: try fallback_fn.
         if self._fallback_fn is not None:
             try:
-                result = self._fallback_fn()
+                result = (
+                    self._fallback_fn(original_error)
+                    if self._fallback_fn_accepts_error
+                    else self._fallback_fn()
+                )
                 return PolicyResult(
                     value=result,
                     outcome=PolicyOutcome.SUCCESS_WITH_FALLBACK,
@@ -238,7 +335,7 @@ class FallbackPolicy(ResiliencePolicy[T], Generic[T]):
                     error=e,
                 )
 
-        # Step 4: default_value 반환
+        # Step 4: return default_value.
         if self._default_value is not None:
             return PolicyResult(
                 value=self._default_value,
@@ -251,7 +348,7 @@ class FallbackPolicy(ResiliencePolicy[T], Generic[T]):
                 },
             )
 
-        # Step 5: 모든 fallback 소진
+        # Step 5: every fallback exhausted.
         return PolicyResult(
             value=None,
             outcome=PolicyOutcome.FAILURE,
@@ -346,48 +443,63 @@ class FallbackPolicy(ResiliencePolicy[T], Generic[T]):
 
 class AsyncFallbackPolicy(Generic[T]):
     """
-    비동기 Fallback Policy — AsyncResiliencePolicy Protocol 구현.
+    Async Fallback Policy — implements the AsyncResiliencePolicy Protocol.
 
-    동기 FallbackPolicy와 동일한 Fallback 체인 로직을 비동기로 제공한다.
-    BulkheadPolicy/AsyncBulkheadPolicy 분리 선례와 동일한 패턴으로 별도 클래스.
+    Provides the same fallback-chain logic as the sync FallbackPolicy,
+    asynchronously. A separate class following the BulkheadPolicy /
+    AsyncBulkheadPolicy split precedent.
 
-    소비자 책임(Consumer Responsibility):
-    fallback_chain, fallback_fn에 전달하는 함수는 반드시 async def여야 한다.
-    동기 Fallback 함수를 혼용하려면 소비자가 asyncio.to_thread()로 래핑하여 주입한다.
-    AsyncHedgingStrategy의 candidates 타입(list[Callable[[], Awaitable[T]]])과 동일 원칙.
+    Consumer responsibility:
+    Callables passed to fallback_chain / fallback_fn MUST be ``async def``. To
+    mix in a sync fallback, the consumer wraps it with ``asyncio.to_thread()``
+    before injecting. Same principle as AsyncHedgingStrategy's ``candidates``
+    type (``list[Callable[[], Awaitable[T]]]``).
 
-    두 가지 실행 경로:
-    - execute(func): 단독 사용 — async func 실행 후 실패 시 Fallback
-    - _apply_fallback(error): AsyncPolicyComposer 전용 — func 재실행 없이 Fallback만 시도
+    Two execution paths:
+    - execute(func): standalone — run the async func, fall back on failure.
+    - _apply_fallback(error): AsyncPolicyComposer-only — try the fallback chain
+      without re-running func.
     """
 
     def __init__(
         self,
-        fallback_fn: Callable[[], Awaitable[T]] | None = None,
+        fallback_fn: Callable[..., Awaitable[T]] | None = None,
         default_value: T | None = None,
-        fallback_chain: list[Callable[[], Awaitable[T]]] | None = None,
+        fallback_chain: list[Callable[..., Awaitable[T]]] | None = None,
         predicate: Callable[[PolicyResult[T]], bool] | None = None,
     ):
         """
         Args:
-            fallback_fn: 단일 비동기 fallback 함수.
-            default_value: 기본값 (모든 fallback 실패 시).
-            fallback_chain: 순차 시도할 비동기 fallback 함수 리스트.
-            predicate: Fallback 활성화 조건 (기본: outcome이 SUCCESS가 아닌 모든 경우).
+            fallback_fn: Single async fallback callable. Zero-arg (``fb()``) or
+                one positional (``fb(error)``); arity detected at construction.
+            default_value: Default value (used when every fallback fails).
+            fallback_chain: Ordered list of async fallback callables, same
+                zero-arg / one-arg contract.
+            predicate: Fallback activation condition (default: any non-SUCCESS).
+
+        Raises:
+            ValueError: A fallback callable declares >= 2 required positional
+                parameters (fail loud at construction).
         """
         self._fallback_fn = fallback_fn
+        self._fallback_fn_accepts_error = (
+            _fallback_accepts_error(fallback_fn) if fallback_fn is not None else False
+        )
         self._default_value = default_value
         self._fallback_chain = fallback_chain or []
+        self._chain_accepts_error = [
+            _fallback_accepts_error(fb) for fb in self._fallback_chain
+        ]
         self._predicate = predicate or self._default_predicate
 
     @property
     def name(self) -> str:
-        """Policy 식별자."""
+        """Policy identifier."""
         return "fallback"
 
     @staticmethod
     def _default_predicate(result: PolicyResult) -> bool:
-        """기본 조건: outcome이 SUCCESS가 아니면 Fallback 활성화."""
+        """Default condition: activate the fallback on any non-SUCCESS outcome."""
         return result.outcome != PolicyOutcome.SUCCESS
 
     async def execute(
@@ -398,15 +510,17 @@ class AsyncFallbackPolicy(Generic[T]):
         **kwargs: Any,
     ) -> PolicyResult[T]:
         """
-        단독 사용 — 비동기 func 실행 후 실패 시 Fallback.
+        Standalone use — run the async func, fall back on failure.
 
-        AsyncBulkheadPolicy.execute()와 동일한 패턴:
-        await func(*args, **kwargs) 호출 후 결과를 PolicyResult로 반환.
+        Same pattern as AsyncBulkheadPolicy.execute(): await func(*args,
+        **kwargs) and return the outcome as a PolicyResult.
 
-        실행 순서:
-        1. await func() 실행
-        2. 성공 → PolicyResult(SUCCESS) 즉시 반환
-        3. 실패 → await _apply_fallback(error) 위임
+        Execution order:
+        1. await func().
+        2. Success → return PolicyResult(SUCCESS) immediately.
+        3. Failure → consult the predicate against the classified outcome; if it
+           declines, return a FAILURE result carrying the original error;
+           otherwise await _apply_fallback(error).
         """
         try:
             result = await func(*args, **kwargs)
@@ -417,6 +531,19 @@ class AsyncFallbackPolicy(Generic[T]):
                 metadata={"fallback_used": False},
             )
         except Exception as primary_error:
+            check_result: PolicyResult[T] = PolicyResult(
+                value=None,
+                outcome=_classify_exception_outcome(primary_error),
+                error=primary_error,
+            )
+            if not self._predicate(check_result):
+                return PolicyResult(
+                    value=None,
+                    outcome=PolicyOutcome.FAILURE,
+                    error=primary_error,
+                    executed_policies=["fallback"],
+                    metadata={"fallback_used": False},
+                )
             return await self._apply_fallback(
                 original_error=primary_error,
                 context=context,
@@ -428,22 +555,27 @@ class AsyncFallbackPolicy(Generic[T]):
         context: PolicyContext | None = None,
     ) -> PolicyResult[T]:
         """
-        AsyncPolicyComposer 전용 — 비동기 Fallback 체인만 시도.
+        AsyncPolicyComposer-only — try the async fallback chain.
 
-        동기 FallbackPolicy._apply_fallback()의 비동기 대응.
-        func를 재실행하지 않고 fallback_chain → fallback_fn → default_value만 시도한다.
+        The async counterpart of sync FallbackPolicy._apply_fallback(). Does not
+        re-run func; tries fallback_chain → fallback_fn → default_value. Each
+        error-accepting fallback receives ``original_error`` positionally.
 
         Args:
-            original_error: 이전 Policy 체인에서 발생한 원본 예외.
-            context: PolicyContext (Guard/Hook/Sink 전파용).
+            original_error: The original exception from the prior policy chain.
+            context: PolicyContext (propagated to Guard/Hook/Sink).
 
         Returns:
-            PolicyResult[T]: Fallback 결과. 예외를 던지지 않는다.
+            PolicyResult[T]: The fallback result. Never raises.
         """
-        # Step 1: fallback_chain 순차 시도
+        # Step 1: try the fallback_chain in turn.
         for i, fallback in enumerate(self._fallback_chain):
             try:
-                result = await fallback()
+                result = await (
+                    fallback(original_error)
+                    if self._chain_accepts_error[i]
+                    else fallback()
+                )
                 return PolicyResult(
                     value=result,
                     outcome=PolicyOutcome.SUCCESS_WITH_FALLBACK,
@@ -462,10 +594,14 @@ class AsyncFallbackPolicy(Generic[T]):
                 )
                 continue
 
-        # Step 2: fallback_fn 시도
+        # Step 2: try fallback_fn.
         if self._fallback_fn is not None:
             try:
-                result = await self._fallback_fn()
+                result = await (
+                    self._fallback_fn(original_error)
+                    if self._fallback_fn_accepts_error
+                    else self._fallback_fn()
+                )
                 return PolicyResult(
                     value=result,
                     outcome=PolicyOutcome.SUCCESS_WITH_FALLBACK,
@@ -482,7 +618,7 @@ class AsyncFallbackPolicy(Generic[T]):
                     error=e,
                 )
 
-        # Step 3: default_value 반환
+        # Step 3: return default_value.
         if self._default_value is not None:
             return PolicyResult(
                 value=self._default_value,
@@ -495,7 +631,7 @@ class AsyncFallbackPolicy(Generic[T]):
                 },
             )
 
-        # Step 4: 모든 fallback 소진
+        # Step 4: every fallback exhausted.
         return PolicyResult(
             value=None,
             outcome=PolicyOutcome.FAILURE,
