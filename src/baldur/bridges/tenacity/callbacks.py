@@ -322,6 +322,10 @@ def _emit_retry_exhausted_event(
             "final_error_type": (
                 type(last_error).__name__ if last_error is not None else None
             ),
+            # The bridge honors arbitrary user stop strategies (stop_after_delay,
+            # etc.), so it cannot attest ``max_attempts`` — ``stop_condition`` is
+            # the honest bridge-only value in the shared reason vocabulary.
+            "reason": "stop_condition",
         }
         bus = get_event_bus()
         bus.emit(

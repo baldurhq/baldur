@@ -14,6 +14,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 - Remote-Prometheus time-series metrics provider (`BALDUR_PROMETHEUS_URL`).
 - `config_shadow` time-series metrics-provider DI seam.
+- Result-predicate retry (`retry_on_result`) and a `BALDUR_RETRY_MAX_ELAPSED` wall-clock budget.
 
 ### Changed
 
@@ -23,6 +24,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - Circuit-breaker state values are now lowercase. **Breaking**
 - Admin config-write endpoints reject unknown fields with `400`. **Breaking**
 - `import baldur` is now lightweight — hot-path barrels load lazily (251→8 modules).
+- Retry `outcome="exhausted"` now excludes non-retryable/budget/deadline aborts.
 
 ### Removed
 

@@ -17,6 +17,7 @@ Internal collaborators are injected via the constructor:
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -28,6 +29,18 @@ import structlog
 # to defer waiting to an external scheduler such as Celery.
 _DEFAULT_SLEEPER: Callable[[float], None] = time.sleep
 
+# Exhaustion-reason -> Prometheus outcome-label value. ``max_attempts`` keeps
+# the historical ``"exhausted"`` value for dashboard/alert continuity; every
+# other cause gets its own additive value so ``"exhausted"`` no longer conflates
+# non-retryable aborts and budget/deadline breaks with genuine attempt exhaustion.
+_REASON_TO_OUTCOME: dict[str, str] = {
+    "max_attempts": "exhausted",
+    "non_retryable": "non_retryable",
+    "retry_budget": "retry_budget",
+    "max_elapsed": "max_elapsed",
+    "deadline": "deadline",
+}
+
 from baldur.core.backoff import BackoffStrategy, ExponentialBackoff
 from baldur.core.execution_mode import intervention_suppressed
 from baldur.interfaces.resilience_policy import (
@@ -37,7 +50,7 @@ from baldur.interfaces.resilience_policy import (
     ResiliencePolicy,
 )
 
-from .models import RetryPolicyConfig
+from .models import MaxRetriesExceededError, RetryPolicyConfig
 
 if TYPE_CHECKING:
     from baldur.services.backoff_calculator import AdaptiveRetryBudget
@@ -80,6 +93,21 @@ class RetryPolicy(ResiliencePolicy[T]):
 
         self._globally_enabled = get_retry_settings().enabled
         self._config = config
+        # Result predicate must be synchronous: an ``async def`` returns a
+        # truthy coroutine object that the fail-open guard cannot catch, so every
+        # successful result would be judged a soft failure and retried to
+        # exhaustion. Reject at construction — the policy is the convergence
+        # point of direct-config, from_policy_config, and @retry surfaces.
+        self._retry_on_result = config.retry_on_result
+        if self._retry_on_result is not None and asyncio.iscoroutinefunction(
+            self._retry_on_result
+        ):
+            raise TypeError(
+                "retry_on_result must be a synchronous callable, not a coroutine "
+                "function; an async predicate always returns a truthy coroutine "
+                "object and cannot be evaluated by the sync retry loop."
+            )
+        self._max_elapsed = config.max_elapsed
         self._backoff = backoff or ExponentialBackoff(
             base_delay=config.backoff_base,
             max_delay=config.backoff_max,
@@ -100,7 +128,7 @@ class RetryPolicy(ResiliencePolicy[T]):
     def name(self) -> str:
         return "retry"
 
-    def execute(  # noqa: C901
+    def execute(  # noqa: C901, PLR0912, PLR0915
         self,
         func: Callable[..., T],
         *args: Any,
@@ -129,10 +157,35 @@ class RetryPolicy(ResiliencePolicy[T]):
 
         attempt = 0
         last_error: Exception | None = None
+        last_result: Any = None
+        result_rejected = False
         retry_history: list[dict[str, Any]] = []
+        reason = "max_attempts"
+
+        # Cooperative wall-clock budget (seconds) + its attribution reason,
+        # resolved once at entry: min-of-two over the policy knob (max_elapsed)
+        # and the request-scoped deadline. ``start`` and the deadline snapshot
+        # share this instant, so ``elapsed >= budget`` means the deadline is
+        # spent. ``budget is None`` -> unbounded (exactly today's behavior).
+        start = time.monotonic()
+        budget, budget_reason = self._resolve_effective_budget()
 
         while attempt < self._config.max_attempts:
             attempt += 1
+
+            # (i) Cooperative budget check — loop top, attempt 2 onward. Catches
+            # budget consumed by the previous sleep AND by rate-limit cooldown
+            # waits (wall-clock burned outside backoff sleeps). Attempt 1 always
+            # runs: an already-expired inbound deadline is the deadline
+            # middleware's fast-fail job, and one guaranteed attempt avoids a
+            # zero-attempt last_error=None FAILURE (composer misclassification).
+            if (
+                attempt > 1
+                and budget is not None
+                and (time.monotonic() - start) >= budget
+            ):
+                reason = budget_reason
+                break
 
             # Adaptive Retry Budget: record request + check budget
             if self._retry_budget:
@@ -142,6 +195,7 @@ class RetryPolicy(ResiliencePolicy[T]):
                         "retry.budget_exhausted",
                         stats=self._retry_budget.get_stats(),
                     )
+                    reason = "retry_budget"
                     break
 
             # Rate limit wait (optional)
@@ -157,20 +211,10 @@ class RetryPolicy(ResiliencePolicy[T]):
 
             try:
                 result = func(*args, **kwargs)
-
-                # Notify RateLimitCoordinator of success
-                if self._rate_limit_coordinator:
-                    self._rate_limit_coordinator.on_success(self._config.domain)
-
-                self._record_outcome(attempt, "success")
-                return PolicyResult(
-                    value=result,
-                    outcome=PolicyOutcome.SUCCESS,
-                    total_attempts=attempt,
-                    executed_policies=["retry"],
-                )
             except Exception as e:
                 last_error = e
+                last_result = None
+                result_rejected = False
                 retry_history.append(
                     {
                         "attempt": attempt,
@@ -183,22 +227,86 @@ class RetryPolicy(ResiliencePolicy[T]):
                 if self._rate_limit_coordinator:
                     self._notify_rate_limit_cooldown(e)
 
-                if not self._should_retry(e, attempt):
+                # Pure exception classification. The attempts bound is hoisted to
+                # the shared tail below so an out-of-attempts stop is attributed
+                # to ``max_attempts``, not ``non_retryable`` (polymorphic-break).
+                if not self._should_retry(e):
+                    reason = "non_retryable"
                     break
+            else:
+                # Function returned — evaluate the result predicate (fail-open).
+                if not self._evaluate_result_rejected(result):
+                    if self._rate_limit_coordinator:
+                        self._rate_limit_coordinator.on_success(self._config.domain)
+                    self._record_outcome(attempt, "success")
+                    return PolicyResult(
+                        value=result,
+                        outcome=PolicyOutcome.SUCCESS,
+                        total_attempts=attempt,
+                        executed_policies=["retry"],
+                    )
+                # Soft failure: treat the rejected value exactly like a retryable
+                # exception, but no exception is raised — track it so exhaustion
+                # can synthesize a MaxRetriesExceededError (last_error stays None).
+                last_result = result
+                last_error = None
+                result_rejected = True
+                retry_history.append(
+                    {
+                        "attempt": attempt,
+                        "result_rejected": True,
+                        "result_type": type(result).__name__,
+                    }
+                )
 
-                # Compute backoff
-                delay = self._backoff.calculate(attempt, context=context)
+            # --- Shared failure tail: retryable exception OR rejected result ---
+            if attempt >= self._config.max_attempts:
+                reason = "max_attempts"
+                break
 
-                # Sleep between attempts. ``self._sleeper`` is always callable —
-                # defaults to ``time.sleep`` for sync callers; Celery callers
-                # pass an explicit no-op at construction time.
-                if delay > 0:
-                    self._sleeper(delay)
+            # Compute backoff
+            delay = self._backoff.calculate(attempt, context=context)
 
-        self._emit_exhausted_event(last_error, attempt, retry_history, context=context)
-        self._record_outcome(attempt, "exhausted")
+            # (ii) Cooperative budget check — never start a sleep+attempt that
+            # would overrun the budget.
+            if budget is not None and (time.monotonic() - start) + delay > budget:
+                reason = budget_reason
+                break
+
+            # Sleep between attempts. ``self._sleeper`` is always callable —
+            # defaults to ``time.sleep`` for sync callers; Celery callers
+            # pass an explicit no-op at construction time.
+            if delay > 0:
+                self._sleeper(delay)
+
+        # Result-rejection exits leave last_error=None; synthesize a first-class
+        # exhaustion error. Without it the composer maps FAILURE(error=None) to
+        # REJECTED (misclassification), and DLQ/@retry lack a real exception.
+        if last_error is None and result_rejected:
+            last_error = MaxRetriesExceededError(
+                f"Retry exhausted for domain '{self._config.domain}': "
+                f"result rejected by predicate after {attempt} attempt(s)",
+                retry_count=attempt,
+                max_retries=self._config.max_attempts,
+                last_error=None,
+                last_result=last_result,
+                result_rejected=True,
+            )
+
+        elapsed = time.monotonic() - start
+        self._emit_exhausted_event(
+            last_error,
+            attempt,
+            retry_history,
+            reason=reason,
+            elapsed=elapsed,
+            budget=budget,
+            context=context,
+        )
+        self._record_outcome(attempt, _REASON_TO_OUTCOME.get(reason, "exhausted"))
 
         return PolicyResult(
+            value=last_result if result_rejected else None,
             outcome=PolicyOutcome.FAILURE,
             error=last_error,
             total_attempts=attempt,
@@ -208,6 +316,7 @@ class RetryPolicy(ResiliencePolicy[T]):
                 "domain": self._config.domain,
                 "should_dlq": self._config.enable_dlq,
                 "retry_history": retry_history,
+                "reason": reason,
             },
         )
 
@@ -242,9 +351,18 @@ class RetryPolicy(ResiliencePolicy[T]):
         last_error: Exception | None,
         attempts: int,
         retry_history: list[dict],
+        *,
+        reason: str = "max_attempts",
+        elapsed: float | None = None,
+        budget: float | None = None,
         context: PolicyContext | None = None,
     ) -> None:
-        """Emit retry.exhausted event to EventBus. Fail-open."""
+        """Emit retry.exhausted event to EventBus. Fail-open.
+
+        ``reason`` disambiguates the exit cause (max_attempts / retry_budget /
+        non_retryable / max_elapsed / deadline); ``elapsed`` and ``budget`` are
+        additive fields carried for the wall-clock exits.
+        """
         try:
             from baldur.services.event_bus import get_event_bus
             from baldur.services.event_bus.bus.event_types import EventType
@@ -255,7 +373,12 @@ class RetryPolicy(ResiliencePolicy[T]):
                 "final_error_type": type(last_error).__name__ if last_error else None,
                 "attempts": attempts,
                 "retry_history_length": len(retry_history),
+                "reason": reason,
             }
+            if elapsed is not None:
+                event_data["elapsed"] = elapsed
+            if budget is not None:
+                event_data["budget"] = budget
             if context is not None:
                 if context.order_id:
                     event_data["order_id"] = context.order_id
@@ -294,15 +417,66 @@ class RetryPolicy(ResiliencePolicy[T]):
         except Exception as e:
             logger.warning("retry.metric_recording_failed", error=str(e))
 
-    def _should_retry(self, exception: Exception, attempt: int) -> bool:
-        """Decide whether a retry is possible."""
-        if attempt >= self._config.max_attempts:
-            return False
+    def _should_retry(self, exception: Exception) -> bool:
+        """Pure exception classification: is this exception retryable?
 
+        The attempts bound is intentionally NOT checked here — it is hoisted to
+        an explicit loop check so an out-of-attempts stop is attributed to
+        ``max_attempts`` rather than ``non_retryable`` (the polymorphic-break
+        fix). A non-retryable-classification stop is the only ``non_retryable``.
+        """
         if isinstance(exception, self._config.non_retryable_exceptions):
             return False
 
         return bool(isinstance(exception, self._config.retryable_exceptions))
+
+    def _resolve_effective_budget(self) -> tuple[float | None, str]:
+        """Resolve the cooperative wall-clock budget (seconds) and its reason.
+
+        min-of-two over the policy knob (``max_elapsed``) and the request-scoped
+        deadline (``deadline_context.get_remaining_ms``). Each side is optional;
+        both absent -> ``(None, ...)`` = unbounded. The tighter bound wins the
+        attribution; an exact tie is attributed to ``max_elapsed``. The deadline
+        lookup is a lazy in-method import (``services -> scaling`` is acyclic)
+        and fail-open: any lookup fault degrades to the knob alone.
+        """
+        knob = self._max_elapsed
+        deadline_s: float | None = None
+        try:
+            from baldur.scaling.deadline_context import get_remaining_ms
+
+            remaining_ms = get_remaining_ms()
+            if remaining_ms is not None:
+                deadline_s = remaining_ms / 1000.0
+        except Exception:
+            deadline_s = None
+
+        if knob is None and deadline_s is None:
+            return None, "max_elapsed"
+        if knob is None:
+            return deadline_s, "deadline"
+        if deadline_s is None:
+            return knob, "max_elapsed"
+        # Both set: remaining < knob -> deadline is tighter; exact tie -> knob.
+        if deadline_s < knob:
+            return deadline_s, "deadline"
+        return knob, "max_elapsed"
+
+    def _evaluate_result_rejected(self, result: Any) -> bool:
+        """Return True if the result predicate rejects ``result`` (soft failure).
+
+        Fail-open: a predicate that raises is logged and treated as *not*
+        rejected (accept the result as success) — re-executing on a broken
+        predicate would amplify side effects, and a failed feature must be
+        inert. ``retry_on_result=None`` never rejects.
+        """
+        if self._retry_on_result is None:
+            return False
+        try:
+            return bool(self._retry_on_result(result))
+        except Exception as e:
+            logger.warning("retry.result_predicate_failed", error=str(e))
+            return False
 
     def _notify_rate_limit_cooldown(self, exception: Exception) -> None:
         """Set a cooldown on the RateLimitCoordinator when a 429 response is detected."""

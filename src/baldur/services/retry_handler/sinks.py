@@ -78,6 +78,10 @@ class DLQSink:
             "domain": domain,
             "final_attempt": policy_result.total_attempts,
             "executed_policies": policy_result.executed_policies,
+            # Exhaustion cause (max_attempts / retry_budget / non_retryable /
+            # max_elapsed / deadline) — passed through so DLQ triage can tell an
+            # attempt-exhaustion apart from a budget/deadline break.
+            "reason": policy_result.metadata.get("reason"),
         }
         return metadata, domain
 
