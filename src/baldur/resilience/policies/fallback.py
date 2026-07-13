@@ -146,9 +146,9 @@ class FallbackPolicy(ResiliencePolicy[T], Generic[T]):
 
     def __init__(
         self,
-        fallback_fn: Callable[[], T] | None = None,
+        fallback_fn: Callable[..., T] | None = None,
         default_value: T | None = None,
-        fallback_chain: list[Callable[[], T]] | None = None,
+        fallback_chain: list[Callable[..., T]] | None = None,
         predicate: Callable[[PolicyResult[T]], bool] | None = None,
         strategy: FallbackStrategy | None = None,
     ):

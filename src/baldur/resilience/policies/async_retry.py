@@ -538,7 +538,9 @@ def retry(
                 # ParamSpec/TypeVar cannot track that R is Awaitable when
                 # asyncio.iscoroutinefunction(func) is True — dispatch is dynamic.
                 result = await apolicy.execute(func, *args, **kwargs)
-                return _unwrap_or_raise(result, func.__name__, config.max_attempts)
+                # Dynamic dispatch: mypy cannot track R through the Any-returning
+                # unwrap helper (see the return-value ignore below, same cause).
+                return _unwrap_or_raise(result, func.__name__, config.max_attempts)  # type: ignore[no-any-return]
 
             return async_wrapper  # type: ignore[return-value]
 
@@ -549,7 +551,9 @@ def retry(
         @functools.wraps(func)
         def sync_wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
             result = sync_policy.execute(func, *args, **kwargs)
-            return _unwrap_or_raise(result, func.__name__, config.max_attempts)
+            # Dynamic dispatch: mypy cannot track R through the Any-returning
+            # unwrap helper (parallels the async wrapper above).
+            return _unwrap_or_raise(result, func.__name__, config.max_attempts)  # type: ignore[no-any-return]
 
         return sync_wrapper
 
