@@ -22,6 +22,7 @@ not wait real wall-clock time (§6.3).
 from __future__ import annotations
 
 import asyncio
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -395,3 +396,249 @@ class TestBuildAsyncComposerChainBehavior:
         )
 
         assert [p.name for p in composer._policies] == ["timeout"]
+
+
+# =============================================================================
+# Behavior — async fallback coverage matrix (705 D2/D3): every inner outcome
+# routes to the fallback
+# =============================================================================
+
+
+class TestAprotectFallbackCoverage:
+    """With a fallback configured, {plain failure, retry exhaustion, TIMEOUT,
+    CB-open} all route to the async fallback (``fallback_used=True``)."""
+
+    def test_covers_plain_failure_serves_fallback_async(self, clean_caches):
+        """A single async fn failure is served by the async fallback."""
+
+        async def bad():
+            raise RuntimeError("boom")
+
+        async def fb():
+            return "fb"
+
+        meta = asyncio.run(
+            aprotect_with_meta(
+                name="acov.plain",
+                fn=bad,
+                fallback=fb,
+                circuit_breaker=False,
+                retry=False,
+                dlq=False,
+                timeout=None,
+            )
+        )
+
+        assert meta.outcome == PolicyOutcome.SUCCESS_WITH_FALLBACK
+        assert meta.fallback_used is True
+        assert meta.value == "fb"
+
+    def test_covers_retry_exhaustion_serves_fallback_async(self, clean_caches):
+        """Async retry runs the full max_attempts, THEN the fallback serves."""
+        calls = {"n": 0}
+
+        async def always_bad():
+            calls["n"] += 1
+            raise ConnectionError("down")
+
+        async def fb():
+            return "fb"
+
+        with patch(_ASYNC_SLEEP, new_callable=AsyncMock):
+            meta = asyncio.run(
+                aprotect_with_meta(
+                    name="acov.exhaust",
+                    fn=always_bad,
+                    retry=RetryPolicyConfig(max_attempts=3, domain="acov.exhaust"),
+                    fallback=fb,
+                    circuit_breaker=False,
+                    dlq=False,
+                    timeout=None,
+                )
+            )
+
+        assert meta.outcome == PolicyOutcome.SUCCESS_WITH_FALLBACK
+        assert meta.fallback_used is True
+        assert calls["n"] == 3  # retry exhausted BEFORE the fallback served
+
+    def test_covers_timeout_serves_fallback_async(self, clean_caches):
+        """A timed-out async fn routes to the fallback (asyncio.wait_for cancels)."""
+
+        async def slow():
+            await asyncio.sleep(5.0)
+            return "primary"
+
+        async def fb():
+            return "fb"
+
+        meta = asyncio.run(
+            aprotect_with_meta(
+                name="acov.timeout",
+                fn=slow,
+                timeout=0.05,
+                fallback=fb,
+                circuit_breaker=False,
+                retry=False,
+                dlq=False,
+            )
+        )
+
+        assert meta.outcome == PolicyOutcome.SUCCESS_WITH_FALLBACK
+        assert meta.fallback_used is True
+        assert meta.value == "fb"
+
+    def test_covers_cb_open_serves_fallback_without_invoking_fn_async(
+        self, clean_caches
+    ):
+        """Once the async breaker is OPEN, a call is served by the fallback and
+        fn is never invoked."""
+        name = "acov.cb_open"
+        _seed_low_threshold_breaker(name, failure_threshold=2)
+
+        calls = {"n": 0}
+
+        async def boom():
+            calls["n"] += 1
+            raise RuntimeError("down")
+
+        async def fb():
+            return "fb"
+
+        # Drive the breaker OPEN (each failure absorbed by the fallback).
+        for _ in range(2):
+            asyncio.run(
+                aprotect_with_meta(
+                    name=name,
+                    fn=boom,
+                    fallback=fb,
+                    circuit_breaker=True,
+                    retry=False,
+                    dlq=False,
+                    timeout=None,
+                )
+            )
+        invoked_before = calls["n"]
+
+        # CB-open call WITH a fallback → served, fn not invoked.
+        meta = asyncio.run(
+            aprotect_with_meta(
+                name=name,
+                fn=boom,
+                fallback=fb,
+                circuit_breaker=True,
+                retry=False,
+                dlq=False,
+                timeout=None,
+            )
+        )
+        assert meta.outcome == PolicyOutcome.SUCCESS_WITH_FALLBACK
+        assert meta.fallback_used is True
+        assert calls["n"] == invoked_before  # fn skipped on the CB-open call
+
+
+# =============================================================================
+# Behavior — truthful attempts on the async facade (705 D14)
+# =============================================================================
+
+
+class TestAprotectAttemptsTruthful:
+    """``aprotect_with_meta().attempts`` reports the real retry count (not 1) on
+    both the retry-exhaustion path and the fallback-served path."""
+
+    def test_attempts_truthful_on_retry_exhaustion_async(self, clean_caches):
+        """max_attempts=3, always-failing async fn, no fallback → attempts == 3."""
+
+        async def always_bad():
+            raise ConnectionError("down")
+
+        with patch(_ASYNC_SLEEP, new_callable=AsyncMock):
+            meta = asyncio.run(
+                aprotect_with_meta(
+                    name="aatt.exhaust",
+                    fn=always_bad,
+                    retry=RetryPolicyConfig(max_attempts=3, domain="aatt.exhaust"),
+                    circuit_breaker=False,
+                    dlq=False,
+                    timeout=None,
+                )
+            )
+
+        assert meta.outcome == PolicyOutcome.FAILURE
+        assert meta.attempts == 3
+
+    def test_attempts_truthful_on_fallback_served_async(self, clean_caches):
+        """Same async retry, but a fallback serves → attempts still reads 3."""
+
+        async def always_bad():
+            raise ConnectionError("down")
+
+        async def fb():
+            return "fb"
+
+        with patch(_ASYNC_SLEEP, new_callable=AsyncMock):
+            meta = asyncio.run(
+                aprotect_with_meta(
+                    name="aatt.fb",
+                    fn=always_bad,
+                    retry=RetryPolicyConfig(max_attempts=3, domain="aatt.fb"),
+                    fallback=fb,
+                    circuit_breaker=False,
+                    dlq=False,
+                    timeout=None,
+                )
+            )
+
+        assert meta.outcome == PolicyOutcome.SUCCESS_WITH_FALLBACK
+        assert meta.fallback_used is True
+        assert meta.attempts == 3
+
+
+# =============================================================================
+# Behavior — degraded-mode WARNING on a served fallback (705 D15, async)
+# =============================================================================
+
+
+class TestAprotectFallbackAppliedLog:
+    """A successfully-served async fallback emits one
+    ``policy_chain.fallback_applied`` WARNING with the error type + source."""
+
+    def test_fallback_applied_log_emits_warning_async(self, clean_caches, caplog):
+        """The async composer terminal logs the degraded-mode WARNING.
+
+        ``configure_structlog()`` routes structlog to stdlib logging, so the
+        WARNING is asserted via ``caplog`` (``record.msg`` is the event_dict)."""
+
+        from baldur.observability.log_processors import reset_rate_limit_state
+
+        async def bad():
+            raise RuntimeError("boom")
+
+        async def fb():
+            return "fb"
+
+        # Reset the structlog rate-limit de-dup window so this single emission
+        # is not suppressed by earlier tests in the same window.
+        reset_rate_limit_state()
+        with caplog.at_level(logging.WARNING):
+            asyncio.run(
+                aprotect(
+                    name="alog.fb",
+                    fn=bad,
+                    fallback=fb,
+                    circuit_breaker=False,
+                    retry=False,
+                    dlq=False,
+                    timeout=None,
+                )
+            )
+
+        events = [
+            r
+            for r in caplog.records
+            if isinstance(r.msg, dict)
+            and r.msg.get("event") == "policy_chain.fallback_applied"
+        ]
+        assert len(events) == 1
+        assert events[0].levelname == "WARNING"
+        assert events[0].msg["error_type"] == "RuntimeError"
+        assert events[0].msg["fallback_source"] == "fallback_fn"

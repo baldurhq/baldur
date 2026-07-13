@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 from structlog.testing import capture_logs
 
+from baldur.core.exceptions import TimeoutPolicyError
 from baldur.interfaces.resilience_policy import (
     GuardResult,
     PolicyContext,
@@ -30,10 +31,12 @@ from baldur.interfaces.resilience_policy import (
 from baldur.resilience.policies.composer import (
     AsyncPolicyComposer,
     PolicyComposer,
+    _classify_exception_outcome,
     _FallbackApplied,
     compose,
     compose_async,
 )
+from baldur.services.circuit_breaker.exceptions import CircuitBreakerOpenError
 
 # =============================================================================
 # Mock 구현체 — Protocol 준수
@@ -1322,3 +1325,185 @@ class TestAsyncComposerTimeoutBehavior:
         assert result.outcome == PolicyOutcome.TIMEOUT
         assert isinstance(result.error, TimeoutPolicyError)
         assert result.error.timeout_seconds == 3.0
+
+
+# =============================================================================
+# Behavior — _classify_exception_outcome shared classifier (705 D6)
+# =============================================================================
+
+
+class TestClassifyExceptionOutcome:
+    """The shared classifier maps a chain exception to its terminal outcome.
+
+    One source feeds the composer terminal ladders, the fallback wrappers'
+    synthesized predicate input, and standalone ``FallbackPolicy.execute``. A
+    ``PolicyRejectedException`` (incl. the real ``CircuitBreakerOpenError``
+    subclass) → REJECTED; a ``TimeoutPolicyError`` → TIMEOUT; anything else →
+    FAILURE.
+    """
+
+    @pytest.mark.parametrize(
+        ("exc", "expected"),
+        [
+            (PolicyRejectedException("rejected"), PolicyOutcome.REJECTED),
+            (CircuitBreakerOpenError("payment"), PolicyOutcome.REJECTED),
+            (TimeoutPolicyError(5.0), PolicyOutcome.TIMEOUT),
+            (RuntimeError("boom"), PolicyOutcome.FAILURE),
+            (ValueError("bad"), PolicyOutcome.FAILURE),
+            (KeyError("missing"), PolicyOutcome.FAILURE),
+        ],
+    )
+    def test_classify_maps_exception_to_terminal_outcome(self, exc, expected):
+        """Each exception class resolves to its documented PolicyOutcome."""
+        assert _classify_exception_outcome(exc) == expected
+
+    def test_circuit_breaker_open_is_a_policy_rejected_subclass(self):
+        """Guards the REJECTED mapping: CircuitBreakerOpenError IS a
+        PolicyRejectedException, so it classifies as REJECTED, not FAILURE."""
+        exc = CircuitBreakerOpenError("payment")
+        assert isinstance(exc, PolicyRejectedException)
+        assert _classify_exception_outcome(exc) == PolicyOutcome.REJECTED
+
+
+# =============================================================================
+# Behavior — fallback_wrapper predicate-input fidelity + D7 metadata merge (705)
+# =============================================================================
+
+
+class _MetadataFailingPolicy:
+    """A regular policy that attaches metadata and surfaces the caught error.
+
+    Mirrors how CB/Retry return a PolicyResult(FAILURE, error=…, metadata=…):
+    the composer's ``policy_wrapper`` merges the metadata into ``chain_metadata``
+    before re-raising the error, so the outermost fallback stage can absorb it.
+    """
+
+    @property
+    def name(self) -> str:
+        return "meta_inner"
+
+    def execute(
+        self,
+        func: Callable[..., Any],
+        *args: Any,
+        context: PolicyContext | None = None,
+        **kwargs: Any,
+    ) -> PolicyResult:
+        try:
+            value = func(*args, **kwargs)
+            return PolicyResult(
+                value=value,
+                outcome=PolicyOutcome.SUCCESS,
+                metadata={"inner_key": "inner_val"},
+            )
+        except Exception as e:
+            return PolicyResult(
+                value=None,
+                outcome=PolicyOutcome.FAILURE,
+                error=e,
+                metadata={"inner_key": "inner_val"},
+            )
+
+
+class TestComposerFallbackInputFidelity:
+    """The fallback wrapper feeds the predicate the TRUE classified outcome
+    (not an always-FAILURE lie), and the ``_FallbackApplied`` terminal merges
+    the inner chain metadata under the fallback metadata (705 D6/D7)."""
+
+    def _throw(self, exc: BaseException) -> Callable[[], Any]:
+        def _raise() -> Any:
+            raise exc
+
+        return _raise
+
+    def test_predicate_sees_timeout_outcome_and_activates(self, composer):
+        """A TIMEOUT-only predicate activates when the chain raises a timeout —
+        proving the wrapper synthesizes TIMEOUT, not FAILURE."""
+        from baldur.resilience.policies.fallback import FallbackPolicy
+
+        fb = FallbackPolicy(
+            default_value="degraded",
+            predicate=lambda r: r.outcome == PolicyOutcome.TIMEOUT,
+        )
+        composer.add(fb)
+
+        result = composer.execute(self._throw(TimeoutPolicyError(1.0)))
+
+        assert result.outcome == PolicyOutcome.SUCCESS_WITH_FALLBACK
+        assert result.value == "degraded"
+
+    def test_predicate_sees_failure_outcome_and_declines(self, composer):
+        """The same TIMEOUT-only predicate declines a plain failure — the
+        wrapper passes FAILURE for a RuntimeError, so the fallback is skipped."""
+        from baldur.resilience.policies.fallback import FallbackPolicy
+
+        fb = FallbackPolicy(
+            default_value="degraded",
+            predicate=lambda r: r.outcome == PolicyOutcome.TIMEOUT,
+        )
+        composer.add(fb)
+
+        result = composer.execute(self._throw(RuntimeError("boom")))
+
+        assert result.outcome == PolicyOutcome.FAILURE
+        assert isinstance(result.error, RuntimeError)
+
+    def test_predicate_sees_rejected_outcome_and_activates(self, composer):
+        """A REJECTED-only predicate activates on a PolicyRejectedException —
+        proving REJECTED classification survives into the predicate input."""
+        from baldur.resilience.policies.fallback import FallbackPolicy
+
+        fb = FallbackPolicy(
+            default_value="degraded",
+            predicate=lambda r: r.outcome == PolicyOutcome.REJECTED,
+        )
+        composer.add(fb)
+
+        result = composer.execute(self._throw(PolicyRejectedException("nope")))
+
+        assert result.outcome == PolicyOutcome.SUCCESS_WITH_FALLBACK
+        assert result.value == "degraded"
+
+    def test_fallback_terminal_merges_inner_chain_metadata(self, composer):
+        """D7: the served-fallback terminal carries BOTH the inner policy's
+        metadata (from chain_metadata) and the fallback's own metadata."""
+        from baldur.resilience.policies.fallback import FallbackPolicy
+
+        composer.add(FallbackPolicy(default_value="degraded"))
+        composer.add(_MetadataFailingPolicy())
+
+        result = composer.execute(self._throw(RuntimeError("boom")))
+
+        assert result.outcome == PolicyOutcome.SUCCESS_WITH_FALLBACK
+        # Inner-policy metadata survives the fallback absorb (D7 merge)...
+        assert result.metadata["inner_key"] == "inner_val"
+        # ...alongside the fallback's own served-path metadata.
+        assert result.metadata["fallback_used"] is True
+
+    def test_fallback_metadata_wins_on_key_collision(self, composer):
+        """D7: on a colliding key the fallback result's value wins (last-write),
+        matching ``{**chain_metadata, **fb_result.metadata}``."""
+        from baldur.resilience.policies.fallback import FallbackPolicy
+
+        class _CollidingPolicy(_MetadataFailingPolicy):
+            def execute(self, func, *args, context=None, **kwargs):
+                try:
+                    return PolicyResult(
+                        value=func(*args, **kwargs), outcome=PolicyOutcome.SUCCESS
+                    )
+                except Exception as e:
+                    # Collides on the ``fallback_used`` key that the fallback
+                    # terminal also sets — the fallback's True must win.
+                    return PolicyResult(
+                        value=None,
+                        outcome=PolicyOutcome.FAILURE,
+                        error=e,
+                        metadata={"fallback_used": "inner-should-lose"},
+                    )
+
+        composer.add(FallbackPolicy(default_value="degraded"))
+        composer.add(_CollidingPolicy())
+
+        result = composer.execute(self._throw(RuntimeError("boom")))
+
+        assert result.metadata["fallback_used"] is True
