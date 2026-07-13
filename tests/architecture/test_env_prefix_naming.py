@@ -28,7 +28,10 @@ import inspect
 from collections import defaultdict
 from pathlib import Path
 
-from baldur.settings.introspection import collect_baldur_settings
+from baldur.settings.introspection import (
+    collect_baldur_settings,
+    force_load_settings_modules,
+)
 from tests.architecture.conftest import (
     PROJECT_ROOT,
     collect_violations,
@@ -120,6 +123,7 @@ class TestEnvPrefixNamingContract:
 
     def test_env_prefix_unique(self):
         """G1 — two settings classes MUST NOT share the same env_prefix."""
+        force_load_settings_modules()
         by_prefix: dict[str, list[type]] = defaultdict(list)
         for cls, prefix in collect_baldur_settings():
             by_prefix[prefix].append(cls)
@@ -151,6 +155,7 @@ class TestEnvPrefixNamingContract:
 
     def test_no_bare_baldur_prefix(self):
         """G2 + G16 — env_prefix MUST NOT be the bare ``BALDUR_`` top-level namespace."""
+        force_load_settings_modules()
         raw: list[tuple[Path, int | None, str | None, str | None]] = []
         for cls, prefix in collect_baldur_settings():
             if prefix == _BALDUR_NAMESPACE:
@@ -180,6 +185,7 @@ class TestEnvPrefixNamingContract:
         from D8 permits ``CB`` / ``DLQ`` tokens to stand in place of expanded
         forms when the module name itself uses the abbreviation.
         """
+        force_load_settings_modules()
         raw: list[tuple[Path, int | None, str | None, str | None]] = []
         for cls, prefix in collect_baldur_settings():
             expected = _expected_prefix_from_module(cls.__module__)
