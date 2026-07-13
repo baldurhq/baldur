@@ -22,11 +22,13 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `TTLCacheBase.get_stats()` returns a locked snapshot, not the live object.
 - Circuit-breaker state values are now lowercase. **Breaking**
 - Admin config-write endpoints reject unknown fields with `400`. **Breaking**
+- `import baldur` is now lightweight — hot-path barrels load lazily (251→8 modules).
 
 ### Removed
 
 - `IPCStateCache.stats` — use `get_stats()`. **Breaking**
 - `baldur.core.timezone` — use `baldur.utils.time.utc_now`. **Breaking**
+- `baldur.settings.audit_settings` alias — use `from baldur.settings import audit`. **Breaking**
 
 ### Security
 

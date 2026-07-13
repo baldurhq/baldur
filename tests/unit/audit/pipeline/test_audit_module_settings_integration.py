@@ -257,7 +257,7 @@ class TestConfigSettingsIntegration:
 
     def test_get_recommended_retention_uses_settings_default(self, monkeypatch):
         """get_recommended_retention이 AuditSettings의 기본값을 사용하는지 확인."""
-        from baldur.settings import audit_settings
+        from baldur.settings import audit as audit_settings
 
         audit_settings.reset_audit_settings()
 
@@ -274,7 +274,7 @@ class TestConfigSettingsIntegration:
 
     def test_get_recommended_retention_with_compliance_standards(self, monkeypatch):
         """get_recommended_retention이 컴플라이언스 표준에 따라 값을 조정하는지 확인."""
-        from baldur.settings import audit_settings
+        from baldur.settings import audit as audit_settings
 
         audit_settings.reset_audit_settings()
 
