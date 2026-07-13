@@ -196,7 +196,7 @@ class AsyncTimeoutPolicy:
         task: asyncio.Task[T] | None = None
         try:
             coro = func(*args, **kwargs)
-            task = asyncio.ensure_future(coro)  # type: ignore[arg-type]
+            task = asyncio.ensure_future(coro)  # type: ignore[call-overload]
             value = await asyncio.wait_for(task, timeout=self._timeout_seconds)
             return PolicyResult(
                 value=value,

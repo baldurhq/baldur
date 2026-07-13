@@ -265,7 +265,7 @@ class PrometheusQueryClient:
                 status_code=response.status_code,
             )
 
-        result = body.get("data", {}).get("result", [])
+        result: list[dict[str, Any]] = body.get("data", {}).get("result", [])
         logger.debug(
             "prometheus_query_client.query_succeeded",
             query=promql,

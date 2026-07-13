@@ -401,7 +401,7 @@ def get_current_state() -> dict:
         "redis_state": health_checker.state.value,
         "redis_healthy": health_checker.is_healthy,
         "redis_degraded": health_checker.is_degraded,
-        "local_limiter_keys": len(local_limiter._requests),
+        "local_limiter_keys": len(local_limiter.get_all_clients()),
     }
 
 
