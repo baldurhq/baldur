@@ -107,6 +107,7 @@ if TYPE_CHECKING:
     from baldur.settings.observability import ObservabilitySettings
     from baldur.settings.otel import OpenTelemetrySettings
     from baldur.settings.pipeline import PipelineSettings
+    from baldur.settings.pool_circuit_breaker import PoolCircuitBreakerSettings
     from baldur.settings.pool_monitor import PoolMonitorSettings
     from baldur.settings.postmortem import PostmortemSettings
     from baldur.settings.precomputed_cache import PrecomputedCacheSettings
@@ -878,6 +879,12 @@ class AdaptersGroup:
         )
 
         return NotificationChannelSettings()
+
+    @cached_property
+    def pool_circuit_breaker(self) -> PoolCircuitBreakerSettings:
+        from baldur.settings.pool_circuit_breaker import PoolCircuitBreakerSettings
+
+        return PoolCircuitBreakerSettings()
 
     @cached_property
     def redis(self) -> RedisSettings:

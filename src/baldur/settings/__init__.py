@@ -359,6 +359,11 @@ if TYPE_CHECKING:
         get_observability_settings,
         reset_observability_settings,
     )
+    from baldur.settings.pool_circuit_breaker import (
+        PoolCircuitBreakerSettings,
+        get_pool_circuit_breaker_settings,
+        reset_pool_circuit_breaker_settings,
+    )
     from baldur.settings.postgres import (
         PostgresSettings,
         get_postgres_settings,
@@ -1131,6 +1136,18 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
         "baldur.settings.observability",
         "reset_observability_settings",
     ),
+    "PoolCircuitBreakerSettings": (
+        "baldur.settings.pool_circuit_breaker",
+        "PoolCircuitBreakerSettings",
+    ),
+    "get_pool_circuit_breaker_settings": (
+        "baldur.settings.pool_circuit_breaker",
+        "get_pool_circuit_breaker_settings",
+    ),
+    "reset_pool_circuit_breaker_settings": (
+        "baldur.settings.pool_circuit_breaker",
+        "reset_pool_circuit_breaker_settings",
+    ),
     "PostgresSettings": ("baldur.settings.postgres", "PostgresSettings"),
     "get_postgres_settings": ("baldur.settings.postgres", "get_postgres_settings"),
     "reset_postgres_settings": ("baldur.settings.postgres", "reset_postgres_settings"),
@@ -1672,6 +1689,10 @@ __all__ = [
     "ApiRateLimitSettings",
     "get_api_rate_limit_settings",
     "reset_api_rate_limit_settings",
+    # Pool Circuit Breaker (Django pool-aware CB middleware)
+    "PoolCircuitBreakerSettings",
+    "get_pool_circuit_breaker_settings",
+    "reset_pool_circuit_breaker_settings",
     # Daily Report Task Settings (108_HARDCODED_CONFIG_REFACTORING_PART1_CELERY_TASKS.md)
     "DailyReportSettings",
     "get_daily_report_settings",

@@ -29,6 +29,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `IPCStateCache.stats` — use `get_stats()`. **Breaking**
 - `baldur.core.timezone` — use `baldur.utils.time.utc_now`. **Breaking**
 - `baldur.settings.audit_settings` alias — use `from baldur.settings import audit`. **Breaking**
+- `POOL_CB_*` pool circuit-breaker env vars — use `BALDUR_POOL_CB_*`. **Breaking**
 
 ### Security
 
