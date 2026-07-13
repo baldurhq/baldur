@@ -34,11 +34,13 @@ obvious:
 
 - **Retry must sit *inside* the circuit breaker.** If you retry on the outside, you keep hammering
   a dependency the breaker has already judged to be down, burning your retry budget and piling
-  load onto a failing service. With the breaker outermost, an open breaker fails the call *fast*
-  and the retries never run.
-- **Fallback must be the *last* resort.** If the fallback runs before retry, a one-off blip that
-  the very next attempt would have survived gets served the degraded answer instead. With fallback
-  innermost, retry gets its chance first.
+  load onto a failing service. With the breaker outside retry, an open breaker stops the retries
+  before they run.
+- **Fallback is the *last* resort — retry gets its chance first.** A fallback must never pre-empt a
+  retry: a one-off blip that the very next attempt would have survived should not be served the
+  degraded answer. So retry runs its full budget first, and the fallback catches only what the
+  inner chain could not save — a genuine exhaustion, a timeout, or an open breaker. It is the
+  *outermost* layer precisely *because* it is the last thing to run.
 
 `@baldur.protected` fixes this order once, correctly, so every protected call in your codebase gets
 the same proven layering. You never re-derive the nesting, and you reason about one entry point
@@ -46,14 +48,14 @@ instead of several hand-rolled wrappers.
 
 ## How it works in Baldur
 
-A protected call runs through the patterns from the outside in. The breaker is checked first and
-can short-circuit everything below it; the fallback is the innermost safety net; and a final
-failure can be copied into the dead-letter queue on the way out.
+A protected call runs through the patterns from the outside in. The fallback wraps everything as
+the last resort; inside it the breaker is checked and can short-circuit the retry; retry rides out
+transient blips; and a final failure can be copied into the dead-letter queue on the way out.
 
 ```mermaid
 flowchart TB
     A["your protected call"] --> CB{"Circuit breaker"}
-    CB -->|"breaker open"| FF["fail fast — skip everything below"]
+    CB -->|"breaker open"| FB
     CB -->|"breaker closed / probing"| RT["Retry with backoff"]
     RT -->|"an attempt succeeds"| OK["return the result"]
     RT -->|"all attempts fail"| FB{"fallback set?"}
@@ -61,9 +63,22 @@ flowchart TB
     FB -->|"no"| ERR["raise the original error — and, with dlq=True,<br/>set the work aside in the dead-letter queue"]
 ```
 
-Because the breaker is outermost, an open breaker fails the call fast: retry and fallback are
-skipped entirely, so you never burn retry attempts or run a fallback against a dependency that is
-already known to be down.
+Because the fallback is outermost, it is the single safety net for **every** way the inner chain
+can fail. And because the breaker still sits outside retry, an open breaker short-circuits *fast* —
+it never burns retry attempts against a dependency already known to be down — but instead of
+raising, it degrades to the fallback when you set one.
+
+#### What routes to the fallback
+
+| Outcome | Without a fallback | With a fallback |
+|---------|--------------------|-----------------|
+| An attempt succeeds | returns the value | returns the value |
+| All retries fail (exhaustion) | raises the last error | serves the fallback |
+| Timeout — the wall-clock bound is hit | raises `TimeoutPolicyError` | serves the fallback |
+| CB-open — the breaker rejects the call | raises `CircuitBreakerOpenError` | serves the fallback |
+
+The one thing the fallback does **not** absorb is an idempotency-duplicate rejection: a blocked
+duplicate raises `IdempotencyDuplicateError` so the caller knows the work did not run a second time.
 
 ### What's on by default
 
@@ -122,9 +137,25 @@ attempts?) without catching an exception, `protect_with_meta()` (and its async c
   not set aside for later. With **PRO**, `dlq=True` durably records every failed operation, nothing
   is lost across restarts, and you can replay or redrive the backlog once the dependency recovers.
   See [DLQ + Replay](../pro/dlq-replay.md).
+- **The fallback runs *outside* the timeout clock, so keep it cheap and local.** The timeout bounds
+  the inner call; when it fires, the fallback is what runs *next*, so it cannot be bounded by the
+  same clock. Serve something fast — a cached value, a static default — not a second network call.
+- **A fallback can branch on the failure.** Give it one parameter and it receives the exception that
+  triggered it, so it can serve a stale read on a timeout but re-raise on an auth error:
+
+  ```python
+  def fb(error: Exception):
+      if isinstance(error, TimeoutError):
+          return cached_snapshot()
+      raise error  # decline the fallback — let the original error propagate
+  ```
+
+  A zero-argument `fallback()` still works unchanged. (For outcome-level conditions beyond the error
+  type, the lower-level `baldur.compose()` builder exposes a `predicate=` on its `FallbackPolicy`;
+  the facade covers the common case through the error-aware callable above.)
 - **On `async def` functions**, the whole pipeline composes with the same guarantees as sync —
   circuit breaker, retry, fallback, dead-letter, idempotency, and timeout — in the same order (the
-  breaker outermost, then timeout, then retry, then fallback). A given `name` shares one breaker
+  fallback outermost, then the breaker, then timeout, then retry). A given `name` shares one breaker
   across both call styles, so failures counted on a sync call and on an async call open the same
   circuit. `@baldur.protected` detects whether the function is sync or async and dispatches
   automatically; reach for `aprotect()` / `@baldur.aprotected` when you want the async path explicit

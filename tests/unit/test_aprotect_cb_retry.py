@@ -340,16 +340,18 @@ class TestAprotectAsyncRetryDLQBehavior:
 class TestBuildAsyncComposerChainBehavior:
     """The async composer nests policies in the sync-mirrored add-order.
 
-    Order is load-bearing: CB (outermost) wraps Retry so one exhausted
-    retry-sequence counts as a single CB failure, and Timeout wraps Retry so a
-    single global timeout bounds the whole sequence (not per-attempt).
+    Order is load-bearing: Fallback (outermost) is the last resort covering
+    every inner outcome; CB sits inside the fallback (so absorbed failures still
+    count toward the breaker) but outside Retry so one exhausted retry-sequence
+    counts as a single CB failure; Timeout wraps Retry so a single global
+    timeout bounds the whole sequence (not per-attempt).
     """
 
     async def _fallback(self):
         return "fb"
 
-    def test_full_chain_order_is_cb_timeout_retry_fallback(self, clean_caches):
-        """All four stages present → add-order CB → Timeout → Retry → Fallback."""
+    def test_full_chain_order_is_fallback_cb_timeout_retry(self, clean_caches):
+        """All four stages present → add-order Fallback → CB → Timeout → Retry."""
         composer = _build_async_composer(
             name="async.chain",
             fallback=self._fallback,
@@ -360,10 +362,10 @@ class TestBuildAsyncComposerChainBehavior:
         )
 
         assert [p.name for p in composer._policies] == [
+            "fallback",
             "circuit_breaker",
             "timeout",
             "retry",
-            "fallback",
         ]
 
     def test_cb_precedes_retry_when_timeout_absent(self, clean_caches):

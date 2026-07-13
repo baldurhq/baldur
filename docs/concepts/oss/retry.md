@@ -60,10 +60,10 @@ A few things to keep in mind:
   that can't succeed.
 - **A timeout bounds the whole sequence, not each attempt.** When you add a timeout under
   `@baldur.protected` (or `protect()` / `aprotect()`), it wraps the entire retry sequence — the
-  circuit breaker sits outermost, the timeout next, then retry, then fallback — so the clock covers
-  every attempt plus the backoff waits between them, not each attempt individually. Baldur exposes
-  no per-attempt timeout knob (identical in sync and async); to bound a single attempt, wrap that
-  call yourself before handing it to retry.
+  fallback sits outermost, the circuit breaker next, then the timeout, then retry — so the clock
+  covers every attempt plus the backoff waits between them, not each attempt individually. Baldur
+  exposes no per-attempt timeout knob (identical in sync and async); to bound a single attempt, wrap
+  that call yourself before handing it to retry.
 - **A retry re-runs your function, so it must be safe to run twice.** Baldur calls the operation
   again; it does not silently undo a partial side effect. For work that must never repeat
   (charging a card, sending a message), dedup the operation. Under `@baldur.protected`, pass
