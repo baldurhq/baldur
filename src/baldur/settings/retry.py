@@ -86,6 +86,14 @@ class RetrySettings(BaseSettings):
         default=STANDARD_MAX_DELAY,
         description="Maximum delay cap in seconds",
     )
+    max_elapsed: float | None = Field(
+        default=None,
+        gt=0,
+        description="Total wall-clock retry budget in seconds (cooperative). "
+        "None disables the budget (attempt-count bound only). Distinct from "
+        "max_delay, which caps a single backoff sleep — max_elapsed bounds the "
+        "whole retry ladder end-to-end.",
+    )
 
     @field_validator("backoff_strategy")
     @classmethod
@@ -102,6 +110,14 @@ class RetrySettings(BaseSettings):
     def _warn_max_delay(cls, v: float) -> float:
         """Warn if max_delay is very high."""
         return warn_above(600, "safe_default.high_consider_using_responsiveness")(v)
+
+    @field_validator("max_elapsed")
+    @classmethod
+    def _warn_max_elapsed(cls, v: float | None) -> float | None:
+        """Warn if max_elapsed is very high (>1h) — likely a responsiveness footgun."""
+        if v is None:
+            return v
+        return warn_above(3600, "safe_default.high_consider_using_responsiveness")(v)
 
 
 # =============================================================================

@@ -10,6 +10,7 @@ RetryResult(dataclass), T TypeVar.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -36,7 +37,15 @@ class RetryAction(str, Enum):
 
 
 class MaxRetriesExceededError(RetryExhaustedError):
-    """Raised when maximum retry attempts have been exhausted."""
+    """Raised when maximum retry attempts have been exhausted.
+
+    Carries the terminal cause via two mutually-exclusive slots:
+    ``last_error`` (the final exception, for exception-driven exhaustion) or
+    ``last_result`` + ``result_rejected`` (the final rejected value, for
+    result-predicate exhaustion). ``is_result_exhaustion`` is the first-class
+    discriminator — do not infer it from ``last_result is not None`` (the
+    predicate may legitimately reject ``None``) or ``last_error is None``.
+    """
 
     def __init__(
         self,
@@ -44,11 +53,20 @@ class MaxRetriesExceededError(RetryExhaustedError):
         retry_count: int,
         max_retries: int,
         last_error: Exception | None = None,
+        last_result: Any = None,
+        result_rejected: bool = False,
     ):
         super().__init__(message)
         self.retry_count = retry_count
         self.max_retries = max_retries
         self.last_error = last_error
+        self.last_result = last_result
+        self.result_rejected = result_rejected
+
+    @property
+    def is_result_exhaustion(self) -> bool:
+        """True when exhaustion was caused by a rejected result, not an exception."""
+        return self.result_rejected
 
     def extra_context(self) -> dict:
         ctx = super().extra_context()
@@ -56,6 +74,9 @@ class MaxRetriesExceededError(RetryExhaustedError):
         ctx["max_retries"] = self.max_retries
         if self.last_error:
             ctx["last_error"] = str(self.last_error)
+        # Marker only — never the rejected value itself (audit/DLQ payload safety).
+        if self.result_rejected:
+            ctx["result_rejected"] = True
         return ctx
 
 
@@ -91,6 +112,17 @@ class RetryConfig:
     critical_tier_full_stop_max_delay: int = 720
     """Maximum wait time for CRITICAL-tier requests in FULL_STOP (12 minutes)"""
 
+    # Result-predicate retry: retry a call that *returned* a soft-error value
+    # (200 + error payload, None, partial response). Constructor/decorator-only —
+    # not env-expressible (a callable cannot round-trip through settings),
+    # matching the retryable_exceptions precedent. Must be a synchronous callable.
+    retry_on_result: Callable[[Any], bool] | None = None
+
+    # Cooperative wall-clock retry budget (seconds). None disables it. Combined
+    # min-of-two with the request-scoped deadline in the policy loop. Distinct
+    # from backoff_max (per-sleep cap): max_elapsed bounds the whole ladder.
+    max_elapsed: float | None = None
+
     @classmethod
     def from_settings(cls, domain: str = "default") -> RetryConfig:
         """
@@ -125,6 +157,7 @@ class RetryConfig:
                 ),
                 backoff_max=int(retry_config.get("max_delay", 180)),
                 jitter_percent=retry_config.get("jitter_percent", 25),
+                max_elapsed=retry_config.get("max_elapsed"),
                 enable_dlq=dlq_config.get("enabled", True),
                 domain=domain,
             )
@@ -148,6 +181,7 @@ class RetryConfig:
             ),
             backoff_max=domain_config.get("max_delay", retry_settings.max_delay),
             jitter_percent=backoff_settings.legacy_jitter_percent,
+            max_elapsed=domain_config.get("max_elapsed", retry_settings.max_elapsed),
             enable_dlq=dlq_settings.enabled,
             domain=domain,
         )
@@ -169,6 +203,12 @@ class RetryPolicyConfig:
     )
     domain: str = "default"
     enable_dlq: bool = True
+
+    # Result-predicate retry (constructor/decorator-only, synchronous callable)
+    # and cooperative wall-clock budget (seconds, None = disabled). See the
+    # matching fields on RetryConfig for the full contract.
+    retry_on_result: Callable[[Any], bool] | None = None
+    max_elapsed: float | None = None
 
     @classmethod
     def from_settings(cls, domain: str = "default") -> RetryPolicyConfig:
@@ -203,6 +243,7 @@ class RetryPolicyConfig:
                 ),
                 backoff_max=int(retry_config.get("max_delay", 180)),
                 jitter_percent=retry_config.get("jitter_percent", 25),
+                max_elapsed=retry_config.get("max_elapsed"),
                 enable_dlq=dlq_config.get("enabled", True),
                 domain=domain,
             )
@@ -223,6 +264,7 @@ class RetryPolicyConfig:
             ),
             backoff_max=domain_config.get("max_delay", retry_settings.max_delay),
             jitter_percent=backoff_settings.legacy_jitter_percent,
+            max_elapsed=domain_config.get("max_elapsed", retry_settings.max_elapsed),
             enable_dlq=dlq_settings.enabled,
             domain=domain,
         )
@@ -239,6 +281,8 @@ class RetryPolicyConfig:
             non_retryable_exceptions=config.non_retryable_exceptions,
             domain=config.domain,
             enable_dlq=config.enable_dlq,
+            retry_on_result=config.retry_on_result,
+            max_elapsed=config.max_elapsed,
         )
 
 

@@ -228,6 +228,9 @@ def _emit_retry_exhausted(
             "final_error_type": (
                 type(last_error).__name__ if last_error is not None else None
             ),
+            # Bridge honors arbitrary user stop strategies -> ``stop_condition``,
+            # not ``max_attempts`` (see callbacks._emit_retry_exhausted_event).
+            "reason": "stop_condition",
         }
         bus = get_event_bus()
         bus.emit(
