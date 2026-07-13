@@ -18,7 +18,7 @@ from unittest.mock import patch
 import pytest
 
 from baldur.core import rate_limiting
-from baldur.core.rate_limiting import SlidingWindowCounter, TokenBucket
+from baldur.core.rate_limiting import CooldownGate, SlidingWindowCounter, TokenBucket
 
 
 class _FakeClock:
@@ -59,9 +59,13 @@ class _AutoAdvanceClock:
 class TestRateLimitingModuleContract:
     """Module-surface contract."""
 
-    def test_module_exports_exactly_the_two_primitives(self):
-        """__all__ declares SlidingWindowCounter + TokenBucket, nothing else."""
-        assert set(rate_limiting.__all__) == {"SlidingWindowCounter", "TokenBucket"}
+    def test_module_exports_exactly_the_three_primitives(self):
+        """__all__ declares the three primitives, nothing else."""
+        assert set(rate_limiting.__all__) == {
+            "CooldownGate",
+            "SlidingWindowCounter",
+            "TokenBucket",
+        }
 
 
 # =============================================================================
@@ -447,3 +451,181 @@ class TestTokenBucketBehavior:
         with patch("time.time", return_value=1003.0):
             assert bucket.consume(6) is True  # 3s * 2 == 6 refilled
             assert bucket.consume(1) is False
+
+
+# =============================================================================
+# CooldownGate — contract (hardcoded spec semantics)
+# =============================================================================
+
+
+class TestCooldownGateContract:
+    """Cooldown boundary, disabled-gate, and clock-resolution contracts."""
+
+    def test_within_cooldown_is_suppressed_and_reserve_denied(self):
+        """A second reserve inside the window returns (False, None)."""
+        clock = _FakeClock(start=1000.0)
+        gate = CooldownGate(clock=clock)
+
+        assert gate.try_reserve("k", 10.0) == (True, 1000.0)
+        clock.advance(9.0)  # still inside the 10s window
+        assert gate.try_reserve("k", 10.0) == (False, None)
+        assert gate.is_suppressed("k", 10.0) is True
+
+    def test_cooldown_boundary_is_exclusive(self):
+        """At exactly ``now - reserved == cooldown`` the key is no longer
+        suppressed (strict ``<``) and a reserve succeeds again."""
+        clock = _FakeClock(start=1000.0)
+        gate = CooldownGate(clock=clock)
+        gate.try_reserve("k", 10.0)
+
+        clock.advance(9.0)  # 9 < 10 -> suppressed
+        assert gate.is_suppressed("k", 10.0) is True
+
+        clock.advance(1.0)  # exactly 10 elapsed -> not suppressed
+        assert gate.is_suppressed("k", 10.0) is False
+        assert gate.try_reserve("k", 10.0) == (True, 1010.0)
+
+    def test_non_positive_cooldown_always_reserves(self):
+        """``cooldown_seconds <= 0`` disables the gate (every reserve succeeds)."""
+        clock = _FakeClock(start=1000.0)
+        gate = CooldownGate(clock=clock)
+
+        assert gate.try_reserve("k", 0.0) == (True, 1000.0)
+        assert gate.try_reserve("k", 0.0) == (True, 1000.0)  # not suppressed
+        assert gate.is_suppressed("k", 0.0) is False
+
+    def test_default_clock_resolves_time_time_at_call_time_and_is_patchable(self):
+        """The default (clock=None) resolves time.time() per call, so patching
+        the module attribute steers the cooldown."""
+        gate = CooldownGate()  # no injected clock
+
+        with patch("time.time", return_value=1000.0):
+            assert gate.try_reserve("k", 10.0) == (True, 1000.0)
+
+        with patch("time.time", return_value=1005.0):
+            assert gate.is_suppressed("k", 10.0) is True  # 5 < 10
+
+        with patch("time.time", return_value=1011.0):
+            assert gate.is_suppressed("k", 10.0) is False  # 11 > 10
+
+
+# =============================================================================
+# CooldownGate — behavior
+# =============================================================================
+
+
+class TestCooldownGateBehavior:
+    """Reservation, token-conditional release, per-window eviction, lifecycle."""
+
+    def test_release_pops_the_reservation_for_a_matching_token(self):
+        """A release with the reserve's token frees the slot for an immediate
+        re-reserve (the rollback-on-failed-send path)."""
+        clock = _FakeClock(start=1000.0)
+        gate = CooldownGate(clock=clock)
+
+        reserved, token = gate.try_reserve("k", 300.0)
+        assert reserved is True
+        assert gate.release("k", token) is True
+        # Slot freed: a re-reserve inside the original window still succeeds.
+        assert gate.try_reserve("k", 300.0) == (True, 1000.0)
+
+    def test_release_is_token_conditional(self):
+        """A stale token must not clobber a successor's live reservation."""
+        clock = _FakeClock(start=1000.0)
+        gate = CooldownGate(clock=clock)
+
+        _, first_token = gate.try_reserve("k", 300.0)
+        clock.advance(301.0)  # first reservation expires
+        _, second_token = gate.try_reserve("k", 300.0)  # successor re-reserves
+
+        assert gate.release("k", first_token) is False  # stale -> no-op
+        assert gate.is_suppressed("k", 300.0) is True  # successor still live
+        assert gate.release("k", second_token) is True
+
+    def test_release_absent_key_returns_false(self):
+        """Releasing a key that was never reserved is a no-op."""
+        gate = CooldownGate(clock=_FakeClock())
+        assert gate.release("missing", 1000.0) is False
+
+    def test_eviction_judges_each_entry_by_its_own_window(self):
+        """G6 regression: a short-cooldown reserve must not evict a still
+        in-window long-cooldown entry sharing the gate."""
+        clock = _FakeClock(start=1000.0)
+        gate = CooldownGate(clock=clock)
+
+        gate.try_reserve("long", 300.0)
+        clock.advance(10.0)  # long entry still inside its 300s window
+
+        # A different key reserves with a short 5s cooldown; its eviction sweep
+        # must use each entry's OWN stored window, not the 5s call window.
+        gate.try_reserve("short", 5.0)
+
+        assert "long" in gate.keys()
+        assert gate.is_suppressed("long", 300.0) is True
+
+    def test_expired_entry_is_evicted_on_next_reserve(self):
+        """An entry past its own stored window is dropped on the next reserve."""
+        clock = _FakeClock(start=1000.0)
+        gate = CooldownGate(clock=clock)
+
+        gate.try_reserve("stale", 10.0)
+        clock.advance(11.0)  # past the 10s window
+        gate.try_reserve("other", 10.0)  # triggers the eviction sweep
+
+        assert "stale" not in gate.keys()
+        assert "other" in gate.keys()
+
+    def test_is_suppressed_reflects_entry_state_without_locking(self):
+        """is_suppressed: absent -> False, in-window -> True, expired -> False."""
+        clock = _FakeClock(start=1000.0)
+        gate = CooldownGate(clock=clock)
+
+        assert gate.is_suppressed("k", 10.0) is False  # no entry
+        gate.try_reserve("k", 10.0)
+        assert gate.is_suppressed("k", 10.0) is True  # in window
+        clock.advance(11.0)
+        assert gate.is_suppressed("k", 10.0) is False  # aged out
+
+    def test_snapshot_maps_key_to_reserved_timestamp(self):
+        """snapshot returns a key -> reserved-timestamp copy."""
+        clock = _FakeClock(start=1000.0)
+        gate = CooldownGate(clock=clock)
+
+        gate.try_reserve("a", 300.0)
+        clock.advance(5.0)
+        gate.try_reserve("b", 300.0)
+
+        assert gate.snapshot() == {"a": 1000.0, "b": 1005.0}
+
+    def test_reset_and_reset_all(self):
+        """reset drops one key (reporting prior existence); reset_all clears."""
+        gate = CooldownGate(clock=_FakeClock())
+        gate.try_reserve("a", 300.0)
+        gate.try_reserve("b", 300.0)
+
+        assert gate.reset("a") is True
+        assert gate.reset("a") is False
+        assert gate.keys() == ["b"]
+
+        gate.reset_all()
+        assert gate.keys() == []
+
+    def test_reserve_admits_exactly_one_under_concurrency(self):
+        """The atomic reserve grants the slot to exactly one racing caller."""
+        gate = CooldownGate(clock=_FakeClock())  # frozen -> all within window
+        thread_count = 200
+        results: list[bool] = []
+        results_lock = threading.Lock()
+
+        def worker() -> None:
+            reserved, _ = gate.try_reserve("k", 60.0)
+            with results_lock:
+                results.append(reserved)
+
+        threads = [threading.Thread(target=worker) for _ in range(thread_count)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert sum(results) == 1  # exactly one reservation wins

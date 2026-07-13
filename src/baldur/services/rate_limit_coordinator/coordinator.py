@@ -28,6 +28,7 @@ import structlog
 
 from baldur.adapters.rate_limit import get_rate_limit_storage
 from baldur.core.backoff import ExponentialBackoff
+from baldur.core.rate_limiting import CooldownGate
 from baldur.interfaces.rate_limit_storage import (
     RateLimitState,
     RateLimitStorageInterface,
@@ -100,9 +101,9 @@ class RateLimitCoordinator:
         self._config = config or RateLimitCoordinatorConfig.from_settings()
         self._local_lock = threading.Lock()
 
-        # EventBus debouncing state (prevents duplicate event emission per key)
-        self._last_event_emit_times: dict[str, float] = {}
-        self._debounce_lock = threading.Lock()
+        # EventBus debouncing gate (prevents duplicate event emission per key;
+        # the shared gate also bounds the map that previously grew per key).
+        self._debounce_gate = CooldownGate()
 
         # Canary state tracking (scout mode for the first request after cooldown)
         self._canary_in_progress: dict[str, bool] = {}
@@ -149,27 +150,25 @@ class RateLimitCoordinator:
         """
         Check debouncing - prevent duplicate events within the window per key.
 
+        A failed emit is not rolled back: the reserved window is kept consumed,
+        matching the previous check-then-record behavior (acceptable-by-design
+        for a debounce).
+
         Args:
             key: Rate limit key
 
         Returns:
             Whether the event should be emitted
         """
-        now = time.time()
-
-        with self._debounce_lock:
-            last_time = self._last_event_emit_times.get(key, 0)
-
-            if now - last_time < self._config.debounce_window_seconds:
-                logger.debug(
-                    "rate_limit_coordinator.debounced_event_last_emit",
-                    rate_limit_key=key,
-                    time_since_last_request=now - last_time,
-                )
-                return False
-
-            self._last_event_emit_times[key] = now
-            return True
+        emitted, _token = self._debounce_gate.try_reserve(
+            key, self._config.debounce_window_seconds
+        )
+        if not emitted:
+            logger.debug(
+                "rate_limit_coordinator.debounced_event_last_emit",
+                rate_limit_key=key,
+            )
+        return emitted
 
     # =========================================================================
     # Cooldown End Event Scheduling
