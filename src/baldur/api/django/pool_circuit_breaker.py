@@ -40,6 +40,7 @@ from baldur.metrics.drift_metrics import (
     record_pool_cb_stale,
     update_pool_cb_hit_rate,
 )
+from baldur.settings.pool_circuit_breaker import get_pool_circuit_breaker_settings
 
 logger = structlog.get_logger()
 
@@ -79,37 +80,22 @@ class PoolCircuitBreaker:
         self._state: str = self.CLOSED
         self._state_lock = threading.Lock()
 
-        # Settings (overridable via environment variables)
-        self._failure_threshold = int(
-            os.getenv("POOL_CB_FAILURE_THRESHOLD", "3")
-        )  # OPEN after 3 failures
-        self._success_threshold = int(
-            os.getenv("POOL_CB_SUCCESS_THRESHOLD", "2")
-        )  # CLOSED after 2 successes
-        self._recovery_timeout = int(
-            os.getenv("POOL_CB_RECOVERY_TIMEOUT", "10")
-        )  # HALF_OPEN after 10 seconds
-        self._half_open_max_requests = int(os.getenv("POOL_CB_HALF_OPEN_MAX", "3"))
+        # Settings resolved through the BALDUR_POOL_CB_ Pydantic settings layer.
+        # Range validation (incl. the cache-interval bounds) is enforced at
+        # settings load, so an out-of-range value fails loudly here instead of
+        # being silently clamped.
+        settings = get_pool_circuit_breaker_settings()
+        self._failure_threshold = settings.failure_threshold  # OPEN after N failures
+        self._success_threshold = settings.success_threshold  # CLOSED after N successes
+        self._recovery_timeout = settings.recovery_timeout  # HALF_OPEN after N seconds
+        self._half_open_max_requests = settings.half_open_max_requests
 
         # v6.2.0: cache-based pool status lookup settings
-        # v6.2.1: TTL range validation and improved stale handling
-        raw_cache_interval = int(os.getenv("POOL_CB_CACHE_INTERVAL_MS", "100"))
-        # TTL range validation: 50ms ~ 1000ms (too short -> contention, too long -> detection lag)
-        self._cache_interval_ms = max(50, min(1000, raw_cache_interval))
-        if raw_cache_interval != self._cache_interval_ms:
-            logger.warning(
-                "pool_circuit_breaker.cache_interval_clamped_ms",
-                raw_cache_interval=raw_cache_interval,
-                cache_interval_ms=self._cache_interval_ms,
-            )
+        self._cache_interval_ms = settings.cache_interval_ms
 
         # v6.2.1: stale cache threshold settings
-        self._stale_threshold_multiplier = int(
-            os.getenv("POOL_CB_STALE_MULTIPLIER", "10")
-        )  # 10x = 1 second (at 100ms)
-        self._critical_stale_ms = int(
-            os.getenv("POOL_CB_CRITICAL_STALE_MS", "5000")
-        )  # fully stale beyond 5 seconds
+        self._stale_threshold_multiplier = settings.stale_multiplier
+        self._critical_stale_ms = settings.critical_stale_ms
 
         self._cached_pool_status = {
             "available": False,

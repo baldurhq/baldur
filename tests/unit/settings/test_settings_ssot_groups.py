@@ -107,9 +107,9 @@ class TestGroupClassCountContract:
         """ObservabilityGroup: correlation, correlation_engine, logging_settings, otel, profile."""
         assert self._count_cached_properties(ObservabilityGroup) == 5
 
-    def test_adapters_group_has_10_properties(self):
-        """AdaptersGroup: arq, celery_task, config_shadow, http_client, kafka_audit, kafka_producer, middleware, notification_channel, redis, secrets."""
-        assert self._count_cached_properties(AdaptersGroup) == 10
+    def test_adapters_group_has_11_properties(self):
+        """AdaptersGroup: arq, celery_task, config_shadow, http_client, kafka_audit, kafka_producer, middleware, notification_channel, pool_circuit_breaker, redis, secrets."""
+        assert self._count_cached_properties(AdaptersGroup) == 11
 
     def test_security_group_has_3_properties(self):
         """SecurityGroup: corruption_shield, domain_sensitivity, security."""
