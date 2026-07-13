@@ -394,19 +394,6 @@ class TestFreezeMode:
         assert allowed is False
         assert "Freeze Mode" in reason
 
-    def test_should_allow_canary_recovery_blocked_in_freeze(self):
-        """Freeze Mode에서 Canary Recovery 금지."""
-        from baldur.services.circuit_breaker.freeze_mode import FreezeModeManager
-
-        FreezeModeManager._instance = None
-        manager = FreezeModeManager()
-        manager._state.active = True
-
-        allowed, reason = manager.should_allow_canary_recovery("payment-api")
-
-        assert allowed is False
-        assert "Canary Recovery blocked" in reason
-
     def test_deactivate_blocked_during_lockdown(self):
         """LOCKDOWN 중에는 수동 비활성화 불가."""
         from baldur.services.circuit_breaker.freeze_mode import FreezeModeManager
@@ -560,7 +547,7 @@ class TestPanicThreshold:
             total_count=4,
             open_circuits=["a", "b", "c"],
             action_taken="emergency_level_3_escalation",
-            halted_systems=["replay", "canary_recovery"],
+            halted_systems=["replay", "auto_open", "auto_close"],
         )
 
         assert result.triggered is True

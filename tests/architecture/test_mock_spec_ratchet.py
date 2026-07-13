@@ -111,7 +111,7 @@ _OSS_ROOT_EXCLUDE = frozenset({"factories", "testapp"})
 # The `oss` budget is this repo's test tree. The `pro` / `dormant` roots do not
 # exist in this repo and are skipped; their entries are inert.
 _MOCK_CREATION_BUDGETS: dict[str, int] = {
-    "oss": 4400,
+    "oss": 4394,
     "pro": 1817,
     "dormant": 401,
 }

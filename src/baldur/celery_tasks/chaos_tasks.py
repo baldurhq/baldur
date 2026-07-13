@@ -21,12 +21,13 @@ logger = structlog.get_logger(__name__)
 )
 def check_recovery_monitoring_experiments(self) -> dict:  # noqa: C901
     """
-    Check RECOVERY_MONITORING state experiments for Canary recovery completion.
+    Complete RECOVERY_MONITORING experiments once recovery is verified.
 
     This task should be scheduled via Celery Beat every 30 seconds.
     It polls experiments in RECOVERY_MONITORING state and:
-    1. Checks if Canary recovery is complete → marks COMPLETED
-    2. Checks if Hard TTL expired → force completes
+    1. Marks COMPLETED once the experiment's recovery hook reports recovered
+       (or immediately when the experiment exposes no recovery hook)
+    2. Force-completes once the Hard TTL expires
 
     Returns:
         Dictionary with check results
@@ -57,13 +58,18 @@ def check_recovery_monitoring_experiments(self) -> dict:  # noqa: C901
                 checked += 1
                 exp_id = getattr(experiment, "experiment_id", "unknown")
 
-                # Check Canary recovery
-                canary_status = {}
-                if hasattr(experiment, "_verify_canary_recovery"):
-                    canary_status = experiment._verify_canary_recovery()
+                # Verify recovery via the CB-state hook (present only on CB
+                # experiments). Absent hook -> complete immediately, since a
+                # non-CB experiment exposes no recovery signal to wait on
+                # (preserves the current first-tick completion timing).
+                if hasattr(experiment, "_verify_recovery"):
+                    recovery_complete = experiment._verify_recovery().get(
+                        "recovered", False
+                    )
+                else:
+                    recovery_complete = True
 
-                # If not in canary anymore, recovery complete
-                if not canary_status.get("in_canary", True):
+                if recovery_complete:
                     if hasattr(experiment, "complete_recovery_monitoring"):
                         experiment.complete_recovery_monitoring()
                         completed += 1

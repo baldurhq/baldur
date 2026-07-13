@@ -14,13 +14,11 @@ from baldur.core.config import (
 )
 from baldur.services.circuit_breaker.models import (
     AdaptiveThresholdPolicy,
-    CanaryRecoveryStageConfig,
     CircuitBreakerAdvancedConfig,
     FreezeModeState,
     LoadSheddingPolicy,
     OpenStrategy,
     PanicThresholdConfig,
-    RecoveryStrategy,
     ServiceConfig,
     SheddingLevel,
     ThresholdMultiplier,
@@ -89,17 +87,6 @@ class TestServiceConfig:
         """잘못된 설정값은 에러 발생."""
         with pytest.raises(ValueError, match=match):
             ServiceConfig(**kwargs)
-
-    def test_service_config_with_recovery_strategy(self):
-        """서비스별 RecoveryStrategy 오버라이드."""
-        recovery = RecoveryStrategy(type="canary", strict_mode=True)
-        config = ServiceConfig(
-            service_id="payment-api",
-            criticality="critical",
-            recovery_strategy=recovery,
-        )
-        assert config.recovery_strategy is not None
-        assert config.recovery_strategy.strict_mode is True
 
     def test_service_config_with_threshold_overrides(self):
         """서비스별 CB 임계값 오버라이드."""
@@ -226,119 +213,6 @@ class TestLoadSheddingPolicy:
         )
         assert policy.trigger_threshold == 40.0
         assert len(policy.levels) == 2
-
-
-# =============================================================================
-# CanaryRecoveryStageConfig Tests
-# =============================================================================
-
-
-class TestCanaryRecoveryStageConfig:
-    """CanaryRecoveryStageConfig 데이터 모델 테스트."""
-
-    def test_valid_canary_stage(self):
-        """정상적인 Canary 단계 생성."""
-        stage = CanaryRecoveryStageConfig(
-            traffic_percent=10.0,
-            duration_seconds=5,
-            required_success_rate=95.0,
-            description="Stage 1",
-        )
-        assert stage.traffic_percent == 10.0
-        assert stage.duration_seconds == 5
-        assert stage.required_success_rate == 95.0
-
-    @pytest.mark.parametrize(
-        ("kwargs", "match"),
-        [
-            (
-                {
-                    "traffic_percent": -10.0,
-                    "duration_seconds": 5,
-                    "required_success_rate": 95.0,
-                },
-                "traffic_percent must be between",
-            ),
-            (
-                {
-                    "traffic_percent": 150.0,
-                    "duration_seconds": 5,
-                    "required_success_rate": 95.0,
-                },
-                "traffic_percent must be between",
-            ),
-            (
-                {
-                    "traffic_percent": 10.0,
-                    "duration_seconds": -1,
-                    "required_success_rate": 95.0,
-                },
-                "duration_seconds must be non-negative",
-            ),
-            (
-                {
-                    "traffic_percent": 10.0,
-                    "duration_seconds": 5,
-                    "required_success_rate": 101.0,
-                },
-                "required_success_rate must be between",
-            ),
-        ],
-        ids=[
-            "negative_traffic",
-            "over100_traffic",
-            "negative_duration",
-            "invalid_success_rate",
-        ],
-    )
-    def test_invalid_canary_stage_raises_error(self, kwargs, match):
-        """잘못된 값은 에러 발생."""
-        with pytest.raises(ValueError, match=match):
-            CanaryRecoveryStageConfig(**kwargs)
-
-
-# =============================================================================
-# RecoveryStrategy Tests
-# =============================================================================
-
-
-class TestRecoveryStrategy:
-    """RecoveryStrategy 데이터 모델 테스트."""
-
-    def test_default_canary_strategy(self):
-        """기본 Canary 전략."""
-        strategy = RecoveryStrategy()
-        assert strategy.type == "canary"
-        assert len(strategy.canary_stages) == 4
-        assert strategy.on_stage_failure == "restart"
-        assert strategy.strict_mode is False
-
-    def test_default_canary_stages_progressive(self):
-        """기본 Canary 단계는 10% → 30% → 60% → 100%."""
-        strategy = RecoveryStrategy()
-        expected_percents = [10.0, 30.0, 60.0, 100.0]
-        actual_percents = [stage.traffic_percent for stage in strategy.canary_stages]
-        assert actual_percents == expected_percents
-
-    def test_immediate_strategy(self):
-        """Immediate 전략."""
-        strategy = RecoveryStrategy(type="immediate")
-        assert strategy.type == "immediate"
-
-    def test_invalid_type_raises_error(self):
-        """잘못된 type은 에러 발생."""
-        with pytest.raises(ValueError, match="Invalid type"):
-            RecoveryStrategy(type="delayed")  # Delayed는 안티패턴으로 미지원
-
-    def test_invalid_on_stage_failure_raises_error(self):
-        """잘못된 on_stage_failure는 에러 발생."""
-        with pytest.raises(ValueError, match="Invalid on_stage_failure"):
-            RecoveryStrategy(on_stage_failure="ignore")
-
-    def test_strict_mode_for_payment(self):
-        """결제 서비스용 strict_mode (100% 성공률 요구)."""
-        strategy = RecoveryStrategy(strict_mode=True)
-        assert strategy.strict_mode is True
 
 
 # =============================================================================
@@ -701,8 +575,6 @@ class TestDesignDecisions:
         """Delayed 전략은 안티패턴으로 지원하지 않음."""
         with pytest.raises(ValueError):
             OpenStrategy(type="delayed")
-        with pytest.raises(ValueError):
-            RecoveryStrategy(type="delayed")
 
     def test_critical_cannot_be_shed(self):
         """critical 서비스는 Load Shedding 대상에 포함될 수 없음."""
@@ -712,19 +584,6 @@ class TestDesignDecisions:
                 shed_criticality=["low", "critical"],  # critical 포함 시 에러
                 traffic_limit=0.0,
             )
-
-    def test_canary_stages_prevent_thundering_herd(self):
-        """Canary 단계는 Thundering Herd 방지를 위해 점진적."""
-        strategy = RecoveryStrategy()
-        stages = strategy.canary_stages
-
-        # 연속 단계 간 트래픽 비율 차이 확인
-        for i in range(len(stages) - 1):
-            current = stages[i].traffic_percent
-            next_stage = stages[i + 1].traffic_percent
-            ratio = next_stage / current if current > 0 else float("inf")
-            # 5배 이상 급증하지 않도록 (10→50 대신 10→30→60 등)
-            assert ratio <= 5, f"Stage {i} to {i + 1} ratio is {ratio}, should be <= 5"
 
     def test_lockdown_freezes_all_automatic_changes(self):
         """LOCKDOWN에서 Adaptive Threshold는 무한대로 자동 OPEN 금지."""

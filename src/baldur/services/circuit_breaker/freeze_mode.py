@@ -329,26 +329,6 @@ class FreezeModeManager:
             is_manual=False,
         )
 
-    def should_allow_canary_recovery(self, service_id: str) -> tuple[bool, str]:
-        """
-        Whether Canary Recovery is allowed.
-
-        Canary Recovery is also forbidden in Freeze Mode.
-
-        Args:
-            service_id: Target service ID
-
-        Returns:
-            Tuple[bool, str]: (whether allowed, reason if denied)
-        """
-        if not self.is_active():
-            return True, ""
-
-        reason = (
-            f"LOCKDOWN: Freeze Mode active - Canary Recovery blocked for {service_id}"
-        )
-        return False, reason
-
 
 # =============================================================================
 # Convenience Functions

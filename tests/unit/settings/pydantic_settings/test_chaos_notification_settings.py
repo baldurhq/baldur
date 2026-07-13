@@ -332,7 +332,6 @@ class TestCircuitBreakerAdvancedSettings:
         assert settings.enabled is False
         assert settings.load_shedding_enabled is False
         assert settings.load_shedding_trigger_threshold == 30.0
-        assert settings.canary_default_stages == 4
 
     def test_env_override(self, monkeypatch):
         """환경변수로 값을 오버라이드할 수 있는지 검증."""

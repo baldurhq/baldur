@@ -14,7 +14,7 @@ relicenses anything in the core.
 
 | Capability | OSS core | PRO |
 |------------|:--------:|:---:|
-| Circuit breaker (incl. staged half-open recovery) | ✅ | ✅ |
+| Circuit breaker (incl. half-open recovery) | ✅ | ✅ |
 | Retry with backoff | ✅ | ✅ |
 | Idempotency | ✅ | ✅ |
 | Health checks | ✅ | ✅ |
@@ -76,25 +76,28 @@ in code, and the capability becomes real when you add the PRO package and a
 license. PRO-only settings left in an OSS install are simply **inert**; an OSS
 deployment never breaks because a PRO knob was present.
 
-## A note on naming: two kinds of "canary"
+## A note on naming: "canary"
 
-"Canary" appears in two unrelated places in Baldur. They are different features
-at different tiers — do not confuse them:
+"Canary" names exactly one feature in Baldur — **Canary Recovery (PRO)** — but
+the word invites a common misreading of the OSS circuit breaker, so it is worth
+stating what each does:
 
-- **Circuit-breaker staged recovery (OSS).** When an OSS circuit breaker leaves
-  the OPEN state, it does not slam 100% of traffic back at the dependency. It
-  ramps through staged percentages (a *canary ramp* in the half-open phase) and
-  reverts to OPEN at the first sign the dependency is still unhealthy. This is
-  part of the [circuit breaker](oss/circuit-breaker.md) and operates on
-  **in-process traffic to one dependency**.
+- **Circuit-breaker half-open recovery (OSS).** When an OSS circuit breaker
+  leaves the OPEN state, it does not slam 100% of traffic back at the
+  dependency. It admits a bounded number of concurrent probe calls (the
+  `half_open_max_calls` slots) and reverts to OPEN at the first probe failure.
+  This is ordinary half-open probing — it does not step traffic back through
+  graduated percentages — and it operates on **in-process traffic to one
+  dependency**. See the [circuit breaker](oss/circuit-breaker.md).
 - **Canary Recovery (PRO).** A separate PRO feature that rolls a **configuration
   change** out to a small slice of your fleet first, watches it, and restores
   the previous configuration automatically if the rollout degrades. It operates
   on **fleet-wide configuration**, not circuit-breaker traffic. See
   [Canary Recovery](pro/canary-recovery.md).
 
-In short: the OSS canary ramp recovers *one breaker's traffic*; PRO Canary
-Recovery rolls out and rolls back *configuration across a fleet*.
+In short: the OSS circuit breaker recovers *one breaker's traffic* with bounded
+half-open probes; PRO Canary Recovery rolls out and rolls back *configuration
+across a fleet*.
 
 ## Turning PRO on
 

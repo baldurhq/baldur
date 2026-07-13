@@ -749,7 +749,6 @@ class PredictedOutcomeSerializer(serializers.Serializer):
     predicted_cb_state = serializers.CharField()
     predicted_recovery_time_seconds = serializers.FloatField()
     predicted_error_rate_increase_percent = serializers.FloatField()
-    predicted_canary_recovery = serializers.BooleanField()
     confidence_score = serializers.FloatField()
     patterns_used = serializers.IntegerField()
     similar_experiment_ids = serializers.ListField(

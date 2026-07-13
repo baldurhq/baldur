@@ -30,7 +30,6 @@ import structlog
 
 from baldur.services.circuit_breaker.models import (
     CircuitBreakerAdvancedConfig,
-    RecoveryStrategy,
     ServiceConfig,
 )
 from baldur.utils.time import utc_now
@@ -88,7 +87,6 @@ class ServiceConfigManager:
             return
 
         self._services: dict[str, ServiceConfig] = {}
-        self._default_recovery: RecoveryStrategy = RecoveryStrategy()
         self._initialized = True
 
         logger.debug("service_config.initialized")
@@ -348,40 +346,6 @@ class ServiceConfigManager:
         return config.shed_priority > 0
 
     # =========================================================================
-    # Recovery Strategy
-    # =========================================================================
-
-    def set_default_recovery_strategy(self, strategy: RecoveryStrategy) -> None:
-        """
-        Set the default Recovery strategy.
-
-        Args:
-            strategy: Default Recovery strategy
-        """
-        self._default_recovery = strategy
-        logger.info(
-            "service_config_manager.default_recovery_strategy_set",
-            strategy=strategy.type,
-        )
-
-    def get_recovery_strategy(self, service_id: str) -> RecoveryStrategy:
-        """
-        Look up the Recovery strategy of a service.
-
-        Returns the default strategy if there is no per-service strategy.
-
-        Args:
-            service_id: Service ID
-
-        Returns:
-            RecoveryStrategy: per-service or default strategy
-        """
-        config = self.get_service_config(service_id)
-        if config is not None and config.recovery_strategy is not None:
-            return config.recovery_strategy
-        return self._default_recovery
-
-    # =========================================================================
     # Service Threshold Override
     # =========================================================================
 
@@ -448,8 +412,6 @@ class ServiceConfigManager:
         # Register services
         count = self.register_services(config.services)
 
-        self.set_default_recovery_strategy(config.default_recovery)
-
         logger.info(
             "service_config_manager.configured_advanced_config_services",
             registered_services_count=count,
@@ -483,7 +445,6 @@ class ServiceConfigManager:
             "total_services": len(self._services),
             "services_by_criticality": services_by_criticality,
             "sheddable_services": sheddable_count,
-            "default_recovery_type": self._default_recovery.type,
             "timestamp": utc_now().isoformat(),
         }
 
@@ -506,7 +467,6 @@ class ServiceConfigManager:
                 }
                 for s in self._services.values()
             ],
-            "default_recovery_type": self._default_recovery.type,
         }
 
 

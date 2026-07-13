@@ -48,8 +48,6 @@ startup_wiring:
   - {file: src/baldur/context/celery_propagation.py, symbol: setup_celery_causation_propagation, reason: 'pre-existing: setup_celery_causation_propagation() not invoked from entry point - dynamic dispatch or wiring gap', ticket: '506'}
   - {file: src/baldur/observability/baggage.py, symbol: setup_baggage_propagation, reason: 'pre-existing: setup_baggage_propagation() not invoked from entry point - dynamic dispatch or wiring gap', ticket: '506'}
   - {file: src/baldur/services/cell_topology/health.py, symbol: setup_cell_health_scheduler, reason: 'pre-existing: setup_cell_health_scheduler() not invoked from entry point - dynamic dispatch or wiring gap', ticket: '506'}
-  - {file: src/baldur/services/circuit_breaker/canary_recovery.py, symbol: start_canary_recovery, reason: 'pre-existing: start_canary_recovery() not invoked from entry point - dynamic dispatch or wiring gap', ticket: '506'}
-  - {file: src/baldur/services/circuit_breaker/recovery_strategy.py, symbol: start_service_recovery, reason: 'pre-existing: start_service_recovery() not invoked from entry point - dynamic dispatch or wiring gap', ticket: '506'}
   - {file: src/baldur/services/dlq_outbox/outbox.py, symbol: setup_dlq_outbox, reason: 'pre-existing: setup_dlq_outbox() not invoked from entry point - dynamic dispatch or wiring gap', ticket: '506'}
 
 singleton_pair:
@@ -420,7 +418,6 @@ all_declaration:
   - {file: "src/baldur/services/circuit_breaker/actionable_alert_urls.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/services/circuit_breaker/adaptive_threshold.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/services/circuit_breaker/blast_radius_integration.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
-  - {file: "src/baldur/services/circuit_breaker/canary_recovery.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/services/circuit_breaker/convenience.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/services/circuit_breaker/exceptions.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/services/circuit_breaker/freeze_mode.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
@@ -434,10 +431,8 @@ all_declaration:
   - {file: "src/baldur/services/circuit_breaker/panic_threshold.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/services/circuit_breaker/policy.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/services/circuit_breaker/protection.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
-  - {file: "src/baldur/services/circuit_breaker/recovery_strategy.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/services/circuit_breaker/service.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/services/circuit_breaker/service_config.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
-  - {file: "src/baldur/services/circuit_breaker/stale_cache_integration.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/services/config/propagation_health.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/services/config/propagator.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/services/config_history/keys.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}

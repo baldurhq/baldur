@@ -13,21 +13,15 @@ from baldur.settings.field_types import (
     IntervalDuration,
     MediumCount,
     Percentage,
-    TinyCount,
 )
 
 
 class CircuitBreakerAdvancedSettings(BaseSettings):
-    """
-    Circuit Breaker 고급 보호 설정.
-
-    이 설정은 RuntimeConfigManager를 통해 중앙 관리됩니다.
-    서버 재시작 없이 API로 변경 가능합니다.
-    """
+    """Circuit Breaker advanced protection settings."""
 
     model_config = make_settings_config("BALDUR_CB_ADVANCED_")
 
-    # 전체 활성화
+    # Global enable
     enabled: bool = Field(
         default=False,
         description="Enable/disable advanced protection features",
@@ -46,7 +40,7 @@ class CircuitBreakerAdvancedSettings(BaseSettings):
     )
 
     # =========================================================================
-    # Adaptive Threshold (Emergency Level 연동)
+    # Adaptive Threshold (Emergency Level integration)
     # =========================================================================
     adaptive_base_failure_threshold: MediumCount = Field(
         default=5,
@@ -58,25 +52,7 @@ class CircuitBreakerAdvancedSettings(BaseSettings):
     )
 
     # =========================================================================
-    # Canary Recovery
-    # =========================================================================
-    canary_default_stages: TinyCount = Field(
-        default=4,
-        description="Default number of canary stages (10% -> 30% -> 60% -> 100%)",
-    )
-    canary_stage_duration_seconds: int = Field(
-        default=5,
-        ge=1,
-        le=300,
-        description="Duration of each canary stage (seconds)",
-    )
-    canary_strict_mode_for_critical: bool = Field(
-        default=True,
-        description="Require 100% success rate for critical services",
-    )
-
-    # =========================================================================
-    # Blast Radius 연동
+    # Blast Radius integration
     # =========================================================================
     blast_radius_integration: bool = Field(
         default=True,

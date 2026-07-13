@@ -84,8 +84,6 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "ServiceConfig": (".models", "ServiceConfig"),
     "SheddingLevel": (".models", "SheddingLevel"),
     "LoadSheddingPolicy": (".models", "LoadSheddingPolicy"),
-    "CanaryRecoveryStageConfig": (".models", "CanaryRecoveryStageConfig"),
-    "RecoveryStrategy": (".models", "RecoveryStrategy"),
     "ThresholdMultiplier": (".models", "ThresholdMultiplier"),
     "AdaptiveThresholdPolicy": (".models", "AdaptiveThresholdPolicy"),
     "OpenStrategy": (".models", "OpenStrategy"),
@@ -155,71 +153,6 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
         ".blast_radius_integration",
         "register_service_dependency",
     ),
-    # canary_recovery (16 symbols)
-    "CanaryRecoveryStage": (".canary_recovery", "CanaryRecoveryStage"),
-    "CanaryStageMetrics": (".canary_recovery", "CanaryStageMetrics"),
-    "CanaryRecoveryState": (".canary_recovery", "CanaryRecoveryState"),
-    "CanaryRecoveryDecision": (".canary_recovery", "CanaryRecoveryDecision"),
-    "CanaryStageTransitionResult": (".canary_recovery", "CanaryStageTransitionResult"),
-    "CanaryRecoveryManager": (".canary_recovery", "CanaryRecoveryManager"),
-    "get_canary_recovery_manager": (".canary_recovery", "get_canary_recovery_manager"),
-    "reset_canary_recovery_manager": (
-        ".canary_recovery",
-        "reset_canary_recovery_manager",
-    ),
-    "start_canary_recovery": (".canary_recovery", "start_canary_recovery"),
-    "stop_canary_recovery": (".canary_recovery", "stop_canary_recovery"),
-    "is_in_canary_recovery": (".canary_recovery", "is_in_canary_recovery"),
-    "canary_should_allow_request": (".canary_recovery", "canary_should_allow_request"),
-    "canary_record_success": (".canary_recovery", "canary_record_success"),
-    "canary_record_failure": (".canary_recovery", "canary_record_failure"),
-    "get_canary_recovery_state": (".canary_recovery", "get_canary_recovery_state"),
-    # stale_cache_integration (13 symbols)
-    "CanaryWithStaleCacheConfig": (
-        ".stale_cache_integration",
-        "CanaryWithStaleCacheConfig",
-    ),
-    "StaleCacheEntry": (".stale_cache_integration", "StaleCacheEntry"),
-    "CanaryWithStaleDecision": (".stale_cache_integration", "CanaryWithStaleDecision"),
-    "StaleCacheStore": (".stale_cache_integration", "StaleCacheStore"),
-    "CanaryWithStaleCacheService": (
-        ".stale_cache_integration",
-        "CanaryWithStaleCacheService",
-    ),
-    "get_canary_stale_cache_service": (
-        ".stale_cache_integration",
-        "get_canary_stale_cache_service",
-    ),
-    "reset_canary_stale_cache_service": (
-        ".stale_cache_integration",
-        "reset_canary_stale_cache_service",
-    ),
-    "canary_should_allow_with_fallback": (
-        ".stale_cache_integration",
-        "should_allow_with_fallback",
-    ),
-    "update_stale_cache": (".stale_cache_integration", "update_stale_cache"),
-    "record_canary_success": (".stale_cache_integration", "record_canary_success"),
-    "record_canary_failure": (".stale_cache_integration", "record_canary_failure"),
-    "build_stale_cache_key": (".stale_cache_integration", "build_stale_cache_key"),
-    # recovery_strategy (12 symbols)
-    "RecoveryStrategySelection": (".recovery_strategy", "RecoveryStrategySelection"),
-    "RecoveryDecision": (".recovery_strategy", "RecoveryDecision"),
-    "RecoveryStrategySelector": (".recovery_strategy", "RecoveryStrategySelector"),
-    "get_recovery_strategy_selector": (
-        ".recovery_strategy",
-        "get_recovery_strategy_selector",
-    ),
-    "reset_recovery_strategy_selector": (
-        ".recovery_strategy",
-        "reset_recovery_strategy_selector",
-    ),
-    "select_recovery_strategy": (".recovery_strategy", "select_recovery_strategy"),
-    "start_service_recovery": (".recovery_strategy", "start_service_recovery"),
-    "stop_service_recovery": (".recovery_strategy", "stop_service_recovery"),
-    "handle_half_open": (".recovery_strategy", "handle_half_open"),
-    "record_recovery_success": (".recovery_strategy", "record_recovery_success"),
-    "record_recovery_failure": (".recovery_strategy", "record_recovery_failure"),
     # load_shedding (17 symbols)
     "SheddingState": (".load_shedding", "SheddingState"),
     "SheddingDecision": (".load_shedding", "SheddingDecision"),
@@ -298,23 +231,6 @@ if TYPE_CHECKING:
     from .blast_radius_integration import (
         should_allow_cb_auto_open as should_allow_cb_auto_open_blast,
     )
-    from .canary_recovery import (
-        CanaryRecoveryDecision,
-        CanaryRecoveryManager,
-        CanaryRecoveryStage,
-        CanaryRecoveryState,
-        CanaryStageMetrics,
-        CanaryStageTransitionResult,
-        canary_record_failure,
-        canary_record_success,
-        canary_should_allow_request,
-        get_canary_recovery_manager,
-        get_canary_recovery_state,
-        is_in_canary_recovery,
-        reset_canary_recovery_manager,
-        start_canary_recovery,
-        stop_canary_recovery,
-    )
     from .config import CircuitBreakerFallbackResult
     from .convenience import (
         force_close_circuit,
@@ -353,13 +269,11 @@ if TYPE_CHECKING:
     from .manual_control import ManualControlMixin
     from .models import (
         AdaptiveThresholdPolicy,
-        CanaryRecoveryStageConfig,
         CircuitBreakerAdvancedConfig,
         FreezeModeState,
         LoadSheddingPolicy,
         OpenStrategy,
         PanicThresholdConfig,
-        RecoveryStrategy,
         ServiceConfig,
         SheddingLevel,
         ThresholdMultiplier,
@@ -379,19 +293,6 @@ if TYPE_CHECKING:
         get_rate_limit_tracker,
         reset_rate_limit_tracker,
     )
-    from .recovery_strategy import (
-        RecoveryDecision,
-        RecoveryStrategySelection,
-        RecoveryStrategySelector,
-        get_recovery_strategy_selector,
-        handle_half_open,
-        record_recovery_failure,
-        record_recovery_success,
-        reset_recovery_strategy_selector,
-        select_recovery_strategy,
-        start_service_recovery,
-        stop_service_recovery,
-    )
     from .service_config import (
         ServiceConfigManager,
         get_service_config,
@@ -401,22 +302,6 @@ if TYPE_CHECKING:
         is_critical_service,
         register_service,
         reset_service_config_manager,
-    )
-    from .stale_cache_integration import (
-        CanaryWithStaleCacheConfig,
-        CanaryWithStaleCacheService,
-        CanaryWithStaleDecision,
-        StaleCacheEntry,
-        StaleCacheStore,
-        build_stale_cache_key,
-        get_canary_stale_cache_service,
-        record_canary_failure,
-        record_canary_success,
-        reset_canary_stale_cache_service,
-        update_stale_cache,
-    )
-    from .stale_cache_integration import (
-        should_allow_with_fallback as canary_should_allow_with_fallback,
     )
 
 
@@ -454,8 +339,6 @@ __all__ = [
     "ServiceConfig",
     "SheddingLevel",
     "LoadSheddingPolicy",
-    "CanaryRecoveryStageConfig",
-    "RecoveryStrategy",
     "ThresholdMultiplier",
     "AdaptiveThresholdPolicy",
     "OpenStrategy",
@@ -501,48 +384,6 @@ __all__ = [
     "assess_cb_open_impact",
     "should_allow_cb_auto_open_blast",
     "register_service_dependency",
-    # Canary Recovery
-    "CanaryRecoveryStage",
-    "CanaryStageMetrics",
-    "CanaryRecoveryState",
-    "CanaryRecoveryDecision",
-    "CanaryStageTransitionResult",
-    "CanaryRecoveryManager",
-    "get_canary_recovery_manager",
-    "reset_canary_recovery_manager",
-    "start_canary_recovery",
-    "stop_canary_recovery",
-    "is_in_canary_recovery",
-    "canary_should_allow_request",
-    "canary_record_success",
-    "canary_record_failure",
-    "get_canary_recovery_state",
-    # Stale Cache Integration
-    "CanaryWithStaleCacheConfig",
-    "StaleCacheEntry",
-    "CanaryWithStaleDecision",
-    "StaleCacheStore",
-    "CanaryWithStaleCacheService",
-    "get_canary_stale_cache_service",
-    "reset_canary_stale_cache_service",
-    "canary_should_allow_with_fallback",
-    "update_stale_cache",
-    "record_canary_success",
-    "record_canary_failure",
-    # Stale Cache Key Helper
-    "build_stale_cache_key",
-    # Recovery Strategy Selector
-    "RecoveryStrategySelection",
-    "RecoveryDecision",
-    "RecoveryStrategySelector",
-    "get_recovery_strategy_selector",
-    "reset_recovery_strategy_selector",
-    "select_recovery_strategy",
-    "start_service_recovery",
-    "stop_service_recovery",
-    "handle_half_open",
-    "record_recovery_success",
-    "record_recovery_failure",
     # Load Shedding
     "SheddingState",
     "SheddingDecision",
