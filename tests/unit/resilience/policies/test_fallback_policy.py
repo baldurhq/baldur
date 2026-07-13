@@ -14,11 +14,13 @@ UNIT_TEST_GUIDELINES.md 준수:
 
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass, field
 from unittest.mock import MagicMock
 
 import pytest
 
+from baldur.core.exceptions import TimeoutPolicyError
 from baldur.core.fallback_strategy import (
     FallbackMode,
     FallbackResult,
@@ -27,6 +29,7 @@ from baldur.core.fallback_strategy import (
 from baldur.interfaces.resilience_policy import (
     PolicyContext,
     PolicyOutcome,
+    PolicyRejectedException,
     PolicyResult,
 )
 from baldur.resilience.policies import (
@@ -34,7 +37,11 @@ from baldur.resilience.policies import (
     FallbackPolicy,
     partition_aware_chain,
 )
-from baldur.resilience.policies.fallback import _FALLBACK_MODE_TO_OUTCOME
+from baldur.resilience.policies.fallback import (
+    _FALLBACK_ARITY_CACHE_SIZE,
+    _FALLBACK_MODE_TO_OUTCOME,
+    _fallback_accepts_error,
+)
 
 # =============================================================================
 # Fixtures — 1개 파일 전용이므로 파일 내부 배치 (§5.1)
@@ -1281,4 +1288,340 @@ class TestFallbackPolicyEdgeCaseBehavior:
         # default_value가 None이 아니므로 (False != None) default 경로 사용
         # 그러나 코드가 `if self._default_value is not None`를 체크하므로 False는 통과
         assert result.value is False
+        assert result.outcome == PolicyOutcome.SUCCESS_WITH_FALLBACK
+
+
+# =============================================================================
+# Contract — arity cache size (705 D3, execution-note leak-avoidance bound)
+# =============================================================================
+
+
+class TestFallbackArityCacheSizeContract:
+    """The arity resolver is memoized with a bounded, named cache size so a
+    per-call lambda fallback cannot grow the cache without bound."""
+
+    def test_arity_cache_size_is_1024(self):
+        """Contract: the named bound is 1024."""
+        assert _FALLBACK_ARITY_CACHE_SIZE == 1024
+
+    def test_arity_helper_lru_cache_uses_the_named_size(self):
+        """The lru_cache maxsize is wired from the named constant (not unbounded)."""
+        assert (
+            _fallback_accepts_error.cache_info().maxsize == _FALLBACK_ARITY_CACHE_SIZE
+        )
+
+
+# =============================================================================
+# Behavior — arity detection (705 D3): call-shape → error-accepting?
+# =============================================================================
+
+
+def _two_required(a, b):
+    """A 2-required-positional callable — rejected as a fallback (fail-loud)."""
+    return (a, b)
+
+
+class _BoundMethodHost:
+    """Host for bound-method arity cases (``self`` is already bound off)."""
+
+    def zero_extra(self):
+        return "zero"
+
+    def one_extra(self, error):
+        return error
+
+
+class _VarArgsCallable:
+    """A callable object whose ``__call__`` is ``(*args, **kwargs)`` — the
+    inspectable var-args shape (also what a bare ``Mock``/``MagicMock`` reports),
+    which the arity resolver classifies as error-accepting."""
+
+    def __call__(self, *args, **kwargs):
+        return "var-args"
+
+
+# (callable, expected accepts_error) — see _fallback_accepts_error docstring.
+_ARITY_SHAPE_CASES = [
+    ("zero_arg_lambda", lambda: "x", False),
+    ("one_required_lambda", lambda error: error, True),
+    ("var_positional", lambda *args: args, True),
+    ("var_keyword_only", lambda **kwargs: kwargs, True),
+    ("partial_leaves_one_required", functools.partial(_two_required, 1), True),
+    ("partial_leaves_zero_required", functools.partial(_two_required, 1, 2), False),
+    ("bound_method_zero_extra", _BoundMethodHost().zero_extra, False),
+    ("bound_method_one_extra", _BoundMethodHost().one_extra, True),
+    ("uninspectable_builtin_type", str, False),
+    ("var_args_call_object", _VarArgsCallable(), True),
+]
+
+
+class TestFallbackArityDetection:
+    """``_fallback_accepts_error`` resolves the fallback call shape once per
+    callable identity: zero required positional (no ``*args``) → legacy zero-arg;
+    one required, ``*args``, or ``**kwargs``-only → error-accepting; an
+    uninspectable callable degrades safely to zero-arg; >= 2 required → ValueError."""
+
+    @pytest.mark.parametrize(
+        ("callable_obj", "expected"),
+        [(c, e) for _id, c, e in _ARITY_SHAPE_CASES],
+        ids=[_id for _id, _c, _e in _ARITY_SHAPE_CASES],
+    )
+    def test_arity_shape_maps_to_error_accepting_flag(self, callable_obj, expected):
+        """Each call shape resolves to the documented error-accepting flag."""
+        assert _fallback_accepts_error(callable_obj) is expected
+
+    def test_arity_uninspectable_builtin_degrades_to_zero_arg(self):
+        """A signature-uninspectable callable (builtin type) degrades to zero-arg
+        (the ``except (ValueError, TypeError)`` guard), never raising."""
+        # ``str`` raises ValueError from inspect.signature; the guard returns False.
+        assert _fallback_accepts_error(str) is False
+
+    def test_arity_two_required_positional_raises_valueerror_at_construction(self):
+        """>= 2 required positional → fail loud at construction (ValueError), not
+        a runtime TypeError mid-incident."""
+        with pytest.raises(ValueError, match="required positional"):
+            FallbackPolicy(fallback_fn=_two_required)
+
+    def test_arity_two_required_in_chain_raises_valueerror(self):
+        """A ≥2-required chain entry also fails loud at construction."""
+        with pytest.raises(ValueError, match="required positional"):
+            FallbackPolicy(fallback_chain=[_two_required])
+
+    def test_async_arity_two_required_positional_raises_valueerror(self):
+        """The async twin fails loud identically on a ≥2-required fallback."""
+        with pytest.raises(ValueError, match="required positional"):
+            AsyncFallbackPolicy(fallback_fn=_two_required)
+
+
+# =============================================================================
+# Behavior — error-aware fallback invocation (705 D3)
+# =============================================================================
+
+
+class TestFallbackErrorAwareInvocation:
+    """A one-arg fallback receives the caught error positionally; a zero-arg
+    fallback is called with no args (legacy shape unchanged)."""
+
+    def test_error_aware_fallback_fn_receives_original_error(self):
+        """``fb(error)`` gets the exact caught exception object."""
+        received: dict[str, BaseException] = {}
+
+        def fb(error):
+            received["error"] = error
+            return "served"
+
+        policy = FallbackPolicy(fallback_fn=fb)
+        err = RuntimeError("boom")
+
+        result = policy._apply_fallback(original_error=err)
+
+        assert result.value == "served"
+        assert received["error"] is err
+
+    def test_zero_arg_fallback_fn_called_without_error(self):
+        """A zero-arg fallback runs with no positional argument (legacy shape)."""
+        calls = {"n": 0}
+
+        def fb():
+            calls["n"] += 1
+            return "served"
+
+        policy = FallbackPolicy(fallback_fn=fb)
+
+        result = policy._apply_fallback(original_error=ValueError("x"))
+
+        assert result.value == "served"
+        assert calls["n"] == 1
+
+    def test_error_aware_chain_entry_receives_error(self):
+        """A one-arg fallback_chain entry also receives the caught error."""
+        seen: list[BaseException] = []
+
+        policy = FallbackPolicy(
+            fallback_chain=[lambda error: seen.append(error) or "chain"],
+        )
+        err = KeyError("k")
+
+        result = policy._apply_fallback(original_error=err)
+
+        assert result.value == "chain"
+        assert seen == [err]
+
+    def test_error_aware_fallback_branches_on_error_type(self):
+        """The SC error-type branch: serve on TimeoutPolicyError, re-raise (→
+        decline) on any other error type."""
+
+        def fb(error):
+            if isinstance(error, TimeoutPolicyError):
+                return "stale-on-timeout"
+            raise error
+
+        policy = FallbackPolicy(fallback_fn=fb)
+
+        # TimeoutPolicyError → the fallback serves its degraded value.
+        served = policy._apply_fallback(original_error=TimeoutPolicyError(1.0))
+        assert served.outcome == PolicyOutcome.SUCCESS_WITH_FALLBACK
+        assert served.value == "stale-on-timeout"
+
+        # Any other error → the fallback re-raises → no value → FAILURE.
+        declined = policy._apply_fallback(original_error=RuntimeError("boom"))
+        assert declined.outcome == PolicyOutcome.FAILURE
+
+    @pytest.mark.asyncio
+    async def test_async_error_aware_fallback_fn_receives_error(self):
+        """The async twin passes the caught error to a one-arg async fallback."""
+        received: dict[str, BaseException] = {}
+
+        async def fb(error):
+            received["error"] = error
+            return "served"
+
+        policy = AsyncFallbackPolicy(fallback_fn=fb)
+        err = RuntimeError("boom")
+
+        result = await policy._apply_fallback(original_error=err)
+
+        assert result.value == "served"
+        assert received["error"] is err
+
+    @pytest.mark.asyncio
+    async def test_async_zero_arg_fallback_fn_called_without_error(self):
+        """A zero-arg async fallback is awaited with no positional argument."""
+        calls = {"n": 0}
+
+        async def fb():
+            calls["n"] += 1
+            return "served"
+
+        policy = AsyncFallbackPolicy(fallback_fn=fb)
+
+        result = await policy._apply_fallback(original_error=ValueError("x"))
+
+        assert result.value == "served"
+        assert calls["n"] == 1
+
+
+# =============================================================================
+# Behavior — standalone execute() honors the predicate (705 D5/D6)
+# =============================================================================
+
+
+class TestFallbackStandalonePredicate:
+    """``FallbackPolicy.execute`` / ``AsyncFallbackPolicy.execute`` consult the
+    predicate against the D6-classified outcome before applying the fallback;
+    a declining predicate re-surfaces the original error as FAILURE."""
+
+    def test_execute_default_predicate_still_serves_on_failure(self):
+        """Default-predicate users see no behavior change — any non-SUCCESS
+        activates the fallback exactly as before."""
+        policy = FallbackPolicy(fallback_fn=lambda: "fb")
+
+        result = policy.execute(lambda: (_ for _ in ()).throw(RuntimeError("x")))
+
+        assert result.outcome == PolicyOutcome.SUCCESS_WITH_FALLBACK
+        assert result.value == "fb"
+
+    def test_execute_declining_predicate_returns_failure_without_fallback(self):
+        """A predicate that declines the classified outcome makes execute()
+        return FAILURE with the original error and never runs the fallback."""
+        calls = {"n": 0}
+
+        def fb():
+            calls["n"] += 1
+            return "fb"
+
+        # TIMEOUT-only predicate; a plain RuntimeError classifies as FAILURE.
+        policy = FallbackPolicy(
+            fallback_fn=fb,
+            predicate=lambda r: r.outcome == PolicyOutcome.TIMEOUT,
+        )
+        err = RuntimeError("boom")
+
+        result = policy.execute(lambda: (_ for _ in ()).throw(err))
+
+        assert result.outcome == PolicyOutcome.FAILURE
+        assert result.error is err
+        assert result.metadata["fallback_used"] is False
+        assert calls["n"] == 0  # predicate declined → fallback never ran
+
+    @pytest.mark.parametrize(
+        ("raised_exc", "expect_served"),
+        [
+            (TimeoutPolicyError(1.0), True),
+            (PolicyRejectedException("rejected"), False),
+            (RuntimeError("boom"), False),
+        ],
+        ids=["timeout_served", "rejected_declined", "failure_declined"],
+    )
+    def test_execute_timeout_only_predicate_distinguishes_outcomes(
+        self, raised_exc, expect_served
+    ):
+        """A TIMEOUT-only predicate distinguishes TIMEOUT from REJECTED/FAILURE —
+        proving execute() feeds the classified outcome, not always-FAILURE."""
+        policy = FallbackPolicy(
+            default_value="degraded",
+            predicate=lambda r: r.outcome == PolicyOutcome.TIMEOUT,
+        )
+
+        result = policy.execute(lambda: (_ for _ in ()).throw(raised_exc))
+
+        if expect_served:
+            assert result.outcome == PolicyOutcome.SUCCESS_WITH_FALLBACK
+        else:
+            assert result.outcome == PolicyOutcome.FAILURE
+
+    def test_execute_rejected_only_predicate_serves_rejected_declines_timeout(self):
+        """A REJECTED-only predicate serves on a rejection but declines a timeout
+        — the mirror direction, confirming REJECTED is distinguishable."""
+        policy = FallbackPolicy(
+            default_value="degraded",
+            predicate=lambda r: r.outcome == PolicyOutcome.REJECTED,
+        )
+
+        served = policy.execute(
+            lambda: (_ for _ in ()).throw(PolicyRejectedException("r"))
+        )
+        assert served.outcome == PolicyOutcome.SUCCESS_WITH_FALLBACK
+
+        declined = policy.execute(
+            lambda: (_ for _ in ()).throw(TimeoutPolicyError(1.0))
+        )
+        assert declined.outcome == PolicyOutcome.FAILURE
+
+    @pytest.mark.asyncio
+    async def test_async_execute_declining_predicate_returns_failure(self):
+        """The async twin honors a declining predicate identically."""
+        calls = {"n": 0}
+
+        async def fb():
+            calls["n"] += 1
+            return "fb"
+
+        policy = AsyncFallbackPolicy(
+            fallback_fn=fb,
+            predicate=lambda r: r.outcome == PolicyOutcome.TIMEOUT,
+        )
+
+        async def bad():
+            raise RuntimeError("boom")
+
+        result = await policy.execute(bad)
+
+        assert result.outcome == PolicyOutcome.FAILURE
+        assert calls["n"] == 0
+
+    @pytest.mark.asyncio
+    async def test_async_execute_timeout_predicate_serves_on_timeout(self):
+        """The async twin serves the fallback when the classified TIMEOUT matches
+        a TIMEOUT-only predicate."""
+        policy = AsyncFallbackPolicy(
+            default_value="degraded",
+            predicate=lambda r: r.outcome == PolicyOutcome.TIMEOUT,
+        )
+
+        async def timed_out():
+            raise TimeoutPolicyError(1.0)
+
+        result = await policy.execute(timed_out)
+
         assert result.outcome == PolicyOutcome.SUCCESS_WITH_FALLBACK

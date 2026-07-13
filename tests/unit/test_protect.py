@@ -16,14 +16,22 @@ Idempotency (flag resolution).
 from __future__ import annotations
 
 import asyncio
+import logging
+import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from baldur import protect_facade
+from baldur.adapters.memory.circuit_breaker import (
+    InMemoryCircuitBreakerStateRepository,
+)
+from baldur.core.execution_mode import clear_execution_mode_override
 from baldur.interfaces.resilience_policy import PolicyOutcome
 from baldur.protect_facade import (
     ProtectResult,
     _build_async_composer,
+    _build_sync_composer,
     _outcome_label,
     _resolve_flags,
     _resolve_retry_stage,
@@ -33,8 +41,20 @@ from baldur.protect_facade import (
     protect,
     protect_with_meta,
     protected,
+    reset_protect_caches,
 )
+from baldur.services.circuit_breaker.config import (
+    CircuitBreakerConfig,
+    CircuitState,
+)
+from baldur.services.circuit_breaker.exceptions import CircuitBreakerOpenError
+from baldur.services.circuit_breaker.policy import CircuitBreakerPolicy
+from baldur.services.circuit_breaker.service import CircuitBreakerService
 from baldur.services.retry_handler.models import RetryPolicyConfig
+
+# The sync retry stage waits between attempts via this module-level default
+# sleeper — patch it so exhaustion / attempt-count tests run instantly.
+_SYNC_RETRY_SLEEP = "baldur.services.retry_handler.policy._DEFAULT_SLEEPER"
 
 
 @pytest.fixture(autouse=True)
@@ -45,6 +65,47 @@ def _reset_protect_settings():
     reset_protect_settings()
     yield
     reset_protect_settings()
+
+
+@pytest.fixture
+def clean_caches():
+    """Isolate process-local protect() caches + execution mode around each test.
+
+    The CB-accounting / cb-open tests seed ``_cb_policy_cache`` directly; the
+    reset both before and after guarantees no per-name breaker (or a prior
+    test's shadow mode / shared timeout executor) leaks across tests.
+    """
+    clear_execution_mode_override()
+    reset_protect_caches()
+    yield
+    reset_protect_caches()
+    clear_execution_mode_override()
+
+
+def _seed_low_threshold_breaker(
+    name: str, *, failure_threshold: int = 2
+) -> CircuitBreakerService:
+    """Inject a real, low-threshold breaker into the per-name cache for ``name``.
+
+    ``protect(name=…, circuit_breaker=True)`` resolves the breaker via
+    ``_get_or_build_cb_policy(name)``, which reads this cache. ``minimum_calls=1``
+    + ``failure_rate_threshold=0`` make the breaker open deterministically after
+    exactly ``failure_threshold`` count-based failures.
+    """
+    cb_config = CircuitBreakerConfig(
+        enabled=True,
+        failure_threshold=failure_threshold,
+        minimum_calls=1,
+        failure_rate_threshold=0,
+        recovery_timeout=60,
+    )
+    cb_service = CircuitBreakerService(
+        config=cb_config,
+        repository=InMemoryCircuitBreakerStateRepository(),
+    )
+    policy = CircuitBreakerPolicy(service_name=name, cb_service=cb_service, hooks=[])
+    protect_facade._cb_policy_cache[name] = policy
+    return cb_service
 
 
 # =============================================================================
@@ -656,3 +717,365 @@ class TestResolveTimeoutBehavior:
         reset_protect_settings()
 
         assert _resolve_timeout(None) is None
+
+
+# =============================================================================
+# Contract — sync composer add-order pin (705 D8): Fallback → CB → Timeout → Retry
+# =============================================================================
+
+
+class TestBuildComposerChainOrder:
+    """``_build_sync_composer`` nests policies outer→inner in one fixed order.
+
+    Order is load-bearing: Fallback (outermost) is the last resort covering
+    every inner outcome; CB sits inside the fallback (so absorbed failures still
+    count toward the breaker) but outside Retry so one exhausted retry-sequence
+    counts as a single CB failure; Timeout wraps Retry (a single global timeout).
+    The async twin is pinned in test_aprotect_cb_retry.py.
+    """
+
+    def test_sync_full_chain_order_is_fallback_cb_timeout_retry(self, clean_caches):
+        """All four stages present → add-order Fallback → CB → Timeout → Retry."""
+        composer = _build_sync_composer(
+            name="sync.chain",
+            fallback=lambda: "fb",
+            dlq=False,
+            retry_cfg=RetryPolicyConfig(max_attempts=2, domain="sync.chain"),
+            circuit_breaker=True,
+            timeout_seconds=1.0,
+        )
+
+        assert [p.name for p in composer._policies] == [
+            "fallback",
+            "circuit_breaker",
+            "timeout",
+            "retry",
+        ]
+
+    def test_sync_cb_precedes_retry_when_timeout_absent(self, clean_caches):
+        """Even without a timeout, CB stays outside Retry (CB → Retry)."""
+        composer = _build_sync_composer(
+            name="sync.chain2",
+            fallback=None,
+            dlq=False,
+            retry_cfg=RetryPolicyConfig(max_attempts=2, domain="sync.chain2"),
+            circuit_breaker=True,
+            timeout_seconds=None,
+        )
+
+        names = [p.name for p in composer._policies]
+        assert names == ["circuit_breaker", "retry"]
+        assert names.index("circuit_breaker") < names.index("retry")
+
+    def test_sync_fallback_is_outermost_when_present(self, clean_caches):
+        """A configured fallback is added FIRST (outermost) — index 0."""
+        composer = _build_sync_composer(
+            name="sync.chain3",
+            fallback=lambda: "fb",
+            dlq=False,
+            retry_cfg=None,
+            circuit_breaker=True,
+            timeout_seconds=None,
+        )
+
+        names = [p.name for p in composer._policies]
+        assert names == ["fallback", "circuit_breaker"]
+
+
+# =============================================================================
+# Behavior — sync fallback coverage matrix (705 D2/D3): every inner outcome
+# routes to the fallback; a guard reject is NOT absorbed
+# =============================================================================
+
+
+class TestProtectFallbackCoverage:
+    """With a fallback configured, {plain failure, retry exhaustion, TIMEOUT,
+    CB-open} all route to the fallback (``fallback_used=True``); a guard reject
+    (idempotency duplicate) runs OUTSIDE the fallback stage and still raises."""
+
+    def test_covers_plain_failure_serves_fallback(self):
+        """A single fn failure is served by the fallback."""
+
+        def bad():
+            raise RuntimeError("boom")
+
+        meta = protect_with_meta(
+            "cov.plain",
+            bad,
+            fallback=lambda: "fb",
+            circuit_breaker=False,
+            retry=False,
+            timeout=None,
+        )
+
+        assert meta.outcome == PolicyOutcome.SUCCESS_WITH_FALLBACK
+        assert meta.fallback_used is True
+        assert meta.value == "fb"
+
+    def test_covers_retry_exhaustion_serves_fallback(self):
+        """Retry runs the full max_attempts, THEN the fallback serves."""
+        calls = {"n": 0}
+
+        def always_bad():
+            calls["n"] += 1
+            raise ConnectionError("down")
+
+        with patch(_SYNC_RETRY_SLEEP, lambda _delay: None):
+            meta = protect_with_meta(
+                "cov.exhaust",
+                always_bad,
+                retry=RetryPolicyConfig(max_attempts=3, domain="cov.exhaust"),
+                fallback=lambda: "fb",
+                circuit_breaker=False,
+                timeout=None,
+            )
+
+        assert meta.outcome == PolicyOutcome.SUCCESS_WITH_FALLBACK
+        assert meta.fallback_used is True
+        assert calls["n"] == 3  # retry exhausted BEFORE the fallback served
+
+    def test_covers_timeout_serves_fallback(self):
+        """A timed-out fn routes to the fallback (was: raised)."""
+        release = threading.Event()
+
+        def blocking():
+            release.wait(timeout=5.0)
+            return "primary"
+
+        try:
+            meta = protect_with_meta(
+                "cov.timeout",
+                blocking,
+                timeout=0.05,
+                fallback=lambda: "fb",
+                circuit_breaker=False,
+                retry=False,
+            )
+
+            assert meta.outcome == PolicyOutcome.SUCCESS_WITH_FALLBACK
+            assert meta.fallback_used is True
+            assert meta.value == "fb"
+        finally:
+            release.set()
+
+    def test_covers_cb_open_serves_fallback_without_invoking_fn(self, clean_caches):
+        """Once the breaker is OPEN, a call is served by the fallback and fn is
+        never invoked; without a fallback the same call raises CircuitBreakerOpenError."""
+        name = "cov.cb_open"
+        _seed_low_threshold_breaker(name, failure_threshold=2)
+
+        calls = {"n": 0}
+
+        def boom():
+            calls["n"] += 1
+            raise RuntimeError("down")
+
+        # Drive the breaker OPEN (each failure absorbed by the fallback).
+        for _ in range(2):
+            protect_with_meta(
+                name,
+                boom,
+                circuit_breaker=True,
+                retry=False,
+                fallback=lambda: "fb",
+                timeout=None,
+            )
+        invoked_before = calls["n"]
+
+        # CB-open call WITH a fallback → served, fn not invoked.
+        meta = protect_with_meta(
+            name,
+            boom,
+            circuit_breaker=True,
+            retry=False,
+            fallback=lambda: "fb",
+            timeout=None,
+        )
+        assert meta.outcome == PolicyOutcome.SUCCESS_WITH_FALLBACK
+        assert meta.fallback_used is True
+        assert calls["n"] == invoked_before  # fn skipped on the CB-open call
+
+        # Contrast: the same CB-open call WITHOUT a fallback raises (the breaker
+        # really is open; only the fallback turns it into a served value).
+        with pytest.raises(CircuitBreakerOpenError):
+            protect(name, boom, circuit_breaker=True, retry=False, timeout=None)
+
+    def test_covers_idempotency_duplicate_still_raises_not_absorbed(self):
+        """Guard cell: an idempotency duplicate is rejected BEFORE the policy
+        chain, so a configured fallback never absorbs it — the duplicate raises
+        IdempotencyDuplicateError instead of returning a degraded value."""
+        from baldur.core.exceptions import (
+            AdapterNotFoundError,
+            IdempotencyDuplicateError,
+        )
+        from baldur.interfaces.resilience_policy import PolicyContext
+        from baldur.runtime import reset_runtime
+        from baldur.settings.idempotency import reset_idempotency_settings
+
+        fb_calls = {"n": 0}
+
+        def fb():
+            fb_calls["n"] += 1
+            return "degraded"
+
+        reset_idempotency_settings()
+        reset_runtime()
+        reset_protect_caches()
+        try:
+            with patch(
+                "baldur.factory.registry.ProviderRegistry.get_cache",
+                side_effect=AdapterNotFoundError(adapter_type="cache"),
+            ):
+                # First call establishes the idempotency key.
+                assert (
+                    protect(
+                        "cov.idem",
+                        lambda: "ok",
+                        idempotency_key="order_id",
+                        context=PolicyContext(order_id="o-1"),
+                        fallback=fb,
+                        circuit_breaker=False,
+                    )
+                    == "ok"
+                )
+                # Duplicate — fallback present, but the guard reject is NOT absorbed.
+                with pytest.raises(IdempotencyDuplicateError):
+                    protect(
+                        "cov.idem",
+                        lambda: "ok",
+                        idempotency_key="order_id",
+                        context=PolicyContext(order_id="o-1"),
+                        fallback=fb,
+                        circuit_breaker=False,
+                    )
+        finally:
+            reset_idempotency_settings()
+            reset_runtime()
+            reset_protect_caches()
+
+        assert fb_calls["n"] == 0  # the fallback never served the duplicate
+
+
+# =============================================================================
+# Behavior — CB counts fallback-absorbed failures (705 D2/G2)
+# =============================================================================
+
+
+class TestProtectCbCountsAbsorbed:
+    """With the breaker now INSIDE the fallback stage, a fallback-absorbed
+    failure is still recorded, so a hard-down dependency with a fallback still
+    trips its breaker (previously it never opened)."""
+
+    def test_cb_counts_absorbed_failures_and_trips_with_fallback(self, clean_caches):
+        """Threshold failing+fallback-served calls OPEN the breaker."""
+        name = "cb.absorbed"
+        cb_service = _seed_low_threshold_breaker(name, failure_threshold=2)
+
+        def boom():
+            raise RuntimeError("dependency down")
+
+        for _ in range(2):
+            meta = protect_with_meta(
+                name,
+                boom,
+                circuit_breaker=True,
+                retry=False,
+                fallback=lambda: "fb",
+                timeout=None,
+            )
+            # Every error is absorbed (served) by the fallback...
+            assert meta.outcome == PolicyOutcome.SUCCESS_WITH_FALLBACK
+            assert meta.fallback_used is True
+
+        # ...yet the breaker still tripped — absorbed failures were counted.
+        assert cb_service.get_or_create_state(name).state == CircuitState.OPEN
+
+
+# =============================================================================
+# Behavior — truthful attempts on the sync facade (705 D14)
+# =============================================================================
+
+
+class TestProtectAttemptsTruthful:
+    """``protect_with_meta().attempts`` reports the real retry count (not 1) on
+    both the retry-exhaustion path and the fallback-served path."""
+
+    def test_attempts_truthful_on_retry_exhaustion_sync(self):
+        """max_attempts=3, always-failing fn, no fallback → attempts == 3."""
+
+        def always_bad():
+            raise ConnectionError("down")
+
+        with patch(_SYNC_RETRY_SLEEP, lambda _delay: None):
+            meta = protect_with_meta(
+                "att.exhaust",
+                always_bad,
+                retry=RetryPolicyConfig(max_attempts=3, domain="att.exhaust"),
+                circuit_breaker=False,
+                timeout=None,
+            )
+
+        assert meta.outcome == PolicyOutcome.FAILURE
+        assert meta.attempts == 3
+
+    def test_attempts_truthful_on_fallback_served_sync(self):
+        """Same retry, but a fallback serves → attempts still reads 3, not 1."""
+
+        def always_bad():
+            raise ConnectionError("down")
+
+        with patch(_SYNC_RETRY_SLEEP, lambda _delay: None):
+            meta = protect_with_meta(
+                "att.fb",
+                always_bad,
+                retry=RetryPolicyConfig(max_attempts=3, domain="att.fb"),
+                fallback=lambda: "fb",
+                circuit_breaker=False,
+                timeout=None,
+            )
+
+        assert meta.outcome == PolicyOutcome.SUCCESS_WITH_FALLBACK
+        assert meta.fallback_used is True
+        assert meta.attempts == 3
+
+
+# =============================================================================
+# Behavior — degraded-mode WARNING on a served fallback (705 D15)
+# =============================================================================
+
+
+class TestProtectFallbackAppliedLog:
+    """A successfully-served fallback emits one ``policy_chain.fallback_applied``
+    WARNING carrying the absorbed error type and the fallback source."""
+
+    def test_fallback_applied_log_emits_warning_sync(self, caplog):
+        """The composer terminal logs the degraded-mode WARNING (sync path).
+
+        The facade calls ``configure_structlog()`` (stdlib routing +
+        cache_logger_on_first_use), so the WARNING lands in stdlib logging and
+        is asserted via pytest's ``caplog`` — ``record.msg`` carries the
+        structlog event_dict verbatim.
+        """
+
+        from baldur.observability.log_processors import reset_rate_limit_state
+
+        def bad():
+            raise RuntimeError("boom")
+
+        # The structlog rate-limit processor de-dups repeated
+        # (logger, event) pairs; reset so this single emission is not
+        # suppressed by earlier tests in the same window.
+        reset_rate_limit_state()
+        with caplog.at_level(logging.WARNING):
+            protect("log.fb", bad, fallback=lambda: "fb", circuit_breaker=False)
+
+        events = [
+            r
+            for r in caplog.records
+            if isinstance(r.msg, dict)
+            and r.msg.get("event") == "policy_chain.fallback_applied"
+        ]
+        assert len(events) == 1
+        assert events[0].levelname == "WARNING"
+        assert events[0].msg["error_type"] == "RuntimeError"
+        assert events[0].msg["fallback_source"] == "fallback_fn"
