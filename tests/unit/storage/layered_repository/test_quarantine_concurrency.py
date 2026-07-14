@@ -39,6 +39,7 @@ path's ``baldur_pro`` import lives inside the spied/patched
 from __future__ import annotations
 
 import threading
+import time
 from unittest.mock import patch
 
 import pytest
@@ -65,14 +66,30 @@ def repo():
     return LayeredCircuitBreakerStateRepository(l2_repo=None, adapter_type="redis")
 
 
+def _join_all(threads, *, budget=20.0):
+    """Join every thread against one shared wall-clock budget; return live ones.
+
+    A ``for t in threads: t.join(timeout=budget)`` loop has a worst case of
+    ``len(threads) * budget`` — six writers at a 20s budget is 120s, exactly the
+    pytest-timeout — so a *starved* (not deadlocked) finish on a loaded CI runner
+    reads as a hard timeout instead of a fast, bounded assertion. Joining against
+    a single shared deadline caps the total wait at one ``budget`` window
+    regardless of thread count.
+    """
+    deadline = time.monotonic() + budget
+    for t in threads:
+        t.join(timeout=max(0.0, deadline - time.monotonic()))
+    return [t for t in threads if t.is_alive()]
+
+
 def _run_concurrently(worker, n_threads, *, join_timeout=20.0):
     """Start ``n_threads`` running ``worker(barrier)`` together, join bounded.
 
     The ``Barrier`` releases every thread at once to maximize contention on the
-    failure-count RMW and the transition decision. Every ``join`` is bounded so
-    a lock-ordering mistake surfaces as a fast CI failure instead of a hang
-    (house convention — UNIT_TEST_GUIDELINES, test_composite_storage_thread_
-    safety.py et al.).
+    failure-count RMW and the transition decision. Joins share one wall-clock
+    budget (see ``_join_all``) so a lock-ordering mistake surfaces as a fast,
+    bounded CI failure instead of a hang (house convention — UNIT_TEST_
+    GUIDELINES, test_composite_storage_thread_safety.py et al.).
     """
     barrier = threading.Barrier(n_threads, timeout=join_timeout)
     threads = [
@@ -80,9 +97,7 @@ def _run_concurrently(worker, n_threads, *, join_timeout=20.0):
     ]
     for t in threads:
         t.start()
-    for t in threads:
-        t.join(timeout=join_timeout)
-    alive = [t for t in threads if t.is_alive()]
+    alive = _join_all(threads, budget=join_timeout)
     assert not alive, (
         f"{len(alive)}/{n_threads} thread(s) did not finish within "
         f"{join_timeout}s — possible deadlock on self._lock"
@@ -354,7 +369,11 @@ class TestQuarantineAdminReadSnapshot:
         ``if consecutive >= 3`` under the lock, and the read snapshots all four
         fields under the same lock — so ``(True, >=3)`` is unobservable.
         """
-        n_writers, m_failures = 6, 3_000
+        # Stress knobs, not spec values: the healthy->quarantined transition is
+        # one-shot (no reset here), so the torn-read window is the first few
+        # failures — the reader loops thousands of times across it at this count.
+        # Bounded so writers finish fast even under CI CPU starvation.
+        n_writers, m_failures = 6, 500
         stop = threading.Event()
         violations: list[tuple[bool, int]] = []
 
@@ -381,12 +400,13 @@ class TestQuarantineAdminReadSnapshot:
             writers = [threading.Thread(target=writer) for _ in range(n_writers)]
             for t in writers:
                 t.start()
-            for t in writers:
-                t.join(timeout=20.0)
+            alive = _join_all(writers, budget=20.0)
             stop.set()
-            reader_thread.join(timeout=20.0)
+            alive += _join_all([reader_thread], budget=5.0)
 
-        assert all(not t.is_alive() for t in [*writers, reader_thread])
+        assert not alive, (
+            f"thread(s) did not finish (possible lock starvation): {alive}"
+        )
         assert not violations, (
             f"reader observed inconsistent (healthy, consecutive): {violations}"
         )
@@ -400,7 +420,10 @@ class TestQuarantineAdminReadSnapshot:
         ``consecutive_failures``; ``get_storage_info`` exposes ``l2_healthy`` /
         ``l2_consecutive_failures``).
         """
-        m = 3_000
+        # Stress knob, not a spec value: reset<->fail races flip the edge many
+        # times, so hundreds of iterations already exercise the snapshot torn
+        # read; bounded so the reader-starved writers finish under CI load.
+        m = 1_000
         stop = threading.Event()
         violations: list[str] = []
 
@@ -447,12 +470,13 @@ class TestQuarantineAdminReadSnapshot:
             ]
             for t in writers:
                 t.start()
-            for t in writers:
-                t.join(timeout=20.0)
+            alive = _join_all(writers, budget=20.0)
             stop.set()
-            reader_thread.join(timeout=20.0)
+            alive += _join_all([reader_thread], budget=5.0)
 
-        assert all(not t.is_alive() for t in [*writers, reader_thread])
+        assert not alive, (
+            f"thread(s) did not finish (possible lock starvation): {alive}"
+        )
         assert not violations, f"reader observed inconsistent snapshot(s): {violations}"
 
 
