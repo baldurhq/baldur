@@ -484,15 +484,21 @@
           method: "POST", risk: "admin", body: true,
           bodyDefault: '{"confirm": true}' }
       ] },
-    { id: "dlq", title: "Dead Letter Queue", pro: true, status: "/dlq/cleanup/stats",
+    // Panel renders for OSS (pro: false) — the read drilldown (list / detail /
+    // retry / resolve / facets) and the cleanup-stats body are OSS-available.
+    // The batch Replay + Archive/Purge management actions carry per-action
+    // `pro: true`, hidden for OSS via the __BALDUR_PANELS__["dlq"] gate in the
+    // action-render loop (buildPanel).
+    { id: "dlq", title: "Dead Letter Queue", pro: false, status: "/dlq/cleanup/stats",
       bodyRender: "dlq_stats", drilldown: "dlq",
       actions: [
         { label: "Replay", path: "/dlq/replay", method: "POST", risk: "operator",
+          pro: true,
           bodyField: { key: "reason", label: "Reason (optional)",
             placeholder: "why this replay "
               + "(recorded in the resolution note + audit trail; optional)" } },
         { label: "Archive", path: "/dlq/cleanup/archive", method: "POST",
-          risk: "operator",
+          risk: "operator", pro: true,
           bodyFields: [
             { key: "older_than_days",
               label: "Archive resolved entries older than (days)",
@@ -501,7 +507,7 @@
                 + "Set 0 to archive all resolved entries now." }
           ] },
         { label: "Purge", path: "/dlq/cleanup/purge", method: "POST",
-          risk: "admin",
+          risk: "admin", pro: true,
           bodyFields: [
             { key: "confirm", label: "Confirm permanent deletion",
               type: "checkbox", default: true,
@@ -2485,6 +2491,12 @@
     if (p.actions && p.actions.length) {
       var actions = el("div", "panel-actions");
       p.actions.forEach(function (a) {
+        // Per-action PRO gate (D5): a `pro: true` action is hidden unless the
+        // panel's backing slot reports PRO present. Reuses the same
+        // __BALDUR_PANELS__ map that panelVisible consults for whole-panel
+        // gating, so a partly-OSS panel (dlq) shows its OSS actions and hides
+        // its PRO-only ones (Replay/Archive/Purge).
+        if (a.pro && (window.__BALDUR_PANELS__ || {})[p.id] !== true) { return; }
         var btn = el("button", btnClass(a), a.label);
         // Copy the action so the post-success panel refresh is attached without
         // mutating the shared PANELS config.
