@@ -12,6 +12,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ### Added
 
+- OSS DLQ now durably captures + replays failed operations (`@protected(dlq=True)`; no PRO required).
 - Remote-Prometheus time-series metrics provider (`BALDUR_PROMETHEUS_URL`).
 - `config_shadow` time-series metrics-provider DI seam.
 - Result-predicate retry (`retry_on_result`) and a `BALDUR_RETRY_MAX_ELAPSED` wall-clock budget.

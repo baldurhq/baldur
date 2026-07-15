@@ -1,58 +1,36 @@
-"""OSS-side thin wrappers for PRO DLQ + postmortem store helpers (518 D4).
+"""OSS-side DLQ store + postmortem helpers — stable import target.
 
 Provides a single, stable import target for OSS callsites that need to store
 operations in the DLQ, compress DLQ entries, or record postmortem incidents.
-When PRO modules are installed, each wrapper delegates to the corresponding
-PRO function. When PRO is not installed, each wrapper silently no-ops and
-returns ``None`` (or an empty result for read helpers).
 
-Each wrapper accepts ``*args, **kwargs`` and forwards them verbatim — the
-caller's exact argument shape is preserved into the PRO call. Consult
-``src/baldur_pro/services/dlq/`` and ``src/baldur_pro/services/postmortem/``
-for parameter types and defaults.
+``store_to_dlq`` / ``dlq_backing_available`` resolve the DLQ capture backing
+through one chain — the PRO ``DLQService`` (registered under ACTIVE entitlement)
+when present, otherwise the OSS ``DLQCaptureService``. So a pure ``pip install
+baldur`` install captures failures into the DLQ store (no ``baldur_pro``
+required); the backing always resolves on a functional install.
 
-Scope (batch a)
----------------
-Function-style helpers only. Singleton getters (``get_dlq_service``,
-``get_dlq_repository``, etc.) belong to the (c) singletons batch; the
-``DLQService`` class import for typing belongs to the (d) types batch.
-
-Re-folded from the dissolved (e) repositories batch: the three
-``postmortem.store`` functions (``add_healing_incident``,
-``get_healing_incidents``, ``get_healing_incidents_count``) ship here
-because they are function-style callsites, not repository abstractions.
+``compress_entries`` and the ``postmortem.store`` helpers stay PRO-only:
+compression and postmortem incident storage remain PRO-tier, so each wrapper
+delegates to the corresponding PRO function when installed and no-ops otherwise
+(``None`` for writers, ``[]`` / ``0`` for read helpers).
 
 Test isolation
 --------------
-Tests that swap PRO presence or pop the relevant PRO modules from
-``sys.modules`` MUST reset the module-level cache via the
-``reset_dlq_helpers`` fixture in ``tests/conftest.py``.
+Tests that swap PRO presence MUST reset the compression / postmortem module
+caches + the OSS capture singleton via the ``reset_dlq_helpers`` fixture in
+``tests/conftest.py``. The DLQ-store backing resolves through the provider
+registry (not a module import cache), so "PRO absent" is simulated by leaving
+the ``dlq_service`` slot empty — no import games.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-_pro_dlq: Any = None
 _pro_dlq_compression: Any = None
 _pro_postmortem_store: Any = None
-_resolved_dlq: bool = False
 _resolved_dlq_compression: bool = False
 _resolved_postmortem_store: bool = False
-
-
-def _get_pro_dlq() -> Any:
-    """Return cached :mod:`baldur_pro.services.dlq` or ``None``."""
-    global _pro_dlq, _resolved_dlq
-    if not _resolved_dlq:
-        try:
-            import baldur_pro.services.dlq as _m
-
-            _pro_dlq = _m
-        except ImportError:
-            _pro_dlq = None
-        _resolved_dlq = True
-    return _pro_dlq
 
 
 def _get_pro_dlq_compression() -> Any:
@@ -88,25 +66,34 @@ def _get_pro_postmortem_store() -> Any:
 # ============================================================
 
 
-def store_to_dlq(*args: Any, **kwargs: Any) -> Any | None:
-    """PRO: store_to_dlq(domain, failure_type, ..., request=None, mode=None) -> DLQEntryResult."""
-    if (p := _get_pro_dlq()) is None:
-        return None
-    return p.store_to_dlq(*args, **kwargs)
+def store_to_dlq(*args: Any, **kwargs: Any) -> Any:
+    """Store a failure in the DLQ via the resolved capture backing.
+
+    Signature: ``store_to_dlq(domain, failure_type, ..., request=None,
+    mode=None) -> DLQEntryResult``. Resolves the PRO ``DLQService`` (ACTIVE
+    entitlement) when present, otherwise the OSS ``DLQCaptureService``.
+    """
+    from baldur.services.dlq_capture import resolve_dlq_backing
+
+    return resolve_dlq_backing().store_failure(*args, **kwargs)
 
 
 def dlq_backing_available() -> bool:
     """Return ``True`` iff a real DLQ store backs :func:`store_to_dlq`.
 
-    Reuses the exact :func:`_get_pro_dlq` resolution that the store path itself
-    consults, so callers asking "will a ``dlq=True`` failure actually persist?"
-    get the same verdict the store would. ``False`` means the store silently
-    no-ops (the caller still sees the failure raised, but nothing is durably
-    captured for replay). The single source of truth for DLQ-store availability:
-    if an OSS-tier store backing is ever added to :func:`store_to_dlq`, update
-    this predicate in lockstep so it never drifts from real store behavior.
+    Resolves the same chain :func:`store_to_dlq` uses, so callers asking "will a
+    ``dlq=True`` failure actually persist?" get the same verdict the store
+    would. The OSS ``DLQCaptureService`` always resolves on a functional install
+    (construction is I/O-free), so this returns ``True`` whenever the DLQ store
+    can be reached — ``False`` only if resolution itself raises (a broken
+    install). Truthful, documented probe; kept in lockstep with the store path.
     """
-    return _get_pro_dlq() is not None
+    from baldur.services.dlq_capture import resolve_dlq_backing
+
+    try:
+        return resolve_dlq_backing() is not None
+    except Exception:
+        return False
 
 
 def compress_entries(*args: Any, **kwargs: Any) -> Any | None:

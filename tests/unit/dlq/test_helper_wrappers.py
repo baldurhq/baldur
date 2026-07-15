@@ -1,14 +1,14 @@
-"""OSS-side DLQ + postmortem store helper wrappers — `baldur.dlq.helpers` (518 batch a).
+"""OSS-side DLQ + postmortem store helper wrappers — ``baldur.dlq.helpers``.
 
 Scope:
-- Three independent module-level caches: ``_pro_dlq`` / ``_pro_dlq_compression``
-  / ``_pro_postmortem_store``. Each resolves a different PRO submodule and
-  caches under its own ``_resolved_*`` flag.
-- Wrappers delegate verbatim args/kwargs to the matching PRO function when
-  the relevant cache resolves; otherwise return the type-appropriate empty
-  sentinel: ``None`` for writers (``store_to_dlq`` / ``compress_entries`` /
-  ``add_healing_incident``), ``[]`` for ``get_healing_incidents``, ``0`` for
-  ``get_healing_incidents_count``.
+- ``store_to_dlq`` / ``dlq_backing_available`` resolve the DLQ capture backing
+  through one chain: the PRO ``DLQService`` (registered under ACTIVE
+  entitlement) when present, else the OSS ``DLQCaptureService``. So a pure OSS
+  install captures failures (no ``baldur_pro`` required) and the backing always
+  resolves on a functional install.
+- ``compress_entries`` / the ``postmortem.store`` helpers stay PRO-only: each
+  caches its PRO submodule under its own ``_resolved_*`` flag and no-ops
+  (``None`` / ``[]`` / ``0``) when the submodule is absent.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import baldur.dlq.helpers as helpers
+from baldur.factory.registry import ProviderRegistry
 
 
 def _patched_import_factory(target_name: str):
@@ -33,17 +34,16 @@ def _patched_import_factory(target_name: str):
 
 
 # =============================================================================
-# Per-submodule cache resolution
+# Per-submodule cache resolution (compression + postmortem — PRO-only)
 # =============================================================================
 
 
 class TestDlqHelpersResolutionBehavior:
-    """Each ``_get_pro_*()`` caches its submodule independently."""
+    """Each PRO-only ``_get_pro_*()`` caches its submodule independently."""
 
     @pytest.mark.parametrize(
         ("resolver_name", "cache_attr", "resolved_attr", "target_module"),
         [
-            ("_get_pro_dlq", "_pro_dlq", "_resolved_dlq", "baldur_pro.services.dlq"),
             (
                 "_get_pro_dlq_compression",
                 "_pro_dlq_compression",
@@ -76,7 +76,6 @@ class TestDlqHelpersResolutionBehavior:
     @pytest.mark.parametrize(
         ("resolver_name", "cache_attr", "resolved_attr", "target_module"),
         [
-            ("_get_pro_dlq", "_pro_dlq", "_resolved_dlq", "baldur_pro.services.dlq"),
             (
                 "_get_pro_dlq_compression",
                 "_pro_dlq_compression",
@@ -104,38 +103,34 @@ class TestDlqHelpersResolutionBehavior:
         assert getattr(helpers, cache_attr) is None
 
     def test_caches_are_independent_per_submodule(self):
-        """A failure resolving one submodule must not poison the others."""
-        # The non-failing submodules must actually resolve, which needs PRO.
+        """A failure resolving one submodule must not poison the other."""
         pytest.importorskip("baldur_pro")
         fake_import = _patched_import_factory("baldur_pro.services.dlq.compression")
         with patch.object(builtins, "__import__", side_effect=fake_import):
             # Compression resolution fails.
             assert helpers._get_pro_dlq_compression() is None
-            # DLQ + postmortem store still resolve cleanly.
-            assert helpers._get_pro_dlq() is not None
+            # Postmortem store still resolves cleanly.
             assert helpers._get_pro_postmortem_store() is not None
 
 
 # =============================================================================
-# Public wrapper delegation
+# PRO-only wrapper delegation (compression + postmortem)
 # =============================================================================
 
 
-# Map each wrapper → (which resolver feeds it, expected absent-sentinel).
-# The resolver attribute is what we monkeypatch to inject the fake module.
+# Map each PRO-only wrapper → (which resolver feeds it, expected absent-sentinel).
 WRAPPER_TABLE = [
     # (wrapper_name, resolver_attr, absent_sentinel)
-    ("store_to_dlq", "_get_pro_dlq", None),
     ("compress_entries", "_get_pro_dlq_compression", None),
     ("add_healing_incident", "_get_pro_postmortem_store", None),
     ("get_healing_incidents", "_get_pro_postmortem_store", []),
     ("get_healing_incidents_count", "_get_pro_postmortem_store", 0),
 ]
 
-# Public names that are NOT verbatim arg-forwarding wrappers and so are absent
-# from WRAPPER_TABLE by design. ``dlq_backing_available`` is a bool predicate
-# over the same ``_get_pro_dlq`` resolution, not a delegating wrapper.
-NON_WRAPPER_PUBLIC_NAMES = {"dlq_backing_available"}
+# Public names that are NOT verbatim PRO-only arg-forwarding wrappers.
+# ``store_to_dlq`` / ``dlq_backing_available`` resolve the OSS-or-PRO backing
+# chain rather than delegating to a cached PRO submodule.
+NON_WRAPPER_PUBLIC_NAMES = {"dlq_backing_available", "store_to_dlq"}
 
 
 @pytest.fixture
@@ -167,7 +162,7 @@ def absent_submodule(monkeypatch):
 
 
 class TestDlqHelpersDelegationContract:
-    """Each wrapper hits its resolver and falls back to the right empty sentinel."""
+    """Each PRO-only wrapper hits its resolver, else the right empty sentinel."""
 
     @pytest.mark.parametrize(
         ("wrapper_name", "resolver_attr", "_sentinel"),
@@ -211,29 +206,75 @@ class TestDlqHelpersDelegationContract:
             obj = getattr(helpers, name, None)
             assert callable(obj), f"{name} declared in __all__ but not callable"
 
-    def test_wrapper_table_covers_every_public_name(self):
-        """Belt-and-braces: the parametrized table must match the wrapper
-        subset of ``__all__`` (every public name except non-wrapper predicates).
+    def test_wrapper_table_covers_every_pro_only_public_name(self):
+        """The parametrized table must match the PRO-only wrapper subset of
+        ``__all__`` (every public name except the backing-chain functions).
         """
         covered = {row[0] for row in WRAPPER_TABLE}
         assert covered == set(helpers.__all__) - NON_WRAPPER_PUBLIC_NAMES
 
 
-class TestDlqBackingAvailablePredicate:
-    """``dlq_backing_available`` mirrors the ``_get_pro_dlq`` store resolution."""
+# =============================================================================
+# store_to_dlq / dlq_backing_available — OSS-or-PRO backing chain
+# =============================================================================
 
-    def test_true_when_store_resolves(self, fake_submodule_factory):
-        fake_submodule_factory("_get_pro_dlq")
+
+class TestDlqBackingChainResolution:
+    """The store path resolves PRO (ACTIVE slot) first, then the OSS backing."""
+
+    def test_store_to_dlq_uses_oss_backing_when_slot_empty(self, monkeypatch):
+        """PRO absent / unentitled (empty slot) → the OSS DLQCaptureService
+        captures the failure (real ``DLQEntryResult``, not ``None``).
+        """
+        from baldur.models.dlq import DLQEntryResult
+        from baldur.services.dlq_capture import service as capture_module
+
+        monkeypatch.setattr(ProviderRegistry.dlq_service, "safe_get", lambda: None)
+
+        # Seed the OSS capture singleton with a mock repo so the store is
+        # deterministic (no Redis) — the point is that the OSS backing captures.
+        mock_repo = MagicMock()
+        mock_entry = MagicMock()
+        mock_entry.id = "oss-entry-1"
+        mock_repo.create.return_value = mock_entry
+        mock_repo.count_all.return_value = 0
+        mock_repo.count_by_domain.return_value = 0
+        monkeypatch.setattr(
+            capture_module,
+            "_capture_service",
+            capture_module.DLQCaptureService(repository=mock_repo),
+        )
+
+        result = helpers.store_to_dlq(
+            domain="payment", failure_type="PG_TIMEOUT", mode="sync"
+        )
+
+        assert isinstance(result, DLQEntryResult)
+        assert result.success is True
+        assert result.dlq_id == "oss-entry-1"
+        mock_repo.create.assert_called_once()
+
+    def test_store_to_dlq_prefers_pro_service_when_slot_registered(self, monkeypatch):
+        """PRO present (registered slot) → the PRO service wins the chain."""
+        pro_service = MagicMock()
+        pro_service.store_failure.return_value = "pro-result"
+        monkeypatch.setattr(
+            ProviderRegistry.dlq_service, "safe_get", lambda: pro_service
+        )
+
+        result = helpers.store_to_dlq(domain="payment", failure_type="t", mode="sync")
+
+        pro_service.store_failure.assert_called_once_with(
+            domain="payment", failure_type="t", mode="sync"
+        )
+        assert result == "pro-result"
+
+    def test_backing_available_true_when_slot_empty(self, monkeypatch):
+        """OSS backing always resolves → available even with no PRO slot."""
+        monkeypatch.setattr(ProviderRegistry.dlq_service, "safe_get", lambda: None)
         assert helpers.dlq_backing_available() is True
 
-    def test_false_when_store_absent(self, absent_submodule):
-        absent_submodule("_get_pro_dlq")
-        assert helpers.dlq_backing_available() is False
-
-    def test_verdict_matches_store_to_dlq_noop(self, absent_submodule):
-        """The predicate's ``False`` must coincide with the store no-op: when it
-        reports unavailable, ``store_to_dlq`` returns ``None`` (nothing stored).
-        """
-        absent_submodule("_get_pro_dlq")
-        assert helpers.dlq_backing_available() is False
-        assert helpers.store_to_dlq(domain="d", failure_type="t") is None
+    def test_backing_available_true_when_slot_registered(self, monkeypatch):
+        # A bare non-None object is enough — the predicate only checks resolution.
+        monkeypatch.setattr(ProviderRegistry.dlq_service, "safe_get", lambda: object())
+        assert helpers.dlq_backing_available() is True

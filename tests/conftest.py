@@ -1586,22 +1586,28 @@ def reset_notification_helpers():
 
 @pytest.fixture(autouse=True)
 def reset_dlq_helpers():
-    """Reset baldur.dlq.helpers per-module caches between tests."""
-    import baldur.dlq.helpers as h
+    """Reset baldur.dlq.helpers caches + the OSS DLQ capture singleton.
 
-    h._pro_dlq = None
+    The DLQ-store backing resolves through the provider registry (not a module
+    import cache), so only the compression / postmortem module caches remain
+    here; "PRO absent" for the store path is simulated by leaving the
+    ``dlq_service`` slot empty. ``reset_dlq_capture_service`` clears the OSS
+    capture singleton so a prior test's config / repository does not leak.
+    """
+    import baldur.dlq.helpers as h
+    from baldur.services.dlq_capture import reset_dlq_capture_service
+
     h._pro_dlq_compression = None
     h._pro_postmortem_store = None
-    h._resolved_dlq = False
     h._resolved_dlq_compression = False
     h._resolved_postmortem_store = False
+    reset_dlq_capture_service()
     yield
-    h._pro_dlq = None
     h._pro_dlq_compression = None
     h._pro_postmortem_store = None
-    h._resolved_dlq = False
     h._resolved_dlq_compression = False
     h._resolved_postmortem_store = False
+    reset_dlq_capture_service()
 
 
 # =============================================================================

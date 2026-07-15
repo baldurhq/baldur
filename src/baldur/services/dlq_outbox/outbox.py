@@ -348,40 +348,38 @@ def record_worker_dead_coercion() -> None:
 
 
 def _default_sync_writer(kwargs: dict[str, Any]) -> Any:
-    """Lazy-resolves ``DLQService`` and dispatches the kwargs synchronously.
+    """Resolve the DLQ capture backing and dispatch the kwargs synchronously.
 
-    Lives in the worker thread, so the PRO import cost moves entirely off
-    the producer hot path (D1).
+    Resolves the single backing chain (PRO ``DLQService`` under ACTIVE
+    entitlement, else the OSS ``DLQCaptureService``) and calls
+    ``store_failure(mode="sync", ...)`` — never ``repository.create`` directly,
+    so validation / masking / truncation / overflow / local-fallback all apply.
+    Lives in the worker thread, so the backing-resolution cost stays entirely
+    off the producer hot path.
     """
-    from baldur.factory.registry import ProviderRegistry
+    from baldur.services.dlq_capture import resolve_dlq_backing
 
-    service = ProviderRegistry.dlq_service.safe_get()
-    if service is None:
-        raise RuntimeError("DLQ outbox requires baldur_pro DLQService")
-    return service.store_failure(mode="sync", **kwargs)
+    return resolve_dlq_backing().store_failure(mode="sync", **kwargs)
 
 
 def _default_emergency_dump(batch: list[dict[str, Any]]) -> None:
-    """Dispatch each remaining entry through ``DLQService._write_to_local_fallback``.
+    """Dispatch each remaining entry through the backing's local fallback.
 
-    Reuses the existing zero-loss disk fallback (D11.3) — no new dump
-    format introduced. Called only on shutdown timeout when the worker
-    cannot drain in time.
+    Reuses the existing zero-loss disk fallback — no new dump format
+    introduced. Called only on shutdown timeout when the worker cannot drain in
+    time. Resolves the same backing chain as the sync writer.
     """
     try:
-        from baldur.factory.registry import ProviderRegistry
+        from baldur.services.dlq_capture import resolve_dlq_backing
 
-        service = ProviderRegistry.dlq_service.safe_get()
-        if service is None:
-            raise RuntimeError("baldur_pro DLQService not registered")
+        service = resolve_dlq_backing()
     except Exception as e:
         logger.warning("dlq_outbox.emergency_dump_unavailable", error=e)
         return
 
-    # The OSS DLQService Protocol intentionally omits `_write_to_local_fallback`
-    # because the disk-fallback path is a PRO impl detail (D11.3). We reach
-    # through to it here only on shutdown emergency dump; getattr keeps the
-    # OSS Protocol contract tight while preserving the zero-loss invariant.
+    # ``_write_to_local_fallback`` is the zero-loss disk-fallback path; both the
+    # OSS ``DLQCaptureService`` base and the PRO overlay expose it. getattr keeps
+    # the reach-through defensive across any backing shape.
     fallback = getattr(service, "_write_to_local_fallback", None)
     if fallback is None:
         logger.warning(
