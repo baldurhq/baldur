@@ -1,6 +1,6 @@
 """Cat 7A.6 — `protect()` lock contention scaling micro-benchmark.
 
-Plan ref: `memory/scenario-test-plan-2026-04-12.md` §436 row 7A.6
+Plan ref: the perf-scenario plan, row 7A.6
 Targets:  N=10 latency < 2x N=1, N=50 < 4x, N=100 < 8x (ratio gate on p50).
 Setup:    4 sequential phases of N concurrent threads each calling
           ``protect(name, lambda: 1)`` with default kwargs (CB on, retry off,
@@ -33,7 +33,7 @@ Per-phase shape:
 
 Ratio gate is computed against phase N=1's pooled p50. Plan §484-488: first
 run = baseline establishment, NOT pass/fail. The ratio thresholds are
-recorded in ``record_property`` for /scenario harness verdict; they are NOT
+recorded in ``record_property`` for the scenario harness verdict; they are NOT
 hard ``assert`` statements.
 
 Two complementary measurement paths (matching 7A.1/7A.5 layout):

@@ -1,6 +1,6 @@
 """Cat 7C.4 — Pipeline preset overhead comparison (baseline-establishment run).
 
-Plan ref:  ``memory/scenario-test-plan-2026-04-12.md`` §507 row 7C.4
+Plan ref:  the perf-scenario plan, row 7C.4
 Targets:   minimal < 0.5%, standard < 2%, ha < 5% relative to baseline
            (Wave 5.6 Unified Profile gates — this run = baseline per plan §507)
 Setup:     ``minimal_pipeline()`` / ``standard_pipeline()`` / ``ha_pipeline()``
@@ -203,7 +203,7 @@ def test_pipeline_preset_overhead_table(record_property: Any) -> None:
     )
     record_property("ranking_respected", int(ranking_respected))
 
-    # Diagnostic dump for /scenario Stage 7 ingestion.
+    # Diagnostic dump for harness result ingestion.
     print("\n[7C.4 pipeline preset overhead table]")
     print(
         f"  baseline p50={baseline_p50:.2f}us p99={results['baseline']['p99_us']:.2f}us"

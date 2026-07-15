@@ -1,6 +1,6 @@
 """Cat 7A.3 — `protect()` CB-reject-path (fast-fail) overhead micro-benchmark.
 
-Plan ref: `memory/scenario-test-plan-2026-04-12.md` §433 row 7A.3
+Plan ref: the perf-scenario plan, row 7A.3
 Targets:  p50 < 0.05 ms, p99 < 0.2 ms
 Setup:    `protect(name, fn)` with default kwargs after the named CB has been
           forced to OPEN via the documented operator API
@@ -24,7 +24,7 @@ Two complementary measurement paths (matching 7A.1/7A.2 layout):
    standard `benchmark(callable)` invocation. Provides median / iqr / ops.
 
 The first run of either test establishes BASELINE per plan §484-488; PASS/FAIL
-verdict is recorded by the /scenario harness, not by these tests.
+verdict is recorded by the scenario harness, not by these tests.
 
 Why force_open (and not "trigger N failures to auto-trip"): the plan setup
 says "CB already OPEN" — auto-trip would mix `record_failure` cost into setup

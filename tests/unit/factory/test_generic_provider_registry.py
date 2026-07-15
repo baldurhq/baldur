@@ -459,7 +459,7 @@ class TestGenericProviderRegistryBehavior:
 # ---------------------------------------------------------------------------
 # Cat 4.6 — Bootstrap with broken provider factory
 #
-# Scenario plan: memory/scenario-test-plan-2026-04-12.md row 4.6 (MUST).
+# Scenario plan: the perf-scenario plan, row 4.6 (MUST).
 # Verification: factory must raise at registration/get time, not defer to
 # first use. create_new() must not silently pass broken factory.
 # Code ref: factory/base.py get() + create_new().

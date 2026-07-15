@@ -1,6 +1,6 @@
 """Cat 7A.7 — DLQ outbox producer-side latency micro-benchmark.
 
-Plan ref: `memory/scenario-test-plan-2026-04-12.md` §436 row 7A.7
+Plan ref: the perf-scenario plan, row 7A.7
 Targets:  producer p50 < 1 μs, p99 < 10 μs, drop_rate < 1%
 Setup:    `outbox.put({...kwargs...})` directly — isolates the producer hot
           path (RingBuffer.put) from the surrounding `_dispatch_to_outbox`
@@ -26,7 +26,7 @@ Two complementary measurement paths (matching 7A.1-7A.6 layout):
    `benchmark(callable)` invocation. Provides median / iqr / ops.
 
 The first run of either test establishes BASELINE per plan §484-488; PASS/FAIL
-verdict is recorded by the /scenario harness, not by these tests.
+verdict is recorded by the scenario harness, not by these tests.
 
 Capacity sizing rationale (G5): measurement count 8000 < default capacity
 10000, so even if the worker drains zero entries during the producer's
