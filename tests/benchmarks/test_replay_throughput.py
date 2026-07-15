@@ -1,6 +1,6 @@
 """Cat 7C.2 — DLQ replay throughput macro-benchmark.
 
-Plan ref: `memory/scenario-test-plan-2026-04-12.md` §505 row 7C.2
+Plan ref: the perf-scenario plan, row 7C.2
 Target:   Replay rate >= 1000 ops/sec (framework-rate ceiling).
 Setup:    Pre-load N=100_000 PENDING entries into a fresh
           `InMemoryFailedOperationRepository`; register a no-op success
@@ -10,7 +10,7 @@ Setup:    Pre-load N=100_000 PENDING entries into a fresh
 Why in-process and not Locust HTTP (deviates from default 7C lane)
 ==================================================================
 Cat 7C.1 measured ~151 ops/sec via the production `xtest/replay/batch/`
-HTTP endpoint (see `scenario-results/7C/7C.1-zero-loss-guarantee.md`
+HTTP endpoint (see a prior scenario's evidence file
 verdict) and explicitly recommended 7C.2 "measure rate in-process to
 avoid the HTTP-orchestrator artifact." Plan §505's "1000 ops/sec"
 target is a FRAMEWORK-rate ceiling claim — HTTP RTT (~50 ms/batch)
@@ -18,7 +18,7 @@ would false-fail the gate by ~7x without measuring framework cost.
 The 7A.x suite (7A.1-7A.7) already establishes the in-process
 `time.perf_counter_ns() + samples_ns list + statistics.quantiles +
 ops_per_sec` scaffold; 7C.2 plugs into that convention at macro scale.
-Decision recorded in /scenario Stage 3 Section 2 Gap #1 sync.
+Decision recorded in the parameter-sync step.
 
 Why InMemoryFailedOperationRepository (not Redis-backed)
 ========================================================
@@ -26,7 +26,7 @@ Redis-backed throughput adds network RTT (~500-1000 us/op) that
 dominates over framework cost; the published claim "rate >= 1000
 ops/sec" only makes sense as a framework ceiling. Redis-backed
 throughput is deferred to a production-cluster benchmark per 7C.1
-Gap #2 OOS precedent. Decision recorded in Stage 3 Section 2 Gap #2.
+a parameter-sync decision. Decision recorded in the parameter-sync step.
 
 Why a no-op success handler (not domain-realistic)
 ==================================================
@@ -35,7 +35,7 @@ network), not framework. Plan §505's "rate" claim implies the
 framework-ceiling for the SUCCESS path. Local `NoOpSuccessReplayHandler`
 mirrors the precedent at `tests/unit/services/test_replay_service_unit.py:52`
 (`FakeReplayHandler(success=True)`) — re-defined locally rather than
-cross-test-dir imported. Decision recorded in Stage 3 Section 2 Gap #3.
+cross-test-dir imported. Decision recorded in the parameter-sync step.
 
 Why N=100_000 and not the plan-cited 1_000_000
 ==============================================
@@ -43,8 +43,8 @@ Rate is steady-state; 100K is sufficient sample size and fits ~200 MB
 heap. At 1000 ops/sec floor the drain takes ~100 s — fast iteration.
 Plan §505's absolute "1M < 17 min" assertion is the rate floor's
 linear extrapolation: `1_000_000 / 1000 ops/s = 1000 s = 16.67 min`.
-1M-direct measurement deferred to production benchmark per 7C.1 Gap #2
-precedent. Decision recorded in Stage 3 Section 2 Gap #4.
+1M-direct measurement deferred to production benchmark per a prior scenario
+precedent. Decision recorded in the parameter-sync step.
 
 Structural guards (G1-G9) — see Section 4 of the result file
 ============================================================
@@ -133,7 +133,7 @@ def _g3_explicit_di(
     present; if it were `None`, `resolve_with_fallback` could return a
     different backend depending on what other tests have configured. The
     benchmark's ops/sec claim is only meaningful against the in-memory
-    backend per Stage 3 Section 2 Gap #2.
+    backend per the parameter-sync step.
     """
     assert service._repository is repo, (
         "ReplayService._repository != injected in-memory repo — "
@@ -293,7 +293,7 @@ def test_replay_throughput_in_process(record_property: Any) -> None:
     )
 
     # Plan §505 1M extrapolation gate (informational; the 1M direct
-    # measurement is deferred to production benchmark per 7C.1 Gap #2).
+    # measurement is deferred to production benchmark per a prior scenario).
     assert extrapolated_1m_min < 17.0, (
         f"Extrapolated 1M drain wall-clock = {extrapolated_1m_min:.2f} min, "
         "exceeds plan §505 'under 17 min' floor — rate dropped below "

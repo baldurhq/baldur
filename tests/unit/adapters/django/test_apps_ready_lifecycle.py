@@ -1,6 +1,6 @@
 """Cat 4.8 — apps.py ``ready()`` exception-propagation contract.
 
-Plan row: ``memory/scenario-test-plan-2026-04-12.md:618``
+Plan row: the perf-scenario plan
 
 Verification criterion: ``apps.py:ready() must NOT swallow init exceptions``.
 

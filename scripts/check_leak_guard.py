@@ -84,6 +84,13 @@ CONTENT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         for p in PRIVATE_DOC_PATHS
     ),
     ("internal architecture-decision ref", re.compile(r"\bADR-\d+\b")),
+    # Private scenario-tracking artifacts (test plan + result evidence) live
+    # under the private ``memory/`` tree. A public file that references them by
+    # path leaks the private process structure; near-zero legitimate use in OSS
+    # content (the OSS module ``adapters/memory`` is disjoint from ``memory/``).
+    ("private scenario plan reference", re.compile(r"scenario-test-plan")),
+    ("private scenario results path", re.compile(r"scenario-results/")),
+    ("private memory-tree scenario path", re.compile(r"memory/scenario")),
 )
 
 # Commit messages additionally must not spell a private source-tree path.

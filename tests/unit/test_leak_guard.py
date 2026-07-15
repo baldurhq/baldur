@@ -29,6 +29,10 @@ _CONTENT_POSITIVES = [
     _DOCS + "self_healing/01_overview.md",
     "ADR-" + "008 governs this",
     "decided in ADR-" + "6",
+    # Private scenario-tracking artifacts (plan + result evidence under memory/).
+    "see " + "scenario-test" + "-plan-2026-04-12.md",
+    "per " + "scenario-" + "results/7C/foo.md",
+    "memory/" + "scenario-results/7B/bar.md",
 ]
 
 # Each MUST NOT be flagged by the content scan (public-repo norms).
@@ -42,6 +46,9 @@ _CONTENT_NEGATIVES = [
     "import baldur",  # bare package
     "HTTP 429 throttling",  # number, no anchor
     "ADDRESS-1 line",  # ADR look-alike, no digit boundary match
+    "baldur.adapters."
+    + "memory.circuit_breaker",  # OSS memory module, not memory/scenario
+    "src/baldur/adapters/" + "memory/failed_operation.py",  # adapters/memory, disjoint
 ]
 
 # The commit-message scan adds the private source-tree paths to the content set.

@@ -47,7 +47,7 @@ Hook responsibilities
     (otherwise gunicorn SIGKILLs the worker before drain completes).
 
 Doc reference: see Cat 1.8 scenario in
-``memory/scenario-test-plan-2026-04-12.md`` for the canonical
+the perf-scenario plan for the canonical
 end-to-end behavior contract.
 """
 

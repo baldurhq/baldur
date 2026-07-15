@@ -98,7 +98,7 @@ class TestLayeredRepositoryBasic:
         Lua transition) with the pre-transition L1 snapshot. D2 drops the
         sync — state mirroring belongs to the explicit write callers.
         Falsifiability mirror of pre-G15 clobber evidence in
-        scenario-results/6.4-multi-worker-cb-half-open-consistency.md.
+        a prior scenario's evidence file
         """
         import time
 

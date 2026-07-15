@@ -239,7 +239,7 @@ It does NOT. View-level `circuit_breaker=False` only disables the view-stage CB 
 - `src/baldur/api/django/middleware/baldur.py:263-310` — at-exception DLQ-store in main path
 - `src/baldur/protect_facade.py:559-589` — `protect()` public API + view-level `@protected` decorator semantics
 - `examples/django_app/payment_app/settings.py` — reference `BALDUR_DLQ_ELIGIBLE_PATHS` setup for the testbed (added 2026-05-12 by `c88f1ab5 test(7B.2): activate middleware-level DLQ for 2-layer storm absorption (F3)`)
-- `memory/scenario-results/7B/7B.2-dlq-write-pressure.md` — scenario result file demonstrating the 1-layer vs 2-layer gap with measured numbers
+- Internal DLQ write-pressure scenario result — demonstrates the 1-layer vs 2-layer gap with measured numbers (not part of the published docs)
 - `docs/runbooks/data-consistency-boundaries.md` — sibling runbook on what to store in Baldur vs ACID DB; this runbook assumes you have read it
 - `docs/runbooks/protect-hang-troubleshooting.md` — sibling runbook on `protect()` hang diagnosis; relevant if view-retry path appears to stall under storm
 

@@ -1,6 +1,6 @@
 """Cat 7A.1 — `protect()` success-path overhead micro-benchmark.
 
-Plan ref: `memory/scenario-test-plan-2026-04-12.md` §431 row 7A.1
+Plan ref: the perf-scenario plan, row 7A.1
 Targets:  p50 < 0.1 ms, p99 < 0.5 ms, p999 < 1 ms
 Setup:    `protect(name, fn)` with default kwargs (CB on, retry off, dlq off,
           timeout 30s) on a healthy lambda. Warmup loop hydrates the in-memory
@@ -22,7 +22,7 @@ Two complementary measurement paths:
    numbers can be compared against future regression runs.
 
 The first run of either test establishes BASELINE per plan §484-488; PASS/FAIL
-verdict is recorded by the /scenario harness, not by these tests.
+verdict is recorded by the scenario harness, not by these tests.
 """
 
 from __future__ import annotations
@@ -100,7 +100,7 @@ def test_protect_success_path_quantiles(record_property: Any) -> None:
     mean_ns = statistics.fmean(samples_ns)
     stdev_ns = statistics.pstdev(samples_ns)
 
-    # Record raw stats for /scenario Stage 7 ingestion. record_property writes
+    # Record raw stats for harness result ingestion. record_property writes
     # to the JUnit XML report and prints under -v.
     record_property("p50_us", p50_ns / 1000)
     record_property("p99_us", p99_ns / 1000)

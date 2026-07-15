@@ -1,11 +1,11 @@
 """Cat 7A.5 — EventBus emit throughput micro-benchmark.
 
-Plan ref: `memory/scenario-test-plan-2026-04-12.md` §435 row 7A.5
+Plan ref: the perf-scenario plan, row 7A.5
 Setup:    Emit ``EventType.EMERGENCY_LEVEL_CHANGED`` events with exactly 5
           registered handlers on a fresh ``BaldurEventBus()`` instance,
           measuring per-emit synchronous-dispatch overhead. Plan target
-          translated to absolute thresholds (Section 2 Gap #1, /scenario
-          Stage 3 sync 2026-05-07): "10,000 events/sec sustained" =>
+          translated to absolute thresholds (a parameter-sync decision,
+          2026-05-07): "10,000 events/sec sustained" =>
           per-emit p50 <= 100 us / p99 <= 200 us / p999 <= 500 us.
 
 Plan rationale ("Verify synchronous dispatch doesn't create backlog")
@@ -42,8 +42,8 @@ this code path* — Thread.start()/join() per handler is the structural
 source of any potential backlog under sustained 10K/s emit pressure.
 Override to 0 would skip the Thread branch entirely (`event_bus.py:82-84`
 inline call) and report numbers from a code path no production caller
-ever takes. Posture decision recorded as Section 2 Gap #2 in the
-/scenario Stage 3 sync.
+ever takes. Posture decision recorded as a parameter-sync decision in the
+the parameter-sync step.
 
 Two complementary measurement paths (matching 7A.1/7A.2/7A.3/7A.4 layout):
 
@@ -56,7 +56,7 @@ Two complementary measurement paths (matching 7A.1/7A.2/7A.3/7A.4 layout):
    — standard ``benchmark(callable)`` invocation. Provides median / iqr / ops.
 
 The first run of either test establishes BASELINE per plan §484-488;
-PASS/FAIL verdict is recorded by the /scenario harness, not by these
+PASS/FAIL verdict is recorded by the scenario harness, not by these
 tests.
 
 Why no ``clear_history()`` between warmup and measurement: ``_record_event``
@@ -79,7 +79,7 @@ from baldur.services.event_bus.bus.event_types import EventPriority, EventType
 from baldur.settings.event_bus import get_event_bus_settings, reset_event_bus_settings
 
 # Plan §435 thresholds (microseconds for ns-precision arithmetic).
-# Derived from "Emit 10,000 events/sec" via /scenario Stage 3 Section 2 Gap #1
+# Derived from "Emit 10,000 events/sec" via the parameter-sync step
 # (Round 2 reuse audit exhausted: no existing throughput baseline in
 # services/, core/, adapters/, resilience/, coordination/, audit/, scaling/,
 # settings/, tests/, or docs/).

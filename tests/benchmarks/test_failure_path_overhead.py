@@ -1,6 +1,6 @@
 """Cat 7A.2 — `protect()` failure-path overhead micro-benchmark.
 
-Plan ref: `memory/scenario-test-plan-2026-04-12.md` §432 row 7A.2
+Plan ref: the perf-scenario plan, row 7A.2
 Targets:  p50 < 0.3 ms, p99 < 1 ms
 Setup:    `protect(name, fn, dlq=True, retry=RetryPolicyConfig(max_attempts=1,
           enable_dlq=True), circuit_breaker=False)` on a function that always
@@ -35,7 +35,7 @@ Two complementary measurement paths (matching 7A.1 layout):
    standard `benchmark(callable)` invocation. Provides median / iqr / ops.
 
 The first run of either test establishes BASELINE per plan §484-488; PASS/FAIL
-verdict is recorded by the /scenario harness, not by these tests.
+verdict is recorded by the scenario harness, not by these tests.
 """
 
 from __future__ import annotations
