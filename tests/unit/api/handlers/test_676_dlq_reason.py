@@ -22,6 +22,9 @@ from baldur.api.handlers.dlq import _parse_reason, dlq_replay, dlq_retry
 from baldur.interfaces.web_framework import HttpMethod, RequestContext
 
 _GET_SERVICE = "baldur.api.handlers.dlq._get_service"
+# dlq_retry resolves via the OSS read/single-entry chain (708 D4); dlq_replay
+# (batch) keeps the PRO-only _get_service resolver.
+_GET_READ_SERVICE = "baldur.api.handlers.dlq._get_read_service"
 
 
 def _ctx(json_body=None, path_params=None):
@@ -127,7 +130,7 @@ class TestDlqRetryReasonContract:
     def test_reason_at_boundary_passes_and_is_forwarded(self):
         service = _retry_service()
         reason = "x" * 500
-        with patch(_GET_SERVICE, return_value=service):
+        with patch(_GET_READ_SERVICE, return_value=service):
             resp = dlq_retry(
                 _ctx(json_body={"reason": reason}, path_params={"pk": "7"})
             )
@@ -137,7 +140,7 @@ class TestDlqRetryReasonContract:
 
     def test_reason_over_boundary_returns_400_before_service(self):
         service = _retry_service()
-        with patch(_GET_SERVICE, return_value=service):
+        with patch(_GET_READ_SERVICE, return_value=service):
             resp = dlq_retry(
                 _ctx(json_body={"reason": "x" * 501}, path_params={"pk": "7"})
             )
@@ -147,7 +150,7 @@ class TestDlqRetryReasonContract:
 
     def test_absent_reason_keeps_current_behavior_and_forwards_none(self):
         service = _retry_service()
-        with patch(_GET_SERVICE, return_value=service):
+        with patch(_GET_READ_SERVICE, return_value=service):
             resp = dlq_retry(_ctx(json_body={}, path_params={"pk": "7"}))
 
         assert resp.status_code == 200

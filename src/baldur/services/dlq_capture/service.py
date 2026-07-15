@@ -721,10 +721,12 @@ class DLQCaptureService:
 
         Audit calls route through the OSS delegating wrappers in
         ``baldur.audit.helpers``: PRO-present each resolves the identical PRO
-        function; PRO-absent each no-ops (the audit trail stays a PRO-tier
-        feature). Only the ``store`` branch fires on the OSS capture path; the
-        replay / force_redrive branches stay reachable for PRO's replay ops via
-        inheritance.
+        function; PRO-absent each no-ops (the audit-trail *persistence* stays a
+        PRO-tier feature). All three branches (``store`` / ``replay`` /
+        ``force_redrive``) fire on the OSS path — ``store`` from the capture
+        core and ``replay`` / ``force_redrive`` from the OSS read/single-entry
+        service (``DLQReadService``) — so the OSS tier *dispatches* the distinct
+        audit event even though its persistence remains PRO-gated.
 
         Args:
             action: Operation type (store, replay, force_redrive, etc.)

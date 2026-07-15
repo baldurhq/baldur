@@ -63,6 +63,26 @@ _CONTROL_LEVELS = frozenset({PermissionLevel.OPERATOR, PermissionLevel.ADMIN})
 # before any coverage assertion can mis-diagnose it.
 _PANEL_FLOOR = len(_V1_PRO_PANEL_SLOTS)
 
+# Per-action-gated panels (708 D5): a panel that stays in ``_V1_PRO_PANEL_SLOTS``
+# (so ``window.__BALDUR_PANELS__[id]`` still reflects PRO presence) yet renders for
+# OSS (``pro: false`` in PANELS) because only *some* of its actions are PRO-gated
+# per-action via that same map — the whole-panel PRO flag is deliberately off.
+# Such a panel appears in the server slot map but NOT among the ``pro:true`` PANELS
+# ids, so it is subtracted from the pro-id oracle below. panel id -> justification.
+_PER_ACTION_GATED_PANELS: dict[str, str] = {
+    "dlq": (
+        "708 D5 — the DLQ panel renders read-only for OSS (list / detail / retry / "
+        "resolve drilldown + cleanup-stats body); its batch Replay + Archive/Purge "
+        "actions carry per-action pro:true, gated via __BALDUR_PANELS__['dlq']. dlq "
+        "stays in the slot map for that per-action signal while the panel is pro:false."
+    ),
+}
+
+# The frontend ``pro:true`` PANELS ids MUST equal the slot map minus the
+# per-action-gated panels — the pinned G2/D4 edge, amended for 708 D5.
+_PRO_PANEL_IDS = set(_V1_PRO_PANEL_SLOTS) - set(_PER_ACTION_GATED_PANELS)
+_PRO_PANEL_FLOOR = len(_PRO_PANEL_IDS)
+
 # console.html is a static HTML/JS asset, not importable Python — PANELS data is
 # regex-parsed from the raw asset (precedent: test_console_handler.py asset
 # parsing). The parsing assumes the established formatting (one panel per
@@ -200,10 +220,12 @@ def _panel_covered_domains(raw: str, *, floor: int = _PANEL_FLOOR) -> set[str]:
     return domains
 
 
-def _panels_pro_ids(raw: str, *, floor: int = _PANEL_FLOOR) -> set[str]:
+def _panels_pro_ids(raw: str, *, floor: int = _PRO_PANEL_FLOOR) -> set[str]:
     """Ids of PANELS entries marked ``pro: true`` (D4).
 
-    Same parse-sanity floor (D5) as :func:`_panel_covered_domains`.
+    Parse-sanity floor (D5) is the pro-panel floor (slot map minus the 708 D5
+    per-action-gated panels), since a per-action-gated panel is ``pro: false``
+    and so is absent from this set by design.
     """
     block = _panels_block(raw)
     ids = set(_PANEL_PRO_ID_RE.findall(block))
@@ -337,14 +359,16 @@ class TestConsolePanelCoverage:
         lists can otherwise drift independently.
         """
         pro_ids = _panels_pro_ids(_console_html())
-        assert pro_ids == set(_V1_PRO_PANEL_SLOTS), (
+        assert pro_ids == _PRO_PANEL_IDS, (
             "console.html PANELS pro:true ids drifted from the server-side "
-            "_V1_PRO_PANEL_SLOTS keys (handler.py).\n"
+            "_V1_PRO_PANEL_SLOTS keys (handler.py), minus the 708 D5 per-action-"
+            "gated panels (_PER_ACTION_GATED_PANELS).\n"
             f"  only in PANELS (renders, never visible): "
-            f"{sorted(pro_ids - set(_V1_PRO_PANEL_SLOTS))}\n"
-            f"  only in slot map (gated, no panel): "
-            f"{sorted(set(_V1_PRO_PANEL_SLOTS) - pro_ids)}\n"
-            "Keep the frontend pro:true ids and the server slot map in lockstep."
+            f"{sorted(pro_ids - _PRO_PANEL_IDS)}\n"
+            f"  only in slot map, not pro:true and not per-action-gated "
+            f"(gated, no panel): {sorted(_PRO_PANEL_IDS - pro_ids)}\n"
+            "Keep the frontend pro:true ids and the server slot map in lockstep "
+            "(a per-action-gated panel belongs in _PER_ACTION_GATED_PANELS)."
         )
 
     def test_every_exempt_domain_has_a_nonempty_reason(self):
@@ -541,7 +565,7 @@ class TestParseSanityFloor:
         """Sanity: the real asset parses well above the live floor for both helpers."""
         raw = _console_html()
         assert len(_panel_covered_domains(raw)) >= _PANEL_FLOOR
-        assert len(_panels_pro_ids(raw)) >= _PANEL_FLOOR
+        assert len(_panels_pro_ids(raw)) >= _PRO_PANEL_FLOOR
 
 
 # =============================================================================

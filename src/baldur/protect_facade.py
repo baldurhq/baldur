@@ -288,9 +288,11 @@ def reset_protect_caches() -> None:
         reset_dlq_capture_service,
         reset_overflow_state,
     )
+    from baldur.services.dlq_read import reset_dlq_read_service
 
     reset_overflow_state()
     reset_dlq_capture_service()
+    reset_dlq_read_service()
 
     # #486 D8 — drain pending outbox entries + stop worker + clear RingBuffer
     # so prior-test outbox state never leaks into the next test.

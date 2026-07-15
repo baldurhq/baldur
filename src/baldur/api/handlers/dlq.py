@@ -81,6 +81,24 @@ def _get_service():
     return service
 
 
+def _get_read_service():
+    """Resolve the DLQ read + single-entry-action backing (always resolves).
+
+    Registry-first: the PRO ``DLQService`` (registered under ACTIVE
+    entitlement) supersedes; otherwise the OSS ``DLQReadService``. Unlike
+    ``_get_service()`` there is no ``RuntimeError`` exit — the read + single-entry
+    surface (list / detail / facets / cleanup stats / retry / resolve /
+    force-redrive) is OSS-available.
+    """
+    from baldur.factory.registry import ProviderRegistry
+    from baldur.services.dlq_read import get_dlq_read_service
+
+    service = ProviderRegistry.dlq_service.safe_get()
+    if service is not None:
+        return service
+    return get_dlq_read_service()
+
+
 def _parse_int(raw, default: int) -> int:
     try:
         return int(raw)
@@ -193,7 +211,7 @@ def _auto_replay_arming_block() -> dict:
 
 def dlq_cleanup_stats(ctx: RequestContext) -> ResponseContext:
     """GET /dlq/cleanup/stats/ — cleanup statistics (viewer+)."""
-    service = _get_service()
+    service = _get_read_service()
     stats = service.get_cleanup_stats()
 
     return ResponseContext.json(
@@ -295,7 +313,7 @@ def dlq_facets(ctx: RequestContext) -> ResponseContext:
     status_filter = ctx.get_query("status") or None
     domain_filter = ctx.get_query("domain") or None
 
-    service = _get_service()
+    service = _get_read_service()
     counts = service.get_facet_counts(status=status_filter, domain=domain_filter)
 
     return ResponseContext.json(
@@ -319,7 +337,7 @@ def dlq_list(ctx: RequestContext) -> ResponseContext:
     page = _parse_int(ctx.get_query("page", 1), 1)
     page_size = _parse_int(ctx.get_query("page_size", 20), 20)
 
-    service = _get_service()
+    service = _get_read_service()
     result = service.list_entries(filters=filters, page=page, page_size=page_size)
 
     return ResponseContext.json(
@@ -343,7 +361,7 @@ def dlq_detail(ctx: RequestContext) -> ResponseContext:
     if pk is None:
         return ResponseContext.json({"error": "pk is required"}, status_code=400)
 
-    service = _get_service()
+    service = _get_read_service()
     entry = service.get_entry(pk)
     if entry is None:
         return ResponseContext.json(
@@ -364,7 +382,7 @@ def dlq_retry(ctx: RequestContext) -> ResponseContext:
     if reason_error is not None:
         return reason_error
 
-    service = _get_service()
+    service = _get_read_service()
     try:
         result = service.retry_entry(pk, reason=reason)
     except DLQError as exc:
@@ -403,7 +421,7 @@ def dlq_resolve(ctx: RequestContext) -> ResponseContext:
     actor = resolve_actor(ctx)
     notes = body.get("notes") or f"Manually resolved by {actor}"
 
-    service = _get_service()
+    service = _get_read_service()
     try:
         result = service.resolve_entry(pk, notes=notes)
     except DLQError as exc:
@@ -463,7 +481,7 @@ def dlq_force_redrive(ctx: RequestContext) -> ResponseContext:
         )
 
     actor = resolve_actor(ctx)
-    service = _get_service()
+    service = _get_read_service()
     try:
         result = service.force_redrive_entry(
             pk, actor_id=actor, reason=reason, ticket_url=ticket_url
