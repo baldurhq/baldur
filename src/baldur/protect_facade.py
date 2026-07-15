@@ -111,40 +111,6 @@ _composer_cache: dict[tuple[str, float | None, ComposerProfile], PolicyComposer]
 # instance allocation that dominated 7B.5's within-cycle RSS climb.
 _DLQ_SINK = DLQSink()
 
-# Fires at most once per process the first time a ``dlq=True`` composer is wired
-# while no DLQ store backs ``store_to_dlq`` (e.g. OSS, ``baldur_pro`` absent).
-# Without this, ``dlq=True`` is accepted with no signal yet the store silently
-# no-ops — a false "failures are captured" guarantee (claim-wiring integrity). Reset by
-# ``reset_protect_caches()`` in lockstep with ``_composer_cache`` so tests that
-# flip PRO presence re-evaluate. The flag, not the log, enforces once-per-process.
-_dlq_no_backing_warned = False
-
-
-def _warn_if_dlq_backing_absent() -> None:
-    """Warn once if a DLQ sink is being wired without a real store behind it.
-
-    No-ops when a store is available (PRO present) or after the first warning.
-    Logs at WARNING, never aborts: the sink stays wired (fail-open) and final
-    failures still raise to the caller — only durable DLQ capture is missing.
-    """
-    global _dlq_no_backing_warned
-    if _dlq_no_backing_warned:
-        return
-    from baldur.dlq.helpers import dlq_backing_available
-
-    if dlq_backing_available():
-        return
-    _dlq_no_backing_warned = True
-    logger.warning(
-        "protect.dlq_requested_without_backing",
-        hint=(
-            "dlq=True was requested but no DLQ store is installed "
-            "(baldur_pro absent); final failures still raise to the caller but "
-            "are NOT durably captured for replay. Install baldur_pro to enable "
-            "DLQ persistence, or unset dlq= to silence this warning."
-        ),
-    )
-
 
 def _get_or_build_cb_policy(name: str) -> CircuitBreakerPolicy:
     """Return the cached ``CircuitBreakerPolicy`` for ``name``, building once.
@@ -265,7 +231,6 @@ def _get_or_build_dlq_protect_composer(
             composer.add(timeout_policy)
         composer.add(retry_policy)
         composer.add_sink(_DLQ_SINK)
-        _warn_if_dlq_backing_absent()
         _composer_cache[key] = composer
         logger.debug(
             "protect.composer_built",
@@ -289,13 +254,9 @@ def reset_protect_caches() -> None:
     drift (CB service config, composer-bound TimeoutPolicy, recorder,
     executor worker count).
     """
-    global _dlq_no_backing_warned
     with _cb_policy_lock:
         _cb_policy_cache.clear()
         _composer_cache.clear()
-        # Re-arm the once-per-process DLQ-no-backing warning in lockstep with
-        # the composer cache so a test that flips PRO presence re-evaluates.
-        _dlq_no_backing_warned = False
 
     # #564 — invalidate the memoized cache-backed idempotency gate + replace
     # its in-process fallback cache so prior-test dedup state cannot leak into
@@ -319,14 +280,17 @@ def reset_protect_caches() -> None:
 
     reset_event_handler_cache()
 
-    # #485 D4/G6 — reset the overflow periodic-N counter + last-ratio cache
-    # so each test starts at ``n=0`` with the always-check fast path.
-    try:
-        from baldur_pro.services.dlq.overflow import reset_overflow_state
+    # Reset the OSS overflow periodic-N counter + last-ratio cache + warn-once
+    # flags so each test starts at ``n=0`` with the always-check fast path, and
+    # reset the OSS DLQ capture singleton so a prior test's config snapshot /
+    # repository does not leak into the next test's capture backing.
+    from baldur.services.dlq_capture import (
+        reset_dlq_capture_service,
+        reset_overflow_state,
+    )
 
-        reset_overflow_state()
-    except ImportError:
-        pass
+    reset_overflow_state()
+    reset_dlq_capture_service()
 
     # #486 D8 — drain pending outbox entries + stop worker + clear RingBuffer
     # so prior-test outbox state never leaks into the next test.
@@ -784,7 +748,6 @@ def _build_sync_composer(
         composer.add(RetryPolicy(config=retry_cfg))
     if dlq:
         composer.add_sink(_DLQ_SINK)
-        _warn_if_dlq_backing_absent()
     logger.debug(
         "protect.composer_built",
         name=name,
@@ -899,7 +862,6 @@ def _build_async_composer(
         composer.add(AsyncRetryPolicy.from_policy_config(retry_cfg))
     if dlq:
         composer.add_sink(_DLQ_SINK)
-        _warn_if_dlq_backing_absent()
     logger.debug(
         "protect.composer_built",
         name=name,

@@ -137,17 +137,17 @@ class TestResetNotificationHelpersFixtureBehavior:
 # =============================================================================
 
 
-# The fixture clears six attributes; this table makes the per-cache assertions
-# data-driven instead of duplicating six near-identical method bodies.
+# The DLQ-store backing resolves through the provider registry (not a module
+# import cache), so only the compression / postmortem sub-caches remain in the
+# helper module; this table drives the per-cache assertions data-driven.
 DLQ_CACHE_ATTRS = [
-    ("_pro_dlq", "_resolved_dlq"),
     ("_pro_dlq_compression", "_resolved_dlq_compression"),
     ("_pro_postmortem_store", "_resolved_postmortem_store"),
 ]
 
 
 class TestResetDlqHelpersFixtureBehavior:
-    """The fixture clears all three sub-module caches on entry AND on cleanup."""
+    """The fixture clears both remaining sub-module caches on entry AND cleanup."""
 
     @pytest.mark.parametrize(("pro_attr", "resolved_attr"), DLQ_CACHE_ATTRS)
     def test_pre_yield_clears_each_subcache(self, pro_attr, resolved_attr):

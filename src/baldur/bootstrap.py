@@ -1837,6 +1837,16 @@ def _build_startup_report(ext_result: ExtensionResult) -> dict[str, Any]:
             features[name] = False
     report["features"] = features
 
+    # DLQ capture backing tier (pro when the PRO DLQService is registered under
+    # ACTIVE entitlement, else the OSS capture backing). Operator visibility for
+    # "does dlq=True durably capture on this install?" — it always does now.
+    try:
+        from baldur.services.dlq_capture import resolve_dlq_backing_tier
+
+        report["dlq_capture_backing"] = resolve_dlq_backing_tier()
+    except Exception:
+        report["dlq_capture_backing"] = "oss"
+
     return report
 
 

@@ -83,7 +83,10 @@ _ROOT_BUDGETS: dict[str, int] = {
     # status-branch shape: CONTINUE/SKIP/ABORT + stale/failed retry paths).
     # 706: -1 — canary_recovery.py deletion dropped its CanaryRecoveryManager
     # C901 noqa (the unwired canary-recovery cluster was removed).
-    "baldur": 108,
+    # 707: +1 — DLQCaptureService.store_failure relocated from the PRO tier into
+    # the OSS baldur.services.dlq_capture core; it carries the same
+    # C901/PLR0912/PLR0915 noqa it had in PRO (relocation, not new complexity).
+    "baldur": 109,
     # 666: -1 — _update_config_with_meta refactored into _versioned_write +
     # _merge_changes + _post_write helpers, dropping its complexity noqa.
     "baldur_pro": 41,
