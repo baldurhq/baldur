@@ -723,6 +723,176 @@ class TestGenericProviderRegistryThreadSafety:
 
 
 # ---------------------------------------------------------------------------
+# Same-slot re-entrancy guard
+#
+# get() invokes the provider factory while holding the non-reentrant
+# registry lock. A factory that (transitively) resolves an uncached name in
+# its own slot would deadlock — the guard converts that hang into an
+# immediate RuntimeError.
+# ---------------------------------------------------------------------------
+
+
+class TestReentrantResolutionGuardBehavior:
+    """A provider factory resolving its own slot raises instead of deadlocking."""
+
+    @pytest.fixture
+    def registry(self) -> GenericProviderRegistry[DummyAdapter]:
+        return GenericProviderRegistry[DummyAdapter](adapter_type="reentrancy")
+
+    def test_factory_resolving_own_name_raises_runtime_error(
+        self, registry: GenericProviderRegistry[DummyAdapter]
+    ):
+        """A factory that re-enters get() for its own name raises, not hangs."""
+
+        def self_resolving_factory():
+            return registry.get("selfref")
+
+        registry.register("selfref", self_resolving_factory)
+
+        with pytest.raises(RuntimeError, match="Re-entrant provider resolution"):
+            registry.get("selfref")
+
+    def test_factory_resolving_other_uncached_name_same_slot_raises(
+        self, registry: GenericProviderRegistry[DummyAdapter]
+    ):
+        """Transitive same-slot resolution of an uncached name raises.
+
+        Same lock, different name — without the guard this is the same
+        deadlock as direct self-resolution.
+        """
+        registry.register("dep", DummyAdapter)
+
+        def transitive_factory():
+            registry.get("dep")  # uncached → would need self._lock → deadlock
+            return DummyAdapter()
+
+        registry.register("outer", transitive_factory)
+
+        with pytest.raises(RuntimeError, match="Re-entrant provider resolution"):
+            registry.get("outer")
+
+    def test_error_message_names_adapter_type_and_requested_name(
+        self, registry: GenericProviderRegistry[DummyAdapter]
+    ):
+        """The error is diagnosable: it names the slot and the re-entrant name."""
+
+        def self_resolving_factory():
+            return registry.get("selfref")
+
+        registry.register("selfref", self_resolving_factory)
+
+        with pytest.raises(RuntimeError, match="'reentrancy'.*'selfref'"):
+            registry.get("selfref")
+
+    def test_factory_may_read_cached_instance_in_same_slot(
+        self, registry: GenericProviderRegistry[DummyAdapter]
+    ):
+        """A factory reading an already-cached same-slot instance is legal.
+
+        The cached fast path is lock-free, so it neither deadlocks nor
+        trips the guard — pins that the guard does not overreach.
+        """
+        registry.register("dep", DummyAdapter)
+        dep = registry.get("dep")  # pre-cache
+
+        seen: list[DummyAdapter] = []
+
+        def composing_factory():
+            seen.append(registry.get("dep"))  # cached → fast path
+            return DummyAdapter()
+
+        registry.register("outer", composing_factory)
+
+        instance = registry.get("outer")
+
+        assert isinstance(instance, DummyAdapter)
+        assert seen == [dep]
+
+    def test_cross_slot_resolution_from_factory_allowed(self):
+        """A factory resolving a DIFFERENT slot is legal (per-slot guard/lock)."""
+        slot_a = GenericProviderRegistry[DummyAdapter](adapter_type="slot_a")
+        slot_b = GenericProviderRegistry[DummyAdapter](adapter_type="slot_b")
+        slot_b.register("dep", DummyAdapter)
+
+        def cross_slot_factory():
+            slot_b.get("dep")  # different registry → different lock
+            return DummyAdapter()
+
+        slot_a.register("outer", cross_slot_factory)
+
+        assert isinstance(slot_a.get("outer"), DummyAdapter)
+
+    def test_guard_flag_cleared_after_failure(
+        self, registry: GenericProviderRegistry[DummyAdapter]
+    ):
+        """After the guard fires, subsequent legal resolution works.
+
+        The in-progress flag must be cleared on the failure path (finally),
+        or every later get() on this thread would false-positive.
+        """
+
+        def self_resolving_factory():
+            return registry.get("selfref")
+
+        registry.register("selfref", self_resolving_factory)
+        registry.register("good", DummyAdapter)
+
+        with pytest.raises(RuntimeError):
+            registry.get("selfref")
+
+        # Failed name is not cached; a legal provider still resolves.
+        assert registry.has_instance("selfref") is False
+        assert isinstance(registry.get("good"), DummyAdapter)
+
+    def test_guard_is_thread_local_concurrent_getter_unaffected(
+        self, registry: GenericProviderRegistry[DummyAdapter]
+    ):
+        """A second thread resolving during construction waits normally.
+
+        The flag is per-thread: while thread 1's factory is mid-construction
+        (flag set on thread 1), thread 2's get() must NOT trip the guard —
+        it blocks on the lock and receives the same cached instance.
+        """
+        factory_entered = threading.Event()
+        release_factory = threading.Event()
+
+        def slow_factory():
+            factory_entered.set()
+            assert release_factory.wait(timeout=5), "release signal missed"
+            return DummyAdapter()
+
+        registry.register("slow", slow_factory)
+
+        results: list[DummyAdapter] = []
+        errors: list[Exception] = []
+
+        def t1():
+            try:
+                results.append(registry.get("slow"))
+            except Exception as e:
+                errors.append(e)
+
+        def t2():
+            try:
+                factory_entered.wait(timeout=5)
+                results.append(registry.get("slow"))
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=t1), threading.Thread(target=t2)]
+        for t in threads:
+            t.start()
+        assert factory_entered.wait(timeout=5)
+        release_factory.set()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert errors == []
+        assert len(results) == 2
+        assert results[0] is results[1]
+
+
+# ---------------------------------------------------------------------------
 # has_provider
 # ---------------------------------------------------------------------------
 
