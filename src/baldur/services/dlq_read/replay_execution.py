@@ -20,6 +20,8 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
+__all__ = ["ReplayExecutionMixin"]
+
 
 class ReplayExecutionMixin:
     """Mixin providing the shared single-entry replay-execution primitive."""

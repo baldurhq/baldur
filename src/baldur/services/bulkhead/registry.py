@@ -35,6 +35,8 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
+__all__ = ["BulkheadRegistry", "get_bulkhead_registry", "reset_bulkhead_registry"]
+
 # Settings-owned built-in compartments: the four ConnectionType values.
 # These are protection compartments constructed from settings at registry
 # creation — unregister is blocked, overwrite is warned.

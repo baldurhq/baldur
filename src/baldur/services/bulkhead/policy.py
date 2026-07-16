@@ -44,6 +44,13 @@ logger = structlog.get_logger()
 
 T = TypeVar("T")
 
+__all__ = [
+    "AsyncBulkheadPolicy",
+    "BulkheadPolicy",
+    "async_bulkhead_policy",
+    "bulkhead_policy",
+]
+
 
 # =============================================================================
 # BulkheadPolicy — synchronous bulkhead Policy

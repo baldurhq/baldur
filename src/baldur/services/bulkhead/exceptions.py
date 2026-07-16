@@ -12,6 +12,13 @@ from __future__ import annotations
 from baldur.core.exceptions import ResilienceError, TimeoutPolicyError
 from baldur.interfaces.resilience_policy import PolicyRejectedException
 
+__all__ = [
+    "BulkheadError",
+    "BulkheadFullError",
+    "BulkheadNotFoundError",
+    "BulkheadTimeoutError",
+]
+
 
 class BulkheadError(ResilienceError):
     """Base exception for bulkhead-related failures."""

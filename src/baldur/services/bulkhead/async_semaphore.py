@@ -30,6 +30,8 @@ from baldur.utils.time import utc_now
 
 logger = structlog.get_logger()
 
+__all__ = ["AsyncSemaphoreBulkhead"]
+
 
 class AsyncSemaphoreBulkhead:
     """

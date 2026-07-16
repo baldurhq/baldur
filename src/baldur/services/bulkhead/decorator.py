@@ -43,6 +43,8 @@ logger = structlog.get_logger()
 
 T = TypeVar("T")
 
+__all__ = ["bulkhead", "bulkhead_for_cache", "bulkhead_for_database"]
+
 
 def _bulkhead_full_predicate(result: Any) -> bool:
     """Activate fallback only on BulkheadFullError.
