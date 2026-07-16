@@ -3,15 +3,17 @@
 Target: ``baldur.services.event_bus.bus._cb_handlers``
 
     - ``_on_circuit_breaker_closed`` — armed-aware skip semantics (D3): a
-      CB auto-CLOSE either dispatches, skips-DEBUG-once (pro_absent /
-      disabled), or WARNs (armed-but-undeliverable / error) — never goes
-      silently inert. Each outcome records a dispatch counter + armed gauge.
+      CB auto-CLOSE either dispatches, skips (disabled), or WARNs
+      (armed-but-undeliverable / error) — never goes silently inert. Each
+      outcome records a dispatch counter + armed gauge. The dispatch path is
+      slot-blind (710): it never consults the PRO ``dlq_service`` slot —
+      auto-replay on CB recovery is OSS.
     - ``_get_replay_automation_config`` — the 617 reader pattern (D1):
       RuntimeConfig absent = DEBUG-once (OSS-normal), read-failure = WARNING
       every time, and the public ``get_config`` accessor is used (never the
       private ``_get_config``).
     - ``get_cb_replay_dispatch_state`` / ``reset_cb_replay_dispatch_state``
-      — the DEBUG-once markers and their reset hook (test isolation).
+      — the DEBUG-once marker and its reset hook (test isolation).
     - D2/D5 config precedence: on the RuntimeConfig-absent path the dispatch
       resolves ``on_recovery_max_items`` from ``ReplayAutomationSettings`` (env-
       honoring), not a hardcoded literal.
@@ -37,10 +39,6 @@ from baldur.services.event_bus.bus._cb_handlers import (
 )
 from baldur.settings.replay_automation import ReplayAutomationSettings
 
-# Sentinel for "the PRO DLQ service slot is populated" — the pre-dispatch
-# tier check only cares that ``safe_get()`` is not None, never the value.
-_PRO_PRESENT = object()
-
 _TASK_PATH = "baldur.adapters.celery.tasks.conditional_replay_on_circuit_close"
 _CELERY_TASKS_MODULE = "baldur.adapters.celery.tasks"
 
@@ -52,11 +50,11 @@ _CELERY_TASKS_MODULE = "baldur.adapters.celery.tasks"
 
 @pytest.fixture(autouse=True)
 def _reset_dispatch_markers():
-    """Reset the module-global DEBUG-once markers around every test.
+    """Reset the module-global DEBUG-once marker around every test.
 
-    The markers are process-global (``get_*/reset_*`` convention), so without
-    this the first test's ``pro_absent``/``runtime_config_absent`` DEBUG would
-    suppress a later test's expectation (xdist-safe isolation).
+    The marker is process-global (``get_*/reset_*`` convention), so without
+    this the first test's ``runtime_config_absent`` DEBUG would suppress a
+    later test's expectation (xdist-safe isolation).
     """
     reset_cb_replay_dispatch_state()
     yield
@@ -81,15 +79,6 @@ def _events(cap_logs: list[dict], name: str) -> list[dict]:
     return [e for e in cap_logs if e.get("event") == name]
 
 
-def _patch_dlq_service(present: bool):
-    """Patch the PRO DLQ service slot to present / absent (tier check)."""
-    return patch.object(
-        ProviderRegistry.dlq_service,
-        "safe_get",
-        return_value=_PRO_PRESENT if present else None,
-    )
-
-
 def _patch_config(config):
     """Patch the resolved RuntimeConfig block the dispatch reads."""
     return patch(
@@ -111,55 +100,48 @@ def _make_task_mock():
 
 class TestOnRecoveryDispatchVisibilityBehavior:
     """Each CB-close dispatch evaluation resolves to exactly one visible
-    outcome (skip-DEBUG / dispatch / WARNING) plus its dispatch-counter label.
+    outcome (dispatch / skip / WARNING) plus its dispatch-counter label.
     """
 
-    def test_pro_absent_skips_dispatch_at_debug_with_reason(self):
-        # Given: OSS posture — the PRO DLQ service slot is empty.
+    def test_dispatch_is_slot_blind_to_the_pro_dlq_service(self):
+        # 710: auto-replay on CB recovery is OSS — the dispatch path must
+        # never consult the PRO ``dlq_service`` slot. Poison the slot so a
+        # reintroduced consultation fails loud (as the propagated
+        # AssertionError or as outcome "error"), never as a silent skip.
         event = _make_event()
+        task_mock = _make_task_mock()
 
-        # When
         with (
-            _patch_dlq_service(present=False),
+            patch.object(
+                ProviderRegistry.dlq_service,
+                "safe_get",
+                side_effect=AssertionError(
+                    "dispatch path must not consult the PRO dlq_service slot"
+                ),
+            ),
+            _patch_config({"on_recovery_enabled": True, "on_recovery_max_items": 50}),
             patch(
                 "baldur.services.event_bus.bus._cb_handlers._record_dispatch_outcome"
             ) as record,
-            patch(_TASK_PATH, new=_make_task_mock()) as task_mock,
+            patch(_TASK_PATH, new=task_mock),
             capture_logs() as cap,
         ):
             _on_circuit_breaker_closed(event)
 
-        # Then: DEBUG skip with reason, no dispatch, counter=skipped_pro_absent.
-        skips = _events(cap, "event_handler.replay_dispatch_skipped")
-        assert len(skips) == 1
-        assert skips[0]["reason"] == "pro_absent"
-        assert skips[0]["log_level"] == "debug"
-        assert task_mock.delay.call_count == 0
-        record.assert_called_once_with("skipped_pro_absent", armed=False)
-
-    def test_pro_absent_debug_is_logged_once_across_repeated_closes(self):
-        # Given: two consecutive CB closes under the OSS posture.
-        with (
-            _patch_dlq_service(present=False),
-            patch(
-                "baldur.services.event_bus.bus._cb_handlers._record_dispatch_outcome"
-            ),
-            patch(_TASK_PATH, new=_make_task_mock()),
-            capture_logs() as cap,
-        ):
-            _on_circuit_breaker_closed(_make_event())
-            _on_circuit_breaker_closed(_make_event())
-
-        # Then: the OSS-normal state is DEBUG-once, not per-close noise.
-        assert len(_events(cap, "event_handler.replay_dispatch_skipped")) == 1
-        assert get_cb_replay_dispatch_state()["dispatch_pro_absent_logged"] is True
+        # Then: the slot was never read and the dispatch proceeded on OSS.
+        task_mock.delay.assert_called_once()
+        record.assert_called_once_with("dispatched", armed=True)
+        # Negatives: the old pro_absent categorization never occurs.
+        assert _events(cap, "event_handler.replay_dispatch_skipped") == []
+        assert all(
+            call.args[0] != "skipped_pro_absent" for call in record.call_args_list
+        )
 
     def test_disabled_on_recovery_logs_info_and_does_not_dispatch(self):
-        # Given: PRO present but on-recovery replay disabled in config.
+        # Given: on-recovery replay disabled in config.
         event = _make_event()
 
         with (
-            _patch_dlq_service(present=True),
             _patch_config({"on_recovery_enabled": False}),
             patch(
                 "baldur.services.event_bus.bus._cb_handlers._record_dispatch_outcome"
@@ -177,12 +159,11 @@ class TestOnRecoveryDispatchVisibilityBehavior:
         record.assert_called_once_with("skipped_disabled", armed=False)
 
     def test_armed_dispatches_task_with_service_and_max_items(self):
-        # Given: PRO present + enabled + a configured max_items.
+        # Given: enabled + a configured max_items.
         event = _make_event(service_name="orders-api")
         task_mock = _make_task_mock()
 
         with (
-            _patch_dlq_service(present=True),
             _patch_config({"on_recovery_enabled": True, "on_recovery_max_items": 42}),
             patch(
                 "baldur.services.event_bus.bus._cb_handlers._record_dispatch_outcome"
@@ -198,12 +179,11 @@ class TestOnRecoveryDispatchVisibilityBehavior:
         record.assert_called_once_with("dispatched", armed=True)
 
     def test_armed_but_celery_missing_warns_with_remediation(self):
-        # Given: armed (PRO present + enabled) but the Celery task import fails.
+        # Given: armed (enabled) but the Celery task import fails.
         # A None entry in sys.modules makes ``import <module>`` raise ImportError.
         event = _make_event()
 
         with (
-            _patch_dlq_service(present=True),
             _patch_config({"on_recovery_enabled": True, "on_recovery_max_items": 50}),
             patch(
                 "baldur.services.event_bus.bus._cb_handlers._record_dispatch_outcome"
@@ -230,7 +210,6 @@ class TestOnRecoveryDispatchVisibilityBehavior:
         task_mock.delay.side_effect = RuntimeError("broker down")
 
         with (
-            _patch_dlq_service(present=True),
             _patch_config({"on_recovery_enabled": True, "on_recovery_max_items": 50}),
             patch(
                 "baldur.services.event_bus.bus._cb_handlers._record_dispatch_outcome"
@@ -252,7 +231,6 @@ class TestOnRecoveryDispatchVisibilityBehavior:
         event = _make_event()
 
         with (
-            _patch_dlq_service(present=True),
             _patch_config({"on_recovery_enabled": True, "on_recovery_max_items": 50}),
             patch(
                 "baldur.services.event_bus.bus._cb_handlers._record_dispatch_outcome"
@@ -286,7 +264,6 @@ class TestOnRecoveryDispatchSettingsFallbackBehavior:
         task_mock = _make_task_mock()
 
         with (
-            _patch_dlq_service(present=True),
             patch.object(
                 ProviderRegistry.runtime_config_manager, "safe_get", return_value=None
             ),
@@ -378,28 +355,23 @@ class TestCBReaderBehavior:
 
 class TestCBDispatchStateContract:
     """``get_cb_replay_dispatch_state`` / ``reset_cb_replay_dispatch_state``
-    expose and clear the module-global DEBUG-once markers.
+    expose and clear the module-global DEBUG-once marker.
     """
 
-    def test_reset_clears_both_markers(self):
-        # Given: a pro_absent close flips the dispatch marker.
-        with (
-            _patch_dlq_service(present=False),
-            patch(
-                "baldur.services.event_bus.bus._cb_handlers._record_dispatch_outcome"
-            ),
+    def test_reset_clears_the_runtime_config_marker(self):
+        # Given: an absent-manager read flips the DEBUG-once marker.
+        with patch.object(
+            ProviderRegistry.runtime_config_manager, "safe_get", return_value=None
         ):
-            _on_circuit_breaker_closed(_make_event())
-        assert get_cb_replay_dispatch_state()["dispatch_pro_absent_logged"] is True
+            _get_replay_automation_config()
+        assert get_cb_replay_dispatch_state()["runtime_config_absent_logged"] is True
 
         # When
         reset_cb_replay_dispatch_state()
 
-        # Then: both markers are back to the pristine False state.
-        state = get_cb_replay_dispatch_state()
-        assert state == {
+        # Then: the marker is back to the pristine False state.
+        assert get_cb_replay_dispatch_state() == {
             "runtime_config_absent_logged": False,
-            "dispatch_pro_absent_logged": False,
         }
 
     def test_absent_reader_flips_runtime_config_marker(self):

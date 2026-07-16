@@ -265,28 +265,25 @@ def _send_postmortem_notification(
         )
 
 
-# Module-global DEBUG-once markers for the OSS-normal states surfaced by the
-# on-recovery dispatch path. The PRO RuntimeConfigManager / DLQ service being
-# absent is the OSS-normal state — logged at DEBUG at most once per process,
-# never as a per-close WARNING. Reset via reset_cb_replay_dispatch_state() for
-# test isolation (get_*/reset_* convention).
+# Module-global DEBUG-once marker for the OSS-normal state surfaced by the
+# on-recovery dispatch path. The PRO RuntimeConfigManager being absent is the
+# OSS-normal state — logged at DEBUG at most once per process, never as a
+# per-close WARNING. Reset via reset_cb_replay_dispatch_state() for test
+# isolation (get_*/reset_* convention).
 _runtime_config_absent_logged = False
-_dispatch_pro_absent_logged = False
 
 
 def get_cb_replay_dispatch_state() -> dict[str, bool]:
     """Return the current on-recovery dispatch DEBUG-once marker state (read accessor)."""
     return {
         "runtime_config_absent_logged": _runtime_config_absent_logged,
-        "dispatch_pro_absent_logged": _dispatch_pro_absent_logged,
     }
 
 
 def reset_cb_replay_dispatch_state() -> None:
-    """Reset the on-recovery dispatch DEBUG-once markers (test isolation)."""
-    global _runtime_config_absent_logged, _dispatch_pro_absent_logged
+    """Reset the on-recovery dispatch DEBUG-once marker (test isolation)."""
+    global _runtime_config_absent_logged
     _runtime_config_absent_logged = False
-    _dispatch_pro_absent_logged = False
 
 
 def _get_replay_automation_config() -> dict | None:
@@ -340,13 +337,10 @@ def _on_circuit_breaker_closed(event: BaldurEvent):
 
     Armed-aware skip semantics (so the advertised auto-replay guarantee is
     never silently inert):
-    - PRO DLQ service absent (OSS posture / entitlement off): the dispatch
-      would enqueue a doomed task, so skip the whole dispatch at DEBUG-once
-      (``replay_dispatch_skipped``, reason ``pro_absent``).
     - On-recovery replay disabled in RuntimeConfig/settings: INFO, no dispatch.
-    - Armed (PRO present + enabled) but the Celery task is not importable: the
-      guarantee is undeliverable — WARNING ``replay_dispatch_blocked`` naming
-      the remediation, instead of a silent DEBUG skip.
+    - Armed (enabled) but the Celery task is not importable: the guarantee is
+      undeliverable — WARNING ``replay_dispatch_blocked`` naming the
+      remediation, instead of a silent DEBUG skip.
 
     Config precedence: RuntimeConfig (present) → static
     ``ReplayAutomationSettings`` (fallback, env-honoring). Each evaluation
@@ -378,24 +372,6 @@ def _on_circuit_breaker_closed(event: BaldurEvent):
             service_name=service_name,
             correlation_id=event.correlation_id,
         )
-        return
-
-    # Pre-dispatch tier check: the on-recovery replay pipeline is a PRO
-    # capability. With the DLQ service slot empty (OSS / entitlement inactive)
-    # a dispatched task would fail on the missing repository — pure noise, no
-    # behavior value. Skip the whole dispatch, DEBUG-once (OSS-normal state).
-    global _dispatch_pro_absent_logged
-    from baldur.factory.registry import ProviderRegistry
-
-    if ProviderRegistry.dlq_service.safe_get() is None:
-        if not _dispatch_pro_absent_logged:
-            logger.debug(
-                "event_handler.replay_dispatch_skipped",
-                service_name=service_name,
-                reason="pro_absent",
-            )
-            _dispatch_pro_absent_logged = True
-        _record_dispatch_outcome("skipped_pro_absent", armed=False)
         return
 
     # Config precedence: RuntimeConfig (present) → static settings (fallback).
@@ -437,9 +413,9 @@ def _on_circuit_breaker_closed(event: BaldurEvent):
         )
         _record_dispatch_outcome("dispatched", armed=True)
     except ImportError:
-        # Armed (PRO present + enabled) but the Celery task is unavailable —
-        # the guarantee is undeliverable. WARNING with remediation rather than
-        # a silent DEBUG skip.
+        # Armed (enabled) but the Celery task is unavailable — the guarantee
+        # is undeliverable. WARNING with remediation rather than a silent
+        # DEBUG skip.
         logger.warning(
             "event_handler.replay_dispatch_blocked",
             service_name=service_name,

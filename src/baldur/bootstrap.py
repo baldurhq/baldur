@@ -1926,9 +1926,9 @@ def _refresh_auto_replay_arming_gauge() -> None:
     """Prime the on-recovery auto-replay armed gauge at startup (non-I/O links).
 
     The worker ping (broker I/O) is skipped so init stays non-blocking — the
-    gauge reflects the non-I/O prerequisites (PRO present, enabled, celery
-    importable, map configured, handler registered). The full worker-inclusive
-    evaluation runs on each arming-probe invocation. Fail-open.
+    gauge reflects the non-I/O prerequisites (enabled, celery importable, map
+    configured, handler registered). The full worker-inclusive evaluation runs
+    on each arming-probe invocation. Fail-open.
     """
     try:
         from baldur.services.replay_service.arming import refresh_armed_gauge
