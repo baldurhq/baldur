@@ -112,8 +112,8 @@ class DLQMetricRecorder(BaseMetricRecorder):
             [],
         )
         # On-recovery dispatch outcome counter. Passive consumption assurance for
-        # the CB-close replay dispatch: outcome in {dispatched,
-        # skipped_pro_absent, skipped_disabled, celery_missing, error}.
+        # the CB-close replay dispatch: outcome in {dispatched, skipped_disabled,
+        # celery_missing, error}.
         self._replay_dispatch_total = get_or_create_counter(
             f"{self.PREFIX}_dlq_replay_dispatch_total",
             "Total on-recovery replay dispatch evaluations by outcome",

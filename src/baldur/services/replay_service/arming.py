@@ -8,12 +8,12 @@ the single source of truth behind three operator surfaces: the Prometheus
 
 Link evaluation order (first missing wins for the headline)::
 
-    pro_absent -> disabled -> celery_missing -> worker_missing
-                -> map_unconfigured -> handler_missing
+    disabled -> celery_missing -> worker_missing
+             -> map_unconfigured -> handler_missing
 
-``pro_absent`` / ``disabled`` / ``celery_missing`` are hard prerequisites: once
-one is missing the downstream links are not evaluated. ``worker_missing`` (a
-broker round-trip, cached), ``map_unconfigured`` and ``handler_missing`` are
+``disabled`` / ``celery_missing`` are hard prerequisites: once one is missing
+the downstream links are not evaluated. ``worker_missing`` (a broker
+round-trip, cached), ``map_unconfigured`` and ``handler_missing`` are
 independent leaf checks evaluated together, so ``missing_links`` may carry more
 than one of them at once.
 
@@ -44,7 +44,6 @@ _DLQ_QUEUE = "dlq_processing"
 
 # Link evaluation order — first missing wins for the headline ``missing_link``.
 _LINK_ORDER = (
-    "pro_absent",
     "disabled",
     "celery_missing",
     "worker_missing",
@@ -88,16 +87,6 @@ class ArmingStatus:
             missing_links=["probe_failed"],
             links={},
         )
-
-
-def _resolve_dlq_service() -> object | None:
-    """Resolve the PRO DLQ service slot (None = PRO absent / entitlement off)."""
-    try:
-        from baldur.factory.registry import ProviderRegistry
-
-        return ProviderRegistry.dlq_service.safe_get()
-    except Exception:
-        return None
 
 
 def _resolve_replay_config() -> dict:
@@ -235,38 +224,32 @@ def _evaluate(check_worker: bool) -> ArmingStatus:
     """Evaluate all links in order. ``check_worker`` gates the broker I/O link."""
     links: dict[str, str] = {}
 
-    # 1. pro_absent — hard prerequisite for everything below.
-    if _resolve_dlq_service() is None:
-        links["pro_absent"] = "missing"
-        return _finalize(links)
-    links["pro_absent"] = "ok"
-
     config = _resolve_replay_config()
 
-    # 2. disabled — needs PRO present.
+    # 1. disabled — hard prerequisite for everything below.
     if not config.get("on_recovery_enabled", True):
         links["disabled"] = "missing"
         return _finalize(links)
     links["disabled"] = "ok"
 
-    # 3. celery_missing — needs PRO + enabled.
+    # 2. celery_missing — needs enabled.
     if not _celery_task_importable():
         links["celery_missing"] = "missing"
         return _finalize(links)
     links["celery_missing"] = "ok"
 
-    # 4. worker_missing — broker I/O (cached); only when check_worker.
+    # 3. worker_missing — broker I/O (cached); only when check_worker.
     if check_worker:
         links["worker_missing"] = _cached_worker_state()
     else:
         links["worker_missing"] = "unevaluated"
 
-    # 5. map_unconfigured — non-I/O, independent of the worker link.
+    # 4. map_unconfigured — non-I/O, independent of the worker link.
     links["map_unconfigured"] = (
         "ok" if config.get("service_failure_type_map") else "missing"
     )
 
-    # 6. handler_missing — non-I/O, independent of the worker link.
+    # 5. handler_missing — non-I/O, independent of the worker link.
     links["handler_missing"] = "ok" if _has_registered_handler() else "missing"
 
     return _finalize(links)

@@ -12,7 +12,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ### Added
 
-- OSS DLQ durably captures + replays failed operations (`@protected(dlq=True)`; no PRO required).
+- OSS DLQ durably captures + replays failed ops, incl. auto-replay on CB recovery (no PRO).
 - OSS DLQ read UI + REST: list/detail/facets/stats + single-entry retry/resolve/force-redrive.
 - Bulkhead primitives (semaphore/async, registry, `@bulkhead`, policy, metrics) are now core.
 - Remote-Prometheus time-series metrics provider (`BALDUR_PROMETHEUS_URL`).

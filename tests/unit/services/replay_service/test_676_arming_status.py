@@ -5,7 +5,7 @@ Target: ``baldur.services.replay_service.arming``
     - ``get_on_recovery_arming_status`` / ``_evaluate`` — the single source of
       truth behind the gauge, the stats block and the console badge. Link
       evaluation order (first missing wins for the headline):
-      ``pro_absent -> disabled -> celery_missing -> worker_missing ->
+      ``disabled -> celery_missing -> worker_missing ->
       map_unconfigured -> handler_missing``.
     - ``ArmingStatus`` / ``ArmingStatus.probe_failed`` — the frozen result
       DTO and its fail-open sentinel (``armed=None``).
@@ -32,9 +32,6 @@ from baldur.services.replay_service.arming import (
 )
 
 _MOD = "baldur.services.replay_service.arming"
-# A non-None object stands in for the resolved PRO DLQ service slot — the
-# probe only cares that resolution is not None, never the value.
-_DLQ_PRESENT = object()
 
 _ARMED_CONFIG = {
     "on_recovery_enabled": True,
@@ -45,20 +42,18 @@ _ARMED_CONFIG = {
 @contextlib.contextmanager
 def _links(
     *,
-    dlq=_DLQ_PRESENT,
     config=None,
     celery=True,
     worker="ok",
     handler=True,
 ):
-    """Patch all five link seams, defaulting to a fully-armed configuration.
+    """Patch all four link seams, defaulting to a fully-armed configuration.
 
     Overriding a single kwarg isolates exactly one missing link so the
     first-missing-wins ordering can be asserted.
     """
     cfg = _ARMED_CONFIG if config is None else config
     with (
-        patch(f"{_MOD}._resolve_dlq_service", return_value=dlq),
         patch(f"{_MOD}._resolve_replay_config", return_value=cfg),
         patch(f"{_MOD}._celery_task_importable", return_value=celery),
         patch(f"{_MOD}._cached_worker_state", return_value=worker),
@@ -85,23 +80,12 @@ class TestArmingStatusBehavior:
         assert status.missing_link is None
         assert status.missing_links == []
         assert status.links == {
-            "pro_absent": "ok",
             "disabled": "ok",
             "celery_missing": "ok",
             "worker_missing": "ok",
             "map_unconfigured": "ok",
             "handler_missing": "ok",
         }
-
-    def test_pro_absent_short_circuits_before_all_other_links(self):
-        with _links(dlq=None):
-            status = arming._evaluate(check_worker=True)
-
-        assert status.armed is False
-        assert status.missing_link == "pro_absent"
-        assert status.missing_links == ["pro_absent"]
-        # Hard prerequisite: nothing downstream is evaluated.
-        assert status.links == {"pro_absent": "missing"}
 
     def test_disabled_short_circuits_before_celery(self):
         with _links(config={"on_recovery_enabled": False}):

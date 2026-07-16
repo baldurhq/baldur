@@ -20,7 +20,6 @@ from baldur.metrics.recorders.dlq import DLQMetricRecorder
 # The bounded outcome cardinality asserted at the dispatch site.
 _OUTCOMES = [
     "dispatched",
-    "skipped_pro_absent",
     "skipped_disabled",
     "celery_missing",
     "error",
