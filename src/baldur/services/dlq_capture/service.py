@@ -51,6 +51,14 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
+__all__ = [
+    "DLQCaptureService",
+    "get_dlq_capture_service",
+    "reset_dlq_capture_service",
+    "resolve_dlq_backing",
+    "resolve_dlq_backing_tier",
+]
+
 
 # DLQ fallback path (owned by baldur, non-intrusive to the host system)
 DLQ_FALLBACK_PATH = Path("/tmp/baldur_dlq_fallback.jsonl")

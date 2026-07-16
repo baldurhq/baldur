@@ -26,6 +26,16 @@ import structlog
 
 logger = structlog.get_logger()
 
+__all__ = [
+    "BulkheadMetricsUpdater",
+    "get_metrics_updater",
+    "increment_rejected_count",
+    "reset_bulkhead_metrics",
+    "start_metrics_updater",
+    "stop_metrics_updater",
+    "update_bulkhead_metrics",
+]
+
 
 # =============================================================================
 # Metric write helpers — delegate to the BulkheadMetricRecorder

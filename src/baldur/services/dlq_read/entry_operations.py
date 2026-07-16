@@ -26,6 +26,8 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
+__all__ = ["EntryOperationsMixin"]
+
 
 class EntryOperationsMixin:
     """Mixin providing DLQ entry operations using Repository pattern."""

@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
+__all__ = ["QueryOperationsMixin"]
+
 
 class QueryOperationsMixin:
     """Mixin providing DLQ query operations."""

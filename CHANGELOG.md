@@ -14,7 +14,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 - OSS DLQ durably captures + replays failed operations (`@protected(dlq=True)`; no PRO required).
 - OSS DLQ read UI + REST: list/detail/facets/stats + single-entry retry/resolve/force-redrive.
-- Bulkhead primitives (semaphore/async compartments, registry, `@bulkhead`, `BulkheadPolicy`, metrics) are now core — no PRO required.
+- Bulkhead primitives (semaphore/async, registry, `@bulkhead`, policy, metrics) are now core.
 - Remote-Prometheus time-series metrics provider (`BALDUR_PROMETHEUS_URL`).
 - `config_shadow` time-series metrics-provider DI seam.
 - Result-predicate retry (`retry_on_result`) and a `BALDUR_RETRY_MAX_ELAPSED` wall-clock budget.
@@ -30,7 +30,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `import baldur` is now lightweight — hot-path barrels load lazily (251→8 modules).
 - Provider factories resolving their own slot now raise `RuntimeError` instead of deadlocking.
 - Retry `outcome="exhausted"` now excludes non-retryable/budget/deadline aborts.
-- `baldur.resilience.policies.__all__` no longer advertises PRO-backed `ThrottlePolicy`/Hedging policies; the names stay importable.
+- `baldur.resilience.policies.__all__` drops PRO-backed policy names; they stay importable.
 - `protect()` fallback runs after retry; timeout/CB-open covered, CB still trips. **Breaking**
 
 ### Removed

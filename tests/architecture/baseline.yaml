@@ -69,6 +69,8 @@ singleton_pair:
   - {file: src/baldur/observability/log_processors.py, symbol: reset_strict_validation_cache, reason: 'pre-existing: reset_strict_validation_cache without get_strict_validation_cache', ticket: '506'}
   - {file: src/baldur/observability/structlog_config.py, symbol: reset_structlog_config, reason: 'pre-existing: reset_structlog_config without get_structlog_config', ticket: '506'}
   - {file: src/baldur/protect_facade.py, symbol: reset_protect_caches, reason: 'pre-existing: reset_protect_caches without get_protect_caches', ticket: '506'}
+  - {file: src/baldur/services/bulkhead/metrics.py, symbol: reset_bulkhead_metrics, reason: 'pre-existing (relocated): reset_bulkhead_metrics without get_bulkhead_metrics', ticket: '709'}
+  - {file: src/baldur/services/dlq_capture/overflow.py, symbol: reset_overflow_state, reason: 'pre-existing (relocated): reset_overflow_state without get_overflow_state', ticket: '707'}
   - {file: src/baldur/services/dlq_outbox/outbox.py, symbol: reset_dlq_outbox, reason: 'pre-existing: reset_dlq_outbox without get_dlq_outbox', ticket: '506'}
   - {file: src/baldur/services/precomputed_cache/multi_tier.py, symbol: reset_drift_stats, reason: 'pre-existing: reset_drift_stats without get_drift_stats', ticket: '506'}
   - {file: src/baldur/settings/layered_provider.py, symbol: get_layered_settings, reason: 'pre-existing: get_layered_settings without reset_layered_settings', ticket: '506'}
@@ -833,6 +835,7 @@ no_print:
   - {file: src/baldur/audit/self_audit.py, symbol: SelfAuditLogger.log, reason: pre-existing print() - pending migration to structlog, ticket: '506'}
   - {file: src/baldur/audit/signed_manifest.py, symbol: main, count: 4, reason: pre-existing print() - pending migration to structlog, ticket: '506'}
   - {file: src/baldur/audit/verify_audit_integrity.py, symbol: main, count: 4, reason: pre-existing print() - pending migration to structlog, ticket: '506'}
+  - {file: src/baldur/services/dlq_capture/service.py, symbol: DLQCaptureService._write_to_local_fallback, reason: pre-existing (relocated) print() - stderr last resort, pending migration to structlog, ticket: '707'}
 
 env_prefix_naming:
   # BaldurSettings (root.py) is the root configuration object — uses empty
