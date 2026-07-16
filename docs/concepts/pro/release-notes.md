@@ -24,6 +24,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - `track2_enabled` runtime-config field and the scheduled-batch DLQ replay it advertised. The periodic beat job behind it was inert — it dispatched an incompatible task signature to a queue no worker consumes — and the config field had no backing setting, so setting it never had any effect. Automatic replay on circuit-breaker recovery and manual/operator batch replay are unaffected and remain the DLQ drain paths.
 - `HedgingResultValidator` / `ResultMismatchRecord` — removed from the Hedging service. No hedging execution path ever constructed or invoked the validator, so the hedged-result divergence detection it implied never ran; removing it makes the hedging surface honest.
+- `DLQService.resolve_entries_batch()` and its `resolve_batch_chunk_size` config field. No REST endpoint, console action, or internal path ever invoked the batch resolve, so nothing observable changes; resolving entries one at a time (`POST /dlq/{id}/resolve`) is unaffected.
 
 ### Fixed
 

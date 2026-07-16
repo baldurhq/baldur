@@ -139,16 +139,6 @@ class DLQSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Batch Resolution Settings
-    # ==========================================================================
-    resolve_batch_chunk_size: int = Field(
-        default=500,
-        ge=50,
-        le=10_000,
-        description="Chunk size for bulk resolve/expire operations.",
-    )
-
-    # ==========================================================================
     # Stale Replaying Recovery (443_LIFECYCLE_CLEANUP_GAPS D4)
     # ==========================================================================
     stale_replaying_timeout_minutes: int = Field(

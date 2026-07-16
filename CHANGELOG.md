@@ -38,6 +38,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `baldur.core.timezone` — use `baldur.utils.time.utc_now`. **Breaking**
 - `baldur.settings.audit_settings` alias — use `from baldur.settings import audit`. **Breaking**
 - `POOL_CB_*` pool circuit-breaker env vars — use `BALDUR_POOL_CB_*`. **Breaking**
+- `BALDUR_DLQ_RESOLVE_BATCH_CHUNK_SIZE` — the setting was never read. **Breaking**
 
 ### Security
 
