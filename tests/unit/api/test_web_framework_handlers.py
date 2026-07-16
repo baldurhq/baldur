@@ -343,6 +343,50 @@ class TestBulkheadStatusBehavior:
         assert resp.status_code == 404
 
 
+class TestBulkheadStatusBareInstallBehavior:
+    """bulkhead_status() through the real chain on a bare install (slot empty).
+
+    No registry mocking: the chain's provider slot is forced empty via the
+    documented mock point, so the handler resolves the base singleton and
+    reports the settings-built built-in compartments.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _bare_install_chain(self, monkeypatch):
+        """Force the chain's fallback leg and a fresh base singleton."""
+        from baldur.factory.registry import ProviderRegistry
+        from baldur.services.bulkhead.registry import reset_bulkhead_registry
+
+        monkeypatch.setattr(
+            ProviderRegistry.bulkhead_registry, "safe_get", lambda name=None: None
+        )
+        reset_bulkhead_registry()
+        yield
+        reset_bulkhead_registry()
+
+    def test_returns_200_with_builtin_compartment_states(self):
+        """The un-mocked chain yields 200 with every built-in compartment."""
+        from baldur.api.handlers.bulkhead import bulkhead_status
+        from baldur.core.connection_health import ConnectionType
+
+        resp = bulkhead_status(_make_ctx())
+
+        assert resp.status_code == 200
+        builtin_names = {ct.value for ct in ConnectionType}
+        assert builtin_names <= set(resp.body["bulkheads"])
+        # The base tier builds the EXTERNAL_API compartment as the semaphore
+        # fallback (slot forced empty, so this holds on any install).
+        assert resp.body["bulkheads"]["external_api"]["type"] == "semaphore"
+
+    def test_unknown_name_filter_returns_404(self):
+        """The unknown-name 404 contract survives the always-resolving chain."""
+        from baldur.api.handlers.bulkhead import bulkhead_status
+
+        resp = bulkhead_status(_make_ctx(query={"name": "no_such_domain"}))
+
+        assert resp.status_code == 404
+
+
 # =============================================================================
 # Throttle Handler
 # =============================================================================

@@ -198,3 +198,134 @@ class TestProRegistrationFlowIntegration:
         assert failing_module in seen
         # A module after the failure still loaded → the loop was not aborted.
         assert later_module in seen
+
+
+# =============================================================================
+# Bulkhead slot chain — end-to-end resolution through the provider slot
+# =============================================================================
+
+
+def _bulkhead_status_response():
+    """Call the framework-agnostic bulkhead handler through the real chain."""
+    from baldur.api.handlers.bulkhead import bulkhead_status
+    from baldur.interfaces.web_framework import HttpMethod, RequestContext
+
+    ctx = RequestContext(
+        method=HttpMethod("GET"),
+        path="/bulkheads",
+        query_params={},
+        path_params={},
+    )
+    return bulkhead_status(ctx)
+
+
+class TestBulkheadSlotChainIntegration:
+    """Extension-present chain leg: slot registration → chain → consumer surface.
+
+    Composes the real components (no internal mocking): the provider slot is
+    populated with the production registration shape (lazy import + getter
+    factory), the chain getter resolves through it, and the REST handler
+    reports the thread-pool compartment the overlay built.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _bulkhead_registries(self):
+        """Gate on the extension package and reset both tiers' singletons."""
+        pytest.importorskip("baldur_pro")
+        from baldur.services.bulkhead.registry import (
+            reset_bulkhead_registry as reset_core,
+        )
+        from baldur_pro.services.bulkhead.registry import (
+            reset_bulkhead_registry as reset_pro,
+        )
+
+        reset_core()
+        reset_pro()
+        yield
+        reset_pro()
+        reset_core()
+
+    def test_slot_registration_routes_chain_to_thread_pool_overlay(self):
+        """Registered slot → chain returns the overlay → handler reports the pool."""
+        import importlib
+
+        from baldur.core.connection_health import ConnectionType
+        from baldur.factory.registry import ProviderRegistry
+        from baldur.services.bulkhead.registry import (
+            get_bulkhead_registry as chain_get_bulkhead_registry,
+        )
+        from baldur_pro.services.bulkhead.registry import ProBulkheadRegistry
+        from baldur_pro.services.bulkhead.threadpool import ThreadPoolBulkhead
+
+        def _pro_slot_factory():
+            # The production registration shape: lazy module import + getter
+            # call at first slot resolution.
+            module = importlib.import_module("baldur_pro.services.bulkhead")
+            return module.get_bulkhead_registry()
+
+        external_api = None
+        with ProviderRegistry.bulkhead_registry.snapshot():
+            ProviderRegistry.bulkhead_registry.register("pro", _pro_slot_factory)
+            try:
+                # The chain resolves the slot to the overlay singleton…
+                resolved = chain_get_bulkhead_registry()
+                assert isinstance(resolved, ProBulkheadRegistry)
+
+                # …whose EXTERNAL_API built-in is a real worker pool…
+                external_api = resolved.get(ConnectionType.EXTERNAL_API)
+                assert isinstance(external_api, ThreadPoolBulkhead)
+
+                # …and the REST consumer surface reflects it through the
+                # same chain.
+                resp = _bulkhead_status_response()
+                assert resp.status_code == 200
+                assert resp.body["bulkheads"]["external_api"]["type"] == ("thread_pool")
+            finally:
+                if external_api is not None:
+                    external_api.shutdown(wait=True)
+
+
+class TestBulkheadSlotEmptyChainIntegration:
+    """Base-only chain leg: empty slot → base singleton → semaphore built-ins.
+
+    Runs on any install (no extension package needed): the slot is forced
+    empty via the documented mock point, so the chain, the built-in
+    construction, and the REST consumer surface compose on the base tier.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _bare_install_chain(self, monkeypatch):
+        """Force the chain's fallback leg and a fresh base singleton."""
+        from baldur.factory.registry import ProviderRegistry
+        from baldur.services.bulkhead.registry import reset_bulkhead_registry
+
+        monkeypatch.setattr(
+            ProviderRegistry.bulkhead_registry, "safe_get", lambda name=None: None
+        )
+        reset_bulkhead_registry()
+        yield
+        reset_bulkhead_registry()
+
+    def test_empty_slot_falls_back_to_base_registry_with_semaphore_builtins(self):
+        """Empty slot → exact base registry → semaphore EXTERNAL_API → handler 200."""
+        from baldur.core.connection_health import ConnectionType
+        from baldur.services.bulkhead.registry import (
+            BulkheadRegistry,
+            get_bulkhead_registry,
+        )
+
+        # The chain lands on its fallback leg — the exact base class, not an
+        # overlay.
+        resolved = get_bulkhead_registry()
+        assert type(resolved) is BulkheadRegistry
+
+        # The built-ins exist and EXTERNAL_API is the semaphore fallback.
+        states = resolved.get_all_states()
+        builtin_names = {ct.value for ct in ConnectionType}
+        assert builtin_names <= set(states)
+        assert states["external_api"].bulkhead_type.value == "semaphore"
+
+        # The REST consumer surface composes through the same chain.
+        resp = _bulkhead_status_response()
+        assert resp.status_code == 200
+        assert resp.body["bulkheads"]["external_api"]["type"] == "semaphore"
