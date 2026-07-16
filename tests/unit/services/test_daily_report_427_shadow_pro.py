@@ -8,12 +8,21 @@ Verification techniques:
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from unittest.mock import patch
+
+from baldur.core.entitlement import EntitlementResult, EntitlementStatus
 from baldur.services.daily_report.formatters import format_report_for_slack
 from baldur.services.daily_report.models import (
     DailyAutonomousReport,
     ShadowProSummary,
 )
 from baldur.services.daily_report.service import DailyReportService
+
+
+class _FakeSettings:
+    def __init__(self, shadow_pro_mode: str = "auto"):
+        self.shadow_pro_mode = shadow_pro_mode
 
 
 class TestShadowProSummaryContract:
@@ -36,10 +45,33 @@ class TestShadowProSummaryContract:
 
 
 class TestCollectShadowProSectionBehavior:
-    """_collect_shadow_pro_section behavior."""
+    """_collect_shadow_pro_section indicator math.
+
+    The 452 visibility guards (settings mode / entitlement / cadence) are
+    pinned open via ``_guards_open`` so these tests stay hermetic against
+    process-global state (settings cache, entitlement singleton, state
+    backend) under parallel execution. Guard behavior itself is covered by
+    the 452 visibility tests.
+    """
 
     def _make_service(self):
         return DailyReportService.__new__(DailyReportService)
+
+    @contextmanager
+    def _guards_open(self):
+        """Pin mode='daily' + inactive entitlement (daily mode never reads
+        the install marker, so the state backend is untouched)."""
+        with (
+            patch(
+                "baldur.settings.daily_report.get_daily_report_settings",
+                return_value=_FakeSettings("daily"),
+            ),
+            patch(
+                "baldur.core.entitlement.get_entitlement_status",
+                return_value=EntitlementResult(status=EntitlementStatus.MISSING),
+            ),
+        ):
+            yield
 
     def test_all_zeros_produces_no_summary(self):
         """Report with no CB trips/failures/drift → shadow_pro_summary stays None."""
@@ -49,7 +81,8 @@ class TestCollectShadowProSectionBehavior:
         report.task_failures = 0
         report.drift_warnings_count = 0
 
-        service._collect_shadow_pro_section(report)
+        with self._guards_open():
+            service._collect_shadow_pro_section(report)
 
         assert report.shadow_pro_summary is None
 
@@ -61,7 +94,8 @@ class TestCollectShadowProSectionBehavior:
         report.task_failures = 0
         report.drift_warnings_count = 0
 
-        service._collect_shadow_pro_section(report)
+        with self._guards_open():
+            service._collect_shadow_pro_section(report)
 
         assert report.shadow_pro_summary is not None
         assert report.shadow_pro_summary.cb_trips_without_auto_degradation == 3
@@ -75,7 +109,8 @@ class TestCollectShadowProSectionBehavior:
         report.task_failures = 2
         report.drift_warnings_count = 7
 
-        service._collect_shadow_pro_section(report)
+        with self._guards_open():
+            service._collect_shadow_pro_section(report)
 
         s = report.shadow_pro_summary
         assert s is not None
