@@ -72,7 +72,7 @@ team depends on. It leads with the operational problem each capability removes:
 | Failed work must survive restarts, not vanish | [Durable dead-letter queue with replay](../pro/dlq-replay.md) |
 | Prove what changed, and what triggered it | [Audit trail](../pro/audit.md) |
 | Hear about an incident without watching a dashboard | [Unified notification](../pro/unified-notification.md) |
-| Shed load and shrink the blast radius under stress | [Emergency mode](../pro/emergency-mode.md) · [Bulkhead](../pro/bulkhead.md) · [Throttle](../pro/throttle.md) |
+| Shed load and shrink the blast radius under stress | [Emergency mode](../pro/emergency-mode.md) · [Bulkhead thread-pool isolation](bulkhead.md) · [Throttle](../pro/throttle.md) |
 | Roll config changes out safely and gate risky automation | [Canary recovery](../pro/canary-recovery.md) · [Governance](../pro/governance.md) |
 | Notice when Baldur itself gets stuck | [Meta-Watchdog](../pro/meta-watchdog.md) — detects the stall and escalates to a human |
 

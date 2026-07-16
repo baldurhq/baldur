@@ -188,28 +188,28 @@ class TestPoliciesLazyImportContract:
 
 
 # =============================================================================
-# 519 PR 3 — BulkheadPolicy / ThrottlePolicy PEP 562 lazy
+# BulkheadPolicy (core import) / ThrottlePolicy (PEP 562 lazy)
 # =============================================================================
 
 
 class TestPoliciesLazyImportBehavior:
-    """519 PR 3 / C-d1 rule 4 — BulkheadPolicy joins ThrottlePolicy under __getattr__.
+    """BulkheadPolicy is a real core import; ThrottlePolicy stays __getattr__.
 
-    Both classes stay PRO-tier (``baldur_pro.services.{bulkhead,throttle}.policy``);
-    OSS code reaches them via ``from baldur.resilience.policies import X`` which
-    routes through the module-level ``__getattr__`` lazy import.
+    BulkheadPolicy went core-tier (``baldur.services.bulkhead.policy``) with a
+    module-level import — no PEP 562 involved. ThrottlePolicy's engine stays
+    in the licensed package, so it remains resolvable-but-not-advertised via
+    the module-level ``__getattr__`` lazy import.
     """
 
-    def test_bulkhead_policy_lazy_import_resolves_pro_concrete_class(self):
+    def test_bulkhead_policy_resolves_core_concrete_class(self):
         """``from baldur.resilience.policies import BulkheadPolicy`` returns the
-        PRO concrete class via PEP 562 __getattr__."""
-        pytest.importorskip("baldur_pro")
+        core concrete class (identity-preserving)."""
         from baldur.resilience.policies import BulkheadPolicy
-        from baldur_pro.services.bulkhead.policy import (
-            BulkheadPolicy as PROBulkheadPolicy,
+        from baldur.services.bulkhead.policy import (
+            BulkheadPolicy as CoreBulkheadPolicy,
         )
 
-        assert BulkheadPolicy is PROBulkheadPolicy
+        assert BulkheadPolicy is CoreBulkheadPolicy
 
     def test_throttle_policy_lazy_import_resolves_pro_concrete_class(self):
         """``ThrottlePolicy`` already routes through PEP 562 (existing precedent)."""
@@ -227,34 +227,13 @@ class TestPoliciesLazyImportBehavior:
 
         assert "BulkheadPolicy" in policies_mod.__all__
 
-    def test_throttle_policy_in_module_all(self):
+    def test_throttle_policy_soft_removed_but_resolvable(self):
+        """``ThrottlePolicy`` is absent from ``__all__`` (honest advertisement)
+        yet still resolvable for existing import statements."""
         import baldur.resilience.policies as policies_mod
 
-        assert "ThrottlePolicy" in policies_mod.__all__
-
-    def test_bulkhead_policy_attribute_error_when_pro_missing(self, monkeypatch):
-        """If the PRO submodule is unavailable, ``__getattr__`` raises ``AttributeError``.
-
-        Simulated by removing the cached PRO module + masking it from
-        ``sys.modules`` so the deferred ``from baldur_pro.services.bulkhead.policy
-        import BulkheadPolicy`` inside ``__getattr__`` raises ``ImportError`` →
-        wrapped as ``AttributeError`` per the source's docstring contract.
-        """
-        import sys
-
-        import baldur.resilience.policies as policies_mod
-
-        # Mask the PRO module so the lazy import inside __getattr__ fails.
-        original = sys.modules.pop("baldur_pro.services.bulkhead.policy", None)
-        monkeypatch.setitem(sys.modules, "baldur_pro.services.bulkhead.policy", None)
-        try:
-            with pytest.raises(AttributeError, match="BulkheadPolicy"):
-                policies_mod.BulkheadPolicy
-        finally:
-            if original is not None:
-                sys.modules["baldur_pro.services.bulkhead.policy"] = original
-            else:
-                sys.modules.pop("baldur_pro.services.bulkhead.policy", None)
+        assert "ThrottlePolicy" not in policies_mod.__all__
+        assert policies_mod.ThrottlePolicy is not None
 
 
 # =============================================================================

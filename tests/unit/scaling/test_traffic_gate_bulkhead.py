@@ -5,21 +5,14 @@ Verify the behavior after adding the bulkhead_name parameter to TrafficGate:
 - allowed=True, bulkhead_acquired=True on successful bulkhead acquisition
 - allowed=False, gate="Bulkhead" when the bulkhead is full
 - automatic release when a later stage rejects after the bulkhead was acquired
-- real ThreadPool-backed domains are routed and isolated at the gate (no
-  silently-swallowed TypeError), and gate rejections are visible in stats
+
+Worker-pool-backed gate routing cases live in the private tree (the pool
+implementation ships in the licensed tier).
 """
 
 from __future__ import annotations
 
 import pytest
-
-pytest.importorskip("baldur_pro")
-
-pytestmark = pytest.mark.requires_pro
-
-
-import pytest
-from structlog.testing import capture_logs
 
 from baldur.core.connection_health import ConnectionType
 from baldur.scaling.config import BackpressureLevel
@@ -28,16 +21,30 @@ from baldur.scaling.traffic_gate import (
     TrafficGate,
     reset_traffic_gate,
 )
-from baldur.settings.bulkhead import reset_bulkhead_settings
-from baldur_pro.services.bulkhead.registry import (
+from baldur.services.bulkhead.registry import (
     get_bulkhead_registry,
     reset_bulkhead_registry,
 )
-from baldur_pro.services.bulkhead.threadpool import ThreadPoolBulkhead
+from baldur.settings.bulkhead import reset_bulkhead_settings
 
 
 @pytest.fixture(autouse=True)
-def reset_singletons():
+def _empty_provider_slot(monkeypatch):
+    """Pin the resolution chain to its fallback leg for this module.
+
+    The gate resolves the registry via the chain; forcing the provider slot
+    empty keeps the compartments deterministic and lets
+    reset_bulkhead_registry() fully isolate each test.
+    """
+    from baldur.factory.registry import ProviderRegistry
+
+    monkeypatch.setattr(
+        ProviderRegistry.bulkhead_registry, "safe_get", lambda name=None: None
+    )
+
+
+@pytest.fixture(autouse=True)
+def reset_singletons(_empty_provider_slot):
     """Reset singletons before and after each test."""
     reset_bulkhead_registry()
     reset_bulkhead_settings()
@@ -147,79 +154,6 @@ class TestTrafficGateBulkheadIntegration:
         assert hasattr(decision, "bulkhead_name")
         assert decision.bulkhead_acquired is False
         assert decision.bulkhead_name is None
-
-
-class TestTrafficGateThreadPoolBulkhead:
-    """TrafficGate routing of real ThreadPool-backed domains (G1 fix, D5-1, D6).
-
-    Before 616, the gate passed ``timeout=`` to ``try_acquire`` on every
-    bulkhead, but only Semaphore bulkheads accepted it — a ThreadPool domain
-    raised a TypeError that the fail-open ``except`` swallowed, silently skipping
-    isolation. These tests route a genuine ThreadPoolBulkhead through the gate.
-    """
-
-    def test_external_api_threadpool_routed_through_gate_acquires(self):
-        """The built-in external_api (ThreadPool) domain acquires and releases at
-        the gate without emitting traffic_gate.bulkhead_failed — isolation is
-        enforced, not silently skipped."""
-        # Given — the built-in external_api domain is a real ThreadPoolBulkhead
-        gate = TrafficGate()
-        registry = get_bulkhead_registry()
-        bulkhead = registry.get(ConnectionType.EXTERNAL_API)
-        assert isinstance(bulkhead, ThreadPoolBulkhead)
-        initial_active = bulkhead.get_state().active_count
-
-        # When — routed through the gate with a timeout
-        with capture_logs() as logs:
-            decision = gate.should_allow(
-                priority=0,
-                bulkhead_name="external_api",
-                bulkhead_timeout=0.05,
-            )
-
-        # Then — acquired, and no fail-open WARNING was emitted
-        assert decision.allowed is True
-        assert decision.bulkhead_acquired is True
-        assert decision.bulkhead_name == "external_api"
-        assert not [e for e in logs if e.get("event") == "traffic_gate.bulkhead_failed"]
-        assert bulkhead.get_state().active_count == initial_active + 1
-
-        # Release works on the ThreadPool path
-        gate.release_bulkhead("external_api")
-        assert bulkhead.get_state().active_count == initial_active
-
-    def test_saturated_threadpool_rejects_at_gate_and_records_stats(self):
-        """A saturated ThreadPool compartment rejects at the gate with
-        gate='Bulkhead' (isolation enforced) and the rejection is visible in
-        stats (D6)."""
-        # Given — a capacity-1 ThreadPool compartment (custom name avoids the
-        # built-in-overwrite WARNING), already occupied
-        gate = TrafficGate()
-        registry = get_bulkhead_registry()
-        bulkhead = ThreadPoolBulkhead("tp_gate_sat", max_workers=1, queue_size=0)
-        registry.register(bulkhead)
-        try:
-            assert bulkhead.try_acquire() is True
-
-            # When — a request routes through the saturated compartment
-            decision = gate.should_allow(
-                priority=0,
-                bulkhead_name="tp_gate_sat",
-                bulkhead_timeout=0.05,
-            )
-
-            # Then — rejected at the bulkhead gate, not silently skipped
-            assert decision.allowed is False
-            assert decision.gate == "Bulkhead"
-            assert "tp_gate_sat" in decision.reason
-            assert decision.bulkhead_acquired is False
-
-            # And the gate rejection is recorded in stats (D6)
-            state = bulkhead.get_state()
-            assert state.rejected_count == 1
-            assert state.last_rejection_time is not None
-        finally:
-            bulkhead.shutdown(wait=False)
 
 
 class TestTrafficGateBulkheadWithLoadShedding:

@@ -2916,6 +2916,59 @@ def _start_hpa_exporter_if_enabled() -> None:
         logger.warning("baldur.hpa_exporter_start_failed", error=e)
 
 
+def _start_bulkhead_metrics_updater_if_enabled() -> None:
+    """Start the bulkhead Prometheus metrics updater when enabled.
+
+    Keeps the bulkhead gauges (active/max/waiting/utilization) live on every
+    install — the series are registered by the shared recorder, so a frozen-
+    at-zero gauge would be a false signal. Routes through
+    ``start_metrics_updater(interval=...)`` so
+    ``BALDUR_BULKHEAD_METRICS_UPDATE_INTERVAL`` is honored — this starter is
+    the sole production first-caller of ``get_metrics_updater``, which
+    captures ``interval`` at first call. The updater reads the registry via
+    the resolution chain, so a populated provider slot is observed
+    transparently.
+
+    Escape hatch: ``BALDUR_BULKHEAD_METRICS_AUTOSTART=0`` skips the start —
+    used by the unit-test process (``metrics_enabled`` defaults True, so any
+    ``init()`` in a test would otherwise spawn the daemon thread). Mirrors the
+    sibling AUTOSTART hatches (meta_watchdog / precomputed_cache /
+    system_metrics_cache / cb_state_seed).
+
+    Fork-safety: skipped in the gunicorn master (thread dies after ``fork()``
+    and ``init()`` is not re-run per worker); the framework-agnostic
+    ``post_worker_init`` hook re-runs the start per worker. ``start()`` is
+    idempotent (``_running`` guard), so the runserver double-call is benign.
+    """
+    autostart = os.environ.get("BALDUR_BULKHEAD_METRICS_AUTOSTART", "1").strip().lower()
+    if autostart in {"0", "false", "no"}:
+        logger.debug("bulkhead_metrics_updater.autostart_disabled_env")
+        return
+
+    try:
+        from baldur.core.process_utils import is_gunicorn_master
+
+        if is_gunicorn_master():
+            logger.debug("bulkhead_metrics_updater.start_skipped_gunicorn_master")
+            return
+
+        from baldur.settings.bulkhead import get_bulkhead_settings
+
+        settings = get_bulkhead_settings()
+        if not settings.metrics_enabled:
+            logger.debug("bulkhead_metrics_updater.start_skipped", reason="disabled")
+            return
+
+        from baldur.services.bulkhead.metrics import start_metrics_updater
+
+        start_metrics_updater(interval=settings.metrics_update_interval)
+        logger.info("baldur.bulkhead_metrics_updater_started")
+    except ImportError as exc:
+        logger.debug("baldur.bulkhead_metrics_updater_module_not_available", error=exc)
+    except Exception as exc:
+        logger.warning("baldur.bulkhead_metrics_updater_start_failed", error=exc)
+
+
 def _seed_circuit_breaker_state() -> None:
     """Seed the ``baldur_circuit_breaker_state`` gauge from the repo.
 
@@ -3037,9 +3090,12 @@ def _reset_cb_state_seed() -> None:
 # ``rate_controller`` / ``hpa_exporter`` (615 D4/G6) are OSS ``baldur.scaling``
 # loops that were Django-only (apps.py F30); both default-OFF and
 # ``_running``-idempotent, so they join directly with no AUTOSTART hatch.
-# ``circuit_mesh`` and the other PRO Django-only extras (bulkhead metrics,
-# crisis-multiplier invalidation, auto-tuning) are ``baldur_pro``-internal and
-# live in ``ProviderRegistry.startup_integrations`` instead (615 D1), iterated
+# ``bulkhead_metrics_updater`` joined the tuple when the bulkhead primitives
+# went core-tier (709); default-ON, so it carries a
+# ``BALDUR_BULKHEAD_METRICS_AUTOSTART`` test hatch.
+# ``circuit_mesh`` and the other PRO Django-only extras (crisis-multiplier
+# invalidation, auto-tuning) are ``baldur_pro``-internal and live in
+# ``ProviderRegistry.startup_integrations`` instead (615 D1), iterated
 # by ``start_background_workers()`` after this OSS tuple.
 # ``audit`` / ``dlq_outbox`` / ``default_scheduler`` / ``admin_server`` are
 # excluded: they have distinct per-process semantics (PID-isolated WAL,
@@ -3062,6 +3118,7 @@ _BACKGROUND_WORKER_STARTERS: tuple[Callable[[], None], ...] = (
     _start_system_metrics_cache_if_enabled,
     _start_rate_controller_if_enabled,
     _start_hpa_exporter_if_enabled,
+    _start_bulkhead_metrics_updater_if_enabled,
     _seed_circuit_breaker_state_if_enabled,
 )
 

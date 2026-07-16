@@ -92,10 +92,11 @@ class TestBackgroundWorkerRegistryContract:
     """D4: the OSS starter registry is the single source of truth — its exact
     membership is the drift guard against the init() chain and the post-fork hook
     diverging (G4). 615 D4 widened it from 5 to 7 with the scaling loops; the
-    CB-state startup seed widened it to 8."""
+    CB-state startup seed widened it to 8; the bulkhead metrics updater
+    widened it to 9."""
 
-    def test_registry_contains_exactly_the_eight_oss_starters(self):
-        """Hardcoded set-equality against the eight expected starter callables."""
+    def test_registry_contains_exactly_the_nine_oss_starters(self):
+        """Hardcoded set-equality against the nine expected starter callables."""
         expected = {
             bootstrap._start_capacity_reservation_if_enabled,
             bootstrap._start_cell_topology_if_enabled,
@@ -104,13 +105,14 @@ class TestBackgroundWorkerRegistryContract:
             bootstrap._start_system_metrics_cache_if_enabled,
             bootstrap._start_rate_controller_if_enabled,
             bootstrap._start_hpa_exporter_if_enabled,
+            bootstrap._start_bulkhead_metrics_updater_if_enabled,
             bootstrap._seed_circuit_breaker_state_if_enabled,
         }
 
         assert set(bootstrap._BACKGROUND_WORKER_STARTERS) == expected
         # No duplicate entries — set size collapses to the tuple length only when
         # every starter is distinct.
-        assert len(bootstrap._BACKGROUND_WORKER_STARTERS) == len(expected) == 8
+        assert len(bootstrap._BACKGROUND_WORKER_STARTERS) == len(expected) == 9
 
     def test_registry_entries_are_all_callable(self):
         assert all(callable(s) for s in bootstrap._BACKGROUND_WORKER_STARTERS)

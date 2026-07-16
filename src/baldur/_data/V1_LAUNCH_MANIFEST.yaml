@@ -52,6 +52,7 @@ entries:
   - {module: "audit.py", class: "AuditSettings", field: "load_shedding_enabled", default: true, tier: "Core", env_var: "BALDUR_AUDIT_LOAD_SHEDDING_ENABLED"}
   - {module: "audit.py", class: "AuditSettings", field: "metrics_enabled", default: true, tier: "Core", env_var: "BALDUR_AUDIT_METRICS_ENABLED"}
   - {module: "bridge.py", class: "BridgeSettings", field: "tenacity_enabled", default: false, tier: "Core", env_var: "BALDUR_BRIDGE_TENACITY_ENABLED"}
+  - {module: "bulkhead.py", class: "BulkheadSettings", field: "metrics_enabled", default: true, tier: "Core", env_var: "BALDUR_BULKHEAD_METRICS_ENABLED"}
   - {module: "canary_interlock.py", class: "CanaryInterlockSettings", field: "refresher_enabled", default: true, tier: "Core", env_var: "BALDUR_CANARY_INTERLOCK_REFRESHER_ENABLED"}
   - {module: "canary_watchdog.py", class: "CanaryWatchdogSettings", field: "enable_auto_promote", default: true, tier: "Core", env_var: "BALDUR_CANARY_WATCHDOG_ENABLE_AUTO_PROMOTE"}
   - {module: "canary_watchdog.py", class: "CanaryWatchdogSettings", field: "enable_auto_rollback", default: true, tier: "Core", env_var: "BALDUR_CANARY_WATCHDOG_ENABLE_AUTO_ROLLBACK"}
@@ -110,7 +111,6 @@ entries:
 
   # ── v1.0 (PRO launch-set Revision 5, retained True per D3) ──
   - {module: "admission_control.py", class: "AdmissionControlSettings", field: "enabled", default: true, tier: "v1.0", env_var: "BALDUR_ADMISSION_CONTROL_ENABLED"}
-  - {module: "bulkhead.py", class: "BulkheadSettings", field: "metrics_enabled", default: true, tier: "v1.0", env_var: "BALDUR_BULKHEAD_METRICS_ENABLED"}
   - {module: "event_journal.py", class: "EventJournalSettings", field: "enabled", default: true, tier: "v1.0", env_var: "BALDUR_EVENT_JOURNAL_ENABLED"}
   - {module: "forensic.py", class: "ForensicSettings", field: "audit_enabled", default: true, tier: "v1.0", env_var: "BALDUR_FORENSIC_AUDIT_ENABLED"}
   - {module: "meta_watchdog.py", class: "MetaWatchdogSettings", field: "enabled", default: true, tier: "v1.0", env_var: "BALDUR_META_WATCHDOG_ENABLED"}

@@ -356,11 +356,11 @@ class TestPoliciesPackageExportContract:
 
         assert Exported is partition_aware_chain
 
-    def test_all_contains_three_exports(self):
-        """__all__은 정확히 39개 항목을 포함한다."""
+    def test_all_contains_exact_count(self):
+        """__all__ contains exactly 35 entries (PRO-backed names not advertised)."""
         import baldur.resilience.policies as pkg
 
-        assert len(pkg.__all__) == 39
+        assert len(pkg.__all__) == 35
 
     def test_all_contains_expected_names(self):
         """__all__에 FallbackPolicy, AsyncFallbackPolicy, partition_aware_chain이 포함된다."""

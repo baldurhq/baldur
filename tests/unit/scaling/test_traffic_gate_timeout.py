@@ -4,19 +4,13 @@ TrafficGate bulkhead_timeout passthrough + _check_bulkhead severity-split unit t
 Test items:
 - Behavior: should_allow()'s bulkhead_timeout is forwarded to Bulkhead.try_acquire()
 - Behavior: None is forwarded when bulkhead_timeout is unset
-- Behavior: _check_bulkhead distinguishes expected unavailability (registry absent
-  → bulkhead_failed WARNING) from unexpected errors (try_acquire raises →
-  bulkhead_error ERROR with exception info), staying fail-open in both cases (D4)
+- Behavior: _check_bulkhead logs unexpected errors loudly (try_acquire raises →
+  bulkhead_error ERROR with exception info) while staying fail-open; the
+  resolution chain always yields a registry, so there is no registry-absent
+  branch left to pin
 """
 
 from __future__ import annotations
-
-import pytest
-
-pytest.importorskip("baldur_pro")
-
-pytestmark = pytest.mark.requires_pro
-
 
 from unittest.mock import MagicMock, patch
 
@@ -73,7 +67,7 @@ class TestBulkheadTimeoutPassthroughBehavior:
         gate = _make_gate()
 
         with patch(
-            "baldur_pro.services.bulkhead.get_bulkhead_registry",
+            "baldur.services.bulkhead.registry.get_bulkhead_registry",
             return_value=mock_registry,
         ):
             gate.should_allow(
@@ -95,7 +89,7 @@ class TestBulkheadTimeoutPassthroughBehavior:
         gate = _make_gate()
 
         with patch(
-            "baldur_pro.services.bulkhead.get_bulkhead_registry",
+            "baldur.services.bulkhead.registry.get_bulkhead_registry",
             return_value=mock_registry,
         ):
             gate.should_allow(
@@ -109,9 +103,9 @@ class TestBulkheadTimeoutPassthroughBehavior:
 class TestCheckBulkheadSeveritySplitBehavior:
     """_check_bulkhead failure-class severity split (D4).
 
-    Fail-open is retained on the allow/deny surface for every failure class, but
-    the log severity distinguishes expected unavailability (registry absent) from
-    an unexpected error (the class that swallowed the pre-616 TypeError).
+    Fail-open is retained on the allow/deny surface for every failure class;
+    an unexpected error (the class that swallowed the pre-616 TypeError) is
+    logged loudly at ERROR.
     """
 
     @pytest.fixture(autouse=True)
@@ -123,32 +117,6 @@ class TestCheckBulkheadSeveritySplitBehavior:
         reset_rate_controller()
         reset_backpressure_settings()
         reset_traffic_gate()
-
-    def test_registry_absent_fails_open_with_bulkhead_failed_warning(self):
-        """Registry unavailable (PRO not installed) → fail-open, logged at WARNING
-        as traffic_gate.bulkhead_failed (expected degradation)."""
-        from baldur.factory.registry import ProviderRegistry
-
-        gate = _make_gate()
-
-        # Given — the bulkhead registry slot resolves to None
-        with patch.object(
-            ProviderRegistry.bulkhead_registry, "safe_get", return_value=None
-        ):
-            with capture_logs() as logs:
-                decision = gate.should_allow(
-                    priority=0,
-                    bulkhead_name="external_api",
-                )
-
-        # Then — fail-open: the request proceeds ungated
-        assert decision.allowed is True
-        assert decision.bulkhead_acquired is False
-
-        warns = [e for e in logs if e.get("event") == "traffic_gate.bulkhead_failed"]
-        assert len(warns) == 1
-        assert warns[0]["log_level"] == "warning"
-        assert warns[0]["bulkhead_name"] == "external_api"
 
     def test_unexpected_try_acquire_error_fails_open_with_bulkhead_error_at_error(self):
         """An unexpected try_acquire error → fail-open, logged loudly at ERROR as
@@ -164,7 +132,7 @@ class TestCheckBulkheadSeveritySplitBehavior:
 
         # When — routed through the gate
         with patch(
-            "baldur_pro.services.bulkhead.get_bulkhead_registry",
+            "baldur.services.bulkhead.registry.get_bulkhead_registry",
             return_value=mock_registry,
         ):
             with capture_logs() as logs:

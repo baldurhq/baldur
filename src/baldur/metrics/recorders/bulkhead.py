@@ -2,13 +2,12 @@
 Bulkhead metric recorder — metric definitions and recording.
 
 Owns all bulkhead-related Prometheus metrics. The series are the single source
-of truth (name + label parity matters): the PRO ``BulkheadMetricsUpdater``
+of truth (name + label parity matters): the ``BulkheadMetricsUpdater``
 daemon and every reject path route their writes through this recorder rather
 than re-defining the series, removing the two-definition label-drift footgun.
 
-On an OSS-only checkout the series register at zero (exactly like DLQ/Throttle),
-so the drift guard (G43) sees them without ``baldur_pro``. On a PRO install the
-updater daemon populates the gauges and the reject sites increment the counter.
+The updater daemon populates the gauges and the reject sites increment the
+counter on every install (the bulkhead primitives are core-tier).
 
 Metrics (5):
 - baldur_bulkhead_active_count{bulkhead_name, bulkhead_type}: active requests

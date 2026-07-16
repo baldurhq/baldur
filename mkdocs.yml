@@ -229,6 +229,7 @@ nav:
           - "OSS vs PRO: capability matrix": concepts/oss-vs-pro.md
           - Baldur and your service mesh: concepts/foundations/service-mesh.md
           - Rate limiting in Baldur: concepts/foundations/rate-limiting.md
+          - Bulkhead: concepts/foundations/bulkhead.md
           - Daily Report: concepts/foundations/daily-report.md
           - Dashboard Service: concepts/foundations/dashboard-service.md
           - Web Console: concepts/foundations/web-console.md
@@ -247,7 +248,6 @@ nav:
           - Emergency Mode: concepts/pro/emergency-mode.md
           - Governance: concepts/pro/governance.md
           - Unified Notification: concepts/pro/unified-notification.md
-          - Bulkhead: concepts/pro/bulkhead.md
           - Canary Recovery: concepts/pro/canary-recovery.md
           - Adaptive Throttle: concepts/pro/throttle.md
           - Meta-Watchdog: concepts/pro/meta-watchdog.md

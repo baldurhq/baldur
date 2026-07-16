@@ -32,6 +32,7 @@ from baldur.resilience.policies.guards import (
 )
 from baldur.resilience.policies.hooks import AuditHook, MetricsHook
 from baldur.resilience.policies.sinks import DLQSink
+from baldur.services.bulkhead.policy import bulkhead_policy
 
 T = TypeVar("T")
 
@@ -253,22 +254,19 @@ def ha_pipeline(
     from baldur.services.retry_handler.policy import RetryPolicy
 
     try:
-        from baldur_pro.services.bulkhead.policy import bulkhead_policy
-    except ImportError:
-        bulkhead_policy = None  # type: ignore[assignment,misc]
-    try:
         from baldur_pro.services.hedging.config import HedgingConfig, HedgingMode
     except ImportError:
         HedgingConfig = None  # type: ignore[assignment,misc]
         HedgingMode = None  # type: ignore[assignment,misc]
 
-    # Fail-closed: ha_pipeline composes PRO-tier Bulkhead + Hedging stages. With
-    # baldur_pro absent these names are None; raise a clear error at construction
-    # time rather than letting the caller receive a pipeline silently missing the
-    # isolation/hedging it asked for (claim-wiring integrity: a degraded pipeline is a false
-    # guarantee, not graceful degradation).
-    if bulkhead_policy is None or HedgingConfig is None or HedgingMode is None:
-        raise RuntimeError("ha_pipeline requires baldur_pro (Bulkhead + Hedging)")
+    # Fail-closed: ha_pipeline composes a PRO-tier Hedging stage (the bulkhead
+    # stage is core). With baldur_pro absent these names are None; raise a clear
+    # error at construction time rather than letting the caller receive a
+    # pipeline silently missing the hedging it asked for (claim-wiring
+    # integrity: a degraded pipeline is a false guarantee, not graceful
+    # degradation).
+    if HedgingConfig is None or HedgingMode is None:
+        raise RuntimeError("ha_pipeline requires baldur_pro (Hedging)")
 
     if retry_policy is not None:
         _raise_if_retry_params_overridden(

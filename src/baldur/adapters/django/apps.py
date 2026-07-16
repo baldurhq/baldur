@@ -629,6 +629,8 @@ class BaldurConfig(AppConfig):
 
             from baldur.factory.registry import ProviderRegistry
 
+            # Deliberately slot-direct (not the bulkhead resolution chain):
+            # the empty slot IS the PRO-capability signal for admission.
             if ProviderRegistry.bulkhead_registry.safe_get() is None:
                 # OSS — admission is a clean no-op, nothing to warn about.
                 return
@@ -705,8 +707,8 @@ class BaldurConfig(AppConfig):
         # Every init()-started background worker — the OSS-5 daemon workers
         # (meta_watchdog, precomputed_cache, system_metrics_cache,
         # capacity_reservation, cell_topology) PLUS the OSS scaling loops
-        # (rate_controller, hpa_exporter) and the PRO startup integrations
-        # (bulkhead metrics updater, crisis-multiplier invalidation,
+        # (rate_controller, hpa_exporter), the OSS bulkhead metrics updater,
+        # and the PRO startup integrations (crisis-multiplier invalidation,
         # auto-tuning, circuit_mesh) — is started by
         # baldur.bootstrap.start_background_workers() (615 D1/D4), invoked by
         # init() and by the framework-agnostic gunicorn post_worker_init hook,

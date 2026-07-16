@@ -86,10 +86,13 @@ _ROOT_BUDGETS: dict[str, int] = {
     # 707: +1 — DLQCaptureService.store_failure relocated from the PRO tier into
     # the OSS baldur.services.dlq_capture core; it carries the same
     # C901/PLR0912/PLR0915 noqa it had in PRO (relocation, not new complexity).
-    "baldur": 109,
+    # 709: +6 — the bulkhead decorator relocated from the licensed tier into the
+    # core baldur.services.bulkhead package; it carries the same six C901 noqas
+    # it had before (relocation, not new complexity).
+    "baldur": 115,
     # 666: -1 — _update_config_with_meta refactored into _versioned_write +
     # _merge_changes + _post_write helpers, dropping its complexity noqa.
-    "baldur_pro": 41,
+    "baldur_pro": 32,
     "baldur_dormant": 12,
 }
 

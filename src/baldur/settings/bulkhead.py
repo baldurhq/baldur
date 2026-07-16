@@ -55,7 +55,10 @@ class BulkheadSettings(BaseSettings):
         default=10,
         ge=0,
         le=100,
-        description="Queue size for EXTERNAL_API type",
+        description=(
+            "Queue size for EXTERNAL_API type (PRO thread-pool only; inert on "
+            "the core semaphore fallback)"
+        ),
     )
 
     message_queue_max_concurrent: MediumCount = Field(
@@ -64,9 +67,9 @@ class BulkheadSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Prometheus metrics updater (PRO) — gates the BulkheadMetricsUpdater that
-    # baldur.init() auto-starts on every framework via the startup-integration
-    # slot. The interval doubles as the DaemonWorkerHandle staleness tick.
+    # Prometheus metrics updater — gates the BulkheadMetricsUpdater that
+    # baldur.init() auto-starts on every framework via the background-worker
+    # registry. The interval doubles as the DaemonWorkerHandle staleness tick.
     # ==========================================================================
     metrics_enabled: bool = Field(
         default=True,

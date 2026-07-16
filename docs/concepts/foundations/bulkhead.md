@@ -2,9 +2,13 @@
 
 > Gives each dependency its own fixed slice of your service's capacity, so a slow database or a hanging API call can exhaust its slice — and nothing more.
 
-!!! info "PRO feature"
-    Bulkhead is a PRO-tier feature. It answers the production question behind most cascading
-    outages: *"why did one slow dependency take the entire service down with it?"*
+!!! info "Cross-tier feature"
+    The bulkhead pattern itself — semaphore and async compartments, the registry, the
+    `@bulkhead` decorator, the policy, and the live metrics — ships in the **OSS core**.
+    **PRO** adds the thread-pool isolation strategy (dedicated worker pools with execution
+    timeouts and graceful shutdown drain) and per-tier admission control built on top of it.
+    It answers the production question behind most cascading outages: *"why did one slow
+    dependency take the entire service down with it?"*
 
 ## What is it?
 
@@ -54,7 +58,7 @@ off:
 |-------------|--------------------|------------------|
 | `database` | semaphore | 10 concurrent |
 | `cache` | semaphore | 20 concurrent |
-| `external_api` | thread pool | 5 workers + 10 waiting |
+| `external_api` | thread pool (PRO) / semaphore (OSS) | 5 workers + 10 waiting (PRO) / 5 concurrent (OSS) |
 | `message_queue` | semaphore | 15 concurrent |
 
 Finer-grained compartments are supported per database alias (`database:replica`) and per cache
@@ -62,15 +66,25 @@ instance (`cache:session`), so a read replica can carry a different budget than 
 
 Three **isolation strategies** cover the three kinds of work:
 
-- **Semaphore** (`SemaphoreBulkhead`) counts concurrent executions: the call runs on the
+- **Semaphore** (`SemaphoreBulkhead`, OSS) counts concurrent executions: the call runs on the
   caller's own thread, but only if a permit is free. The cheapest form, right for I/O-bound work
   like database queries and cache lookups.
-- **Thread pool** (`ThreadPoolBulkhead`) runs the call inside a dedicated worker pool with a
+- **Thread pool** (`ThreadPoolBulkhead`, PRO) runs the call inside a dedicated worker pool with a
   bounded waiting queue, fully separating it from the request workers; right for CPU-bound work.
   Request context and trace IDs follow the task into the pool, and each call carries an execution
   timeout (30 seconds unless you set one), so a runaway task cannot hold a worker forever.
-- **Async semaphore** (`AsyncSemaphoreBulkhead`) is the same permit counting for asyncio
+- **Async semaphore** (`AsyncSemaphoreBulkhead`, OSS) is the same permit counting for asyncio
   applications, without ever blocking the event loop.
+
+The timeout means something different in the two sync strategies, and the difference matters
+under a real incident. On a **semaphore** compartment, the timeout bounds the *admission wait
+only*: once the call is admitted it runs on the caller's own thread, so a hung call occupies
+that thread until it returns. On a **thread pool** compartment (PRO), the timeout bounds the
+*execution*: the caller is freed with a timeout error when it expires, and the runaway task
+stays contained inside the pool worker instead of the request thread. On an OSS install a
+compartment that asks for `thread_pool` isolation is created as a semaphore compartment of the
+same capacity — a correct, bounded compartment, with a startup warning naming exactly this
+fallback — so requesting thread-pool isolation never fails, it just isolates less strongly.
 
 In the two semaphore strategies, admission is all-or-nothing. By default a call to a full
 compartment **fails fast** — rejected on the spot rather than queued. Give the call a wait
@@ -152,8 +166,10 @@ sets a wait timeout.
 The tuning settings behind the built-in defaults are advanced / internal for v1.0: they are not
 part of the public operator-tunable environment-variable allowlist yet.
 
-Bulkhead ships with the PRO tier. The compartments and the status surface are available once PRO
-is active; without it, the status endpoint reports the feature as unavailable.
+The compartments, the `/bulkheads` status surface, and the console panel are available on every
+install. With PRO active, the `external_api` built-in (and any compartment requesting
+`thread_pool` isolation) is backed by a real worker pool with execution-timeout containment and
+graceful shutdown drain; without PRO, the same compartments run as semaphore isolation.
 
 ## See also
 

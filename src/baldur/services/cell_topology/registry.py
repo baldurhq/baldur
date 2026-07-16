@@ -1,11 +1,11 @@
 """
-Cell Registry — Consistent Hash 기반 Cell 할당.
+Cell Registry — consistent-hash-based cell assignment.
 
-서비스/테넌트를 Cell에 할당하고, Cell별 Bulkhead를 자동 관리합니다.
+Assigns services/tenants to cells and auto-manages the per-cell bulkheads.
 
-의존성:
-- BulkheadRegistry: Cell별 격벽 생성 (bulkhead_isolation_enabled=True일 때)
-- CellTopologySettings: 설정 주입
+Dependencies:
+- BulkheadRegistry: per-cell bulkhead creation (when bulkhead_isolation_enabled=True)
+- CellTopologySettings: settings injection
 """
 
 from __future__ import annotations
@@ -26,23 +26,23 @@ from baldur.settings.cell_topology import CellTopologySettings
 logger = structlog.get_logger()
 
 VNODES_PER_CELL = 150
-"""Consistent Hash Ring의 Cell당 가상 노드 수."""
+"""Number of virtual nodes per cell on the consistent hash ring."""
 
 
 class CellRegistry(EventEmitterMixin):
     """
-    Cell Registry — Consistent Hash Ring 기반 Cell 할당.
+    Cell Registry — consistent-hash-ring-based cell assignment.
 
-    기능:
-    1. Consistent Hash Ring으로 서비스/테넌트를 Cell에 할당
-    2. Cell 상태 관리 (ACTIVE/WARMUP/DRAINING/ISOLATED)
-    3. BulkheadRegistry 연동 — Cell별 격벽 자동 생성
-    4. Cell 목록 및 상태 조회
-    5. L1(Memory) + L2(Redis) 2-Tier 상태 동기화
-    6. 서비스 Heartbeat 기반 동적 할당/만료
-    7. 런타임 동적 Ring 리사이징
+    Features:
+    1. Assign services/tenants to cells via a consistent hash ring
+    2. Cell state management (ACTIVE/WARMUP/DRAINING/ISOLATED)
+    3. BulkheadRegistry integration — automatic per-cell bulkhead creation
+    4. Cell listing and state inspection
+    5. L1 (memory) + L2 (Redis) two-tier state synchronization
+    6. Service-heartbeat-based dynamic assignment/expiry
+    7. Runtime dynamic ring resizing
 
-    사용 예시:
+    Usage:
         registry = get_cell_registry()
         cell_id = registry.get_cell_for_key("user-12345")
         cell_info = registry.get_cell_info(cell_id)
@@ -53,7 +53,7 @@ class CellRegistry(EventEmitterMixin):
     def __init__(self, settings: CellTopologySettings | None = None):
         """
         Args:
-            settings: Cell Topology 설정
+            settings: Cell topology settings
         """
         from baldur.settings.cell_topology import get_cell_topology_settings
 
@@ -65,14 +65,14 @@ class CellRegistry(EventEmitterMixin):
         self._initialize_cells()
 
     def _initialize_cells(self) -> None:
-        """Cell 초기화 및 Hash Ring 구성."""
+        """Initialize cells and build the hash ring."""
         for i in range(self._settings.cell_count):
             cell_id = f"{self._settings.cell_prefix}-{i}"
             self._cells[cell_id] = CellInfo(cell_id=cell_id)
 
         self._build_hash_ring()
 
-        # Bulkhead 자동 등록
+        # Automatic bulkhead registration
         if self._settings.bulkhead_isolation_enabled:
             self._register_cell_bulkheads()
 
@@ -84,12 +84,11 @@ class CellRegistry(EventEmitterMixin):
 
     def _build_hash_ring(self) -> None:
         """
-        Consistent Hash Ring 구성.
+        Build the consistent hash ring.
 
-        각 Cell에 대해 가상 노드(vnode)를 생성하여
-        균일 분배를 보장합니다.
-        Copy-on-Write 방식으로 새 리스트를 구성 후
-        원자적 참조 교체(GIL-safe)합니다.
+        Creates virtual nodes (vnodes) for each cell to guarantee uniform
+        distribution. Builds a fresh list copy-on-write, then swaps the
+        reference atomically (GIL-safe).
         """
         ring: list[tuple[int, str]] = []
 
@@ -105,23 +104,23 @@ class CellRegistry(EventEmitterMixin):
 
     @staticmethod
     def _hash(key: str) -> int:
-        """SHA-256 기반 해시."""
+        """SHA-256-based hash."""
         return int(hashlib.sha256(key.encode()).hexdigest(), 16)
 
     def get_cell_for_key(self, key: str) -> str:
         """
-        키를 Consistent Hash Ring에서 Cell에 할당.
+        Assign a key to a cell on the consistent hash ring.
 
-        DRAINING/ISOLATED Cell은 건너뛰고 다음 ACTIVE Cell을 반환합니다.
+        DRAINING/ISOLATED cells are skipped; the next ACTIVE cell is returned.
 
         Args:
-            key: 할당 키 (서비스명, 테넌트ID, user_id 등)
+            key: Assignment key (service name, tenant ID, user_id, etc.)
 
         Returns:
-            cell_id (예: "cell-3")
+            cell_id (e.g. "cell-3")
         """
         if not self._settings.enabled:
-            return f"{self._settings.cell_prefix}-0"  # 비활성 시 기본 Cell
+            return f"{self._settings.cell_prefix}-0"  # default cell when disabled
 
         hash_val = self._hash(key)
         ring = self._hash_ring
@@ -129,7 +128,7 @@ class CellRegistry(EventEmitterMixin):
         if not ring:
             return f"{self._settings.cell_prefix}-0"
 
-        # Binary search로 위치 찾기
+        # Locate the position via binary search
         lo, hi = 0, len(ring) - 1
         while lo < hi:
             mid = (lo + hi) // 2
@@ -138,7 +137,7 @@ class CellRegistry(EventEmitterMixin):
             else:
                 hi = mid
 
-        # Ring을 순회하며 ACTIVE/WARMUP Cell 찾기
+        # Walk the ring looking for an ACTIVE/WARMUP cell
         for offset in range(len(ring)):
             idx = (lo + offset) % len(ring)
             cell_id = ring[idx][1]
@@ -149,25 +148,25 @@ class CellRegistry(EventEmitterMixin):
             if cell.state == CellState.ACTIVE:
                 return cell_id
 
-            # WARMUP Cell: percentage 기반 확률적 라우팅
+            # WARMUP cell: percentage-based probabilistic routing
             if cell.state == CellState.WARMUP:
                 if (hash_val % 100) < cell.warmup_percentage:
                     return cell_id
-                continue  # percentage 밖이면 다음 ACTIVE Cell로
+                continue  # outside the percentage — move on to the next ACTIVE cell
 
-        # 모든 Cell이 비활성이면 첫 번째 반환 (최후의 수단)
+        # All cells inactive — return the first match (last resort)
         return ring[lo % len(ring)][1]
 
     def get_cell_info(self, cell_id: str) -> CellInfo | None:
-        """Cell 정보 조회."""
+        """Look up cell info."""
         return self._cells.get(cell_id)
 
     def get_all_cells(self) -> dict[str, CellInfo]:
-        """모든 Cell 정보 조회."""
+        """Look up all cell info."""
         return dict(self._cells)
 
     def get_active_cells(self) -> list[str]:
-        """ACTIVE 상태 Cell ID 목록."""
+        """List of ACTIVE cell IDs."""
         return [
             cell_id
             for cell_id, info in self._cells.items()
@@ -176,7 +175,7 @@ class CellRegistry(EventEmitterMixin):
 
     def set_cell_state(self, cell_id: str, state: CellState, reason: str = "") -> bool:
         """
-        Cell 상태 변경.
+        Change a cell's state.
 
         L1→L2→emit ordering (doc 388, Q7):
         1. L1 dict write
@@ -184,12 +183,12 @@ class CellRegistry(EventEmitterMixin):
         3. EventBus emit (cross-pod notification)
 
         Args:
-            cell_id: Cell 식별자
-            state: 새 상태
-            reason: 변경 사유
+            cell_id: Cell identifier
+            state: New state
+            reason: Reason for the change
 
         Returns:
-            변경 성공 여부
+            Whether the change succeeded
         """
         import time
 
@@ -235,40 +234,40 @@ class CellRegistry(EventEmitterMixin):
             return True
 
     def update_health_score(self, cell_id: str, score: float) -> None:
-        """Cell 건강도 업데이트. CellHealthAggregator가 호출."""
+        """Update a cell's health score. Called by CellHealthAggregator."""
         cell = self._cells.get(cell_id)
         if cell:
             cell.health_score = max(0.0, min(1.0, score))
 
     def assign_service(self, service_name: str) -> str:
         """
-        서비스를 Cell에 할당하고 Heartbeat를 갱신.
+        Assign a service to a cell and refresh its heartbeat.
 
-        매 요청마다 호출하지 않고, CellTagger 미들웨어의
-        백그라운드 Heartbeat 스레드가 30초 주기로 호출한다.
-        TTL 만료(5분) 시 CellHealthAggregator가 자동 제거.
+        Not called per request — the CellTagger middleware's background
+        heartbeat thread calls this on a 30-second cadence. On TTL expiry
+        (5 minutes) the CellHealthAggregator evicts the service automatically.
 
         Args:
-            service_name: 서비스 이름
+            service_name: Service name
 
         Returns:
-            할당된 cell_id
+            Assigned cell_id
         """
         cell_id = self.get_cell_for_key(service_name)
         cell = self._cells.get(cell_id)
         if cell:
             cell.assigned_services.add(service_name)
-            # L2(Redis)에 Heartbeat 기록 — TTL 자동 만료
+            # Record the heartbeat in L2 (Redis) — TTL auto-expiry
             self._record_service_heartbeat(cell_id, service_name)
         return cell_id
 
     def _record_service_heartbeat(self, cell_id: str, service_name: str) -> None:
         """
-        Redis ZADD로 서비스 Heartbeat 기록.
+        Record a service heartbeat via Redis ZADD.
 
-        키: baldur:cell:{cell_id}:services
-        Score: 현재 timestamp
-        TTL: 서비스가 5분간 Heartbeat 없으면 자동 만료.
+        Key: baldur:cell:{cell_id}:services
+        Score: current timestamp
+        TTL: a service with no heartbeat for 5 minutes expires automatically.
         """
         try:
             import time
@@ -290,13 +289,13 @@ class CellRegistry(EventEmitterMixin):
         self, cell_id: str, ttl_seconds: float = 300.0
     ) -> list[str]:
         """
-        TTL 만료된 서비스를 Cell에서 제거.
+        Evict TTL-expired services from a cell.
 
-        CellHealthAggregator가 Reconciliation 시점에 호출.
-        5분(300초) 이상 Heartbeat가 없는 서비스를 ZRANGEBYSCORE로 탐지.
+        Called by CellHealthAggregator at reconciliation time. Detects
+        services with no heartbeat for 5 minutes (300s) via ZRANGEBYSCORE.
 
         Returns:
-            제거된 서비스 목록
+            List of evicted services
         """
         evicted: list[str] = []
         try:
@@ -310,12 +309,12 @@ class CellRegistry(EventEmitterMixin):
             key = f"baldur:cell:{cell_id}:services"
             cutoff = time.time() - ttl_seconds
 
-            # 만료된 서비스 조회
+            # Query expired services
             expired = redis.zrangebyscore(key, "-inf", cutoff)
             if expired:
                 redis.zrem(key, *expired)
 
-                # L1 메모리에서도 제거
+                # Also remove from L1 memory
                 cell = self._cells.get(cell_id)
                 if cell:
                     for svc in expired:
@@ -340,15 +339,13 @@ class CellRegistry(EventEmitterMixin):
 
     def _register_cell_bulkheads(self) -> None:
         """
-        BulkheadRegistry에 Cell별 Bulkhead 등록.
+        Register per-cell bulkheads with the BulkheadRegistry.
 
-        BulkheadRegistry.get_or_create()를 사용하여
-        Cell별 격벽을 자동 생성합니다.
+        Uses BulkheadRegistry.get_or_create() to auto-create the per-cell
+        compartments.
         """
         try:
-            from baldur_pro.services.bulkhead.registry import (
-                get_bulkhead_registry,
-            )
+            from baldur.services.bulkhead.registry import get_bulkhead_registry
 
             bulkhead_registry = get_bulkhead_registry()
             for cell_id in self._cells:
@@ -363,22 +360,20 @@ class CellRegistry(EventEmitterMixin):
                 cells_count=len(self._cells),
                 bulkhead_max_concurrent_per_cell=self._settings.bulkhead_max_concurrent_per_cell,
             )
-        except ImportError:
-            logger.warning("cell_registry.bulkhead_registry_unavailable")
         except Exception as e:
             logger.exception(
                 "cell.bulkhead_registration_failed",
                 error=e,
             )
 
-    # ── L1/L2 동기화 ────────────────────────────────────────
+    # ── L1/L2 synchronization ───────────────────────────────
 
     def _sync_state_to_redis(self, cell_id: str) -> None:
         """
-        Cell 상태를 L2(Redis Hash)에 기록.
+        Write a cell's state to L2 (Redis hash).
 
-        set_cell_state(), add_cells(), remove_cells()에서 호출.
-        Cross-pod propagation은 EventBus를 통해 처리 (Q2 — raw Pub/Sub 제거).
+        Called from set_cell_state(), add_cells(), remove_cells().
+        Cross-pod propagation goes through the EventBus (Q2 — raw Pub/Sub removed).
         """
         try:
             from baldur.adapters.redis import get_redis_client
@@ -401,15 +396,15 @@ class CellRegistry(EventEmitterMixin):
 
     def _load_all_states_from_redis(self) -> int:
         """
-        L2(Redis)에서 모든 Cell 상태를 L1에 로드 (Anti-entropy Reconciliation).
+        Load every cell's state from L2 (Redis) into L1 (anti-entropy reconciliation).
 
-        워커 시작 시 hydration 1회 + anti-entropy daemon thread 주기적 호출.
-        EventBus 이벤트 누락 시 보정 역할.
+        One hydration pass at worker startup plus periodic calls from the
+        anti-entropy daemon thread. Compensates for missed EventBus events.
 
         Uses CellInfo.apply_l2_dict() for LWW+MRW hybrid comparison (Q19).
 
         Returns:
-            동기화된 Cell 수
+            Number of synchronized cells
         """
         synced = 0
         try:
@@ -443,9 +438,9 @@ class CellRegistry(EventEmitterMixin):
 
     def _load_single_state_from_redis(self, cell_id: str) -> bool:
         """
-        L2(Redis)에서 단일 Cell 상태를 L1에 로드.
+        Load a single cell's state from L2 (Redis) into L1.
 
-        EventBus handler (_on_cell_state_event)에서 호출.
+        Called from the EventBus handler (_on_cell_state_event).
         Uses CellInfo.apply_l2_dict() for LWW+MRW hybrid comparison (Q19).
 
         Args:
@@ -494,20 +489,20 @@ class CellRegistry(EventEmitterMixin):
             return
         self._load_single_state_from_redis(cell_id)
 
-    # ── 동적 스케일링 ──────────────────────────────────────
+    # ── Dynamic scaling ─────────────────────────────────────
 
     def add_cells(self, count: int) -> list[str]:
         """
-        런타임에 Cell을 추가하고 Hash Ring을 리빌딩.
+        Add cells at runtime and rebuild the hash ring.
 
-        새 Cell은 WARMUP 상태로 시작하여 점진적으로
-        트래픽을 투입받는다.
+        New cells start in the WARMUP state and take on traffic
+        progressively.
 
         Args:
-            count: 추가할 Cell 수
+            count: Number of cells to add
 
         Returns:
-            추가된 cell_id 목록
+            List of added cell_ids
         """
         with self._lock:
             added: list[str] = []
@@ -523,14 +518,14 @@ class CellRegistry(EventEmitterMixin):
                 self._cells[cell_id] = cell
                 added.append(cell_id)
 
-            # Copy-on-Write Ring 리빌딩 (GIL-safe atomic swap)
+            # Copy-on-write ring rebuild (GIL-safe atomic swap)
             self._build_hash_ring()
 
-            # 새 Cell에 Bulkhead 등록
+            # Register bulkheads for the new cells
             if self._settings.bulkhead_isolation_enabled:
                 self._register_cell_bulkheads()
 
-            # L2에 새 Cell 상태 기록
+            # Record the new cells' states in L2
             for cell_id in added:
                 self._sync_state_to_redis(cell_id)
 
@@ -544,16 +539,17 @@ class CellRegistry(EventEmitterMixin):
 
     def remove_cells(self, cell_ids: list[str]) -> list[str]:
         """
-        Cell을 제거하기 전 DRAINING → ISOLATED → 삭제.
+        DRAINING → ISOLATED → delete, before removing a cell.
 
-        즉시 삭제하지 않고 DRAINING으로 전환만 수행.
-        실제 삭제는 CellEvacuationPolicy가 드레인 완료 후 호출.
+        Does not delete immediately — only transitions to DRAINING.
+        The actual deletion is invoked by CellEvacuationPolicy after the
+        drain completes.
 
         Args:
-            cell_ids: 제거할 Cell ID 목록
+            cell_ids: List of cell IDs to remove
 
         Returns:
-            DRAINING으로 전환된 cell_id 목록
+            List of cell_ids transitioned to DRAINING
         """
         drained: list[str] = []
         for cell_id in cell_ids:
@@ -572,7 +568,7 @@ _registry_lock = threading.Lock()
 
 
 def get_cell_registry() -> CellRegistry:
-    """CellRegistry 싱글톤 반환."""
+    """Return the CellRegistry singleton."""
     global _registry
     if _registry is None:
         with _registry_lock:
@@ -582,7 +578,7 @@ def get_cell_registry() -> CellRegistry:
 
 
 def reset_cell_registry() -> None:
-    """싱글톤 초기화 (테스트용)."""
+    """Reset the singleton (for testing)."""
     global _registry
     with _registry_lock:
         if _registry is not None:

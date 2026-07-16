@@ -390,23 +390,18 @@ class TestExportContract:
 
         assert "HedgingConfigUpdateHook" in hedging_module.__all__
 
-    def test_resilience_policies_all_contains_hedging_policy(self):
-        """resilience/policies/__all__에 'HedgingPolicy'가 포함된다."""
+    @pytest.mark.parametrize(
+        "name",
+        ["HedgingPolicy", "AsyncHedgingPolicy", "HedgingConfigUpdateHook"],
+    )
+    def test_resilience_policies_soft_removed_but_resolvable(self, name):
+        """Hedging names are absent from resilience/policies/__all__ (honest
+        advertisement — the engine requires the licensed package at runtime)
+        yet still resolvable for existing import statements."""
         import baldur.resilience.policies as policies_module
 
-        assert "HedgingPolicy" in policies_module.__all__
-
-    def test_resilience_policies_all_contains_async_hedging_policy(self):
-        """resilience/policies/__all__에 'AsyncHedgingPolicy'가 포함된다."""
-        import baldur.resilience.policies as policies_module
-
-        assert "AsyncHedgingPolicy" in policies_module.__all__
-
-    def test_resilience_policies_all_contains_hedging_config_update_hook(self):
-        """resilience/policies/__all__에 'HedgingConfigUpdateHook'이 포함된다."""
-        import baldur.resilience.policies as policies_module
-
-        assert "HedgingConfigUpdateHook" in policies_module.__all__
+        assert name not in policies_module.__all__
+        assert getattr(policies_module, name) is not None
 
 
 # =============================================================================
