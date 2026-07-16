@@ -630,3 +630,69 @@ class TestCellHandlerRegistrationBehavior:
                 EventType.CELL_STATE_CHANGED,
                 registry._on_cell_state_event,
             )
+
+
+class TestCellBulkheadThreadPoolFallbackBehavior:
+    """bulkhead_type="thread_pool" cell config routes through the builder seam.
+
+    On the base tier the per-cell thread-pool request falls back to
+    semaphore isolation — registration succeeds without the old
+    ImportError-guard skip path.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _bare_install_bulkhead_chain(self, monkeypatch):
+        """Force the bulkhead chain onto its base fallback leg (slot empty)."""
+        from baldur.factory.registry import ProviderRegistry
+        from baldur.services.bulkhead.registry import reset_bulkhead_registry
+
+        monkeypatch.setattr(
+            ProviderRegistry.bulkhead_registry, "safe_get", lambda name=None: None
+        )
+        reset_bulkhead_registry()
+        yield
+        reset_bulkhead_registry()
+
+    @pytest.fixture
+    def thread_pool_settings(self) -> CellTopologySettings:
+        """bulkhead_isolation enabled with the thread_pool type requested."""
+        return CellTopologySettings(
+            enabled=True,
+            bulkhead_isolation_enabled=True,
+            bulkhead_type="thread_pool",
+            cell_count=2,
+            cell_prefix="cell",
+        )
+
+    def test_thread_pool_cells_get_semaphore_fallback_compartments(
+        self, thread_pool_settings
+    ):
+        """Each cell's compartment is the semaphore fallback at the per-cell capacity."""
+        from baldur.services.bulkhead.registry import get_bulkhead_registry
+        from baldur.services.bulkhead.semaphore import SemaphoreBulkhead
+
+        # Given/When — registry construction registers per-cell bulkheads
+        registry = CellRegistry(settings=thread_pool_settings)
+
+        # Then — every cell resolves to a semaphore fallback compartment
+        bulkhead_registry = get_bulkhead_registry()
+        cells = registry.get_all_cells()
+        assert len(cells) == thread_pool_settings.cell_count
+        for cell_id in cells:
+            compartment = bulkhead_registry.get(cell_id)
+            assert isinstance(compartment, SemaphoreBulkhead)
+            assert (
+                compartment.get_state().max_concurrent
+                == thread_pool_settings.bulkhead_max_concurrent_per_cell
+            )
+
+    def test_registration_succeeds_without_failure_event(self, thread_pool_settings):
+        """Registration completes — no cell.bulkhead_registration_failed emitted."""
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            CellRegistry(settings=thread_pool_settings)
+
+        events = [e.get("event") for e in logs]
+        assert "cell.bulkhead_registration_failed" not in events
+        assert "cell_registry.bulkheads_registered" in events

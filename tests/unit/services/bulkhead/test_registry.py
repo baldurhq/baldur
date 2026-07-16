@@ -233,6 +233,68 @@ class TestBulkheadRegistryGetOrCreate:
         assert state.max_concurrent == 8
 
 
+class TestThreadPoolFallbackWarningBehavior:
+    """thread_pool_unavailable WARNING on the base builder seam (D2).
+
+    The base registry has no worker-pool implementation, so a thread-pool
+    request falls back to semaphore isolation and warns once per name at
+    compartment creation — stating the fallback semantics explicitly.
+    """
+
+    def test_builtin_external_api_construction_warns_once(self):
+        """Registry construction warns once for the EXTERNAL_API thread-pool request."""
+        with capture_logs() as logs:
+            BulkheadRegistry()
+
+        warns = [
+            e
+            for e in logs
+            if e.get("event") == "bulkhead_registry.thread_pool_unavailable"
+        ]
+        assert len(warns) == 1
+        assert warns[0]["log_level"] == "warning"
+        assert warns[0]["bulkhead_name"] == ConnectionType.EXTERNAL_API.value
+
+    def test_get_or_create_thread_pool_warns_once_per_name(self):
+        """The WARNING fires at creation only — the cached lookup stays silent."""
+        registry = BulkheadRegistry()
+
+        with capture_logs() as logs:
+            registry.get_or_create(
+                "pool_a", max_concurrent=4, bulkhead_type="thread_pool"
+            )
+            registry.get_or_create(
+                "pool_a", max_concurrent=4, bulkhead_type="thread_pool"
+            )
+
+        warns = [
+            e
+            for e in logs
+            if e.get("event") == "bulkhead_registry.thread_pool_unavailable"
+        ]
+        assert len(warns) == 1
+        assert warns[0]["bulkhead_name"] == "pool_a"
+
+    def test_warning_payload_states_fallback_semantics(self):
+        """The payload names the fallback and its admission-only timeout semantics."""
+        registry = BulkheadRegistry()
+
+        with capture_logs() as logs:
+            registry.get_or_create(
+                "pool_b", max_concurrent=6, bulkhead_type="thread_pool"
+            )
+
+        warn = next(
+            e
+            for e in logs
+            if e.get("event") == "bulkhead_registry.thread_pool_unavailable"
+        )
+        assert warn["fallback"] == "semaphore"
+        assert warn["max_concurrent"] == 6
+        assert "no worker-pool offload" in warn["semantics"]
+        assert "admission wait only" in warn["semantics"]
+
+
 class TestBulkheadRegistryGetAsync:
     """Asynchronous bulkhead lookup tests."""
 
