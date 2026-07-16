@@ -67,14 +67,14 @@ The individual limits and windows (the per-endpoint cap, the admin-API rate, the
 
 ## Tier behavior
 
-- **In OSS**: the per-endpoint cap (`@rate_limit`, opt-in), the circuit breaker's `429`-storm detection, the always-on admin / control API protection, and the outbound cooldown coordinator reached through Baldur's retry integration.
-- **With PRO active**: Adaptive Throttle adds a self-adjusting inbound admission limit that tracks live latency (and sheds the least important traffic first when it tightens under pressure), and Bulkhead adds per-dependency capacity isolation so one slow dependency can only saturate its own compartment instead of taking the whole service down. Neither adds a fleet-wide inbound quota, which stays at the gateway.
+- **In OSS**: the per-endpoint cap (`@rate_limit`, opt-in), the circuit breaker's `429`-storm detection, the always-on admin / control API protection, the outbound cooldown coordinator reached through Baldur's retry integration, and Bulkhead's per-dependency capacity isolation so one slow dependency can only saturate its own compartment instead of taking the whole service down.
+- **With PRO active**: Adaptive Throttle adds a self-adjusting inbound admission limit that tracks live latency (and sheds the least important traffic first when it tightens under pressure), and Bulkhead gains thread-pool isolation with execution-timeout containment. Neither adds a fleet-wide inbound quota, which stays at the gateway.
 
 ## See also
 
 - [Adaptive Throttle](../pro/throttle.md) — the PRO self-adjusting inbound limit, and the outbound Rate Limit Coordinator covered in depth
 - [Circuit Breaker](../oss/circuit-breaker.md) — the `429`-storm detection that trips the breaker
-- [Bulkhead](../pro/bulkhead.md) — per-dependency capacity isolation so one slow dependency can't sink the whole service
+- [Bulkhead](bulkhead.md) — per-dependency capacity isolation so one slow dependency can't sink the whole service
 - [Baldur and your service mesh](service-mesh.md) — the same "infra owns the network, Baldur owns the code" split that puts a fleet-wide quota at the gateway
 - [Retry](../oss/retry.md) — the retry integration the outbound cooldown plugs into
 - [OSS vs PRO tier model](tier-model.md) — what each tier includes

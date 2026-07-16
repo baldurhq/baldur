@@ -66,7 +66,7 @@ class PartitionState:
     external_apis: dict[str, bool] = field(default_factory=dict)
     detected_at: datetime | None = None
     bulkhead_states: dict[str, dict] = field(default_factory=dict)
-    """격벽 상태 정보 (ConnectionType별 active_count, max_concurrent 등)"""
+    """Bulkhead state info (active_count, max_concurrent, etc. per ConnectionType)"""
 
     @property
     def is_partial_partition(self) -> bool:
@@ -149,7 +149,7 @@ class DefaultConnectionHealthMonitor(ConnectionHealthMonitor):
         self._health_states: dict[str, ConnectionHealth] = {}
         self._failure_threshold = failure_threshold
 
-        # 카오스 테스트용 시뮬레이션 오버라이드
+        # Simulation overrides for chaos testing
         self._simulation_overrides: dict[str, ConnectionHealth] = {}
         self._partition_override: PartitionState | None = None
         self._simulation_experiment_id: str | None = None
@@ -159,14 +159,14 @@ class DefaultConnectionHealthMonitor(ConnectionHealthMonitor):
         cls, settings=None, **overrides
     ) -> DefaultConnectionHealthMonitor:
         """
-        Settings 기반 인스턴스 생성.
+        Create an instance from settings.
 
         Args:
-            settings: PoolMonitorSettings 인스턴스 (None이면 자동 로드)
-            **overrides: 개별 필드 오버라이드
+            settings: PoolMonitorSettings instance (auto-loaded if None)
+            **overrides: Per-field overrides
 
         Returns:
-            DefaultConnectionHealthMonitor: Settings 기반 인스턴스
+            DefaultConnectionHealthMonitor: settings-based instance
         """
         from baldur.settings.pool_monitor import get_pool_monitor_settings
 
@@ -185,13 +185,13 @@ class DefaultConnectionHealthMonitor(ConnectionHealthMonitor):
         experiment_id: str | None = None,
     ) -> None:
         """
-        특정 연결에 대한 시뮬레이션 상태 설정.
+        Set a simulated status for a specific connection.
 
         Args:
-            connection_type: 연결 타입 (DATABASE, CACHE, EXTERNAL_API)
-            name: 연결 이름
-            status: 강제할 연결 상태
-            experiment_id: 관련 카오스 실험 ID (감사 추적용)
+            connection_type: Connection type (DATABASE, CACHE, EXTERNAL_API)
+            name: Connection name
+            status: Connection status to force
+            experiment_id: Related chaos experiment ID (for audit tracing)
 
         Example:
             monitor.set_simulation_override(
@@ -221,11 +221,11 @@ class DefaultConnectionHealthMonitor(ConnectionHealthMonitor):
         experiment_id: str | None = None,
     ) -> None:
         """
-        네트워크 파티션 시뮬레이션 설정.
+        Set a simulated network-partition state.
 
         Args:
-            partition_state: 강제할 파티션 상태
-            experiment_id: 관련 카오스 실험 ID (감사 추적용)
+            partition_state: Partition state to force
+            experiment_id: Related chaos experiment ID (for audit tracing)
         """
         self._partition_override = partition_state
         self._simulation_experiment_id = experiment_id
@@ -238,7 +238,7 @@ class DefaultConnectionHealthMonitor(ConnectionHealthMonitor):
 
     def clear_all_simulation_overrides(self) -> None:
         """
-        모든 시뮬레이션 오버라이드 해제.
+        Clear all simulation overrides.
         """
         self._simulation_overrides.clear()
         self._partition_override = None
@@ -246,11 +246,11 @@ class DefaultConnectionHealthMonitor(ConnectionHealthMonitor):
         logger.info("connection_health.simulation_overrides_cleared")
 
     def is_simulation_active(self) -> bool:
-        """시뮬레이션 오버라이드가 활성화되어 있는지 확인."""
+        """Check whether any simulation override is active."""
         return bool(self._simulation_overrides) or self._partition_override is not None
 
     def get_simulation_experiment_id(self) -> str | None:
-        """현재 시뮬레이션과 연관된 실험 ID 반환."""
+        """Return the experiment ID tied to the current simulation."""
         return self._simulation_experiment_id
 
     def register_health_check(
@@ -283,11 +283,11 @@ class DefaultConnectionHealthMonitor(ConnectionHealthMonitor):
         """
         Check health of a specific connection.
 
-        시뮬레이션 오버라이드를 지원합니다.
+        Supports simulation overrides.
         """
         key = f"{connection_type.value}:{name}"
 
-        # 시뮬레이션 오버라이드 체크
+        # Simulation override check
         if key in self._simulation_overrides:
             logger.debug(
                 "connection_health.simulated_health_returned", override_key=key
@@ -341,10 +341,10 @@ class DefaultConnectionHealthMonitor(ConnectionHealthMonitor):
         """
         Get current partition state across all connections.
 
-        시뮬레이션 오버라이드를 지원합니다.
-        Bulkhead 상태도 함께 수집합니다.
+        Supports simulation overrides.
+        Also collects bulkhead states.
         """
-        # 파티션 시뮬레이션 오버라이드 체크
+        # Partition simulation override check
         if self._partition_override is not None:
             logger.debug("connection_health.simulated_partition_returned")
             return self._partition_override
@@ -363,25 +363,27 @@ class DefaultConnectionHealthMonitor(ConnectionHealthMonitor):
             elif conn_type == ConnectionType.EXTERNAL_API.value:
                 state.external_apis[name] = is_healthy
 
-        # Bulkhead 상태 수집
+        # Collect bulkhead states
         state.bulkhead_states = self._collect_bulkhead_states()
 
         return state
 
     def _collect_bulkhead_states(self) -> dict[str, dict]:
         """
-        모든 Bulkhead의 현재 상태 수집.
+        Collect the current state of every bulkhead.
+
+        The resolution chain always yields a registry (the built-in
+        compartments at minimum), so the snapshot is never empty by design;
+        an unexpected error still degrades to an empty dict (fail-open —
+        health collection must not break on a bulkhead contract violation).
 
         Returns:
-            격벽 이름 -> 상태 정보 딕셔너리
+            Bulkhead name -> state-info dictionary
         """
         try:
-            from baldur.factory.registry import ProviderRegistry
+            from baldur.services.bulkhead.registry import get_bulkhead_registry
 
-            registry = ProviderRegistry.bulkhead_registry.safe_get()
-            if registry is None:
-                raise RuntimeError("baldur_pro BulkheadRegistry not registered")
-            states = registry.get_all_states()
+            states = get_bulkhead_registry().get_all_states()
 
             return {
                 name: {
@@ -395,8 +397,6 @@ class DefaultConnectionHealthMonitor(ConnectionHealthMonitor):
                 }
                 for name, state in states.items()
             }
-        except ImportError:
-            return {}
         except Exception as e:
             logger.warning(
                 "connection_health.bulkhead_states_collection_failed", error=str(e)

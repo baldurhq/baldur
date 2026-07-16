@@ -73,7 +73,7 @@ class TestBulkheadShutdownHandlerBehavior:
         autospec=True,
     )
     @patch(
-        "baldur_pro.services.bulkhead.metrics.get_metrics_updater",
+        "baldur.services.bulkhead.metrics.get_metrics_updater",
         autospec=True,
     )
     def test_on_shutdown_start_stops_metrics_updater(
@@ -100,7 +100,7 @@ class TestBulkheadShutdownHandlerBehavior:
         autospec=True,
     )
     @patch(
-        "baldur_pro.services.bulkhead.metrics.get_metrics_updater",
+        "baldur.services.bulkhead.metrics.get_metrics_updater",
         autospec=True,
     )
     def test_on_shutdown_start_shuts_down_thread_pool_bulkheads(

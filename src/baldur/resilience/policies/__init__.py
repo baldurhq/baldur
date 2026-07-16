@@ -12,9 +12,12 @@ Example::
     ).execute(lambda: fetch_a())
 
 Note:
-    HedgingPolicy, AsyncHedgingPolicy, and HedgingConfigUpdateHook are provided
-    via lazy import due to a circular reference with core.hedging. Prefer
-    ``from baldur.resilience.policies.hedging import HedgingPolicy`` directly.
+    HedgingPolicy, AsyncHedgingPolicy, HedgingConfigUpdateHook, and
+    ThrottlePolicy are resolvable from this module via ``__getattr__`` but are
+    deliberately not advertised in ``__all__``: their engines require
+    ``baldur_pro`` at runtime (the Hedging names additionally use lazy import
+    due to a circular reference with core.hedging — prefer
+    ``from baldur.resilience.policies.hedging import HedgingPolicy`` directly).
 """
 
 from __future__ import annotations
@@ -77,6 +80,9 @@ from baldur.resilience.policies.sinks import DLQSink
 
 # Policies — Timeout
 from baldur.resilience.policies.timeout import AsyncTimeoutPolicy, TimeoutPolicy
+
+# Policies — Bulkhead (core-tier)
+from baldur.services.bulkhead.policy import BulkheadPolicy
 from baldur.services.circuit_breaker.policy import (
     AsyncCircuitBreakerPolicy,
     CircuitBreakerPolicy,
@@ -90,17 +96,19 @@ if TYPE_CHECKING:
         HedgingPolicy,
     )
 
-# BulkheadPolicy and ThrottlePolicy are PRO-tier (Bulkhead 519 PR 3, Throttle
-# inherited from before). They resolve via ``__getattr__`` below so the module
-# does not carry a module-level OSS↔PRO import. IDE/mypy treat them as ``Any``
-# at this re-export site; consumers needing precise typing can import the
-# concrete class from its PRO submodule directly.
+# ThrottlePolicy is PRO-tier and the Hedging engine requires baldur_pro at
+# runtime. These names resolve via ``__getattr__`` below — kept resolvable so
+# existing import statements keep working — but are deliberately absent from
+# ``__all__`` (honest advertisement surface). IDE/mypy treat ThrottlePolicy as
+# ``Any`` at this re-export site; consumers needing precise typing can import
+# the concrete class from its PRO submodule directly.
 
 
 def __getattr__(name: str):
-    """Lazy import for PRO-tier policies (BulkheadPolicy/ThrottlePolicy) and
-    the in-tree Hedging policies (which use deferred imports to break the
-    OSS↔PRO module-load cycle — see ``hedging.py`` for the rationale)."""
+    """Lazy import for the PRO-tier ThrottlePolicy and the in-tree Hedging
+    policies (which use deferred imports to break the module-load cycle with
+    core.hedging — see ``hedging.py`` for the rationale). These names are
+    resolvable but not in ``__all__``; their engines require baldur_pro."""
     _hedging_names = {"AsyncHedgingPolicy", "HedgingConfigUpdateHook", "HedgingPolicy"}
     if name in _hedging_names:
         try:
@@ -111,13 +119,6 @@ def __getattr__(name: str):
             raise AttributeError(
                 f"Cannot import {name} from hedging module: {e}"
             ) from e
-    if name == "BulkheadPolicy":
-        try:
-            from baldur_pro.services.bulkhead.policy import BulkheadPolicy
-
-            return BulkheadPolicy
-        except ImportError as e:
-            raise AttributeError(f"Cannot import BulkheadPolicy (PRO tier): {e}") from e
     if name == "ThrottlePolicy":
         try:
             from baldur_pro.services.throttle.policy import ThrottlePolicy
@@ -144,16 +145,12 @@ __all__ = [
     # Policies
     "AsyncCircuitBreakerPolicy",
     "AsyncFallbackPolicy",
-    "AsyncHedgingPolicy",
     "AsyncRetryPolicy",
     "AsyncTimeoutPolicy",
     "BulkheadPolicy",
     "CircuitBreakerPolicy",
     "FallbackPolicy",
-    "HedgingConfigUpdateHook",
-    "HedgingPolicy",
     "RetryPolicy",
-    "ThrottlePolicy",
     "TimeoutPolicy",
     "async_retry_policy",
     "partition_aware_chain",

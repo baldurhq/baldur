@@ -43,10 +43,13 @@ __all__ = ["console_page"]
 # (the map is no longer frozen — incremental-accumulation window): runtime_config
 # is the Runtime Config editor panel (662), the first post-v1.0 panel addition,
 # gated on the PRO-only RuntimeConfigManager slot.
+#
+# Removals: bulkhead left the map when the bulkhead primitives went core-tier
+# (709) — the panel is status-only (no actions) and its /bulkheads backend now
+# always resolves, so it renders ungated on every install.
 _V1_PRO_PANEL_SLOTS: dict[str, str] = {
     "emergency": "emergency_manager",
     "dlq": "dlq_service",
-    "bulkhead": "bulkhead_registry",
     "canary": "canary_rollout_service",
     "throttle": "adaptive_throttle",
     "governance": "governance",

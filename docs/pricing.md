@@ -18,12 +18,12 @@ workloads.
 | System control | ✅ | ✅ |
 | Built-in web console | ✅ | ✅ |
 | Precomputed cache | ✅ | ✅ |
+| Bulkhead isolation | ✅ | ✅ (＋thread-pool) |
 | Dead-letter queue + replay | — | ✅ |
 | Audit trail | — | ✅ |
 | Emergency mode | — | ✅ |
 | Governance gates | — | ✅ |
 | Unified notifications | — | ✅ |
-| Bulkhead isolation | — | ✅ |
 | Canary recovery | — | ✅ |
 | Adaptive throttle | — | ✅ |
 | Meta-watchdog (self-monitoring) | — | ✅ |

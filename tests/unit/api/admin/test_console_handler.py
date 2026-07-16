@@ -39,10 +39,11 @@ _HANDLER_SETTINGS = "baldur.api.admin.console.handler.get_admin_server_settings"
 # pro-launch-strategy.md Rev 7, after the original 6-key set was frozen.
 # runtime_config joined in 662 — the Runtime Config editor, the first post-v1.0
 # panel addition (incremental-accumulation window).
+# bulkhead left the gated-panel set when the bulkhead primitives went
+# core-tier — the panel is status-only and renders ungated on every install.
 _V1_PANEL_KEYS = {
     "emergency",
     "dlq",
-    "bulkhead",
     "canary",
     "throttle",
     "governance",

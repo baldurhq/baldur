@@ -17,13 +17,9 @@ __all__ = ["bulkhead_status"]
 
 def bulkhead_status(ctx: RequestContext) -> ResponseContext:
     """Get all bulkhead states with optional name filter."""
-    from baldur.factory.registry import ProviderRegistry
+    from baldur.services.bulkhead.registry import get_bulkhead_registry
 
-    registry = ProviderRegistry.bulkhead_registry.safe_get()
-    if registry is None:
-        return ResponseContext.not_found(
-            "Bulkhead registry is unavailable (baldur_pro required)"
-        )
+    registry = get_bulkhead_registry()
     name_filter = ctx.get_query("name")
 
     states = registry.get_all_states()

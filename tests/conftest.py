@@ -101,6 +101,13 @@ os.environ.setdefault("BALDUR_SYSTEM_METRICS_CACHE_AUTOSTART", "0")
 # _seed_circuit_breaker_state() directly. Mirrors the autostart hatches above.
 os.environ.setdefault("BALDUR_CB_STATE_SEED_AUTOSTART", "0")
 
+# 709: BulkheadSettings.metrics_enabled defaults True and init() starts the
+# bulkhead metrics updater framework-agnostically (relocated with the core-tier
+# bulkhead primitives), so any init() in a test would otherwise spawn the poll
+# daemon thread. Tests that exercise the updater start one directly. Mirrors
+# the autostart hatches above.
+os.environ.setdefault("BALDUR_BULKHEAD_METRICS_AUTOSTART", "0")
+
 
 # =============================================================================
 # Canonical Test Structlog Config (578 D2)

@@ -415,16 +415,12 @@ class TestCBOpenRatioBehavior:
 
 
 class TestBulkheadUtilizationBehavior:
-    """Bulkhead Utilization 동작 검증."""
-
-    @pytest.fixture(autouse=True)
-    def _require_pro(self):
-        pytest.importorskip("baldur_pro")
+    """Bulkhead utilization behavior (core registry)."""
 
     def test_no_bulkhead_returns_zero(self, aggregator: CellHealthAggregator):
         """BulkheadRegistry에 데이터 없으면 0.0이어야 한다."""
         with patch(
-            "baldur_pro.services.bulkhead.registry.get_bulkhead_registry"
+            "baldur.services.bulkhead.registry.get_bulkhead_registry"
         ) as mock_get:
             mock_registry = MagicMock()
             mock_registry.get_all_states.return_value = {}
@@ -442,7 +438,7 @@ class TestBulkheadUtilizationBehavior:
             active_count: int = 50
 
         with patch(
-            "baldur_pro.services.bulkhead.registry.get_bulkhead_registry"
+            "baldur.services.bulkhead.registry.get_bulkhead_registry"
         ) as mock_get:
             mock_registry = MagicMock()
             mock_registry.get_all_states.return_value = {
@@ -462,7 +458,7 @@ class TestBulkheadUtilizationBehavior:
             active_count: int = 20  # 초과 상태
 
         with patch(
-            "baldur_pro.services.bulkhead.registry.get_bulkhead_registry"
+            "baldur.services.bulkhead.registry.get_bulkhead_registry"
         ) as mock_get:
             mock_registry = MagicMock()
             mock_registry.get_all_states.return_value = {
@@ -478,7 +474,7 @@ class TestBulkheadUtilizationBehavior:
     ):
         """BulkheadRegistry import 실패 시 0.0이어야 한다."""
         with patch(
-            "baldur_pro.services.bulkhead.registry.get_bulkhead_registry",
+            "baldur.services.bulkhead.registry.get_bulkhead_registry",
             side_effect=ImportError("not installed"),
         ):
             util = aggregator._get_bulkhead_utilization("cell-0")

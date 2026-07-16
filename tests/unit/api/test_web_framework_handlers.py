@@ -297,11 +297,7 @@ class TestHealthCheckHttpStatusMappingBehavior:
 
 
 class TestBulkheadStatusBehavior:
-    """bulkhead_status() handler behavior."""
-
-    @pytest.fixture(autouse=True)
-    def _require_pro(self):
-        pytest.importorskip("baldur_pro")
+    """bulkhead_status() handler behavior (resolution chain always resolves)."""
 
     def test_returns_all_bulkheads_without_filter(self):
         """Returns all bulkheads when no name filter."""
@@ -321,7 +317,7 @@ class TestBulkheadStatusBehavior:
         mock_registry.get_all_states.return_value = {"db": mock_state}
 
         with patch(
-            "baldur_pro.services.bulkhead.get_bulkhead_registry",
+            "baldur.services.bulkhead.registry.get_bulkhead_registry",
             return_value=mock_registry,
         ):
             resp = bulkhead_status(_make_ctx())
@@ -338,7 +334,7 @@ class TestBulkheadStatusBehavior:
         mock_registry.get_all_states.return_value = {}
 
         with patch(
-            "baldur_pro.services.bulkhead.get_bulkhead_registry",
+            "baldur.services.bulkhead.registry.get_bulkhead_registry",
             return_value=mock_registry,
         ):
             ctx = _make_ctx(query={"name": "nonexistent"})

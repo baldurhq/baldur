@@ -137,9 +137,10 @@ class TrafficGate:
 
         Fail-open on every failure class (the request proceeds ungated), but the
         log severity distinguishes expected unavailability from unexpected errors:
-        registry-absent (PRO not installed) and unknown-name skips are routine;
-        an unexpected error means the bulkhead contract was violated and is
-        logged loudly so the next contract-class bug surfaces instead of hiding.
+        unknown-name skips are routine; an unexpected error means the bulkhead
+        contract was violated and is logged loudly so the next contract-class
+        bug surfaces instead of hiding. The resolution chain always yields a
+        registry, so there is no registry-absent branch.
 
         Args:
             bulkhead_name: bulkhead name
@@ -147,21 +148,13 @@ class TrafficGate:
             metadata: additional metadata
             timeout: upper bound (seconds) on how long the bulkhead may wait for
                 capacity — not a guarantee of waiting. None fails fast. Semaphore
-                compartments honor it; ThreadPool compartments return an
+                compartments honor it; thread-pool compartments return an
                 immediate verdict regardless (their bounded queue absorbs bursts).
         """
         try:
-            from baldur.factory.registry import ProviderRegistry
+            from baldur.services.bulkhead.registry import get_bulkhead_registry
 
-            registry = ProviderRegistry.bulkhead_registry.safe_get()
-            if registry is None:
-                # PRO not installed — expected degradation, fail-open.
-                logger.warning(
-                    "traffic_gate.bulkhead_failed",
-                    bulkhead_name=bulkhead_name,
-                )
-                return False, None
-            bulkhead = registry.get(bulkhead_name)
+            bulkhead = get_bulkhead_registry().get(bulkhead_name)
 
             if not bulkhead.try_acquire(timeout=timeout):
                 return False, TrafficDecision(
@@ -346,12 +339,9 @@ class TrafficGate:
     def _release_bulkhead_internal(self, bulkhead_name: str) -> None:
         """Internal bulkhead release."""
         try:
-            from baldur.factory.registry import ProviderRegistry
+            from baldur.services.bulkhead.registry import get_bulkhead_registry
 
-            registry = ProviderRegistry.bulkhead_registry.safe_get()
-            if registry is None:
-                raise RuntimeError("baldur_pro BulkheadRegistry not registered")
-            bulkhead = registry.get(bulkhead_name)
+            bulkhead = get_bulkhead_registry().get(bulkhead_name)
             bulkhead.release()
         except Exception as e:
             logger.warning(

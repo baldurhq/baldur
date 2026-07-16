@@ -98,15 +98,16 @@ Each pattern handles one kind of failure for you. Start with the free OSS buildi
 | The process is told to shut down | Drain in-flight work before exiting | [Graceful Shutdown](../oss/graceful-shutdown.md) |
 
 There is more in the free tier too: [Metrics](../oss/metrics.md),
-[System Control](../oss/system-control.md), and [Precomputed Cache](../oss/precomputed-cache.md).
+[System Control](../oss/system-control.md), [Bulkhead](bulkhead.md) isolation,
+and [Precomputed Cache](../oss/precomputed-cache.md).
 
 ### Free to start, production-grade when you need it
 
 The OSS patterns above are free and enough to get hooked. When you run Baldur in production for a
 team, **PRO** adds the heavier machinery: a durable
 [dead-letter queue with replay](../pro/dlq-replay.md) that captures failed work so nothing is
-lost, an [audit trail](../pro/audit.md), [bulkhead](../pro/bulkhead.md) isolation,
-[canary recovery](../pro/canary-recovery.md), and self-monitoring that
+lost, an [audit trail](../pro/audit.md), thread-pool [bulkhead](bulkhead.md)
+isolation, [canary recovery](../pro/canary-recovery.md), and self-monitoring that
 [escalates to a human](../pro/meta-watchdog.md) when Baldur itself gets stuck.
 
 ## See also

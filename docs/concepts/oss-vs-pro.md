@@ -23,11 +23,11 @@ relicenses anything in the core.
 | System control (runtime on/off) | ✅ | ✅ |
 | Built-in web console (operate & recover) | ✅ | ✅ (＋PRO panels) |
 | Precomputed cache | ✅ | ✅ |
+| Bulkhead isolation | ✅ | ✅ (＋thread-pool) |
 | Dead-letter queue + replay | — | ✅ |
 | Audit trail (hash-chained, exportable) | — | ✅ |
 | Unified notification / alerting | — | ✅ |
 | Emergency mode (coordinated load shedding) | — | ✅ |
-| Bulkhead isolation (productized) | — | ✅ |
 | Throttle / adaptive rate limiting | — | ✅ |
 | Canary Recovery (config rollout + auto-rollback) | — | ✅ |
 | Governance gates for risky automation | — | ✅ |
@@ -75,6 +75,15 @@ the durable/coordinated machinery is PRO. This is intentional — you opt in onc
 in code, and the capability becomes real when you add the PRO package and a
 license. PRO-only settings left in an OSS install are simply **inert**; an OSS
 deployment never breaks because a PRO knob was present.
+
+[Bulkhead](foundations/bulkhead.md) draws the same line inside one feature. The
+compartments, the registry, the `@bulkhead` decorator, and the metrics are all
+core — semaphore isolation works fully on OSS. PRO upgrades the *isolation
+strength*: a compartment that requests `thread_pool` isolation gets a dedicated
+worker pool whose execution timeout **frees the caller** when a task runs away
+(on the OSS semaphore fallback, the timeout bounds only the wait for admission —
+once admitted, a hung call occupies the calling thread until it returns). The
+same code runs on both tiers; OSS logs a startup warning naming the fallback.
 
 ## A note on naming: "canary"
 

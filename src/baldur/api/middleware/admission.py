@@ -9,10 +9,13 @@ framework-free decision function adapters can compose, mirroring
 
 Capability ladder
 -----------------
-Per-tier Bulkhead concurrency isolation — the priority-*differentiating* part —
-lives in ``baldur_pro``. The ``ProviderRegistry.bulkhead_registry`` slot is
-empty in OSS and populated only by ``baldur_pro._register_singleton_providers``,
-so admission gates on **bulkhead-registry presence**:
+Admission control — the priority-*differentiating* per-tier gate — is a
+``baldur_pro`` capability even though the bulkhead primitives themselves ship
+in the core. The ``ProviderRegistry.bulkhead_registry`` slot is empty in OSS
+and populated only by ``baldur_pro._register_singleton_providers`` (the core's
+own bulkhead registry deliberately does NOT register into it), so admission
+gates on **slot presence** — deliberately slot-direct, never the resolution
+chain:
 
 - **baldur_pro absent (OSS)** — the registry slot is empty, so
   ``check_admission`` is a clean no-op (``active=False``): it classifies
@@ -105,6 +108,8 @@ def _bulkhead_registry():
     Presence of this registry is the capability gate: it is populated only by
     ``baldur_pro._register_singleton_providers``. ``None`` (empty slot or
     factory unavailable) means OSS -> ``check_admission`` is a clean no-op.
+    Deliberately reads the slot directly (NOT the bulkhead resolution chain):
+    the chain always resolves, which would flip admission live on OSS.
     Resolved lazily so unit tests can patch ``ProviderRegistry`` and so a slim
     install does not break import of this module.
     """

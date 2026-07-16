@@ -413,9 +413,7 @@ class CellHealthAggregator:
         Uses BulkheadRegistry.get_all_states() to read from local memory.
         """
         try:
-            from baldur_pro.services.bulkhead.registry import (
-                get_bulkhead_registry,
-            )
+            from baldur.services.bulkhead.registry import get_bulkhead_registry
 
             registry = get_bulkhead_registry()
             all_states = registry.get_all_states()
@@ -424,8 +422,6 @@ class CellHealthAggregator:
                 max_c = state.max_concurrent or 1
                 active = state.active_count or 0
                 return min(active / max_c, 1.0)
-        except ImportError:
-            pass
         except Exception as e:
             logger.warning(
                 "cell_health_aggregator.bulkhead_query_failed",

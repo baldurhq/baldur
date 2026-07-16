@@ -1,16 +1,17 @@
 """
-Bulkhead Status API - 격벽 상태 조회 엔드포인트.
+Bulkhead Status API - bulkhead state inspection endpoints.
 
-격벽 패턴의 현재 상태를 조회하는 REST API를 제공합니다.
-모든 격벽 또는 특정 격벽의 상태, 사용률, 거부 통계를 조회할 수 있습니다.
+Provides the REST API for inspecting the current state of the bulkhead
+pattern: all compartments or a single one, with utilization and rejection
+statistics.
 
 Endpoints:
-    GET /api/baldur/bulkhead/status/ - 모든 격벽 상태 조회
-    GET /api/baldur/bulkhead/status/?name=database - 특정 격벽 상태 조회
+    GET /api/baldur/bulkhead/status/ - all bulkhead states
+    GET /api/baldur/bulkhead/status/?name=database - a specific bulkhead's state
 
 Note:
-    예외 처리는 baldur_exception_handler로 위임됩니다.
-    settings.py의 REST_FRAMEWORK.EXCEPTION_HANDLER 설정 참조.
+    Exception handling is delegated to baldur_exception_handler.
+    See the REST_FRAMEWORK.EXCEPTION_HANDLER setting in settings.py.
 """
 
 from __future__ import annotations
@@ -22,23 +23,22 @@ from rest_framework.views import APIView
 
 from baldur.api.django.base import HandlerAPIView
 from baldur.api.handlers.bulkhead import bulkhead_status
-from baldur.factory.registry import ProviderRegistry
 from baldur.interfaces.web_framework import PermissionLevel
 from baldur.utils.time import utc_now
 
 
 class BulkheadStatusView(HandlerAPIView):
     """
-    격벽 상태 조회 API.
+    Bulkhead status API.
 
-    모든 격벽의 현재 상태를 조회하거나, 특정 격벽의 상태를 조회합니다.
-    각 격벽의 사용률, 활성 요청 수, 거부 통계 등을 반환합니다.
+    Returns the current state of every bulkhead, or of a single named one:
+    utilization, active request count, rejection statistics, etc.
 
     GET /api/baldur/bulkhead/status/
-        - 모든 격벽 상태 조회
+        - all bulkhead states
 
     GET /api/baldur/bulkhead/status/?name=database
-        - 특정 격벽 상태 조회
+        - a specific bulkhead's state
     """
 
     permission_level = PermissionLevel.PUBLIC
@@ -47,23 +47,19 @@ class BulkheadStatusView(HandlerAPIView):
 
 class BulkheadDetailView(APIView):
     """
-    특정 격벽 상세 조회 API.
+    Single-bulkhead detail API.
 
     GET /api/baldur/bulkhead/{name}/
-        - 특정 격벽의 상세 상태 조회
+        - detailed state of the named bulkhead
     """
 
     permission_classes: list = []  # Public endpoint
 
     def get(self, request: Request, name: str) -> Response:
         """Get detail for a specific bulkhead."""
-        registry = ProviderRegistry.bulkhead_registry.safe_get()
-        if registry is None:
-            raise NotFound(
-                detail={
-                    "error": "Bulkhead registry is unavailable (baldur_pro required)"
-                }
-            )
+        from baldur.services.bulkhead.registry import get_bulkhead_registry
+
+        registry = get_bulkhead_registry()
 
         try:
             bulkhead = registry.get(name)
