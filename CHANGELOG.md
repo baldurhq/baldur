@@ -27,6 +27,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - Circuit-breaker state values are now lowercase. **Breaking**
 - Admin config-write endpoints reject unknown fields with `400`. **Breaking**
 - `import baldur` is now lightweight — hot-path barrels load lazily (251→8 modules).
+- Provider factories resolving their own slot now raise `RuntimeError` instead of deadlocking.
 - Retry `outcome="exhausted"` now excludes non-retryable/budget/deadline aborts.
 - `protect()` fallback runs after retry; timeout/CB-open covered, CB still trips. **Breaking**
 

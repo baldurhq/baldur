@@ -52,6 +52,10 @@ class GenericProviderRegistry(Generic[T]):
         self._interface = interface
         self._auto_discover = auto_discover
         self._lock = threading.Lock()
+        # Per-thread flag set while get() invokes a provider factory under
+        # self._lock. Lets a re-entrant same-slot get() fail loud instead of
+        # deadlocking on the non-reentrant lock (see get()).
+        self._resolving = threading.local()
         # Cached instances are stored in a ContextVar so test fixtures can
         # swap them per Context (450 D5). The ContextVar default is a
         # process-shared dict so threads that did not inherit the parent
@@ -127,6 +131,22 @@ class GenericProviderRegistry(Generic[T]):
         if name in self._instances:
             return self._instances[name]
 
+        # Re-entrancy guard: the provider factory below runs while this
+        # thread holds the non-reentrant registry lock. A factory that
+        # (transitively) resolves an uncached name in its own slot would
+        # block on that lock forever — a deadlock that surfaces as a hang
+        # with no stack trace. Fail loud instead. Placed after the fast
+        # path so a factory may still read already-cached instances of the
+        # same slot (lock-free path).
+        if getattr(self._resolving, "active", False):
+            raise RuntimeError(
+                f"Re-entrant provider resolution for adapter type "
+                f"'{self._adapter_type}' (name={name!r}): a provider factory "
+                f"must not resolve its own registry slot — this would "
+                f"deadlock on the non-reentrant registry lock. Construct the "
+                f"instance without consulting the slot (slot-blind factory)."
+            )
+
         with self._lock:
             # Double check
             if name in self._instances:
@@ -139,7 +159,14 @@ class GenericProviderRegistry(Generic[T]):
                 )
 
             provider = self._providers[name]
-            instance = provider() if callable(provider) else provider
+            if callable(provider):
+                self._resolving.active = True
+                try:
+                    instance = provider()
+                finally:
+                    self._resolving.active = False
+            else:
+                instance = provider
 
             self._instances[name] = instance
             return instance
