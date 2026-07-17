@@ -522,6 +522,7 @@
                 + "Overrides the age filter above." }
           ] }
       ] },
+    { id: "bulkhead", title: "Bulkheads", pro: false, status: "/bulkheads" },
     { id: "emergency", title: "Emergency", pro: true, status: "/emergency/status",
       actions: [
         { label: "Trigger", path: "/emergency/trigger", method: "POST",
@@ -577,7 +578,6 @@
               help: "Recorded in the audit trail." }
           ] }
       ] },
-    { id: "bulkhead", title: "Bulkheads", pro: false, status: "/bulkheads" },
     { id: "canary", title: "Canary Rollouts", pro: true,
       status: "/canary/rollouts?include_completed=true", bodyRender: "canary_summary",
       drilldown: "canary",
