@@ -63,7 +63,7 @@ The clearest examples are audit and notification. On OSS, the core already
 surfaces as a structured event in your logs. What PRO adds is the machinery
 that turns those events into something a team operates on — the hash-chained,
 exportable audit trail that persists them as a compliance record, and unified
-notification that pushes an incident to a channel like Slack or PagerDuty
+notification that pushes an incident to a channel like Slack
 instead of waiting for someone to read the logs. In short: OSS observes and logs, PRO
 persists and pushes.
 
