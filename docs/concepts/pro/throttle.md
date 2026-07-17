@@ -106,8 +106,8 @@ deferred until the ramp completes — so the floodgates open on a schedule, not 
 with the context needed to run it again — into Baldur's dead-letter queue. When the related circuit
 breaker recovers, those parked requests are replayed automatically in batches, once the system has
 recovered far enough to take them. A burst that was rejected because the system was briefly
-overloaded is run later instead of lost. (This uses the DLQ + Replay subsystem, part of the same
-PRO tier.)
+overloaded is run later instead of lost. (This uses the
+[DLQ + Replay](../foundations/dlq-replay.md) subsystem.)
 
 **It moves in step with the circuit breaker.** Throttle and the circuit breaker share the same
 response-time data. Sustained critical latency that the throttle sees can feed the breaker's
@@ -181,7 +181,7 @@ v1.0: it is not part of the public operator-tunable environment-variable allowli
 ## See also
 
 - [Circuit Breaker](../oss/circuit-breaker.md) — stops calling a dependency that keeps failing; Adaptive Throttle shares its latency data and moves its limit in step with the breaker's state
-- [DLQ + Replay](dlq-replay.md) — where throttle-rejected requests are parked and from which they are auto-replayed on recovery
+- [DLQ + Replay](../foundations/dlq-replay.md) — where throttle-rejected requests are parked and from which they are auto-replayed on recovery
 - [Emergency Mode](emergency-mode.md) — the severity levels that freeze the throttle's limit changes during an incident
 - [Adaptive Throttle API Reference](../../reference/pro/throttle.md) — full options and signatures
 - [Admin REST API](../../reference/api-admin.md) — the read-only status surface

@@ -50,7 +50,7 @@ flowchart LR
     C["caller"] --> M["service mesh<br/>· mTLS · routing<br/>· connection retry"]
     M --> P
     subgraph P["your process"]
-        B["@baldur.protected<br/>· business retry · domain fallback<br/>· idempotency · replay (PRO)"]
+        B["@baldur.protected<br/>· business retry · domain fallback<br/>· idempotency · capture & replay"]
     end
     B --> D["dependency<br/>payment · database · API"]
 ```
@@ -64,7 +64,7 @@ reach, because they exist only inside your process:
 | **Visibility** — a proxy sees an HTTP status, not your call. It can't tell a retryable error from a fatal one, or know this request belongs to a critical-tier customer. | Baldur's decisions read the actual exception and the call's business context — order, customer, tier — which it pulls from the call site automatically (a `PolicyContext`). |
 | **Semantics** — the wire retries a request blind; it has no idea two attempts are the *same* operation, so a retried charge double-charges. | Idempotency keyed to *your* business identifier, so a repeated operation runs its side effect once. |
 | **Action** — on failure a proxy can only error out or reroute; it can't compute a domain answer. | A fallback returns a safe, domain-specific value, so the caller still gets a useful response. |
-| **State** — a proxy is stateless per request: once a call fails for good, the work is gone. | **With PRO:** failed work is captured and replayed when the dependency recovers — or a half-finished, multi-step operation is unwound. |
+| **State** — a proxy is stateless per request: once a call fails for good, the work is gone. | Failed work is captured into a dead-letter queue with the context needed to run it again, and replays when the dependency recovers. |
 
 Two of these you reach through the same facade you would use anyway — by business key, both opt-in:
 
@@ -84,8 +84,8 @@ def charge(order_id: str) -> dict:
 
 `idempotency_key="order_id"` makes the dedup key *your* order id — the thing the network can't see —
 so a retried call charges once. `fallback=` hands the caller a domain answer when the charge can't
-go through. Capturing and replaying failed work durably is the
-[dead-letter queue](../pro/dlq-replay.md), a PRO capability.
+go through. Capturing and replaying failed work is the
+[dead-letter queue](dlq-replay.md), reached from the same decorator with `dlq=True`.
 
 ### Running both, without fighting
 
@@ -107,5 +107,5 @@ circuit breaking — trip on connection health in the mesh, trip on business-err
 - [What is self-healing?](self-healing.md) — the problem Baldur exists to solve
 - [Composing with @baldur.protected](composition.md) — the one decorator these patterns live behind
 - [Idempotency](../oss/idempotency.md) — make a retried operation safe to repeat, by business key
-- [DLQ + Replay](../pro/dlq-replay.md) — the PRO durable capture-and-replay for failed work
+- [DLQ + Replay](dlq-replay.md) — capture-and-replay for failed work, the mesh's missing memory
 - [Getting Started](../../getting-started/index.md) — protect an endpoint in five minutes

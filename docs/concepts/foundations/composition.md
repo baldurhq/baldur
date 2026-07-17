@@ -91,7 +91,7 @@ for:
 | Circuit breaker | **Yes** | `circuit_breaker=False` to turn it off |
 | Retry with backoff | No | `retry=True` |
 | Fallback | No | pass `fallback=<callable>` |
-| Dead-letter queue (PRO) | No | `dlq=True` |
+| Dead-letter queue | No | `dlq=True` |
 | Timeout (wall-clock bound) | No | pass `timeout=<seconds>` |
 | Idempotency (dedup) | No | pass `idempotency_key=...` |
 
@@ -132,11 +132,11 @@ attempts?) without catching an exception, `protect_with_meta()` (and its async c
   and all, so a retried charge can charge twice. Pass `idempotency_key=` (or make the function
   idempotent yourself) when the work is not naturally safe to repeat. Baldur will not silently
   assume it is. See [Idempotency](../oss/idempotency.md).
-- **The dead-letter queue is a PRO feature.** You can pass `dlq=True` on an OSS install, but the
-  queue's storage ships with **PRO** — without it, a final failure is not captured, so the work is
-  not set aside for later. With **PRO**, `dlq=True` durably records every failed operation, nothing
-  is lost across restarts, and you can replay or redrive the backlog once the dependency recovers.
-  See [DLQ + Replay](../pro/dlq-replay.md).
+- **`dlq=True` captures the failure, on either tier.** A final failure is recorded with the context
+  needed to run it again, the backlog is browsable in the web console, and entries can be retried
+  once the dependency recovers — no PRO required. PRO adds the operate-at-scale surface: one-click
+  batch replay, adaptive pacing, and archive/purge retention.
+  See [DLQ + Replay](dlq-replay.md).
 - **The fallback runs *outside* the timeout clock, so keep it cheap and local.** The timeout bounds
   the inner call; when it fires, the fallback is what runs *next*, so it cannot be bounded by the
   same clock. Serve something fast — a cached value, a static default — not a second network call.
@@ -181,5 +181,5 @@ retry's backoff, idempotency's storage — documented in their own guides and li
 - [Circuit Breaker](../oss/circuit-breaker.md) — the outermost layer, and a good first read
 - [Retry](../oss/retry.md) — the retry-with-backoff stage
 - [Idempotency](../oss/idempotency.md) — make a retried side effect safe to repeat
-- [DLQ + Replay](../pro/dlq-replay.md) — the PRO durable dead-letter queue
+- [DLQ + Replay](dlq-replay.md) — where `dlq=True` sets a final failure aside, and how it replays
 - [Facade API reference](../../reference/baldur/facade.md) — every option and signature

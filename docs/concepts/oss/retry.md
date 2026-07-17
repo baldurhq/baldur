@@ -76,10 +76,10 @@ A few things to keep in mind:
   while `@baldur.protected` re-raises the original error (or runs your fallback, if you supplied
   one). With DLQ routing enabled, the failed operation is also preserved in the Dead Letter Queue
   (DLQ) for inspection or later replay.
-- **DLQ routing is a PRO feature.** Retry and backoff are OSS; the Dead Letter Queue store that
-  preserves an exhausted operation for later replay ships in the PRO package. Without it, an
-  exhausted retry still surfaces the error to the caller. The operation simply isn't captured for
-  replay.
+- **DLQ routing is opt-in, not automatic.** Retry and backoff run on their own; the Dead Letter
+  Queue captures an exhausted operation only where you asked for it (`dlq=True`). Without that
+  flag, an exhausted retry still surfaces the error to the caller — the operation simply isn't
+  captured for replay. See [DLQ + Replay](../foundations/dlq-replay.md).
 
 | What you observe | When it happens |
 |------------------|-----------------|

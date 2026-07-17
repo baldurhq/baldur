@@ -24,7 +24,8 @@ relicenses anything in the core.
 | Built-in web console (operate & recover) | ✅ | ✅ (＋PRO panels) |
 | Precomputed cache | ✅ | ✅ |
 | Bulkhead isolation | ✅ | ✅ (＋thread-pool) |
-| Dead-letter queue + replay | — | ✅ |
+| Dead-letter queue + replay (capture, view, single-entry actions) | ✅ | ✅ |
+| DLQ at scale (batch replay from the console, adaptive pacing, durable outbox, archive/purge) | — | ✅ |
 | Audit trail (hash-chained, exportable) | — | ✅ |
 | Unified notification / alerting | — | ✅ |
 | Emergency mode (coordinated load shedding) | — | ✅ |
@@ -57,24 +58,19 @@ OSS and have the **same code** light up under PRO — but that means a few
 features expose an OSS *API surface* whose heavier *backing* ships with PRO.
 Knowing exactly where that line falls avoids surprises.
 
-The clearest example is the dead-letter queue:
+The clearest examples are audit and notification. On OSS, the core already
+*emits* everything worth knowing: every state change, block, and recovery
+surfaces as a structured event in your logs. What PRO adds is the machinery
+that turns those events into something a team operates on — the hash-chained,
+exportable audit trail that persists them as a compliance record, and unified
+notification that pushes an incident to a channel like Slack or PagerDuty
+instead of waiting for someone to read the logs. In short: OSS observes and logs, PRO
+persists and pushes.
 
-```python
-@baldur.protected("charge-customer", retry=True, dlq=True)
-def charge(order_id: str) -> dict:
-    return payment_gateway.charge(order_id)
-```
-
-- **On OSS**, `dlq=True` is accepted and your code is correct, but there is no
-  durable store behind it — a final failure is not set aside for later replay.
-- **On PRO**, the exact same decorator now records every failed operation
-  durably, survives restarts, and can be replayed once the dependency recovers.
-
-The same shape applies to audit and notification: the hooks exist in the core,
-the durable/coordinated machinery is PRO. This is intentional — you opt in once,
-in code, and the capability becomes real when you add the PRO package and a
-license. PRO-only settings left in an OSS install are simply **inert**; an OSS
-deployment never breaks because a PRO knob was present.
+This is intentional — the events are already flowing on OSS, and the
+capability becomes real when you add the PRO package and a license. PRO-only
+settings left in an OSS install are simply **inert**; an OSS deployment never
+breaks because a PRO knob was present.
 
 [Bulkhead](foundations/bulkhead.md) draws the same line inside one feature. The
 compartments, the registry, the `@bulkhead` decorator, and the metrics are all
@@ -93,8 +89,8 @@ stating what each does:
 
 - **Circuit-breaker half-open recovery (OSS).** When an OSS circuit breaker
   leaves the OPEN state, it does not slam 100% of traffic back at the
-  dependency. It admits a bounded number of concurrent probe calls (the
-  `half_open_max_calls` slots) and reverts to OPEN at the first probe failure.
+  dependency. It admits a bounded number of concurrent probe calls (capped by
+  `BALDUR_CB_HALF_OPEN_MAX_CALLS`) and reverts to OPEN at the first probe failure.
   This is ordinary half-open probing — it does not step traffic back through
   graduated percentages — and it operates on **in-process traffic to one
   dependency**. See the [circuit breaker](oss/circuit-breaker.md).
