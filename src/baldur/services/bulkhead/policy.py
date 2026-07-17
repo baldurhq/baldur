@@ -222,7 +222,7 @@ class AsyncBulkheadPolicy:
         """
         try:
             async with self._async_bulkhead.acquire(timeout=self._timeout):
-                result = await func(*args, **kwargs)
+                result = await func(*args, **kwargs)  # type: ignore[misc]
                 return PolicyResult(
                     value=result,
                     outcome=PolicyOutcome.SUCCESS,

@@ -20,7 +20,7 @@ Usage:
 from __future__ import annotations
 
 import threading
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import structlog
 
@@ -382,7 +382,10 @@ def get_bulkhead_registry() -> BulkheadRegistry:
 
     slot_registry = ProviderRegistry.bulkhead_registry.safe_get()
     if slot_registry is not None:
-        return slot_registry
+        # The slot's static type is the interface protocol; the chain-getter
+        # contract is that slot providers are registry overlays subclassing
+        # this module's BulkheadRegistry.
+        return cast("BulkheadRegistry", slot_registry)
 
     global _registry
     if _registry is None:

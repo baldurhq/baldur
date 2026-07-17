@@ -22,7 +22,11 @@ from baldur.interfaces.repositories import FailedOperationStatus
 from baldur.utils.time import utc_now
 
 if TYPE_CHECKING:
-    pass
+    from baldur.interfaces.repositories import (
+        FailedOperationData,
+        FailedOperationRepository,
+    )
+    from baldur.models.dlq import DLQConfig
 
 logger = structlog.get_logger()
 
@@ -31,6 +35,37 @@ __all__ = ["EntryOperationsMixin"]
 
 class EntryOperationsMixin:
     """Mixin providing DLQ entry operations using Repository pattern."""
+
+    if TYPE_CHECKING:
+        # Host contract — the composed service (dlq_read.service.DLQReadService)
+        # provides ``config`` / ``repository`` / ``_log_dlq_audit`` via
+        # DLQCaptureService, and ``_execute_replay`` / ``_emit_replay_exhausted``
+        # via ReplayExecutionMixin. Typing-only stubs; no runtime definition,
+        # so the MRO is unchanged.
+        config: DLQConfig
+
+        @property
+        def repository(self) -> FailedOperationRepository: ...
+
+        def _execute_replay(self, entry: FailedOperationData) -> bool: ...
+
+        def _emit_replay_exhausted(self, entry: FailedOperationData) -> None: ...
+
+        def _log_dlq_audit(
+            self,
+            action: str,
+            dlq_id: str,
+            domain: str,
+            failure_type: str = "",
+            error_message: str = "",
+            success: bool = True,
+            actor_id: str | None = None,
+            request: Any = None,
+            reason: str = "",
+            ticket_url: str | None = None,
+            previous_total_retries: int | None = None,
+            origin_trace_id: str | None = None,
+        ) -> None: ...
 
     def retry_entry(self, pk: str, reason: str | None = None) -> dict[str, Any]:
         """

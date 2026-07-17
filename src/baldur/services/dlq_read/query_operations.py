@@ -14,7 +14,11 @@ from baldur.models.dlq import CleanupStats
 from baldur.utils.time import utc_now
 
 if TYPE_CHECKING:
-    from baldur.interfaces.repositories import FailedOperationData
+    from baldur.interfaces.repositories import (
+        FailedOperationData,
+        FailedOperationRepository,
+    )
+    from baldur.models.dlq import DLQConfig
 
 logger = structlog.get_logger()
 
@@ -23,6 +27,15 @@ __all__ = ["QueryOperationsMixin"]
 
 class QueryOperationsMixin:
     """Mixin providing DLQ query operations."""
+
+    if TYPE_CHECKING:
+        # Host contract — the composed service (dlq_read.service.DLQReadService)
+        # provides ``config`` / ``repository`` via DLQCaptureService.
+        # Typing-only stubs; no runtime definition, so the MRO is unchanged.
+        config: DLQConfig
+
+        @property
+        def repository(self) -> FailedOperationRepository: ...
 
     def get_pending_entries(
         self,
