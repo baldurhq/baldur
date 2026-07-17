@@ -120,10 +120,10 @@ The **`@bulkhead` decorator** is the everyday entry point: name the compartment 
 built-ins, or a compartment you have registered — and it dispatches sync or async automatically.
 `@bulkhead_for_database` and `@bulkhead_for_cache` pick the per-alias / per-instance compartment
 for you. The four built-ins are always available; a custom compartment must be registered before
-you decorate a call with it, and decorating one that was never registered fails fast with
-`BulkheadNotFoundError` — the error lists every compartment that *is* registered, so a typo or a
-skipped setup step is immediately obvious, and it behaves identically whether the call is sync or
-async. An optional **fallback** answers *only* when the call was rejected because the compartment
+the first decorated call runs, and a call that names a compartment that was never registered fails
+fast with `BulkheadNotFoundError` — the error lists every compartment that *is* registered, so a
+typo or a skipped setup step is immediately obvious, and it behaves identically whether the call is
+sync or async. An optional **fallback** answers *only* when the call was rejected because the compartment
 was full — your own business exceptions propagate unchanged, and the not-registered error is
 raised before any fallback is considered, so neither an application bug nor a setup mistake ever
 silently turns into a fallback response.
