@@ -10,6 +10,11 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+### Fixed
+
+- `dlq_outbox_current_size` gauge now reports the outbox queue depth (was never set).
+- `overflow_strategy` help text now matches OSS synchronous eviction (background worker is PRO).
+
 ## [1.2.0] - 2026-07-17
 
 ### Added

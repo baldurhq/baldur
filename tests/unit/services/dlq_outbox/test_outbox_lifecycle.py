@@ -194,6 +194,25 @@ class TestOutboxPutContract:
         assert before <= enqueue_time <= after
         assert stored_kwargs is kwargs
 
+    def test_put_refreshes_current_size_gauge(
+        self, build_outbox, make_sync_writer, collected_writes
+    ):
+        """D4 queue-depth gauge tracks RingBuffer size, refreshed on each put."""
+        # Given
+        from baldur.services.metrics.definitions import dlq_outbox_current_size
+
+        writer = make_sync_writer(collected_writes)
+        outbox, buffer, _ = build_outbox(writer)
+        # Worker not started — entries stay buffered so size is deterministic.
+
+        # When
+        outbox.put({"domain": "payment", "failure_type": "PG_TIMEOUT"})
+        outbox.put({"domain": "payment", "failure_type": "PG_TIMEOUT"})
+
+        # Then — gauge reflects the buffer size observed at the last put
+        assert buffer.size == 2
+        assert dlq_outbox_current_size._value.get() == 2
+
 
 # =============================================================================
 # Contract — Outbox.from_settings constructs RingBuffer per per-feature settings

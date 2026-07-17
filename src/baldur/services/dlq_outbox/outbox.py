@@ -138,7 +138,16 @@ class Outbox:
         """
         # D4 — wrap with enqueue_time so the worker can observe processing
         # delay when popping the entry.
-        return self._buffer.put((time.monotonic(), kwargs))
+        accepted = self._buffer.put((time.monotonic(), kwargs))
+        # D4 — queue-depth leading indicator, refreshed lazily on each put
+        # (reads the lock-maintained RingBuffer size; fail-open on metric errors).
+        try:
+            from baldur.services.metrics.definitions import dlq_outbox_current_size
+
+            dlq_outbox_current_size.set(self._buffer.size)
+        except Exception:
+            pass
+        return accepted
 
     # ------------------------------------------------------------------
     # Lifecycle
