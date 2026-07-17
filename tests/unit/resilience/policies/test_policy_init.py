@@ -12,6 +12,8 @@ UNIT_TEST_GUIDELINES.md 준수:
 
 from __future__ import annotations
 
+import importlib.util
+
 import pytest
 
 # =============================================================================
@@ -228,12 +230,18 @@ class TestPoliciesLazyImportBehavior:
         assert "BulkheadPolicy" in policies_mod.__all__
 
     def test_throttle_policy_soft_removed_but_resolvable(self):
-        """``ThrottlePolicy`` is absent from ``__all__`` (honest advertisement)
-        yet still resolvable for existing import statements."""
+        """``ThrottlePolicy`` is absent from ``__all__`` (honest advertisement).
+        With the PRO package installed the name still resolves for existing
+        import statements; pure OSS gets an actionable PRO-tier
+        ``AttributeError`` instead of a bare unknown-attribute error."""
         import baldur.resilience.policies as policies_mod
 
         assert "ThrottlePolicy" not in policies_mod.__all__
-        assert policies_mod.ThrottlePolicy is not None
+        if importlib.util.find_spec("baldur_pro") is not None:
+            assert policies_mod.ThrottlePolicy is not None
+        else:
+            with pytest.raises(AttributeError, match="PRO tier"):
+                _ = policies_mod.ThrottlePolicy
 
 
 # =============================================================================
