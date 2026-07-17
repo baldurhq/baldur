@@ -11,6 +11,8 @@ Verification targets:
 
 from __future__ import annotations
 
+import importlib.util
+
 import pytest
 
 from baldur.api.admin.registry import (
@@ -85,21 +87,31 @@ class TestPhase2aRegistrationContract:
         assert expected.issubset(paths)
 
     def test_dlq_routes_registered(self):
-        """9 DLQ routes."""
+        """DLQ routes — the OSS-set (read + single-entry actions) always
+        registers; the PRO-set (batch replay + management lifecycle) registers
+        only when ``baldur_pro`` is installed (pure OSS → absent → 404)."""
         reg = get_admin_registry()
         paths = {(r.method.value, r.path) for r in reg.all_routes()}
-        expected = {
-            ("POST", "/dlq/replay"),
+        expected_oss = {
             ("GET", "/dlq/cleanup/stats"),
-            ("POST", "/dlq/cleanup/archive"),
-            ("POST", "/dlq/cleanup/purge"),
             ("GET", "/dlq/list"),
+            ("GET", "/dlq/facets"),
             ("GET", "/dlq/{pk}"),
             ("POST", "/dlq/{pk}/retry"),
             ("POST", "/dlq/{pk}/resolve"),
+            ("POST", "/dlq/{pk}/force-redrive"),
+        }
+        expected_pro = {
+            ("POST", "/dlq/replay"),
+            ("POST", "/dlq/cleanup/archive"),
+            ("POST", "/dlq/cleanup/purge"),
             ("POST", "/dlq/test/create"),
         }
-        assert expected.issubset(paths)
+        assert expected_oss.issubset(paths)
+        if importlib.util.find_spec("baldur_pro") is not None:
+            assert expected_pro.issubset(paths)
+        else:
+            assert not (expected_pro & paths)
 
     def test_emergency_routes_registered(self):
         """9 emergency routes (status + trigger + release + recovery + history
