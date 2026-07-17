@@ -35,19 +35,30 @@ development backend.
 
 ### Redis (shared across workers)
 
-The moment you run more than one worker or host, point Baldur at Redis so every
-process shares one view of its state. It is a single variable, no code change:
+The moment you run more than one worker or host, point Baldur at Redis so its
+bookkeeping lives in one store that every process shares. It is a single
+variable, no code change:
 
 ```bash
 pip install baldur-framework[redis]
 export BALDUR_REDIS_URL=redis://localhost:6379/0
 ```
 
-That one URL is the canonical routing input for Baldur's Redis consumers —
+That one URL is the canonical routing input for Baldur's Redis consumers:
 circuit breaker state, idempotency keys, rate-limit windows, the dead-letter
-queue, the shared cache tier, and the system-control kill switch — so a duplicate
-key, an open breaker, or a disabled kill switch now applies fleet-wide instead of
-per process.
+queue, the shared cache tier, and the system-control kill switch. A duplicate
+idempotency key is now rejected fleet-wide instead of per worker, and every
+worker's breaker state and dead letters land in the same store.
+
+Two of those consumers share *state* through Redis without sharing *decisions*,
+and the difference matters when you plan around an incident. Each circuit
+breaker still opens and closes from its own worker-local counts; Redis gives it
+restart recovery and half-open coordination, not a fleet-wide trip. The
+[Circuit Breaker guide](../oss/circuit-breaker.md) covers how one worker's OPEN
+can reach the rest of the fleet (a PRO option). The kill switch reaches the
+whole fleet only after you deliberately select its Redis state backend; by
+default its state lives in a local file on each host, and the
+[System Control guide](../oss/system-control.md) walks through that choice.
 
 **High availability.** For a Redis Sentinel topology, use the `redis+sentinel://`
 scheme with the master name and the sentinel hosts; credentials stay out of the
