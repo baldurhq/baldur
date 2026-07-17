@@ -63,7 +63,7 @@ class TestProtectDlqChainBehavior:
             raise ValueError("always_fails")
 
         with patch(
-            "baldur_pro.services.dlq.store_to_dlq",
+            "baldur.services.retry_handler.sinks.store_to_dlq",
             return_value=MagicMock(success=True, dlq_id="dlq-123", error=None),
         ) as mock_store:
             with pytest.raises(ValueError):
@@ -93,7 +93,7 @@ class TestProtectDlqChainBehavior:
         retry_policy = RetryPolicy(config=self._retry_cfg(enable_dlq=False))
 
         with patch(
-            "baldur_pro.services.dlq.store_to_dlq",
+            "baldur.services.retry_handler.sinks.store_to_dlq",
             return_value=MagicMock(success=True, dlq_id="x", error=None),
         ) as mock_store:
             with pytest.raises(ValueError):
@@ -115,7 +115,7 @@ class TestProtectDlqChainBehavior:
             raise RuntimeError("boom")
 
         with patch(
-            "baldur_pro.services.dlq.store_to_dlq",
+            "baldur.services.retry_handler.sinks.store_to_dlq",
             return_value=MagicMock(success=True, dlq_id="dlq-1", error=None),
         ) as mock_store:
             with pytest.raises(RuntimeError):
@@ -137,7 +137,7 @@ class TestProtectDlqChainBehavior:
             raise ValueError("boom")
 
         with patch(
-            "baldur_pro.services.dlq.store_to_dlq",
+            "baldur.services.retry_handler.sinks.store_to_dlq",
             return_value=MagicMock(success=True, dlq_id="dlq-7", error=None),
         ):
             outcome = protect_with_meta(

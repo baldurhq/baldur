@@ -12,8 +12,8 @@ hot path:
   ``_baldur_pro_dlq_unavailable`` (D1b / G4)
 - ``baldur.metrics.event_handlers._metrics_init_failed`` +
   surrounding caches (D1d / G7)
-- ``baldur_pro.services.dlq.overflow._overflow_check_counter`` +
-  ``_overflow_last_ratio`` (D4 / G6)
+- ``baldur.services.dlq_capture.overflow._overflow_check_counter`` +
+  ``_overflow_last_ratio`` (overflow check relocated to OSS)
 
 D7 wires each piece into ``reset_protect_caches()`` so a single reset
 call cascades to every new sticky / counter / cached-ref. This test
@@ -24,7 +24,6 @@ this round was designed to prevent.
 
 from __future__ import annotations
 
-import sys
 from unittest.mock import patch
 
 import pytest
@@ -70,10 +69,24 @@ class TestResetProtectCachesD7ChainContract:
         mock_reset.assert_called_once()
 
     def test_chain_calls_reset_overflow_state(self):
-        """D4 — overflow periodic-N counter reset is in the chain."""
-        pytest.importorskip("baldur_pro")
+        """The overflow periodic-N counter reset is in the chain.
+
+        The overflow check + its ``reset_overflow_state`` now live in the OSS
+        ``baldur.services.dlq_capture`` package (unconditional import — no
+        PRO gating), so the chain resolves it there.
+        """
         with patch(
-            "baldur_pro.services.dlq.overflow.reset_overflow_state",
+            "baldur.services.dlq_capture.reset_overflow_state",
+            autospec=True,
+        ) as mock_reset:
+            reset_protect_caches()
+
+        mock_reset.assert_called_once()
+
+    def test_chain_calls_reset_dlq_capture_service(self):
+        """The OSS DLQ capture singleton reset is in the chain."""
+        with patch(
+            "baldur.services.dlq_capture.reset_dlq_capture_service",
             autospec=True,
         ) as mock_reset:
             reset_protect_caches()
@@ -87,27 +100,3 @@ class TestResetProtectCachesD7ChainContract:
     # individual chain tests (CB recorder, event-handler cache, overflow
     # state) still verify the reset-cascade invariant for the surviving
     # sticky flags one at a time.
-
-
-class TestResetProtectCachesProAbsentBehavior:
-    """#659 G1/D1 — ``reset_protect_caches()`` fails open when ``baldur_pro`` is
-    absent. ``reset_overflow_state`` is the lone gated symbol in the reset chain;
-    its import is guarded inside ``try/except ImportError`` so the name is never
-    bound-then-called PRO-absent (claim-wiring fail-open). The PRO-present cascade is
-    covered by ``test_chain_calls_reset_overflow_state`` above; this drives the
-    PRO-absent branch — the path only the mirror CI / repro harness otherwise
-    exercises — so a guard regression is caught in the normal monorepo suite too.
-    Runs unchanged in both tiers: ``sys.modules[...] = None`` forces the same
-    ``ImportError`` the mirror raises naturally.
-    """
-
-    def test_reset_protect_caches_pro_absent_does_not_crash(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
-        # Given: the gated overflow submodule resolves to None (PRO absent on the
-        # mirror), so its function-body import raises ImportError on entry.
-        monkeypatch.setitem(sys.modules, "baldur_pro.services.dlq.overflow", None)
-
-        # When / Then: the reset chain completes without TypeError/NameError —
-        # a regression that moved the call outside the try would crash here.
-        reset_protect_caches()

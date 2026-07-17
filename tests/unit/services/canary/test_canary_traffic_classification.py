@@ -105,14 +105,11 @@ class TestDLQCanaryMetadataInjectionBehavior:
         from baldur.models.dlq import DLQConfig
         from baldur_pro.services.dlq.store_operations import StoreOperationsMixin
 
-        mixin = StoreOperationsMixin()
         mock_repo = MagicMock()
         mock_failed_op = MagicMock()
         mock_failed_op.id = "test-id"
         mock_repo.create.return_value = mock_failed_op
-        mixin.repository = mock_repo
-        mixin.is_enabled = True
-        mixin.config = DLQConfig()
+        mixin = StoreOperationsMixin(config=DLQConfig(), repository=mock_repo)
 
         # When — call store_failure inside canary domain context
         with DomainContext("canary"):
