@@ -10,6 +10,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-07-17
+
 ### Added
 
 - OSS DLQ durably captures + replays failed ops, incl. auto-replay on CB recovery (no PRO).
