@@ -126,4 +126,4 @@ export BALDUR_REDIS_URL=redis://localhost:6379/0
 
 - [Composing with @baldur.protected](../concepts/foundations/composition.md) — how the facade layers retry, fallback, and idempotency
 - [Circuit Breaker](../concepts/oss/circuit-breaker.md) — the pattern your tasks travel through
-- [DLQ + Replay](../concepts/pro/dlq-replay.md) — durable failure capture and replay (PRO)
+- [DLQ + Replay](../concepts/foundations/dlq-replay.md) — durable failure capture and replay

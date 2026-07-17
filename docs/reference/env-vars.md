@@ -19,20 +19,17 @@ BALDUR_CB_RECOVERY_TIMEOUT=60
 BALDUR_CB_HALF_OPEN_MAX_CALLS=3
 BALDUR_RETRY_MAX_ATTEMPTS=3
 BALDUR_RETRY_BASE_DELAY=1.0
+BALDUR_RETRY_MAX_ELAPSED=30.0  # total wall-clock retry budget (s); unset = no budget. Distinct from the per-sleep max_delay cap.
 BALDUR_IDEMPOTENCY_ENABLED=true
 BALDUR_IDEMPOTENCY_DEFAULT_CACHE_TTL=60
 BALDUR_IDEMPOTENCY_GATE_MEMORY_TTL_SECONDS=1800
 ```
 
-## DLQ (PRO)
+## DLQ
 
-Requires the `baldur_pro` package — the DLQ store ships only in `baldur_pro`.
-Without it these knobs are a no-op: the OSS path is a no-op recorder that
-discards the operation instead of capturing it for replay. The failure still
-raises to the caller — only the durable, replayable record is missing. The
-first time `protect(dlq=True)` is wired without a store, the facade logs a
-one-time `protect.dlq_requested_without_backing` warning so the missing
-backing is visible rather than silent.
+Dead-letter capture ships in the OSS core: a failed operation is recorded with
+the context needed to replay it, size limits plus the overflow strategy bound
+the queue, and the non-blocking outbox keeps capture off the request hot path.
 
 ```bash
 BALDUR_DLQ_ENABLED=true
@@ -40,13 +37,15 @@ BALDUR_DLQ_MAX_SIZE=100000
 BALDUR_DLQ_OUTBOX_ENABLED=true
 ```
 
-## Replay automation (PRO)
+## Replay automation
 
 Automatic replay on circuit-breaker recovery. `ON_RECOVERY_ENABLED` is on by
-default; `SERVICE_FAILURE_TYPE_MAP` maps each recovered service to the failure types
+default; setting it to `false` disables the on-recovery dispatch and, with it,
+the per-recovery WARNING about a missing replay worker.
+`SERVICE_FAILURE_TYPE_MAP` maps each recovered service to the failure types
 whose captured entries it is responsible for — an empty mapping leaves the loop unable
 to select entries on recovery (surfaced as a blocked-with-signal event, not a silent
-no-op). See [DLQ + Replay → Closing the loop](../concepts/pro/dlq-replay.md) for the
+no-op). See [DLQ + Replay → Closing the loop](../concepts/foundations/dlq-replay.md) for the
 full set of prerequisites.
 
 ```bash

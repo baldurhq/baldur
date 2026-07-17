@@ -77,9 +77,10 @@ dependency. If it isn't installed, recording calls quietly become no-ops and the
 returns a `503` — your application keeps running exactly as before. Metrics are an observability
 layer, never a thing that can take your app down.
 
-- **DLQ-depth and replay metrics are PRO.** The circuit-breaker, retry, and cardinality-guard
-  metrics are OSS and recorded out of the box; the dead-letter-queue depth and replay-success
-  metrics report on the PRO subsystems, so they only carry data once the PRO package is installed.
+- **A metric only carries data when its subsystem runs.** The circuit-breaker, retry,
+  dead-letter-queue, replay, and cardinality-guard metrics are recorded out of the box on OSS;
+  series that report on PRO subsystems (adaptive throttle, emergency mode, canary rollouts) start
+  carrying data once the PRO package is installed and those services run.
 
 ## Configuration
 

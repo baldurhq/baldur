@@ -229,10 +229,11 @@ nav:
           - "OSS vs PRO: capability matrix": concepts/oss-vs-pro.md
           - Baldur and your service mesh: concepts/foundations/service-mesh.md
           - Rate limiting in Baldur: concepts/foundations/rate-limiting.md
-          - Bulkhead: concepts/foundations/bulkhead.md
           - Daily Report: concepts/foundations/daily-report.md
           - Dashboard Service: concepts/foundations/dashboard-service.md
           - Web Console: concepts/foundations/web-console.md
+          - DLQ + Replay: concepts/foundations/dlq-replay.md
+          - Bulkhead: concepts/foundations/bulkhead.md
       - OSS Features:
           - Circuit Breaker: concepts/oss/circuit-breaker.md
           - Retry: concepts/oss/retry.md
@@ -243,7 +244,6 @@ nav:
           - System Control: concepts/oss/system-control.md
           - Precomputed Cache: concepts/oss/precomputed-cache.md
       - PRO Features:
-          - DLQ + Replay: concepts/pro/dlq-replay.md
           - Audit Trail: concepts/pro/audit.md
           - Emergency Mode: concepts/pro/emergency-mode.md
           - Governance: concepts/pro/governance.md

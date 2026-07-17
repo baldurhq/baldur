@@ -61,15 +61,15 @@ flowchart LR
     B -->|"healthy"| C["dependency<br/>API · DB · queue"]
     B -. "transient failure" .-> D["retry with backoff"]
     B -. "dependency failing" .-> E["circuit breaker opens"]
-    B -. "all retries fail" .-> F["fallback → dead-letter queue (PRO)"]
+    B -. "all retries fail" .-> F["fallback → dead-letter queue"]
 ```
 
 - A **transient** failure is retried with backoff, so a one-off blip never reaches the user.
 - A **failing** dependency trips the circuit breaker, so your app stops hammering it and fails
   fast instead of hanging.
 - When a call still cannot succeed, a **fallback** runs so the caller still gets a safe answer
-  instead of an error. With PRO's durable **dead-letter queue**, work that must not be lost
-  is set aside to replay later instead of dropped.
+  instead of an error, and work that must not be lost is set aside in the **dead-letter queue**
+  to replay later instead of dropped.
 
 Adoption stays cheap because there is nothing to stand up and nothing new to learn:
 
@@ -96,6 +96,7 @@ Each pattern handles one kind of failure for you. Start with the free OSS buildi
 | A request might run twice (a retry, a double-click) | Run the side effect only once | [Idempotency](../oss/idempotency.md) |
 | A load balancer asks "are you healthy?" | Answer truthfully so traffic routes around you | [Health Check](../oss/health-check.md) |
 | The process is told to shut down | Drain in-flight work before exiting | [Graceful Shutdown](../oss/graceful-shutdown.md) |
+| A call fails for good and the work must not be lost | Capture it with its context, replay it when the dependency recovers | [DLQ + Replay](dlq-replay.md) |
 
 There is more in the free tier too: [Metrics](../oss/metrics.md),
 [System Control](../oss/system-control.md), [Bulkhead](bulkhead.md) isolation,
@@ -104,10 +105,10 @@ and [Precomputed Cache](../oss/precomputed-cache.md).
 ### Free to start, production-grade when you need it
 
 The OSS patterns above are free and enough to get hooked. When you run Baldur in production for a
-team, **PRO** adds the heavier machinery: a durable
-[dead-letter queue with replay](../pro/dlq-replay.md) that captures failed work so nothing is
-lost, an [audit trail](../pro/audit.md), thread-pool [bulkhead](bulkhead.md)
-isolation, [canary recovery](../pro/canary-recovery.md), and self-monitoring that
+team, **PRO** adds the heavier machinery: operating the
+[dead-letter backlog at scale](dlq-replay.md) (batch replay, adaptive pacing, archive/purge),
+an [audit trail](../pro/audit.md), thread-pool [bulkhead](bulkhead.md) isolation,
+[canary recovery](../pro/canary-recovery.md), and self-monitoring that
 [escalates to a human](../pro/meta-watchdog.md) when Baldur itself gets stuck.
 
 ## See also

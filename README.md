@@ -87,6 +87,8 @@ coroutine functions.
 | [Retry with backoff](docs/concepts/oss/retry.md) | Exponential backoff with jitter and bounded attempts |
 | [Fallback & composition](docs/concepts/foundations/composition.md) | One ordered pipeline for all resilience patterns |
 | [Idempotency](docs/concepts/oss/idempotency.md) | Concurrent duplicate calls execute the side effect exactly once |
+| [Bulkhead isolation](docs/concepts/foundations/bulkhead.md) | Each dependency gets a fixed slice of concurrency, so one slow dependency can't drain every worker |
+| [Dead-letter queue + replay](docs/concepts/foundations/dlq-replay.md) | A call that fails for good is captured with its context and replayed once the dependency recovers |
 | [Health checks](docs/concepts/oss/health-check.md) | Liveness/readiness that reflect real dependency state |
 | [Graceful shutdown](docs/concepts/oss/graceful-shutdown.md) | Drain in-flight work cleanly on restart and deploy |
 | [Metrics](docs/concepts/oss/metrics.md) | Prometheus and OpenTelemetry, emitted by default |
@@ -97,13 +99,13 @@ coroutine functions.
 ## Baldur PRO
 
 PRO adds the durable, fleet-level machinery on top of the same API — nothing in
-the core gets relicensed or replaced. Highlights: durable
-[dead-letter queue + replay](docs/concepts/pro/dlq-replay.md) (a failed
-operation is stored, survives restarts, and is replayed once the dependency
-recovers), hash-chained [audit trail](docs/concepts/pro/audit.md),
+the core gets relicensed or replaced. Highlights:
+[DLQ at scale](docs/concepts/foundations/dlq-replay.md) (batch replay from the
+console, success-rate-driven pacing, a disk-durable outbox, and archive/purge
+retention), hash-chained [audit trail](docs/concepts/pro/audit.md),
 [unified notifications](docs/concepts/pro/unified-notification.md),
 [emergency mode](docs/concepts/pro/emergency-mode.md),
-[bulkhead isolation](docs/concepts/pro/bulkhead.md),
+[bulkhead thread-pool isolation](docs/concepts/foundations/bulkhead.md),
 [adaptive throttling](docs/concepts/pro/throttle.md),
 [canary recovery](docs/concepts/pro/canary-recovery.md),
 [governance gates](docs/concepts/pro/governance.md), and a

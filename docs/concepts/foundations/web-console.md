@@ -48,8 +48,8 @@ tier you are looking at.
 | Circuit Breakers | OSS | The state of each service's breaker | Reset a breaker |
 | System Control | OSS | Whether automation is enabled, and the kill-switch state | Enable or disable (kill-switch) automation, with a dry-run mode |
 | Emergency | PRO | The current emergency level | Trigger or release emergency mode |
-| Dead Letter Queue | PRO | The backlog of failed operations, browsable entry by entry | Replay, archive, or purge; retry or resolve a single entry |
-| Bulkheads | PRO | Per-compartment concurrency usage | — (read-only) |
+| Dead Letter Queue | OSS | The backlog of failed operations, browsable entry by entry | Retry, resolve, or force-redrive a single entry; batch replay, archive, and purge with PRO |
+| Bulkheads | OSS | Per-compartment concurrency usage | — (read-only) |
 | Canary Rollouts | PRO | In-flight canary rollouts | — (read-only) |
 | Adaptive Throttle | PRO | The current auto-tuning state | — (read-only) |
 | Governance | PRO | The pending-approval queue | — (read-only) |
@@ -105,15 +105,18 @@ The Web Console is one console for both tiers; what scopes by tier is *which pan
 
 - **In OSS**: the console is a complete operate-and-recover surface for the core resilience layer.
   You get the OSS panels — the Dashboard summary (the at-a-glance self-healing picture), Circuit
-  Breakers with one-click reset, and System Control (the kill-switch, including a dry-run mode).
+  Breakers with one-click reset, System Control (the kill-switch, including a dry-run mode),
+  the Dead Letter Queue (browse the backlog; retry, resolve, or force-redrive an entry), and
+  Bulkheads (per-compartment concurrency at a glance, read-only).
   Every panel is labelled OSS, and none of it depends on PRO.
 
 - **With PRO active**: additional panels appear automatically as their backing PRO services start —
-  Emergency mode, the Dead Letter Queue (browse, replay, archive, purge), Bulkheads, Canary
-  rollouts, Adaptive Throttle, Governance, the Meta-Watchdog self-monitor, and the Runtime Config
-  editor (change a runtime-editable setting from the browser). They surface only
-  when the service is actually running, so the console always reflects what is genuinely available.
-  Nothing about the OSS panels changes; the PRO panels are purely additive.
+  Emergency mode, Canary rollouts, Adaptive Throttle, Governance, the Meta-Watchdog
+  self-monitor, and the Runtime Config editor (change a runtime-editable setting from the browser).
+  They surface only when the service is actually running, so the console always reflects what is
+  genuinely available. The OSS panels keep working unchanged; the Dead Letter Queue panel gains its
+  at-scale actions (batch replay, archive, purge), and the rest of the PRO surface is purely
+  additive.
 
 ## See also
 
