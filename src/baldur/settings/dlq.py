@@ -92,9 +92,11 @@ class DLQSettings(BaseSettings):
         pattern=r"^(drop_oldest|reject|compress_oldest)$",
         description=(
             "Strategy when limit exceeded: "
-            "drop_oldest=evict oldest via background worker, "
+            "drop_oldest=evict oldest (synchronously at store time on OSS; "
+            "PRO defers eviction to a background worker), "
             "reject=reject new items (503), "
-            "compress_oldest=summarize then evict"
+            "compress_oldest=summarize then evict (PRO; "
+            "OSS degrades to drop_oldest)"
         ),
     )
     emergency_purge_threshold: float = Field(
