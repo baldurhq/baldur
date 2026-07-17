@@ -127,7 +127,7 @@ def charge(order_id: str) -> dict:
 | Fallback | No | `fallback=<callable>` |
 | Timeout (wall-clock) | No | `timeout=<seconds>` |
 | Idempotency (dedup) | No | `idempotency_key=...` |
-| Dead-letter queue `(PRO)` | No | `dlq=True` |
+| Dead-letter queue | No | `dlq=True` |
 
 On `async def` callsites, circuit breaker and retry are not available — request them on an
 async call and Baldur raises a clear error rather than pretending to protect it. Use
@@ -162,27 +162,26 @@ a `protect.composer_built` event: `timeout_seconds=None` and no `'timeout'` in i
 
 ### Dead-letter queue (DLQ)
 
-**(OSS) Work that failed permanently just disappears — nothing is captured for replay.**
-*Cause:* on an OSS install, `dlq=True` has nowhere to write. The OSS path is a **no-op
-recorder** — it silently discards the failed operation instead of capturing it. The
-durable dead-letter store that actually parks failed work for replay ships in the PRO
-package.
-*Fix:* this is a tier boundary, not a bug. On OSS, an exhausted call still surfaces the
-error to the caller (and runs your `fallback` if you set one) — the operation simply
-isn't set aside. To capture and replay failed work, add PRO `(OSS no-op → PRO)`: the
-**exact same** `dlq=True` code then records every failed operation durably across
-restarts.
+**Work that failed permanently just disappears — nothing is captured for replay.**
+*Cause:* the call isn't opted in. Capture and replay are OSS as of v1.2.0 — `dlq=True`
+parks every permanently failed operation with its forensic context, no PRO required — but
+it is per-call: an exhausted call without `dlq=True` surfaces the error to the caller
+(and runs your `fallback` if you set one) without setting the operation aside. On
+installs older than v1.2.0 the OSS path was a no-op recorder and PRO was required.
+*Fix:* add `dlq=True` to the protected call (upgrading to v1.2.0+ if needed) — the
+captured entries then appear in the Web Console DLQ panel and the DLQ read API.
 
-**(PRO) The DLQ keeps growing and never drains. `(PRO)`**
-*Cause:* either the replay worker isn't running, or new failures are arriving faster than
+**The DLQ keeps growing and never drains.**
+*Cause:* either no replay path is running, or new failures are arriving faster than
 they drain. The queue protects itself with an overall size cap (`BALDUR_DLQ_MAX_SIZE`,
 default `100000`) and a per-domain cap, plus an overflow strategy.
-*Fix:* confirm the replay worker is alive, then drain with a targeted or batch replay from
-the Web Console DLQ panel or the REST API. The overflow strategy decides what gives when
-the cap is hit — `drop_oldest` (the default) evicts the oldest entries, `reject` refuses
-new ones (surfaced as a `503`), `compress_oldest` summarizes the oldest before evicting.
+*Fix:* confirm the replay worker is alive, then drain with a targeted retry from the Web
+Console DLQ panel or a batch replay via the replay API. The overflow strategy decides
+what gives when the cap is hit — `drop_oldest` (the default) evicts the oldest entries,
+`reject` refuses new ones (surfaced as a `503`), and `compress_oldest` `(PRO)` summarizes
+the oldest before evicting (on OSS it degrades to `drop_oldest`).
 
-**(PRO) DLQ replay isn't running. `(PRO)`**
+**DLQ replay isn't running.**
 *Cause:* nothing has triggered a replay. Replay happens three ways: a **targeted** replay
 of one entry/domain, a **batch** replay of a domain or failure type, or **automatic on
 recovery** — when a dependency's circuit breaker closes again, Baldur sweeps that
@@ -296,9 +295,10 @@ returns `503` — your app keeps running exactly as before.
 pip install "baldur-framework[prometheus]"
 ```
 
-The circuit-breaker, retry, and cardinality-guard metrics are OSS; dead-letter-queue depth
-and replay-success metrics report on the PRO subsystems and only carry data with PRO
-installed.
+The circuit-breaker, retry, cardinality-guard, dead-letter-queue, and replay metrics are
+all OSS — DLQ capture, outbox queue depth/drop health, and replay outcomes carry data
+without PRO. Metrics for PRO subsystems (the adaptive-throttle family, for example) only
+populate with PRO installed.
 
 **Health checks return `503` during a deploy / shutdown.**
 *Cause:* this is graceful-shutdown draining, working as designed. When the process gets
@@ -359,11 +359,11 @@ satisfied, recovery proceeds one level at a time with a stabilization window bet
 mid-recovery re-check failure holds the current level rather than continuing down. An operator
 who must exit regardless can **force** the release, deliberately bypassing the gate.
 
-**`BulkheadFullError` — requests are rejected immediately. `(PRO)`**
+**`BulkheadFullError` — requests are rejected immediately.**
 *Cause:* the call's compartment is at capacity. A bulkhead admits a fixed number of
 concurrent executions per domain; when full, calls **fail fast** (rejected on the spot) rather
-than piling up. The defaults: `database` 10, `cache` 20, `external_api` 5 workers + 10
-waiting, `message_queue` 15.
+than piling up. The defaults: `database` 10, `cache` 20, `external_api` 5 (plus a 10-slot
+wait queue on the PRO thread-pool bulkhead), `message_queue` 15.
 *Fix:* the error names the compartment and its occupancy (e.g. `12/10 active`) — that's your
 diagnosis. Raise the compartment's capacity where it's created (in code), give the call a
 **wait timeout** so it waits for a permit instead of failing fast, or set a `fallback` (which
@@ -402,10 +402,11 @@ emergency / budget condition.
 
 **OSS → OSS + PRO: what changes, and what code do I rewrite?**
 Nothing in your application code. Install `baldur-pro` and set `BALDUR_LICENSE_KEY`, and the
-same `@baldur.protected` calls light up the PRO capabilities behind them: `dlq=True` becomes a
-durable, replayable dead-letter queue; notification delivery, audit, emergency mode, bulkhead,
-canary, throttle, governance, and the meta-watchdog all activate. A PRO subscription includes
-every PRO feature — they aren't unlocked one at a time.
+same `@baldur.protected` calls light up the PRO capabilities behind them: the OSS dead-letter
+queue gains its at-scale operations surface (adaptive batch replay, compressed retention,
+background eviction, a disk-durable outbox); notification delivery, audit, emergency mode,
+thread-pool bulkheads, canary, throttle, governance, and the meta-watchdog all activate. A PRO
+subscription includes every PRO feature — they aren't unlocked one at a time.
 
 **The OSS "what you're missing" block vanished after I added PRO.**
 *Cause:* on OSS the daily report carries a "what you're missing" insights block that estimates
