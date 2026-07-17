@@ -21,8 +21,12 @@ from __future__ import annotations
 
 import threading
 import time
+from typing import TYPE_CHECKING
 
 import structlog
+
+if TYPE_CHECKING:
+    from baldur.meta.daemon_worker import DaemonWorkerHandle
 
 logger = structlog.get_logger()
 
@@ -119,7 +123,7 @@ class BulkheadMetricsUpdater:
         self._interval = interval
         self._running = False
         self._thread: threading.Thread | None = None
-        self._handle = None  # DaemonWorkerHandle (impl 489 D9)
+        self._handle: DaemonWorkerHandle | None = None  # impl 489 D9
         self._stop_event = threading.Event()
 
     def start(self) -> None:
@@ -133,6 +137,7 @@ class BulkheadMetricsUpdater:
         self._stop_event.clear()
         self._running = True
         self._spawn_thread()
+        assert self._thread is not None  # _spawn_thread() postcondition
         self._handle = DaemonWorkerHandle(
             thread=self._thread,
             tick_interval_seconds=self._interval,

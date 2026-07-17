@@ -7,9 +7,12 @@ Uses Repository pattern for domain-free architecture.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
+
+if TYPE_CHECKING:
+    from baldur.interfaces.repositories import FailedOperationRepository
 
 logger = structlog.get_logger()
 
@@ -18,6 +21,13 @@ __all__ = ["ListOperationsMixin"]
 
 class ListOperationsMixin:
     """Mixin providing DLQ list operations using Repository pattern."""
+
+    if TYPE_CHECKING:
+        # Host contract — the composed service (dlq_read.service.DLQReadService)
+        # provides ``repository`` via DLQCaptureService. Typing-only stub; no
+        # runtime definition, so the MRO is unchanged.
+        @property
+        def repository(self) -> FailedOperationRepository: ...
 
     def list_entries(
         self,

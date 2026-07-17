@@ -33,7 +33,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from functools import wraps
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 import structlog
 
@@ -139,7 +139,9 @@ def bulkhead(  # noqa: C901
                     if asyncio.iscoroutinefunction(fallback):
 
                         async def fb_fn() -> T:
-                            return await fallback(*args, **kwargs)
+                            # iscoroutinefunction narrows ``fallback`` to a
+                            # coroutine function returning Any — restore T.
+                            return cast("T", await fallback(*args, **kwargs))
 
                     else:
 
@@ -162,7 +164,7 @@ def bulkhead(  # noqa: C901
                     return result.value  # type: ignore[return-value]
                 if result.error:
                     raise result.error
-                return None
+                return None  # type: ignore[return-value]
 
             return async_wrapper  # type: ignore
 
@@ -176,7 +178,7 @@ def bulkhead(  # noqa: C901
             registry = get_bulkhead_registry()
             key = name.value if isinstance(name, ConnectionType) else name
             bh = registry.get(key)
-            bp = BulkheadPolicy(bulkhead=bh, timeout=timeout)
+            bp: BulkheadPolicy[T] = BulkheadPolicy(bulkhead=bh, timeout=timeout)
 
             if fallback is not None:
                 from baldur.resilience.policies.composer import compose
@@ -196,7 +198,7 @@ def bulkhead(  # noqa: C901
                 return result.value  # type: ignore[return-value]
             if result.error:
                 raise result.error
-            return None
+            return None  # type: ignore[return-value]
 
         return sync_wrapper
 
@@ -258,7 +260,9 @@ def bulkhead_for_database(  # noqa: C901
                     if asyncio.iscoroutinefunction(fallback):
 
                         async def fb_fn() -> T:
-                            return await fallback(*args, **kwargs)
+                            # iscoroutinefunction narrows ``fallback`` to a
+                            # coroutine function returning Any — restore T.
+                            return cast("T", await fallback(*args, **kwargs))
 
                     else:
 
@@ -281,7 +285,7 @@ def bulkhead_for_database(  # noqa: C901
                     return result.value  # type: ignore[return-value]
                 if result.error:
                     raise result.error
-                return None
+                return None  # type: ignore[return-value]
 
             return async_wrapper  # type: ignore
 
@@ -294,7 +298,7 @@ def bulkhead_for_database(  # noqa: C901
 
             registry = get_bulkhead_registry()
             bh = registry.get_for_database(alias)
-            bp = BulkheadPolicy(bulkhead=bh, timeout=timeout)
+            bp: BulkheadPolicy[T] = BulkheadPolicy(bulkhead=bh, timeout=timeout)
 
             if fallback is not None:
                 from baldur.resilience.policies.composer import compose
@@ -314,7 +318,7 @@ def bulkhead_for_database(  # noqa: C901
                 return result.value  # type: ignore[return-value]
             if result.error:
                 raise result.error
-            return None
+            return None  # type: ignore[return-value]
 
         return sync_wrapper
 
@@ -376,7 +380,9 @@ def bulkhead_for_cache(  # noqa: C901
                     if asyncio.iscoroutinefunction(fallback):
 
                         async def fb_fn() -> T:
-                            return await fallback(*args, **kwargs)
+                            # iscoroutinefunction narrows ``fallback`` to a
+                            # coroutine function returning Any — restore T.
+                            return cast("T", await fallback(*args, **kwargs))
 
                     else:
 
@@ -399,7 +405,7 @@ def bulkhead_for_cache(  # noqa: C901
                     return result.value  # type: ignore[return-value]
                 if result.error:
                     raise result.error
-                return None
+                return None  # type: ignore[return-value]
 
             return async_wrapper  # type: ignore
 
@@ -412,7 +418,7 @@ def bulkhead_for_cache(  # noqa: C901
 
             registry = get_bulkhead_registry()
             bh = registry.get_for_cache(name)
-            bp = BulkheadPolicy(bulkhead=bh, timeout=timeout)
+            bp: BulkheadPolicy[T] = BulkheadPolicy(bulkhead=bh, timeout=timeout)
 
             if fallback is not None:
                 from baldur.resilience.policies.composer import compose
@@ -432,7 +438,7 @@ def bulkhead_for_cache(  # noqa: C901
                 return result.value  # type: ignore[return-value]
             if result.error:
                 raise result.error
-            return None
+            return None  # type: ignore[return-value]
 
         return sync_wrapper
 

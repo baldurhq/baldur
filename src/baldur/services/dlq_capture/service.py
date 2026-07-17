@@ -605,9 +605,13 @@ class DLQCaptureService:
         Returns:
             Stored path (on success), None (on failure)
         """
-        # Tier 1: DiskPersistentBuffer (LMDB-based)
+        # Tier 1: DiskPersistentBuffer (LMDB-based). Import from the adapter's
+        # home module — the disk_buffer barrel re-exports it through an untyped
+        # lazy __getattr__ (cycle-breaker), which erases the class type.
         try:
-            from baldur.audit.persistence.disk_buffer import DiskBufferAdapter
+            from baldur.audit.persistence.disk_buffer_adapter import (
+                DiskBufferAdapter,
+            )
 
             buffer = DiskBufferAdapter.get_instance()
             buffer.add(
