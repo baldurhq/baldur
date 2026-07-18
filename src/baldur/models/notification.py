@@ -28,19 +28,20 @@ class NotificationPriority(str, Enum):
     """Notification priority levels."""
 
     CRITICAL = "critical"
-    """Immediate, all channels."""
+    """Immediate; routed to Slack by default, plus PagerDuty when the
+    integration is enabled."""
 
     HIGH = "high"
-    """Urgent, Slack only."""
+    """Urgent; routed to Slack by default."""
 
     MEDIUM = "medium"
-    """Normal, Slack only."""
+    """Normal; routed to Slack by default."""
 
     LOW = "low"
-    """Low urgency, Slack only."""
+    """Low urgency; routed to Slack by default."""
 
     INFO = "info"
-    """Log only unless configured."""
+    """Log only unless a channel is configured."""
 
 
 class NotificationCategory(str, Enum):
