@@ -26,7 +26,7 @@ Meta-Watchdog turns that silent gap into an explicit, observable signal:
 
 ## How it works in Baldur
 
-Meta-Watchdog runs as a background loop. On a fixed interval (30 seconds by default) it probes each of Baldur's healing subsystems (the circuit breakers, the dead-letter queue, the recovery pipeline, the Redis connection, the audit system, the chaos scheduler, the notification channels, the precomputed cache, and the error-budget gate) and grades each one:
+Meta-Watchdog runs as a background loop. On a fixed interval (30 seconds by default) it probes each of Baldur's healing subsystems (the circuit breakers, the dead-letter queue, the recovery pipeline, the Redis connection, the audit system, the chaos scheduler, the notification channels, the precomputed cache, the error-budget gate, canary rollouts, emergency mode, and the adaptive throttle) and grades each one, skipping any subsystem you have disabled so the status view only ever shows what is actually running:
 
 | Status | Meaning |
 |--------|---------|
@@ -37,7 +37,7 @@ Meta-Watchdog runs as a background loop. On a fixed interval (30 seconds by defa
 
 The overall health is the *worst* status across all subsystems, so a single broken component is never averaged away by the healthy ones.
 
-**The key trick is detecting "stuck".** Beyond asking "is it up?", Meta-Watchdog watches whether each subsystem is actually *making progress*. If a component's key metric stops changing entirely — its variance falls to essentially zero — while its error rate stays high, it is treated as **stuck** even though the process is alive and answering. A queue pinned at exactly 1,000 pending entries that never drains, or a circuit breaker locked open, fits this pattern. A component that has simply been unhealthy for too long is flagged the same way. This is what lets the watchdog catch the frozen-but-running failures that ordinary up/down health checks miss.
+**The key trick is detecting "stuck".** Beyond asking "is it up?", Meta-Watchdog watches whether each subsystem is actually *making progress*. If a component's key metric stops changing entirely — its variance falls to essentially zero — while its error rate stays high, it is treated as **stuck** even though the process is alive and answering. A queue pinned at exactly 1,000 pending entries that never drains, or a circuit breaker locked open, fits this pattern. So does frozen *business* state: a canary rollout wedged at one stage, an emergency level stuck mid-recovery instead of winding down, or an adaptive throttle whose limit never moves while requests are still being rejected. A component that has simply been unhealthy for too long is flagged the same way. This is what lets the watchdog catch the frozen-but-running failures that ordinary up/down health checks miss.
 
 When a subsystem stays unhealthy across several consecutive probes, Meta-Watchdog escalates — it pages a human through your configured Slack channel with a critical-severity alert titled **`Baldur <component> Failure`**. The alert names the failing component, includes the underlying error, and states that manual intervention is required.
 
@@ -80,6 +80,8 @@ Meta-Watchdog is **on by default** under PRO. The most common knobs:
 | `BALDUR_META_WATCHDOG_ESCALATION_ENABLED` | `true` | Whether detections page a human |
 | `BALDUR_META_WATCHDOG_PROBE_INTERVAL_SECONDS` | `30` | How often it probes every subsystem |
 | `BALDUR_META_WATCHDOG_SLACK_WEBHOOK_URL` | _(none)_ | Slack incoming-webhook URL pages are delivered to — while unset, pages are logged but nothing is posted |
+
+One caution on the webhook URL: a set URL posts for real from any process that loads it, local development included, so leave it unset anywhere that should not page a shared channel.
 
 The full set of tuning options lives in the [environment variable reference](../../reference/env-vars.md).
 
