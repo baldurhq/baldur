@@ -12,6 +12,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ### Fixed
 
+- SLA drift check no longer crashes every run on non-Django hosts (QuerySet-only `.count()`).
 - `dlq_outbox_current_size` gauge now reports the outbox queue depth (was never set).
 - `overflow_strategy` help text now matches OSS synchronous eviction (background worker is PRO).
 

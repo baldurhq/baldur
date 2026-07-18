@@ -111,10 +111,9 @@ _OSS_ROOT_EXCLUDE = frozenset({"factories", "testapp"})
 # The `oss` budget is this repo's test tree. The `pro` / `dormant` roots do not
 # exist in this repo and are skipped; their entries are inert.
 _MOCK_CREATION_BUDGETS: dict[str, int] = {
-    # 709: oss unchanged — the bulkhead test relocation's four spec-less mocks
-    # gained specs on landing; pro -17 — the relocated/split bulkhead tests
-    # left the pro root.
-    "oss": 4394,
+    # drift-detection list-fallback fix: -1 — the QuerySet-shaped Mock in the
+    # SLA drift fixtures became real lists.
+    "oss": 4393,
     "pro": 1800,
     "dormant": 401,
 }
