@@ -48,7 +48,7 @@ tier you are looking at.
 | Circuit Breakers | OSS | The state of each service's breaker | Reset a breaker |
 | System Control | OSS | Whether automation is enabled, and the kill-switch state | Enable or disable (kill-switch) automation, with a dry-run mode |
 | Emergency | PRO | The current emergency level | Trigger or release emergency mode |
-| Dead Letter Queue | OSS | The backlog of failed operations, browsable entry by entry | Retry, resolve, or force-redrive a single entry; batch replay, archive, and purge with PRO |
+| Dead Letter Queue | OSS | The backlog of failed operations, browsable entry by entry | Retry or resolve a single entry; batch replay, archive, and purge with PRO |
 | Bulkheads | OSS | Per-compartment concurrency usage | — (read-only) |
 | Canary Rollouts | PRO | In-flight canary rollouts | — (read-only) |
 | Adaptive Throttle | PRO | The current auto-tuning state | — (read-only) |
@@ -106,7 +106,7 @@ The Web Console is one console for both tiers; what scopes by tier is *which pan
 - **In OSS**: the console is a complete operate-and-recover surface for the core resilience layer.
   You get the OSS panels — the Dashboard summary (the at-a-glance self-healing picture), Circuit
   Breakers with one-click reset, System Control (the kill-switch, including a dry-run mode),
-  the Dead Letter Queue (browse the backlog; retry, resolve, or force-redrive an entry), and
+  the Dead Letter Queue (browse the backlog; retry or resolve an entry), and
   Bulkheads (per-compartment concurrency at a glance, read-only).
   Every panel is labelled OSS, and none of it depends on PRO.
 
@@ -123,6 +123,7 @@ The Web Console is one console for both tiers; what scopes by tier is *which pan
 - [Dashboard Service](dashboard-service.md) — the read-model behind the console's Dashboard panel
 - [System Control](../oss/system-control.md) — the kill-switch the console's System Control panel flips
 - [Circuit Breaker](../oss/circuit-breaker.md) — what the console's "Reset breaker" action resets
+- [DLQ + Replay](dlq-replay.md) — the failure backlog behind the console's Dead Letter Queue panel
 - [OSS vs PRO tier model](tier-model.md) — why some panels appear only when PRO is running
 - [Daily Report](daily-report.md) — the once-a-day digest companion to the console's live view
 - [Getting Started](../../getting-started/index.md) — set Baldur up in five minutes

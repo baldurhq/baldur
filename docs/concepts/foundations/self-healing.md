@@ -106,7 +106,7 @@ and [Precomputed Cache](../oss/precomputed-cache.md).
 
 The OSS patterns above are free and enough to get hooked. When you run Baldur in production for a
 team, **PRO** adds the heavier machinery: operating the
-[dead-letter backlog at scale](dlq-replay.md) (batch replay, adaptive pacing, archive/purge),
+[dead-letter backlog at scale](dlq-replay.md) (batch replay from the console, adaptive pacing, archive/purge),
 an [audit trail](../pro/audit.md), thread-pool [bulkhead](bulkhead.md) isolation,
 [canary recovery](../pro/canary-recovery.md), and self-monitoring that
 [escalates to a human](../pro/meta-watchdog.md) when Baldur itself gets stuck.
