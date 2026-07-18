@@ -1,6 +1,6 @@
 # Meta-Watchdog Escalation Response Runbook
 
-> **Purpose**: When Baldur's own Meta-Watchdog pages you — a `Baldur <component> Failure` notification on Slack — this runbook tells you, **without reading the source**, how to diagnose and manually remediate each failure mode. At v1.0 the watchdog runs in **detect-and-escalate mode** (`recovery_enabled=False`): it autonomously notices when Baldur's self-healing has stalled and pages a human, but takes **no automatic recovery action**. You are that human.
+> **Purpose**: When Baldur's own Meta-Watchdog pages you — a `Baldur <component> Failure` notification on PagerDuty/Slack — this runbook tells you, **without reading the source**, how to diagnose and manually remediate each failure mode. At v1.0 the watchdog runs in **detect-and-escalate mode** (`recovery_enabled=False`): it autonomously notices when Baldur's self-healing has stalled and pages a human, but takes **no automatic recovery action**. You are that human.
 > **Audience**: On-call operator / SRE who received a `Baldur <component> Failure` page.
 > **Cadence**: On every page. Also review the per-component **Graduation Note** sections when deciding whether to promote a component to auto-recovery (Slice B/C).
 
@@ -211,17 +211,17 @@ Bespoke rows (the 2 respawn-ineligible workers) and the catch-all:
 
 ## notification_channels — meta-critical (priority 3)
 
-**Symptom**: `Baldur notification_channels Failure`. The delivery channel (Slack) is itself unhealthy.
+**Symptom**: `Baldur notification_channels Failure`. The delivery channel (Slack/PagerDuty) is itself unhealthy.
 
 > ⚠️ **Meta-critical**: if the channel that delivers pages is down, *other* escalations may not reach you. Baldur falls back to a disk JSONL record on genuine delivery failure (`_record_fallback_escalation`) — **check that file for pages you never received** while the channel was down.
 
 **Diagnose**:
 - `POST /meta-watchdog/escalation-test` — sends a test page; tells you whether delivery works now.
-- Verify the channel config: the Slack webhook URL.
+- Verify the channel config: Slack webhook URL, PagerDuty routing key.
 - Inspect the fallback JSONL on disk for queued/missed escalations.
 
 **Manual remediation**:
-1. Fix the channel config (rotate the webhook).
+1. Fix the channel config (rotate the webhook, correct the routing key).
 2. `POST /meta-watchdog/escalation-test` until it succeeds.
 3. **Replay missed pages**: read the fallback JSONL and action any escalation that fired while the channel was down.
 
