@@ -171,6 +171,53 @@ class TestSlackFormatterAdaptiveSectionsBehavior:
 
 
 # =============================================================================
+# Alerts section — Behavior Tests
+# =============================================================================
+
+
+class TestFormatterAlertsBehavior:
+    """The alerts block renders from drift warnings alone (711 D5).
+
+    `approval_expired_count` was removed: it had no producer in any tier, so
+    the block always rendered a hardwired "Approval expired: 0". These tests
+    pin both halves — drift still renders the block, and no residual
+    approval fragment survives in the digest.
+    """
+
+    def test_alerts_section_renders_from_drift_warnings_alone(self):
+        """Drift warnings alone are sufficient to render the alerts block."""
+        report = DailyAutonomousReport()
+        report.drift_warnings_count = 3
+
+        result = format_report_for_slack(report)
+
+        assert "Alerts" in result
+        assert "Drift warnings: 3" in result
+
+    def test_alerts_section_omits_approval_expired_fragment(self):
+        """The rendered alerts line carries no always-zero approval counter."""
+        report = DailyAutonomousReport()
+        report.drift_warnings_count = 3
+
+        result = format_report_for_slack(report)
+
+        assert "Approval expired" not in result
+
+    def test_alerts_section_hidden_when_no_drift_warnings(self):
+        """With drift at zero the block is suppressed entirely.
+
+        Post-removal `drift_warnings_count` is the sole render condition —
+        no second disjunct can resurrect an always-empty block.
+        """
+        report = DailyAutonomousReport()
+        report.drift_warnings_count = 0
+
+        result = format_report_for_slack(report)
+
+        assert "Alerts" not in result
+
+
+# =============================================================================
 # format_report_for_pagerduty() — Behavior Tests
 # =============================================================================
 
