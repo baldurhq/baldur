@@ -34,11 +34,19 @@ from baldur.services.daily_report.models import (
 # Design-doc D5 map (impl 660). Hardcoded here so the Contract test pins the
 # exact tier classification the formatter/guide/parity triad agrees on.
 _OSS_KEYS = frozenset(
-    {"auto_processing", "alerts", "circuit_breaker", "errors", "custom", "shadow_pro"}
+    {
+        "auto_processing",
+        "alerts",
+        "circuit_breaker",
+        "errors",
+        "custom",
+        "shadow_pro",
+        "dlq",
+        "automated_actions",
+        "auto_replay",
+    }
 )
-_V1_KEYS = frozenset(
-    {"dlq", "automated_actions", "auto_replay", "canary", "emergency", "governance"}
-)
+_V1_KEYS = frozenset({"canary", "emergency", "governance"})
 _DEFERRED_KEYS = frozenset(
     {"chaos", "load_shedding", "error_budget", "auto_tuning", "saga"}
 )

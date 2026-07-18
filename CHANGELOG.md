@@ -10,8 +10,22 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+### Added
+
+- Daily report records the on-recovery replay sweep, so its "Auto-replay" line renders on OSS.
+
+### Changed
+
+- Digest sections `dlq`, `automated_actions`, `auto_replay` are labeled OSS, not PRO.
+- Daily-report `failed_ops_without_dlq` → `dlq_captured_without_adaptive_replay`. **Breaking**
+
+### Removed
+
+- Daily-report `approval_expired_count` — no producer, always 0. **Breaking**
+
 ### Fixed
 
+- Shadow-PRO insight no longer claims failed operations had no DLQ; OSS captures them.
 - SLA drift check no longer crashes every run on non-Django hosts (QuerySet-only `.count()`).
 - `dlq_outbox_current_size` gauge now reports the outbox queue depth (was never set).
 - `overflow_strategy` help text now matches OSS synchronous eviction (background worker is PRO).

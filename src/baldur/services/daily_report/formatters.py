@@ -23,9 +23,9 @@ _SECTION_TIER: dict[str, str] = {
     "errors": "oss",
     "custom": "oss",
     "shadow_pro": "oss",
-    "dlq": "v1.0",
-    "automated_actions": "v1.0",
-    "auto_replay": "v1.0",
+    "dlq": "oss",
+    "automated_actions": "oss",
+    "auto_replay": "oss",
     "canary": "v1.0",
     "emergency": "v1.0",
     "governance": "v1.0",
@@ -111,15 +111,13 @@ def format_report_for_slack(report: DailyAutonomousReport) -> str:  # noqa: C901
             ]
         )
 
-    # Alerts (conditional — drift or approval_expired > 0, D10)
-    if _is_shipped("alerts") and (
-        report.drift_warnings_count > 0 or report.approval_expired_count > 0
-    ):
+    # Alerts (conditional — drift warnings > 0, D10)
+    if _is_shipped("alerts") and report.drift_warnings_count > 0:
         detail.extend(
             [
                 "",
                 "*🔔 Alerts*",
-                f"• Drift warnings: {report.drift_warnings_count} / Approval expired: {report.approval_expired_count}",
+                f"• Drift warnings: {report.drift_warnings_count}",
             ]
         )
 
@@ -277,9 +275,10 @@ def format_report_for_slack(report: DailyAutonomousReport) -> str:  # noqa: C901
             detail.append(
                 f"• {shadow.cb_trips_without_auto_degradation} CB trips without auto-degradation"
             )
-        if shadow.failed_ops_without_dlq > 0:
+        if shadow.dlq_captured_without_adaptive_replay > 0:
             detail.append(
-                f"• {shadow.failed_ops_without_dlq} operations failed permanently (no DLQ)"
+                f"• {shadow.dlq_captured_without_adaptive_replay} operations captured in the DLQ, "
+                "replayed at a fixed batch size (no adaptive sizing or throttled replay queue)"
             )
         if shadow.drift_warnings_manual_only > 0:
             detail.append(

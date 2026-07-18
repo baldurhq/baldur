@@ -75,21 +75,23 @@ features you have active.
 
 - **In OSS**: Baldur generates the report from your real activity, keeps the rolling history, and you
   **read it on demand** — `baldur report` on the command line, or the report API / admin console.
-  Because OSS detects and reports but does not *act* on failures the way PRO does, the report also
-  carries a **"what you're missing" insights block**: drawn entirely from your own production
-  numbers, it estimates the impact the PRO features would have had — for example *N circuit-breaker
-  trips with no automatic degradation*, *N operations that failed permanently with nowhere to capture
-  them for retry*, or *N drift warnings you had to resolve by hand*. It's a directional estimate from
-  your data, not a synthetic demo, and it appears on a cadence you control.
+  OSS already captures failed work and replays it when a dependency recovers, so the digest shows
+  that activity — the dead-letter queue section and the auto-replay line are both OSS. What OSS does
+  not do is *tune* that recovery for you, so the report also carries a **"what you're missing"
+  insights block**: drawn entirely from your own production numbers, it estimates the impact the PRO
+  features would have had — for example *N circuit-breaker trips with no automatic degradation*,
+  *N operations captured in the dead-letter queue and replayed at a fixed batch size rather than one
+  adapted to the recovering dependency*, or *N drift warnings you had to resolve by hand*. It's a
+  directional estimate from your data, not a synthetic demo, and it appears on a cadence you control.
 
 - **With PRO active**: the same report is **delivered to Slack automatically** each day — Baldur's
   notification transports ship with PRO, so in OSS the report is generated and stored but pushing it
   to a channel is a PRO capability. The "what you're missing" block disappears, because you are no
-  longer missing it. In its place the report gains an **"Automated Actions" section** showing what
-  PRO actually *did* while you were away — dead-letter batches auto-replayed, canary rollouts and
-  rollbacks, emergency-level changes, governance blocks — alongside richer
-  sections fed by the PRO features. The same daily digest shifts from *"here's what you're missing"*
-  to *"here's what was handled for you."*
+  longer missing it. The **"Automated Actions" section** — which on OSS carries the auto-replayed
+  dead-letter batches — fills out with the rest of what Baldur did while you were away: canary
+  rollouts and rollbacks, emergency-level changes, governance blocks, alongside richer sections fed
+  by the PRO features. The same daily digest shifts from *"here's what you're missing"* to *"here's
+  what was handled for you."*
 
 ### Sections by tier
 
@@ -100,14 +102,14 @@ don't have. The sections the Slack digest can carry today:
 | Section | What it covers | Tier |
 |---------|----------------|------|
 | `auto_processing` | Items auto-processed yesterday — archived, expired, recovered, purged | OSS |
-| `alerts` | Config-drift warnings and expired approvals | OSS |
+| `alerts` | Config-drift warnings | OSS |
 | `circuit_breaker` | Circuit-breaker transitions (opened / closed) | OSS |
 | `errors` | Task failures and critical alerts | OSS |
 | `custom` | Any custom counters you record | OSS |
 | `shadow_pro` | The OSS-only "what you're missing" insights block | OSS |
-| `dlq` | Dead-letter queue activity — new, auto-resolved, pending | PRO |
-| `automated_actions` | Heading for the PRO actions Baldur took for you | PRO |
-| `auto_replay` | Dead-letter batches auto-replayed | PRO |
+| `dlq` | Dead-letter queue activity — new, auto-resolved, pending | OSS |
+| `automated_actions` | Heading for the actions Baldur took for you | OSS |
+| `auto_replay` | Dead-letter batches auto-replayed | OSS |
 | `canary` | Canary rollouts completed and rolled back | PRO |
 | `emergency` | Emergency-level changes | PRO |
 | `governance` | Governance policy blocks | PRO |

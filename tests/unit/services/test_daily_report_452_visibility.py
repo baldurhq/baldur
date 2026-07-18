@@ -252,7 +252,7 @@ class TestCollectShadowProSectionBehavior:
         """Report whose indicators would otherwise populate a summary."""
         report = DailyAutonomousReport()
         report.circuit_transitions = 3
-        report.task_failures = 2
+        report.dlq_new_entries_count = 2
         report.drift_warnings_count = 4
         return report
 
@@ -346,7 +346,7 @@ class TestCollectShadowProSectionBehavior:
         s = report.shadow_pro_summary
         assert s is not None
         assert s.cb_trips_without_auto_degradation == 3
-        assert s.failed_ops_without_dlq == 2
+        assert s.dlq_captured_without_adaptive_replay == 2
         assert s.drift_warnings_manual_only == 4
 
     def test_cadence_skip_day_suppresses_summary(self):
@@ -437,7 +437,7 @@ class TestSlackFormatterShadowProFooterContract:
         """Footer wraps the env var hint in Slack italic underscores."""
         report = DailyAutonomousReport()
         report.shadow_pro_summary = ShadowProSummary(
-            failed_ops_without_dlq=1,
+            dlq_captured_without_adaptive_replay=1,
         )
 
         output = format_report_for_slack(report)

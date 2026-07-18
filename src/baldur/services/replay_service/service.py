@@ -1424,6 +1424,8 @@ class ReplayService(EventEmitterMixin):
             },
         )
 
+        self._record_sweep_in_daily_report(service_name, batch_result)
+
         logger.info(
             "replay_service.circuit_close_replay",
             service_name=service_name,
@@ -1434,6 +1436,46 @@ class ReplayService(EventEmitterMixin):
         )
 
         return batch_result
+
+    def _record_sweep_in_daily_report(
+        self, service_name: str, batch_result: BatchReplayResult
+    ) -> None:
+        """Push an on-recovery sweep outcome to the daily report collector.
+
+        Emitted only from the circuit-close sweep, not from operator-initiated
+        batch replays, so the digest's "Auto-replay" line counts automatic
+        recoveries only. Fail-open: a collector failure never breaks the sweep,
+        matching the module's observability posture.
+
+        Args:
+            service_name: The recovered service whose backlog was swept.
+            batch_result: Outcome of the sweep; nothing is recorded when the
+                sweep processed no entries.
+        """
+        if batch_result.total <= 0:
+            return
+
+        try:
+            from baldur.services.daily_report import get_daily_report_collector
+
+            get_daily_report_collector().add_result(
+                task_name="auto_replay_batch",
+                result={
+                    "recovered_count": batch_result.success_count,
+                    "failed_count": batch_result.failed_count,
+                    "processed_count": batch_result.total,
+                    "success_rate": round(
+                        batch_result.success_count / batch_result.total, 4
+                    ),
+                    "service_name": service_name,
+                },
+            )
+        except Exception as exc:
+            logger.warning(
+                "replay_service.daily_report_record_failed",
+                service_name=service_name,
+                error=str(exc),
+            )
 
 
 # =============================================================================

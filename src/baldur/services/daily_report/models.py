@@ -70,7 +70,7 @@ class ShadowProSummary(SerializableMixin):
     """
 
     cb_trips_without_auto_degradation: int = 0
-    failed_ops_without_dlq: int = 0
+    dlq_captured_without_adaptive_replay: int = 0
     drift_warnings_manual_only: int = 0
 
 
@@ -174,7 +174,6 @@ class DailyAutonomousReport:
     archived_count: int = 0
     expired_count: int = 0
     purged_count: int = 0
-    approval_expired_count: int = 0
     recovered_count: int = 0
     drift_warnings_count: int = 0
 
@@ -224,7 +223,6 @@ class DailyAutonomousReport:
             "archived_count": "archived_count",
             "expired_count": "expired_count",
             "purged_count": "purged_count",
-            "approval_expired_count": "approval_expired_count",
             "recovered_count": "recovered_count",
             "drift_warnings_count": "drift_warnings_count",
             "circuit_transitions": "circuit_transitions",
@@ -256,7 +254,6 @@ class DailyAutonomousReport:
         self.archived_count += other.archived_count
         self.expired_count += other.expired_count
         self.purged_count += other.purged_count
-        self.approval_expired_count += other.approval_expired_count
         self.recovered_count += other.recovered_count
         self.drift_warnings_count += other.drift_warnings_count
         self.circuit_transitions += other.circuit_transitions
@@ -304,7 +301,6 @@ class DailyAutonomousReport:
             "archived_count": self.archived_count,
             "expired_count": self.expired_count,
             "purged_count": self.purged_count,
-            "approval_expired_count": self.approval_expired_count,
             "recovered_count": self.recovered_count,
             "drift_warnings_count": self.drift_warnings_count,
             "circuit_transitions": self.circuit_transitions,

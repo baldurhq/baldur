@@ -33,10 +33,10 @@ class TestShadowProSummaryContract:
         s = ShadowProSummary()
         assert s.cb_trips_without_auto_degradation == 0
 
-    def test_failed_ops_default_zero(self):
-        """failed_ops_without_dlq defaults to 0."""
+    def test_dlq_captured_default_zero(self):
+        """dlq_captured_without_adaptive_replay defaults to 0."""
         s = ShadowProSummary()
-        assert s.failed_ops_without_dlq == 0
+        assert s.dlq_captured_without_adaptive_replay == 0
 
     def test_drift_warnings_default_zero(self):
         """drift_warnings_manual_only defaults to 0."""
@@ -78,7 +78,7 @@ class TestCollectShadowProSectionBehavior:
         service = self._make_service()
         report = DailyAutonomousReport()
         report.circuit_transitions = 0
-        report.task_failures = 0
+        report.dlq_new_entries_count = 0
         report.drift_warnings_count = 0
 
         with self._guards_open():
@@ -91,7 +91,7 @@ class TestCollectShadowProSectionBehavior:
         service = self._make_service()
         report = DailyAutonomousReport()
         report.circuit_transitions = 3
-        report.task_failures = 0
+        report.dlq_new_entries_count = 0
         report.drift_warnings_count = 0
 
         with self._guards_open():
@@ -99,14 +99,14 @@ class TestCollectShadowProSectionBehavior:
 
         assert report.shadow_pro_summary is not None
         assert report.shadow_pro_summary.cb_trips_without_auto_degradation == 3
-        assert report.shadow_pro_summary.failed_ops_without_dlq == 0
+        assert report.shadow_pro_summary.dlq_captured_without_adaptive_replay == 0
 
     def test_all_indicators_populated(self):
         """All three indicators present → all fields set."""
         service = self._make_service()
         report = DailyAutonomousReport()
         report.circuit_transitions = 5
-        report.task_failures = 2
+        report.dlq_new_entries_count = 2
         report.drift_warnings_count = 7
 
         with self._guards_open():
@@ -115,7 +115,7 @@ class TestCollectShadowProSectionBehavior:
         s = report.shadow_pro_summary
         assert s is not None
         assert s.cb_trips_without_auto_degradation == 5
-        assert s.failed_ops_without_dlq == 2
+        assert s.dlq_captured_without_adaptive_replay == 2
         assert s.drift_warnings_manual_only == 7
 
 
@@ -127,7 +127,7 @@ class TestShadowProFormatterBehavior:
         report = DailyAutonomousReport()
         report.shadow_pro_summary = ShadowProSummary(
             cb_trips_without_auto_degradation=3,
-            failed_ops_without_dlq=1,
+            dlq_captured_without_adaptive_replay=1,
             drift_warnings_manual_only=2,
         )
 
@@ -135,7 +135,7 @@ class TestShadowProFormatterBehavior:
 
         assert "PRO Insights" in output
         assert "3 CB trips without auto-degradation" in output
-        assert "1 operations failed permanently" in output
+        assert "1 operations captured in the DLQ" in output
         assert "2 drift warnings, manual resolution only" in output
 
     def test_shadow_pro_omitted_when_none(self):
@@ -152,7 +152,7 @@ class TestShadowProFormatterBehavior:
         report = DailyAutonomousReport()
         report.shadow_pro_summary = ShadowProSummary(
             cb_trips_without_auto_degradation=0,
-            failed_ops_without_dlq=4,
+            dlq_captured_without_adaptive_replay=4,
             drift_warnings_manual_only=0,
         )
 
@@ -160,7 +160,7 @@ class TestShadowProFormatterBehavior:
 
         assert "PRO Insights" in output
         assert "CB trips" not in output
-        assert "4 operations failed permanently" in output
+        assert "4 operations captured in the DLQ" in output
         assert "drift warnings" not in output
 
 
@@ -179,7 +179,7 @@ class TestShadowProToDictBehavior:
         report = DailyAutonomousReport()
         report.shadow_pro_summary = ShadowProSummary(
             cb_trips_without_auto_degradation=3,
-            failed_ops_without_dlq=1,
+            dlq_captured_without_adaptive_replay=1,
             drift_warnings_manual_only=2,
         )
 
@@ -187,7 +187,7 @@ class TestShadowProToDictBehavior:
 
         assert "shadow_pro_summary" in d
         assert d["shadow_pro_summary"]["cb_trips_without_auto_degradation"] == 3
-        assert d["shadow_pro_summary"]["failed_ops_without_dlq"] == 1
+        assert d["shadow_pro_summary"]["dlq_captured_without_adaptive_replay"] == 1
         assert d["shadow_pro_summary"]["drift_warnings_manual_only"] == 2
 
 

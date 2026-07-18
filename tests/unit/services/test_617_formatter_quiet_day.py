@@ -49,7 +49,6 @@ _SHIPPED_SECTION_TRIGGERS = [
     _mut("purged_count", 1),
     _mut("recovered_count", 1),
     _mut("drift_warnings_count", 1),
-    _mut("approval_expired_count", 1),
     _mut("circuit_transitions", 1),
     _mut("dlq_new_entries_count", 1),
     _mut("dlq_resolved_count", 1),
