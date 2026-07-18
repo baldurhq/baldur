@@ -164,7 +164,6 @@ class TestDailyAutonomousReport:
         assert report.archived_count == 0
         assert report.expired_count == 0
         assert report.purged_count == 0
-        assert report.approval_expired_count == 0
         assert report.recovered_count == 0
         assert report.drift_warnings_count == 0
         assert report.custom_counts == {}

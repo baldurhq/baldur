@@ -474,10 +474,12 @@ class DailyReportService(EventEmitterMixin):
             )
 
     def _collect_automated_actions_section(self, report: DailyAutonomousReport) -> None:  # noqa: C901
-        """Aggregate automated actions from PRO service entries (Phase 3, D7).
+        """Aggregate automated actions from service entries (Phase 3, D7).
 
-        Entries with specific task_names produced by PRO services are counted
-        into a typed AutomatedActionsSummary. Entries are NOT removed — they
+        Entries with specific task_names are counted into a typed
+        AutomatedActionsSummary. Producers span both tiers — the OSS
+        on-recovery replay sweep emits ``auto_replay_batch``, the remaining
+        action names come from PRO services. Entries are NOT removed — they
         remain available for the detail API view (per-event context).
         """
         from .models import AutomatedActionsSummary
@@ -559,13 +561,15 @@ class DailyReportService(EventEmitterMixin):
             return
 
         cb_trips = report.circuit_transitions
-        failed_ops = report.task_failures
+        # Anchored on the same counter the DLQ section renders, so the insight
+        # and the section are never inconsistent within one digest.
+        dlq_captured = report.dlq_new_entries_count
         drift_warnings = report.drift_warnings_count
 
-        if cb_trips > 0 or failed_ops > 0 or drift_warnings > 0:
+        if cb_trips > 0 or dlq_captured > 0 or drift_warnings > 0:
             report.shadow_pro_summary = ShadowProSummary(
                 cb_trips_without_auto_degradation=cb_trips,
-                failed_ops_without_dlq=failed_ops,
+                dlq_captured_without_adaptive_replay=dlq_captured,
                 drift_warnings_manual_only=drift_warnings,
             )
 
