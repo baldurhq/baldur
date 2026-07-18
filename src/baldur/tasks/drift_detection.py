@@ -44,6 +44,8 @@ class FailedOperationQuerySet(Protocol):
 
     def __getitem__(self, key): ...
 
+    def __len__(self) -> int: ...
+
 
 class DriftDetectionOperationProtocol(Protocol):
     """Protocol for FailedOperation-like objects."""
@@ -191,7 +193,10 @@ class SLADriftDetector:
             resolved_at__gte=window_start,
         )
 
-        total_resolved = resolved_ops.count()
+        # len(), not QuerySet.count(): the injected query fn's non-Django
+        # fallback returns a plain list, and len() evaluates a QuerySet once
+        # for the iteration below instead of issuing an extra COUNT query.
+        total_resolved = len(resolved_ops)
 
         if total_resolved == 0:
             return {

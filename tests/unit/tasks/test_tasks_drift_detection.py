@@ -7,6 +7,28 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from baldur.utils.time import utc_now
+
+
+class _FakeOp:
+    """Minimal DriftDetectionOperationProtocol stand-in."""
+
+    def __init__(self, created_at, resolved_at=None):
+        self.created_at = created_at
+        self.resolved_at = resolved_at
+
+
+def _fast_resolved_ops(count=5):
+    """Ops resolved well inside every configured SLA (no warning path)."""
+    now = utc_now()
+    return [
+        _FakeOp(
+            created_at=now - timedelta(minutes=15),
+            resolved_at=now - timedelta(minutes=10),
+        )
+        for _ in range(count)
+    ]
+
 
 class TestSLADriftDetector:
     """Test SLADriftDetector class."""
@@ -20,13 +42,13 @@ class TestSLADriftDetector:
             "point": timedelta(hours=1),
         }
 
-        mock_operations = Mock()
-        mock_operations.filter.return_value = mock_operations
-        mock_operations.count.return_value = 5
+        # A plain list, exactly like the query fn's non-Django fallback —
+        # the detector must not rely on QuerySet-only APIs.
+        resolved_ops = _fast_resolved_ops(5)
 
         return {
             "get_sla_thresholds": lambda: mock_thresholds,
-            "get_failed_operations": lambda **kwargs: mock_operations,
+            "get_failed_operations": lambda **kwargs: list(resolved_ops),
             "record_sla_breach": Mock(),
         }
 
@@ -56,7 +78,7 @@ class TestSLADriftDetector:
         result = detector.check_drift()
 
         assert isinstance(result, dict)
-        assert "success" in result
+        assert result["success"] is True
 
     def test_check_drift_includes_checked_at(self, mock_dependencies):
         """Should include timestamp in result."""
@@ -69,8 +91,8 @@ class TestSLADriftDetector:
 
         result = detector.check_drift()
 
-        if result["success"]:
-            assert "checked_at" in result
+        assert result["success"] is True
+        assert "checked_at" in result
 
     def test_check_drift_handles_exception(self, mock_dependencies):
         """Should handle exceptions gracefully."""
@@ -103,22 +125,55 @@ class TestSLADriftDetectorDriftAnalysis:
             "payment": timedelta(minutes=30),
         }
 
-        mock_operations = Mock()
-        mock_operations.filter.return_value = mock_operations
-        mock_operations.count.return_value = 10
-
         return SLADriftDetector(
             get_sla_thresholds=lambda: mock_thresholds,
-            get_failed_operations=lambda **kwargs: mock_operations,
+            get_failed_operations=lambda **kwargs: _fast_resolved_ops(10),
         )
 
     def test_analyzes_all_domains(self, detector_with_data):
         """Should analyze all configured domains."""
         result = detector_with_data.check_drift()
 
-        if result["success"]:
-            assert "domains_checked" in result
-            assert "payment" in result["domains_checked"]
+        assert result["success"] is True
+        assert "payment" in result["domains_checked"]
+        assert result["metrics"]["payment"]["total_resolved"] == 10
+
+
+class TestDriftDetectorListFallback:
+    """The injected query fn may return a plain list, not a QuerySet.
+
+    The shipped factory falls back to ``[]`` whenever Django is not
+    configured (plain-Python / Flask / FastAPI hosts), so the analysis
+    must work on list semantics.
+    """
+
+    def _detector(self, ops):
+        from baldur.tasks.drift_detection import SLADriftDetector
+
+        mock_thresholds = Mock()
+        mock_thresholds.get_all_thresholds.return_value = {
+            "payment": timedelta(minutes=30),
+        }
+        return SLADriftDetector(
+            get_sla_thresholds=lambda: mock_thresholds,
+            get_failed_operations=lambda **kwargs: list(ops),
+        )
+
+    def test_empty_list_fallback_succeeds(self):
+        # Regression: the non-Django fallback returns [] — check_drift must
+        # analyze it to zero metrics, not die on QuerySet-only .count().
+        result = self._detector([]).check_drift()
+
+        assert result["success"] is True
+        assert result["metrics"]["payment"]["total_resolved"] == 0
+
+    def test_list_of_ops_computes_metrics(self):
+        result = self._detector(_fast_resolved_ops(3)).check_drift()
+
+        assert result["success"] is True
+        metrics = result["metrics"]["payment"]
+        assert metrics["total_resolved"] == 3
+        assert metrics["sla_breach_count"] == 0
 
 
 class TestDriftDetectorProtocols:
