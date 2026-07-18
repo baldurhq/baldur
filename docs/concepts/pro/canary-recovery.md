@@ -18,11 +18,15 @@ change step by step.
 
 In Baldur, a canary **rollout** is a first-class object: one configuration change (say, lowering
 a circuit breaker's failure threshold) plus an ordered list of **stages**, each naming the
-clusters it applies to and how long to observe them before advancing. The *recovery* half of the
-name is the other direction: at creation time Baldur snapshots the configuration being replaced,
-and rolling back (manually, or automatically when the rollout goes wrong) restores that
-snapshot on every cluster the rollout touched. It is a configuration write, not a redeploy, so
-recovery takes effect without restarting anything.
+clusters it watches and how long to observe them before advancing. Applying it is a
+configuration write through the same runtime-config surface a console edit uses, so it takes
+effect in-process, without a redeploy — and on a single deployment that write reaches the whole
+deployment at once. What the stages ration is not traffic but *supervision*: each stage is a
+time-boxed observation window with pass criteria and gates that decide whether the rollout may
+advance, stay put, or be taken back. The *recovery* half of the name is the other direction: at
+creation time Baldur snapshots the configuration being replaced, and rolling back (manually, or
+automatically when the rollout goes wrong) restores that snapshot through the same surface,
+again without restarting anything.
 
 !!! note "Not the same as the circuit breaker's recovery"
     The OSS [circuit breaker](../oss/circuit-breaker.md) also *recovers* after
@@ -39,16 +43,17 @@ code-review-and-CI pipeline that protects code changes, they take effect immedia
 value (a timeout too low, a threshold too aggressive) often *looks* fine until production traffic
 hits it. Canary Recovery turns that one-shot gamble into a supervised, reversible process:
 
-- **A bad value hurts one stage, not the fleet.** The first stage is your blast-radius cap: if
-  the new value misbehaves, only the canary clusters feel it while the rest of the fleet keeps
-  the old configuration.
+- **A bad value is caught while someone is still watching.** The change lands inside a
+  supervised observation window with pass criteria and a prepared rollback, so a value that
+  misbehaves is blocked from advancing and converges on automatic rollback, instead of sitting
+  in production until an unrelated incident review finds it.
 - **The way back is prepared before the way forward.** The previous values are captured when the
   rollout is created; recovery never depends on someone remembering what the old setting was at
   3 a.m.
 - **Forgotten rollouts clean themselves up.** A rollout that stalls (promotion blocked, an
   operator pulled away mid-change) is detected, announced, and eventually rolled back
-  automatically. "Half the fleet on config A, half on config B, nobody remembers why" stops
-  being a failure mode.
+  automatically. "A config change is live, its supervision never finished, and nobody remembers
+  why" stops being a failure mode.
 - **An escalating incident pulls the brake for you.** If Baldur's Emergency Mode climbs while
   rollouts are mid-flight, they are paused automatically — and at the highest severity, rolled
   back — without waiting for an operator to remember the canary among everything else on fire.
@@ -61,8 +66,8 @@ hits it. Canary Recovery turns that one-shot gamble into a supervised, reversibl
 ## How it works in Baldur
 
 A rollout is created with a **config type** (which configuration this changes), the **new
-values**, and its **stages**. Each stage names its clusters, the share of the fleet it
-represents, how many minutes to observe it (5 by default), whether it may **auto-promote** when
+values**, and its **stages**. Each stage names the clusters it watches, the share of the fleet
+they represent, how many minutes to observe (5 by default), whether it may **auto-promote** when
 that time passes, and the **pass criteria** the stage must meet to be considered healthy. At
 creation Baldur also records the configuration's current values — the snapshot that rollback
 will restore.
@@ -116,12 +121,12 @@ Each gate can be explicitly bypassed for emergencies — but a bypass demands a 
 least 10 characters) and the requester's identity, and it is recorded in the audit trail flagged
 for post-incident review. There is no quiet override.
 
-A **chaos guard** protects the rollout's measurements: applying a config change to a cluster
-that is currently running a chaos experiment would make the canary's metrics unreadable (was
-that latency spike the new config, or the injected fault?). By default the guard simply excludes
-the affected clusters and proceeds with the rest; if *every* target cluster is under chaos, the
-rollout is blocked. A strict policy that blocks on any overlap, and an explicit force flag for
-emergencies, are both available.
+A **chaos guard** protects the rollout's measurements: a cluster that is currently running a
+chaos experiment cannot give the canary a readable signal (was that latency spike the new
+config, or the injected fault?). By default the guard blocks creation and start only when
+*every* target cluster is under an experiment; a partial overlap proceeds with a warning, and
+the audit record of the start names which clusters were in conflict. A strict policy that
+blocks on any overlap, and an explicit force flag for emergencies, are both available.
 
 ### Health validation and promotion
 
@@ -173,7 +178,7 @@ than 30 minutes — unless it was paused *by* governance or the error budget, wh
 legitimate wait, not a stall. A stalled rollout triggers a high-priority notification naming the
 rollout, its config type, how long it has been stuck, and who created it. If it stays stuck past
 the auto-rollback deadline (60 minutes by default), the watchdog rolls it back automatically:
-the snapshot is restored on every affected cluster, the action is audited under the watchdog's
+the snapshot is restored, the action is audited under the watchdog's
 own identity, and a second notification reports what was rolled back and where. Degradation and
 abandonment thus converge on the same safe end state: blocked promotion stalls the rollout, and
 a stalled rollout becomes a rollback.
@@ -222,13 +227,13 @@ is a luxury you don't have.
 |------------------|-----------------|
 | Creating a second rollout for a config type is rejected, naming the current holder | one active rollout per config type, enforced by lock |
 | Start or promote is refused with a governance message | kill switch engaged, Emergency Mode at level 2+, or the error budget exhausted (only with the error-budget gate enabled) — or the check itself failed (fail-closed) |
-| Some clusters are silently skipped at start | a chaos experiment is running there; the guard excluded them |
+| Start is refused because of running chaos experiments | experiments cover every target cluster; a partial overlap proceeds instead, with the conflicted clusters recorded in the audit trail |
 | The rollout advances on its own | the stage's observation time passed, auto-promote is on, and the gates passed |
 | A high-priority "zombie rollout" notification | the rollout stalled past its threshold |
 | A promotion is validated against stricter limits than the stage declared, with the tightened fields logged | the service's tier floor — resolved automatically from its config type — clamped the stage's criteria |
 | Every in-flight rollout pauses at once, marked paused by the safety interlock | Emergency Mode escalated to level 2 |
 | Every in-flight rollout rolls back, audited under the system's own identity as a flagged bypass | Emergency Mode escalated to level 3 |
-| The previous configuration reappears on every affected cluster | manual rollback, panic rollback, or the watchdog's auto-rollback after 60 minutes stuck |
+| The previous configuration is back in effect | manual rollback, panic rollback, or the watchdog's auto-rollback after 60 minutes stuck |
 | An action fails with a version conflict | a concurrent actor changed the rollout first — no state corruption |
 | A bypass appears in the audit trail with reason and requester | someone bypassed a governance gate; a forced start during chaos is likewise recorded, with the clusters involved |
 | Completed and rolled-back rollouts appear in the daily report | both finishing outcomes — completion and rollback — are pushed to the ops summary |
