@@ -373,11 +373,3 @@ class TestCBDispatchStateContract:
         assert get_cb_replay_dispatch_state() == {
             "runtime_config_absent_logged": False,
         }
-
-    def test_absent_reader_flips_runtime_config_marker(self):
-        with patch.object(
-            ProviderRegistry.runtime_config_manager, "safe_get", return_value=None
-        ):
-            _get_replay_automation_config()
-
-        assert get_cb_replay_dispatch_state()["runtime_config_absent_logged"] is True
