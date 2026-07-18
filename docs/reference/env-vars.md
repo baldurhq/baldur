@@ -142,7 +142,7 @@ BALDUR_META_WATCHDOG_SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
 ## Meta-Watchdog (self-monitoring, PRO)
 
 Autonomous self-monitoring of Baldur's own healing subsystems. On detection
-of a stuck/dead subsystem it pages a human through Slack; it does not
+of a stuck/dead subsystem it pages a human through Slack or PagerDuty; it does not
 self-recover (autonomous recovery is deferred). Default-on under PRO — set
 `BALDUR_META_WATCHDOG_ENABLED=false` to silence. Escalation pages deliver to
 the same `BALDUR_META_WATCHDOG_SLACK_WEBHOOK_URL` documented in the
@@ -153,6 +153,7 @@ BALDUR_META_WATCHDOG_ENABLED=true
 BALDUR_META_WATCHDOG_ESCALATION_ENABLED=true
 BALDUR_META_WATCHDOG_PROBE_INTERVAL_SECONDS=30
 BALDUR_META_WATCHDOG_SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
+BALDUR_META_WATCHDOG_PAGERDUTY_ROUTING_KEY=<pd-key>
 ```
 
 ## Metrics source (canary live evaluation)
