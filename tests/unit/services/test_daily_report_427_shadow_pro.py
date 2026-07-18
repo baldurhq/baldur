@@ -163,6 +163,45 @@ class TestShadowProFormatterBehavior:
         assert "4 operations captured in the DLQ" in output
         assert "drift warnings" not in output
 
+    def test_dlq_insight_line_omitted_when_nothing_captured(self):
+        """The DLQ insight renders iff the capture counter populated it (711 D4).
+
+        The counterpart of the non-zero case above — a day with no captures
+        must not render a "0 operations captured" line.
+        """
+        report = DailyAutonomousReport()
+        report.shadow_pro_summary = ShadowProSummary(
+            cb_trips_without_auto_degradation=2,
+            dlq_captured_without_adaptive_replay=0,
+            drift_warnings_manual_only=0,
+        )
+
+        output = format_report_for_slack(report)
+
+        assert "PRO Insights" in output
+        assert "captured in the DLQ" not in output
+
+    def test_dlq_insight_claims_no_capability_oss_already_has(self):
+        """The insight asserts only real PRO deltas (711 D4 claim precision).
+
+        Post-v1.2.0 OSS captures to the DLQ and auto-replays on CB recovery,
+        so the pre-relocation "failed permanently (no DLQ)" premise is false.
+        The line may name only the FEATURE_CATALOG DLQ-entry PRO sentence
+        capabilities — adaptive batch sizing and the throttled replay queue.
+        """
+        report = DailyAutonomousReport()
+        report.shadow_pro_summary = ShadowProSummary(
+            dlq_captured_without_adaptive_replay=5,
+        )
+
+        output = format_report_for_slack(report)
+
+        # The real PRO delta is named...
+        assert "no adaptive sizing or throttled replay queue" in output
+        # ...and no claim contradicts the shipped OSS capture/replay surface.
+        assert "failed permanently" not in output
+        assert "no DLQ" not in output
+
 
 class TestShadowProToDictBehavior:
     """to_dict() includes shadow_pro_summary when present."""
