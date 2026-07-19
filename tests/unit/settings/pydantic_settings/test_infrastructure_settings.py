@@ -427,7 +427,6 @@ class TestAuditIntegritySettings:
         assert settings.orphan_ttl_seconds == 86400
         assert settings.archive_threshold_days == 7
         assert settings.cold_retention_years == 7
-        assert settings.integrity_check_interval == 3600
 
     def test_env_override(self, monkeypatch):
         """환경변수로 값을 오버라이드할 수 있는지 검증."""

@@ -40,11 +40,6 @@ from baldur.audit.integrity.local_manager import (
     reset_hash_chain_manager,
 )
 
-# Merkle Spot Checker
-from baldur.audit.integrity.merkle_spot_checker import (
-    MerkleSpotChecker,
-)
-
 # Models and core functions
 from baldur.audit.integrity.models import (
     IntegrityInfo,
@@ -88,8 +83,6 @@ __all__ = [
     "IntegrityInfo",
     "compute_hash",
     "canonical_json_bytes",
-    # Merkle Spot Checker
-    "MerkleSpotChecker",
     # Protocol
     "HashChainManagerProtocol",
     # Verifier

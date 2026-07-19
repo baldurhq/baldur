@@ -111,14 +111,15 @@ _OSS_ROOT_EXCLUDE = frozenset({"factories", "testapp"})
 # The `oss` budget is this repo's test tree. The `pro` / `dormant` roots do not
 # exist in this repo and are skipped; their entries are inert.
 _MOCK_CREATION_BUDGETS: dict[str, int] = {
-    # drift-detection list-fallback fix: -1 — the QuerySet-shaped Mock in the
-    # SLA drift fixtures became real lists.
-    "oss": 4393,
+    # dead schedule-lane retirement: -40 — the cascade-cleanup, integrity-task
+    # and merkle spot-checker suites were deleted with the code they covered.
+    "oss": 4353,
     "pro": 1800,
     "dormant": 401,
 }
 _DECORATOR_PATCH_BUDGETS: dict[str, int] = {
-    "oss": 719,
+    # dead schedule-lane retirement: -50 — same deleted suites.
+    "oss": 669,
     "pro": 434,
     "dormant": 144,
 }
