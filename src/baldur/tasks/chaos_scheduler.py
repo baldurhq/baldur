@@ -4,9 +4,9 @@ Chaos Scheduler Celery Tasks
 Celery Beat-based tasks for autonomous chaos experiment execution.
 
 Thin Task, Fat Service Architecture:
-    - 이 파일의 Celery Task들은 단순 위임자 역할만 수행
-    - 모든 비즈니스 로직은 ChaosExecutionService에서 처리
-    - 안전 체크 (Kill Switch, ErrorBudget)는 서비스 레이어에서 수행
+    - The Celery tasks in this file act as thin delegators only
+    - All business logic lives in ChaosExecutionService
+    - Safety checks (Kill Switch, ErrorBudget) run in the service layer
 
 Features:
 - Scheduled experiment execution
@@ -27,7 +27,7 @@ from baldur.settings.chaos import get_chaos_settings
 
 logger = structlog.get_logger()
 
-# 모듈 로드 시점에 설정값 캐싱
+# Cache settings at module load time
 _chaos_settings = get_chaos_settings()
 
 
@@ -43,10 +43,10 @@ def run_scheduled_experiments() -> dict[str, Any]:
     This function is a thin wrapper that delegates to ChaosExecutionService.
     All governance checks and safety validations are performed in the service layer.
 
-    Audit 기록:
-    - CHAOS_EXPERIMENT_STARTED/COMPLETED 이벤트 기록
+    Audit records:
+    - Emits CHAOS_EXPERIMENT_STARTED/COMPLETED events
 
-    Note: task_id는 task_prerun 시그널에서 celery_context로 자동 설정됨
+    Note: task_id is set automatically on celery_context by the task_prerun signal
 
     Called at regular intervals (default: every 5 minutes) via Celery Beat.
 
@@ -91,10 +91,10 @@ def generate_daily_resilience_report() -> dict[str, Any]:
     This function is a thin wrapper that delegates to ChaosExecutionService.
     Called once per day (default: 6 AM UTC).
 
-    Audit 기록:
-    - 리포트 생성 결과 기록
+    Audit records:
+    - Records the report generation outcome
 
-    Note: task_id는 task_prerun 시그널에서 celery_context로 자동 설정됨
+    Note: task_id is set automatically on celery_context by the task_prerun signal
 
     Returns:
         Report summary
@@ -131,10 +131,10 @@ def cleanup_expired_approvals() -> dict[str, Any]:
 
     This function is a thin wrapper that delegates to ChaosExecutionService.
 
-    Audit 기록:
-    - 만료된 승인 정리 결과 기록
+    Audit records:
+    - Records the expired-approval cleanup outcome
 
-    Note: task_id는 task_prerun 시그널에서 celery_context로 자동 설정됨
+    Note: task_id is set automatically on celery_context by the task_prerun signal
 
     Returns:
         Cleanup summary
@@ -173,7 +173,7 @@ def check_and_alert_pending_approvals() -> dict[str, Any]:
 
     This function is a thin wrapper that delegates to ChaosExecutionService.
 
-    Note: task_id는 task_prerun 시그널에서 celery_context로 자동 설정됨
+    Note: task_id is set automatically on celery_context by the task_prerun signal
 
     Returns:
         Alert summary
@@ -418,21 +418,21 @@ def _hunt_cross_process_zombies(
 
 def hunt_zombie_experiments() -> dict[str, Any]:  # noqa: C901, PLR0912, PLR0915
     """
-    Zombie Hunter: 고아 실험 정리 함수.
+    Zombie Hunter: clean up orphaned experiments.
 
-    RUNNING 상태인데 TTL이 만료된 실험 = 워커 크래시로 간주
-    → 분산 락 획득 후 강제 rollback → ABORTED 처리
+    An experiment still in RUNNING state whose TTL has expired is treated as a
+    worker crash → acquire the distributed lock, force a rollback, mark ABORTED.
 
-    Fail-Safe 보장:
-    - 워커가 크래시해도 주입된 장애가 운영 환경에 남지 않도록 보장
-    - 분산 락으로 중복 rollback 방지
+    Fail-safe guarantees:
+    - An injected fault never outlives a crashed worker in production
+    - The distributed lock prevents duplicate rollbacks
 
     Returns:
         Dictionary with hunt results:
         - success: bool
-        - hunted: int (처리된 좀비 수)
-        - skipped: int (락 경쟁으로 스킵된 수)
-        - errors: List[Dict] (에러 발생한 실험 정보)
+        - hunted: int (zombies handled)
+        - skipped: int (skipped due to lock contention)
+        - errors: List[Dict] (experiments that raised)
     """
     logger.info("zombie_hunter.starting_zombie_experiment_hunt")
 
@@ -452,7 +452,7 @@ def hunt_zombie_experiments() -> dict[str, Any]:  # noqa: C901, PLR0912, PLR0915
             raise RuntimeError("baldur_pro ChaosScheduler not registered")
         idempotency = IdempotencyService()
 
-        # RUNNING 상태 실험 조회
+        # Fetch experiments in RUNNING state
         running_experiments = scheduler.get_experiments_by_status(
             ExperimentStatus.RUNNING.value
         )
@@ -466,19 +466,19 @@ def hunt_zombie_experiments() -> dict[str, Any]:  # noqa: C901, PLR0912, PLR0915
                 exp_id = getattr(experiment, "experiment_id", "unknown")
 
                 try:
-                    # TTL 만료 체크 (Monotonic 지원)
+                    # TTL expiry check (monotonic-aware)
                     is_expired = False
 
-                    # Monotonic TTL 우선 체크 (ClockSkew 실험 보호)
+                    # Prefer the monotonic TTL (protects ClockSkew experiments)
                     if hasattr(experiment, "_is_expired_monotonic"):
                         is_expired = experiment._is_expired_monotonic()
                     elif hasattr(experiment, "is_expired"):
                         is_expired = experiment.is_expired()
 
                     if not is_expired:
-                        continue  # TTL 아직 유효 → 스킵
+                        continue  # TTL still valid — skip
 
-                    # === 분산 락 획득 (레이스 컨디션 방지) ===
+                    # === Acquire distributed lock (prevents race conditions) ===
                     lock_key = IdempotencyKey(
                         domain=IdempotencyDomain.CHAOS_ZOMBIE_HUNTER,
                         key=f"zombie_rollback:{exp_id}",
@@ -488,7 +488,7 @@ def hunt_zombie_experiments() -> dict[str, Any]:  # noqa: C901, PLR0912, PLR0915
                     if not idempotency.acquire_lock(
                         lock_key, ttl_seconds=_chaos_settings.experiment_lock_ttl
                     ):
-                        # 다른 스케줄러가 이미 처리 중
+                        # Another scheduler is already handling it
                         skipped += 1
                         logger.debug(
                             "zombie_hunter.already_handled",
