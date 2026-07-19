@@ -567,3 +567,56 @@ class TestPublicDialectHelpersContract:
         # sqlite fallbacks
         assert "TEXT" in dialect_json_type(SQLDialect.SQLITE)
         assert "AUTOINCREMENT" in dialect_bigserial(SQLDialect.SQLITE)
+
+
+# ---------------------------------------------------------------------------
+# Timestamp read normalization
+# ---------------------------------------------------------------------------
+
+
+class TestDatetimeFromDbContract:
+    """_dt_from_db always yields a timezone-aware UTC datetime.
+
+    MySQL/MariaDB store DATETIME(6), which carries no zone, and sqlite may
+    hold a naive ISO string. Both used to come back naive while the memory
+    and Redis adapters returned aware values for the same DTO field, so a
+    caller comparing one against utc_now() raised TypeError on those
+    backends only.
+    """
+
+    def test_naive_datetime_is_stamped_utc(self):
+        result = GenericSQLRepository._dt_from_db(datetime(2026, 4, 1, 12, 0))
+        assert result == datetime(2026, 4, 1, 12, 0, tzinfo=UTC)
+        assert result.tzinfo is not None
+
+    def test_aware_datetime_is_returned_unchanged(self):
+        value = datetime(2026, 4, 1, 12, 0, tzinfo=UTC)
+        assert GenericSQLRepository._dt_from_db(value) == value
+
+    def test_naive_iso_string_is_stamped_utc(self):
+        result = GenericSQLRepository._dt_from_db("2026-04-01T12:00:00")
+        assert result == datetime(2026, 4, 1, 12, 0, tzinfo=UTC)
+
+    def test_rfc3339_string_keeps_its_offset(self):
+        result = GenericSQLRepository._dt_from_db("2026-04-01T12:00:00+00:00")
+        assert result == datetime(2026, 4, 1, 12, 0, tzinfo=UTC)
+
+    def test_bytes_are_decoded_then_stamped(self):
+        result = GenericSQLRepository._dt_from_db(b"2026-04-01T12:00:00")
+        assert result == datetime(2026, 4, 1, 12, 0, tzinfo=UTC)
+
+    def test_result_is_comparable_against_utc_now(self):
+        """The regression this normalization exists to prevent.
+
+        A DATETIME(6) read compared against an aware cutoff used to raise
+        "can't compare offset-naive and offset-aware datetimes" inside the
+        compressed-entry lifecycle sweep.
+        """
+        from baldur.utils.time import utc_now
+
+        stale_at = GenericSQLRepository._dt_from_db(datetime(2026, 4, 1, 12, 0))
+        assert stale_at < utc_now()
+
+    def test_none_and_garbage_return_none(self):
+        assert GenericSQLRepository._dt_from_db(None) is None
+        assert GenericSQLRepository._dt_from_db("not-a-timestamp") is None

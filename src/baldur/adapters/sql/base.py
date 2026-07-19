@@ -29,7 +29,7 @@ import json
 import threading
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -371,18 +371,29 @@ class GenericSQLRepository:
 
     @staticmethod
     def _dt_from_db(value: Any) -> datetime | None:
+        """Read a timestamp column back as a timezone-aware UTC datetime.
+
+        Every timestamp this layer writes is UTC, but not every dialect
+        round-trips the offset: MySQL/MariaDB store ``DATETIME(6)``, which
+        carries no zone, and sqlite may hold a naive ISO string. Both come
+        back naive while the memory and Redis adapters return aware values
+        for the same DTO field, so a caller comparing one against
+        ``utc_now()`` raises ``TypeError`` on those backends only. Naive
+        values are therefore stamped UTC here, at the one boundary every
+        read passes through.
+        """
         if value is None:
             return None
-        if isinstance(value, datetime):
-            return value
         if isinstance(value, (bytes, bytearray)):
             value = value.decode("utf-8")
         if isinstance(value, str):
             # sqlite path. Accept both naive ISO strings and full RFC 3339.
             try:
-                return datetime.fromisoformat(value)
+                value = datetime.fromisoformat(value)
             except ValueError:
                 return None
+        if isinstance(value, datetime):
+            return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
         return None
 
     # ----- DDL helpers ------------------------------------------------------
