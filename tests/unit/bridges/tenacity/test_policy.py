@@ -15,12 +15,15 @@ from unittest.mock import MagicMock
 import pytest
 import tenacity
 
+from baldur.adapters.rate_limit.memory_adapter import InMemoryRateLimitStorage
 from baldur.bridges.tenacity.policy import (
     _BRIDGE_EXPLICIT_MARKER,
+    AsyncTenacityBridgePolicy,
     TenacityBridgePolicy,
 )
 from baldur.interfaces.resilience_policy import PolicyOutcome
 from baldur.services.backoff_calculator.budget import AdaptiveRetryBudget
+from baldur.services.rate_limit_coordinator import RateLimitCoordinator
 from baldur.services.rate_limit_coordinator.models import RateLimitResult
 
 # =============================================================================
@@ -445,3 +448,176 @@ class TestTenacityBridgePolicyExplicitMarkerContract:
     def test_marker_attribute_name_is_baldur_bridge_explicit(self):
         """Contract: marker name matches D5/D7 spec."""
         assert _BRIDGE_EXPLICIT_MARKER == "__baldur_bridge_explicit__"
+
+
+# =============================================================================
+# Behavior — bounded cooldown wait: deferral + bound forwarding (D6)
+# =============================================================================
+
+
+_LONG_COOLDOWN_SECONDS = 300.0
+
+
+def _coordinator_in_cooldown(key: str):
+    """Real coordinator with a shared cooldown far longer than any test bound."""
+    import time
+
+    storage = InMemoryRateLimitStorage()
+    storage.set_cooldown(key, time.time() + _LONG_COOLDOWN_SECONDS)
+    return RateLimitCoordinator(storage=storage)
+
+
+class TestTenacityBridgeCooldownDeferralBehavior:
+    """An over-bound cooldown aborts the bridge loop into a FAILURE with defer metadata."""
+
+    def test_sync_deferral_returns_failure_with_defer_metadata(self):
+        """Sync execute: deferral -> FAILURE, rate_limit_deferred + not_before, func skipped."""
+        coord = _coordinator_in_cooldown("api")
+        fn, counter = _make_counting_fn(0)
+        policy: TenacityBridgePolicy[str] = TenacityBridgePolicy(
+            stop=tenacity.stop_after_attempt(3),
+            domain="api",
+            rate_limit_coordinator=coord,
+            rate_limit_key="api",
+            rate_limit_max_wait=1.0,
+        )
+
+        result = policy.execute(fn)
+
+        assert result.outcome == PolicyOutcome.FAILURE
+        assert result.metadata["rate_limit_deferred"] is True
+        assert result.metadata["not_before"] is not None
+        assert counter["calls"] == 0  # the attempt was never made
+
+    def test_async_deferral_returns_failure_with_defer_metadata(self):
+        """Async execute mirrors the sync deferral translation."""
+        import asyncio
+
+        coord = _coordinator_in_cooldown("api")
+
+        async def afn():
+            return "ok"
+
+        policy: AsyncTenacityBridgePolicy[str] = AsyncTenacityBridgePolicy(
+            stop=tenacity.stop_after_attempt(3),
+            domain="api",
+            rate_limit_coordinator=coord,
+            rate_limit_key="api",
+            rate_limit_max_wait=1.0,
+        )
+
+        result = asyncio.run(policy.execute(afn))
+
+        assert result.outcome == PolicyOutcome.FAILURE
+        assert result.metadata["rate_limit_deferred"] is True
+        assert result.metadata["not_before"] is not None
+
+    def test_constructor_stores_the_bound(self):
+        policy: TenacityBridgePolicy[str] = TenacityBridgePolicy(
+            rate_limit_key="api", rate_limit_max_wait=2.5
+        )
+        assert policy._rate_limit_max_wait == 2.5
+
+    def test_from_existing_forwards_the_bound(self):
+        policy = TenacityBridgePolicy.from_existing(
+            tenacity.Retrying(),
+            domain="api",
+            rate_limit_key="api",
+            rate_limit_max_wait=2.5,
+        )
+        assert policy._rate_limit_max_wait == 2.5
+
+    def test_from_sync_preserves_the_bound(self):
+        """The sync->async field-by-field copy must not drop the bound (silent-drop site)."""
+        sync_bridge: TenacityBridgePolicy[str] = TenacityBridgePolicy(
+            rate_limit_key="api", rate_limit_max_wait=1.0
+        )
+
+        async_bridge = AsyncTenacityBridgePolicy.from_sync(sync_bridge)
+
+        assert async_bridge._rate_limit_max_wait == 1.0
+        # Negative: it is the forwarded value, not the constructor default.
+        assert async_bridge._rate_limit_max_wait is not None
+
+
+class TestTenacityBridgeCoordinatorFailOpenBehavior:
+    """A coordinator fault in a bridge callback never changes the business outcome.
+
+    The ``after`` hook only runs when a retry follows, so its fault sites are
+    driven with a failing first attempt (on_rate_limited) and a retry_if_result
+    rejection (on_success) — a plain success never reaches them.
+    """
+
+    def _coordinator_mock(self):
+        coord = MagicMock(spec=RateLimitCoordinator)
+        coord.wait_if_needed.return_value = RateLimitResult(waited=False)
+        return coord
+
+    def test_before_wait_fault_is_fail_open(self):
+        """Site 4: wait_if_needed raises in ``before`` -> the loop still runs."""
+        coord = self._coordinator_mock()
+        coord.wait_if_needed.side_effect = RuntimeError("coordinator down")
+        fn, counter = _make_counting_fn(0)
+        policy: TenacityBridgePolicy[str] = TenacityBridgePolicy(
+            stop=tenacity.stop_after_attempt(1),
+            rate_limit_coordinator=coord,
+            rate_limit_key="api",
+        )
+
+        result = policy.execute(fn)
+
+        assert result.outcome == PolicyOutcome.SUCCESS
+        assert result.value == "ok"
+
+    def test_after_on_rate_limited_fault_does_not_truncate_loop(self):
+        """Site 6: a fault recording the first 429 must not skip attempt 2."""
+
+        class _RateLimited(Exception):
+            """429-detectable via its message (rate_limit_detection)."""
+
+        coord = self._coordinator_mock()
+        coord.on_rate_limited.side_effect = RuntimeError("coordinator down")
+        attempts = {"n": 0}
+
+        def flaky():
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise _RateLimited("429 too many requests")
+            return "recovered"
+
+        policy: TenacityBridgePolicy[str] = TenacityBridgePolicy(
+            stop=tenacity.stop_after_attempt(3),
+            retry=tenacity.retry_if_exception_type(_RateLimited),
+            wait=tenacity.wait_fixed(0),
+            rate_limit_coordinator=coord,
+            rate_limit_key="api",
+        )
+
+        result = policy.execute(flaky)
+
+        assert result.outcome == PolicyOutcome.SUCCESS
+        assert result.value == "recovered"
+        assert attempts["n"] == 2  # attempt 2 ran — loop not truncated
+
+    def test_after_on_success_fault_is_fail_open(self):
+        """Site 5: on_success raises on the retry-driving ``after`` -> result preserved."""
+        coord = self._coordinator_mock()
+        coord.on_success.side_effect = RuntimeError("coordinator down")
+        results = {"n": 0}
+
+        def rejecting():
+            results["n"] += 1
+            return "BAD" if results["n"] == 1 else "good"
+
+        policy: TenacityBridgePolicy[str] = TenacityBridgePolicy(
+            stop=tenacity.stop_after_attempt(3),
+            retry=tenacity.retry_if_result(lambda v: v == "BAD"),
+            wait=tenacity.wait_fixed(0),
+            rate_limit_coordinator=coord,
+            rate_limit_key="api",
+        )
+
+        result = policy.execute(rejecting)
+
+        assert result.outcome == PolicyOutcome.SUCCESS
+        assert result.value == "good"
