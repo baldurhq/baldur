@@ -20,6 +20,10 @@ logger = structlog.get_logger()
 
 DAILY_REPORT_CACHE_KEY_PREFIX = "baldur:daily_report"
 
+# Result keys the report's Auto-Processing section aggregates. A cleanup
+# result carrying none of them has nothing to contribute to that section.
+AUTO_PROCESSING_INGEST_KEYS = ("archived_count", "expired_count", "purged_count")
+
 
 def _get_daily_report_recorder():
     """Lazy accessor for DailyReportMetricRecorder (graceful if metrics unavailable)."""
@@ -146,6 +150,54 @@ from baldur.utils.singleton import make_singleton_factory
 ) = make_singleton_factory("daily_report_collector", DailyReportCollector)
 
 
+def record_cleanup_result(task_name: str, result: dict[str, Any]) -> None:
+    """Record a cleanup-lane task result into today's digest.
+
+    The cleanup lane (DLQ archival, config expiry, archived-entry purge) feeds
+    the report's Auto-Processing counters. Recording is a lane side-effect, so
+    this lives beside the collector rather than inside the cleanup service, and
+    is called from the task bodies — which covers both the Celery-beat lane and
+    the framework-independent scheduler lane with one call site each.
+
+    Recorded only when all three hold, so the digest counts real work:
+
+    1. The task succeeded. Both result shapes are accepted — ``success: True``
+       (CleanupResult) and ``status: "success"`` (the config-changes task).
+       Failure shapes must not be pushed: a tier-gated task returns a failure
+       result on every run where its backing service is absent, which would
+       bump ``task_failures`` daily rather than reporting cleanup.
+    2. It was not a dry run. A purge dry-run reports the would-purge count,
+       which never happened.
+    3. At least one Auto-Processing counter is present and above zero. A run
+       that cleaned nothing adds no information to the digest.
+
+    Fail-open: a recording failure never propagates into the cleanup lane.
+
+    Args:
+        task_name: Identifier stored on the entry (the registered task name).
+        result: The task's result dict, pushed verbatim — keys outside the
+            ingest map are ignored by the report's field mapping.
+    """
+    try:
+        succeeded = result.get("success") is True or result.get("status") == "success"
+        if not succeeded or result.get("dry_run"):
+            return
+
+        if not any(
+            int(result.get(key) or 0) > 0 for key in AUTO_PROCESSING_INGEST_KEYS
+        ):
+            return
+
+        get_daily_report_collector().add_result(task_name=task_name, result=result)
+
+    except Exception as e:
+        logger.warning(
+            "daily_report_collector.record_cleanup_result_failed",
+            task_name=task_name,
+            error=e,
+        )
+
+
 def aggregate_daily_results(
     date: datetime | None = None,
 ) -> DailyAutonomousReport:
@@ -165,10 +217,12 @@ def aggregate_daily_results(
 
 
 __all__ = [
+    "AUTO_PROCESSING_INGEST_KEYS",
     "DAILY_REPORT_CACHE_KEY_PREFIX",
     "DailyReportCollector",
     "get_daily_report_collector",
     "configure_daily_report_collector",
     "reset_daily_report_collector",
     "aggregate_daily_results",
+    "record_cleanup_result",
 ]

@@ -211,6 +211,7 @@ def cleanup_resolved_dlq_entries(self, days_old: int = 30) -> dict:
 
     try:
         from baldur.factory import ProviderRegistry
+        from baldur.services.daily_report import record_cleanup_result
 
         if not ProviderRegistry.has_statistics_adapter():
             logger.info("dlq_cleanup.stats_adapter_unavailable")
@@ -229,10 +230,15 @@ def cleanup_resolved_dlq_entries(self, days_old: int = 30) -> dict:
             archived_count=archived_count,
         )
 
-        return {
+        cleanup_summary = {
             "success": True,
             "archived_count": archived_count,
         }
+        record_cleanup_result(
+            "baldur.adapters.celery.tasks.cleanup_resolved_dlq_entries",
+            cleanup_summary,
+        )
+        return cleanup_summary
 
     except Exception as e:
         logger.exception(

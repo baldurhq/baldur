@@ -425,6 +425,7 @@ def cleanup_resolved_dlq_entries(self, days_old: int = 30) -> dict:
     """
 
     from baldur.factory.registry import ProviderRegistry
+    from baldur.services.daily_report import record_cleanup_result
 
     task_id = self.request.id or "unknown"
     bound_logger = logger.bind(task_id=task_id)
@@ -446,10 +447,14 @@ def cleanup_resolved_dlq_entries(self, days_old: int = 30) -> dict:
             archived_count=result.get("archived_count", 0),
         )
 
-        return {
+        cleanup_summary = {
             "success": True,
             **result,
         }
+        record_cleanup_result(
+            "baldur.celery_tasks.cleanup_resolved_dlq_entries", cleanup_summary
+        )
+        return cleanup_summary
 
     except Exception as e:
         bound_logger.exception(
