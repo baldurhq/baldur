@@ -21,6 +21,7 @@ from baldur.bridges.tenacity.policy import (
 )
 from baldur.interfaces.resilience_policy import PolicyOutcome
 from baldur.services.backoff_calculator.budget import AdaptiveRetryBudget
+from baldur.services.rate_limit_coordinator.models import RateLimitResult
 
 # =============================================================================
 # Helpers
@@ -224,7 +225,9 @@ class TestTenacityBridgePolicyRateLimitBehavior:
         # tenacity fires ``before`` on every attempt, so two attempts → two calls.
         fn, counter = _make_counting_fn(failures_before_success=1)
         coord = MagicMock()
-        coord.wait_if_needed.return_value = MagicMock(waited=False, wait_time=0.0)
+        # Real result object, not a MagicMock: an auto-generated ``.deferred``
+        # attribute is truthy and would abort the loop before any attempt runs.
+        coord.wait_if_needed.return_value = RateLimitResult(waited=False, wait_time=0.0)
 
         policy: TenacityBridgePolicy[str] = TenacityBridgePolicy(
             stop=tenacity.stop_after_attempt(3),
@@ -252,7 +255,9 @@ class TestTenacityBridgePolicyRateLimitBehavior:
                 self.response = MagicMock(headers={"Retry-After": "5"})
 
         coord = MagicMock()
-        coord.wait_if_needed.return_value = MagicMock(waited=False, wait_time=0.0)
+        # Real result object, not a MagicMock: an auto-generated ``.deferred``
+        # attribute is truthy and would abort the loop before any attempt runs.
+        coord.wait_if_needed.return_value = RateLimitResult(waited=False, wait_time=0.0)
 
         def _fail_429():
             raise _RateLimited()

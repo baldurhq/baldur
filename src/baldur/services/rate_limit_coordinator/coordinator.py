@@ -40,7 +40,11 @@ from .helpers import (
     _emit_rate_limit_event,
     _record_rate_limit_metrics,
 )
-from .models import RateLimitCoordinatorConfig, RateLimitResult
+from .models import (
+    RateLimitCoordinatorConfig,
+    RateLimitDeferredError,
+    RateLimitResult,
+)
 
 logger = structlog.get_logger()
 
@@ -260,23 +264,56 @@ class RateLimitCoordinator:
         """Get current rate limit state for a key."""
         return self._storage.get_state(key)
 
-    def wait_if_needed(self, key: str) -> RateLimitResult:
+    def wait_if_needed(
+        self, key: str, max_wait: float | None = None
+    ) -> RateLimitResult:
         """
-        Wait if currently in cooldown period.
+        Wait if currently in cooldown period, bounded by the caller's budget.
 
         Call this BEFORE making an external request.
         The first request right after cooldown is marked is_canary=True.
 
+        Serve-or-defer: when the remaining cooldown fits within the bound the
+        full remaining time is slept (``waited=True``). When it does not, the
+        call returns immediately with ``deferred=True`` and **sleeps nothing** —
+        any slice shorter than the remaining cooldown cannot make the request
+        legal before the cooldown expires, so it would be wasted budget. The
+        caller decides what to do next (requeue, fail, drop); the shared
+        cooldown is left untouched either way.
+
         Args:
             key: Rate limit key (e.g., "payment_api", "external_service")
+            max_wait: Maximum seconds this call may sleep. ``None`` uses the
+                configured ``max_delay`` as the default bound; ``float("inf")``
+                opts into an unbounded wait.
 
         Returns:
-            RateLimitResult with wait information and canary mode flag
+            RateLimitResult with wait information, canary mode flag, and — on a
+            deferral — ``not_before`` (the cooldown's expiry timestamp).
         """
         state = self._storage.get_state(key)
 
         if state.is_in_cooldown:
             wait_time = state.remaining_cooldown
+            bound = self._config.max_delay if max_wait is None else max_wait
+
+            if wait_time > bound:
+                logger.warning(
+                    "rate_limit_coordinator.wait_deferred",
+                    wait_time=wait_time,
+                    max_wait=bound,
+                    key=key,
+                    state=state.consecutive_429s,
+                )
+                return RateLimitResult(
+                    waited=False,
+                    wait_time=0.0,
+                    was_rate_limited=True,
+                    consecutive_429s=state.consecutive_429s,
+                    is_canary=False,
+                    deferred=True,
+                    not_before=state.cooldown_until,
+                )
 
             logger.info(
                 "rate_limit_coordinator.waiting",
@@ -328,22 +365,7 @@ class RateLimitCoordinator:
         """
         consecutive = self._storage.increment_consecutive_429s(key)
 
-        # Calculate backoff with exponential increase
-        if retry_after is not None and retry_after > 0:
-            base_delay = retry_after
-        else:
-            base_delay = self._config.default_retry_after
-
-        # Exponential backoff with jitter, composed from the canonical strategy
-        # (jitter_factor == jitter_percent / 100 keeps the symmetric-uniform semantics).
-        backoff = ExponentialBackoff(
-            base_delay=base_delay,
-            multiplier=self._config.backoff_multiplier,
-            max_delay=self._config.max_delay,
-            jitter=True,
-            jitter_factor=self._config.jitter_percent / 100.0,
-        )
-        delay = max(_MIN_COOLDOWN_SECONDS, backoff.calculate(consecutive))
+        delay, honored, clamped = self._compute_cooldown(key, consecutive, retry_after)
 
         # Set global cooldown
         cooldown_until = time.time() + delay
@@ -360,6 +382,8 @@ class RateLimitCoordinator:
                     "calculated_delay": delay,
                     "consecutive_429s": consecutive,
                     "cooldown_until": cooldown_until,
+                    "retry_after_honored": honored,
+                    "retry_after_clamped": clamped,
                 },
                 priority_name="HIGH",
             )
@@ -387,6 +411,73 @@ class RateLimitCoordinator:
         )
 
         return delay
+
+    def _compute_cooldown(
+        self,
+        key: str,
+        consecutive: int,
+        retry_after: float | None,
+    ) -> tuple[float, bool, bool]:
+        """Compute the cooldown a 429 installs, honoring a provider Retry-After.
+
+        The headerless ladder (exponential backoff with jitter, hard-capped at
+        ``max_delay``) is always Baldur's own escalation guard. A provider header
+        acts as a **floor** on top of it — never undercut by jitter, never
+        amplified by the ladder multiplier — bounded above by
+        ``retry_after_ceiling``.
+
+        Args:
+            key: Rate limit key (logging only)
+            consecutive: Consecutive-429 count for this key (1-indexed)
+            retry_after: Retry-After header value in seconds, when present
+
+        Returns:
+            ``(delay, retry_after_honored, retry_after_clamped)`` — the two flags
+            mark a header honored beyond ``max_delay`` and a header cut down by
+            the ceiling, respectively.
+        """
+        # Exponential backoff with jitter, composed from the canonical strategy
+        # (jitter_factor == jitter_percent / 100 keeps the symmetric-uniform semantics).
+        # Seeded from default_retry_after unconditionally: seeding it from the
+        # header would escalate the provider's own stated wait on every repeat.
+        backoff = ExponentialBackoff(
+            base_delay=self._config.default_retry_after,
+            multiplier=self._config.backoff_multiplier,
+            max_delay=self._config.max_delay,
+            jitter=True,
+            jitter_factor=self._config.jitter_percent / 100.0,
+        )
+        ladder = backoff.calculate(consecutive)
+
+        if retry_after is None or retry_after <= 0:
+            return max(_MIN_COOLDOWN_SECONDS, ladder), False, False
+
+        ceiling = self._config.retry_after_ceiling
+        clamped = retry_after > ceiling
+        # The header is a floor, so no jitter is applied to it: the stored value
+        # is a single shared global and every worker wakes on the same
+        # cooldown_until — dispersal buys nothing and could undercut the header.
+        delay = max(_MIN_COOLDOWN_SECONDS, min(ceiling, max(retry_after, ladder)))
+        honored = delay > self._config.max_delay
+
+        if clamped:
+            logger.warning(
+                "rate_limit_coordinator.retry_after_clamped",
+                key=key,
+                retry_after=retry_after,
+                ceiling=ceiling,
+                delay=delay,
+            )
+        elif honored:
+            logger.info(
+                "rate_limit_coordinator.retry_after_honored",
+                key=key,
+                retry_after=retry_after,
+                max_delay=self._config.max_delay,
+                delay=delay,
+            )
+
+        return delay, honored, clamped
 
     def _broadcast_to_cluster(
         self,
@@ -452,6 +543,7 @@ class RateLimitCoordinator:
         key: str,
         is_429: Callable[[Any], bool] | None = None,
         get_retry_after: Callable[[Any], float | None] | None = None,
+        max_wait: float | None = None,
     ) -> Callable[[Callable[..., T]], Callable[..., T]]:
         """
         Decorator to make a function rate-limit aware.
@@ -460,9 +552,19 @@ class RateLimitCoordinator:
             key: Rate limit key
             is_429: Function to detect if response is 429 (default: check status_code)
             get_retry_after: Function to extract Retry-After from response
+            max_wait: Maximum seconds the wrapper may sleep on an active cooldown.
+                ``None`` uses the configured ``max_delay``. When the remaining
+                cooldown exceeds the bound the wrapper raises
+                ``RateLimitDeferredError`` instead of calling the function — a
+                decorator cannot return "nothing", so raising is its only correct
+                refusal.
 
         Returns:
             Decorated function
+
+        Raises:
+            RateLimitDeferredError: Cooldown outlasts ``max_wait``; the wrapped
+                function was not called and is safe to retry at ``not_before``.
 
         Example:
             @coordinator.rate_limit_aware("payment_api")
@@ -480,20 +582,51 @@ class RateLimitCoordinator:
 
         def decorator(func: Callable[..., T]) -> Callable[..., T]:
             def wrapper(*args: Any, **kwargs: Any) -> T:
-                # Wait if in cooldown
-                self.wait_if_needed(key)
+                # Wait if in cooldown. Fail-open on a coordinator fault (proceed
+                # without waiting) — but a *deferral* is a deliberate refusal, so
+                # it is decided from the returned result, outside the wrap.
+                try:
+                    wait_result: RateLimitResult | None = self.wait_if_needed(
+                        key, max_wait=max_wait
+                    )
+                except Exception as coordinator_error:
+                    logger.warning(
+                        "rate_limit_coordinator.decorator_wait_failed",
+                        key=key,
+                        error=str(coordinator_error),
+                    )
+                    wait_result = None
+
+                if wait_result is not None and wait_result.deferred:
+                    raise RateLimitDeferredError(
+                        key=key,
+                        not_before=wait_result.not_before,
+                    )
 
                 result = func(*args, **kwargs)
 
-                # Check if rate limited
+                # Check if rate limited. Both notifications are fail-open: the
+                # wrapped call has already committed its side effect, so a
+                # coordinator fault must not surface as if the call never ran.
                 _is_429 = is_429 or _default_is_429
                 _get_retry_after = get_retry_after or _default_get_retry_after
 
-                if _is_429(result):
-                    retry_after = _get_retry_after(result)
-                    self.on_rate_limited(key, retry_after)
-                else:
-                    self.on_success(key)
+                # The user-supplied predicates stay OUTSIDE the wrap: their
+                # exceptions are the caller's own and must keep propagating.
+                rate_limited = _is_429(result)
+                retry_after = _get_retry_after(result) if rate_limited else None
+
+                try:
+                    if rate_limited:
+                        self.on_rate_limited(key, retry_after)
+                    else:
+                        self.on_success(key)
+                except Exception as coordinator_error:
+                    logger.warning(
+                        "rate_limit_coordinator.decorator_notify_failed",
+                        key=key,
+                        error=str(coordinator_error),
+                    )
 
                 return result
 

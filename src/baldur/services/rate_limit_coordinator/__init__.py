@@ -11,10 +11,10 @@ Key Features:
     - 100% coverage with database fallback
 
 Design Philosophy:
-    "어떤 고객 환경이든 100% Self-DDoS 차단"
-    - Redis 있으면 사용 (최고 성능)
-    - 없으면 Database 사용 (100% 호환)
-    - DB도 없으면 InMemory (단일 프로세스)
+    "100% Self-DDoS prevention in any customer environment"
+    - Use Redis if available (best performance)
+    - Fall back to Database otherwise (100% compatible)
+    - Fall back to InMemory if no DB (single process)
 """
 
 from __future__ import annotations
@@ -38,12 +38,14 @@ from .helpers import (
 )
 from .models import (
     RateLimitCoordinatorConfig,
+    RateLimitDeferredError,
     RateLimitResult,
 )
 
 __all__ = [
     # Models
     "RateLimitCoordinatorConfig",
+    "RateLimitDeferredError",
     "RateLimitResult",
     # Helpers
     "_emit_rate_limit_event",

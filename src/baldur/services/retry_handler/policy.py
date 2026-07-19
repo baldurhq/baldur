@@ -39,6 +39,7 @@ _REASON_TO_OUTCOME: dict[str, str] = {
     "retry_budget": "retry_budget",
     "max_elapsed": "max_elapsed",
     "deadline": "deadline",
+    "rate_limit_deferred": "rate_limit_deferred",
 }
 
 from baldur.core.backoff import BackoffStrategy, ExponentialBackoff
@@ -55,6 +56,7 @@ from .models import MaxRetriesExceededError, RetryPolicyConfig
 if TYPE_CHECKING:
     from baldur.services.backoff_calculator import AdaptiveRetryBudget
     from baldur.services.rate_limit_coordinator import RateLimitCoordinator
+    from baldur.services.rate_limit_coordinator.models import RateLimitResult
 
 logger = structlog.get_logger()
 
@@ -161,6 +163,7 @@ class RetryPolicy(ResiliencePolicy[T]):
         result_rejected = False
         retry_history: list[dict[str, Any]] = []
         reason = "max_attempts"
+        not_before: float | None = None
 
         # Cooperative wall-clock budget (seconds) + its attribution reason,
         # resolved once at entry: min-of-two over the policy knob (max_elapsed)
@@ -174,11 +177,15 @@ class RetryPolicy(ResiliencePolicy[T]):
             attempt += 1
 
             # (i) Cooperative budget check — loop top, attempt 2 onward. Catches
-            # budget consumed by the previous sleep AND by rate-limit cooldown
-            # waits (wall-clock burned outside backoff sleeps). Attempt 1 always
-            # runs: an already-expired inbound deadline is the deadline
-            # middleware's fast-fail job, and one guaranteed attempt avoids a
-            # zero-attempt last_error=None FAILURE (composer misclassification).
+            # budget consumed by the previous sleep (rate-limit cooldown waits
+            # are now bounded by the remaining budget at the wait site itself,
+            # so they can no longer overrun it). Attempt 1 always runs, with one
+            # exception: a cooldown deferral can refuse attempt 1 (see the wait
+            # site below). Both original reasons survive that exception — the
+            # zero-attempt last_error=None FAILURE is prevented by the deferral
+            # synthesis below, and a deferral is a correct refusal rather than a
+            # deadline artifact, so the deadline middleware's fast-fail job is
+            # untouched.
             if (
                 attempt > 1
                 and budget is not None
@@ -198,12 +205,22 @@ class RetryPolicy(ResiliencePolicy[T]):
                     reason = "retry_budget"
                     break
 
-            # Rate limit wait (optional)
+            # Rate limit wait (optional), bounded by whatever budget is left.
+            # A cooldown longer than the remaining budget is deferred rather
+            # than slept: sleeping it would blow the budget and the attempt
+            # would be aborted afterwards anyway.
             if self._rate_limit_coordinator:
-                rl_result = self._rate_limit_coordinator.wait_if_needed(
-                    self._config.domain
+                rl_bound = (
+                    None
+                    if budget is None
+                    else max(0.0, budget - (time.monotonic() - start))
                 )
-                if rl_result.waited:
+                rl_result = self._wait_for_rate_limit_cooldown(rl_bound)
+                if rl_result is not None and rl_result.deferred:
+                    reason = "rate_limit_deferred"
+                    not_before = rl_result.not_before
+                    break
+                if rl_result is not None and rl_result.waited:
                     logger.debug(
                         "retry.rate_limit_cooldown_waited",
                         wait_time=rl_result.wait_time,
@@ -223,9 +240,18 @@ class RetryPolicy(ResiliencePolicy[T]):
                     }
                 )
 
-                # 429 detected → request a cooldown from RateLimitCoordinator
+                # 429 detected → request a cooldown from RateLimitCoordinator.
+                # Fail-open: a coordinator fault here must never replace the
+                # business error that is being classified below.
                 if self._rate_limit_coordinator:
-                    self._notify_rate_limit_cooldown(e)
+                    try:
+                        self._notify_rate_limit_cooldown(e)
+                    except Exception as coordinator_error:
+                        logger.warning(
+                            "retry.rate_limit_cooldown_notify_failed",
+                            error=str(coordinator_error),
+                            domain=self._config.domain,
+                        )
 
                 # Pure exception classification. The attempts bound is hoisted to
                 # the shared tail below so an out-of-attempts stop is attributed
@@ -236,8 +262,17 @@ class RetryPolicy(ResiliencePolicy[T]):
             else:
                 # Function returned — evaluate the result predicate (fail-open).
                 if not self._evaluate_result_rejected(result):
+                    # Fail-open: a coordinator fault must never destroy a
+                    # successful business result.
                     if self._rate_limit_coordinator:
-                        self._rate_limit_coordinator.on_success(self._config.domain)
+                        try:
+                            self._rate_limit_coordinator.on_success(self._config.domain)
+                        except Exception as coordinator_error:
+                            logger.warning(
+                                "retry.rate_limit_success_notify_failed",
+                                error=str(coordinator_error),
+                                domain=self._config.domain,
+                            )
                     self._record_outcome(attempt, "success")
                     return PolicyResult(
                         value=result,
@@ -279,10 +314,31 @@ class RetryPolicy(ResiliencePolicy[T]):
             if delay > 0:
                 self._sleeper(delay)
 
+        # Cooldown-deferral exits are synthesized FIRST, ahead of the
+        # result-rejection branch below. ``last_error is None`` does not imply
+        # "attempt 1": a rejected result sets it to None on every attempt, so a
+        # rejection on attempt 1 followed by a deferral on attempt 2 matches both
+        # conditions. The deferral is the actual exit cause, and the exhaustion
+        # wording below would be factually wrong on it — retries were not
+        # exhausted and the deferred attempt never called ``func``. Nothing is
+        # lost: the rejected value still rides out in ``PolicyResult.value``.
+        if reason == "rate_limit_deferred" and last_error is None:
+            # Lazy import: keeps the coordinator package (and its adapter chain)
+            # out of this module's import graph, matching the TYPE_CHECKING-only
+            # deferral of ``RateLimitCoordinator`` above.
+            from baldur.services.rate_limit_coordinator.models import (
+                RateLimitDeferredError,
+            )
+
+            last_error = RateLimitDeferredError(
+                key=self._config.domain,
+                not_before=not_before,
+            )
+
         # Result-rejection exits leave last_error=None; synthesize a first-class
         # exhaustion error. Without it the composer maps FAILURE(error=None) to
         # REJECTED (misclassification), and DLQ/@retry lack a real exception.
-        if last_error is None and result_rejected:
+        elif last_error is None and result_rejected:
             last_error = MaxRetriesExceededError(
                 f"Retry exhausted for domain '{self._config.domain}': "
                 f"result rejected by predicate after {attempt} attempt(s)",
@@ -317,8 +373,33 @@ class RetryPolicy(ResiliencePolicy[T]):
                 "should_dlq": self._config.enable_dlq,
                 "retry_history": retry_history,
                 "reason": reason,
+                # Defer vocabulary for requeue-capable callers (Celery/DLQ):
+                # present only on a cooldown deferral.
+                **({"not_before": not_before} if not_before is not None else {}),
             },
         )
+
+    def _wait_for_rate_limit_cooldown(
+        self, max_wait: float | None
+    ) -> RateLimitResult | None:
+        """Wait out an active 429 cooldown, bounded by ``max_wait``. Fail-open.
+
+        Returns the coordinator's result, or ``None`` when the coordinator itself
+        failed — a coordinator that is down degrades to inert (proceed without
+        waiting) rather than failing the business call. A *deferral* is not a
+        fault: it is returned as a normal result for the caller to act on.
+        """
+        try:
+            return self._rate_limit_coordinator.wait_if_needed(  # type: ignore[union-attr]
+                self._config.domain, max_wait=max_wait
+            )
+        except Exception as coordinator_error:
+            logger.warning(
+                "retry.rate_limit_wait_failed",
+                error=str(coordinator_error),
+                domain=self._config.domain,
+            )
+            return None
 
     def _single_attempt(
         self, func: Callable[..., T], *args: Any, **kwargs: Any
