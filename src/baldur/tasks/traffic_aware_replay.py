@@ -437,7 +437,15 @@ TRAFFIC_AWARE_TASKS = [
 def register_traffic_aware_tasks_with_celery(app) -> None:
     """Register the Traffic-Aware tasks with the Celery app."""
     for task_class in TRAFFIC_AWARE_TASKS:
-        app.register_task(task_class())
+        # Mix in app.Task like the intelligence and compliance registrars do:
+        # a bare BaseNotifyingTask instance is not a Celery task, so
+        # register_task fails on the missing bind().
+        wrapped = type(
+            task_class.__name__,
+            (task_class, app.Task),
+            {"name": task_class.name},
+        )
+        app.register_task(wrapped())
         logger.debug(
             "cell_registry.bulkheads_registered",
             task_class=task_class.name,
