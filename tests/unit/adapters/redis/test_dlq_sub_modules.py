@@ -1248,6 +1248,165 @@ class TestRedisDLQMaintenanceBehavior:
 
 
 # =============================================================================
+# C-2. RedisDLQMaintenance counter integrity (a write must land to be counted)
+# =============================================================================
+
+
+class TestDLQMaintenanceCounterBehavior:
+    """Archive/purge counters reflect writes that landed, not writes attempted.
+
+    Both underlying primitives report a no-op rather than raising: ``_update``
+    returns False when the blob is already gone (a concurrent purge, an
+    eviction, or TTL expiry between the snapshot read and the write), and
+    ``delete`` is idempotent and returns False for an already-absent entry.
+    Counting those inflates the archived/purged statistics that reach the
+    audit trail and the daily digest — a lane that moved nothing still
+    reports work.
+
+    The sibling ``evict_oldest`` and the lifecycle helpers already count this
+    way; these two sites were the outliers.
+    """
+
+    @staticmethod
+    def _resolved_entry(now, id=1):
+        return _make_failed_op_data(
+            id=id,
+            status=FailedOperationStatus.RESOLVED.value,
+            resolved_at=now - timedelta(days=45),
+        )
+
+    @staticmethod
+    def _archived_entry(now, id=1):
+        return _make_failed_op_data(
+            id=id,
+            status=FailedOperationStatus.ARCHIVED.value,
+            resolved_at=now - timedelta(days=100),
+        )
+
+    @pytest.mark.parametrize(
+        ("write_landed", "expected"),
+        [
+            pytest.param(True, 1, id="write_landed_counts"),
+            pytest.param(False, 0, id="no_op_write_not_counted"),
+        ],
+    )
+    def test_archive_counts_only_updates_that_landed(self, write_landed, expected):
+        """An `_update` reporting a no-op yields no archived count."""
+        # Given: one eligible entry whose write may or may not land
+        now = datetime(2026, 3, 16, 12, 0, 0, tzinfo=UTC)
+        repo = _make_repo()
+        repo.query.by_status = MagicMock(
+            spec=repo.query.by_status, return_value=[self._resolved_entry(now)]
+        )
+        repo._update = MagicMock(spec=repo._update, return_value=write_landed)
+
+        # When
+        with patch(
+            "baldur.adapters.redis.dlq_maintenance.utc_now",
+            return_value=now,
+        ):
+            archived = repo.maintenance.archive_old_resolved(older_than_days=30)
+
+        # Then
+        assert archived == expected
+        repo._update.assert_called_once()
+
+    @pytest.mark.parametrize(
+        ("write_landed", "expected"),
+        [
+            pytest.param(True, 1, id="delete_landed_counts"),
+            pytest.param(False, 0, id="no_op_delete_not_counted"),
+        ],
+    )
+    def test_purge_by_ids_counts_only_deletes_that_landed(self, write_landed, expected):
+        """A `delete` reporting an already-absent entry yields no purged count."""
+        now = datetime(2026, 3, 16, 12, 0, 0, tzinfo=UTC)
+        repo = _make_repo()
+        repo.get_by_id = MagicMock(
+            spec=repo.get_by_id, return_value=self._archived_entry(now)
+        )
+        repo.delete = MagicMock(spec=repo.delete, return_value=write_landed)
+
+        purged = repo.maintenance.purge_archived(ids=[1])
+
+        assert purged == expected
+        repo.delete.assert_called_once_with(1)
+
+    @pytest.mark.parametrize(
+        ("write_landed", "expected"),
+        [
+            pytest.param(True, 1, id="delete_landed_counts"),
+            pytest.param(False, 0, id="no_op_delete_not_counted"),
+        ],
+    )
+    def test_purge_by_age_counts_only_deletes_that_landed(self, write_landed, expected):
+        """The age-filtered purge lane gates on the same return."""
+        now = datetime(2026, 3, 16, 12, 0, 0, tzinfo=UTC)
+        repo = _make_repo()
+        repo.query.by_status = MagicMock(
+            spec=repo.query.by_status, return_value=[self._archived_entry(now)]
+        )
+        repo.delete = MagicMock(spec=repo.delete, return_value=write_landed)
+
+        with patch(
+            "baldur.adapters.redis.dlq_maintenance.utc_now",
+            return_value=now,
+        ):
+            purged = repo.maintenance.purge_archived(older_than_days=30)
+
+        assert purged == expected
+        repo.delete.assert_called_once_with(1)
+
+    def test_archive_counts_the_landed_subset_of_a_mixed_batch(self):
+        """A partially-landing batch counts exactly the entries that moved.
+
+        Pins the count instead of a "greater than zero" check: a gate applied
+        to the loop rather than to the counter would still return a non-zero
+        number here while over-reporting.
+        """
+        # Given: three eligible entries, the middle write losing its blob
+        now = datetime(2026, 3, 16, 12, 0, 0, tzinfo=UTC)
+        repo = _make_repo()
+        entries = [self._resolved_entry(now, id=i) for i in (1, 2, 3)]
+        repo.query.by_status = MagicMock(
+            spec=repo.query.by_status, return_value=entries
+        )
+        repo._update = MagicMock(spec=repo._update, side_effect=[True, False, True])
+
+        # When
+        with patch(
+            "baldur.adapters.redis.dlq_maintenance.utc_now",
+            return_value=now,
+        ):
+            archived = repo.maintenance.archive_old_resolved(older_than_days=30)
+
+        # Then
+        assert archived == 2
+        assert repo._update.call_count == 3
+
+    def test_purge_by_ids_skips_non_archived_without_attempting_a_delete(self):
+        """The status filter still runs ahead of the return gate.
+
+        Keeps the two skip reasons distinguishable: a non-archived entry is
+        never deleted at all, whereas an archived one is attempted and only
+        then gated on the result.
+        """
+        repo = _make_repo()
+        repo.get_by_id = MagicMock(
+            spec=repo.get_by_id,
+            return_value=_make_failed_op_data(
+                id=1, status=FailedOperationStatus.PENDING.value
+            ),
+        )
+        repo.delete = MagicMock(spec=repo.delete, return_value=True)
+
+        purged = repo.maintenance.purge_archived(ids=[1])
+
+        assert purged == 0
+        repo.delete.assert_not_called()
+
+
+# =============================================================================
 # D. RedisDLQCompression Behavior Tests
 # =============================================================================
 
