@@ -955,12 +955,15 @@ class InMemoryFailedOperationRepository(FailedOperationRepository):
         before: datetime,
         limit: int = 100,
         offset: int = 0,
+        after: datetime | None = None,
     ) -> list[DLQCompressedEntry]:
-        """Query compressed entries older than a cutoff, oldest first."""
+        """Query compressed entries in a cutoff window, oldest first."""
         entries = [
             e
             for e in self._compressed_storage.values()
-            if e.status == status and e.compressed_at < before
+            if e.status == status
+            and e.compressed_at < before
+            and (after is None or e.compressed_at >= after)
         ]
         entries.sort(key=lambda e: e.compressed_at)
         return entries[offset : offset + limit]

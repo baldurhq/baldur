@@ -1159,15 +1159,25 @@ class SQLFailedOperationRepository(GenericSQLRepository, FailedOperationReposito
         before: datetime,
         limit: int = 100,
         offset: int = 0,
+        after: datetime | None = None,
     ) -> list[DLQCompressedEntry]:
-        """Query compressed entries older than a cutoff, oldest first."""
+        """Query compressed entries in a cutoff window, oldest first.
+
+        The (status, compressed_at) index serves both bounds and the order.
+        """
+        window = "WHERE status = %s AND compressed_at < %s "
+        params: list[Any] = [status, before]
+        if after is not None:
+            window += "AND compressed_at >= %s "
+            params.append(after)
         sql = (
             f"SELECT id, domain, failure_type, error_code, count, status, "
             f"compressed_at, stale_at, archived_at, data FROM {_COMPRESSED_TABLE} "
-            f"WHERE status = %s AND compressed_at < %s "
+            f"{window}"
             f"ORDER BY compressed_at ASC LIMIT %s OFFSET %s"
         )
-        rows = self._fetch_all(sql, [status, before, limit, offset])
+        params.extend([limit, offset])
+        rows = self._fetch_all(sql, params)
         return [self._compressed_row_to_entry(row) for row in rows]
 
     def _compressed_row_to_entry(self, row: Any) -> DLQCompressedEntry:

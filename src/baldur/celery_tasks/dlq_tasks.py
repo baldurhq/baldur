@@ -512,14 +512,20 @@ def cleanup_compressed_dlq_entries(self) -> dict:
     def _drain(from_status: str, to_status: str, cutoff, is_eligible) -> int:
         """Transition entries older than ``cutoff``, oldest first, in pages.
 
-        The cursor counts only the entries this pass left behind. A transition
-        moves an entry out of ``from_status``, so it drops out of the very
-        query that produced it and the next page starts where this one ended
-        without any offset. Entries that matched the query but failed
-        ``is_eligible`` do stay, so they must be stepped over or the next page
-        would return them forever.
+        The cursor is the last ``compressed_at`` handled, carried forward as
+        the next page's lower bound so the window shrinks instead of
+        restarting at the oldest entry. That matters on Redis, where status is
+        not part of the index: a scan from the head would re-read every entry
+        the drain had already transitioned, once per page.
+
+        A transition moves an entry out of ``from_status``, so it drops out of
+        the query on its own. Entries that matched but failed ``is_eligible``
+        stay, and those below the cursor fall outside the next window — only
+        the ones sitting exactly on the cursor would come back, so those are
+        counted into ``offset``.
         """
         transitioned = 0
+        after = None
         offset = 0
 
         for _ in range(_COMPRESSED_DRAIN_MAX_ITERATIONS):
@@ -528,16 +534,25 @@ def cleanup_compressed_dlq_entries(self) -> dict:
                 before=cutoff,
                 limit=_COMPRESSED_DRAIN_PAGE_SIZE,
                 offset=offset,
+                after=after,
             )
             if not page:
                 break
 
+            left_behind = []
             for entry in page:
                 if not is_eligible(entry):
-                    offset += 1
+                    left_behind.append(entry)
                     continue
                 repository.update_compressed_status(entry.id, to_status)
                 transitioned += 1
+
+            cursor = page[-1].compressed_at
+            stuck = sum(1 for e in left_behind if e.compressed_at == cursor)
+            # The cursor only fails to advance when a whole page shares one
+            # timestamp; then the skips accumulate rather than reset.
+            offset = offset + stuck if after == cursor else stuck
+            after = cursor
 
         return transitioned
 

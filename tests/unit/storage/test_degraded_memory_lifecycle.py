@@ -358,3 +358,52 @@ class TestBoundedBlobMemoryBehavior:
         assert backend.get_blob("dlq:entry:b") is None  # least-recently-written
         assert backend.get_blob("dlq:entry:c") == b"\x03" * 300
         assert backend._blob_memory_bytes == 600
+
+
+# =============================================================================
+# TestDegradedZrangeByScoreBehavior — score-window reads without Redis
+# =============================================================================
+
+
+class TestDegradedZrangeByScoreBehavior:
+    """zrangebyscore keeps its score-window contract in DEGRADED mode.
+
+    The compressed-entry lifecycle sweep resumes each page from a score so it
+    does not re-read what it already transitioned. That only holds if the
+    degraded path honours the same window the Redis path does.
+    """
+
+    def test_window_is_inclusive_on_both_bounds(self, degraded_backend):
+        degraded_backend.zadd("z", {"a": 10.0, "b": 20.0, "c": 30.0})
+
+        assert degraded_backend.zrangebyscore("z", 10.0, 30.0) == ["a", "b", "c"]
+        assert degraded_backend.zrangebyscore("z", 20.0, 20.0) == ["b"]
+
+    def test_window_excludes_members_outside_it(self, degraded_backend):
+        degraded_backend.zadd("z", {"a": 10.0, "b": 20.0, "c": 30.0})
+
+        assert degraded_backend.zrangebyscore("z", 15.0, 25.0) == ["b"]
+
+    def test_results_are_ascending_by_score(self, degraded_backend):
+        degraded_backend.zadd("z", {"c": 30.0, "a": 10.0, "b": 20.0})
+
+        assert degraded_backend.zrangebyscore("z", float("-inf"), 100.0) == [
+            "a",
+            "b",
+            "c",
+        ]
+
+    def test_offset_and_count_page_within_the_window(self, degraded_backend):
+        degraded_backend.zadd("z", {"a": 1.0, "b": 2.0, "c": 3.0, "d": 4.0})
+
+        assert degraded_backend.zrangebyscore("z", 1.0, 4.0, offset=1, count=2) == [
+            "b",
+            "c",
+        ]
+        assert degraded_backend.zrangebyscore("z", 1.0, 4.0, offset=3) == ["d"]
+
+    def test_empty_window_returns_empty(self, degraded_backend):
+        degraded_backend.zadd("z", {"a": 1.0})
+
+        assert degraded_backend.zrangebyscore("z", 50.0, 60.0) == []
+        assert degraded_backend.zrangebyscore("missing", 0.0, 10.0) == []
