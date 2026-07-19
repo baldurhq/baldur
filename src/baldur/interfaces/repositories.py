@@ -861,8 +861,37 @@ class FailedOperationRepository(ABC):
         status: str | None = None,
         limit: int = 100,
     ) -> list[DLQCompressedEntry]:
-        """Return compressed DLQ entries, optionally filtered."""
+        """Return compressed DLQ entries, optionally filtered.
+
+        Newest first — this is the listing order the console read paths expect.
+        Lifecycle sweeps need the opposite end and must use
+        ``get_compressed_entries_before``.
+        """
         raise NotImplementedError("Compression query not implemented for this adapter")
+
+    def get_compressed_entries_before(
+        self,
+        *,
+        status: str,
+        before: datetime,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[DLQCompressedEntry]:
+        """Return compressed entries with ``compressed_at`` older than ``before``.
+
+        Oldest first, so the eligible set is a prefix of the result and a
+        lifecycle sweep can stop as soon as an entry at or after the cutoff
+        appears.
+
+        ``offset`` skips that many *matching* entries. A caller draining in
+        pages does not need it to step past entries it transitioned: those
+        leave ``status`` and so drop out of this query on their own. It exists
+        for entries the caller matched but deliberately left in place, which
+        would otherwise come back on every iteration.
+        """
+        raise NotImplementedError(
+            "Compression cutoff query not implemented for this adapter"
+        )
 
     def get_compressed_summary(self) -> dict[str, Any]:
         """Return aggregate statistics of compressed entries."""

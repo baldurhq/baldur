@@ -11,6 +11,12 @@ from baldur.utils.time import utc_now
 
 logger = structlog.get_logger(__name__)
 
+# Bounds for the compressed-entry lifecycle drain. One run processes at most
+# _COMPRESSED_DRAIN_PAGE_SIZE * _COMPRESSED_DRAIN_MAX_ITERATIONS entries per
+# transition; whatever is left is picked up by the next daily run.
+_COMPRESSED_DRAIN_PAGE_SIZE = 500
+_COMPRESSED_DRAIN_MAX_ITERATIONS = 200
+
 
 @shared_task(
     bind=True,
@@ -501,32 +507,57 @@ def cleanup_compressed_dlq_entries(self) -> dict:
     stale_cutoff = now - timedelta(days=settings.compress_stale_after_days)
     archive_cutoff = now - timedelta(days=settings.compress_archive_after_days)
 
-    stale_count = 0
-    archived_count = 0
-
     from baldur.interfaces.repositories import DLQCompressedStatus
 
-    # ACTIVE -> STALE
-    active_entries = repository.get_compressed_entries(
-        status=DLQCompressedStatus.ACTIVE.value,
-    )
-    for entry in active_entries:
-        if entry.compressed_at < stale_cutoff:
-            repository.update_compressed_status(
-                entry.id, DLQCompressedStatus.STALE.value
-            )
-            stale_count += 1
+    def _drain(from_status: str, to_status: str, cutoff, is_eligible) -> int:
+        """Transition entries older than ``cutoff``, oldest first, in pages.
 
-    # STALE -> ARCHIVED
-    stale_entries = repository.get_compressed_entries(
-        status=DLQCompressedStatus.STALE.value,
-    )
-    for entry in stale_entries:
-        if entry.stale_at and entry.stale_at < archive_cutoff:
-            repository.update_compressed_status(
-                entry.id, DLQCompressedStatus.ARCHIVED.value
+        The cursor counts only the entries this pass left behind. A transition
+        moves an entry out of ``from_status``, so it drops out of the very
+        query that produced it and the next page starts where this one ended
+        without any offset. Entries that matched the query but failed
+        ``is_eligible`` do stay, so they must be stepped over or the next page
+        would return them forever.
+        """
+        transitioned = 0
+        offset = 0
+
+        for _ in range(_COMPRESSED_DRAIN_MAX_ITERATIONS):
+            page = repository.get_compressed_entries_before(
+                status=from_status,
+                before=cutoff,
+                limit=_COMPRESSED_DRAIN_PAGE_SIZE,
+                offset=offset,
             )
-            archived_count += 1
+            if not page:
+                break
+
+            for entry in page:
+                if not is_eligible(entry):
+                    offset += 1
+                    continue
+                repository.update_compressed_status(entry.id, to_status)
+                transitioned += 1
+
+        return transitioned
+
+    # ACTIVE -> STALE. The cutoff query already encodes eligibility.
+    stale_count = _drain(
+        DLQCompressedStatus.ACTIVE.value,
+        DLQCompressedStatus.STALE.value,
+        stale_cutoff,
+        lambda entry: True,
+    )
+
+    # STALE -> ARCHIVED. Archiving is driven off stale_at, but compressed_at is
+    # always earlier than stale_at, so the compressed_at cutoff yields a
+    # superset of the eligible entries — the per-entry check narrows it.
+    archived_count = _drain(
+        DLQCompressedStatus.STALE.value,
+        DLQCompressedStatus.ARCHIVED.value,
+        archive_cutoff,
+        lambda entry: entry.stale_at is not None and entry.stale_at < archive_cutoff,
+    )
 
     bound_logger.info(
         "dlq.compressed_cleanup_completed",
@@ -622,6 +653,11 @@ def get_dlq_maintenance_beat_schedule():
         "release-stale-replaying-entries": {
             "task": "baldur.celery_tasks.release_stale_replaying",
             "schedule": crontab(minute="*/15"),
+            "options": {"queue": "maintenance"},
+        },
+        "cleanup-compressed-dlq-entries": {
+            "task": "baldur.celery_tasks.cleanup_compressed_dlq_entries",
+            "schedule": crontab(hour=4, minute=30),
             "options": {"queue": "maintenance"},
         },
     }

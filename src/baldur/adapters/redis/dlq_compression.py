@@ -151,6 +151,60 @@ class RedisDLQCompression:
 
         return entries
 
+    def get_compressed_entries_before(
+        self,
+        *,
+        status: str,
+        before: datetime,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[DLQCompressedEntry]:
+        """Query compressed entries older than a cutoff, oldest first.
+
+        The index is scored by ``compressed_at``, so walking it ascending makes
+        the eligible entries a prefix: the first entry at or after the cutoff
+        ends the scan, bounding the walk to the eligible range rather than the
+        whole index.
+
+        ``status`` cannot be filtered index-side — it lives in the entry blob —
+        so ``offset`` counts matching entries, matching what the SQL and memory
+        adapters do with it. The walk therefore restarts at the index head each
+        call and steps over entries whose status has already moved on.
+        """
+        from baldur.utils.serialization import fast_loads
+
+        entries: list[DLQCompressedEntry] = []
+        matched = 0
+        cursor = 0
+        page_size = max(limit, 1)
+
+        while len(entries) < limit:
+            member_ids = self._backend.zrange(
+                _COMPRESSED_INDEX_KEY, cursor, cursor + page_size - 1
+            )
+            if not member_ids:
+                break
+            cursor += len(member_ids)
+
+            for member_id in member_ids:
+                blob = self._backend.get_blob(f"{_COMPRESSED_PREFIX}{member_id}")
+                if blob is None:
+                    continue
+                entry = _deserialize_compressed_entry(fast_loads(blob))
+                if entry.compressed_at >= before:
+                    # Ascending order: nothing beyond this point is eligible.
+                    return entries
+                if entry.status != status:
+                    continue
+                matched += 1
+                if matched <= offset:
+                    continue
+                entries.append(entry)
+                if len(entries) >= limit:
+                    break
+
+        return entries
+
     def get_compressed_summary(self) -> dict[str, Any]:
         """Aggregate statistics of compressed entries."""
         from baldur.utils.serialization import fast_loads

@@ -31,6 +31,9 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ### Fixed
 
+- Compressed DLQ entries now age ACTIVE→STALE→ARCHIVED on a daily schedule (was never run).
+- Compressed-entry sweep reads the oldest page, not the newest — it was a no-op above ~3/day.
+- SQL DLQ adapter stamps `stale_at`/`archived_at`, so STALE→ARCHIVED can fire on SQL backends.
 - Daily-report Auto-Processing counts (archived/expired/purged) now reflect real cleanup work.
 - Replay-driven DLQ resolutions now count in the digest and decrement the pending gauge.
 - Redis DLQ archive/purge counts no longer include writes that changed nothing.
