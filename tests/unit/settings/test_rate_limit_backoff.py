@@ -52,6 +52,35 @@ class TestRateLimitBackoffSettingsContract:
         s = RateLimitBackoffSettings()
         assert s.debounce_window_seconds == 5.0
 
+    def test_retry_after_ceiling_default_is_one_hour(self):
+        """Honored provider Retry-After is bounded at 3600s by default."""
+        s = RateLimitBackoffSettings()
+        assert s.retry_after_ceiling == 3600.0
+
+    @pytest.mark.parametrize(
+        ("value", "should_pass"),
+        [
+            (59.0, False),  # below ge=60
+            (60.0, True),  # at ge=60
+            (86400.0, True),  # at le=86400
+            (86401.0, False),  # above le=86400
+        ],
+        ids=["below_min", "at_min", "at_max", "above_max"],
+    )
+    def test_retry_after_ceiling_boundary(self, value, should_pass):
+        """retry_after_ceiling accepts [60, 86400] — wider than LongDuration's le=3600."""
+        if should_pass:
+            s = RateLimitBackoffSettings(retry_after_ceiling=value)
+            assert s.retry_after_ceiling == value
+        else:
+            with pytest.raises(ValidationError):
+                RateLimitBackoffSettings(retry_after_ceiling=value)
+
+    def test_retry_after_ceiling_env_override(self, monkeypatch):
+        monkeypatch.setenv("BALDUR_RATE_LIMIT_BACKOFF_RETRY_AFTER_CEILING", "7200.0")
+        s = RateLimitBackoffSettings()
+        assert s.retry_after_ceiling == 7200.0
+
     @pytest.mark.parametrize(
         ("field", "value"),
         [
@@ -137,3 +166,18 @@ class TestCoordinatorConfigFromSettingsBehavior:
         assert config.base_delay == 3.0
         assert config.debounce_window_seconds == 7.5
         assert config.max_delay == 60.0
+
+    def test_from_settings_maps_retry_after_ceiling(
+        self, monkeypatch, _reset_backoff_settings
+    ):
+        """The new retry_after_ceiling field flows into the coordinator config."""
+        from baldur.services.rate_limit_coordinator.models import (
+            RateLimitCoordinatorConfig,
+        )
+
+        monkeypatch.setenv("BALDUR_RATE_LIMIT_BACKOFF_RETRY_AFTER_CEILING", "1800.0")
+        reset_rate_limit_backoff_settings()
+
+        config = RateLimitCoordinatorConfig.from_settings()
+
+        assert config.retry_after_ceiling == 1800.0

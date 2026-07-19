@@ -8,6 +8,9 @@ DecorrelatedJitterBackoff, and get_backoff_calculator factory function.
 from unittest.mock import MagicMock
 
 import pytest
+from hypothesis import given
+from hypothesis import settings as hyp_settings
+from hypothesis import strategies as st
 
 from baldur.core.backoff import (
     BackoffStrategy,
@@ -277,3 +280,125 @@ class TestBackoffStrategyInterface:
         """Cannot instantiate abstract class directly."""
         with pytest.raises(TypeError):
             BackoffStrategy()
+
+
+# =============================================================================
+# Hard delay cap (jitter can no longer exceed max_delay)
+# =============================================================================
+
+
+class TestBackoffHardCapBehavior:
+    """Jittered Exponential/Linear delays never exceed ``max_delay``.
+
+    Before this contract, jitter was applied *after* the ``min(delay, max_delay)``
+    clamp, so the effective delay could overshoot the documented cap by up to
+    ``jitter_factor``. The cap is now a hard ceiling on the returned value.
+    """
+
+    # A saturating config: base * multiplier ** (attempt-1) blows past max_delay
+    # by attempt 4, so attempts >= 4 exercise the at-saturation jitter regime and
+    # attempt 1 (base_delay well below the cap) exercises the below-saturation one.
+    _CAP = 60.0
+    _JITTER_FACTOR = 0.3
+
+    @given(
+        base=st.floats(min_value=0.1, max_value=100.0),
+        multiplier=st.floats(min_value=1.1, max_value=5.0),
+        max_delay=st.floats(min_value=1.0, max_value=300.0),
+        jitter_factor=st.floats(min_value=0.0, max_value=1.0),
+        attempt=st.integers(min_value=1, max_value=20),
+    )
+    @hyp_settings(max_examples=300)
+    def test_exponential_delay_never_exceeds_max_delay(
+        self, base, multiplier, max_delay, jitter_factor, attempt
+    ):
+        """No (config, attempt, jitter draw) yields a delay above max_delay or below 0."""
+        backoff = ExponentialBackoff(
+            base_delay=base,
+            multiplier=multiplier,
+            max_delay=max_delay,
+            jitter=True,
+            jitter_factor=jitter_factor,
+        )
+        delay = backoff.calculate(attempt)
+        assert 0.0 <= delay <= max_delay
+
+    @given(
+        base=st.floats(min_value=0.1, max_value=100.0),
+        increment=st.floats(min_value=0.0, max_value=100.0),
+        max_delay=st.floats(min_value=1.0, max_value=300.0),
+        jitter_factor=st.floats(min_value=0.0, max_value=1.0),
+        attempt=st.integers(min_value=1, max_value=20),
+    )
+    @hyp_settings(max_examples=300)
+    def test_linear_delay_never_exceeds_max_delay(
+        self, base, increment, max_delay, jitter_factor, attempt
+    ):
+        """Linear shares the same hard-cap shape as exponential."""
+        backoff = LinearBackoff(
+            base_delay=base,
+            increment=increment,
+            max_delay=max_delay,
+            jitter=True,
+            jitter_factor=jitter_factor,
+        )
+        delay = backoff.calculate(attempt)
+        assert 0.0 <= delay <= max_delay
+
+    def test_saturated_jitter_is_inward_only(self):
+        """At saturation the jitter draws inward: ``[max_delay - width, max_delay]``."""
+        backoff = ExponentialBackoff(
+            base_delay=1000.0,  # attempt 1 already saturates a 60s cap
+            multiplier=2.0,
+            max_delay=self._CAP,
+            jitter=True,
+            jitter_factor=self._JITTER_FACTOR,
+        )
+        lower_bound = self._CAP - self._CAP * self._JITTER_FACTOR
+        for _ in range(500):
+            delay = backoff.calculate(1)
+            assert lower_bound <= delay <= self._CAP
+
+    def test_saturated_jitter_preserves_dispersion_width(self):
+        """Inward jitter keeps the full dispersion band — it does not collapse to the cap."""
+        backoff = ExponentialBackoff(
+            base_delay=1000.0,
+            multiplier=2.0,
+            max_delay=self._CAP,
+            jitter=True,
+            jitter_factor=self._JITTER_FACTOR,
+        )
+        samples = [backoff.calculate(1) for _ in range(500)]
+        # Over 500 draws the minimum should fall well below the cap (dispersion
+        # preserved), not sit pinned at max_delay.
+        assert min(samples) < self._CAP - (self._CAP * self._JITTER_FACTOR) / 2
+
+    def test_below_saturation_jitter_stays_under_cap(self):
+        """Below saturation, symmetric jitter around a near-cap raw value still clamps to the cap."""
+        # raw = 55, jitter_factor 0.3 → symmetric band [38.5, 71.5], but capped at 60.
+        backoff = ExponentialBackoff(
+            base_delay=55.0,
+            multiplier=2.0,
+            max_delay=self._CAP,
+            jitter=True,
+            jitter_factor=self._JITTER_FACTOR,
+        )
+        saw_above_raw = False
+        for _ in range(500):
+            delay = backoff.calculate(1)
+            assert delay <= self._CAP
+            if delay > 55.0:
+                saw_above_raw = True
+        # The upward half of the symmetric jitter is exercised (not one-sided).
+        assert saw_above_raw
+
+    def test_no_jitter_clamps_without_exceeding_cap(self):
+        """With jitter off the value is a plain clamp into ``[0, max_delay]``."""
+        backoff = ExponentialBackoff(
+            base_delay=10.0,
+            multiplier=2.0,
+            max_delay=self._CAP,
+            jitter=False,
+        )
+        assert backoff.calculate(1) == 10.0
+        assert backoff.calculate(10) == self._CAP  # saturated, no jitter

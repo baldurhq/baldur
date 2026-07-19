@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+from baldur.adapters.rate_limit.memory_adapter import InMemoryRateLimitStorage
 from baldur.core.backoff import (
     BackoffStrategy,
     ConstantBackoff,
@@ -22,6 +23,10 @@ from baldur.interfaces.resilience_policy import (
     PolicyContext,
     PolicyOutcome,
     ResiliencePolicy,
+)
+from baldur.services.rate_limit_coordinator import (
+    RateLimitCoordinator,
+    RateLimitDeferredError,
 )
 from baldur.services.rate_limit_coordinator.models import RateLimitResult
 from baldur.services.retry_handler.models import RetryPolicyConfig
@@ -653,3 +658,216 @@ class TestRetryPolicyExhaustedEventP0_3Behavior:
         ) or mock_bus.emit.call_args[1].get("data")
         assert event_data["attempts"] == 1
         assert event_data["final_error_type"] == "CircuitBreakerError"
+
+
+# =============================================================================
+# RetryPolicy — Cooldown deferral exit (D2)
+# =============================================================================
+
+
+def _coordinator_with_cooldown(domain: str, seconds: float):
+    """Real coordinator over an in-memory store with a shared cooldown installed."""
+    import time
+
+    storage = InMemoryRateLimitStorage()
+    storage.set_cooldown(domain, time.time() + seconds)
+    return RateLimitCoordinator(storage=storage), storage
+
+
+class TestRetryPolicyCooldownDeferralBehavior:
+    """A cooldown longer than the remaining budget defers the attempt, not sleeps it."""
+
+    def test_deferral_exit_reason_and_not_before(self):
+        """Over-budget cooldown -> reason=rate_limit_deferred, not_before on metadata."""
+        coord, _ = _coordinator_with_cooldown("payment", 300.0)
+        policy = RetryPolicy(
+            config=RetryPolicyConfig(max_attempts=3, domain="payment", max_elapsed=5.0),
+            rate_limit_coordinator=coord,
+            sleeper=lambda _: None,
+        )
+
+        result = policy.execute(lambda: "ok")
+
+        assert result.outcome == PolicyOutcome.FAILURE
+        assert result.metadata["reason"] == "rate_limit_deferred"
+        assert result.metadata["not_before"] is not None
+
+    def test_first_attempt_deferral_does_not_run_func_and_leaves_history_empty(self):
+        """The deferred attempt never calls func; empty history is the discriminator."""
+        coord, _ = _coordinator_with_cooldown("payment", 300.0)
+        calls = []
+        policy = RetryPolicy(
+            config=RetryPolicyConfig(max_attempts=3, domain="payment", max_elapsed=5.0),
+            rate_limit_coordinator=coord,
+            sleeper=lambda _: None,
+        )
+
+        def func():
+            calls.append(1)
+            return "ok"
+
+        result = policy.execute(func)
+
+        assert calls == []  # func never ran
+        assert result.metadata["retry_history"] == []
+
+    def test_first_attempt_deferral_synthesizes_deferred_error(self):
+        """With no prior real error, the loop synthesizes a RateLimitDeferredError."""
+        coord, _ = _coordinator_with_cooldown("payment", 300.0)
+        policy = RetryPolicy(
+            config=RetryPolicyConfig(max_attempts=3, domain="payment", max_elapsed=5.0),
+            rate_limit_coordinator=coord,
+            sleeper=lambda _: None,
+        )
+
+        result = policy.execute(lambda: "ok")
+
+        assert type(result.error) is RateLimitDeferredError
+
+    def test_deferral_reason_is_not_exhausted_or_deadline(self):
+        """Negative: the deferral outcome is distinct from exhaustion / budget breaks."""
+        coord, _ = _coordinator_with_cooldown("payment", 300.0)
+        policy = RetryPolicy(
+            config=RetryPolicyConfig(max_attempts=3, domain="payment", max_elapsed=5.0),
+            rate_limit_coordinator=coord,
+            sleeper=lambda _: None,
+        )
+
+        result = policy.execute(lambda: "ok")
+
+        assert result.metadata["reason"] not in (
+            "max_attempts",
+            "max_elapsed",
+            "deadline",
+        )
+
+
+class TestRetryPolicyDeferralSynthesisPrecedenceBehavior:
+    """A rejected result on attempt 1 then a cooldown on attempt 2 yields the deferral error.
+
+    ``last_error is None`` holds on BOTH a first-attempt deferral and a
+    result-rejection exit, so the deferral synthesis must be ordered ahead of the
+    result-rejection one — otherwise the exhaustion wording leaks onto an exit
+    where retries were not exhausted and attempt 2 never ran.
+    """
+
+    def test_rejected_then_deferred_yields_deferred_error(self):
+        import time
+
+        storage = InMemoryRateLimitStorage()
+        coord = RateLimitCoordinator(storage=storage)
+        seq = []
+
+        def func():
+            seq.append(1)
+            if len(seq) == 1:
+                # Another worker's 429 installs a shared cooldown between attempts.
+                storage.set_cooldown("payment", time.time() + 300.0)
+                return "BAD"
+            return "ok"
+
+        policy = RetryPolicy(
+            config=RetryPolicyConfig(
+                max_attempts=3,
+                domain="payment",
+                max_elapsed=5.0,
+                retry_on_result=lambda r: r == "BAD",
+            ),
+            rate_limit_coordinator=coord,
+            sleeper=lambda _: None,
+        )
+
+        result = policy.execute(func)
+
+        assert type(result.error) is RateLimitDeferredError
+        assert result.metadata["reason"] == "rate_limit_deferred"
+        # The rejected value still rides out, and only attempt 1 is recorded.
+        assert result.value == "BAD"
+        assert len(result.metadata["retry_history"]) == 1
+
+    def test_rejected_then_deferred_message_has_no_exhaustion_wording(self):
+        """Negative: the exhaustion message must not leak onto a deferral exit."""
+        import time
+
+        storage = InMemoryRateLimitStorage()
+        coord = RateLimitCoordinator(storage=storage)
+        seq = []
+
+        def func():
+            seq.append(1)
+            if len(seq) == 1:
+                storage.set_cooldown("payment", time.time() + 300.0)
+                return "BAD"
+            return "ok"
+
+        policy = RetryPolicy(
+            config=RetryPolicyConfig(
+                max_attempts=3,
+                domain="payment",
+                max_elapsed=5.0,
+                retry_on_result=lambda r: r == "BAD",
+            ),
+            rate_limit_coordinator=coord,
+            sleeper=lambda _: None,
+        )
+
+        result = policy.execute(func)
+
+        assert "Retry exhausted" not in str(result.error)
+
+
+class TestRetryPolicyCoordinatorFailOpenBehavior:
+    """A coordinator fault at any of the three loop call sites never changes the result."""
+
+    def _coordinator_mock(self):
+        """Spec'd coordinator; wait returns a real idle result (not a truthy mock)."""
+        coord = MagicMock(spec=RateLimitCoordinator)
+        coord.wait_if_needed.return_value = RateLimitResult(waited=False)
+        return coord
+
+    def test_wait_fault_preserves_success(self):
+        """Site 1: wait_if_needed raises -> loop proceeds, SUCCESS preserved."""
+        coord = self._coordinator_mock()
+        coord.wait_if_needed.side_effect = RuntimeError("coordinator down")
+        policy = RetryPolicy(
+            config=RetryPolicyConfig(max_attempts=2, domain="d"),
+            rate_limit_coordinator=coord,
+            sleeper=lambda _: None,
+        )
+
+        result = policy.execute(lambda: "ok")
+
+        assert result.outcome == PolicyOutcome.SUCCESS
+        assert result.value == "ok"
+
+    def test_on_rate_limited_fault_preserves_business_error(self):
+        """Site 2: on_rate_limited raises inside except -> business 429 error preserved."""
+        coord = self._coordinator_mock()
+        coord.on_rate_limited.side_effect = RuntimeError("coordinator down")
+        policy = RetryPolicy(
+            config=RetryPolicyConfig(max_attempts=1, domain="d"),
+            rate_limit_coordinator=coord,
+            sleeper=lambda _: None,
+        )
+
+        business_error = Exception("429 too many requests")
+        result = policy.execute(lambda: (_ for _ in ()).throw(business_error))
+
+        assert result.error is business_error
+        assert not isinstance(result.error, RuntimeError)
+
+    def test_on_success_fault_preserves_success(self):
+        """Site 3: on_success raises in the else clause -> SUCCESS not destroyed."""
+        coord = self._coordinator_mock()
+        coord.on_success.side_effect = RuntimeError("coordinator down")
+        policy = RetryPolicy(
+            config=RetryPolicyConfig(max_attempts=2, domain="d"),
+            rate_limit_coordinator=coord,
+            sleeper=lambda _: None,
+        )
+
+        result = policy.execute(lambda: "ok")
+
+        assert result.outcome == PolicyOutcome.SUCCESS
+        assert result.value == "ok"
+        assert result.error is None
