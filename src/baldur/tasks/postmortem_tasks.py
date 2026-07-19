@@ -6,6 +6,10 @@ Periodic postmortem maintenance tasks.
 Celery Beat schedule:
     - postmortem_auto_seal: daily (86400s)
 
+The composed schedule injects this lane's entry, but postmortem_auto_seal
+carries no task registration, so a worker cannot resolve the name and the lane
+does not currently run.
+
 Usage:
     # Normally unnecessary: configure_baldur_celery(app) merges this lane.
     CELERY_BEAT_SCHEDULE.update(get_postmortem_beat_schedule())

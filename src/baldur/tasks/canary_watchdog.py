@@ -18,11 +18,11 @@ Reference:
     docs/baldur/middleware_system/71_CANARY_CONFIG_ROLLOUT.md
 
 Celery Beat:
-    These tasks ship as part of the composed Baldur beat schedule, so no
-    hand-written entries are needed:
-
-        from baldur.adapters.celery.beat_schedule import configure_baldur_celery
-        configure_baldur_celery(app)
+    The composed schedule injects entries for these tasks, but the functions
+    below carry no task registration, so a worker cannot resolve the names and
+    the lane does not currently run. Registering them would start automatic
+    canary promotion and rollback on installs that have never had it, so the
+    activation is a deliberate decision rather than a wiring detail.
 """
 
 from __future__ import annotations
@@ -904,6 +904,9 @@ def collect_canary_metrics() -> dict[str, Any]:
 def get_canary_watchdog_beat_schedule() -> dict[str, Any]:
     """
     Canary Watchdog Celery Beat schedule configuration.
+
+    The entries this returns name tasks that are not registered, so they do not
+    resolve on a worker yet — see the module docstring.
 
     Returns:
         Dict[str, Any]: Celery Beat schedule configuration
