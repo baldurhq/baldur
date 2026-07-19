@@ -334,6 +334,115 @@ class TestSQLFailedOperationCompressionBehavior:
         assert len(rows) == 1
 
 
+def _compressed(dlq, suffix, *, days_ago, status="active"):
+    """Store a compressed entry aged ``days_ago`` and return it."""
+    now = utc_now()
+    entry = DLQCompressedEntry(
+        id=f"compressed:payment:timeout:E_X:{suffix}",
+        domain="payment",
+        failure_type="timeout",
+        error_code="E_X",
+        count=1,
+        first_seen=now,
+        last_seen=now,
+        sample_error_message="x",
+        status=status,
+        compressed_at=now - timedelta(days=days_ago),
+    )
+    dlq.store_compressed_entry(entry)
+    return entry
+
+
+class TestSQLCompressedCutoffQueryContract:
+    """get_compressed_entries_before is oldest-first, cutoff-bounded and paged.
+
+    Driven against a real sqlite-backed adapter rather than a mocked cursor.
+    The defect this query exists to fix was an ordering one — the lifecycle
+    sweep read the newest page and so transitioned nothing — and a mocked
+    cursor returns whatever the test hands it, passing against either
+    ordering.
+    """
+
+    def test_returns_oldest_first(self, dlq):
+        _compressed(dlq, "a", days_ago=10)
+        _compressed(dlq, "b", days_ago=50)
+        _compressed(dlq, "c", days_ago=30)
+
+        rows = dlq.get_compressed_entries_before(
+            status="active", before=utc_now() - timedelta(days=5)
+        )
+
+        assert [r.id.split(":")[-1] for r in rows] == ["b", "c", "a"]
+
+    def test_excludes_entries_at_or_after_the_cutoff(self, dlq):
+        _compressed(dlq, "old", days_ago=40)
+        _compressed(dlq, "young", days_ago=10)
+
+        rows = dlq.get_compressed_entries_before(
+            status="active", before=utc_now() - timedelta(days=30)
+        )
+
+        assert [r.id.split(":")[-1] for r in rows] == ["old"]
+
+    def test_filters_by_status(self, dlq):
+        _compressed(dlq, "active-one", days_ago=40)
+        _compressed(dlq, "stale-one", days_ago=40, status="stale")
+
+        rows = dlq.get_compressed_entries_before(
+            status="stale", before=utc_now() - timedelta(days=5)
+        )
+
+        assert [r.id.split(":")[-1] for r in rows] == ["stale-one"]
+
+    def test_limit_bounds_the_page(self, dlq):
+        for i in range(5):
+            _compressed(dlq, f"e{i}", days_ago=40 - i)
+
+        rows = dlq.get_compressed_entries_before(
+            status="active", before=utc_now() - timedelta(days=5), limit=2
+        )
+
+        assert [r.id.split(":")[-1] for r in rows] == ["e0", "e1"]
+
+    def test_offset_skips_matching_entries(self, dlq):
+        for i in range(5):
+            _compressed(dlq, f"e{i}", days_ago=40 - i)
+
+        rows = dlq.get_compressed_entries_before(
+            status="active",
+            before=utc_now() - timedelta(days=5),
+            limit=2,
+            offset=2,
+        )
+
+        assert [r.id.split(":")[-1] for r in rows] == ["e2", "e3"]
+
+
+class TestSQLCompressedStatusStampParity:
+    """update_compressed_status stamps the timestamp its transition implies.
+
+    STALE -> ARCHIVED is driven off ``stale_at``; a status-only write would
+    leave every SQL-backed entry stranded in STALE forever.
+    """
+
+    def test_stale_transition_stamps_stale_at(self, dlq):
+        entry = _compressed(dlq, "s1", days_ago=40)
+
+        dlq.update_compressed_status(entry.id, "stale")
+
+        row = dlq.get_compressed_entries(status="stale")[0]
+        assert row.stale_at is not None
+        assert row.archived_at is None
+
+    def test_archived_transition_stamps_archived_at(self, dlq):
+        entry = _compressed(dlq, "s2", days_ago=100, status="stale")
+
+        dlq.update_compressed_status(entry.id, "archived")
+
+        row = dlq.get_compressed_entries(status="archived")[0]
+        assert row.archived_at is not None
+
+
 # ---------------------------------------------------------------------------
 # PR2 review fix #2 — find_sla_breached per-domain SQL
 # ---------------------------------------------------------------------------
