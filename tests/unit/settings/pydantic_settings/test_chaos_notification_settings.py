@@ -1,17 +1,17 @@
 """
-Chaos Engineering 및 알림 Settings 테스트.
+Tests for chaos engineering and notification settings.
 
 Chaos Engineering:
-- ChaosBlastRadiusSettings: Chaos 실험 폭발 반경 제한 설정
-- ChaosExperimentSettings: Chaos 실험 기본 설정
+- ChaosBlastRadiusSettings: chaos experiment blast-radius limits
+- ChaosExperimentSettings: chaos experiment defaults
 
-데이터 보호 및 알림:
-- CorruptionShieldSettings: 데이터 손상 방지 설정
-- NotificationChannelSettings: 알림 채널 설정
+Data protection and notification:
+- CorruptionShieldSettings: data corruption prevention settings
+- NotificationChannelSettings: notification channel settings
 
-회로 차단기 고급:
-- CascadeRetentionSettings: 캐스케이드 보존 설정
-- CircuitBreakerAdvancedSettings: 서킷브레이커 고급 설정
+Circuit breaker (advanced):
+- CascadeRetentionSettings: cascade retention settings
+- CircuitBreakerAdvancedSettings: advanced circuit breaker settings
 """
 
 import pytest
@@ -33,7 +33,7 @@ class TestChaosBlastRadiusSettings:
         reset_chaos_blast_radius_settings()
 
     def test_default_values(self):
-        """기본값 검증."""
+        """Default values."""
         from baldur.settings.chaos_blast_radius import ChaosBlastRadiusSettings
 
         settings = ChaosBlastRadiusSettings()
@@ -44,7 +44,7 @@ class TestChaosBlastRadiusSettings:
         assert settings.instance_auto_approve is True
 
     def test_env_override(self, monkeypatch):
-        """환경변수로 값을 오버라이드할 수 있는지 검증."""
+        """Values can be overridden via environment variables."""
         from baldur.settings.chaos_blast_radius import ChaosBlastRadiusSettings
 
         monkeypatch.setenv("BALDUR_CHAOS_BLAST_RADIUS_INSTANCE_MAX_CONCURRENT", "10")
@@ -54,7 +54,7 @@ class TestChaosBlastRadiusSettings:
         assert settings.instance_max_concurrent == 10
 
     def test_validation_concurrent_range(self):
-        """concurrent 범위 검증."""
+        """concurrent range validation."""
         from baldur.settings.chaos_blast_radius import ChaosBlastRadiusSettings
 
         with pytest.raises(ValidationError):
@@ -64,7 +64,7 @@ class TestChaosBlastRadiusSettings:
             ChaosBlastRadiusSettings(service_max_concurrent=20)  # > 10
 
     def test_singleton_pattern(self):
-        """싱글톤 패턴이 동작하는지 검증."""
+        """Singleton pattern returns the same instance."""
         from baldur.settings.chaos_blast_radius import (
             get_chaos_blast_radius_settings,
         )
@@ -90,7 +90,7 @@ class TestChaosExperimentSettings:
         reset_chaos_experiment_settings()
 
     def test_default_values(self):
-        """기본값 검증."""
+        """Default values."""
         from baldur.settings.chaos_experiment import ChaosExperimentSettings
 
         settings = ChaosExperimentSettings()
@@ -101,7 +101,7 @@ class TestChaosExperimentSettings:
         assert settings.grace_period_seconds == 300
 
     def test_env_override(self, monkeypatch):
-        """환경변수로 값을 오버라이드할 수 있는지 검증."""
+        """Values can be overridden via environment variables."""
         from baldur.settings.chaos_experiment import ChaosExperimentSettings
 
         monkeypatch.setenv("BALDUR_CHAOS_EXPERIMENT_MAX_DURATION_SECONDS", "7200")
@@ -111,7 +111,7 @@ class TestChaosExperimentSettings:
         assert settings.max_duration_seconds == 7200
 
     def test_validation_duration_range(self):
-        """duration 범위 검증."""
+        """duration range validation."""
         from baldur.settings.chaos_experiment import ChaosExperimentSettings
 
         with pytest.raises(ValidationError):
@@ -121,7 +121,7 @@ class TestChaosExperimentSettings:
             ChaosExperimentSettings(max_duration_seconds=100000)  # > 86400
 
     def test_singleton_pattern(self):
-        """싱글톤 패턴이 동작하는지 검증."""
+        """Singleton pattern returns the same instance."""
         from baldur.settings.chaos_experiment import get_chaos_experiment_settings
 
         settings1 = get_chaos_experiment_settings()
@@ -145,7 +145,7 @@ class TestCorruptionShieldSettings:
         reset_corruption_shield_settings()
 
     def test_default_values(self):
-        """기본값 검증 (v1.1 deferred per impl 527 — layer enabled flags default False)."""
+        """Default values (v1.1 deferred per impl 527 — layer enabled flags default False)."""
         from baldur.settings.corruption_shield import CorruptionShieldSettings
 
         settings = CorruptionShieldSettings()
@@ -157,7 +157,7 @@ class TestCorruptionShieldSettings:
         assert settings.max_string_length == 1000
 
     def test_env_override(self, monkeypatch):
-        """환경변수로 값을 오버라이드할 수 있는지 검증."""
+        """Values can be overridden via environment variables."""
         from baldur.settings.corruption_shield import CorruptionShieldSettings
 
         monkeypatch.setenv("BALDUR_CORRUPTION_SHIELD_L3_ENABLED", "false")
@@ -167,7 +167,7 @@ class TestCorruptionShieldSettings:
         assert settings.l3_enabled is False
 
     def test_validation_max_string_range(self):
-        """max_string_length 범위 검증."""
+        """max_string_length range validation."""
         from baldur.settings.corruption_shield import CorruptionShieldSettings
 
         with pytest.raises(ValidationError):
@@ -177,7 +177,7 @@ class TestCorruptionShieldSettings:
             CorruptionShieldSettings(max_string_length=20000)  # > 10000
 
     def test_singleton_pattern(self):
-        """싱글톤 패턴이 동작하는지 검증."""
+        """Singleton pattern returns the same instance."""
         from baldur.settings.corruption_shield import (
             get_corruption_shield_settings,
         )
@@ -203,7 +203,7 @@ class TestNotificationChannelSettings:
         reset_notification_channel_settings()
 
     def test_default_values(self):
-        """기본값 검증."""
+        """Default values."""
         from baldur.settings.notification_channel import (
             NotificationChannelSettings,
         )
@@ -216,7 +216,7 @@ class TestNotificationChannelSettings:
         assert settings.retry_delay_seconds == 30
 
     def test_env_override(self, monkeypatch):
-        """환경변수로 값을 오버라이드할 수 있는지 검증."""
+        """Values can be overridden via environment variables."""
         from baldur.settings.notification_channel import (
             NotificationChannelSettings,
         )
@@ -228,7 +228,7 @@ class TestNotificationChannelSettings:
         assert settings.rate_limit_per_minute == 100
 
     def test_validation_rate_limit_range(self):
-        """rate_limit 범위 검증."""
+        """rate_limit range validation."""
         from baldur.settings.notification_channel import (
             NotificationChannelSettings,
         )
@@ -240,7 +240,7 @@ class TestNotificationChannelSettings:
             NotificationChannelSettings(rate_limit_per_hour=10000)  # > 5000
 
     def test_singleton_pattern(self):
-        """싱글톤 패턴이 동작하는지 검증."""
+        """Singleton pattern returns the same instance."""
         from baldur.settings.notification_channel import (
             get_notification_channel_settings,
         )
@@ -266,7 +266,7 @@ class TestCascadeRetentionSettings:
         reset_cascade_retention_settings()
 
     def test_default_values(self):
-        """기본값 검증."""
+        """Default values."""
         from baldur.settings.cascade_retention import CascadeRetentionSettings
 
         settings = CascadeRetentionSettings()
@@ -275,7 +275,7 @@ class TestCascadeRetentionSettings:
         assert settings.max_cascade_index_size == 10000
 
     def test_env_override(self, monkeypatch):
-        """환경변수로 값을 오버라이드할 수 있는지 검증."""
+        """Values can be overridden via environment variables."""
         from baldur.settings.cascade_retention import CascadeRetentionSettings
 
         monkeypatch.setenv("BALDUR_CASCADE_RETENTION_HOT_RETENTION_DAYS", "14")
@@ -285,7 +285,7 @@ class TestCascadeRetentionSettings:
         assert settings.hot_retention_days == 14
 
     def test_validation_retention_days_range(self):
-        """retention_days 범위 검증."""
+        """retention_days range validation."""
         from baldur.settings.cascade_retention import CascadeRetentionSettings
 
         with pytest.raises(ValidationError):
@@ -295,7 +295,7 @@ class TestCascadeRetentionSettings:
             CascadeRetentionSettings(hot_retention_days=31)  # > 30
 
     def test_singleton_pattern(self):
-        """싱글톤 패턴이 동작하는지 검증."""
+        """Singleton pattern returns the same instance."""
         from baldur.settings.cascade_retention import (
             get_cascade_retention_settings,
         )
@@ -321,7 +321,7 @@ class TestCircuitBreakerAdvancedSettings:
         reset_circuit_breaker_advanced_settings()
 
     def test_default_values(self):
-        """기본값 검증 (v1.1 deferred per impl 527 — all advanced enabled flags False)."""
+        """Default values (v1.1 deferred per impl 527 — all advanced enabled flags False)."""
         from baldur.settings.circuit_breaker_advanced import (
             CircuitBreakerAdvancedSettings,
         )
@@ -333,7 +333,7 @@ class TestCircuitBreakerAdvancedSettings:
         assert settings.load_shedding_trigger_threshold == 30.0
 
     def test_env_override(self, monkeypatch):
-        """환경변수로 값을 오버라이드할 수 있는지 검증."""
+        """Values can be overridden via environment variables."""
         from baldur.settings.circuit_breaker_advanced import (
             CircuitBreakerAdvancedSettings,
         )
@@ -345,7 +345,7 @@ class TestCircuitBreakerAdvancedSettings:
         assert settings.load_shedding_enabled is False
 
     def test_validation_threshold_range(self):
-        """threshold 범위 검증."""
+        """threshold range validation."""
         from baldur.settings.circuit_breaker_advanced import (
             CircuitBreakerAdvancedSettings,
         )
@@ -359,7 +359,7 @@ class TestCircuitBreakerAdvancedSettings:
             )  # > 100
 
     def test_singleton_pattern(self):
-        """싱글톤 패턴이 동작하는지 검증."""
+        """Singleton pattern returns the same instance."""
         from baldur.settings.circuit_breaker_advanced import (
             get_circuit_breaker_advanced_settings,
         )

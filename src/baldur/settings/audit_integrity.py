@@ -47,7 +47,7 @@ class AuditIntegritySettings(BaseSettings):
     orphan_ttl_seconds: int = Field(
         default=86400,
         ge=3600,
-        le=604800,  # 7일
+        le=604800,  # 7 days
         description="Orphan entry TTL (seconds). Default 24 hours.",
     )
 

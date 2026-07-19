@@ -1,24 +1,24 @@
 """
-인프라 및 API Settings 테스트.
+Tests for infrastructure and API settings.
 
-대시보드 및 배치:
-- DashboardSettings: 대시보드 캐시 TTL 설정
-- BatchSettings: 배치 처리 크기 및 간격 설정
+Dashboard and batching:
+- DashboardSettings: dashboard cache TTL settings
+- BatchSettings: batch size and flush interval settings
 
-감사 및 모니터링:
-- AuditSettings: 감사 로그 기록 설정
-- AuditIntegritySettings: 감사 무결성 검증 설정
+Audit and monitoring:
+- AuditSettings: audit logging settings
+- AuditIntegritySettings: audit integrity verification settings
 
-API 및 태스크:
-- ApiViewSettings: API 페이지네이션 설정
-- CeleryTaskSettings: Celery 태스크 재시도 설정
+API and tasks:
+- ApiViewSettings: API pagination settings
+- CeleryTaskSettings: Celery task retry settings
 
-도메인 및 알림:
-- DomainSensitivitySettings: 도메인별 민감도 설정
-- SlackChannelSettings: Slack 채널 및 메시지 제한 설정
+Domain and notification:
+- DomainSensitivitySettings: per-domain sensitivity settings
+- SlackChannelSettings: Slack channel and message limit settings
 
-지역 복구:
-- RegionalRecoveryPolicySettings: 지역별 복구 정책 설정
+Regional recovery:
+- RegionalRecoveryPolicySettings: per-region recovery policy settings
 """
 
 import pytest
@@ -38,7 +38,7 @@ class TestDashboardSettings:
         reset_dashboard_settings()
 
     def test_default_values(self):
-        """기본값 검증."""
+        """Default values."""
         from baldur.settings.dashboard import DashboardSettings
 
         settings = DashboardSettings()
@@ -49,7 +49,7 @@ class TestDashboardSettings:
         assert settings.tracker_cache_ttl == 30.0
 
     def test_env_override(self, monkeypatch):
-        """환경변수로 값을 오버라이드할 수 있는지 검증."""
+        """Values can be overridden via environment variables."""
         from baldur.settings.dashboard import DashboardSettings
 
         monkeypatch.setenv("BALDUR_DASHBOARD_CACHE_TTL_SECONDS", "60")
@@ -59,7 +59,7 @@ class TestDashboardSettings:
         assert settings.cache_ttl_seconds == 60
 
     def test_validation_ttl_range(self):
-        """TTL 범위 검증."""
+        """TTL range validation."""
         from baldur.settings.dashboard import DashboardSettings
 
         with pytest.raises(ValidationError):
@@ -69,7 +69,7 @@ class TestDashboardSettings:
             DashboardSettings(cache_ttl_activity=1000)  # > 600
 
     def test_singleton_pattern(self):
-        """싱글톤 패턴이 동작하는지 검증."""
+        """Singleton pattern returns the same instance."""
         from baldur.settings.dashboard import get_dashboard_settings
 
         settings1 = get_dashboard_settings()
@@ -91,17 +91,17 @@ class TestBatchSettings:
         reset_batch_settings()
 
     def test_default_values(self):
-        """기본값 검증."""
+        """Default values."""
         from baldur.settings.batch import BatchSettings
 
         settings = BatchSettings()
 
         assert settings.default_batch_size == 100
-        assert settings.logger_batch_size == 100  # 변경: 10 -> 100
+        assert settings.logger_batch_size == 100  # changed: 10 -> 100
         assert settings.flush_interval == 5.0
 
     def test_env_override(self, monkeypatch):
-        """환경변수로 값을 오버라이드할 수 있는지 검증."""
+        """Values can be overridden via environment variables."""
         from baldur.settings.batch import BatchSettings
 
         monkeypatch.setenv("BALDUR_BATCH_LOGGER_BATCH_SIZE", "20")
@@ -111,7 +111,7 @@ class TestBatchSettings:
         assert settings.logger_batch_size == 20
 
     def test_validation_batch_size_range(self):
-        """batch_size 범위 검증."""
+        """batch_size range validation."""
         from baldur.settings.batch import BatchSettings
 
         with pytest.raises(ValidationError):
@@ -121,7 +121,7 @@ class TestBatchSettings:
             BatchSettings(default_batch_size=2000)  # > 1000
 
     def test_singleton_pattern(self):
-        """싱글톤 패턴이 동작하는지 검증."""
+        """Singleton pattern returns the same instance."""
         from baldur.settings.batch import get_batch_settings
 
         settings1 = get_batch_settings()
@@ -143,7 +143,7 @@ class TestAuditSettings:
         reset_audit_settings()
 
     def test_default_values(self):
-        """기본값 검증."""
+        """Default values."""
         from baldur.settings.audit import AuditSettings
 
         settings = AuditSettings()
@@ -153,7 +153,7 @@ class TestAuditSettings:
         assert settings.retention_days == 90
 
     def test_env_override(self, monkeypatch):
-        """환경변수로 값을 오버라이드할 수 있는지 검증."""
+        """Values can be overridden via environment variables."""
         from baldur.settings.audit import AuditSettings
 
         monkeypatch.setenv("BALDUR_AUDIT_MAX_HISTORY", "200")
@@ -163,7 +163,7 @@ class TestAuditSettings:
         assert settings.max_history == 200
 
     def test_validation_history_range(self):
-        """history 범위 검증."""
+        """history range validation."""
         from baldur.settings.audit import AuditSettings
 
         with pytest.raises(ValidationError):
@@ -173,7 +173,7 @@ class TestAuditSettings:
             AuditSettings(config_history_entries=1000)  # > 500
 
     def test_singleton_pattern(self):
-        """싱글톤 패턴이 동작하는지 검증."""
+        """Singleton pattern returns the same instance."""
         from baldur.settings.audit import get_audit_settings
 
         settings1 = get_audit_settings()
@@ -195,7 +195,7 @@ class TestCeleryTaskSettings:
         reset_celery_task_settings()
 
     def test_default_values(self):
-        """기본값 검증."""
+        """Default values."""
         from baldur.settings.celery_task import CeleryTaskSettings
 
         settings = CeleryTaskSettings()
@@ -206,7 +206,7 @@ class TestCeleryTaskSettings:
         assert settings.backoff_multiplier == 2.0
 
     def test_env_override(self, monkeypatch):
-        """환경변수로 값을 오버라이드할 수 있는지 검증."""
+        """Values can be overridden via environment variables."""
         from baldur.settings.celery_task import CeleryTaskSettings
 
         monkeypatch.setenv("BALDUR_CELERY_TASK_MAX_RETRIES", "5")
@@ -216,10 +216,10 @@ class TestCeleryTaskSettings:
         assert settings.max_retries == 5
 
     def test_validation_retries_range(self):
-        """max_retries 범위 (0-10) 검증."""
+        """max_retries range (0-10) validation."""
         from baldur.settings.celery_task import CeleryTaskSettings
 
-        # 0은 유효 (재시도 안함)
+        # 0 is valid (no retries)
         settings = CeleryTaskSettings(max_retries=0)
         assert settings.max_retries == 0
 
@@ -227,7 +227,7 @@ class TestCeleryTaskSettings:
             CeleryTaskSettings(max_retries=15)  # > 10
 
     def test_singleton_pattern(self):
-        """싱글톤 패턴이 동작하는지 검증."""
+        """Singleton pattern returns the same instance."""
         from baldur.settings.celery_task import get_celery_task_settings
 
         settings1 = get_celery_task_settings()
@@ -249,7 +249,7 @@ class TestApiViewSettings:
         reset_api_view_settings()
 
     def test_default_values(self):
-        """기본값 검증."""
+        """Default values."""
         from baldur.settings.api_view import ApiViewSettings
 
         settings = ApiViewSettings()
@@ -260,7 +260,7 @@ class TestApiViewSettings:
         assert settings.default_order == "-created_at"
 
     def test_env_override(self, monkeypatch):
-        """환경변수로 값을 오버라이드할 수 있는지 검증."""
+        """Values can be overridden via environment variables."""
         from baldur.settings.api_view import ApiViewSettings
 
         monkeypatch.setenv("BALDUR_API_VIEW_DEFAULT_LIMIT", "50")
@@ -270,7 +270,7 @@ class TestApiViewSettings:
         assert settings.default_limit == 50
 
     def test_validation_limit_range(self):
-        """limit 범위 검증."""
+        """limit range validation."""
         from baldur.settings.api_view import ApiViewSettings
 
         with pytest.raises(ValidationError):
@@ -280,7 +280,7 @@ class TestApiViewSettings:
             ApiViewSettings(max_limit=20000)  # > 10000
 
     def test_singleton_pattern(self):
-        """싱글톤 패턴이 동작하는지 검증."""
+        """Singleton pattern returns the same instance."""
         from baldur.settings.api_view import get_api_view_settings
 
         settings1 = get_api_view_settings()
@@ -304,7 +304,7 @@ class TestDomainSensitivitySettings:
         reset_domain_sensitivity_settings()
 
     def test_default_values(self):
-        """기본값 검증."""
+        """Default values."""
         from baldur.settings.domain_sensitivity import DomainSensitivitySettings
 
         settings = DomainSensitivitySettings()
@@ -317,7 +317,7 @@ class TestDomainSensitivitySettings:
         assert settings.default_sensitivity == 1.0
 
     def test_env_override(self, monkeypatch):
-        """환경변수로 값을 오버라이드할 수 있는지 검증."""
+        """Values can be overridden via environment variables."""
         from baldur.settings.domain_sensitivity import DomainSensitivitySettings
 
         monkeypatch.setenv(
@@ -330,7 +330,7 @@ class TestDomainSensitivitySettings:
         assert settings.domains["payment"] == 15.0
 
     def test_validation_sensitivity_range(self):
-        """sensitivity 범위 검증."""
+        """sensitivity range validation."""
         from baldur.settings.domain_sensitivity import DomainSensitivitySettings
 
         with pytest.raises(ValidationError):
@@ -340,7 +340,7 @@ class TestDomainSensitivitySettings:
             DomainSensitivitySettings(domains={"bad": 150.0})  # > 100.0
 
     def test_singleton_pattern(self):
-        """싱글톤 패턴이 동작하는지 검증."""
+        """Singleton pattern returns the same instance."""
         from baldur.settings.domain_sensitivity import (
             get_domain_sensitivity_settings,
         )
@@ -364,7 +364,7 @@ class TestSlackChannelSettings:
         reset_slack_channel_settings()
 
     def test_default_values(self):
-        """기본값 검증."""
+        """Default values."""
         from baldur.settings.slack_channel import SlackChannelSettings
 
         settings = SlackChannelSettings()
@@ -376,7 +376,7 @@ class TestSlackChannelSettings:
         assert settings.max_attachments == 10
 
     def test_env_override(self, monkeypatch):
-        """환경변수로 값을 오버라이드할 수 있는지 검증."""
+        """Values can be overridden via environment variables."""
         from baldur.settings.slack_channel import SlackChannelSettings
 
         monkeypatch.setenv("BALDUR_SLACK_CHANNEL_DEFAULT_CHANNEL", "#custom-alerts")
@@ -386,7 +386,7 @@ class TestSlackChannelSettings:
         assert settings.default_channel == "#custom-alerts"
 
     def test_validation_text_limit_range(self):
-        """text_limit 범위 검증."""
+        """text_limit range validation."""
         from baldur.settings.slack_channel import SlackChannelSettings
 
         with pytest.raises(ValidationError):
@@ -396,7 +396,7 @@ class TestSlackChannelSettings:
             SlackChannelSettings(block_text_limit=20000)  # > 10000
 
     def test_singleton_pattern(self):
-        """싱글톤 패턴이 동작하는지 검증."""
+        """Singleton pattern returns the same instance."""
         from baldur.settings.slack_channel import get_slack_channel_settings
 
         settings1 = get_slack_channel_settings()
@@ -418,7 +418,7 @@ class TestAuditIntegritySettings:
         reset_audit_integrity_settings()
 
     def test_default_values(self):
-        """기본값 검증."""
+        """Default values."""
         from baldur.settings.audit_integrity import AuditIntegritySettings
 
         settings = AuditIntegritySettings()
@@ -429,7 +429,7 @@ class TestAuditIntegritySettings:
         assert settings.cold_retention_years == 7
 
     def test_env_override(self, monkeypatch):
-        """환경변수로 값을 오버라이드할 수 있는지 검증."""
+        """Values can be overridden via environment variables."""
         from baldur.settings.audit_integrity import AuditIntegritySettings
 
         monkeypatch.setenv("BALDUR_AUDIT_INTEGRITY_ARCHIVE_THRESHOLD_DAYS", "14")
@@ -439,7 +439,7 @@ class TestAuditIntegritySettings:
         assert settings.archive_threshold_days == 14
 
     def test_validation_ttl_range(self):
-        """TTL 범위 검증."""
+        """TTL range validation."""
         from baldur.settings.audit_integrity import AuditIntegritySettings
 
         with pytest.raises(ValidationError):
@@ -449,7 +449,7 @@ class TestAuditIntegritySettings:
             AuditIntegritySettings(orphan_ttl_seconds=1000000)  # > 604800
 
     def test_singleton_pattern(self):
-        """싱글톤 패턴이 동작하는지 검증."""
+        """Singleton pattern returns the same instance."""
         from baldur.settings.audit_integrity import get_audit_integrity_settings
 
         settings1 = get_audit_integrity_settings()
@@ -473,7 +473,7 @@ class TestRegionalRecoveryPolicySettings:
         reset_regional_recovery_policy_settings()
 
     def test_default_values(self):
-        """기본값 검증."""
+        """Default values."""
         from baldur.settings.regional_recovery_policy import (
             RegionalRecoveryPolicySettings,
         )
@@ -487,7 +487,7 @@ class TestRegionalRecoveryPolicySettings:
         assert settings.cooldown_minutes == 15
 
     def test_env_override(self, monkeypatch):
-        """환경변수로 값을 오버라이드할 수 있는지 검증."""
+        """Values can be overridden via environment variables."""
         from baldur.settings.regional_recovery_policy import (
             RegionalRecoveryPolicySettings,
         )
@@ -501,7 +501,7 @@ class TestRegionalRecoveryPolicySettings:
         assert settings.error_rate_threshold == 0.15
 
     def test_validation_rate_range(self):
-        """rate 범위 검증."""
+        """rate range validation."""
         from baldur.settings.regional_recovery_policy import (
             RegionalRecoveryPolicySettings,
         )
@@ -513,7 +513,7 @@ class TestRegionalRecoveryPolicySettings:
             RegionalRecoveryPolicySettings(success_rate_threshold=1.1)  # > 1.0
 
     def test_singleton_pattern(self):
-        """싱글톤 패턴이 동작하는지 검증."""
+        """Singleton pattern returns the same instance."""
         from baldur.settings.regional_recovery_policy import (
             get_regional_recovery_policy_settings,
         )

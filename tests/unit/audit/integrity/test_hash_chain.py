@@ -1,10 +1,10 @@
 """
-Hash Chain 및 Checkpoint 단위 테스트 (Phase 3).
+Hash chain and checkpoint unit tests (Phase 3).
 
 Tests:
-- 체크포인트 생성 및 조회
-- 체크포인트 기반 무결성 검증
-- 특정 시각 이후 이벤트 조회
+- Checkpoint creation and lookup
+- Checkpoint-based integrity verification
+- Querying events after a given timestamp
 """
 
 from datetime import UTC, datetime, timedelta
@@ -24,7 +24,7 @@ from baldur.audit.cascade_auditor import (
 
 @pytest.fixture
 def memory_backend():
-    """메모리 백엔드 fixture."""
+    """Memory backend fixture."""
     from baldur.core.state_backend import MemoryStateBackend
 
     return MemoryStateBackend()
@@ -44,9 +44,9 @@ def cascade_auditor(memory_backend):
 @pytest.fixture
 def populated_auditor(cascade_auditor):
     """
-    여러 Cascade Event가 등록된 auditor fixture.
+    Auditor fixture pre-populated with several cascade events.
 
-    5개의 이벤트를 생성하여 체인을 구성합니다.
+    Records 5 events to build up the chain.
     """
     for i in range(5):
         cascade_auditor.record(
@@ -68,10 +68,10 @@ def populated_auditor(cascade_auditor):
 
 
 class TestCreateCheckpoint:
-    """체크포인트 생성 테스트."""
+    """Checkpoint creation tests."""
 
     def test_create_checkpoint_empty_namespace(self, cascade_auditor):
-        """빈 네임스페이스에서 체크포인트 생성."""
+        """Create a checkpoint for an empty namespace."""
         checkpoint = cascade_auditor.create_checkpoint("empty")
 
         assert checkpoint is not None
@@ -81,7 +81,7 @@ class TestCreateCheckpoint:
         assert "verified_at" in checkpoint
 
     def test_create_checkpoint_with_events(self, populated_auditor):
-        """이벤트가 있는 네임스페이스에서 체크포인트 생성."""
+        """Create a checkpoint for a namespace that has events."""
         checkpoint = populated_auditor.create_checkpoint("test")
 
         assert checkpoint is not None
@@ -93,11 +93,11 @@ class TestCreateCheckpoint:
         assert checkpoint["version"] == "1.0"
 
     def test_create_checkpoint_updates_existing(self, populated_auditor):
-        """체크포인트가 업데이트되는지 확인."""
-        # 첫 번째 체크포인트
+        """A later checkpoint reflects newly recorded events."""
+        # First checkpoint
         checkpoint1 = populated_auditor.create_checkpoint("test")
 
-        # 새 이벤트 추가
+        # Add a new event
         populated_auditor.record(
             trigger_type="NEW_EVENT",
             trigger_details={},
@@ -105,7 +105,7 @@ class TestCreateCheckpoint:
             namespace="test",
         )
 
-        # 두 번째 체크포인트
+        # Second checkpoint
         checkpoint2 = populated_auditor.create_checkpoint("test")
 
         assert checkpoint2["event_count"] == 6
@@ -119,19 +119,19 @@ class TestCreateCheckpoint:
 
 
 class TestGetCheckpoint:
-    """체크포인트 조회 테스트."""
+    """Checkpoint lookup tests."""
 
     def test_get_checkpoint_not_exists(self, cascade_auditor):
-        """존재하지 않는 체크포인트 조회."""
+        """Look up a checkpoint that does not exist."""
         result = cascade_auditor.get_checkpoint("nonexistent")
         assert result is None
 
     def test_get_checkpoint_exists(self, populated_auditor):
-        """존재하는 체크포인트 조회."""
-        # 체크포인트 생성
+        """Look up an existing checkpoint."""
+        # Create the checkpoint
         created = populated_auditor.create_checkpoint("test")
 
-        # 조회
+        # Retrieve
         retrieved = populated_auditor.get_checkpoint("test")
 
         assert retrieved is not None
@@ -146,22 +146,22 @@ class TestGetCheckpoint:
 
 
 class TestVerifyChainIntegrityFromCheckpoint:
-    """체크포인트 기반 무결성 검증 테스트."""
+    """Checkpoint-based integrity verification tests."""
 
     def test_verify_no_checkpoint_falls_back(self, populated_auditor):
-        """체크포인트 없으면 전체 검증으로 폴백."""
+        """Fall back to full verification when no checkpoint exists."""
         result = populated_auditor.verify_chain_integrity_from_checkpoint("test")
 
         assert result["valid"] is True
         assert result["checked"] == 5
-        # from_checkpoint 없거나 None
+        # from_checkpoint is absent or None
 
     def test_verify_with_checkpoint_no_new_events(self, populated_auditor):
-        """체크포인트 이후 새 이벤트 없음."""
-        # 체크포인트 생성
+        """No new events after the checkpoint."""
+        # Create the checkpoint
         populated_auditor.create_checkpoint("test")
 
-        # 검증 (새 이벤트 없음)
+        # Verify (no new events)
         result = populated_auditor.verify_chain_integrity_from_checkpoint("test")
 
         assert result["valid"] is True
@@ -169,11 +169,11 @@ class TestVerifyChainIntegrityFromCheckpoint:
         assert "from_checkpoint" in result
 
     def test_verify_with_checkpoint_new_events(self, populated_auditor):
-        """체크포인트 이후 새 이벤트 검증."""
-        # 체크포인트 생성
+        """Verify only the events recorded after the checkpoint."""
+        # Create the checkpoint
         populated_auditor.create_checkpoint("test")
 
-        # 새 이벤트 추가
+        # Add new events
         populated_auditor.record(
             trigger_type="NEW_EVENT_1",
             trigger_details={},
@@ -187,7 +187,7 @@ class TestVerifyChainIntegrityFromCheckpoint:
             namespace="test",
         )
 
-        # 검증 (2개만 검증)
+        # Verify (only the 2 new events)
         result = populated_auditor.verify_chain_integrity_from_checkpoint("test")
 
         assert result["valid"] is True
@@ -195,7 +195,7 @@ class TestVerifyChainIntegrityFromCheckpoint:
         assert "from_checkpoint" in result
 
     def test_verify_empty_namespace(self, cascade_auditor):
-        """빈 네임스페이스 검증."""
+        """Verify an empty namespace."""
         result = cascade_auditor.verify_chain_integrity_from_checkpoint("empty")
 
         assert result["valid"] is True
@@ -208,10 +208,10 @@ class TestVerifyChainIntegrityFromCheckpoint:
 
 
 class TestHashChainIntegrity:
-    """해시 체인 무결성 테스트."""
+    """Hash chain integrity tests."""
 
     def test_chain_integrity_valid(self, populated_auditor):
-        """유효한 체인 검증."""
+        """Verify a valid chain."""
         result = populated_auditor.verify_chain_integrity("test")
 
         assert result["valid"] is True
@@ -219,17 +219,17 @@ class TestHashChainIntegrity:
         assert result["errors"] == []
 
     def test_hash_values_unique(self, populated_auditor):
-        """각 이벤트의 해시가 고유한지 확인."""
+        """Each event's hash is unique."""
         events = populated_auditor.get_recent_events("test")
         hashes = [e.current_hash for e in events]
 
-        assert len(hashes) == len(set(hashes))  # 모두 고유
+        assert len(hashes) == len(set(hashes))  # all unique
 
     def test_previous_hash_chain(self, populated_auditor):
-        """이전 해시가 체인으로 연결되는지 확인."""
+        """Each event's previous_hash links back through the chain."""
         events = populated_auditor.get_recent_events("test")
 
-        # 최신순 정렬이므로 events[0]이 최신
+        # Sorted newest-first, so events[0] is the most recent
         for i in range(len(events) - 1):
             newer = events[i]
             older = events[i + 1]
@@ -243,10 +243,10 @@ class TestHashChainIntegrity:
 
 
 class TestGetEventsAfterTimestamp:
-    """특정 시각 이후 이벤트 조회 테스트."""
+    """Tests for querying events after a given timestamp."""
 
     def test_get_events_after_past_timestamp(self, populated_auditor):
-        """과거 시각 이후 모든 이벤트 조회."""
+        """A past timestamp returns every event."""
         past = (datetime.now(UTC) - timedelta(days=1)).isoformat()
 
         events = populated_auditor.get_events_after_timestamp("test", past)
@@ -254,7 +254,7 @@ class TestGetEventsAfterTimestamp:
         assert len(events) == 5
 
     def test_get_events_after_future_timestamp(self, populated_auditor):
-        """미래 시각 이후 이벤트 없음."""
+        """A future timestamp returns no events."""
         future = (datetime.now(UTC) + timedelta(days=1)).isoformat()
 
         events = populated_auditor.get_events_after_timestamp("test", future)
@@ -262,7 +262,7 @@ class TestGetEventsAfterTimestamp:
         assert len(events) == 0
 
     def test_get_events_invalid_timestamp(self, populated_auditor):
-        """잘못된 시각 형식은 전체 반환."""
+        """An invalid timestamp format returns everything."""
         events = populated_auditor.get_events_after_timestamp("test", "invalid")
 
         assert len(events) == 5
@@ -274,10 +274,10 @@ class TestGetEventsAfterTimestamp:
 
 
 class TestCheckpointKeyPattern:
-    """체크포인트 키 패턴 테스트."""
+    """Checkpoint key pattern tests."""
 
     def test_checkpoint_key_format(self):
-        """체크포인트 키 형식 확인."""
+        """Checkpoint key format."""
         auditor = CascadeEventAuditor()
 
         key = auditor.CHECKPOINT_KEY.format(namespace="test")
@@ -285,7 +285,7 @@ class TestCheckpointKeyPattern:
         assert key == "baldur:test:audit:cascade_checkpoint"
 
     def test_checkpoint_key_with_namespace(self):
-        """다양한 네임스페이스 키 형식."""
+        """Key format across different namespaces."""
         auditor = CascadeEventAuditor()
 
         assert (
