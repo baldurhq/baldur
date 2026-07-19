@@ -3,19 +3,24 @@ Metrics & Monitoring Celery Tasks.
 
 These tasks collect metrics, check SLA breaches, and provide health monitoring.
 
-Usage in CELERY_BEAT_SCHEDULE:
-    'collect-baldur-metrics': {
-        'task': 'baldur.adapters.celery.tasks.collect_baldur_metrics',
-        'schedule': 60.0,  # Every minute
-    },
-    'check-sla-breaches': {
-        'task': 'baldur.adapters.celery.tasks.check_and_report_sla_breaches',
-        'schedule': 300.0,  # Every 5 minutes
-    },
-    'emit-baldur-heartbeat': {
-        'task': 'baldur.adapters.celery.tasks.emit_baldur_heartbeat',
-        'schedule': 60.0,  # Should match heartbeat_interval_seconds config
-    },
+These tasks are registered but are NOT part of the composed beat schedule
+that configure_baldur_celery() injects. To run them periodically, add them
+to your own beat config:
+
+    CELERY_BEAT_SCHEDULE.update({
+        "collect-baldur-metrics": {
+            "task": "baldur.adapters.celery.tasks.collect_baldur_metrics",
+            "schedule": 60.0,  # Every minute
+        },
+        "check-sla-breaches": {
+            "task": "baldur.adapters.celery.tasks.check_and_report_sla_breaches",
+            "schedule": 300.0,  # Every 5 minutes
+        },
+        "emit-baldur-heartbeat": {
+            "task": "baldur.adapters.celery.tasks.emit_baldur_heartbeat",
+            "schedule": 60.0,  # Should match heartbeat_interval_seconds config
+        },
+    })
 """
 
 from datetime import UTC, datetime, timedelta

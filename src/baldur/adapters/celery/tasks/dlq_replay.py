@@ -5,11 +5,19 @@ These tasks handle replay of failed operations from the Dead Letter Queue.
 
 RBAC role information is propagated through the actor_info parameter.
 
-Usage in CELERY_BEAT_SCHEDULE:
-    'cleanup-dlq-entries': {
-        'task': 'baldur.adapters.celery.tasks.cleanup_resolved_dlq_entries',
-        'schedule': 86400.0,  # Daily
-    },
+The replay tasks here are invoked on demand, not on a schedule.
+
+cleanup_resolved_dlq_entries is registered but is NOT part of the composed
+beat schedule; the DLQ maintenance lane schedules its twin
+(baldur.celery_tasks.cleanup_resolved_dlq_entries) instead. Schedule this
+one only if you are not running that lane:
+
+    CELERY_BEAT_SCHEDULE.update({
+        "cleanup-dlq-entries": {
+            "task": "baldur.adapters.celery.tasks.cleanup_resolved_dlq_entries",
+            "schedule": 86400.0,  # Daily
+        },
+    })
 """
 
 from typing import Any

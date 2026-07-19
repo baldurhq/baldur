@@ -4,18 +4,27 @@ Postmortem Celery Tasks.
 Celery tasks for IncidentGroup closing and Notification aggregation.
 
 Tasks:
-- close_incident_group: close an incident group and create a consolidated Postmortem
+- close_incident_group: close an incident group and create a consolidated
+  Postmortem. Triggered on demand, either by the emergency-postmortem event
+  path or by check_stale_incident_groups — do not schedule it directly.
+- check_stale_incident_groups: find groups that meet the close condition and
+  trigger close_incident_group for them
 - flush_aggregated_notifications: send aggregated notifications
 
-Usage in CELERY_BEAT_SCHEDULE:
-    'close-stale-incident-groups': {
-        'task': 'baldur.adapters.celery.tasks.close_incident_group',
-        'schedule': 60.0,  # Every minute
-    },
-    'flush-aggregated-notifications': {
-        'task': 'baldur.adapters.celery.tasks.flush_aggregated_notifications',
-        'schedule': 30.0,  # Every 30 seconds
-    },
+These tasks are registered but are NOT part of the composed beat schedule
+that configure_baldur_celery() injects. To run the periodic ones, add them
+to your own beat config:
+
+    CELERY_BEAT_SCHEDULE.update({
+        "check-stale-incident-groups": {
+            "task": "baldur.adapters.celery.tasks.check_stale_incident_groups",
+            "schedule": 60.0,  # Every minute
+        },
+        "flush-aggregated-notifications": {
+            "task": "baldur.adapters.celery.tasks.flush_aggregated_notifications",
+            "schedule": 30.0,  # Every 30 seconds
+        },
+    })
 """
 
 from __future__ import annotations

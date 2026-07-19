@@ -17,17 +17,12 @@ Thin Task, Fat Service principle:
 Reference:
     docs/baldur/middleware_system/71_CANARY_CONFIG_ROLLOUT.md
 
-Celery Beat configuration example:
-    CELERY_BEAT_SCHEDULE = {
-        'scan-zombie-rollouts': {
-            'task': 'baldur.tasks.canary_watchdog.scan_zombie_rollouts',
-            'schedule': crontab(minute='*/5'),  # every 5 minutes
-        },
-        'auto-promote-eligible': {
-            'task': 'baldur.tasks.canary_watchdog.auto_promote_eligible',
-            'schedule': crontab(minute='*/1'),  # every minute
-        },
-    }
+Celery Beat:
+    These tasks ship as part of the composed Baldur beat schedule, so no
+    hand-written entries are needed:
+
+        from baldur.adapters.celery.beat_schedule import configure_baldur_celery
+        configure_baldur_celery(app)
 """
 
 from __future__ import annotations
@@ -914,11 +909,10 @@ def get_canary_watchdog_beat_schedule() -> dict[str, Any]:
         Dict[str, Any]: Celery Beat schedule configuration
 
     Usage:
+        # Normally unnecessary: configure_baldur_celery(app) merges this lane.
         from baldur.tasks.canary_watchdog import get_canary_watchdog_beat_schedule
 
-        CELERY_BEAT_SCHEDULE = {
-            **get_canary_watchdog_beat_schedule(),
-        }
+        CELERY_BEAT_SCHEDULE.update(get_canary_watchdog_beat_schedule())
     """
     from celery.schedules import crontab
 
