@@ -707,13 +707,15 @@ def register_intelligence_tasks_with_celery(app):
         register_intelligence_tasks_with_celery(app)
     """
     for task_class in INTELLIGENCE_TASKS:
+        # No "bind" key here: bind is a decorator option for function tasks,
+        # and Task.bind is the classmethod Celery calls from register_task.
+        # Setting it as a class attribute shadows that method and registration
+        # fails with "'bool' object is not callable". These are class-based
+        # tasks whose run(self) already receives self.
         wrapped = type(
             task_class.__name__,
             (task_class, app.Task),
-            {
-                "name": task_class.name,
-                "bind": True,
-            },
+            {"name": task_class.name},
         )
         app.register_task(wrapped())
         logger.info(

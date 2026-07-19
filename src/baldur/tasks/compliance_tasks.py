@@ -167,13 +167,11 @@ def register_compliance_tasks_with_celery(app):
         register_compliance_tasks_with_celery(app)
     """
     for task_class in COMPLIANCE_TASKS:
+        # No "bind" key here — see register_intelligence_tasks_with_celery.
         wrapped = type(
             task_class.__name__,
             (task_class, app.Task),
-            {
-                "name": task_class.name,
-                "bind": True,
-            },
+            {"name": task_class.name},
         )
         app.register_task(wrapped())
         logger.info(

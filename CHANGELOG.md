@@ -29,9 +29,11 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - Cascade event archive repositories (interface, memory/sql/django adapters). **Breaking**
 - `CascadeEventData`, `TriggerType`, `CascadeEventArchive` model + its table. **Breaking**
 - `CELERY_BEAT_SCHEDULE` — use `configure_baldur_celery(app)` instead. **Breaking**
+- `CHAOS_SCHEDULER_BEAT_SCHEDULE` — unread duplicate of the lane getter. **Breaking**
 
 ### Fixed
 
+- `configure_baldur_celery(app)` raised `TypeError` on every call and registered nothing.
 - Compressed DLQ entries now age ACTIVE→STALE→ARCHIVED on a daily schedule (was never run).
 - Compressed-entry sweep reads the oldest page, not the newest — it was a no-op above ~3/day.
 - SQL DLQ adapter stamps `stale_at`/`archived_at`, so STALE→ARCHIVED can fire on SQL backends.
