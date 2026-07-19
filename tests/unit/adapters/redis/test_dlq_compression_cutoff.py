@@ -110,7 +110,14 @@ def backend() -> FakeSortedSetBackend:
 
 @pytest.fixture
 def compression(backend):
-    return _make_repo(backend).compression
+    """The repository, not the compression mixin it delegates to.
+
+    The lifecycle sweep holds a repository, so the delegating wrapper is
+    part of the call path under test. Driving the mixin directly would let
+    a wrapper whose signature has drifted from the mixin's pass here and
+    fail in production.
+    """
+    return _make_repo(backend)
 
 
 def _store(compression, suffix, *, days_ago, status="active"):
