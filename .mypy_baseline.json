@@ -1,5 +1,5 @@
 {
-  "count": 325,
+  "count": 319,
   "errors": [
     {
       "code": "no-any-return",
@@ -130,67 +130,67 @@
     {
       "code": "no-any-return",
       "file": "src/baldur/adapters/cache/redis_adapter.py",
-      "line": 498,
+      "line": 502,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
       "code": "no-any-return",
       "file": "src/baldur/adapters/cache/redis_adapter.py",
-      "line": 510,
+      "line": 514,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
       "code": "no-any-return",
       "file": "src/baldur/adapters/cache/redis_adapter.py",
-      "line": 526,
+      "line": 530,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
       "code": "no-any-return",
       "file": "src/baldur/adapters/cache/redis_adapter.py",
-      "line": 538,
+      "line": 542,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
       "code": "no-any-return",
       "file": "src/baldur/adapters/cache/redis_adapter.py",
-      "line": 572,
+      "line": 576,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
       "code": "no-any-return",
       "file": "src/baldur/adapters/cache/redis_adapter.py",
-      "line": 626,
+      "line": 630,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
       "code": "no-any-return",
       "file": "src/baldur/adapters/cache/redis_adapter.py",
-      "line": 659,
+      "line": 663,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
       "code": "no-any-return",
       "file": "src/baldur/adapters/cache/redis_adapter.py",
-      "line": 751,
+      "line": 755,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
       "code": "no-any-return",
       "file": "src/baldur/adapters/cache/redis_adapter.py",
-      "line": 829,
+      "line": 833,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
       "code": "no-any-return",
       "file": "src/baldur/adapters/cache/redis_adapter.py",
-      "line": 867,
+      "line": 871,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
       "code": "no-any-return",
       "file": "src/baldur/adapters/cache/redis_adapter.py",
-      "line": 985,
+      "line": 989,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
@@ -221,18 +221,6 @@
       "code": "no-any-return",
       "file": "src/baldur/adapters/django/models/_abstract_security_incident.py",
       "line": 257,
-      "normalized_msg": "Returning Any from function declared to return \"_\""
-    },
-    {
-      "code": "no-any-return",
-      "file": "src/baldur/adapters/django/repositories/cascade_event.py",
-      "line": 95,
-      "normalized_msg": "Returning Any from function declared to return \"_\""
-    },
-    {
-      "code": "no-any-return",
-      "file": "src/baldur/adapters/django/repositories/cascade_event.py",
-      "line": 100,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
@@ -388,25 +376,25 @@
     {
       "code": "no-any-return",
       "file": "src/baldur/adapters/queues/rq_adapter.py",
-      "line": 329,
+      "line": 334,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
       "code": "no-any-return",
       "file": "src/baldur/adapters/queues/rq_adapter.py",
-      "line": 554,
+      "line": 569,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
       "code": "no-any-return",
       "file": "src/baldur/adapters/queues/rq_adapter.py",
-      "line": 613,
+      "line": 628,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
       "code": "no-any-return",
       "file": "src/baldur/adapters/queues/rq_adapter.py",
-      "line": 627,
+      "line": 642,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
@@ -508,13 +496,13 @@
     {
       "code": "no-any-return",
       "file": "src/baldur/adapters/redis/dlq_maintenance.py",
-      "line": 92,
+      "line": 105,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
       "code": "no-any-return",
       "file": "src/baldur/adapters/redis/dlq_maintenance.py",
-      "line": 97,
+      "line": 110,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
@@ -658,7 +646,7 @@
     {
       "code": "no-any-return",
       "file": "src/baldur/api/django/views/xtest/retry.py",
-      "line": 443,
+      "line": 444,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
@@ -1022,12 +1010,6 @@
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
-      "code": "no-any-return",
-      "file": "src/baldur/audit/integrity/merkle_spot_checker.py",
-      "line": 243,
-      "normalized_msg": "Returning Any from function declared to return \"_\""
-    },
-    {
       "code": "var-annotated",
       "file": "src/baldur/audit/integrity/reconciler.py",
       "line": 140,
@@ -1090,13 +1072,13 @@
     {
       "code": "no-any-return",
       "file": "src/baldur/audit/persistence/disk_buffer_adapter.py",
-      "line": 127,
+      "line": 133,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
       "code": "no-any-return",
       "file": "src/baldur/audit/persistence/disk_buffer_adapter.py",
-      "line": 134,
+      "line": 140,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
@@ -1168,7 +1150,7 @@
     {
       "code": "no-any-return",
       "file": "src/baldur/bootstrap.py",
-      "line": 2161,
+      "line": 2216,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
@@ -1192,7 +1174,7 @@
     {
       "code": "no-any-return",
       "file": "src/baldur/celery_tasks/dlq_tasks.py",
-      "line": 388,
+      "line": 394,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
@@ -1246,7 +1228,7 @@
     {
       "code": "no-any-return",
       "file": "src/baldur/core/backoff.py",
-      "line": 280,
+      "line": 302,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
@@ -1312,19 +1294,19 @@
     {
       "code": "no-any-return",
       "file": "src/baldur/dlq/helpers.py",
-      "line": 128,
+      "line": 115,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
       "code": "no-any-return",
       "file": "src/baldur/dlq/helpers.py",
-      "line": 135,
+      "line": 122,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
       "code": "no-any-return",
       "file": "src/baldur/dlq/helpers.py",
-      "line": 142,
+      "line": 129,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
@@ -1366,7 +1348,7 @@
     {
       "code": "no-any-return",
       "file": "src/baldur/models/recovery_session_archive.py",
-      "line": 365,
+      "line": 364,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
@@ -1390,19 +1372,19 @@
     {
       "code": "var-annotated",
       "file": "src/baldur/protect_facade.py",
-      "line": 257,
+      "line": 223,
       "normalized_msg": "Need type annotation for \"_\""
     },
     {
       "code": "no-any-return",
       "file": "src/baldur/protect_facade.py",
-      "line": 485,
+      "line": 451,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
       "code": "no-any-return",
       "file": "src/baldur/protect_facade.py",
-      "line": 1613,
+      "line": 1595,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
@@ -1420,43 +1402,49 @@
     {
       "code": "arg-type",
       "file": "src/baldur/resilience/policies/async_retry.py",
-      "line": 374,
+      "line": 540,
       "normalized_msg": "Argument 3 to \"_\" of \"_\" has incompatible type \"_\"; expected \"_\""
     },
     {
       "code": "var-annotated",
       "file": "src/baldur/resilience/policies/async_retry.py",
-      "line": 388,
+      "line": 549,
       "normalized_msg": "Need type annotation for \"_\""
     },
     {
       "code": "arg-type",
       "file": "src/baldur/resilience/policies/async_retry.py",
-      "line": 392,
+      "line": 553,
       "normalized_msg": "Argument 3 to \"_\" of \"_\" has incompatible type \"_\"; expected \"_\""
     },
     {
       "code": "no-any-return",
       "file": "src/baldur/resilience/policies/composer.py",
-      "line": 482,
+      "line": 248,
+      "normalized_msg": "Returning Any from function declared to return \"_\""
+    },
+    {
+      "code": "no-any-return",
+      "file": "src/baldur/resilience/policies/composer.py",
+      "line": 529,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
       "code": "var-annotated",
       "file": "src/baldur/resilience/policies/composer.py",
-      "line": 487,
+      "line": 536,
       "normalized_msg": "Need type annotation for \"_\""
     },
     {
       "code": "no-any-return",
       "file": "src/baldur/resilience/policies/composer.py",
-      "line": 823,
+      "line": 888,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
       "code": "var-annotated",
       "file": "src/baldur/resilience/policies/composer.py",
-      "line": 827,
+      "line": 894,
       "normalized_msg": "Need type annotation for \"_\""
     },
     {
@@ -1526,12 +1514,6 @@
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
-      "code": "var-annotated",
-      "file": "src/baldur/resilience/policies/timeout.py",
-      "line": 190,
-      "normalized_msg": "Need type annotation for \"_\""
-    },
-    {
       "code": "no-any-return",
       "file": "src/baldur/scaling/deadline_context.py",
       "line": 419,
@@ -1540,25 +1522,19 @@
     {
       "code": "no-any-return",
       "file": "src/baldur/scaling/rate_controller.py",
-      "line": 409,
+      "line": 325,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
       "code": "no-any-return",
       "file": "src/baldur/scaling/traffic_gate.py",
-      "line": 432,
+      "line": 422,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
       "code": "no-any-return",
       "file": "src/baldur/scaling/traffic_gate.py",
-      "line": 452,
-      "normalized_msg": "Returning Any from function declared to return \"_\""
-    },
-    {
-      "code": "no-any-return",
-      "file": "src/baldur/services/backoff_calculator/calculator.py",
-      "line": 125,
+      "line": 442,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
@@ -1570,25 +1546,13 @@
     {
       "code": "no-any-return",
       "file": "src/baldur/services/cell_topology/tagger.py",
-      "line": 77,
+      "line": 79,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
       "code": "no-any-return",
       "file": "src/baldur/services/cell_topology/tagger.py",
-      "line": 85,
-      "normalized_msg": "Returning Any from function declared to return \"_\""
-    },
-    {
-      "code": "no-any-return",
-      "file": "src/baldur/services/cell_topology/tagger.py",
-      "line": 133,
-      "normalized_msg": "Returning Any from function declared to return \"_\""
-    },
-    {
-      "code": "no-any-return",
-      "file": "src/baldur/services/cell_topology/tagger.py",
-      "line": 134,
+      "line": 87,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
@@ -1600,7 +1564,7 @@
     {
       "code": "no-any-return",
       "file": "src/baldur/services/circuit_breaker/blast_radius_integration.py",
-      "line": 162,
+      "line": 168,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
@@ -1642,25 +1606,25 @@
     {
       "code": "no-any-return",
       "file": "src/baldur/services/circuit_breaker/rate_limit_tracker.py",
-      "line": 208,
+      "line": 265,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
       "code": "no-any-return",
       "file": "src/baldur/services/circuit_breaker/rate_limit_tracker.py",
-      "line": 218,
+      "line": 275,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
       "code": "no-any-return",
       "file": "src/baldur/services/circuit_breaker/rate_limit_tracker.py",
-      "line": 228,
+      "line": 285,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
       "code": "no-any-return",
       "file": "src/baldur/services/circuit_breaker/rate_limit_tracker.py",
-      "line": 239,
+      "line": 296,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
@@ -1792,37 +1756,37 @@
     {
       "code": "arg-type",
       "file": "src/baldur/services/replay_service/service.py",
-      "line": 370,
+      "line": 416,
       "normalized_msg": "Argument \"_\" to \"_\" of \"_\" has incompatible type \"_\"; expected \"_\""
     },
     {
       "code": "no-any-return",
       "file": "src/baldur/services/replay_service/service.py",
-      "line": 967,
+      "line": 1029,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
       "code": "no-any-return",
       "file": "src/baldur/services/replay_service/service.py",
-      "line": 974,
+      "line": 1036,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
       "code": "no-any-return",
       "file": "src/baldur/services/replay_service/service.py",
-      "line": 981,
+      "line": 1043,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
       "code": "no-any-return",
       "file": "src/baldur/services/replay_service/service.py",
-      "line": 991,
+      "line": 1053,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
       "code": "no-any-return",
       "file": "src/baldur/services/replay_service/service.py",
-      "line": 1007,
+      "line": 1069,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
@@ -1912,37 +1876,37 @@
     {
       "code": "no-any-return",
       "file": "src/baldur/tasks/base.py",
-      "line": 253,
+      "line": 275,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
       "code": "no-any-return",
       "file": "src/baldur/tasks/canary_watchdog.py",
-      "line": 449,
+      "line": 444,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
       "code": "no-any-return",
       "file": "src/baldur/tasks/canary_watchdog.py",
-      "line": 450,
+      "line": 445,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
       "code": "no-any-return",
       "file": "src/baldur/tasks/governance.py",
-      "line": 158,
+      "line": 155,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
       "code": "no-any-return",
       "file": "src/baldur/utils/async_logger.py",
-      "line": 227,
+      "line": 230,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
       "code": "no-any-return",
       "file": "src/baldur/utils/async_logger.py",
-      "line": 232,
+      "line": 235,
       "normalized_msg": "Returning Any from function declared to return \"_\""
     },
     {
