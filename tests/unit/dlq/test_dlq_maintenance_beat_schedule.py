@@ -74,12 +74,12 @@ class TestDlqMaintenanceBeatScheduleContract:
         schedule = get_dlq_maintenance_beat_schedule()
         assert schedule["cleanup-resolved-dlq-entries"]["kwargs"]["days_old"] == 30
 
-    def test_schedule_has_exactly_three_entries(self):
-        """Schedule contains exactly 3 tasks."""
+    def test_schedule_has_exactly_four_entries(self):
+        """Schedule contains exactly 4 tasks."""
         from baldur.celery_tasks.dlq_tasks import get_dlq_maintenance_beat_schedule
 
         schedule = get_dlq_maintenance_beat_schedule()
-        assert len(schedule) == 3
+        assert len(schedule) == 4
 
     def test_schedule_contains_release_stale_replaying_task(self):
         """release-stale-replaying-entries entry exists with correct task name."""
@@ -91,6 +91,27 @@ class TestDlqMaintenanceBeatScheduleContract:
         entry = schedule["release-stale-replaying-entries"]
         assert entry["task"] == "baldur.celery_tasks.release_stale_replaying"
         assert entry["options"]["queue"] == "maintenance"
+
+    def test_schedule_contains_cleanup_compressed_task(self):
+        """cleanup-compressed-dlq-entries entry exists with correct task name."""
+        from baldur.celery_tasks.dlq_tasks import get_dlq_maintenance_beat_schedule
+
+        schedule = get_dlq_maintenance_beat_schedule()
+
+        assert "cleanup-compressed-dlq-entries" in schedule
+        entry = schedule["cleanup-compressed-dlq-entries"]
+        assert entry["task"] == "baldur.celery_tasks.cleanup_compressed_dlq_entries"
+        assert entry["options"]["queue"] == "maintenance"
+
+    def test_cleanup_compressed_runs_daily_at_0430(self):
+        """cleanup-compressed runs once a day, clear of the other lanes."""
+        from baldur.celery_tasks.dlq_tasks import get_dlq_maintenance_beat_schedule
+
+        schedule = get_dlq_maintenance_beat_schedule()
+        entry = schedule["cleanup-compressed-dlq-entries"]
+
+        assert entry["schedule"].hour == {4}
+        assert entry["schedule"].minute == {30}
 
 
 class TestBeatScheduleWiringContract:

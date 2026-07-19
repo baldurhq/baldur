@@ -114,13 +114,16 @@ _MOCK_CREATION_BUDGETS: dict[str, int] = {
     # dead schedule-lane retirement: -40 — the cascade-cleanup, integrity-task
     # and merkle spot-checker suites were deleted with the code they covered.
     # cascade archive-repository removal: -1 — its integration suite went too.
-    "oss": 4352,
+    # compressed-lifecycle suite: -8 — MagicMock entries/repos became a real
+    # in-memory repository, which is what makes those tests able to fail.
+    "oss": 4344,
     "pro": 1800,
     "dormant": 401,
 }
 _DECORATOR_PATCH_BUDGETS: dict[str, int] = {
     # dead schedule-lane retirement: -50 — same deleted suites.
-    "oss": 669,
+    # compressed-lifecycle suite: -1 — one fewer patched repository getter.
+    "oss": 668,
     "pro": 434,
     "dormant": 144,
 }

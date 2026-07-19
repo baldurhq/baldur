@@ -32,6 +32,7 @@ from baldur.adapters.sql.base import (
 )
 from baldur.interfaces.repositories import (
     DLQCompressedEntry,
+    DLQCompressedStatus,
     FailedOperationData,
     FailedOperationRepository,
     FailedOperationStatus,
@@ -45,7 +46,10 @@ logger = structlog.get_logger()
 
 
 _TABLE = "baldur_dlq"
-_SCHEMA_VERSION = 1
+# v2 adds the compressed-entry (status, compressed_at) index. Every statement
+# in _ddl is IF NOT EXISTS, so an existing install re-runs the set harmlessly
+# and picks up only what it is missing.
+_SCHEMA_VERSION = 2
 _COMPRESSED_TABLE = "baldur_dlq_compressed"
 
 
@@ -96,6 +100,11 @@ def _ddl(dialect: SQLDialect) -> list[str]:
         """,
         f"CREATE INDEX IF NOT EXISTS idx_{_COMPRESSED_TABLE}_domain_status "
         f"ON {_COMPRESSED_TABLE} (domain, status)",
+        # Serves the lifecycle sweep's (status, compressed_at) predicate and
+        # its ascending order. The domain-leading index above cannot: the
+        # sweep does not filter by domain.
+        f"CREATE INDEX IF NOT EXISTS idx_{_COMPRESSED_TABLE}_status_compressed_at "
+        f"ON {_COMPRESSED_TABLE} (status, compressed_at)",
     ]
 
 
@@ -1139,38 +1148,56 @@ class SQLFailedOperationRepository(GenericSQLRepository, FailedOperationReposito
             sql += " WHERE " + " AND ".join(clauses)
         sql += " ORDER BY compressed_at DESC LIMIT %s"
         params.append(limit)
-        rows = self._fetch_all(sql, params)
-        results: list[DLQCompressedEntry] = []
-        for row in rows:
-            data = self._loads_json(row[9]) or {}
-            first_seen = data.get("first_seen")
-            last_seen = data.get("last_seen")
-            results.append(
-                DLQCompressedEntry(
-                    id=row[0],
-                    domain=row[1],
-                    failure_type=row[2],
-                    error_code=row[3],
-                    count=int(row[4]),
-                    status=row[5],
-                    first_seen=(
-                        datetime.fromisoformat(first_seen)
-                        if isinstance(first_seen, str)
-                        else (first_seen or utc_now())
-                    ),
-                    last_seen=(
-                        datetime.fromisoformat(last_seen)
-                        if isinstance(last_seen, str)
-                        else (last_seen or utc_now())
-                    ),
-                    sample_error_message=data.get("sample_error_message", "") or "",
-                    sample_context=data.get("sample_context", {}) or {},
-                    compressed_at=self._dt_from_db(row[6]) or utc_now(),
-                    stale_at=self._dt_from_db(row[7]),
-                    archived_at=self._dt_from_db(row[8]),
-                )
-            )
-        return results
+        return [
+            self._compressed_row_to_entry(row) for row in self._fetch_all(sql, params)
+        ]
+
+    def get_compressed_entries_before(
+        self,
+        *,
+        status: str,
+        before: datetime,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[DLQCompressedEntry]:
+        """Query compressed entries older than a cutoff, oldest first."""
+        sql = (
+            f"SELECT id, domain, failure_type, error_code, count, status, "
+            f"compressed_at, stale_at, archived_at, data FROM {_COMPRESSED_TABLE} "
+            f"WHERE status = %s AND compressed_at < %s "
+            f"ORDER BY compressed_at ASC LIMIT %s OFFSET %s"
+        )
+        rows = self._fetch_all(sql, [status, before, limit, offset])
+        return [self._compressed_row_to_entry(row) for row in rows]
+
+    def _compressed_row_to_entry(self, row: Any) -> DLQCompressedEntry:
+        """Map a compressed-table row onto its DTO."""
+        data = self._loads_json(row[9]) or {}
+        first_seen = data.get("first_seen")
+        last_seen = data.get("last_seen")
+        return DLQCompressedEntry(
+            id=row[0],
+            domain=row[1],
+            failure_type=row[2],
+            error_code=row[3],
+            count=int(row[4]),
+            status=row[5],
+            first_seen=(
+                datetime.fromisoformat(first_seen)
+                if isinstance(first_seen, str)
+                else (first_seen or utc_now())
+            ),
+            last_seen=(
+                datetime.fromisoformat(last_seen)
+                if isinstance(last_seen, str)
+                else (last_seen or utc_now())
+            ),
+            sample_error_message=data.get("sample_error_message", "") or "",
+            sample_context=data.get("sample_context", {}) or {},
+            compressed_at=self._dt_from_db(row[6]) or utc_now(),
+            stale_at=self._dt_from_db(row[7]),
+            archived_at=self._dt_from_db(row[8]),
+        )
 
     def get_compressed_summary(self) -> dict[str, Any]:
         row = self._fetch_one(
@@ -1190,8 +1217,28 @@ class SQLFailedOperationRepository(GenericSQLRepository, FailedOperationReposito
         }
 
     def update_compressed_status(self, entry_id: str, new_status: str) -> bool:
-        self._execute(
-            f"UPDATE {_COMPRESSED_TABLE} SET status = %s WHERE id = %s",
-            (new_status, entry_id),
-        )
+        """Transition compressed entry lifecycle status.
+
+        Stamps the matching timestamp column alongside the status, as the
+        memory and Redis adapters do. STALE -> ARCHIVED is driven off
+        ``stale_at``, so an unstamped transition would strand the entry.
+        """
+        now = utc_now()
+        if new_status == DLQCompressedStatus.STALE.value:
+            self._execute(
+                f"UPDATE {_COMPRESSED_TABLE} SET status = %s, stale_at = %s "
+                f"WHERE id = %s",
+                (new_status, now, entry_id),
+            )
+        elif new_status == DLQCompressedStatus.ARCHIVED.value:
+            self._execute(
+                f"UPDATE {_COMPRESSED_TABLE} SET status = %s, archived_at = %s "
+                f"WHERE id = %s",
+                (new_status, now, entry_id),
+            )
+        else:
+            self._execute(
+                f"UPDATE {_COMPRESSED_TABLE} SET status = %s WHERE id = %s",
+                (new_status, entry_id),
+            )
         return True

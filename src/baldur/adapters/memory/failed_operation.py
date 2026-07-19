@@ -948,6 +948,23 @@ class InMemoryFailedOperationRepository(FailedOperationRepository):
             entries = [e for e in entries if e.status == status]
         return entries[:limit]
 
+    def get_compressed_entries_before(
+        self,
+        *,
+        status: str,
+        before: datetime,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[DLQCompressedEntry]:
+        """Query compressed entries older than a cutoff, oldest first."""
+        entries = [
+            e
+            for e in self._compressed_storage.values()
+            if e.status == status and e.compressed_at < before
+        ]
+        entries.sort(key=lambda e: e.compressed_at)
+        return entries[offset : offset + limit]
+
     def get_compressed_summary(self) -> dict[str, Any]:
         """Aggregate statistics of compressed entries."""
         status_counts: dict[str, int] = {s.value: 0 for s in DLQCompressedStatus}

@@ -780,95 +780,159 @@ class TestEvictOverflowDistributedLockBehavior:
 
 
 class TestCleanupCompressedEntriesBehavior:
-    """cleanup_compressed_dlq_entries task behavior."""
+    """cleanup_compressed_dlq_entries task behavior.
 
-    @patch("baldur.settings.dlq.get_dlq_settings")
-    @patch("baldur_pro.services.dlq.base.get_dlq_repository")
-    def test_transitions_active_to_stale(self, mock_get_repo, mock_get_settings):
-        """ACTIVE entries older than stale cutoff are transitioned to STALE."""
+    Driven against a real in-memory repository rather than a mocked one. The
+    defect this lane carried was in adapter query ordering, and a mocked
+    repository returns whatever the test hands it — it would pass against
+    either ordering and so prove nothing.
+    """
+
+    @staticmethod
+    def _entry(entry_id, *, compressed_days_ago, status="active", stale_days_ago=None):
+        now = datetime.now(UTC)
+        return DLQCompressedEntry(
+            id=entry_id,
+            domain="payment",
+            failure_type="timeout",
+            error_code="ETIMEDOUT",
+            count=1,
+            first_seen=now,
+            last_seen=now,
+            sample_error_message="boom",
+            status=status,
+            compressed_at=now - timedelta(days=compressed_days_ago),
+            stale_at=(
+                now - timedelta(days=stale_days_ago)
+                if stale_days_ago is not None
+                else None
+            ),
+        )
+
+    def _run(self, repo, mock_get_settings):
         from baldur.celery_tasks.dlq_tasks import cleanup_compressed_dlq_entries
 
-        now = datetime.now(UTC)
+        settings = MagicMock()
+        settings.compress_stale_after_days = 30
+        settings.compress_archive_after_days = 90
+        mock_get_settings.return_value = settings
 
-        old_entry = MagicMock()
-        old_entry.compressed_at = now - timedelta(days=31)
-        old_entry.id = "compressed:test:1"
+        with patch("baldur.factory.registry.ProviderRegistry") as registry:
+            registry.dlq_repository.safe_get.return_value = repo
+            return cleanup_compressed_dlq_entries.apply()
 
-        mock_repo = MagicMock()
-        mock_repo.get_compressed_entries.side_effect = lambda status=None, **kw: (
-            [old_entry] if status == "active" else []
-        )
-        mock_get_repo.return_value = mock_repo
+    @patch("baldur.settings.dlq.get_dlq_settings")
+    def test_transitions_active_to_stale(self, mock_get_settings):
+        """ACTIVE entries older than the stale cutoff are transitioned to STALE."""
+        repo = InMemoryFailedOperationRepository()
+        repo.store_compressed_entry(self._entry("c:1", compressed_days_ago=31))
 
-        mock_settings = MagicMock()
-        mock_settings.compress_stale_after_days = 30
-        mock_settings.compress_archive_after_days = 90
-        mock_get_settings.return_value = mock_settings
-
-        result = cleanup_compressed_dlq_entries.apply()
+        result = self._run(repo, mock_get_settings)
 
         assert result.result["success"] is True
         assert result.result["stale_count"] == 1
-        mock_repo.update_compressed_status.assert_called_with(
-            "compressed:test:1", "stale"
-        )
+        assert repo._compressed_storage["c:1"].status == "stale"
+        assert repo._compressed_storage["c:1"].stale_at is not None
 
     @patch("baldur.settings.dlq.get_dlq_settings")
-    @patch("baldur_pro.services.dlq.base.get_dlq_repository")
-    def test_transitions_stale_to_archived(self, mock_get_repo, mock_get_settings):
-        """STALE entries older than archive cutoff are transitioned to ARCHIVED."""
-        from baldur.celery_tasks.dlq_tasks import cleanup_compressed_dlq_entries
-
-        now = datetime.now(UTC)
-
-        stale_entry = MagicMock()
-        stale_entry.stale_at = now - timedelta(days=91)
-        stale_entry.id = "compressed:test:2"
-
-        mock_repo = MagicMock()
-        mock_repo.get_compressed_entries.side_effect = lambda status=None, **kw: (
-            [stale_entry] if status == "stale" else []
+    def test_transitions_stale_to_archived(self, mock_get_settings):
+        """STALE entries whose stale_at predates the archive cutoff are ARCHIVED."""
+        repo = InMemoryFailedOperationRepository()
+        repo.store_compressed_entry(
+            self._entry(
+                "c:2", compressed_days_ago=200, status="stale", stale_days_ago=91
+            )
         )
-        mock_get_repo.return_value = mock_repo
 
-        mock_settings = MagicMock()
-        mock_settings.compress_stale_after_days = 30
-        mock_settings.compress_archive_after_days = 90
-        mock_get_settings.return_value = mock_settings
-
-        result = cleanup_compressed_dlq_entries.apply()
+        result = self._run(repo, mock_get_settings)
 
         assert result.result["success"] is True
         assert result.result["archived_count"] == 1
-        mock_repo.update_compressed_status.assert_called_with(
-            "compressed:test:2", "archived"
-        )
+        assert repo._compressed_storage["c:2"].status == "archived"
 
     @patch("baldur.settings.dlq.get_dlq_settings")
-    @patch("baldur_pro.services.dlq.base.get_dlq_repository")
-    def test_recent_entries_not_transitioned(self, mock_get_repo, mock_get_settings):
-        """Recent entries within cutoff are NOT transitioned."""
-        from baldur.celery_tasks.dlq_tasks import cleanup_compressed_dlq_entries
+    def test_recent_entries_not_transitioned(self, mock_get_settings):
+        """Entries inside the cutoff are left alone."""
+        repo = InMemoryFailedOperationRepository()
+        repo.store_compressed_entry(self._entry("c:3", compressed_days_ago=5))
 
-        now = datetime.now(UTC)
-
-        recent_entry = MagicMock()
-        recent_entry.compressed_at = now - timedelta(days=5)
-        recent_entry.id = "compressed:recent:1"
-
-        mock_repo = MagicMock()
-        mock_repo.get_compressed_entries.side_effect = lambda status=None, **kw: (
-            [recent_entry] if status == "active" else []
-        )
-        mock_get_repo.return_value = mock_repo
-
-        mock_settings = MagicMock()
-        mock_settings.compress_stale_after_days = 30
-        mock_settings.compress_archive_after_days = 90
-        mock_get_settings.return_value = mock_settings
-
-        result = cleanup_compressed_dlq_entries.apply()
+        result = self._run(repo, mock_get_settings)
 
         assert result.result["stale_count"] == 0
         assert result.result["archived_count"] == 0
-        mock_repo.update_compressed_status.assert_not_called()
+        assert repo._compressed_storage["c:3"].status == "active"
+
+    @patch("baldur.settings.dlq.get_dlq_settings")
+    def test_transitions_entries_beyond_a_single_page(self, mock_get_settings):
+        """The drain crosses page boundaries instead of stopping at the first.
+
+        Pins the regression that made this lane inert: reading a single page of
+        newest-first entries transitioned nothing once volume outgrew the page.
+        """
+        from baldur.celery_tasks.dlq_tasks import _COMPRESSED_DRAIN_PAGE_SIZE
+
+        repo = InMemoryFailedOperationRepository()
+        total = _COMPRESSED_DRAIN_PAGE_SIZE + 250
+        for i in range(total):
+            repo.store_compressed_entry(
+                self._entry(f"c:{i:05d}", compressed_days_ago=31 + i % 7)
+            )
+
+        result = self._run(repo, mock_get_settings)
+
+        assert result.result["stale_count"] == total
+        assert all(e.status == "stale" for e in repo._compressed_storage.values())
+
+    @patch("baldur.settings.dlq.get_dlq_settings")
+    def test_ineligible_stale_entries_do_not_stall_the_drain(self, mock_get_settings):
+        """STALE entries not yet archivable are stepped over, not re-read forever.
+
+        A skipped entry keeps its status, so it stays in the query's result set;
+        the drain has to advance past it or it would re-read the same page until
+        the iteration bound runs out. The outcome is right either way, so this
+        asserts the query count — the only place the difference shows.
+        """
+        repo = InMemoryFailedOperationRepository()
+        for i in range(60):
+            repo.store_compressed_entry(
+                self._entry(
+                    f"old:{i:03d}",
+                    compressed_days_ago=200,
+                    status="stale",
+                    stale_days_ago=91,
+                )
+            )
+        for i in range(40):
+            repo.store_compressed_entry(
+                self._entry(
+                    f"new:{i:03d}",
+                    compressed_days_ago=200,
+                    status="stale",
+                    stale_days_ago=1,
+                )
+            )
+
+        calls = {"n": 0}
+        original = repo.get_compressed_entries_before
+
+        def counting(*args, **kwargs):
+            calls["n"] += 1
+            return original(*args, **kwargs)
+
+        repo.get_compressed_entries_before = counting
+
+        result = self._run(repo, mock_get_settings)
+
+        assert result.result["archived_count"] == 60
+        # Two queries per transition lane (one page + one empty page) plus the
+        # ACTIVE lane's single empty page. A drain that never advanced its
+        # cursor would spin to _COMPRESSED_DRAIN_MAX_ITERATIONS instead.
+        assert calls["n"] <= 6, f"drain re-read its own page ({calls['n']} queries)"
+        archived = [
+            e for e in repo._compressed_storage.values() if e.status == "archived"
+        ]
+        still_stale = [
+            e for e in repo._compressed_storage.values() if e.status == "stale"
+        ]
+        assert len(archived) == 60
+        assert len(still_stale) == 40

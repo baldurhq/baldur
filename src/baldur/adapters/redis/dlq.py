@@ -890,6 +890,18 @@ class RedisDLQRepository(
     ) -> list[DLQCompressedEntry]:
         return self.compression.get_compressed_entries(domain, status, limit)
 
+    def get_compressed_entries_before(
+        self,
+        *,
+        status: str,
+        before: datetime,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[DLQCompressedEntry]:
+        return self.compression.get_compressed_entries_before(
+            status=status, before=before, limit=limit, offset=offset
+        )
+
     def get_compressed_summary(self) -> dict[str, Any]:
         return self.compression.get_compressed_summary()
 
