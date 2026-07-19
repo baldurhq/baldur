@@ -127,12 +127,29 @@ class TestBeatEntriesResolveToRegisteredTasks:
             configure_baldur_celery,
         )
 
-        app = celery.Celery("g70_schedule_registration_sync")
+        # set_as_current=False is load-bearing: a new Celery app otherwise
+        # becomes the current one for the whole process, rebinding every
+        # @shared_task proxy to it. Later tests in the same session would then
+        # patch one task object and have the proxy resolve to another, sending
+        # .delay() at this throwaway app's non-existent broker.
+        current_before = celery.current_app._get_current_object()
+        app = celery.Celery(
+            "g70_schedule_registration_sync",
+            set_as_current=False,
+        )
         _reset_celery_configured()
         try:
             configure_baldur_celery(app)
         finally:
             _reset_celery_configured()
+
+        # Self-guard: this gate configures a whole Celery app, so it is the
+        # most likely test in the suite to leak one. Assert it did not.
+        assert celery.current_app._get_current_object() is current_before, (
+            "G70's own fixture hijacked the current Celery app — every "
+            "@shared_task proxy in the process now resolves to the throwaway "
+            "app, which breaks unrelated tests downstream."
+        )
 
         registered = set(app.tasks.keys())
         violations = [

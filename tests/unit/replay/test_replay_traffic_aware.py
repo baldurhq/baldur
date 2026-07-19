@@ -391,7 +391,12 @@ class TestTaskRegistry:
             register_traffic_aware_tasks_with_celery,
         )
 
-        app = celery.Celery("test_traffic_aware_registration")
+        # set_as_current=False keeps this app from becoming the process-wide
+        # current app and rebinding every @shared_task proxy to it.
+        app = celery.Celery(
+            "test_traffic_aware_registration",
+            set_as_current=False,
+        )
         register_traffic_aware_tasks_with_celery(app)
 
         # Against a MagicMock app this assertion held no matter what the
