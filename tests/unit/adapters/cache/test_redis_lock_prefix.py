@@ -204,8 +204,8 @@ class TestRedisLockPrefixBehavior:
 class TestRedisDistributedLockContract:
     """Direct ``RedisDistributedLock(full_key=...)`` construction contract.
 
-    Pins behavior for the 5 production direct callers (audit/integrity,
-    audit/fallback, integrity_tasks, postmortem GENERATE/GROUP). They
+    Pins behavior for the 4 production direct callers (audit/integrity,
+    audit/fallback, postmortem GENERATE/GROUP). They
     construct the prefixed key themselves and pass it as ``full_key``;
     the lock writes it verbatim with zero transformation.
     """
