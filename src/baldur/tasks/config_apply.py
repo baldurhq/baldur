@@ -4,9 +4,9 @@ Configuration Apply Tasks.
 Celery tasks for applying scheduled/delayed configuration changes.
 
 Thin Task, Fat Service Architecture:
-    - 이 파일의 Celery Task들은 단순 위임자 역할만 수행
-    - 모든 비즈니스 로직은 ConfigApplyService에서 처리
-    - 거버넌스 체크 (Emergency Mode)도 서비스 레이어에서 수행
+    - The Celery tasks in this file act only as simple delegators
+    - All business logic is handled in ConfigApplyService
+    - Governance checks (Emergency Mode) also run in the service layer
 
 Tasks:
 - apply_pending_config_changes: Apply all due pending changes
@@ -23,7 +23,7 @@ from baldur.settings.apply_strategy import get_apply_strategy_settings
 
 logger = structlog.get_logger()
 
-# 모듈 로드 시점에 설정값 캐싱
+# Cache the settings at module load time
 _apply_settings = get_apply_strategy_settings()
 
 
@@ -40,12 +40,12 @@ def apply_pending_config_changes(self):
     This task is a thin wrapper that delegates to ConfigApplyService.
     All governance checks (Emergency Mode) are performed in the service layer.
 
-    Audit 기록:
-    - 설정 적용 성공/실패/차단 시 CONFIG_CHANGE 이벤트 기록
+    Audit trail:
+    - Records a CONFIG_CHANGE event on apply success/failure/block
 
     Note:
-        - Kill Switch는 체크하지 않음 (복구 퇴로 확보)
-        - Emergency Mode LEVEL_2+ 시 차단
+        - Kill Switch is not checked (keeps a recovery path open)
+        - Blocked under Emergency Mode LEVEL_2+
 
     This task should be scheduled to run periodically (e.g., every 5 seconds)
     via Celery Beat.
@@ -112,8 +112,8 @@ def apply_graceful_config_change(self, pending_id: str, max_wait_seconds: int = 
     This task is a thin wrapper that delegates to ConfigApplyService.
     Waits for in-progress operations to complete before applying.
 
-    Audit 기록:
-    - 설정 적용 성공/실패/차단 시 CONFIG_CHANGE 이벤트 기록
+    Audit trail:
+    - Records a CONFIG_CHANGE event on apply success/failure/block
 
     Args:
         pending_id: ID of the pending configuration change
@@ -130,7 +130,7 @@ def apply_graceful_config_change(self, pending_id: str, max_wait_seconds: int = 
         status = result.get("status", "unknown")
 
         if status == "blocked":
-            # 비상 모드에서는 재시도하여 비상 모드 해제 후 적용
+            # Retry under emergency mode so the change applies once it lifts
             if self.request.retries < self.max_retries:
                 logger.info("config_task.retry_after_emergency_mode")
                 raise self.retry(countdown=30)
@@ -146,7 +146,7 @@ def apply_graceful_config_change(self, pending_id: str, max_wait_seconds: int = 
             return result
 
         if status == "retry":
-            # 진행 중인 작업이 있으면 재시도
+            # Retry while operations are still in progress
             logger.info(
                 "config_task.waiting_progress_ops_retry",
                 pending_id=pending_id,
@@ -219,11 +219,12 @@ def cleanup_expired_config_changes(max_age_hours: int | None = None):
     Should be scheduled to run periodically (e.g., daily).
 
     Args:
-        max_age_hours: 만료 기준 시간 (기본값: 설정에서 로드)
+        max_age_hours: Expiry threshold in hours (default: loaded from settings)
     """
+    from baldur.services.daily_report import record_cleanup_result
     from baldur.services.pending_config import get_pending_config_service
 
-    # 설정값 사용 (인자가 None이면 설정에서 가져옴)
+    # Fall back to the configured threshold when the argument is None
     if max_age_hours is None:
         max_age_hours = _apply_settings.cleanup_max_age_hours
 
@@ -231,10 +232,12 @@ def cleanup_expired_config_changes(max_age_hours: int | None = None):
         pending_service = get_pending_config_service()
         count = pending_service.cleanup_expired(max_age_hours)
 
-        return {
+        result = {
             "status": "success",
             "expired_count": count,
         }
+        record_cleanup_result("baldur.cleanup_expired_config_changes", result)
+        return result
     except Exception as e:
         logger.exception(
             "config_task.error_cleaning_up_expired",

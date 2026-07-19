@@ -11,10 +11,12 @@ Module Structure:
 """
 
 from .aggregator import (
+    AUTO_PROCESSING_INGEST_KEYS,
     DAILY_REPORT_CACHE_KEY_PREFIX,
     DailyReportCollector,
     aggregate_daily_results,
     get_daily_report_collector,
+    record_cleanup_result,
     reset_daily_report_collector,
 )
 from .formatters import format_report_for_pagerduty, format_report_for_slack
@@ -42,11 +44,13 @@ __all__ = [
     "DailyAutonomousReport",
     "DailyReportData",
     # Aggregator
+    "AUTO_PROCESSING_INGEST_KEYS",
     "DAILY_REPORT_CACHE_KEY_PREFIX",
     "DailyReportCollector",
     "get_daily_report_collector",
     "reset_daily_report_collector",
     "aggregate_daily_results",
+    "record_cleanup_result",
     # Formatters
     "format_report_for_slack",
     "format_report_for_pagerduty",

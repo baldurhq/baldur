@@ -25,6 +25,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ### Fixed
 
+- Daily-report Auto-Processing counts (archived/expired/purged) now reflect real cleanup work.
 - Redis DLQ archive/purge counts no longer include writes that changed nothing.
 - Shadow-PRO insight no longer claims failed operations had no DLQ; OSS captures them.
 - SLA drift check no longer crashes every run on non-Django hosts (QuerySet-only `.count()`).

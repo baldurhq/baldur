@@ -44,11 +44,14 @@ def archive_old_dlq_entries(older_than_days: int = 30) -> dict[str, Any]:
         }
     """
     from baldur.services.cleanup_service import get_cleanup_service
+    from baldur.services.daily_report import record_cleanup_result
 
     try:
         service = get_cleanup_service()
         result = service.archive_old_dlq_entries(older_than_days=older_than_days)
-        return result.to_dict()
+        result_dict = result.to_dict()
+        record_cleanup_result("baldur.archive_old_dlq_entries", result_dict)
+        return result_dict
 
     except Exception as e:
         logger.exception(
@@ -75,11 +78,14 @@ def cleanup_expired_config(older_than_hours: int = 24) -> dict[str, Any]:
         }
     """
     from baldur.services.cleanup_service import get_cleanup_service
+    from baldur.services.daily_report import record_cleanup_result
 
     try:
         service = get_cleanup_service()
         result = service.cleanup_expired_config(older_than_hours=older_than_hours)
-        return result.to_dict()
+        result_dict = result.to_dict()
+        record_cleanup_result("baldur.cleanup_expired_config", result_dict)
+        return result_dict
 
     except Exception as e:
         logger.exception(
@@ -144,6 +150,7 @@ def purge_archived_dlq_entries(
         }
     """
     from baldur.services.cleanup_service import get_cleanup_service
+    from baldur.services.daily_report import record_cleanup_result
 
     try:
         service = get_cleanup_service()
@@ -151,7 +158,9 @@ def purge_archived_dlq_entries(
             older_than_days=older_than_days,
             dry_run=dry_run,
         )
-        return result.to_dict()
+        result_dict = result.to_dict()
+        record_cleanup_result("baldur.purge_archived_dlq_entries", result_dict)
+        return result_dict
 
     except Exception as e:
         logger.exception(
