@@ -271,37 +271,6 @@ def register_celery_tasks(app):
 # =============================================================================
 
 
-CHAOS_SCHEDULER_BEAT_SCHEDULE = {
-    # Run scheduled experiments every 5 minutes during maintenance window
-    "chaos-run-scheduled-experiments": {
-        "task": "baldur.tasks.chaos_scheduler.run_scheduled_experiments_task",
-        "schedule": 300.0,  # Every 5 minutes
-        "options": {"queue": "chaos"},
-    },
-    # Generate daily resilience report at 6 AM UTC
-    "chaos-daily-resilience-report": {
-        "task": "baldur.tasks.chaos_scheduler.generate_daily_resilience_report_task",
-        "schedule": {
-            "hour": 6,
-            "minute": 0,
-        },
-        "options": {"queue": "reports"},
-    },
-    # Clean up expired approvals every hour
-    "chaos-cleanup-expired-approvals": {
-        "task": "baldur.tasks.chaos_scheduler.cleanup_expired_approvals_task",
-        "schedule": 3600.0,  # Every hour
-        "options": {"queue": "maintenance"},
-    },
-    # Check pending approvals every 30 minutes
-    "chaos-check-pending-approvals": {
-        "task": "baldur.tasks.chaos_scheduler.check_pending_approvals_task",
-        "schedule": 1800.0,  # Every 30 minutes
-        "options": {"queue": "maintenance"},
-    },
-}
-
-
 def get_beat_schedule_for_celery():
     """
     Get Celery Beat schedule configuration.
