@@ -1,24 +1,22 @@
 """
 Cascade Retention Settings - Pydantic v2.
 
-Cascade 데이터의 Hot/Warm/Cold 계층별 보관 정책 설정입니다.
+Retention and load-shedding settings for cascade audit events.
 
-Replaces:
-- audit/cascade_config.py:CascadeRetentionConfig (하드코딩된 기본값)
+Cascade events are held in a single tier backed by the configured state
+backend. Retention is expressed as a TTL on each event write, which the
+Redis backend honors and the file backend ignores; the event index is
+additionally capped by size. There is no automatic movement of events to
+any secondary store.
 
 Environment Variables:
     BALDUR_CASCADE_RETENTION_HOT_RETENTION_DAYS=7
-    BALDUR_CASCADE_RETENTION_WARM_RETENTION_DAYS=90
-    BALDUR_CASCADE_RETENTION_COLD_RETENTION_DAYS=365
-
-Reference:
-- docs/baldur/middleware_system/92_CONFIG_IMPLEMENTATION_GUIDE.md (Week 3 [16])
-- docs/baldur/middleware_system/91_CONFIG_INVENTORY.md §14.2
-- docs/baldur/middleware_system/76_CASCADE_EVENT_AUDIT.md
+    BALDUR_CASCADE_RETENTION_MAX_CASCADE_INDEX_SIZE=10000
+    BALDUR_CASCADE_RETENTION_MAX_EVENTS_PER_SECOND=10000
 """
 
 import structlog
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 
 from baldur.settings.base import make_settings_config
@@ -28,71 +26,30 @@ logger = structlog.get_logger()
 
 class CascadeRetentionSettings(BaseSettings):
     """
-    Cascade 데이터 보관 정책 설정.
+    Cascade audit event retention and load-shedding settings.
 
-    Tiered Storage 모델:
-    - Hot (Redis): 실시간 조회용, 짧은 보관 (7일)
-    - Warm (PostgreSQL): 복잡한 쿼리, 중간 보관 (90일)
-    - Cold (Archive): 법적 요구사항, 장기 보관 (365일)
+    Retention:
+    - hot_retention_days: TTL applied to every event write. Honored by the
+      Redis state backend; the file backend ignores TTLs.
+    - max_cascade_index_size: hard cap on the event index, bounding both
+      memory use and the number of events reachable by a query.
 
-    데이터 흐름:
-    Hot → Warm → Cold → 삭제
+    Load shedding:
+    - buffer_warning_threshold / buffer_critical_threshold: buffer pressure
+      tiers that trigger warnings and shedding.
+    - max_events_per_second: ingest rate above which sampling kicks in.
     """
 
     model_config = make_settings_config("BALDUR_CASCADE_RETENTION_")
 
     # ==========================================================================
-    # Hot Tier (Redis) - from cascade_config.py
+    # Retention - from cascade_config.py
     # ==========================================================================
     hot_retention_days: int = Field(
         default=7,
         ge=1,
         le=30,
-        description="Retention period in Redis (days). For fast lookups.",
-    )
-
-    hot_max_count: int = Field(
-        default=10000,
-        ge=1000,
-        le=100000,
-        description="Maximum event count in Redis (memory limit)",
-    )
-
-    # ==========================================================================
-    # Warm Tier (PostgreSQL) - from cascade_config.py
-    # ==========================================================================
-    warm_retention_days: int = Field(
-        default=90,
-        ge=30,
-        le=365,
-        description="Retention period in PostgreSQL (days). For audit purposes.",
-    )
-
-    # ==========================================================================
-    # Cold Tier (Archive) - from cascade_config.py
-    # ==========================================================================
-    cold_retention_days: int = Field(
-        default=365,
-        ge=180,
-        le=2555,  # 7년
-        description="Archive retention period (days). Legal requirement.",
-    )
-
-    # ==========================================================================
-    # Index & Anchor - from cascade_config.py
-    # ==========================================================================
-    index_retention_days: int = Field(
-        default=30,
-        ge=7,
-        le=90,
-        description="Index key retention period (days)",
-    )
-
-    anchor_retention_days: int = Field(
-        default=90,
-        ge=30,
-        le=365,
-        description="Checkpoint (anchor) retention period (days)",
+        description="Event TTL (days). Honored by the Redis backend, ignored by the file backend.",
     )
 
     # ==========================================================================
@@ -136,29 +93,12 @@ class CascadeRetentionSettings(BaseSettings):
         description="Maximum cascade index size. Limits Redis memory usage.",
     )
 
-    @model_validator(mode="after")
-    def validate_tier_order(self) -> "CascadeRetentionSettings":
-        """보관 기간 순서 검증: Hot < Warm < Cold."""
-        if self.hot_retention_days >= self.warm_retention_days:
-            logger.warning(
-                "cascade_retention.hot_retention_not_shorter_than_warm",
-                hot_retention_days=self.hot_retention_days,
-                warm_retention_days=self.warm_retention_days,
-            )
-        if self.warm_retention_days >= self.cold_retention_days:
-            logger.warning(
-                "cascade_retention.warm_retention_not_shorter_than_cold",
-                warm_retention_days=self.warm_retention_days,
-                cold_retention_days=self.cold_retention_days,
-            )
-        return self
-
     @field_validator("buffer_critical_threshold")
     @classmethod
     def validate_buffer_order(cls, v: float, info) -> float:
-        """Critical이 Warning보다 커야 함."""
-        # Note: cross-field validation은 model_validator에서 더 적합하지만
-        # 여기서는 경고만 발생
+        """Critical must sit above warning."""
+        # Note: cross-field validation belongs in a model_validator, but this
+        # only emits a warning.
         if v <= 0.7:
             logger.warning(
                 "cascade_retention.buffer_critical_threshold_low",

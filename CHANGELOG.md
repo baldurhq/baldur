@@ -24,6 +24,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - Daily-report `approval_expired_count` — no producer, always 0. **Breaking**
 - `MerkleSpotChecker` — only its never-scheduled callers used it. **Breaking**
 - Dead `BALDUR_AUDIT_INTEGRITY_*` knobs: merkle, verification, lock-timeout, check-interval.
+- Cascade Warm/Cold retention tiers — never delivered; only the event TTL ships. **Breaking**
+- `CascadeRetentionConfig`, `get_cascade_retention_config` — unused. **Breaking**
 
 ### Fixed
 

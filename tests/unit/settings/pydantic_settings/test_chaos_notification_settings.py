@@ -272,8 +272,7 @@ class TestCascadeRetentionSettings:
         settings = CascadeRetentionSettings()
 
         assert settings.hot_retention_days == 7
-        assert settings.hot_max_count == 10000
-        assert settings.warm_retention_days == 90
+        assert settings.max_cascade_index_size == 10000
 
     def test_env_override(self, monkeypatch):
         """환경변수로 값을 오버라이드할 수 있는지 검증."""
@@ -293,7 +292,7 @@ class TestCascadeRetentionSettings:
             CascadeRetentionSettings(hot_retention_days=0)  # < 1
 
         with pytest.raises(ValidationError):
-            CascadeRetentionSettings(warm_retention_days=400)  # > 365
+            CascadeRetentionSettings(hot_retention_days=31)  # > 30
 
     def test_singleton_pattern(self):
         """싱글톤 패턴이 동작하는지 검증."""
