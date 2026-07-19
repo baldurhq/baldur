@@ -941,6 +941,49 @@ class ResilientStorageBackend:
         end_idx = end + 1 if end >= 0 else None
         return [item["member"] for item in items[start:end_idx]]
 
+    def zrangebyscore(
+        self,
+        key: str,
+        min_score: float,
+        max_score: float,
+        *,
+        offset: int = 0,
+        count: int | None = None,
+    ) -> list[str]:
+        """Get sorted set members within an inclusive score window, ascending.
+
+        Lets a caller resume a scan from a score rather than from the head of
+        the index. A scan that filters on data held outside the score — a
+        status kept in the entry blob, say — otherwise has to re-read every
+        member it has already passed on each call.
+        """
+        self._ensure_redis()
+        full_key = self._get_full_key(key)
+
+        if self._mode == ResilientStorageMode.REDIS and self._redis:
+            try:
+                result = self._redis.raw_client.zrangebyscore(
+                    full_key,
+                    min_score,
+                    max_score,
+                    start=offset,
+                    num=count if count is not None else -1,
+                )
+                return [v.decode() if isinstance(v, bytes) else v for v in result]
+            except Exception:
+                self._switch_to_degraded()
+
+        # Degraded mode: _mem_apply_zadd keeps self._memory[key] sorted
+        # ascending by score, so filtering preserves the order.
+        selected = [
+            item["member"]
+            for item in self._memory.get(key, [])
+            if min_score <= item["score"] <= max_score
+        ]
+        if count is None:
+            return selected[offset:]
+        return selected[offset : offset + count]
+
     def zrem(self, key: str, *members: str) -> int:
         """Remove members from sorted set."""
         self._ensure_redis()

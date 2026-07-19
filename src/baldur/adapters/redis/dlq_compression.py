@@ -158,18 +158,24 @@ class RedisDLQCompression:
         before: datetime,
         limit: int = 100,
         offset: int = 0,
+        after: datetime | None = None,
     ) -> list[DLQCompressedEntry]:
-        """Query compressed entries older than a cutoff, oldest first.
+        """Query compressed entries in a cutoff window, oldest first.
 
-        The index is scored by ``compressed_at``, so walking it ascending makes
-        the eligible entries a prefix: the first entry at or after the cutoff
-        ends the scan, bounding the walk to the eligible range rather than the
-        whole index.
+        The index is scored by ``compressed_at``, so the window is a score
+        range walked ascending, and the first entry at or after ``before`` ends
+        the scan.
 
-        ``status`` cannot be filtered index-side — it lives in the entry blob —
-        so ``offset`` counts matching entries, matching what the SQL and memory
-        adapters do with it. The walk therefore restarts at the index head each
-        call and steps over entries whose status has already moved on.
+        ``after`` bounds the window from below, which is what keeps a paging
+        caller off its own processed prefix. ``status`` lives in the entry blob
+        and cannot be filtered index-side, so a scan that always started at the
+        index head would re-read every already-transitioned entry — one round
+        trip each — on every page, turning a drain into quadratic work.
+
+        ``offset`` then only has to cover the boundary the score cannot
+        express: matching entries at exactly ``after`` that the caller left in
+        place. It counts matching entries, as it does on the SQL and memory
+        adapters.
         """
         from baldur.utils.serialization import fast_loads
 
@@ -177,10 +183,16 @@ class RedisDLQCompression:
         matched = 0
         cursor = 0
         page_size = max(limit, 1)
+        min_score = after.timestamp() if after is not None else float("-inf")
+        max_score = before.timestamp()
 
         while len(entries) < limit:
-            member_ids = self._backend.zrange(
-                _COMPRESSED_INDEX_KEY, cursor, cursor + page_size - 1
+            member_ids = self._backend.zrangebyscore(
+                _COMPRESSED_INDEX_KEY,
+                min_score,
+                max_score,
+                offset=cursor,
+                count=page_size,
             )
             if not member_ids:
                 break

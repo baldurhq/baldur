@@ -876,6 +876,7 @@ class FailedOperationRepository(ABC):
         before: datetime,
         limit: int = 100,
         offset: int = 0,
+        after: datetime | None = None,
     ) -> list[DLQCompressedEntry]:
         """Return compressed entries with ``compressed_at`` older than ``before``.
 
@@ -883,11 +884,18 @@ class FailedOperationRepository(ABC):
         lifecycle sweep can stop as soon as an entry at or after the cutoff
         appears.
 
-        ``offset`` skips that many *matching* entries. A caller draining in
-        pages does not need it to step past entries it transitioned: those
-        leave ``status`` and so drop out of this query on their own. It exists
-        for entries the caller matched but deliberately left in place, which
-        would otherwise come back on every iteration.
+        ``after`` bounds the window from below, inclusive. A caller draining in
+        pages advances it to the last ``compressed_at`` it handled, which keeps
+        the window shrinking instead of restarting at the oldest entry every
+        call. Without it a backend that cannot filter ``status`` inside its
+        index — Redis keeps the status in the entry blob — has to re-read every
+        entry it has already transitioned, once per page.
+
+        ``offset`` skips that many *matching* entries and exists only for the
+        boundary ``after`` cannot express: entries the caller matched but
+        deliberately left in place whose ``compressed_at`` equals ``after``,
+        which would otherwise come back on every iteration. Entries left behind
+        below ``after`` drop out of the window on their own.
         """
         raise NotImplementedError(
             "Compression cutoff query not implemented for this adapter"

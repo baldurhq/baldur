@@ -936,3 +936,39 @@ class TestCleanupCompressedEntriesBehavior:
         ]
         assert len(archived) == 60
         assert len(still_stale) == 40
+
+    @patch("baldur.settings.dlq.get_dlq_settings", autospec=True)
+    def test_drain_advances_the_score_cursor_across_pages(self, mock_get_settings):
+        """Each page is fetched with a lower bound taken from the last one.
+
+        Without it the query restarts at the oldest entry every iteration.
+        The memory adapter does not care, but Redis keeps status in the entry
+        blob rather than in the index, so a head-anchored scan re-reads the
+        whole transitioned prefix once per page.
+        """
+        from baldur.celery_tasks.dlq_tasks import _COMPRESSED_DRAIN_PAGE_SIZE
+
+        repo = InMemoryFailedOperationRepository()
+        for i in range(_COMPRESSED_DRAIN_PAGE_SIZE + 250):
+            repo.store_compressed_entry(
+                self._entry(f"c:{i:05d}", compressed_days_ago=31 + i % 7)
+            )
+
+        seen_after = []
+        original = repo.get_compressed_entries_before
+
+        def spy(*args, **kwargs):
+            seen_after.append(kwargs.get("after"))
+            return original(*args, **kwargs)
+
+        repo.get_compressed_entries_before = spy
+
+        result = self._run(repo, mock_get_settings)
+
+        assert result.result["stale_count"] == _COMPRESSED_DRAIN_PAGE_SIZE + 250
+        # The first call of a lane opens the window; later calls carry a
+        # cursor forward instead of restarting at the oldest entry.
+        assert seen_after[0] is None
+        assert any(a is not None for a in seen_after[1:]), (
+            f"drain never advanced its cursor: {seen_after}"
+        )
