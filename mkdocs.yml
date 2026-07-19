@@ -281,6 +281,7 @@ nav:
       - Services:
           - Service access: reference/services/access.md
           - Circuit breaker & rate limiting: reference/services/circuit_breaker.md
+          - Bulkhead: reference/services/bulkhead.md
           - Idempotency: reference/services/idempotency.md
           - Retry: reference/services/retry.md
           - Security & notification: reference/services/security.md

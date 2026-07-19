@@ -186,10 +186,10 @@ All under the admin server (mount prefix is deployment-specific):
 | DLQ / outbox (2) | `DLQOutboxWorker`, `DLQConsumer-*` (one per resource) |
 | Coordination / election / scheduling (2) | `Scheduler-*` (one per resource), `LeaderElector-*` (one per resource — bespoke row below) |
 | Event bus / config / IPC / pool (4) | `RedisEventBusListener`, `GlobalConfigPropagatorListener`, `CBStateSnapshotWriter`, `PoolCB-Refresh` |
-| Scaling / capacity (3) | `RateController`, `HPAMetricsExporter`, `capacity-reservation-scheduler` |
+| Scaling / capacity (4) | `RateController`, `HPAMetricsExporter`, `capacity-reservation-scheduler`, `bulkhead_metrics_updater` |
 | Meta probes / guards / feedback (4) | `HealthProbeManager`, `AutoRollbackGuard`, `RuntimeFeedback`, `SelfHealerWatchdog` (PRO) |
 | Regional / cell (2) | `PartitionHeartbeat`, `cell-topology-anti-entropy` |
-| PRO services (6) | `ThrottleAuditWorker`, `CanaryStateRefresher`, `bulkhead_metrics_updater`, `ChaosWorkerHeartbeat`, `EmergencyGradualRecovery` (bespoke row below), `synthetic-load-*` (one per experiment) |
+| PRO services (5) | `ThrottleAuditWorker`, `CanaryStateRefresher`, `ChaosWorkerHeartbeat`, `EmergencyGradualRecovery` (bespoke row below), `synthetic-load-*` (one per experiment) |
 
 Bespoke rows (the 2 respawn-ineligible workers) and the catch-all:
 
