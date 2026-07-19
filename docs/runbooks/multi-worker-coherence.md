@@ -68,7 +68,7 @@ export BALDUR_EVENT_BUS_BACKEND=redis
 # export BALDUR_EVENT_BUS_REDIS_URL=redis://your-redis:6379/1
 ```
 
-`CONFIG_UPDATED` is how live resilience consumers (bulkhead, hedging, etc.) pick up an applied change without a restart. With `EVENT_BUS_BACKEND=memory` (the default) those events stay in-process, so other pods' consumers keep the old value until they restart.
+`CONFIG_UPDATED` is how live resilience consumers (hedging, adaptive throttle, etc.) pick up an applied change without a restart. With `EVENT_BUS_BACKEND=memory` (the default) those events stay in-process, so other pods' consumers keep the old value until they restart.
 
 ### 3. Distributed leader election (or Celery beat)
 
