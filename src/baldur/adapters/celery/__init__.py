@@ -245,28 +245,3 @@ __all__ = [
     "register_all_tasks_with_celery",
     "BALDUR_QUEUE_CONFIG",
 ]
-
-
-# Default Celery Beat Schedule for baldur tasks
-CELERY_BEAT_SCHEDULE = {
-    "baldur-check-circuit-recovery": {
-        "task": "baldur.celery_tasks.check_circuit_breaker_recovery",
-        "schedule": 60.0,  # Every minute
-    },
-    "baldur-expire-manual-overrides": {
-        "task": "baldur.celery_tasks.expire_manual_overrides",
-        "schedule": 300.0,  # Every 5 minutes
-    },
-    "baldur-collect-metrics": {
-        "task": "baldur.adapters.celery.tasks.collect_baldur_metrics",
-        "schedule": 60.0,  # Every minute
-    },
-    "baldur-check-sla-breaches": {
-        "task": "baldur.adapters.celery.tasks.check_and_report_sla_breaches",
-        "schedule": 300.0,  # Every 5 minutes
-    },
-    "baldur-cleanup-dlq": {
-        "task": "baldur.adapters.celery.tasks.cleanup_resolved_dlq_entries",
-        "schedule": 86400.0,  # Daily
-    },
-}
