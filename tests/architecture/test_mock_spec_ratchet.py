@@ -116,7 +116,7 @@ _MOCK_CREATION_BUDGETS: dict[str, int] = {
     # cascade archive-repository removal: -1 — its integration suite went too.
     # compressed-lifecycle suite: -8 — MagicMock entries/repos became a real
     # in-memory repository, which is what makes those tests able to fail.
-    "oss": 4344,
+    "oss": 4343,
     "pro": 1800,
     "dormant": 401,
 }
