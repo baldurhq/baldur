@@ -14,7 +14,6 @@ __all__ = [
     "discover_security_repos",
     "discover_event_journal_repos",
     "discover_postmortem_repos",
-    "discover_cascade_event_repos",
     "discover_recovery_session_repos",
     "discover_config_history_stores",
     "discover_canary_rollout_stores",
@@ -288,48 +287,6 @@ def discover_postmortem_repos() -> None:
 
         if not reg.has_provider("sql"):
             reg.register("sql", _create_sql_postmortem_repo)
-    except ImportError:
-        pass
-
-
-def discover_cascade_event_repos() -> None:
-    """Auto-register available cascade event archive repository implementations."""
-    from baldur.factory.registry import ProviderRegistry
-
-    reg = ProviderRegistry.cascade_event_repo
-
-    # In-memory (for testing, standalone, non-Django)
-    try:
-        from baldur.adapters.memory.cascade_event import (
-            InMemoryCascadeEventArchiveRepository,
-        )
-
-        if not reg.has_provider("memory"):
-            reg.register("memory", InMemoryCascadeEventArchiveRepository)
-    except ImportError:
-        pass
-
-    # Django-based
-    try:
-        from baldur.adapters.django.repositories.cascade_event import (
-            DjangoCascadeEventArchiveRepository,
-        )
-
-        if not reg.has_provider("django"):
-            reg.register("django", DjangoCascadeEventArchiveRepository)
-    except ImportError:
-        pass
-
-    # SQL-based (DB-API 2.0 — PostgreSQL / MySQL / SQLite)
-    try:
-        from baldur.adapters.sql import SQLCascadeEventArchiveRepository
-        from baldur.adapters.sql.connection import build_connection_factory
-
-        def _create_sql_cascade_event_repo():
-            return SQLCascadeEventArchiveRepository(build_connection_factory())
-
-        if not reg.has_provider("sql"):
-            reg.register("sql", _create_sql_cascade_event_repo)
     except ImportError:
         pass
 

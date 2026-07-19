@@ -1259,7 +1259,6 @@ _REGISTRIES_TO_WIRE: tuple[_RegistryWiring, ...] = (
     ),
     # Group B — SQL/Django-backed (464 D7 reclassifies security_repo here;
     # 570 D5 adds postmortem_repo, structurally identical — memory/django/sql).
-    _RegistryWiring(_BackendKind.SQL_DJANGO, "cascade_event_repo", "django"),
     _RegistryWiring(_BackendKind.SQL_DJANGO, "recovery_session_repo", "django"),
     _RegistryWiring(_BackendKind.SQL_DJANGO, "security_repo", "django"),
     _RegistryWiring(_BackendKind.SQL_DJANGO, "postmortem_repo", "django"),

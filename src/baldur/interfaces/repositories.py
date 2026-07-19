@@ -25,7 +25,6 @@ from baldur.core.serializable import SerializableMixin
 from baldur.utils.time import utc_now
 
 if TYPE_CHECKING:
-    from baldur.models.cascade_event import CascadeEventData
     from baldur.models.recovery_session import RecoverySessionData
 
 # ============================================================================
@@ -1534,72 +1533,6 @@ class PostmortemRepository(ABC):
         JSONField values are deep-merged with existing data.
         Returns True if the record was found and updated.
         """
-        ...
-
-
-# ============================================================================
-# Cascade Event Archive DTOs & Repository
-# ============================================================================
-
-
-# ORM patterns sourced from tasks/cascade_cleanup_tasks.py.
-class CascadeEventArchiveRepository(ABC):
-    """Cascade Event archive persistence."""
-
-    @abstractmethod
-    def save(self, data: CascadeEventData) -> bool:
-        """Persist a cascade event record.
-
-        Idempotent — Django: IntegrityError → False, InMemory: overwrite → True.
-        """
-        ...
-
-    @abstractmethod
-    def get_by_cascade_id(self, cascade_id: str) -> CascadeEventData | None:
-        """Retrieve a single cascade event by ID."""
-        ...
-
-    @abstractmethod
-    def find(
-        self,
-        *,
-        namespace: str | None = None,
-        trigger_type: str | None = None,
-        start_date: datetime | None = None,
-        end_date: datetime | None = None,
-        is_test: bool | None = None,
-        offset: int = 0,
-        limit: int = 100,
-    ) -> list[CascadeEventData]:
-        """Query with optional filters. Results ordered by timestamp DESC."""
-        ...
-
-    @abstractmethod
-    def count(
-        self,
-        *,
-        namespace: str | None = None,
-        trigger_type: str | None = None,
-        start_date: datetime | None = None,
-        end_date: datetime | None = None,
-    ) -> int:
-        """Count cascade events matching filters."""
-        ...
-
-    @abstractmethod
-    def delete_older_than(self, cutoff: datetime) -> int:
-        """Delete archived events older than cutoff. Returns deleted count."""
-        ...
-
-    @abstractmethod
-    def get_chain(
-        self,
-        namespace: str,
-        *,
-        start_date: datetime | None = None,
-        end_date: datetime | None = None,
-    ) -> list[CascadeEventData]:
-        """Retrieve hash chain for integrity verification. Ordered by timestamp ASC."""
         ...
 
 

@@ -58,13 +58,13 @@ def cache_registry_isolated():
 
 
 @pytest.fixture
-def cascade_registry_isolated():
-    """Use ``ProviderRegistry.cascade_event_repo`` for Group B helper tests."""
+def recovery_session_registry_isolated():
+    """Use ``ProviderRegistry.recovery_session_repo`` for Group B helper tests."""
     from baldur.factory.registry import ProviderRegistry
 
-    with ProviderRegistry.cascade_event_repo.snapshot():
-        ProviderRegistry.cascade_event_repo.set_default("memory")
-        yield ProviderRegistry.cascade_event_repo
+    with ProviderRegistry.recovery_session_repo.snapshot():
+        ProviderRegistry.recovery_session_repo.set_default("memory")
+        yield ProviderRegistry.recovery_session_repo
 
 
 @pytest.fixture
@@ -261,18 +261,18 @@ class TestWireSqlDjangoRegistryBehavior:
     """Per-row D6 matrix for ``_wire_sql_django_registry``.
 
     Six trigger conditions × the 3 Group B rows; the helper logic is
-    identical across rows so a representative ``cascade_event_repo``
+    identical across rows so a representative ``recovery_session_repo``
     fixture covers the matrix.
     """
 
     def test_sql_set_picks_sql_target_regardless_of_django(
-        self, cascade_registry_isolated, fake_runtime
+        self, recovery_session_registry_isolated, fake_runtime
     ):
         """D5 priority: ``BALDUR_SQL_DSN`` always wins over Django."""
         from baldur import bootstrap
 
         bootstrap._wire_sql_django_registry(
-            cascade_registry_isolated,
+            recovery_session_registry_isolated,
             sql_target="sql",
             django_target="django",
             sql_set=True,
@@ -280,16 +280,16 @@ class TestWireSqlDjangoRegistryBehavior:
             runtime=fake_runtime(is_production=True),
         )
 
-        assert cascade_registry_isolated.get_default_name() == "sql"
+        assert recovery_session_registry_isolated.get_default_name() == "sql"
 
     def test_only_django_set_picks_django_target(
-        self, cascade_registry_isolated, fake_runtime
+        self, recovery_session_registry_isolated, fake_runtime
     ):
         """DSN unset + Django set → ``set_default(django_target)``."""
         from baldur import bootstrap
 
         bootstrap._wire_sql_django_registry(
-            cascade_registry_isolated,
+            recovery_session_registry_isolated,
             sql_target="sql",
             django_target="django",
             sql_set=False,
@@ -297,17 +297,17 @@ class TestWireSqlDjangoRegistryBehavior:
             runtime=fake_runtime(is_production=True),
         )
 
-        assert cascade_registry_isolated.get_default_name() == "django"
+        assert recovery_session_registry_isolated.get_default_name() == "django"
 
     def test_neither_signal_in_production_raises_configuration_error(
-        self, cascade_registry_isolated, fake_runtime
+        self, recovery_session_registry_isolated, fake_runtime
     ):
         """prod + neither signal → ConfigurationError naming both."""
         from baldur import bootstrap
 
         with pytest.raises(ConfigurationError) as exc_info:
             bootstrap._wire_sql_django_registry(
-                cascade_registry_isolated,
+                recovery_session_registry_isolated,
                 sql_target="sql",
                 django_target="django",
                 sql_set=False,
@@ -318,17 +318,17 @@ class TestWireSqlDjangoRegistryBehavior:
         message = str(exc_info.value)
         assert "BALDUR_SQL_DSN" in message
         assert "Django DATABASES" in message
-        assert "ProviderRegistry.cascade_event_repo" in message
+        assert "ProviderRegistry.recovery_session_repo" in message
 
     def test_neither_signal_in_non_production_warns_and_falls_back_to_memory(
-        self, cascade_registry_isolated, fake_runtime, caplog
+        self, recovery_session_registry_isolated, fake_runtime, caplog
     ):
         """non-prod + neither → WARNING + ``set_default("memory")``."""
         from baldur import bootstrap
 
         with caplog.at_level("WARNING"):
             bootstrap._wire_sql_django_registry(
-                cascade_registry_isolated,
+                recovery_session_registry_isolated,
                 sql_target="sql",
                 django_target="django",
                 sql_set=False,
@@ -336,7 +336,7 @@ class TestWireSqlDjangoRegistryBehavior:
                 runtime=fake_runtime(is_production=False),
             )
 
-        assert cascade_registry_isolated.get_default_name() == "memory"
+        assert recovery_session_registry_isolated.get_default_name() == "memory"
         # Helper emits the unified ``registry_memory_fallback`` event with
         # ``reason="sql_django_unset"`` for Group B non-prod fallback.
         assert any(
@@ -345,13 +345,13 @@ class TestWireSqlDjangoRegistryBehavior:
         )
 
     def test_sql_set_in_non_production_picks_sql_target(
-        self, cascade_registry_isolated, fake_runtime
+        self, recovery_session_registry_isolated, fake_runtime
     ):
         """non-prod + DSN set → ``"sql"`` (no special non-prod treatment)."""
         from baldur import bootstrap
 
         bootstrap._wire_sql_django_registry(
-            cascade_registry_isolated,
+            recovery_session_registry_isolated,
             sql_target="sql",
             django_target="django",
             sql_set=True,
@@ -359,16 +359,16 @@ class TestWireSqlDjangoRegistryBehavior:
             runtime=fake_runtime(is_production=False),
         )
 
-        assert cascade_registry_isolated.get_default_name() == "sql"
+        assert recovery_session_registry_isolated.get_default_name() == "sql"
 
     def test_only_django_set_in_non_production_picks_django(
-        self, cascade_registry_isolated, fake_runtime
+        self, recovery_session_registry_isolated, fake_runtime
     ):
         """non-prod + Django set → ``"django"``."""
         from baldur import bootstrap
 
         bootstrap._wire_sql_django_registry(
-            cascade_registry_isolated,
+            recovery_session_registry_isolated,
             sql_target="sql",
             django_target="django",
             sql_set=False,
@@ -376,7 +376,7 @@ class TestWireSqlDjangoRegistryBehavior:
             runtime=fake_runtime(is_production=False),
         )
 
-        assert cascade_registry_isolated.get_default_name() == "django"
+        assert recovery_session_registry_isolated.get_default_name() == "django"
 
 
 # =============================================================================

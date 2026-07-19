@@ -113,7 +113,8 @@ _OSS_ROOT_EXCLUDE = frozenset({"factories", "testapp"})
 _MOCK_CREATION_BUDGETS: dict[str, int] = {
     # dead schedule-lane retirement: -40 — the cascade-cleanup, integrity-task
     # and merkle spot-checker suites were deleted with the code they covered.
-    "oss": 4353,
+    # cascade archive-repository removal: -1 — its integration suite went too.
+    "oss": 4352,
     "pro": 1800,
     "dormant": 401,
 }

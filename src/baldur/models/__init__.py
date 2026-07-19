@@ -15,7 +15,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from baldur.models.blast_radius import BlastRadiusLevel
-from baldur.models.cascade_event import CascadeEventData, TriggerType
 from baldur.models.compliance import ComplianceContext, ComplianceStandard
 from baldur.models.drift_config import DriftThresholdConfig
 from baldur.models.emergency import EmergencyLevel
@@ -29,10 +28,6 @@ from baldur.models.recovery_session import (
 )
 
 if TYPE_CHECKING:
-    from baldur.models.cascade_event_archive import (
-        AbstractCascadeEventArchive,
-        CascadeEventArchive,
-    )
     from baldur.models.recovery_session_archive import (
         AbstractRecoverySessionArchive,
     )
@@ -49,27 +44,15 @@ __all__ = [
     # Learning shared models (599 D8)
     "PatternType",
     # Domain models (366)
-    "CascadeEventData",
-    "TriggerType",
     "RecoverySessionData",
     "RecoveryStepData",
     "RecoveryStatus",
     "TriggerLevel",
     # Django Abstract Models (legacy — used by adapters)
-    "AbstractCascadeEventArchive",
-    "CascadeEventArchive",
     "AbstractRecoverySessionArchive",
 ]
 
 _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
-    "AbstractCascadeEventArchive": (
-        "baldur.models.cascade_event_archive",
-        "AbstractCascadeEventArchive",
-    ),
-    "CascadeEventArchive": (
-        "baldur.models.cascade_event_archive",
-        "CascadeEventArchive",
-    ),
     "AbstractRecoverySessionArchive": (
         "baldur.models.recovery_session_archive",
         "AbstractRecoverySessionArchive",
