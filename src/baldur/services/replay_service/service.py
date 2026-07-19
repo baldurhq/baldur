@@ -32,7 +32,7 @@ from baldur.interfaces.repositories import ResolutionTrigger
 from baldur.services.event_bus.emitter import EventEmitterMixin
 from baldur.settings import get_config
 from baldur.settings.replay_automation import get_replay_automation_settings
-from baldur.utils.time import utc_now
+from baldur.utils.time import ensure_aware, utc_now
 
 from .handlers import _truncate_gate, get_replay_handler
 from .models import BatchReplayResult, ReplayResult
@@ -79,6 +79,52 @@ def _resolution_type_for(trigger: ResolutionTrigger | str) -> str:
     versions — take ``.value`` for the enum, pass a raw string through.
     """
     return trigger.value if isinstance(trigger, ResolutionTrigger) else str(trigger)
+
+
+def _resolution_wall_time(failed_op_data: FailedOperationData) -> float | None:
+    """Seconds from the original failure to now, or None when uncomputable.
+
+    This is the recovery-duration histogram's documented semantic. Degrading
+    to None keeps the resolution itself recorded when a repository supplies no
+    usable ``created_at`` — the duration is a bonus signal, the pending-gauge
+    decrement is not.
+    """
+    try:
+        created_at = getattr(failed_op_data, "created_at", None)
+        if created_at is None:
+            return None
+        return max(0.0, (utc_now() - ensure_aware(created_at)).total_seconds())
+    except Exception:
+        return None
+
+
+def _record_item_resolved(
+    failed_op_data: FailedOperationData, resolution_type: str
+) -> None:
+    """Feed a replay-path resolution into the DLQ resolution metrics.
+
+    Every other resolution path reaches ``on_item_resolved`` through
+    ``resolve_entry``; the replay pipeline finalizes entries via
+    ``complete_replay`` instead, and so would otherwise skip the pending-gauge
+    decrement, the recovery-duration histogram, and the daily report's
+    resolved count.
+
+    Fail-open: recording must never fail a replay that already succeeded.
+    """
+    try:
+        from baldur.metrics.event_handlers import DLQMetricEventHandler
+
+        DLQMetricEventHandler.on_item_resolved(
+            domain=failed_op_data.domain,
+            resolution_type=resolution_type,
+            duration_seconds=_resolution_wall_time(failed_op_data),
+        )
+    except Exception as e:
+        logger.warning(
+            "replay_service.resolution_metrics_failed",
+            resolution_type=resolution_type,
+            error=e,
+        )
 
 
 def _replay_inflight_lock_name(service_name: str) -> str:
@@ -383,6 +429,12 @@ class ReplayService(EventEmitterMixin):
                 self.repository.complete_replay(
                     dlq_id, success=True, resolution_type="duplicate_skip"
                 )
+                # This exit finalizes a pending entry, so it must count like
+                # any other resolution or the pending gauge stays stale. It
+                # cannot double-count: an earlier attempt that already
+                # recorded left the entry non-pending and unacquirable, and a
+                # crashed one never recorded.
+                _record_item_resolved(failed_op_data, "duplicate_skip")
                 return ReplayResult.skipped_result(dlq_id, reason="duplicate")
             if gate_result.decision == IdempotencyDecision.ABORT:
                 logger.info(
@@ -520,6 +572,9 @@ class ReplayService(EventEmitterMixin):
             if result.success
             else (result.error or "Replay failed"),
         )
+
+        if result.success:
+            _record_item_resolved(failed_op_data, _resolution_type_for(trigger))
 
         # Mark idempotency gate completion
         if idem_key:
