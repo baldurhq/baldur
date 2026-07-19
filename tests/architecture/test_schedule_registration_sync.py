@@ -18,7 +18,8 @@ than an environment check.
 
 Orphan half: AST-sweep the source tree for schedule-shaped surfaces and
 require each to be reachable from the composition table (or explicitly
-allowlisted). The allowlist starts empty and every addition needs a reason.
+allowlisted). Both allowlists carry a stated reason per entry — an
+unexplained entry is indistinguishable from the wiring this rule catches.
 
 Rule registry: ``ARCHITECTURE.md#g70-schedule-registration-sync``
 """
@@ -32,7 +33,6 @@ import pytest
 
 from tests.architecture.conftest import (
     DEFAULT_SRC_ROOTS,
-    PROJECT_ROOT,
     format_violation,
     parse_ast,
     walk_src,
@@ -70,16 +70,22 @@ _ORPHAN_ALLOWLIST: frozenset[str] = frozenset(
     }
 )
 
-# The composition table and the legacy loader are the two places a schedule
-# surface can be reached from.
-_COMPOSITION_MODULE = (
-    PROJECT_ROOT / "src" / "baldur" / "adapters" / "celery" / "beat_schedule.py"
-)
+
+def _composition_module() -> Path:
+    """Locate the module holding the composition table and the legacy loader.
+
+    Resolved through the imported package rather than ``PROJECT_ROOT`` so the
+    rule works from both checkouts: the private repo consumes ``baldur`` as an
+    editable install from a sibling clone and has no ``src/baldur`` of its own.
+    """
+    from baldur.adapters.celery import beat_schedule
+
+    return Path(beat_schedule.__file__).resolve()
 
 
 def _composition_source() -> str:
     """Read the module that decides which schedule surfaces get composed."""
-    return _COMPOSITION_MODULE.read_text(encoding="utf-8")
+    return _composition_module().read_text(encoding="utf-8")
 
 
 def _iter_schedule_surfaces() -> list[tuple[Path, int, str]]:
@@ -90,8 +96,9 @@ def _iter_schedule_surfaces() -> list[tuple[Path, int, str]]:
     shapes a beat composition can consume.
     """
     surfaces: list[tuple[Path, int, str]] = []
+    composition_path = _composition_module()
     for path in walk_src(DEFAULT_SRC_ROOTS):
-        if path.resolve() == _COMPOSITION_MODULE.resolve():
+        if path.resolve() == composition_path:
             continue
         tree = parse_ast(path)
         if tree is None:
@@ -131,7 +138,7 @@ class TestBeatEntriesResolveToRegisteredTasks:
         violations = [
             format_violation(
                 _RULE_ANCHOR,
-                _COMPOSITION_MODULE,
+                _composition_module(),
                 None,
                 f"beat entry {entry_name!r} schedules unregistered task "
                 f"{entry['task']!r}",

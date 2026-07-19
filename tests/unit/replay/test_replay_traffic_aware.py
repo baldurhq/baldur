@@ -383,16 +383,22 @@ class TestTaskRegistry:
         assert len(TRAFFIC_AWARE_TASKS) >= 1
 
     def test_register_with_celery(self):
-        """Verify registration with the Celery app."""
+        """The registered object must be one a real Celery app can resolve."""
+        celery = pytest.importorskip("celery")
+
         from baldur.tasks.traffic_aware_replay import (
+            TrafficAwareReplayTask,
             register_traffic_aware_tasks_with_celery,
         )
 
-        mock_app = MagicMock()
-        register_traffic_aware_tasks_with_celery(mock_app)
+        app = celery.Celery("test_traffic_aware_registration")
+        register_traffic_aware_tasks_with_celery(app)
 
-        # Verify register_task was called
-        assert mock_app.register_task.called
+        # Against a MagicMock app this assertion held no matter what the
+        # registrar produced, which is how a registrar that handed Celery a
+        # bare instance with no bind() stayed green. A real app rejects that,
+        # so the name lands in app.tasks only if a usable task was built.
+        assert TrafficAwareReplayTask.name in app.tasks
 
 
 # =============================================================================
