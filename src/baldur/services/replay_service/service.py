@@ -426,15 +426,18 @@ class ReplayService(EventEmitterMixin):
                     dlq_id=dlq_id,
                     idempotency_key=idem_key.cache_key,
                 )
-                self.repository.complete_replay(
+                finalized = self.repository.complete_replay(
                     dlq_id, success=True, resolution_type="duplicate_skip"
                 )
                 # This exit finalizes a pending entry, so it must count like
                 # any other resolution or the pending gauge stays stale. It
                 # cannot double-count: an earlier attempt that already
                 # recorded left the entry non-pending and unacquirable, and a
-                # crashed one never recorded.
-                _record_item_resolved(failed_op_data, "duplicate_skip")
+                # crashed one never recorded. Gated on the write landing —
+                # complete_replay reports False when the entry is gone, which
+                # resolved nothing.
+                if finalized:
+                    _record_item_resolved(failed_op_data, "duplicate_skip")
                 return ReplayResult.skipped_result(dlq_id, reason="duplicate")
             if gate_result.decision == IdempotencyDecision.ABORT:
                 logger.info(
@@ -564,7 +567,7 @@ class ReplayService(EventEmitterMixin):
             failed_op_data.domain, result.success, duration
         )
 
-        self.repository.complete_replay(
+        finalized = self.repository.complete_replay(
             id=dlq_id,
             success=result.success,
             resolution_type=_resolution_type_for(trigger) if result.success else "",
@@ -573,7 +576,11 @@ class ReplayService(EventEmitterMixin):
             else (result.error or "Replay failed"),
         )
 
-        if result.success:
+        # Gated on the write landing: complete_replay reports False when the
+        # entry vanished between acquisition and completion (TTL expiry, a
+        # concurrent purge, eviction), which transitioned nothing and so must
+        # not decrement the pending gauge or count as a resolution.
+        if result.success and finalized:
             _record_item_resolved(failed_op_data, _resolution_type_for(trigger))
 
         # Mark idempotency gate completion

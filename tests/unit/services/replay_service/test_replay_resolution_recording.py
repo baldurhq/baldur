@@ -37,6 +37,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 from structlog.testing import capture_logs
 
+from baldur.adapters.memory.failed_operation import (
+    InMemoryFailedOperationRepository,
+)
 from baldur.core.idempotency_gate import (
     IdempotencyCheckResult,
     IdempotencyDecision,
@@ -49,6 +52,7 @@ from baldur.interfaces.repositories import (
     ResolutionTrigger,
 )
 from baldur.metrics.event_handlers import DLQMetricEventHandler
+from baldur.services.dlq_read.service import DLQReadService
 from baldur.services.event_bus.bus.event_bus import BaldurEventBus
 from baldur.services.replay_service import (
     ReplayResult,
@@ -362,6 +366,39 @@ class TestReplayResolutionRecordingBehavior:
         assert result.success is False
         recorded.assert_not_called()
 
+    @pytest.mark.parametrize(
+        "gate_decision",
+        [
+            pytest.param(None, id="main_completion"),
+            pytest.param(IdempotencyDecision.SKIP, id="duplicate_skip"),
+        ],
+    )
+    def test_completion_that_did_not_land_records_nothing(
+        self, service, repository, recorded, gate_decision
+    ):
+        """A successful replay whose finalizing write was a no-op is not counted.
+
+        `complete_replay` reports False when the entry is gone — its blob
+        expired, was evicted, or a concurrent purge removed it between
+        acquisition and completion. Nothing transitioned, so recording would
+        decrement the pending gauge and add a resolved count for an entry
+        that was never resolved. Same gate the archive/purge counters use.
+        """
+        # Given: the handler succeeds but the finalizing write lands nothing
+        repository.complete_replay.return_value = False
+        _register(ReplayResult.succeeded(DLQ_ID, "OK"))
+
+        # When
+        if gate_decision is None:
+            service._execute_replay(DLQ_ID)
+        else:
+            with _skip_gate(gate_decision):
+                service._execute_replay(DLQ_ID)
+
+        # Then
+        repository.complete_replay.assert_called_once()
+        recorded.assert_not_called()
+
     # --- one record per resolved entry, across the three flows --------------
 
     def test_replay_single_records_once_per_resolved_entry(self, service, recorded):
@@ -455,3 +492,57 @@ class TestReplayResolutionRecordingBehavior:
         )
         assert record["log_level"] == "warning"
         assert record["resolution_type"] == "traffic_aware"
+
+
+# =============================================================================
+# The sibling resolution path — Behavior
+# =============================================================================
+
+
+class TestResolveEntryRecordingBehavior:
+    """`resolve_entry` still records once — the other half of the invariant.
+
+    Every non-replay resolution reaches ``on_item_resolved`` through
+    ``resolve_entry``: the OSS single-entry action driven here, and the PRO
+    batch replay that inherits it. The replay pipeline reaches it through
+    ``_record_item_resolved`` instead. One record per resolved entry holds
+    only while those two call graphs stay disjoint, so both sides are pinned
+    — a replay that also took the ``resolve_entry`` route would record the
+    same entry twice and drive the pending gauge below the real backlog.
+    """
+
+    def test_single_entry_resolve_records_exactly_once(self, recorded):
+        """The OSS single-entry action records once, unchanged by this work.
+
+        Driven against the real in-memory repository so the recording rides
+        on an actual resolution rather than a stubbed one.
+        """
+        # Given
+        repository = InMemoryFailedOperationRepository()
+        entry = repository.create(domain=DOMAIN, failure_type="PG_TIMEOUT")
+
+        # When
+        DLQReadService(repository=repository).resolve_entry(
+            entry.id, resolution_type="manual"
+        )
+
+        # Then
+        recorded.assert_called_once()
+        assert recorded.call_args.kwargs["resolution_type"] == "manual"
+
+    def test_replay_finalizes_without_the_resolve_entry_write(
+        self, service, repository, recorded
+    ):
+        """The replay pipeline completes the replay; it never marks-as-resolved.
+
+        Pins the disjointness at the repository call rather than only at the
+        record count, so a future replay path routed through `resolve_entry`
+        fails here with a named cause instead of a bare count mismatch.
+        """
+        _register(ReplayResult.succeeded(DLQ_ID, "OK"))
+
+        service._execute_replay(DLQ_ID)
+
+        repository.complete_replay.assert_called_once()
+        repository.mark_as_resolved.assert_not_called()
+        recorded.assert_called_once()
