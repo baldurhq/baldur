@@ -326,7 +326,7 @@ class TestInitGroupAIntegration:
 class TestInitGroupBIntegration:
     """464 — at least one Group B row exercised through ``init()``.
 
-    ``cascade_event_repo`` is the chosen representative: SQL/Django-backed,
+    ``recovery_session_repo`` is the chosen representative: SQL/Django-backed,
     no special fallback (cf. ``rate_limit_storage``), so the D6 matrix
     applies directly.
     """
@@ -370,7 +370,7 @@ class TestInitGroupBIntegration:
         with _scaffold_init_subdeps():
             bootstrap.init()
 
-        assert ProviderRegistry.cascade_event_repo.get_default_name() == "sql"
+        assert ProviderRegistry.recovery_session_repo.get_default_name() == "sql"
         assert ProviderRegistry.recovery_session_repo.get_default_name() == "sql"
         assert ProviderRegistry.security_repo.get_default_name() == "sql"
 
@@ -427,7 +427,7 @@ class TestInitWiredRegistryResetIntegration:
 
             # Sanity: Group A → redis, Group B → sql.
             assert ProviderRegistry.config_history_store.get_default_name() == "redis"
-            assert ProviderRegistry.cascade_event_repo.get_default_name() == "sql"
+            assert ProviderRegistry.recovery_session_repo.get_default_name() == "sql"
 
             bootstrap.reset_init_state()
 

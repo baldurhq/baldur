@@ -20,9 +20,6 @@ Status: Public
 """
 
 from baldur.adapters.memory.canary_rollout import InMemoryCanaryRolloutStore
-from baldur.adapters.memory.cascade_event import (
-    InMemoryCascadeEventArchiveRepository,
-)
 from baldur.adapters.memory.chaos_experiment import InMemoryChaosExperimentStore
 from baldur.adapters.memory.circuit_breaker import (
     InMemoryCircuitBreakerStateRepository,
@@ -64,7 +61,6 @@ __all__ = [
     "LayeredCircuitBreakerStateRepository",
     "InMemorySecurityIncidentRepository",
     "InMemoryPostmortemRepository",
-    "InMemoryCascadeEventArchiveRepository",
     "InMemoryRecoverySessionArchiveRepository",
     "InMemoryEventJournalRepository",
     # Drift Reconciliation

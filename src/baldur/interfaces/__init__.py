@@ -161,7 +161,6 @@ if TYPE_CHECKING:
         RateLimitStorageUnavailableError,
     )
     from baldur.interfaces.repositories import (
-        CascadeEventArchiveRepository,
         CircuitBreakerStateData,
         CircuitBreakerStateEnum,
         CircuitBreakerStateRepository,
@@ -390,10 +389,6 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
         "baldur.interfaces.rate_limit_storage",
         "RateLimitStorageUnavailableError",
     ),
-    "CascadeEventArchiveRepository": (
-        "baldur.interfaces.repositories",
-        "CascadeEventArchiveRepository",
-    ),
     "CircuitBreakerStateData": (
         "baldur.interfaces.repositories",
         "CircuitBreakerStateData",
@@ -555,7 +550,6 @@ __all__ = [
     "CircuitBreakerStateRepository",
     "SecurityIncidentRepository",
     "PostmortemRepository",
-    "CascadeEventArchiveRepository",
     "RecoverySessionArchiveRepository",
     # =========================================================================
     # Database Health Provider Interface (368)

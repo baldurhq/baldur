@@ -26,6 +26,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - Dead `BALDUR_AUDIT_INTEGRITY_*` knobs: merkle, verification, lock-timeout, check-interval.
 - Cascade Warm/Cold retention tiers — never delivered; only the event TTL ships. **Breaking**
 - `CascadeRetentionConfig`, `get_cascade_retention_config` — unused. **Breaking**
+- Cascade event archive repositories (interface, memory/sql/django adapters). **Breaking**
+- `CascadeEventData`, `TriggerType`, `CascadeEventArchive` model + its table. **Breaking**
 
 ### Fixed
 

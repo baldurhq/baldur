@@ -19,7 +19,6 @@ PostgreSQL 영속성 저장소용 Django Abstract 모델.
 
 Reference:
     docs/baldur/middleware_system/77_RECOVERY_COORDINATOR.md#1.4
-    models/cascade_event_archive.py (AbstractCascadeEventArchive 패턴)
 """
 
 from __future__ import annotations

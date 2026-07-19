@@ -1,13 +1,12 @@
 """Archive Repository Integration Tests (366)
 
 Verifies end-to-end flows between archive services and InMemory repositories
-for both CascadeEvent and RecoverySession domains.
+for the RecoverySession domain.
 
 Test Categories:
     A. RecoverySessionArchiveService lifecycle:
        archive -> get -> update -> resume -> cleanup
-    B. CascadeEvent archive task -> repository flow
-    C. ProviderRegistry auto-discover integration
+    B. ProviderRegistry auto-discover integration
 
 Note: All tests use in-memory mock repositories - no DB dependency.
       This enables parallel test execution with pytest-xdist.
@@ -24,13 +23,9 @@ pytestmark = pytest.mark.requires_pro
 
 from datetime import timedelta
 
-from baldur.adapters.memory.cascade_event import (
-    InMemoryCascadeEventArchiveRepository,
-)
 from baldur.adapters.memory.recovery_session import (
     InMemoryRecoverySessionArchiveRepository,
 )
-from baldur.models.cascade_event import CascadeEventData
 from baldur.models.recovery_session import RecoverySessionData
 from baldur.utils.time import utc_now
 from baldur_pro.services.coordination.enums import RecoveryStatus
@@ -192,91 +187,7 @@ class TestRecoverySessionArchiveLifecycle:
 
 
 # =============================================================================
-# B. CascadeEvent Archive Repository Integration
-# =============================================================================
-
-
-class TestCascadeEventArchiveIntegration:
-    """CascadeEvent domain model + InMemory repository integration.
-
-    Validates:
-    - CascadeEventData creation → save → find → chain retrieval
-    - Hash integrity verification through repository roundtrip
-    """
-
-    def setup_method(self):
-        """Set up fresh repository."""
-        self.repo = InMemoryCascadeEventArchiveRepository()
-        self.now = utc_now()
-
-    def test_save_find_chain_end_to_end(self):
-        """Save events → find → get_chain produces consistent results.
-
-        Purpose:
-            Verify that cascade events saved to repository can be
-            queried back through both find() and get_chain().
-        """
-        # Given — save 3 events across 2 namespaces
-        for i, ns in enumerate(["global", "global", "seoul"]):
-            self.repo.save(
-                CascadeEventData(
-                    cascade_id=f"cascade-evt-{i}",
-                    namespace=ns,
-                    trigger_type="CANARY_ROLLBACK",
-                    current_hash=f"hash-{i}",
-                    timestamp=self.now - timedelta(hours=i),
-                )
-            )
-
-        # When — find by namespace
-        global_events = self.repo.find(namespace="global")
-        chain = self.repo.get_chain("global")
-
-        # Then
-        assert len(global_events) == 2
-        # find returns DESC
-        assert global_events[0].cascade_id == "cascade-evt-0"
-        # get_chain returns ASC
-        assert chain[0].cascade_id == "cascade-evt-1"
-        assert chain[1].cascade_id == "cascade-evt-0"
-
-    def test_hash_integrity_preserved_through_repository(self):
-        """Hash integrity is preserved after save → retrieve roundtrip.
-
-        Purpose:
-            Verify that verify_hash_integrity() returns True after
-            data passes through the repository.
-        """
-        import hashlib
-
-        from baldur.utils.serialization import fast_canonical_dumps
-
-        content = {
-            "id": "cascade-evt-integrity",
-            "trigger": {"trigger_type": "DEESCALATION", "details": {}},
-            "effects": [],
-            "namespace": "global",
-            "timestamp": self.now.isoformat(),
-            "previous_hash": "",
-        }
-        valid_hash = hashlib.sha256(fast_canonical_dumps(content)).hexdigest()
-
-        data = CascadeEventData(
-            cascade_id="cascade-evt-integrity",
-            namespace="global",
-            trigger_type="DEESCALATION",
-            current_hash=valid_hash,
-            timestamp=self.now,
-        )
-        self.repo.save(data)
-
-        # Retrieve and verify
-        retrieved = self.repo.get_by_cascade_id("cascade-evt-integrity")
-        assert retrieved.verify_hash_integrity() is True
-
-
-# =============================================================================
-# C. ProviderRegistry Auto-Discover Integration
+# B. ProviderRegistry Auto-Discover Integration
 # =============================================================================
 
 
@@ -284,32 +195,9 @@ class TestProviderRegistryArchiveRepoIntegration:
     """ProviderRegistry auto-discover + archive repository integration.
 
     Validates:
-    - cascade_event_repo and recovery_session_repo are auto-registered
+    - recovery_session_repo is auto-registered
     - Default (memory) repositories are functional via ProviderRegistry
     """
-
-    def test_cascade_event_repo_auto_discovered(self):
-        """ProviderRegistry.get_cascade_event_repo() returns a working instance.
-
-        Purpose:
-            Verify auto-discover registers InMemory cascade event repo
-            and it can perform basic operations.
-        """
-        from baldur.factory.registry import ProviderRegistry
-
-        repo = ProviderRegistry.get_cascade_event_repo()
-        assert repo is not None
-
-        # Verify basic operation
-        data = CascadeEventData(
-            cascade_id="registry-test",
-            namespace="global",
-            trigger_type="CANARY_ROLLBACK",
-            current_hash="test",
-            timestamp=utc_now(),
-        )
-        repo.save(data)
-        assert repo.get_by_cascade_id("registry-test") is not None
 
     def test_recovery_session_repo_auto_discovered(self):
         """ProviderRegistry.get_recovery_session_repo() returns a working instance.

@@ -112,6 +112,7 @@ all_declaration:
   - {file: "src/baldur/adapters/django/management/commands/security_review.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/adapters/django/migrations/0001_initial.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/adapters/django/migrations/0002_add_dlq_and_security_models.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
+  - {file: "src/baldur/adapters/django/migrations/0003_delete_cascade_event_archive.py", reason: "django migration module shape - no __all__, as with every sibling migration", ticket: "713"}
   - {file: "src/baldur/adapters/django/security_incident.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/adapters/django/signal_hooks.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/adapters/django/statistics.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
@@ -370,7 +371,6 @@ all_declaration:
   - {file: "src/baldur/metrics/prometheus.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/metrics/registry.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/models/blast_radius.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
-  - {file: "src/baldur/models/cascade_event_archive.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/models/governance.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/models/recovery_session_archive.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/observability/baggage.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
@@ -699,9 +699,9 @@ optional_imports:
   - {file: "src/baldur/adapters/django/management/commands/security_review.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
   - {file: "src/baldur/adapters/django/migrations/0001_initial.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
   - {file: "src/baldur/adapters/django/migrations/0002_add_dlq_and_security_models.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/adapters/django/migrations/0003_delete_cascade_event_archive.py", reason: "django migration module shape - django import is unconditional by construction", ticket: "713"}
   - {file: "src/baldur/adapters/django/models/_abstract_audit_log.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
   - {file: "src/baldur/adapters/django/models/_abstract_failed_external_request.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
-  - {file: "src/baldur/adapters/django/repositories/cascade_event.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
   - {file: "src/baldur/adapters/django/repositories/postmortem.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
   - {file: "src/baldur/adapters/django/repositories/recovery_session.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
   - {file: "src/baldur/adapters/django/security_incident.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}

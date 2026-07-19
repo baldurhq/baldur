@@ -60,7 +60,6 @@ if TYPE_CHECKING:
     from baldur.interfaces.quorum import QuorumWitnessProtocol
     from baldur.interfaces.rate_limit_storage import RateLimitStorageInterface
     from baldur.interfaces.repositories import (
-        CascadeEventArchiveRepository,
         CircuitBreakerStateRepository,
         FailedOperationRepository,
         PostmortemRepository,
@@ -432,16 +431,6 @@ class ProviderRegistry:
         )
     )
 
-    cascade_event_repo: GenericProviderRegistry[CascadeEventArchiveRepository] = (
-        GenericProviderRegistry(
-            adapter_type="cascade_event_repo",
-            auto_discover=lambda: __import__(
-                "baldur.factory.repositories",
-                fromlist=["discover_cascade_event_repos"],
-            ).discover_cascade_event_repos(),
-        )
-    )
-
     recovery_session_repo: GenericProviderRegistry[RecoverySessionArchiveRepository] = (
         GenericProviderRegistry(
             adapter_type="recovery_session_repo",
@@ -746,26 +735,6 @@ class ProviderRegistry:
         return cls.postmortem_repo.has_any_providers()
 
     # =========================================================================
-    # Cascade Event repository
-    # =========================================================================
-
-    @classmethod
-    def register_cascade_event_repo(cls, name: str, repo_class: type) -> None:
-        """Register a cascade event archive repository."""
-        cls.cascade_event_repo.register(name, repo_class)
-
-    @classmethod
-    def get_cascade_event_repo(
-        cls,
-        name: str | None = None,
-        singleton: bool = True,
-    ) -> CascadeEventArchiveRepository:
-        """Get cascade event archive repository instance."""
-        if not singleton:
-            return cls.cascade_event_repo.create_new(name)
-        return cls.cascade_event_repo.get(name)
-
-    # =========================================================================
     # Recovery Session repository
     # =========================================================================
 
@@ -1053,7 +1022,6 @@ class ProviderRegistry:
             "alert": cls.alert.list_providers(),
             "async_queue": cls.async_queue.list_providers(),
             "postmortem_repo": cls.postmortem_repo.list_providers(),
-            "cascade_event_repo": cls.cascade_event_repo.list_providers(),
             "recovery_session_repo": cls.recovery_session_repo.list_providers(),
             "rate_limit_storage": cls.rate_limit_storage.list_providers(),
             "statistics_adapter": (
@@ -1151,7 +1119,6 @@ def _auto_register_adapters() -> None:
     )
     from baldur.factory.repositories import (
         discover_canary_rollout_stores,
-        discover_cascade_event_repos,
         discover_chaos_experiment_stores,
         discover_circuit_breaker_repos,
         discover_config_history_stores,
@@ -1171,7 +1138,6 @@ def _auto_register_adapters() -> None:
     discover_security_repos()
     discover_event_journal_repos()
     discover_postmortem_repos()
-    discover_cascade_event_repos()
     discover_recovery_session_repos()
     discover_config_history_stores()
     discover_canary_rollout_stores()
@@ -1214,7 +1180,6 @@ ProviderRegistry.audit.set_default("null")  # D11: OSS-safe default at module lo
 ProviderRegistry.traffic_routing.set_default("logging")
 ProviderRegistry.notification.set_default("logging")
 ProviderRegistry.alert.set_default("stdout")
-ProviderRegistry.cascade_event_repo.set_default("memory")
 ProviderRegistry.recovery_session_repo.set_default("memory")
 # 570 D6 — explicit module-load baseline for the two registries 464 D12
 # deferred. Both previously relied on auto-discover first-registered-wins

@@ -8,8 +8,6 @@ archive, and event-journal repositories.
 
 ::: baldur.adapters.memory.InMemorySecurityIncidentRepository
 
-::: baldur.adapters.memory.InMemoryCascadeEventArchiveRepository
-
 ::: baldur.adapters.memory.InMemoryRecoverySessionArchiveRepository
 
 ::: baldur.adapters.memory.InMemoryEventJournalRepository

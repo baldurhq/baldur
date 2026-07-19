@@ -595,7 +595,6 @@ class TestWireRegistryDefaultsGroupABehavior:
 
 
 GROUP_B_REGISTRY_ATTRS: tuple[str, ...] = (
-    "cascade_event_repo",
     "recovery_session_repo",
     "security_repo",
 )
@@ -650,8 +649,8 @@ class TestWireRegistryDefaultsGroupBBehavior:
         message = str(exc_info.value)
         assert "BALDUR_SQL_DSN" in message
         assert "Django DATABASES" in message
-        # cascade_event_repo is the first Group B row.
-        assert "ProviderRegistry.cascade_event_repo" in message
+        # recovery_session_repo is the first Group B row.
+        assert "ProviderRegistry.recovery_session_repo" in message
 
     def test_production_with_sql_dsn_set_wires_sql_for_every_group_b_row(
         self, monkeypatch, isolated_all_wired_registries
@@ -1086,7 +1085,7 @@ class TestWireRegistryDefaultsEventJournalBehavior:
 class TestWireRegistryDefaultsPostmortemBehavior:
     """570 D5 — ``postmortem_repo`` wired as a Group B SQL_DJANGO row
     (``sql > django > memory``), structurally identical to
-    ``cascade_event_repo`` / ``recovery_session_repo`` / ``security_repo``.
+    ``recovery_session_repo`` / ``security_repo``.
 
     Asserts specifically on ``postmortem_repo`` because the shared
     ``GROUP_B_REGISTRY_ATTRS`` matrix predates D5 and does not include it.
@@ -1204,11 +1203,11 @@ class TestWireRegistryDefaultsPostmortemBehavior:
 
         assert ProviderRegistry.postmortem_repo.get_default_name() == "django"
 
-    def test_production_neither_signal_raises_at_cascade_postmortem_stays_memory(
+    def test_production_neither_signal_raises_at_first_row_postmortem_stays_memory(
         self, monkeypatch, isolated_all_wired_registries
     ):
         """prod + neither SQL nor Django → ConfigurationError at the FIRST
-        Group B row (``cascade_event_repo``), so postmortem adds no new crash
+        Group B row (``recovery_session_repo``), so postmortem adds no new crash
         condition and stays at the memory baseline (570 D5 rationale)."""
         from baldur import bootstrap
         from baldur.factory.registry import ProviderRegistry
@@ -1234,8 +1233,8 @@ class TestWireRegistryDefaultsPostmortemBehavior:
             with pytest.raises(ConfigurationError) as exc_info:
                 bootstrap._wire_registry_defaults()
 
-        # cascade_event_repo is the first Group B row to evaluate the verdict.
-        assert "ProviderRegistry.cascade_event_repo" in str(exc_info.value)
+        # recovery_session_repo is the first Group B row to evaluate the verdict.
+        assert "ProviderRegistry.recovery_session_repo" in str(exc_info.value)
         # postmortem's row was never reached; default unchanged.
         assert ProviderRegistry.postmortem_repo.get_default_name() == "memory"
 
@@ -1254,10 +1253,10 @@ class TestRegistriesToWireContract:
     """
 
     def test_registries_to_wire_row_count(self):
-        """Cache (1) + 5 Group A + 4 Group B + 4 PRIORITY_CHAIN (570) = 14 rows."""
+        """Cache (1) + 5 Group A + 3 Group B + 4 PRIORITY_CHAIN (570) = 13 rows."""
         from baldur.bootstrap import _REGISTRIES_TO_WIRE
 
-        assert len(_REGISTRIES_TO_WIRE) == 14
+        assert len(_REGISTRIES_TO_WIRE) == 13
 
     def test_registries_to_wire_attribute_set(self):
         """Every wired registry attribute must be listed exactly once.
@@ -1278,7 +1277,6 @@ class TestRegistriesToWireContract:
             "chaos_experiment_store",
             "cross_cluster_store",
             "rate_limit_storage",
-            "cascade_event_repo",
             "recovery_session_repo",
             "security_repo",
             "postmortem_repo",
@@ -1322,7 +1320,6 @@ class TestRegistriesToWireContract:
             w for w in _REGISTRIES_TO_WIRE if w.backend_kind is _BackendKind.SQL_DJANGO
         ]
         assert [w.registry_attr for w in group_b] == [
-            "cascade_event_repo",
             "recovery_session_repo",
             "security_repo",
             "postmortem_repo",

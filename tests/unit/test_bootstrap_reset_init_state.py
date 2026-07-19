@@ -77,13 +77,11 @@ class TestResetInitStateWiredRegistryCleanup:
         from baldur import bootstrap
         from baldur.factory.registry import ProviderRegistry
 
-        ProviderRegistry.cascade_event_repo.set_default("django")
         ProviderRegistry.recovery_session_repo.set_default("sql")
         ProviderRegistry.security_repo.set_default("django")
 
         bootstrap.reset_init_state()
 
-        assert ProviderRegistry.cascade_event_repo.get_default_name() == "memory"
         assert ProviderRegistry.recovery_session_repo.get_default_name() == "memory"
         assert ProviderRegistry.security_repo.get_default_name() == "memory"
 
@@ -96,16 +94,16 @@ class TestResetInitStateWiredRegistryCleanup:
         stub_a = MagicMock()
         stub_b = MagicMock()
         ProviderRegistry.config_history_store.set_instance("redis", stub_a)
-        ProviderRegistry.cascade_event_repo.set_instance("django", stub_b)
+        ProviderRegistry.recovery_session_repo.set_instance("django", stub_b)
 
         # Sanity: instances are cached.
         assert ProviderRegistry.config_history_store.has_instance("redis")
-        assert ProviderRegistry.cascade_event_repo.has_instance("django")
+        assert ProviderRegistry.recovery_session_repo.has_instance("django")
 
         bootstrap.reset_init_state()
 
         assert not ProviderRegistry.config_history_store.has_instance("redis")
-        assert not ProviderRegistry.cascade_event_repo.has_instance("django")
+        assert not ProviderRegistry.recovery_session_repo.has_instance("django")
 
     def test_reset_handles_rate_limit_storage_database_fallback(self):
         """D11 row: post-reset, ``rate_limit_storage`` is back at memory.
@@ -220,7 +218,7 @@ class TestResetInitStateWiredRegistryCleanup:
             # All Group A rows are at "redis" (URL set, non-prod, no Django).
             assert ProviderRegistry.config_history_store.get_default_name() == "redis"
             # Group B rows: no DSN/Django → memory fallback (non-prod path).
-            assert ProviderRegistry.cascade_event_repo.get_default_name() == "memory"
+            assert ProviderRegistry.recovery_session_repo.get_default_name() == "memory"
 
             bootstrap.reset_init_state()
 
