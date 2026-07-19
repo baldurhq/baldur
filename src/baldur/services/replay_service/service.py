@@ -1442,10 +1442,14 @@ class ReplayService(EventEmitterMixin):
     ) -> None:
         """Push an on-recovery sweep outcome to the daily report collector.
 
-        Emitted only from the circuit-close sweep, not from operator-initiated
-        batch replays, so the digest's "Auto-replay" line counts automatic
-        recoveries only. Fail-open: a collector failure never breaks the sweep,
-        matching the module's observability posture.
+        Emitted only from the circuit-close sweep, never from operator-initiated
+        ``replay_batch`` calls, so what this seam contributes to the digest's
+        "Auto-replay" line is automatic recoveries only. That is a property of
+        this emission site, not of the rendered line: the PRO batch-replay
+        emitter feeds the same ``auto_replay_batch`` name from manual console
+        batches, so on a PRO install the line also carries operator work.
+        Fail-open: a collector failure never breaks the sweep, matching the
+        module's observability posture.
 
         Args:
             service_name: The recovered service whose backlog was swept.
