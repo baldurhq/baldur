@@ -33,7 +33,13 @@ class RedisDLQMaintenance:
         return self._repo._backend
 
     def archive_old_resolved(self, older_than_days: int = 30) -> int:
-        """Archive resolved entries older than N days."""
+        """Archive resolved entries older than N days.
+
+        The count reflects writes that actually landed: ``_update`` returns
+        False when the blob is already gone (concurrent purge/eviction or TTL
+        expiry between the snapshot read and the write), which is no
+        transition and must not be counted.
+        """
         resolved = self._repo.query.by_status(
             FailedOperationStatus.RESOLVED.value, limit=10000
         )
@@ -42,11 +48,12 @@ class RedisDLQMaintenance:
         cutoff = utc_now() - timedelta(days=older_than_days)
 
         for entry in resolved:
-            if entry.resolved_at and entry.resolved_at < cutoff:
-                self._repo._update(
-                    entry_id=entry.id,
-                    status=FailedOperationStatus.ARCHIVED.value,
-                )
+            if not (entry.resolved_at and entry.resolved_at < cutoff):
+                continue
+            if self._repo._update(
+                entry_id=entry.id,
+                status=FailedOperationStatus.ARCHIVED.value,
+            ):
                 archived += 1
 
         return archived
@@ -62,6 +69,10 @@ class RedisDLQMaintenance:
         an explicit ``0`` means "older than 0 days" — i.e. every archived entry
         resolved before now — matching the memory/SQL adapter contract. A
         ``None`` filter (neither argument) stays a no-op for the Redis adapter.
+
+        The count reflects deletes that actually landed: ``delete`` is
+        idempotent and returns False for an already-absent entry, which
+        removes nothing and must not be counted.
         """
         if ids is not None and older_than_days is not None:
             raise ValueError("Specify either ids or older_than_days, not both")
@@ -71,8 +82,9 @@ class RedisDLQMaintenance:
         if ids:
             for id in ids:
                 entry = self._repo.get_by_id(id)
-                if entry and entry.status == FailedOperationStatus.ARCHIVED.value:
-                    self._repo.delete(id)
+                if not entry or entry.status != FailedOperationStatus.ARCHIVED.value:
+                    continue
+                if self._repo.delete(id):
                     purged += 1
         elif older_than_days is not None:
             archived = self._repo.query.by_status(
@@ -81,8 +93,9 @@ class RedisDLQMaintenance:
             cutoff = utc_now() - timedelta(days=older_than_days)
 
             for entry in archived:
-                if entry.resolved_at and entry.resolved_at < cutoff:
-                    self._repo.delete(entry.id)
+                if not (entry.resolved_at and entry.resolved_at < cutoff):
+                    continue
+                if self._repo.delete(entry.id):
                     purged += 1
 
         return purged
