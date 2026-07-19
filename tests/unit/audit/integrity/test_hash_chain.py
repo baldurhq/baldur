@@ -269,57 +269,6 @@ class TestGetEventsAfterTimestamp:
 
 
 # =============================================================================
-# CascadeRetentionConfig Tests
-# =============================================================================
-
-
-class TestCascadeRetentionConfig:
-    """Cascade 보관 정책 설정 테스트."""
-
-    def test_default_config(self):
-        """기본 설정값 확인."""
-        from baldur.audit.cascade_config import (
-            DEFAULT_CASCADE_RETENTION_CONFIG,
-        )
-
-        config = DEFAULT_CASCADE_RETENTION_CONFIG
-
-        assert config.hot_retention_days == 7
-        assert config.hot_max_count == 10000
-        assert config.warm_retention_days == 90
-        assert config.cold_retention_days == 365
-        assert config.index_retention_days == 30
-        assert config.anchor_retention_days == 90
-
-    def test_custom_config(self):
-        """커스텀 설정값."""
-        from baldur.audit.cascade_config import CascadeRetentionConfig
-
-        config = CascadeRetentionConfig(
-            hot_retention_days=3,
-            hot_max_count=5000,
-            warm_retention_days=60,
-            cold_retention_days=180,
-        )
-
-        assert config.hot_retention_days == 3
-        assert config.hot_max_count == 5000
-        assert config.warm_retention_days == 60
-        assert config.cold_retention_days == 180
-
-    def test_get_retention_config(self):
-        """설정 로더 테스트."""
-        from baldur.audit.cascade_config import get_cascade_retention_config
-
-        config = get_cascade_retention_config()
-
-        assert config is not None
-        assert config.hot_retention_days > 0
-        assert config.warm_retention_days > config.hot_retention_days
-        assert config.cold_retention_days > config.warm_retention_days
-
-
-# =============================================================================
 # Checkpoint Key Pattern Tests
 # =============================================================================
 
