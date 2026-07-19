@@ -28,7 +28,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `CascadeRetentionConfig`, `get_cascade_retention_config` — unused. **Breaking**
 - Cascade event archive repositories (interface, memory/sql/django adapters). **Breaking**
 - `CascadeEventData`, `TriggerType`, `CascadeEventArchive` model + its table. **Breaking**
-- `CELERY_BEAT_SCHEDULE` — use `configure_baldur_celery(app)` instead. **Breaking**
+- `CELERY_BEAT_SCHEDULE` — `configure_baldur_celery(app)` replaces 2 of its 5 entries. **Breaking**
 - `CHAOS_SCHEDULER_BEAT_SCHEDULE` — unread duplicate of the lane getter. **Breaking**
 
 ### Fixed
@@ -37,6 +37,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - Compressed DLQ entries now age ACTIVE→STALE→ARCHIVED on a daily schedule (was never run).
 - Compressed-entry sweep reads the oldest page, not the newest — it was a no-op above ~3/day.
 - SQL DLQ adapter stamps `stale_at`/`archived_at`, so STALE→ARCHIVED can fire on SQL backends.
+- SQL adapters read timestamps back as UTC-aware; MySQL returned naive ones and broke compares.
+- Compressed-entry sweep no longer re-reads entries it already transitioned on Redis.
 - Daily-report Auto-Processing counts (archived/expired/purged) now reflect real cleanup work.
 - Replay-driven DLQ resolutions now count in the digest and decrement the pending gauge.
 - Redis DLQ archive/purge counts no longer include writes that changed nothing.
