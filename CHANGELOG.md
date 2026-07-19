@@ -28,6 +28,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `CascadeRetentionConfig`, `get_cascade_retention_config` — unused. **Breaking**
 - Cascade event archive repositories (interface, memory/sql/django adapters). **Breaking**
 - `CascadeEventData`, `TriggerType`, `CascadeEventArchive` model + its table. **Breaking**
+- `CELERY_BEAT_SCHEDULE` — use `configure_baldur_celery(app)` instead. **Breaking**
 
 ### Fixed
 
