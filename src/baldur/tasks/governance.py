@@ -1,26 +1,23 @@
 """
 Governance Celery Tasks - Emergency Mode Auto-Recovery + Approval Visibility.
 
-긴급 모드 자동 복귀 및 알림 발송을 위한 Celery 태스크입니다.
+Celery tasks for automatic emergency-mode recovery and its notifications.
 
 Thin Task, Fat Service Architecture:
-    - 이 파일의 Celery Task들은 단순 위임자 역할만 수행
-    - 모든 비즈니스 로직은 GovernanceService에서 처리
-    - 거버넌스 체크도 서비스 레이어에서 수행
+    - The Celery tasks in this file are simple delegators.
+    - All business logic lives in GovernanceService.
+    - Governance checks also run in the service layer.
 
-Celery Beat 스케줄:
-    - check_emergency_mode_expiry: 15분 주기
-    - refresh_governance_approval_metrics: 5분 주기 (484 D11)
+Celery Beat cadences:
+    - check_emergency_mode_expiry: every 15 minutes
+    - refresh_governance_approval_metrics: every 5 minutes
 
-Usage:
-    # settings.py 또는 celery.py에 추가
-    CELERY_BEAT_SCHEDULE = {
-        "check-emergency-mode-expiry": {
-            "task": "baldur.tasks.governance.check_emergency_mode_expiry",
-            "schedule": 900.0,  # 15분
-        },
-    }
+Celery Beat:
+    These tasks ship as part of the composed Baldur beat schedule, so no
+    hand-written entries are needed:
 
+        from baldur.adapters.celery.beat_schedule import configure_baldur_celery
+        configure_baldur_celery(app)
 """
 
 from __future__ import annotations
@@ -114,8 +111,8 @@ def check_emergency_mode_expiry(task_id: str | None = None) -> dict[str, Any]:
 
     This should be scheduled via Celery Beat (every 15 minutes).
 
-    Audit 기록:
-    - EMERGENCY_MODE_ACTIVATED/DEACTIVATED 이벤트 기록
+    Audit trail:
+    - Records EMERGENCY_MODE_ACTIVATED/DEACTIVATED events
 
     Actions (handled by GovernanceService):
     1. Check if emergency mode is active
@@ -127,7 +124,7 @@ def check_emergency_mode_expiry(task_id: str | None = None) -> dict[str, Any]:
         task_id: Celery task ID (for audit tracking)
 
     Returns:
-        dict: 실행 결과
+        dict: Execution result
     """
     try:
         from baldur_pro.services.governance.service import get_governance_service
@@ -220,7 +217,7 @@ try:
 
     from baldur.settings.governance import get_governance_settings
 
-    # 모듈 로드 시점에 설정값 캐싱
+    # Cache the settings value at module load time
     _governance_settings = get_governance_settings()
 
     @shared_task(

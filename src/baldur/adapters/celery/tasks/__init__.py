@@ -8,35 +8,33 @@ These tasks provide background processing for:
 - SLA monitoring
 - Cleanup operations
 
-Usage:
-    Add these tasks to your Celery beat schedule:
+Scheduling:
+    Circuit-breaker recovery and manual-override expiry ship in the composed
+    beat schedule, so one call covers them:
 
-    CELERY_BEAT_SCHEDULE = {
-        'check-circuit-breaker-recovery': {
-            'task': 'baldur.celery_tasks.check_circuit_breaker_recovery',
-            'schedule': 60.0,  # Every minute
-        },
-        'expire-manual-overrides': {
-            'task': 'baldur.celery_tasks.expire_manual_overrides',
-            'schedule': 300.0,  # Every 5 minutes
-        },
-        'collect-baldur-metrics': {
-            'task': 'baldur.adapters.celery.tasks.collect_baldur_metrics',
-            'schedule': 60.0,  # Every minute
-        },
-        'check-sla-breaches': {
-            'task': 'baldur.adapters.celery.tasks.check_and_report_sla_breaches',
-            'schedule': 300.0,  # Every 5 minutes
-        },
-        'cleanup-dlq-entries': {
-            'task': 'baldur.adapters.celery.tasks.cleanup_resolved_dlq_entries',
-            'schedule': 86400.0,  # Daily
-        },
-        'emit-baldur-heartbeat': {
-            'task': 'baldur.adapters.celery.tasks.emit_baldur_heartbeat',
-            'schedule': 60.0,  # Every minute
-        },
-    }
+        from baldur.adapters.celery.beat_schedule import configure_baldur_celery
+        configure_baldur_celery(app)
+
+    The remaining tasks in this package are registered but NOT composed. Add
+    the ones you want to your own beat config:
+
+        CELERY_BEAT_SCHEDULE.update({
+            "collect-baldur-metrics": {
+                "task": "baldur.adapters.celery.tasks.collect_baldur_metrics",
+                "schedule": 60.0,  # Every minute
+            },
+            "check-sla-breaches": {
+                "task": "baldur.adapters.celery.tasks.check_and_report_sla_breaches",
+                "schedule": 300.0,  # Every 5 minutes
+            },
+            "emit-baldur-heartbeat": {
+                "task": "baldur.adapters.celery.tasks.emit_baldur_heartbeat",
+                "schedule": 60.0,  # Every minute
+            },
+        })
+
+    cleanup_resolved_dlq_entries is deliberately omitted above: the DLQ
+    maintenance lane already schedules its twin. See dlq_replay.
 """
 
 from __future__ import annotations

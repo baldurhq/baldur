@@ -7,9 +7,8 @@ Celery Beat schedule:
     - postmortem_auto_seal: daily (86400s)
 
 Usage:
-    CELERY_BEAT_SCHEDULE = {
-        **get_postmortem_beat_schedule(),
-    }
+    # Normally unnecessary: configure_baldur_celery(app) merges this lane.
+    CELERY_BEAT_SCHEDULE.update(get_postmortem_beat_schedule())
 """
 
 from __future__ import annotations
