@@ -72,16 +72,29 @@ class RateLimitStorageInterface(ABC):
     Implementations must be thread-safe and support atomic operations.
 
     Usage:
-        storage = get_rate_limit_storage()
+        This interface stores cooldown state; it does not decide how long a
+        caller may block on it. Prefer ``RateLimitCoordinator``, which owns the
+        bounded serve-or-defer semantics:
 
-        # On 429 response
-        storage.set_cooldown("payment_api", cooldown_until=time.time() + 60)
-        storage.increment_consecutive_429s("payment_api")
+            coordinator = get_rate_limit_coordinator()
 
-        # Before making request
-        state = storage.get_state("payment_api")
-        if state.is_in_cooldown:
-            time.sleep(state.remaining_cooldown)
+            # Before making request — sleeps at most ``max_wait`` seconds, and
+            # returns ``deferred=True`` having slept nothing when the remaining
+            # cooldown does not fit within that bound.
+            result = coordinator.wait_if_needed("payment_api", max_wait=5.0)
+            if result.deferred:
+                reschedule_at(result.not_before)
+                return
+
+            # On 429 response — computes and stores the cooldown.
+            coordinator.on_rate_limited("payment_api", retry_after=retry_after)
+
+        Direct storage access is for implementing a backend or inspecting
+        state; never sleep ``remaining_cooldown`` unbounded:
+
+            state = storage.get_state("payment_api")
+            if state.is_in_cooldown:
+                ...
 
     Implementations:
         - RedisRateLimitStorage (fastest, requires Redis)

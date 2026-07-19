@@ -16,6 +16,7 @@ Environment Variables:
     BALDUR_RATE_LIMIT_BACKOFF_DEFAULT_RETRY_AFTER=5.0
     BALDUR_RATE_LIMIT_BACKOFF_BACKOFF_MULTIPLIER=2.0
     BALDUR_RATE_LIMIT_BACKOFF_DEBOUNCE_WINDOW_SECONDS=5.0
+    BALDUR_RATE_LIMIT_BACKOFF_RETRY_AFTER_CEILING=3600.0
 """
 
 from pydantic import Field
@@ -75,6 +76,18 @@ class RateLimitBackoffSettings(BaseSettings):
         description=(
             "EventBus debounce window (seconds) suppressing duplicate "
             "rate-limit events for the same service."
+        ),
+    )
+    # Explicit Field rather than LongDuration: the honored-header range must reach
+    # a full day, well past LongDuration's le=3600 (same reason as max_delay above).
+    retry_after_ceiling: float = Field(
+        default=3600.0,
+        ge=60.0,
+        le=86400.0,
+        description=(
+            "Upper bound (seconds) on an honored provider Retry-After header. "
+            "Headers above this are clamped and marked; max_delay does not "
+            "bound honored headers."
         ),
     )
 

@@ -1,11 +1,11 @@
 """
-RetryPolicy 순수 재시도 정책 단위 테스트.
+Unit tests for the pure RetryPolicy retry policy.
 
-테스트 대상: services/retry_handler/policy.py
-- 핵심 재시도 루프 (성공, 실패, 재시도, 예외 분류)
-- Collaborator 주입: sleeper, retry_budget, rate_limit_coordinator, backoff
-- 429 rate limit 감지
-- PolicyContext 전달
+Target: services/retry_handler/policy.py
+- Core retry loop (success, failure, retry, exception classification)
+- Collaborator injection: sleeper, retry_budget, rate_limit_coordinator, backoff
+- 429 rate limit detection
+- PolicyContext propagation
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ from baldur.interfaces.resilience_policy import (
     PolicyOutcome,
     ResiliencePolicy,
 )
+from baldur.services.rate_limit_coordinator.models import RateLimitResult
 from baldur.services.retry_handler.models import RetryPolicyConfig
 from baldur.services.retry_handler.policy import RetryPolicy
 from baldur.services.retry_handler.rate_limit_detection import (  # noqa: F401
@@ -30,59 +31,59 @@ from baldur.services.retry_handler.rate_limit_detection import (  # noqa: F401
 )
 
 # =============================================================================
-# RetryPolicy — 계약 검증
+# RetryPolicy — Contract
 # =============================================================================
 
 
 class TestRetryPolicyContract:
-    """RetryPolicy 고정 식별자 및 결과 구조 검증."""
+    """RetryPolicy fixed identifiers and result structure."""
 
     def test_retry_policy_is_resilience_policy(self):
-        """RetryPolicy는 ResiliencePolicy Protocol과 isinstance 호환이다."""
+        """RetryPolicy is isinstance-compatible with the ResiliencePolicy Protocol."""
         policy = RetryPolicy(config=RetryPolicyConfig(max_attempts=1))
         assert isinstance(policy, ResiliencePolicy)
 
     def test_name_is_retry(self):
-        """RetryPolicy.name은 'retry'이다."""
+        """RetryPolicy.name is 'retry'."""
         policy = RetryPolicy(config=RetryPolicyConfig(max_attempts=1))
         assert policy.name == "retry"
 
     def test_rate_limit_indicators_contain_expected_keywords(self):
-        """RATE_LIMIT_INDICATORS에 429, rate limit, throttle 등이 포함된다."""
+        """RATE_LIMIT_INDICATORS contains 429, rate limit, throttle and friends."""
         assert "429" in RATE_LIMIT_INDICATORS
         assert "rate limit" in RATE_LIMIT_INDICATORS
         assert "throttle" in RATE_LIMIT_INDICATORS
         assert "too many requests" in RATE_LIMIT_INDICATORS
 
     def test_success_result_has_retry_in_executed_policies(self):
-        """성공 결과의 executed_policies에 'retry'가 포함된다."""
+        """A successful result's executed_policies contains 'retry'."""
         policy = RetryPolicy(config=RetryPolicyConfig(max_attempts=1))
         result = policy.execute(lambda: "ok")
         assert "retry" in result.executed_policies
 
     def test_failure_metadata_contains_should_dlq(self):
-        """실패 결과의 metadata에 should_dlq 키가 포함된다."""
+        """A failure result's metadata contains the should_dlq key."""
         policy = RetryPolicy(config=RetryPolicyConfig(max_attempts=1, enable_dlq=True))
         result = policy.execute(lambda: (_ for _ in ()).throw(Exception("fail")))
         assert "should_dlq" in result.metadata
 
     def test_failure_metadata_contains_domain(self):
-        """실패 결과의 metadata에 domain이 포함된다."""
+        """A failure result's metadata contains the domain."""
         policy = RetryPolicy(config=RetryPolicyConfig(max_attempts=1, domain="payment"))
         result = policy.execute(lambda: (_ for _ in ()).throw(Exception("fail")))
         assert result.metadata["domain"] == "payment"
 
 
 # =============================================================================
-# RetryPolicy — 핵심 재시도 동작
+# RetryPolicy — Core retry behavior
 # =============================================================================
 
 
 class TestRetryPolicyExecuteBehavior:
-    """RetryPolicy.execute() 핵심 재시도 동작 검증."""
+    """RetryPolicy.execute() core retry behavior."""
 
     def test_success_first_attempt(self):
-        """첫 시도에서 성공하면 SUCCESS를 반환한다."""
+        """Success on the first attempt returns SUCCESS."""
         policy = RetryPolicy(config=RetryPolicyConfig(max_attempts=3))
         result = policy.execute(lambda: "ok")
         assert result.outcome == PolicyOutcome.SUCCESS
@@ -90,7 +91,7 @@ class TestRetryPolicyExecuteBehavior:
         assert result.total_attempts == 1
 
     def test_success_after_retry(self):
-        """첫 시도 실패 후 두 번째 시도에서 성공한다."""
+        """A first-attempt failure is followed by a successful second attempt."""
         policy = RetryPolicy(
             config=RetryPolicyConfig(max_attempts=3),
             backoff=ConstantBackoff(delay=0.0),
@@ -110,7 +111,7 @@ class TestRetryPolicyExecuteBehavior:
         assert result.total_attempts == 2
 
     def test_all_attempts_exhausted_returns_failure(self):
-        """모든 시도 소진 시 FAILURE를 반환한다."""
+        """Exhausting every attempt returns FAILURE."""
         policy = RetryPolicy(
             config=RetryPolicyConfig(max_attempts=3),
             backoff=ConstantBackoff(delay=0.0),
@@ -122,7 +123,7 @@ class TestRetryPolicyExecuteBehavior:
         assert isinstance(result.error, ConnectionError)
 
     def test_non_retryable_exception_stops_immediately(self):
-        """non_retryable_exceptions에 해당하면 즉시 중단된다."""
+        """A non_retryable_exceptions match stops the loop immediately."""
         config = RetryPolicyConfig(
             max_attempts=5,
             retryable_exceptions=(Exception,),
@@ -135,7 +136,7 @@ class TestRetryPolicyExecuteBehavior:
         assert isinstance(result.error, ValueError)
 
     def test_retryable_exception_triggers_retry(self):
-        """retryable_exceptions에 해당하는 예외만 재시도를 트리거한다."""
+        """Only exceptions in retryable_exceptions trigger a retry."""
         policy = RetryPolicy(
             config=RetryPolicyConfig(
                 max_attempts=3, retryable_exceptions=(ConnectionError,)
@@ -156,7 +157,7 @@ class TestRetryPolicyExecuteBehavior:
         assert result.total_attempts == 3
 
     def test_non_matching_exception_stops_retry(self):
-        """retryable_exceptions에 없는 예외는 재시도하지 않는다."""
+        """Exceptions outside retryable_exceptions are not retried."""
         config = RetryPolicyConfig(
             max_attempts=3, retryable_exceptions=(ConnectionError,)
         )
@@ -166,7 +167,7 @@ class TestRetryPolicyExecuteBehavior:
         assert result.total_attempts == 1
 
     def test_retry_history_records_all_failed_attempts(self):
-        """retry_history에 모든 실패 시도가 기록된다."""
+        """Every failed attempt is recorded in retry_history."""
         policy = RetryPolicy(
             config=RetryPolicyConfig(max_attempts=3),
             backoff=ConstantBackoff(delay=0.0),
@@ -180,7 +181,7 @@ class TestRetryPolicyExecuteBehavior:
             assert entry["error_type"] == "ConnectionError"
 
     def test_should_dlq_flag_reflects_enable_dlq_config(self):
-        """should_dlq 플래그는 config.enable_dlq 값을 반영한다."""
+        """The should_dlq flag reflects config.enable_dlq."""
         for enable_dlq in (True, False):
             policy = RetryPolicy(
                 config=RetryPolicyConfig(max_attempts=1, enable_dlq=enable_dlq)
@@ -189,7 +190,7 @@ class TestRetryPolicyExecuteBehavior:
             assert result.metadata["should_dlq"] is enable_dlq
 
     def test_max_attempts_in_failure_metadata(self):
-        """실패 metadata에 max_attempts가 포함된다."""
+        """Failure metadata contains max_attempts."""
         config = RetryPolicyConfig(max_attempts=5)
         policy = RetryPolicy(
             config=config, backoff=ConstantBackoff(delay=0.0), sleeper=lambda _: None
@@ -199,15 +200,15 @@ class TestRetryPolicyExecuteBehavior:
 
 
 # =============================================================================
-# RetryPolicy — Sleeper 대기 함수 주입
+# RetryPolicy — Sleeper injection
 # =============================================================================
 
 
 class TestRetryPolicySleeperBehavior:
-    """RetryPolicy sleeper 대기 함수 주입 동작 검증."""
+    """RetryPolicy sleeper injection behavior."""
 
     def test_sleeper_none_skips_sleep(self):
-        """sleeper=None이면 sleep을 수행하지 않는다."""
+        """sleeper=None performs no sleep."""
         policy = RetryPolicy(
             config=RetryPolicyConfig(max_attempts=2),
             backoff=ConstantBackoff(delay=1.0),
@@ -218,7 +219,7 @@ class TestRetryPolicySleeperBehavior:
         assert result.total_attempts == 2
 
     def test_sleeper_called_with_backoff_delay(self):
-        """sleeper가 제공되면 backoff 지연값으로 호출된다."""
+        """A provided sleeper is called with the backoff delay."""
         mock_sleeper = MagicMock()
         delay_value = 2.5
         policy = RetryPolicy(
@@ -230,7 +231,7 @@ class TestRetryPolicySleeperBehavior:
         mock_sleeper.assert_called_once_with(delay_value)
 
     def test_sleeper_not_called_on_zero_delay(self):
-        """delay가 0이면 sleeper를 호출하지 않는다."""
+        """A zero delay does not call the sleeper."""
         mock_sleeper = MagicMock()
         policy = RetryPolicy(
             config=RetryPolicyConfig(max_attempts=2),
@@ -241,7 +242,7 @@ class TestRetryPolicySleeperBehavior:
         mock_sleeper.assert_not_called()
 
     def test_sleeper_not_called_on_first_attempt_success(self):
-        """첫 시도 성공 시 sleeper가 호출되지 않는다."""
+        """The sleeper is not called when the first attempt succeeds."""
         mock_sleeper = MagicMock()
         policy = RetryPolicy(
             config=RetryPolicyConfig(max_attempts=3), sleeper=mock_sleeper
@@ -256,10 +257,10 @@ class TestRetryPolicySleeperBehavior:
 
 
 class TestRetryPolicyRetryBudgetBehavior:
-    """RetryPolicy retry_budget Collaborator 동작 검증."""
+    """RetryPolicy retry_budget collaborator behavior."""
 
     def test_record_request_called_per_attempt(self):
-        """retry_budget.record_request()가 매 시도마다 호출된다."""
+        """retry_budget.record_request() is called on every attempt."""
         mock_budget = MagicMock()
         mock_budget.should_allow_retry.return_value = True
         mock_budget.get_stats.return_value = {}
@@ -277,7 +278,7 @@ class TestRetryPolicyRetryBudgetBehavior:
         mock_budget.record_request.assert_any_call(is_retry=True)
 
     def test_budget_exhaustion_breaks_loop(self):
-        """retry_budget.should_allow_retry()가 False면 루프를 중단한다."""
+        """A False retry_budget.should_allow_retry() stops the loop."""
         mock_budget = MagicMock()
         mock_budget.should_allow_retry.return_value = False
         mock_budget.get_stats.return_value = {"ratio": 0.9}
@@ -293,7 +294,7 @@ class TestRetryPolicyRetryBudgetBehavior:
         assert result.outcome == PolicyOutcome.FAILURE
 
     def test_budget_none_allows_all_attempts(self):
-        """retry_budget=None이면 budget 체크 없이 모든 시도를 수행한다."""
+        """retry_budget=None runs every attempt with no budget check."""
         policy = RetryPolicy(
             config=RetryPolicyConfig(max_attempts=3),
             backoff=ConstantBackoff(delay=0.0),
@@ -310,24 +311,27 @@ class TestRetryPolicyRetryBudgetBehavior:
 
 
 class TestRetryPolicyRateLimitCoordinatorBehavior:
-    """RetryPolicy rate_limit_coordinator Collaborator 동작 검증."""
+    """RetryPolicy rate_limit_coordinator collaborator behavior."""
 
     def test_wait_if_needed_called_before_execution(self):
-        """rate_limit_coordinator.wait_if_needed()가 함수 실행 전에 호출된다."""
+        """rate_limit_coordinator.wait_if_needed() runs before the function."""
         mock_coord = MagicMock()
-        mock_coord.wait_if_needed.return_value = MagicMock(waited=False)
+        # Real result object, not a MagicMock: an auto-generated ``.deferred``
+        # attribute is truthy and would defer before any attempt runs.
+        mock_coord.wait_if_needed.return_value = RateLimitResult(waited=False)
 
         policy = RetryPolicy(
             config=RetryPolicyConfig(max_attempts=1, domain="payment"),
             rate_limit_coordinator=mock_coord,
         )
         policy.execute(lambda: "ok")
-        mock_coord.wait_if_needed.assert_called_once_with("payment")
+        # No budget configured -> unbounded wait bound is forwarded as None.
+        mock_coord.wait_if_needed.assert_called_once_with("payment", max_wait=None)
 
     def test_on_success_called_after_success(self):
-        """성공 시 rate_limit_coordinator.on_success()가 호출된다."""
+        """on_success() is called on the coordinator after a successful call."""
         mock_coord = MagicMock()
-        mock_coord.wait_if_needed.return_value = MagicMock(waited=False)
+        mock_coord.wait_if_needed.return_value = RateLimitResult(waited=False)
 
         policy = RetryPolicy(
             config=RetryPolicyConfig(max_attempts=1, domain="payment"),
@@ -337,7 +341,7 @@ class TestRetryPolicyRateLimitCoordinatorBehavior:
         mock_coord.on_success.assert_called_once_with("payment")
 
     def test_coordinator_none_skips_rate_limit(self):
-        """rate_limit_coordinator=None이면 rate limit 체크 없이 실행된다."""
+        """With rate_limit_coordinator=None the rate-limit check is skipped."""
         policy = RetryPolicy(
             config=RetryPolicyConfig(max_attempts=1),
             rate_limit_coordinator=None,
@@ -352,15 +356,15 @@ class TestRetryPolicyRateLimitCoordinatorBehavior:
 
 
 class TestRetryPolicyBackoffBehavior:
-    """RetryPolicy backoff Collaborator 동작 검증."""
+    """RetryPolicy backoff collaborator behavior."""
 
     def test_default_backoff_is_exponential(self):
-        """backoff=None이면 ExponentialBackoff가 기본 생성된다."""
+        """backoff=None constructs an ExponentialBackoff by default."""
         policy = RetryPolicy(config=RetryPolicyConfig(max_attempts=1))
         assert isinstance(policy._backoff, ExponentialBackoff)
 
     def test_default_backoff_uses_config_values(self):
-        """기본 ExponentialBackoff는 config의 backoff 설정을 사용한다."""
+        """The default ExponentialBackoff uses the config's backoff settings."""
         config = RetryPolicyConfig(backoff_base=10, backoff_max=300, jitter_percent=50)
         policy = RetryPolicy(config=config)
         backoff = policy._backoff
@@ -369,7 +373,7 @@ class TestRetryPolicyBackoffBehavior:
         assert backoff.jitter_factor == config.jitter_percent / 100.0
 
     def test_custom_backoff_strategy_injected(self):
-        """커스텀 BackoffStrategy가 주입되면 그것을 사용한다."""
+        """An injected custom BackoffStrategy is the one used."""
         custom_backoff = LinearBackoff(base_delay=1.0, increment=2.0)
         policy = RetryPolicy(
             config=RetryPolicyConfig(max_attempts=1), backoff=custom_backoff
@@ -377,7 +381,7 @@ class TestRetryPolicyBackoffBehavior:
         assert policy._backoff is custom_backoff
 
     def test_backoff_calculate_receives_context(self):
-        """backoff.calculate()가 PolicyContext와 함께 호출된다."""
+        """backoff.calculate() is called with the PolicyContext."""
         mock_backoff = MagicMock(spec=BackoffStrategy)
         mock_backoff.calculate.return_value = 1.0
         ctx = PolicyContext(tier_id="critical", domain="payment")
@@ -392,37 +396,37 @@ class TestRetryPolicyBackoffBehavior:
 
 
 # =============================================================================
-# RetryPolicy — 429 Rate Limit 감지
+# RetryPolicy — 429 rate limit detection
 # =============================================================================
 
 
 class TestRetryPolicyDetectRateLimitBehavior:
-    """RetryPolicy._detect_rate_limit() 정적 메서드 동작 검증."""
+    """RetryPolicy._detect_rate_limit() static method behavior."""
 
     def test_detect_429_in_message(self):
-        """에러 메시지에 429가 포함되면 True를 반환한다."""
+        """An error message containing 429 returns True."""
         is_rate, _ = RetryPolicy._detect_rate_limit(
             Exception("HTTP 429 Too Many Requests")
         )
         assert is_rate is True
 
     def test_detect_rate_limit_keyword(self):
-        """'rate limit' 키워드가 있으면 True를 반환한다."""
+        """The 'rate limit' keyword returns True."""
         is_rate, _ = RetryPolicy._detect_rate_limit(Exception("Rate limit exceeded"))
         assert is_rate is True
 
     def test_detect_throttle_keyword(self):
-        """'throttle' 키워드가 있으면 True를 반환한다."""
+        """The 'throttle' keyword returns True."""
         is_rate, _ = RetryPolicy._detect_rate_limit(Exception("Request throttled"))
         assert is_rate is True
 
     def test_normal_error_not_detected(self):
-        """일반 에러는 rate limit으로 감지되지 않는다."""
+        """An ordinary error is not detected as a rate limit."""
         is_rate, _ = RetryPolicy._detect_rate_limit(ValueError("Invalid input"))
         assert is_rate is False
 
     def test_extract_retry_after_attribute(self):
-        """예외에 retry_after 속성이 있으면 추출한다."""
+        """A retry_after attribute on the exception is extracted."""
         err = Exception("429")
         err.retry_after = 30.0
         is_rate, retry_after = RetryPolicy._detect_rate_limit(err)
@@ -430,7 +434,7 @@ class TestRetryPolicyDetectRateLimitBehavior:
         assert retry_after == 30.0
 
     def test_extract_retry_after_from_response_headers(self):
-        """예외.response.headers['Retry-After']에서 값을 추출한다."""
+        """The value is extracted from exception.response.headers['Retry-After']."""
         err = Exception("429")
         mock_response = MagicMock()
         mock_response.headers = {"Retry-After": "60"}
@@ -440,29 +444,29 @@ class TestRetryPolicyDetectRateLimitBehavior:
         assert retry_after == 60.0
 
     def test_no_retry_after_returns_none(self):
-        """retry_after 정보가 없으면 None을 반환한다."""
+        """Absent retry_after information returns None."""
         is_rate, retry_after = RetryPolicy._detect_rate_limit(Exception("429 error"))
         assert is_rate is True
         assert retry_after is None
 
 
 # =============================================================================
-# RetryPolicy — PolicyContext 전달
+# RetryPolicy — PolicyContext propagation
 # =============================================================================
 
 
 class TestRetryPolicyContextBehavior:
-    """RetryPolicy.execute()에 PolicyContext 전달 동작 검증."""
+    """PolicyContext propagation into RetryPolicy.execute()."""
 
     def test_execute_accepts_context_parameter(self):
-        """execute()가 context 파라미터를 수용한다."""
+        """execute() accepts a context parameter."""
         ctx = PolicyContext(order_id="ORD-123", tier_id="critical")
         policy = RetryPolicy(config=RetryPolicyConfig(max_attempts=1))
         result = policy.execute(lambda: "ok", context=ctx)
         assert result.outcome == PolicyOutcome.SUCCESS
 
     def test_execute_works_without_context(self):
-        """context=None이어도 정상 동작한다."""
+        """context=None still works."""
         policy = RetryPolicy(config=RetryPolicyConfig(max_attempts=1))
         result = policy.execute(lambda: "ok")
         assert result.outcome == PolicyOutcome.SUCCESS

@@ -97,7 +97,11 @@ class RetryConfig:
     enable_dlq: bool = True
     domain: str = "default"
 
-    # Rate limit awareness settings
+    # Rate limit awareness settings.
+    # NOTE: no built-in wiring consumes either field. Coordinator integration is
+    # always explicit — RetryPolicy(rate_limit_coordinator=...), the tenacity
+    # bridge's rate_limit_key, or @coordinator.rate_limit_aware. Setting these
+    # two alone enables nothing.
     rate_limit_aware: bool = True  # Enable Self-DDoS prevention
     rate_limit_key: str | None = None  # Custom key, defaults to domain
 

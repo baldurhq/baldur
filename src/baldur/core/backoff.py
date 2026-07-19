@@ -16,6 +16,37 @@ if TYPE_CHECKING:
     from baldur.interfaces.resilience_policy import PolicyContext
 
 
+def _apply_capped_jitter(
+    raw_delay: float,
+    max_delay: float,
+    jitter: bool,
+    jitter_factor: float,
+) -> float:
+    """Clamp ``raw_delay`` to ``[0, max_delay]`` with jitter that never exceeds the cap.
+
+    ``max_delay`` is a hard ceiling on the *returned* value, not on the
+    pre-jitter delay: applying symmetric jitter after a clamp would let the
+    effective delay overshoot the documented cap by ``jitter_factor``.
+
+    Two jitter regimes keep the dispersion width intact while honoring the cap:
+
+    - **Below saturation** (``raw_delay < max_delay``): symmetric jitter around
+      the raw delay, then clamped into ``[0, max_delay]``.
+    - **At saturation** (``raw_delay >= max_delay``): inward-only jitter —
+      ``max_delay - U(0, max_delay * jitter_factor)`` — which preserves the full
+      dispersion width below the cap instead of straddling it.
+    """
+    if not jitter:
+        return max(0.0, min(raw_delay, max_delay))
+
+    if raw_delay >= max_delay:
+        return max(0.0, max_delay - random.uniform(0.0, max_delay * jitter_factor))
+
+    jitter_range = raw_delay * jitter_factor
+    jittered = raw_delay + random.uniform(-jitter_range, jitter_range)
+    return max(0.0, min(jittered, max_delay))
+
+
 class BackoffStrategy(ABC):
     """Abstract base class for backoff calculation strategies."""
 
@@ -68,6 +99,9 @@ class ExponentialBackoff(BackoffStrategy):
 
     Delay grows exponentially with each attempt: base_delay * (multiplier ^ attempt)
     Optional jitter adds randomness to prevent thundering herd.
+
+    ``max_delay`` is a hard cap on the returned delay: jitter is applied so the
+    result never exceeds it (symmetric below saturation, inward-only at the cap).
     """
 
     base_delay: float = 1.0
@@ -102,16 +136,11 @@ class ExponentialBackoff(BackoffStrategy):
         )
 
     def calculate(self, attempt: int, context: PolicyContext | None = None) -> float:
-        """Calculate exponential delay with optional jitter."""
-        delay = self.base_delay * (self.multiplier ** (attempt - 1))
-        delay = min(delay, self.max_delay)
-
-        if self.jitter:
-            jitter_range = delay * self.jitter_factor
-            delay = delay + random.uniform(-jitter_range, jitter_range)
-            delay = max(0.0, delay)
-
-        return delay
+        """Calculate exponential delay with jitter, hard-capped at ``max_delay``."""
+        raw = self.base_delay * (self.multiplier ** (attempt - 1))
+        return _apply_capped_jitter(
+            raw, self.max_delay, self.jitter, self.jitter_factor
+        )
 
     def reset(self) -> None:
         """Reset is a no-op for stateless exponential backoff."""
@@ -124,6 +153,9 @@ class LinearBackoff(BackoffStrategy):
     Linear backoff strategy.
 
     Delay grows linearly with each attempt: base_delay + (increment * attempt)
+
+    ``max_delay`` is a hard cap on the returned delay: jitter is applied so the
+    result never exceeds it (symmetric below saturation, inward-only at the cap).
     """
 
     base_delay: float = 1.0
@@ -156,16 +188,11 @@ class LinearBackoff(BackoffStrategy):
         )
 
     def calculate(self, attempt: int, context: PolicyContext | None = None) -> float:
-        """Calculate linear delay."""
-        delay = self.base_delay + (self.increment * (attempt - 1))
-        delay = min(delay, self.max_delay)
-
-        if self.jitter:
-            jitter_range = delay * self.jitter_factor
-            delay = delay + random.uniform(-jitter_range, jitter_range)
-            delay = max(0.0, delay)
-
-        return delay
+        """Calculate linear delay, hard-capped at ``max_delay``."""
+        raw = self.base_delay + (self.increment * (attempt - 1))
+        return _apply_capped_jitter(
+            raw, self.max_delay, self.jitter, self.jitter_factor
+        )
 
     def reset(self) -> None:
         """Reset is a no-op for stateless linear backoff."""

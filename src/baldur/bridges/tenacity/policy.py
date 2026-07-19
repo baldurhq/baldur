@@ -80,6 +80,11 @@ class TenacityBridgePolicy(ResiliencePolicy[T]):
             the singleton via ``RateLimitCoordinator.get_instance()``.
         rate_limit_key: Key passed to ``wait_if_needed`` / ``on_rate_limited``.
             ``None`` disables rate-limit integration.
+        rate_limit_max_wait: Maximum seconds an attempt may block on an active
+            429 cooldown. ``None`` uses the coordinator's configured
+            ``max_delay``. A cooldown longer than the bound stops the loop and
+            yields a FAILURE ``PolicyResult`` with ``rate_limit_deferred`` /
+            ``not_before`` metadata instead of blocking the worker.
         before: Optional user ``before(retry_state)`` callback. Runs BEFORE
             Baldur's hook on every attempt.
         after: Optional user ``after(retry_state)`` callback.
@@ -100,6 +105,7 @@ class TenacityBridgePolicy(ResiliencePolicy[T]):
         retry_budget: AdaptiveRetryBudget | None = None,
         rate_limit_coordinator: RateLimitCoordinator | None = None,
         rate_limit_key: str | None = None,
+        rate_limit_max_wait: float | None = None,
         before: Callable[[Any], None] | None = None,
         after: Callable[[Any], None] | None = None,
         before_sleep: Callable[[Any], None] | None = None,
@@ -119,6 +125,7 @@ class TenacityBridgePolicy(ResiliencePolicy[T]):
         self._domain = domain
         self._retry_budget = retry_budget
         self._rate_limit_key = rate_limit_key
+        self._rate_limit_max_wait = rate_limit_max_wait
         self._user_before = before
         self._user_after = after
         self._user_before_sleep = before_sleep
@@ -152,6 +159,7 @@ class TenacityBridgePolicy(ResiliencePolicy[T]):
         retry_budget: AdaptiveRetryBudget | None = None,
         rate_limit_coordinator: RateLimitCoordinator | None = None,
         rate_limit_key: str | None = None,
+        rate_limit_max_wait: float | None = None,
     ) -> TenacityBridgePolicy[T]:
         """Build a bridge from an existing ``tenacity.Retrying`` instance.
 
@@ -169,6 +177,7 @@ class TenacityBridgePolicy(ResiliencePolicy[T]):
             retry_budget=retry_budget,
             rate_limit_coordinator=rate_limit_coordinator,
             rate_limit_key=rate_limit_key,
+            rate_limit_max_wait=rate_limit_max_wait,
             before=getattr(retrying, "before", None),
             after=getattr(retrying, "after", None),
             before_sleep=getattr(retrying, "before_sleep", None),
@@ -200,10 +209,15 @@ class TenacityBridgePolicy(ResiliencePolicy[T]):
         - all attempts failed (user callback returns fallback) → FAILURE
           with ``value=user_fallback`` and ``metadata.user_callback_fallback``.
         - budget-exhausted abort → FAILURE with the prior exception.
+        - cooldown-deferred abort → FAILURE with ``rate_limit_deferred``
+          metadata; the attempt was never made.
         """
         import tenacity as _t
 
-        from baldur.bridges.tenacity.callbacks import _BudgetExhaustedAbort
+        from baldur.bridges.tenacity.callbacks import (
+            _BudgetExhaustedAbort,
+            _CooldownDeferredAbort,
+        )
 
         ctx, retrying_kwargs = self._build_ctx_and_kwargs()
 
@@ -228,6 +242,8 @@ class TenacityBridgePolicy(ResiliencePolicy[T]):
             value = retrying(func, *args, **kwargs)
         except _BudgetExhaustedAbort:
             return self._budget_abort_result(ctx, start)
+        except _CooldownDeferredAbort as abort:
+            return self._cooldown_deferred_result(abort, ctx, start)
         except _t.RetryError as exc:
             return self._retry_error_result(exc, ctx, start)
         except Exception as exc:  # propagated by reraise=True or non-retryable
@@ -251,6 +267,7 @@ class TenacityBridgePolicy(ResiliencePolicy[T]):
             domain=self._domain,
             rate_limit_key=self._rate_limit_key,
             rate_limit_coordinator=self._rate_limit_coordinator,
+            rate_limit_max_wait=self._rate_limit_max_wait,
             retry_budget=self._retry_budget,
         )
 
@@ -291,6 +308,32 @@ class TenacityBridgePolicy(ResiliencePolicy[T]):
             metadata={
                 "domain": self._domain,
                 "budget_exhausted": True,
+            },
+        )
+
+    def _cooldown_deferred_result(
+        self, abort: Any, ctx: BridgeCallbackContext, start: float
+    ) -> PolicyResult[T]:
+        """Translate a cooldown-deferred abort into a FAILURE PolicyResult.
+
+        Carries the defer vocabulary (``rate_limit_deferred`` / ``not_before``)
+        so a requeue-capable caller can reschedule rather than treat this as a
+        failed attempt — the deferred attempt never called ``func``.
+        """
+        duration_ms = (time.perf_counter() - start) * 1000.0
+        snapshot = ctx.snapshot
+        attempts = snapshot.attempt_number if snapshot else 1
+        last_error = snapshot.last_error if snapshot else None
+        return PolicyResult(
+            outcome=PolicyOutcome.FAILURE,
+            error=last_error if isinstance(last_error, Exception) else None,
+            total_attempts=attempts,
+            total_duration_ms=duration_ms,
+            executed_policies=[self.name],
+            metadata={
+                "domain": self._domain,
+                "rate_limit_deferred": True,
+                "not_before": abort.not_before,
             },
         )
 
@@ -457,6 +500,7 @@ class AsyncTenacityBridgePolicy(TenacityBridgePolicy[T]):
             retry_budget=bridge._retry_budget,
             rate_limit_coordinator=bridge._rate_limit_coordinator,
             rate_limit_key=bridge._rate_limit_key,
+            rate_limit_max_wait=bridge._rate_limit_max_wait,
             before=bridge._user_before,
             after=bridge._user_after,
             before_sleep=bridge._user_before_sleep,
@@ -479,7 +523,10 @@ class AsyncTenacityBridgePolicy(TenacityBridgePolicy[T]):
         """
         import tenacity as _t
 
-        from baldur.bridges.tenacity.callbacks import _BudgetExhaustedAbort
+        from baldur.bridges.tenacity.callbacks import (
+            _BudgetExhaustedAbort,
+            _CooldownDeferredAbort,
+        )
 
         ctx, retrying_kwargs = self._build_ctx_and_kwargs()
 
@@ -493,6 +540,8 @@ class AsyncTenacityBridgePolicy(TenacityBridgePolicy[T]):
             value = await retrying(func, *args, **kwargs)
         except _BudgetExhaustedAbort:
             return self._budget_abort_result(ctx, start)
+        except _CooldownDeferredAbort as abort:
+            return self._cooldown_deferred_result(abort, ctx, start)
         except _t.RetryError as exc:
             return self._retry_error_result(exc, ctx, start)
         except Exception as exc:  # propagated by reraise=True or non-retryable

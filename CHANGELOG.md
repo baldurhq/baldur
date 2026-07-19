@@ -18,6 +18,10 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 - Digest sections `dlq`, `automated_actions`, `auto_replay` are labeled OSS, not PRO.
 - Daily-report `failed_ops_without_dlq` → `dlq_captured_without_adaptive_replay`. **Breaking**
+- Outbound 429 cooldown waits are bounded: `wait_if_needed(key, max_wait=...)` sleeps a cooldown that fits and otherwise defers (`deferred`, `not_before`) without sleeping.
+- A provider `Retry-After` is honored up to `BALDUR_RATE_LIMIT_BACKOFF_RETRY_AFTER_CEILING` (default 1h) instead of being truncated at `max_delay`.
+- The 429 escalation ladder is seeded from `default_retry_after`, not the `Retry-After` header, so a repeated header no longer escalates off its own value.
+- `rate_limit_cooldown_seconds` can now record honored cooldowns above `max_delay`.
 
 ### Removed
 
@@ -33,6 +37,9 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ### Fixed
 
+- Jittered `ExponentialBackoff`/`LinearBackoff` delays no longer exceed `max_delay` — jitter was applied after the cap, overshooting it by up to `jitter_factor`.
+- A provider `Retry-After` is never undercut: jitter could schedule the next request before the provider's stated earliest time.
+- A rate-limit coordinator or storage fault no longer changes the business outcome on the retry loop, tenacity bridge, or `@rate_limit_aware` decorator — it degrades to a logged no-op.
 - `configure_baldur_celery(app)` raised `TypeError` on every call and registered nothing.
 - Compressed DLQ entries now age ACTIVE→STALE→ARCHIVED on a daily schedule (was never run).
 - Compressed-entry sweep reads the oldest page, not the newest — it was a no-op above ~3/day.
