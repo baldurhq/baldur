@@ -17,13 +17,19 @@ Test Categories:
     B. Cross-worker shared state:
         - A cooldown installed by one worker defers an independent worker that
           never saw a 429 of its own
+    C. The same lifecycle reached through the *default* wiring, with no
+       coordinator handed to the policy
+    D. Cross-instance sharing over real Redis — the one claim the in-memory
+       adapter cannot make, since its state lives in the instance
 
-Note: All tests use the in-memory rate-limit adapter - no infra dependency.
-      This enables parallel test execution with pytest-xdist.
+Note: Categories A-C use the in-memory rate-limit adapter - no infra dependency.
+      This enables parallel test execution with pytest-xdist. Category D is
+      marked ``requires_redis`` and auto-skips without it.
 """
 
 from __future__ import annotations
 
+import uuid
 from unittest.mock import patch
 
 import pytest
@@ -218,3 +224,150 @@ class TestOutboundCooldownLifecycle:
         assert sleep_mock.call_count == 0  # and it slept nothing
         # B had no prior error of its own, so the deferral error is synthesized.
         assert type(result.error) is RateLimitDeferredError
+
+
+class TestDefaultWiredCooldownLifecycle:
+    """The same lifecycle with nothing injected — the shape production runs.
+
+    Every case above hands the policy a coordinator. Production does not: a
+    settings-derived ``RetryPolicy`` is built with none and resolves the shared
+    one at use time. That resolution is the composition seam this feature added,
+    and it is the one a caller never exercises explicitly, so the whole chain is
+    re-driven through it here.
+    """
+
+    def test_a_default_wired_policy_installs_and_honors_its_own_cooldown(self):
+        """
+        Purpose:
+            A policy that was handed no coordinator still writes a 429 cooldown
+            to shared storage and reads it back on the next attempt.
+        Expected:
+            - The retried call succeeds after waiting out the installed cooldown
+            - Storage carries the cooldown the loop itself installed
+            - The recovery success clears the consecutive-429 counter
+        """
+        storage = InMemoryRateLimitStorage()
+        calls = {"n": 0}
+
+        def func():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise Exception(_RATE_LIMIT_MESSAGE)
+            return "ok"
+
+        # Stand the shared coordinator up over in-memory storage. Patching
+        # get_instance rather than the storage auto-detect keeps the resolution
+        # path itself under test — only the backend choice is pinned.
+        policy = RetryPolicy(
+            config=RetryPolicyConfig(
+                max_attempts=3, domain="payment", max_elapsed=30.0
+            ),
+            backoff=ConstantBackoff(delay=0.0),
+            sleeper=lambda _: None,
+        )
+        with patch.object(
+            RateLimitCoordinator,
+            "get_instance",
+            autospec=True,
+            return_value=_coordinator(storage, default_retry_after=0.5),
+        ):
+            with mock_sleep() as sleep_mock:
+                result = policy.execute(func)
+
+        assert result.outcome == PolicyOutcome.SUCCESS
+        assert result.value == "ok"
+        # Attempt 2 waited out the cooldown attempt 1's 429 installed.
+        assert any(0.4 <= slept <= 0.6 for slept in sleep_mock.calls)
+        # And the recovery reset the ladder for the next 429.
+        assert storage.get_state("payment").consecutive_429s == 0
+
+    def test_an_unidentified_default_wired_policy_writes_nothing(self):
+        """
+        Purpose:
+            The paired negative at composition level: without a domain identity
+            the default wiring must not reach storage at all.
+        Expected:
+            - The 429 exhausts retries normally (no coordination side effects)
+            - Storage holds no cooldown and no counter for the placeholder key
+        """
+        storage = InMemoryRateLimitStorage()
+        policy = RetryPolicy(
+            config=RetryPolicyConfig(max_attempts=2, max_elapsed=30.0),
+            backoff=ConstantBackoff(delay=0.0),
+            sleeper=lambda _: None,
+        )
+
+        with patch.object(
+            RateLimitCoordinator,
+            "get_instance",
+            autospec=True,
+            return_value=_coordinator(storage, default_retry_after=10.0),
+        ):
+            with mock_sleep():
+                result = policy.execute(
+                    lambda: (_ for _ in ()).throw(Exception(_RATE_LIMIT_MESSAGE))
+                )
+
+        assert result.outcome == PolicyOutcome.FAILURE
+        state = storage.get_state("default")
+        assert state.is_in_cooldown is False
+        assert state.consecutive_429s == 0
+
+
+@pytest.mark.requires_redis
+class TestCrossInstanceCooldownSharingOverRedis:
+    """Two independently constructed storages share one cooldown record.
+
+    The in-memory case above shares a storage *object*, so it proves the
+    coordinator reads what it wrote — not that two workers in different
+    processes converge. In-memory state lives in the instance, so it cannot make
+    that claim by construction. Redis is the backend the shared-cooldown promise
+    actually rests on, and this is the only test that puts weight on it.
+    """
+
+    def test_a_cooldown_written_by_one_instance_defers_another(self, redis_client):
+        """
+        Purpose:
+            Worker A's 429, written through its own RedisRateLimitStorage,
+            defers worker B holding a separate storage instance over the same
+            Redis — the cross-process contract.
+        Expected:
+            - B defers without ever running its call or raising a 429 of its own
+        """
+        from baldur.adapters.rate_limit.redis_adapter import RedisRateLimitStorage
+
+        key = f"lifecycle-test-{uuid.uuid4().hex}"
+        storage_a = RedisRateLimitStorage(redis_client)
+        storage_b = RedisRateLimitStorage(redis_client)
+
+        policy_a = _policy(
+            _coordinator(storage_a, default_retry_after=30.0),
+            domain=key,
+            max_elapsed=2.0,
+        )
+        policy_b = _policy(
+            _coordinator(storage_b, default_retry_after=30.0),
+            domain=key,
+            max_elapsed=2.0,
+        )
+        b_calls = {"n": 0}
+
+        def b_func():
+            b_calls["n"] += 1
+            return "ok"
+
+        try:
+            with mock_sleep():
+                policy_a.execute(
+                    lambda: (_ for _ in ()).throw(Exception(_RATE_LIMIT_MESSAGE))
+                )
+                result = policy_b.execute(b_func)
+
+            assert result.metadata["reason"] == "rate_limit_deferred"
+            assert b_calls["n"] == 0  # B never ran, on a cooldown it never wrote
+        finally:
+            redis_client.delete(
+                f"ratelimit:{key}:cooldown_until",
+                f"ratelimit:{key}:consecutive_429s",
+                f"ratelimit:{key}:last_updated",
+            )

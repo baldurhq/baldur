@@ -877,8 +877,17 @@ class TestRetryPolicyCoordinatorFailOpenBehavior:
         assert not isinstance(result.error, RuntimeError)
 
     def test_on_success_fault_preserves_success(self):
-        """Site 3: on_success raises in the else clause -> SUCCESS not destroyed."""
+        """Site 3: on_success raises in the else clause -> SUCCESS not destroyed.
+
+        The wait result reports a signal on purpose. ``on_success`` is only owed
+        once this call has observed one, so an idle wait result would leave site
+        3 unreached and this test asserting nothing — the failing mock would
+        never be called at all.
+        """
         coord = self._coordinator_mock()
+        coord.wait_if_needed.return_value = RateLimitResult(
+            waited=True, wait_time=0.01, was_rate_limited=True
+        )
         coord.on_success.side_effect = RuntimeError("coordinator down")
         policy = RetryPolicy(
             config=RetryPolicyConfig(max_attempts=2, domain="d"),
@@ -888,6 +897,7 @@ class TestRetryPolicyCoordinatorFailOpenBehavior:
 
         result = policy.execute(lambda: "ok")
 
+        coord.on_success.assert_called_once()  # site 3 was actually reached
         assert result.outcome == PolicyOutcome.SUCCESS
         assert result.value == "ok"
         assert result.error is None

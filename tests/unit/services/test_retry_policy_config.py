@@ -8,6 +8,9 @@ Target: services/retry_handler/models.py
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from unittest.mock import patch
+
 from baldur.interfaces.resilience_policy import PolicyOutcome
 from baldur.services.retry_handler.models import (
     RetryAction,
@@ -105,6 +108,112 @@ class TestRetryPolicyConfigBehavior:
         assert config.enable_dlq is False
         assert config.retryable_exceptions == (ConnectionError, TimeoutError)
         assert config.non_retryable_exceptions == (ValueError,)
+
+
+class TestRetryPolicyConfigSourcingBehavior:
+    """``from_settings`` sources the 429-coordination fields on both paths.
+
+    Sourcing is what makes the per-domain opt-out reachable at all: every
+    canonical surface builds its config through ``from_settings``, so a field
+    that is not read there is a field an operator cannot set. The two paths are
+    covered separately because they read from different places — the PRO
+    RuntimeConfigManager's retry dict, and the static per-domain override map.
+    """
+
+    def _runtime_manager(self, retry_config):
+        """Stand-in for the PRO RuntimeConfigManager.
+
+        A plain namespace rather than a mock: only two methods are consulted,
+        both returning plain dicts, and a spec-less mock here would happily
+        answer for a method the real manager does not have.
+        """
+        return SimpleNamespace(
+            get_retry_config=lambda: retry_config,
+            get_dlq_config=lambda: {"enabled": True},
+        )
+
+    def _static_config(self, domain_configs):
+        """Minimal settings tree for the PRO-absent static path."""
+        return SimpleNamespace(
+            core=SimpleNamespace(
+                retry=SimpleNamespace(max_attempts=3, max_delay=180, max_elapsed=None),
+                backoff=SimpleNamespace(legacy_base=4, legacy_jitter_percent=25),
+            ),
+            services_group=SimpleNamespace(dlq=SimpleNamespace(enabled=True)),
+            domain_configs=domain_configs,
+        )
+
+    def _from_settings_static(self, domain, domain_configs):
+        with patch(
+            "baldur.factory.registry.ProviderRegistry.runtime_config_manager"
+        ) as manager_slot:
+            manager_slot.safe_get.return_value = None  # force the static path
+            with patch(
+                "baldur.services.retry_handler.models.get_config",
+                return_value=self._static_config(domain_configs),
+            ):
+                return RetryPolicyConfig.from_settings(domain)
+
+    def test_static_path_reads_the_per_domain_override(self):
+        """A domain that opts out of coordination gets a config that says so."""
+        cfg = self._from_settings_static(
+            "payment",
+            {
+                "payment": {
+                    "retry": {
+                        "rate_limit_aware": False,
+                        "rate_limit_key": "stripe-api",
+                    }
+                }
+            },
+        )
+
+        assert cfg.rate_limit_aware is False
+        assert cfg.rate_limit_key == "stripe-api"
+
+    def test_static_path_defaults_to_coordinating_with_no_override(self):
+        """No per-domain entry means default-on and no key override."""
+        cfg = self._from_settings_static("payment", {})
+
+        assert cfg.rate_limit_aware is True
+        assert cfg.rate_limit_key is None
+
+    def test_runtime_config_manager_path_reads_the_retry_config(self):
+        """The PRO path sources both fields off the runtime retry dict."""
+        manager = self._runtime_manager(
+            {
+                "max_attempts": 3,
+                "rate_limit_aware": False,
+                "rate_limit_key": "stripe-api",
+            }
+        )
+
+        with patch(
+            "baldur.factory.registry.ProviderRegistry.runtime_config_manager"
+        ) as manager_slot:
+            manager_slot.safe_get.return_value = manager
+            cfg = RetryPolicyConfig.from_settings("payment")
+
+        assert cfg.rate_limit_aware is False
+        assert cfg.rate_limit_key == "stripe-api"
+
+    def test_runtime_config_manager_path_defaults_when_the_keys_are_absent(self):
+        """An older runtime config without these keys still coordinates.
+
+        The PRO runtime config is data, not code — a deployment carrying a dict
+        written before these keys existed must land on the shipped default
+        rather than on a falsy miss.
+        """
+        manager = self._runtime_manager({"max_attempts": 3})
+
+        with patch(
+            "baldur.factory.registry.ProviderRegistry.runtime_config_manager"
+        ) as manager_slot:
+            manager_slot.safe_get.return_value = manager
+            cfg = RetryPolicyConfig.from_settings("payment")
+
+        assert cfg.rate_limit_aware is True
+        assert cfg.rate_limit_key is None
 
 
 # =============================================================================

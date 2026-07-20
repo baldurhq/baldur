@@ -924,6 +924,47 @@ class TestAsyncRetryFromPolicyConfigContract:
 
         assert policy._backoff is custom
 
+    def test_rate_limit_fields_are_not_carried_onto_the_async_policy(self):
+        """The two 429-coordination fields stop at the sync stage — deliberately.
+
+        ``RetryPolicyConfig`` is the config class for *both* retry stages, so a
+        caller can set these on an ``aprotect()`` or async ``@retry`` path and
+        have them silently do nothing. That is a documented boundary, not an
+        oversight: the coordinator's wait is synchronous and would block the
+        event loop.
+
+        Asserted rather than left implicit because the failure mode is invisible.
+        If this mapping ever grew the fields without an async wait behind them,
+        every async caller would get a blocking sleep under the loop.
+        """
+        from baldur.services.retry_handler.models import RetryPolicyConfig
+
+        cfg = RetryPolicyConfig(
+            max_attempts=3,
+            domain="payment",
+            rate_limit_aware=True,
+            rate_limit_key="stripe-api",
+        )
+        policy = AsyncRetryPolicy.from_policy_config(cfg)
+
+        assert not hasattr(policy, "_rate_limit_aware")
+        assert not hasattr(policy, "_rate_limit_key")
+        assert not hasattr(policy, "_rate_limit_coordinator")
+
+    def test_the_non_carry_is_disclosed_on_the_mapping_docstring(self):
+        """The disclosure is part of the contract, so it is asserted like one.
+
+        This docstring otherwise claims the async and sync stages "behave
+        identically off the same config" — a claim these two fields falsify the
+        moment they exist. Undisclosed, the config surface would recreate the
+        exact dead-flag shape this feature removed from the legacy class.
+        """
+        doc = AsyncRetryPolicy.from_policy_config.__doc__ or ""
+
+        assert "rate_limit_aware" in doc
+        assert "rate_limit_key" in doc
+        assert "not carried" in doc.lower()
+
 
 # =============================================================================
 # Behavior — should_dlq arming on exhaustion (670 D1)

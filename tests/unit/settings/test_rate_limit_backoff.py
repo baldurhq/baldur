@@ -47,6 +47,25 @@ class TestRateLimitBackoffSettingsContract:
         assert s.default_retry_after == 5.0
         assert s.backoff_multiplier == 2.0
 
+    def test_coordination_enabled_defaults_to_on(self):
+        """The default outbound 429 coordination ships on.
+
+        This default is the feature. The flag it replaced was also default-True
+        but had no behavioral consumer at all, so a regression to False here
+        would put that false guarantee straight back.
+        """
+        assert RateLimitBackoffSettings().coordination_enabled is True
+
+    def test_coordination_enabled_env_override(self, monkeypatch):
+        """The kill switch is reachable by env var — the operator's only lever.
+
+        The name is hard-coded rather than derived: it is the published string an
+        operator types into a deployment, so a rename must break a test instead
+        of silently disarming every override already in the field.
+        """
+        monkeypatch.setenv("BALDUR_RATE_LIMIT_BACKOFF_COORDINATION_ENABLED", "false")
+        assert RateLimitBackoffSettings().coordination_enabled is False
+
     def test_debounce_window_default_is_5_seconds(self):
         """Absorbed from the coordinator config's former inline default."""
         s = RateLimitBackoffSettings()
