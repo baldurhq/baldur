@@ -1,7 +1,7 @@
 """
 Intelligence Task Settings - Pydantic v2.
 
-지능 레인(Analyze & Learn) 태스크 관련 설정.
+Settings for the intelligence lane (Analyze & Learn) tasks.
 
 Source:
 - tasks/intelligence_tasks.py
@@ -24,9 +24,10 @@ from baldur.settings.base import make_settings_config
 
 class IntelligenceTaskSettings(BaseSettings):
     """
-    지능 레인 태스크 설정.
+    Intelligence lane task settings.
 
-    SLA 드리프트 감지, 포렌식 분석, 인사이트 추출 등의 설정을 정의합니다.
+    Defines settings for SLA drift detection, forensic analysis, insight
+    extraction, and related tasks.
     """
 
     model_config = make_settings_config("BALDUR_INTELLIGENCE_TASK_")
@@ -115,8 +116,8 @@ class IntelligenceTaskSettings(BaseSettings):
     @field_validator("severity_high_threshold")
     @classmethod
     def validate_severity_thresholds(cls, v: int, info) -> int:
-        """severity_high_threshold가 severity_medium_threshold보다 커야 함."""
-        # Note: Pydantic v2에서는 values 대신 info 사용
+        """severity_high_threshold must be greater than severity_medium_threshold."""
+        # Note: Pydantic v2 uses info instead of values
         return v
 
 
@@ -127,10 +128,10 @@ class IntelligenceTaskSettings(BaseSettings):
 
 def get_intelligence_task_settings() -> "IntelligenceTaskSettings":
     """
-    캐시된 IntelligenceTaskSettings 인스턴스 반환.
+    Return the cached IntelligenceTaskSettings instance.
 
     Returns:
-        IntelligenceTaskSettings: 싱글톤 인스턴스
+        IntelligenceTaskSettings: The singleton instance
     """
     from baldur.settings.root import get_config
 
@@ -139,9 +140,9 @@ def get_intelligence_task_settings() -> "IntelligenceTaskSettings":
 
 def reset_intelligence_task_settings() -> None:
     """
-    캐시된 설정 초기화 (테스트용).
+    Reset the cached settings (for tests).
 
-    환경 변수 변경 후 설정을 다시 로드하려면 이 함수를 호출하세요.
+    Call this to reload the settings after changing environment variables.
     """
     from baldur.settings.root import get_config
 

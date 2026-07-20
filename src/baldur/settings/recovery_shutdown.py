@@ -11,10 +11,6 @@ Environment Variables:
     BALDUR_RECOVERY_SHUTDOWN_RECOVERY_EXTENSION=300.0
     BALDUR_RECOVERY_SHUTDOWN_MAX_WAIT=600.0
     ... etc
-
-Reference:
-- docs/baldur/middleware_system/92_CONFIG_IMPLEMENTATION_GUIDE.md
-- docs/baldur/middleware_system/77_RECOVERY_COORDINATOR.md#11.3
 """
 
 from typing import Self
@@ -33,8 +29,8 @@ class RecoveryShutdownSettings(BaseSettings):
     """
     Recovery-aware Shutdown configuration with validation.
 
-    K8s preStop 훅에서 현재 진행 중인 Recovery Session이 있는지 확인하고,
-    있다면 종료를 지연시켜 복구 프로세스를 물리적으로 보호합니다.
+    The K8s preStop hook checks whether a Recovery Session is in progress and,
+    if so, delays termination to physically protect the recovery process.
 
     All defaults match:
     - services/coordination/recovery_shutdown.py:RecoveryAwareShutdownConfig

@@ -1,9 +1,9 @@
 """
 Gate Fault Settings - Pydantic v2.
 
-Error Budget Gate 내부 장애 감지기 설정.
-Gate가 Error Budget 서비스(Redis/DB)에 반복 접근 실패 시,
-매번 타임아웃을 기다리지 않고 즉시 Fail-Open으로 응답합니다.
+Settings for the Error Budget Gate's internal fault detector.
+When the Gate repeatedly fails to reach the Error Budget service (Redis/DB),
+it responds fail-open immediately instead of waiting for a timeout each time.
 
 Source:
 - services/error_budget_gate/fault_detector.py (GateFaultDetector)
@@ -24,12 +24,14 @@ logger = structlog.get_logger()
 
 class GateFaultSettings(BaseSettings):
     """
-    Gate Fault Detector 설정.
+    Gate Fault Detector settings.
 
-    Error Budget Gate 내부의 장애 감지 및 복구 설정을 정의합니다.
-    ⚠️ 주의: 이것은 메인 CircuitBreakerService와 다릅니다!
-    - GateFaultDetector: Gate 내부용, 메모리 전용 (외부 의존성 없음)
-    - CircuitBreakerService: 외부 API 호출용, 분산 환경 지원
+    Defines fault detection and recovery inside the Error Budget Gate.
+    ⚠️ Note: this is NOT the main CircuitBreakerService!
+    - GateFaultDetector: internal to the Gate, memory-only (no external
+      dependency)
+    - CircuitBreakerService: for external API calls, supports distributed
+      environments
     """
 
     model_config = make_settings_config("BALDUR_GATE_FAULT_")
@@ -57,7 +59,7 @@ class GateFaultSettings(BaseSettings):
     @field_validator("failure_threshold")
     @classmethod
     def validate_failure_threshold(cls, v: int) -> int:
-        """failure_threshold가 너무 작으면 경고."""
+        """Warn when failure_threshold is too small."""
         if v < 3:
             logger.warning(
                 "gate_fault_settings.low_consider_using_avoid",

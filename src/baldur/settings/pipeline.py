@@ -1,8 +1,9 @@
 """
 Adaptive Pipeline Settings - Pydantic v2.
 
-부하 적응형 파이프라인 설정.
-GracefulDegradation 연동으로 시스템 부하에 따라 자동으로 파이프라인을 전환한다.
+Load-adaptive pipeline settings.
+Integrates with GracefulDegradation to switch pipelines automatically based on
+system load.
 
 Environment Variables:
     BALDUR_PIPELINE_ADAPTIVE_ENABLED=false
@@ -21,16 +22,17 @@ logger = structlog.get_logger()
 
 class PipelineSettings(BaseSettings):
     """
-    적응형 파이프라인 설정.
+    Adaptive pipeline settings.
 
-    adaptive_enabled=False(기본값)이면 항상 standard_pipeline을 사용한다.
-    adaptive_enabled=True이면 요청의 tier_id와 시스템 부하에 따라
-    minimal/standard/ha 파이프라인을 자동 선택한다.
+    With adaptive_enabled=False (the default), standard_pipeline is always used.
+    With adaptive_enabled=True, the minimal/standard/ha pipeline is selected
+    automatically based on the request's tier_id and the system load.
 
     Attributes:
-        adaptive_enabled: 적응형 파이프라인 활성화 여부
-        hot_path_tiers: minimal 파이프라인을 적용할 tier 목록
-        audit_sampling_rate: minimal 파이프라인의 감사 샘플링 비율 (1.0=100%)
+        adaptive_enabled: Whether the adaptive pipeline is enabled
+        hot_path_tiers: Tiers the minimal pipeline applies to
+        audit_sampling_rate: Audit sampling rate of the minimal pipeline
+            (1.0=100%)
     """
 
     model_config = make_settings_config("BALDUR_PIPELINE_")
@@ -55,7 +57,7 @@ class PipelineSettings(BaseSettings):
     @field_validator("audit_sampling_rate")
     @classmethod
     def validate_audit_sampling_rate(cls, v: float) -> float:
-        """샘플링 비율이 극단적이면 경고."""
+        """Warn when the sampling rate is extreme."""
         if 0.0 < v < 0.01:
             logger.warning(
                 "pipeline_settings.very_low_audit_sampling",

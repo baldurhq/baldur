@@ -1,8 +1,8 @@
 """
 Air-Gap Settings - Pydantic v2.
 
-Air-Gap 저장소 관련 설정입니다.
-비즈니스 DB와 Baldur 엔진 사이의 중간 저장소 역할을 합니다.
+Air-Gap store settings.
+Acts as the intermediate store between the business DB and the Baldur engine.
 
 Replaces:
 - adapters/airgap/redis_adapter.py:DEFAULT_TTL
@@ -25,15 +25,15 @@ from baldur.settings.base import make_settings_config
 
 class AirGapSettings(BaseSettings):
     """
-    Air-Gap 저장소 설정.
+    Air-Gap store settings.
 
-    Air-Gap은 비즈니스 레이어와 Baldur 엔진 사이의 분리 계층입니다.
-    비즈니스 DB 변경 시 Redis에 요약 상태를 기록하고,
-    Baldur 엔진은 Redis에서만 상태를 조회합니다.
+    Air-Gap is the isolation layer between the business layer and the Baldur
+    engine. A business DB change writes a summary state to Redis, and the
+    Baldur engine reads state only from Redis.
 
     Attributes:
-        redis_ttl: Redis에 저장되는 Air-Gap 상태의 TTL (초)
-        key_prefix: Redis 키 접두사
+        redis_ttl: TTL of the Air-Gap state stored in Redis (seconds)
+        key_prefix: Redis key prefix
     """
 
     model_config = make_settings_config("BALDUR_AIRGAP_")
@@ -59,7 +59,7 @@ class AirGapSettings(BaseSettings):
     @field_validator("key_prefix")
     @classmethod
     def validate_key_prefix(cls, v: str) -> str:
-        """키 접두사가 콜론으로 끝나는지 확인."""
+        """Ensure the key prefix ends with a colon."""
         if not v.endswith(":"):
             return f"{v}:"
         return v

@@ -12,7 +12,7 @@ Environment Variables:
     BALDUR_GOVERNANCE_THRESHOLD_OPERATOR=0.15
     BALDUR_GOVERNANCE_EMERGENCY_EXPIRY_HOURS=8
 
-    # Celery Task 재시도 설정
+    # Celery task retry settings
     BALDUR_GOVERNANCE_EXPIRY_CHECK_MAX_RETRIES=3
     BALDUR_GOVERNANCE_EXPIRY_CHECK_RETRY_DELAY=60
 """
@@ -129,7 +129,7 @@ class GovernanceSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Break Glass (비상 탈출구) - 172_CANARY_ERROR_BUDGET_GATE.md §13.2
+    # Break Glass (emergency escape hatch)
     # ==========================================================================
     break_glass_enabled: bool = Field(
         default=False,
@@ -142,7 +142,7 @@ class GovernanceSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Celery Task 재시도 설정 (check_emergency_mode_expiry_task)
+    # Celery task retry settings (check_emergency_mode_expiry_task)
     # ==========================================================================
     expiry_check_max_retries: int = Field(
         default=3,

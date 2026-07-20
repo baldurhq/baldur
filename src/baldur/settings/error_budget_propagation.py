@@ -1,7 +1,7 @@
 """
 Error Budget Propagation Settings - Pydantic v2.
 
-도메인 간 Error Budget 전파 설정을 관리합니다.
+Manages cross-domain Error Budget propagation settings.
 
 Replaces:
 - services/error_budget/constants.py:DEFAULT_PROPAGATION_DECAY
@@ -12,10 +12,6 @@ Environment Variables:
     BALDUR_ERROR_BUDGET_PROPAGATION_DECAY_PER_HOP=0.5
     BALDUR_ERROR_BUDGET_PROPAGATION_MAX_HOPS=3
     BALDUR_ERROR_BUDGET_PROPAGATION_BASE_MULTIPLIER=5.0
-
-Reference:
-- docs/baldur/middleware_system/92_CONFIG_IMPLEMENTATION_GUIDE.md (Week 2 [7])
-- docs/baldur/middleware_system/91_CONFIG_INVENTORY.md §9.1
 """
 
 from pydantic import Field, field_validator

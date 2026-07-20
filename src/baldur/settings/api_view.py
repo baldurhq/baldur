@@ -1,19 +1,15 @@
 """
 API View Settings - Pydantic v2.
 
-API 페이징 및 필터링 기본 설정입니다.
+Default API pagination and filtering settings.
 
 Replaces:
-- api/django/views 내 default_limit, default_offset, max_limit
+- default_limit, default_offset, max_limit in api/django/views
 
 Environment Variables:
     BALDUR_API_VIEW_DEFAULT_LIMIT=100
     BALDUR_API_VIEW_DEFAULT_OFFSET=0
     BALDUR_API_VIEW_MAX_LIMIT=1000
-
-Reference:
-- docs/baldur/middleware_system/92_CONFIG_IMPLEMENTATION_GUIDE.md (Week 4 [22])
-- docs/baldur/middleware_system/91_CONFIG_INVENTORY.md §3.6
 """
 
 from pydantic import Field, model_validator
@@ -24,19 +20,19 @@ from baldur.settings.base import make_settings_config
 
 class ApiViewSettings(BaseSettings):
     """
-    API View 페이징 및 필터링 설정.
+    API View pagination and filtering settings.
 
-    페이징:
-    - default_limit: 기본 페이지 크기 (100)
-    - default_offset: 기본 시작 위치 (0)
-    - max_limit: 최대 페이지 크기 (1000)
+    Pagination:
+    - default_limit: default page size (100)
+    - default_offset: default start position (0)
+    - max_limit: maximum page size (1000)
 
-    정렬:
-    - default_order: 기본 정렬 순서 ("-created_at")
+    Ordering:
+    - default_order: default sort order ("-created_at")
 
-    기타:
-    - max_events: XTest 최대 이벤트 수 (500)
-    - max_incidents: XTest 최대 인시던트 수 (100)
+    Other:
+    - max_events: maximum number of XTest events (500)
+    - max_incidents: maximum number of XTest incidents (100)
     """
 
     model_config = make_settings_config("BALDUR_API_VIEW_")
@@ -107,7 +103,7 @@ class ApiViewSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Auto-Tuning Views - from views/auto_tuning.py (Phase 3 리팩토링)
+    # Auto-Tuning Views - from views/auto_tuning.py (Phase 3 refactor)
     # ==========================================================================
     auto_tuning_export_limit: int = Field(
         default=1000,
@@ -124,7 +120,7 @@ class ApiViewSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # XTest Observability Views - from views/xtest/observability.py (Phase 3 리팩토링)
+    # XTest Observability Views - from views/xtest/observability.py (Phase 3)
     # ==========================================================================
     xtest_timeline_default_limit: int = Field(
         default=50,
@@ -133,7 +129,7 @@ class ApiViewSettings(BaseSettings):
         description="Default limit for XTest timeline queries",
     )
 
-    # Postmortem 히스토리 limit (새 필드명)
+    # Postmortem history limit (new field name)
     postmortem_history_limit: int = Field(
         default=100,
         ge=50,
@@ -142,7 +138,7 @@ class ApiViewSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Auto Postmortem - CB CLOSED 시 자동 Post-mortem 생성 (새 필드명)
+    # Auto Postmortem - automatic post-mortem on CB CLOSED (new field name)
     # ==========================================================================
     auto_postmortem_min_duration: int = Field(
         default=30,
@@ -152,7 +148,7 @@ class ApiViewSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Post-mortem Notification - CB 복구 후 Post-mortem 알림
+    # Post-mortem Notification - post-mortem alert after CB recovery
     # ==========================================================================
     postmortem_notification_min_duration: int = Field(
         default=60,
@@ -171,7 +167,7 @@ class ApiViewSettings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_limits(self) -> "ApiViewSettings":
-        """default_limit이 max_limit보다 작은지 검증."""
+        """Validate that default_limit does not exceed max_limit."""
         if self.default_limit > self.max_limit:
             raise ValueError(
                 f"default_limit ({self.default_limit}) must be less than or equal to "
@@ -181,7 +177,7 @@ class ApiViewSettings(BaseSettings):
 
 
 # ==========================================================================
-# Singleton 관리
+# Singleton management
 # ==========================================================================
 
 

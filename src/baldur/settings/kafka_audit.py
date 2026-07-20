@@ -1,17 +1,17 @@
 """
 Kafka Audit Settings.
 
-고처리량 감사 이벤트를 Kafka로 스트리밍하기 위한 설정.
-confluent-kafka (librdkafka 기반) Producer 설정을 제공합니다.
+Configuration for streaming high-throughput audit events to Kafka.
+Provides confluent-kafka (librdkafka-based) Producer settings.
 
-주요 기능:
-- Idempotent Producer (중복 전송 방지)
-- 배치 전송 (linger_ms, batch_size)
-- 압축 지원 (snappy, lz4, zstd)
-- Hot Partition 방지 (솔트 파티셔닝)
-- TLS/SASL 인증
+Key capabilities:
+- Idempotent Producer (prevents duplicate delivery)
+- Batched delivery (linger_ms, batch_size)
+- Compression support (snappy, lz4, zstd)
+- Hot partition prevention (salted partitioning)
+- TLS/SASL authentication
 
-환경 변수 접두사: BALDUR_KAFKA_AUDIT_
+Environment variable prefix: BALDUR_KAFKA_AUDIT_
 
 Usage:
     from baldur.settings.kafka_audit import KafkaAuditSettings
@@ -32,7 +32,7 @@ from baldur.settings.base import make_settings_config
 
 
 class SerializationFormat(str, Enum):
-    """직렬화 포맷."""
+    """Serialization format."""
 
     JSON = "json"
     AVRO = "avro"
@@ -41,9 +41,9 @@ class SerializationFormat(str, Enum):
 
 class KafkaAuditSettings(BaseSettings):
     """
-    Kafka 감사 로그 설정.
+    Kafka audit log configuration.
 
-    환경 변수 예시:
+    Environment variable examples:
         BALDUR_KAFKA_AUDIT_BOOTSTRAP_SERVERS=kafka1:9092,kafka2:9092
         BALDUR_KAFKA_AUDIT_TOPIC=baldur.audit.events
         BALDUR_KAFKA_AUDIT_ENABLE_IDEMPOTENCE=true
@@ -100,7 +100,7 @@ class KafkaAuditSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Hot Partition 방지
+    # Hot partition prevention
     # ==========================================================================
     partition_salt_enabled: bool = Field(
         default=True,
@@ -147,14 +147,14 @@ class KafkaAuditSettings(BaseSettings):
         description="Retry backoff time (ms)",
     )
     message_timeout_ms: int = Field(
-        default=30000,  # 30초
+        default=30000,  # 30s
         ge=1000,
         le=120000,
         description="Message delivery timeout (ms)",
     )
 
     # ==========================================================================
-    # Buffer (Producer Lag 모니터링용)
+    # Buffer (for Producer Lag monitoring)
     # ==========================================================================
     buffer_memory: int = Field(
         default=33554432,  # 32MB
@@ -190,7 +190,7 @@ class KafkaAuditSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Security: SASL (프로덕션 인증)
+    # Security: SASL (production authentication)
     # ==========================================================================
     sasl_mechanism: str = Field(
         default="SCRAM-SHA-512",
@@ -236,10 +236,10 @@ class KafkaAuditSettings(BaseSettings):
 
     def get_producer_config(self) -> dict:
         """
-        confluent-kafka Producer 설정 딕셔너리 반환.
+        Return the confluent-kafka Producer configuration dictionary.
 
         Returns:
-            Producer 생성에 필요한 설정 딕셔너리
+            Configuration dictionary needed to construct a Producer
         """
         import os
 
@@ -247,26 +247,26 @@ class KafkaAuditSettings(BaseSettings):
             # Connection
             "bootstrap.servers": ",".join(self.bootstrap_servers),
             "client.id": f"baldur-audit-{os.getpid()}",
-            # Idempotent Producer (Exactly-once 보장)
+            # Idempotent Producer (exactly-once guarantee)
             "enable.idempotence": self.enable_idempotence,
             "acks": "all" if self.enable_idempotence else self.acks,
             "max.in.flight.requests.per.connection": 5,
-            # 배치 설정 (성능 최적화)
+            # Batching (performance tuning)
             "batch.size": self.batch_size_bytes,
             "linger.ms": self.linger_ms,
-            # 압축
+            # Compression
             "compression.type": self.compression_type,
-            # 신뢰성
+            # Reliability
             "retries": self.retries,
             "retry.backoff.ms": self.retry_backoff_ms,
-            # 버퍼 (Producer Lag 모니터링용)
+            # Buffer (for Producer Lag monitoring)
             "queue.buffering.max.messages": self.max_queue_messages,
             "queue.buffering.max.kbytes": self.buffer_memory // 1024,
-            # 메시지 전송 타임아웃
+            # Message delivery timeout
             "message.timeout.ms": self.message_timeout_ms,
         }
 
-        # TLS/SASL 인증 (프로덕션용)
+        # TLS/SASL authentication (for production)
         if self.security_protocol != "PLAINTEXT":
             config["security.protocol"] = self.security_protocol
 

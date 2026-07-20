@@ -1,20 +1,17 @@
 """
 Corruption Shield Settings - Pydantic v2.
 
-데이터 무결성 보호를 위한 Corruption Shield 설정입니다.
+Corruption Shield settings for data integrity protection.
 
 Replaces:
-- services/corruption_shield/config.py:CorruptionShieldConfig (하드코딩된 기본값)
+- services/corruption_shield/config.py:CorruptionShieldConfig (hardcoded
+  defaults)
 
 Environment Variables:
     BALDUR_CORRUPTION_SHIELD_Z_SCORE_THRESHOLD=3.0
     BALDUR_CORRUPTION_SHIELD_IQR_MULTIPLIER=1.5
     BALDUR_CORRUPTION_SHIELD_MIN_SAMPLES_FOR_ANOMALY=10
     BALDUR_CORRUPTION_SHIELD_MAX_AMOUNT=100000000
-
-Reference:
-- docs/baldur/middleware_system/92_CONFIG_IMPLEMENTATION_GUIDE.md (Week 3 [14])
-- docs/baldur/middleware_system/91_CONFIG_INVENTORY.md §9.5
 """
 
 import structlog
@@ -29,12 +26,12 @@ logger = structlog.get_logger()
 
 class CorruptionShieldSettings(BaseSettings):
     """
-    Corruption Shield 설정.
+    Corruption Shield settings.
 
-    3계층 데이터 무결성 보호:
-    - L1: 스키마 검증 (필수 필드, 타입)
-    - L2: 비즈니스 규칙 (금액 범위, 허용 상태)
-    - L3: 이상치 탐지 (Z-Score, IQR)
+    Three-layer data integrity protection:
+    - L1: Schema validation (required fields, types)
+    - L2: Business rules (amount range, allowed statuses)
+    - L3: Anomaly detection (Z-score, IQR)
     """
 
     model_config = make_settings_config("BALDUR_CORRUPTION_SHIELD_")
@@ -165,13 +162,13 @@ class CorruptionShieldSettings(BaseSettings):
     @field_validator("z_score_threshold")
     @classmethod
     def _warn_z_score(cls, v: float) -> float:
-        """Z-Score가 너무 낮으면 경고."""
+        """Warn when the Z-score is too low."""
         return warn_below(2.0, "corruption_shield.z_score_too_sensitive")(v)
 
     @field_validator("min_amount", "max_amount")
     @classmethod
     def validate_amount_range(cls, v: int, info) -> int:
-        """금액 범위 로깅."""
+        """Log the amount range."""
         if info.field_name == "max_amount" and v > 500_000_000:
             logger.info(
                 "corruption_shield.large_transaction_amount_set",

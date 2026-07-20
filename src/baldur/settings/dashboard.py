@@ -1,7 +1,7 @@
 """
 Dashboard Settings - Pydantic v2.
 
-대시보드 캐시 TTL 및 관련 설정입니다.
+Dashboard cache TTL and related settings.
 
 Replaces:
 - services/dashboard_service.py:CACHE_TTL_SECONDS, CACHE_TTL_STATUS, CACHE_TTL_ACTIVITY
@@ -12,10 +12,6 @@ Environment Variables:
     BALDUR_DASHBOARD_CACHE_TTL_SECONDS=30
     BALDUR_DASHBOARD_CACHE_TTL_STATUS=15
     BALDUR_DASHBOARD_CACHE_TTL_ACTIVITY=60
-
-Reference:
-- docs/baldur/middleware_system/92_CONFIG_IMPLEMENTATION_GUIDE.md (Week 4 [18])
-- docs/baldur/middleware_system/91_CONFIG_INVENTORY.md §3.1
 """
 
 from pydantic import Field, field_validator
@@ -26,15 +22,15 @@ from baldur.settings.base import make_settings_config
 
 class DashboardSettings(BaseSettings):
     """
-    대시보드 캐시 및 표시 설정.
+    Dashboard cache and display settings.
 
-    캐시 TTL 전략:
-    - cache_ttl_seconds: 대시보드 기본 데이터 (30초)
-    - cache_ttl_status: 상태 카운트 (15초, 더 자주 갱신)
-    - cache_ttl_activity: 활동 통계 (60초, 덜 자주 갱신)
-    - tracker_cache_ttl: Emergency Tracker 캐시 (30초)
-    - health_penalty_cache_ttl: Health Penalty 캐시 (5초, 빠른 반응)
-    - stale_threshold_minutes: 데이터 오래됨 임계치 (30분)
+    Cache TTL strategy:
+    - cache_ttl_seconds: dashboard default data (30s)
+    - cache_ttl_status: status counts (15s, refreshed more often)
+    - cache_ttl_activity: activity statistics (60s, refreshed less often)
+    - tracker_cache_ttl: Emergency Tracker cache (30s)
+    - health_penalty_cache_ttl: Health Penalty cache (5s, fast reaction)
+    - stale_threshold_minutes: stale data threshold (30 min)
     """
 
     model_config = make_settings_config("BALDUR_DASHBOARD_")
@@ -111,7 +107,7 @@ class DashboardSettings(BaseSettings):
     @field_validator("cache_prefix")
     @classmethod
     def validate_cache_prefix(cls, v: str) -> str:
-        """캐시 접두사가 콜론으로 끝나는지 확인."""
+        """Ensure the cache prefix ends with a colon."""
         if not v.endswith(":"):
             return f"{v}:"
         return v

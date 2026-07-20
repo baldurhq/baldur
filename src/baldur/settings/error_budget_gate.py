@@ -1,18 +1,16 @@
 """
 Error Budget Gate Settings - Pydantic v2.
 
-에러 예산 게이트 설정.
-자동화 허용/차단을 에러 예산 기반으로 결정하는 게이트 설정.
+Error budget gate configuration.
+Gate settings that decide whether automation is allowed or blocked based on the
+remaining error budget.
 
-Moved from: services/error_budget_gate/config.py (BaseSettings 전환)
+Moved from: services/error_budget_gate/config.py (converted to BaseSettings)
 
 Environment Variables:
     BALDUR_ERROR_BUDGET_GATE_ENABLED=true
     BALDUR_ERROR_BUDGET_GATE_CRITICAL_THRESHOLD_PERCENT=10.0
     BALDUR_ERROR_BUDGET_GATE_FAIL_OPEN=true
-
-Reference:
-- docs/baldur/12_ERROR_BUDGET.md
 """
 
 from __future__ import annotations
@@ -28,15 +26,17 @@ from baldur.settings.field_types import Percentage
 
 class ErrorBudgetGateSettings(BaseSettings):
     """
-    에러 예산 게이트 설정.
+    Error budget gate configuration.
 
     Attributes:
-        enabled: 게이트 활성화 여부 (False면 항상 자동화 허용)
-        critical_threshold_percent: 이 값 미만이면 자동화 차단 (기본: 10%)
-        warning_threshold_percent: 이 값 미만이면 경고 표시 (기본: 20%)
-        threshold_hysteresis_buffer_percent: 임계치 복구 시 버퍼 (플래핑 방지, 기본: 2%)
-        fail_open: 에러 예산 조회 실패 시 자동화 허용 여부 (기본: True)
-        cache_ttl_seconds: 에러 예산 캐시 TTL (기본: 30초)
+        enabled: Whether the gate is active (False always allows automation)
+        critical_threshold_percent: Block automation below this value (default: 10%)
+        warning_threshold_percent: Show a warning below this value (default: 20%)
+        threshold_hysteresis_buffer_percent: Buffer applied on threshold recovery
+            (prevents flapping, default: 2%)
+        fail_open: Whether to allow automation when the error budget query fails
+            (default: True)
+        cache_ttl_seconds: Error budget cache TTL (default: 30 seconds)
     """
 
     model_config = make_settings_config("BALDUR_ERROR_BUDGET_GATE_")
@@ -70,7 +70,7 @@ class ErrorBudgetGateSettings(BaseSettings):
         description="Error budget cache TTL (seconds)",
     )
 
-    # 티어별 차등 임계치
+    # Per-tier differentiated thresholds
     tier_thresholds_enabled: bool = Field(
         default=False,
         description="Enable per-tier differentiated thresholds (False uses global thresholds)",
@@ -93,7 +93,7 @@ class ErrorBudgetGateSettings(BaseSettings):
         description="Per-tier differentiated thresholds. Based on VALID_TIER_IDS (service criticality).",
     )
 
-    # 리전별 임계치 오버라이드
+    # Per-region threshold overrides
     regional_thresholds_enabled: bool = Field(
         default=False,
         description="Enable per-region threshold overrides",
@@ -107,7 +107,7 @@ class ErrorBudgetGateSettings(BaseSettings):
         ),
     )
 
-    # Fail-Open Rate Limiting (최소한의 제약이 있는 방임)
+    # Fail-Open Rate Limiting (permissive, but with a minimal constraint)
     fail_open_rate_limit_enabled: bool = Field(
         default=False,
         description="Apply rate limiting during fail-open mode",
@@ -125,7 +125,7 @@ class ErrorBudgetGateSettings(BaseSettings):
         description="Rate limit sliding window size (seconds)",
     )
 
-    # Circuit Breaker (빠른 실패 처리)
+    # Circuit Breaker (fast failure handling)
     circuit_breaker_enabled: bool = Field(
         default=False,
         description="Enable Circuit Breaker",
@@ -143,7 +143,7 @@ class ErrorBudgetGateSettings(BaseSettings):
         description="Circuit recovery wait time (seconds)",
     )
 
-    # 알림 설정
+    # Alert settings
     alert_on_fail_open: bool = Field(
         default=True,
         description="Send alert when fail-open is triggered",
@@ -156,7 +156,7 @@ class ErrorBudgetGateSettings(BaseSettings):
     )
 
     def to_dict(self) -> dict[str, Any]:
-        """설정을 딕셔너리로 변환."""
+        """Convert the configuration to a dictionary."""
         return {
             "enabled": self.enabled,
             "critical_threshold_percent": self.critical_threshold_percent,
@@ -180,9 +180,9 @@ class ErrorBudgetGateSettings(BaseSettings):
 
     def get_thresholds_for_tier(self, tier_id: str) -> tuple[float, float]:
         """
-        티어별 (critical_threshold, warning_threshold) 반환.
+        Return the per-tier (critical_threshold, warning_threshold).
 
-        tier_thresholds_enabled=False면 글로벌 임계치 반환.
+        Returns the global thresholds when tier_thresholds_enabled=False.
 
         Args:
             tier_id: "critical" | "standard" | "non_essential"
@@ -208,12 +208,12 @@ class ErrorBudgetGateSettings(BaseSettings):
 
     def get_thresholds_for_region(self, region: str) -> tuple[float, float]:
         """
-        리전별 (critical_threshold, warning_threshold) 반환.
+        Return the per-region (critical_threshold, warning_threshold).
 
-        regional_thresholds_enabled=False면 글로벌 임계치 반환.
+        Returns the global thresholds when regional_thresholds_enabled=False.
 
         Args:
-            region: 리전 식별자 (e.g., "seoul", "tokyo")
+            region: Region identifier (e.g., "seoul", "tokyo")
 
         Returns:
             (critical_threshold_percent, warning_threshold_percent)
@@ -240,17 +240,17 @@ class ErrorBudgetGateSettings(BaseSettings):
         region: str | None = None,
     ) -> tuple[float, float]:
         """
-        최종 적용 임계치 반환.
+        Return the thresholds that actually apply.
 
-        우선순위:
-        1. regional_thresholds[region] (리전 명시 오버라이드)
-        2. tier_thresholds[tier_id] (티어별 기본값)
+        Priority:
+        1. regional_thresholds[region] (explicit region override)
+        2. tier_thresholds[tier_id] (per-tier default)
         3. global (critical_threshold_percent, warning_threshold_percent)
 
         Returns:
             (critical_threshold_percent, warning_threshold_percent)
         """
-        # 1단계: 리전 오버라이드 확인
+        # Step 1: check the region override
         if region and self.regional_thresholds_enabled:
             region_config = self.regional_thresholds.get(region)
             if region_config:
@@ -265,16 +265,16 @@ class ErrorBudgetGateSettings(BaseSettings):
                     ),
                 )
 
-        # 2단계: 티어별 확인
+        # Step 2: check the per-tier values
         if tier_id and self.tier_thresholds_enabled:
             return self.get_thresholds_for_tier(tier_id)
 
-        # 3단계: 글로벌 기본값
+        # Step 3: global defaults
         return self.critical_threshold_percent, self.warning_threshold_percent
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ErrorBudgetGateSettings:
-        """딕셔너리에서 설정 생성 (runtime config 지원)."""
+        """Build the configuration from a dictionary (runtime config support)."""
         valid_keys = {k: v for k, v in data.items() if k in cls.model_fields}
         return cls(**valid_keys)
 

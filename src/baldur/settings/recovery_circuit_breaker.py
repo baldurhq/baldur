@@ -11,10 +11,6 @@ Environment Variables:
     BALDUR_RECOVERY_CB_SAMPLING_WINDOW_SECONDS=60
     BALDUR_RECOVERY_CB_MIN_SAMPLES=10
     ... etc
-
-Reference:
-- docs/baldur/middleware_system/92_CONFIG_IMPLEMENTATION_GUIDE.md
-- docs/baldur/middleware_system/77_RECOVERY_COORDINATOR.md#8.1
 """
 
 import structlog
@@ -36,8 +32,8 @@ class RecoveryCircuitBreakerSettings(BaseSettings):
     """
     Recovery Circuit Breaker configuration with validation.
 
-    복구 진행 중 지표가 다시 악화되면 즉시 복구를 중단하고
-    Emergency 상태로 재-에스컬레이션합니다.
+    If metrics degrade again while recovery is in progress, recovery is halted
+    immediately and the system re-escalates to the Emergency state.
 
     All defaults match:
     - services/coordination/recovery_circuit_breaker.py:RecoveryCircuitBreakerConfig

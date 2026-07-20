@@ -1,17 +1,14 @@
 """
 Post-mortem Settings - Pydantic v2.
 
-Post-mortem 리포트 생성 및 자동 트리거 관련 설정입니다.
+Configuration for post-mortem report generation and auto-triggering.
 
-X-Test 모듈에서 분리된 독립적인 설정으로, 프로덕션 환경에서도 사용됩니다.
+Split out of the X-Test module as standalone settings; also used in production.
 
 Environment Variables:
     BALDUR_POSTMORTEM_HISTORY_LIMIT=100
     BALDUR_POSTMORTEM_AUTO_ENABLED=false
     BALDUR_POSTMORTEM_AUTO_MIN_DURATION=30
-
-Reference:
-- docs/baldur/middleware_system/134_POSTMORTEM_NEW_MODULE_STRUCTURE.md
 """
 
 from __future__ import annotations
@@ -24,27 +21,27 @@ from baldur.settings.base import make_settings_config
 
 class PostmortemSettings(BaseSettings):
     """
-    Post-mortem 리포트 생성 및 자동 트리거 설정.
+    Post-mortem report generation and auto-trigger settings.
 
-    히스토리 조회:
-    - history_limit: Post-mortem 생성 시 조회할 이벤트 수 (100)
+    History lookup:
+    - history_limit: Number of events queried when generating a post-mortem (100)
 
-    자동 생성:
-    - auto_enabled: CB CLOSED 시 자동 Post-mortem 생성 (False)
-    - auto_min_duration: 자동 생성 최소 인시던트 지속 시간 (30초)
+    Auto generation:
+    - auto_enabled: Generate a post-mortem automatically on CB CLOSED (False)
+    - auto_min_duration: Minimum incident duration for auto generation (30s)
 
-    알림:
-    - notification_enabled: Post-mortem 생성 시 알림 발송 (True)
-    - notification_min_duration: 알림 발송 최소 인시던트 지속 시간 (60초)
+    Notification:
+    - notification_enabled: Send a notification on post-mortem generation (False)
+    - notification_min_duration: Minimum incident duration for notification (60s)
 
-    인시던트 목록:
-    - incidents_default_limit: 인시던트 목록 조회 기본 limit (10)
+    Incident list:
+    - incidents_default_limit: Default limit for incident list queries (10)
     """
 
     model_config = make_settings_config("BALDUR_POSTMORTEM_")
 
     # ==========================================================================
-    # History Limit - Post-mortem 생성 시 이벤트 조회 개수
+    # History Limit - number of events queried when generating a post-mortem
     # ==========================================================================
     history_limit: int = Field(
         default=100,
@@ -54,7 +51,7 @@ class PostmortemSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Auto Generation - CB CLOSED 시 자동 Post-mortem 생성
+    # Auto Generation - automatic post-mortem generation on CB CLOSED
     # ==========================================================================
     auto_enabled: bool = Field(
         default=False,
@@ -69,7 +66,7 @@ class PostmortemSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Notification - Post-mortem 생성 시 알림 발송
+    # Notification - notification sent on post-mortem generation
     # ==========================================================================
     notification_enabled: bool = Field(
         default=False,
@@ -84,7 +81,7 @@ class PostmortemSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Incidents List - 인시던트 목록 조회
+    # Incidents List - incident list queries
     # ==========================================================================
     incidents_default_limit: int = Field(
         default=10,
@@ -94,7 +91,7 @@ class PostmortemSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Incident Group - 연쇄 CB 이벤트 그룹핑
+    # Incident Group - grouping of cascading CB events
     # ==========================================================================
     incident_group_enabled: bool = Field(
         default=False,
@@ -123,7 +120,7 @@ class PostmortemSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Notification Aggregation - 알림 집계 (Alert Storm 방지)
+    # Notification Aggregation - alert aggregation (prevents alert storms)
     # ==========================================================================
     notification_aggregation_enabled: bool = Field(
         default=False,
@@ -145,10 +142,10 @@ class PostmortemSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Timeline Snapshot - Postmortem 타임라인 스냅샷 보존
+    # Timeline Snapshot - post-mortem timeline snapshot retention
     # ==========================================================================
 
-    # Prometheus 쿼리 설정
+    # Prometheus query settings
     snapshot_prometheus_enabled: bool = Field(
         default=False,
         description="Enable Prometheus peak metrics query",
@@ -166,7 +163,7 @@ class PostmortemSettings(BaseSettings):
         description="Prometheus query timeout (seconds)",
     )
 
-    # 로그 수집 설정
+    # Log collection settings
     snapshot_logs_enabled: bool = Field(
         default=False,
         description="Enable error log collection",
@@ -186,7 +183,7 @@ class PostmortemSettings(BaseSettings):
         description="Maximum log message length",
     )
 
-    # Grafana 대시보드 링크 설정
+    # Grafana dashboard link settings
     snapshot_grafana_base_url: str = Field(
         default="http://grafana:3000",
         description="Grafana server URL",
@@ -198,7 +195,7 @@ class PostmortemSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Deployment Correlator - 배포 연관성 분석
+    # Deployment Correlator - deployment correlation analysis
     # ==========================================================================
     deployment_correlator_enabled: bool = Field(
         default=False,
@@ -225,7 +222,7 @@ class PostmortemSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Revision/Versioning - Postmortem 리비전(버전) 관리
+    # Revision/Versioning - post-mortem revision management
     # ==========================================================================
     versioning_enabled: bool = Field(
         default=False,
@@ -252,7 +249,7 @@ class PostmortemSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Deep Links - Postmortem 딥링크 URL 설정
+    # Deep Links - post-mortem deep link URL settings
     # ==========================================================================
     deep_links_enabled: bool = Field(
         default=False,
@@ -280,7 +277,7 @@ class PostmortemSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Notification Channels - 알림 채널 설정
+    # Notification Channels - notification channel settings
     # ==========================================================================
     slack_webhook_url: str = Field(
         default="",
@@ -288,7 +285,7 @@ class PostmortemSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # CascadeEvent Integration - 감사 증적 연결
+    # CascadeEvent Integration - audit evidence linking
     # ==========================================================================
     cascade_event_integration_enabled: bool = Field(
         default=False,

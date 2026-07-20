@@ -1,14 +1,14 @@
 """
 Rate Limit Throttle Integration Settings - Pydantic v2.
 
-429 응답과 AdaptiveThrottle 간의 연동 설정을 정의합니다.
+Defines how 429 responses feed back into AdaptiveThrottle.
 
 Features:
-    - 429 발생 시 throttle limit 자동 감소
-    - 연속 429 횟수별 감소 비율 설정
-    - Key-Service 매핑 (인접 간섭 방지)
-    - Recovery 전략 설정
-    - 에스컬레이션 설정
+    - Automatic throttle limit reduction on a 429
+    - Reduction ratio per consecutive 429 count
+    - Key-service mapping (prevents interference between neighbours)
+    - Recovery strategy settings
+    - Escalation settings
 
 Environment Variables:
     BALDUR_RATE_LIMIT_THROTTLE_INTEGRATION_ENABLED=true
@@ -32,16 +32,16 @@ from baldur.settings.field_types import (
 
 class RateLimitThrottleIntegrationSettings(BaseSettings):
     """
-    429-Throttle 연동 설정.
+    429-throttle integration settings.
 
-    외부 API의 429 응답 수신 시 AdaptiveThrottle의 limit을
-    자동으로 조정하기 위한 설정입니다.
+    Settings for automatically adjusting the AdaptiveThrottle limit when a
+    429 response is received from an external API.
     """
 
     model_config = make_settings_config("BALDUR_RATE_LIMIT_THROTTLE_INTEGRATION_")
 
     # =========================================================================
-    # 기본 활성화 설정
+    # Base enablement
     # =========================================================================
     enabled: bool = Field(
         default=True,
@@ -49,7 +49,7 @@ class RateLimitThrottleIntegrationSettings(BaseSettings):
     )
 
     # =========================================================================
-    # 연속 429 횟수별 limit 감소 비율
+    # Limit reduction ratio per consecutive 429 count
     # =========================================================================
     reduction_ratio_1: float = Field(
         default=0.8,
@@ -83,7 +83,7 @@ class RateLimitThrottleIntegrationSettings(BaseSettings):
     )
 
     # =========================================================================
-    # EventBus 디바운싱 설정
+    # EventBus debouncing
     # =========================================================================
     debounce_window_seconds: float = Field(
         default=5.0,
@@ -93,25 +93,25 @@ class RateLimitThrottleIntegrationSettings(BaseSettings):
     )
 
     # =========================================================================
-    # Key-Service 매핑 (인접 간섭 방지)
+    # Key-service mapping (prevents interference between neighbours)
     # =========================================================================
     default_service: str = Field(
         default="default",
         description="Default service for unmapped keys",
     )
 
-    # Note: key_to_service_mapping은 환경변수로 설정하기 어려우므로
-    # 코드에서 직접 설정하거나 별도 설정 파일 사용
+    # Note: key_to_service_mapping is awkward to express as an env var, so set it
+    # directly in code or from a separate config file.
 
     def get_reduction_ratio(self, consecutive_429s: int) -> float:
         """
-        연속 429 횟수에 따른 감소 비율 반환.
+        Return the reduction ratio for the given consecutive 429 count.
 
         Args:
-            consecutive_429s: 연속 429 횟수
+            consecutive_429s: number of consecutive 429s
 
         Returns:
-            유지 비율 (예: 0.8 = 20% 감소)
+            Retention ratio (e.g. 0.8 = 20% reduction)
         """
         if consecutive_429s >= 3:
             return self.reduction_ratio_3

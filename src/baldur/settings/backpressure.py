@@ -1,12 +1,12 @@
 """
 Backpressure Settings - Pydantic v2.
 
-Auto-Scaling & Backpressure 설정.
-트래픽 제어용 설정 (기존 ScaleSettings와 역할 분리).
+Auto-Scaling & Backpressure configuration.
+Traffic control settings (role-separated from the existing ScaleSettings).
 
-Moved from: scaling/config.py (위치 통일)
+Moved from: scaling/config.py (location unification)
 
-환경변수 접두사: BALDUR_BACKPRESSURE_
+Environment variable prefix: BALDUR_BACKPRESSURE_
 """
 
 from __future__ import annotations
@@ -26,17 +26,17 @@ from baldur.settings.field_types import (
 
 class BackpressureLevel(str, Enum):
     """
-    Backpressure 레벨.
+    Backpressure level.
 
-    큐 크기에 따라 시스템 부하 상태를 나타냅니다.
+    Represents the system load state derived from queue size.
     Ordering: NONE < LOW < MEDIUM < HIGH < CRITICAL (severity-based).
     """
 
-    NONE = "none"  # 정상 상태
-    LOW = "low"  # 약간 과부하
-    MEDIUM = "medium"  # 중간 과부하
-    HIGH = "high"  # 높은 과부하
-    CRITICAL = "critical"  # 위험 (긴급 조치 필요)
+    NONE = "none"  # Normal
+    LOW = "low"  # Slightly overloaded
+    MEDIUM = "medium"  # Moderately overloaded
+    HIGH = "high"  # Heavily overloaded
+    CRITICAL = "critical"  # Critical (emergency action required)
 
     @property
     def severity(self) -> int:
@@ -75,37 +75,37 @@ _BP_SEVERITY_ORDER: dict[BackpressureLevel, int] = {
 
 class BackpressureStrategy(str, Enum):
     """
-    Backpressure 전략.
+    Backpressure strategy.
 
-    과부하 시 어떤 방식으로 대응할지 결정합니다.
+    Decides how to respond when the system is overloaded.
     """
 
-    DROP_OLDEST = "drop_oldest"  # 오래된 항목 삭제
-    DROP_NEWEST = "drop_newest"  # 최신 항목 삭제
-    REJECT = "reject"  # 거부 (HTTP 503)
-    THROTTLE = "throttle"  # Rate Limit 적용
-    QUEUE = "queue"  # 대기열에 추가
+    DROP_OLDEST = "drop_oldest"  # Drop the oldest items
+    DROP_NEWEST = "drop_newest"  # Drop the newest items
+    REJECT = "reject"  # Reject (HTTP 503)
+    THROTTLE = "throttle"  # Apply rate limiting
+    QUEUE = "queue"  # Enqueue for later
 
 
 # =============================================================================
-# AIMD (Additive Increase, Multiplicative Decrease) 패턴
-# 레벨별 Rate 감소 배율
+# AIMD (Additive Increase, Multiplicative Decrease) pattern
+# Per-level rate reduction multipliers
 # =============================================================================
 
 LEVEL_RATE_MULTIPLIERS: dict[BackpressureLevel, float] = {
-    BackpressureLevel.NONE: 1.0,  # 정상: 100% 처리율
-    BackpressureLevel.LOW: 1.0,  # 약간: 유지
-    BackpressureLevel.MEDIUM: 0.9,  # 중간: 90%로 감소
-    BackpressureLevel.HIGH: 0.8,  # 높음: 80%로 감소
-    BackpressureLevel.CRITICAL: 0.5,  # 위험: 50%로 급감 (AIMD의 MD 부분)
+    BackpressureLevel.NONE: 1.0,  # Normal: 100% throughput
+    BackpressureLevel.LOW: 1.0,  # Slight: unchanged
+    BackpressureLevel.MEDIUM: 0.9,  # Moderate: reduce to 90%
+    BackpressureLevel.HIGH: 0.8,  # High: reduce to 80%
+    BackpressureLevel.CRITICAL: 0.5,  # Critical: drop to 50% (the MD in AIMD)
 }
 
 
 class BackpressureSettings(BaseSettings):
     """
-    Auto-Scaling & Backpressure 설정.
+    Auto-Scaling & Backpressure configuration.
 
-    환경변수:
+    Environment variables:
         BALDUR_BACKPRESSURE_ENABLED=true
         BALDUR_BACKPRESSURE_DEFAULT_STRATEGY=throttle
         BALDUR_BACKPRESSURE_MAX_RATE_PER_SECOND=1000
@@ -114,19 +114,19 @@ class BackpressureSettings(BaseSettings):
 
     model_config = make_settings_config("BALDUR_BACKPRESSURE_")
 
-    # Backpressure 활성화
+    # Backpressure activation
     backpressure_enabled: bool = Field(
         default=False,
         description="Enable/disable backpressure",
     )
 
-    # 기본 전략
+    # Default strategy
     default_strategy: BackpressureStrategy = Field(
         default=BackpressureStrategy.THROTTLE,
         description="Default backpressure strategy",
     )
 
-    # 큐 임계치 (큐 크기에 따른 레벨 결정)
+    # Queue thresholds (level determined by queue size)
     queue_low_threshold: int = Field(
         default=100,
         ge=1,
@@ -148,7 +148,7 @@ class BackpressureSettings(BaseSettings):
         description="CRITICAL level queue size threshold",
     )
 
-    # Rate Limit (처리/초)
+    # Rate limit (items processed per second)
     max_rate_per_second: float = Field(
         default=1000.0,
         ge=1.0,
@@ -160,7 +160,7 @@ class BackpressureSettings(BaseSettings):
         description="Minimum processing rate (items/second)",
     )
 
-    # Rate 조절 파라미터
+    # Rate adjustment parameters
     rate_increase_factor: float = Field(
         default=1.1,
         ge=1.0,
@@ -173,7 +173,7 @@ class BackpressureSettings(BaseSettings):
         description="Rate adjustment interval (seconds)",
     )
 
-    # 큐 크기 캐싱 (Redis 네트워크 지연 방지)
+    # Queue size caching (avoids Redis network latency)
     queue_size_cache_ttl_seconds: float = Field(
         default=2.0,
         ge=0.5,
@@ -181,7 +181,7 @@ class BackpressureSettings(BaseSettings):
         description="Queue size cache TTL (seconds)",
     )
 
-    # Prometheus 메트릭 설정
+    # Prometheus metrics settings
     metrics_enabled: bool = Field(
         default=False,
         description="Enable Prometheus metrics",
@@ -191,7 +191,7 @@ class BackpressureSettings(BaseSettings):
         description="Metrics name prefix",
     )
 
-    # HPA 설정
+    # HPA settings
     hpa_enabled: bool = Field(
         default=False,
         description="Enable HPA custom metrics",
@@ -214,7 +214,7 @@ class BackpressureSettings(BaseSettings):
         description="Enable graceful degradation",
     )
 
-    # CPU 사용률 기반 Rate 감쇠 임계치
+    # CPU-usage-based rate decay thresholds
     resource_cpu_high_threshold: Percentage = Field(
         default=80.0,
         description="Reduce rate to 50% when CPU usage exceeds this threshold",
@@ -224,7 +224,7 @@ class BackpressureSettings(BaseSettings):
         description="Reduce rate to 10% when CPU usage exceeds this threshold",
     )
 
-    # 503 응답 커스터마이징
+    # 503 response customization
     reject_message: str = Field(
         default="Service temporarily unavailable due to high load",
         description="Response message for 503 rejection",
@@ -235,9 +235,9 @@ class BackpressureSettings(BaseSettings):
     )
 
     # =========================================================================
-    # Priority Watermark — 토큰 잔량 비율 임계치
-    # 현재 토큰 비율이 이 값 미만이면 해당 tier 요청을 거부한다.
-    # 환경변수 예: BALDUR_BACKPRESSURE_WATERMARK_STANDARD=0.4
+    # Priority Watermark — remaining-token ratio thresholds
+    # Requests of a tier are rejected when the current token ratio falls below
+    # its value. Example env var: BALDUR_BACKPRESSURE_WATERMARK_STANDARD=0.4
     # =========================================================================
     watermark_critical: Probability = Field(
         default=0.0,
@@ -267,13 +267,13 @@ class BackpressureSettings(BaseSettings):
 
     def get_level_for_queue_size(self, queue_size: int) -> BackpressureLevel:
         """
-        큐 크기에 따른 Backpressure 레벨 반환.
+        Return the backpressure level for a given queue size.
 
         Args:
-            queue_size: 현재 큐 크기
+            queue_size: Current queue size
 
         Returns:
-            BackpressureLevel: 해당하는 레벨
+            BackpressureLevel: The matching level
         """
         if queue_size >= self.queue_critical_threshold:
             return BackpressureLevel.CRITICAL
@@ -287,18 +287,18 @@ class BackpressureSettings(BaseSettings):
 
     def get_rate_multiplier(self, level: BackpressureLevel) -> float:
         """
-        레벨별 Rate 감소 배율 반환 (AIMD 패턴).
+        Return the per-level rate reduction multiplier (AIMD pattern).
 
         Args:
-            level: Backpressure 레벨
+            level: Backpressure level
 
         Returns:
-            float: Rate 배율 (0.0 ~ 1.0)
+            float: Rate multiplier (0.0 ~ 1.0)
         """
         return LEVEL_RATE_MULTIPLIERS.get(level, 1.0)
 
     def get_priority_watermarks(self) -> dict[str, float]:
-        """Tier별 Watermark 임계치 딕셔너리 반환."""
+        """Return the per-tier watermark threshold dictionary."""
         return {
             "critical": self.watermark_critical,
             "standard": self.watermark_standard,
@@ -306,17 +306,18 @@ class BackpressureSettings(BaseSettings):
         }
 
     def get_retry_after_for_level(self, level: BackpressureLevel) -> int:
-        """BackpressureLevel별 Retry-After 값 반환.
+        """Return the Retry-After value for a BackpressureLevel.
 
-        부하가 높을수록 클라이언트 재시도 간격을 늘려
-        Retry Storm을 방지한다.
-        base * 배율로 계산하며 단일 설정 노브로 전체 스케일 조절 가능.
+        The higher the load, the longer the client retry interval, which
+        prevents a retry storm.
+        Computed as base * multiplier, so a single settings knob scales the
+        whole range.
 
         Args:
-            level: 현재 Backpressure 레벨
+            level: Current backpressure level
 
         Returns:
-            Retry-After 값 (초)
+            Retry-After value (seconds)
         """
         base = self.reject_retry_after_seconds
         multiplier = {

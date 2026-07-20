@@ -1,8 +1,8 @@
 """
 CgroupResourceMonitor Settings - Pydantic v2.
 
-컨테이너/VM 리소스 모니터링 설정.
-메모리/CPU 안전 마진을 환경변수로 설정 가능.
+Container/VM resource monitoring settings.
+Memory/CPU safety margins are configurable through environment variables.
 
 Environment Variables:
     BALDUR_RESOURCE_MONITOR_SAFETY_MARGIN=0.15
@@ -17,16 +17,16 @@ from baldur.settings.base import make_settings_config
 
 class ResourceMonitorSettings(BaseSettings):
     """
-    CgroupResourceMonitor 설정.
+    CgroupResourceMonitor settings.
 
-    Chaos Experiment의 Resource Exhaustion이 안전 한계 내에서 동작하도록
-    리소스 사용량 마진을 설정합니다.
+    Sets the resource usage margins that keep a Chaos Experiment's Resource
+    Exhaustion within safe limits.
     """
 
     model_config = make_settings_config("BALDUR_RESOURCE_MONITOR_")
 
     # ==========================================================================
-    # 메모리 안전 마진
+    # Memory safety margin
     # ==========================================================================
     safety_margin: float = Field(
         default=0.15,
@@ -36,7 +36,7 @@ class ResourceMonitorSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # CPU 안전 마진 (향후 확장용)
+    # CPU safety margin (for future expansion)
     # ==========================================================================
     cpu_margin: float = Field(
         default=0.10,

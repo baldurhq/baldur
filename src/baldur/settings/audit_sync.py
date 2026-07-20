@@ -1,7 +1,7 @@
 """
 Audit Sync Settings - Pydantic v2.
 
-Background Sync Worker (WAL → 중앙 저장소 동기화) 설정.
+Background Sync Worker settings (WAL → central store synchronization).
 
 Source:
 - audit/sync_worker.py (SyncWorkerConfig)
@@ -32,10 +32,11 @@ from baldur.settings.validators import warn_below
 
 class AuditSyncSettings(BaseSettings):
     """
-    Audit Sync Worker 설정.
+    Audit Sync Worker settings.
 
-    WAL에서 중앙 저장소로 감사 로그를 동기화하는 백그라운드 워커 설정.
-    Fail-Open + WAL 기반 누락 0 보장 구현.
+    Settings for the background worker that syncs audit logs from the WAL to
+    the central store. Implements fail-open plus a WAL-based zero-loss
+    guarantee.
     """
 
     model_config = make_settings_config("BALDUR_AUDIT_SYNC_")
@@ -121,7 +122,7 @@ class AuditSyncSettings(BaseSettings):
     @field_validator("sync_interval_seconds")
     @classmethod
     def _warn_sync_interval_seconds(cls, v: float) -> float:
-        """동기화 주기가 너무 짧으면 경고."""
+        """Warn when the sync interval is too short."""
         return warn_below(0.5, "audit_sync_settings.very_short_consider_using")(v)
 
 
@@ -132,10 +133,10 @@ class AuditSyncSettings(BaseSettings):
 
 def get_audit_sync_settings() -> "AuditSyncSettings":
     """
-    캐시된 AuditSyncSettings 인스턴스 반환.
+    Return the cached AuditSyncSettings instance.
 
     Returns:
-        AuditSyncSettings: 싱글톤 인스턴스
+        AuditSyncSettings: The singleton instance
     """
     from baldur.settings.root import get_config
 
@@ -144,7 +145,7 @@ def get_audit_sync_settings() -> "AuditSyncSettings":
 
 def reset_audit_sync_settings() -> None:
     """
-    캐시된 Settings 초기화 (테스트용).
+    Reset the cached settings (for tests).
     """
     from baldur.settings.root import get_config
 

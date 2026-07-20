@@ -1,8 +1,9 @@
 """
 AutoRollbackGuard Settings - Pydantic v2.
 
-자율 조정 실패 대비 독립 안전장치 설정.
-에러율/레이턴시 임계값 및 연속 실패 횟수를 환경변수로 설정 가능.
+Independent safety net for when autonomous tuning fails.
+Error rate / latency thresholds and consecutive failure counts are configurable
+via environment variables.
 
 Environment Variables:
     BALDUR_AUTO_ROLLBACK_ERROR_RATE_MAJOR=0.1
@@ -23,15 +24,16 @@ from baldur.settings.field_types import SmallCount
 
 class AutoRollbackSettings(BaseSettings):
     """
-    AutoRollbackGuard 설정.
+    AutoRollbackGuard settings.
 
-    시스템 상태 저하 수준 판단 및 긴급 복구 트리거를 위한 임계값 설정.
+    Thresholds for classifying system degradation level and triggering
+    emergency recovery.
     """
 
     model_config = make_settings_config("BALDUR_AUTO_ROLLBACK_")
 
     # ==========================================================================
-    # 에러율 임계값 (0.0 ~ 1.0)
+    # Error rate thresholds (0.0 ~ 1.0)
     # ==========================================================================
     error_rate_major: float = Field(
         default=0.1,
@@ -47,7 +49,7 @@ class AutoRollbackSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # 레이턴시 임계값 (밀리초)
+    # Latency thresholds (milliseconds)
     # ==========================================================================
     latency_major_ms: int = Field(
         default=5000,
@@ -63,7 +65,7 @@ class AutoRollbackSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # 헬스체크 히스토리 크기 (Phase 2: 238_PREDICTIVE_ANOMALY_FORECASTER)
+    # Health check history size (Phase 2: predictive anomaly forecaster)
     # ==========================================================================
     max_health_history: int = Field(
         default=10000,
@@ -73,7 +75,7 @@ class AutoRollbackSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # 연속 실패 임계값
+    # Consecutive failure thresholds
     # ==========================================================================
     failures_alert: SmallCount = Field(
         default=3,
@@ -87,7 +89,7 @@ class AutoRollbackSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Minor 임계값 + 쿨다운 (338: Settings Gap Phase 2)
+    # Minor thresholds + cooldown (338: Settings Gap Phase 2)
     # ==========================================================================
     error_rate_minor: float = Field(
         default=0.05,
@@ -110,7 +112,7 @@ class AutoRollbackSettings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_thresholds(self) -> "AutoRollbackSettings":
-        """임계값 순서 검증: major < critical."""
+        """Validate threshold ordering: major < critical."""
         if self.error_rate_major >= self.error_rate_critical:
             raise ValueError(
                 f"error_rate_major ({self.error_rate_major}) must be less than "
@@ -136,10 +138,10 @@ class AutoRollbackSettings(BaseSettings):
 
 def get_auto_rollback_settings() -> "AutoRollbackSettings":
     """
-    캐시된 AutoRollbackSettings 인스턴스 반환.
+    Return the cached AutoRollbackSettings instance.
 
     Returns:
-        AutoRollbackSettings: 싱글톤 인스턴스
+        AutoRollbackSettings: singleton instance
     """
     from baldur.settings.root import get_config
 
@@ -148,7 +150,7 @@ def get_auto_rollback_settings() -> "AutoRollbackSettings":
 
 def reset_auto_rollback_settings() -> None:
     """
-    캐시된 설정 초기화 (테스트용).
+    Reset cached settings (for testing).
     """
     from baldur.settings.root import get_config
 

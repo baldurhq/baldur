@@ -1,8 +1,9 @@
 """
-Correlation Engine Settings — DAG 구축 및 동시발생 분석 관련 설정.
+Correlation Engine Settings — DAG construction and co-occurrence analysis.
 
-트리거 이벤트 기준 시간 윈도우(lookback/lookahead),
-Debounce cooldown, DAG 크기 제한, Co-occurrence Tracker 설정 등을 환경변수로 제어한다.
+Controls the time window relative to the trigger event (lookback/lookahead),
+debounce cooldown, DAG size limits, Co-occurrence Tracker settings, and more
+through environment variables.
 
 Environment Variables:
     BALDUR_CORRELATION_LOOKBACK_SECONDS=300
@@ -28,11 +29,11 @@ from baldur.settings.base import make_settings_config
 
 
 class CorrelationSettings(BaseSettings):
-    """Correlation Engine DAG 구축 및 Co-occurrence 분석 설정."""
+    """Correlation Engine DAG construction and co-occurrence analysis settings."""
 
     model_config = make_settings_config("BALDUR_CORRELATION_")
 
-    # ── DAG 구축 설정 ──
+    # ── DAG construction settings ──
 
     lookback_seconds: int = Field(
         default=300,
@@ -76,7 +77,7 @@ class CorrelationSettings(BaseSettings):
         description="Maximum DAG graph depth (prevents OOM)",
     )
 
-    # ── Co-occurrence Tracker 설정 ──
+    # ── Co-occurrence Tracker settings ──
 
     window_seconds: float = Field(
         default=300.0,

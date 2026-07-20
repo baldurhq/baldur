@@ -1,8 +1,10 @@
 """
 Enterprise Scale Settings - Pydantic v2.
 
-대기업 환경에서의 대규모 감사 이벤트 처리를 위한 통합 설정.
-프로파일 선택으로 관련 설정을 일괄 조정하거나 개별 오버라이드 가능.
+Unified configuration for large-scale audit event processing in enterprise
+environments.
+Selecting a profile adjusts the related settings as a group; individual
+overrides are also supported.
 
 Environment Variables:
     BALDUR_SCALE_PROFILE=enterprise
@@ -23,19 +25,19 @@ from baldur.settings.base import make_settings_config
 
 class ScaleProfile(str, Enum):
     """
-    사전 정의된 스케일 프로파일.
+    Predefined scale profiles.
 
-    환경 규모에 따라 적절한 기본값을 제공합니다.
+    Provides sensible defaults for the size of the environment.
     """
 
-    DEVELOPMENT = "development"  # 개발/테스트 환경
-    SMALL_BUSINESS = "small"  # 소규모 (1-10 pods)
-    MEDIUM_BUSINESS = "medium"  # 중규모 (10-50 pods)
-    ENTERPRISE = "enterprise"  # 대기업 (50+ pods)
-    HIGH_THROUGHPUT = "high"  # 초고속 처리 (100,000+ RPS)
+    DEVELOPMENT = "development"  # Development/test environment
+    SMALL_BUSINESS = "small"  # Small scale (1-10 pods)
+    MEDIUM_BUSINESS = "medium"  # Medium scale (10-50 pods)
+    ENTERPRISE = "enterprise"  # Enterprise (50+ pods)
+    HIGH_THROUGHPUT = "high"  # Very high throughput (100,000+ RPS)
 
 
-# 프로파일별 기본값 정의
+# Per-profile default values
 PROFILE_DEFAULTS: dict[ScaleProfile, dict[str, int | float]] = {
     ScaleProfile.DEVELOPMENT: {
         "max_events_per_request": 100,
@@ -77,10 +79,10 @@ PROFILE_DEFAULTS: dict[ScaleProfile, dict[str, int | float]] = {
 
 class ScaleSettings(BaseSettings):
     """
-    Enterprise Scale 통합 설정.
+    Unified Enterprise Scale configuration.
 
-    프로파일 선택으로 관련 설정 일괄 조정 가능.
-    개별 설정 오버라이드도 지원합니다.
+    Selecting a profile adjusts the related settings as a group.
+    Overriding individual settings is also supported.
     """
 
     model_config = make_settings_config("BALDUR_SCALE_")
@@ -94,7 +96,7 @@ class ScaleSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Per-Request Limits (개별 오버라이드용)
+    # Per-Request Limits (individual override)
     # ==========================================================================
     max_events_per_request: int | None = Field(
         default=None,
@@ -104,7 +106,7 @@ class ScaleSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Throughput Limits (개별 오버라이드용)
+    # Throughput Limits (individual override)
     # ==========================================================================
     max_events_per_second: int | None = Field(
         default=None,
@@ -114,7 +116,7 @@ class ScaleSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Buffer Sizes (개별 오버라이드용)
+    # Buffer Sizes (individual override)
     # ==========================================================================
     ring_buffer_capacity: int | None = Field(
         default=None,
@@ -124,7 +126,7 @@ class ScaleSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Batch Settings (개별 오버라이드용)
+    # Batch Settings (individual override)
     # ==========================================================================
     batch_size: int | None = Field(
         default=None,
@@ -141,46 +143,46 @@ class ScaleSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Effective Value Properties (프로파일 기반 계산)
+    # Effective Value Properties (computed from the profile)
     # ==========================================================================
     @property
     def effective_max_events_per_request(self) -> int:
-        """프로파일 기반 유효 max_events_per_request."""
+        """Profile-derived effective max_events_per_request."""
         if self.max_events_per_request is not None:
             return self.max_events_per_request
         return int(PROFILE_DEFAULTS[self.profile]["max_events_per_request"])
 
     @property
     def effective_max_events_per_second(self) -> int:
-        """프로파일 기반 유효 max_events_per_second."""
+        """Profile-derived effective max_events_per_second."""
         if self.max_events_per_second is not None:
             return self.max_events_per_second
         return int(PROFILE_DEFAULTS[self.profile]["max_events_per_second"])
 
     @property
     def effective_ring_buffer_capacity(self) -> int:
-        """프로파일 기반 유효 ring_buffer_capacity."""
+        """Profile-derived effective ring_buffer_capacity."""
         if self.ring_buffer_capacity is not None:
             return self.ring_buffer_capacity
         return int(PROFILE_DEFAULTS[self.profile]["ring_buffer_capacity"])
 
     @property
     def effective_batch_size(self) -> int:
-        """프로파일 기반 유효 batch_size."""
+        """Profile-derived effective batch_size."""
         if self.batch_size is not None:
             return self.batch_size
         return int(PROFILE_DEFAULTS[self.profile]["batch_size"])
 
     @property
     def effective_flush_interval(self) -> float:
-        """프로파일 기반 유효 flush_interval."""
+        """Profile-derived effective flush_interval."""
         if self.flush_interval_seconds is not None:
             return self.flush_interval_seconds
         return float(PROFILE_DEFAULTS[self.profile]["flush_interval"])
 
 
 # ==========================================================================
-# Singleton 관리
+# Singleton management
 # ==========================================================================
 def get_scale_settings() -> "ScaleSettings":
     """Get cached ScaleSettings instance."""

@@ -1,7 +1,7 @@
 """
 Audit Watchdog Settings - Pydantic v2.
 
-Audit Watchdog (Dead Man's Switch Pattern) 설정.
+Audit Watchdog settings (Dead Man's Switch pattern).
 
 Source:
 - audit/audit_watchdog.py (WatchdogConfig, HeartbeatTarget)
@@ -24,10 +24,11 @@ from baldur.settings.validators import warn_below
 
 class AuditWatchdogSettings(BaseSettings):
     """
-    Audit Watchdog 설정.
+    Audit Watchdog settings.
 
-    Dead Man's Switch 패턴으로 감사 시스템 생존 확인.
-    주기적으로 heartbeat를 전송하고 외부 모니터링 시스템이 감시.
+    Confirms the audit system is alive via the Dead Man's Switch pattern.
+    Sends a heartbeat periodically, which an external monitoring system
+    watches.
     """
 
     model_config = make_settings_config("BALDUR_AUDIT_WATCHDOG_")
@@ -86,7 +87,7 @@ class AuditWatchdogSettings(BaseSettings):
     @field_validator("heartbeat_interval_seconds")
     @classmethod
     def _warn_heartbeat_interval_seconds(cls, v: float) -> float:
-        """heartbeat 주기가 너무 짧으면 경고."""
+        """Warn when the heartbeat interval is too short."""
         return warn_below(15.0, "audit_watchdog_settings.low_consider_using_reduce")(v)
 
 
@@ -97,10 +98,10 @@ class AuditWatchdogSettings(BaseSettings):
 
 def get_audit_watchdog_settings() -> "AuditWatchdogSettings":
     """
-    캐시된 AuditWatchdogSettings 인스턴스 반환.
+    Return the cached AuditWatchdogSettings instance.
 
     Returns:
-        AuditWatchdogSettings: 싱글톤 인스턴스
+        AuditWatchdogSettings: The singleton instance
     """
     from baldur.settings.root import get_config
 
@@ -109,7 +110,7 @@ def get_audit_watchdog_settings() -> "AuditWatchdogSettings":
 
 def reset_audit_watchdog_settings() -> None:
     """
-    캐시된 Settings 초기화 (테스트용).
+    Reset the cached settings (for tests).
     """
     from baldur.settings.root import get_config
 

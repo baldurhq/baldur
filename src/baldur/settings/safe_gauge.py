@@ -1,8 +1,8 @@
 """
 SafeGauge Settings - Pydantic v2.
 
-SafeGauge 레이블 조합 관리 설정입니다.
-Prometheus 메트릭 카디널리티 폭발을 방지합니다.
+SafeGauge label-combination management settings.
+Prevents cardinality explosion in Prometheus metrics.
 
 Replaces:
 - metrics/safe_gauge/core.py:DEFAULT_MAX_LABEL_COMBINATIONS
@@ -27,19 +27,19 @@ logger = structlog.get_logger()
 
 class SafeGaugeSettings(BaseSettings):
     """
-    SafeGauge 설정.
+    SafeGauge settings.
 
-    LRU 캐시 기반의 레이블 조합 관리 설정입니다.
-    카디널리티 폭발(Cardinality Explosion)을 방지합니다.
+    LRU-cache-based label-combination management settings.
+    Prevents cardinality explosion.
 
-    환경별 권장값:
-    - 단일 서버: 1000 (기본값)
+    Recommended values per environment:
+    - Single server: 1000 (default)
     - K8s 10 Pods: 500
     - K8s 100+ Pods: 200
 
     Attributes:
-        max_label_combinations: 캐시할 최대 레이블 조합 수
-        eviction_warning_threshold: Eviction 경고 임계치 (%)
+        max_label_combinations: Maximum label combinations to cache
+        eviction_warning_threshold: Eviction warning threshold (%)
     """
 
     model_config = make_settings_config("BALDUR_SAFE_GAUGE_")
@@ -67,7 +67,7 @@ class SafeGaugeSettings(BaseSettings):
     @field_validator("max_label_combinations")
     @classmethod
     def validate_max_label_combinations(cls, v: int) -> int:
-        """레이블 조합 수가 적절한지 경고."""
+        """Warn when the label-combination count is not appropriate."""
         if v > 5000:
             logger.warning(
                 "safe_gauge.max_label_combinations_high",

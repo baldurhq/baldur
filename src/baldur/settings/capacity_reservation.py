@@ -1,9 +1,9 @@
 """
 Capacity Reservation Settings - Pydantic v2.
 
-예정 이벤트 기반 사전 용량 확보 설정.
+Settings for pre-provisioning capacity ahead of scheduled events.
 
-환경변수 접두사: BALDUR_CAPACITY_RESERVATION_
+Environment variable prefix: BALDUR_CAPACITY_RESERVATION_
 """
 
 from __future__ import annotations
@@ -16,9 +16,9 @@ from baldur.settings.base import make_settings_config
 
 class CapacityReservationSettings(BaseSettings):
     """
-    Capacity Reservation 설정.
+    Capacity Reservation settings.
 
-    환경변수:
+    Environment Variables:
         BALDUR_CAPACITY_RESERVATION_ENABLED=false
         BALDUR_CAPACITY_RESERVATION_DEFAULT_WARMUP_MINUTES=5
         BALDUR_CAPACITY_RESERVATION_DRY_RUN=true

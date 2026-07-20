@@ -1,11 +1,11 @@
 """
 ApplyStrategy Settings - Pydantic v2.
 
-설정 적용 전략별 delay 및 grace_timeout 설정.
-config 타입별 기본 지연 시간을 환경변수로 설정 가능.
+Per-strategy delay and grace_timeout settings for config application.
+Default delay per config type is configurable via environment variables.
 
 Environment Variables:
-    # 설정 타입별 지연 시간
+    # Delay per config type
     BALDUR_APPLY_STRATEGY_SLA_DELAY=0
     BALDUR_APPLY_STRATEGY_METRICS_DELAY=0
     BALDUR_APPLY_STRATEGY_NOTIFICATION_DELAY=0
@@ -19,7 +19,7 @@ Environment Variables:
     BALDUR_APPLY_STRATEGY_ERROR_BUDGET_DELAY=30
     BALDUR_APPLY_STRATEGY_DEFAULT_GRACE_TIMEOUT=60
 
-    # Celery Task 재시도 설정
+    # Celery task retry settings
     BALDUR_APPLY_STRATEGY_PENDING_MAX_RETRIES=3
     BALDUR_APPLY_STRATEGY_PENDING_RETRY_DELAY=10
     BALDUR_APPLY_STRATEGY_GRACEFUL_MAX_RETRIES=10
@@ -35,15 +35,15 @@ from baldur.settings.base import make_settings_config
 
 class ApplyStrategySettings(BaseSettings):
     """
-    ApplyStrategy 설정.
+    ApplyStrategy settings.
 
-    설정 변경 적용 시 타입별 지연 시간 및 grace timeout 설정.
+    Per-type delay and grace timeout applied when a config change is rolled out.
     """
 
     model_config = make_settings_config("BALDUR_APPLY_STRATEGY_")
 
     # ==========================================================================
-    # 즉시 적용 (Safe Immediate) - delay_seconds
+    # Immediate apply (Safe Immediate) - delay_seconds
     # ==========================================================================
     sla_delay: int = Field(
         default=0,
@@ -71,7 +71,7 @@ class ApplyStrategySettings(BaseSettings):
     )
 
     # ==========================================================================
-    # 트래픽 제어 - 즉시지만 주의 필요
+    # Traffic control - immediate, but requires care
     # ==========================================================================
     rate_limit_delay: int = Field(
         default=0,
@@ -81,7 +81,7 @@ class ApplyStrategySettings(BaseSettings):
     )
 
     # ==========================================================================
-    # 처리 관련 - 지연 적용
+    # Processing related - delayed apply
     # ==========================================================================
     retry_delay: int = Field(
         default=10,
@@ -97,7 +97,7 @@ class ApplyStrategySettings(BaseSettings):
     )
 
     # ==========================================================================
-    # 핵심 보호 - 긴 지연
+    # Core protection - long delay
     # ==========================================================================
     circuit_breaker_delay: int = Field(
         default=30,
@@ -125,7 +125,7 @@ class ApplyStrategySettings(BaseSettings):
     )
 
     # ==========================================================================
-    # 공통 설정
+    # Common settings
     # ==========================================================================
     default_grace_timeout: int = Field(
         default=60,
@@ -135,7 +135,7 @@ class ApplyStrategySettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Celery Task 재시도 설정 (apply_pending_config_changes)
+    # Celery task retry settings (apply_pending_config_changes)
     # ==========================================================================
     pending_max_retries: int = Field(
         default=3,
@@ -151,8 +151,8 @@ class ApplyStrategySettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Celery Task 재시도 설정 (apply_graceful_config_change)
-    # 진행 중인 작업 완료 대기가 필요하므로 재시도 횟수가 많음
+    # Celery task retry settings (apply_graceful_config_change)
+    # Retry count is high because in-flight work must be allowed to finish
     # ==========================================================================
     graceful_max_retries: int = Field(
         default=10,
@@ -168,7 +168,7 @@ class ApplyStrategySettings(BaseSettings):
     )
 
     # ==========================================================================
-    # 만료 설정 정리 (cleanup_expired_config_changes)
+    # Expired config cleanup (cleanup_expired_config_changes)
     # ==========================================================================
     cleanup_max_age_hours: int = Field(
         default=24,
@@ -185,10 +185,10 @@ class ApplyStrategySettings(BaseSettings):
 
 def get_apply_strategy_settings() -> "ApplyStrategySettings":
     """
-    캐시된 ApplyStrategySettings 인스턴스 반환.
+    Return the cached ApplyStrategySettings instance.
 
     Returns:
-        ApplyStrategySettings: 싱글톤 인스턴스
+        ApplyStrategySettings: singleton instance
     """
     from baldur.settings.root import get_config
 
@@ -197,7 +197,7 @@ def get_apply_strategy_settings() -> "ApplyStrategySettings":
 
 def reset_apply_strategy_settings() -> None:
     """
-    캐시된 설정 초기화 (테스트용).
+    Reset cached settings (for testing).
     """
     from baldur.settings.root import get_config
 

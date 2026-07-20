@@ -11,9 +11,6 @@ Environment Variables:
     BALDUR_RESILIENT_RECORDER_FLUSH_INTERVAL=1.0
     BALDUR_RESILIENT_RECORDER_FLUSH_BATCH_SIZE=100
     ... etc
-
-Reference:
-- docs/baldur/middleware_system/92_CONFIG_IMPLEMENTATION_GUIDE.md
 """
 
 from pydantic import Field, field_validator
@@ -35,13 +32,13 @@ class ResilientRecorderSettings(BaseSettings):
     """
     Resilient Continuous Audit Recorder configuration with validation.
 
-    장애 허용 기능을 가진 연속 감사 기록기 설정입니다.
+    Settings for the fault-tolerant continuous audit recorder.
 
     Features:
-    - RingBuffer: 비침투 Shadow Logging
-    - CircuitBreaker: resilience.py 재사용
-    - Self-Audit: 자체 상태 기록
-    - SyslogFallback: 최후의 수단
+    - RingBuffer: non-intrusive Shadow Logging
+    - CircuitBreaker: reuses resilience.py
+    - Self-Audit: records its own state
+    - SyslogFallback: last resort
 
     All defaults match:
     - audit/resilient_recorder.py:ResilientRecorderConfig

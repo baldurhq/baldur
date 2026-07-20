@@ -1,8 +1,8 @@
 """
 Graceful Degradation Settings - Pydantic v2.
 
-Hash chain 저하 수준 및 Fallback 체인 설정.
-Redis 장애 시 단계적 저하 및 복구 설정을 정의합니다.
+Hash chain degradation levels and fallback chain settings.
+Defines staged degradation and recovery settings for Redis outages.
 
 Source:
 - audit/graceful_degradation/enums.py (FallbackConfig, CircuitBreakerConfig)
@@ -30,14 +30,14 @@ from baldur.settings.validators import warn_above
 
 class GracefulDegradationSettings(BaseSettings):
     """
-    Graceful Degradation 설정.
+    Graceful Degradation settings.
 
-    Redis 장애 시 Fallback 체인 및 Circuit Breaker 설정을 정의합니다.
-    저하 수준:
-    - NORMAL: Redis 사용
-    - DEGRADED: 로컬 Fallback 사용
-    - EMERGENCY: 메모리 전용
-    - READONLY: 읽기 전용
+    Defines the fallback chain and Circuit Breaker settings for Redis outages.
+    Degradation levels:
+    - NORMAL: use Redis
+    - DEGRADED: use the local fallback
+    - EMERGENCY: memory only
+    - READONLY: read-only
     """
 
     model_config = make_settings_config("BALDUR_GRACEFUL_DEGRADATION_")
@@ -97,7 +97,7 @@ class GracefulDegradationSettings(BaseSettings):
     @field_validator("redis_timeout_seconds")
     @classmethod
     def _warn_redis_timeout(cls, v: float) -> float:
-        """redis_timeout이 너무 길면 경고."""
+        """Warn when redis_timeout is too long."""
         return warn_above(
             10.0, "graceful_degradation_settings.high_consider_using_responsiveness"
         )(v)

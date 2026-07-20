@@ -1,21 +1,17 @@
 """
 Notification Channel Settings - Pydantic v2.
 
-알림 채널별 Rate Limiting 및 재시도 정책 설정입니다.
+Per-channel rate limiting and retry policy settings for notifications.
 
 Replaces:
-- services/unified_notification.py:채널 매핑
-- core/safe_defaults.py:notification 관련 설정
+- services/unified_notification.py: channel mapping
+- core/safe_defaults.py: notification-related settings
 - notification_policy.py:cooldown_seconds
 
 Environment Variables:
     BALDUR_NOTIFICATION_CHANNEL_RATE_LIMIT_PER_MINUTE=60
     BALDUR_NOTIFICATION_CHANNEL_MAX_RETRY=3
     BALDUR_NOTIFICATION_CHANNEL_COOLDOWN_SECONDS=300
-
-Reference:
-- docs/baldur/middleware_system/92_CONFIG_IMPLEMENTATION_GUIDE.md (Week 3 [15])
-- docs/baldur/middleware_system/91_CONFIG_INVENTORY.md §6.33, §8.6
 """
 
 from pydantic import Field, field_validator
@@ -30,15 +26,15 @@ from baldur.settings.validators import warn_above
 
 class NotificationChannelSettings(BaseSettings):
     """
-    알림 채널 설정.
+    Notification channel settings.
 
-    심각도별 채널 매핑 및 Rate Limiting을 관리합니다.
+    Manages severity-based channel mapping and rate limiting.
 
     Features:
-    - 심각도별 채널 라우팅 (CRITICAL → slack,email,pagerduty)
-    - Rate Limiting으로 알림 폭주 방지
-    - 재시도 정책
-    - 쿨다운으로 중복 알림 방지
+    - Severity-based channel routing (CRITICAL → slack,email,pagerduty)
+    - Rate limiting to prevent notification floods
+    - Retry policy
+    - Cooldown to suppress duplicate notifications
     """
 
     model_config = make_settings_config("BALDUR_NOTIFICATION_CHANNEL_")
@@ -96,7 +92,7 @@ class NotificationChannelSettings(BaseSettings):
     @field_validator("rate_limit_per_minute")
     @classmethod
     def _warn_rate_limit(cls, v: int) -> int:
-        """Rate limit이 너무 높으면 경고."""
+        """Warn when the rate limit is too high."""
         return warn_above(100, "notification_channel.rate_limit_high")(v)
 
 

@@ -1,8 +1,9 @@
 """
 EmergencyMode Settings - Pydantic v2.
 
-Emergency Mode 서비스의 RecoveryGate 파라미터, 레벨 결정 임계값, 스로틀 배율,
-건강도 감점 상수, 트래픽 배율 규칙을 환경변수로 외부화.
+Externalizes the Emergency Mode service's RecoveryGate parameters, level
+decision thresholds, throttle multipliers, health penalty constants, and
+traffic multiplier rules into environment variables.
 
 Source:
 - services/emergency_mode/models.py (RecoveryGateConfig defaults)
@@ -56,10 +57,10 @@ from baldur.settings.field_types import (
 
 class EmergencyModeSettings(BaseSettings):
     """
-    Emergency Mode 설정.
+    Emergency Mode settings.
 
-    RecoveryGate 파라미터, 레벨 결정 임계값, 스로틀 배율,
-    건강도 감점 상수, 트래픽 배율 규칙을 정의합니다.
+    Defines the RecoveryGate parameters, level decision thresholds, throttle
+    multipliers, health penalty constants, and traffic multiplier rules.
     """
 
     model_config = make_settings_config("BALDUR_EMERGENCY_MODE_")

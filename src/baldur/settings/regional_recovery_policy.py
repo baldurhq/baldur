@@ -1,20 +1,16 @@
 """
 Regional Recovery Policy Settings - Pydantic v2.
 
-지역별 복구 정책 설정입니다.
+Per-region recovery policy settings.
 
 Replaces:
-- services/coordination/regional_recovery_policy.py 내 하드코딩된 값들
+- hardcoded values in services/coordination/regional_recovery_policy.py
 - models.py:approval_timeout_minutes, escalation_intervals
 
 Environment Variables:
     BALDUR_REGIONAL_RECOVERY_POLICY_ERROR_RATE_THRESHOLD=0.10
     BALDUR_REGIONAL_RECOVERY_POLICY_SUCCESS_RATE_THRESHOLD=0.95
     BALDUR_REGIONAL_RECOVERY_POLICY_STABILITY_CHECK_DURATION_MINUTES=10
-
-Reference:
-- docs/baldur/middleware_system/92_CONFIG_IMPLEMENTATION_GUIDE.md (Week 4 [26])
-- docs/baldur/middleware_system/91_CONFIG_INVENTORY.md §6.4, §8.6
 """
 
 from pydantic import Field, model_validator
@@ -26,23 +22,23 @@ from baldur.settings.field_types import TinyCount
 
 class RegionalRecoveryPolicySettings(BaseSettings):
     """
-    지역별 복구 정책 설정.
+    Per-region recovery policy settings.
 
-    임계치:
-    - error_rate_threshold: 복구 시작 에러율 임계치 (10%)
-    - success_rate_threshold: 복구 완료 성공률 임계치 (95%)
+    Thresholds:
+    - error_rate_threshold: error rate that starts recovery (10%)
+    - success_rate_threshold: success rate that completes recovery (95%)
 
-    시간 설정:
-    - stability_check_duration_minutes: 안정성 확인 기간 (10분)
-    - max_recovery_duration_minutes: 최대 복구 시간 (60분)
-    - cooldown_minutes: 복구 후 쿨다운 (15분)
+    Time settings:
+    - stability_check_duration_minutes: stability check window (10 min)
+    - max_recovery_duration_minutes: maximum recovery time (60 min)
+    - cooldown_minutes: post-recovery cooldown (15 min)
 
-    승인:
-    - approval_timeout_minutes: 승인 타임아웃 (60분)
-    - escalation_intervals: 에스컬레이션 간격 ([15, 30, 60]분)
+    Approval:
+    - approval_timeout_minutes: approval timeout (60 min)
+    - escalation_intervals: escalation intervals ([15, 30, 60] min)
 
-    동시성:
-    - max_concurrent_recoveries: 최대 동시 복구 수 (3)
+    Concurrency:
+    - max_concurrent_recoveries: maximum concurrent recoveries (3)
     """
 
     model_config = make_settings_config("BALDUR_REGIONAL_RECOVERY_POLICY_")
@@ -152,7 +148,7 @@ class RegionalRecoveryPolicySettings(BaseSettings):
     )
 
     def get_escalation_intervals(self) -> list[int]:
-        """에스컬레이션 간격 리스트 반환."""
+        """Return the escalation interval list."""
         return [
             self.escalation_interval_1,
             self.escalation_interval_2,
@@ -161,13 +157,13 @@ class RegionalRecoveryPolicySettings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_thresholds(self) -> "RegionalRecoveryPolicySettings":
-        """임계치 검증."""
+        """Validate thresholds."""
         if self.error_rate_threshold >= self.success_rate_threshold:
             raise ValueError(
                 f"error_rate_threshold ({self.error_rate_threshold}) must be less than "
                 f"success_rate_threshold ({self.success_rate_threshold})"
             )
-        # 에스컬레이션 간격이 오름차순인지 확인
+        # Check that escalation intervals are in ascending order
         intervals = self.get_escalation_intervals()
         for i in range(1, len(intervals)):
             if intervals[i] <= intervals[i - 1]:

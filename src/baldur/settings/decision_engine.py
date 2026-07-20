@@ -1,8 +1,9 @@
 """
 DecisionEngine Settings - Pydantic v2.
 
-조정 결정 엔진 설정.
-최소 변경 비율, 샘플 수 기반 신뢰도, 변동성 기반 안정성 계수 설정.
+Tuning decision engine configuration.
+Minimum change ratio, sample-count-based confidence, and variability-based
+stability factor settings.
 
 Environment Variables:
     BALDUR_DECISION_ENGINE_MAX_HISTORY=5000
@@ -31,15 +32,16 @@ from baldur.settings.base import make_settings_config
 
 class DecisionEngineSettings(BaseSettings):
     """
-    DecisionEngine 설정.
+    DecisionEngine configuration.
 
-    메트릭 분석 기반 조정 결정에 필요한 임계값 및 신뢰도 매핑 설정.
+    Thresholds and confidence mappings used by metric-analysis-driven tuning
+    decisions.
     """
 
     model_config = make_settings_config("BALDUR_DECISION_ENGINE_")
 
     # ==========================================================================
-    # 히스토리 크기 (Phase 2: 238_PREDICTIVE_ANOMALY_FORECASTER)
+    # History size
     # ==========================================================================
     max_history: int = Field(
         default=5000,
@@ -49,7 +51,7 @@ class DecisionEngineSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # 최소 변경 비율
+    # Minimum change ratio
     # ==========================================================================
     min_change_ratio: float = Field(
         default=0.05,
@@ -59,7 +61,7 @@ class DecisionEngineSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # 샘플 수 기반 신뢰도 매핑 - 샘플 수 임계값
+    # Sample-count-based confidence mapping - sample count thresholds
     # ==========================================================================
     confidence_samples_very_low: int = Field(
         default=5,
@@ -87,7 +89,7 @@ class DecisionEngineSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # 샘플 수 기반 신뢰도 매핑 - 신뢰도 값
+    # Sample-count-based confidence mapping - confidence values
     # ==========================================================================
     confidence_value_very_low: float = Field(
         default=0.3,
@@ -121,7 +123,7 @@ class DecisionEngineSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # 변동성(CV) 기반 안정성 계수 - CV 임계값
+    # Variability (CV) based stability factor - CV thresholds
     # ==========================================================================
     stability_cv_high: float = Field(
         default=0.5,
@@ -137,7 +139,7 @@ class DecisionEngineSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # 변동성(CV) 기반 안정성 계수 - 계수 값
+    # Variability (CV) based stability factor - factor values
     # ==========================================================================
     stability_factor_unstable: float = Field(
         default=0.7,
@@ -160,8 +162,8 @@ class DecisionEngineSettings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_thresholds(self) -> "DecisionEngineSettings":
-        """샘플 수 및 신뢰도 값 순서 검증."""
-        # 샘플 수 순서 검증
+        """Validate the ordering of sample counts and confidence values."""
+        # Sample count ordering
         if not (
             self.confidence_samples_very_low
             < self.confidence_samples_low
@@ -173,7 +175,7 @@ class DecisionEngineSettings(BaseSettings):
                 "very_low < low < medium < high"
             )
 
-        # 신뢰도 값 순서 검증
+        # Confidence value ordering
         if not (
             self.confidence_value_very_low
             < self.confidence_value_low
@@ -186,7 +188,7 @@ class DecisionEngineSettings(BaseSettings):
                 "very_low < low < medium < high < very_high"
             )
 
-        # 안정성 계수 순서 검증
+        # Stability factor ordering
         if not (
             self.stability_factor_unstable
             < self.stability_factor_moderate
@@ -197,7 +199,7 @@ class DecisionEngineSettings(BaseSettings):
                 "unstable < moderate < stable"
             )
 
-        # CV 임계값 순서 검증
+        # CV threshold ordering
         if self.stability_cv_medium >= self.stability_cv_high:
             raise ValueError(
                 f"stability_cv_medium ({self.stability_cv_medium}) must be less than "
@@ -208,13 +210,13 @@ class DecisionEngineSettings(BaseSettings):
 
     def get_sample_confidence(self, sample_count: int) -> float:
         """
-        샘플 수에 따른 신뢰도 반환.
+        Return the confidence for a given sample count.
 
         Args:
-            sample_count: 샘플 수
+            sample_count: Number of samples
 
         Returns:
-            신뢰도 값 (0.0 ~ 1.0)
+            Confidence value (0.0 ~ 1.0)
         """
         if sample_count < self.confidence_samples_very_low:
             return self.confidence_value_very_low
@@ -228,13 +230,13 @@ class DecisionEngineSettings(BaseSettings):
 
     def get_stability_factor(self, coefficient_of_variation: float) -> float:
         """
-        변동계수(CV)에 따른 안정성 계수 반환.
+        Return the stability factor for a given coefficient of variation (CV).
 
         Args:
-            coefficient_of_variation: 변동계수 (표준편차/평균)
+            coefficient_of_variation: Coefficient of variation (stddev/mean)
 
         Returns:
-            안정성 계수 (0.0 ~ 1.0)
+            Stability factor (0.0 ~ 1.0)
         """
         if coefficient_of_variation > self.stability_cv_high:
             return self.stability_factor_unstable
@@ -250,10 +252,10 @@ class DecisionEngineSettings(BaseSettings):
 
 def get_decision_engine_settings() -> "DecisionEngineSettings":
     """
-    캐시된 DecisionEngineSettings 인스턴스 반환.
+    Return the cached DecisionEngineSettings instance.
 
     Returns:
-        DecisionEngineSettings: 싱글톤 인스턴스
+        DecisionEngineSettings: Singleton instance
     """
     from baldur.settings.root import get_config
 
@@ -262,7 +264,7 @@ def get_decision_engine_settings() -> "DecisionEngineSettings":
 
 def reset_decision_engine_settings() -> None:
     """
-    캐시된 설정 초기화 (테스트용).
+    Reset the cached settings (for testing).
     """
     from baldur.settings.root import get_config
 

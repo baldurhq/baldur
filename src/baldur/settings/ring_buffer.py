@@ -1,8 +1,9 @@
 """
 Ring Buffer Settings - Pydantic v2.
 
-Shadow Logging을 위한 Ring Buffer 설정.
-비침투 원칙에 따라 DROP_OLDEST가 기본값이며, 메인 애플리케이션 성능에 영향을 주지 않습니다.
+Ring Buffer settings for Shadow Logging.
+Following the non-intrusive principle, DROP_OLDEST is the default and the main
+application's performance is never affected.
 
 Source:
 - audit/ring_buffer.py
@@ -26,10 +27,10 @@ logger = structlog.get_logger()
 
 class RingBufferSettings(BaseSettings):
     """
-    Ring Buffer 설정.
+    Ring Buffer settings.
 
-    Shadow Logging을 위한 비침투 버퍼 설정을 정의합니다.
-    메인 애플리케이션을 절대 블로킹하지 않습니다.
+    Defines the non-intrusive buffer settings for Shadow Logging.
+    Never blocks the main application.
     """
 
     model_config = make_settings_config("BALDUR_RING_BUFFER_")
@@ -65,7 +66,7 @@ class RingBufferSettings(BaseSettings):
     @field_validator("capacity")
     @classmethod
     def validate_capacity(cls, v: int) -> int:
-        """capacity가 너무 크면 경고."""
+        """Warn when capacity is too large."""
         if v > 100000:
             logger.warning(
                 "ring_buffer_settings.high_consider_using_memory",
@@ -81,10 +82,10 @@ class RingBufferSettings(BaseSettings):
 
 def get_ring_buffer_settings() -> "RingBufferSettings":
     """
-    캐시된 RingBufferSettings 인스턴스 반환.
+    Return the cached RingBufferSettings instance.
 
     Returns:
-        RingBufferSettings: 싱글톤 인스턴스
+        RingBufferSettings: The singleton instance
     """
     from baldur.settings.root import get_config
 
@@ -93,9 +94,9 @@ def get_ring_buffer_settings() -> "RingBufferSettings":
 
 def reset_ring_buffer_settings() -> None:
     """
-    캐시된 설정 초기화 (테스트용).
+    Reset the cached settings (for tests).
 
-    환경 변수 변경 후 설정을 다시 로드하려면 이 함수를 호출하세요.
+    Call this to reload the settings after changing environment variables.
     """
     from baldur.settings.root import get_config
 

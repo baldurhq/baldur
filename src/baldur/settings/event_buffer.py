@@ -1,8 +1,8 @@
 """
 Event Buffer Settings - Pydantic v2.
 
-요청당 감사 이벤트 버퍼 크기 설정입니다.
-대규모 벌크 작업 시 이벤트 손실을 방지합니다.
+Per-request audit event buffer size settings.
+Prevents event loss during large bulk operations.
 
 Environment Variables:
     BALDUR_EVENT_BUFFER_MAX_EVENTS_PER_REQUEST=1000
@@ -23,10 +23,10 @@ logger = structlog.get_logger()
 
 class EventBufferSettings(BaseSettings):
     """
-    요청당 이벤트 버퍼 설정.
+    Per-request event buffer settings.
 
-    HTTP 요청당 수집되는 감사 이벤트의 버퍼 크기를 관리합니다.
-    벌크 작업(대량 생성/수정/삭제) 시 이벤트 손실을 방지합니다.
+    Manages the buffer size for audit events collected per HTTP request.
+    Prevents event loss during bulk operations (mass create/update/delete).
     """
 
     model_config = make_settings_config("BALDUR_EVENT_BUFFER_")
@@ -71,7 +71,7 @@ class EventBufferSettings(BaseSettings):
     @field_validator("overflow_strategy")
     @classmethod
     def validate_overflow_strategy(cls, v: str) -> str:
-        """block 전략 사용 시 경고."""
+        """Warn when the block strategy is used."""
         if v == "block":
             logger.warning(
                 "event_buffer.blocking_overflow_strategy_discouraged",
@@ -81,7 +81,7 @@ class EventBufferSettings(BaseSettings):
 
 
 # ==========================================================================
-# Singleton 관리
+# Singleton management
 # ==========================================================================
 def get_event_buffer_settings() -> "EventBufferSettings":
     """Get cached EventBufferSettings instance."""
