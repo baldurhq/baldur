@@ -1,7 +1,7 @@
 """
-Rate Limit 테스트 공통 fixtures.
+Rate Limit tests - shared fixtures.
 
-분리된 테스트 파일들이 사용하는 공통 Mock, fixture, helper를 정의합니다.
+Defines the shared Mocks, fixtures and helpers used by the split test files.
 """
 
 from __future__ import annotations
@@ -15,15 +15,15 @@ from unittest.mock import MagicMock
 import pytest
 
 # =============================================================================
-# 테스트 상수 (Config 기본값에서 파생)
+# Test constants (derived from Config defaults)
 # =============================================================================
 
-# ThrottleConfig 기본값
+# ThrottleConfig defaults
 DEFAULT_INITIAL_LIMIT = 100
 DEFAULT_MIN_LIMIT = 10
 DEFAULT_MAX_LIMIT = 500
 
-# RateLimitCoordinatorConfig 기본값
+# RateLimitCoordinatorConfig defaults
 DEFAULT_BASE_DELAY = 1.0
 DEFAULT_MAX_DELAY = 60.0
 DEFAULT_RETRY_AFTER = 5.0
@@ -31,10 +31,10 @@ DEFAULT_BACKOFF_MULTIPLIER = 2.0
 DEFAULT_DEBOUNCE_WINDOW = 5.0
 DEFAULT_JITTER_PERCENT = 30.0
 
-# RateLimitThrottleIntegrationSettings 기본값
-REDUCTION_RATIO_1ST = 0.8  # 1회 429 → 80% 유지
-REDUCTION_RATIO_2ND = 0.6  # 2회 연속 → 60% 유지
-REDUCTION_RATIO_3RD = 0.5  # 3회+ 연속 → 50% 유지
+# RateLimitThrottleIntegrationSettings defaults
+REDUCTION_RATIO_1ST = 0.8  # 1st 429 -> keep 80%
+REDUCTION_RATIO_2ND = 0.6  # 2nd consecutive -> keep 60%
+REDUCTION_RATIO_3RD = 0.5  # 3rd+ consecutive -> keep 50%
 SLA_WARNING_THRESHOLD = 3
 DEFAULT_ESCALATION_THRESHOLD = 10
 
@@ -56,14 +56,14 @@ class MockRateLimitState:
 
 
 class MockInMemoryRateLimitStorage:
-    """단위 테스트용 InMemory Rate Limit Storage Mock."""
+    """InMemory Rate Limit Storage mock for unit tests."""
 
     def __init__(self):
         self._states: dict[str, MockRateLimitState] = {}
         self._lock = threading.Lock()
 
     def get_state(self, key: str) -> MockRateLimitState:
-        """현재 상태 조회."""
+        """Read the current state."""
         with self._lock:
             if key not in self._states:
                 self._states[key] = MockRateLimitState(key=key)
@@ -81,14 +81,14 @@ class MockInMemoryRateLimitStorage:
             return state
 
     def set_cooldown(self, key: str, cooldown_until: float) -> None:
-        """Cooldown 설정."""
+        """Set the cooldown."""
         with self._lock:
             if key not in self._states:
                 self._states[key] = MockRateLimitState(key=key)
             self._states[key].cooldown_until = cooldown_until
 
     def increment_consecutive_429s(self, key: str) -> int:
-        """연속 429 횟수 증가."""
+        """Increment the consecutive-429 count."""
         with self._lock:
             if key not in self._states:
                 self._states[key] = MockRateLimitState(key=key)
@@ -96,7 +96,7 @@ class MockInMemoryRateLimitStorage:
             return self._states[key].consecutive_429s
 
     def reset_consecutive_429s(self, key: str) -> None:
-        """연속 429 횟수 리셋."""
+        """Reset the consecutive-429 count."""
         with self._lock:
             if key in self._states:
                 self._states[key].consecutive_429s = 0
@@ -158,13 +158,13 @@ def _isolate_throttle_state():
 
 @pytest.fixture
 def mock_storage() -> MockInMemoryRateLimitStorage:
-    """Fresh MockInMemoryRateLimitStorage 인스턴스."""
+    """Fresh MockInMemoryRateLimitStorage instance."""
     return MockInMemoryRateLimitStorage()
 
 
 @pytest.fixture
 def coordinator_no_jitter_no_debounce(mock_storage):
-    """Jitter/Debounce 비활성화된 RateLimitCoordinator (정밀 테스트용)."""
+    """RateLimitCoordinator with jitter/debounce disabled (for exact-value tests)."""
     from baldur.services.rate_limit_coordinator import (
         RateLimitCoordinator,
         RateLimitCoordinatorConfig,
@@ -191,7 +191,7 @@ def throttle_config():
 
 @pytest.fixture
 def adaptive_throttle(throttle_config):
-    """Fresh AdaptiveThrottle 인스턴스 (테스트 전후 자동 리셋)."""
+    """Fresh AdaptiveThrottle instance (auto-reset around each test)."""
     pytest.importorskip("baldur_pro")
     from baldur_pro.services.throttle.adaptive import (
         AdaptiveThrottle,
@@ -214,8 +214,8 @@ def make_429_event(
     consecutive_429s: int = 1,
     cooldown_seconds: float = 10.0,
 ) -> dict[str, Any]:
-    """429 이벤트 데이터 dict 생성 (legacy: PRO AdaptiveThrottle._handle_rate_limit_429
-    이 BaldurEvent | dict 둘 다 수용)."""
+    """Build a 429 event-data dict (legacy: the PRO AdaptiveThrottle 429 handler
+    accepts both a BaldurEvent and a plain dict)."""
     return {
         "key": key,
         "consecutive_429s": consecutive_429s,
@@ -228,14 +228,14 @@ def make_429_baldur_event(
     consecutive_429s: int = 1,
     cooldown_seconds: float = 10.0,
 ) -> Any:
-    """429 BaldurEvent (data dict carried under `.data`) 생성 — rate_limit_escalation.py 용."""
+    """Build a 429 BaldurEvent (data dict carried under `.data`) for the escalation path."""
     event = MagicMock()
     event.data = make_429_event(key, consecutive_429s, cooldown_seconds)
     return event
 
 
 def make_cooldown_end_event(key: str = "test_api") -> dict[str, Any]:
-    """COOLDOWN_END 이벤트 데이터 dict 생성."""
+    """Build a COOLDOWN_END event-data dict."""
     return {
         "key": key,
         "cooldown_ended_at": time.time(),
@@ -243,7 +243,7 @@ def make_cooldown_end_event(key: str = "test_api") -> dict[str, Any]:
 
 
 def make_mock_event_bus() -> tuple[MagicMock, list[dict]]:
-    """Mock EventBus와 캡처된 이벤트 리스트를 반환.
+    """Return a mock EventBus together with the list of captured events.
 
     Returns:
         (mock_bus, emitted_events) tuple
@@ -274,7 +274,7 @@ def compute_progressive_limits(
         REDUCTION_RATIO_3RD,
     ),
 ) -> list[int]:
-    """연속 429 시 점진적 감소 limit 시퀀스 계산.
+    """Compute the progressively-reduced limit sequence for consecutive 429s.
 
     Returns:
         [initial, after_1st, after_2nd, after_3rd]

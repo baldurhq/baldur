@@ -470,6 +470,20 @@ def _coordinator_in_cooldown(key: str):
 class TestTenacityBridgeCooldownDeferralBehavior:
     """An over-bound cooldown aborts the bridge loop into a FAILURE with defer metadata."""
 
+    @pytest.fixture(autouse=True)
+    def _coordinator_singleton_hygiene(self):
+        """Keep the bound-forwarding tests from leaking the coordinator singleton.
+
+        A bridge built with ``rate_limit_key`` but no explicit coordinator
+        resolves ``RateLimitCoordinator.get_instance()``, so the three forwarding
+        tests below would leave a process-wide instance (and its cooldown timers)
+        behind for every later test in the same xdist worker
+        (UNIT_TEST_GUIDELINES 6.5).
+        """
+        RateLimitCoordinator.reset_instance()
+        yield
+        RateLimitCoordinator.reset_instance()
+
     def test_sync_deferral_returns_failure_with_defer_metadata(self):
         """Sync execute: deferral -> FAILURE, rate_limit_deferred + not_before, func skipped."""
         coord = _coordinator_in_cooldown("api")
@@ -598,6 +612,45 @@ class TestTenacityBridgeCoordinatorFailOpenBehavior:
         assert result.outcome == PolicyOutcome.SUCCESS
         assert result.value == "recovered"
         assert attempts["n"] == 2  # attempt 2 ran — loop not truncated
+
+    def test_after_429_detection_fault_does_not_truncate_loop(self):
+        """Site 6: the fault surface includes 429 *detection*, not just the notify call.
+
+        ``detect_rate_limit`` reads attributes off the caller's exception, so a
+        response object without the expected shape raises inside the ``after``
+        hook. Left outside the wrap it escapes tenacity's un-guarded ``after``,
+        truncating the loop at attempt 1 and replacing the business error — the
+        exact blast radius the wrap exists to prevent. The retry loop's
+        equivalent wrap has always covered detection.
+        """
+
+        class _BadHeaders:
+            headers = ["Retry-After: 5"]  # a list has no .get()
+
+        business_error = RuntimeError("429 too many requests")
+        business_error.response = _BadHeaders()
+
+        coord = self._coordinator_mock()
+        attempts = {"n": 0}
+
+        def always_429():
+            attempts["n"] += 1
+            raise business_error
+
+        policy: TenacityBridgePolicy[str] = TenacityBridgePolicy(
+            stop=tenacity.stop_after_attempt(3),
+            retry=tenacity.retry_if_exception_type(RuntimeError),
+            wait=tenacity.wait_fixed(0),
+            rate_limit_coordinator=coord,
+            rate_limit_key="api",
+        )
+
+        result = policy.execute(always_429)
+
+        assert attempts["n"] == 3  # loop not truncated
+        # Negative: the detection fault never becomes the reported error.
+        assert not isinstance(result.error, AttributeError)
+        assert result.error is business_error
 
     def test_after_on_success_fault_is_fail_open(self):
         """Site 5: on_success raises on the retry-driving ``after`` -> result preserved."""
