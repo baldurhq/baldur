@@ -1,7 +1,7 @@
 """
-Cascade Auditor - 이벤트 기록 모듈.
+Cascade Auditor - event recording module.
 
-Cascade Event 생성/저장 책임을 담당합니다.
+Responsible for Cascade Event creation and storage.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ logger = structlog.get_logger()
 
 
 class RecordingMixin:
-    """Cascade Event 기록 관련 메서드."""
+    """Cascade Event recording methods."""
 
     if TYPE_CHECKING:
         # Host contract — attributes/methods provided by CascadeEventAuditor
@@ -52,29 +52,31 @@ class RecordingMixin:
         external_trace: ExternalTraceContext | None = None,
     ) -> CascadeEvent:
         """
-        Cascade Event 기록.
+        Record a Cascade Event.
 
         Args:
-            trigger_type: 트리거 유형 (EMERGENCY_LEVEL_CHANGED, MANUAL_ACTIVATION 등)
-            trigger_details: 트리거 상세 정보
-            effects: 연쇄 효과 목록 (각 항목은 action_type, success 등 포함)
-            namespace: 네임스페이스
-            triggered_by: 트리거 주체 (user, system)
-            external_trace: 외부 분산 추적 컨텍스트 (선택)
+            trigger_type: Trigger type (EMERGENCY_LEVEL_CHANGED,
+                MANUAL_ACTIVATION, etc.)
+            trigger_details: Trigger details
+            effects: List of cascading effects (each item carries action_type,
+                success, etc.)
+            namespace: Namespace
+            triggered_by: Triggering actor (user, system)
+            external_trace: External distributed trace context (optional)
 
         Returns:
-            생성된 CascadeEvent
+            The created CascadeEvent
 
         Note:
-            Phase 5 Fail-Soft: Redis 장애 시 로컬 폴백으로 저장
+            Phase 5 Fail-Soft: falls back to local storage on Redis failure
         """
         with self._lock:
-            # 1. ID 생성
+            # 1. Generate IDs
             cascade_id = generate_cascade_id()
             trigger_event_id = generate_event_id()
             now = get_current_timestamp()
 
-            # 2. 트리거 생성
+            # 2. Build the trigger
             trigger = CascadeTrigger(
                 trigger_type=trigger_type,
                 event_id=trigger_event_id,
@@ -82,13 +84,13 @@ class RecordingMixin:
                 triggered_by=triggered_by,
             )
 
-            # 3. 효과 생성
+            # 3. Build the effects
             cascade_effects = _create_effects(effects, trigger_event_id, now)
 
-            # 4. 이전 해시 조회
+            # 4. Look up the previous hash
             previous_hash = self._get_last_hash(namespace)
 
-            # 5. Cascade Event 생성
+            # 5. Build the Cascade Event
             cascade_event = CascadeEvent(
                 id=cascade_id,
                 trigger=trigger,
@@ -100,10 +102,10 @@ class RecordingMixin:
                 is_test=TestModeContext.is_synthetic(),
             )
 
-            # 6. 해시 계산 및 설정
+            # 6. Compute and set the hash
             cascade_event.current_hash = cascade_event.calculate_hash()
 
-            # 7. 저장 (Fail-Soft: Redis 실패 시 로컬 폴백)
+            # 7. Store (Fail-Soft: local fallback on Redis failure)
             try:
                 self._save_cascade_event(cascade_event)
                 self._update_last_hash(namespace, cascade_event.current_hash)
@@ -135,16 +137,16 @@ class RecordingMixin:
         triggered_by: str | None = None,
     ) -> CascadeEvent:
         """
-        외부 Trace Context를 포함하여 Cascade Event 기록.
+        Record a Cascade Event including the external Trace Context.
 
-        Django HttpRequest에서 W3C Trace Context를 추출합니다.
+        Extracts the W3C Trace Context from a Django HttpRequest.
         """
         external_trace = None
         if request:
             headers = {}
             meta = getattr(request, "META", {})
 
-            # HTTP_ 접두사를 제거하고 소문자로 변환
+            # Strip the HTTP_ prefix and lowercase
             header_mappings = {
                 "HTTP_TRACEPARENT": "traceparent",
                 "HTTP_TRACESTATE": "tracestate",
@@ -177,9 +179,9 @@ def _create_effects(
     timestamp: str,
 ) -> list[CascadeEffect]:
     """
-    효과 목록 생성.
+    Build the effect list.
 
-    각 효과의 caused_by가 명시되지 않으면 이전 이벤트 ID를 사용합니다.
+    If an effect's caused_by is not specified, the previous event ID is used.
     """
     cascade_effects: list[CascadeEffect] = []
     previous_event_id = trigger_event_id
@@ -187,7 +189,7 @@ def _create_effects(
     for effect_data in effects_data:
         effect_event_id = generate_event_id()
 
-        # ManualInterventionEffect 여부 확인
+        # Check whether this is a ManualInterventionEffect
         intervention_type = effect_data.get("intervention_type")
         effect: CascadeEffect
         if intervention_type:

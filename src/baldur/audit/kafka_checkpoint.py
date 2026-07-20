@@ -1,11 +1,11 @@
 """
-WAL → Kafka 동기화 헬퍼.
+WAL → Kafka sync helper.
 
-WAL 시퀀스와 Kafka 오프셋을 원자적으로 기록하여
-'어디까지 Kafka로 보냈는지'를 추적합니다.
+Atomically records the WAL sequence together with the Kafka offset to track
+"how far we have sent to Kafka".
 
-KafkaRedisCheckpointStorage (checkpoint_strategy.py)를 사용하여
-체크포인트를 관리합니다.
+Uses KafkaRedisCheckpointStorage (checkpoint_strategy.py) to manage
+checkpoints.
 
 Usage:
     from baldur.audit.kafka_checkpoint import sync_wal_to_kafka_with_checkpoint
@@ -39,7 +39,7 @@ logger = structlog.get_logger()
 
 
 # =============================================================================
-# WAL → Kafka 동기화 헬퍼
+# WAL → Kafka sync helper
 # =============================================================================
 
 
@@ -50,19 +50,19 @@ def sync_wal_to_kafka_with_checkpoint(
     namespace: str = "default",
 ) -> int:
     """
-    WAL → Kafka 동기화 (체크포인트 기반).
+    WAL → Kafka sync (checkpoint-based).
 
-    마지막 체크포인트 이후의 엔트리만 전송하여 중복 방지.
-    KafkaAuditProducer 또는 기존 KafkaAuditAdapter 모두 지원.
+    Sends only the entries after the last checkpoint to avoid duplicates.
+    Supports both KafkaAuditProducer and the existing KafkaAuditAdapter.
 
     Args:
-        wal: WriteAheadLog 인스턴스
-        producer: KafkaAuditProducer 또는 KafkaAuditAdapter 인스턴스
-        checkpoint_strategy: CheckpointStorageStrategy 인스턴스
-        namespace: 네임스페이스
+        wal: WriteAheadLog instance
+        producer: KafkaAuditProducer or KafkaAuditAdapter instance
+        checkpoint_strategy: CheckpointStorageStrategy instance
+        namespace: Namespace
 
     Returns:
-        동기화된 엔트리 수
+        Number of entries synced
     """
     from baldur.audit.checkpoint import UnifiedCheckpointData
 
@@ -71,7 +71,7 @@ def sync_wal_to_kafka_with_checkpoint(
     entries = wal.recover_unprocessed(last_processed_seq=last_seq)
     synced = 0
 
-    # Producer 타입 감지: KafkaAuditProducer vs 기존 Adapter
+    # Detect the producer type: KafkaAuditProducer vs the existing Adapter
     is_new_producer = hasattr(producer, "publish_audit_event")
 
     for entry in entries:

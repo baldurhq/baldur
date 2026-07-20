@@ -412,22 +412,22 @@ def trace_id_middleware(get_response):
 
             return response
         finally:
-            # Clear trace ID after request — 예외 발생 시에도 반드시 정리
+            # Clear trace ID after request — always clean up, even on exception
             clear_trace_id()
 
     return middleware
 
 
 # =============================================================================
-# Celery Task trace_id 전파 및 복원
+# Celery Task trace_id propagation and restoration
 # =============================================================================
 
 
 # =============================================================================
-# Celery Task trace_id 표준화
+# Celery Task trace_id standardization
 # =============================================================================
 
-# Celery 컨텍스트 저장용 변수
+# Variable holding the Celery context
 _celery_context_var: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
     "celery_context", default=None
 )
@@ -435,53 +435,53 @@ _celery_context_var: contextvars.ContextVar[dict | None] = contextvars.ContextVa
 
 def generate_celery_trace_id(task_id: str) -> str:
     """
-    Celery Task ID를 기반으로 trace_id를 생성합니다.
+    Generate a trace_id from a Celery Task ID.
 
-    OTEL이 활성화된 경우 OTEL의 trace_id를 우선 사용합니다.
-    OTEL이 비활성화된 경우 "CELERY_{task_id}" 형식을 사용합니다.
+    When OTEL is enabled, OTEL's trace_id takes precedence.
+    When OTEL is disabled, the "CELERY_{task_id}" format is used.
 
-    이 형식을 사용하면:
-    - Flower UI에서 task_id로 직접 검색 가능
-    - 재시도 시에도 동일한 trace_id 유지
-    - Audit 로그에서 Celery Task와 1:1 매칭
+    This format gives:
+    - Direct search by task_id in the Flower UI
+    - The same trace_id preserved across retries
+    - 1:1 matching between audit logs and Celery Tasks
 
     Args:
-        task_id: Celery Task ID (예: "7483abc-1234-...")
+        task_id: Celery Task ID (e.g. "7483abc-1234-...")
 
     Returns:
-        str: trace_id (OTEL 형식 또는 "CELERY_{task_id}" 형식)
+        str: trace_id (OTEL format or "CELERY_{task_id}" format)
 
     Example:
         >>> generate_celery_trace_id("7483abc-1234-5678-90ab-cdef12345678")
-        "CELERY_7483abc-1234-5678-90ab-cdef12345678"  # OTEL 비활성화 시
-        "req-a1b2c3d4"  # OTEL 활성화 시 (현재 span에서 추출)
+        "CELERY_7483abc-1234-5678-90ab-cdef12345678"  # OTEL disabled
+        "req-a1b2c3d4"  # OTEL enabled (extracted from the current span)
     """
-    # OTEL 활성화 시 현재 span의 trace_id 우선 사용
+    # When OTEL is enabled, prefer the current span's trace_id
     otel_trace_id = _get_trace_id_from_otel()
     if otel_trace_id:
         return otel_trace_id
 
     if not task_id:
-        # Fallback: task_id가 없으면 기존 방식으로 생성
+        # Fallback: no task_id — generate the conventional way
         return f"CELERY_{generate_trace_id()}"
     return f"CELERY_{task_id}"
 
 
 def get_celery_trace_id_with_otel_context(task_id: str) -> dict[str, str | None]:
     """
-    Celery Task의 trace 정보를 OTEL 컨텍스트와 함께 반환합니다.
+    Return a Celery Task's trace info together with the OTEL context.
 
-    OTEL이 활성화된 경우 전체 W3C trace_id와 span_id도 포함합니다.
+    When OTEL is enabled, the full W3C trace_id and span_id are included too.
 
     Args:
         task_id: Celery Task ID
 
     Returns:
         dict: {
-            "trace_id": 표시용 trace_id (req-xxx 또는 CELERY_xxx),
-            "trace_id_full": 전체 W3C trace_id (32자 hex, OTEL 활성화 시),
-            "span_id": 현재 span_id (16자 hex, OTEL 활성화 시),
-            "celery_task_id": 원본 Celery task_id
+            "trace_id": display trace_id (req-xxx or CELERY_xxx),
+            "trace_id_full": full W3C trace_id (32 hex chars, OTEL enabled),
+            "span_id": current span_id (16 hex chars, OTEL enabled),
+            "celery_task_id": original Celery task_id
         }
     """
     result: dict[str, str | None] = {
@@ -515,14 +515,15 @@ def set_celery_context(
     retries: int = 0,
 ) -> None:
     """
-    현재 Celery Task 컨텍스트를 설정합니다.
+    Set the current Celery Task context.
 
-    task_prerun 시그널에서 호출되어 Task 실행 동안 유지됩니다.
+    Called from the task_prerun signal and kept for the Task's execution.
 
     Args:
         task_id: Celery Task ID
-        task_name: Celery Task 이름 (예: "baldur.adapters.celery.tasks.replay_single_dlq_entry")
-        retries: 현재 재시도 횟수
+        task_name: Celery Task name
+            (e.g. "baldur.adapters.celery.tasks.replay_single_dlq_entry")
+        retries: Current retry count
     """
     context = {
         "task_id": task_id,
@@ -531,26 +532,27 @@ def set_celery_context(
     }
     _celery_context_var.set(context)
 
-    # trace_id도 함께 설정
+    # Set the trace_id as well
     trace_id = generate_celery_trace_id(task_id)
     set_trace_id(trace_id)
 
 
 def get_celery_context() -> dict | None:
     """
-    현재 Celery Task 컨텍스트를 반환합니다.
+    Return the current Celery Task context.
 
     Returns:
-        dict: {"task_id": ..., "task_name": ..., "retries": ...} 또는 None
+        dict: {"task_id": ..., "task_name": ..., "retries": ...} or None
     """
     return _celery_context_var.get()
 
 
 def clear_celery_context() -> None:
     """
-    Celery Task 컨텍스트를 정리합니다.
+    Clear the Celery Task context.
 
-    task_postrun 시그널에서 호출되어 Worker 재사용 시 이전 컨텍스트 잔존을 방지합니다.
+    Called from the task_postrun signal to prevent a previous context from
+    lingering when a Worker is reused.
     """
     _celery_context_var.set(None)
     clear_trace_id()
@@ -558,26 +560,27 @@ def clear_celery_context() -> None:
 
 def is_celery_task() -> bool:
     """
-    현재 실행 컨텍스트가 Celery Task 내부인지 확인합니다.
+    Check whether the current execution context is inside a Celery Task.
 
     Returns:
-        bool: Celery Task 내부이면 True
+        bool: True if inside a Celery Task
     """
     return _celery_context_var.get() is not None
 
 
 def get_trace_for_celery() -> dict[str, Any]:
     """
-    Celery Task에 전달할 trace 정보를 반환합니다.
+    Return the trace info to hand off to a Celery Task.
 
-    HTTP 요청 컨텍스트에서 호출 시 현재 trace_id를 포함하여 반환합니다.
-    Celery Task 내에서 restore_trace_from_celery()로 복원할 수 있습니다.
+    When called from an HTTP request context, the current trace_id is
+    included. Inside the Celery Task it can be restored with
+    restore_trace_from_celery().
 
     Returns:
-        dict: trace_id와 source 정보를 담은 딕셔너리
+        dict: dictionary carrying the trace_id and source info
 
     Example:
-        # View에서 Task 호출 시
+        # Calling a Task from a View
         from baldur.audit.trace import get_trace_for_celery
 
         replay_single_dlq_entry.delay(
@@ -600,36 +603,36 @@ def restore_trace_from_celery(
     celery_task_name: str | None = None,
 ) -> Generator[str, None, None]:
     """
-    Celery Task에서 trace 컨텍스트를 복원하거나 자체 생성합니다.
+    Restore — or self-generate — the trace context inside a Celery Task.
 
-    우선순위:
-    1. trace_info에 trace_id가 있으면 사용 (HTTP → Celery 전파)
-    2. celery_task_id가 있으면 CELERY_{task_id} 생성
-    3. 둘 다 없으면 CELERY_{uuid} 생성 (Fallback)
+    Precedence:
+    1. Use trace_info's trace_id if present (HTTP → Celery propagation)
+    2. Generate CELERY_{task_id} if celery_task_id is present
+    3. Generate CELERY_{uuid} if neither is present (Fallback)
 
     Note:
-        task_prerun 시그널이 활성화되면 이 함수는 더 이상 수동 호출 불필요.
-        하위 호환성을 위해 유지됨.
+        Once the task_prerun signal is enabled, this function no longer needs
+        to be called manually. Kept for backward compatibility.
 
     Args:
-        trace_info: HTTP 요청에서 전파된 trace 정보 (optional)
+        trace_info: Trace info propagated from the HTTP request (optional)
         celery_task_id: Celery Task ID (optional, self.request.id)
-        celery_task_name: Celery Task 이름 (optional)
+        celery_task_name: Celery Task name (optional)
 
     Yields:
-        str: 현재 사용 중인 trace_id
+        str: The trace_id currently in use
     """
     if trace_info and trace_info.get("trace_id"):
-        # HTTP 요청에서 전파된 trace_id 사용
+        # Use the trace_id propagated from the HTTP request
         trace_id = trace_info["trace_id"]
     elif celery_task_id:
-        # Celery Task ID 기반 생성
+        # Generate from the Celery Task ID
         trace_id = generate_celery_trace_id(celery_task_id)
     else:
-        # Fallback: UUID 기반 생성
+        # Fallback: generate from a UUID
         trace_id = f"CELERY_{generate_trace_id()}"
 
-    # Celery 컨텍스트 설정 (있는 경우)
+    # Set the Celery context (when available)
     if celery_task_id:
         set_celery_context(
             task_id=celery_task_id,

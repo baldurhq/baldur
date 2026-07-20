@@ -1,8 +1,8 @@
 """
-WAL 파일 읽기/복구 모듈.
+WAL file read/recovery module.
 
-기존 코드에서 구조가 동일했던 _read_wal_file과 _read_wal_file_best_effort를
-모드 파라미터로 통합합니다.
+Unifies _read_wal_file and _read_wal_file_best_effort — structurally identical
+in the original code — behind a mode parameter.
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ def _wal_glob_pattern(file_prefix: str, mode: Literal["runtime", "startup"]) -> 
 
 
 class WALReaderMixin:
-    """WAL 파일 읽기/복구 관련 메서드."""
+    """WAL file read/recovery methods."""
 
     if TYPE_CHECKING:
         # Host contract — attributes/methods provided by WriteAheadLog.
@@ -74,21 +74,21 @@ class WALReaderMixin:
 
     def _read_wal_file(self, filepath: Path) -> Iterator[Any]:
         """
-        WAL 파일 읽기.
+        Read a WAL file.
 
         Args:
-            filepath: WAL 파일 경로
+            filepath: WAL file path
 
         Yields:
-            WALEntry 객체
+            WALEntry objects
         """
         yield from self._read_wal_file_impl(filepath, best_effort=False)
 
     def _read_wal_file_best_effort(self, filepath: Path) -> Iterator[Any]:
         """
-        Best-effort 복구 모드로 WAL 파일 읽기.
+        Read a WAL file in best-effort recovery mode.
 
-        손상된 레코드를 건너뛰고 가능한 많은 엔트리를 복구합니다.
+        Skips corrupted records and recovers as many entries as possible.
         """
         yield from self._read_wal_file_impl(filepath, best_effort=True)
 
@@ -96,21 +96,21 @@ class WALReaderMixin:
         self, filepath: Path, best_effort: bool = False
     ) -> Iterator[Any]:
         """
-        WAL 파일 읽기 통합 구현.
+        Unified WAL file read implementation.
 
-        기존 _read_wal_file과 _read_wal_file_best_effort의
-        동일 구조를 하나로 통합합니다.
+        Merges the identical structures of _read_wal_file and
+        _read_wal_file_best_effort into one.
 
         Args:
-            filepath: WAL 파일 경로
-            best_effort: True면 손상 레코드를 건너뛰고 계속 진행
+            filepath: WAL file path
+            best_effort: If True, skip corrupted records and keep going
 
         Yields:
-            WALEntry 객체
+            WALEntry objects
         """
         from baldur.audit.wal._models import WALCorruptionError
 
-        # Drift Detection 메트릭 (선택적 import)
+        # Drift Detection metrics (optional import)
         try:
             from baldur.metrics.drift_metrics import record_wal_corruption
 
@@ -120,7 +120,7 @@ class WALReaderMixin:
 
         try:
             with open(filepath, "rb") as f:
-                # 헤더 읽기
+                # Read the header
                 header = f.read(self.HEADER_SIZE)
                 if len(header) < self.HEADER_SIZE:
                     return
@@ -129,9 +129,9 @@ class WALReaderMixin:
                 if magic != self.MAGIC:
                     return
 
-                # 레코드 읽기
+                # Read records
                 while True:
-                    # 길이 읽기
+                    # Read the length
                     length_bytes = f.read(4)
                     if len(length_bytes) < 4:
                         break
@@ -150,7 +150,7 @@ class WALReaderMixin:
                         self._corrupted_entries += 1
                         break
 
-                    # 체크섬 읽기
+                    # Read the checksum
                     checksum_bytes = f.read(8)
                     if len(checksum_bytes) < 8:
                         break
@@ -160,12 +160,12 @@ class WALReaderMixin:
                     else:
                         checksum = checksum_bytes.decode("ascii")
 
-                    # 데이터 읽기
+                    # Read the data
                     data_bytes = f.read(length)
                     if len(data_bytes) < length:
                         break
 
-                    # 체크섬 검증
+                    # Verify the checksum
                     if not verify_checksum(data_bytes, checksum):
                         self._corrupted_entries += 1
 
@@ -195,7 +195,7 @@ class WALReaderMixin:
                                 self._on_corruption(error)
                             continue
 
-                    # JSON 파싱
+                    # JSON parsing
                     entry = self._parse_wal_record(data_bytes, checksum)
                     if entry is not None:
                         yield entry
@@ -206,14 +206,14 @@ class WALReaderMixin:
             pass
 
     def _handle_corrupted_record_length(self, f) -> bool:
-        """손상된 레코드 길이 처리. 계속 진행 가능하면 True."""
+        """Handle a corrupted record length. True if reading can continue."""
         if self._config.best_effort_recovery:
             pos = self._scan_for_valid_record(f)
             return pos != -1
         return False
 
     def _parse_wal_record(self, data_bytes: bytes, checksum: str):
-        """WAL 레코드 파싱. 실패 시 None."""
+        """Parse a WAL record. None on failure."""
         from baldur.audit.wal._models import WALEntry
 
         try:
@@ -232,12 +232,12 @@ class WALReaderMixin:
 
     def _scan_for_valid_record(self, f) -> int:
         """
-        다음 유효한 레코드 위치까지 스캔.
+        Scan forward to the next valid record position.
 
-        손상된 영역을 건너뛰고 다음 유효한 JSON 레코드를 찾습니다.
+        Skips the corrupted region and finds the next valid JSON record.
         """
         scan_buffer = bytearray()
-        max_scan_bytes = 1024 * 1024  # 최대 1MB 스캔
+        max_scan_bytes = 1024 * 1024  # scan at most 1MB
         scanned = 0
 
         while scanned < max_scan_bytes:
@@ -299,9 +299,9 @@ class WALReaderMixin:
         except ImportError:
             has_metrics = False
 
-        # OOM 방어: CgroupResourceMonitor를 활용하여 런타임 가용 메모리 기반 가드
+        # OOM defense: guard on runtime available memory via CgroupResourceMonitor
         estimated_bytes = sum(f.stat().st_size for f in wal_files)
-        estimated_memory = estimated_bytes * 3  # JSON 파싱 + WALEntry 객체 오버헤드
+        estimated_memory = estimated_bytes * 3  # JSON parsing + WALEntry overhead
 
         try:
             from baldur.core.resource_monitor import CgroupResourceMonitor
@@ -320,7 +320,7 @@ class WALReaderMixin:
                     available,
                 )
         except ImportError:
-            pass  # non-K8s 환경 — 가드 스킵
+            pass  # non-K8s environment — skip the guard
 
         max_workers = min(
             self._config.recovery_max_workers,
@@ -328,14 +328,14 @@ class WALReaderMixin:
         )
 
         if max_workers <= 1:
-            # 파일 1개면 병렬화 오버헤드만 발생 — 기존 직렬 경로
+            # A single file only adds parallelization overhead — serial path
             logger.info(
                 "wal.sequential_recovery_started",
                 file_count=len(wal_files),
             )
             sorted_entries = self._recover_sequential(wal_files, last_processed_seq)
         else:
-            # 파일별 독립 읽기 (lock 불필요 — 읽기 전용, 파일별 독립 핸들)
+            # Independent per-file reads (no lock — read-only, per-file handle)
             logger.info(
                 "wal.parallel_recovery_started",
                 file_count=len(wal_files),
@@ -389,11 +389,11 @@ class WALReaderMixin:
 
     def _read_file_entries(self, wal_file, last_processed_seq: int) -> list:
         """
-        단일 WAL 파일에서 미처리 엔트리 읽기 (병렬 안전).
+        Read unprocessed entries from a single WAL file (parallel-safe).
 
-        best_effort 모드를 사용하여 부분 손상 시에도 정상 엔트리를 최대한 복구한다.
-        I/O 에러 발생 시 에러 직전까지의 부분 결과를 반환하고
-        CRITICAL 알림을 전송한다.
+        Uses best_effort mode so intact entries are recovered as far as
+        possible even under partial corruption. On an I/O error it returns
+        the partial result up to the error and sends a CRITICAL notification.
         """
         entries = []
         try:
@@ -429,7 +429,7 @@ class WALReaderMixin:
                 UnifiedNotificationManager().notify(payload)
             except Exception:
                 pass
-        return entries  # 부분 결과라도 반환 — WAL의 데이터 유실 최소화 원칙
+        return entries  # return even a partial result — WAL minimizes data loss
 
     def _orphan_wal_files(self, file_prefix: str) -> list[Path]:
         """Non-own-PID (orphan) WAL file paths in the shared ``wal_dir``.
@@ -485,7 +485,7 @@ class WALReaderMixin:
         return sorted(entries, key=lambda e: e.sequence)
 
     def _recover_sequential(self, wal_files, last_processed_seq: int) -> list:
-        """기존 직렬 복구 경로 (파일 1개 또는 병렬 비활성화 시)."""
+        """Serial recovery path (a single file, or parallelism disabled)."""
         entries = []
         with self._lock:
             for wal_file in wal_files:
@@ -503,10 +503,11 @@ class WALReaderMixin:
         available_bytes: int,
     ) -> list:
         """
-        메모리 제한 청크 모드 복구.
+        Memory-bounded chunked recovery.
 
-        OOM 가드가 트리거되었을 때 파일을 하나씩 처리하여 메모리 사용량을 제한한다.
-        각 파일 처리 후 결과를 즉시 정렬/합산하여 메모리 피크를 낮춘다.
+        When the OOM guard trips, files are processed one at a time to bound
+        memory use. Results are sorted/accumulated right after each file to
+        lower the memory peak.
         """
         all_entries: list = []
         consumed = 0
@@ -600,13 +601,14 @@ class WALReaderMixin:
 
     def _get_file_max_sequence(self, wal_file: Path) -> int:
         """
-        WAL 파일의 최대 시퀀스 번호를 경량 스캔으로 조회.
+        Read a WAL file's max sequence number via a lightweight scan.
 
-        _read_wal_file() → _parse_wal_record() → WALEntry() 객체 생성 경로를
-        완전히 우회한다. 체크섬 검증도 스킵한다 (삭제 판단 전용이므로 정합성 불필요).
+        Completely bypasses the _read_wal_file() → _parse_wal_record() →
+        WALEntry() construction path. Checksum verification is skipped too
+        (this only decides deletion, so integrity checking is unnecessary).
 
-        cleanup_processed()는 sync_worker에서 sync_interval(1초)마다 호출되므로,
-        이 경량 스캔으로 hot path의 CPU/GC 오버헤드를 줄인다.
+        cleanup_processed() is invoked by sync_worker every sync_interval
+        (1s), so this lightweight scan cuts hot-path CPU/GC overhead.
         """
         max_seq = 0
         try:
@@ -624,7 +626,7 @@ class WALReaderMixin:
                     if length > _MAX_RECORD_SIZE_BYTES:  # oversized → corruption
                         break
 
-                    f.read(8)  # checksum — 스킵
+                    f.read(8)  # checksum — skipped
                     data_bytes = f.read(length)
                     if len(data_bytes) < length:
                         break

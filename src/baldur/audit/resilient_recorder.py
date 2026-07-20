@@ -1,17 +1,17 @@
 """
 Resilient Continuous Audit Recorder.
 
-기존 ContinuousAuditRecorder에 장애 허용 기능 추가:
-- RingBuffer: 비침투 Shadow Logging
-- CircuitBreaker: resilience.py 재사용
-- Self-Audit: 자체 상태 기록
-- SyslogFallback: 최후의 수단
+Adds fault-tolerance capabilities on top of ContinuousAuditRecorder:
+- RingBuffer: non-intrusive shadow logging
+- CircuitBreaker: reuses resilience.py
+- Self-Audit: records its own state
+- SyslogFallback: last resort
 
 Design:
     Application → record() → RingBuffer → Background Worker → Storage
         (Non-blocking)    (Shadow)      (Async Flush)
 
-    장애 발생 시:
+    On failure:
     Primary Store → Fallback → Syslog → stderr
 
 Usage:
@@ -62,7 +62,7 @@ logger = structlog.get_logger()
 
 @dataclass
 class ResilientRecorderConfig:
-    """Resilient Recorder 설정."""
+    """Resilient Recorder configuration."""
 
     # Buffer
     buffer_capacity: int = 10000
@@ -88,17 +88,17 @@ class ResilientRecorderConfig:
         cls, settings: ResilientRecorderSettings | None = None
     ) -> "ResilientRecorderConfig":
         """
-        ResilientRecorderSettings에서 Config 생성.
+        Build a Config from ResilientRecorderSettings.
 
         Args:
-            settings: Pydantic Settings 인스턴스 (None이면 기본값 사용)
+            settings: Pydantic Settings instance (defaults are used when None)
 
         Returns:
-            ResilientRecorderConfig 인스턴스
+            ResilientRecorderConfig instance
         """
         s = settings or get_resilient_recorder_settings()
 
-        # backpressure_strategy 문자열 -> enum 변환.
+        # backpressure_strategy string -> enum conversion.
         # BLOCK is accepted by the settings validator but not implemented in the
         # BackpressureStrategy enum — falls back to DROP_OLDEST.
         strategy_map: dict[str, BackpressureStrategy] = {
@@ -127,28 +127,28 @@ class ResilientRecorderConfig:
 
 class ResilientContinuousAuditRecorder(ContinuousAuditRecorder):
     """
-    장애 허용 연속 감사 기록기.
+    Fault-tolerant continuous audit recorder.
 
-    ContinuousAuditRecorder를 확장하여 다음 기능 추가:
-    1. RingBuffer: 비침투 Shadow Logging (Non-blocking)
-    2. CircuitBreaker 연결: resilience.py 재사용
-    3. Self-Audit: 자체 상태 기록
-    4. Syslog 연결: 최후의 수단
-    5. Background Flush: 비동기 배치 처리
+    Extends ContinuousAuditRecorder with:
+    1. RingBuffer: non-intrusive shadow logging (non-blocking)
+    2. CircuitBreaker wiring: reuses resilience.py
+    3. Self-Audit: records its own state
+    4. Syslog wiring: last resort
+    5. Background Flush: asynchronous batch processing
 
     Fallback Chain:
-        Primary (Adapter 주입: File/S3/Loki/사용자 정의)
-            ↓ 실패
+        Primary (injected adapter: File/S3/Loki/custom)
+            ↓ fails
         Fallback (Local File)
-            ↓ 실패
+            ↓ fails
         Syslog (OS-level)
-            ↓ 실패
-        stderr (최후)
+            ↓ fails
+        stderr (last resort)
 
-    비침투 원칙:
-        - 고객사 DB에 직접 접근하지 않음
-        - 기본값: FileAuditLogAdapter (로컬 JSONL)
-        - 고객이 원하면 Adapter를 교체하여 S3/Loki/DB 사용 가능
+    Non-intrusive principle:
+        - Never touches the customer's DB directly
+        - Default: FileAuditLogAdapter (local JSONL)
+        - Customers may swap the adapter to use S3/Loki/DB instead
     """
 
     def __init__(
@@ -163,11 +163,11 @@ class ResilientContinuousAuditRecorder(ContinuousAuditRecorder):
         Initialize ResilientContinuousAuditRecorder.
 
         Args:
-            audit_adapter: 감사 로그 저장 어댑터 (Primary)
-            config: 감사 설정
-            resilient_config: Resilient 기능 설정
-            alert_callback: 알림 콜백
-            state_file: 해시 체인 상태 파일 경로
+            audit_adapter: audit log storage adapter (Primary)
+            config: audit configuration
+            resilient_config: resilient-feature configuration
+            alert_callback: alert callback
+            state_file: hash-chain state file path
         """
         super().__init__(
             audit_adapter=audit_adapter,
@@ -181,7 +181,7 @@ class ResilientContinuousAuditRecorder(ContinuousAuditRecorder):
         )
 
         # ─────────────────────────────────────────────────────────
-        # 기존 resilience.py 구성요소 연결
+        # Wire up existing resilience.py components
         # ─────────────────────────────────────────────────────────
         self._cb_registry = CircuitBreakerRegistry.get_instance()
         self._circuit_breaker = self._cb_registry.get_or_create(
@@ -198,14 +198,15 @@ class ResilientContinuousAuditRecorder(ContinuousAuditRecorder):
         self._degraded_manager = DegradedModeManager.get_instance()
 
         # ─────────────────────────────────────────────────────────
-        # 신규 구성요소
+        # New components
         # ─────────────────────────────────────────────────────────
         self._buffer: RingBuffer[dict[str, Any]] = RingBuffer(
             capacity=self._resilient_config.buffer_capacity,
             strategy=self._resilient_config.backpressure_strategy,
         )
 
-        # Primary Store 기록용 executor (timeout 보호, 좌비 스레드 최대 1개)
+        # Executor for Primary Store writes (timeout protection,
+        # at most one zombie thread)
         self._write_executor: ThreadPoolExecutor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="audit_write",
@@ -222,12 +223,12 @@ class ResilientContinuousAuditRecorder(ContinuousAuditRecorder):
         if self._resilient_config.fallback_file_path:
             self._init_fallback_adapter()
 
-        # Self-audit 로깅
+        # Self-audit logging
         self_audit().log(
             SelfAuditEvent.INITIALIZED, "ResilientContinuousAuditRecorder initialized"
         )
 
-        # Background flush 시작
+        # Start background flush
         if self._resilient_config.enable_background_flush:
             self.start()
 
@@ -260,7 +261,7 @@ class ResilientContinuousAuditRecorder(ContinuousAuditRecorder):
     # ─────────────────────────────────────────────────────────────
 
     def start(self) -> None:
-        """Background flush worker 시작."""
+        """Start the background flush worker."""
         from baldur.meta.daemon_worker import DaemonWorkerHandle
         from baldur.metrics.recorders.daemon_worker import register_daemon_worker
 
@@ -304,7 +305,7 @@ class ResilientContinuousAuditRecorder(ContinuousAuditRecorder):
             raise
 
     def stop(self, timeout: float | None = None) -> None:
-        """Background flush worker 중지."""
+        """Stop the background flush worker."""
         from baldur.metrics.recorders.daemon_worker import unregister_daemon_worker
 
         if timeout is None:
@@ -332,11 +333,11 @@ class ResilientContinuousAuditRecorder(ContinuousAuditRecorder):
                 join_timeout_seconds=timeout,
             )
 
-        # Drain remaining buffer (executor 필요)
+        # Drain remaining buffer (needs the executor)
         self._flush_remaining()
 
-        # executor 정리: _flush_remaining() 완료 후 호출
-        # wait=False — hang된 좌비 스레드가 있어도 애플리케이션 종료를 막지 않음
+        # Executor cleanup: called after _flush_remaining() completes.
+        # wait=False — a hung zombie thread must not block application shutdown
         self._write_executor.shutdown(wait=False)
 
         self._started = False
@@ -349,29 +350,30 @@ class ResilientContinuousAuditRecorder(ContinuousAuditRecorder):
 
     def _record_with_integrity(self, entry: AuditEntry) -> str:
         """
-        해시 체인과 함께 기록 (Non-blocking).
+        Record together with the hash chain (non-blocking).
 
-        RingBuffer에 먼저 추가하고, Background Worker가 실제 저장.
+        Appends to the RingBuffer first; the background worker does the
+        actual store.
         """
         with self._lock:
-            # 엔트리를 딕셔너리로 변환
+            # Convert the entry to a dictionary
             entry_dict = entry.to_dict()
 
-            # 해시 체인 무결성 정보 추가
+            # Add hash-chain integrity information
             entry_dict = self._hash_manager.add_integrity(entry_dict)
 
-            # 무결성 정보를 details에 포함
+            # Include the integrity information in details
             entry.details["integrity"] = entry_dict.get("integrity", {})
 
-            # Checksum 추가
+            # Add checksum
             entry_dict["checksum"] = compute_crc32(entry_dict)
 
-            # ID 생성
+            # Generate the ID
             integrity = entry_dict.get("integrity", {})
             audit_id = f"audit-{entry.timestamp.strftime('%Y%m%d%H%M%S')}-{integrity.get('sequence', 0):06d}"
             entry_dict["audit_id"] = audit_id
 
-            # RingBuffer에 추가 (Non-blocking)
+            # Append to the RingBuffer (non-blocking)
             if not self._buffer.put(entry_dict):
                 self_audit().log(
                     SelfAuditEvent.BUFFER_OVERFLOW,
@@ -419,10 +421,10 @@ class ResilientContinuousAuditRecorder(ContinuousAuditRecorder):
 
     def _flush_batch(self) -> int:
         """
-        배치 플러시.
+        Flush a batch.
 
         Returns:
-            처리된 엔트리 수
+            Number of entries processed
         """
         batch = self._buffer.get_batch(self._resilient_config.flush_batch_size)
 
@@ -445,7 +447,7 @@ class ResilientContinuousAuditRecorder(ContinuousAuditRecorder):
         return processed
 
     def _flush_remaining(self) -> None:
-        """남은 버퍼 모두 플러시."""
+        """Flush everything left in the buffer."""
         total = 0
         while not self._buffer.is_empty:
             count = self._flush_batch()
@@ -461,7 +463,7 @@ class ResilientContinuousAuditRecorder(ContinuousAuditRecorder):
 
     def _write_with_fallback(self, entry_dict: dict[str, Any]) -> bool:
         """
-        Fallback 체인으로 기록.
+        Write through the fallback chain.
 
         Primary → Fallback → Syslog → stderr
         """
@@ -490,7 +492,7 @@ class ResilientContinuousAuditRecorder(ContinuousAuditRecorder):
                     details={"error": str(e)},
                 )
 
-                # Circuit 상태 변경 알림
+                # Circuit state-change notification
                 if self._circuit_breaker.state == CircuitState.OPEN:
                     self_audit().log(
                         SelfAuditEvent.CIRCUIT_OPENED,
@@ -531,7 +533,7 @@ class ResilientContinuousAuditRecorder(ContinuousAuditRecorder):
                     f"Syslog failed: {e}",
                 )
 
-        # 4. stderr (최후)
+        # 4. stderr (last resort)
         self._write_to_stderr(entry_dict)
         return True
 
@@ -540,31 +542,33 @@ class ResilientContinuousAuditRecorder(ContinuousAuditRecorder):
         entry_dict: dict[str, Any],
         timeout: float,
     ) -> None:
-        """Primary Store에 timeout 제한으로 기록."""
+        """Write to the Primary Store under a timeout."""
         future = self._write_executor.submit(self._write_to_primary, entry_dict)
         try:
             future.result(timeout=timeout)
         except FuturesTimeoutError as err:
-            # 이미 실행 중인 작업: cancel 무효 (Python thread는 강제 종료 불가)
-            # 큐에서 대기 중인 작업: 큐에서 제거하여 뒤늦은 실행/중복 기록 방지
+            # Already-running task: cancel is a no-op (Python threads cannot
+            # be force-killed).
+            # Task still queued: remove it from the queue to prevent a late
+            # execution / duplicate record.
             future.cancel()
             raise TimeoutError(
                 f"Primary store write timed out after {timeout}s"
             ) from err
 
     def _write_to_primary(self, entry_dict: dict[str, Any]) -> None:
-        """Primary Store에 기록."""
+        """Write to the Primary Store."""
         entry = AuditEntry.from_dict(entry_dict)
         self.audit_adapter.log(entry)
 
     def _write_to_fallback(self, entry_dict: dict[str, Any]) -> None:
-        """Fallback File에 기록."""
+        """Write to the Fallback File."""
         if self._fallback_adapter:
             entry = AuditEntry.from_dict(entry_dict)
             self._fallback_adapter.log(entry)
 
     def _write_to_syslog(self, entry_dict: dict[str, Any]) -> None:
-        """Syslog에 기록."""
+        """Write to Syslog."""
         action = entry_dict.get("action", "unknown")
         audit_id = entry_dict.get("audit_id", "unknown")
         self._syslog_fallback.log_critical(
@@ -574,7 +578,7 @@ class ResilientContinuousAuditRecorder(ContinuousAuditRecorder):
         )
 
     def _write_to_stderr(self, entry_dict: dict[str, Any]) -> None:
-        """stderr에 기록 (최후의 수단, 테스트 환경에서는 생략)."""
+        """Write to stderr (last resort, skipped in test environments)."""
         import os
         import sys
 
@@ -594,11 +598,11 @@ class ResilientContinuousAuditRecorder(ContinuousAuditRecorder):
     # ─────────────────────────────────────────────────────────────
 
     def get_buffer_stats(self) -> RingBufferStats:
-        """버퍼 통계 반환."""
+        """Return buffer statistics."""
         return self._buffer.get_stats()
 
     def get_health_status(self) -> dict[str, Any]:
-        """헬스 상태 반환."""
+        """Return the health status."""
         buffer_stats = self._buffer.get_stats()
 
         return {
@@ -626,21 +630,21 @@ class ResilientContinuousAuditRecorder(ContinuousAuditRecorder):
         }
 
     def _is_healthy(self) -> bool:
-        """헬스 상태 확인."""
-        # Buffer가 80% 이상 차면 unhealthy
+        """Check the health status."""
+        # Unhealthy once the buffer is 80% or more full
         buffer_stats = self._buffer.get_stats()
         if buffer_stats.size > buffer_stats.capacity * 0.8:
             return False
 
-        # Circuit breaker가 열려있으면 unhealthy
+        # Unhealthy while the circuit breaker is open
         if self._circuit_breaker.state == CircuitState.OPEN:
             return False
 
-        # Self-audit 실패율이 높으면 unhealthy
+        # Unhealthy when the self-audit failure rate is high
         return self_audit().is_healthy()
 
     def force_flush(self) -> int:
-        """수동 플러시."""
+        """Flush manually."""
         return self._flush_batch()
 
     def __enter__(self):

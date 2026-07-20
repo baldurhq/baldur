@@ -1,11 +1,12 @@
 """
 Cross-Cluster Audit Linker.
 
-각 클러스터의 로컬 해시 체인을 글로벌 앵커로 연결.
+Links each cluster's local hash chain through a global anchor.
 
-설계 원칙:
-- 체인은 클러스터별로 독립 (Local Chain) - 성능 보장
-- 일일 앵커만 글로벌 저장소에 통합 (Global Anchoring) - 전사 무결성
+Design principles:
+- Chains stay independent per cluster (Local Chain) - guarantees performance
+- Only daily anchors are consolidated into the global store (Global Anchoring)
+  - org-wide integrity
 """
 
 from __future__ import annotations
@@ -40,7 +41,7 @@ def _get_global_anchor_ttl_days() -> int:
 
 @dataclass
 class ClusterDailyAnchor:
-    """클러스터별 일일 앵커."""
+    """Per-cluster daily anchor."""
 
     cluster_id: str
     anchor_date: date
@@ -61,7 +62,7 @@ class ClusterDailyAnchor:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ClusterDailyAnchor:
-        """딕셔너리에서 ClusterDailyAnchor 생성."""
+        """Build a ClusterDailyAnchor from a dict."""
         return cls(
             cluster_id=data["cluster_id"],
             anchor_date=date.fromisoformat(data["date"]),
@@ -76,14 +77,14 @@ class ClusterDailyAnchor:
         )
 
     def compute_anchor_hash(self) -> str:
-        """앵커 해시 계산."""
+        """Compute the anchor hash."""
         data = f"{self.cluster_id}:{self.anchor_date}:{self.final_sequence}:{self.final_hash}"
         return hashlib.sha256(data.encode()).hexdigest()
 
 
 @dataclass
 class GlobalDailyAnchor:
-    """글로벌 일일 앵커 (모든 클러스터 통합)."""
+    """Global daily anchor (all clusters consolidated)."""
 
     anchor_date: date
     cluster_anchors: list[ClusterDailyAnchor]
@@ -95,11 +96,11 @@ class GlobalDailyAnchor:
             self.global_hash = self._compute_global_hash()
 
     def _compute_global_hash(self) -> str:
-        """모든 클러스터 앵커를 결합한 글로벌 해시."""
+        """Global hash combining every cluster anchor."""
         if not self.cluster_anchors:
             return hashlib.sha256(b"empty").hexdigest()
 
-        # 클러스터 ID 순으로 정렬하여 결정론적 해시 보장
+        # Sort by cluster ID to guarantee a deterministic hash
         sorted_anchors = sorted(self.cluster_anchors, key=lambda a: a.cluster_id)
         combined = ":".join(a.compute_anchor_hash() for a in sorted_anchors)
         return hashlib.sha256(combined.encode()).hexdigest()
@@ -115,7 +116,7 @@ class GlobalDailyAnchor:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> GlobalDailyAnchor:
-        """딕셔너리에서 GlobalDailyAnchor 생성."""
+        """Build a GlobalDailyAnchor from a dict."""
         cluster_anchors = [
             ClusterDailyAnchor.from_dict(ca) for ca in data.get("cluster_anchors", [])
         ]
@@ -133,14 +134,15 @@ class GlobalDailyAnchor:
 
 class CrossClusterAuditLinker:
     """
-    클러스터 간 Audit 체인 연결기.
+    Cross-cluster audit chain linker.
 
-    하이브리드 전략:
-    - Local: 각 클러스터가 독립적인 해시 체인 유지 (성능)
-    - Global: 일일 앵커만 글로벌 저장소에 통합 (무결성 증명)
+    Hybrid strategy:
+    - Local: each cluster maintains an independent hash chain (performance)
+    - Global: only daily anchors are consolidated into the global store
+      (integrity proof)
     """
 
-    # Redis 키 패턴
+    # Redis key patterns
     LOCAL_ANCHOR_KEY_TEMPLATE = "{prefix}audit:anchor:{date}"
     GLOBAL_ANCHOR_KEY_TEMPLATE = "baldur:global:anchor:{date}"
     GLOBAL_ANCHOR_LIST_KEY = "baldur:global:anchor:list"
@@ -162,12 +164,14 @@ class CrossClusterAuditLinker:
         Initialize CrossClusterAuditLinker.
 
         Args:
-            local_redis: 로컬 Redis 클라이언트
-            global_redis: 글로벌 Redis 클라이언트 (없으면 local 사용)
-            cluster_identity: 클러스터 식별 정보
-            key_prefix: Redis 키 프리픽스
-            local_anchor_ttl_days: 로컬 앵커 TTL (default from AuditIntegritySettings)
-            global_anchor_ttl_days: 글로벌 앵커 TTL (default from AuditIntegritySettings)
+            local_redis: Local Redis client
+            global_redis: Global Redis client (falls back to local if unset)
+            cluster_identity: Cluster identification info
+            key_prefix: Redis key prefix
+            local_anchor_ttl_days: Local anchor TTL
+                (default from AuditIntegritySettings)
+            global_anchor_ttl_days: Global anchor TTL
+                (default from AuditIntegritySettings)
         """
         self._local_redis = local_redis
         self._global_redis = global_redis or local_redis
@@ -186,11 +190,11 @@ class CrossClusterAuditLinker:
         self._initialized = False
 
     def _ensure_initialized(self) -> None:
-        """지연 초기화 수행."""
+        """Perform lazy initialization."""
         if self._initialized:
             return
 
-        # ClusterIdentity 초기화
+        # ClusterIdentity initialization
         if self._identity is None:
             try:
                 from baldur.core.cluster_identity import get_cluster_identity
@@ -202,7 +206,7 @@ class CrossClusterAuditLinker:
                     error=e,
                 )
 
-        # Redis 클라이언트 초기화
+        # Redis client initialization
         if self._local_redis is None:
             try:
                 from baldur.core.tiered_redis import (
@@ -226,13 +230,13 @@ class CrossClusterAuditLinker:
         self, target_date: date | None = None
     ) -> ClusterDailyAnchor | None:
         """
-        로컬 클러스터의 일일 앵커 생성.
+        Create the local cluster's daily anchor.
 
         Args:
-            target_date: 대상 날짜 (기본: 어제)
+            target_date: Target date (default: yesterday)
 
         Returns:
-            생성된 앵커 또는 None
+            The created anchor, or None
         """
         self._ensure_initialized()
 
@@ -244,7 +248,7 @@ class CrossClusterAuditLinker:
             return None
 
         try:
-            # 로컬 체인에서 해당 날짜의 마지막 엔트리 조회
+            # Look up that date's last entry in the local chain
             state_key = f"{self._key_prefix}audit:hash_chain:state"
             state = self._local_redis.hgetall(state_key)
 
@@ -262,17 +266,17 @@ class CrossClusterAuditLinker:
             sequence = int(get_state_value("sequence") or 0)
             previous_hash = get_state_value("previous_hash") or ""
 
-            # 앵커 생성
+            # Create the anchor
             cluster_id = self._identity.cluster_id if self._identity else "unknown"
             anchor = ClusterDailyAnchor(
                 cluster_id=cluster_id,
                 anchor_date=target_date,
                 final_sequence=sequence,
                 final_hash=previous_hash,
-                entry_count=sequence,  # 전체 시퀀스를 엔트리 카운트로 사용
+                entry_count=sequence,  # use the full sequence as the entry count
             )
 
-            # 로컬 저장
+            # Store locally
             anchor_key = self.LOCAL_ANCHOR_KEY_TEMPLATE.format(
                 prefix=self._key_prefix, date=target_date.isoformat()
             )
@@ -298,13 +302,13 @@ class CrossClusterAuditLinker:
 
     def get_local_anchor(self, target_date: date) -> ClusterDailyAnchor | None:
         """
-        로컬 앵커 조회.
+        Look up a local anchor.
 
         Args:
-            target_date: 대상 날짜
+            target_date: Target date
 
         Returns:
-            앵커 또는 None
+            The anchor, or None
         """
         self._ensure_initialized()
 
@@ -330,13 +334,13 @@ class CrossClusterAuditLinker:
 
     def submit_to_global(self, anchor: ClusterDailyAnchor) -> bool:
         """
-        로컬 앵커를 글로벌 저장소에 제출.
+        Submit a local anchor to the global store.
 
         Args:
-            anchor: 로컬 앵커
+            anchor: Local anchor
 
         Returns:
-            제출 성공 여부
+            Whether the submission succeeded
         """
         self._ensure_initialized()
 
@@ -345,12 +349,12 @@ class CrossClusterAuditLinker:
             return False
 
         try:
-            # 글로벌 앵커 키
+            # Global anchor key
             global_key = self.GLOBAL_ANCHOR_KEY_TEMPLATE.format(
                 date=anchor.anchor_date.isoformat()
             )
 
-            # 기존 글로벌 앵커 조회
+            # Look up the existing global anchor
             existing = self._global_redis.get(global_key)
             if existing:
                 if isinstance(existing, bytes):
@@ -359,7 +363,7 @@ class CrossClusterAuditLinker:
                 global_anchor = GlobalDailyAnchor.from_dict(global_data)
                 cluster_anchors = list(global_anchor.cluster_anchors)
 
-                # 중복 체크
+                # Duplicate check
                 if any(ca.cluster_id == anchor.cluster_id for ca in cluster_anchors):
                     logger.info(
                         "cross_cluster_audit_linker.anchor_already_submitted",
@@ -370,7 +374,7 @@ class CrossClusterAuditLinker:
             else:
                 cluster_anchors = [anchor]
 
-            # 글로벌 앵커 생성/갱신
+            # Create/refresh the global anchor
             global_anchor = GlobalDailyAnchor(
                 anchor_date=anchor.anchor_date,
                 cluster_anchors=cluster_anchors,
@@ -382,7 +386,7 @@ class CrossClusterAuditLinker:
                 ex=self._global_anchor_ttl * 86400,
             )
 
-            # 앵커 목록에 추가
+            # Add to the anchor list
             self._global_redis.zadd(
                 self.GLOBAL_ANCHOR_LIST_KEY,
                 {anchor.anchor_date.isoformat(): anchor.anchor_date.toordinal()},
@@ -405,13 +409,13 @@ class CrossClusterAuditLinker:
 
     def get_global_anchor(self, target_date: date) -> GlobalDailyAnchor | None:
         """
-        글로벌 앵커 조회.
+        Look up a global anchor.
 
         Args:
-            target_date: 대상 날짜
+            target_date: Target date
 
         Returns:
-            글로벌 앵커 또는 None
+            The global anchor, or None
         """
         self._ensure_initialized()
 
@@ -437,13 +441,13 @@ class CrossClusterAuditLinker:
 
     def verify_global_integrity(self, target_date: date) -> dict[str, Any]:
         """
-        글로벌 앵커 무결성 검증.
+        Verify global anchor integrity.
 
         Args:
-            target_date: 검증 대상 날짜
+            target_date: Date to verify
 
         Returns:
-            검증 결과
+            Verification result
         """
         self._ensure_initialized()
 
@@ -456,7 +460,7 @@ class CrossClusterAuditLinker:
             if not global_anchor:
                 return {"valid": False, "error": "Global anchor not found"}
 
-            # 글로벌 해시 재계산
+            # Recompute the global hash
             recomputed = GlobalDailyAnchor(
                 anchor_date=target_date,
                 cluster_anchors=global_anchor.cluster_anchors,
@@ -479,13 +483,13 @@ class CrossClusterAuditLinker:
 
     def list_global_anchors(self, limit: int = 30) -> list[str]:
         """
-        글로벌 앵커 목록 조회.
+        List global anchors.
 
         Args:
-            limit: 최대 반환 개수
+            limit: Maximum number of results
 
         Returns:
-            날짜 문자열 목록 (최신순)
+            List of date strings (newest first)
         """
         self._ensure_initialized()
 
@@ -493,7 +497,7 @@ class CrossClusterAuditLinker:
             return []
 
         try:
-            # 최신순으로 조회
+            # Query newest first
             dates = self._global_redis.zrevrange(
                 self.GLOBAL_ANCHOR_LIST_KEY, 0, limit - 1
             )
@@ -515,7 +519,7 @@ _linker_lock = threading.Lock()
 
 
 def get_cross_cluster_audit_linker() -> CrossClusterAuditLinker:
-    """CrossClusterAuditLinker 싱글톤 반환."""
+    """Return the CrossClusterAuditLinker singleton."""
     global _linker
     if _linker is None:
         with _linker_lock:
@@ -525,6 +529,6 @@ def get_cross_cluster_audit_linker() -> CrossClusterAuditLinker:
 
 
 def reset_cross_cluster_audit_linker() -> None:
-    """테스트용 싱글톤 리셋."""
+    """Reset the singleton (for tests)."""
     global _linker
     _linker = None

@@ -1,8 +1,9 @@
 """
-Cascade Auditor - 무결성 검증 모듈.
+Cascade Auditor - integrity verification module.
 
-해시 체인 검증, 체크포인트 관련 책임을 담당합니다.
-중복되던 해시 검증 로직을 _verify_event_chain()으로 통합합니다.
+Owns hash chain verification and checkpoint responsibilities.
+Consolidates the duplicated hash verification logic into
+_verify_event_chain().
 """
 
 from __future__ import annotations
@@ -21,21 +22,21 @@ logger = structlog.get_logger()
 
 def _verify_event_chain(events: list[CascadeEvent]) -> list[dict[str, Any]]:
     """
-    이벤트 목록의 해시 체인 무결성을 검증하는 공통 로직.
+    Shared logic verifying the hash chain integrity of an event list.
 
-    기존 verify_chain_integrity/verify_chain_integrity_from_checkpoint에서
-    동일하게 반복되던 검증 코드를 통합합니다.
+    Consolidates the verification code that was repeated identically in
+    verify_chain_integrity/verify_chain_integrity_from_checkpoint.
 
     Args:
-        events: CascadeEvent 목록 (최신순 정렬)
+        events: CascadeEvent list (sorted newest first)
 
     Returns:
-        오류 목록
+        Error list
     """
     errors = []
 
     for i, event in enumerate(events):
-        # 1. 해시 재계산
+        # 1. Recompute the hash
         recalculated_hash = event.calculate_hash()
         if recalculated_hash != event.current_hash:
             errors.append(
@@ -47,8 +48,8 @@ def _verify_event_chain(events: list[CascadeEvent]) -> list[dict[str, Any]]:
                 }
             )
 
-        # 2. 체인 연결 확인 (마지막 제외)
-        # 최신순 정렬이므로 i=0이 최신, i+1이 이전 이벤트
+        # 2. Check the chain link (excluding the last one)
+        # Sorted newest first, so i=0 is newest and i+1 is the older event
         if i < len(events) - 1:
             older_event = events[i + 1]
             if event.previous_hash != older_event.current_hash:
@@ -65,9 +66,9 @@ def _verify_event_chain(events: list[CascadeEvent]) -> list[dict[str, Any]]:
 
 
 class VerificationMixin:
-    """Hash Chain 무결성 검증 및 체크포인트 관련 메서드."""
+    """Hash Chain integrity verification and checkpoint methods."""
 
-    # 체크포인트 Redis 키 패턴
+    # Checkpoint Redis key pattern
     CHECKPOINT_KEY = "baldur:{namespace}:audit:cascade_checkpoint"
 
     if TYPE_CHECKING:
@@ -87,17 +88,17 @@ class VerificationMixin:
         limit: int = 1000,
     ) -> dict[str, Any]:
         """
-        Hash Chain 무결성 검증.
+        Hash Chain integrity verification.
 
         Args:
-            namespace: 네임스페이스
-            limit: 검증할 최대 이벤트 수
+            namespace: Namespace
+            limit: Maximum number of events to verify
 
         Returns:
-            검증 결과 딕셔너리:
-            - valid: 무결성 유효 여부
-            - checked: 검증한 이벤트 수
-            - errors: 오류 목록
+            Verification result dictionary:
+            - valid: Whether integrity holds
+            - checked: Number of events verified
+            - errors: Error list
         """
         events = self.get_recent_events(namespace, limit)
 
@@ -114,29 +115,29 @@ class VerificationMixin:
 
     def create_checkpoint(self, namespace: str) -> dict[str, Any]:
         """
-        현재 상태를 체크포인트로 저장.
+        Save the current state as a checkpoint.
 
-        체크포인트는 특정 시점의 Hash Chain 상태를 기록하여
-        이후 무결성 검증 시 처음부터 검증하지 않고 체크포인트
-        이후만 검증할 수 있게 합니다.
+        A checkpoint records the Hash Chain state at a point in time so that
+        later integrity verification can verify only what follows the
+        checkpoint instead of starting from the beginning.
 
-        Daily Celery Beat에서 호출됩니다.
+        Invoked from the daily Celery Beat.
 
         Args:
-            namespace: 네임스페이스
+            namespace: Namespace
 
         Returns:
-            생성된 체크포인트 정보
+            The created checkpoint info
         """
 
         from baldur.audit.cascade_auditor._helpers import get_index_ids
 
         backend = self._get_backend()
 
-        # 최신 이벤트의 해시 조회
+        # Look up the newest event's hash
         last_hash = self._get_last_hash(namespace)
 
-        # 이벤트 수 계산
+        # Count the events
         index_key = self.CASCADE_INDEX_KEY.format(namespace=namespace)
         event_count = len(get_index_ids(backend, index_key))
 
@@ -162,13 +163,13 @@ class VerificationMixin:
 
     def get_checkpoint(self, namespace: str) -> dict[str, Any] | None:
         """
-        체크포인트 조회.
+        Look up a checkpoint.
 
         Args:
-            namespace: 네임스페이스
+            namespace: Namespace
 
         Returns:
-            체크포인트 정보 또는 None
+            Checkpoint info, or None
         """
         backend = self._get_backend()
         key = self.CHECKPOINT_KEY.format(namespace=namespace)
@@ -179,25 +180,25 @@ class VerificationMixin:
         namespace: str,
     ) -> dict[str, Any]:
         """
-        체크포인트 이후만 검증 (효율적).
+        Verify only what follows the checkpoint (efficient).
 
-        기존 verify_chain_integrity()는 처음부터 검증하지만,
-        이 메서드는 마지막 체크포인트 이후만 검증합니다.
+        verify_chain_integrity() verifies from the beginning, while this
+        method verifies only what follows the last checkpoint.
 
         Args:
-            namespace: 네임스페이스
+            namespace: Namespace
 
         Returns:
-            검증 결과 딕셔너리
+            Verification result dictionary
         """
-        # 1. 체크포인트 조회
+        # 1. Look up the checkpoint
         checkpoint = self.get_checkpoint(namespace)
 
         if not checkpoint or not checkpoint.get("last_hash"):
-            # 체크포인트 없으면 전체 검증
+            # No checkpoint — verify everything
             return self.verify_chain_integrity(namespace)
 
-        # 2. 전체 이벤트 조회 (최신순)
+        # 2. Look up all events (newest first)
         events = self.get_recent_events(namespace, limit=10000)
 
         if not events:
@@ -208,7 +209,7 @@ class VerificationMixin:
                 "errors": [],
             }
 
-        # 3. 체크포인트 이후 이벤트 필터링
+        # 3. Filter to the events after the checkpoint
         checkpoint_hash = checkpoint.get("last_hash")
         events_after_checkpoint = []
         checkpoint_found = False
@@ -234,11 +235,12 @@ class VerificationMixin:
                 "errors": [],
             }
 
-        # 4. 체크포인트 이후 이벤트만 검증
+        # 4. Verify only the events after the checkpoint
         errors = []
 
-        # 첫 번째 이벤트(체크포인트 직후)의 previous_hash가 체크포인트와 연결되는지 확인
-        first_event = events_after_checkpoint[-1]  # 가장 오래된 것
+        # Check that the first event (right after the checkpoint) has a
+        # previous_hash linking back to the checkpoint
+        first_event = events_after_checkpoint[-1]  # the oldest one
         if first_event.previous_hash != checkpoint_hash:
             errors.append(
                 {
@@ -249,7 +251,7 @@ class VerificationMixin:
                 }
             )
 
-        # 나머지 체인 검증 (통합 함수 사용)
+        # Verify the rest of the chain (via the shared function)
         errors.extend(_verify_event_chain(events_after_checkpoint))
 
         return {

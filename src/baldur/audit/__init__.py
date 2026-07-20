@@ -35,9 +35,10 @@ from typing import TYPE_CHECKING
 from baldur.audit.integrity import HashChainManager
 
 # =============================================================================
-# CORE API - 직접 import (11개) - 가장 자주 사용되는 핵심 API
-# NOTE: self_audit 함수는 서브모듈 이름과 동일하여 lazy import 불가,
-#       직접 import 필요 (Python import 시스템 제약)
+# CORE API - direct import (11) - the most frequently used core API
+# NOTE: the self_audit function shares its name with a submodule, so lazy
+#       import is impossible; a direct import is required (Python import
+#       system constraint)
 # =============================================================================
 from baldur.audit.logger import (
     AuditLogger,
@@ -50,7 +51,8 @@ from baldur.audit.masking import (
     mask_ip,
 )
 
-# self_audit 함수는 모듈명과 동일하여 __getattr__ lazy import 불가 - 직접 import
+# self_audit shares its name with the module, so __getattr__ lazy import is
+# impossible - import it directly
 from baldur.audit.self_audit import self_audit as self_audit
 from baldur.audit.trace import (
     generate_trace_id,
@@ -59,30 +61,30 @@ from baldur.audit.trace import (
 )
 
 # =============================================================================
-# LAZY IMPORTS - 106개 심볼
+# LAZY IMPORTS - 106 symbols
 # =============================================================================
 _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
-    # logger (추가)
+    # logger (additional)
     "AuditConfigChangeEvent": ("baldur.audit.logger", "AuditConfigChangeEvent"),
     "ConfigChangeEvent": (
         "baldur.audit.logger",
         "ConfigChangeEvent",
     ),  # deprecated alias
     "ConfigAuditAction": ("baldur.audit.logger", "ConfigAuditAction"),
-    # masking (추가)
+    # masking (additional)
     "mask_sensitive_fields": ("baldur.audit.masking", "mask_sensitive_fields"),
     "extract_ip_from_request": ("baldur.audit.masking", "extract_ip_from_request"),
-    # trace (추가)
+    # trace (additional)
     "TraceContext": ("baldur.audit.trace", "TraceContext"),
     "trace_id_middleware": ("baldur.audit.trace", "trace_id_middleware"),
-    # integrity (추가)
+    # integrity (additional)
     "HashChainVerifier": ("baldur.audit.integrity", "HashChainVerifier"),
     "verify_audit_log_integrity": (
         "baldur.audit.integrity",
         "verify_audit_log_integrity",
     ),
     # 416: audit/backends/ package was deleted (H1/H2 unification).
-    # resilience (15개)
+    # resilience (15)
     "CircuitBreaker": ("baldur.audit.resilience", "CircuitBreaker"),
     "AuditCircuitBreakerConfig": (
         "baldur.audit.resilience",
@@ -116,7 +118,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
         "baldur.audit.resilience",
         "log_critical_to_syslog",
     ),
-    # env_snapshot (5개)
+    # env_snapshot (5)
     "collect_env_snapshot": ("baldur.audit.env_snapshot", "collect_env_snapshot"),
     "log_env_snapshot_to_audit": (
         "baldur.audit.env_snapshot",
@@ -128,7 +130,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     ),
     "TRACKED_PREFIXES": ("baldur.audit.env_snapshot", "TRACKED_PREFIXES"),
     "SENSITIVE_KEYWORDS": ("baldur.audit.env_snapshot", "SENSITIVE_KEYWORDS"),
-    # config (3개)
+    # config (3)
     "AuditConfig": ("baldur.audit.config", "AuditConfig"),
     "COMPLIANCE_RETENTION_DAYS": (
         "baldur.audit.config",
@@ -138,20 +140,20 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
         "baldur.audit.config",
         "get_recommended_retention",
     ),
-    # continuous_audit (1개)
+    # continuous_audit (1)
     "ContinuousAuditRecorder": (
         "baldur.audit.continuous_audit",
         "ContinuousAuditRecorder",
     ),
-    # ring_buffer (3개)
+    # ring_buffer (3)
     "RingBuffer": ("baldur.audit.ring_buffer", "RingBuffer"),
     "RingBufferStats": ("baldur.audit.ring_buffer", "RingBufferStats"),
     "BackpressureStrategy": ("baldur.scaling.config", "BackpressureStrategy"),
-    # self_audit (3개) - self_audit 함수는 직접 import (모듈명 충돌)
+    # self_audit (3) - the self_audit function is imported directly (name clash)
     "SelfAuditLogger": ("baldur.audit.self_audit", "SelfAuditLogger"),
     "SelfAuditEvent": ("baldur.audit.self_audit", "SelfAuditEvent"),
     "SelfAuditStats": ("baldur.audit.self_audit", "SelfAuditStats"),
-    # checksum (10개)
+    # checksum (10)
     "compute_crc32": ("baldur.audit.checksum", "compute_crc32"),
     "compute_sha256": ("baldur.audit.checksum", "compute_sha256"),
     "verify_crc32": ("baldur.audit.checksum", "verify_crc32"),
@@ -162,7 +164,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "checksum_dict": ("baldur.audit.checksum", "checksum_dict"),
     "checksum_file": ("baldur.audit.checksum", "checksum_file"),
     "verify_file_checksum": ("baldur.audit.checksum", "verify_file_checksum"),
-    # resilient_recorder (2개)
+    # resilient_recorder (2)
     "ResilientContinuousAuditRecorder": (
         "baldur.audit.resilient_recorder",
         "ResilientContinuousAuditRecorder",
@@ -171,7 +173,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
         "baldur.audit.resilient_recorder",
         "ResilientRecorderConfig",
     ),
-    # wal (8개)
+    # wal (8)
     "WriteAheadLog": ("baldur.audit.wal", "WriteAheadLog"),
     "WALConfig": ("baldur.audit.wal", "WALConfig"),
     "WALEntry": ("baldur.audit.wal", "WALEntry"),
@@ -180,7 +182,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "WALState": ("baldur.audit.wal", "WALState"),
     "WALStats": ("baldur.audit.wal", "WALStats"),
     "create_wal": ("baldur.audit.wal", "create_wal"),
-    # audit_watchdog (9개)
+    # audit_watchdog (9)
     "AuditWatchdog": ("baldur.audit.audit_watchdog", "AuditWatchdog"),
     "AuditWatchdogConfig": ("baldur.audit.audit_watchdog", "AuditWatchdogConfig"),
     "AuditWatchdogStatus": ("baldur.audit.audit_watchdog", "AuditWatchdogStatus"),
@@ -190,7 +192,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "get_watchdog": ("baldur.audit.audit_watchdog", "get_watchdog"),
     "start_watchdog": ("baldur.audit.audit_watchdog", "start_watchdog"),
     "stop_watchdog": ("baldur.audit.audit_watchdog", "stop_watchdog"),
-    # verify_audit_integrity (4개)
+    # verify_audit_integrity (4)
     "AuditIntegrityVerifier": (
         "baldur.audit.verify_audit_integrity",
         "AuditIntegrityVerifier",
@@ -204,7 +206,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
         "VerificationSummary",
     ),
     "OutputFormat": ("baldur.audit.verify_audit_integrity", "OutputFormat"),
-    # audit_integration (10개)
+    # audit_integration (10)
     "EventSeverity": ("baldur.utils.async_logger", "EventSeverity"),
     "AsyncLoggerConfig": ("baldur.audit.audit_integration", "AsyncLoggerConfig"),
     "AsyncLoggerAdapter": ("baldur.audit.audit_integration", "AsyncLoggerAdapter"),
@@ -230,19 +232,19 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
         "baldur.audit.audit_integration",
         "create_command_center_callback",
     ),
-    # export (5개)
+    # export (5)
     "AuditExporter": ("baldur.audit.export", "AuditExporter"),
     "ExportFormat": ("baldur.audit.export", "ExportFormat"),
     "ExportTarget": ("baldur.audit.export", "ExportTarget"),
     "ExportOptions": ("baldur.audit.export", "ExportOptions"),
     "ExportStats": ("baldur.audit.export", "ExportStats"),
-    # signed_manifest (5개)
+    # signed_manifest (5)
     "MerkleTree": ("baldur.audit.signed_manifest", "MerkleTree"),
     "RFC3161Timestamp": ("baldur.audit.signed_manifest", "RFC3161Timestamp"),
     "RFC3161Client": ("baldur.audit.signed_manifest", "RFC3161Client"),
     "SignedManifest": ("baldur.audit.signed_manifest", "SignedManifest"),
     "ManifestEntry": ("baldur.audit.signed_manifest", "ManifestEntry"),
-    # event_buffer (5개)
+    # event_buffer (5)
     "AuditEventType": ("baldur.audit.event_buffer", "AuditEventType"),
     "BufferEventType": (
         "baldur.audit.event_buffer",
@@ -414,7 +416,7 @@ if TYPE_CHECKING:
 
 
 __all__ = [
-    # Main API (직접 import)
+    # Main API (direct import)
     "AuditLogger",
     "get_audit_logger",
     "log_config_change",

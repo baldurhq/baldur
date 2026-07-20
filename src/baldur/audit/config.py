@@ -1,8 +1,8 @@
 """
 Continuous Audit Configuration.
 
-환경변수 기반 설정으로 하드코딩 문제 방지.
-보안에 민감한 값(해시 시드)은 반드시 환경변수로 설정.
+Env-var-based configuration to avoid hardcoding.
+Security-sensitive values (the hash seed) MUST be set via environment variables.
 """
 
 import os
@@ -19,39 +19,39 @@ logger = structlog.get_logger()
 @dataclass
 class AuditConfig(SerializableMixin):
     """
-    감사 로그 설정 - 환경변수 우선.
+    Audit log configuration - environment variables take precedence.
 
-    설정 우선순위:
-    1. 환경변수 (AUDIT_*)
-    2. DNA 선언 (서비스별 설정)
-    3. 설정 파일
-    4. 코드 기본값
+    Configuration precedence:
+    1. Environment variables (AUDIT_*)
+    2. DNA declaration (per-service configuration)
+    3. Configuration file
+    4. Code defaults
 
     Environment Variables:
-        AUDIT_HASH_SEED: 해시 체인 시드 (필수)
-        AUDIT_RETENTION_DAYS: 로그 보존 기간 (기본: 365)
-        AUDIT_STORAGE: 스토리지 백엔드 (기본: file)
-        AUDIT_S3_BUCKET: S3 버킷 이름 (선택)
-        AUDIT_S3_WORM: WORM 모드 활성화 (기본: false)
-        AUDIT_ALERT_CHANNELS: 알림 채널 (쉼표 구분)
+        AUDIT_HASH_SEED: Hash chain seed (required)
+        AUDIT_RETENTION_DAYS: Log retention period (default: 365)
+        AUDIT_STORAGE: Storage backend (default: file)
+        AUDIT_S3_BUCKET: S3 bucket name (optional)
+        AUDIT_S3_WORM: Enable WORM mode (default: false)
+        AUDIT_ALERT_CHANNELS: Alert channels (comma-separated)
     """
 
-    # 해시 체인 시드 (환경변수 필수)
+    # Hash chain seed (environment variable required)
     hash_seed: str = field(
         default_factory=lambda: os.environ.get("AUDIT_HASH_SEED", "")
     )
 
-    # 보존 기간 (규정별 다름)
+    # Retention period (varies per regulation)
     retention_days: int = field(
         default_factory=lambda: int(os.environ.get("AUDIT_RETENTION_DAYS", "365"))
     )
 
-    # 스토리지 백엔드: file, s3, loki
+    # Storage backend: file, s3, loki
     storage_backend: str = field(
         default_factory=lambda: os.environ.get("AUDIT_STORAGE", "file")
     )
 
-    # S3 설정 (선택)
+    # S3 configuration (optional)
     s3_bucket: str | None = field(
         default_factory=lambda: os.environ.get("AUDIT_S3_BUCKET")
     )
@@ -61,20 +61,20 @@ class AuditConfig(SerializableMixin):
         )
     )
 
-    # 알림 채널
+    # Alert channels
     alert_channels: list[str] = field(default_factory=list)
 
-    # 민감 데이터 마스킹
+    # Sensitive data masking
     mask_sensitive_data: bool = True
 
-    # 무결성 검증 주기 (초)
+    # Integrity check interval (seconds)
     integrity_check_interval: int = field(
         default_factory=lambda: int(
             os.environ.get("AUDIT_INTEGRITY_CHECK_INTERVAL", "3600")
         )
     )
 
-    # 배치 저장 설정
+    # Batch persistence settings
     batch_size: int = field(
         default_factory=lambda: int(os.environ.get("AUDIT_BATCH_SIZE", "100"))
     )
@@ -104,8 +104,8 @@ class AuditConfig(SerializableMixin):
     )
 
     def __post_init__(self) -> None:
-        """환경변수에서 알림 채널 로드 및 해시 시드 검증."""
-        # 알림 채널 파싱
+        """Load alert channels from env vars and validate the hash seed."""
+        # Parse alert channels
         channels_str = os.environ.get("AUDIT_ALERT_CHANNELS", "")
         if channels_str and not self.alert_channels:
             self.alert_channels = [
@@ -129,13 +129,13 @@ class AuditConfig(SerializableMixin):
     @classmethod
     def from_dna(cls, dna_config: dict) -> "AuditConfig":
         """
-        DNA 선언에서 설정 로드 (환경변수가 우선).
+        Load configuration from a DNA declaration (env vars take precedence).
 
         Args:
-            dna_config: DNA에서 로드된 설정 딕셔너리
+            dna_config: Configuration dictionary loaded from DNA
 
         Returns:
-            AuditConfig 인스턴스
+            AuditConfig instance
         """
         return cls(
             hash_seed=os.environ.get(
@@ -160,7 +160,7 @@ class AuditConfig(SerializableMixin):
 
     @classmethod
     def get_default(cls) -> "AuditConfig":
-        """환경변수에서 기본 설정 생성."""
+        """Build the default configuration from environment variables."""
         return cls()
 
     def _post_serialize(self, data: dict[str, Any]) -> dict[str, Any]:
@@ -203,13 +203,13 @@ class AuditConfig(SerializableMixin):
             return None
 
 
-# 규정별 최소 보존 기간 (법적 요구사항 기반 기본값)
+# Minimum retention period per regulation (defaults based on legal requirements)
 COMPLIANCE_RETENTION_DAYS: dict[str, int | None] = {
-    "DORA": 1825,  # 5년
-    "PCI-DSS": 365,  # 1년
-    "SOC2": 365,  # 1년
-    "GDPR": None,  # 목적 달성 시까지 (서비스별 판단)
-    "HIPAA": 2190,  # 6년
+    "DORA": 1825,  # 5 years
+    "PCI-DSS": 365,  # 1 year
+    "SOC2": 365,  # 1 year
+    "GDPR": None,  # Until the purpose is fulfilled (decided per service)
+    "HIPAA": 2190,  # 6 years
 }
 
 
@@ -222,13 +222,13 @@ def _get_default_max_retention() -> int:
 
 def get_recommended_retention(standards: list[str]) -> int:
     """
-    규정 목록에 따른 권장 보존 기간 반환.
+    Return the recommended retention period for a list of regulations.
 
     Args:
-        standards: 준수해야 할 규정 목록 (예: ["DORA", "PCI-DSS"])
+        standards: Regulations to comply with (e.g. ["DORA", "PCI-DSS"])
 
     Returns:
-        최대 보존 기간 (일)
+        Maximum retention period (days)
     """
     max_days = _get_default_max_retention()
 

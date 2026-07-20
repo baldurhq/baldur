@@ -1,14 +1,11 @@
 """
-Cascade Chain 검증 로직.
+Cascade Chain validation logic.
 
-체인 깊이 검사 및 순환 참조 감지 기능을 제공합니다.
+Provides chain-depth checking and cycle detection.
 
 Features:
-- check_chain_depth: 체인 깊이 검사
-- detect_cycle: 순환 참조 감지
-
-Reference:
-    docs/baldur/middleware_system/76_CASCADE_EVENT_AUDIT.md
+- check_chain_depth: chain depth check
+- detect_cycle: cycle detection
 """
 
 from __future__ import annotations
@@ -33,7 +30,7 @@ logger = structlog.get_logger()
 
 
 # =============================================================================
-# 체인 깊이 검사
+# Chain depth check
 # =============================================================================
 
 
@@ -45,24 +42,24 @@ def check_chain_depth(
     config: CascadeChainConfig | None = None,
 ) -> None:
     """
-    체인 깊이 검사.
+    Chain depth check.
 
-    현재 체인 깊이가 설정된 임계치를 초과했는지 확인합니다.
+    Checks whether the current chain depth exceeds the configured threshold.
 
     Args:
-        current_depth: 현재 체인 깊이
+        current_depth: Current chain depth
         cascade_id: Cascade ID
-        namespace: 네임스페이스
-        trigger_type: 트리거 유형
-        config: 체인 설정 (None이면 기본값 사용)
+        namespace: Namespace
+        trigger_type: Trigger type
+        config: Chain config (defaults are used when None)
 
     Raises:
-        CascadeChainDepthExceeded: 깊이 초과 시 (block_on_exceed=True)
+        CascadeChainDepthExceeded: On depth overflow (block_on_exceed=True)
     """
     if config is None:
         config = DEFAULT_CASCADE_CHAIN_CONFIG
 
-    # 경고 임계치 체크
+    # Warning threshold check
     if current_depth >= config.warn_at_depth:
         logger.warning(
             "cascade_chain.depth_warning",
@@ -73,7 +70,7 @@ def check_chain_depth(
             trigger_type=trigger_type,
         )
 
-    # 최대 깊이 체크
+    # Max depth check
     if current_depth >= config.max_chain_depth:
         logger.error(
             "cascade_chain.depth_exceeded",
@@ -82,7 +79,7 @@ def check_chain_depth(
             cascade_id=cascade_id,
         )
 
-        # 메트릭 기록 (있는 경우)
+        # Record the metric (when available)
         _increment_depth_exceeded_metric(namespace, trigger_type)
 
         if config.block_on_exceed:
@@ -98,13 +95,13 @@ def check_chain_depth(
         )
 
 
-# 메트릭 캐시 (중복 등록 방지)
+# Metric cache (prevents duplicate registration)
 _CASCADE_CHAIN_DEPTH_EXCEEDED = None
 _CASCADE_CYCLE_DETECTED = None
 
 
 def _get_depth_exceeded_counter():
-    """체인 깊이 초과 Counter 싱글톤 반환."""
+    """Return the chain-depth-exceeded Counter singleton."""
     global _CASCADE_CHAIN_DEPTH_EXCEEDED
     if _CASCADE_CHAIN_DEPTH_EXCEEDED is None:
         try:
@@ -121,7 +118,7 @@ def _get_depth_exceeded_counter():
 
 
 def _get_cycle_detected_counter():
-    """순환 참조 감지 Counter 싱글톤 반환."""
+    """Return the cycle-detected Counter singleton."""
     global _CASCADE_CYCLE_DETECTED
     if _CASCADE_CYCLE_DETECTED is None:
         try:
@@ -138,7 +135,7 @@ def _get_cycle_detected_counter():
 
 
 def _increment_depth_exceeded_metric(namespace: str, trigger_type: str) -> None:
-    """체인 깊이 초과 메트릭 증가 (선택적)."""
+    """Increment the chain-depth-exceeded metric (optional)."""
     counter = _get_depth_exceeded_counter()
     if counter:
         counter.labels(
@@ -148,7 +145,7 @@ def _increment_depth_exceeded_metric(namespace: str, trigger_type: str) -> None:
 
 
 # =============================================================================
-# 순환 참조 감지
+# Cycle detection
 # =============================================================================
 
 
@@ -157,23 +154,23 @@ def detect_cycle(
     trigger_event_id: str,
 ) -> list[str] | None:
     """
-    순환 참조 감지.
+    Cycle detection.
 
-    효과 목록에서 순환 참조(A → B → A)가 있는지 확인합니다.
+    Checks the effect list for a cycle (A → B → A).
 
     Args:
-        effects: 효과 목록
-        trigger_event_id: 트리거 이벤트 ID
+        effects: Effect list
+        trigger_event_id: Trigger event ID
 
     Returns:
-        순환 경로 (이벤트 ID 목록), 없으면 None
+        The cycle path (list of event IDs), or None if there is none
 
     Example:
         >>> effects = [
         ...     CascadeEffect(event_id="A", caused_by="trigger", ...),
         ...     CascadeEffect(event_id="B", caused_by="A", ...),
         ...     CascadeEffect(event_id="C", caused_by="B", ...),
-        ...     CascadeEffect(event_id="A", caused_by="C", ...),  # 순환!
+        ...     CascadeEffect(event_id="A", caused_by="C", ...),  # cycle!
         ... ]
         >>> cycle = detect_cycle(effects, "trigger")
         >>> print(cycle)  # ["A", "B", "C", "A"]
@@ -181,12 +178,12 @@ def detect_cycle(
     if not effects:
         return None
 
-    # 그래프 구축: event_id -> caused_by
+    # Build the graph: event_id -> caused_by
     graph: dict[str, str | None] = {trigger_event_id: None}
     for effect in effects:
         graph[effect.event_id] = effect.caused_by
 
-    # 각 효과를 원인으로 하는 다음 효과들 매핑
+    # Map each effect to the effects it causes
     children: dict[str, list[str]] = {}
     for effect in effects:
         caused_by = effect.caused_by
@@ -194,13 +191,13 @@ def detect_cycle(
             children[caused_by] = []
         children[caused_by].append(effect.event_id)
 
-    # DFS로 순환 감지
+    # Detect cycles via DFS
     visited: set[str] = set()
     path: list[str] = []
 
     def dfs(node: str) -> list[str] | None:
         if node in path:
-            # 순환 발견
+            # Cycle found
             cycle_start = path.index(node)
             return path[cycle_start:] + [node]
 
@@ -210,7 +207,7 @@ def detect_cycle(
         visited.add(node)
         path.append(node)
 
-        # 이 노드를 원인으로 하는 효과들 탐색
+        # Walk the effects caused by this node
         for child in children.get(node, []):
             cycle = dfs(child)
             if cycle:
@@ -230,17 +227,17 @@ def check_and_raise_cycle(
     config: CascadeChainConfig | None = None,
 ) -> None:
     """
-    순환 참조 검사 및 예외 발생.
+    Check for a cycle and raise.
 
     Args:
-        effects: 효과 목록
-        trigger_event_id: 트리거 이벤트 ID
+        effects: Effect list
+        trigger_event_id: Trigger event ID
         cascade_id: Cascade ID
-        namespace: 네임스페이스
-        config: 체인 설정 (None이면 기본값 사용)
+        namespace: Namespace
+        config: Chain config (defaults are used when None)
 
     Raises:
-        CascadeCycleDetected: 순환 참조 감지 시
+        CascadeCycleDetected: When a cycle is detected
     """
     if config is None:
         config = DEFAULT_CASCADE_CHAIN_CONFIG
@@ -258,7 +255,7 @@ def check_and_raise_cycle(
             namespace=namespace,
         )
 
-        # 메트릭 기록 (있는 경우)
+        # Record the metric (when available)
         _increment_cycle_detected_metric(namespace)
 
         raise CascadeCycleDetected(
@@ -268,14 +265,14 @@ def check_and_raise_cycle(
 
 
 def _increment_cycle_detected_metric(namespace: str) -> None:
-    """순환 참조 감지 메트릭 증가 (선택적)."""
+    """Increment the cycle-detected metric (optional)."""
     counter = _get_cycle_detected_counter()
     if counter:
         counter.labels(namespace=namespace).inc()
 
 
 # =============================================================================
-# 통합 검증 함수
+# Combined validation function
 # =============================================================================
 
 
@@ -289,27 +286,27 @@ def validate_cascade_chain(
     config: CascadeChainConfig | None = None,
 ) -> None:
     """
-    Cascade 체인 전체 검증.
+    Full Cascade chain validation.
 
-    깊이 검사와 순환 참조 감지를 모두 수행합니다.
+    Performs both the depth check and cycle detection.
 
     Args:
-        effects: 효과 목록
-        trigger_event_id: 트리거 이벤트 ID
+        effects: Effect list
+        trigger_event_id: Trigger event ID
         cascade_id: Cascade ID
-        namespace: 네임스페이스
-        current_depth: 현재 체인 깊이
-        trigger_type: 트리거 유형
-        config: 체인 설정 (None이면 기본값 사용)
+        namespace: Namespace
+        current_depth: Current chain depth
+        trigger_type: Trigger type
+        config: Chain config (defaults are used when None)
 
     Raises:
-        CascadeChainDepthExceeded: 깊이 초과 시
-        CascadeCycleDetected: 순환 참조 감지 시
+        CascadeChainDepthExceeded: On depth overflow
+        CascadeCycleDetected: When a cycle is detected
     """
     if config is None:
         config = DEFAULT_CASCADE_CHAIN_CONFIG
 
-    # 1. 깊이 검사
+    # 1. Depth check
     check_chain_depth(
         current_depth=current_depth,
         cascade_id=cascade_id,
@@ -318,7 +315,7 @@ def validate_cascade_chain(
         config=config,
     )
 
-    # 2. 순환 참조 감지
+    # 2. Cycle detection
     check_and_raise_cycle(
         effects=effects,
         trigger_event_id=trigger_event_id,

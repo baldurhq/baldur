@@ -1,8 +1,9 @@
 """
-JSONL WAL 정리 유틸리티.
+JSONL WAL cleanup utilities.
 
-4중 WAL 구현의 정리 로직을 통합합니다.
-모든 정리 유틸리티는 Atomic Replace 패턴(.tmp + os.replace + directory fsync)을 적용합니다.
+Unifies the cleanup logic of the four WAL implementations.
+Every cleanup utility applies the atomic-replace pattern
+(.tmp + os.replace + directory fsync).
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ logger = structlog.get_logger()
 
 
 def atomic_rewrite(target: Path, lines: list[str]) -> None:
-    """임시 파일에 쓴 후 원자적으로 교체 (데이터 유실 방지)."""
+    """Write to a temp file, then replace atomically (prevents data loss)."""
     tmp = target.with_suffix(".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         f.writelines(lines)
@@ -39,7 +40,10 @@ def atomic_rewrite(target: Path, lines: list[str]) -> None:
 
 
 def cleanup_by_sequence(file_path: Path, keep_after_seq: int) -> int:
-    """시퀀스 기반 compact (HashChainWAL.compact() 위임 대상)."""
+    """Sequence-based compaction.
+
+    Delegation target of ``HashChainWAL.compact()``.
+    """
     if not file_path.exists():
         return 0
 
@@ -65,7 +69,10 @@ def cleanup_by_sequence(file_path: Path, keep_after_seq: int) -> int:
 
 
 def cleanup_by_age(directory: Path, pattern: str, max_age_days: int) -> int:
-    """날짜 기반 파일 삭제 (HashChainWALRecovery.cleanup_old_wal_files() 위임 대상)."""
+    """Date-based file deletion.
+
+    Delegation target of ``HashChainWALRecovery.cleanup_old_wal_files()``.
+    """
     cutoff = utc_now() - timedelta(days=max_age_days)
     removed = 0
 
@@ -87,7 +94,10 @@ def cleanup_by_age(directory: Path, pattern: str, max_age_days: int) -> int:
 
 
 def cleanup_by_namespace(file_path: Path, namespace: str) -> int:
-    """네임스페이스 기반 필터링 재작성 (WALRecoveryMixin._remove_namespace_from_wal() 위임 대상)."""
+    """Namespace-based filtered rewrite.
+
+    Delegation target of ``WALRecoveryMixin._remove_namespace_from_wal()``.
+    """
     if not file_path.exists():
         return 0
 

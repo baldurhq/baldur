@@ -1,10 +1,10 @@
 """
 Audit Watchdog - Dead Man's Switch Pattern.
 
-감사 시스템 생존 확인:
-- 주기적으로 heartbeat 전송
-- 외부 모니터링 시스템이 heartbeat 감시
-- heartbeat 누락 시 알림
+Liveness confirmation for the audit system:
+- Sends a heartbeat periodically
+- An external monitoring system watches the heartbeat
+- Alerts when a heartbeat is missed
 
 Usage:
     from baldur.audit.audit_watchdog import (
@@ -13,11 +13,11 @@ Usage:
         HeartbeatTarget,
     )
 
-    # 기본 설정으로 시작
+    # Start with the default configuration
     watchdog = AuditWatchdog()
     watchdog.start()
 
-    # 커스텀 설정
+    # Custom configuration
     config = AuditWatchdogConfig(
         heartbeat_interval_seconds=30.0,
         missed_threshold=3,
@@ -31,13 +31,13 @@ Usage:
     watchdog = AuditWatchdog(config=config)
     watchdog.start()
 
-    # 수동 heartbeat
+    # Manual heartbeat
     watchdog.pet()
 
-    # 종료
+    # Shutdown
     watchdog.stop()
 
-최소 의존성: urllib만 사용 (requests 불필요)
+Minimal dependencies: uses urllib only (requests not required)
 """
 
 from __future__ import annotations
@@ -68,16 +68,16 @@ _WORKER_NAME = "AuditWatchdog"
 
 
 class AuditWatchdogStatus(str, Enum):
-    """Watchdog 상태."""
+    """Watchdog status."""
 
     STOPPED = "stopped"
     RUNNING = "running"
-    DEGRADED = "degraded"  # heartbeat 전송 실패
+    DEGRADED = "degraded"  # heartbeat delivery failed
 
 
 @dataclass
 class HeartbeatTarget:
-    """Heartbeat 전송 대상."""
+    """Heartbeat delivery target."""
 
     name: str
     url: str
@@ -89,21 +89,21 @@ class HeartbeatTarget:
 
 @dataclass
 class AuditWatchdogConfig:
-    """Watchdog 설정."""
+    """Watchdog configuration."""
 
-    # Heartbeat 주기 (초)
+    # Heartbeat interval (seconds)
     heartbeat_interval_seconds: float = 30.0
 
-    # 연속 실패 허용 횟수
+    # Allowed number of consecutive failures
     missed_threshold: int = 3
 
-    # Heartbeat 전송 대상 목록
+    # List of heartbeat delivery targets
     targets: list[HeartbeatTarget] = field(default_factory=list)
 
-    # 로컬 파일 heartbeat (외부 서비스 없이도 작동)
+    # Local file heartbeat (works without an external service)
     local_heartbeat_file: str | None = None
 
-    # 콜백 함수들
+    # Callback functions
     on_heartbeat_success: Callable[[], None] | None = None
     on_heartbeat_failure: Callable[[str, Exception], None] | None = None
     on_threshold_exceeded: Callable[[int], None] | None = None
@@ -115,20 +115,21 @@ class AuditWatchdogConfig:
         **overrides,
     ) -> AuditWatchdogConfig:
         """
-        Settings에서 AuditWatchdogConfig 인스턴스 생성.
+        Build an AuditWatchdogConfig instance from settings.
 
         Args:
-            settings: AuditWatchdogSettings 인스턴스 (없으면 싱글톤 사용)
-            **overrides: 개별 필드 오버라이드
+            settings: AuditWatchdogSettings instance (uses the singleton
+                when omitted)
+            **overrides: individual field overrides
 
         Returns:
-            AuditWatchdogConfig: Settings 기반 인스턴스
+            AuditWatchdogConfig: settings-based instance
         """
         from baldur.settings.audit_watchdog import get_audit_watchdog_settings
 
         s = settings or get_audit_watchdog_settings()
 
-        # Settings에서 heartbeat_url이 있으면 target 생성
+        # Create a target when settings supply a heartbeat_url
         targets = overrides.get("targets", [])
         if not targets and s.heartbeat_url:
             targets.append(
@@ -156,7 +157,7 @@ class AuditWatchdogConfig:
 
 @dataclass
 class WatchdogStats:
-    """Watchdog 통계."""
+    """Watchdog statistics."""
 
     total_heartbeats: int = 0
     successful_heartbeats: int = 0
@@ -170,13 +171,13 @@ class WatchdogStats:
 
 class AuditWatchdog:
     """
-    Dead Man's Switch 패턴 Watchdog.
+    Dead Man's Switch pattern Watchdog.
 
-    특징:
-    - 주기적 heartbeat 전송
-    - 외부/로컬 heartbeat 지원
-    - 연속 실패 감지 및 알림
-    - 수동 heartbeat (pet) 지원
+    Characteristics:
+    - Periodic heartbeat delivery
+    - External and local heartbeat support
+    - Consecutive-failure detection and alerting
+    - Manual heartbeat (pet) support
     - Thread-safe
     """
 
@@ -190,9 +191,11 @@ class AuditWatchdog:
         Initialize AuditWatchdog.
 
         Args:
-            config: Watchdog 설정
-            on_alive: 정상 heartbeat 콜백 (deprecated, use config.on_heartbeat_success)
-            on_dead: 임계값 초과 콜백 (deprecated, use config.on_threshold_exceeded)
+            config: Watchdog configuration
+            on_alive: healthy-heartbeat callback (deprecated, use
+                config.on_heartbeat_success)
+            on_dead: threshold-exceeded callback (deprecated, use
+                config.on_threshold_exceeded)
         """
         self._config = config or AuditWatchdogConfig.from_settings()
         self._state = AuditWatchdogStatus.STOPPED
@@ -203,7 +206,7 @@ class AuditWatchdog:
         self._start_time: datetime | None = None
         self._handle: Any | None = None  # DaemonWorkerHandle (impl 489 D9)
 
-        # 레거시 콜백 지원
+        # Legacy callback support
         if on_alive and not self._config.on_heartbeat_success:
             self._config.on_heartbeat_success = on_alive
         if on_dead and not self._config.on_threshold_exceeded:
@@ -211,19 +214,19 @@ class AuditWatchdog:
 
     @property
     def state(self) -> AuditWatchdogStatus:
-        """현재 상태 조회."""
+        """Query the current status."""
         return self._state
 
     @property
     def is_running(self) -> bool:
-        """실행 중 여부."""
+        """Whether it is running."""
         return self._state in (
             AuditWatchdogStatus.RUNNING,
             AuditWatchdogStatus.DEGRADED,
         )
 
     def start(self) -> None:
-        """Watchdog 시작."""
+        """Start the Watchdog."""
         from baldur.meta.daemon_worker import DaemonWorkerHandle
         from baldur.metrics.recorders.daemon_worker import register_daemon_worker
 
@@ -280,7 +283,7 @@ class AuditWatchdog:
             raise
 
     def stop(self, timeout: float | None = None) -> None:
-        """Watchdog 중지."""
+        """Stop the Watchdog."""
         from baldur.metrics.recorders.daemon_worker import unregister_daemon_worker
 
         if timeout is None:
@@ -319,10 +322,10 @@ class AuditWatchdog:
 
     def pet(self) -> None:
         """
-        수동 heartbeat (정상 작동 확인).
+        Manual heartbeat (confirms normal operation).
 
-        주기적 heartbeat 외에 수동으로 heartbeat를 보낼 때 사용.
-        연속 실패 카운터를 리셋함.
+        Used to send a heartbeat by hand, outside the periodic one.
+        Resets the consecutive-failure counter.
         """
         with self._lock:
             self._stats.consecutive_failures = 0
@@ -330,7 +333,7 @@ class AuditWatchdog:
             self._send_heartbeat()
 
     def get_stats(self) -> WatchdogStats:
-        """통계 조회."""
+        """Query the statistics."""
         with self._lock:
             if self._start_time:
                 self._stats.uptime_seconds = (
@@ -348,7 +351,7 @@ class AuditWatchdog:
             )
 
     def _heartbeat_loop(self) -> None:
-        """Heartbeat 루프 (백그라운드 스레드)."""
+        """Heartbeat loop (background thread)."""
         import time as _time
 
         while not self._stop_event.is_set():
@@ -365,17 +368,17 @@ class AuditWatchdog:
                 self._handle.observe_iteration(_time.monotonic() - iter_start)
                 self._handle.heartbeat()
 
-            # interval 동안 대기 (stop_event로 중단 가능)
+            # Wait out the interval (interruptible via stop_event)
             self._stop_event.wait(timeout=self._config.heartbeat_interval_seconds)
 
     def _send_heartbeat(self) -> None:  # noqa: C901, PLR0912
-        """Heartbeat 전송."""
+        """Send a heartbeat."""
         with self._lock:
             self._stats.total_heartbeats += 1
             success = True
             failure_reason = None
 
-            # 1. 외부 타겟에 heartbeat 전송
+            # 1. Send the heartbeat to external targets
             for target in self._config.targets:
                 if not target.enabled:
                     continue
@@ -397,7 +400,7 @@ class AuditWatchdog:
                         except Exception:
                             pass
 
-            # 2. 로컬 파일 heartbeat
+            # 2. Local file heartbeat
             if self._config.local_heartbeat_file:
                 try:
                     self._write_local_heartbeat()
@@ -409,7 +412,7 @@ class AuditWatchdog:
                         error=e,
                     )
 
-            # 3. 결과 처리
+            # 3. Result handling
             now = utc_now()
 
             if success:
@@ -436,7 +439,7 @@ class AuditWatchdog:
                     details={"reason": failure_reason},
                 )
 
-                # 임계값 초과 체크
+                # Threshold-exceeded check
                 if self._stats.consecutive_failures >= self._config.missed_threshold:
                     self_audit().log(
                         SelfAuditEvent.WATCHDOG_TIMEOUT,
@@ -452,7 +455,7 @@ class AuditWatchdog:
                             pass
 
     def _send_to_target(self, target: HeartbeatTarget) -> None:
-        """외부 타겟에 heartbeat 전송."""
+        """Send a heartbeat to an external target."""
         headers = {
             "User-Agent": "AuditWatchdog/1.0",
             "Content-Type": "application/json",
@@ -480,10 +483,10 @@ class AuditWatchdog:
             )
 
         with safe_urlopen(request, timeout=target.timeout_seconds) as response:
-            _ = response.read()  # 응답 소비
+            _ = response.read()  # consume the response
 
     def _write_local_heartbeat(self) -> None:
-        """로컬 파일에 heartbeat 기록."""
+        """Write the heartbeat to a local file."""
         if not self._config.local_heartbeat_file:
             return
 
@@ -503,10 +506,10 @@ class AuditWatchdog:
 
 class WatchdogChecker:
     """
-    Watchdog 상태 검사기.
+    Watchdog status checker.
 
-    로컬 heartbeat 파일을 읽어서 Watchdog 상태 확인.
-    외부 모니터링 스크립트나 헬스체크에서 사용.
+    Reads the local heartbeat file to check the Watchdog status.
+    Used by external monitoring scripts or health checks.
     """
 
     def __init__(
@@ -518,14 +521,14 @@ class WatchdogChecker:
         Initialize WatchdogChecker.
 
         Args:
-            heartbeat_file: heartbeat 파일 경로
-            max_age_seconds: heartbeat 최대 허용 경과 시간
+            heartbeat_file: heartbeat file path
+            max_age_seconds: maximum allowed heartbeat age
         """
         self._heartbeat_file = heartbeat_file
         self._max_age_seconds = max_age_seconds
 
     def is_alive(self) -> bool:
-        """Watchdog 생존 여부 확인."""
+        """Check whether the Watchdog is alive."""
         try:
             heartbeat = self.read_heartbeat()
             if not heartbeat:
@@ -543,7 +546,7 @@ class WatchdogChecker:
             return False
 
     def read_heartbeat(self) -> dict[str, Any] | None:
-        """Heartbeat 파일 읽기."""
+        """Read the heartbeat file."""
         try:
             with open(self._heartbeat_file) as f:
                 return json.load(f)
@@ -551,7 +554,7 @@ class WatchdogChecker:
             return None
 
     def get_age_seconds(self) -> float | None:
-        """마지막 heartbeat 이후 경과 시간."""
+        """Elapsed time since the last heartbeat."""
         try:
             heartbeat = self.read_heartbeat()
             if not heartbeat:
@@ -567,13 +570,13 @@ class WatchdogChecker:
             return None
 
 
-# 싱글톤 인스턴스 관리
+# Singleton instance management
 _watchdog_instance: AuditWatchdog | None = None
 _watchdog_lock = threading.Lock()
 
 
 def get_watchdog() -> AuditWatchdog:
-    """싱글톤 Watchdog 인스턴스 조회."""
+    """Get the singleton Watchdog instance."""
     global _watchdog_instance
     if _watchdog_instance is None:
         with _watchdog_lock:
@@ -583,7 +586,7 @@ def get_watchdog() -> AuditWatchdog:
 
 
 def start_watchdog(config: AuditWatchdogConfig | None = None) -> AuditWatchdog:
-    """Watchdog 시작 (편의 함수)."""
+    """Start the Watchdog (convenience function)."""
     global _watchdog_instance
     with _watchdog_lock:
         if _watchdog_instance is not None:
@@ -594,7 +597,7 @@ def start_watchdog(config: AuditWatchdogConfig | None = None) -> AuditWatchdog:
 
 
 def stop_watchdog() -> None:
-    """Watchdog 중지 (편의 함수)."""
+    """Stop the Watchdog (convenience function)."""
     global _watchdog_instance
     with _watchdog_lock:
         if _watchdog_instance is not None:

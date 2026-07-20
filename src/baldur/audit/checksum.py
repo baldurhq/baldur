@@ -1,10 +1,10 @@
 """
 Checksum Utilities for Data Integrity.
 
-CRC32 및 SHA256 체크섬 계산/검증 유틸리티.
-WAL, 캐시, 감사 기록 등에서 사용.
+CRC32 and SHA256 checksum compute/verify utilities.
+Used by WAL, cache, audit records, etc.
 
-최소 의존성: 표준 라이브러리만 사용 (zlib, hashlib, json)
+Minimal dependencies: standard library only (zlib, hashlib, json)
 
 Usage:
     from baldur.audit.checksum import (
@@ -14,11 +14,11 @@ Usage:
         verify_sha256,
     )
 
-    # CRC32 (빠름, WAL용)
+    # CRC32 (fast, for WAL)
     checksum = compute_crc32(data)
     is_valid = verify_crc32(data, checksum)
 
-    # SHA256 (보안, 해시 체인용)
+    # SHA256 (secure, for hash chains)
     checksum = compute_sha256(data)
     is_valid = verify_sha256(data, checksum)
 """
@@ -31,7 +31,7 @@ from typing import Any
 
 @dataclass
 class ChecksumResult:
-    """체크섬 검증 결과."""
+    """Checksum verification result."""
 
     is_valid: bool
     expected: str
@@ -41,15 +41,15 @@ class ChecksumResult:
 
 def compute_crc32(data: bytes | str | dict | Any) -> str:
     """
-    CRC32 체크섬 계산.
+    Compute a CRC32 checksum.
 
-    빠른 체크섬으로 WAL, 캐시 무결성 검증에 적합.
+    A fast checksum, suited to WAL and cache integrity verification.
 
     Args:
-        data: 체크섬 대상 데이터 (bytes, str, dict, or any JSON-serializable)
+        data: Data to checksum (bytes, str, dict, or any JSON-serializable)
 
     Returns:
-        8자리 16진수 문자열 (예: "a1b2c3d4")
+        8-digit hex string (e.g. "a1b2c3d4")
     """
     data_bytes = _normalize_to_bytes(data)
     crc = zlib.crc32(data_bytes) & 0xFFFFFFFF
@@ -58,11 +58,11 @@ def compute_crc32(data: bytes | str | dict | Any) -> str:
 
 def verify_crc32(data: bytes | str | dict | Any, expected: str) -> ChecksumResult:
     """
-    CRC32 체크섬 검증.
+    Verify a CRC32 checksum.
 
     Args:
-        data: 검증할 데이터
-        expected: 예상 체크섬
+        data: Data to verify
+        expected: Expected checksum
 
     Returns:
         ChecksumResult with validation result
@@ -81,16 +81,16 @@ def compute_sha256(
     truncate: int | None = None,
 ) -> str:
     """
-    SHA256 체크섬 계산.
+    Compute a SHA256 checksum.
 
-    보안 해시로 해시 체인, 감사 로그 무결성에 적합.
+    A secure hash, suited to hash chains and audit log integrity.
 
     Args:
-        data: 체크섬 대상 데이터
-        truncate: 결과 자릿수 (None이면 전체 64자)
+        data: Data to checksum
+        truncate: Result length in digits (full 64 chars when None)
 
     Returns:
-        16진수 문자열 (기본 64자, truncate 시 해당 자릿수)
+        Hex string (64 chars by default, or the truncated length)
     """
     data_bytes = _normalize_to_bytes(data)
     full_hash = hashlib.sha256(data_bytes).hexdigest()
@@ -106,17 +106,17 @@ def verify_sha256(
     truncate: int | None = None,
 ) -> ChecksumResult:
     """
-    SHA256 체크섬 검증.
+    Verify a SHA256 checksum.
 
     Args:
-        data: 검증할 데이터
-        expected: 예상 체크섬
-        truncate: 자릿수 (expected와 동일하게 설정)
+        data: Data to verify
+        expected: Expected checksum
+        truncate: Length in digits (set to match expected)
 
     Returns:
         ChecksumResult with validation result
     """
-    # truncate 자동 추론
+    # Infer truncate automatically
     if truncate is None and len(expected) < 64:
         truncate = len(expected)
 
@@ -135,15 +135,15 @@ def compute_checksum(
     truncate: int | None = None,
 ) -> str:
     """
-    범용 체크섬 계산.
+    Generic checksum computation.
 
     Args:
-        data: 체크섬 대상 데이터
-        algorithm: 알고리즘 ("crc32" or "sha256")
-        truncate: SHA256일 때 자릿수
+        data: Data to checksum
+        algorithm: Algorithm ("crc32" or "sha256")
+        truncate: Length in digits when using SHA256
 
     Returns:
-        체크섬 문자열
+        Checksum string
     """
     if algorithm == "sha256":
         return compute_sha256(data, truncate)
@@ -172,12 +172,12 @@ def verify_checksum(
     algorithm: str = "crc32",
 ) -> ChecksumResult:
     """
-    범용 체크섬 검증.
+    Generic checksum verification.
 
     Args:
-        data: 검증할 데이터
-        expected: 예상 체크섬
-        algorithm: 알고리즘 ("crc32" or "sha256")
+        data: Data to verify
+        expected: Expected checksum
+        algorithm: Algorithm ("crc32" or "sha256")
 
     Returns:
         ChecksumResult with validation result
@@ -191,13 +191,13 @@ def verify_checksum(
 
 def _normalize_to_bytes(data: bytes | str | dict | Any) -> bytes:
     """
-    다양한 타입의 데이터를 bytes로 정규화.
+    Normalize data of various types to bytes.
 
     Args:
-        data: 변환할 데이터
+        data: Data to convert
 
     Returns:
-        bytes 형태의 데이터
+        The data as bytes
     """
     if isinstance(data, bytes):
         return data
@@ -207,7 +207,7 @@ def _normalize_to_bytes(data: bytes | str | dict | Any) -> bytes:
         from baldur.utils.serialization import fast_canonical_dumps
 
         return fast_canonical_dumps(data)
-    # 기타 타입은 문자열로 변환
+    # Any other type is converted to a string
     return str(data).encode("utf-8")
 
 
@@ -218,29 +218,29 @@ def _normalize_to_bytes(data: bytes | str | dict | Any) -> bytes:
 
 def checksum_dict(data: dict, algorithm: str = "sha256", truncate: int = 16) -> str:
     """
-    딕셔너리 체크섬 (캐시, 감사 기록용).
+    Dictionary checksum (for cache and audit records).
 
     Args:
-        data: 딕셔너리 데이터
-        algorithm: 알고리즘
-        truncate: 자릿수
+        data: Dictionary data
+        algorithm: Algorithm
+        truncate: Length in digits
 
     Returns:
-        체크섬 문자열
+        Checksum string
     """
     return compute_checksum(data, algorithm, truncate)
 
 
 def checksum_file(filepath: str, algorithm: str = "sha256") -> str:
     """
-    파일 체크섬 계산.
+    Compute a file checksum.
 
     Args:
-        filepath: 파일 경로
-        algorithm: 알고리즘
+        filepath: File path
+        algorithm: Algorithm
 
     Returns:
-        체크섬 문자열
+        Checksum string
     """
     with open(filepath, "rb") as f:
         content = f.read()
@@ -251,12 +251,12 @@ def verify_file_checksum(
     filepath: str, expected: str, algorithm: str = "sha256"
 ) -> ChecksumResult:
     """
-    파일 체크섬 검증.
+    Verify a file checksum.
 
     Args:
-        filepath: 파일 경로
-        expected: 예상 체크섬
-        algorithm: 알고리즘
+        filepath: File path
+        expected: Expected checksum
+        algorithm: Algorithm
 
     Returns:
         ChecksumResult

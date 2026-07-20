@@ -1,15 +1,15 @@
 """
-mmap 기반 Disk-Persistent Buffer.
+mmap-based disk-persistent buffer.
 
-표준 라이브러리만 사용 (외부 의존성 없음).
-LMDB가 설치되지 않은 환경에서 대안으로 사용합니다.
+Standard library only (no external dependencies).
+Used as an alternative where LMDB is not installed.
 
-제한사항:
-- 고정 크기 파일
-- 삭제 없음 (순환 버퍼 방식)
-- 단순 순차 접근
+Limitations:
+- Fixed-size file
+- No deletion (circular buffer)
+- Simple sequential access
 
-사용법:
+Usage:
     buffer = MmapBuffer("/var/lib/baldur/mmap_buffer.dat")
     buffer.put({"event": "test"})
 
@@ -45,16 +45,16 @@ class MmapBufferError(AuditError):
 
 class MmapBuffer:
     """
-    mmap 기반 간단한 영속 버퍼.
+    Simple mmap-based persistent buffer.
 
-    파일 구조:
+    File layout:
     - Header (16 bytes): magic(4) + version(2) + entry_count(4) + write_pos(4) + reserved(2)
     - Entries: [length(4) + data(variable)] ...
 
-    제한사항:
-    - 고정 크기 파일
-    - 삭제 없음 (순환 버퍼 방식으로 덮어쓰기)
-    - 단순 순차 접근
+    Limitations:
+    - Fixed-size file
+    - No deletion (overwritten circular-buffer style)
+    - Simple sequential access
     """
 
     MAGIC = b"MMBF"
@@ -68,11 +68,11 @@ class MmapBuffer:
         size_mb: int = DEFAULT_SIZE_MB,
     ):
         """
-        MmapBuffer 초기화.
+        Initialize MmapBuffer.
 
         Args:
-            file_path: 버퍼 파일 경로
-            size_mb: 버퍼 크기 (MB)
+            file_path: Buffer file path
+            size_mb: Buffer size (MB)
         """
         if file_path is None:
             if sys.platform == "win32":
@@ -92,19 +92,19 @@ class MmapBuffer:
         self._init_storage()
 
     def _init_storage(self) -> None:
-        """스토리지 초기화."""
+        """Initialize storage."""
         self._file_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # 파일 생성 또는 열기
+        # Create or open the file
         if not self._file_path.exists():
             self._create_new_file()
         else:
             self._open_existing_file()
 
     def _create_new_file(self) -> None:
-        """새 파일 생성."""
+        """Create a new file."""
         with open(self._file_path, "wb") as f:
-            # Header 쓰기
+            # Write the header
             header = struct.pack(
                 ">4sHIIxx",  # magic(4) + version(2) + count(4) + pos(4) + reserved(2)
                 self.MAGIC,
@@ -113,7 +113,7 @@ class MmapBuffer:
                 self.HEADER_SIZE,  # write_pos
             )
             f.write(header)
-            # 나머지 공간 0으로 채우기
+            # Zero-fill the remaining space
             f.write(b"\x00" * (self._size_bytes - self.HEADER_SIZE))
 
         self._open_existing_file()
@@ -123,11 +123,11 @@ class MmapBuffer:
         )
 
     def _open_existing_file(self) -> None:
-        """기존 파일 열기."""
+        """Open an existing file."""
         self._file = open(self._file_path, "r+b")  # noqa: SIM115
         self._mmap = mmap.mmap(self._file.fileno(), 0)
 
-        # Header 검증
+        # Validate the header
         magic = self._mmap[:4]
         if magic != self.MAGIC:
             raise MmapBufferError(f"Invalid magic: {magic!r}")
@@ -138,14 +138,14 @@ class MmapBuffer:
         )
 
     def _read_header(self) -> tuple[int, int]:
-        """헤더 읽기: (entry_count, write_pos)."""
+        """Read the header: (entry_count, write_pos)."""
         if self._mmap is None:
             raise MmapBufferError("Buffer not initialized")
         data = struct.unpack(">4sHIIxx", self._mmap[: self.HEADER_SIZE])
         return data[2], data[3]
 
     def _write_header(self, entry_count: int, write_pos: int) -> None:
-        """헤더 쓰기."""
+        """Write the header."""
         if self._mmap is None:
             raise MmapBufferError("Buffer not initialized")
         header = struct.pack(
@@ -160,13 +160,13 @@ class MmapBuffer:
 
     def put(self, entry: dict[str, Any]) -> bool:
         """
-        엔트리 저장.
+        Store an entry.
 
         Args:
-            entry: 이벤트 데이터
+            entry: Event data
 
         Returns:
-            저장 성공 여부
+            Whether the store succeeded
         """
         if self._mmap is None:
             raise MmapBufferError("Buffer not initialized")
@@ -174,21 +174,21 @@ class MmapBuffer:
         with self._lock:
             entry_count, write_pos = self._read_header()
 
-            # JSON 직렬화
+            # JSON serialization
             data = fast_dumps(entry, default=str)
             record_size = 4 + len(data)  # length(4) + data
 
-            # 공간 확인 (순환 버퍼 방식)
+            # Check space (circular buffer)
             if write_pos + record_size > self._size_bytes:
                 logger.warning("mmap_buffer.buffer_full_wrapping_around")
                 write_pos = self.HEADER_SIZE
                 entry_count = 0
 
-            # 레코드 쓰기
+            # Write the record
             self._mmap[write_pos : write_pos + 4] = struct.pack(">I", len(data))
             self._mmap[write_pos + 4 : write_pos + record_size] = data
 
-            # 헤더 업데이트
+            # Update the header
             self._write_header(entry_count + 1, write_pos + record_size)
             self._total_added += 1
 
@@ -196,10 +196,10 @@ class MmapBuffer:
 
     def iter_entries(self) -> list[dict[str, Any]]:
         """
-        모든 엔트리 읽기.
+        Read all entries.
 
         Returns:
-            엔트리 목록
+            List of entries
         """
         if self._mmap is None:
             raise MmapBufferError("Buffer not initialized")
@@ -233,20 +233,20 @@ class MmapBuffer:
         return entries
 
     def count(self) -> int:
-        """현재 엔트리 수."""
+        """Current entry count."""
         with self._lock:
             entry_count, _ = self._read_header()
             return entry_count
 
     def clear(self) -> int:
-        """버퍼 초기화. Returns number of cleared entries."""
+        """Reset the buffer. Returns number of cleared entries."""
         with self._lock:
             entry_count, _ = self._read_header()
             self._write_header(0, self.HEADER_SIZE)
             return entry_count
 
     def get_stats(self) -> dict[str, Any]:
-        """통계 반환."""
+        """Return statistics."""
         with self._lock:
             entry_count, write_pos = self._read_header()
             return {
@@ -265,7 +265,7 @@ class MmapBuffer:
             }
 
     def close(self) -> None:
-        """버퍼 종료."""
+        """Close the buffer."""
         if self._mmap:
             self._mmap.close()
             self._mmap = None
@@ -275,11 +275,11 @@ class MmapBuffer:
         logger.info("mmap_buffer.closed")
 
     def __enter__(self) -> MmapBuffer:
-        """Context manager 진입."""
+        """Context manager entry."""
         return self
 
     def __exit__(self, *args: Any) -> None:
-        """Context manager 종료."""
+        """Context manager exit."""
         self.close()
 
 

@@ -1,8 +1,8 @@
 """
-Cascade Auditor - WAL/Load Shedding 모듈.
+Cascade Auditor - WAL/Load Shedding module.
 
-로컬 WAL 저장, Load Shedding, 복구 관련 책임을 담당합니다.
-JSONLWriter를 통해 스레드 안전한 JSONL WAL 쓰기를 수행합니다.
+Owns local WAL storage, Load Shedding, and recovery responsibilities.
+Performs thread-safe JSONL WAL writes through JSONLWriter.
 """
 
 from __future__ import annotations
@@ -43,7 +43,8 @@ LOCAL_CASCADE_WAL_DIR = _DEFAULT_CASCADE_WAL_DIR
 LOCAL_CASCADE_WAL_PATH = f"{LOCAL_CASCADE_WAL_DIR}/cascade_audit_wal.jsonl"
 LOCAL_CASCADE_FALLBACK_PATH = LOCAL_CASCADE_WAL_PATH
 
-# Lazy-initialized JSONLWriter (fsync=False — Redis가 1차 복구 수단, 로컬 WAL은 best-effort fallback)
+# Lazy-initialized JSONLWriter (fsync=False — Redis is the primary recovery
+# path, the local WAL is a best-effort fallback)
 # Lazy init prevents file creation during unit test imports where the module is loaded but not used.
 _wal_writer: JSONLWriter | None = None
 
@@ -67,25 +68,25 @@ def reset_wal_writer() -> None:
     _wal_writer = None
 
 
-# 배치 복구 상수
+# Batch recovery constants
 _BATCH_SIZE = 1000
-_IDEMPOTENCY_TTL = 3600  # 1시간
+_IDEMPOTENCY_TTL = 3600  # 1 hour
 
 
 def _append_to_wal(data: dict) -> None:
     """
-    WAL 파일에 데이터를 JSONL 형식으로 추가.
+    Append data to the WAL file in JSONL format.
 
-    JSONLWriter를 통해 스레드 안전하게 기록합니다.
+    Writes thread-safely through JSONLWriter.
 
     Args:
-        data: 저장할 딕셔너리 데이터
+        data: dictionary data to store
     """
     _get_wal_writer().append(data)
 
 
 class WALRecoveryMixin:
-    """WAL/Load Shedding/복구 관련 메서드."""
+    """WAL / Load Shedding / recovery methods."""
 
     if TYPE_CHECKING:
         # Host contract — attributes/methods provided via MRO by
@@ -119,26 +120,27 @@ class WALRecoveryMixin:
         external_trace: ExternalTraceContext | None = None,
     ) -> CascadeEvent | None:
         """
-        Load Shedding을 적용하여 Cascade Event 기록.
+        Record a Cascade Event with Load Shedding applied.
 
-        버퍼 사용률에 따라 우선순위가 낮은 이벤트를 드롭합니다.
-        CRITICAL 이벤트는 절대 드롭하지 않으며, 필요시 로컬 폴백을 사용합니다.
+        Drops lower-priority events based on buffer utilization.
+        CRITICAL events are never dropped; a local fallback is used
+        when necessary.
 
         Args:
-            trigger_type: 트리거 유형
-            trigger_details: 트리거 상세 정보
-            effects: 연쇄 효과 목록
-            namespace: 네임스페이스
-            triggered_by: 트리거 주체
-            external_trace: 외부 분산 추적 컨텍스트
+            trigger_type: trigger type
+            trigger_details: trigger detail information
+            effects: list of cascading effects
+            namespace: namespace
+            triggered_by: the actor that triggered it
+            external_trace: external distributed tracing context
 
         Returns:
-            생성된 CascadeEvent 또는 None (드롭된 경우)
+            The created CascadeEvent, or None if dropped
         """
         load_shedding = self._get_load_shedding()
 
         if not load_shedding:
-            # Load Shedding 비활성화 시 일반 기록
+            # Load Shedding disabled — record normally
             return self.record(
                 trigger_type=trigger_type,
                 trigger_details=trigger_details,
@@ -148,12 +150,12 @@ class WALRecoveryMixin:
                 external_trace=external_trace,
             )
 
-        # 버퍼 상태 확인
+        # Check the buffer state
         backend = self._get_backend()
         index_key = self.CASCADE_INDEX_KEY.format(namespace=namespace)
         buffer_size = len(get_index_ids(backend, index_key))
 
-        # Load Shedding 결정
+        # Load Shedding decision
         decision = load_shedding.should_accept(
             trigger_type=trigger_type,
             buffer_size=buffer_size,
@@ -161,14 +163,14 @@ class WALRecoveryMixin:
         )
 
         if not decision["accepted"]:
-            # 드롭
+            # Dropped
             logger.warning(
                 "cascade_audit.event_dropped_load_shedding",
                 trigger_type=trigger_type,
                 decision=decision["reason"],
             )
 
-            # 폴백 권장 시 로컬에 저장
+            # Store locally when a fallback is recommended
             if decision.get("use_fallback"):
                 self._record_dropped_to_wal(
                     trigger_type=trigger_type,
@@ -180,7 +182,7 @@ class WALRecoveryMixin:
 
             return None
 
-        # 정상 기록
+        # Normal record
         return self.record(
             trigger_type=trigger_type,
             trigger_details=trigger_details,
@@ -192,12 +194,12 @@ class WALRecoveryMixin:
 
     def _save_to_local_wal(self, event: CascadeEvent) -> None:
         """
-        로컬 WAL에 Cascade Event 저장.
+        Save a Cascade Event to the local WAL.
 
-        Redis 장애 시 로컬 WAL 파일에 JSONL 형식으로 저장합니다.
+        On Redis failure, stores to the local WAL file in JSONL format.
 
         Args:
-            event: 저장할 CascadeEvent
+            event: the CascadeEvent to store
         """
         try:
             _append_to_wal(event.to_dict())
@@ -211,7 +213,7 @@ class WALRecoveryMixin:
                 error=e,
             )
 
-    # 하위 호환성
+    # Backward compatibility
     _save_to_local_fallback = _save_to_local_wal
 
     def _record_dropped_to_wal(
@@ -223,9 +225,9 @@ class WALRecoveryMixin:
         reason: str,
     ) -> None:
         """
-        드롭된 이벤트 정보를 WAL에 기록.
+        Record information about a dropped event to the WAL.
 
-        Load Shedding으로 드롭된 이벤트의 최소 정보를 기록합니다.
+        Records the minimal information for events dropped by Load Shedding.
         """
         try:
             _append_to_wal(
@@ -244,7 +246,7 @@ class WALRecoveryMixin:
                 error=e,
             )
 
-    # 하위 호환성
+    # Backward compatibility
     _record_dropped_to_fallback = _record_dropped_to_wal
 
     def recover_from_local_wal(  # noqa: C901, PLR0912
@@ -253,18 +255,18 @@ class WALRecoveryMixin:
         dry_run: bool = False,
     ) -> dict[str, Any]:
         """
-        로컬 WAL에서 Redis로 복구 (배치 최적화).
+        Recover from the local WAL into Redis (batch-optimized).
 
-        Redis 장애 복구 후 로컬 WAL에 쌓인 이벤트를 Redis로 이관합니다.
-        배치 멱등성 검사로 중복 복구를 방지하고,
-        인덱스 일괄 업데이트로 Redis 왕복을 최소화합니다.
+        After Redis recovers, migrates the events accumulated in the local
+        WAL into Redis. Batch idempotency checks prevent duplicate recovery,
+        and bulk index updates minimize Redis round trips.
 
         Args:
-            namespace: 네임스페이스
-            dry_run: True면 실제 복구 없이 대상만 확인
+            namespace: namespace
+            dry_run: when True, only reports the targets without recovering
 
         Returns:
-            복구 결과 통계 (idempotency_skipped 포함)
+            Recovery result statistics (including idempotency_skipped)
         """
         wal_path = Path(LOCAL_CASCADE_WAL_PATH)
 
@@ -279,7 +281,7 @@ class WALRecoveryMixin:
 
         entries = []
 
-        # WAL 파일에서 해당 네임스페이스 이벤트 읽기
+        # Read this namespace's events from the WAL file
         from baldur.audit.wal._jsonl import JSONLReader
 
         for entry in JSONLReader.iter_entries(wal_path):
@@ -309,7 +311,7 @@ class WALRecoveryMixin:
                 "idempotency_skipped": 0,
             }
 
-        # 배치 멱등성 체크 — 이미 복구된 엔트리 스킵
+        # Batch idempotency check — skip already-recovered entries
         idempotency_skipped = 0
         entries_to_recover = []
 
@@ -323,7 +325,7 @@ class WALRecoveryMixin:
                 else:
                     entries_to_recover.append(entry)
 
-        # Redis로 복구
+        # Recover into Redis
         recovered = 0
         failed = 0
         recovered_ids: list[str] = []
@@ -343,7 +345,7 @@ class WALRecoveryMixin:
                 )
                 failed += 1
 
-        # 배치 인덱스 업데이트 (N × GET/SET → 1 GET + 1 SET)
+        # Batch index update (N × GET/SET → 1 GET + 1 SET)
         index_failed = False
         if recovered_ids:
             try:
@@ -356,13 +358,15 @@ class WALRecoveryMixin:
                 )
                 index_failed = True
 
-        # 배치 멱등성 마킹 (성공적으로 복구된 엔트리만)
-        # 인덱스 실패 시에도 마킹하여 다음 복구에서 데이터 중복 저장 방지
+        # Batch idempotency marking (only successfully recovered entries).
+        # Mark even when the index update failed, to prevent duplicate data
+        # being stored on the next recovery.
         if recovered_entries:
             self._batch_mark_cascade_processed(recovered_entries)
 
-        # 복구 완료 후 해당 네임스페이스 엔트리 제거
-        # 인덱스 실패 시 WAL 유지 → 다음 복구에서 인덱스 재시도
+        # Remove this namespace's entries once recovery completes.
+        # Keep the WAL when the index failed → the next recovery retries
+        # the index.
         if (
             failed == 0
             and not index_failed
@@ -392,13 +396,14 @@ class WALRecoveryMixin:
         entries: list[dict[str, Any]],
     ) -> set[int]:
         """
-        배치 멱등성 검사 (cascade recovery).
+        Batch idempotency check (cascade recovery).
 
-        IdempotencyService.batch_check()로 1000건씩 중복 검사.
-        서비스 미사용 또는 장애 시 빈 집합 반환 (안전하게 진행).
+        Checks duplicates 1000 at a time via IdempotencyService.batch_check().
+        Returns an empty set when the service is unused or failing (proceed
+        safely).
 
         Returns:
-            중복인 엔트리의 배치 내 인덱스 집합
+            Set of in-batch indices for duplicate entries
         """
         try:
             from baldur.services.idempotency import (
@@ -437,7 +442,7 @@ class WALRecoveryMixin:
         self,
         entries: list[dict[str, Any]],
     ) -> None:
-        """배치 멱등성 마킹 (cascade recovery)."""
+        """Batch idempotency marking (cascade recovery)."""
         try:
             from baldur.services.idempotency import (
                 IdempotencyKey,
@@ -473,17 +478,18 @@ class WALRecoveryMixin:
         cascade_ids: list[str],
     ) -> None:
         """
-        복구된 이벤트 ID를 인덱스에 일괄 추가.
+        Bulk-add recovered event IDs to the index.
 
-        N × (GET + SET) 대신 1 GET + 1 SET으로 Redis 왕복 최소화.
-        기존 _add_to_index 동작과 동일한 최신순 유지를 위해 역순 삽입.
+        Uses 1 GET + 1 SET instead of N × (GET + SET) to minimize Redis
+        round trips. Inserts in reverse order to keep the same
+        newest-first ordering as _add_to_index.
         """
         backend = self._get_backend()
         key = self.CASCADE_INDEX_KEY.format(namespace=namespace)
         ids = get_index_ids(backend, key)
 
-        # 기존 _add_to_index는 insert(0, id)를 N회 호출 → 마지막 ID가 맨 앞
-        # 동일 순서를 유지하기 위해 역순으로 prepend
+        # _add_to_index calls insert(0, id) N times → the last ID ends up first.
+        # Prepend in reverse order to preserve the same ordering.
         ids = list(reversed(cascade_ids)) + ids
 
         if len(ids) > self._max_index_size:
@@ -491,16 +497,16 @@ class WALRecoveryMixin:
 
         backend.set(key, {"ids": ids})
 
-    # 하위 호환성
+    # Backward compatibility
     recover_from_local_fallback = recover_from_local_wal
 
     def _remove_namespace_from_wal(self, namespace: str) -> None:
-        """WAL 파일에서 특정 네임스페이스 엔트리 제거."""
+        """Remove a specific namespace's entries from the WAL file."""
         from baldur.audit.wal._cleanup import cleanup_by_namespace
 
         cleanup_by_namespace(Path(LOCAL_CASCADE_WAL_PATH), namespace)
 
-    # 하위 호환성
+    # Backward compatibility
     _remove_namespace_from_fallback = _remove_namespace_from_wal
 
     def get_load_shedding_status(
@@ -508,13 +514,13 @@ class WALRecoveryMixin:
         namespace: str = "global",
     ) -> dict[str, Any]:
         """
-        Load Shedding 상태 조회.
+        Query the Load Shedding status.
 
         Args:
-            namespace: 네임스페이스
+            namespace: namespace
 
         Returns:
-            Load Shedding 상태 정보
+            Load Shedding status information
         """
         load_shedding = self._get_load_shedding()
 
@@ -524,7 +530,7 @@ class WALRecoveryMixin:
                 "status": "DISABLED",
             }
 
-        # 버퍼 상태 확인
+        # Check the buffer state
         backend = self._get_backend()
         index_key = self.CASCADE_INDEX_KEY.format(namespace=namespace)
         buffer_size = len(get_index_ids(backend, index_key))

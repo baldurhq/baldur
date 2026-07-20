@@ -1,5 +1,5 @@
 """
-WAL 데이터 모델 및 예외 클래스.
+WAL data models and exception classes.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from baldur.core.exceptions import AuditError
 
 
 class WALState(str, Enum):
-    """WAL 상태."""
+    """WAL state."""
 
     ACTIVE = "active"
     ROTATING = "rotating"
@@ -23,7 +23,7 @@ class WALState(str, Enum):
 
 @dataclass
 class WALEntry:
-    """WAL 엔트리."""
+    """WAL entry."""
 
     sequence: int
     timestamp: float
@@ -31,7 +31,7 @@ class WALEntry:
     checksum: str
 
     def to_dict(self) -> dict[str, Any]:
-        """딕셔너리로 변환."""
+        """Convert to a dictionary."""
         return {
             "seq": self.sequence,
             "ts": self.timestamp,
@@ -41,7 +41,7 @@ class WALEntry:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> WALEntry:
-        """딕셔너리에서 생성."""
+        """Create from a dictionary."""
         return cls(
             sequence=d["seq"],
             timestamp=d["ts"],
@@ -52,7 +52,7 @@ class WALEntry:
 
 @dataclass
 class WALConfig:
-    """WAL 설정."""
+    """WAL configuration."""
 
     wal_dir: str = "/var/log/audit/wal"
     max_file_size_mb: int = 100
@@ -60,23 +60,23 @@ class WALConfig:
     max_files: int = 10
     file_prefix: str = "audit_wal"
 
-    # Group Commit 설정
+    # Group Commit settings
     group_commit_enabled: bool = False
     group_commit_max_entries: int = 100
     group_commit_max_wait_ms: int = 10
 
-    # Disk Full Fail-Open 설정
+    # Disk Full Fail-Open settings
     fail_open_on_disk_full: bool = True
     disk_recovery_threshold: float = 0.1
 
-    # Best-Effort Recovery 설정
+    # Best-Effort Recovery settings
     best_effort_recovery: bool = True
 
-    # Parallel Recovery 설정
+    # Parallel Recovery settings
     recovery_max_workers: int = 4
     recovery_batch_size: int = 1000
 
-    # Priority-based Purge 설정
+    # Priority-based Purge settings
     priority_based_purge: bool = True
     purge_priority_order: tuple[str, ...] = (
         "DEBUG",
@@ -94,7 +94,7 @@ class WALConfig:
 
 @dataclass
 class WALStats:
-    """WAL 통계."""
+    """WAL statistics."""
 
     state: WALState
     current_file: str | None

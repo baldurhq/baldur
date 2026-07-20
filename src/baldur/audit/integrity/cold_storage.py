@@ -18,8 +18,8 @@ Industry Standards:
     - PCI-DSS: 1 year + 3 months readily accessible, then 7 years archived
     - GDPR: Depends on purpose, but audit trails often 5+ years
 
-Reference:
-    92_CONFIG_IMPLEMENTATION_GUIDE.md Week 4 [25] AuditIntegritySettings 참조.
+Configuration:
+    AuditIntegritySettings (baldur.settings.audit_integrity).
 """
 
 from __future__ import annotations
