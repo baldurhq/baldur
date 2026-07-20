@@ -500,8 +500,18 @@ def retry(
     preserves the wrapped signature, so framework dependency injection (e.g.
     FastAPI ``Depends``) resolves against the original parameters.
 
+    Outbound 429 coordination applies to the **sync** branch only, and only
+    when ``domain`` is set. A sync function with a named domain shares a
+    cooldown with every other caller on that domain, so a 429 backs the fleet
+    off together instead of each worker retrying on its own ladder. Leaving
+    ``domain`` unset opts out — the placeholder is shared by every unnamed
+    caller, and one cooldown record cannot stand for unrelated downstreams.
+    An ``async def`` never participates regardless of ``domain``; async callers
+    who want it use the tenacity bridge with a ``rate_limit_key``.
+
     Args:
-        domain: Configuration domain (also the retry / DLQ / metric key).
+        domain: Configuration domain (also the retry / DLQ / metric key, and
+            the outbound 429 coordination key — see above).
         max_attempts: Override the total attempt count (``None`` uses settings).
         retryable_exceptions: Override the retryable exception tuple.
         non_retryable_exceptions: Override the non-retryable exception tuple.

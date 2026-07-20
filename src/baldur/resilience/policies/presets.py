@@ -135,7 +135,10 @@ def standard_pipeline(
     Args:
         service_name: Service identifier (used for metrics/logging and CB)
         max_retries: Maximum retry attempts
-        domain: Domain identifier (RetryPolicyConfig.domain)
+        domain: Domain identifier (RetryPolicyConfig.domain). Also the
+            outbound 429 coordination key: leave it unset and the retry stage
+            does not share cooldowns for these calls, because the default
+            placeholder is shared by every caller who did not name one.
         cb_enabled: Include CircuitBreakerPolicy (default True)
         fallback_chain: Ordered fallback callable list.
         fallback_fn: Single callable fallback function.
@@ -222,7 +225,10 @@ def ha_pipeline(
         max_retries: Maximum retry attempts
         hedging_delay: Hedging delay in seconds
         max_concurrent: Bulkhead max concurrency
-        domain: Domain identifier
+        domain: Domain identifier. Also the outbound 429 coordination key:
+            leave it unset and the retry stage does not share cooldowns for
+            these calls, because the default placeholder is shared by every
+            caller who did not name one.
         fallback_chain: Ordered fallback callable list.
         fallback_fn: Single callable fallback function.
         fallback_default: Static default value (last resort).

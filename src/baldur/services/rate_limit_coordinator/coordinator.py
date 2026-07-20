@@ -2,19 +2,36 @@
 Rate Limit Coordinator - Core Coordinator
 
 Central coordinator for distributed rate limit management.
-Prevents Self-DDoS by coordinating retry behavior across all workers.
+Prevents Self-DDoS by coordinating retry behavior across workers: when one
+worker is told to back off by a 429, the others honor the same cooldown
+instead of each running its own backoff ladder against the same provider.
 
 Key Features:
-    - Global cooldown on 429 responses
+    - Shared cooldown on 429 responses
     - Exponential backoff with jitter
     - Distributed state via pluggable storage
-    - 100% coverage with database fallback
 
-Design Philosophy:
-    "100% Self-DDoS prevention in any customer environment"
-    - Use Redis if available (best performance)
-    - Fall back to Database otherwise (100% compatible)
-    - Fall back to InMemory if no DB (single process)
+Coverage:
+    Baldur's own *synchronous* retry stage consults this coordinator by
+    default, provided the call carries a domain identity — the coordination key
+    is ``rate_limit_key`` or, failing that, ``domain``. A call that never named
+    a domain is not coordinated, because the placeholder is shared by every
+    such caller and one cooldown record cannot stand for unrelated downstreams.
+    Two levers turn the default off: ``rate_limit_aware`` on the retry config
+    and ``BALDUR_RATE_LIMIT_BACKOFF_COORDINATION_ENABLED``. Passing a
+    coordinator explicitly overrides both.
+
+    Asynchronous surfaces do not participate in the default. Async callers who
+    want outbound 429 coordination opt in through the tenacity bridge with a
+    ``rate_limit_key``; a bring-your-own retry engine owns its own coordination.
+
+    The cooldown is shared per key, so two call sites hitting the same provider
+    under different domains do not share one — the key is the unit of
+    coordination, and there is no provider-level auto-grouping.
+
+Storage:
+    Redis when configured (shared across processes and hosts), otherwise an
+    in-process store (per-process cooldown only).
 """
 
 from __future__ import annotations
@@ -65,20 +82,37 @@ class RateLimitCoordinator:
     3. Making all workers wait before retrying
     4. Using exponential backoff with jitter
 
-    Usage:
-        coordinator = RateLimitCoordinator()
+    Most callers never construct this directly. Baldur's synchronous retry
+    stage resolves the shared coordinator itself, so naming a domain is all it
+    takes::
 
-        # Before making request
-        coordinator.wait_if_needed("payment_api")
+        # Coordinated by default — "payment_api" is the coordination key.
+        @retry(domain="payment_api")
+        def call_external_api():
+            return requests.post(...)
 
-        # After receiving 429
-        coordinator.on_rate_limited(
+        protect("payment_api", retry=True)(call_external_api)
+
+    Opting out, in order of narrowness::
+
+        # Per policy / per domain.
+        RetryPolicyConfig(domain="payment_api", rate_limit_aware=False)
+
+        # Whole deployment.
+        BALDUR_RATE_LIMIT_BACKOFF_COORDINATION_ENABLED=false
+
+    Driving it directly — for a call that Baldur's retry stage does not wrap,
+    or to override the resolved instance (explicit injection wins over both
+    opt-outs above)::
+
+        coordinator = RateLimitCoordinator.get_instance()
+
+        coordinator.wait_if_needed("payment_api")   # before the request
+        coordinator.on_rate_limited(                # after a 429
             key="payment_api",
             retry_after=response.headers.get("Retry-After"),
         )
-
-        # After successful request
-        coordinator.on_success("payment_api")
+        coordinator.on_success("payment_api")       # after a success
 
     With decorator:
         @coordinator.rate_limit_aware("payment_api")
