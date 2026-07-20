@@ -1,20 +1,21 @@
 """
 IP Ban Enforcement Middleware.
 
-Redis에 기록된 IP ban을 실제 HTTP 요청 단계에서 강제 적용합니다.
+Enforces Redis-recorded IP bans at the HTTP request boundary.
 
-SecurityViolationService._temporary_ip_ban()과 _permanent_ip_ban()이
-Redis에 ban을 기록하지만, 후속 요청을 차단하는 미들웨어가 없었음.
-is_ip_banned()가 정의만 되어 있고 호출되는 곳이 없었음.
+SecurityViolationService._temporary_ip_ban() and _permanent_ip_ban() record
+bans in Redis, and is_ip_banned() can read them back, but without this
+middleware nothing consults that state on subsequent requests — the ban is
+recorded and never enforced.
 
-설계:
-- FAIL-OPEN: Redis 장애 시 요청 허용 (가용성 우선)
-- 헬스체크 경로 면제: /health/, /readiness/, /liveness/ 경로는 ban 대상에서 제외
-- IP 추출: baldur.utils.network.extract_client_ip() 재사용 (프로젝트 표준)
-- 응답 최소화: 403 응답에 ban_type 미포함 (공격자 정보 노출 방지)
+Design:
+- FAIL-OPEN: allow the request when Redis is unavailable (availability first)
+- Health-check paths exempt: /health/, /readiness/, /liveness/ are never banned
+- IP extraction: reuses baldur.utils.network.extract_client_ip() (project standard)
+- Minimal response: 403 omits ban_type (avoids leaking information to attackers)
 
-미들웨어 위치 (base.py MIDDLEWARE):
-    TieringMiddleware 다음, BaldurMiddleware 이전
+Middleware position (base.py MIDDLEWARE):
+    After TieringMiddleware, before BaldurMiddleware
 
 Usage in settings.py:
     MIDDLEWARE = [
@@ -42,19 +43,20 @@ logger = structlog.get_logger()
 
 class IPBanMiddleware:
     """
-    IP Ban 강제 적용 미들웨어.
+    IP ban enforcement middleware.
 
-    SecurityViolationService가 Redis에 기록한 IP ban 정보를 확인하여
-    ban된 IP의 요청을 403으로 거부합니다.
+    Checks the IP ban records written to Redis by SecurityViolationService and
+    rejects requests from banned IPs with a 403.
 
-    Redis 키 패턴: security:banned_ip:{ip_address}
-    Redis 값: {"banned": True, "type": "temporary"|"permanent"}
+    Redis key pattern: security:banned_ip:{ip_address}
+    Redis value: {"banned": True, "type": "temporary"|"permanent"}
 
-    Fail-Open: Redis 조회 실패 시 요청을 허용합니다.
+    Fail-open: allows the request when the Redis lookup fails.
     """
 
-    # 헬스체크 경로 면제 (K8s probe, ELB health check 등)
-    # /health/는 nginx.conf에서 직접 응답하여 Django 미도달이나, 방어적으로 유지
+    # Health-check paths are exempt (K8s probes, ELB health checks, etc.).
+    # /health/ is normally answered by nginx.conf and never reaches Django;
+    # kept here defensively.
     EXEMPT_PATH_PREFIXES = (
         "/health/",
         "/readiness/",
@@ -113,12 +115,13 @@ class IPBanMiddleware:
     def _get_banned_ip_prefix(self) -> str:
         """Get banned IP cache prefix from config.
 
-        CRITICAL: SecurityViolationService._temporary_ip_ban()/_permanent_ip_ban()과
-        반드시 동일한 키 프리픽스를 사용해야 함. 변경 시 ban 조회 불가 버그 발생.
+        CRITICAL: must use the same key prefix as
+        SecurityViolationService._temporary_ip_ban()/_permanent_ip_ban().
+        Changing one side alone silently breaks ban lookups.
         """
         if self._config is not None:
             return str(self._config.banned_ip_cache_prefix)
-        # SecurityConfig 기본값과 동일 (models.py banned_ip_cache_prefix 필드)
+        # Same as the SecurityConfig default (models.py banned_ip_cache_prefix)
         return "security:banned_ip:"
 
     def __call__(self, request: HttpRequest) -> HttpResponse:
@@ -126,14 +129,14 @@ class IPBanMiddleware:
 
         self._lazy_init()
 
-        # 헬스체크 경로 면제
+        # Health-check paths are exempt
         if any(request.path.startswith(prefix) for prefix in self.EXEMPT_PATH_PREFIXES):
             return cast("HttpResponse", self.get_response(request))
 
-        # IP 추출 (프로젝트 표준: baldur.utils.network.extract_client_ip)
+        # IP extraction (project standard: baldur.utils.network.extract_client_ip)
         client_ip = extract_client_ip(request, default="unknown") or "unknown"
 
-        # ban 여부 확인
+        # Check whether the IP is banned
         ban_info = self._check_ip_ban(client_ip)
 
         if ban_info is not None:
@@ -144,8 +147,8 @@ class IPBanMiddleware:
                 request_path=request.path,
             )
 
-            # 보안: ban_type을 응답에 포함하지 않음 (공격자 정보 노출 방지)
-            # ban_type은 로그에만 기록
+            # Security: ban_type is omitted from the response so attackers
+            # learn nothing; it is recorded in the log only.
             return JsonResponse(
                 {
                     "error": "Access denied",
@@ -158,12 +161,12 @@ class IPBanMiddleware:
 
     def _check_ip_ban(self, ip_address: str) -> dict[str, Any] | None:
         """
-        Redis에서 IP ban 정보 조회.
+        Look up IP ban information in Redis.
 
         Returns:
-            ban 정보 dict (banned인 경우) or None (미차단/조회실패)
+            The ban info dict when banned, or None (not banned / lookup failed).
 
-        FAIL-OPEN: Redis 조회 실패 시 None 반환 (요청 허용)
+        FAIL-OPEN: returns None when the Redis lookup fails (request allowed).
         """
         cache = self._get_cache()
         if cache is None:
@@ -180,7 +183,7 @@ class IPBanMiddleware:
             return None
 
         except Exception as e:
-            # FAIL-OPEN: Redis 장애 시 요청 허용
+            # FAIL-OPEN: allow the request when Redis is unavailable
             logger.debug(
                 "ip_ban_middleware.cache_check_failed_fail",
                 error=e,
