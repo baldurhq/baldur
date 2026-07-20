@@ -1,9 +1,10 @@
 """
-SLA 알림 비동기 전송 Celery 태스크.
+Celery task that sends SLA notifications asynchronously.
 
-SLA 위반 이벤트(Warning/Critical/Recovered)를 비동기로 처리합니다.
-autoretry로 전송 실패 시 자동 재시도(max 3회, 30초 간격)하며,
-acks_late로 Worker 종료 시 미완료 태스크를 브로커에 반환합니다.
+Handles SLA violation events (warning/critical/recovered) asynchronously.
+autoretry retries automatically on delivery failure (max 3 attempts, 30s
+apart), and acks_late returns unfinished tasks to the broker when a worker
+shuts down.
 """
 
 from __future__ import annotations
@@ -33,14 +34,15 @@ def send_sla_notification(
     notification_type: str,
 ) -> dict[str, Any]:
     """
-    SLA 알림 비동기 전송 태스크.
+    Task that sends an SLA notification asynchronously.
 
     Args:
-        event_data: SLA 이벤트 데이터 (rtt_ms, threshold_ms, service_name 등)
-        notification_type: 알림 유형 ("warning", "critical", "recovered")
+        event_data: SLA event data (rtt_ms, threshold_ms, service_name, etc.)
+        notification_type: Notification kind ("warning", "critical",
+            "recovered")
 
     Returns:
-        전송 결과 딕셔너리
+        Delivery result dictionary
     """
     try:
         from baldur_pro.services.throttle.sla_notification import (

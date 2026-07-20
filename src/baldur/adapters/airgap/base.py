@@ -19,27 +19,27 @@ from typing import Any, Protocol, runtime_checkable
 @runtime_checkable
 class AirGapStorageAdapter(Protocol):
     """
-    Air-Gap 저장소 어댑터 인터페이스.
+    Air-Gap storage adapter interface.
 
-    비즈니스 레이어는 DB 변경 시 이 어댑터를 통해 요약 상태를 기록하고,
-    Baldur 엔진은 이 어댑터를 통해서만 상태를 조회합니다.
+    The business layer records summary state through this adapter whenever the
+    DB changes, and the Baldur engine reads state only through this adapter.
 
     Architecture:
         ┌──────────────┐
-        │ Business DB  │  ← Baldur 엔진 접근 금지
+        │ Business DB  │  ← Baldur engine access forbidden
         └──────────────┘
                │
-               │ (비즈니스 레이어가 요약 기록)
+               │ (business layer writes the summary)
                ▼
         ┌──────────────┐
-        │  Air-Gap     │  ← Redis 또는 다른 캐시
+        │  Air-Gap     │  ← Redis or another cache
         │  Storage     │
         └──────────────┘
                │
-               │ (Baldur 엔진 읽기 전용)
+               │ (Baldur engine reads only)
                ▼
         ┌──────────────┐
-        │ Baldur │
+        │    Baldur    │
         │    Engine    │
         └──────────────┘
 
@@ -58,87 +58,87 @@ class AirGapStorageAdapter(Protocol):
 
     def write_summary(self, key: str, value: Any, ttl: int | None = None) -> bool:
         """
-        요약 상태를 Air-Gap 저장소에 기록.
+        Write summary state to the Air-Gap storage.
 
-        비즈니스 레이어에서 DB 변경 시 호출합니다.
+        Called by the business layer whenever the DB changes.
 
         Args:
-            key: 저장소 키 (예: "dlq:payment:pending", "cb:toss:state")
-            value: 저장할 값 (직렬화 가능해야 함)
+            key: storage key (e.g. "dlq:payment:pending", "cb:toss:state")
+            value: value to store (must be serializable)
             ttl: Time-to-live in seconds (optional)
 
         Returns:
-            성공 여부
+            Whether the write succeeded
         """
         ...
 
     def read_summary(self, key: str) -> Any:
         """
-        Air-Gap 저장소에서 요약 상태 조회.
+        Read summary state from the Air-Gap storage.
 
-        Baldur 엔진에서 메트릭 조회 시 호출합니다.
+        Called by the Baldur engine when reading metrics.
 
         Args:
-            key: 저장소 키
+            key: storage key
 
         Returns:
-            저장된 값 또는 None
+            The stored value, or None
         """
         ...
 
     def delete_summary(self, key: str) -> bool:
         """
-        Air-Gap 저장소에서 요약 상태 삭제.
+        Delete summary state from the Air-Gap storage.
 
         Args:
-            key: 저장소 키
+            key: storage key
 
         Returns:
-            성공 여부
+            Whether the delete succeeded
         """
         ...
 
     def read_many(self, keys: list[str]) -> dict[str, Any]:
         """
-        여러 키의 값을 한 번에 조회.
+        Read the values of several keys at once.
 
         Args:
-            keys: 조회할 키 목록
+            keys: keys to read
 
         Returns:
-            키-값 딕셔너리
+            Key-value dictionary
         """
         ...
 
     def increment(self, key: str, amount: int = 1) -> int:
         """
-        카운터 값 증가.
+        Increment a counter value.
 
         Args:
-            key: 저장소 키
-            amount: 증가량
+            key: storage key
+            amount: increment amount
 
         Returns:
-            증가 후 값
+            The value after incrementing
         """
         ...
 
     def decrement(self, key: str, amount: int = 1) -> int:
         """
-        카운터 값 감소 (음수 방지).
+        Decrement a counter value (never goes negative).
 
         Args:
-            key: 저장소 키
-            amount: 감소량
+            key: storage key
+            amount: decrement amount
 
         Returns:
-            감소 후 값 (최소 0)
+            The value after decrementing (minimum 0)
         """
         ...
 
     def is_enabled(self) -> bool:
         """
-        Air-Gap 기능 활성화 여부.
+        Whether the Air-Gap feature is enabled.
 
         Returns:
             True if enabled, False otherwise
@@ -148,39 +148,39 @@ class AirGapStorageAdapter(Protocol):
 
 class BaseAirGapAdapter(ABC):
     """
-    Air-Gap 저장소 어댑터 기본 클래스.
+    Base class for Air-Gap storage adapters.
 
-    구체적인 어댑터는 이 클래스를 상속하여 구현합니다.
+    Concrete adapters subclass this and provide the implementation.
     """
 
     @abstractmethod
     def write_summary(self, key: str, value: Any, ttl: int | None = None) -> bool:
-        """요약 상태를 Air-Gap 저장소에 기록."""
+        """Write summary state to the Air-Gap storage."""
         raise NotImplementedError
 
     @abstractmethod
     def read_summary(self, key: str) -> Any:
-        """Air-Gap 저장소에서 요약 상태 조회."""
+        """Read summary state from the Air-Gap storage."""
         raise NotImplementedError
 
     @abstractmethod
     def delete_summary(self, key: str) -> bool:
-        """Air-Gap 저장소에서 요약 상태 삭제."""
+        """Delete summary state from the Air-Gap storage."""
         raise NotImplementedError
 
     def read_many(self, keys: list[str]) -> dict[str, Any]:
-        """여러 키의 값을 한 번에 조회. 기본 구현은 개별 조회."""
+        """Read several keys at once. Default implementation reads one by one."""
         return {key: self.read_summary(key) for key in keys}
 
     def increment(self, key: str, amount: int = 1) -> int:
-        """카운터 값 증가. 기본 구현은 read-modify-write."""
+        """Increment a counter. Default implementation is read-modify-write."""
         current = self.read_summary(key)
         new_value = (int(current) if current else 0) + amount
         self.write_summary(key, new_value)
         return new_value
 
     def decrement(self, key: str, amount: int = 1) -> int:
-        """카운터 값 감소 (음수 방지). 기본 구현은 read-modify-write."""
+        """Decrement a counter (never negative). Default is read-modify-write."""
         current = self.read_summary(key)
         current_int = int(current) if current else 0
         new_value = max(0, current_int - amount)
@@ -189,44 +189,44 @@ class BaseAirGapAdapter(ABC):
 
     @abstractmethod
     def is_enabled(self) -> bool:
-        """Air-Gap 기능 활성화 여부."""
+        """Whether the Air-Gap feature is enabled."""
         raise NotImplementedError
 
 
-# Key 생성 헬퍼 함수들
+# Key-building helper functions
 class AirGapKeys:
-    """Air-Gap 저장소 키 생성 헬퍼."""
+    """Air-Gap storage key builder helpers."""
 
     PREFIX = "sh:airgap:"
 
     @classmethod
     def dlq_pending(cls, domain: str) -> str:
-        """DLQ pending count 키."""
+        """DLQ pending count key."""
         return f"{cls.PREFIX}dlq:{domain}:pending"
 
     @classmethod
     def dlq_status(cls, domain: str, status: str) -> str:
-        """DLQ status count 키."""
+        """DLQ status count key."""
         return f"{cls.PREFIX}dlq:{domain}:{status}"
 
     @classmethod
     def circuit_breaker_state(cls, service: str) -> str:
-        """Circuit breaker state 키."""
+        """Circuit breaker state key."""
         return f"{cls.PREFIX}cb:{service}:state"
 
     @classmethod
     def circuit_breaker_failure_count(cls, service: str) -> str:
-        """Circuit breaker failure count 키."""
+        """Circuit breaker failure count key."""
         return f"{cls.PREFIX}cb:{service}:failures"
 
     @classmethod
     def retry_success_count(cls, domain: str) -> str:
-        """Retry success count 키."""
+        """Retry success count key."""
         return f"{cls.PREFIX}retry:{domain}:success"
 
     @classmethod
     def retry_failure_count(cls, domain: str) -> str:
-        """Retry failure count 키."""
+        """Retry failure count key."""
         return f"{cls.PREFIX}retry:{domain}:failure"
 
 

@@ -1,8 +1,8 @@
 """
-모듈별 ConfigApplier를 조합하는 Composite ConfigApplier.
+Composite ConfigApplier that combines the per-module ConfigAppliers.
 
-appliers 리스트를 순서대로 순회하며, 첫 번째로 처리 가능한
-applier가 요청을 수행한다. 어떤 applier도 처리하지 못하면 False를 반환한다.
+Walks the appliers list in order and lets the first applier that can handle
+the request serve it. Returns False when no applier can handle it.
 """
 
 from typing import Protocol
@@ -13,7 +13,7 @@ logger = structlog.get_logger()
 
 
 class ConfigApplierProtocol(Protocol):
-    """ConfigApplier Protocol (core/runtime_feedback.py 정의와 동일)."""
+    """ConfigApplier Protocol (identical to the runtime-feedback definition)."""
 
     def get_current(self, parameter: str) -> float: ...
     def apply(self, parameter: str, value: float) -> bool: ...
@@ -22,11 +22,10 @@ class ConfigApplierProtocol(Protocol):
 
 class CompositeConfigApplier:
     """
-    모듈별 ConfigApplier를 조합하는 Composite.
+    Composite that combines the per-module ConfigAppliers.
 
-    appliers 리스트를 순서대로 순회하며, 첫 번째로 처리 가능한
-    applier가 요청을 수행한다. 어떤 applier도 처리하지 못하면
-    False를 반환한다.
+    Walks the appliers list in order and lets the first applier that can
+    handle the request serve it. Returns False when no applier can handle it.
     """
 
     def __init__(self, appliers: list[ConfigApplierProtocol]):
@@ -35,7 +34,7 @@ class CompositeConfigApplier:
         self._appliers = appliers
 
     def get_current(self, parameter: str) -> float:
-        """첫 번째로 처리 가능한 applier에서 값 조회."""
+        """Read the value from the first applier that can handle it."""
         last_error: Exception | None = None
         for applier in self._appliers:
             try:
@@ -43,13 +42,13 @@ class CompositeConfigApplier:
             except (ValueError, KeyError) as e:
                 last_error = e
                 continue
-        # 모든 applier가 실패 → 마지막 에러 전파
+        # Every applier failed -> propagate the last error
         raise ValueError(
             f"No applier can handle parameter '{parameter}'"
         ) from last_error
 
     def apply(self, parameter: str, value: float) -> bool:
-        """첫 번째로 True를 반환하는 applier에 위임."""
+        """Delegate to the first applier that returns True."""
         for applier in self._appliers:
             if applier.apply(parameter, value):
                 return True
@@ -61,5 +60,5 @@ class CompositeConfigApplier:
         return False
 
     def rollback(self, parameter: str, value: float) -> bool:
-        """apply()와 동일한 라우팅 로직으로 롤백."""
+        """Roll back using the same routing logic as apply()."""
         return any(applier.rollback(parameter, value) for applier in self._appliers)

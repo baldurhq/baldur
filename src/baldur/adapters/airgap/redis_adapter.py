@@ -24,7 +24,7 @@ logger = structlog.get_logger()
 
 
 def _get_airgap_redis_ttl() -> int:
-    """AirGapSettings에서 Redis TTL을 가져온다."""
+    """Read the Redis TTL from AirGapSettings."""
     try:
         from baldur.settings.airgap import get_airgap_settings
 
@@ -34,7 +34,7 @@ def _get_airgap_redis_ttl() -> int:
 
 
 def _get_airgap_key_prefix() -> str:
-    """AirGapSettings에서 키 접두사를 가져온다."""
+    """Read the key prefix from AirGapSettings."""
     try:
         from baldur.settings.airgap import get_airgap_settings
 
@@ -45,10 +45,10 @@ def _get_airgap_key_prefix() -> str:
 
 class RedisAirGapAdapter(BaseAirGapAdapter):
     """
-    Redis 기반 Air-Gap 저장소 어댑터.
+    Redis-backed Air-Gap storage adapter.
 
-    비즈니스 레이어에서 DB 변경 시 Redis에 요약 상태를 기록하고,
-    Baldur 엔진은 Redis에서만 상태를 조회합니다.
+    The business layer records summary state in Redis whenever the DB changes,
+    and the Baldur engine reads state only from Redis.
 
     Features:
     - Atomic operations (INCR, DECR)
@@ -69,7 +69,7 @@ class RedisAirGapAdapter(BaseAirGapAdapter):
         >>> print(count)  # 5
     """
 
-    # 하위 호환성용 레거시 상수
+    # Legacy constant kept for backward compatibility
     DEFAULT_TTL = 3600
 
     def __init__(
@@ -83,13 +83,13 @@ class RedisAirGapAdapter(BaseAirGapAdapter):
 
         Args:
             redis_client: Redis client instance
-            prefix: Key prefix for all Air-Gap keys (None = Settings에서 가져옴)
-            default_ttl: Default TTL in seconds (None = Settings에서 가져옴)
+            prefix: Key prefix for all Air-Gap keys (None = read from Settings)
+            default_ttl: Default TTL in seconds (None = read from Settings)
         """
         # redis-py's stub declares dual sync/async return unions (`Awaitable[X] | X`)
         # for nearly every command. The Awaitable arm is unreachable on a sync
         # `redis.Redis`; widening to Any at the attribute keeps mypy out of every
-        # call site (mirrors `core/state_backend.py:RedisStateBackend._client: Any`).
+        # call site (mirrors `RedisStateBackend._client: Any` in core/state_backend).
         self.redis: Any = redis_client
         self.prefix = prefix if prefix is not None else _get_airgap_key_prefix()
         self.default_ttl = (
@@ -128,15 +128,15 @@ class RedisAirGapAdapter(BaseAirGapAdapter):
 
     def write_summary(self, key: str, value: Any, ttl: int | None = None) -> bool:
         """
-        요약 상태를 Redis에 기록.
+        Write summary state to Redis.
 
         Args:
-            key: 저장소 키
-            value: 저장할 값
+            key: storage key
+            value: value to store
             ttl: TTL in seconds (None = use default_ttl)
 
         Returns:
-            성공 여부
+            Whether the write succeeded
         """
         try:
             redis_key = self._make_key(key)
@@ -165,13 +165,13 @@ class RedisAirGapAdapter(BaseAirGapAdapter):
 
     def read_summary(self, key: str) -> Any:
         """
-        Redis에서 요약 상태 조회.
+        Read summary state from Redis.
 
         Args:
-            key: 저장소 키
+            key: storage key
 
         Returns:
-            저장된 값 또는 None
+            The stored value, or None
         """
         try:
             redis_key = self._make_key(key)
@@ -194,13 +194,13 @@ class RedisAirGapAdapter(BaseAirGapAdapter):
 
     def delete_summary(self, key: str) -> bool:
         """
-        Redis에서 요약 상태 삭제.
+        Delete summary state from Redis.
 
         Args:
-            key: 저장소 키
+            key: storage key
 
         Returns:
-            성공 여부
+            Whether the delete succeeded
         """
         try:
             redis_key = self._make_key(key)
@@ -221,13 +221,13 @@ class RedisAirGapAdapter(BaseAirGapAdapter):
 
     def read_many(self, keys: list[str]) -> dict[str, Any]:
         """
-        여러 키의 값을 한 번에 조회 (MGET).
+        Read the values of several keys at once (MGET).
 
         Args:
-            keys: 조회할 키 목록
+            keys: keys to read
 
         Returns:
-            키-값 딕셔너리
+            Key-value dictionary
         """
         if not keys:
             return {}
@@ -251,20 +251,20 @@ class RedisAirGapAdapter(BaseAirGapAdapter):
 
     def increment(self, key: str, amount: int = 1) -> int:
         """
-        카운터 값 증가 (atomic INCRBY).
+        Increment a counter value (atomic INCRBY).
 
         Args:
-            key: 저장소 키
-            amount: 증가량
+            key: storage key
+            amount: increment amount
 
         Returns:
-            증가 후 값
+            The value after incrementing
         """
         try:
             redis_key = self._make_key(key)
             new_value = self.redis.incrby(redis_key, amount)
 
-            # TTL 갱신
+            # Refresh the TTL
             if self.default_ttl:
                 self.redis.expire(redis_key, self.default_ttl)
 
@@ -286,16 +286,16 @@ class RedisAirGapAdapter(BaseAirGapAdapter):
 
     def decrement(self, key: str, amount: int = 1) -> int:
         """
-        카운터 값 감소 (atomic, 음수 방지).
+        Decrement a counter value (atomic, never negative).
 
-        Lua 스크립트를 사용하여 원자적으로 음수 방지를 보장합니다.
+        Uses a Lua script so the non-negative floor is guaranteed atomically.
 
         Args:
-            key: 저장소 키
-            amount: 감소량
+            key: storage key
+            amount: decrement amount
 
         Returns:
-            감소 후 값 (최소 0)
+            The value after decrementing (minimum 0)
         """
         # Lua script for atomic decrement with floor at 0
         lua_script = """
@@ -337,9 +337,9 @@ class RedisAirGapAdapter(BaseAirGapAdapter):
 
     def is_enabled(self) -> bool:
         """
-        Air-Gap 활성화 상태.
+        Whether Air-Gap is enabled.
 
-        Redis 연결이 정상이면 True.
+        True when the Redis connection is healthy.
 
         Returns:
             True if Redis is connected
@@ -352,10 +352,10 @@ class RedisAirGapAdapter(BaseAirGapAdapter):
 
     def health_check(self) -> dict[str, Any]:
         """
-        Air-Gap 저장소 상태 확인.
+        Check the Air-Gap storage status.
 
         Returns:
-            상태 정보 딕셔너리
+            Status information dictionary
         """
         try:
             self.redis.ping()

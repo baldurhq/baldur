@@ -1,12 +1,12 @@
 """
-Auto Tuning Metrics Adapters - 자율 조정용 메트릭 어댑터
+Auto Tuning Metrics Adapters - metric adapters for autonomous tuning.
 
-RuntimeFeedbackLoop에서 사용하는 메트릭 수집 어댑터들
+Metric collection adapters used by RuntimeFeedbackLoop.
 
-제공 어댑터:
-- InternalMetricsAdapter: DB/캐시 기반 내부 메트릭
-- PrometheusMetricsAdapter: Prometheus 연동
-- MockMetricsAdapter: 테스트용
+Provided adapters:
+- InternalMetricsAdapter: internal metrics backed by DB/cache
+- PrometheusMetricsAdapter: Prometheus integration
+- MockMetricsAdapter: for testing
 """
 
 from __future__ import annotations
@@ -19,31 +19,31 @@ logger = structlog.get_logger()
 
 
 class AutoTuningMetricsAdapter(Protocol):
-    """자율 조정용 메트릭 어댑터 프로토콜"""
+    """Metric adapter protocol for autonomous tuning."""
 
     def fetch_current_metrics(self) -> dict[str, float]:
         """
-        현재 메트릭 수집
+        Collect current metrics.
 
         Returns:
-            메트릭 딕셔너리:
-            - error_rate: 에러율 (0.0 ~ 1.0)
-            - p99_latency_ms: P99 레이턴시 (ms)
-            - retry_exhausted_rate: 재시도 소진율
-            - retry_collision_rate: 재시도 충돌율
-            - throttle_rate: 스로틀링 비율
-            - throughput_rps: 처리량 (requests/sec)
-            - sample_count: 샘플 수
+            Metrics dictionary:
+            - error_rate: error rate (0.0 ~ 1.0)
+            - p99_latency_ms: P99 latency (ms)
+            - retry_exhausted_rate: retry exhaustion rate
+            - retry_collision_rate: retry collision rate
+            - throttle_rate: throttling ratio
+            - throughput_rps: throughput (requests/sec)
+            - sample_count: number of samples
         """
         ...
 
 
 class InternalMetricsAdapter:
     """
-    내부 메트릭 어댑터
+    Internal metrics adapter.
 
-    DB나 캐시에서 메트릭을 수집합니다.
-    외부 시스템 의존 없이 동작 가능합니다.
+    Collects metrics from a DB or cache.
+    Can operate without depending on any external system.
     """
 
     def __init__(
@@ -54,20 +54,20 @@ class InternalMetricsAdapter:
     ):
         """
         Args:
-            cache_provider: Redis 등 캐시 제공자
-            db_provider: DB 접근 제공자
-            metrics_prefix: 메트릭 키 접두사
+            cache_provider: cache provider such as Redis
+            db_provider: DB access provider
+            metrics_prefix: metric key prefix
         """
         self.cache_provider = cache_provider
         self.db_provider = db_provider
         self.metrics_prefix = metrics_prefix
 
-        # 내부 메트릭 저장소 (캐시 없을 경우)
+        # Internal metric store (used when no cache is available)
         self._internal_metrics: dict[str, float] = {}
         self._sample_counts: dict[str, int] = {}
 
     def fetch_current_metrics(self) -> dict[str, float]:
-        """현재 메트릭 수집"""
+        """Collect current metrics."""
         metrics = {
             "error_rate": self._get_error_rate(),
             "p99_latency_ms": self._get_p99_latency(),
@@ -85,7 +85,7 @@ class InternalMetricsAdapter:
         return metrics
 
     def record_metric(self, name: str, value: float):
-        """메트릭 기록 (외부에서 호출)"""
+        """Record a metric (called externally)."""
         self._internal_metrics[name] = value
         self._sample_counts[name] = self._sample_counts.get(name, 0) + 1
 
@@ -100,8 +100,8 @@ class InternalMetricsAdapter:
                 )
 
     def _get_metric(self, name: str, default: float = 0.0) -> float:
-        """메트릭 값 조회"""
-        # 캐시에서 먼저 시도
+        """Look up a metric value."""
+        # Try the cache first
         if self.cache_provider:
             try:
                 key = f"{self.metrics_prefix}:{name}"
@@ -111,7 +111,7 @@ class InternalMetricsAdapter:
             except Exception:
                 pass
 
-        # 내부 저장소에서 조회
+        # Fall back to the internal store
         return self._internal_metrics.get(name, default)
 
     def _get_error_rate(self) -> float:
@@ -138,9 +138,9 @@ class InternalMetricsAdapter:
 
 class PrometheusMetricsAdapter:
     """
-    Prometheus 메트릭 어댑터
+    Prometheus metrics adapter.
 
-    Prometheus에서 메트릭을 쿼리하여 자율 조정에 사용합니다.
+    Queries metrics from Prometheus for use in autonomous tuning.
     """
 
     def __init__(
@@ -151,59 +151,59 @@ class PrometheusMetricsAdapter:
     ):
         """
         Args:
-            prometheus_url: Prometheus 서버 URL
-            timeout_seconds: 요청 타임아웃
-            job_name: 메트릭 job 라벨
+            prometheus_url: Prometheus server URL
+            timeout_seconds: request timeout
+            job_name: metric job label
         """
         self.prometheus_url = prometheus_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
         self.job_name = job_name
 
     def fetch_current_metrics(self) -> dict[str, float]:
-        """Prometheus에서 메트릭 쿼리"""
+        """Query metrics from Prometheus."""
         metrics = {}
 
-        # 에러율 쿼리
+        # Error rate query
         metrics["error_rate"] = self._query_metric(
             f'sum(rate(http_requests_total{{job="{self.job_name}",status=~"5.."}}[5m])) / '
             f'sum(rate(http_requests_total{{job="{self.job_name}"}}[5m]))',
             default=0.01,
         )
 
-        # P99 레이턴시 쿼리
+        # P99 latency query
         metrics["p99_latency_ms"] = self._query_metric(
             f'histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{{job="{self.job_name}"}}[5m])) by (le)) * 1000',
             default=200.0,
         )
 
-        # 재시도 소진율
+        # Retry exhaustion rate
         metrics["retry_exhausted_rate"] = self._query_metric(
             f'sum(rate(retry_exhausted_total{{job="{self.job_name}"}}[5m])) / '
             f'sum(rate(retry_attempts_total{{job="{self.job_name}"}}[5m]))',
             default=0.02,
         )
 
-        # 재시도 충돌율
+        # Retry collision rate
         metrics["retry_collision_rate"] = self._query_metric(
             f'sum(rate(retry_collision_total{{job="{self.job_name}"}}[5m])) / '
             f'sum(rate(retry_attempts_total{{job="{self.job_name}"}}[5m]))',
             default=0.01,
         )
 
-        # 스로틀링 비율
+        # Throttling ratio
         metrics["throttle_rate"] = self._query_metric(
             f'sum(rate(rate_limited_total{{job="{self.job_name}"}}[5m])) / '
             f'sum(rate(http_requests_total{{job="{self.job_name}"}}[5m]))',
             default=0.005,
         )
 
-        # 처리량
+        # Throughput
         metrics["throughput_rps"] = self._query_metric(
             f'sum(rate(http_requests_total{{job="{self.job_name}"}}[5m]))',
             default=100.0,
         )
 
-        # 샘플 수
+        # Sample count
         metrics["sample_count"] = self._query_metric(
             f'sum(http_requests_total{{job="{self.job_name}"}})', default=1000
         )
@@ -215,7 +215,7 @@ class PrometheusMetricsAdapter:
         return metrics
 
     def _query_metric(self, query: str, default: float = 0.0) -> float:
-        """Prometheus 쿼리 실행"""
+        """Execute a Prometheus query."""
         try:
             import urllib.parse
             import urllib.request
@@ -249,9 +249,9 @@ class PrometheusMetricsAdapter:
 
 class MockMetricsAdapter:
     """
-    Mock 메트릭 어댑터 (테스트용)
+    Mock metrics adapter (for testing).
 
-    테스트에서 메트릭 값을 직접 설정할 수 있습니다.
+    Lets tests set metric values directly.
     """
 
     def __init__(self, initial_metrics: dict[str, float] | None = None):
@@ -266,19 +266,19 @@ class MockMetricsAdapter:
         }
 
     def fetch_current_metrics(self) -> dict[str, float]:
-        """Mock 메트릭 반환"""
+        """Return the mock metrics."""
         return self.metrics.copy()
 
     def set_metrics(self, metrics: dict[str, float]):
-        """메트릭 설정"""
+        """Set metrics."""
         self.metrics.update(metrics)
 
     def set_metric(self, name: str, value: float):
-        """단일 메트릭 설정"""
+        """Set a single metric."""
         self.metrics[name] = value
 
     def simulate_degradation(self, level: str = "minor"):
-        """저하 상황 시뮬레이션"""
+        """Simulate a degradation scenario."""
         if level == "minor":
             self.metrics["error_rate"] = 0.06
             self.metrics["p99_latency_ms"] = 3500
@@ -290,7 +290,7 @@ class MockMetricsAdapter:
             self.metrics["p99_latency_ms"] = 12000
 
     def reset(self):
-        """기본값으로 리셋"""
+        """Reset to default values."""
         self.metrics = {
             "error_rate": 0.02,
             "p99_latency_ms": 150.0,

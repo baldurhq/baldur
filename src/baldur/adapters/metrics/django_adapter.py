@@ -28,9 +28,9 @@ logger = structlog.get_logger()
 
 class DjangoMetricSourceAdapter(BaseMetricSourceAdapter):
     """
-    Django ORM 기반 메트릭 소스 어댑터.
+    Django ORM-based metric source adapter.
 
-    Django 모델을 사용하여 DLQ, Circuit Breaker 등의 메트릭을 조회합니다.
+    Reads DLQ, circuit breaker, and related metrics from Django models.
 
     Example:
         >>> from myapp.models import DLQItem, CircuitBreakerState
@@ -79,13 +79,13 @@ class DjangoMetricSourceAdapter(BaseMetricSourceAdapter):
 
     def get_dlq_pending_count(self, domain: str) -> int:
         """
-        도메인별 대기 중인 DLQ 항목 수 반환.
+        Return the number of pending DLQ items for a domain.
 
         Args:
-            domain: 도메인 이름 (payment, point, inventory 등)
+            domain: Domain name (payment, point, inventory, etc.)
 
         Returns:
-            대기 중인 DLQ 항목 수
+            Number of pending DLQ items
         """
         if self.dlq_model is None:
             logger.debug("django_adapter.dlq_model_configured")
@@ -106,13 +106,13 @@ class DjangoMetricSourceAdapter(BaseMetricSourceAdapter):
 
     def get_dlq_count_by_status(self, status: str) -> int:
         """
-        상태별 DLQ 항목 수 반환.
+        Return the number of DLQ items in a given status.
 
         Args:
-            status: 상태 (pending, resolved, failed 등)
+            status: Status (pending, resolved, failed, etc.)
 
         Returns:
-            해당 상태의 DLQ 항목 수
+            Number of DLQ items in that status
         """
         if self.dlq_model is None:
             logger.debug("django_adapter.dlq_model_configured")
@@ -130,13 +130,13 @@ class DjangoMetricSourceAdapter(BaseMetricSourceAdapter):
 
     def get_circuit_breaker_state(self, service: str) -> str:
         """
-        서비스의 Circuit Breaker 상태 반환.
+        Return the circuit breaker state for a service.
 
         Args:
-            service: 서비스 이름
+            service: Service name
 
         Returns:
-            상태 문자열 (closed, open, half_open)
+            State string (closed, open, half_open)
         """
         if self.cb_model is None:
             logger.debug("django_adapter.circuit_breaker_model_configured")
@@ -157,13 +157,13 @@ class DjangoMetricSourceAdapter(BaseMetricSourceAdapter):
 
     def get_retry_success_rate(self, domain: str) -> float:
         """
-        도메인별 재시도 성공률 반환 (최근 1시간 기준).
+        Return the retry success rate for a domain (over the last hour).
 
         Args:
-            domain: 도메인 이름
+            domain: Domain name
 
         Returns:
-            성공률 (0.0 ~ 100.0)
+            Success rate (0.0 ~ 100.0)
         """
         if self.dlq_model is None:
             logger.debug("django_adapter.dlq_model_configured")
@@ -174,20 +174,20 @@ class DjangoMetricSourceAdapter(BaseMetricSourceAdapter):
 
             one_hour_ago = utc_now() - timedelta(hours=1)
 
-            # 최근 1시간 내 해결된 항목 기준 성공률 계산
+            # Compute the rate over items resolved within the last hour
             filter_kwargs = {
                 self.domain_field: domain,
                 f"{self.resolved_at_field}__gte": one_hour_ago,
             }
 
-            # 성공률 계산 (is_success 필드가 boolean인 경우)
+            # Compute the success rate (when is_success is a boolean field)
             result = self.dlq_model.objects.filter(**filter_kwargs).aggregate(
                 success_rate=Avg(self.is_success_field)
             )
 
             rate = result.get("success_rate")
             if rate is not None:
-                # boolean은 0/1로 평균 계산되므로 100을 곱함
+                # Booleans average as 0/1, so scale by 100
                 return float(rate) * 100
             return 0.0
 

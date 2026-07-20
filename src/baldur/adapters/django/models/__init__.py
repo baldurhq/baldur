@@ -82,10 +82,11 @@ class PostmortemRecord(AbstractPostmortemRecord):
     """
     Concrete PostmortemRecord model provided by baldur package.
 
-    이 모델은 baldur/0001_initial migration에 의해 생성된 테이블을 그대로 사용한다.
-    패키지에서 직접 제공하는 concrete 모델.
+    This model uses the table created by baldur's 0001_initial migration
+    as-is. A concrete model supplied directly by the package.
 
-    호스트 앱이 커스터마이징이 필요한 경우 AbstractPostmortemRecord를 직접 상속하면 된다.
+    Host apps that need customization can inherit from
+    AbstractPostmortemRecord directly.
     """
 
     class Meta(AbstractPostmortemRecord.Meta):

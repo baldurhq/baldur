@@ -1,16 +1,16 @@
 """
 Django Audit Log Adapter.
 
-136_EXCEPTION_HANDLER_6_ENHANCEMENTS.md Q3 보완 구현:
-- PostgreSQL INSERT 시 ON CONFLICT (audit_event_id) DO NOTHING 지원
-- WAL 복구 시 중복 삽입 방지 (2차 방어)
+Deduplication support:
+- PostgreSQL INSERT with ON CONFLICT (audit_event_id) DO NOTHING
+- Duplicate insert prevention during WAL recovery (second line of defense)
 
 Usage:
     from baldur.adapters.audit.django_adapter import DjangoAuditLogAdapter
 
     adapter = DjangoAuditLogAdapter(model_class=YourAuditLogModel)
 
-    # ContinuousAuditRecorder와 연동
+    # Wire into ContinuousAuditRecorder
     from baldur.audit.continuous_audit import ContinuousAuditRecorder
     recorder = ContinuousAuditRecorder(audit_adapter=adapter)
 """
@@ -63,8 +63,8 @@ class DjangoAuditLogAdapter(AuditLogAdapter):
         Initialize DjangoAuditLogAdapter.
 
         Args:
-            model_class: AbstractAuditLog를 상속한 Django 모델 클래스
-            generate_event_id: audit_event_id가 없을 때 자동 생성 여부
+            model_class: Django model class inheriting from AbstractAuditLog
+            generate_event_id: Whether to auto-generate a missing audit_event_id
         """
         self._model_class = model_class
         self._generate_event_id = generate_event_id
@@ -83,13 +83,13 @@ class DjangoAuditLogAdapter(AuditLogAdapter):
         Args:
             entry: The audit entry to log
         """
-        # audit_event_id 생성 또는 추출
+        # Generate or extract audit_event_id
         audit_event_id = self._get_or_generate_event_id(entry)
 
-        # AuditEntry를 모델 필드로 변환
+        # Convert AuditEntry into model fields
         fields = self._entry_to_fields(entry, audit_event_id)
 
-        # 중복 무시 삽입
+        # Insert, ignoring duplicates
         try:
             instance, created = self._model_class.insert_ignore_conflict(
                 audit_event_id=audit_event_id,
@@ -131,7 +131,7 @@ class DjangoAuditLogAdapter(AuditLogAdapter):
         if not entries:
             return 0, 0
 
-        # 각 entry를 딕셔너리로 변환
+        # Convert each entry into a dict
         records = []
         for entry in entries:
             audit_event_id = self._get_or_generate_event_id(entry)
@@ -139,7 +139,7 @@ class DjangoAuditLogAdapter(AuditLogAdapter):
             fields["audit_event_id"] = audit_event_id
             records.append(fields)
 
-        # 벌크 삽입
+        # Bulk insert
         try:
             inserted, skipped = self._model_class.bulk_insert_ignore_conflict(records)
 
@@ -203,25 +203,25 @@ class DjangoAuditLogAdapter(AuditLogAdapter):
 
     def _get_or_generate_event_id(self, entry: AuditEntry) -> str:
         """
-        audit_event_id 조회 또는 생성.
+        Look up or generate the audit_event_id.
 
-        우선순위:
+        Priority:
         1. entry.details["audit_event_id"]
-        2. entry.details["wal_sequence"] 기반 생성
-        3. UUID 생성
+        2. Derived from entry.details["wal_sequence"]
+        3. Generated UUID
         """
         details = entry.details or {}
 
-        # 1. 명시적 audit_event_id
+        # 1. Explicit audit_event_id
         if "audit_event_id" in details:
             return str(details["audit_event_id"])
 
-        # 2. WAL sequence 기반
+        # 2. Derived from the WAL sequence
         if "wal_sequence" in details:
             operation = details.get("operation", "pg_insert")
             return f"wal:{details['wal_sequence']}:{operation}"
 
-        # 3. UUID 생성
+        # 3. Generated UUID
         if self._generate_event_id:
             return f"auto:{uuid.uuid4()}"
 
@@ -232,7 +232,7 @@ class DjangoAuditLogAdapter(AuditLogAdapter):
         entry: AuditEntry,
         audit_event_id: str,
     ) -> dict[str, Any]:
-        """AuditEntry를 모델 필드 딕셔너리로 변환."""
+        """Convert an AuditEntry into a dict of model fields."""
         return {
             "action": (
                 entry.action.value
@@ -251,7 +251,7 @@ class DjangoAuditLogAdapter(AuditLogAdapter):
             "details": entry.details or {},
             "success": entry.success,
             "error_message": entry.error_message or "",
-            # 해시 체인 필드 (details에서 추출)
+            # Hash-chain fields (extracted from details)
             "integrity_hash": (entry.details or {})
             .get("integrity", {})
             .get("hash", ""),
@@ -264,7 +264,7 @@ class DjangoAuditLogAdapter(AuditLogAdapter):
         }
 
     def _model_to_entry(self, obj: AbstractAuditLog) -> AuditEntry:
-        """모델 인스턴스를 AuditEntry로 변환."""
+        """Convert a model instance into an AuditEntry."""
         return AuditEntry(
             action=obj.action,
             timestamp=obj.timestamp,
@@ -294,16 +294,16 @@ def get_django_audit_adapter(
     model_class: type[AbstractAuditLog] | None = None,
 ) -> DjangoAuditLogAdapter:
     """
-    DjangoAuditLogAdapter 팩토리 함수.
+    Factory function for DjangoAuditLogAdapter.
 
     Args:
-        model_class: AbstractAuditLog 상속 모델 (필수)
+        model_class: Model inheriting from AbstractAuditLog (required)
 
     Returns:
-        DjangoAuditLogAdapter 인스턴스
+        DjangoAuditLogAdapter instance
 
     Raises:
-        ValueError: model_class가 None인 경우
+        ValueError: If model_class is None
     """
     if model_class is None:
         raise ValueError(

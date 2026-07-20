@@ -14,14 +14,14 @@ from typing import Protocol, runtime_checkable
 @runtime_checkable
 class MetricSourceAdapter(Protocol):
     """
-    메트릭 소스 어댑터 인터페이스.
+    Metric source adapter interface.
 
-    사용자는 이 인터페이스를 구현하여 자신의 데이터 소스에서
-    메트릭 값을 제공합니다. DB, 캐시, 외부 API 등 어떤 소스든 가능합니다.
+    Users implement this interface to supply metric values from their own data
+    source. Any source works: DB, cache, external API, and so on.
 
     Design Principles:
-    - Zero DB Dependency: 사용자 DB 스키마에 직접 의존하지 않음
-    - Plug & Play: Redis 없이도 동작, 인프라 의존성 최소화
+    - Zero DB Dependency: no direct dependency on the user's DB schema
+    - Plug & Play: works without Redis, minimal infrastructure dependency
 
     Example:
         >>> class MyAdapter:
@@ -40,102 +40,102 @@ class MetricSourceAdapter(Protocol):
 
     def get_dlq_pending_count(self, domain: str) -> int:
         """
-        도메인별 대기 중인 DLQ 항목 수 반환.
+        Return the number of pending DLQ entries for a domain.
 
         Args:
-            domain: 도메인 이름 (payment, point, inventory 등)
+            domain: domain name (payment, point, inventory, etc.)
 
         Returns:
-            대기 중인 DLQ 항목 수
+            Number of pending DLQ entries
         """
         ...
 
     def get_dlq_count_by_status(self, status: str) -> int:
         """
-        상태별 DLQ 항목 수 반환.
+        Return the number of DLQ entries in a given status.
 
         Args:
-            status: 상태 (pending, resolved, failed 등)
+            status: status (pending, resolved, failed, etc.)
 
         Returns:
-            해당 상태의 DLQ 항목 수
+            Number of DLQ entries in that status
         """
         ...
 
     def get_circuit_breaker_state(self, service: str) -> str:
         """
-        서비스의 Circuit Breaker 상태 반환.
+        Return the Circuit Breaker state of a service.
 
         Args:
-            service: 서비스 이름
+            service: service name
 
         Returns:
-            상태 문자열 (closed, open, half_open)
+            State string (closed, open, half_open)
         """
         ...
 
     def get_retry_success_rate(self, domain: str) -> float:
         """
-        도메인별 재시도 성공률 반환.
+        Return the retry success rate for a domain.
 
         Args:
-            domain: 도메인 이름
+            domain: domain name
 
         Returns:
-            성공률 (0.0 ~ 100.0)
+            Success rate (0.0 ~ 100.0)
         """
         ...
 
 
 class BaseMetricSourceAdapter(ABC):
     """
-    메트릭 소스 어댑터 기본 클래스.
+    Base class for metric source adapters.
 
-    모든 메서드에 대해 기본 구현 또는 예외를 제공합니다.
-    구체적인 어댑터는 이 클래스를 상속하여 필요한 메서드만 오버라이드합니다.
+    Provides a default implementation or an exception for every method.
+    Concrete adapters subclass this and override only what they need.
     """
 
     @abstractmethod
     def get_dlq_pending_count(self, domain: str) -> int:
-        """도메인별 대기 중인 DLQ 항목 수 반환."""
+        """Return the number of pending DLQ entries for a domain."""
         raise NotImplementedError
 
     @abstractmethod
     def get_dlq_count_by_status(self, status: str) -> int:
-        """상태별 DLQ 항목 수 반환."""
+        """Return the number of DLQ entries in a given status."""
         raise NotImplementedError
 
     def get_circuit_breaker_state(self, service: str) -> str:
-        """서비스의 Circuit Breaker 상태 반환. 기본값: closed."""
+        """Return the Circuit Breaker state of a service. Default: closed."""
         return "closed"
 
     def get_retry_success_rate(self, domain: str) -> float:
-        """도메인별 재시도 성공률 반환. 기본값: 0.0."""
+        """Return the retry success rate for a domain. Default: 0.0."""
         return 0.0
 
 
 class NullMetricSourceAdapter(BaseMetricSourceAdapter):
     """
-    No-op 메트릭 소스 어댑터.
+    No-op metric source adapter.
 
-    어댑터가 설정되지 않았을 때 사용됩니다.
-    모든 메서드가 기본값(0, "closed")을 반환합니다.
+    Used when no adapter has been configured.
+    Every method returns a default value (0, "closed").
     """
 
     def get_dlq_pending_count(self, domain: str) -> int:
-        """항상 0을 반환합니다."""
+        """Always returns 0."""
         return 0
 
     def get_dlq_count_by_status(self, status: str) -> int:
-        """항상 0을 반환합니다."""
+        """Always returns 0."""
         return 0
 
     def get_circuit_breaker_state(self, service: str) -> str:
-        """항상 'closed'를 반환합니다."""
+        """Always returns 'closed'."""
         return "closed"
 
     def get_retry_success_rate(self, domain: str) -> float:
-        """항상 0.0을 반환합니다."""
+        """Always returns 0.0."""
         return 0.0
 
 

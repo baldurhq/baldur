@@ -46,7 +46,7 @@ def _create_redis_adapter() -> AirGapStorageAdapter | None:
     redis_url = os.environ.get("BALDUR_AIRGAP_REDIS_URL")
 
     if not redis_url:
-        # Django settings에서 가져오기 시도
+        # Try to read it from Django settings
         redis_url = _get_redis_url_from_django()
 
     if not redis_url:
@@ -59,7 +59,7 @@ def _create_redis_adapter() -> AirGapStorageAdapter | None:
         )
 
         client = get_redis_connection_factory().create(redis_url)
-        client.ping()  # 연결 테스트
+        client.ping()  # Connection test
 
         prefix = os.environ.get("BALDUR_AIRGAP_PREFIX", "sh:airgap:")
         ttl_str = os.environ.get("BALDUR_AIRGAP_TTL", "3600")
@@ -90,7 +90,7 @@ def _get_redis_url_from_django() -> str | None:
     try:
         from django.conf import settings
 
-        # 다양한 설정 이름 시도
+        # Try the various setting names
         for attr in ["REDIS_URL", "CACHES", "CELERY_BROKER_URL"]:
             if hasattr(settings, attr):
                 value = getattr(settings, attr)

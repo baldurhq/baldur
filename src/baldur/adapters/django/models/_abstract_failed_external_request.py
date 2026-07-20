@@ -1,7 +1,8 @@
 """
 AbstractFailedExternalRequest abstract model.
 
-이 모듈은 baldur.adapters.django.models 패키지의 내부 구현입니다.
+This module is an internal implementation of the
+baldur.adapters.django.models package.
 """
 
 from __future__ import annotations
@@ -27,8 +28,9 @@ class AbstractFailedExternalRequest(models.Model if DJANGO_AVAILABLE else object
     """
     Abstract Dead Letter Queue model for unrecoverable external API requests.
 
-    도메인 중립적 설계 - 특정 비즈니스 도메인(결제, 주문 등)에 의존하지 않음.
-    FK 대신 entity_type/entity_id로 느슨한 결합.
+    Domain-neutral by design — does not depend on any specific business
+    domain (payment, order, etc.). Loosely coupled via entity_type/entity_id
+    instead of a foreign key.
 
     Subclasses should:
     - Set abstract = False in Meta
@@ -50,7 +52,7 @@ class AbstractFailedExternalRequest(models.Model if DJANGO_AVAILABLE else object
             "Install it with: pip install django"
         )
 
-    # 실패 유형
+    # Failure type
     FAILURE_TYPE_CHOICES = [
         ("max_retries_exceeded", "Max Retries Exceeded"),
         ("non_retryable_error", "Non-Retryable Error"),
@@ -60,7 +62,7 @@ class AbstractFailedExternalRequest(models.Model if DJANGO_AVAILABLE else object
         ("unknown", "Unknown Error"),
     ]
 
-    # 처리 상태
+    # Processing status
     STATUS_CHOICES = [
         ("pending", "Pending Review"),
         ("reviewing", "Reviewing"),
@@ -69,7 +71,7 @@ class AbstractFailedExternalRequest(models.Model if DJANGO_AVAILABLE else object
         ("expired", "Expired"),
     ]
 
-    # 도메인 타입
+    # Domain type
     DOMAIN_CHOICES = [
         ("external_api", "External API"),
         ("payment", "Payment"),

@@ -1,7 +1,8 @@
 """
 AbstractPostmortemRecord abstract model.
 
-이 모듈은 baldur.adapters.django.models 패키지의 내부 구현입니다.
+This module is an internal implementation of the
+baldur.adapters.django.models package.
 """
 
 from __future__ import annotations
@@ -21,23 +22,24 @@ except ImportError:
 
 class AbstractPostmortemRecord(models.Model if DJANGO_AVAILABLE else object):  # type: ignore[misc]
     """
-    장애 사후 분석(Post-mortem) 영속 저장소 추상 모델.
+    Abstract model for the post-mortem persistence store.
 
-    서버 재시작 시 데이터 손실 방지를 위해 PostgreSQL에 영구 저장합니다.
-    In-Memory 저장소의 한계(최대 100개, 다중 워커 불일치)를 해결합니다.
+    Persists to PostgreSQL so records survive a server restart. Resolves the
+    limits of the in-memory store (100 records max, inconsistency across
+    workers).
 
     Attributes:
-        incident_id: 고유 인시던트 식별자
-        started_at: 인시던트 시작 시각
-        resolved_at: 인시던트 종료 시각
-        duration_seconds: 장애 지속 시간(초)
-        affected_services: 영향받은 서비스 목록
-        timeline: 시간순 이벤트 기록
-        auto_actions: 자동으로 수행된 복구 조치
-        recommendations: 권장 사항 목록
-        system_snapshot: 장애 시점 시스템 상태 스냅샷
-        created_at: 레코드 생성 시각
-        source: 생성 출처 (auto/manual)
+        incident_id: Unique incident identifier
+        started_at: Incident start time
+        resolved_at: Incident end time
+        duration_seconds: Incident duration (seconds)
+        affected_services: List of affected services
+        timeline: Chronological event record
+        auto_actions: Recovery actions performed automatically
+        recommendations: List of recommendations
+        system_snapshot: System state snapshot at the time of the incident
+        created_at: Record creation time
+        source: Origin of the record (auto/manual)
     """
 
     if not DJANGO_AVAILABLE:
@@ -47,7 +49,7 @@ class AbstractPostmortemRecord(models.Model if DJANGO_AVAILABLE else object):  #
         )
 
     class Source(models.TextChoices):
-        """Post-mortem 생성 출처."""
+        """Origin of the post-mortem record."""
 
         AUTO = "auto", "Automatic (System Generated)"
         MANUAL = "manual", "Manual (User Created)"
@@ -161,7 +163,7 @@ class AbstractPostmortemRecord(models.Model if DJANGO_AVAILABLE else object):  #
         return f"Postmortem {self.incident_id} ({self.started_at})"
 
     def to_dict(self) -> dict[str, Any]:
-        """레코드를 딕셔너리로 변환 (API 응답용)."""
+        """Convert the record into a dict (for API responses)."""
         return {
             "id": str(self.id),
             "incident_id": self.incident_id,

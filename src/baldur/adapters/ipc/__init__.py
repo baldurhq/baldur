@@ -1,14 +1,14 @@
 """
-IPC 어댑터 — Library-mode 컴포넌트.
+IPC adapters — library-mode components.
 
 Dual-use components retained after Sidecar → Library transition:
-    - CBStateCache: TTL 기반 CB 상태 캐시 (Redis hit 감소)
-    - CBStateSnapshot: Shared Memory 기반 CB 상태 공유 (sub-10μs)
-    - RequestHandler: 서비스 라우팅 추상화
-    - IPC exceptions: 에러 코드 체계
+    - CBStateCache: TTL-based CB state cache (fewer Redis hits)
+    - CBStateSnapshot: shared-memory CB state sharing (sub-10μs)
+    - RequestHandler: service routing abstraction
+    - IPC exceptions: error code scheme
 
-Sidecar-only 코드 (UDS/gRPC 서버, auth, metrics, probe, protocol)는
-316 Gunicorn Preload Optimization에서 제거 대상으로 분류됨.
+Sidecar-only code (UDS/gRPC server, auth, metrics, probe, protocol) was
+marked for removal by 316 Gunicorn Preload Optimization.
 
 Usage:
     from baldur.adapters.ipc import (

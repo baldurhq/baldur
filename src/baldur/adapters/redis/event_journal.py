@@ -1,8 +1,9 @@
 """
 Redis-based Event Journal Repository.
 
-Redis Sorted Set 기반 구현. 멀티 워커 환경용.
-월별 파티셔닝 키 구조를 사용하여 시간 범위 쿼리 성능을 최적화한다.
+Redis Sorted Set-based implementation, for multi-worker environments.
+Uses a monthly partitioned key structure to optimize time-range query
+performance.
 """
 
 from __future__ import annotations
@@ -25,13 +26,14 @@ logger = structlog.get_logger()
 
 class RedisEventJournalRepository(EventJournalRepository):
     """
-    Redis Sorted Set 기반 구현. 멀티 워커 환경용.
+    Redis Sorted Set-based implementation, for multi-worker environments.
 
     Redis Key Structure:
     - baldur:journal:YYYY-MM → Sorted Set (score=sequence, member=JSON)
-    - baldur:journal:sequence → 원자적 시퀀스 카운터
+    - baldur:journal:sequence → atomic sequence counter
 
-    월별 파티셔닝으로 시간 범위 쿼리 시 관련 월의 키만 조회한다.
+    Monthly partitioning means a time-range query only scans the keys for the
+    months it covers.
     """
 
     KEY_PREFIX = "baldur:journal"
@@ -45,9 +47,9 @@ class RedisEventJournalRepository(EventJournalRepository):
     ):
         """
         Args:
-            redis_client: Redis 클라이언트 인스턴스
-            ttl_seconds: 파티션 키 TTL (기본 30일 = 2592000초)
-            max_query_limit: query() 최대 반환 건수 상한
+            redis_client: Redis client instance
+            ttl_seconds: Partition key TTL (default 30 days = 2592000 seconds)
+            max_query_limit: Upper bound on rows returned by query()
         """
         self._redis = redis_client
         self._ttl_seconds = ttl_seconds
@@ -154,11 +156,11 @@ class RedisEventJournalRepository(EventJournalRepository):
     # =========================================================================
 
     def _get_key(self, timestamp: datetime) -> str:
-        """타임스탬프 기반 월별 파티션 키를 반환한다."""
+        """Return the monthly partition key for a timestamp."""
         return f"{self.KEY_PREFIX}:{timestamp.strftime('%Y-%m')}"
 
     def _resolve_keys(self, query_filter: JournalQueryFilter) -> list[str]:
-        """필터 조건에 따라 조회할 파티션 키를 반환한다."""
+        """Return the partition keys to scan for the given filter."""
         if query_filter.start_time and query_filter.end_time:
             return self._resolve_partition_keys(
                 query_filter.start_time, query_filter.end_time
@@ -170,7 +172,7 @@ class RedisEventJournalRepository(EventJournalRepository):
         start_time: datetime,
         end_time: datetime,
     ) -> list[str]:
-        """시간 범위에 걸치는 모든 월별 파티션 키를 반환한다."""
+        """Return every monthly partition key spanned by the time range."""
         keys = []
         current = start_time.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         while current < end_time:
@@ -182,7 +184,7 @@ class RedisEventJournalRepository(EventJournalRepository):
         return keys
 
     def _get_all_active_keys(self) -> list[str]:
-        """현재 존재하는 모든 저널 파티션 키를 반환한다."""
+        """Return every journal partition key that currently exists."""
         pattern = f"{self.KEY_PREFIX}:????-??"
         keys: list[str] = []
         for key in self._redis.scan_iter(match=pattern, count=200):
@@ -190,7 +192,7 @@ class RedisEventJournalRepository(EventJournalRepository):
         return keys
 
     def _has_no_entry_level_filter(self, query_filter: JournalQueryFilter) -> bool:
-        """엔트리 단위 필터링이 불필요한지 확인한다."""
+        """Check whether entry-level filtering can be skipped."""
         return (
             query_filter.event_types is None
             and query_filter.service_name is None
@@ -201,7 +203,7 @@ class RedisEventJournalRepository(EventJournalRepository):
         )
 
     def _serialize(self, entry: JournalEntry, seq: int) -> str:
-        """JournalEntry를 JSON 문자열로 직렬화한다."""
+        """Serialize a JournalEntry into a JSON string."""
         data = {
             "sequence": seq,
             "event_type": entry.event_type,
@@ -215,7 +217,7 @@ class RedisEventJournalRepository(EventJournalRepository):
         return fast_dumps_str(data)
 
     def _deserialize(self, raw: Any) -> JournalEntry | None:
-        """JSON 문자열을 JournalEntry로 역직렬화한다."""
+        """Deserialize a JSON string into a JournalEntry."""
         try:
             data = fast_loads(raw)
             return JournalEntry(
@@ -235,7 +237,7 @@ class RedisEventJournalRepository(EventJournalRepository):
     def _matches_filter(
         self, entry: JournalEntry, query_filter: JournalQueryFilter
     ) -> bool:
-        """엔트리가 필터 조건에 맞는지 확인한다."""
+        """Check whether an entry matches the filter."""
         if (
             query_filter.event_types is not None
             and entry.event_type not in query_filter.event_types
