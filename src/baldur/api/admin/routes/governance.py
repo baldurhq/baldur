@@ -8,8 +8,8 @@ from baldur.interfaces.web_framework import HttpMethod, PermissionLevel
 
 
 def _register_governance_routes(registry: AdminRegistry) -> None:
-    # Removed endpoints (no current handler — tracked in OOS_INDEX for v1.1
-    # admin surface expansion): GET /governance/status, GET
+    # Removed endpoints (no current handler — deferred to a later admin
+    # surface expansion): GET /governance/status, GET
     # /governance/status/{service_name}, GET /governance/status/channels,
     # GET /governance/approvals/{approval_id}, POST
     # /governance/approvals/{approval_id}, POST

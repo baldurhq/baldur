@@ -4,7 +4,6 @@ Framework-agnostic dataclass replacing AbstractRecoverySessionArchive's data rol
 Django Abstract Model remains as adapter-internal persistence detail.
 
 Reference:
-    docs/baldur/middleware_system/366_MODEL_LAYER_SEPARATION.md
     models/recovery_session_archive.py (original Django Abstract Model)
 """
 

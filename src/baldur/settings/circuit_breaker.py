@@ -13,9 +13,6 @@ Environment Variables:
     BALDUR_CB_FAILURE_THRESHOLD=5
     BALDUR_CB_RECOVERY_TIMEOUT=60
     ... etc
-
-Reference:
-- docs/baldur/middleware_system/40_PYDANTIC_CONFIG_MIGRATION.md
 """
 
 from pydantic import Field, field_validator

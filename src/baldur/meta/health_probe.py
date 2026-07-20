@@ -570,7 +570,7 @@ class DLQProbe(HealthProbe):
             # the flagship "1,000 pending that never drains" case, which the >
             # level logic above leaves HEALTHY — still trips. Fail-open but NOT
             # silent: a detector fault keeps the level verdict (never UNKNOWN)
-            # and is surfaced via details (CROSS_SERVICE_STANDARDS §3).
+            # and is surfaced via details.
             stuck_detection_error: str | None = None
             try:
                 from baldur.meta.stuck_detector import get_stuck_detector

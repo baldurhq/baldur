@@ -1,4 +1,3 @@
-# packages/baldur-python/src/baldur/core/degraded_mode_handler.py
 """
 DegradedModeHandler - manages Degraded Mode when the command center is
 unreachable (Platinum SLA optimization).

@@ -9,8 +9,8 @@ from baldur.interfaces.web_framework import HttpMethod, PermissionLevel
 
 def _register_analysis_routes(registry: AdminRegistry) -> None:
     # --- cascade + blast_radius ---
-    # Removed endpoints (no current handler — tracked in OOS_INDEX for v1.1
-    # admin surface expansion): /cascade/active-chains, /cascade/stats,
+    # Removed endpoints (no current handler — deferred to a later admin
+    # surface expansion): /cascade/active-chains, /cascade/stats,
     # /cascade/risk-assessment, /blast-radius/summary, /blast-radius/assess,
     # /blast-radius/analysis/{assessment_id}, /blast-radius/history,
     # /blast-radius/dependencies/{service_name}, /blast-radius/impact-prediction,

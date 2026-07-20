@@ -5,7 +5,7 @@ Records audit events raised by every middleware and service as a 'single hash ch
 Just before returning the response, it 'grabs' the events from the RequestAuditBuffer
 and forwards them to the ContinuousAuditRecorder.
 
-Core design principles (56_AUDIT_MIDDLEWARE_DESIGN.md):
+Core design principles:
 -------------------------------------------------
 1. "The angler (Middleware) must stand last"
    - AuditMiddleware must be last so it can grab all the CB-open, RateLimit-block,

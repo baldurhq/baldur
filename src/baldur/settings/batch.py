@@ -13,10 +13,6 @@ Environment Variables:
     BALDUR_BATCH_DEFAULT_BATCH_SIZE=100
     BALDUR_BATCH_LOGGER_BATCH_SIZE=10
     BALDUR_BATCH_FLUSH_INTERVAL=5.0
-
-Reference:
-- docs/baldur/middleware_system/92_CONFIG_IMPLEMENTATION_GUIDE.md (Week 4 [19])
-- docs/baldur/middleware_system/91_CONFIG_INVENTORY.md §3.5
 """
 
 from pydantic import Field

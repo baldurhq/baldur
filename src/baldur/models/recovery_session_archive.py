@@ -16,9 +16,6 @@ Usage:
         class Meta(AbstractRecoverySessionArchive.Meta):
             abstract = False
             db_table = "baldur_recovery_sessions"
-
-Reference:
-    docs/baldur/middleware_system/77_RECOVERY_COORDINATOR.md#1.4
 """
 
 from __future__ import annotations

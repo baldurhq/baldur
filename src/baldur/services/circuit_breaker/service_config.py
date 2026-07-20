@@ -68,9 +68,8 @@ class ServiceConfigManager:
         # Look up services by criticality
         low_services = manager.get_services_by_criticality("low")
 
-    Reference:
-        docs/baldur/middleware_system/21_CB_ADVANCED_PROTECTION.md
-        Section 2 - Service Criticality configuration
+    Criticality levels and their per-service knobs are defined on
+    ``ServiceConfig`` (baldur.services.circuit_breaker.models).
     """
 
     _instance: ServiceConfigManager | None = None

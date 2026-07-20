@@ -85,7 +85,7 @@ class RateLimitSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Function-level @rate_limit decorator toggle (D5 of 458_DX_DECORATORS.md)
+    # Function-level @rate_limit decorator toggle (458 D5)
     # Distinct from middleware_rate_limit (HTTP-middleware-only).
     # When False, @rate_limit short-circuits at wrapper entry and calls the
     # wrapped function directly without consulting SlidingWindowLimiter.

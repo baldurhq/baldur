@@ -11,9 +11,6 @@ Replaces:
 Environment Variables:
     BALDUR_SLO_DEFAULT_WINDOW_DAYS=30
     BALDUR_SLO_DEFAULT_TARGET=0.999
-
-Reference:
-- docs/baldur/middleware_system/40_PYDANTIC_CONFIG_MIGRATION.md
 """
 
 from typing import Any

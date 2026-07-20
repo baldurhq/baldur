@@ -151,9 +151,10 @@ def _apply_admin_identity(ctx: RequestContext, *, trusted: bool) -> None:
 
     PRO registers a concrete resolver that maps a trusted proxy-forwarded
     identity header to an :class:`~baldur.interfaces.admin_identity.AdminPrincipal`.
-    Side-effect fail-open (CROSS_SERVICE_STANDARDS): a resolver exception
-    degrades attribution to ``"anonymous"`` but never blocks the control
-    action — the request was already authorized by the API-key / unlock gate.
+    Side-effect fail-open (attribution is not an authorization gate): a
+    resolver exception degrades attribution to ``"anonymous"`` but never
+    blocks the control action — the request was already authorized by the
+    API-key / unlock gate.
     The header *value* is never logged (PII); only a coarse reason.
     """
     from baldur.factory.registry import ProviderRegistry

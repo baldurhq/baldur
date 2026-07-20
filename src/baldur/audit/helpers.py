@@ -65,9 +65,9 @@ def _get_pro() -> Any:
 def _safe_delegate(func_name: str, *args: Any, **kwargs: Any) -> Any:
     """Delegate to a PRO audit function, fail-open on any exception.
 
-    Log level: WARNING per LOGGING_STANDARDS §3.2 — audit/compliance
-    recording failures are GDPR/SOC2-essential. The operator must be
-    aware that an audit write was missed, even though the caller's
+    Log level: the ``_failed`` event is emitted at WARNING, never lower —
+    audit/compliance recording failures are GDPR/SOC2-essential. The operator
+    must be aware that an audit write was missed, even though the caller's
     primary operation continues.
     """
     p = _get_pro()

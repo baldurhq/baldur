@@ -10,9 +10,6 @@ Replaces:
 Environment Variables:
     BALDUR_LOGGING_SETTINGS_DLQ_LOG_LEVEL=INFO
     BALDUR_LOGGING_SETTINGS_CIRCUIT_BREAKER_LOG_LEVEL=INFO
-
-Reference:
-- docs/baldur/middleware_system/40_PYDANTIC_CONFIG_MIGRATION.md
 """
 
 from pydantic import Field, field_validator

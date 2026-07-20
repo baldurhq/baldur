@@ -13,8 +13,8 @@ Features:
 - **Redis caching for high-traffic scenarios**
 - **Hybrid storage support via ProviderRegistry**
 
-Reference:
-    92_CONFIG_IMPLEMENTATION_GUIDE.md Week 4 [18] DashboardSettings.
+Configuration:
+    DashboardSettings (baldur.settings.dashboard)
 """
 
 from __future__ import annotations
@@ -79,8 +79,8 @@ class DashboardService:
         # Force fresh data (bypass cache)
         summary = service.get_summary(skip_cache=True)
 
-    Reference:
-        92_CONFIG_IMPLEMENTATION_GUIDE.md Week 4 [18] DashboardSettings.
+    Configuration:
+        DashboardSettings (baldur.settings.dashboard)
     """
 
     def __init__(self, cache: CacheProviderInterface | None = None):
@@ -209,7 +209,7 @@ class DashboardService:
             failed=status_counts.failed,
         )
 
-        # Recovery summary (77_RECOVERY_COORDINATOR.md#10.2.4.13)
+        # Recovery summary (None when the recovery dashboard is unavailable)
         recovery_summary = self._get_recovery_summary()
 
         summary = DashboardSummary(
@@ -271,9 +271,6 @@ class DashboardService:
 
         Integrates with RecoveryDashboardService to provide
         recovery-related statistics for the main dashboard.
-
-        Reference:
-            77_RECOVERY_COORDINATOR.md#10.2.4.13
 
         Returns:
             Recovery summary dict or None if unavailable

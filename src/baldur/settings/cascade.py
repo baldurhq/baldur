@@ -11,10 +11,6 @@ Environment Variables:
     BALDUR_CASCADE_WARN_DEPTH=7
     BALDUR_CASCADE_BLOCK_ON_EXCEED=true
     BALDUR_CASCADE_DETECT_CYCLES=true
-
-Reference:
-- docs/baldur/middleware_system/368_DJANGO_SETTINGS_DB_DECOUPLING.md
-- docs/baldur/middleware_system/76_CASCADE_EVENT_AUDIT.md
 """
 
 from pydantic import Field, model_validator

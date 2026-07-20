@@ -1,4 +1,3 @@
-# packages/baldur-python/src/baldur/utils/serialization.py
 """Fast JSON serialization utilities.
 
 Automatic orjson acceleration with stdlib json fallback.

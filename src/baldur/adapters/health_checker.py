@@ -1,4 +1,3 @@
-# packages/baldur-python/src/baldur/adapters/health_checker.py
 """
 Portable high-performance health checker (Platinum SLA optimization).
 

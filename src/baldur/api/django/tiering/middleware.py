@@ -48,8 +48,11 @@ class TieringMiddleware:
         # Optional: Disable middleware
         BALDUR_TIERING_MIDDLEWARE_ENABLED = True
 
-    Reference:
-    - docs/baldur/16_GOVERNANCE_IMPLEMENTATION_PART1A.md (Section 3)
+    Tier rules and multipliers:
+        BACKPRESSURE_TIER_RULES (baldur.scaling.tiering.defaults),
+        TierRegistry (baldur.scaling.tiering.registry)
+
+    Prior art:
     - Netflix Hystrix Load Shedding
     - Google SRE "Handling Overload"
     """

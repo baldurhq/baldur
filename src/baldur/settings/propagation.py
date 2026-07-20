@@ -2,8 +2,6 @@
 Propagation Settings - Cross-Cluster Configuration Propagation.
 
 Defines propagation consistency settings.
-
-Reference: docs/baldur/middleware_system/70_MULTI_CLUSTER_ARCHITECTURE.md
 """
 
 from pydantic import Field

@@ -11,9 +11,6 @@ Replaces:
 Environment Variables:
     BALDUR_FORENSIC_ERROR_MESSAGE_MAX_LENGTH=500
     BALDUR_FORENSIC_MAX_STACK_FRAMES=50
-
-Reference:
-- docs/baldur/middleware_system/40_PYDANTIC_CONFIG_MIGRATION.md
 """
 
 from pydantic import Field

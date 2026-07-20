@@ -9,8 +9,8 @@ from baldur.interfaces.web_framework import HttpMethod, PermissionLevel
 
 def _register_recovery_routes(registry: AdminRegistry) -> None:
     # --- recovery ---
-    # Removed endpoints (no current handler — tracked in OOS_INDEX for v1.1
-    # admin surface expansion): /recovery/plan, /recovery/execute/{plan_id},
+    # Removed endpoints (no current handler — deferred to a later admin
+    # surface expansion): /recovery/plan, /recovery/execute/{plan_id},
     # /recovery/approvals/{approval_id} (GET detail + POST submit),
     # /recovery/regional-policy.
     try:

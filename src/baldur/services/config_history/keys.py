@@ -1,15 +1,16 @@
 """
 Configuration History - Redis Key Helpers & Legacy Constants.
 
-Redis Key Helpers (Multi-Cluster Support)
-Reference: docs/baldur/middleware_system/70_MULTI_CLUSTER_ARCHITECTURE.md
+Builds the Redis keys for config history, version counters, and current
+values. Every key is namespace-prefixed so several clusters can share one
+Redis instance; the prefix comes from NamespaceSettings
+(baldur.settings.namespace).
 """
 
 from baldur.settings.audit import get_audit_settings
 
 # =============================================================================
 # Redis Key Helpers (Multi-Cluster Support)
-# Reference: docs/baldur/middleware_system/70_MULTI_CLUSTER_ARCHITECTURE.md
 # =============================================================================
 
 

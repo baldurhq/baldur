@@ -14,9 +14,6 @@ Thin Task, Fat Service principle:
 - The functions in this file are simple delegators.
 - All business logic lives in the RolloutWatchdog class.
 
-Reference:
-    docs/baldur/middleware_system/71_CANARY_CONFIG_ROLLOUT.md
-
 Celery Beat:
     The composed schedule injects entries for these tasks, but the functions
     below carry no task registration, so a worker cannot resolve the names and
@@ -347,9 +344,8 @@ class RolloutWatchdog:
         Eligibility: renew every active rollout EXCEPT CREATED (a never-started
         rollout has no liveness signal — renewing it would convert a bounded
         TTL freeze into an unbounded silent one) and terminal (defensive).
-        Renewal failures are isolated per rollout (independent try/except per
-        CROSS_SERVICE_STANDARDS) so one bad rollout cannot abort the zombie
-        scan.
+        Renewal failures are isolated per rollout — each renewal is guarded by
+        its own try/except — so one bad rollout cannot abort the zombie scan.
 
         On a CONFLICT outcome (a foreign rollout already holds the lock) a
         Slack alert is raised when notifications are enabled; the alert is

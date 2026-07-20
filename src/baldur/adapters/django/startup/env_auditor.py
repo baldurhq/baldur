@@ -44,8 +44,8 @@ class EnvironmentAuditor:
         Best-effort: If sync fails, system continues normally.
         Hash chain will be recovered on next successful write.
 
-        Reference:
-            docs/baldur/middleware_system/43_DISTRIBUTED_HASH_CHAIN_ENHANCED.md
+        Implementation:
+            StartupHashChainSync (baldur.audit.integrity)
         """
         try:
             # Check if distributed hash chain is enabled

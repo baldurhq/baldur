@@ -6,13 +6,6 @@ resolves precedence atomically.
 
 Network round trips: 2 -> 1 (50% reduction)
 Race conditions: eliminated at the source
-
-Code reference:
-    coordination/atomic_transition.py (Lua script pattern)
-    canary/locking.py#L177-187 (Lua atomic handling)
-
-Reference:
-    docs/baldur/middleware_system/73_NAMESPACE_AWARE_EMERGENCY.md
 """
 
 from __future__ import annotations

@@ -75,10 +75,6 @@ class FreezeModeManager:
             new_state="OPEN",
             is_manual=False
         )
-
-    Reference:
-        docs/baldur/middleware_system/21_CB_ADVANCED_PROTECTION.md
-        Section 6 - LOCKDOWN Freeze Mode
     """
 
     _instance: FreezeModeManager | None = None

@@ -272,7 +272,9 @@ class _EntitlementValidator:
 
     @staticmethod
     def _log_result(result: EntitlementResult) -> None:
-        """Log validation result per LOGGING_STANDARDS.md.
+        """Log the validation result as a structured ``entitlement.*`` event.
+
+        An invalid token logs at WARNING; an active or absent one at INFO.
 
         Best-effort: a console that cannot encode a non-ASCII field (e.g. a
         cp949 Windows terminal rendering a non-ASCII org name) must never

@@ -1,4 +1,3 @@
-# packages/baldur-python/src/baldur/utils/async_logger.py
 """
 Asynchronous healing event logger (Platinum SLA optimization)
 

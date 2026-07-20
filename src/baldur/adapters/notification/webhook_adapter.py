@@ -12,8 +12,9 @@ Design:
   shape, simplified — no escalation orchestration, dedup, or retry (those stay
   PRO differentiators).
 - Fail-open: any non-200 / network error returns ``False`` and never raises
-  into the protected call (CROSS_SERVICE_STANDARDS side-effects fail-open;
-  the claim-wiring rule). Delivery outcome is logged so a silent fail-open stays diagnosable.
+  into the protected call — a notification is a side-effect, so its failure
+  must never cancel the operation it reports on. The delivery outcome is
+  logged so a silent fail-open stays diagnosable.
 - URL/timeout injected via constructor (DI) — no hidden settings read inside
   ``send()``, so the adapter stays generic and unit-testable.
 """

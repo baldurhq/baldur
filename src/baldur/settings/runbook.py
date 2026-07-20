@@ -18,9 +18,6 @@ Environment Variables:
     BALDUR_RUNBOOK_LOCK_TTL_SECONDS=600
     BALDUR_RUNBOOK_APPROVAL_TIMER_SECONDS=300
     BALDUR_RUNBOOK_APPROVAL_MAX_WAIT_SECONDS=3600
-
-Reference:
-- docs/baldur/middleware_system/272_RUNBOOK_ARCHITECTURE_OVERVIEW.md §7
 """
 
 import structlog

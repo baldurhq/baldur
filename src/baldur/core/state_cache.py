@@ -1,4 +1,3 @@
-# packages/baldur-python/src/baldur/core/state_cache.py
 """
 Circuit Breaker state cache (Platinum SLA optimization).
 

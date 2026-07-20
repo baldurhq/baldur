@@ -10,11 +10,6 @@ Replaces:
 Environment Variables:
     BALDUR_ANTI_FLAPPING_LEVEL_COOLDOWN_SECONDS=300
     BALDUR_ANTI_FLAPPING_RECOVERY_HYSTERESIS_FACTOR=1.15
-
-Reference:
-- docs/baldur/middleware_system/92_CONFIG_IMPLEMENTATION_GUIDE.md (Week 2 [8])
-- docs/baldur/middleware_system/91_CONFIG_INVENTORY.md §8.4
-- docs/baldur/middleware_system/72_EMERGENCY_COORDINATION_LAYER.md
 """
 
 import structlog
