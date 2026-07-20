@@ -21,6 +21,10 @@ Coverage:
     and ``BALDUR_RATE_LIMIT_BACKOFF_COORDINATION_ENABLED``. Passing a
     coordinator explicitly overrides both.
 
+    Detection is exception-borne: the retry stage classifies a 429 from the
+    exception a call raises. A client that reports the 429 as a returned value
+    instead installs no cooldown, even when a result predicate retries on it.
+
     Asynchronous surfaces do not participate in the default. Async callers who
     want outbound 429 coordination opt in through the tenacity bridge with a
     ``rate_limit_key``; a bring-your-own retry engine owns its own coordination.
@@ -87,9 +91,14 @@ class RateLimitCoordinator:
     takes::
 
         # Coordinated by default — "payment_api" is the coordination key.
+        # The 429 must surface as an *exception* for the retry stage to see
+        # it: a client that returns the response object instead (``requests``
+        # without ``raise_for_status``) neither retries nor coordinates.
         @retry(domain="payment_api")
         def call_external_api():
-            return requests.post(...)
+            response = requests.post(...)
+            response.raise_for_status()
+            return response
 
         protect("payment_api", retry=True)(call_external_api)
 

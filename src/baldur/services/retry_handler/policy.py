@@ -152,6 +152,18 @@ class RetryPolicy(ResiliencePolicy[T]):
     def name(self) -> str:
         return "retry"
 
+    def _coordination_key(self) -> str:
+        """The key this policy's outbound 429 cooldowns are shared under.
+
+        Single expression for the identity gate, the three coordinator calls,
+        and the deferral error alike, so no two of them can disagree about what
+        counts as an override. ``or`` rather than ``is not None``: an override
+        set to the empty string is not an identity, and treating it as one
+        would let the gate pass while the key fell back to the placeholder —
+        coordinating unrelated downstreams on one record, silently.
+        """
+        return self._config.rate_limit_key or self._config.domain
+
     def _resolve_rate_limit_coordinator(self) -> RateLimitCoordinator | None:
         """Resolve the coordinator that this call should coordinate 429s through.
 
@@ -159,8 +171,8 @@ class RetryPolicy(ResiliencePolicy[T]):
         opt-out levers, because a caller who constructed one asked for it.
         Otherwise the process-wide singleton is resolved when all three hold:
 
-        1. ``coordination_enabled`` (deployment kill switch), then
-        2. ``config.rate_limit_aware`` (per-policy / per-domain opt-out), then
+        1. ``config.rate_limit_aware`` (per-policy / per-domain opt-out), then
+        2. ``coordination_enabled`` (deployment kill switch), then
         3. the coordination key is *identified* (not the placeholder domain).
 
         The order is load-bearing rather than incidental. Both levers are
@@ -186,9 +198,7 @@ class RetryPolicy(ResiliencePolicy[T]):
             if not get_rate_limit_backoff_settings().coordination_enabled:
                 return None
 
-            if self._config.rate_limit_key is None and (
-                self._config.domain == _UNIDENTIFIED_DOMAIN
-            ):
+            if self._coordination_key() == _UNIDENTIFIED_DOMAIN:
                 self._warn_unidentified_coordination_key()
                 return None
 
@@ -212,7 +222,7 @@ class RetryPolicy(ResiliencePolicy[T]):
         who most needs the line would never see it. The once-per-key dedup is
         what makes that level affordable.
         """
-        key = self._config.domain
+        key = self._coordination_key()
         with _unidentified_key_warned_lock:
             if key in _unidentified_key_warned:
                 return
@@ -262,7 +272,7 @@ class RetryPolicy(ResiliencePolicy[T]):
         # a Redis connect — on paths that never use it. Coverage statement:
         # retry-disabled and observe-only/shadow calls do not coordinate.
         coordinator = self._resolve_rate_limit_coordinator()
-        rate_limit_key = self._config.rate_limit_key or self._config.domain
+        rate_limit_key = self._coordination_key()
         # D5 cost containment: on_success costs a storage read (plus a reset
         # write when a counter is standing), so it is owed only once this call
         # has actually observed a rate-limit signal — a detected 429, an
@@ -451,8 +461,13 @@ class RetryPolicy(ResiliencePolicy[T]):
                 RateLimitDeferredError,
             )
 
+            # The coordination key, not the domain: they diverge whenever
+            # ``rate_limit_key`` overrides, and the deferral was computed
+            # against the former. ``extra_context()`` carries this key into
+            # audit and DLQ payloads, so the wrong one names a cooldown record
+            # that does not exist.
             last_error = RateLimitDeferredError(
-                key=self._config.domain,
+                key=rate_limit_key,
                 not_before=not_before,
             )
 
