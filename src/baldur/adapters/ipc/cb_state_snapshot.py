@@ -1,16 +1,16 @@
 """
-CB 상태 스냅샷 - Shared Memory (mmap) 기반.
+CB state snapshot - backed by shared memory (mmap).
 
-Circuit Breaker 상태를 Shared Memory에 저장하여
-~10μs 수준의 저지연 조회를 제공합니다.
+Stores Circuit Breaker state in shared memory to provide low-latency lookups
+on the order of ~10us.
 
-주요 특징:
-- mmap 기반 Shared Memory
-- 구조체 형식의 바이너리 직렬화
-- Lock-free 읽기 (atomic write)
-- 주기적 스냅샷 업데이트 (100ms)
+Key characteristics:
+- mmap-based shared memory
+- binary struct serialization
+- lock-free reads (atomic write)
+- periodic snapshot updates (100ms)
 
-메모리 레이아웃:
+Memory layout:
 - Header (24 bytes): magic, version, timestamp, cb_count
 - CB Entry (72 bytes each): cb_id (32), state (4), failure_count (4),
                             success_count (4), last_failure (8),
@@ -26,7 +26,7 @@ Usage:
     snapshot = get_cb_state_snapshot()
     snapshot.start()
 
-    # 상태 조회 (~10μs)
+    # State lookup (~10us)
     state = snapshot.get_state("payment_service")
 
     snapshot.stop()
@@ -60,7 +60,7 @@ logger = structlog.get_logger()
 
 
 class CBState(IntEnum):
-    """Circuit Breaker 상태."""
+    """Circuit Breaker state."""
 
     CLOSED = 0
     OPEN = 1
@@ -68,16 +68,16 @@ class CBState(IntEnum):
 
 
 # =============================================================================
-# 메모리 레이아웃 상수
+# Memory layout constants
 # =============================================================================
 
 # Magic Number: "CBSS" in ASCII
 MAGIC_NUMBER = 0x43425353
 
-# 버전
+# Version
 VERSION = 1
 
-# 헤더 크기 (24 bytes)
+# Header size (24 bytes)
 # - magic: 4 bytes (uint32)
 # - version: 4 bytes (uint32)
 # - timestamp: 8 bytes (double)
@@ -86,7 +86,7 @@ VERSION = 1
 HEADER_SIZE = 24
 HEADER_FORMAT = "!IIdII"
 
-# CB 엔트리 크기 (72 bytes)
+# CB entry size (72 bytes)
 # - cb_id: 32 bytes (32s, UTF-8)
 # - state: 4 bytes (uint32)
 # - failure_count: 4 bytes (uint32)
@@ -98,13 +98,13 @@ HEADER_FORMAT = "!IIdII"
 CB_ENTRY_SIZE = 72
 CB_ENTRY_FORMAT = "!32sIIIddId"
 
-# 최대 CB 개수
+# Maximum number of CBs
 MAX_CB_COUNT = 1000
 
-# 전체 메모리 크기
+# Total memory size
 TOTAL_SIZE = HEADER_SIZE + (CB_ENTRY_SIZE * MAX_CB_COUNT)
 
-# 기본 파일 경로
+# Default file path
 if os.name == "nt":
     DEFAULT_SHM_PATH = r"\\.\pipe\baldur_cb_state"
 else:
@@ -113,7 +113,7 @@ else:
 
 @dataclass
 class CBStateEntry(SerializableMixin):
-    """CB 상태 엔트리."""
+    """CB state entry."""
 
     cb_id: str
     state: CBState
@@ -126,53 +126,53 @@ class CBStateEntry(SerializableMixin):
 
     @property
     def is_open(self) -> bool:
-        """Open 상태인지 확인."""
+        """Whether the state is Open."""
         return self.state == CBState.OPEN
 
     @property
     def is_closed(self) -> bool:
-        """Closed 상태인지 확인."""
+        """Whether the state is Closed."""
         return self.state == CBState.CLOSED
 
     @property
     def is_half_open(self) -> bool:
-        """Half-Open 상태인지 확인."""
+        """Whether the state is Half-Open."""
         return self.state == CBState.HALF_OPEN
 
     @property
     def last_failure(self) -> datetime | None:
-        """마지막 실패 시간."""
+        """Time of the last failure."""
         if self.last_failure_ts <= 0:
             return None
         return datetime.fromtimestamp(self.last_failure_ts, tz=UTC)
 
     @property
     def last_success(self) -> datetime | None:
-        """마지막 성공 시간."""
+        """Time of the last success."""
         if self.last_success_ts <= 0:
             return None
         return datetime.fromtimestamp(self.last_success_ts, tz=UTC)
 
     def should_allow(self) -> bool:
         """
-        요청 허용 여부 판단.
+        Decide whether a request is allowed.
 
         Returns:
-            허용 여부
+            Whether the request is allowed
         """
         if self.state == CBState.CLOSED:
             return True
         if self.state == CBState.HALF_OPEN:
-            return True  # Half-Open은 테스트 요청 허용
+            return True  # Half-Open allows trial requests
         # OPEN
-        # Recovery timeout 경과 여부 확인
+        # Check whether the recovery timeout has elapsed
         if self.last_failure_ts <= 0:
             return True
         elapsed_ms = (time.time() - self.last_failure_ts) * 1000
         return elapsed_ms >= self.recovery_timeout_ms
 
     def to_dict(self) -> dict[str, Any]:
-        """딕셔너리로 변환."""
+        """Convert to a dictionary."""
         return {
             "cb_id": self.cb_id,
             "state": self.state.name,
@@ -191,10 +191,10 @@ class CBStateEntry(SerializableMixin):
 
 class CBStateSnapshot:
     """
-    CB 상태 스냅샷 - Shared Memory 기반.
+    CB state snapshot - backed by shared memory.
 
-    mmap을 사용하여 CB 상태를 공유 메모리에 저장하고
-    매우 낮은 지연 시간(~10μs)으로 조회할 수 있습니다.
+    Uses mmap to store CB state in shared memory so it can be read with very
+    low latency (~10us).
     """
 
     def __init__(
@@ -205,12 +205,12 @@ class CBStateSnapshot:
         is_writer: bool = False,
     ):
         """
-        스냅샷 초기화.
+        Initialize the snapshot.
 
         Args:
-            shm_path: Shared Memory 파일 경로
-            update_interval_ms: 업데이트 간격 (밀리초)
-            is_writer: 쓰기 모드 여부
+            shm_path: shared memory file path
+            update_interval_ms: update interval (milliseconds)
+            is_writer: whether to open in write mode
         """
         self.shm_path = shm_path
         self.update_interval_ms = update_interval_ms
@@ -223,7 +223,7 @@ class CBStateSnapshot:
         self._lock = threading.Lock()
         self._handle: DaemonWorkerHandle | None = None  # impl 489 D9
 
-        # 통계
+        # Statistics
         self._read_count = 0
         self._write_count = 0
         self._last_update_ts = 0.0
@@ -235,7 +235,7 @@ class CBStateSnapshot:
         )
 
     def start(self) -> None:
-        """스냅샷 시작."""
+        """Start the snapshot."""
         from baldur.meta.daemon_worker import DaemonWorkerHandle
         from baldur.metrics.recorders.daemon_worker import register_daemon_worker
 
@@ -292,7 +292,7 @@ class CBStateSnapshot:
             raise
 
     def stop(self) -> None:
-        """스냅샷 중지."""
+        """Stop the snapshot."""
         from baldur.metrics.recorders.daemon_worker import unregister_daemon_worker
 
         if self._handle is not None:
@@ -314,22 +314,22 @@ class CBStateSnapshot:
         logger.info("cb_state_snapshot.stopped")
 
     def _open_shm(self) -> None:
-        """Shared Memory 열기."""
+        """Open shared memory."""
         if os.name == "nt":
-            # Windows: 일반 파일 기반 mmap 사용
+            # Windows: use a regular file-backed mmap
             self._open_shm_windows()
         else:
-            # Unix: /dev/shm 또는 파일 기반 mmap
+            # Unix: /dev/shm or a file-backed mmap
             self._open_shm_unix()
 
     def _open_shm_windows(self) -> None:
-        """Windows용 Shared Memory 열기."""
-        # Windows에서는 Named Shared Memory 대신 파일 기반 mmap 사용
+        """Open shared memory on Windows."""
+        # On Windows, use a file-backed mmap instead of named shared memory
         shm_path = self.shm_path.replace(r"\\.\pipe\\", "")
         shm_file = Path(os.environ.get("TEMP", "C:\\Temp")) / f"{shm_path}.shm"
 
         if self.is_writer:
-            # 쓰기 모드: 파일 생성
+            # Write mode: create the file
             shm_file.parent.mkdir(parents=True, exist_ok=True)
             fh = open(shm_file, "w+b")  # noqa: SIM115
             fh.write(b"\x00" * TOTAL_SIZE)
@@ -342,7 +342,7 @@ class CBStateSnapshot:
             )
             self._write_header()
         else:
-            # 읽기 모드: 기존 파일 열기
+            # Read mode: open the existing file
             if not shm_file.exists():
                 raise FileNotFoundError(f"SHM file not found: {shm_file}")
             fh = open(shm_file, "r+b")  # noqa: SIM115
@@ -354,11 +354,11 @@ class CBStateSnapshot:
             )
 
     def _open_shm_unix(self) -> None:
-        """Unix용 Shared Memory 열기."""
+        """Open shared memory on Unix."""
         shm_path = Path(self.shm_path)
 
         if self.is_writer:
-            # 쓰기 모드: 파일 생성
+            # Write mode: create the file
             shm_path.parent.mkdir(parents=True, exist_ok=True)
             fh = open(shm_path, "w+b")  # noqa: SIM115
             fh.write(b"\x00" * TOTAL_SIZE)
@@ -371,7 +371,7 @@ class CBStateSnapshot:
             )
             self._write_header()
         else:
-            # 읽기 모드: 기존 파일 열기
+            # Read mode: open the existing file
             if not shm_path.exists():
                 raise FileNotFoundError(f"SHM file not found: {shm_path}")
             fh = open(shm_path, "r+b")  # noqa: SIM115
@@ -383,7 +383,7 @@ class CBStateSnapshot:
             )
 
     def _close_shm(self) -> None:
-        """Shared Memory 닫기."""
+        """Close shared memory."""
         if self._mmap is not None:
             self._mmap.close()
             self._mmap = None
@@ -393,7 +393,7 @@ class CBStateSnapshot:
             self._file = None
 
     def _write_header(self) -> None:
-        """헤더 쓰기."""
+        """Write the header."""
         if self._mmap is None:
             return
 
@@ -402,7 +402,7 @@ class CBStateSnapshot:
             MAGIC_NUMBER,
             VERSION,
             time.time(),
-            0,  # cb_count (초기값)
+            0,  # cb_count (initial value)
             0,  # reserved
         )
         self._mmap.seek(0)
@@ -411,10 +411,10 @@ class CBStateSnapshot:
 
     def _read_header(self) -> tuple[int, int, float, int]:
         """
-        헤더 읽기.
+        Read the header.
 
         Returns:
-            (magic, version, timestamp, cb_count) 튜플
+            (magic, version, timestamp, cb_count) tuple
         """
         if self._mmap is None:
             raise RuntimeError("SHM not open")
@@ -429,13 +429,13 @@ class CBStateSnapshot:
 
     def get_state(self, cb_id: str) -> CBStateEntry | None:
         """
-        CB 상태 조회.
+        Look up CB state.
 
         Args:
             cb_id: Circuit Breaker ID
 
         Returns:
-            CB 상태 엔트리 또는 None
+            CB state entry, or None
         """
         if self._mmap is None:
             return None
@@ -443,14 +443,14 @@ class CBStateSnapshot:
         try:
             self._read_count += 1
 
-            # 헤더 읽기
+            # Read the header
             magic, version, timestamp, cb_count = self._read_header()
 
             if magic != MAGIC_NUMBER:
                 logger.warning("cb_state_snapshot.invalid_magic_number")
                 return None
 
-            # CB 엔트리 검색
+            # Search the CB entries
             cb_id_bytes = cb_id.encode("utf-8")[:32].ljust(32, b"\x00")
 
             for i in range(cb_count):
@@ -492,16 +492,16 @@ class CBStateSnapshot:
 
     def get_all_states(self) -> list[CBStateEntry]:
         """
-        모든 CB 상태 조회.
+        Look up every CB state.
 
         Returns:
-            CB 상태 엔트리 목록
+            List of CB state entries
         """
         if self._mmap is None:
             return []
 
         try:
-            # 헤더 읽기
+            # Read the header
             magic, version, timestamp, cb_count = self._read_header()
 
             if magic != MAGIC_NUMBER:
@@ -549,13 +549,13 @@ class CBStateSnapshot:
 
     def update_state(self, entry: CBStateEntry) -> bool:
         """
-        CB 상태 업데이트.
+        Update CB state.
 
         Args:
-            entry: CB 상태 엔트리
+            entry: CB state entry
 
         Returns:
-            성공 여부
+            Whether the update succeeded
         """
         if not self.is_writer or self._mmap is None:
             return False
@@ -564,14 +564,14 @@ class CBStateSnapshot:
             with self._lock:
                 self._write_count += 1
 
-                # 헤더 읽기
+                # Read the header
                 magic, version, timestamp, cb_count = self._read_header()
 
                 if magic != MAGIC_NUMBER:
                     self._write_header()
                     cb_count = 0
 
-                # 기존 엔트리 검색 또는 새 슬롯 할당
+                # Find the existing entry or allocate a new slot
                 cb_id_bytes = entry.cb_id.encode("utf-8")[:32].ljust(32, b"\x00")
                 target_index = -1
 
@@ -585,14 +585,14 @@ class CBStateSnapshot:
                         break
 
                 if target_index == -1:
-                    # 새 엔트리 추가
+                    # Append a new entry
                     if cb_count >= MAX_CB_COUNT:
                         logger.warning("cb_state_snapshot.max_cb_count_reached")
                         return False
                     target_index = cb_count
                     cb_count += 1
 
-                # 엔트리 쓰기
+                # Write the entry
                 offset = HEADER_SIZE + (target_index * CB_ENTRY_SIZE)
                 entry_data = struct.pack(
                     CB_ENTRY_FORMAT,
@@ -608,7 +608,7 @@ class CBStateSnapshot:
                 self._mmap.seek(offset)
                 self._mmap.write(entry_data)
 
-                # 헤더 업데이트
+                # Update the header
                 header = struct.pack(
                     HEADER_FORMAT,
                     MAGIC_NUMBER,
@@ -632,7 +632,7 @@ class CBStateSnapshot:
             return False
 
     def _update_loop(self) -> None:
-        """주기적 업데이트 루프."""
+        """Periodic update loop."""
         while self._running:
             iter_start = time.monotonic()
             try:
@@ -650,7 +650,7 @@ class CBStateSnapshot:
             time.sleep(self.update_interval_ms / 1000.0)
 
     def _sync_from_registry(self) -> None:
-        """CB 서비스에서 상태 동기화."""
+        """Sync state from the CB service."""
         try:
             from baldur.services import get_circuit_breaker_service
 
@@ -658,8 +658,8 @@ class CBStateSnapshot:
             if cb_service is None:
                 return
 
-            # CB 서비스에서 모든 서비스 상태를 가져와 동기화
-            # get_all_states()가 있으면 사용, 없으면 스킵
+            # Pull every service state from the CB service and sync it
+            # Use get_all_states() when present, otherwise skip
             get_all_states = getattr(cb_service, "get_all_states", None)
             if get_all_states is None:
                 return
@@ -692,7 +692,7 @@ class CBStateSnapshot:
                 self.update_state(entry)
 
         except ImportError:
-            # 서비스 모듈 없음
+            # Service module not present
             pass
         except Exception as e:
             logger.debug(
@@ -702,10 +702,10 @@ class CBStateSnapshot:
 
     def get_stats(self) -> dict[str, Any]:
         """
-        통계 반환.
+        Return statistics.
 
         Returns:
-            통계 딕셔너리
+            Statistics dictionary
         """
         return {
             "read_count": self._read_count,
@@ -717,7 +717,7 @@ class CBStateSnapshot:
 
 
 # =============================================================================
-# 싱글톤 인스턴스
+# Singleton instance
 # =============================================================================
 
 from baldur.utils.singleton import CLEANUP_STOP, make_singleton_factory

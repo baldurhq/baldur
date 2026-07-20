@@ -24,18 +24,18 @@ logger = structlog.get_logger()
 
 class RedisMetricSourceAdapter(BaseMetricSourceAdapter):
     """
-    Redis 기반 메트릭 소스 어댑터.
+    Redis-backed metric source adapter.
 
-    Write-Through 패턴으로 비즈니스 로직에서 DB 저장 시
-    Redis에도 동시에 기록하는 경우 사용.
+    Use this when business logic follows the Write-Through pattern and updates
+    Redis at the same time it writes to the DB.
 
     Example:
         >>> import redis
         >>> client = redis.from_url("redis://localhost:6379/0")
         >>> adapter = RedisMetricSourceAdapter(client)
-        >>> # Write-Through: DB 저장과 동시에 Redis 업데이트
+        >>> # Write-Through: update Redis together with the DB write
         >>> adapter.increment_dlq_pending("payment")
-        >>> # 조회
+        >>> # Read back
         >>> count = adapter.get_dlq_pending_count("payment")
     """
 
@@ -53,7 +53,7 @@ class RedisMetricSourceAdapter(BaseMetricSourceAdapter):
         """
         # redis-py stub declares dual sync/async return unions; widening to
         # Any at the attribute keeps mypy out of sync call sites (mirrors
-        # adapters/airgap/redis_adapter.py).
+        # the Air-Gap Redis adapter).
         self.redis: Any = redis_client
         self.prefix = prefix
 
@@ -63,13 +63,13 @@ class RedisMetricSourceAdapter(BaseMetricSourceAdapter):
 
     def get_dlq_pending_count(self, domain: str) -> int:
         """
-        도메인별 대기 중인 DLQ 항목 수 반환.
+        Return the number of pending DLQ entries for a domain.
 
         Args:
-            domain: 도메인 이름 (payment, point, inventory 등)
+            domain: domain name (payment, point, inventory, etc.)
 
         Returns:
-            대기 중인 DLQ 항목 수
+            Number of pending DLQ entries
         """
         try:
             key = self._make_key("dlq", "pending", domain)
@@ -84,13 +84,13 @@ class RedisMetricSourceAdapter(BaseMetricSourceAdapter):
 
     def get_dlq_count_by_status(self, status: str) -> int:
         """
-        상태별 DLQ 항목 수 반환.
+        Return the number of DLQ entries in a given status.
 
         Args:
-            status: 상태 (pending, resolved, failed 등)
+            status: status (pending, resolved, failed, etc.)
 
         Returns:
-            해당 상태의 DLQ 항목 수
+            Number of DLQ entries in that status
         """
         try:
             key = self._make_key("dlq", "status", status)
@@ -105,13 +105,13 @@ class RedisMetricSourceAdapter(BaseMetricSourceAdapter):
 
     def get_circuit_breaker_state(self, service: str) -> str:
         """
-        서비스의 Circuit Breaker 상태 반환.
+        Return the Circuit Breaker state of a service.
 
         Args:
-            service: 서비스 이름
+            service: service name
 
         Returns:
-            상태 문자열 (closed, open, half_open)
+            State string (closed, open, half_open)
         """
         try:
             key = self._make_key("cb", "state", service)
@@ -131,13 +131,13 @@ class RedisMetricSourceAdapter(BaseMetricSourceAdapter):
 
     def get_retry_success_rate(self, domain: str) -> float:
         """
-        도메인별 재시도 성공률 반환.
+        Return the retry success rate for a domain.
 
         Args:
-            domain: 도메인 이름
+            domain: domain name
 
         Returns:
-            성공률 (0.0 ~ 100.0)
+            Success rate (0.0 ~ 100.0)
         """
         try:
             key = self._make_key("retry", "success_rate", domain)
@@ -156,13 +156,13 @@ class RedisMetricSourceAdapter(BaseMetricSourceAdapter):
 
     def increment_dlq_pending(self, domain: str) -> int:
         """
-        DLQ 대기 수 증가 (DLQ 생성 시 호출).
+        Increment the DLQ pending count (called when a DLQ entry is created).
 
         Args:
-            domain: 도메인 이름
+            domain: domain name
 
         Returns:
-            증가 후 값
+            The value after incrementing
         """
         try:
             key = self._make_key("dlq", "pending", domain)
@@ -176,13 +176,13 @@ class RedisMetricSourceAdapter(BaseMetricSourceAdapter):
 
     def decrement_dlq_pending(self, domain: str) -> int:
         """
-        DLQ 대기 수 감소 (DLQ 해결 시 호출).
+        Decrement the DLQ pending count (called when a DLQ entry is resolved).
 
         Args:
-            domain: 도메인 이름
+            domain: domain name
 
         Returns:
-            감소 후 값
+            The value after decrementing
         """
         try:
             key = self._make_key("dlq", "pending", domain)
@@ -201,11 +201,11 @@ class RedisMetricSourceAdapter(BaseMetricSourceAdapter):
         ttl_seconds: int | None = None,
     ) -> None:
         """
-        Circuit Breaker 상태 설정.
+        Set the Circuit Breaker state.
 
         Args:
-            service: 서비스 이름
-            state: 상태 (closed, open, half_open)
+            service: service name
+            state: state (closed, open, half_open)
             ttl_seconds: Optional TTL in seconds
         """
         try:
@@ -222,11 +222,11 @@ class RedisMetricSourceAdapter(BaseMetricSourceAdapter):
 
     def set_retry_success_rate(self, domain: str, rate: float) -> None:
         """
-        재시도 성공률 설정.
+        Set the retry success rate.
 
         Args:
-            domain: 도메인 이름
-            rate: 성공률 (0.0 ~ 100.0)
+            domain: domain name
+            rate: success rate (0.0 ~ 100.0)
         """
         try:
             key = self._make_key("retry", "success_rate", domain)
@@ -239,11 +239,11 @@ class RedisMetricSourceAdapter(BaseMetricSourceAdapter):
 
     def set_dlq_pending_count(self, domain: str, count: int) -> None:
         """
-        DLQ 대기 수 직접 설정 (동기화 시 사용).
+        Set the DLQ pending count directly (used when syncing).
 
         Args:
-            domain: 도메인 이름
-            count: 설정할 값
+            domain: domain name
+            count: value to set
         """
         try:
             key = self._make_key("dlq", "pending", domain)

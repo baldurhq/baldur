@@ -1,14 +1,15 @@
 """
 Deployment Adapter Base Interface and Data Models.
 
-외부 배포 시스템과 연동하기 위한 추상 인터페이스와 데이터 모델을 정의합니다.
+Defines the abstract interface and data models for integrating with external
+deployment systems.
 
 Data Models:
-- DeploymentEvent: 배포 이벤트 정보
-- DeploymentConfigChange: 설정 변경 이벤트 정보
+- DeploymentEvent: deployment event information
+- DeploymentConfigChange: configuration change event information
 
 Interfaces:
-- ExternalDeploymentAdapter: 외부 배포 시스템 어댑터 프로토콜
+- ExternalDeploymentAdapter: external deployment system adapter protocol
 """
 
 from __future__ import annotations
@@ -22,99 +23,99 @@ from baldur.core.serializable import SerializableMixin
 
 
 class DeploymentType(str, Enum):
-    """배포 방식 유형."""
+    """Deployment strategy type."""
 
     ROLLING = "rolling"
-    """롤링 업데이트 배포."""
+    """Rolling update deployment."""
 
     CANARY = "canary"
-    """카나리 배포."""
+    """Canary deployment."""
 
     BLUE_GREEN = "blue-green"
-    """블루-그린 배포."""
+    """Blue-green deployment."""
 
     RECREATE = "recreate"
-    """재생성 배포."""
+    """Recreate deployment."""
 
     UNKNOWN = "unknown"
-    """알 수 없는 배포 방식."""
+    """Unknown deployment strategy."""
 
 
 class DeploymentSource(str, Enum):
-    """배포 정보 소스."""
+    """Source of the deployment information."""
 
     KUBERNETES = "kubernetes"
-    """Kubernetes API에서 수집."""
+    """Collected from the Kubernetes API."""
 
     ARGOCD = "argocd"
-    """ArgoCD에서 수집."""
+    """Collected from ArgoCD."""
 
     HELM = "helm"
-    """Helm Release에서 수집."""
+    """Collected from a Helm release."""
 
     MANUAL = "manual"
-    """수동 입력."""
+    """Entered manually."""
 
     MOCK = "mock"
-    """테스트용 Mock 데이터."""
+    """Mock data for testing."""
 
 
 @dataclass
 class DeploymentEvent(SerializableMixin):
     """
-    배포 이벤트 정보.
+    Deployment event information.
 
-    인시던트 발생 전후의 배포 이력을 추적하기 위한 데이터 모델입니다.
+    Data model for tracking deployment history around an incident.
 
     Attributes:
-        deployment_id: 배포 고유 ID
-        service_name: 대상 서비스 이름
-        version_from: 이전 버전
-        version_to: 새 버전
-        deployed_at: 배포 시각 (ISO 8601)
-        deployed_by: 배포자 (사용자 또는 시스템)
-        deployment_type: 배포 방식
-        source: 배포 정보 소스
-        namespace: 네임스페이스 (Kubernetes)
-        is_rollback: 롤백 배포 여부
-        metadata: 추가 메타데이터
+        deployment_id: unique deployment ID
+        service_name: target service name
+        version_from: previous version
+        version_to: new version
+        deployed_at: deployment time (ISO 8601)
+        deployed_by: deployer (user or system)
+        deployment_type: deployment strategy
+        source: source of the deployment information
+        namespace: namespace (Kubernetes)
+        is_rollback: whether this deployment is a rollback
+        metadata: additional metadata
     """
 
     deployment_id: str
-    """배포 고유 ID."""
+    """Unique deployment ID."""
 
     service_name: str
-    """대상 서비스 이름."""
+    """Target service name."""
 
     version_from: str
-    """이전 버전."""
+    """Previous version."""
 
     version_to: str
-    """새 버전."""
+    """New version."""
 
     deployed_at: str
-    """배포 시각 (ISO 8601 형식)."""
+    """Deployment time (ISO 8601 format)."""
 
     deployed_by: str = "system"
-    """배포자 (사용자 또는 시스템)."""
+    """Deployer (user or system)."""
 
     deployment_type: DeploymentType = DeploymentType.ROLLING
-    """배포 방식."""
+    """Deployment strategy."""
 
     source: DeploymentSource = DeploymentSource.KUBERNETES
-    """배포 정보 소스."""
+    """Source of the deployment information."""
 
     namespace: str = "default"
-    """네임스페이스."""
+    """Namespace."""
 
     is_rollback: bool = False
-    """롤백 배포 여부."""
+    """Whether this deployment is a rollback."""
 
     metadata: dict[str, Any] = field(default_factory=dict)
-    """추가 메타데이터."""
+    """Additional metadata."""
 
     def to_timeline_event(self) -> dict[str, Any]:
-        """타임라인 이벤트 형식으로 변환."""
+        """Convert to timeline event format."""
         event_type = "ROLLBACK" if self.is_rollback else "DEPLOY"
         return {
             "timestamp": self.deployed_at,
@@ -132,47 +133,47 @@ class DeploymentEvent(SerializableMixin):
 @dataclass
 class DeploymentConfigChange(SerializableMixin):
     """
-    설정 변경 이벤트 정보.
+    Configuration change event information.
 
-    인시던트 발생 전후의 설정 변경 이력을 추적하기 위한 데이터 모델입니다.
+    Data model for tracking configuration change history around an incident.
 
     Attributes:
-        change_id: 변경 고유 ID
-        config_key: 변경된 설정 키
-        old_value: 이전 값 (민감 정보 마스킹됨)
-        new_value: 새 값 (민감 정보 마스킹됨)
-        changed_at: 변경 시각 (ISO 8601)
-        changed_by: 변경자
-        service_name: 대상 서비스 이름
-        namespace: 네임스페이스
+        change_id: unique change ID
+        config_key: changed configuration key
+        old_value: previous value (sensitive data masked)
+        new_value: new value (sensitive data masked)
+        changed_at: change time (ISO 8601)
+        changed_by: who made the change
+        service_name: target service name
+        namespace: namespace
     """
 
     change_id: str
-    """변경 고유 ID."""
+    """Unique change ID."""
 
     config_key: str
-    """변경된 설정 키."""
+    """Changed configuration key."""
 
     old_value: str
-    """이전 값 (민감 정보 마스킹됨)."""
+    """Previous value (sensitive data masked)."""
 
     new_value: str
-    """새 값 (민감 정보 마스킹됨)."""
+    """New value (sensitive data masked)."""
 
     changed_at: str
-    """변경 시각 (ISO 8601 형식)."""
+    """Change time (ISO 8601 format)."""
 
     changed_by: str = "system"
-    """변경자."""
+    """Who made the change."""
 
     service_name: str = ""
-    """대상 서비스 이름."""
+    """Target service name."""
 
     namespace: str = "default"
-    """네임스페이스."""
+    """Namespace."""
 
     def to_timeline_event(self) -> dict[str, Any]:
-        """타임라인 이벤트 형식으로 변환."""
+        """Convert to timeline event format."""
         return {
             "timestamp": self.changed_at,
             "event_type": f"[CONFIG] {self.config_key}: {self.old_value} → {self.new_value}",
@@ -187,14 +188,15 @@ class DeploymentConfigChange(SerializableMixin):
 @runtime_checkable
 class ExternalDeploymentAdapter(Protocol):
     """
-    외부 배포 시스템 어댑터 인터페이스.
+    External deployment system adapter interface.
 
-    Kubernetes, ArgoCD, Helm 등 외부 배포 시스템과 연동하여
-    배포 이력을 수집하는 어댑터의 프로토콜을 정의합니다.
+    Defines the protocol for adapters that collect deployment history by
+    integrating with external deployment systems such as Kubernetes, ArgoCD
+    and Helm.
 
-    구현체:
-    - MockDeploymentAdapter: 테스트용 정적 데이터 반환
-    - KubernetesDeploymentAdapter: Kubernetes API 연동
+    Implementations:
+    - MockDeploymentAdapter: returns static data for testing
+    - KubernetesDeploymentAdapter: Kubernetes API integration
 
     Example:
         >>> adapter = MockDeploymentAdapter()
@@ -215,16 +217,16 @@ class ExternalDeploymentAdapter(Protocol):
         namespace: str = "default",
     ) -> list[DeploymentEvent]:
         """
-        지정된 시간 범위 내의 배포 이력을 조회합니다.
+        Look up deployment history within the given time range.
 
         Args:
-            service_name: 서비스 이름
-            start_time: 조회 시작 시각
-            end_time: 조회 종료 시각
-            namespace: 네임스페이스
+            service_name: service name
+            start_time: start of the query range
+            end_time: end of the query range
+            namespace: namespace
 
         Returns:
-            배포 이벤트 목록 (시간순 정렬)
+            List of deployment events (sorted chronologically)
         """
         ...
 
@@ -235,15 +237,15 @@ class ExternalDeploymentAdapter(Protocol):
         namespace: str = "default",
     ) -> DeploymentEvent | None:
         """
-        특정 버전의 배포 상세 정보를 조회합니다.
+        Look up deployment details for a specific version.
 
         Args:
-            service_name: 서비스 이름
-            version: 배포 버전
-            namespace: 네임스페이스
+            service_name: service name
+            version: deployed version
+            namespace: namespace
 
         Returns:
-            배포 이벤트 또는 None
+            Deployment event, or None
         """
         ...
 
@@ -253,14 +255,14 @@ class ExternalDeploymentAdapter(Protocol):
         namespace: str = "default",
     ) -> str | None:
         """
-        서비스의 현재 배포 버전을 조회합니다.
+        Look up the currently deployed version of a service.
 
         Args:
-            service_name: 서비스 이름
-            namespace: 네임스페이스
+            service_name: service name
+            namespace: namespace
 
         Returns:
-            현재 버전 문자열 또는 None
+            Current version string, or None
         """
         ...
 
@@ -271,15 +273,15 @@ class ExternalDeploymentAdapter(Protocol):
         limit: int = 10,
     ) -> list[DeploymentEvent]:
         """
-        롤백 이력을 조회합니다.
+        Look up rollback history.
 
         Args:
-            service_name: 서비스 이름
-            namespace: 네임스페이스
-            limit: 최대 조회 개수
+            service_name: service name
+            namespace: namespace
+            limit: maximum number of entries to return
 
         Returns:
-            롤백 이벤트 목록 (최신순 정렬)
+            List of rollback events (newest first)
         """
         ...
 
@@ -291,24 +293,24 @@ class ExternalDeploymentAdapter(Protocol):
         namespace: str = "default",
     ) -> list[DeploymentConfigChange]:
         """
-        지정된 시간 범위 내의 설정 변경 이력을 조회합니다.
+        Look up configuration change history within the given time range.
 
         Args:
-            service_name: 서비스 이름
-            start_time: 조회 시작 시각
-            end_time: 조회 종료 시각
-            namespace: 네임스페이스
+            service_name: service name
+            start_time: start of the query range
+            end_time: end of the query range
+            namespace: namespace
 
         Returns:
-            설정 변경 이벤트 목록 (시간순 정렬)
+            List of configuration change events (sorted chronologically)
         """
         ...
 
     def is_available(self) -> bool:
         """
-        어댑터가 사용 가능한지 확인합니다.
+        Check whether the adapter is available.
 
         Returns:
-            사용 가능 여부
+            Whether the adapter is available
         """
         ...

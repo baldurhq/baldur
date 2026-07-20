@@ -210,8 +210,6 @@ class RedisCircuitBreakerStateRepository(
     Multi-Cluster Support:
     - Namespace-aware key prefixing via NamespaceSettings
     - Key pattern: {namespace}:cb:{service_name} (when enabled)
-
-    Reference: docs/baldur/middleware_system/70_MULTI_CLUSTER_ARCHITECTURE.md
     """
 
     _BASE_PREFIX = "cb"
@@ -244,8 +242,8 @@ class RedisCircuitBreakerStateRepository(
         Returns:
             Component key prefix like "cb:"
         """
-        # CB는 항상 base prefix만 반환
-        # namespace prefixing은 ResilientStorageBackend에서 처리
+        # CB always returns only the base prefix.
+        # Namespace prefixing is handled by ResilientStorageBackend.
         return f"{self._BASE_PREFIX}:"
 
     @property

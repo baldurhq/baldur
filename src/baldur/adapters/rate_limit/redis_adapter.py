@@ -28,7 +28,7 @@ from baldur.interfaces.rate_limit_storage import (
     RateLimitStorageUnavailableError,
 )
 
-# Drift Detection 메트릭
+# Drift detection metrics
 try:
     from baldur.metrics.drift_metrics import (
         record_ratelimit_drift,
@@ -58,7 +58,7 @@ logger = structlog.get_logger()
 
 
 def _get_redis_ttl() -> int:
-    """RateLimitSettings에서 Redis TTL을 가져온다."""
+    """Read the Redis TTL from RateLimitSettings."""
     try:
         from baldur.settings.rate_limit import get_rate_limit_settings
 
@@ -74,10 +74,10 @@ class RedisRateLimitStorage(RateLimitStorageInterface):
     Uses Redis for atomic distributed rate limit state management.
     Recommended for production multi-server environments.
 
-    v6.3.0: Drift Detection
-    - Fallback 모드 추적 및 메트릭
-    - Redis 복구 시 로컬 상태와 동기화
-    - Drift 감지 및 reconciliation
+    v6.3.0: Drift detection
+    - Fallback-mode tracking and metrics
+    - Sync with local state once Redis recovers
+    - Drift detection and reconciliation
 
     Key schema:
         ratelimit:{key}:cooldown_until - float timestamp
@@ -93,7 +93,7 @@ class RedisRateLimitStorage(RateLimitStorageInterface):
     """
 
     KEY_PREFIX = "ratelimit"
-    DEFAULT_TTL = 3600  # 하위 호환성용 레거시 상수
+    DEFAULT_TTL = 3600  # Legacy constant kept for backward compatibility
 
     def __init__(self, redis_client: Any, ttl: int | None = None) -> None:
         """
@@ -101,14 +101,14 @@ class RedisRateLimitStorage(RateLimitStorageInterface):
 
         Args:
             redis_client: Redis client instance (redis.Redis or compatible)
-            ttl: Redis 키 TTL (초). None이면 Settings에서 가져옴.
+            ttl: Redis key TTL (seconds). Taken from settings when None.
         """
         self._redis = redis_client
         self._ttl = ttl if ttl is not None else _get_redis_ttl()
         self._available: bool | None = None
-        # v6.3.0: Fallback 모드 및 로컬 상태 추적
+        # v6.3.0: Fallback-mode and local-state tracking
         self._fallback_mode = False
-        self._local_state: dict[str, RateLimitState] = {}  # 폴백용 로컬 상태
+        self._local_state: dict[str, RateLimitState] = {}  # Local fallback state
 
     @property
     def storage_type(self) -> RateLimitStorageType:
@@ -122,7 +122,7 @@ class RedisRateLimitStorage(RateLimitStorageInterface):
         """Check if Redis is available."""
         try:
             self._redis.ping()
-            # v6.3.0: 복구됨 - drift 체크 필요
+            # v6.3.0: Recovered - a drift check is required
             if self._fallback_mode:
                 self._reconcile_after_recovery()
             self._fallback_mode = False
@@ -130,7 +130,7 @@ class RedisRateLimitStorage(RateLimitStorageInterface):
             self._available = True
             return True
         except Exception as e:
-            # v6.3.0: Redis 불가용 메트릭 기록
+            # v6.3.0: Record the Redis-unavailable metric
             if not self._fallback_mode:
                 record_ratelimit_redis_unavailable()
                 logger.warning(
@@ -143,7 +143,7 @@ class RedisRateLimitStorage(RateLimitStorageInterface):
             return False
 
     def _reconcile_after_recovery(self) -> None:
-        """Redis 복구 후 로컬 상태와 동기화."""
+        """Sync with local state after Redis recovers."""
         if not self._local_state:
             return
 
@@ -175,7 +175,7 @@ class RedisRateLimitStorage(RateLimitStorageInterface):
         self._local_state.clear()
 
     def _get_state_from_redis(self, key: str) -> RateLimitState | None:
-        """Redis에서 직접 상태 조회 (내부용)."""
+        """Read state directly from Redis (internal use)."""
         try:
             pipeline = self._redis.pipeline()
             pipeline.get(self._make_key(key, "cooldown_until"))
@@ -197,19 +197,19 @@ class RedisRateLimitStorage(RateLimitStorageInterface):
         local: RateLimitState,
         remote: RateLimitState,
     ) -> RateLimitState:
-        """두 상태 중 더 보수적인 값 선택."""
+        """Pick the more conservative of the two states."""
         return RateLimitState(
             key=local.key,
-            # 더 긴 cooldown 선택 (안전 우선)
+            # Take the longer cooldown (safety first)
             cooldown_until=max(local.cooldown_until, remote.cooldown_until),
-            # 더 높은 429 카운트 선택
+            # Take the higher 429 count
             consecutive_429s=max(local.consecutive_429s, remote.consecutive_429s),
-            # 더 최신 타임스탬프 선택
+            # Take the more recent timestamp
             last_updated=max(local.last_updated, remote.last_updated),
         )
 
     def _save_to_redis(self, key: str, state: RateLimitState) -> None:
-        """Redis에 상태 저장 (내부용)."""
+        """Save state to Redis (internal use)."""
         pipeline = self._redis.pipeline()
         pipeline.set(
             self._make_key(key, "cooldown_until"),

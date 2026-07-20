@@ -8,7 +8,7 @@ from django.db import migrations, models
 
 
 def create_baldur_groups(apps, schema_editor):
-    """baldur RBAC 그룹 생성."""
+    """Create the baldur RBAC groups."""
     groups = [
         "baldur_viewer",
         "baldur_operator",
@@ -20,7 +20,7 @@ def create_baldur_groups(apps, schema_editor):
 
 
 def remove_baldur_groups(apps, schema_editor):
-    """baldur RBAC 그룹 삭제 (롤백용)."""
+    """Delete the baldur RBAC groups (for rollback)."""
     groups = [
         "baldur_viewer",
         "baldur_operator",
@@ -32,12 +32,12 @@ def remove_baldur_groups(apps, schema_editor):
 
 class Migration(migrations.Migration):
     """
-    Baldur 시스템 초기 마이그레이션.
+    Initial migration for the Baldur system.
 
-    생성 내용:
-    - RBAC 그룹 (viewer, operator, admin, chaos_tester)
-    - PostmortemRecord 테이블
-    - CascadeEventArchive 테이블
+    Creates:
+    - RBAC groups (viewer, operator, admin, chaos_tester)
+    - PostmortemRecord table
+    - CascadeEventArchive table
     """
 
     initial = True
@@ -47,12 +47,12 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        # RBAC 그룹 생성
+        # Create RBAC groups
         migrations.RunPython(
             create_baldur_groups,
             reverse_code=remove_baldur_groups,
         ),
-        # PostmortemRecord 테이블
+        # PostmortemRecord table
         migrations.CreateModel(
             name="PostmortemRecord",
             fields=[
@@ -178,7 +178,7 @@ class Migration(migrations.Migration):
                 "ordering": ["-started_at"],
             },
         ),
-        # PostmortemRecord 인덱스
+        # PostmortemRecord indexes
         migrations.AddIndex(
             model_name="postmortemrecord",
             index=models.Index(
@@ -193,7 +193,7 @@ class Migration(migrations.Migration):
                 name="baldur_source_d92f33_idx",
             ),
         ),
-        # CascadeEventArchive 테이블
+        # CascadeEventArchive table
         migrations.CreateModel(
             name="CascadeEventArchive",
             fields=[
@@ -344,7 +344,7 @@ class Migration(migrations.Migration):
                 "ordering": ["-timestamp"],
             },
         ),
-        # CascadeEventArchive 인덱스
+        # CascadeEventArchive indexes
         migrations.AddIndex(
             model_name="cascadeeventarchive",
             index=models.Index(

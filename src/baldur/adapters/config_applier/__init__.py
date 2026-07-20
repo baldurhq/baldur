@@ -1,12 +1,12 @@
 """
 Config Applier Adapters.
 
-ConfigApplier Protocol 구현체 모음.
-각 어댑터는 특정 시스템의 설정을 런타임에 적용/롤백한다.
+Collection of ConfigApplier Protocol implementations.
+Each adapter applies or rolls back one system's settings at runtime.
 
 Available Adapters:
-    - ThrottleConfigApplier: AdaptiveThrottle SLA 설정 전용
-    - CompositeConfigApplier: 여러 ConfigApplier를 조합하는 Composite
+    - ThrottleConfigApplier: dedicated to AdaptiveThrottle SLA settings
+    - CompositeConfigApplier: composite combining several ConfigAppliers
 """
 
 from baldur.adapters.config_applier.composite import CompositeConfigApplier

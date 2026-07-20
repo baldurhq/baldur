@@ -1,7 +1,8 @@
 """
 AbstractAuditLog abstract model.
 
-이 모듈은 baldur.adapters.django.models 패키지의 내부 구현입니다.
+This module is an internal implementation of the
+baldur.adapters.django.models package.
 """
 
 from __future__ import annotations
@@ -28,14 +29,14 @@ class AbstractAuditLog(models.Model if DJANGO_AVAILABLE else object):  # type: i
     """
     Abstract Audit Log model for continuous audit recording.
 
-    136_EXCEPTION_HANDLER_6_ENHANCEMENTS.md Q3 보완 구현:
-    - audit_event_id: WAL 복구 시 중복 제거를 위한 Unique 필드
-    - ON CONFLICT (audit_event_id) DO NOTHING 지원
+    Deduplication support:
+    - audit_event_id: unique field used to deduplicate WAL recovery
+    - ON CONFLICT (audit_event_id) DO NOTHING support
 
-    특징:
-    - 해시 체인 기반 무결성 검증 지원
-    - WAL 복구 시 중복 삽입 방지 (2차 방어)
-    - 규정 준수를 위한 감사 추적
+    Features:
+    - Hash-chain-based integrity verification
+    - Duplicate insert prevention during WAL recovery (second line of defense)
+    - Audit trail for regulatory compliance
 
     Subclasses should:
     - Set abstract = False in Meta
@@ -59,7 +60,7 @@ class AbstractAuditLog(models.Model if DJANGO_AVAILABLE else object):  # type: i
         )
 
     # ========================================
-    # Unique Event Identifier (WAL 중복 방지용)
+    # Unique Event Identifier (for WAL deduplication)
     # ========================================
     audit_event_id = models.CharField(
         max_length=128,
@@ -240,7 +241,7 @@ class AbstractAuditLog(models.Model if DJANGO_AVAILABLE else object):  # type: i
         """
         Insert with ON CONFLICT DO NOTHING semantics.
 
-        WAL 복구 시 중복 삽입 방지 (2차 방어).
+        Prevents duplicate inserts during WAL recovery (second line of defense).
 
         Args:
             audit_event_id: Unique event identifier
@@ -361,7 +362,7 @@ class AbstractAuditLog(models.Model if DJANGO_AVAILABLE else object):  # type: i
         inserted = 0
         with connection.cursor() as cursor:
             for entry in normalized:
-                # dict/list 타입 필드를 JSON 문자열로 변환 (psycopg2 호환)
+                # Convert dict/list fields to JSON strings (psycopg2 compat)
                 values = []
                 for f in fields:
                     val = entry[f]

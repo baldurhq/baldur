@@ -1,7 +1,8 @@
 """
 AbstractFailedOperation abstract model.
 
-이 모듈은 baldur.adapters.django.models 패키지의 내부 구현입니다.
+This module is an internal implementation of the
+baldur.adapters.django.models package.
 """
 
 from __future__ import annotations
@@ -594,7 +595,7 @@ class AbstractFailedOperation(models.Model if DJANGO_AVAILABLE else object):  # 
         """
         expires_at = timezone.now() + timedelta(days=retention_days)
 
-        # Phase 0: metadata에 region 자동 주입 (221 설계)
+        # Auto-inject the region into metadata (221 design)
         metadata = metadata or {}
         try:
             from baldur.core.cluster_identity import get_cluster_identity
@@ -603,7 +604,7 @@ class AbstractFailedOperation(models.Model if DJANGO_AVAILABLE else object):  # 
             if identity.region:
                 metadata.setdefault("region", identity.region)
         except Exception:
-            pass  # Fail-Open: region 주입 실패 시 무시
+            pass  # Fail-open: ignore a failed region injection
 
         return cls.objects.create(
             domain=domain,

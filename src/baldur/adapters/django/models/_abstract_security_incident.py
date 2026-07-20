@@ -1,7 +1,8 @@
 """
 AbstractSecurityIncident abstract model.
 
-이 모듈은 baldur.adapters.django.models 패키지의 내부 구현입니다.
+This module is an internal implementation of the
+baldur.adapters.django.models package.
 """
 
 from __future__ import annotations

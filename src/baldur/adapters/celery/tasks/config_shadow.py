@@ -1,7 +1,7 @@
 """
 Config Shadow Celery Tasks.
 
-Shadow Evaluation 비동기 실행을 Celery 태스크로 래핑한다.
+Wraps asynchronous shadow evaluation execution in a Celery task.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ def run_shadow_evaluation(
     region: str = "",
     rollout_id: str | None = None,
 ) -> dict:
-    """Shadow Evaluation을 비동기로 실행한다."""
+    """Run a shadow evaluation asynchronously."""
     try:
         from baldur.services.config_shadow import (
             get_shadow_evaluator_service,

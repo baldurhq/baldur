@@ -1,11 +1,13 @@
 """
-Cell 대피 관련 비동기 Celery 태스크.
+Async Celery tasks for cell evacuation.
 
-Cell 격리/복구 시 감사 로그 및 이벤트 발행을 비동기로 처리합니다.
-CellEvacuationPolicy의 Fire-and-forget 통보에서 호출됩니다.
+Handles audit logging and event publication asynchronously when a cell is
+isolated or restored. Invoked from CellEvacuationPolicy's fire-and-forget
+notifications.
 
-autoretry로 전송 실패 시 자동 재시도(max 3회, 30초 간격)하며,
-acks_late로 Worker 종료 시 미완료 태스크를 브로커에 반환합니다.
+autoretry retries automatically on delivery failure (max 3 attempts, 30s
+apart), and acks_late returns unfinished tasks to the broker when a worker
+shuts down.
 """
 
 from __future__ import annotations
@@ -36,18 +38,18 @@ def notify_cell_isolation(
     duration_seconds: int = 3600,
 ) -> dict[str, Any]:
     """
-    Cell 격리 감사 로그 비동기 발행 태스크.
+    Task that asynchronously emits the cell-isolation audit log.
 
-    RegionalIsolationGate.isolate_region()을 호출하여
-    감사 로그 및 전역 이벤트를 기록합니다.
+    Calls RegionalIsolationGate.isolate_region() to record the audit log and
+    the global event.
 
     Args:
-        cell_id: 격리 대상 Cell 식별자
-        reason: 격리 사유
-        duration_seconds: 격리 지속 시간 (초)
+        cell_id: Identifier of the cell to isolate
+        reason: Isolation reason
+        duration_seconds: Isolation duration (seconds)
 
     Returns:
-        처리 결과 딕셔너리
+        Result dictionary
     """
     from baldur.services.isolation.regional_gate import (
         get_regional_isolation_gate,
@@ -90,17 +92,16 @@ def notify_cell_blast_radius(
     affected_services: list[str] | None = None,
 ) -> dict[str, Any]:
     """
-    Cell Blast Radius 정책 설정 비동기 태스크.
+    Task that asynchronously sets the cell blast-radius policy.
 
-    BlastRadiusService.set_policy()를 호출하여
-    감사 로그를 기록합니다.
+    Calls BlastRadiusService.set_policy() to record the audit log.
 
     Args:
-        cell_id: 대상 Cell 식별자
-        affected_services: 영향받는 서비스 목록
+        cell_id: Identifier of the target cell
+        affected_services: List of affected services
 
     Returns:
-        처리 결과 딕셔너리
+        Result dictionary
     """
     from baldur.services.blast_radius.models import BlastRadiusLevel
     from baldur.services.blast_radius.service import BlastRadiusService
@@ -146,16 +147,16 @@ def notify_cell_restoration(
     cell_id: str,
 ) -> dict[str, Any]:
     """
-    Cell 복구 감사 로그 비동기 발행 태스크.
+    Task that asynchronously emits the cell-restoration audit log.
 
-    RegionalIsolationGate.restore_region()을 호출하여
-    복구 감사 로그를 기록합니다.
+    Calls RegionalIsolationGate.restore_region() to record the restoration
+    audit log.
 
     Args:
-        cell_id: 복구 대상 Cell 식별자
+        cell_id: Identifier of the cell to restore
 
     Returns:
-        처리 결과 딕셔너리
+        Result dictionary
     """
     from baldur.services.isolation.regional_gate import (
         get_regional_isolation_gate,

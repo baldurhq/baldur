@@ -1,8 +1,8 @@
 """
-IPC 통신 관련 예외 클래스.
+Exception classes for IPC communication.
 
-Unix Domain Socket 및 gRPC 사이드카 통신에서 발생하는
-예외 상황을 정의합니다.
+Defines the failure cases that arise in Unix domain socket and gRPC sidecar
+communication.
 
 Usage:
     from baldur.adapters.ipc.exceptions import (
@@ -17,7 +17,7 @@ Usage:
     try:
         client.should_allow("service_name")
     except IPCConnectionError:
-        # Fail-open: 연결 실패 시 허용
+        # Fail-open: allow when the connection fails
         return True
 """
 
@@ -51,14 +51,14 @@ class IPCError(AdapterError):
 
 
 class IPCConnectionError(IPCError):
-    """IPC 연결 실패 예외."""
+    """Raised when an IPC connection fails."""
 
     def __init__(self, message: str = "Failed to connect to IPC server"):
         super().__init__(message, jsonrpc_code=-32003)
 
 
 class IPCTimeoutError(IPCError):
-    """IPC 요청 타임아웃 예외."""
+    """Raised when an IPC request times out."""
 
     def __init__(
         self, message: str = "IPC request timed out", timeout: float | None = None
@@ -68,21 +68,21 @@ class IPCTimeoutError(IPCError):
 
 
 class IPCAuthenticationError(IPCError):
-    """IPC 인증 실패 예외."""
+    """Raised when IPC authentication fails."""
 
     def __init__(self, message: str = "Authentication failed"):
         super().__init__(message, jsonrpc_code=-32001)
 
 
 class IPCAuthorizationError(IPCError):
-    """IPC 권한 부족 예외."""
+    """Raised when the IPC caller lacks permission."""
 
     def __init__(self, message: str = "Authorization denied"):
         super().__init__(message, jsonrpc_code=-32002)
 
 
 class IPCMethodNotFoundError(IPCError):
-    """IPC 메서드를 찾을 수 없음."""
+    """Raised when the IPC method cannot be found."""
 
     def __init__(self, method: str):
         message = f"Method not found: {method}"
@@ -91,7 +91,7 @@ class IPCMethodNotFoundError(IPCError):
 
 
 class IPCInvalidParamsError(IPCError):
-    """IPC 잘못된 파라미터."""
+    """Raised when IPC parameters are invalid."""
 
     def __init__(self, message: str = "Invalid params", param_name: str | None = None):
         super().__init__(message, jsonrpc_code=-32602)
@@ -99,14 +99,14 @@ class IPCInvalidParamsError(IPCError):
 
 
 class IPCParseError(IPCError):
-    """IPC 메시지 파싱 실패."""
+    """Raised when an IPC message cannot be parsed."""
 
     def __init__(self, message: str = "Failed to parse message"):
         super().__init__(message, jsonrpc_code=-32700)
 
 
 class IPCInternalError(IPCError):
-    """IPC 내부 서버 오류."""
+    """Raised on an internal IPC server error."""
 
     def __init__(
         self, message: str = "Internal server error", cause: Exception | None = None
@@ -116,7 +116,7 @@ class IPCInternalError(IPCError):
 
 
 class IPCRateLimitedError(IPCError):
-    """IPC 요청 제한 초과."""
+    """Raised when the IPC request rate limit is exceeded."""
 
     def __init__(
         self, message: str = "Rate limit exceeded", retry_after: float | None = None
@@ -126,7 +126,7 @@ class IPCRateLimitedError(IPCError):
 
 
 class IPCCircuitBreakerOpenError(IPCError):
-    """IPC 서킷 브레이커 열림 상태."""
+    """Raised when the IPC circuit breaker is open."""
 
     def __init__(self, service_name: str, message: str | None = None):
         msg = message or f"Circuit breaker is open for service: {service_name}"
@@ -135,7 +135,7 @@ class IPCCircuitBreakerOpenError(IPCError):
 
 
 class IPCServiceUnavailableError(IPCError):
-    """IPC 서비스 이용 불가."""
+    """Raised when the IPC service is unavailable."""
 
     def __init__(self, service_name: str | None = None, message: str | None = None):
         msg = message or "Service unavailable"

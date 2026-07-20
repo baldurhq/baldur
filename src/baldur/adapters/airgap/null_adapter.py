@@ -18,17 +18,17 @@ logger = structlog.get_logger()
 
 class NullAirGapAdapter(BaseAirGapAdapter):
     """
-    비활성화용 No-op Air-Gap 어댑터.
+    No-op Air-Gap adapter for the disabled case.
 
-    Air-Gap 기능이 비활성화된 경우 사용됩니다.
-    모든 쓰기 작업은 무시되고, 읽기 작업은 None을 반환합니다.
-    기존 로직이 그대로 동작합니다.
+    Used when the Air-Gap feature is turned off.
+    All writes are ignored and all reads return None,
+    so existing logic keeps working unchanged.
 
     Example:
         >>> adapter = NullAirGapAdapter()
-        >>> adapter.write_summary("key", "value")  # 무시됨
+        >>> adapter.write_summary("key", "value")  # ignored
         True
-        >>> adapter.read_summary("key")  # None 반환
+        >>> adapter.read_summary("key")  # returns None
         None
         >>> adapter.is_enabled()
         False
@@ -40,86 +40,86 @@ class NullAirGapAdapter(BaseAirGapAdapter):
 
     def write_summary(self, key: str, value: Any, ttl: int | None = None) -> bool:
         """
-        쓰기 작업 무시 (no-op).
+        Ignore the write (no-op).
 
         Args:
-            key: 저장소 키 (무시됨)
-            value: 저장할 값 (무시됨)
-            ttl: TTL (무시됨)
+            key: storage key (ignored)
+            value: value to store (ignored)
+            ttl: TTL (ignored)
 
         Returns:
-            항상 True (성공으로 간주)
+            Always True (treated as success)
         """
         return True
 
     def read_summary(self, key: str) -> Any:
         """
-        항상 None 반환.
+        Always return None.
 
         Args:
-            key: 저장소 키
+            key: storage key
 
         Returns:
-            항상 None (Air-Gap에 데이터 없음)
+            Always None (no data in the Air-Gap storage)
         """
         return None
 
     def delete_summary(self, key: str) -> bool:
         """
-        삭제 작업 무시 (no-op).
+        Ignore the delete (no-op).
 
         Args:
-            key: 저장소 키 (무시됨)
+            key: storage key (ignored)
 
         Returns:
-            항상 True (성공으로 간주)
+            Always True (treated as success)
         """
         return True
 
     def read_many(self, keys: list[str]) -> dict[str, Any]:
         """
-        모든 키에 대해 None 반환.
+        Return None for every key.
 
         Args:
-            keys: 조회할 키 목록
+            keys: keys to read
 
         Returns:
-            모든 값이 None인 딕셔너리
+            Dictionary whose values are all None
         """
         return dict.fromkeys(keys)
 
     def increment(self, key: str, amount: int = 1) -> int:
         """
-        증가 작업 무시 (no-op).
+        Ignore the increment (no-op).
 
         Args:
-            key: 저장소 키 (무시됨)
-            amount: 증가량 (무시됨)
+            key: storage key (ignored)
+            amount: increment amount (ignored)
 
         Returns:
-            항상 0
+            Always 0
         """
         return 0
 
     def decrement(self, key: str, amount: int = 1) -> int:
         """
-        감소 작업 무시 (no-op).
+        Ignore the decrement (no-op).
 
         Args:
-            key: 저장소 키 (무시됨)
-            amount: 감소량 (무시됨)
+            key: storage key (ignored)
+            amount: decrement amount (ignored)
 
         Returns:
-            항상 0
+            Always 0
         """
         return 0
 
     def is_enabled(self) -> bool:
         """
-        Air-Gap 비활성화 상태.
+        Air-Gap is disabled.
 
         Returns:
-            항상 False
+            Always False
         """
         return False
 
