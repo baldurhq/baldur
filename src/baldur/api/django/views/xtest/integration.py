@@ -1,27 +1,27 @@
 """
 X-Test-Mode Integration Test Views
 
-Baldur 컴포넌트들의 상호 연동을 검증하기 위한 통합 테스트 API.
+Integration test API verifying that Baldur components work together.
 
 Endpoints:
-- POST /api/baldur/xtest/integration/run-scenario/ - 시나리오 실행
-- GET  /api/baldur/xtest/integration/scenario/{id}/ - 시나리오 상태 조회
-- GET  /api/baldur/xtest/integration/full-snapshot/ - 전체 시스템 스냅샷
-- POST /api/baldur/xtest/integration/reset/ - 시스템 초기화 (테스트용)
+- POST /api/baldur/xtest/integration/run-scenario/ - run a scenario
+- GET  /api/baldur/xtest/integration/scenario/{id}/ - query scenario status
+- GET  /api/baldur/xtest/integration/full-snapshot/ - full system snapshot
+- POST /api/baldur/xtest/integration/reset/ - reset the system (test only)
 
 Scenarios:
-- cb_open_dlq_flow: CB Open → DLQ 저장 플로우
-- retry_exhaust_dlq: Retry 소진 → DLQ 플로우
-- rate_limit_retry: Rate Limit → Retry 백오프
-- dlq_replay_success: DLQ → Replay 성공
-- dlq_replay_failure: DLQ → Replay 실패 → 재DLQ
-- full_recovery_cycle: 전체 장애 → 복구 사이클
-- idempotent_replay: Replay 멱등성 보장
+- cb_open_dlq_flow: CB Open -> DLQ store flow
+- retry_exhaust_dlq: retry exhaustion -> DLQ flow
+- rate_limit_retry: rate limit -> retry backoff
+- dlq_replay_success: DLQ -> replay success
+- dlq_replay_failure: DLQ -> replay failure -> re-DLQ
+- full_recovery_cycle: full outage -> recovery cycle
+- idempotent_replay: replay idempotency guarantee
 
 Security:
-- X-Test-Mode: chaos-monkey 헤더 필수
-- DEBUG 또는 CHAOS_ENABLED 환경 변수 필요
-- production 환경에서는 완전 차단
+- X-Test-Mode: chaos-monkey header required
+- DEBUG or the CHAOS_ENABLED environment variable required
+- fully blocked in production environments
 """
 
 from typing import Any
@@ -47,21 +47,21 @@ logger = structlog.get_logger()
 
 
 # =============================================================================
-# 시나리오 실행 View
+# Run Scenario View
 # =============================================================================
 
 
 class RunScenarioView(XTestModeMixin, APIView):
     """
-    통합 테스트 시나리오 실행 API.
+    Integration test scenario execution API.
 
     POST /api/baldur/xtest/integration/run-scenario/
 
     Request:
         {
-            "scenario": "cb_open_dlq_flow",  // 시나리오 식별자 (필수)
-            "service_name": "test_service",  // 테스트 대상 서비스 (필수)
-            "config": {                      // 시나리오별 설정 (선택)
+            "scenario": "cb_open_dlq_flow",  // scenario identifier (required)
+            "service_name": "test_service",  // service under test (required)
+            "config": {                      // per-scenario settings (optional)
                 "failure_count": 5
             }
         }
@@ -87,7 +87,7 @@ class RunScenarioView(XTestModeMixin, APIView):
         service_name = request.data.get("service_name")
         config = request.data.get("config", {})
 
-        # 필수 파라미터 검증
+        # Validate the required parameters
         if not scenario_name:
             return Response(
                 {
@@ -109,7 +109,7 @@ class RunScenarioView(XTestModeMixin, APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # 시나리오 클래스 조회
+        # Look up the scenario class
         scenario_class = get_scenario_class(scenario_name)
         if not scenario_class:
             return Response(
@@ -122,7 +122,7 @@ class RunScenarioView(XTestModeMixin, APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # 시나리오 실행
+        # Run the scenario
         try:
             scenario = scenario_class(service_name=service_name, config=config)
             result = scenario.run()
@@ -134,8 +134,8 @@ class RunScenarioView(XTestModeMixin, APIView):
                 steps_count=len(result.steps),
             )
 
-            # WAL Audit 기록 (scenario_audit 사용)
-            # duration_ms 계산: 각 step의 duration_ms 합계
+            # Record the WAL audit entry (via scenario_audit)
+            # duration_ms is the sum of every step's duration_ms
             total_duration_ms = sum(s.duration_ms for s in result.steps)
             log_xtest_scenario_audit(
                 scenario_id=result.scenario_id,
@@ -177,13 +177,13 @@ class RunScenarioView(XTestModeMixin, APIView):
 
 
 # =============================================================================
-# 시나리오 상태 조회 View
+# Scenario Status View
 # =============================================================================
 
 
 class ScenarioStatusView(XTestModeMixin, APIView):
     """
-    시나리오 실행 상태 조회 API.
+    Scenario execution status query API.
 
     GET /api/baldur/xtest/integration/scenario/{scenario_id}/
 
@@ -216,7 +216,7 @@ class ScenarioStatusView(XTestModeMixin, APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        # WAL Audit 기록
+        # Record the WAL audit entry
         self.log_xtest_audit(
             request=request,
             action="query_scenario",
@@ -235,19 +235,19 @@ class ScenarioStatusView(XTestModeMixin, APIView):
 
 
 # =============================================================================
-# 전체 시스템 스냅샷 View
+# Full System Snapshot View
 # =============================================================================
 
 
 class FullSnapshotView(XTestModeMixin, APIView):
     """
-    모든 Baldur 컴포넌트 상태 통합 조회 API.
+    Combined status query API across every Baldur component.
 
     GET /api/baldur/xtest/integration/full-snapshot/
 
     Query Parameters:
-        service_name: 서비스 필터 (선택)
-        include_history: 히스토리 포함 여부 (선택, 기본 false)
+        service_name: service filter (optional)
+        include_history: whether to include history (optional, default false)
 
     Response:
         {
@@ -278,7 +278,7 @@ class FullSnapshotView(XTestModeMixin, APIView):
             "include_history": include_history,
         }
 
-        # Circuit Breaker 상태
+        # Circuit Breaker state
         try:
             from baldur.services.circuit_breaker import (
                 get_circuit_breaker_service,
@@ -304,7 +304,7 @@ class FullSnapshotView(XTestModeMixin, APIView):
             )
             snapshot["circuit_breakers"] = {"error": str(e)}
 
-        # Error Budget 상태
+        # Error Budget state
         try:
             from baldur.factory.registry import ProviderRegistry
 
@@ -334,7 +334,7 @@ class FullSnapshotView(XTestModeMixin, APIView):
             )
             snapshot["error_budget"] = {"error": str(e)}
 
-        # DLQ 상태
+        # DLQ state
         try:
             from baldur.factory.registry import ProviderRegistry
 
@@ -354,7 +354,7 @@ class FullSnapshotView(XTestModeMixin, APIView):
             )
             snapshot["dlq"] = {"error": str(e)}
 
-        # Rate Limiter 상태
+        # Rate Limiter state
         try:
             from baldur.api.django.rate_limit import (
                 RedisHealthState,
@@ -380,7 +380,7 @@ class FullSnapshotView(XTestModeMixin, APIView):
             )
             snapshot["rate_limiter"] = {"error": str(e)}
 
-        # Idempotency 상태
+        # Idempotency state
         try:
             from baldur.services.idempotency import IdempotencyService
 
@@ -397,7 +397,7 @@ class FullSnapshotView(XTestModeMixin, APIView):
             )
             snapshot["idempotency"] = {"error": str(e)}
 
-        # Retry 상태
+        # Retry state
         try:
             from baldur.services.retry_handler import RetryPolicyConfig
 
@@ -418,10 +418,10 @@ class FullSnapshotView(XTestModeMixin, APIView):
             )
             snapshot["retry"] = {"error": str(e)}
 
-        # 시스템 스냅샷 추가
+        # Add the system snapshot
         snapshot["system"] = collect_system_snapshot()
 
-        # WAL Audit 기록
+        # Record the WAL audit entry
         self.log_xtest_audit(
             request=request,
             action="full_snapshot",
@@ -443,7 +443,7 @@ class FullSnapshotView(XTestModeMixin, APIView):
 
 
 # =============================================================================
-# 시스템 초기화 View
+# System Reset View
 # =============================================================================
 
 
@@ -455,7 +455,7 @@ class FullSnapshotView(XTestModeMixin, APIView):
 def _reset_circuit_breakers(
     service_name: str | None, xtest_only: bool
 ) -> dict[str, Any]:
-    """Circuit Breaker 컴포넌트 초기화."""
+    """Reset the Circuit Breaker component."""
     try:
         from baldur.services.circuit_breaker import (
             get_circuit_breaker_service,
@@ -474,12 +474,12 @@ def _reset_circuit_breakers(
 
 
 def _reset_error_budget() -> dict[str, Any]:
-    """Error Budget 컴포넌트 초기화."""
+    """Reset the Error Budget component."""
     return {"reset": True, "note": "EB reset is simulated in X-Test mode"}
 
 
 def _reset_dlq(xtest_only: bool) -> dict[str, Any]:
-    """DLQ 컴포넌트 초기화."""
+    """Reset the DLQ component."""
     try:
         from baldur.factory.registry import ProviderRegistry
 
@@ -494,7 +494,7 @@ def _reset_dlq(xtest_only: bool) -> dict[str, Any]:
 
 
 def _reset_rate_limiter() -> dict[str, Any]:
-    """Rate Limiter 컴포넌트 초기화."""
+    """Reset the Rate Limiter component."""
     try:
         from baldur.api.django.rate_limit import get_local_limiter
 
@@ -509,12 +509,12 @@ def _reset_rate_limiter() -> dict[str, Any]:
 
 
 def _reset_idempotency(xtest_only: bool) -> dict[str, Any]:
-    """Idempotency 컴포넌트 초기화."""
+    """Reset the Idempotency component."""
     return {"reset": True, "scope": "xtest_keys" if xtest_only else "all_keys"}
 
 
 def _reset_scenarios() -> dict[str, Any]:
-    """Scenario 결과 초기화."""
+    """Reset the stored scenario results."""
     try:
         count = clear_scenario_results()
         return {"reset": True, "cleared_count": count}
@@ -524,15 +524,15 @@ def _reset_scenarios() -> dict[str, Any]:
 
 class ResetView(XTestModeMixin, APIView):
     """
-    테스트 전 시스템 상태 초기화 API.
+    Pre-test system state reset API.
 
     POST /api/baldur/xtest/integration/reset/
 
     Request:
         {
-            "components": ["circuit_breakers", "dlq", "rate_limiter"],  // 선택, 기본 all
-            "service_name": "test_service",  // 선택
-            "xtest_only": true               // 선택, X-Test 생성 데이터만 (기본 true)
+            "components": ["circuit_breakers", "dlq", "rate_limiter"],  // optional, default all
+            "service_name": "test_service",  // optional
+            "xtest_only": true               // optional, X-Test-created data only (default true)
         }
 
     Response:
@@ -556,7 +556,7 @@ class ResetView(XTestModeMixin, APIView):
         "all",
     ]
 
-    # 컴포넌트별 리셋 핸들러 매핑
+    # Per-component reset handler mapping
     RESET_HANDLERS = {
         "circuit_breakers": lambda sn, xo: _reset_circuit_breakers(sn, xo),
         "error_budget": lambda sn, xo: _reset_error_budget(),
@@ -567,7 +567,7 @@ class ResetView(XTestModeMixin, APIView):
     }
 
     def _validate_components(self, components: list[str]) -> Response | None:
-        """컴포넌트 유효성 검증. 오류 시 Response 반환."""
+        """Validate the component list; return a Response on error."""
         invalid = [c for c in components if c not in self.VALID_COMPONENTS]
         if invalid:
             return Response(
@@ -587,7 +587,7 @@ class ResetView(XTestModeMixin, APIView):
         service_name: str | None,
         xtest_only: bool,
     ) -> dict[str, Any]:
-        """각 컴포넌트에 대한 리셋 실행."""
+        """Run the reset for each component."""
         reset_all = "all" in components
         results: dict[str, Any] = {}
 
@@ -609,12 +609,12 @@ class ResetView(XTestModeMixin, APIView):
         if isinstance(components, str):
             components = [components]
 
-        # 유효성 검증
+        # Validate
         validation_error = self._validate_components(components)
         if validation_error:
             return validation_error
 
-        # 컴포넌트별 리셋 실행
+        # Run the per-component resets
         reset_results = self._execute_resets(components, service_name, xtest_only)
 
         logger.info(
@@ -633,7 +633,7 @@ class ResetView(XTestModeMixin, APIView):
             "timestamp": timezone.now().isoformat(),
         }
 
-        # WAL Audit 기록
+        # Record the WAL audit entry
         self.log_xtest_cleanup(
             request=request,
             component="integration",
