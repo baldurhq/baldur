@@ -1,18 +1,17 @@
 """
 Cascade Event Audit Prometheus Metrics.
 
-Prometheus 호환 메트릭 정의.
+Prometheus-compatible metric definitions.
 
 Metrics:
-- baldur_cascade_events_total: Cascade Event 총 개수 (by namespace, trigger_type)
-- baldur_cascade_effects_total: 연쇄 효과 총 개수 (by namespace, action_type, success)
-- baldur_cascade_chain_depth_max: 최대 체인 깊이 (by namespace)
-- baldur_cascade_integrity_valid: Hash Chain 무결성 상태 (1=valid, 0=invalid)
-- baldur_cascade_load_shedding_dropped_total: Load Shedding으로 드랍된 이벤트 수 (by priority)
-- baldur_cascade_fallback_writes_total: 로컬 폴백 저장 횟수
-
-Reference:
-    docs/baldur/middleware_system/76_CASCADE_EVENT_AUDIT.md
+- baldur_cascade_events_total: total cascade events (by namespace, trigger_type)
+- baldur_cascade_effects_total: total cascade effects
+  (by namespace, action_type, success)
+- baldur_cascade_chain_depth_max: maximum chain depth (by namespace)
+- baldur_cascade_integrity_valid: hash chain integrity status (1=valid, 0=invalid)
+- baldur_cascade_load_shedding_dropped_total: events dropped by load shedding
+  (by priority)
+- baldur_cascade_fallback_writes_total: number of local fallback writes
 """
 
 from __future__ import annotations
@@ -30,9 +29,9 @@ logger = structlog.get_logger()
 
 class CascadeMetrics:
     """
-    Cascade Event Audit용 Prometheus 호환 메트릭.
+    Prometheus-compatible metrics for Cascade Event Audit.
 
-    싱글턴 패턴으로 구현되어 전역에서 동일 인스턴스를 사용합니다.
+    Implemented as a singleton so the same instance is used globally.
 
     Usage:
         from baldur.audit.cascade_metrics import CascadeMetrics
@@ -56,7 +55,7 @@ class CascadeMetrics:
         # {priority: count}
         self._load_shedding_dropped_total: dict[str, int] = {}
 
-        # 로컬 폴백 저장 횟수
+        # Number of local fallback writes
         self._fallback_writes_total: int = 0
 
         # Gauges
@@ -65,12 +64,12 @@ class CascadeMetrics:
         # {namespace: is_valid (1 or 0)}
         self._integrity_valid: dict[str, int] = {}
 
-        # 타임스탬프
+        # Timestamp
         self._last_updated: datetime | None = None
 
     @classmethod
     def get_instance(cls) -> CascadeMetrics:
-        """싱글턴 인스턴스 획득."""
+        """Get the singleton instance."""
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
@@ -79,7 +78,7 @@ class CascadeMetrics:
 
     @classmethod
     def reset_instance(cls) -> None:
-        """테스트용: 싱글턴 인스턴스 초기화."""
+        """For testing: reset the singleton instance."""
         with cls._lock:
             cls._instance = None
 
@@ -93,11 +92,11 @@ class CascadeMetrics:
         trigger_type: str,
     ) -> None:
         """
-        Cascade Event 기록 메트릭.
+        Record a Cascade Event metric.
 
         Args:
-            namespace: 네임스페이스
-            trigger_type: 트리거 유형 (EMERGENCY_LEVEL_CHANGED 등)
+            namespace: Namespace
+            trigger_type: Trigger type (EMERGENCY_LEVEL_CHANGED, etc.)
         """
         with self._metrics_lock:
             if namespace not in self._cascade_events_total:
@@ -122,12 +121,12 @@ class CascadeMetrics:
         success: bool,
     ) -> None:
         """
-        연쇄 효과 기록 메트릭.
+        Record a cascade effect metric.
 
         Args:
-            namespace: 네임스페이스
-            action_type: 액션 유형 (governance_strict, canary_rollback 등)
-            success: 성공 여부
+            namespace: Namespace
+            action_type: Action type (governance_strict, canary_rollback, etc.)
+            success: Whether it succeeded
         """
         with self._metrics_lock:
             if namespace not in self._cascade_effects_total:
@@ -149,11 +148,11 @@ class CascadeMetrics:
         depth: int,
     ) -> None:
         """
-        체인 깊이 기록 (최대값 갱신).
+        Record chain depth (updates the maximum).
 
         Args:
-            namespace: 네임스페이스
-            depth: 현재 체인 깊이
+            namespace: Namespace
+            depth: Current chain depth
         """
         with self._metrics_lock:
             current_max = self._chain_depth_max.get(namespace, 0)
@@ -167,11 +166,11 @@ class CascadeMetrics:
         is_valid: bool,
     ) -> None:
         """
-        Hash Chain 무결성 검증 결과 기록.
+        Record the result of a Hash Chain integrity check.
 
         Args:
-            namespace: 네임스페이스
-            is_valid: 무결성 유효 여부
+            namespace: Namespace
+            is_valid: Whether integrity holds
         """
         with self._metrics_lock:
             self._integrity_valid[namespace] = 1 if is_valid else 0
@@ -182,10 +181,10 @@ class CascadeMetrics:
         priority: str,
     ) -> None:
         """
-        Load Shedding 드랍 기록.
+        Record a Load Shedding drop.
 
         Args:
-            priority: 이벤트 우선순위 (CRITICAL, HIGH, MEDIUM, LOW)
+            priority: Event priority (CRITICAL, HIGH, MEDIUM, LOW)
         """
         with self._metrics_lock:
             if priority not in self._load_shedding_dropped_total:
@@ -195,7 +194,7 @@ class CascadeMetrics:
             self._last_updated = utc_now()
 
     def record_fallback_write(self) -> None:
-        """로컬 폴백 저장 기록."""
+        """Record a local fallback write."""
         with self._metrics_lock:
             self._fallback_writes_total += 1
             self._last_updated = utc_now()
@@ -205,41 +204,41 @@ class CascadeMetrics:
     # =========================================================================
 
     def get_cascade_events_total(self) -> dict[str, dict[str, int]]:
-        """Cascade Event 총 개수 조회 (namespace → trigger_type → count)."""
+        """Read total cascade events (namespace → trigger_type → count)."""
         with self._metrics_lock:
             return dict(self._cascade_events_total)
 
     def get_effects_total(self) -> dict[str, dict[str, dict[str, int]]]:
-        """연쇄 효과 총 개수 조회 (namespace → action_type → success/failure → count)."""
+        """Read total effects (namespace → action_type → success/failure → count)."""
         with self._metrics_lock:
             return dict(self._cascade_effects_total)
 
     def get_chain_depth_max(self) -> dict[str, int]:
-        """네임스페이스별 최대 체인 깊이 조회."""
+        """Read the maximum chain depth per namespace."""
         with self._metrics_lock:
             return dict(self._chain_depth_max)
 
     def get_integrity_status(self) -> dict[str, int]:
-        """네임스페이스별 무결성 상태 조회 (1=valid, 0=invalid)."""
+        """Read integrity status per namespace (1=valid, 0=invalid)."""
         with self._metrics_lock:
             return dict(self._integrity_valid)
 
     def get_load_shedding_dropped(self) -> dict[str, int]:
-        """우선순위별 Load Shedding 드랍 개수 조회."""
+        """Read the Load Shedding drop count per priority."""
         with self._metrics_lock:
             return dict(self._load_shedding_dropped_total)
 
     def get_fallback_writes_total(self) -> int:
-        """로컬 폴백 저장 총 횟수."""
+        """Total number of local fallback writes."""
         with self._metrics_lock:
             return self._fallback_writes_total
 
     def get_all_metrics(self) -> dict[str, Any]:
         """
-        전체 메트릭 조회.
+        Read all metrics.
 
         Returns:
-            모든 메트릭을 포함한 딕셔너리
+            Dictionary containing every metric
         """
         with self._metrics_lock:
             return {
@@ -256,10 +255,10 @@ class CascadeMetrics:
 
     def to_prometheus_format(self) -> str:
         """
-        Prometheus 텍스트 형식으로 내보내기.
+        Export in the Prometheus text format.
 
         Returns:
-            Prometheus exposition format 문자열
+            Prometheus exposition format string
         """
         lines = []
 
@@ -334,5 +333,5 @@ class CascadeMetrics:
 
 
 def get_cascade_metrics() -> CascadeMetrics:
-    """CascadeMetrics 싱글턴 획득 헬퍼 함수."""
+    """Helper to get the CascadeMetrics singleton."""
     return CascadeMetrics.get_instance()

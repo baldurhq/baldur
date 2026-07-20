@@ -5,18 +5,23 @@ Provides privacy-preserving data handling for audit logs.
 Implements Privacy-by-Design principles for GDPR/CCPA compliance.
 
 Role-based Masking:
-    - MaskingLevel.CLIENT: 클라이언트 응답용 - 완전 치환 (***REDACTED***)
-    - MaskingLevel.AUDIT: 내부 감사용 - 해시화 (동일성 확인 가능)
-    - MaskingLevel.FORENSIC: 법적 조사용 - Fernet 대칭 암호화 (복원 가능)
+    - MaskingLevel.CLIENT: for client responses - full replacement
+      (***REDACTED***)
+    - MaskingLevel.AUDIT: for internal audit - hashed (equality still
+      checkable)
+    - MaskingLevel.FORENSIC: for legal investigation - Fernet symmetric
+      encryption (recoverable)
 
-RBAC 역할별 접근 가능 레벨:
-    - baldur_admin (우선순위 3): FORENSIC까지 허용
-    - baldur_operator (우선순위 2): AUDIT까지 허용
-    - baldur_viewer (우선순위 1): CLIENT만 허용
+Levels accessible per RBAC role:
+    - baldur_admin (priority 3): allowed up to FORENSIC
+    - baldur_operator (priority 2): allowed up to AUDIT
+    - baldur_viewer (priority 1): CLIENT only
 
 Security Hardening (214_SECURITY_VULNERABILITY_FIXES):
-    - FORENSIC 레벨: SHA-256 해시 → Fernet 대칭 암호화 (실제 복원 가능)
-    - encryption_key 미설정 시 AUDIT 레벨로 자동 폴백
+    - FORENSIC level: SHA-256 hash → Fernet symmetric encryption
+      (actually recoverable)
+    - Falls back automatically to the AUDIT level when encryption_key
+      is unset
 """
 
 import base64
@@ -62,41 +67,41 @@ DEFAULT_SENSITIVE_KEYS: list[str] = [
 ]
 
 # =============================================================================
-# MaskingLevel Enum (RBAC 연동)
+# MaskingLevel Enum (RBAC integration)
 # =============================================================================
 
 
 class MaskingLevel(str, Enum):
     """
-    마스킹 수준.
+    Masking level.
 
-    RBAC 역할에 따라 다른 마스킹 수준을 적용합니다.
+    Applies a different masking level depending on the RBAC role.
 
-    - CLIENT: 클라이언트 응답용 - 완전 치환 (***REDACTED***)
-    - AUDIT: 내부 감사용 - SHA-256 해시화 (동일성 확인 가능)
-    - FORENSIC: 법적 조사용 - 암호화 저장 (복원 가능)
+    - CLIENT: for client responses - full replacement (***REDACTED***)
+    - AUDIT: for internal audit - SHA-256 hashed (equality still checkable)
+    - FORENSIC: for legal investigation - stored encrypted (recoverable)
     """
 
     CLIENT = "client"
-    """클라이언트 응답용: 완전 치환 (복원 불가)"""
+    """For client responses: full replacement (not recoverable)."""
 
     AUDIT = "audit"
-    """내부 감사용: SHA-256 해시화 (동일성 확인만 가능)"""
+    """For internal audit: SHA-256 hashed (equality checks only)."""
 
     FORENSIC = "forensic"
-    """법적 조사용: Fernet 대칭 암호화 (복원 가능)"""
+    """For legal investigation: Fernet symmetric encryption (recoverable)."""
 
 
 def _get_forensic_fernet():
     """
-    FORENSIC 레벨 암호화를 위한 Fernet 인스턴스 반환.
+    Return a Fernet instance for FORENSIC-level encryption.
 
     Security Hardening (214_SECURITY_VULNERABILITY_FIXES):
-    - SecretsSettings.encryption_key를 사용하여 Fernet 인스턴스 생성
-    - 키 미설정 시 None 반환 (호출측에서 AUDIT 폴백)
+    - Builds the Fernet instance from SecretsSettings.encryption_key
+    - Returns None when the key is unset (caller falls back to AUDIT)
 
     Returns:
-        Fernet 인스턴스 또는 None (키 미설정 시)
+        Fernet instance, or None when the key is unset
     """
     try:
         from baldur.settings.secrets import get_secrets
@@ -108,12 +113,13 @@ def _get_forensic_fernet():
 
         from cryptography.fernet import Fernet
 
-        # Fernet은 URL-safe base64 인코딩된 32바이트 키가 필요
-        # encryption_key가 이미 Fernet 키 형식이면 그대로 사용
+        # Fernet requires a URL-safe base64-encoded 32-byte key.
+        # If encryption_key is already in Fernet key form, use it as-is.
         try:
             return Fernet(key.encode() if isinstance(key, str) else key)
         except Exception:
-            # 키가 Fernet 형식이 아니면 SHA-256으로 32바이트 키 생성 후 base64 변환
+            # Not a Fernet-form key: derive a 32-byte key via SHA-256,
+            # then base64-encode it
             derived_key = hashlib.sha256(key.encode()).digest()
             fernet_key = base64.urlsafe_b64encode(derived_key)
             return Fernet(fernet_key)
@@ -134,15 +140,15 @@ def mask_with_level(
     salt: str | None = None,
 ) -> str:
     """
-    마스킹 수준에 따른 마스킹 적용.
+    Apply masking according to the masking level.
 
     Args:
-        value: 마스킹할 원본 값
-        level: 마스킹 수준 (CLIENT, AUDIT, FORENSIC)
-        salt: 해시용 솔트 (AUDIT 레벨에서 사용)
+        value: the original value to mask
+        level: masking level (CLIENT, AUDIT, FORENSIC)
+        salt: salt for hashing (used at the AUDIT level)
 
     Returns:
-        마스킹된 문자열
+        The masked string
 
     Examples:
         >>> mask_with_level("admin@example.com", MaskingLevel.CLIENT)
@@ -156,16 +162,16 @@ def mask_with_level(
         return ""
 
     if level == MaskingLevel.CLIENT:
-        # 완전 치환 - 복원 불가
+        # Full replacement - not recoverable
         return "***REDACTED***"
 
     if level == MaskingLevel.AUDIT:
-        # SHA-256 해시 - 동일성 확인만 가능
+        # SHA-256 hash - equality checks only
         return hash_for_audit(value, salt)
 
     if level == MaskingLevel.FORENSIC:
         # Security Hardening (214_SECURITY_VULNERABILITY_FIXES):
-        # Fernet 대칭 암호화 - 실제 복원 가능
+        # Fernet symmetric encryption - actually recoverable
         fernet = _get_forensic_fernet()
         if fernet is not None:
             try:
@@ -178,27 +184,29 @@ def mask_with_level(
                 )
                 return _forensic_hmac_fallback(value, salt)
         else:
-            # encryption_key 미설정 시 HMAC 기반 폴백 (encrypted: 접두사 유지)
+            # encryption_key unset: HMAC-based fallback (keeps the
+            # "encrypted:" prefix)
             logger.debug("security.forensic_masking_unavailable_no")
             return _forensic_hmac_fallback(value, salt)
 
-    # 기본값은 CLIENT 레벨
+    # The default is the CLIENT level
     return "***REDACTED***"
 
 
 def _forensic_hmac_fallback(value: str, salt: str | None = None) -> str:
-    """FORENSIC 레벨 HMAC 기반 폴백.
+    """HMAC-based fallback for the FORENSIC level.
 
-    Fernet 암호화가 불가능할 때 HMAC-SHA256으로 비가역 암호화 형태를 생성.
-    encrypted: 접두사를 유지하여 FORENSIC 레벨 API 계약을 보장하되,
-    이 값은 복호화가 불가능함을 인지해야 한다.
+    When Fernet encryption is unavailable, produces an irreversible
+    encrypted-looking form via HMAC-SHA256. It keeps the "encrypted:"
+    prefix so the FORENSIC-level API contract holds, but callers must be
+    aware that this value cannot be decrypted.
 
     Args:
-        value: 마스킹할 원본 값
-        salt: 추가 솔트 (선택)
+        value: the original value to mask
+        salt: additional salt (optional)
 
     Returns:
-        'encrypted:hmac:<base64-encoded HMAC>' 형식 문자열
+        A string of the form 'encrypted:hmac:<base64-encoded HMAC>'
     """
     import hmac as _hmac
 
@@ -210,24 +218,24 @@ def _forensic_hmac_fallback(value: str, salt: str | None = None) -> str:
 
 def decrypt_forensic(encrypted_value: str) -> str:
     """
-    FORENSIC 레벨로 암호화된 값을 복호화.
+    Decrypt a FORENSIC-level encrypted value.
 
-    지원 형식:
-    - "encrypted:{fernet_token}" → Fernet 복호화
-    - "sha256:..." → 단방향 해시, 복원 불가 → ValueError
-    - "encrypted:hmac:..." → HMAC fallback, 복원 불가 → ValueError
+    Supported forms:
+    - "encrypted:{fernet_token}" → Fernet decryption
+    - "sha256:..." → one-way hash, not recoverable → ValueError
+    - "encrypted:hmac:..." → HMAC fallback, not recoverable → ValueError
 
     Args:
-        encrypted_value: "encrypted:..." 형식의 암호화된 문자열
+        encrypted_value: encrypted string in "encrypted:..." form
 
     Returns:
-        복호화된 원본 문자열
+        The decrypted original string
 
     Raises:
-        ValueError: 잘못된 형식이거나 복호화 실패 시
-        RuntimeError: encryption_key 미설정 시
+        ValueError: on a malformed value or a decryption failure
+        RuntimeError: when encryption_key is unset
     """
-    # 레거시 SHA-256 해시 감지 (Fernet 도입 이전 데이터)
+    # Detect a legacy SHA-256 hash (data from before Fernet was introduced)
     if encrypted_value.startswith("sha256:"):
         raise ValueError(
             "This value was stored as a SHA-256 hash (pre-Fernet era). "
@@ -241,9 +249,10 @@ def decrypt_forensic(encrypted_value: str) -> str:
             f"Got prefix: '{encrypted_value[:20]}...'"
         )
 
-    # HMAC fallback 감지 (_forensic_hmac_fallback 출력)
-    # encryption_key 미설정 시 mask_with_level(FORENSIC)이 HMAC으로 폴백하며
-    # "encrypted:hmac:..." 형식을 생성한다. 이 값은 복원 불가.
+    # Detect the HMAC fallback (output of _forensic_hmac_fallback).
+    # When encryption_key is unset, mask_with_level(FORENSIC) falls back to
+    # HMAC and produces the "encrypted:hmac:..." form. That value is not
+    # recoverable.
     token = encrypted_value[len("encrypted:") :]
     if token.startswith("hmac:"):
         raise ValueError(
@@ -268,16 +277,16 @@ def decrypt_forensic(encrypted_value: str) -> str:
 
 def get_masking_level_for_context() -> MaskingLevel:
     """
-    현재 ActorContext의 RBAC 역할에 따른 마스킹 레벨 결정.
+    Decide the masking level from the current ActorContext's RBAC role.
 
-    RBAC 역할별 접근 가능 레벨:
-        - baldur_admin (우선순위 3): FORENSIC
-        - baldur_operator (우선순위 2): AUDIT
-        - baldur_viewer (우선순위 1): CLIENT
-        - 역할 없음: CLIENT (기본값)
+    Levels accessible per RBAC role:
+        - baldur_admin (priority 3): FORENSIC
+        - baldur_operator (priority 2): AUDIT
+        - baldur_viewer (priority 1): CLIENT
+        - no role: CLIENT (default)
 
     Returns:
-        MaskingLevel (현재 Actor가 접근 가능한 최대 레벨)
+        MaskingLevel (the highest level the current Actor may access)
     """
     try:
         from baldur.context.actor_context import (
@@ -293,12 +302,12 @@ def get_masking_level_for_context() -> MaskingLevel:
         highest_role = actor.highest_role
         priority = RBAC_ROLE_PRIORITY.get(highest_role, 0)
 
-        # 우선순위에 따른 레벨 결정
+        # Decide the level from the priority
         if priority >= 3:  # baldur_admin
             return MaskingLevel.FORENSIC
         if priority >= 2:  # baldur_operator
             return MaskingLevel.AUDIT
-        # baldur_viewer 또는 역할 없음
+        # baldur_viewer, or no role at all
         return MaskingLevel.CLIENT
 
     except ImportError:

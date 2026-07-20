@@ -1,7 +1,7 @@
 """
-Cascade Auditor - 조회 모듈.
+Cascade Auditor - querying module.
 
-Cascade Event 조회, 인과관계 추적 책임을 담당합니다.
+Responsible for Cascade Event lookup and causation tracing.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ logger = structlog.get_logger()
 
 
 class QueryingMixin:
-    """Cascade Event 조회 관련 메서드."""
+    """Cascade Event querying methods."""
 
     if TYPE_CHECKING:
         # Host contract — attributes/methods provided by CascadeEventAuditor.
@@ -32,14 +32,14 @@ class QueryingMixin:
         namespace: str,
     ) -> CascadeEvent | None:
         """
-        Cascade Event 조회.
+        Look up a Cascade Event.
 
         Args:
             cascade_id: Cascade Event ID
-            namespace: 네임스페이스
+            namespace: Namespace
 
         Returns:
-            CascadeEvent 또는 None
+            CascadeEvent, or None
         """
         backend = self._get_backend()
         key = self.CASCADE_KEY.format(namespace=namespace, cascade_id=cascade_id)
@@ -55,14 +55,14 @@ class QueryingMixin:
         limit: int = 100,
     ) -> list[CascadeEvent]:
         """
-        최근 Cascade Event 목록 조회.
+        List recent Cascade Events.
 
         Args:
-            namespace: 네임스페이스
-            limit: 최대 개수
+            namespace: Namespace
+            limit: Maximum count
 
         Returns:
-            CascadeEvent 목록 (최신순)
+            List of CascadeEvent (newest first)
         """
         backend = self._get_backend()
         index_key = self.CASCADE_INDEX_KEY.format(namespace=namespace)
@@ -83,13 +83,13 @@ class QueryingMixin:
 
     def get_event_count(self, namespace: str) -> int:
         """
-        네임스페이스의 Cascade Event 총 개수 조회.
+        Total Cascade Event count for a namespace.
 
         Args:
-            namespace: 네임스페이스
+            namespace: Namespace
 
         Returns:
-            이벤트 개수
+            Event count
         """
         backend = self._get_backend()
         index_key = self.CASCADE_INDEX_KEY.format(namespace=namespace)
@@ -101,14 +101,14 @@ class QueryingMixin:
         namespace: str,
     ) -> CascadeEvent | None:
         """
-        트리거 이벤트 ID로 Cascade Event 조회.
+        Look up a Cascade Event by trigger event ID.
 
         Args:
-            trigger_event_id: 트리거 이벤트 ID
-            namespace: 네임스페이스
+            trigger_event_id: Trigger event ID
+            namespace: Namespace
 
         Returns:
-            CascadeEvent 또는 None
+            CascadeEvent, or None
         """
         events = self.get_recent_events(namespace, limit=1000)
 
@@ -124,28 +124,28 @@ class QueryingMixin:
         namespace: str,
     ) -> list[dict[str, Any]]:
         """
-        효과 이벤트의 인과관계 추적.
+        Trace the causation of an effect event.
 
-        특정 효과가 왜 발생했는지 역추적합니다.
+        Traces back why a specific effect occurred.
 
         Args:
-            effect_event_id: 효과 이벤트 ID
-            namespace: 네임스페이스
+            effect_event_id: Effect event ID
+            namespace: Namespace
 
         Returns:
-            인과관계 추적 결과 (트리거까지 역추적)
+            Causation trace result (traced back to the trigger)
         """
         events = self.get_recent_events(namespace, limit=1000)
 
         for cascade in events:
             for effect in cascade.effects:
                 if effect.event_id == effect_event_id:
-                    # 인과관계 역추적
+                    # Trace causation backwards
                     trace: list[dict[str, Any]] = []
                     current_id = effect_event_id
 
                     while True:
-                        # 현재 ID에 해당하는 효과 찾기
+                        # Find the effect matching the current ID
                         found = False
                         for e in cascade.effects:
                             if e.event_id == current_id:
@@ -161,7 +161,7 @@ class QueryingMixin:
                                 break
 
                         if not found:
-                            # 트리거에 도달
+                            # Reached the trigger
                             if current_id == cascade.trigger.event_id:
                                 trace.append(
                                     {
@@ -183,15 +183,15 @@ class QueryingMixin:
         limit: int = 1000,
     ) -> list[CascadeEvent]:
         """
-        특정 시각 이후의 이벤트 조회.
+        Look up events after a specific point in time.
 
         Args:
-            namespace: 네임스페이스
-            after_timestamp: 이 시각 이후의 이벤트만 조회 (ISO format)
-            limit: 최대 개수
+            namespace: Namespace
+            after_timestamp: Only events after this time (ISO format)
+            limit: Maximum count
 
         Returns:
-            CascadeEvent 목록 (최신순)
+            List of CascadeEvent (newest first)
         """
         from datetime import datetime
 
@@ -211,7 +211,7 @@ class QueryingMixin:
                 if event_time > cutoff:
                     filtered.append(event)
             except ValueError:
-                # 파싱 실패 시 포함
+                # Include on parse failure
                 filtered.append(event)
 
         return filtered

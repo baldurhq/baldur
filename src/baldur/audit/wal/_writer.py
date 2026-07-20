@@ -1,7 +1,8 @@
 """
-WAL 쓰기 모듈.
+WAL write module.
 
-직접 기록, 버퍼 기록, 배치 기록을 통합된 직렬화 함수로 처리합니다.
+Handles direct writes, buffered writes, and batch writes through a unified
+serialization function.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ logger = structlog.get_logger()
 
 
 class WALWriterMixin:
-    """WAL 쓰기 관련 메서드."""
+    """WAL write methods."""
 
     if TYPE_CHECKING:
         # Host contract — attributes/methods provided by WriteAheadLog
@@ -42,24 +43,24 @@ class WALWriterMixin:
 
     def write(self, data: dict[str, Any]) -> int:
         """
-        WAL에 기록.
+        Write to the WAL.
 
         Args:
-            data: 기록할 데이터 (딕셔너리)
+            data: Data to write (dictionary)
 
         Returns:
-            시퀀스 번호
+            Sequence number
         """
         if self._config.group_commit_enabled:
             return self._buffered_write(data)
         return self._direct_write(data)
 
     def _direct_write(self, data: dict[str, Any]) -> int:
-        """직접 기록 (Disk Full Fail-Open 지원)."""
+        """Direct write (supports Disk Full Fail-Open)."""
         from baldur.audit.wal._models import WALError, WALState
 
         with self._lock:
-            # Fail-Open 모드면 WAL 기록 스킵
+            # Skip the WAL write while in Fail-Open mode
             if self._state == WALState.DISK_FULL_FAILOPEN:
                 logger.warning("wal.disk_full_fail_open")
                 return -1
@@ -98,7 +99,7 @@ class WALWriterMixin:
                     raise
                 raise
 
-            # Drift Detection 메트릭 기록
+            # Record Drift Detection metrics
             try:
                 from baldur.metrics.drift_metrics import (
                     record_wal_entry_written,
@@ -114,9 +115,9 @@ class WALWriterMixin:
 
     def _buffered_write(self, data: dict[str, Any]) -> int:
         """
-        버퍼링된 기록 (Group Commit).
+        Buffered write (Group Commit).
 
-        여러 엔트리를 모아서 한 번에 fsync 수행.
+        Collects several entries and fsyncs them in a single pass.
         """
         from baldur.audit.wal._models import WALError, WALState
 
@@ -146,11 +147,11 @@ class WALWriterMixin:
             return current_seq
 
     def _time_since_last_flush_ms(self) -> float:
-        """마지막 플러시 이후 경과 시간 (ms)."""
+        """Elapsed time since the last flush (ms)."""
         return (time.time() - self._last_flush_time) * 1000
 
     def _flush_buffer(self) -> None:
-        """버퍼의 모든 엔트리를 한 번에 기록."""
+        """Write every buffered entry in a single pass."""
         if not self._group_buffer:
             return
 
@@ -170,20 +171,20 @@ class WALWriterMixin:
         self._last_flush_time = time.time()
 
     def flush_group_commit(self) -> None:
-        """Group Commit 버퍼 강제 플러시."""
+        """Force-flush the Group Commit buffer."""
         with self._lock:
             if self._config.group_commit_enabled:
                 self._flush_buffer()
 
     def batch_write_entries(self, entries: list[dict[str, Any]]) -> list[int]:
         """
-        여러 엔트리를 한 번에 기록 (단일 fsync).
+        Write several entries in a single pass (one fsync).
 
         Args:
-            entries: 기록할 데이터 딕셔너리 목록
+            entries: List of data dictionaries to write
 
         Returns:
-            각 엔트리의 시퀀스 번호 목록
+            List of sequence numbers, one per entry
         """
         from baldur.audit.wal._models import WALError, WALState
 
@@ -210,7 +211,7 @@ class WALWriterMixin:
                 record, _checksum = serialize_entry(entry)
                 records.append(record)
 
-            # 파일에 일괄 기록
+            # Write to the file in bulk
             self._ensure_file_open()
 
             if self._current_handle:
@@ -223,7 +224,7 @@ class WALWriterMixin:
                 )
                 self._last_write_time = time.time()
 
-            # Drift Detection 메트릭 기록
+            # Record Drift Detection metrics
             try:
                 from baldur.metrics.drift_metrics import (
                     record_wal_entry_written,

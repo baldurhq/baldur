@@ -1,20 +1,20 @@
 """
 Self-Audit Logger.
 
-감사 시스템 자체의 상태를 기록.
+Records the state of the audit system itself.
 
-원칙:
-1. 감사 시스템 실패도 기록되어야 함
-2. 최소 의존성: 표준 stderr/syslog만 사용
-3. 순환 의존 방지: 다른 audit 모듈과 독립
+Principles:
+1. Audit system failures must be recorded too
+2. Minimal dependencies: standard stderr/syslog only
+3. No circular dependency: independent of other audit modules
 
 Usage:
     from baldur.audit.self_audit import self_audit, SelfAuditEvent
 
-    # 시스템 시작
+    # System startup
     self_audit().log(SelfAuditEvent.STARTUP, "Audit system started")
 
-    # WAL 기록 실패
+    # WAL write failure
     self_audit().log(
         SelfAuditEvent.WAL_WRITE_FAILED,
         "WAL write failed",
@@ -40,7 +40,7 @@ logger = structlog.get_logger()
 
 
 class SelfAuditEvent(str, Enum):
-    """감사 시스템 자체 이벤트 유형."""
+    """Event types of the audit system itself."""
 
     # Lifecycle
     STARTUP = "startup"
@@ -84,7 +84,7 @@ class SelfAuditEvent(str, Enum):
 
 @dataclass
 class SelfAuditStats:
-    """Self-Audit 통계."""
+    """Self-Audit statistics."""
 
     total_events: int = 0
     failure_events: int = 0
@@ -95,19 +95,19 @@ class SelfAuditStats:
 
 class SelfAuditLogger:
     """
-    감사 시스템 자체의 상태를 기록.
+    Records the state of the audit system itself.
 
-    특징:
-    - 순환 의존 없음 (독립적)
-    - 최소 의존성 (표준 라이브러리만)
-    - 항상 성공하도록 설계 (실패 무시)
-    - 싱글톤 패턴
+    Characteristics:
+    - No circular dependency (self-contained)
+    - Minimal dependencies (standard library only)
+    - Designed to always succeed (failures ignored)
+    - Singleton pattern
     """
 
     _instance: SelfAuditLogger | None = None
     _lock = threading.Lock()
 
-    # 실패로 간주되는 이벤트
+    # Events considered failures
     FAILURE_EVENTS = frozenset(
         [
             SelfAuditEvent.WAL_WRITE_FAILED,
@@ -135,33 +135,33 @@ class SelfAuditLogger:
 
     @staticmethod
     def _get_max_recent_events() -> int:
-        """Settings에서 max_recent_events 조회."""
+        """Read max_recent_events from settings."""
         try:
             from baldur.settings.audit import get_audit_settings
 
             return get_audit_settings().self_audit_max_recent_events
         except Exception:
-            return 100  # 기본값
+            return 100  # default
 
     @staticmethod
     def _get_default_limit() -> int:
-        """Settings에서 default_limit 조회."""
+        """Read default_limit from settings."""
         try:
             from baldur.settings.audit import get_audit_settings
 
             return get_audit_settings().self_audit_default_limit
         except Exception:
-            return 20  # 기본값
+            return 20  # default
 
     @staticmethod
     def _get_max_failure_rate() -> float:
-        """Settings에서 max_failure_rate 조회."""
+        """Read max_failure_rate from settings."""
         try:
             from baldur.settings.audit import get_audit_settings
 
             return get_audit_settings().self_audit_max_failure_rate
         except Exception:
-            return 0.1  # 기본값
+            return 0.1  # default
 
     @classmethod
     def get_instance(cls) -> SelfAuditLogger:
@@ -185,17 +185,17 @@ class SelfAuditLogger:
         details: dict[str, Any] | None = None,
     ) -> None:
         """
-        Self-Audit 이벤트 기록. 항상 성공해야 함.
+        Record a Self-Audit event. Must always succeed.
 
         Args:
-            event_type: 이벤트 유형
-            message: 메시지
-            details: 추가 상세 정보
+            event_type: Event type
+            message: Message
+            details: Additional details
         """
         try:
             now = utc_now()
 
-            # 통계 업데이트
+            # Update statistics
             with self._stats_lock:
                 self._stats.total_events += 1
                 self._stats.last_event_time = now
@@ -208,7 +208,7 @@ class SelfAuditLogger:
                 if event_type in self.FAILURE_EVENTS:
                     self._stats.failure_events += 1
 
-                # 최근 이벤트 저장
+                # Store recent event
                 event_record = {
                     "timestamp": now.isoformat(),
                     "event": event_name,
@@ -221,7 +221,7 @@ class SelfAuditLogger:
                         -self._max_recent_events :
                     ]
 
-            # 로그 레벨 결정
+            # Decide log level
             if event_type in self.FAILURE_EVENTS:
                 log_method = self._logger.error
             elif event_type in (
@@ -233,7 +233,7 @@ class SelfAuditLogger:
             else:
                 log_method = self._logger.info
 
-            # 로깅
+            # Logging
             log_kwargs: dict[str, Any] = {
                 "event_type": event_type.value,
                 "message": message,
@@ -242,7 +242,7 @@ class SelfAuditLogger:
                 log_kwargs["details"] = details
             log_method("self_audit.event", **log_kwargs)
 
-            # stderr 출력 (실패 이벤트만, 테스트 환경에서는 생략)
+            # stderr output (failure events only, skipped in test environments)
             if event_type in self.FAILURE_EVENTS and not os.environ.get(
                 "BALDUR_TEST_MODE"
             ):
@@ -253,15 +253,15 @@ class SelfAuditLogger:
                 )
 
         except Exception:
-            # Self-audit 실패는 조용히 넘어감 (무한 루프 방지)
+            # Self-audit failures are swallowed silently (prevents infinite loops)
             pass
 
     def get_stats(self) -> SelfAuditStats:
         """
-        통계 조회.
+        Read statistics.
 
         Returns:
-            SelfAuditStats 객체
+            SelfAuditStats object
         """
         with self._stats_lock:
             uptime = (utc_now() - self._start_time).total_seconds()
@@ -275,13 +275,13 @@ class SelfAuditLogger:
 
     def get_recent_events(self, limit: int | None = None) -> list[dict[str, Any]]:
         """
-        최근 이벤트 조회.
+        Read recent events.
 
         Args:
-            limit: 최대 개수 (None이면 Settings에서 기본값 사용)
+            limit: Maximum count (None uses the default from settings)
 
         Returns:
-            최근 이벤트 목록
+            List of recent events
         """
         if limit is None:
             limit = self._get_default_limit()
@@ -290,10 +290,10 @@ class SelfAuditLogger:
 
     def get_failure_rate(self) -> float:
         """
-        실패율 계산.
+        Compute the failure rate.
 
         Returns:
-            실패 이벤트 비율 (0.0 ~ 1.0)
+            Ratio of failure events (0.0 ~ 1.0)
         """
         with self._stats_lock:
             if self._stats.total_events == 0:
@@ -302,10 +302,11 @@ class SelfAuditLogger:
 
     def is_healthy(self, max_failure_rate: float | None = None) -> bool:
         """
-        헬스 체크.
+        Health check.
 
         Args:
-            max_failure_rate: 최대 허용 실패율 (None이면 Settings에서 기본값 사용)
+            max_failure_rate: Maximum allowed failure rate (None uses the
+                default from settings)
 
         Returns:
             True if healthy
@@ -317,7 +318,7 @@ class SelfAuditLogger:
 
 def self_audit() -> SelfAuditLogger:
     """
-    Self-Audit Logger 인스턴스 반환.
+    Return the Self-Audit Logger instance.
 
     Usage:
         self_audit().log(SelfAuditEvent.STARTUP, "Started")

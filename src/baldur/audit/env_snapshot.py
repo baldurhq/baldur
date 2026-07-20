@@ -36,7 +36,7 @@ from baldur.utils.time import utc_now
 
 logger = structlog.get_logger()
 
-# Baldur 관련 환경변수 prefix
+# Baldur-related environment variable prefixes
 TRACKED_PREFIXES: list[str] = [
     "BALDUR_",
     "CIRCUIT_BREAKER_",
@@ -45,7 +45,7 @@ TRACKED_PREFIXES: list[str] = [
     "CHAOS_",
 ]
 
-# 민감 키워드 (마스킹 대상)
+# Sensitive keywords (masking targets)
 SENSITIVE_KEYWORDS: list[str] = [
     "SECRET",
     "PASSWORD",
@@ -56,20 +56,20 @@ SENSITIVE_KEYWORDS: list[str] = [
     "PRIVATE",
 ]
 
-# Fallback 로그 파일 경로
+# Fallback log file path
 FALLBACK_LOG_PATH = "logs/env_snapshot_fallback.jsonl"
 
-# 전역 상태: 스냅샷 기록 성공 여부
+# Global state: whether the snapshot was recorded successfully
 _snapshot_recorded: bool = False
 _last_snapshot_hash: str | None = None
 
 
 def _get_metrics():
-    """Prometheus 메트릭 (lazy import to avoid circular deps)."""
+    """Prometheus metrics (lazy import to avoid circular deps)."""
     try:
         from baldur.metrics.registry import get_or_create_gauge
 
-        # 싱글톤 패턴으로 메트릭 생성
+        # Create metrics via the singleton pattern
         if not hasattr(_get_metrics, "_env_snapshot_recorded"):
             _get_metrics._env_snapshot_recorded = get_or_create_gauge(
                 "baldur_env_snapshot_recorded",
@@ -112,15 +112,15 @@ def collect_env_snapshot() -> dict[str, Any]:
     variables: dict[str, str] = {}
 
     for key, value in os.environ.items():
-        # Prefix 매칭
+        # Prefix match
         if any(key.startswith(prefix) for prefix in TRACKED_PREFIXES):
-            # 민감 정보 마스킹
+            # Mask sensitive values
             if any(kw in key.upper() for kw in SENSITIVE_KEYWORDS):
                 variables[key] = "***MASKED***"
             else:
                 variables[key] = value
 
-    # 변경 감지용 해시 (마스킹된 값 기준)
+    # Change-detection hash (computed over the masked values)
     sorted_items = sorted(variables.items())
     hash_input = str(sorted_items).encode("utf-8")
     config_hash = hashlib.sha256(hash_input).hexdigest()[:16]

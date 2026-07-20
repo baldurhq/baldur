@@ -1,11 +1,11 @@
 """
-JSONL WAL 공통 유틸리티.
+JSONL WAL shared utilities.
 
-4중 JSONL WAL 구현(HashChainWAL, HashChainWALRecovery, WALRecoveryMixin)의
-공통 쓰기/읽기 패턴을 통합합니다.
+Unifies the common write/read patterns of the four JSONL WAL
+implementations (HashChainWAL, HashChainWALRecovery, WALRecoveryMixin).
 
-- JSONLWriter: 스레드 안전, fsync 정책, 크기 기반 로테이션
-- JSONLReader: 손상 라인 logged skip + 메트릭, 커밋 마커 파싱
+- JSONLWriter: thread-safe, fsync policy, size-based rotation
+- JSONLReader: logged skip + metric for corrupt lines, commit marker parsing
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ class CommitMarker(TypedDict):
 
 
 class JSONLWriter:
-    """JSONL WAL 쓰기 공통 유틸리티 (스레드 안전, fsync 정책, 크기 기반 로테이션)."""
+    """JSONL WAL write utility (thread-safe, fsync policy, size rotation)."""
 
     _serialize = staticmethod(fast_dumps_str)
 
@@ -72,7 +72,7 @@ class JSONLWriter:
         return self._lock
 
     def ensure_open(self) -> None:
-        """WAL 파일이 열려있는지 확인하고 필요시 생성."""
+        """Ensure the WAL file is open, creating it if needed."""
         if self._handle is None:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             self._handle = open(self._path, "a", encoding="utf-8")  # noqa: SIM115
@@ -82,7 +82,7 @@ class JSONLWriter:
                 self._current_size = 0
 
     def append(self, entry: dict[str, Any]) -> None:
-        """JSONL 라인 추가 (write + flush + 조건부 fsync + 로테이션 체크)."""
+        """Append a JSONL line (write + flush + conditional fsync + rotate check)."""
         with self._lock:
             self.ensure_open()
             assert self._handle is not None  # ensure_open() invariant
@@ -95,7 +95,7 @@ class JSONLWriter:
             self._maybe_rotate()
 
     def close(self) -> None:
-        """WAL 파일 닫기."""
+        """Close the WAL file."""
         with self._lock:
             if self._handle:
                 try:
@@ -107,7 +107,7 @@ class JSONLWriter:
                     self._handle = None
 
     def _maybe_rotate(self) -> None:
-        """크기 초과 시 파일 로테이션 (RLock 내부에서 호출)."""
+        """Rotate the file when the size is exceeded (called under RLock)."""
         if self._max_size and self._current_size >= self._max_size:
             if self._handle:
                 self._handle.close()
@@ -118,11 +118,11 @@ class JSONLWriter:
 
 
 class JSONLReader:
-    """JSONL WAL 읽기 공통 유틸리티 (손상 라인 logged skip + 메트릭)."""
+    """JSONL WAL read utility (logged skip + metric for corrupt lines)."""
 
     @staticmethod
     def iter_entries(file_path: Path) -> Iterator[dict]:
-        """JSONL 파일의 엔트리를 순회. 손상 라인은 경고 로그 + 메트릭 후 건너뜀."""
+        """Iterate JSONL entries; corrupt lines are skipped (warn log + metric)."""
         if not file_path.exists():
             return
 
@@ -153,7 +153,7 @@ class JSONLReader:
         commit_field: str = "status",
         commit_value: str = "COMMITTED",
     ) -> tuple[list[dict], set[int]]:
-        """JSONL 파일을 파싱하여 (전체 엔트리, 커밋된 시퀀스 집합)을 반환."""
+        """Parse a JSONL file and return (all entries, committed sequence set)."""
         entries: list[dict] = []
         committed_seqs: set[int] = set()
 

@@ -1,8 +1,8 @@
 """
-Redis Audit 배치 처리용 Lua 스크립트.
+Lua scripts for Redis audit batch processing.
 
-Buffer → Processing Queue → External 패턴을 통한 데이터 손실 방지.
-모든 Lua 스크립트는 Redis에서 원자적으로 실행됩니다.
+Prevents data loss via the Buffer → Processing Queue → External pattern.
+All Lua scripts execute atomically inside Redis.
 """
 
 from __future__ import annotations
@@ -20,15 +20,15 @@ logger = structlog.get_logger()
 
 class AuditBatchLuaScripts:
     """
-    Audit 배치 처리용 Lua 스크립트 모음.
+    Lua script collection for audit batch processing.
 
-    Processing Queue 패턴:
-    1. Buffer Queue에서 Processing Queue로 원자적 이동
-    2. Processing Queue의 데이터를 외부 저장소로 전송
-    3. 성공 시 Processing Queue 정리, 실패 시 Buffer로 복원
+    Processing Queue pattern:
+    1. Atomic move from Buffer Queue to Processing Queue
+    2. Send the Processing Queue data to external storage
+    3. On success clear the Processing Queue; on failure restore to Buffer
     """
 
-    # Buffer → Processing Queue 원자적 배치 이동
+    # Atomic batch move: Buffer → Processing Queue
     LUA_ATOMIC_BATCH_MOVE = """
     -- KEYS[1] = audit:buffer:{domain}
     -- KEYS[2] = audit:processing:{domain}
@@ -55,7 +55,7 @@ class AuditBatchLuaScripts:
     return moved
     """
 
-    # Processing Queue 처리 완료 후 정리
+    # Cleanup after Processing Queue completion
     LUA_ATOMIC_BATCH_COMPLETE = """
     -- KEYS[1] = audit:processing:{domain}
     -- ARGV[1] = count
@@ -78,7 +78,7 @@ class AuditBatchLuaScripts:
     return removed
     """
 
-    # 실패 시 Processing Queue → Buffer Queue 복원 (순서 보존)
+    # On failure, restore Processing Queue → Buffer Queue (order preserved)
     LUA_ATOMIC_BATCH_RESTORE = """
     -- KEYS[1] = audit:processing:{domain}
     -- KEYS[2] = audit:buffer:{domain}
@@ -101,10 +101,10 @@ class AuditBatchLuaScripts:
 
     def __init__(self, redis_client: Redis):
         """
-        AuditBatchLuaScripts 초기화.
+        Initialize AuditBatchLuaScripts.
 
         Args:
-            redis_client: Redis 클라이언트
+            redis_client: Redis client
         """
         from baldur.audit.performance.lua_registry import LuaScriptRegistry
 
@@ -121,15 +121,15 @@ class AuditBatchLuaScripts:
         worker_id: str,
     ) -> int:
         """
-        Buffer Queue에서 Processing Queue로 원자적 이동.
+        Atomic move from the Buffer Queue to the Processing Queue.
 
         Args:
-            domain: 도메인 이름
-            batch_size: 이동할 항목 수
-            worker_id: 처리 워커 식별자
+            domain: Domain name
+            batch_size: Number of items to move
+            worker_id: Processing worker identifier
 
         Returns:
-            실제 이동된 항목 수
+            Number of items actually moved
         """
         buffer_key = f"audit:{{{domain}}}:buffer"
         processing_key = f"audit:{{{domain}}}:processing"
@@ -143,14 +143,14 @@ class AuditBatchLuaScripts:
 
     def atomic_batch_complete(self, domain: str, count: int) -> int:
         """
-        Processing Queue에서 처리 완료된 항목 제거.
+        Remove completed items from the Processing Queue.
 
         Args:
-            domain: 도메인 이름
-            count: 제거할 항목 수
+            domain: Domain name
+            count: Number of items to remove
 
         Returns:
-            실제 제거된 항목 수
+            Number of items actually removed
         """
         processing_key = f"audit:{{{domain}}}:processing"
 
@@ -163,15 +163,15 @@ class AuditBatchLuaScripts:
 
     def atomic_batch_restore(self, domain: str) -> int:
         """
-        Processing Queue의 항목을 Buffer Queue로 복원 (순서 보존).
+        Restore Processing Queue items to the Buffer Queue (order preserved).
 
-        실패 시 호출하여 데이터 손실 방지.
+        Call on failure to prevent data loss.
 
         Args:
-            domain: 도메인 이름
+            domain: Domain name
 
         Returns:
-            복원된 항목 수
+            Number of items restored
         """
         processing_key = f"audit:{{{domain}}}:processing"
         buffer_key = f"audit:{{{domain}}}:buffer"
@@ -188,13 +188,13 @@ class AuditBatchLuaScripts:
         timeout_seconds: int = 300,
     ) -> list[tuple[str, str, int]]:
         """
-        타임아웃된 고아 Processing Queue 조회.
+        Look up timed-out orphaned Processing Queues.
 
         Args:
-            timeout_seconds: 고아 판단 임계 시간 (기본 5분)
+            timeout_seconds: Age threshold for orphan detection (default 5 min)
 
         Returns:
-            (processing_key, worker_id, age_seconds) 튜플 리스트
+            List of (processing_key, worker_id, age_seconds) tuples
         """
         import time
 
@@ -226,7 +226,7 @@ class AuditBatchLuaScripts:
                     if age > timeout_seconds:
                         orphaned.append((key_str, worker_id, age))
                 except (ValueError, TypeError):
-                    # 잘못된 형식의 메타 데이터
+                    # Malformed metadata
                     orphaned.append((key_str, "unknown", timeout_seconds + 1))
 
         except redis_lib.RedisError as e:

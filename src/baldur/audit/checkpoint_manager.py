@@ -1,23 +1,24 @@
 """
-CheckpointManager - WAL 처리 시퀀스 영속화.
+CheckpointManager - persists the WAL processing sequence.
 
-마지막 처리된 WAL 시퀀스를 디스크에 저장하여 프로세스 재시작 시 복구 지원.
-WriteAheadLog의 recover_unprocessed()와 함께 사용하여 데이터 유실 0% 달성.
+Stores the last processed WAL sequence on disk so it can be recovered after a
+process restart. Used together with WriteAheadLog.recover_unprocessed() to
+achieve 0% data loss.
 
-주요 기능:
-- 환경변수 기반 경로 설정 (BALDUR_AUDIT_PATH)
-- 멀티 프로세스 파일 락 지원
-- 쓰기 권한 검증 및 자동 폴백
+Main features:
+- Env-var-based path configuration (BALDUR_AUDIT_PATH)
+- Multi-process file locking
+- Write-permission verification with automatic fallback
 
 Usage:
     from baldur.audit.checkpoint_manager import CheckpointManager
 
     checkpoint = CheckpointManager("/var/log/audit/checkpoint")
 
-    # 처리 완료 후 체크포인트 저장
+    # Save the checkpoint after processing completes
     checkpoint.save(last_seq=1234)
 
-    # 재시작 시 체크포인트 로드
+    # Load the checkpoint on restart
     last_seq = checkpoint.load()
     entries = wal.recover_unprocessed(last_seq)
 
@@ -50,7 +51,7 @@ logger = structlog.get_logger()
 
 
 def lock_file(f: BinaryIO) -> None:
-    """파일 락 획득 (크로스 플랫폼)."""
+    """Acquire a file lock (cross-platform)."""
     if sys.platform == "win32":
         import msvcrt
 
@@ -62,7 +63,7 @@ def lock_file(f: BinaryIO) -> None:
 
 
 def unlock_file(f: BinaryIO) -> None:
-    """파일 락 해제 (크로스 플랫폼)."""
+    """Release a file lock (cross-platform)."""
     if sys.platform == "win32":
         import msvcrt
 
@@ -75,27 +76,27 @@ def unlock_file(f: BinaryIO) -> None:
 
 @dataclass(kw_only=True)
 class CheckpointData(SerializableMixin):
-    """체크포인트 데이터."""
+    """Checkpoint data."""
 
     last_sequence: int = 0
     timestamp: float = 0.0
     version: int = 1
 
 
-# CheckpointError: 단일 소스는 checkpoint_strategy.py (Item 1 중복 제거)
+# CheckpointError: single source is checkpoint_strategy.py (Item 1 dedup)
 from baldur.audit.checkpoint import CheckpointError  # noqa: F401
 
 
 class CheckpointManager:
     """
-    WAL 처리 시퀀스 관리자.
+    WAL processing sequence manager.
 
     .. deprecated::
         Use ``CheckpointStorageStrategy`` from ``checkpoint_strategy.py`` instead.
         This class will be removed in the next major version.
 
-    마지막 처리된 WAL 시퀀스를 디스크에 영속화하여
-    프로세스 재시작 시 정확한 복구 지점 제공.
+    Persists the last processed WAL sequence to disk so an exact recovery
+    point is available after a process restart.
     """
 
     DEFAULT_CHECKPOINT_DIR = "/var/log/audit"
@@ -103,12 +104,12 @@ class CheckpointManager:
 
     @staticmethod
     def _get_default_path() -> Path:
-        """환경변수 기반 기본 경로 결정."""
+        """Resolve the default path from environment variables."""
         env_path = os.environ.get("BALDUR_AUDIT_PATH")
         if env_path:
             return Path(env_path) / "checkpoint.json"
 
-        # OS별 기본 경로
+        # Per-OS default path
         if os.name == "nt":  # Windows
             return Path(tempfile.gettempdir()) / "baldur" / "checkpoint.json"
         # Unix/Linux
@@ -132,7 +133,7 @@ class CheckpointManager:
         self._sync_on_write = sync_on_write
         self._lock = threading.RLock()
 
-        # 권한 체크 및 폴백
+        # Permission check and fallback
         if not self._verify_write_permission():
             fallback_path = Path(tempfile.gettempdir()) / "baldur" / "checkpoint.json"
             logger.warning(
@@ -142,11 +143,11 @@ class CheckpointManager:
             )
             self._path = fallback_path
 
-        # 디렉토리 생성
+        # Create the directory
         self._path.parent.mkdir(parents=True, exist_ok=True)
 
     def _verify_write_permission(self) -> bool:
-        """쓰기 권한 검증."""
+        """Verify write permission."""
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             test_file = self._path.parent / ".write_test"
@@ -158,20 +159,20 @@ class CheckpointManager:
 
     @property
     def path(self) -> Path:
-        """체크포인트 파일 경로."""
+        """Checkpoint file path."""
         return self._path
 
     def save(self, last_sequence: int) -> None:
         """
-        체크포인트 저장 (멀티 프로세스 파일 락 지원).
+        Save the checkpoint (with multi-process file locking).
 
-        원자적 쓰기를 위해 임시 파일에 먼저 쓰고 rename.
+        Writes to a temporary file first and renames, for atomicity.
 
         Args:
-            last_sequence: 마지막 처리된 시퀀스 번호
+            last_sequence: Last processed sequence number
 
         Raises:
-            CheckpointError: 저장 실패 시
+            CheckpointError: When saving fails
         """
         with self._lock:
             checkpoint_data = CheckpointData(
@@ -183,12 +184,12 @@ class CheckpointManager:
             lock_file_path = self._path.with_suffix(".lock")
 
             try:
-                # 파일 락 획득
+                # Acquire the file lock
                 with open(lock_file_path, "wb") as lock_f:
                     try:
                         lock_file(lock_f)
 
-                        # 임시 파일에 쓰기
+                        # Write to the temporary file
                         with open(temp_path, "w", encoding="utf-8") as f:
                             json.dump(checkpoint_data.to_dict(), f, indent=2)
 
@@ -196,7 +197,7 @@ class CheckpointManager:
                                 f.flush()
                                 os.fsync(f.fileno())
 
-                        # 원자적 rename
+                        # Atomic rename
                         temp_path.replace(self._path)
 
                         # Directory fsync (optional, recommended on Linux).
@@ -228,14 +229,14 @@ class CheckpointManager:
                 )
 
             except (BlockingIOError, OSError) as e:
-                # 다른 프로세스가 락 보유 중 - 스킵
+                # Another process holds the lock - skip
                 logger.warning(
                     "checkpoint_manager.lock_contention_skipping_save",
                     error=e,
                 )
 
             except Exception as e:
-                # 임시 파일 정리
+                # Clean up the temporary file
                 try:
                     temp_path.unlink(missing_ok=True)
                 except Exception:
@@ -245,12 +246,12 @@ class CheckpointManager:
 
     def load(self) -> int:
         """
-        체크포인트 로드.
+        Load the checkpoint.
 
-        파일이 없거나 읽기 실패 시 0 반환.
+        Returns 0 when the file is missing or unreadable.
 
         Returns:
-            마지막 처리된 시퀀스 번호 (없으면 0)
+            Last processed sequence number (0 if none)
         """
         with self._lock:
             if not self._path.exists():
@@ -277,10 +278,10 @@ class CheckpointManager:
 
     def load_full(self) -> CheckpointData | None:
         """
-        체크포인트 전체 데이터 로드.
+        Load the full checkpoint data.
 
         Returns:
-            CheckpointData 또는 None
+            CheckpointData or None
         """
         with self._lock:
             if not self._path.exists():
@@ -296,15 +297,15 @@ class CheckpointManager:
                 return None
 
     def exists(self) -> bool:
-        """체크포인트 파일 존재 여부."""
+        """Whether the checkpoint file exists."""
         return self._path.exists()
 
     def delete(self) -> bool:
         """
-        체크포인트 파일 삭제.
+        Delete the checkpoint file.
 
         Returns:
-            삭제 성공 여부
+            Whether deletion succeeded
         """
         with self._lock:
             try:
@@ -315,10 +316,10 @@ class CheckpointManager:
 
     def get_age_seconds(self) -> float | None:
         """
-        체크포인트 경과 시간 (초).
+        Checkpoint age in seconds.
 
         Returns:
-            마지막 저장 후 경과 시간 또는 None
+            Elapsed time since the last save, or None
         """
         checkpoint_data = self.load_full()
         if checkpoint_data is None:

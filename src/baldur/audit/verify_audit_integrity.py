@@ -2,25 +2,25 @@
 """
 Hash Chain Verifier CLI Tool.
 
-감사 로그 무결성 검증을 위한 CLI 도구.
+CLI tool for verifying audit log integrity.
 
 Usage:
-    # 단일 파일 검증
+    # Verify a single file
     python -m baldur.audit.verify_audit_integrity audit.jsonl
 
-    # 디렉토리 내 모든 감사 로그 검증
+    # Verify every audit log in a directory
     python -m baldur.audit.verify_audit_integrity /var/log/audit/ --recursive
 
-    # JSON 출력
+    # JSON output
     python -m baldur.audit.verify_audit_integrity audit.jsonl --format json
 
-    # 상세 모드
+    # Verbose mode
     python -m baldur.audit.verify_audit_integrity audit.jsonl --verbose
 
-    # WAL 파일 검증
+    # Verify WAL files
     python -m baldur.audit.verify_audit_integrity /var/log/audit/wal/ --wal
 
-최소 의존성: 표준 라이브러리만 사용
+Minimal dependencies: standard library only
 """
 
 import argparse
@@ -33,7 +33,7 @@ from typing import Any
 
 from baldur.utils.time import utc_now
 
-# 상대 임포트 (패키지 내에서 실행 시)
+# Relative import (when run from inside the package)
 try:
     from baldur.audit.integrity import (
         HashChainVerifier,
@@ -41,7 +41,7 @@ try:
     )
     from baldur.audit.wal import WALConfig, WriteAheadLog
 except ImportError:
-    # 직접 실행 시
+    # When run directly
     from integrity import HashChainVerifier
 
     try:
@@ -52,7 +52,7 @@ except ImportError:
 
 
 class OutputFormat(str, Enum):
-    """출력 형식."""
+    """Output format."""
 
     TEXT = "text"
     JSON = "json"
@@ -61,7 +61,7 @@ class OutputFormat(str, Enum):
 
 @dataclass
 class VerificationResult:
-    """검증 결과."""
+    """Verification result."""
 
     file_path: str
     is_valid: bool
@@ -73,7 +73,7 @@ class VerificationResult:
 
 @dataclass
 class VerificationSummary:
-    """검증 요약."""
+    """Verification summary."""
 
     total_files: int = 0
     valid_files: int = 0
@@ -86,13 +86,13 @@ class VerificationSummary:
 
 class AuditIntegrityVerifier:
     """
-    감사 로그 무결성 검증기.
+    Audit log integrity verifier.
 
-    기능:
-    - 단일/다중 파일 검증
-    - 디렉토리 재귀 검증
-    - WAL 파일 검증
-    - 다양한 출력 형식
+    Features:
+    - Single/multi file verification
+    - Recursive directory verification
+    - WAL file verification
+    - Multiple output formats
     """
 
     AUDIT_FILE_EXTENSIONS = {".jsonl", ".json", ".log", ".audit"}
@@ -103,17 +103,17 @@ class AuditIntegrityVerifier:
         Initialize verifier.
 
         Args:
-            verbose: 상세 출력 여부
+            verbose: Whether to print verbose output
         """
         self._verbose = verbose
         self._verifier = HashChainVerifier()
 
     def verify_file(self, file_path: Path) -> VerificationResult:
         """
-        단일 파일 검증.
+        Verify a single file.
 
         Args:
-            file_path: 검증할 파일 경로
+            file_path: Path of the file to verify
 
         Returns:
             VerificationResult
@@ -146,10 +146,10 @@ class AuditIntegrityVerifier:
 
     def verify_wal_directory(self, wal_dir: Path) -> VerificationResult:
         """
-        WAL 디렉토리 검증.
+        Verify a WAL directory.
 
         Args:
-            wal_dir: WAL 디렉토리 경로
+            wal_dir: WAL directory path
 
         Returns:
             VerificationResult
@@ -212,7 +212,7 @@ class AuditIntegrityVerifier:
             )
 
     def _verify_wal_file(self, wal_file: Path) -> VerificationResult:
-        """WAL 파일 개별 검증."""
+        """Verify an individual WAL file."""
         issues: list[dict[str, Any]] = []
         entries = 0
 
@@ -302,12 +302,12 @@ class AuditIntegrityVerifier:
         pattern: str | None = None,
     ) -> VerificationSummary:
         """
-        디렉토리 내 파일들 검증.
+        Verify the files inside a directory.
 
         Args:
-            directory: 디렉토리 경로
-            recursive: 재귀 검색 여부
-            pattern: 파일 패턴 (예: "*.jsonl")
+            directory: Directory path
+            recursive: Whether to search recursively
+            pattern: File pattern (e.g. "*.jsonl")
 
         Returns:
             VerificationSummary
@@ -317,7 +317,7 @@ class AuditIntegrityVerifier:
         if not directory.exists():
             return summary
 
-        # 파일 검색
+        # File search
         if pattern:
             if recursive:
                 files = list(directory.rglob(pattern))
@@ -354,20 +354,20 @@ class AuditIntegrityVerifier:
         return summary
 
     def _load_entries(self, file_path: Path) -> list[dict[str, Any]]:
-        """파일에서 엔트리 로드."""
+        """Load entries from a file."""
         entries = []
 
         with open(file_path, encoding="utf-8") as f:
             content = f.read().strip()
 
-            # JSON Lines 형식
+            # JSON Lines format
             if file_path.suffix == ".jsonl" or "\n" in content:
                 for line in content.split("\n"):
                     line = line.strip()
                     if line:
                         entries.append(json.loads(line))
             else:
-                # 단일 JSON (배열)
+                # Single JSON (array)
                 data = json.loads(content)
                 entries = data if isinstance(data, list) else [data]
 
@@ -375,7 +375,7 @@ class AuditIntegrityVerifier:
 
 
 def format_text_output(summary: VerificationSummary, verbose: bool = False) -> str:
-    """텍스트 형식 출력."""
+    """Text format output."""
     lines = []
     lines.append("=" * 60)
     lines.append("Audit Log Integrity Verification Report")
@@ -383,7 +383,7 @@ def format_text_output(summary: VerificationSummary, verbose: bool = False) -> s
     lines.append(f"Verification Time: {utc_now().isoformat()}")
     lines.append("")
 
-    # 요약
+    # Summary
     lines.append("Summary:")
     lines.append(f"  Total Files:   {summary.total_files}")
     lines.append(f"  Valid:         {summary.valid_files}")
@@ -393,7 +393,7 @@ def format_text_output(summary: VerificationSummary, verbose: bool = False) -> s
     lines.append(f"  Total Issues:  {summary.total_issues}")
     lines.append("")
 
-    # 상세 결과
+    # Detailed results
     if verbose or summary.invalid_files > 0 or summary.error_files > 0:
         lines.append("Details:")
         lines.append("-" * 60)
@@ -411,7 +411,7 @@ def format_text_output(summary: VerificationSummary, verbose: bool = False) -> s
 
             if result.issues:
                 lines.append(f"      Issues ({len(result.issues)}):")
-                for issue in result.issues[:5]:  # 최대 5개만 표시
+                for issue in result.issues[:5]:  # show at most 5
                     issue_type = issue.get("type", "unknown")
                     message = issue.get("message", str(issue))
                     lines.append(f"        - [{issue_type}] {message}")
@@ -420,7 +420,7 @@ def format_text_output(summary: VerificationSummary, verbose: bool = False) -> s
 
             lines.append("")
 
-    # 최종 결과
+    # Final result
     lines.append("-" * 60)
     if summary.invalid_files == 0 and summary.error_files == 0:
         lines.append("Result: ✓ All audit logs are VALID")
@@ -434,7 +434,7 @@ def format_text_output(summary: VerificationSummary, verbose: bool = False) -> s
 
 
 def format_json_output(summary: VerificationSummary) -> str:
-    """JSON 형식 출력."""
+    """JSON format output."""
     output = {
         "verified_at": utc_now().isoformat(),
         "summary": {
@@ -462,7 +462,7 @@ def format_json_output(summary: VerificationSummary) -> str:
 
 
 def format_summary_output(summary: VerificationSummary) -> str:
-    """간단한 요약 출력."""
+    """Short summary output."""
     status = (
         "PASS" if summary.invalid_files == 0 and summary.error_files == 0 else "FAIL"
     )
@@ -473,7 +473,7 @@ def format_summary_output(summary: VerificationSummary) -> str:
 
 
 def _create_argument_parser() -> argparse.ArgumentParser:
-    """ArgumentParser 생성."""
+    """Build the ArgumentParser."""
     parser = argparse.ArgumentParser(
         description="Audit Log Integrity Verifier - Hash Chain Verification Tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -544,7 +544,7 @@ Exit Codes:
 
 
 def _create_summary_from_result(result: VerificationResult) -> VerificationSummary:
-    """단일 VerificationResult로부터 VerificationSummary 생성."""
+    """Build a VerificationSummary from a single VerificationResult."""
     return VerificationSummary(
         total_files=1,
         valid_files=1 if result.is_valid else 0,
@@ -564,10 +564,10 @@ def _verify_path(
     pattern: str | None,
 ) -> VerificationSummary | None:
     """
-    경로 타입에 따라 적절한 검증 수행.
+    Run the verification appropriate to the path type.
 
     Returns:
-        VerificationSummary 또는 None (경로가 유효하지 않은 경우)
+        VerificationSummary, or None when the path is not valid
     """
     if wal_mode:
         result = verifier.verify_wal_directory(path)
@@ -586,7 +586,7 @@ def _verify_path(
 def _format_output(
     summary: VerificationSummary, format_type: str, verbose: bool
 ) -> str:
-    """출력 형식에 따른 포맷팅."""
+    """Format according to the output format."""
     if format_type == "json":
         return format_json_output(summary)
     if format_type == "summary":
@@ -595,14 +595,14 @@ def _format_output(
 
 
 def _get_exit_code(summary: VerificationSummary) -> int:
-    """검증 결과에 따른 종료 코드 반환."""
+    """Return the exit code for the verification result."""
     if summary.invalid_files == 0 and summary.error_files == 0:
         return 0
     return 1
 
 
 def main() -> None:
-    """CLI 메인 함수."""
+    """CLI entry point."""
     parser = _create_argument_parser()
     args = parser.parse_args()
 

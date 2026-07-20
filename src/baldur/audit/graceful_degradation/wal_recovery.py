@@ -203,7 +203,7 @@ class HashChainWALRecovery:  # verified-by: test_recover_uncommitted_entries
         return result
 
     def _recover_from_wal_file(self, wal_file: Path) -> dict[str, int]:  # noqa: C901
-        """WAL 파일에서 미커밋 엔트리 복구 (Redis 파이프라인 배치)."""
+        """Recover uncommitted entries from a WAL file (Redis pipeline batch)."""
         from baldur.audit.wal._jsonl import JSONLReader
 
         result = {
@@ -218,7 +218,7 @@ class HashChainWALRecovery:  # verified-by: test_recover_uncommitted_entries
         committed_sequences: set[int] = set()
 
         try:
-            # Pass 1: 수집
+            # Pass 1: collect
             for entry in JSONLReader.iter_entries(wal_file):
                 wal_seq = entry.get("wal_sequence")
                 operation = entry.get("operation")
@@ -232,7 +232,7 @@ class HashChainWALRecovery:  # verified-by: test_recover_uncommitted_entries
                     entries[wal_seq] = entry
                     result["found"] += 1
 
-            # 커밋 필터링
+            # Filter out committed entries
             uncommitted = {
                 seq: entry
                 for seq, entry in entries.items()
@@ -243,7 +243,7 @@ class HashChainWALRecovery:  # verified-by: test_recover_uncommitted_entries
             if not uncommitted:
                 return result
 
-            # Pass 2: 배치 멱등성 체크 (Redis 파이프라인)
+            # Pass 2: batch idempotency check (Redis pipeline)
             batch_size = 1000
             seqs = list(uncommitted.keys())
             recovered_seqs: list[int] = []
@@ -264,7 +264,7 @@ class HashChainWALRecovery:  # verified-by: test_recover_uncommitted_entries
                     else:
                         result["failed"] += 1
 
-            # 배치 멱등성 마킹
+            # Batch idempotency marking
             if recovered_seqs:
                 self._batch_mark_processed(recovered_seqs, "redis_replay")
 
@@ -279,10 +279,11 @@ class HashChainWALRecovery:  # verified-by: test_recover_uncommitted_entries
 
     def _batch_check_idempotency(self, wal_seqs: list[int], operation: str) -> set[int]:
         """
-        배치 멱등성 검사 (Redis 파이프라인).
+        Batch idempotency check (Redis pipeline).
 
-        건별 SETNX 대신 파이프라인으로 1000건씩 검사.
-        런타임 실패 시 건별 폴백 + 연속 실패 short-circuit으로 안전하게 처리한다.
+        Checks 1000 at a time through a pipeline instead of per-entry SETNX.
+        On runtime failure it degrades safely to a per-entry fallback with a
+        consecutive-failure short-circuit.
         """
         try:
             from baldur.services.idempotency import (
@@ -310,11 +311,11 @@ class HashChainWALRecovery:  # verified-by: test_recover_uncommitted_entries
             return duplicates
 
         except (ImportError, AttributeError):
-            # batch_check 미구현 시 건별 폴백
+            # Per-entry fallback when batch_check is not implemented
             return self._individual_check_with_guard(wal_seqs, operation)
 
         except Exception:
-            # 런타임 실패 (Redis 네트워크 파티션, 클러스터 슬롯 변경 등)
+            # Runtime failure (Redis network partition, cluster slot change, etc.)
             logger.warning(
                 "wal.batch_idempotency_fallback",
                 batch_size=len(wal_seqs),
@@ -325,10 +326,11 @@ class HashChainWALRecovery:  # verified-by: test_recover_uncommitted_entries
         self, wal_seqs: list[int], operation: str
     ) -> set[int]:
         """
-        건별 멱등성 체크 + 연속 실패 short-circuit.
+        Per-entry idempotency check + consecutive-failure short-circuit.
 
-        Redis 완전 다운 시 1,000건 × socket_timeout(5초) = 5,000초 블로킹을
-        방지하기 위해 연속 5회 실패 시 나머지를 즉시 스킵한다.
+        Skips the remainder immediately after 5 consecutive failures, to avoid
+        blocking for 1,000 entries × socket_timeout (5s) = 5,000s when Redis
+        is fully down.
         """
         max_consecutive_failures = 5
         consecutive_failures = 0
@@ -354,9 +356,10 @@ class HashChainWALRecovery:  # verified-by: test_recover_uncommitted_entries
 
     def _batch_mark_processed(self, wal_seqs: list[int], operation: str) -> None:
         """
-        배치 멱등성 마킹 (Redis 파이프라인).
+        Batch idempotency marking (Redis pipeline).
 
-        런타임 실패 시 건별 폴백 + 연속 실패 short-circuit 동일 적용.
+        The same per-entry fallback + consecutive-failure short-circuit
+        applies on runtime failure.
         """
         try:
             from baldur.services.idempotency import (
@@ -389,7 +392,7 @@ class HashChainWALRecovery:  # verified-by: test_recover_uncommitted_entries
             self._individual_mark_with_guard(wal_seqs, operation)
 
     def _individual_mark_with_guard(self, wal_seqs: list[int], operation: str) -> None:
-        """건별 멱등성 마킹 + 연속 실패 short-circuit."""
+        """Per-entry idempotency marking + consecutive-failure short-circuit."""
         max_consecutive_failures = 5
         consecutive_failures = 0
 
@@ -461,13 +464,14 @@ class HashChainWALRecovery:  # verified-by: test_recover_uncommitted_entries
 
     def _is_duplicate_via_idempotency(self, wal_seq: int, operation: str) -> bool:
         """
-        IdempotencyKey를 사용하여 중복 WAL 엔트리인지 확인 (1차 방어).
+        Check via IdempotencyKey whether this is a duplicate WAL entry
+        (first line of defense).
 
-        Redis 기반 빠른 중복 감지로 불필요한 DB 쓰기를 방지합니다.
+        Fast Redis-based duplicate detection avoids unnecessary DB writes.
 
         Args:
-            wal_seq: WAL 시퀀스 번호
-            operation: 복구 작업 유형 (redis_replay, pg_insert 등)
+            wal_seq: WAL sequence number
+            operation: Recovery operation type (redis_replay, pg_insert, etc.)
 
         Returns:
             True if duplicate (should skip), False if new
@@ -478,7 +482,7 @@ class HashChainWALRecovery:  # verified-by: test_recover_uncommitted_entries
                 IdempotencyService,
             )
 
-            # WAL 복구용 멱등성 키 생성
+            # Build the idempotency key for WAL recovery
             key = IdempotencyKey.for_wal_recovery(
                 wal_entry_id=str(wal_seq),
                 operation=operation,
@@ -490,11 +494,11 @@ class HashChainWALRecovery:  # verified-by: test_recover_uncommitted_entries
             return result.is_duplicate
 
         except ImportError:
-            # IdempotencyService 미사용 환경
+            # Environment without IdempotencyService
             logger.debug("hash_chain_wal.idempotencyservice_available")
             return False
         except Exception as e:
-            # 멱등성 검사 실패 시 안전하게 진행 (중복 허용)
+            # Proceed safely if the idempotency check fails (allow duplicates)
             logger.warning(
                 "hash_chain_wal.idempotency_check_failed",
                 error=e,
@@ -503,13 +507,13 @@ class HashChainWALRecovery:  # verified-by: test_recover_uncommitted_entries
 
     def _mark_as_processed_idempotency(self, wal_seq: int, operation: str) -> None:
         """
-        복구 완료된 WAL 엔트리를 멱등성 캐시에 등록.
+        Register a recovered WAL entry in the idempotency cache.
 
-        다음 복구 시도에서 중복으로 처리되도록 합니다.
+        Makes the next recovery attempt treat it as a duplicate.
 
         Args:
-            wal_seq: WAL 시퀀스 번호
-            operation: 복구 작업 유형
+            wal_seq: WAL sequence number
+            operation: Recovery operation type
         """
         try:
             from baldur.services.idempotency import (
@@ -523,7 +527,7 @@ class HashChainWALRecovery:  # verified-by: test_recover_uncommitted_entries
             )
 
             service = IdempotencyService()
-            # TTL 1시간 (복구 세션 내 중복 방지용)
+            # TTL 1 hour (dedupe within a recovery session)
             service.mark_as_processed(key, ttl=3600)
 
         except ImportError:

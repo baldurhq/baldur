@@ -61,14 +61,15 @@ class FallbackConfig:
         **overrides,
     ) -> FallbackConfig:
         """
-        Settings에서 FallbackConfig 인스턴스 생성.
+        Create a FallbackConfig instance from Settings.
 
         Args:
-            settings: GracefulDegradationSettings 인스턴스 (없으면 싱글톤 사용)
-            **overrides: 개별 필드 오버라이드
+            settings: GracefulDegradationSettings instance (singleton if
+                omitted)
+            **overrides: Per-field overrides
 
         Returns:
-            FallbackConfig: Settings 기반 인스턴스
+            FallbackConfig: Settings-based instance
         """
         from baldur.settings.graceful_degradation import (
             get_graceful_degradation_settings,
@@ -106,14 +107,15 @@ class HashChainCircuitBreakerConfig:
         **overrides,
     ) -> HashChainCircuitBreakerConfig:
         """
-        Settings에서 HashChainCircuitBreakerConfig 인스턴스 생성.
+        Create a HashChainCircuitBreakerConfig instance from Settings.
 
         Args:
-            settings: GracefulDegradationSettings 인스턴스 (없으면 싱글톤 사용)
-            **overrides: 개별 필드 오버라이드
+            settings: GracefulDegradationSettings instance (singleton if
+                omitted)
+            **overrides: Per-field overrides
 
         Returns:
-            HashChainCircuitBreakerConfig: Settings 기반 인스턴스
+            HashChainCircuitBreakerConfig: Settings-based instance
         """
         from baldur.settings.graceful_degradation import (
             get_graceful_degradation_settings,

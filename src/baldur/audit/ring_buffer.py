@@ -1,8 +1,8 @@
 """
 Ring Buffer with Backpressure for Shadow Logging.
 
-비침투 원칙에 따라 DROP_OLDEST가 기본값.
-메인 애플리케이션 성능에 영향을 주지 않음.
+DROP_OLDEST is the default, following the non-intrusive principle.
+Does not affect main application performance.
 
 Usage:
     buffer = RingBuffer[AuditEntry](capacity=10000)
@@ -27,7 +27,7 @@ T = TypeVar("T")
 
 @dataclass
 class RingBufferStats:
-    """버퍼 통계."""
+    """Buffer statistics."""
 
     capacity: int
     size: int
@@ -40,16 +40,16 @@ class RingBuffer(Generic[T]):
     """
     Thread-Safe Ring Buffer with Backpressure.
 
-    Shadow Logging을 위한 비침투 버퍼.
-    메인 애플리케이션을 절대 블로킹하지 않음.
+    Non-intrusive buffer for Shadow Logging.
+    Never blocks the main application.
 
     Features:
     - Non-blocking put() with DROP_OLDEST strategy
     - Batch retrieval for background workers
     - Thread-safe operations
     - Statistics for monitoring
-    - Drop rate alert callback (운영 가시성)
-    - High capacity warning (메모리 보호)
+    - Drop rate alert callback (operational visibility)
+    - High capacity warning (memory protection)
 
     Usage:
         buffer = RingBuffer[AuditEntry](capacity=10000)
@@ -63,11 +63,11 @@ class RingBuffer(Generic[T]):
             await store.save(entry)
     """
 
-    # 메모리 경고 임계치 (10만 이상)
+    # Memory warning threshold (100k and above)
     CAPACITY_WARNING_THRESHOLD = 100000
-    # 추정 이벤트 크기 (1KB)
+    # Estimated event size (1KB)
     ESTIMATED_EVENT_SIZE_BYTES = 1024
-    # 드랍률 알림 최소 샘플 수
+    # Minimum samples before a drop-rate alert
     MIN_SAMPLES_FOR_ALERT = 100
 
     def __init__(
@@ -83,13 +83,14 @@ class RingBuffer(Generic[T]):
         Args:
             capacity: Maximum buffer size
             strategy: Backpressure strategy (DROP_OLDEST recommended)
-            on_drop_threshold: 드랍률 임계치 초과 시 호출될 콜백
-            drop_rate_threshold: 드랍률 알림 임계치 (기본 1%)
+            on_drop_threshold: Callback invoked when the drop rate exceeds
+                the threshold
+            drop_rate_threshold: Drop-rate alert threshold (default 1%)
         """
         if capacity < 1:
             raise ValueError("capacity must be at least 1")
 
-        # 고용량 메모리 경고
+        # High-capacity memory warning
         if capacity > self.CAPACITY_WARNING_THRESHOLD:
             estimated_mb = (capacity * self.ESTIMATED_EVENT_SIZE_BYTES) / (1024 * 1024)
             logger.warning(
@@ -105,7 +106,7 @@ class RingBuffer(Generic[T]):
         self._total_enqueued = 0
         self._total_dropped = 0
 
-        # 드랍률 알림 설정
+        # Drop-rate alert settings
         self._on_drop_threshold = on_drop_threshold
         self._drop_rate_threshold = drop_rate_threshold
         self._alert_sent = False
@@ -113,14 +114,14 @@ class RingBuffer(Generic[T]):
     @classmethod
     def from_settings(cls, settings=None, **overrides) -> "RingBuffer[T]":
         """
-        Settings 기반 인스턴스 생성.
+        Create an instance from Settings.
 
         Args:
-            settings: RingBufferSettings 인스턴스 (None이면 자동 로드)
-            **overrides: 개별 필드 오버라이드
+            settings: RingBufferSettings instance (auto-loaded if None)
+            **overrides: Per-field overrides
 
         Returns:
-            RingBuffer: Settings 기반 인스턴스
+            RingBuffer: Settings-based instance
         """
         from baldur.settings.ring_buffer import get_ring_buffer_settings
 
@@ -191,7 +192,7 @@ class RingBuffer(Generic[T]):
             return True
 
     def _check_drop_rate_alert(self) -> None:
-        """드랍률 임계치 초과 시 알림 콜백 호출."""
+        """Invoke the alert callback when the drop rate exceeds the threshold."""
         if self._on_drop_threshold is None or self._alert_sent:
             return
 
@@ -211,10 +212,10 @@ class RingBuffer(Generic[T]):
             try:
                 self._on_drop_threshold(stats)
             except Exception:
-                pass  # 알림 실패가 메인 로직 방해 금지
+                pass  # An alert failure must never disrupt the main logic
 
     def reset_alert(self) -> None:
-        """알림 상태 리셋 (주기적 호출용)."""
+        """Reset the alert state (for periodic invocation)."""
         with self._lock:
             self._alert_sent = False
 
@@ -251,7 +252,7 @@ class RingBuffer(Generic[T]):
         Get and remove batch of items.
 
         Args:
-            max_size: Maximum batch size (None이면 Settings에서 로드)
+            max_size: Maximum batch size (loaded from Settings if None)
 
         Returns:
             List of items (may be smaller than max_size)
@@ -297,13 +298,13 @@ class RingBuffer(Generic[T]):
 
     def get_all(self) -> list[T]:
         """
-        모든 항목 반환 (비파괴적).
+        Return all items (non-destructive).
 
-        버퍼에 있는 모든 항목을 리스트로 반환합니다.
-        항목을 제거하지 않습니다.
+        Returns every item in the buffer as a list.
+        Does not remove any item.
 
         Returns:
-            버퍼 내 모든 항목의 복사본 리스트
+            A copied list of every item in the buffer
         """
         with self._lock:
             return list(self._buffer)

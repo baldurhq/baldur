@@ -1,7 +1,7 @@
 """
-WAL 디스크 관리 모듈.
+WAL disk management module.
 
-디스크 풀 처리, 우선순위 기반 Purge, 복구 체크 등을 담당합니다.
+Handles disk-full conditions, priority-based purging, and recovery checks.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ logger = structlog.get_logger()
 
 
 class WALDiskManagerMixin:
-    """디스크 관리 관련 메서드."""
+    """Disk management methods."""
 
     if TYPE_CHECKING:
         # Host contract — attributes provided by WriteAheadLog.
@@ -29,19 +29,22 @@ class WALDiskManagerMixin:
         _wal_dir: Path
 
     def _handle_disk_full(self) -> None:
-        """디스크 풀 상황 처리 (우선순위 기반 Purge 시도 후 Fail-Open 모드 전환)."""
+        """Handle a disk-full condition.
+
+        Tries a priority-based purge first, then switches to Fail-Open mode.
+        """
         from baldur.audit.wal._models import WALState
 
-        # 우선순위 기반 Purge 시도
+        # Try a priority-based purge
         if self._config.priority_based_purge and self._purge_by_priority():
             logger.info("wal.purge_recovered")
             return
 
-        # Purge 실패 또는 비활성화 시 Fail-Open 모드 전환
+        # Switch to Fail-Open mode if the purge failed or is disabled
         self._state = WALState.DISK_FULL_FAILOPEN
         logger.critical("wal.disk_full_failopen")
 
-        # 메트릭 기록
+        # Record metrics
         try:
             from baldur.metrics.drift_metrics import record_wal_disk_full
 
@@ -49,7 +52,7 @@ class WALDiskManagerMixin:
         except ImportError:
             pass
 
-        # 알림 전송
+        # Send a notification
         try:
             from baldur_pro.services.unified_notification import (
                 NotificationCategory,
@@ -75,16 +78,16 @@ class WALDiskManagerMixin:
 
     def _purge_by_priority(self) -> bool:  # noqa: C901
         """
-        우선순위 기반 삭제로 디스크 공간 확보.
+        Free disk space by deleting files in priority order.
 
         Returns:
-            True: 충분한 공간 확보 성공
-            False: 공간 확보 실패
+            True: enough space was freed
+            False: failed to free enough space
         """
         freed_bytes = 0
         target_free = self._config.max_file_size_bytes
 
-        # CRITICAL 제외한 우선순위 순서로 삭제
+        # Delete in priority order, excluding CRITICAL
         purge_priorities = self._config.purge_priority_order[:-1]
 
         for priority in purge_priorities:
@@ -119,7 +122,7 @@ class WALDiskManagerMixin:
                         error=e,
                     )
 
-        # 우선순위 파일 없으면 일반 파일 중 오래된 것부터 삭제
+        # With no priority files left, delete general files oldest-first
         if freed_bytes < target_free:
             general_files = sorted(
                 self._wal_dir.glob(f"{self._config.file_prefix}_*.wal"),
@@ -172,11 +175,11 @@ class WALDiskManagerMixin:
 
     def check_disk_recovery(self) -> bool:
         """
-        디스크 여유 공간 확보 시 정상 모드 복귀.
+        Return to normal mode once free disk space is available again.
 
         Returns:
-            True: 정상 모드로 복귀
-            False: 여전히 디스크 풀 상태
+            True: returned to normal mode
+            False: still disk-full
         """
         from baldur.audit.wal._models import WALState
 

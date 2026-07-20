@@ -301,9 +301,9 @@ class HashChainFallbackChain:
         Add integrity using disk-persistent buffer (last resort).
 
         Uses DiskPersistentBuffer instead of volatile memory buffer.
-        Pod 재시작에도 데이터가 보존됩니다.
+        Data survives pod restarts.
         """
-        # DiskPersistentBuffer 사용 (환경변수 BALDUR_BUFFER_TYPE에 따라 자동 전환)
+        # Use DiskPersistentBuffer (auto-switched via BALDUR_BUFFER_TYPE env var)
         try:
             from baldur.audit.persistence.disk_buffer import get_disk_buffer
 
@@ -324,7 +324,7 @@ class HashChainFallbackChain:
             timestamp = utc_now().isoformat()
             pod_id = os.environ.get("HOSTNAME", os.environ.get("POD_NAME", "unknown"))
 
-            # tier와 volatile 플래그는 DiskBuffer 사용 여부에 따라 결정
+            # tier and volatile flags depend on whether DiskBuffer is in use
             if use_disk_buffer:
                 tier = "disk_buffer"
                 volatile = False
@@ -348,11 +348,12 @@ class HashChainFallbackChain:
             entry["integrity"]["current_hash"] = current_hash
             self._memory_previous_hash = current_hash
 
-            # DiskBuffer 또는 메모리 버퍼에 저장
+            # Store in the DiskBuffer or the memory buffer
             if use_disk_buffer:
                 disk_buffer.put(entry.copy())
 
-            # memory_buffer에도 보관 (get_degraded_entries / clear_memory_buffer 일관성)
+            # Also keep in memory_buffer (consistency for
+            # get_degraded_entries / clear_memory_buffer)
             self._memory_buffer.append(entry.copy())
             if len(self._memory_buffer) > self._config.memory_max_entries:
                 removed = self._memory_buffer.pop(0)

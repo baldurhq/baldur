@@ -35,14 +35,14 @@ class SamplingConfig:
         **overrides,
     ) -> SamplingConfig:
         """
-        Settings에서 SamplingConfig 인스턴스 생성.
+        Create a SamplingConfig instance from Settings.
 
         Args:
-            settings: SamplingSettings 인스턴스 (없으면 싱글톤 사용)
-            **overrides: 개별 필드 오버라이드
+            settings: SamplingSettings instance (singleton if omitted)
+            **overrides: Per-field overrides
 
         Returns:
-            SamplingConfig: Settings 기반 인스턴스
+            SamplingConfig: Settings-based instance
         """
         from baldur.settings.sampling import get_sampling_settings
 

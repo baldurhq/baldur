@@ -1,10 +1,11 @@
 """
-Disk Buffer Drain-on-Startup 마이그레이션.
+Disk Buffer drain-on-startup migration.
 
-Pod 재시작 시 이전에 영속된 이벤트를 주 스토리지로 플러시합니다.
-애플리케이션 시작 시 호출하여 이전 세션의 미처리 이벤트를 복구합니다.
+Flushes previously persisted events to primary storage when a pod restarts.
+Call at application startup to recover unprocessed events from the previous
+session.
 
-사용법:
+Usage:
     from baldur.audit.persistence import (
         DiskPersistentBuffer,
         drain_on_startup,
@@ -13,7 +14,7 @@ Pod 재시작 시 이전에 영속된 이벤트를 주 스토리지로 플러시
     buffer = DiskPersistentBuffer()
 
     def send_to_primary(entries: list[dict]) -> bool:
-        # 주 스토리지 (Kafka, DB 등)로 전송
+        # Send to primary storage (Kafka, DB, etc.)
         return True
 
     result = drain_on_startup(
@@ -43,22 +44,22 @@ logger = structlog.get_logger()
 
 @dataclass
 class DrainResult:
-    """Drain 작업 결과."""
+    """Result of a drain operation."""
 
     drained: int = 0
-    """성공적으로 플러시된 엔트리 수."""
+    """Number of entries flushed successfully."""
 
     failed: int = 0
-    """플러시 실패한 엔트리 수."""
+    """Number of entries that failed to flush."""
 
     skipped: int = 0
-    """건너뛴 엔트리 수."""
+    """Number of entries skipped."""
 
     duration_seconds: float = 0.0
-    """작업 소요 시간 (초)."""
+    """Elapsed time of the operation (seconds)."""
 
     errors: list[str] = field(default_factory=list)
-    """발생한 에러 메시지 목록."""
+    """List of error messages raised."""
 
 
 def drain_on_startup(
@@ -69,17 +70,17 @@ def drain_on_startup(
     fail_fast: bool = False,
 ) -> DrainResult:
     """
-    시작 시 버퍼에 남은 이벤트를 주 스토리지로 플러시.
+    Flush events left in the buffer to primary storage at startup.
 
-    Pod 재시작 후 이전 세션에서 저장된 미처리 이벤트를
-    주 스토리지 (Kafka, DB 등)로 전송합니다.
+    Sends events persisted by the previous session — after a pod restart —
+    to primary storage (Kafka, DB, etc.).
 
     Args:
-        buffer: DiskPersistentBuffer 인스턴스
-        flush_handler: 이벤트 배치 처리 핸들러 (성공 시 True 반환)
-        batch_size: 배치 크기
-        max_batches: 최대 처리 배치 수 (None=무제한)
-        fail_fast: 실패 시 즉시 중단
+        buffer: DiskPersistentBuffer instance
+        flush_handler: Event batch handler (returns True on success)
+        batch_size: Batch size
+        max_batches: Maximum number of batches to process (None=unlimited)
+        fail_fast: Stop immediately on failure
 
     Returns:
         DrainResult
@@ -114,14 +115,14 @@ def drain_on_startup(
             )
             break
 
-        # 배치 조회
+        # Fetch a batch
         entries = list(buffer.iter_entries(limit=batch_size))
         if not entries:
             break
 
-        # 핸들러 호출
+        # Invoke the handler
         try:
-            # BufferEntry → dict 변환
+            # BufferEntry → dict conversion
             entry_dicts = [e.data for e in entries]
             success = flush_handler(entry_dicts)
         except Exception as e:
@@ -138,7 +139,7 @@ def drain_on_startup(
             continue
 
         if success:
-            # 성공 시 삭제
+            # Delete on success
             keys = [e.key for e in entries]
             deleted = buffer.delete_batch(keys)
             result.drained += deleted
@@ -147,7 +148,7 @@ def drain_on_startup(
                 deleted=deleted,
             )
         else:
-            # 실패 시 해당 배치 스킵 (다음 배치 시도)
+            # Skip this batch on failure (try the next batch)
             result.skipped += len(entries)
             logger.warning(
                 "drain_on_startup.batch_failed_skipping_entries",
@@ -179,15 +180,15 @@ async def async_drain_on_startup(
     max_batches: int | None = None,
 ) -> DrainResult:
     """
-    비동기 버전의 drain_on_startup.
+    Async version of drain_on_startup.
 
-    비동기 주 스토리지 핸들러를 사용하는 경우에 적합합니다.
+    Suitable when the primary-storage handler is asynchronous.
 
     Args:
-        buffer: DiskPersistentBuffer 인스턴스
-        async_flush_handler: 비동기 이벤트 핸들러
-        batch_size: 배치 크기
-        max_batches: 최대 배치 수
+        buffer: DiskPersistentBuffer instance
+        async_flush_handler: Async event handler
+        batch_size: Batch size
+        max_batches: Maximum number of batches
 
     Returns:
         DrainResult
@@ -242,7 +243,7 @@ async def async_drain_on_startup(
             result.skipped += len(entries)
 
         batches_processed += 1
-        await asyncio.sleep(0)  # 이벤트 루프 양보
+        await asyncio.sleep(0)  # Yield to the event loop
 
     result.duration_seconds = time.time() - start_time
 

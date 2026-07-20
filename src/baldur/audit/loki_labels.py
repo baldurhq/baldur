@@ -1,12 +1,12 @@
 """
-Loki/ELK 표준 라벨 정의.
+Loki/ELK standard label definitions.
 
-로그 시스템 친화적 라벨링을 위한 헬퍼 함수.
+Helper functions for log-system-friendly labeling.
 
 Loki Label Best Practice:
-- 낮은 카디널리티 (Low Cardinality) 권장
-- 고정 값 선호 (cluster, env, component)
-- 높은 카디널리티는 라벨 대신 로그 내용으로
+- Prefer low cardinality
+- Prefer fixed values (cluster, env, component)
+- Put high-cardinality data in the log body, not in labels
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ import structlog
 
 logger = structlog.get_logger()
 
-# CASCADE_EVENT 대상 이벤트 집합 (throttle/audit.py에서 import)
+# CASCADE_EVENT target action set (imported by throttle/audit.py)
 CASCADE_EVENT_ACTIONS: set[str] = {
     "throttle_emergency_sync",
     "throttle_cb_sync",
@@ -29,33 +29,33 @@ CASCADE_EVENT_ACTIONS: set[str] = {
 
 def get_standard_labels(audit_data: dict[str, Any]) -> dict[str, str]:
     """
-    감사 데이터에서 표준 라벨 추출.
+    Extract standard labels from audit data.
 
     Loki Label Best Practice:
-    - 낮은 카디널리티 (Low Cardinality)
-    - 고정 값 선호 (cluster, env, component)
-    - 높은 카디널리티는 라벨 대신 로그 내용으로
+    - Low cardinality
+    - Prefer fixed values (cluster, env, component)
+    - Put high-cardinality data in the log body, not in labels
 
     Args:
-        audit_data: 감사 데이터 딕셔너리
+        audit_data: Audit data dictionary
 
     Returns:
-        Loki/ELK 라벨용 딕셔너리
+        Dictionary of Loki/ELK labels
     """
     cluster_info = audit_data.get("cluster", {})
     action = audit_data.get("action", "unknown")
 
     return {
-        # 낮은 카디널리티 라벨
+        # Low-cardinality labels
         "job": "baldur-audit",
         "component": "throttle",
         "env": cluster_info.get("environment", "production"),
         "region": cluster_info.get("region", "unknown"),
         "cluster": cluster_info.get("cluster_id", "unknown"),
-        # 이벤트 분류
+        # Event classification
         "audit_action": action,
         "severity": audit_data.get("severity", "info"),
-        # CASCADE_EVENT 여부
+        # Whether this is a CASCADE_EVENT
         "is_cascade": str(action in CASCADE_EVENT_ACTIONS).lower(),
     }
 
@@ -68,17 +68,17 @@ def get_throttle_labels(
     environment: str = "production",
 ) -> dict[str, str]:
     """
-    Throttle 감사 이벤트용 표준 라벨 생성.
+    Build standard labels for a throttle audit event.
 
     Args:
-        action: 감사 이벤트 타입
-        severity: 심각도 (debug, info, warning, critical)
-        region: 리전 정보
-        cluster_id: 클러스터 ID
-        environment: 환경 (production, staging, development)
+        action: Audit event type
+        severity: Severity (debug, info, warning, critical)
+        region: Region info
+        cluster_id: Cluster ID
+        environment: Environment (production, staging, development)
 
     Returns:
-        Loki/ELK 라벨 딕셔너리
+        Loki/ELK label dictionary
     """
     return {
         "job": "baldur-audit",
@@ -97,16 +97,16 @@ def merge_labels(
     custom_labels: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """
-    기본 라벨과 사용자 정의 라벨 병합.
+    Merge base labels with user-defined labels.
 
-    사용자 정의 라벨이 기본 라벨을 오버라이드함.
+    User-defined labels override base labels.
 
     Args:
-        base_labels: 기본 라벨 딕셔너리
-        custom_labels: 사용자 정의 라벨 (선택)
+        base_labels: Base label dictionary
+        custom_labels: User-defined labels (optional)
 
     Returns:
-        병합된 라벨 딕셔너리
+        Merged label dictionary
     """
     if custom_labels is None:
         return base_labels.copy()
@@ -118,17 +118,17 @@ def merge_labels(
 
 def validate_labels(labels: dict[str, str]) -> tuple[bool, list[str]]:
     """
-    라벨 유효성 검증.
+    Validate labels.
 
-    Loki 라벨 규칙:
-    - 라벨 이름: 영문자, 숫자, _ 만 허용
-    - 라벨 값: 빈 문자열 허용 안함
+    Loki label rules:
+    - Label name: only letters, digits and _ allowed
+    - Label value: empty string not allowed
 
     Args:
-        labels: 검증할 라벨 딕셔너리
+        labels: Label dictionary to validate
 
     Returns:
-        (유효 여부, 오류 목록) 튜플
+        Tuple of (is_valid, list of errors)
     """
     import re
 
@@ -136,11 +136,11 @@ def validate_labels(labels: dict[str, str]) -> tuple[bool, list[str]]:
     label_name_pattern = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
     for name, value in labels.items():
-        # 라벨 이름 검증
+        # Validate label name
         if not label_name_pattern.match(name):
             errors.append(f"Invalid label name: {name}")
 
-        # 라벨 값 검증
+        # Validate label value
         if not value or not isinstance(value, str):
             errors.append(f"Invalid label value for {name}: {value}")
 
@@ -149,26 +149,26 @@ def validate_labels(labels: dict[str, str]) -> tuple[bool, list[str]]:
 
 def sanitize_label_value(value: str, max_length: int = 128) -> str:
     """
-    라벨 값 정제.
+    Sanitize a label value.
 
-    특수문자 제거, 길이 제한 적용.
+    Strips special characters and applies a length limit.
 
     Args:
-        value: 원본 라벨 값
-        max_length: 최대 길이 (기본 128)
+        value: Original label value
+        max_length: Maximum length (default 128)
 
     Returns:
-        정제된 라벨 값
+        Sanitized label value
     """
     if not value:
         return "unknown"
 
-    # 특수문자를 underscore로 대체
+    # Replace special characters with underscore
     import re
 
     sanitized = re.sub(r"[^a-zA-Z0-9_\-]", "_", value)
 
-    # 길이 제한
+    # Apply length limit
     if len(sanitized) > max_length:
         sanitized = sanitized[:max_length]
 

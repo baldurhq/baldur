@@ -1,13 +1,14 @@
 """
-Cascade Event Auditor - 연계 이벤트 감사기.
+Cascade Event Auditor - cascading event auditor.
 
-연계 이벤트를 생성, 저장, 조회하고 해시 체인 무결성을 검증합니다.
+Creates, stores, and queries cascading events, and verifies hash chain
+integrity.
 
 Features:
-- Cascade Event 생성 및 저장
-- Hash Chain 연결
-- 무결성 검증
-- 인과관계 조회
+- Cascade Event creation and storage
+- Hash Chain linking
+- Integrity verification
+- Causation queries
 
 Usage:
     from baldur.audit.cascade_auditor import get_cascade_event_auditor
@@ -25,17 +26,14 @@ Usage:
         triggered_by="system",
     )
 
-    # 조회
+    # Query
     event = auditor.get_cascade_event("cascade-abc123", "seoul")
     events = auditor.get_recent_events("seoul", limit=100)
 
-    # 무결성 검증
+    # Integrity verification
     result = auditor.verify_chain_integrity("seoul")
     if result["valid"]:
         print("Hash chain is valid")
-
-Reference:
-    docs/baldur/middleware_system/76_CASCADE_EVENT_AUDIT.md
 """
 
 from __future__ import annotations
@@ -72,20 +70,21 @@ class CascadeEventAuditor(
     WALRecoveryMixin,
 ):
     """
-    Cascade Event 감사기.
+    Cascade Event auditor.
 
-    연계 이벤트를 생성, 저장, 조회하고 해시 체인 무결성을 검증합니다.
+    Creates, stores, and queries cascading events, and verifies hash chain
+    integrity.
 
     Features:
-    - Cascade Event 생성 및 저장
-    - Hash Chain 연결
-    - 무결성 검증
-    - 인과관계 조회
+    - Cascade Event creation and storage
+    - Hash Chain linking
+    - Integrity verification
+    - Causation queries
     - Load Shedding (Phase 5)
-    - Fail-Soft 로컬 폴백 (Phase 5)
+    - Fail-Soft local fallback (Phase 5)
     """
 
-    # Redis 키 패턴
+    # Redis key patterns
     CASCADE_KEY = "baldur:{namespace}:audit:cascade:{cascade_id}"
     CASCADE_INDEX_KEY = "baldur:{namespace}:audit:cascade_index"
     LAST_HASH_KEY = "baldur:{namespace}:audit:cascade_last_hash"
@@ -100,8 +99,8 @@ class CascadeEventAuditor(
     ) -> None:
         """
         Args:
-            enable_load_shedding: Load Shedding 활성화 여부
-            max_index_size: 인덱스 최대 크기 (default from CascadeRetentionSettings)
+            enable_load_shedding: Whether Load Shedding is enabled
+            max_index_size: Max index size (default from CascadeRetentionSettings)
         """
         self._lock = threading.RLock()
         self._enable_load_shedding = enable_load_shedding
@@ -113,13 +112,13 @@ class CascadeEventAuditor(
         )
 
     def _get_backend(self):
-        """State backend 획득."""
+        """Acquire the state backend."""
         from baldur.core.state_backend import get_state_backend
 
         return get_state_backend()
 
     def _get_load_shedding(self):
-        """Load Shedding 관리자 획득 (Lazy init)."""
+        """Acquire the Load Shedding manager (lazy init)."""
         if self._load_shedding is None and self._enable_load_shedding:
             from baldur.audit.cascade_load_shedding import (
                 get_cascade_load_shedding,
@@ -133,7 +132,7 @@ class CascadeEventAuditor(
     # =========================================================================
 
     def _get_last_hash(self, namespace: str) -> str | None:
-        """마지막 해시 조회."""
+        """Look up the last hash."""
         backend = self._get_backend()
         key = self.LAST_HASH_KEY.format(namespace=namespace)
         data = backend.get(key)
@@ -142,17 +141,18 @@ class CascadeEventAuditor(
         return None
 
     def _update_last_hash(self, namespace: str, hash_value: str) -> None:
-        """마지막 해시 업데이트."""
+        """Update the last hash."""
         backend = self._get_backend()
         key = self.LAST_HASH_KEY.format(namespace=namespace)
         backend.set(key, {"hash": hash_value})
 
     def _save_cascade_event(self, event: Any) -> None:
-        """Cascade Event 저장.
+        """Store a Cascade Event.
 
-        CascadeRetentionSettings.hot_retention_days를 TTL로 적용하여
-        Redis 메모리 누수를 방지한다. StateBackend.set()의 ttl_seconds 파라미터를
-        사용하며, RedisStateBackend는 redis.setex()로 원자적 만료를 설정한다.
+        Applies CascadeRetentionSettings.hot_retention_days as the TTL to
+        prevent Redis memory leaks. Uses the ttl_seconds parameter of
+        StateBackend.set(); RedisStateBackend sets atomic expiry via
+        redis.setex().
         """
         backend = self._get_backend()
         key = self.CASCADE_KEY.format(
@@ -164,15 +164,15 @@ class CascadeEventAuditor(
         backend.set(key, event.to_dict(), ttl_seconds=ttl_seconds)
 
     def _add_to_index(self, namespace: str, cascade_id: str) -> None:
-        """인덱스에 추가 (최신순)."""
+        """Add to the index (newest first)."""
         backend = self._get_backend()
         key = self.CASCADE_INDEX_KEY.format(namespace=namespace)
         ids = get_index_ids(backend, key)
 
-        # 맨 앞에 추가
+        # Prepend
         ids.insert(0, cascade_id)
 
-        # 최대 크기 유지
+        # Keep within the max size
         if len(ids) > self._max_index_size:
             ids = ids[: self._max_index_size]
 

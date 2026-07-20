@@ -1,9 +1,10 @@
 """
-WAL 레코드 직렬화.
+WAL record serialization.
 
-기존 코드에서 3회 반복되던 직렬화/역직렬화 로직을 통합합니다.
-- json.dumps + CRC32 + struct.pack 패턴
-- fsync + rotation 패턴
+Unifies the serialization/deserialization logic that was repeated three
+times across the existing code.
+- json.dumps + CRC32 + struct.pack pattern
+- fsync + rotation pattern
 """
 
 from __future__ import annotations
@@ -17,29 +18,29 @@ from baldur.utils.serialization import fast_dumps
 
 
 def compute_checksum(data: bytes) -> str:
-    """CRC32 체크섬 계산."""
+    """Compute a CRC32 checksum."""
     crc = zlib.crc32(data) & 0xFFFFFFFF
     return f"{crc:08x}"
 
 
 def verify_checksum(data: bytes, expected: str) -> bool:
-    """CRC32 체크섬 검증."""
+    """Verify a CRC32 checksum."""
     computed = compute_checksum(data)
     return computed.lower() == expected.lower()
 
 
 def serialize_entry(entry: dict[str, Any]) -> tuple[bytes, str]:
     """
-    WAL 엔트리를 바이트 레코드로 직렬화.
+    Serialize a WAL entry into a byte record.
 
-    기존 _direct_write, _flush_buffer, batch_write_entries에서
-    3회 반복되던 패턴을 통합합니다.
+    Unifies the pattern that was repeated three times across
+    _direct_write, _flush_buffer, and batch_write_entries.
 
     Args:
-        entry: WAL 엔트리 딕셔너리 (seq, ts, data)
+        entry: WAL entry dictionary (seq, ts, data)
 
     Returns:
-        (record_bytes, checksum) 튜플
+        (record_bytes, checksum) tuple
     """
     entry_bytes = fast_dumps(entry)
     checksum = compute_checksum(entry_bytes)
@@ -51,15 +52,15 @@ def serialize_entry(entry: dict[str, Any]) -> tuple[bytes, str]:
 
 def sync_and_maybe_rotate(handle, config, rotate_fn) -> None:
     """
-    파일 동기화 및 필요 시 로테이션.
+    Sync the file and rotate it if needed.
 
-    기존 _direct_write, _flush_buffer, batch_write_entries에서
-    3회 반복되던 패턴을 통합합니다.
+    Unifies the pattern that was repeated three times across
+    _direct_write, _flush_buffer, and batch_write_entries.
 
     Args:
-        handle: 파일 핸들
+        handle: File handle
         config: WALConfig
-        rotate_fn: 로테이션 함수 콜백
+        rotate_fn: Rotation callback
     """
     if config.sync_on_write:
         handle.flush()

@@ -4,8 +4,8 @@ Pending Sequence Manager.
 Contains:
 - PendingSequenceManager: Tracks incomplete hash chain writes to ensure atomicity
 
-Reference:
-    92_CONFIG_IMPLEMENTATION_GUIDE.md Week 4 [25] AuditIntegritySettings 참조.
+Configuration:
+    AuditIntegritySettings (baldur.settings.audit_integrity).
 """
 
 from __future__ import annotations

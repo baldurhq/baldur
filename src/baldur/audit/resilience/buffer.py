@@ -1,9 +1,9 @@
 """
 In-Memory Audit Buffer.
 
-WAL 실패 시 메모리 폴백 버퍼.
-디스크 장애 시 중요 로그를 메모리에 임시 보관하고,
-시스템 정상화 시 파일로 플러시합니다.
+Memory fallback buffer for when the WAL fails.
+Holds critical logs in memory during a disk outage and flushes them to file
+once the system recovers.
 """
 
 from __future__ import annotations
@@ -36,17 +36,17 @@ def _get_flush_interval() -> float:
 
 class InMemoryAuditBuffer:
     """
-    WAL 실패 시 메모리 폴백 버퍼.
+    Memory fallback buffer for when the WAL fails.
 
-    디스크 장애 시 중요 로그를 메모리에 임시 보관하고,
-    시스템 정상화 시 파일로 플러시합니다.
+    Holds critical logs in memory during a disk outage and flushes them to
+    file once the system recovers.
 
-    설계 원칙:
-    - 최대 엔트리 수는 ResilientRecorderSettings에서 설정 (기본 10,000개)
-    - FIFO: 용량 초과 시 가장 오래된 엔트리 삭제
-    - 주기적 플러시 시도 (기본 30초 간격)
+    Design principles:
+    - Max entry count comes from ResilientRecorderSettings (default 10,000)
+    - FIFO: the oldest entry is dropped once capacity is exceeded
+    - Periodic flush attempts (default every 30 seconds)
 
-    Thread-safe: RLock 사용
+    Thread-safe: uses RLock
     """
 
     _instance: InMemoryAuditBuffer | None = None
@@ -62,11 +62,12 @@ class InMemoryAuditBuffer:
         flush_interval_seconds: float | None = None,
     ):
         """
-        InMemoryAuditBuffer 초기화.
+        Initialize InMemoryAuditBuffer.
 
         Args:
-            max_entries: 최대 엔트리 수 (default from ResilientRecorderSettings)
-            flush_interval_seconds: 플러시 간격 (default from ResilientRecorderSettings)
+            max_entries: Max entry count (default from ResilientRecorderSettings)
+            flush_interval_seconds: Flush interval (default from
+                ResilientRecorderSettings)
         """
         self._buffer: list[dict[str, Any]] = []
         self._buffer_lock = threading.RLock()
@@ -85,7 +86,7 @@ class InMemoryAuditBuffer:
 
     @classmethod
     def get_instance(cls) -> InMemoryAuditBuffer:
-        """싱글톤 인스턴스 반환."""
+        """Return the singleton instance."""
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
@@ -94,16 +95,16 @@ class InMemoryAuditBuffer:
 
     @classmethod
     def reset_instance(cls) -> None:
-        """인스턴스 리셋 (테스트용)."""
+        """Reset the instance (for testing)."""
         with cls._lock:
             cls._instance = None
 
     def add(self, entry: dict[str, Any]) -> bool:
         """
-        엔트리 추가.
+        Add an entry.
 
         Args:
-            entry: WAL 엔트리 딕셔너리
+            entry: WAL entry dictionary
 
         Returns:
             True if added successfully, False if buffer full and oldest removed
@@ -111,7 +112,7 @@ class InMemoryAuditBuffer:
         with self._buffer_lock:
             dropped = False
             if len(self._buffer) >= self._max_entries:
-                # FIFO: 가장 오래된 엔트리 삭제
+                # FIFO: drop the oldest entry
                 self._buffer.pop(0)
                 self._total_dropped += 1
                 dropped = True
@@ -128,13 +129,13 @@ class InMemoryAuditBuffer:
 
     def try_flush(self, wal_write_func: Callable[[dict[str, Any]], int | None]) -> int:
         """
-        버퍼를 WAL로 플러시 시도.
+        Try to flush the buffer to the WAL.
 
         Args:
-            wal_write_func: WAL 쓰기 함수 (entry dict -> sequence 반환)
+            wal_write_func: WAL write function (entry dict -> returns sequence)
 
         Returns:
-            플러시된 엔트리 수
+            Number of flushed entries
         """
         with self._buffer_lock:
             if not self._buffer:
@@ -146,7 +147,7 @@ class InMemoryAuditBuffer:
 
             for entry in self._buffer:
                 try:
-                    # buffered_at 제거 후 WAL에 기록
+                    # Strip buffered_at before writing to the WAL
                     entry_copy = {k: v for k, v in entry.items() if k != "buffered_at"}
                     result = wal_write_func(entry_copy)
                     if result is not None:
@@ -174,16 +175,16 @@ class InMemoryAuditBuffer:
             return flushed
 
     def count(self) -> int:
-        """현재 버퍼 크기 (AuditBufferProtocol)."""
+        """Current buffer size (AuditBufferProtocol)."""
         with self._buffer_lock:
             return len(self._buffer)
 
     def get_buffer_size(self) -> int:
-        """현재 버퍼 크기 (legacy alias)."""
+        """Current buffer size (legacy alias)."""
         return self.count()
 
     def get_stats(self) -> dict[str, Any]:
-        """버퍼 통계."""
+        """Buffer statistics."""
         with self._buffer_lock:
             current = len(self._buffer)
             capacity = self._max_entries
@@ -208,7 +209,7 @@ class InMemoryAuditBuffer:
             }
 
     def clear(self) -> int:
-        """버퍼 비우기 (테스트용). 삭제된 엔트리 수 반환."""
+        """Empty the buffer (for testing). Returns the number of removed entries."""
         with self._buffer_lock:
             count = len(self._buffer)
             self._buffer.clear()
@@ -222,20 +223,20 @@ def get_inmemory_audit_buffer() -> InMemoryAuditBuffer:
 
 def get_audit_buffer() -> AuditBufferProtocol:
     """
-    Audit Buffer 팩토리.
+    Audit Buffer factory.
 
-    환경변수로 구현 선택:
-    - BALDUR_BUFFER_TYPE=memory (기본, 기존 휘발성 버퍼)
-    - BALDUR_BUFFER_TYPE=disk (영속 버퍼, Pod 재시작에도 데이터 보존)
+    Implementation selected by environment variable:
+    - BALDUR_BUFFER_TYPE=memory (default, the existing volatile buffer)
+    - BALDUR_BUFFER_TYPE=disk (persistent buffer, survives pod restarts)
 
     Returns:
-        InMemoryAuditBuffer 또는 DiskBufferAdapter 인스턴스
+        InMemoryAuditBuffer or DiskBufferAdapter instance
 
     Note:
-        DiskBufferAdapter는 InMemoryAuditBuffer와 동일한 인터페이스를 제공합니다.
-        - add(entry): 엔트리 추가
-        - try_flush(callback): WAL로 플러시
-        - get_stats(): 통계 조회
+        DiskBufferAdapter offers the same interface as InMemoryAuditBuffer.
+        - add(entry): add an entry
+        - try_flush(callback): flush to the WAL
+        - get_stats(): read statistics
     """
     import os
 

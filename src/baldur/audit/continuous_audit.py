@@ -1,15 +1,15 @@
 """
-Continuous Audit Recorder - 기업 감사 스타일 지속적 감사.
+Continuous Audit Recorder - enterprise-audit-style continuous auditing.
 
-모든 자동화된 결정을 위변조 불가능하게 기록합니다.
-보고서 포맷팅은 제공하지 않고, 완전한 raw data만 제공합니다.
-(각 조직은 자체 형식으로 데이터를 가공해야 함)
+Records every automated decision in a tamper-evident way.
+No report formatting is provided, only complete raw data.
+(Each organization shapes the data into its own format.)
 
 Design Philosophy:
-- 완전하고 정확한 raw data 기록
-- 해시 체인으로 위변조 방지
-- 쿼리/필터링/익스포트 기능 제공
-- 포맷팅은 사용자 책임
+- Complete, accurate raw data recording
+- Tamper protection via hash chain
+- Query/filter/export capabilities
+- Formatting is the user's responsibility
 """
 
 from __future__ import annotations
@@ -45,40 +45,40 @@ logger = structlog.get_logger()
 
 class ContinuousAuditRecorder:
     """
-    지속적 감사 기록기.
+    Continuous audit recorder.
 
-    특징:
-    - 해시 체인으로 위변조 방지
-    - 다중 스토리지 백엔드 지원
-    - 규정 위반 시 즉시 알림
-    - Raw data 조회/필터/익스포트 제공
-    - 보고서 포맷팅 미제공 (사용자가 직접 가공)
+    Characteristics:
+    - Tamper protection via hash chain
+    - Multiple storage backends supported
+    - Immediate alerting on compliance violations
+    - Raw data query/filter/export
+    - No report formatting (users shape it themselves)
 
     FAIL-OPEN Design Policy:
     --------------------------
-    감사 로그 기록 실패가 비즈니스 처리를 방해하지 않습니다.
-    - 기본: Audit 실패 → 경고 로그 + fallback stdout
-    - 선택: fail_open=False로 Fail-Secure 모드 가능 (PCI-DSS)
+    An audit log write failure never blocks business processing.
+    - Default: audit failure -> warning log + stdout fallback
+    - Optional: fail_open=False enables Fail-Secure mode (PCI-DSS)
 
-    업계 정책:
-    - Netflix Zuul: Fail-Open (가용성 우선)
-    - Stripe: Fail-Open + 재시도
-    - PCI-DSS: Fail-Secure 권장 (단, 가용성 예외 허용)
-    - SOC2: Fail-Open 허용 (실패 기록만 있으면 됨)
+    Industry policies:
+    - Netflix Zuul: Fail-Open (availability first)
+    - Stripe: Fail-Open + retry
+    - PCI-DSS: Fail-Secure recommended (availability exceptions allowed)
+    - SOC2: Fail-Open allowed (a record of the failure is enough)
 
     Usage:
         config = AuditConfig.get_default()
         recorder = ContinuousAuditRecorder(
             audit_adapter=FileAuditLogAdapter("logs/audit.jsonl"),
             config=config,
-            fail_open=True,  # 기본: Fail-Open
+            fail_open=True,  # default: Fail-Open
         )
 
         recorder.record_auto_tuning(
             parameter="timeout_ms",
             old_value=5000,
             new_value=6000,
-            reason="P99 레이턴시 증가",
+            reason="P99 latency increase",
             confidence=0.85,
             metrics_snapshot={"p99_latency_ms": 4200},
             safety_check={"within_bounds": True},
@@ -91,16 +91,16 @@ class ContinuousAuditRecorder:
         config: AuditConfig | None = None,
         alert_callback: Callable[[str, dict[str, Any]], None] | None = None,
         state_file: Path | None = None,
-        # Fail-Open 정책
+        # Fail-Open policy
         fail_open: bool = True,
         fallback_to_stdout: bool = True,
-        # WAL 연동
+        # WAL integration
         wal_enabled: bool = False,
         wal_config: WALConfig | None = None,
-        # Checkpoint Strategy 연동
+        # Checkpoint Strategy integration
         checkpoint_strategy: CheckpointStorageStrategy | None = None,
         checkpoint_namespace: str = "default",
-        # Checkpoint Back-pressure 설정
+        # Checkpoint back-pressure settings
         checkpoint_save_interval: int = 10,
         checkpoint_save_max_seconds: float = 30.0,
     ):
@@ -108,33 +108,36 @@ class ContinuousAuditRecorder:
         Initialize ContinuousAuditRecorder.
 
         Args:
-            audit_adapter: 감사 로그 저장 어댑터
-            config: 감사 설정 (None이면 환경변수에서 로드)
-            alert_callback: 알림 콜백 (channel, data) -> None
-            state_file: 해시 체인 상태 파일 경로
-            fail_open: Fail-Open 정책 (기본: True)
-            fallback_to_stdout: 실패 시 stdout 출력 (기본: True)
-            wal_enabled: WAL 활성화 (기본: False)
-            wal_config: WAL 설정
-            checkpoint_strategy: 체크포인트 저장 전략 (None이면 WAL 활성화 시 기본값 사용)
-            checkpoint_namespace: 체크포인트 네임스페이스
-            checkpoint_save_interval: N번 기록마다 체크포인트 저장 (기본: 10)
-            checkpoint_save_max_seconds: 최대 저장 간격 초 (기본: 30.0)
+            audit_adapter: Audit log storage adapter
+            config: Audit settings (loaded from env vars when None)
+            alert_callback: Alert callback (channel, data) -> None
+            state_file: Hash chain state file path
+            fail_open: Fail-Open policy (default: True)
+            fallback_to_stdout: Print to stdout on failure (default: True)
+            wal_enabled: Enable WAL (default: False)
+            wal_config: WAL settings
+            checkpoint_strategy: Checkpoint save strategy (when None, the
+                default is used if WAL is enabled)
+            checkpoint_namespace: Checkpoint namespace
+            checkpoint_save_interval: Save a checkpoint every N records
+                (default: 10)
+            checkpoint_save_max_seconds: Max save interval in seconds
+                (default: 30.0)
         """
         self.audit_adapter = audit_adapter
         self.config = config or AuditConfig.get_default()
         self.alert_callback = alert_callback
 
-        # Fail-Open 정책
+        # Fail-Open policy
         self._fail_open = fail_open
         self._fallback_to_stdout = fallback_to_stdout
         self._failed_write_count = 0
 
-        # 해시 체인 관리자
+        # Hash chain manager
         self._hash_manager = HashChainManager(state_file=state_file)
         self._lock = threading.RLock()
 
-        # WAL 초기화 (선택적)
+        # WAL initialization (optional)
         self._wal_enabled = wal_enabled
         self._wal: WriteAheadLog | None = None
 
@@ -152,20 +155,20 @@ class ContinuousAuditRecorder:
                 )
                 self._wal_enabled = False
 
-        # Checkpoint Strategy 초기화
+        # Checkpoint strategy initialization
         self._checkpoint_strategy: CheckpointStorageStrategy | None = (
             checkpoint_strategy
         )
         self._checkpoint_namespace = checkpoint_namespace
 
-        # Checkpoint Back-pressure 상태 (호출자 책임 패턴)
+        # Checkpoint back-pressure state (caller-responsibility pattern)
         self._checkpoint_save_interval = checkpoint_save_interval
         self._checkpoint_save_max_seconds = checkpoint_save_max_seconds
         self._records_since_checkpoint: int = 0
         self._last_checkpoint_time: float = time.time()
 
         if checkpoint_strategy is None and wal_enabled:
-            # WAL 활성화 시 기본 전략 자동 설정
+            # Auto-configure the default strategy when WAL is enabled
             try:
                 from baldur.audit.checkpoint import (
                     get_default_checkpoint_strategy,
@@ -179,13 +182,13 @@ class ContinuousAuditRecorder:
                     error=e,
                 )
 
-        # 환경 정보
+        # Environment information
         self._environment = os.environ.get("ENVIRONMENT", "development")
         self._service_name = os.environ.get("SERVICE_NAME", "unknown")
         self._service_version = os.environ.get("SERVICE_VERSION", "unknown")
 
     # ─────────────────────────────────────────────────────────────
-    # 기록 메서드 (Auto Tuning)
+    # Record methods (Auto Tuning)
     # ─────────────────────────────────────────────────────────────
 
     def record_auto_tuning(
@@ -200,20 +203,20 @@ class ContinuousAuditRecorder:
         actor_id: str = "runtime_feedback_loop",
     ) -> str:
         """
-        자율 조정 기록.
+        Record an autonomous adjustment.
 
         Args:
-            parameter: 조정된 파라미터 이름
-            old_value: 이전 값
-            new_value: 새 값
-            reason: 조정 사유
-            confidence: 신뢰도 (0.0 ~ 1.0)
-            metrics_snapshot: 결정 시점 메트릭
-            safety_check: 안전 검사 결과
-            actor_id: 조정 수행 주체
+            parameter: Name of the adjusted parameter
+            old_value: Previous value
+            new_value: New value
+            reason: Reason for the adjustment
+            confidence: Confidence level (0.0 ~ 1.0)
+            metrics_snapshot: Metrics at decision time
+            safety_check: Safety check result
+            actor_id: Actor that performed the adjustment
 
         Returns:
-            감사 로그 ID
+            Audit log ID
         """
         entry = AuditEntry(
             action=AuditAction.AUTO_TUNING_ADJUSTMENT,
@@ -238,7 +241,7 @@ class ContinuousAuditRecorder:
 
         audit_id = self._record_with_integrity(entry)
 
-        # 알림 발송
+        # Send alert
         self._send_alert(
             "auto_tuning",
             {
@@ -259,7 +262,7 @@ class ContinuousAuditRecorder:
         rejection_reason: str,
         safety_bounds: dict[str, Any],
     ) -> str:
-        """안전 한계 초과로 자율 조정 거부됨."""
+        """Autonomous adjustment rejected for exceeding safety bounds."""
         entry = AuditEntry(
             action=AuditAction.AUTO_TUNING_REJECTED,
             target_type="runtime_config",
@@ -300,7 +303,7 @@ class ContinuousAuditRecorder:
         rollback_reason: str,
         strategy: str,  # last_known_good, dna_declared, system_defaults
     ) -> str:
-        """자율 조정 롤백 기록."""
+        """Record an autonomous adjustment rollback."""
         entry = AuditEntry(
             action=AuditAction.AUTO_TUNING_ROLLBACK,
             target_type="runtime_config",
@@ -321,7 +324,7 @@ class ContinuousAuditRecorder:
         return self._record_with_integrity(entry)
 
     # ─────────────────────────────────────────────────────────────
-    # 기록 메서드 (DNA Drift)
+    # Record methods (DNA Drift)
     # ─────────────────────────────────────────────────────────────
 
     def record_drift_detected(
@@ -333,14 +336,14 @@ class ContinuousAuditRecorder:
         severity: str,  # low, medium, high, critical
     ) -> str:
         """
-        DNA Drift 감지 기록.
+        Record a DNA drift detection.
 
         Args:
-            resource_id: 드리프트가 발생한 리소스 ID
-            declared: DNA에 선언된 값
-            actual: 실제 런타임 값
-            drifted_fields: 드리프트된 필드 목록
-            severity: 심각도
+            resource_id: ID of the resource that drifted
+            declared: Value declared in the DNA
+            actual: Actual runtime value
+            drifted_fields: List of drifted fields
+            severity: Severity level
         """
         entry = AuditEntry(
             action=AuditAction.DNA_DRIFT_DETECTED,
@@ -362,7 +365,7 @@ class ContinuousAuditRecorder:
 
         audit_id = self._record_with_integrity(entry)
 
-        # 심각도에 따라 알림
+        # Alert according to severity
         if severity in ("high", "critical"):
             self._send_alert(
                 "drift_critical",
@@ -381,7 +384,7 @@ class ContinuousAuditRecorder:
         resolved_fields: list[str],
         resolution_method: str,  # manual, auto_sync, config_update
     ) -> str:
-        """DNA Drift 해결 기록."""
+        """Record a DNA drift resolution."""
         entry = AuditEntry(
             action=AuditAction.DNA_DRIFT_RESOLVED,
             target_type="stage_dna",
@@ -399,7 +402,7 @@ class ContinuousAuditRecorder:
         return self._record_with_integrity(entry)
 
     # ─────────────────────────────────────────────────────────────
-    # 기록 메서드 (Compliance)
+    # Record methods (Compliance)
     # ─────────────────────────────────────────────────────────────
 
     def record_compliance_check(
@@ -409,12 +412,12 @@ class ContinuousAuditRecorder:
         overall_status: str,  # compliant, compliant_with_warnings, non_compliant
     ) -> str:
         """
-        Compliance 검사 결과 기록.
+        Record a compliance check result.
 
         Args:
-            standards_checked: 검사한 규정 목록 (예: ["DORA", "PCI-DSS"])
-            results: 규정별 검사 결과
-            overall_status: 전체 준수 상태
+            standards_checked: Standards checked (e.g. ["DORA", "PCI-DSS"])
+            results: Per-standard check results
+            overall_status: Overall compliance status
         """
         entry = AuditEntry(
             action=AuditAction.COMPLIANCE_CHECK,
@@ -435,7 +438,7 @@ class ContinuousAuditRecorder:
 
         audit_id = self._record_with_integrity(entry)
 
-        # 위반 시 알림
+        # Alert on violation
         if overall_status == "non_compliant":
             self._send_alert(
                 "compliance_violation",
@@ -455,7 +458,7 @@ class ContinuousAuditRecorder:
         description: str,
         remediation_required: bool = True,
     ) -> str:
-        """Compliance 위반 기록."""
+        """Record a compliance violation."""
         entry = AuditEntry(
             action=AuditAction.COMPLIANCE_VIOLATION,
             target_type="compliance",
@@ -488,7 +491,7 @@ class ContinuousAuditRecorder:
         return audit_id
 
     # ─────────────────────────────────────────────────────────────
-    # 조회 메서드 (Raw Data)
+    # Query methods (Raw Data)
     # ─────────────────────────────────────────────────────────────
 
     def query(
@@ -501,18 +504,18 @@ class ContinuousAuditRecorder:
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         """
-        감사 로그 조회 (Raw data).
+        Query audit logs (raw data).
 
         Args:
-            action: 액션 유형 필터
-            target_type: 대상 유형 필터
-            target_id: 대상 ID 필터
-            start_time: 시작 시간
-            end_time: 종료 시간
-            limit: 최대 반환 개수
+            action: Action type filter
+            target_type: Target type filter
+            target_id: Target ID filter
+            start_time: Start time
+            end_time: End time
+            limit: Maximum number of results
 
         Returns:
-            감사 로그 딕셔너리 목록
+            List of audit log dictionaries
         """
         entries = self.audit_adapter.query(
             action=action,
@@ -533,16 +536,16 @@ class ContinuousAuditRecorder:
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         """
-        자율 조정 이력 조회.
+        Query autonomous adjustment history.
 
         Args:
-            parameter: 파라미터 이름 필터
-            start_time: 시작 시간
-            end_time: 종료 시간
-            limit: 최대 반환 개수
+            parameter: Parameter name filter
+            start_time: Start time
+            end_time: End time
+            limit: Maximum number of results
 
         Returns:
-            자율 조정 로그 목록
+            List of autonomous adjustment logs
         """
         return self.query(
             action=AuditAction.AUTO_TUNING_ADJUSTMENT,
@@ -561,12 +564,12 @@ class ContinuousAuditRecorder:
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         """
-        DNA Drift 이력 조회.
+        Query DNA drift history.
 
         Returns:
-            드리프트 감지/해결 로그 목록
+            List of drift detection/resolution logs
         """
-        # DNA_DRIFT_DETECTED와 DNA_DRIFT_RESOLVED 모두 조회
+        # Query both DNA_DRIFT_DETECTED and DNA_DRIFT_RESOLVED
         detected = self.query(
             action=AuditAction.DNA_DRIFT_DETECTED,
             target_id=resource_id,
@@ -583,7 +586,7 @@ class ContinuousAuditRecorder:
             limit=limit // 2,
         )
 
-        # 시간순 정렬
+        # Sort chronologically
         all_entries = detected + resolved
         all_entries.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
 
@@ -597,10 +600,10 @@ class ContinuousAuditRecorder:
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         """
-        Compliance 검사 이력 조회.
+        Query compliance check history.
 
         Returns:
-            규정 준수 검사 로그 목록
+            List of compliance check logs
         """
         return self.query(
             action=AuditAction.COMPLIANCE_CHECK,
@@ -611,7 +614,7 @@ class ContinuousAuditRecorder:
         )
 
     # ─────────────────────────────────────────────────────────────
-    # 익스포트 메서드 (Raw Data)
+    # Export methods (Raw Data)
     # ─────────────────────────────────────────────────────────────
 
     def export_jsonl(
@@ -667,21 +670,21 @@ class ContinuousAuditRecorder:
             yield flat
 
     # ─────────────────────────────────────────────────────────────
-    # 무결성 검증
+    # Integrity verification
     # ─────────────────────────────────────────────────────────────
 
     def verify_integrity(self) -> dict[str, Any]:
         """
-        감사 로그 무결성 검증.
+        Verify audit log integrity.
 
         Returns:
-            검증 결과 딕셔너리
+            Verification result dictionary
         """
         entries = self.query(limit=10000)
 
         verifier = HashChainVerifier()
 
-        # 엔트리에 integrity 필드가 있으면 검증
+        # Verify entries that carry an integrity field
         entries_with_integrity = [
             e for e in entries if "integrity" in e.get("details", {})
         ]
@@ -694,7 +697,7 @@ class ContinuousAuditRecorder:
                 "message": "No entries with integrity information found",
             }
 
-        # 무결성 정보를 최상위로 이동
+        # Lift integrity information to the top level
         for entry in entries_with_integrity:
             entry["integrity"] = entry.get("details", {}).get("integrity", {})
 
@@ -715,39 +718,39 @@ class ContinuousAuditRecorder:
         return result
 
     def get_chain_state(self) -> dict[str, Any]:
-        """현재 해시 체인 상태 반환."""
+        """Return the current hash chain state."""
         return self._hash_manager.get_state()
 
     # ─────────────────────────────────────────────────────────────
-    # 내부 메서드
+    # Internal methods
     # ─────────────────────────────────────────────────────────────
 
     def _record_with_integrity(self, entry: AuditEntry) -> str:
         """
-        해시 체인과 함께 기록.
+        Record together with the hash chain.
 
-        FAIL-OPEN 정책:
-        - 기록 실패 시에도 비즈니스 로직을 차단하지 않음
-        - fallback_to_stdout 활성화 시 stdout에 최소한의 기록
-        - fail_open=False로 Fail-Secure 모드 가능
+        FAIL-OPEN policy:
+        - A write failure never blocks business logic
+        - With fallback_to_stdout enabled, a minimal record goes to stdout
+        - fail_open=False enables Fail-Secure mode
 
         Args:
-            entry: 감사 엔트리
+            entry: Audit entry
 
         Returns:
-            감사 로그 ID
+            Audit log ID
         """
         with self._lock:
-            # 엔트리를 딕셔너리로 변환
+            # Convert the entry to a dictionary
             entry_dict = entry.to_dict()
 
-            # 해시 체인 무결성 정보 추가
+            # Add hash chain integrity information
             entry_dict = self._hash_manager.add_integrity(entry_dict)
 
-            # 무결성 정보를 details에 포함
+            # Include integrity information in details
             entry.details["integrity"] = entry_dict.get("integrity", {})
 
-            # WAL 기록 (활성화된 경우)
+            # WAL write (when enabled)
             wal_seq = None
             if self._wal_enabled and self._wal:
                 try:
@@ -758,12 +761,13 @@ class ContinuousAuditRecorder:
                         error=e,
                     )
 
-            # Fail-Open 패턴으로 기록
+            # Record with the Fail-Open pattern
             try:
                 self.audit_adapter.log(entry)
 
-                # WAL 커밋 (성공 시) — `mark_processed` is a PRO-impl extension;
-                # OSS WriteAheadLog is write-only, so duck-type the call.
+                # WAL commit (on success) — `mark_processed` is a PRO-impl
+                # extension; OSS WriteAheadLog is write-only, so duck-type
+                # the call.
                 if wal_seq is not None and self._wal:
                     try:
                         mark_processed = getattr(self._wal, "mark_processed", None)
@@ -775,7 +779,7 @@ class ContinuousAuditRecorder:
                             error=e,
                         )
 
-                # Checkpoint 저장 (Back-pressure 적용)
+                # Checkpoint save (back-pressure applied)
                 if wal_seq is not None and self._checkpoint_strategy:
                     self._maybe_save_checkpoint(wal_seq, entry_dict)
 
@@ -783,7 +787,7 @@ class ContinuousAuditRecorder:
                 self._failed_write_count += 1
 
                 if self._fallback_to_stdout:
-                    # Fallback: stdout에 최소한의 기록
+                    # Fallback: write a minimal record to stdout
                     import sys
 
                     print(
@@ -792,7 +796,7 @@ class ContinuousAuditRecorder:
                     )
 
                 if not self._fail_open:
-                    # Fail-Secure 모드: 예외 전파
+                    # Fail-Secure mode: propagate the exception
                     raise
 
                 logger.warning(
@@ -801,7 +805,7 @@ class ContinuousAuditRecorder:
                     failed_write_count=self._failed_write_count,
                 )
 
-            # ID 생성 (timestamp + sequence)
+            # Generate the ID (timestamp + sequence)
             integrity = entry_dict.get("integrity", {})
             audit_id = f"audit-{entry.timestamp.strftime('%Y%m%d%H%M%S')}-{integrity.get('sequence', 0):06d}"
 
@@ -814,7 +818,7 @@ class ContinuousAuditRecorder:
             return audit_id
 
     def get_stats(self) -> dict[str, Any]:
-        """감사 기록기 통계 반환."""
+        """Return audit recorder statistics."""
         return {
             "failed_write_count": self._failed_write_count,
             "fail_open": self._fail_open,
@@ -827,10 +831,10 @@ class ContinuousAuditRecorder:
 
     def _maybe_save_checkpoint(self, wal_seq: int, entry_dict: dict[str, Any]) -> None:
         """
-        Back-pressure를 적용한 체크포인트 저장.
+        Save a checkpoint with back-pressure applied.
 
-        N번 기록마다 또는 최대 저장 간격 초과 시에만 저장.
-        sync_worker.py의 Back-pressure 패턴과 동일.
+        Saves only every N records or once the max save interval is exceeded.
+        Same back-pressure pattern as the sync worker.
         """
         self._records_since_checkpoint += 1
 
@@ -856,7 +860,7 @@ class ContinuousAuditRecorder:
                 checkpoint_data,
             )
 
-            # 저장 성공 시 카운터 리셋
+            # Reset counters on a successful save
             self._records_since_checkpoint = 0
             self._last_checkpoint_time = time.time()
 
@@ -873,9 +877,10 @@ class ContinuousAuditRecorder:
 
     def force_save_checkpoint(self, wal_seq: int | None = None) -> None:
         """
-        체크포인트 강제 저장 (Back-pressure 무시).
+        Force a checkpoint save (ignoring back-pressure).
 
-        종료 시그널, 에러 복구 등 즉시 저장이 필요한 경우 사용.
+        Use when an immediate save is required, e.g. on a shutdown signal or
+        during error recovery.
         """
         if not self._checkpoint_strategy:
             return
@@ -906,7 +911,7 @@ class ContinuousAuditRecorder:
             )
 
     def _send_alert(self, channel: str, data: dict[str, Any]) -> None:
-        """알림 발송."""
+        """Send an alert."""
         if self.alert_callback:
             try:
                 self.alert_callback(channel, data)
@@ -916,7 +921,7 @@ class ContinuousAuditRecorder:
                     error=e,
                 )
 
-        # 설정된 채널로 알림 (확장 가능)
+        # Alert on the configured channels (extensible)
         if channel in self.config.alert_channels or "all" in self.config.alert_channels:
             logger.info(
                 "continuous_audit.alert",

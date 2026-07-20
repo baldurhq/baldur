@@ -1,33 +1,35 @@
 """
-Signed Manifest - 법적 효력을 위한 무결성 증명.
+Signed Manifest - integrity proof for legal admissibility.
 
-파일 기반 감사 로그의 법적 효력을 높이기 위한 도구.
+A tool for strengthening the legal weight of file-based audit logs.
 
-핵심 개념:
-1. Merkle Tree: 모든 로그 엔트리의 해시를 트리 구조로 합침
-2. Merkle Root: 트리의 최상위 해시 - 단일 해시로 전체 무결성 증명
-3. RFC 3161 Timestamp: 외부 TSA(Time Stamp Authority)에서 타임스탬프 발급
+Core concepts:
+1. Merkle Tree: combines the hashes of all log entries into a tree
+2. Merkle Root: the top hash of the tree - proves whole-set integrity with a
+   single hash
+3. RFC 3161 Timestamp: a timestamp issued by an external TSA
+   (Time Stamp Authority)
 
-비침투 원칙:
-- 하루에 한 번, 단일 해시값만 외부에 제출
-- 고객사 DB/시스템에 전혀 접근하지 않음
-- 제3자 TSA가 시간 증명 (우리가 아닌 제3자 신뢰)
+Non-intrusive principle:
+- Only a single hash value is submitted externally, once a day
+- No access at all to the customer's DB or systems
+- A third-party TSA proves the time (trust a third party, not us)
 
-법적 효력:
-- 머클 루트는 블록체인과 동일한 원리로 무결성 보장
-- RFC 3161 타임스탬프는 법적으로 인정되는 시간 증명
-- 감사 시 "이 시점에 이 데이터가 존재했음"을 증명 가능
+Legal weight:
+- The Merkle root guarantees integrity on the same principle as a blockchain
+- An RFC 3161 timestamp is a legally recognized proof of time
+- During an audit, "this data existed at this point in time" is provable
 
-사용법:
-    # 머클 루트 생성
+Usage:
+    # Build the Merkle root
     manifest = SignedManifest()
     manifest.add_log_file("/var/log/audit/2025-01-15.jsonl")
     root = manifest.compute_merkle_root()
 
-    # RFC 3161 타임스탬프 발급 (선택)
+    # Obtain an RFC 3161 timestamp (optional)
     timestamp = manifest.get_rfc3161_timestamp(root)
 
-    # 매니페스트 저장
+    # Save the manifest
     manifest.save("manifest_2025-01-15.json")
 """
 
@@ -61,16 +63,16 @@ logger = structlog.get_logger()
 
 class MerkleTree:
     """
-    Merkle Tree 구현.
+    Merkle Tree implementation.
 
-    블록체인에서 사용되는 것과 동일한 원리:
-    - 리프 노드: 각 데이터 항목의 해시
-    - 내부 노드: 자식 노드들의 해시를 합친 것의 해시
-    - 루트: 전체 트리의 단일 해시
+    Same principle as the one used in blockchains:
+    - Leaf node: the hash of each data item
+    - Internal node: the hash of its children's hashes combined
+    - Root: a single hash for the whole tree
 
-    특징:
-    - 데이터 하나라도 변경되면 루트가 완전히 달라짐
-    - 특정 데이터의 포함 여부를 O(log n)으로 증명 가능
+    Characteristics:
+    - Changing even one data item changes the root completely
+    - Membership of a specific data item is provable in O(log n)
     """
 
     def __init__(self, hash_func: str = "sha256"):
@@ -79,35 +81,35 @@ class MerkleTree:
         self._tree: list[list[bytes]] = []
 
     def add_leaf(self, data: bytes) -> None:
-        """리프 노드 추가."""
+        """Add a leaf node."""
         leaf_hash = self._hash(data)
         self._leaves.append(leaf_hash)
 
     def add_leaf_hash(self, hash_bytes: bytes) -> None:
-        """이미 해시된 리프 추가."""
+        """Add an already-hashed leaf."""
         self._leaves.append(hash_bytes)
 
     def _hash(self, data: bytes) -> bytes:
-        """해시 계산."""
+        """Compute a hash."""
         hex_str = compute_checksum(data, algorithm=self._hash_func)
         return bytes.fromhex(hex_str)
 
     def compute_root(self) -> bytes:
-        """머클 루트 계산."""
+        """Compute the Merkle root."""
         if not self._leaves:
             return self._hash(b"")
 
-        # 레벨 0: 리프 노드들
+        # Level 0: the leaf nodes
         current_level = self._leaves.copy()
         self._tree = [current_level]
 
-        # 트리 빌드 (bottom-up)
+        # Build the tree (bottom-up)
         while len(current_level) > 1:
             next_level = []
 
             for i in range(0, len(current_level), 2):
                 left = current_level[i]
-                # 홀수 개일 경우 마지막 노드는 자기 자신과 합침
+                # With an odd count, the last node is combined with itself
                 right = current_level[i + 1] if i + 1 < len(current_level) else left
                 parent = self._hash(left + right)
                 next_level.append(parent)
@@ -118,15 +120,15 @@ class MerkleTree:
         return current_level[0]
 
     def compute_root_hex(self) -> str:
-        """머클 루트 (16진수)."""
+        """Merkle root (hexadecimal)."""
         return self.compute_root().hex()
 
     def get_proof(self, index: int) -> list[tuple[bytes, str]]:
         """
-        특정 리프의 Merkle Proof 생성.
+        Build the Merkle proof for a specific leaf.
 
-        Proof를 사용하면 특정 데이터가 트리에 포함되어 있음을
-        전체 데이터 없이도 증명 가능.
+        The proof lets you prove that a specific data item is included in the
+        tree without needing the full data set.
 
         Returns:
             List of (sibling_hash, direction) tuples
@@ -138,8 +140,8 @@ class MerkleTree:
         proof = []
         current_index = index
 
-        for level in self._tree[:-1]:  # 루트 레벨 제외
-            sibling_index = current_index ^ 1  # XOR로 형제 인덱스 계산
+        for level in self._tree[:-1]:  # excluding the root level
+            sibling_index = current_index ^ 1  # sibling index via XOR
 
             if sibling_index < len(level):
                 sibling = level[sibling_index]
@@ -156,7 +158,7 @@ class MerkleTree:
         proof: list[tuple[bytes, str]],
         root: bytes,
     ) -> bool:
-        """Merkle Proof 검증."""
+        """Verify a Merkle proof."""
         current = leaf_hash
 
         for sibling, direction in proof:
@@ -169,7 +171,7 @@ class MerkleTree:
 
     @property
     def leaf_count(self) -> int:
-        """리프 노드 개수."""
+        """Number of leaf nodes."""
         return len(self._leaves)
 
 
@@ -180,35 +182,36 @@ class MerkleTree:
 
 @dataclass
 class RFC3161Timestamp:
-    """RFC 3161 타임스탬프."""
+    """RFC 3161 timestamp."""
 
     timestamp: datetime
     tsa_name: str
     serial_number: str
     hash_algorithm: str
-    message_imprint: str  # 해시된 데이터 (hex)
-    token: bytes  # DER 인코딩된 타임스탬프 토큰
+    message_imprint: str  # hashed data (hex)
+    token: bytes  # DER-encoded timestamp token
 
 
 class RFC3161Client:
     """
-    RFC 3161 TSA (Time Stamp Authority) 클라이언트.
+    RFC 3161 TSA (Time Stamp Authority) client.
 
-    외부 TSA 서비스에서 타임스탬프를 발급받습니다.
+    Obtains timestamps from an external TSA service.
 
-    지원되는 무료 TSA:
+    Supported free TSAs:
     - FreeTSA: https://freetsa.org/tsr
     - DigiCert: http://timestamp.digicert.com
 
-    상용 TSA (법적 효력 강화):
-    - GlobalSign, Symantec, Entrust 등
+    Commercial TSAs (stronger legal weight):
+    - GlobalSign, Symantec, Entrust, etc.
 
-    NOTE: 실제 RFC 3161 요청/응답은 ASN.1/DER 인코딩이 필요합니다.
-          이 구현은 간소화된 버전입니다.
-          실제 사용 시 `rfc3161ng` 또는 `asn1crypto` 라이브러리 사용을 권장합니다.
+    NOTE: Real RFC 3161 requests/responses require ASN.1/DER encoding.
+          This implementation is a simplified version.
+          For production use, the `rfc3161ng` or `asn1crypto` library is
+          recommended.
     """
 
-    # 무료 TSA 서비스들
+    # Free TSA services
     DEFAULT_TSA_URLS = [
         "https://freetsa.org/tsr",
         "http://timestamp.digicert.com",
@@ -225,24 +228,24 @@ class RFC3161Client:
 
     def get_timestamp(self, data_hash: bytes) -> RFC3161Timestamp | None:
         """
-        RFC 3161 타임스탬프 발급 요청.
+        Request an RFC 3161 timestamp.
 
-        NOTE: 이 구현은 간소화된 버전입니다.
-              실제 RFC 3161 프로토콜은 ASN.1/DER 인코딩이 필요합니다.
+        NOTE: This implementation is a simplified version.
+              The real RFC 3161 protocol requires ASN.1/DER encoding.
 
-        실제 사용 시:
+        For production use:
             pip install rfc3161ng
-            그리고 해당 라이브러리 사용
+            and use that library
 
         Args:
-            data_hash: SHA-256 해시 (bytes)
+            data_hash: SHA-256 hash (bytes)
 
         Returns:
             RFC3161Timestamp or None on failure
         """
         try:
-            # 간소화된 요청 (실제로는 ASN.1 TimeStampReq 필요)
-            # 여기서는 FreeTSA의 간단한 API 사용
+            # Simplified request (a real ASN.1 TimeStampReq is required)
+            # Here the simple FreeTSA API is used
             timestamp_request = self._create_timestamp_request(data_hash)
 
             req = urllib.request.Request(
@@ -281,22 +284,23 @@ class RFC3161Client:
 
     def _create_timestamp_request(self, data_hash: bytes) -> bytes:
         """
-        RFC 3161 TimeStampReq 생성 (간소화 버전).
+        Build an RFC 3161 TimeStampReq (simplified version).
 
-        실제 구현에서는 ASN.1 라이브러리 사용 필요.
+        A real implementation needs an ASN.1 library.
         """
-        # 간소화: 해시값만 전송 (실제로는 ASN.1 구조 필요)
+        # Simplified: send the hash only (a real ASN.1 structure is required)
         return data_hash
 
     def _parse_timestamp_response(
         self, response_data: bytes, original_hash: bytes
     ) -> RFC3161Timestamp | None:
         """
-        RFC 3161 TimeStampResp 파싱 (간소화 버전).
+        Parse an RFC 3161 TimeStampResp (simplified version).
 
-        실제 구현에서는 ASN.1 파싱 필요.
+        A real implementation needs ASN.1 parsing.
         """
-        # 간소화: 현재 시간으로 대체 (실제로는 TSA 응답 파싱)
+        # Simplified: substitute the current time (a real TSA response would
+        # be parsed)
         return RFC3161Timestamp(
             timestamp=utc_now(),
             tsa_name=self._tsa_url,
@@ -314,7 +318,7 @@ class RFC3161Client:
 
 @dataclass
 class ManifestEntry:
-    """매니페스트 엔트리."""
+    """Manifest entry."""
 
     file_path: str
     file_hash: str  # SHA-256 hex
@@ -325,7 +329,7 @@ class ManifestEntry:
 
 @dataclass
 class SignedManifestData:
-    """서명된 매니페스트 데이터."""
+    """Signed manifest data."""
 
     version: str = "1.0"
     created_at: str = ""
@@ -337,17 +341,17 @@ class SignedManifestData:
 
 class SignedManifest:
     """
-    서명된 매니페스트 생성기.
+    Signed manifest generator.
 
-    사용 시나리오:
-    1. 매일 자정에 cron으로 실행
-    2. 그 날의 모든 감사 로그 파일을 처리
-    3. 머클 루트 계산 + RFC 3161 타임스탬프 발급
-    4. 매니페스트 파일 저장
+    Usage scenario:
+    1. Run via cron every midnight
+    2. Process all of that day's audit log files
+    3. Compute the Merkle root + obtain an RFC 3161 timestamp
+    4. Save the manifest file
 
-    결과물:
-    - manifest_YYYY-MM-DD.json: 머클 루트 + 파일 목록 + 타임스탬프
-    - 이 파일 하나로 해당 날짜의 모든 로그 무결성 증명 가능
+    Output:
+    - manifest_YYYY-MM-DD.json: Merkle root + file list + timestamp
+    - This single file proves the integrity of all logs for that date
 
     Usage:
         manifest = SignedManifest()
@@ -369,12 +373,12 @@ class SignedManifest:
 
     def add_log_file(self, file_path: str | Path) -> ManifestEntry:
         """
-        감사 로그 파일 추가.
+        Add an audit log file.
 
-        파일의 각 라인(JSONL)을 머클 트리에 추가합니다.
+        Adds each line of the file (JSONL) to the Merkle tree.
 
         Args:
-            file_path: 감사 로그 파일 경로
+            file_path: Audit log file path
 
         Returns:
             ManifestEntry with file metadata
@@ -396,15 +400,15 @@ class SignedManifest:
 
                 line_bytes = line.strip().encode("utf-8")
 
-                # 머클 트리에 추가
+                # Add to the Merkle tree
                 self._merkle_tree.add_leaf(line_bytes)
 
-                # 파일 전체 해시에도 추가
+                # Also add to the whole-file hash
                 file_hasher.update(line_bytes)
 
                 entry_count += 1
 
-                # 타임스탬프 추출 (첫/마지막)
+                # Extract timestamps (first/last)
                 try:
                     entry = fast_loads(line)
                     ts = entry.get("timestamp")
@@ -438,11 +442,11 @@ class SignedManifest:
         pattern: str = "*.jsonl",
     ) -> list[ManifestEntry]:
         """
-        디렉토리의 모든 로그 파일 추가.
+        Add every log file in a directory.
 
         Args:
-            dir_path: 디렉토리 경로
-            pattern: 파일 패턴 (glob)
+            dir_path: Directory path
+            pattern: File pattern (glob)
 
         Returns:
             List of ManifestEntry
@@ -459,7 +463,7 @@ class SignedManifest:
 
     def compute_merkle_root(self) -> str:
         """
-        머클 루트 계산.
+        Compute the Merkle root.
 
         Returns:
             Merkle root as hex string
@@ -472,10 +476,10 @@ class SignedManifest:
         data: bytes | None = None,
     ) -> RFC3161Timestamp | None:
         """
-        RFC 3161 타임스탬프 발급.
+        Obtain an RFC 3161 timestamp.
 
         Args:
-            data: 타임스탬프할 데이터 (기본: 머클 루트)
+            data: Data to timestamp (default: the Merkle root)
 
         Returns:
             RFC3161Timestamp or None
@@ -495,7 +499,7 @@ class SignedManifest:
 
     def compute_and_timestamp(self) -> tuple[str, RFC3161Timestamp | None]:
         """
-        머클 루트 계산 및 타임스탬프 발급 (원스텝).
+        Compute the Merkle root and obtain a timestamp (one step).
 
         Returns:
             (merkle_root, timestamp)
@@ -505,7 +509,7 @@ class SignedManifest:
         return root, timestamp
 
     def to_dict(self) -> dict[str, Any]:
-        """매니페스트를 딕셔너리로 변환."""
+        """Convert the manifest to a dictionary."""
         if self._merkle_root is None:
             self.compute_merkle_root()
         assert self._merkle_root is not None  # compute_merkle_root() populates
@@ -552,10 +556,10 @@ class SignedManifest:
 
     def save(self, output_path: str | Path) -> None:
         """
-        매니페스트 저장.
+        Save the manifest.
 
         Args:
-            output_path: 저장 경로
+            output_path: Save path
         """
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -571,10 +575,10 @@ class SignedManifest:
     @classmethod
     def load(cls, manifest_path: str | Path) -> SignedManifest:
         """
-        매니페스트 로드.
+        Load a manifest.
 
         Args:
-            manifest_path: 매니페스트 파일 경로
+            manifest_path: Manifest file path
 
         Returns:
             SignedManifest instance
@@ -590,14 +594,14 @@ class SignedManifest:
 
     def verify(self) -> bool:
         """
-        매니페스트 검증.
+        Verify the manifest.
 
-        저장된 파일들이 변경되지 않았는지 확인.
+        Checks that the recorded files have not been modified.
 
         Returns:
             True if all files are intact
         """
-        # 각 파일 해시 재계산
+        # Recompute each file's hash
         tree = MerkleTree()
 
         for entry in self._entries:
@@ -615,7 +619,7 @@ class SignedManifest:
                     if line.strip():
                         tree.add_leaf(line.strip().encode("utf-8"))
 
-        # 머클 루트 비교
+        # Compare the Merkle roots
         computed_root = tree.compute_root_hex()
 
         if computed_root != self._merkle_root:
@@ -636,7 +640,7 @@ class SignedManifest:
 
 
 def main():
-    """CLI 엔트리포인트."""
+    """CLI entry point."""
     import argparse
     import sys
 
@@ -647,7 +651,7 @@ def main():
 
     subparsers = parser.add_subparsers(dest="command", help="Commands")
 
-    # create 명령
+    # create command
     create_parser = subparsers.add_parser("create", help="Create a new manifest")
     create_parser.add_argument(
         "--input",
@@ -672,7 +676,7 @@ def main():
         help="Custom TSA URL",
     )
 
-    # verify 명령
+    # verify command
     verify_parser = subparsers.add_parser("verify", help="Verify a manifest")
     verify_parser.add_argument(
         "manifest",

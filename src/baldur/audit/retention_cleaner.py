@@ -1,12 +1,12 @@
 """
-WAL Retention Cleaner - 시간 기반 감사 로그 정리.
+WAL Retention Cleaner - time-based audit log cleanup.
 
-WAL 파일 보관 기간 기반 정리 기능 제공.
+Provides retention-period-based cleanup of WAL files.
 
-정책:
-1. retention_days 이전 파일 삭제
-2. 파일 개수 제한 (max_files)과 병행
-3. 동기화 완료된 파일만 삭제 대상 (옵션)
+Policy:
+1. Delete files older than retention_days
+2. Runs alongside the file-count limit (max_files)
+3. Only synced files are eligible for deletion (optional)
 """
 
 from __future__ import annotations
@@ -31,18 +31,18 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
-# 기본 보관 기간 (일)
+# Default retention period (days)
 DEFAULT_RETENTION_DAYS = 90
 
 
 class WALRetentionCleaner:
     """
-    WAL 파일 보관 기간 기반 정리.
+    Retention-period-based WAL file cleanup.
 
-    특징:
-    - retention_days 이전 파일 삭제
-    - 파일 개수 제한과 병행 가능
-    - 중앙 저장소 동기화 완료된 파일만 삭제 (옵션)
+    Characteristics:
+    - Deletes files older than retention_days
+    - Can run alongside the file-count limit
+    - Only files synced to the central store are deleted (optional)
     """
 
     def __init__(
@@ -56,10 +56,11 @@ class WALRetentionCleaner:
         Initialize cleaner.
 
         Args:
-            wal_dir: WAL 파일 디렉토리
-            retention_days: 보관 기간 (None이면 설정에서 로드 또는 기본값)
-            check_synced: 동기화 완료 확인 여부
-            file_pattern: 삭제 대상 파일 패턴
+            wal_dir: WAL file directory
+            retention_days: Retention period (loaded from settings, or the
+                default, when None)
+            check_synced: Whether to check for sync completion
+            file_pattern: Pattern of files eligible for deletion
         """
         self._wal_dir = Path(wal_dir)
         self._retention_days = retention_days or self._get_retention_from_settings()
@@ -67,7 +68,7 @@ class WALRetentionCleaner:
         self._file_pattern = file_pattern
 
     def _get_retention_from_settings(self) -> int:
-        """설정에서 retention_days 로드."""
+        """Load retention_days from settings."""
         try:
             from baldur.settings.audit import get_audit_settings
 
@@ -85,10 +86,10 @@ class WALRetentionCleaner:
 
     def cleanup(self) -> int:
         """
-        보관 기간 초과 WAL 파일 정리.
+        Clean up WAL files past the retention period.
 
         Returns:
-            삭제된 파일 수
+            Number of deleted files
         """
         if not self._wal_dir.exists():
             logger.debug(
@@ -102,7 +103,7 @@ class WALRetentionCleaner:
 
         for wal_file in self._wal_dir.glob(self._file_pattern):
             try:
-                # 파일 수정 시간 확인
+                # Check the file's modification time
                 mtime = datetime.fromtimestamp(
                     wal_file.stat().st_mtime,
                     tz=UTC,
@@ -111,7 +112,7 @@ class WALRetentionCleaner:
                 if mtime >= cutoff:
                     continue
 
-                # 동기화 완료 확인 (옵션)
+                # Sync-completion check (optional)
                 if self._check_synced and not self._is_synced(wal_file):
                     logger.warning(
                         "retention_cleaner.skipping_unsynced_old_file",
@@ -119,7 +120,7 @@ class WALRetentionCleaner:
                     )
                     continue
 
-                # 파일 삭제
+                # Delete the file
                 age_days = (utc_now() - mtime).days
                 if safe_unlink(wal_file):
                     deleted_count += 1
@@ -130,7 +131,7 @@ class WALRetentionCleaner:
                         age_days=age_days,
                     )
 
-                # synced 마커도 삭제
+                # Delete the synced marker too
                 synced_marker = wal_file.with_suffix(".synced")
                 safe_unlink(synced_marker)
 
@@ -149,17 +150,17 @@ class WALRetentionCleaner:
         return deleted_count
 
     def _is_synced(self, wal_file: Path) -> bool:
-        """WAL 파일이 동기화 완료되었는지 확인."""
-        # .synced 마커 파일 존재 확인
+        """Check whether a WAL file has finished syncing."""
+        # Check for the .synced marker file
         synced_marker = wal_file.with_suffix(".synced")
         return synced_marker.exists()
 
     def get_stats(self) -> dict:
         """
-        현재 WAL 디렉토리 통계 반환.
+        Return current WAL directory statistics.
 
         Returns:
-            통계 딕셔너리
+            Statistics dictionary
         """
         if not self._wal_dir.exists():
             return {
@@ -206,9 +207,9 @@ class WALRetentionCleaner:
 
 class RetentionCleanupScheduler:
     """
-    주기적 Retention 정리 스케줄러.
+    Periodic retention cleanup scheduler.
 
-    백그라운드 스레드에서 주기적으로 WAL 파일 정리 실행.
+    Runs WAL file cleanup periodically on a background thread.
     """
 
     def __init__(
@@ -221,9 +222,9 @@ class RetentionCleanupScheduler:
         Initialize scheduler.
 
         Args:
-            cleaner: WALRetentionCleaner 인스턴스
-            interval_hours: 정리 주기 (시간)
-            on_cleanup: 정리 완료 콜백 (삭제 파일 수 전달)
+            cleaner: WALRetentionCleaner instance
+            interval_hours: Cleanup interval (hours)
+            on_cleanup: Cleanup-complete callback (receives the deleted count)
         """
         self._cleaner = cleaner
         self._interval_seconds = interval_hours * 3600
@@ -233,7 +234,7 @@ class RetentionCleanupScheduler:
         self._handle: DaemonWorkerHandle | None = None
 
     def start(self) -> None:
-        """스케줄러 시작."""
+        """Start the scheduler."""
         from baldur.meta.daemon_worker import DaemonWorkerHandle
         from baldur.metrics.recorders.daemon_worker import register_daemon_worker
 
@@ -273,7 +274,7 @@ class RetentionCleanupScheduler:
             raise
 
     def stop(self) -> None:
-        """스케줄러 중지."""
+        """Stop the scheduler."""
         from baldur.metrics.recorders.daemon_worker import unregister_daemon_worker
         from baldur.settings.thread_management import (
             get_thread_management_settings,
@@ -295,7 +296,7 @@ class RetentionCleanupScheduler:
         logger.info("retention_scheduler.stopped")
 
     def _cleanup_loop(self) -> None:
-        """백그라운드 정리 루프."""
+        """Background cleanup loop."""
         while self._running:
             iter_start = time.monotonic()
             try:
@@ -320,7 +321,7 @@ class RetentionCleanupScheduler:
                 self._handle.observe_iteration(time.monotonic() - iter_start)
                 self._handle.heartbeat()
 
-            # 다음 정리까지 대기
+            # Wait until the next cleanup
             for _ in range(int(self._interval_seconds)):
                 if not self._running:
                     break
@@ -330,7 +331,7 @@ class RetentionCleanupScheduler:
 
     @property
     def is_running(self) -> bool:
-        """스케줄러 실행 중 여부."""
+        """Whether the scheduler is running."""
         return self._running
 
 
@@ -340,15 +341,15 @@ def schedule_retention_cleanup(
     retention_days: int | None = None,
 ) -> RetentionCleanupScheduler:
     """
-    주기적 Retention 정리 스케줄링 편의 함수.
+    Convenience function for scheduling periodic retention cleanup.
 
     Args:
-        wal_dir: WAL 디렉토리 (None이면 환경변수 또는 기본값)
-        interval_hours: 정리 주기 (시간)
-        retention_days: 보관 기간 (일)
+        wal_dir: WAL directory (env var or default when None)
+        interval_hours: Cleanup interval (hours)
+        retention_days: Retention period (days)
 
     Returns:
-        시작된 RetentionCleanupScheduler 인스턴스
+        The started RetentionCleanupScheduler instance
     """
     if wal_dir is None:
         wal_dir = os.environ.get("AUDIT_WAL_DIR", "/var/log/audit/wal")
@@ -369,13 +370,13 @@ def schedule_retention_cleanup(
 
 def mark_as_synced(wal_file: Path | str) -> bool:
     """
-    WAL 파일을 동기화 완료로 마크.
+    Mark a WAL file as synced.
 
     Args:
-        wal_file: WAL 파일 경로
+        wal_file: WAL file path
 
     Returns:
-        성공 여부
+        Whether it succeeded
     """
     try:
         wal_path = Path(wal_file)

@@ -1,15 +1,12 @@
 """
-Cascade Audit 예외 클래스.
+Cascade Audit exception classes.
 
-Cascade Event 처리 중 발생할 수 있는 예외들을 정의합니다.
+Defines the exceptions that can be raised while processing Cascade Events.
 
 Exception Hierarchy:
     CascadeAuditError (base)
-    ├── CascadeChainDepthExceeded - 체인 깊이 초과
-    └── CascadeCycleDetected - 순환 참조 감지
-
-Reference:
-    docs/baldur/middleware_system/76_CASCADE_EVENT_AUDIT.md
+    ├── CascadeChainDepthExceeded - chain depth exceeded
+    └── CascadeCycleDetected - cycle detected
 """
 
 from __future__ import annotations
@@ -25,14 +22,15 @@ class CascadeAuditError(AuditError):
 
 class CascadeChainDepthExceeded(CascadeAuditError):
     """
-    체인 깊이 초과 예외.
+    Chain depth exceeded exception.
 
-    Cascade 체인이 설정된 최대 깊이를 초과했을 때 발생합니다.
-    이는 보통 자동화 시스템 간의 과도한 연쇄 반응을 의미합니다.
+    Raised when a Cascade chain exceeds the configured maximum depth.
+    This usually indicates an excessive chain reaction between automated
+    systems.
 
     Attributes:
-        depth: 현재 체인 깊이
-        max_depth: 최대 허용 깊이
+        depth: Current chain depth
+        max_depth: Maximum allowed depth
         cascade_id: Cascade Event ID
     """
 
@@ -61,7 +59,7 @@ class CascadeChainDepthExceeded(CascadeAuditError):
         return ctx
 
     def to_dict(self) -> dict:
-        """예외 정보를 딕셔너리로 변환."""
+        """Convert the exception details to a dictionary."""
         return {
             "error_type": "CascadeChainDepthExceeded",
             "depth": self.depth,
@@ -73,13 +71,13 @@ class CascadeChainDepthExceeded(CascadeAuditError):
 
 class CascadeCycleDetected(CascadeAuditError):
     """
-    순환 참조 감지 예외.
+    Cycle detected exception.
 
-    Cascade 체인에서 순환 참조(A → B → A)가 감지되었을 때 발생합니다.
-    이는 자동화 시스템 간의 무한 루프를 의미합니다.
+    Raised when a cycle (A → B → A) is detected in a Cascade chain.
+    This indicates an infinite loop between automated systems.
 
     Attributes:
-        cycle_path: 순환 경로 (이벤트 ID 목록)
+        cycle_path: Cycle path (list of event IDs)
         cascade_id: Cascade Event ID
     """
 
@@ -104,7 +102,7 @@ class CascadeCycleDetected(CascadeAuditError):
         return ctx
 
     def to_dict(self) -> dict:
-        """예외 정보를 딕셔너리로 변환."""
+        """Convert the exception details to a dictionary."""
         return {
             "error_type": "CascadeCycleDetected",
             "cycle_path": self.cycle_path,
@@ -115,9 +113,9 @@ class CascadeCycleDetected(CascadeAuditError):
 
 class CascadeEventNotFound(CascadeAuditError):
     """
-    Cascade Event 미발견 예외.
+    Cascade Event not found exception.
 
-    요청한 Cascade Event를 찾을 수 없을 때 발생합니다.
+    Raised when the requested Cascade Event cannot be found.
     """
 
     def __init__(
@@ -143,9 +141,9 @@ class CascadeEventNotFound(CascadeAuditError):
 
 class CascadeIntegrityError(CascadeAuditError):
     """
-    Cascade 무결성 오류 예외.
+    Cascade integrity error exception.
 
-    해시 체인 무결성 검증에 실패했을 때 발생합니다.
+    Raised when hash chain integrity verification fails.
     """
 
     def __init__(
@@ -170,7 +168,7 @@ class CascadeIntegrityError(CascadeAuditError):
         return ctx
 
     def to_dict(self) -> dict:
-        """예외 정보를 딕셔너리로 변환."""
+        """Convert the exception details to a dictionary."""
         return {
             "error_type": "CascadeIntegrityError",
             "cascade_id": self.cascade_id,

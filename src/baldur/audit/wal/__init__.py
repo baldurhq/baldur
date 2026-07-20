@@ -1,12 +1,12 @@
 """
 Write-Ahead Log (WAL) with CRC32 Checksum.
 
-데이터 무결성 보장:
-1. 메모리에 먼저 기록 전 WAL 작성
-2. 각 엔트리에 CRC32 체크섬
-3. 복구 시 체크섬 검증
+Data integrity guarantees:
+1. Write to the WAL before recording in memory
+2. CRC32 checksum on every entry
+3. Checksum verification on recovery
 
-최소 의존성: 표준 라이브러리만 사용 (struct, json, zlib, os, threading)
+Minimal dependencies: standard library only (struct, json, zlib, os, threading)
 
 Usage:
     from baldur.audit.wal import WriteAheadLog, WALEntry, WALConfig
@@ -45,7 +45,7 @@ from baldur.core.file_utils import safe_unlink
 
 logger = structlog.get_logger()
 
-# Drift Detection 메트릭
+# Drift Detection metrics
 try:
     from baldur.metrics.drift_metrics import (
         record_wal_rotation,
@@ -65,15 +65,15 @@ class WriteAheadLog(
     """
     Write-Ahead Log with CRC32 Checksum.
 
-    특징:
+    Characteristics:
     - Thread-safe
-    - CRC32 체크섬으로 무결성 검증
-    - 파일 로테이션
-    - 미처리 엔트리 복구
-    - Best-Effort Recovery (손상 시 마커 기반 복구)
+    - Integrity verification via CRC32 checksum
+    - File rotation
+    - Recovery of unprocessed entries
+    - Best-Effort Recovery (marker-based recovery on corruption)
     """
 
-    # 파일 포맷 상수
+    # File format constants
     MAGIC = b"AWAL"
     VERSION = 1
     HEADER_SIZE = 8
@@ -89,13 +89,13 @@ class WriteAheadLog(
         audit_adapter=None,
     ):
         """
-        WAL 초기화.
+        Initialize the WAL.
 
         Args:
-            config: WAL 설정
-            on_rotate: 파일 로테이션 시 콜백
-            on_corruption: 손상 발견 시 콜백
-            audit_adapter: Audit 어댑터 (이벤트 기록용)
+            config: WAL configuration
+            on_rotate: Callback on file rotation
+            on_corruption: Callback when corruption is found
+            audit_adapter: Audit adapter (for event recording)
         """
         self._config = config or WALConfig()
         self._on_rotate = on_rotate
@@ -109,18 +109,18 @@ class WriteAheadLog(
         self._state = WALState.ACTIVE
         self._lock = threading.RLock()
 
-        # 통계
+        # Statistics
         self._total_entries = 0
         self._corrupted_entries = 0
         self._recovered_entries = 0
         self._last_write_time: float | None = None
 
-        # Group Commit 버퍼
+        # Group Commit buffer
         self._group_buffer: list[dict[str, Any]] = []
         self._last_flush_time: float = time.time()
         self._group_commit_flushes: int = 0
 
-        # 초기화
+        # Initialization
         self._init_or_recover()
 
     def _init_or_recover(self) -> None:
@@ -153,13 +153,13 @@ class WriteAheadLog(
     # =========================================================================
 
     def _get_current_wal_filename(self) -> str:
-        """현재 WAL 파일명 생성 (PID 포함)."""
+        """Build the current WAL filename (includes the PID)."""
         timestamp = utc_now().strftime("%Y%m%d_%H%M%S")
         pid = os.getpid()
         return f"{self._config.file_prefix}_{timestamp}_{pid}.wal"
 
     def _ensure_file_open(self) -> None:
-        """WAL 파일이 열려있는지 확인하고 필요시 생성."""
+        """Ensure the WAL file is open, creating it when needed."""
         if self._current_handle is None or self._current_file is None:
             self._current_file = self._wal_dir / self._get_current_wal_filename()
             self._current_handle = open(self._current_file, "ab")  # noqa: SIM115
@@ -168,14 +168,14 @@ class WriteAheadLog(
                 self._write_header()
 
     def _write_header(self) -> None:
-        """WAL 파일 헤더 쓰기."""
+        """Write the WAL file header."""
         if self._current_handle:
             header = self.MAGIC + struct.pack(">HH", self.VERSION, 0)
             self._current_handle.write(header)
             self._current_handle.flush()
 
     def _rotate_file(self) -> None:
-        """WAL 파일 로테이션."""
+        """Rotate the WAL file."""
         with self._lock:
             old_state = self._state
             self._state = WALState.ROTATING
@@ -219,7 +219,7 @@ class WriteAheadLog(
                 )
 
     def _cleanup_old_files(self) -> None:
-        """오래된 WAL 파일 정리."""
+        """Clean up old WAL files."""
         wal_files = sorted(self._wal_dir.glob(f"{self._config.file_prefix}_*.wal"))
 
         while len(wal_files) > self._config.max_files:
@@ -231,7 +231,7 @@ class WriteAheadLog(
     # =========================================================================
 
     def get_stats(self) -> WALStats:
-        """WAL 통계 조회."""
+        """Read WAL statistics."""
         with self._lock:
             current_size = 0
             if self._current_handle:
@@ -257,12 +257,12 @@ class WriteAheadLog(
             )
 
     def count_unprocessed(self, last_processed_seq: int = 0) -> int:
-        """미처리 엔트리 수 반환."""
+        """Return the number of unprocessed entries."""
         with self._lock:
             return max(0, self._sequence - last_processed_seq)
 
     def get_sync_lag(self, last_synced_seq: int = 0) -> int:
-        """중앙 저장소와의 동기화 지연 계산."""
+        """Compute the sync lag against the central store."""
         with self._lock:
             lag = max(0, self._sequence - last_synced_seq)
             if HAS_DRIFT_METRICS:
@@ -271,28 +271,27 @@ class WriteAheadLog(
 
     def flush(self) -> None:
         """
-        버퍼 플러시.
+        Flush the buffer.
 
-        Group Commit 모드에서는 버퍼를 플러시하고,
-        일반 모드에서는 현재 파일을 동기화합니다.
+        In Group Commit mode this flushes the buffer; in normal mode it
+        syncs the current file.
 
-        NOTE: 기존 코드에서 flush()가 L486과 L1052에서 이중 정의되어
-        Group Commit 플러시가 동작하지 않는 버그가 있었습니다.
-        이제 두 동작을 하나의 메서드에서 처리합니다.
+        NOTE: an earlier version defined flush() twice, so the Group Commit
+        flush never ran. Both behaviors are now handled by this single method.
         """
         with self._lock:
-            # Group Commit 버퍼가 있으면 먼저 플러시
+            # Flush the Group Commit buffer first, if any
             if self._config.group_commit_enabled and self._group_buffer:
                 self._flush_buffer()
 
-            # 현재 파일 동기화
+            # Sync the current file
             if self._current_handle:
                 self._current_handle.flush()
                 if self._config.sync_on_write:
                     os.fsync(self._current_handle.fileno())
 
     def close(self) -> None:
-        """WAL 닫기."""
+        """Close the WAL."""
         with self._lock:
             self._state = WALState.CLOSED
 
@@ -362,7 +361,7 @@ def create_wal(
     max_file_size_mb: int = 100,
     sync_on_write: bool = True,
 ) -> WriteAheadLog:
-    """WAL 생성 헬퍼 함수."""
+    """Helper to create a WAL."""
     config = WALConfig(
         wal_dir=wal_dir,
         max_file_size_mb=max_file_size_mb,
