@@ -63,7 +63,15 @@ def detect_rate_limit(exception: Exception) -> tuple[bool, float | None]:
 
     retry_after: float | None = None
     if hasattr(exception, "retry_after"):
-        retry_after = exception.retry_after  # type: ignore[attr-defined]
+        # Coerced like the header branch below, and for the same reason: a
+        # client may expose the raw header string. Uncoerced, it reaches the
+        # coordinator's numeric comparison and raises there — where the
+        # fail-open wrap drops the cooldown entirely, so a real 429 installs
+        # no cooldown while the consecutive counter still advances.
+        try:
+            retry_after = float(exception.retry_after)  # type: ignore[attr-defined]
+        except (ValueError, TypeError):
+            pass
     elif hasattr(exception, "response"):
         response = exception.response  # type: ignore[attr-defined]
         if hasattr(response, "headers"):

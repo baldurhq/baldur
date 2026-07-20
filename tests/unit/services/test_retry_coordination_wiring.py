@@ -558,6 +558,57 @@ class TestRetryRateLimitNotifyBehavior:
 
         assert coordinator.on_rate_limited.call_args.kwargs["retry_after"] == 30.0
 
+    def test_a_result_borne_429_is_not_detected(self, singleton_coordinator):
+        """Boundary: detection is exception-borne, and the docstrings say so.
+
+        A client that returns the 429 response instead of raising installs no
+        cooldown — even when a result predicate retries on it. Asserted so the
+        limit is a recorded contract rather than a surprise, since the shape it
+        excludes (``requests`` without ``raise_for_status``) is a common one.
+        """
+        coordinator, _ = singleton_coordinator
+
+        class Response:
+            status_code = 429
+
+        _policy(
+            max_attempts=2,
+            domain="payment",
+            retry_on_result=lambda r: r.status_code == 429,
+        ).execute(Response)
+
+        coordinator.on_rate_limited.assert_not_called()
+
+    def test_a_string_retry_after_is_coerced_before_it_leaves(self):
+        """Regression: a raw header string reached the coordinator uncoerced.
+
+        Clients commonly expose ``retry_after`` as the header's own string. The
+        coordinator compares it numerically, so an uncoerced value raised
+        there — inside the fail-open wrap, which swallowed it *after* the
+        consecutive counter had already advanced. Net effect: a real 429
+        installed no cooldown at all, silently. The header branch beside it has
+        always coerced; this makes the two agree.
+        """
+
+        class ThrottledError(Exception):
+            retry_after = "120"
+
+        assert RetryPolicy._detect_rate_limit(ThrottledError(_RATE_LIMIT_MESSAGE)) == (
+            True,
+            120.0,
+        )
+
+    def test_an_uncoercible_retry_after_falls_back_rather_than_raising(self):
+        """Boundary: garbage degrades to the coordinator's own default delay."""
+
+        class ThrottledError(Exception):
+            retry_after = "not-a-number"
+
+        assert RetryPolicy._detect_rate_limit(ThrottledError(_RATE_LIMIT_MESSAGE)) == (
+            True,
+            None,
+        )
+
 
 # =============================================================================
 # execute() — key sourcing across all three coordinator call sites
@@ -616,6 +667,32 @@ class TestRetryCoordinationKeyBehavior:
         assert coordinator.wait_if_needed.call_args.args[0] == "stripe-api"
         assert coordinator.on_rate_limited.call_args.kwargs["key"] == "stripe-api"
         coordinator.on_success.assert_called_once_with("stripe-api")
+
+    def test_an_empty_override_is_not_an_identity(self, singleton_coordinator):
+        """Regression: the gate and the key must read set-ness the same way.
+
+        An ``is None`` gate beside an ``or`` key expression disagreed about
+        ``rate_limit_key=""``: the gate saw an override and passed, the key
+        fell back to the placeholder, and the call coordinated on the shared
+        "default" record with no warning — the exact cross-downstream merge the
+        identity gate exists to prevent. Reachable from settings, since
+        ``from_settings`` propagates the empty string verbatim.
+        """
+        _coordinator, get_instance = singleton_coordinator
+
+        _policy(domain=_UNIDENTIFIED_DOMAIN, rate_limit_key="").execute(lambda: "ok")
+
+        get_instance.assert_not_called()
+
+    def test_an_empty_override_still_coordinates_under_a_named_domain(
+        self, singleton_coordinator
+    ):
+        """The paired positive: an empty override falls back, it does not disable."""
+        coordinator, _ = singleton_coordinator
+
+        _policy(domain="payment", rate_limit_key="").execute(lambda: "ok")
+
+        coordinator.wait_if_needed.assert_called_once_with("payment", max_wait=None)
 
 
 # =============================================================================
@@ -1029,3 +1106,42 @@ class TestRetryWiredCooldownDeferralBehavior:
 
         assert result.outcome == PolicyOutcome.SUCCESS
         assert any(0.3 <= slept <= 0.6 for slept in sleep_mock.calls)
+
+    def test_the_deferral_error_names_the_key_it_deferred_on(
+        self, no_cluster_broadcast
+    ):
+        """Regression: the synthesized error carried the domain, not the key.
+
+        They are the same value until ``rate_limit_key`` overrides, at which
+        point the error named a cooldown record that does not exist —
+        ``extra_context()`` puts that key into audit and DLQ payloads, so a
+        requeue keyed on it looks up nothing.
+        """
+        from baldur.services.rate_limit_coordinator.models import (
+            RateLimitDeferredError,
+        )
+
+        storage = InMemoryRateLimitStorage()
+        storage.set_cooldown("stripe_v2", time.time() + 300.0)
+
+        with patch.object(
+            RateLimitCoordinator,
+            "get_instance",
+            autospec=True,
+            return_value=_real_coordinator(storage),
+        ):
+            policy = RetryPolicy(
+                config=RetryPolicyConfig(
+                    max_attempts=2,
+                    domain="payment",
+                    rate_limit_key="stripe_v2",
+                    max_elapsed=5.0,
+                ),
+                backoff=ConstantBackoff(delay=0.0),
+                sleeper=lambda _: None,
+            )
+            with mock_sleep():
+                result = policy.execute(lambda: "ok")
+
+        assert type(result.error) is RateLimitDeferredError
+        assert result.error.key == "stripe_v2"

@@ -45,6 +45,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - Jittered `ExponentialBackoff`/`LinearBackoff` delays no longer exceed `max_delay`.
 - A provider `Retry-After` is no longer undercut by jitter into an early retry.
 - A rate-limit coordinator or storage fault degrades to a logged no-op, not a changed outcome.
+- An exception's string `retry_after` is coerced, so a 429 no longer installs no cooldown.
 - `configure_baldur_celery(app)` raised `TypeError` on every call and registered nothing.
 - Compressed DLQ entries now age ACTIVE→STALE→ARCHIVED on a daily schedule (was never run).
 - Compressed-entry sweep reads the oldest page, not the newest — it was a no-op above ~3/day.
