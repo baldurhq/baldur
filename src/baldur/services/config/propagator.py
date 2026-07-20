@@ -1,17 +1,15 @@
 """
 Global Config Propagator.
 
-글로벌 네임스페이스 설정 변경을 모든 클러스터에 전파.
+Propagates global-namespace config changes to every cluster.
 
-코드 근거:
-- event_bus_redis.py: RedisEventBus 존재, Chaos 전용
-- event_bus.py#L77-78: CONFIG_UPDATED 이벤트 타입 이미 정의
+Code basis:
+- event_bus_redis.py: RedisEventBus exists, Chaos-only
+- event_bus.py: the CONFIG_UPDATED event type is already defined
 
-확장 방향:
-- RedisEventBus를 Config 전파에도 활용
-- 글로벌 채널과 로컬 채널 분리
-
-Reference: docs/baldur/middleware_system/70_MULTI_CLUSTER_ARCHITECTURE.md
+Extension direction:
+- Reuse RedisEventBus for config propagation as well
+- Separate the global channel from the regional channel
 """
 
 from __future__ import annotations
@@ -44,31 +42,31 @@ _TICK_INTERVAL_SECONDS = 1.0
 
 
 class ConfigScope(str, Enum):
-    """설정 적용 범위."""
+    """Config application scope."""
 
-    LOCAL = "local"  # 현재 클러스터만
-    REGIONAL = "regional"  # 같은 리전 내 모든 클러스터
-    GLOBAL = "global"  # 모든 클러스터
+    LOCAL = "local"  # Current cluster only
+    REGIONAL = "regional"  # All clusters in the same region
+    GLOBAL = "global"  # All clusters
 
 
 class PropagationTier(str, Enum):
-    """전파 일관성 등급 (SLA 기반)."""
+    """Propagation consistency tier (SLA-based)."""
 
-    TIER_1_IMMEDIATE = "tier_1"  # 1초 내 전파 보장 (Audit/Governance)
-    TIER_2_EVENTUAL = "tier_2"  # 30초 내 전파 허용 (Metrics/Stats)
+    TIER_1_IMMEDIATE = "tier_1"  # Propagation guaranteed within 1s (Audit/Governance)
+    TIER_2_EVENTUAL = "tier_2"  # Propagation within 30s allowed (Metrics/Stats)
 
 
 @dataclass
 class GlobalConfigChange(SerializableMixin):
-    """글로벌 설정 변경 이벤트."""
+    """Global config change event."""
 
-    config_type: str  # circuit_breaker, dlq, emergency 등
-    config_key: str  # 설정 키
-    new_value: Any  # 새 값
-    previous_value: Any  # 이전 값
-    scope: ConfigScope  # 적용 범위
-    tier: PropagationTier  # 전파 등급
-    source_cluster: str  # 변경 발생 클러스터
+    config_type: str  # circuit_breaker, dlq, emergency, etc.
+    config_key: str  # Config key
+    new_value: Any  # New value
+    previous_value: Any  # Previous value
+    scope: ConfigScope  # Application scope
+    tier: PropagationTier  # Propagation tier
+    source_cluster: str  # Cluster where the change originated
     timestamp: datetime = field(default_factory=lambda: utc_now())
 
     def __post_init__(self) -> None:
@@ -77,7 +75,7 @@ class GlobalConfigChange(SerializableMixin):
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> GlobalConfigChange:
-        """딕셔너리에서 GlobalConfigChange 생성."""
+        """Build a GlobalConfigChange from a dict."""
         return cls(
             config_type=data["config_type"],
             config_key=data["config_key"],
@@ -96,12 +94,12 @@ class GlobalConfigChange(SerializableMixin):
 
 class GlobalConfigPropagator:
     """
-    글로벌 설정 전파기.
+    Global config propagator.
 
-    RedisEventBus를 확장하여 Config 변경을 모든 클러스터에 전파.
+    Extends RedisEventBus to propagate config changes to every cluster.
     """
 
-    # 채널 정의
+    # Channel definitions
     GLOBAL_CONFIG_CHANNEL = "baldur:global:config"
     REGIONAL_CONFIG_CHANNEL_TEMPLATE = "baldur:{region}:config"
 
@@ -114,8 +112,8 @@ class GlobalConfigPropagator:
         Initialize GlobalConfigPropagator.
 
         Args:
-            redis_client: Redis 클라이언트 (없으면 TieredRedisProvider에서 가져옴)
-            cluster_identity: 클러스터 식별 정보 (없으면 싱글톤 사용)
+            redis_client: Redis client (taken from TieredRedisProvider if omitted)
+            cluster_identity: cluster identity info (singleton used if omitted)
         """
         self._redis = redis_client
         self._identity = cluster_identity
@@ -130,7 +128,7 @@ class GlobalConfigPropagator:
         self._initialized = False
 
     def _ensure_initialized(self) -> None:
-        """지연 초기화 수행."""
+        """Perform lazy initialization."""
         if self._initialized:
             return
 
@@ -138,7 +136,7 @@ class GlobalConfigPropagator:
             if self._initialized:
                 return
 
-            # ClusterIdentity 초기화
+            # Initialize ClusterIdentity
             if self._identity is None:
                 try:
                     from baldur.core.cluster_identity import get_cluster_identity
@@ -150,7 +148,7 @@ class GlobalConfigPropagator:
                         error=e,
                     )
 
-            # Redis 클라이언트 초기화
+            # Initialize the Redis client
             if self._redis is None:
                 try:
                     from baldur.core.tiered_redis import (
@@ -170,17 +168,17 @@ class GlobalConfigPropagator:
 
     def propagate(self, change: GlobalConfigChange) -> bool:
         """
-        설정 변경 전파.
+        Propagate a config change.
 
         Args:
-            change: 설정 변경 이벤트
+            change: config change event
 
         Returns:
-            전파 성공 여부
+            Whether the propagation succeeded
         """
         self._ensure_initialized()
 
-        # Quarantine Mode 체크
+        # Quarantine Mode check
         try:
             from baldur.core.cluster_identity import is_quarantine_mode
 
@@ -199,20 +197,20 @@ class GlobalConfigPropagator:
             return False
 
         try:
-            # 범위에 따른 채널 선택
+            # Select the channel based on the scope
             if change.scope == ConfigScope.GLOBAL:
                 channel = self.GLOBAL_CONFIG_CHANNEL
             elif change.scope == ConfigScope.REGIONAL:
                 region = self._identity.region if self._identity else "default"
                 channel = self.REGIONAL_CONFIG_CHANNEL_TEMPLATE.format(region=region)
             else:
-                # LOCAL은 전파 불필요
+                # LOCAL needs no propagation
                 logger.debug(
                     "global_config_propagator.local_scope_skipping_propagation"
                 )
                 return True
 
-            # 전파
+            # Propagate
             payload = fast_dumps_str(change.to_dict(), default=str)
             subscribers = self._redis.publish(channel, payload)
 
@@ -236,11 +234,11 @@ class GlobalConfigPropagator:
         self, config_type: str, handler: Callable[[GlobalConfigChange], None]
     ) -> None:
         """
-        설정 변경 구독.
+        Subscribe to config changes.
 
         Args:
-            config_type: 구독할 설정 타입 (예: "circuit_breaker", "dlq")
-            handler: 변경 이벤트 핸들러 함수
+            config_type: config type to subscribe to (e.g. "circuit_breaker", "dlq")
+            handler: change event handler function
         """
         with self._lock:
             if config_type not in self._handlers:
@@ -255,11 +253,11 @@ class GlobalConfigPropagator:
         self, config_type: str, handler: Callable[[GlobalConfigChange], None]
     ) -> None:
         """
-        설정 변경 구독 해제.
+        Unsubscribe from config changes.
 
         Args:
-            config_type: 구독 해제할 설정 타입
-            handler: 제거할 핸들러 함수
+            config_type: config type to unsubscribe from
+            handler: handler function to remove
         """
         with self._lock:
             if config_type in self._handlers:
@@ -270,10 +268,10 @@ class GlobalConfigPropagator:
 
     def start_listener(self) -> None:
         """
-        Redis Pub/Sub 리스너 시작.
+        Start the Redis Pub/Sub listener.
 
-        백그라운드 스레드에서 글로벌/리전 채널을 구독하고
-        수신된 설정 변경을 로컬 핸들러에 전달합니다.
+        Subscribes to the global/regional channels on a background thread and
+        dispatches received config changes to the local handlers.
         """
         self._ensure_initialized()
 
@@ -288,10 +286,10 @@ class GlobalConfigPropagator:
             self._running = True
             self._pubsub = self._redis.pubsub()
 
-            # 글로벌 채널 구독
+            # Subscribe to the global channel
             channels = [self.GLOBAL_CONFIG_CHANNEL]
 
-            # 리전 채널도 구독 (있으면)
+            # Also subscribe to the regional channel (if any)
             if self._identity and self._identity.region:
                 regional_channel = self.REGIONAL_CONFIG_CHANNEL_TEMPLATE.format(
                     region=self._identity.region
@@ -340,7 +338,7 @@ class GlobalConfigPropagator:
             raise
 
     def stop_listener(self) -> None:
-        """Redis Pub/Sub 리스너 중지."""
+        """Stop the Redis Pub/Sub listener."""
         from baldur.metrics.recorders.daemon_worker import unregister_daemon_worker
 
         with self._lock:
@@ -366,7 +364,7 @@ class GlobalConfigPropagator:
         logger.info("global_config_propagator.listener_stopped")
 
     def _listen_loop(self) -> None:
-        """Redis 메시지 수신 루프."""
+        """Redis message receive loop."""
         import time as _time
 
         while self._running and self._pubsub:
@@ -389,16 +387,16 @@ class GlobalConfigPropagator:
                 self._handle.heartbeat()
 
     def _handle_message(self, data: str) -> None:
-        """Redis 메시지 처리."""
+        """Handle a Redis message."""
         try:
             change = GlobalConfigChange.from_dict(fast_loads(data))
 
-            # 자기 자신이 보낸 메시지는 무시
+            # Ignore messages published by this cluster itself
             if self._identity and change.source_cluster == self._identity.cluster_id:
                 logger.debug("global_config_propagator.ignoring_own_message")
                 return
 
-            # 핸들러 호출
+            # Invoke the handlers
             handlers = self._handlers.get(change.config_type, [])
             for handler in handlers:
                 try:
@@ -432,7 +430,7 @@ _propagator_lock = threading.Lock()
 
 
 def get_global_config_propagator() -> GlobalConfigPropagator:
-    """GlobalConfigPropagator 싱글톤 반환."""
+    """Return the GlobalConfigPropagator singleton."""
     global _propagator
     if _propagator is None:
         with _propagator_lock:
@@ -442,7 +440,7 @@ def get_global_config_propagator() -> GlobalConfigPropagator:
 
 
 def reset_global_config_propagator() -> None:
-    """테스트용 싱글톤 리셋."""
+    """Reset the singleton (for tests)."""
     global _propagator
     if _propagator:
         _propagator.stop_listener()

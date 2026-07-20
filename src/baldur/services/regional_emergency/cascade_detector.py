@@ -1,26 +1,23 @@
 """
 Regional Cascade Detector.
 
-다중 리전 연쇄 장애 감지 및 GLOBAL 격상 권고.
+Multi-region cascading failure detection and GLOBAL escalation recommendation.
 
-여러 리전이 동시에 STRICT 상태에 진입하면 전역적 장애 징후로 판단하고
-GLOBAL Emergency 격상을 제안합니다.
+When several regions enter STRICT state at the same time, that is treated as a
+sign of a global failure and a GLOBAL Emergency escalation is proposed.
 
-주요 기능:
-- check_cascade_condition(): 연쇄 장애 조건 확인
-- get_cascade_status(): 현재 cascade 상태 조회
-- auto_escalate_to_global(): 자동 GLOBAL 격상 (설정 시)
+Main features:
+- check_cascade_condition(): check the cascading failure condition
+- get_cascade_status(): look up the current cascade state
+- auto_escalate_to_global(): automatic GLOBAL escalation (when configured)
 
-Cascade 조건:
-- 2개 이상 리전이 동시에 STRICT 상태
-- 짧은 시간(window) 내 다중 리전 활성화
+Cascade condition:
+- Two or more regions in STRICT state at the same time
+- Multiple regions activated within a short window
 
 Code reference:
-    coordination/anti_flapping.py (AntiFlappingGuard 패턴)
-    isolation/regional_gate.py (list_isolated_regions 패턴)
-
-Reference:
-    docs/baldur/middleware_system/73_NAMESPACE_AWARE_EMERGENCY.md
+    coordination/anti_flapping.py (AntiFlappingGuard pattern)
+    isolation/regional_gate.py (list_isolated_regions pattern)
 """
 
 from __future__ import annotations
@@ -44,14 +41,14 @@ logger = structlog.get_logger()
 # =============================================================================
 
 DEFAULT_ESCALATION_THRESHOLD = 2
-"""기본 격상 임계값: 2개 이상 리전이 STRICT면 cascade."""
+"""Default escalation threshold: cascade when 2 or more regions are STRICT."""
 
 DEFAULT_CASCADE_WINDOW_MINUTES = 30
-"""Cascade 판단 시간 윈도우 (분)."""
+"""Time window for the cascade decision (minutes)."""
 
 
 def _get_escalation_threshold() -> int:
-    """Settings에서 escalation_threshold 로드."""
+    """Load escalation_threshold from settings."""
     try:
         from baldur.settings.regional_emergency import (
             get_regional_emergency_settings,
@@ -63,7 +60,7 @@ def _get_escalation_threshold() -> int:
 
 
 def _get_cascade_window_minutes() -> int:
-    """Settings에서 cascade_window_minutes 로드."""
+    """Load cascade_window_minutes from settings."""
     try:
         from baldur.settings.regional_emergency import (
             get_regional_emergency_settings,
@@ -77,51 +74,51 @@ def _get_cascade_window_minutes() -> int:
 @dataclass
 class CascadeDetectionEvent(SerializableMixin):
     """
-    Cascade 이벤트 정보.
+    Cascade event information.
 
-    연쇄 장애 감지 시 생성되는 이벤트 레코드.
+    Event record created when a cascading failure is detected.
     """
 
     event_id: str = ""
-    """이벤트 고유 ID."""
+    """Unique event ID."""
 
     detected_at: datetime = field(default_factory=lambda: utc_now())
-    """감지 시각."""
+    """Detection time."""
 
     affected_regions: list[str] = field(default_factory=list)
-    """영향받은 리전 목록."""
+    """List of affected regions."""
 
     total_strict_count: int = 0
-    """STRICT 상태 리전 수."""
+    """Number of regions in STRICT state."""
 
     threshold: int = DEFAULT_ESCALATION_THRESHOLD
-    """적용된 임계값."""
+    """Applied threshold."""
 
     auto_escalated: bool = False
-    """자동 GLOBAL 격상 여부."""
+    """Whether an automatic GLOBAL escalation happened."""
 
     escalated_at: datetime | None = None
-    """격상 시각."""
+    """Escalation time."""
 
     escalated_by: str = ""
-    """격상 주체 ("system" 또는 admin ID)."""
+    """Who escalated ("system" or an admin ID)."""
 
 
 class RegionalCascadeDetector:
     """
-    다중 리전 연쇄 장애 감지기.
+    Multi-region cascading failure detector.
 
-    여러 리전이 동시에 STRICT 상태면 GLOBAL 격상을 권고합니다.
+    Recommends a GLOBAL escalation when several regions are STRICT at once.
 
-    설계 원칙:
-    - 기본적으로 권고만 (auto_escalate=False)
-    - 운영자 확인 후 수동 격상이 안전
-    - auto_escalate=True면 자동 GLOBAL 전환 (위험!)
+    Design principles:
+    - Recommend only by default (auto_escalate=False)
+    - Manual escalation after operator confirmation is the safe path
+    - auto_escalate=True switches to GLOBAL automatically (dangerous!)
 
     Usage:
         detector = RegionalCascadeDetector(threshold=2)
 
-        # 주기적 체크 (예: 1분마다)
+        # Periodic check (e.g. every minute)
         result = detector.check_cascade_condition()
 
         if result["cascade_detected"]:
@@ -137,13 +134,14 @@ class RegionalCascadeDetector:
         auto_escalate: bool = False,
     ):
         """
-        RegionalCascadeDetector 초기화.
+        Initialize RegionalCascadeDetector.
 
         Args:
-            tracker: NamespacedEmergencyTracker 인스턴스
-            escalation_threshold: STRICT 리전 수 임계값 (None이면 Settings에서 로드)
-            cascade_window_minutes: cascade 판단 시간 윈도우 (None이면 Settings에서 로드)
-            auto_escalate: True면 자동 GLOBAL 격상 (위험, 기본: False)
+            tracker: NamespacedEmergencyTracker instance
+            escalation_threshold: STRICT region count threshold (from settings if None)
+            cascade_window_minutes: cascade decision window (from settings if None)
+            auto_escalate: True escalates to GLOBAL automatically (dangerous,
+                default: False)
         """
         self._tracker = tracker
         self._threshold = (
@@ -159,12 +157,12 @@ class RegionalCascadeDetector:
         self._auto_escalate = auto_escalate
         self._lock = threading.Lock()
 
-        # Cascade 이벤트 히스토리 (메모리 버퍼)
+        # Cascade event history (in-memory buffer)
         self._cascade_history: list[CascadeDetectionEvent] = []
         self._max_history_size = 100
 
     def _get_tracker(self) -> Any:
-        """NamespacedEmergencyTracker 인스턴스 획득."""
+        """Obtain the NamespacedEmergencyTracker instance."""
         if self._tracker is None:
             from baldur.services.regional_emergency.tracker import (
                 get_namespaced_emergency_tracker,
@@ -175,24 +173,24 @@ class RegionalCascadeDetector:
 
     def check_cascade_condition(self) -> dict[str, Any]:
         """
-        연쇄 장애 조건 확인.
+        Check the cascading failure condition.
 
         Returns:
             dict:
-                cascade_detected: cascade 감지 여부
-                strict_count: STRICT 상태 리전 수
-                affected_regions: 영향받은 리전 목록
-                threshold: 적용된 임계값
-                recommendation: 권고 사항
-                auto_escalated: 자동 격상 수행 여부
-                checked_at: 확인 시각
+                cascade_detected: whether a cascade was detected
+                strict_count: number of regions in STRICT state
+                affected_regions: list of affected regions
+                threshold: applied threshold
+                recommendation: recommended action
+                auto_escalated: whether an automatic escalation was performed
+                checked_at: check time
         """
         tracker = self._get_tracker()
 
-        # 활성 네임스페이스 조회
+        # Look up the active namespaces
         active_namespaces = tracker.get_all_active_namespaces()
 
-        # Global 제외한 Regional STRICT 리전만 필터
+        # Keep only Regional STRICT regions, excluding Global
         regional_strict = []
         for ns in active_namespaces:
             if ns == "global":
@@ -226,10 +224,10 @@ class RegionalCascadeDetector:
                 strict_count=strict_count,
             )
 
-            # Cascade 이벤트 기록
+            # Record the cascade event
             event = self._record_cascade_event(regional_strict)
 
-            # 자동 격상 (설정 시)
+            # Automatic escalation (when configured)
             if self._auto_escalate:
                 self._escalate_to_global(regional_strict, event)
                 result["auto_escalated"] = True
@@ -243,24 +241,24 @@ class RegionalCascadeDetector:
 
     def get_cascade_status(self) -> dict[str, Any]:
         """
-        현재 cascade 상태 조회.
+        Look up the current cascade state.
 
-        check_cascade_condition()의 간략 버전.
+        Short form of check_cascade_condition().
 
         Returns:
-            dict: cascade 상태 정보
+            dict: cascade state information
         """
         return self.check_cascade_condition()
 
     def get_recent_cascade_events(self, limit: int = 10) -> list[dict[str, Any]]:
         """
-        최근 cascade 이벤트 조회.
+        Look up recent cascade events.
 
         Args:
-            limit: 반환할 최대 개수
+            limit: maximum number of entries to return
 
         Returns:
-            cascade 이벤트 목록 (최신순)
+            List of cascade events (newest first)
         """
         with self._lock:
             events = self._cascade_history[-limit:]
@@ -272,20 +270,20 @@ class RegionalCascadeDetector:
         reason: str,
     ) -> dict[str, Any]:
         """
-        수동 GLOBAL 격상.
+        Manual GLOBAL escalation.
 
-        운영자가 cascade 상태를 확인하고 수동으로 격상할 때 사용.
+        Used when an operator reviews the cascade state and escalates by hand.
 
         Args:
-            escalated_by: 격상 주체 (admin ID)
-            reason: 격상 사유
+            escalated_by: who escalated (admin ID)
+            reason: escalation reason
 
         Returns:
-            격상 결과
+            Escalation result
         """
         tracker = self._get_tracker()
 
-        # 현재 상태 확인
+        # Check the current state
         active_regions = tracker.get_all_active_namespaces()
         regional_strict = [
             ns
@@ -293,7 +291,7 @@ class RegionalCascadeDetector:
             if ns != "global" and tracker.get_state(ns).governance_mode == "STRICT"
         ]
 
-        # GLOBAL 활성화
+        # Activate GLOBAL
         state = tracker.activate_emergency(
             level=EmergencyLevel.LEVEL_3,
             activated_by=escalated_by,
@@ -301,7 +299,7 @@ class RegionalCascadeDetector:
             scope=EmergencyScope.GLOBAL,
         )
 
-        # 이벤트 기록
+        # Record the event
         event = CascadeDetectionEvent(
             event_id=f"cascade-manual-{utc_now().strftime('%Y%m%d%H%M%S')}",
             affected_regions=regional_strict,
@@ -338,7 +336,7 @@ class RegionalCascadeDetector:
     def _record_cascade_event(
         self, affected_regions: list[str]
     ) -> CascadeDetectionEvent:
-        """Cascade 이벤트 기록."""
+        """Record a cascade event."""
         event = CascadeDetectionEvent(
             event_id=f"cascade-{utc_now().strftime('%Y%m%d%H%M%S')}",
             affected_regions=affected_regions,
@@ -358,7 +356,7 @@ class RegionalCascadeDetector:
         affected_regions: list[str],
         event: CascadeDetectionEvent,
     ) -> None:
-        """자동 GLOBAL 격상 (auto_escalate=True일 때만)."""
+        """Automatic GLOBAL escalation (only when auto_escalate=True)."""
         tracker = self._get_tracker()
 
         tracker.activate_emergency(
@@ -368,12 +366,12 @@ class RegionalCascadeDetector:
             scope=EmergencyScope.GLOBAL,
         )
 
-        # 이벤트 업데이트
+        # Update the event
         event.auto_escalated = True
         event.escalated_at = utc_now()
         event.escalated_by = "CascadeDetector"
 
-        # Audit 로그
+        # Audit log
         try:
             from baldur.services.regional_emergency.escalation_audit import (
                 EscalationDecisionType,
@@ -409,7 +407,7 @@ _detector_lock = threading.Lock()
 
 
 def get_cascade_detector() -> RegionalCascadeDetector:
-    """RegionalCascadeDetector 싱글톤 반환."""
+    """Return the RegionalCascadeDetector singleton."""
     global _cascade_detector
 
     if _cascade_detector is None:
@@ -421,7 +419,7 @@ def get_cascade_detector() -> RegionalCascadeDetector:
 
 
 def reset_cascade_detector() -> None:
-    """싱글톤 초기화 (테스트용)."""
+    """Reset the singleton (for tests)."""
     global _cascade_detector
     with _detector_lock:
         _cascade_detector = None

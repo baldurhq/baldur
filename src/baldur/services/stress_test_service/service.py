@@ -1,14 +1,14 @@
 """
 Stress Test Service.
 
-DB Connection Pool 스트레스 테스트를 위한 비즈니스 로직.
+Business logic for DB connection pool stress testing.
 
-이 모듈은 테스트 전용이며, 프로덕션에서는 절대 사용하지 마세요!
-비즈니스 로직을 View 레이어에서 분리하여 클린 아키텍처를 유지합니다.
+This module is test-only; never use it in production!
+Business logic is separated from the View layer to keep the architecture clean.
 
 Note:
-- Views(stress_views.py)는 Request/Response 처리만 담당
-- 실제 DB 연산, 락 테스트, 풀 관리 로직은 이 서비스에서 담당
+- Views (stress_views.py) handle request/response only
+- Actual DB operations, lock tests, and pool management live in this service
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
-# SQLAlchemy Pool 상태 조회를 위한 import
+# Import used to query SQLAlchemy pool state
 try:
     from sqlalchemy.exc import TimeoutError as SATimeoutError
     from sqlalchemy.pool import QueuePool  # noqa: F401
@@ -52,22 +52,22 @@ except ImportError:
 
 class StressTestService:
     """
-    스트레스 테스트 서비스.
+    Stress test service.
 
-    DB Connection Pool 관련 테스트 로직을 캡슐화합니다.
-    PgAdminProvider를 통해 Raw SQL을 캡슐화합니다.
+    Encapsulates DB connection pool test logic.
+    Raw SQL is encapsulated behind PgAdminProvider.
     """
 
-    # 점유 중인 커넥션들을 저장하는 클래스 변수
+    # Class variable holding the currently occupied connections
     _held_connections: list = []
     _held_connections_lock: threading.Lock | None = None
 
     def __init__(self, repository: PgAdminProvider | None = None):
         """
-        서비스 초기화.
+        Initialize the service.
 
         Args:
-            repository: PgAdminProvider 인스턴스 (없으면 registry default 사용)
+            repository: PgAdminProvider instance (registry default if omitted)
         """
         if StressTestService._held_connections_lock is None:
             StressTestService._held_connections_lock = threading.Lock()
@@ -84,9 +84,9 @@ class StressTestService:
     # =========================================================================
 
     def get_pool_info(self) -> dict:
-        """SQLAlchemy Pool 정보 조회.
+        """Query SQLAlchemy pool information.
 
-        ProviderRegistry.pool_info 의 활성 provider 에 위임합니다.
+        Delegates to the active provider of ProviderRegistry.pool_info.
         """
         try:
             from baldur.factory import ProviderRegistry
@@ -102,9 +102,9 @@ class StressTestService:
             return {"pool_type": "unknown", "error": str(e)}
 
     def get_pool_status(self) -> PoolStatusResult:
-        """현재 Connection Pool 상태 조회."""
+        """Query the current connection pool state."""
         try:
-            # SQLAlchemy Pool 정보 먼저 시도
+            # Try SQLAlchemy pool info first
             pool_info = self.get_pool_info()
 
             from baldur.factory import ProviderRegistry
@@ -112,7 +112,7 @@ class StressTestService:
             db_provider = ProviderRegistry.database_health.get()
             conn_info = db_provider.check_connection("default")
 
-            # PostgreSQL 연결 통계 조회 (Repository 사용)
+            # Query PostgreSQL connection stats (via repository)
             stats = self._repo.get_connection_stats()
 
             is_exhausted = pool_info.get("pool_exhausted", False)
@@ -154,10 +154,10 @@ class StressTestService:
     # =========================================================================
 
     def execute_slow_query(self, seconds: int) -> StressTestResult:
-        """지정된 시간 동안 DB 연결을 점유하는 느린 쿼리 실행."""
+        """Run a slow query that holds a DB connection for the given duration."""
         start = time.time()
         try:
-            # Repository를 통해 pg_sleep 실행
+            # Run pg_sleep through the repository
             self._repo.execute_slow_query(seconds)
 
             elapsed = time.time() - start
@@ -194,22 +194,22 @@ class StressTestService:
             )
 
     def simulate_connection_leak(self, hold_seconds: int) -> StressTestResult:
-        """의도적으로 연결을 '누수'시키는 시뮬레이션."""
-        hold_seconds = min(hold_seconds, 60)  # 최대 60초
+        """Simulate an intentional connection 'leak'."""
+        hold_seconds = min(hold_seconds, 60)  # 60s max
 
         start = time.time()
         try:
-            # Repository를 통해 커서 생성 (연결 점유)
+            # Create a cursor through the repository (occupies a connection)
             cursor = self._repo.create_cursor()
 
-            # ping으로 연결 점유
+            # Hold the connection with a ping
             self._repo.execute_with_cursor(cursor, "SELECT 1")
 
-            # 의도적 지연
+            # Intentional delay
             time.sleep(hold_seconds)
 
-            # 명시적으로 닫지 않음 (누수 시뮬레이션)
-            # cursor.close()  # 의도적으로 주석 처리
+            # Never closed explicitly (leak simulation)
+            # cursor.close()  # commented out intentionally
 
             elapsed = time.time() - start
             return StressTestResult(
@@ -234,7 +234,7 @@ class StressTestService:
             )
 
     def execute_heavy_query(self) -> StressTestResult:
-        """무거운 쿼리 실행."""
+        """Run a heavy query."""
         start = time.time()
         try:
             # STRESS TEST ONLY: This query uses a configurable table for testing.
@@ -242,12 +242,12 @@ class StressTestService:
 
             stress_table = get_stress_test_settings().table
 
-            # Repository를 통해 집계 쿼리 실행
+            # Run the aggregate query through the repository
             total, avg_price, max_price, min_price = self._repo.execute_aggregate_query(
                 stress_table
             )
 
-            # 추가 지연 (1초)
+            # Extra delay (1 second)
             self._repo.pg_sleep(1)
 
             elapsed = time.time() - start
@@ -287,12 +287,12 @@ class StressTestService:
         exclusive: bool = True,
         wait: bool = True,
     ) -> StressTestResult:
-        """PostgreSQL Advisory Lock 획득."""
+        """Acquire a PostgreSQL advisory lock."""
         hold_seconds = min(hold_seconds, 60)
         start = time.time()
 
         try:
-            # Repository의 컨텍스트 매니저 사용
+            # Use the repository's context manager
             with self._repo.advisory_lock_context(
                 lock_id, exclusive, wait
             ) as lock_acquired:
@@ -316,7 +316,7 @@ class StressTestService:
                 )
                 time.sleep(hold_seconds)
 
-            # 컨텍스트 매니저가 자동으로 락 해제
+            # The context manager releases the lock automatically
             elapsed = time.time() - start
             logger.info(
                 "stress_test_service.lock_released_after",
@@ -339,7 +339,7 @@ class StressTestService:
             elapsed = time.time() - start
             error_str = str(e).lower()
 
-            # 락 타임아웃 또는 데드락 감지
+            # Detect a lock timeout or a deadlock
             if "lock" in error_str or "timeout" in error_str or "deadlock" in error_str:
                 logger.warning(
                     "stress_test_service.lock_contention_detected",
@@ -372,7 +372,7 @@ class StressTestService:
         duration_seconds: int = 5,
         lock_hold_ms: int = 100,
     ) -> LockContentionResult:
-        """Advisory Lock 경합 시뮬레이션."""
+        """Simulate advisory lock contention."""
         duration_seconds = min(duration_seconds, 30)
         lock_hold_ms = min(lock_hold_ms, 5000)
 
@@ -387,14 +387,14 @@ class StressTestService:
             while time.time() < end_time:
                 attempt_start = time.time()
 
-                # Repository를 통해 비대기 모드로 락 시도
+                # Try the lock in non-blocking mode through the repository
                 lock_acquired = self._repo.try_advisory_lock(lock_id)
 
                 if lock_acquired:
                     success_count += 1
-                    # 락 유지
+                    # Hold the lock
                     time.sleep(lock_hold_ms / 1000.0)
-                    # 락 해제
+                    # Release the lock
                     self._repo.release_advisory_lock(lock_id)
                 else:
                     fail_count += 1
@@ -445,8 +445,11 @@ class StressTestService:
         burst_duration_seconds: int = 10,
         concurrent_locks: int = 50,
     ) -> BurstFailureResult:
-        """Controlled Burst Failure - 폭풍 전야 → 시스템 붕괴 → 자율 복구 연출."""
-        lock_timeout_ms = max(lock_timeout_ms, 1)  # 최소 1ms
+        """Controlled burst failure.
+
+        Stages calm-before-the-storm -> system collapse -> autonomous recovery.
+        """
+        lock_timeout_ms = max(lock_timeout_ms, 1)  # 1ms min
         burst_duration_seconds = min(burst_duration_seconds, 30)
         concurrent_locks = min(concurrent_locks, 100)
 
@@ -456,7 +459,7 @@ class StressTestService:
         deadlock_count = 0
 
         try:
-            # Repository의 타임아웃 컨텍스트 매니저 사용
+            # Use the repository's timeout context manager
             with self._repo.timeout_context(
                 lock_timeout_ms=lock_timeout_ms,
                 statement_timeout_ms=lock_timeout_ms * 10,
@@ -467,11 +470,12 @@ class StressTestService:
                     burst_duration_seconds=burst_duration_seconds,
                 )
 
-                # 먼저 하나의 락을 잡아서 유지 (다른 요청들이 실패하도록)
+                # Hold one lock first so that other requests fail
                 try:
                     self._repo.acquire_advisory_lock(lock_id, wait=True)
 
-                    # burst 동안 반복적으로 새 연결에서 락 시도 (타임아웃 유발)
+                    # Repeatedly try the lock on new connections during the
+                    # burst (induces timeouts)
                     end_time = start + burst_duration_seconds
 
                     while time.time() < end_time:
@@ -493,7 +497,7 @@ class StressTestService:
 
                         time.sleep(0.01)  # 10ms
 
-                    # 메인 락 해제
+                    # Release the main lock
                     self._repo.release_advisory_lock(lock_id)
 
                 except Exception as lock_e:
@@ -503,7 +507,7 @@ class StressTestService:
                     )
                     timeout_count += 1
 
-            # 타임아웃 컨텍스트 매니저가 자동으로 타임아웃 복원
+            # The timeout context manager restores the timeouts automatically
 
             elapsed = time.time() - start
             total_attempts = timeout_count + success_count + deadlock_count
@@ -553,7 +557,7 @@ class StressTestService:
         connections_to_hold: int = 10,
         hold_seconds: int = 30,
     ) -> StressTestResult:
-        """DB 커넥션 풀을 의도적으로 고갈시킴."""
+        """Intentionally exhaust the DB connection pool."""
         connections_to_hold = min(connections_to_hold, 20)
         hold_seconds = min(hold_seconds, 60)
 
@@ -567,7 +571,7 @@ class StressTestService:
                 hold_seconds=hold_seconds,
             )
 
-            # 기존 점유 커넥션 정리
+            # Clean up previously held connections
             if StressTestService._held_connections_lock:
                 with StressTestService._held_connections_lock:
                     for conn_info in StressTestService._held_connections:
@@ -577,12 +581,12 @@ class StressTestService:
                             pass
                     StressTestService._held_connections.clear()
 
-            # 여러 커넥션 점유 (Repository 사용)
+            # Occupy several connections (via repository)
             for i in range(connections_to_hold):
                 try:
                     cursor = self._repo.create_cursor()
 
-                    # 커넥션을 busy 상태로 유지
+                    # Keep the connection in a busy state
                     self._repo.execute_with_cursor(
                         cursor, "SELECT pg_backend_pid(), pg_sleep(0.01)"
                     )
@@ -608,7 +612,7 @@ class StressTestService:
                     )
                     break
 
-            # 커넥션 유지하면서 대기
+            # Wait while holding the connections
             logger.warning(
                 "stress_test_service.holding_connections",
                 held_count=held_count,
@@ -616,7 +620,7 @@ class StressTestService:
             )
             time.sleep(hold_seconds)
 
-            # 커넥션 반환
+            # Return the connections
             if StressTestService._held_connections_lock:
                 with StressTestService._held_connections_lock:
                     for conn_info in StressTestService._held_connections:
@@ -656,23 +660,23 @@ class StressTestService:
             )
 
     def trigger_cb_failure(self, error_type: str = "db_error") -> StressTestResult:
-        """Circuit Breaker를 직접 트리거하기 위한 의도적 실패."""
+        """Intentional failure used to trigger the circuit breaker directly."""
         start = time.time()
 
         try:
             if error_type == "db_error":
-                # 의도적인 DB 에러 발생 (Repository 사용)
+                # Raise an intentional DB error (via repository)
                 self._repo.execute_nonexistent_table_query()
 
             elif error_type == "timeout":
-                # 타임아웃 에러 발생 (Repository 사용)
+                # Raise a timeout error (via repository)
                 self._repo.execute_timeout_query(timeout_ms=1, sleep_seconds=1)
 
             elif error_type == "exception":
-                # Python 예외 발생
+                # Raise a Python exception
                 raise RuntimeError("Intentional test exception for CB trigger")
 
-            # 정상적으로 여기까지 오면 안됨
+            # Reaching this point normally should not happen
             return StressTestResult(status="unexpected_success")
 
         except Exception as e:

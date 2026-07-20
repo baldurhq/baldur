@@ -61,28 +61,28 @@ logger = structlog.get_logger()
 
 
 def _get_l1_ttl_seconds() -> float:
-    """L1 TTL을 Settings에서 로드."""
+    """Load the L1 TTL from Settings."""
     from baldur.settings.precomputed_cache import get_precomputed_cache_settings
 
     return get_precomputed_cache_settings().l1_ttl_seconds
 
 
 def _get_l2_ttl_seconds() -> float:
-    """L2 TTL을 Settings에서 로드."""
+    """Load the L2 TTL from Settings."""
     from baldur.settings.precomputed_cache import get_precomputed_cache_settings
 
     return get_precomputed_cache_settings().l2_ttl_seconds
 
 
 def _get_refresh_interval() -> float:
-    """Refresh interval을 Settings에서 로드."""
+    """Load the refresh interval from Settings."""
     from baldur.settings.precomputed_cache import get_precomputed_cache_settings
 
     return get_precomputed_cache_settings().refresh_interval_seconds
 
 
 def _get_l1_maxsize() -> int:
-    """L1 maxsize를 Settings에서 로드."""
+    """Load the L1 maxsize from Settings."""
     from baldur.settings.precomputed_cache import get_precomputed_cache_settings
 
     return get_precomputed_cache_settings().l1_maxsize

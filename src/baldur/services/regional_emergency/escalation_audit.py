@@ -1,23 +1,20 @@
 """
 Escalation Audit Trail.
 
-오버라이드 의사결정 이유를 Audit 로그에 박제합니다.
+Records the reasoning behind every override decision in the audit log.
 
-기록 대상:
-- Global → Regional 강제 오버라이드
-- Admin Override로 Global 무시
-- Safety-Max 결정
-- Cascade Escalation (다중 리전 연쇄 격상)
-- Partition Fallback (네트워크 고립으로 인한 로컬 폴백)
+Recorded events:
+- Global -> Regional forced override
+- Global ignored via Admin Override
+- Safety-Max decision
+- Cascade Escalation (chained escalation across multiple regions)
+- Partition Fallback (local fallback caused by network isolation)
 
-"왜 이 상태가 됐는지" 100% 추적 가능.
+Makes "why did it end up in this state" 100% traceable.
 
 Code reference:
-    coordination/coordinator.py (DryRunAuditLogger 패턴)
-    coordination/critical_path_fallback.py#L214-246 (append_audit_log)
-
-Reference:
-    docs/baldur/middleware_system/73_NAMESPACE_AWARE_EMERGENCY.md
+    coordination/coordinator.py (DryRunAuditLogger pattern)
+    CriticalPathFallback.append_audit_log
 """
 
 from __future__ import annotations
@@ -43,103 +40,103 @@ logger = structlog.get_logger()
 
 class EscalationDecisionType:
     """
-    오버라이드 의사결정 유형.
+    Override decision types.
 
-    각 유형은 "왜 이 상태가 됐는지"를 명시합니다.
+    Each type states "why it ended up in this state".
     """
 
     GLOBAL_OVERRIDE = "GLOBAL_OVERRIDE"
-    """Global STRICT가 Regional을 강제 오버라이드."""
+    """Global STRICT forcibly overrides Regional."""
 
     ADMIN_OVERRIDE = "ADMIN_OVERRIDE"
-    """Admin이 수동으로 Global을 무시하고 Regional 적용."""
+    """Admin manually ignores Global and applies Regional."""
 
     SAFETY_MAX = "SAFETY_MAX"
-    """Safety-Max: 둘 중 더 엄격한 상태 선택."""
+    """Safety-Max: pick the stricter of the two states."""
 
     REGIONAL_DEFAULT = "REGIONAL_DEFAULT"
-    """둘 다 NORMAL, Regional 기본값 사용."""
+    """Both NORMAL, so the Regional default is used."""
 
     CASCADE_ESCALATION = "CASCADE_ESCALATION"
-    """다중 리전 연쇄 장애로 인한 Global 격상."""
+    """Global escalation caused by a chained multi-region failure."""
 
     PARTITION_FALLBACK = "PARTITION_FALLBACK"
-    """네트워크 고립으로 인한 로컬 폴백."""
+    """Local fallback caused by network isolation."""
 
     REGIONAL_STRICT = "REGIONAL_STRICT"
-    """Regional STRICT 활성화 (Global은 NORMAL)."""
+    """Regional STRICT activated (Global is NORMAL)."""
 
     FALLBACK = "FALLBACK"
-    """조회 실패로 인한 안전 기본값 사용."""
+    """Safe default used because the query failed."""
 
 
 @dataclass
 class EscalationAuditEntry(SerializableMixin):
     """
-    오버라이드 의사결정 Audit 엔트리.
+    Audit entry for an override decision.
 
-    scope와 namespace뿐 아니라 **'왜 이런 결정이 내려졌는지'**를
-    명시적으로 기록합니다.
+    Beyond scope and namespace, it explicitly records **"why this decision
+    was made"**.
 
     Attributes:
-        event_id: 고유 이벤트 ID (예: "esc-a1b2c3d4e5f6")
-        decision_type: 의사결정 유형 (EscalationDecisionType)
-        decision_reason: 의사결정 상세 이유
-        namespace: 대상 네임스페이스
-        effective_state: 최종 적용된 상태
-        overridden_state: 덮어씌워진 상태 (Before 스냅샷)
-        triggered_by: 결정을 트리거한 주체
-        precedence: 명령 우선순위
-        timestamp: 기록 시각 (ISO format)
-        global_state_snapshot: Global 상태 스냅샷 (결정 시점)
-        regional_state_snapshot: Regional 상태 스냅샷 (결정 시점)
-        ttl_minutes: Admin Override TTL (분)
+        event_id: Unique event ID (e.g. "esc-a1b2c3d4e5f6")
+        decision_type: Decision type (EscalationDecisionType)
+        decision_reason: Detailed reason for the decision
+        namespace: Target namespace
+        effective_state: State that was finally applied
+        overridden_state: State that was overwritten (before snapshot)
+        triggered_by: Actor that triggered the decision
+        precedence: Command precedence
+        timestamp: Recording time (ISO format)
+        global_state_snapshot: Global state snapshot (at decision time)
+        regional_state_snapshot: Regional state snapshot (at decision time)
+        ttl_minutes: Admin Override TTL (minutes)
     """
 
-    # 고유 식별자
+    # Unique identifier
     event_id: str = field(default_factory=lambda: f"esc-{uuid.uuid4().hex[:12]}")
 
-    # 의사결정 정보 (핵심!)
+    # Decision information (the core!)
     decision_type: str = ""
-    """의사결정 유형 (GLOBAL_OVERRIDE, ADMIN_OVERRIDE, etc.)."""
+    """Decision type (GLOBAL_OVERRIDE, ADMIN_OVERRIDE, etc.)."""
 
     decision_reason: str = ""
-    """의사결정 이유 (예: 'Global STRICT overrides regional seoul (NORMAL)')."""
+    """Decision reason (e.g. 'Global STRICT overrides regional seoul (NORMAL)')."""
 
-    # 상태 정보
+    # State information
     namespace: str = ""
-    """대상 네임스페이스."""
+    """Target namespace."""
 
     effective_state: dict[str, Any] = field(default_factory=dict)
-    """최종 적용된 상태."""
+    """State that was finally applied."""
 
     overridden_state: dict[str, Any] | None = None
-    """덮어씌워진 상태 (Before 스냅샷)."""
+    """State that was overwritten (before snapshot)."""
 
-    # 행위자 정보
+    # Actor information
     triggered_by: str = ""
-    """결정을 트리거한 주체 (user_id, 'system', 'AtomicStateQuery')."""
+    """Actor that triggered the decision (user_id, 'system', 'AtomicStateQuery')."""
 
     precedence: str | None = None
-    """명령 우선순위 (수동 오버라이드 시)."""
+    """Command precedence (for manual overrides)."""
 
-    # 메타데이터
+    # Metadata
     timestamp: str = field(default_factory=lambda: utc_now().isoformat())
 
-    # Global 상태 스냅샷 (비교용)
+    # Global state snapshot (for comparison)
     global_state_snapshot: dict[str, Any] | None = None
-    """Global 상태 스냅샷 (결정 시점)."""
+    """Global state snapshot (at decision time)."""
 
     regional_state_snapshot: dict[str, Any] | None = None
-    """Regional 상태 스냅샷 (결정 시점)."""
+    """Regional state snapshot (at decision time)."""
 
-    # TTL 정보
+    # TTL information
     ttl_minutes: int | None = None
-    """Admin Override TTL (분)."""
+    """Admin Override TTL (minutes)."""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> EscalationAuditEntry:
-        """딕셔너리에서 생성."""
+        """Build from a dictionary."""
         return cls(
             event_id=data.get("event_id", f"esc-{uuid.uuid4().hex[:12]}"),
             decision_type=data.get("decision_type", ""),
@@ -158,38 +155,39 @@ class EscalationAuditEntry(SerializableMixin):
 
 class EscalationAuditTrail:
     """
-    오버라이드 의사결정 Audit Trail.
+    Audit trail for override decisions.
 
-    모든 상태 결정을 기록하여 "왜 이 상태가 됐는지" 100% 추적 가능.
+    Records every state decision so that "why it ended up in this state" is
+    100% traceable.
 
     Features:
-    - 메모리 버퍼 + CriticalPathFallback 연동
-    - 스레드 안전 (RLock)
-    - 의사결정 유형별 편의 메서드
+    - Memory buffer + CriticalPathFallback integration
+    - Thread-safe (RLock)
+    - Convenience methods per decision type
 
     Code reference:
-        coordination/critical_path_fallback.py#L214-246 (append_audit_log)
+        CriticalPathFallback.append_audit_log
 
     Usage:
         audit = EscalationAuditTrail()
 
-        # Global 오버라이드 기록
+        # Record a Global override
         event_id = audit.log_global_override(
             namespace="seoul",
             global_state={"governance_mode": "STRICT", ...},
             regional_state={"governance_mode": "NORMAL", ...},
         )
 
-        # 최근 의사결정 조회
+        # Query recent decisions
         decisions = audit.get_recent_decisions(namespace="seoul", limit=10)
     """
 
     def __init__(self, max_buffer_size: int | None = None):
         """
-        EscalationAuditTrail 초기화.
+        Initialize EscalationAuditTrail.
 
         Args:
-            max_buffer_size: 메모리 버퍼 최대 크기 (None이면 Settings에서 로드)
+            max_buffer_size: Max memory buffer size (loaded from Settings if None)
         """
         self._lock = threading.RLock()
         self._memory_buffer: list[EscalationAuditEntry] = []
@@ -201,7 +199,7 @@ class EscalationAuditTrail:
 
     @staticmethod
     def _get_max_buffer_size() -> int:
-        """Settings에서 max_buffer_size 로드."""
+        """Load max_buffer_size from Settings."""
         try:
             from baldur.settings.regional_emergency import (
                 get_regional_emergency_settings,
@@ -209,7 +207,7 @@ class EscalationAuditTrail:
 
             return get_regional_emergency_settings().max_buffer_size
         except ImportError:
-            return 1000  # 기본값
+            return 1000  # default
 
     def log_decision(
         self,
@@ -225,22 +223,22 @@ class EscalationAuditTrail:
         ttl_minutes: int | None = None,
     ) -> str:
         """
-        의사결정 기록.
+        Record a decision.
 
         Args:
-            decision_type: 의사결정 유형 (EscalationDecisionType)
-            decision_reason: 의사결정 이유 (상세!)
-            namespace: 대상 네임스페이스
-            effective_state: 최종 적용된 상태
-            overridden_state: 덮어씌워진 상태 (Before 스냅샷)
-            triggered_by: 결정을 트리거한 주체
-            precedence: 명령 우선순위
-            global_state: Global 상태 스냅샷
-            regional_state: Regional 상태 스냅샷
+            decision_type: Decision type (EscalationDecisionType)
+            decision_reason: Decision reason (be specific!)
+            namespace: Target namespace
+            effective_state: State that was finally applied
+            overridden_state: State that was overwritten (before snapshot)
+            triggered_by: Actor that triggered the decision
+            precedence: Command precedence
+            global_state: Global state snapshot
+            regional_state: Regional state snapshot
             ttl_minutes: Admin Override TTL
 
         Returns:
-            생성된 event_id
+            The generated event_id
         """
         entry = EscalationAuditEntry(
             decision_type=decision_type,
@@ -257,14 +255,14 @@ class EscalationAuditTrail:
 
         with self._lock:
             self._memory_buffer.append(entry)
-            # 버퍼 크기 제한
+            # Enforce the buffer size limit
             if len(self._memory_buffer) > self._max_buffer_size:
                 self._memory_buffer = self._memory_buffer[-self._max_buffer_size :]
 
-        # CriticalPathFallback 연동 (영구 저장)
+        # CriticalPathFallback integration (durable storage)
         self._persist_to_fallback(entry)
 
-        # 로그 출력
+        # Emit the log line
         log_level = (
             logging.WARNING
             if decision_type
@@ -293,18 +291,18 @@ class EscalationAuditTrail:
         triggered_by: str = "system",
     ) -> str:
         """
-        Global → Regional 강제 오버라이드 기록.
+        Record a Global -> Regional forced override.
 
-        Global STRICT가 Regional 상태를 강제로 덮어쓸 때 호출.
+        Called when Global STRICT forcibly overwrites the Regional state.
 
         Args:
-            namespace: 대상 네임스페이스
-            global_state: Global 상태 (적용됨)
-            regional_state: Regional 상태 (무시됨)
-            triggered_by: 트리거 주체
+            namespace: Target namespace
+            global_state: Global state (applied)
+            regional_state: Regional state (ignored)
+            triggered_by: Triggering actor
 
         Returns:
-            생성된 event_id
+            The generated event_id
         """
         reason = (
             f"Global STRICT ({global_state.get('emergency_level', 'N/A')}) "
@@ -333,20 +331,21 @@ class EscalationAuditTrail:
         ttl_minutes: int | None = None,
     ) -> str:
         """
-        Admin Override 기록 (Global 무시).
+        Record an Admin Override (Global ignored).
 
-        관리자가 명시적으로 Global을 무시하고 Regional 상태를 적용할 때 호출.
+        Called when an administrator explicitly ignores Global and applies the
+        Regional state.
 
         Args:
-            namespace: 대상 네임스페이스
-            regional_state: Regional 상태 (적용됨)
-            global_state: Global 상태 (무시됨)
-            triggered_by: 관리자 ID
-            precedence: 명령 우선순위 ("ADMIN_OVERRIDE" 또는 "KILL_SWITCH")
-            ttl_minutes: 오버라이드 TTL
+            namespace: Target namespace
+            regional_state: Regional state (applied)
+            global_state: Global state (ignored)
+            triggered_by: Administrator ID
+            precedence: Command precedence ("ADMIN_OVERRIDE" or "KILL_SWITCH")
+            ttl_minutes: Override TTL
 
         Returns:
-            생성된 event_id
+            The generated event_id
         """
         reason = (
             f"Admin override ({precedence}) by {triggered_by}: "
@@ -378,18 +377,18 @@ class EscalationAuditTrail:
         triggered_by: str = "system",
     ) -> str:
         """
-        Regional STRICT 활성화 기록.
+        Record a Regional STRICT activation.
 
-        Global은 NORMAL이지만 Regional이 STRICT일 때 호출.
+        Called when Global is NORMAL but Regional is STRICT.
 
         Args:
-            namespace: 대상 네임스페이스
-            regional_state: Regional 상태 (STRICT)
-            global_state: Global 상태 (NORMAL)
-            triggered_by: 트리거 주체
+            namespace: Target namespace
+            regional_state: Regional state (STRICT)
+            global_state: Global state (NORMAL)
+            triggered_by: Triggering actor
 
         Returns:
-            생성된 event_id
+            The generated event_id
         """
         reason = (
             f"Regional STRICT active for {namespace} "
@@ -414,16 +413,17 @@ class EscalationAuditTrail:
         triggered_by: str = "system",
     ) -> str:
         """
-        Cascade Escalation 기록 (다중 리전 연쇄 격상).
+        Record a Cascade Escalation (chained multi-region escalation).
 
-        여러 리전이 동시에 STRICT 상태가 되어 Global로 격상할 때 호출.
+        Called when several regions become STRICT at once and escalate to
+        Global.
 
         Args:
-            affected_regions: 영향받은 리전 목록
-            triggered_by: 트리거 주체
+            affected_regions: List of affected regions
+            triggered_by: Triggering actor
 
         Returns:
-            생성된 event_id
+            The generated event_id
         """
         reason = (
             f"Cascade escalation to Global STRICT: "
@@ -446,15 +446,15 @@ class EscalationAuditTrail:
         triggered_by: str = "AtomicStateQuery",
     ) -> str:
         """
-        Fallback 기록 (조회 실패로 인한 안전 기본값).
+        Record a fallback (safe default used because the query failed).
 
         Args:
-            namespace: 대상 네임스페이스
-            error: 실패 원인
-            triggered_by: 트리거 주체
+            namespace: Target namespace
+            error: Failure cause
+            triggered_by: Triggering actor
 
         Returns:
-            생성된 event_id
+            The generated event_id
         """
         reason = f"Query failed for {namespace}, using safe default: {error}"
 
@@ -473,15 +473,15 @@ class EscalationAuditTrail:
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         """
-        최근 의사결정 조회.
+        Query recent decisions.
 
         Args:
-            namespace: 필터링할 네임스페이스 (None이면 전체)
-            decision_type: 필터링할 의사결정 유형 (None이면 전체)
-            limit: 반환할 최대 개수
+            namespace: Namespace to filter by (all if None)
+            decision_type: Decision type to filter by (all if None)
+            limit: Maximum number of entries to return
 
         Returns:
-            의사결정 목록 (최신순)
+            List of decisions (newest first)
         """
         with self._lock:
             entries = self._memory_buffer[-limit:]
@@ -496,13 +496,13 @@ class EscalationAuditTrail:
 
     def get_decision_by_id(self, event_id: str) -> dict[str, Any] | None:
         """
-        특정 의사결정 조회.
+        Query a specific decision.
 
         Args:
-            event_id: 이벤트 ID
+            event_id: Event ID
 
         Returns:
-            의사결정 딕셔너리 또는 None
+            Decision dictionary, or None
         """
         with self._lock:
             for entry in self._memory_buffer:
@@ -512,10 +512,10 @@ class EscalationAuditTrail:
 
     def get_stats(self) -> dict[str, Any]:
         """
-        Audit Trail 통계 반환.
+        Return audit trail statistics.
 
         Returns:
-            통계 딕셔너리
+            Statistics dictionary
         """
         with self._lock:
             by_type: dict[str, int] = {}
@@ -533,12 +533,12 @@ class EscalationAuditTrail:
             }
 
     def clear(self) -> None:
-        """버퍼 초기화 (테스트용)."""
+        """Clear the buffer (for tests)."""
         with self._lock:
             self._memory_buffer.clear()
 
     def _persist_to_fallback(self, entry: EscalationAuditEntry) -> None:
-        """CriticalPathFallback에 영구 저장."""
+        """Persist durably to CriticalPathFallback."""
         try:
             from baldur_pro.services.coordination.critical_path_fallback import (
                 CriticalPathFallback,
@@ -563,10 +563,10 @@ _audit_trail_lock = threading.Lock()
 
 def get_escalation_audit_trail() -> EscalationAuditTrail:
     """
-    EscalationAuditTrail 싱글톤 반환.
+    Return the EscalationAuditTrail singleton.
 
     Returns:
-        EscalationAuditTrail 인스턴스
+        EscalationAuditTrail instance
     """
     global _audit_trail
     if _audit_trail is None:
@@ -577,6 +577,6 @@ def get_escalation_audit_trail() -> EscalationAuditTrail:
 
 
 def reset_escalation_audit_trail() -> None:
-    """테스트용 싱글톤 리셋."""
+    """Reset the singleton (for tests)."""
     global _audit_trail
     _audit_trail = None

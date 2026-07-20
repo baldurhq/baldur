@@ -18,13 +18,10 @@ Components:
 - RegionalCascadeDetector: multi-region cascade failure detection
 - EmergencyHealthPenalty: Health Score penalty integration
 - PartitionReconciliationService: network partition recovery
-
-Reference:
-    docs/baldur/middleware_system/73_NAMESPACE_AWARE_EMERGENCY.md
 """
 
-# ScopedEmergencyState는 coordination/models.py에서 재export
-# Phase 1: 안전 기반
+# ScopedEmergencyState is re-exported from the coordination models module.
+# Phase 1: safety foundation
 from baldur.models.emergency import ScopedEmergencyState
 from baldur.services.regional_emergency.atomic_query import (
     AtomicStateQuery,
@@ -43,7 +40,7 @@ from baldur.services.regional_emergency.escalation_audit import (
     get_escalation_audit_trail,
 )
 
-# Phase 3: 고급 기능
+# Phase 3: advanced features
 from baldur.services.regional_emergency.health_penalty import (
     EmergencyHealthPenalty,
     PenaltyBreakdown,
@@ -59,7 +56,7 @@ from baldur.services.regional_emergency.partition_reconciliation import (
     reset_partition_reconciliation_service,
 )
 
-# Phase 2: 핵심 기능
+# Phase 2: core features
 from baldur.services.regional_emergency.tracker import (
     GLOBAL_NAMESPACE,
     NamespacedEmergencyTracker,

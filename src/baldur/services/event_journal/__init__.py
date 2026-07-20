@@ -1,8 +1,8 @@
 """
 Event Journal Service.
 
-Baldur 결정 이벤트를 append-only 저널에 기록한다.
-Config Shadow Evaluator(299)의 시뮬레이션 데이터 소스로 사용된다.
+Records Baldur decision events into an append-only journal.
+Used as the simulation data source for the Config Shadow Evaluator.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ _journal_subscriber: JournalSubscriber | None = None
 def init_event_journal(
     bus: EventBusProtocol | None = None,
 ) -> JournalSubscriber | None:
-    """EventJournal 구독자를 초기화한다. 앱 시작 시 1회 호출."""
+    """Initialize the EventJournal subscriber. Called once at app startup."""
     global _journal_subscriber
     if _journal_subscriber is not None:
         return _journal_subscriber
@@ -50,12 +50,12 @@ def init_event_journal(
 
 
 def get_event_journal() -> JournalSubscriber | None:
-    """현재 초기화된 JournalSubscriber를 반환한다. 미초기화 시 None."""
+    """Return the initialized JournalSubscriber, or None if not initialized."""
     return _journal_subscriber
 
 
 def reset_event_journal() -> None:
-    """JournalSubscriber 싱글톤을 리셋한다 (테스트용)."""
+    """Reset the JournalSubscriber singleton (for testing)."""
     global _journal_subscriber
     if _journal_subscriber is not None:
         _journal_subscriber.close()

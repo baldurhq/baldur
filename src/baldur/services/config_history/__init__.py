@@ -1,20 +1,20 @@
 """
 Configuration History & Rollback Service.
 
-Redis에 설정 변경 이력을 저장하고 롤백 기능 제공.
+Stores config change history in Redis and provides rollback.
 
 Features:
-- 변경 시 자동 버전 저장
-- 최근 N개 버전 유지
-- 특정 버전으로 롤백
-- Redis 장애 시 Graceful Degradation
+- Automatic version save on change
+- Retention of the most recent N versions
+- Rollback to a specific version
+- Graceful degradation on Redis failure
 
 Usage:
     from baldur.services.config_history import get_config_history_service
 
     service = get_config_history_service()
 
-    # 버전 저장
+    # Save a version
     version = service.save_version(
         config_type="circuit_breaker",
         values={"failure_threshold": 10},
@@ -22,10 +22,10 @@ Usage:
         reason="Increase threshold for high load",
     )
 
-    # 이력 조회
+    # Read history
     history = service.get_history("circuit_breaker", limit=10)
 
-    # 롤백
+    # Rollback
     rolled_back = service.rollback(
         config_type="circuit_breaker",
         target_version=1,
@@ -36,8 +36,8 @@ Audit:
 - save_version: log_config_apply_audit(status="applied")
 - rollback: log_rollback_audit(state="completed")
 
-Reference:
-    92_CONFIG_IMPLEMENTATION_GUIDE.md Week 4 [20] AuditSettings 참조.
+See also:
+    AuditSettings for the audit configuration used by these calls.
 """
 
 # === Explicit re-exports ===

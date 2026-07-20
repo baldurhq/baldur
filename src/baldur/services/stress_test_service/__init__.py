@@ -1,14 +1,14 @@
 """
 Stress Test Service Package.
 
-DB Connection Pool 스트레스 테스트를 위한 비즈니스 로직.
+Business logic for DB connection pool stress testing.
 
-이 모듈은 테스트 전용이며, 프로덕션에서는 절대 사용하지 마세요!
-비즈니스 로직을 View 레이어에서 분리하여 클린 아키텍처를 유지합니다.
+This module is test-only — never use it in production!
+Keeping the business logic out of the view layer preserves a clean architecture.
 
 Modules:
-    - models: 스트레스 테스트 결과 데이터 클래스
-    - service: StressTestService 클래스 및 싱글톤
+    - models: stress test result dataclasses
+    - service: the StressTestService class and its singleton
 
 Usage:
     from baldur.services.stress_test_service import (
@@ -17,7 +17,8 @@ Usage:
     )
 
 .. versionadded:: 2.2.0
-    ``stress_test_service.py`` 플랫 파일에서 ``stress_test_service/`` 패키지로 전환.
+    Converted from the flat ``stress_test_service.py`` file to the
+    ``stress_test_service/`` package.
 """
 
 # Dynamic forwarding for patch compatibility

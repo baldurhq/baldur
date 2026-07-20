@@ -335,7 +335,7 @@ canary_governance_bypass_total = get_or_create_counter(
 
 
 # =============================================================================
-# Rate Limit Coordinator Metrics (429 통합 대응)
+# Rate Limit Coordinator Metrics (unified 429 handling)
 # =============================================================================
 
 rate_limit_429_total = get_or_create_counter(
@@ -432,7 +432,7 @@ retry_critical_tier_grace_retries_total = get_or_create_counter(
 
 
 # =============================================================================
-# Throttle DLQ Replay Integration Metrics (거부 요청 DLQ 저장/Replay 연동)
+# Throttle DLQ Replay Integration Metrics (rejections stored to DLQ / replayed)
 # =============================================================================
 
 throttle_rejection_dlq_stored_total = get_or_create_counter(

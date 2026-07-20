@@ -1,20 +1,20 @@
 """
 Configuration History & Rollback Service.
 
-Redis에 설정 변경 이력을 저장하고 롤백 기능 제공.
+Stores configuration change history in Redis and provides rollback.
 
 Features:
-- 변경 시 자동 버전 저장
-- 최근 N개 버전 유지
-- 특정 버전으로 롤백
-- Redis 장애 시 Graceful Degradation
+- Automatic version save on every change
+- Retention of the most recent N versions
+- Rollback to a specific version
+- Graceful degradation when Redis is down
 
 Usage:
     from baldur.services.config_history import get_config_history_service
 
     service = get_config_history_service()
 
-    # 버전 저장
+    # Save a version
     version = service.save_version(
         config_type="circuit_breaker",
         values={"failure_threshold": 10},
@@ -22,10 +22,10 @@ Usage:
         reason="Increase threshold for high load",
     )
 
-    # 이력 조회
+    # Query history
     history = service.get_history("circuit_breaker", limit=10)
 
-    # 롤백
+    # Rollback
     rolled_back = service.rollback(
         config_type="circuit_breaker",
         target_version=1,
@@ -37,7 +37,7 @@ Audit:
 - rollback: log_rollback_audit(state="completed")
 
 Reference:
-    92_CONFIG_IMPLEMENTATION_GUIDE.md Week 4 [20] AuditSettings 참조.
+    See the AuditSettings section of the configuration implementation guide.
 """
 
 from __future__ import annotations
@@ -64,16 +64,16 @@ logger = structlog.get_logger()
 
 class ConfigHistoryService:
     """
-    설정 변경 이력 관리 서비스.
+    Configuration change history management service.
 
     Features:
-    - 변경 시 자동 버전 저장
-    - 최근 N개 버전 유지
-    - 특정 버전으로 롤백
-    - Redis 장애 시 Graceful Degradation
+    - Automatic version save on every change
+    - Retention of the most recent N versions
+    - Rollback to a specific version
+    - Graceful degradation when Redis is down
     """
 
-    # 지원하는 config_type 목록
+    # Supported config_type values
     SUPPORTED_CONFIG_TYPES = [
         "circuit_breaker",
         "dlq",
@@ -87,10 +87,10 @@ class ConfigHistoryService:
         "forensic",
         "metrics",
         "error_budget",
-        "drift_threshold",  # Drift 임계값 설정
-        "emergency",  # Emergency Mode 설정
-        "logging",  # Logging 설정
-        "chaos",  # Chaos Engineering 설정
+        "drift_threshold",  # Drift threshold settings
+        "emergency",  # Emergency Mode settings
+        "logging",  # Logging settings
+        "chaos",  # Chaos Engineering settings
     ]
 
     def __init__(self, store: ConfigHistoryStore | None = None):
@@ -112,7 +112,7 @@ class ConfigHistoryService:
         return self._store
 
     def is_valid_config_type(self, config_type: str) -> bool:
-        """유효한 config_type인지 확인."""
+        """Check whether the config_type is valid."""
         return config_type in self.SUPPORTED_CONFIG_TYPES
 
     def save_version(
@@ -123,16 +123,16 @@ class ConfigHistoryService:
         reason: str = "",
     ) -> ConfigVersion | None:
         """
-        새 설정 버전 저장.
+        Save a new configuration version.
 
         Args:
-            config_type: 설정 유형 (circuit_breaker, dlq, retry 등)
-            values: 설정 값
-            changed_by: 변경자
-            reason: 변경 사유
+            config_type: Setting category (circuit_breaker, dlq, retry, ...)
+            values: Setting values
+            changed_by: Who made the change
+            reason: Reason for the change
 
         Returns:
-            저장된 ConfigVersion 또는 None (Redis 장애 시)
+            The saved ConfigVersion, or None when Redis is down
         """
         if not self.is_valid_config_type(config_type):
             logger.error(
@@ -146,10 +146,10 @@ class ConfigHistoryService:
             return None
 
         try:
-            # 새 버전 번호 (원자적 증가)
+            # New version number (atomic increment)
             version_num = self.store.next_version(config_type)
 
-            # 해시 생성
+            # Compute the hash
             config_hash = self._compute_hash(values)
 
             version = ConfigVersion(
@@ -162,7 +162,7 @@ class ConfigHistoryService:
                 hash=config_hash,
             )
 
-            # 원자적 저장 (history + current)
+            # Atomic save (history + current)
             max_entries = _get_max_history_entries()
             self.store.save_version(config_type, version.to_dict(), max_entries)
 
@@ -174,7 +174,7 @@ class ConfigHistoryService:
                 reason=reason,
             )
 
-            # === Audit 기록: 설정 버전 저장 ===
+            # === Audit record: configuration version saved ===
             log_config_apply_audit(
                 pending_id=None,
                 config_key=config_type,
@@ -200,14 +200,14 @@ class ConfigHistoryService:
 
     def get_history(self, config_type: str, limit: int = 10) -> list[ConfigVersion]:
         """
-        설정 변경 이력 조회.
+        Query the configuration change history.
 
         Args:
-            config_type: 설정 유형
-            limit: 조회할 버전 수
+            config_type: Setting category
+            limit: Number of versions to fetch
 
         Returns:
-            ConfigVersion 목록 (최신순)
+            List of ConfigVersion (newest first)
         """
         if not self.is_valid_config_type(config_type):
             logger.error(
@@ -245,7 +245,7 @@ class ConfigHistoryService:
             return []
 
     def get_current_version(self, config_type: str) -> ConfigVersion | None:
-        """현재 버전 조회."""
+        """Query the current version."""
         if not self.is_valid_config_type(config_type):
             return None
 
@@ -266,7 +266,7 @@ class ConfigHistoryService:
             return None
 
     def get_version(self, config_type: str, version: int) -> ConfigVersion | None:
-        """특정 버전 조회."""
+        """Query a specific version."""
         history = self.get_history(config_type, limit=_get_max_history_entries())
 
         for v in history:
@@ -279,18 +279,18 @@ class ConfigHistoryService:
         self, config_type: str, target_version: int, rolled_back_by: str
     ) -> ConfigVersion | None:
         """
-        특정 버전으로 롤백.
+        Roll back to a specific version.
 
-        Note: 이 메서드는 버전 이력만 저장합니다.
-        실제 설정 적용은 호출자가 _apply_config_values()를 호출해야 합니다.
+        Note: this method only records the version history.
+        The caller must invoke _apply_config_values() to apply the settings.
 
         Args:
-            config_type: 설정 유형
-            target_version: 롤백할 버전 번호
-            rolled_back_by: 롤백 수행자
+            config_type: Setting category
+            target_version: Version number to roll back to
+            rolled_back_by: Who performed the rollback
 
         Returns:
-            새로 생성된 롤백 버전 정보 또는 None
+            The newly created rollback version, or None
         """
         target = self.get_version(config_type, target_version)
 
@@ -302,7 +302,7 @@ class ConfigHistoryService:
             )
             return None
 
-        # 롤백도 새 버전으로 저장
+        # A rollback is also stored as a new version
         new_version = self.save_version(
             config_type=config_type,
             values=target.values,
@@ -319,7 +319,7 @@ class ConfigHistoryService:
                 rolled_back_by=rolled_back_by,
             )
 
-            # === Audit 기록: 설정 롤백 ===
+            # === Audit record: configuration rollback ===
             log_rollback_audit(
                 request_id=f"config-rollback-{config_type}-{new_version.version}",
                 service_name=config_type,
@@ -339,10 +339,10 @@ class ConfigHistoryService:
         self, config_type: str, version_a: int, version_b: int
     ) -> dict[str, Any] | None:
         """
-        두 버전 간 차이점 비교.
+        Compare the differences between two versions.
 
         Returns:
-            차이점 딕셔너리 또는 None
+            Dictionary of differences, or None
         """
         v_a = self.get_version(config_type, version_a)
         v_b = self.get_version(config_type, version_b)
@@ -372,7 +372,7 @@ class ConfigHistoryService:
         return diff
 
     def get_version_count(self, config_type: str) -> int:
-        """저장된 버전 수 조회."""
+        """Query the number of stored versions."""
         if not self.store:
             return 0
 
@@ -383,9 +383,9 @@ class ConfigHistoryService:
 
     def clear_history(self, config_type: str) -> bool:
         """
-        특정 config_type의 이력 삭제 (테스트용).
+        Delete the history of a specific config_type (test use).
 
-        WARNING: 프로덕션에서 사용 주의!
+        WARNING: use with care in production!
         """
         if not self.store:
             return False
@@ -406,19 +406,19 @@ class ConfigHistoryService:
             return False
 
     def _compute_hash(self, values: dict[str, Any]) -> str:
-        """설정값 해시 계산."""
+        """Compute the hash of the setting values."""
         from baldur.utils.serialization import fast_canonical_dumps
 
         return hashlib.sha256(fast_canonical_dumps(values)).hexdigest()[:16]
 
 
-# 싱글톤 인스턴스
+# Singleton instance
 _config_history_service: ConfigHistoryService | None = None
 _config_history_service_lock = threading.Lock()
 
 
 def get_config_history_service() -> ConfigHistoryService:
-    """ConfigHistoryService 싱글톤 반환."""
+    """Return the ConfigHistoryService singleton."""
     global _config_history_service
     if _config_history_service is None:
         with _config_history_service_lock:
@@ -428,6 +428,6 @@ def get_config_history_service() -> ConfigHistoryService:
 
 
 def reset_config_history_service() -> None:
-    """싱글톤 인스턴스 리셋 (테스트용)."""
+    """Reset the singleton instance (test use)."""
     global _config_history_service
     _config_history_service = None

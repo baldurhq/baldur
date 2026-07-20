@@ -1,10 +1,10 @@
 """
 Cell Topology Service — Orchestration Layer.
 
-CellRegistry, CellEvacuationPolicy, EventBus, Anti-entropy를
-하나의 진입점으로 통합하는 오케스트레이터.
+Orchestrator that unifies CellRegistry, CellEvacuationPolicy, EventBus and
+anti-entropy behind a single entry point.
 
-CircuitMeshService (circuit_mesh/service.py) 패턴을 따른다.
+Follows the CircuitMeshService pattern.
 
 Startup sequence (doc 388):
     CellTopologyService.start()
@@ -39,10 +39,10 @@ __all__ = [
 
 class CellTopologyService:
     """
-    Cell Topology 오케스트레이터.
+    Cell Topology orchestrator.
 
-    start()/stop() 단일 진입점으로 CellRegistry, EventBus handler,
-    Anti-entropy daemon, Health scheduling을 관리한다.
+    Manages CellRegistry, EventBus handlers, the anti-entropy daemon and health
+    scheduling behind the single start()/stop() entry point.
     """
 
     def __init__(self) -> None:
@@ -58,7 +58,7 @@ class CellTopologyService:
 
     def start(self) -> None:
         """
-        Cell Topology 서비스 시작.
+        Start the Cell Topology service.
 
         No hydration guard needed — LWW comparison is order-independent
         and idempotent (Q17).
@@ -104,7 +104,7 @@ class CellTopologyService:
 
     def stop(self) -> None:
         """
-        Cell Topology 서비스 중지.
+        Stop the Cell Topology service.
 
         EventBus unregister + anti-entropy thread shutdown.
         L2(Redis) is preserved for other workers (Q10).

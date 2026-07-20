@@ -1,12 +1,12 @@
 """
 Post-Recovery Integrity Gate.
 
-CB CLOSED 시 리플레이 전에 WAL↔해시체인 무결성을 검증합니다.
-실패 시 리플레이를 차단하고 관리자에게 경고합니다.
+Verifies WAL <-> hash-chain integrity before replay when the CB goes CLOSED.
+On failure it blocks the replay and alerts the operator.
 
-EventBus 핸들러 우선순위:
-    CRITICAL: 이 게이트 (리플레이보다 먼저 실행)
-    NORMAL: _on_circuit_breaker_closed (리플레이)
+EventBus handler priority:
+    CRITICAL: this gate (runs before replay)
+    NORMAL: _on_circuit_breaker_closed (replay)
     LOW: _on_circuit_breaker_closed_postmortem
 """
 
@@ -19,7 +19,7 @@ import structlog
 
 logger = structlog.get_logger()
 
-# 이벤트 데이터 플래그 키 (bus.py에서 import하여 참조)
+# Event-data flag keys (imported and referenced by the bus module)
 INTEGRITY_GATE_KEY = "integrity_gate_result"
 INTEGRITY_FAILED_KEY = "integrity_failed"
 
@@ -31,26 +31,26 @@ INTEGRITY_FAILED_KEY = "integrity_failed"
 
 def on_circuit_breaker_closed_integrity_gate(event: Any) -> None:
     """
-    CB 복구 시 WAL 무결성 게이트.
+    WAL integrity gate on CB recovery.
 
-    CRITICAL 우선순위로 등록되어 Replay 핸들러보다 먼저 실행됩니다.
+    Registered at CRITICAL priority so it runs before the replay handler.
 
-    동작:
-        1. 서킷이 Open이었던 시간대의 WAL 엔트리 수집
-        2. 해당 구간의 해시체인 무결성 검증
-        3. 실패 시 event.data에 integrity_failed=True 설정
-        4. 후속 _on_circuit_breaker_closed가 이 플래그를 확인
+    Behavior:
+        1. Collect WAL entries from the window where the circuit was Open
+        2. Verify hash-chain integrity over that window
+        3. On failure, set integrity_failed=True on event.data
+        4. The downstream _on_circuit_breaker_closed checks this flag
     """
     service_name = event.data.get("service_name", "unknown")
     start = time.time()
 
-    # 설정에서 Fail-Open/Secure 모드 로드
+    # Load Fail-Open/Secure mode from settings
     try:
         from baldur.settings.audit_integrity import get_audit_integrity_settings
 
         fail_open = get_audit_integrity_settings().integrity_gate_fail_open
     except Exception:
-        fail_open = True  # 설정 로드 실패 시 안전한 기본값
+        fail_open = True  # Safe default when settings loading fails
 
     logger.info(
         "integrity_gate.checking_wal_integrity_before",
@@ -89,7 +89,7 @@ def on_circuit_breaker_closed_integrity_gate(event: Any) -> None:
         _update_health_score(result, duration_ms)
 
     except Exception as e:
-        # Fail-Open/Secure 설정에 따라 분기
+        # Branch on the Fail-Open/Secure setting
         if fail_open:
             logger.warning(
                 "integrity_gate.gate_check_failed_proceeding",
@@ -122,7 +122,7 @@ def _verify_recovery_window_integrity(
     event: Any,
 ) -> dict[str, Any]:
     """
-    서킷 Open 기간 동안 쌓인 WAL 데이터의 해시체인 검증.
+    Verify the hash chain of WAL data accumulated while the circuit was Open.
 
     Returns:
         {"valid": bool, "checked": int, "errors": list, "strategy": str}
@@ -131,13 +131,13 @@ def _verify_recovery_window_integrity(
 
     verifier = HashChainVerifier()
 
-    # WAL에서 미동기화 엔트리 수집
+    # Collect unsynced entries from the WAL
     wal_entries = _get_unsynced_wal_entries(service_name)
 
     if not wal_entries:
         return {"valid": True, "checked": 0, "errors": [], "strategy": "no_entries"}
 
-    # 해시체인 검증
+    # Verify the hash chain
     is_valid, error_msg = verifier.verify_chain(wal_entries)
     issues = verifier.find_tampering(wal_entries) if not is_valid else []
 
@@ -153,10 +153,10 @@ def _verify_recovery_window_integrity(
 
 def _get_unsynced_wal_entries(service_name: str) -> list[dict]:
     """
-    WAL에서 아직 동기화되지 않은 엔트리 조회.
+    Fetch entries from the WAL that have not been synced yet.
 
-    wal.recover_unprocessed()를 사용하여 미처리 엔트리를 수집합니다.
-    WALEntry.data 필드(dict)를 추출하여 반환합니다.
+    Uses wal.recover_unprocessed() to collect unprocessed entries and returns
+    their WALEntry.data fields (dicts).
     """
     try:
         from baldur_pro.services.audit.base import _get_wal
@@ -165,10 +165,9 @@ def _get_unsynced_wal_entries(service_name: str) -> list[dict]:
         if wal is None:
             return []
 
-        # recover_unprocessed (wal.py L772)
-        # last_processed_seq=0 → 전체 미처리 엔트리 수집
+        # last_processed_seq=0 -> collect every unprocessed entry
         wal_entries = wal.recover_unprocessed(last_processed_seq=0)
-        # WALEntry.data 필드 추출 (wal.py L76: WALEntry.data: dict[str, Any])
+        # Extract the WALEntry.data field (dict[str, Any])
         return [e.data for e in wal_entries if hasattr(e, "data")]
 
     except Exception as e:
@@ -184,7 +183,7 @@ def _send_integrity_violation_alert(
     result: dict,
     duration_ms: float,
 ) -> None:
-    """무결성 위반 알림 발송 및 감사 기록."""
+    """Send an integrity-violation alert and record it in the audit trail."""
     try:
         from baldur_pro.services.audit.base import _write_to_wal
 
@@ -208,7 +207,7 @@ def _send_integrity_violation_alert(
 
 
 def _update_health_score(result: dict, duration_ms: float) -> None:
-    """IntegrityHealthScore 업데이트."""
+    """Update the IntegrityHealthScore."""
     try:
         from baldur.audit.integrity import get_integrity_health_score
 

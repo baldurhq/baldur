@@ -1,26 +1,23 @@
 """
 Namespaced Emergency Tracker.
 
-리전별 독립적인 Emergency 상태를 관리합니다.
-Global 상태는 모든 리전보다 우선합니다.
+Manages Emergency state independently per region.
+Global state takes precedence over every region.
 
-주요 기능:
-- 네임스페이스별 독립 상태 관리 (get_state, set_state)
-- Global/Regional 우선순위 적용 (get_effective_state)
-- AtomicStateQuery 통합 (원자적 조회)
-- EscalationAuditTrail 연동 (의사결정 기록)
+Key features:
+- Independent per-namespace state management (get_state, set_state)
+- Global/Regional precedence resolution (get_effective_state)
+- AtomicStateQuery integration (atomic lookup)
+- EscalationAuditTrail integration (decision recording)
 
-Redis 키 구조:
+Redis key layout:
 - baldur:governance:emergency_state (Global)
 - baldur:{namespace}:governance:emergency_state (Regional)
 
 Code reference:
-    governance.py (EmergencyModeTracker 기존 패턴)
-    core/state_backend.py (StateBackend 인터페이스)
+    governance.py (existing EmergencyModeTracker pattern)
+    core/state_backend.py (StateBackend interface)
     regional_emergency/atomic_query.py (AtomicStateQuery)
-
-Reference:
-    docs/baldur/middleware_system/73_NAMESPACE_AWARE_EMERGENCY.md
 """
 
 from __future__ import annotations
@@ -45,11 +42,11 @@ logger = structlog.get_logger()
 # =============================================================================
 
 GLOBAL_NAMESPACE = "global"
-"""Global 네임스페이스 식별자."""
+"""Global namespace identifier."""
 
 
 def _get_emergency_expiry_hours() -> int:
-    """Settings에서 Emergency 만료 시간 로드."""
+    """Load the Emergency expiry duration from Settings."""
     try:
         from baldur.settings.regional_emergency import (
             get_regional_emergency_settings,
@@ -57,11 +54,11 @@ def _get_emergency_expiry_hours() -> int:
 
         return get_regional_emergency_settings().expiry_hours
     except ImportError:
-        return 8  # 기본값
+        return 8  # default
 
 
 def _get_cache_ttl_seconds() -> float:
-    """Settings에서 로컬 캐시 TTL 로드."""
+    """Load the local cache TTL from Settings."""
     try:
         from baldur.settings.regional_emergency import (
             get_regional_emergency_settings,
@@ -69,36 +66,36 @@ def _get_cache_ttl_seconds() -> float:
 
         return get_regional_emergency_settings().cache_ttl_seconds
     except ImportError:
-        return 30.0  # 기본값
+        return 30.0  # default
 
 
-# 하위 호환성을 위한 상수 (권장하지 않음)
+# Backward-compatibility constants (not recommended)
 DEFAULT_EMERGENCY_EXPIRY_HOURS = 8
-"""Emergency 상태 기본 만료 시간 (8시간). 권장: _get_emergency_expiry_hours() 사용."""
+"""Default Emergency state expiry (8 hours). Prefer _get_emergency_expiry_hours()."""
 
 CACHE_TTL_SECONDS = 30.0
-"""로컬 캐시 TTL (30초). 권장: _get_cache_ttl_seconds() 사용."""
+"""Local cache TTL (30 seconds). Prefer _get_cache_ttl_seconds()."""
 
 
 class NamespacedEmergencyTracker(EventEmitterMixin):
     """
-    네임스페이스 인지형 Emergency 추적기 with cross-pod sync.
+    Namespace-aware Emergency tracker with cross-pod sync.
 
-    리전별 독립적인 Emergency 상태를 관리합니다.
-    Global 상태는 모든 리전보다 우선합니다.
+    Manages Emergency state independently per region.
+    Global state takes precedence over every region.
 
-    주요 기능:
-    - get_state(namespace): 특정 네임스페이스 상태 조회
-    - set_state(namespace, state): 상태 저장
-    - get_effective_state(namespace): 우선순위 적용된 유효 상태 조회
-    - activate_emergency(namespace, level): Emergency 활성화
-    - deactivate_emergency(namespace): Emergency 비활성화
-    - get_all_active_namespaces(): 활성 네임스페이스 목록
+    Key features:
+    - get_state(namespace): read the state of a specific namespace
+    - set_state(namespace, state): persist state
+    - get_effective_state(namespace): read the effective state after precedence
+    - activate_emergency(namespace, level): activate Emergency
+    - deactivate_emergency(namespace): deactivate Emergency
+    - get_all_active_namespaces(): list active namespaces
 
-    우선순위 (Safety-Max):
-    1. Admin Override (ADMIN_OVERRIDE, KILL_SWITCH): 명시적 지역 오버라이드
-    2. Global STRICT: 전역 비상시 모든 리전 STRICT
-    3. Regional: 로컬 상태
+    Precedence (Safety-Max):
+    1. Admin Override (ADMIN_OVERRIDE, KILL_SWITCH): explicit regional override
+    2. Global STRICT: a global emergency puts every region in STRICT
+    3. Regional: local state
 
     Cross-pod sync:
     - EventBus subscription for cache invalidation on external events
@@ -107,22 +104,22 @@ class NamespacedEmergencyTracker(EventEmitterMixin):
     Usage:
         tracker = NamespacedEmergencyTracker()
 
-        # Seoul 리전 Emergency 활성화
+        # Activate Emergency for the Seoul region
         tracker.activate_emergency(
             namespace="seoul",
             level=EmergencyLevel.LEVEL_3,
             activated_by="admin@company.com",
-            reason="DB 장애 감지",
+            reason="DB failure detected",
         )
 
-        # 유효 상태 조회 (Global 우선순위 적용)
+        # Read the effective state (Global precedence applied)
         state = tracker.get_effective_state("seoul")
         if state.governance_mode == "STRICT":
-            # STRICT 모드 처리
+            # Handle STRICT mode
             ...
     """
 
-    # Redis 키 패턴
+    # Redis key pattern
     STATE_KEY_PATTERN = "governance:emergency_state"
 
     # EventEmitterMixin: event source identifier
@@ -135,12 +132,12 @@ class NamespacedEmergencyTracker(EventEmitterMixin):
         audit_trail: Any | None = None,
     ):
         """
-        NamespacedEmergencyTracker 초기화.
+        Initialize NamespacedEmergencyTracker.
 
         Args:
-            backend: StateBackend 인스턴스 (None이면 자동 획득)
-            atomic_query: AtomicStateQuery 인스턴스 (None이면 자동 획득)
-            audit_trail: EscalationAuditTrail 인스턴스 (None이면 자동 획득)
+            backend: StateBackend instance (resolved automatically if None)
+            atomic_query: AtomicStateQuery instance (resolved automatically if None)
+            audit_trail: EscalationAuditTrail instance (resolved automatically if None)
         """
         self._backend = backend
         self._atomic_query = atomic_query
@@ -148,7 +145,7 @@ class NamespacedEmergencyTracker(EventEmitterMixin):
         self._lock = threading.RLock()
         self._subscribed = False
 
-        # 로컬 캐시 (네트워크 왕복 감소)
+        # Local cache (reduces network round trips)
         self._local_cache: dict[str, ScopedEmergencyState] = {}
         self._cache_timestamps: dict[str, float] = {}
 
@@ -255,7 +252,7 @@ class NamespacedEmergencyTracker(EventEmitterMixin):
     # =========================================================================
 
     def _get_backend(self) -> Any:
-        """StateBackend 인스턴스 획득."""
+        """Obtain the StateBackend instance."""
         if self._backend is None:
             from baldur.core.state_backend import get_state_backend
 
@@ -263,7 +260,7 @@ class NamespacedEmergencyTracker(EventEmitterMixin):
         return self._backend
 
     def _get_atomic_query(self) -> Any:
-        """AtomicStateQuery 인스턴스 획득."""
+        """Obtain the AtomicStateQuery instance."""
         if self._atomic_query is None:
             try:
                 from baldur.services.regional_emergency.atomic_query import (
@@ -272,12 +269,12 @@ class NamespacedEmergencyTracker(EventEmitterMixin):
 
                 self._atomic_query = get_atomic_state_query()
             except Exception:
-                # Redis 미사용 환경에서는 None 유지
+                # Stay None in environments without Redis
                 pass
         return self._atomic_query
 
     def _get_audit_trail(self) -> Any:
-        """EscalationAuditTrail 인스턴스 획득."""
+        """Obtain the EscalationAuditTrail instance."""
         if self._audit_trail is None:
             from baldur.services.regional_emergency.escalation_audit import (
                 get_escalation_audit_trail,
@@ -288,9 +285,9 @@ class NamespacedEmergencyTracker(EventEmitterMixin):
 
     def _get_current_namespace(self) -> str:
         """
-        현재 인스턴스의 네임스페이스 획득.
+        Obtain the namespace of the current instance.
 
-        ClusterIdentity.region을 참조하여 현재 리전 식별.
+        Identifies the current region from ClusterIdentity.region.
         """
         try:
             from baldur.core.cluster_identity import get_cluster_identity
@@ -302,13 +299,13 @@ class NamespacedEmergencyTracker(EventEmitterMixin):
 
     def _get_state_key(self, namespace: str) -> str:
         """
-        네임스페이스용 Redis 키 생성.
+        Build the Redis key for a namespace.
 
         Args:
-            namespace: 대상 네임스페이스
+            namespace: target namespace
 
         Returns:
-            Redis 키 (예: "baldur:seoul:governance:emergency_state")
+            Redis key (e.g. "baldur:seoul:governance:emergency_state")
         """
         if namespace == GLOBAL_NAMESPACE:
             return f"baldur:{self.STATE_KEY_PATTERN}"
@@ -320,13 +317,13 @@ class NamespacedEmergencyTracker(EventEmitterMixin):
 
     def get_state(self, namespace: str | None = None) -> ScopedEmergencyState:
         """
-        특정 네임스페이스의 상태 조회 (캐시 활용).
+        Read the state of a specific namespace (cache-backed).
 
         Args:
-            namespace: 대상 네임스페이스 (None이면 현재 인스턴스)
+            namespace: target namespace (current instance if None)
 
         Returns:
-            ScopedEmergencyState (없으면 기본값)
+            ScopedEmergencyState (default value if absent)
         """
         ns = namespace or self._get_current_namespace()
         return self._load_state(ns)
@@ -337,11 +334,11 @@ class NamespacedEmergencyTracker(EventEmitterMixin):
         namespace: str | None = None,
     ) -> None:
         """
-        상태 저장.
+        Persist state.
 
         Args:
-            state: 저장할 상태
-            namespace: 대상 네임스페이스 (None이면 state.namespace 사용)
+            state: state to persist
+            namespace: target namespace (uses state.namespace if None)
         """
         ns = namespace or state.namespace
         self._save_state(ns, state)
@@ -352,26 +349,26 @@ class NamespacedEmergencyTracker(EventEmitterMixin):
         precedence: str | None = None,
     ) -> ScopedEmergencyState:
         """
-        유효한 Emergency 상태 조회 (우선순위 적용).
+        Read the effective Emergency state (precedence applied).
 
-        AtomicStateQuery를 사용하여 Global+Regional을 원자적으로 조회하고
-        우선순위에 따라 유효한 상태를 결정합니다.
+        Uses AtomicStateQuery to read Global+Regional atomically and determines
+        the effective state according to precedence.
 
-        우선순위:
-        1. Admin Override (precedence >= ADMIN_OVERRIDE): 리전 우선
-        2. Global STRICT: 전역 비상시 모든 리전 STRICT
-        3. Regional: 로컬 상태
+        Precedence:
+        1. Admin Override (precedence >= ADMIN_OVERRIDE): region wins
+        2. Global STRICT: a global emergency puts every region in STRICT
+        3. Regional: local state
 
         Args:
-            namespace: 조회할 네임스페이스 (None이면 현재 인스턴스)
-            precedence: 명령 우선순위 ("AUTO", "ADMIN_OVERRIDE" 등)
+            namespace: namespace to query (current instance if None)
+            precedence: command precedence ("AUTO", "ADMIN_OVERRIDE", etc.)
 
         Returns:
-            유효한 ScopedEmergencyState
+            The effective ScopedEmergencyState
         """
         ns = namespace or self._get_current_namespace()
 
-        # AtomicStateQuery 사용 시도
+        # Try AtomicStateQuery first
         atomic_query = self._get_atomic_query()
         if atomic_query is not None:
             try:
@@ -380,7 +377,7 @@ class NamespacedEmergencyTracker(EventEmitterMixin):
                     precedence=precedence,
                 )
 
-                # Audit 기록 (중요 결정만)
+                # Audit record (significant decisions only)
                 if decision_type in ("GLOBAL_OVERRIDE", "ADMIN_OVERRIDE"):
                     audit = self._get_audit_trail()
                     audit.log_decision(
@@ -400,7 +397,7 @@ class NamespacedEmergencyTracker(EventEmitterMixin):
                     error=e,
                 )
 
-        # 폴백: 수동 조회 (2회 Redis 호출)
+        # Fallback: manual lookup (2 Redis calls)
         return self._get_effective_state_manual(ns, precedence)
 
     def _get_effective_state_manual(
@@ -409,31 +406,31 @@ class NamespacedEmergencyTracker(EventEmitterMixin):
         precedence: str | None = None,
     ) -> ScopedEmergencyState:
         """
-        수동 유효 상태 조회 (AtomicStateQuery 폴백).
+        Manual effective-state lookup (AtomicStateQuery fallback).
 
-        Redis 2회 호출 (Global + Regional).
+        Two Redis calls (Global + Regional).
         """
         with self._lock:
             global_state = self._load_state(GLOBAL_NAMESPACE)
             regional_state = self._load_state(namespace)
 
-            # 우선순위 확인 (ADMIN_OVERRIDE 이상이면 Regional 우선)
+            # Precedence check (Regional wins at ADMIN_OVERRIDE or above)
             if precedence in ("ADMIN_OVERRIDE", "KILL_SWITCH"):
                 return regional_state
 
-            # Safety-Max: 둘 중 더 엄격한 상태
+            # Safety-Max: the stricter of the two states
             global_is_strict = (
                 global_state.is_active() and global_state.governance_mode == "STRICT"
             )
             (regional_state.is_active() and regional_state.governance_mode == "STRICT")
 
             if global_is_strict:
-                # Global STRICT가 Regional을 오버라이드
+                # Global STRICT overrides Regional
                 return ScopedEmergencyState(
                     namespace=namespace,
                     emergency_level=global_state.emergency_level,
                     governance_mode="STRICT",
-                    scope=EmergencyScope.GLOBAL,  # Global에서 왔음을 표시
+                    scope=EmergencyScope.GLOBAL,  # Mark that it came from Global
                     activated_at=global_state.activated_at,
                     activated_by=global_state.activated_by,
                     reason=f"Global override: {global_state.reason or 'N/A'}",
@@ -455,30 +452,30 @@ class NamespacedEmergencyTracker(EventEmitterMixin):
         expiry_hours: int | None = None,
     ) -> ScopedEmergencyState:
         """
-        Emergency 모드 활성화.
+        Activate Emergency mode.
 
         Args:
-            level: Emergency 레벨 (LEVEL_1, LEVEL_2, LEVEL_3)
-            activated_by: 활성화한 주체 (user ID 또는 "system")
-            reason: 활성화 사유
-            namespace: 대상 네임스페이스 (None이면 현재 인스턴스)
-            scope: 적용 범위 (REGIONAL 또는 GLOBAL)
-            expiry_hours: 만료 시간 (None이면 기본값 8시간)
+            level: Emergency level (LEVEL_1, LEVEL_2, LEVEL_3)
+            activated_by: actor that activated it (user ID or "system")
+            reason: activation reason
+            namespace: target namespace (current instance if None)
+            scope: application scope (REGIONAL or GLOBAL)
+            expiry_hours: expiry duration (defaults to 8 hours if None)
 
         Returns:
-            활성화된 ScopedEmergencyState
+            The activated ScopedEmergencyState
         """
         target_ns = namespace or self._get_current_namespace()
 
-        # GLOBAL scope면 global 네임스페이스에 저장
+        # GLOBAL scope is stored under the global namespace
         if scope == EmergencyScope.GLOBAL:
             target_ns = GLOBAL_NAMESPACE
 
-        # 만료 시간 계산 (Settings에서 로드)
+        # Compute expiry (loaded from Settings)
         hours = expiry_hours or _get_emergency_expiry_hours()
         expires_at = utc_now() + timedelta(hours=hours)
 
-        # Governance 모드 결정 (LEVEL_2 이상이면 STRICT)
+        # Determine governance mode (STRICT at LEVEL_2 or above)
         governance_mode = "STRICT" if level >= EmergencyLevel.LEVEL_2 else "NORMAL"
 
         with self._lock:
@@ -519,15 +516,15 @@ class NamespacedEmergencyTracker(EventEmitterMixin):
         scope: EmergencyScope = EmergencyScope.REGIONAL,
     ) -> ScopedEmergencyState:
         """
-        Emergency 모드 비활성화.
+        Deactivate Emergency mode.
 
         Args:
-            deactivated_by: 비활성화한 주체
-            namespace: 대상 네임스페이스 (None이면 현재 인스턴스)
-            scope: 적용 범위
+            deactivated_by: actor that deactivated it
+            namespace: target namespace (current instance if None)
+            scope: application scope
 
         Returns:
-            비활성화된 ScopedEmergencyState
+            The deactivated ScopedEmergencyState
         """
         target_ns = namespace or self._get_current_namespace()
 
@@ -565,21 +562,21 @@ class NamespacedEmergencyTracker(EventEmitterMixin):
 
     def get_all_active_namespaces(self) -> list[str]:
         """
-        활성화된 모든 네임스페이스 목록 조회.
+        List every namespace with an active Emergency.
 
         Returns:
-            활성 Emergency 네임스페이스 목록
+            List of namespaces with an active Emergency
         """
         active = []
         backend = self._get_backend()
 
         try:
-            # 패턴 매칭으로 모든 emergency_state 키 조회
+            # Pattern-match every emergency_state key
             all_states = backend.get_all(f"*{self.STATE_KEY_PATTERN}")
 
             for key, data in all_states.items():
                 if data and data.get("emergency_level", "normal") != "normal":
-                    # 키에서 네임스페이스 추출
+                    # Extract the namespace from the key
                     # baldur:seoul:governance:emergency_state -> seoul
                     parts = key.split(":")
                     if len(parts) >= 2:
@@ -599,10 +596,10 @@ class NamespacedEmergencyTracker(EventEmitterMixin):
 
     def invalidate_cache(self, namespace: str | None = None) -> None:
         """
-        캐시 무효화.
+        Invalidate the cache.
 
         Args:
-            namespace: 무효화할 네임스페이스 (None이면 전체)
+            namespace: namespace to invalidate (all namespaces if None)
         """
         with self._lock:
             if namespace:
@@ -697,7 +694,7 @@ _tracker_lock = threading.Lock()
 
 
 def get_namespaced_emergency_tracker() -> NamespacedEmergencyTracker:
-    """NamespacedEmergencyTracker 싱글톤 반환."""
+    """Return the NamespacedEmergencyTracker singleton."""
     global _namespaced_tracker
 
     if _namespaced_tracker is None:
@@ -709,7 +706,7 @@ def get_namespaced_emergency_tracker() -> NamespacedEmergencyTracker:
 
 
 def reset_namespaced_emergency_tracker() -> None:
-    """싱글톤 초기화 (테스트용)."""
+    """Reset the singleton (for tests)."""
     global _namespaced_tracker
     with _tracker_lock:
         if _namespaced_tracker is not None:

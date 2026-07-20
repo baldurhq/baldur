@@ -16,7 +16,7 @@ from baldur.settings import get_config
 # Constants
 # =============================================================================
 
-# 시스템 전체 타임아웃 (30분) - 이를 초과하면 사용자 체감 불가
+# System-wide timeout (30 min) — beyond this the user cannot perceive a result
 SYSTEM_TIMEOUT_SECONDS = 1800
 
 
@@ -27,7 +27,7 @@ SYSTEM_TIMEOUT_SECONDS = 1800
 
 @dataclass
 class ThrottleState:
-    """AdaptiveThrottle 현재 상태 스냅샷."""
+    """Snapshot of the current AdaptiveThrottle state."""
 
     current_limit: int
     initial_limit: int
@@ -42,10 +42,10 @@ class ThrottleState:
 @dataclass
 class PushBasedThrottleStateCache:
     """
-    EventBus 푸시 기반 Throttle 상태 캐시.
+    EventBus push-based throttle state cache.
 
-    매번 get_stats() 호출로 Lock 경합하는 대신
-    EventBus 이벤트를 구독하여 상태 변경 시에만 캐시를 업데이트합니다.
+    Instead of contending on the lock via a get_stats() call every time, it
+    subscribes to EventBus events and updates the cache only on state changes.
     """
 
     multiplier: float = 1.0
@@ -54,20 +54,20 @@ class PushBasedThrottleStateCache:
     full_stop_active: bool = False
     emergency_level: int = 0
 
-    # 캐시 유효 시간 (EventBus 이벤트 누락 대비 폴백)
+    # Cache lifetime (fallback in case an EventBus event is missed)
     max_cache_age_seconds: float = 30.0
 
     def is_stale(self) -> bool:
-        """캐시가 오래되었는지 확인 (Fail-safe)."""
+        """Check whether the cache has gone stale (fail-safe)."""
         return (time.time() - self.last_updated) > self.max_cache_age_seconds
 
 
 @dataclass
 class GlobalThrottleState(SerializableMixin):
     """
-    클러스터 전체 Throttle 상태 (Redis 저장).
+    Cluster-wide throttle state (stored in Redis).
 
-    Pod 간 상태 공유를 위한 집계 데이터 구조.
+    Aggregate data structure for sharing state across pods.
     """
 
     cluster_avg_rtt_ms: float = 0.0

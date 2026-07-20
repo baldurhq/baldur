@@ -1,9 +1,9 @@
 """
-EventCalendar — 예정 이벤트 등록/관리/스케줄링.
+EventCalendar — scheduled event registration/management/scheduling.
 
-인메모리 dict + StateBackend 영속화 (Pull + Push 하이브리드).
-이벤트 수가 많지 않으므로 (일 수십 건 이하) 인메모리가 런타임 캐시이고,
-StateBackend(Redis/File)가 SSOT(단일 진실 공급원)이다.
+In-memory dict + StateBackend persistence (Pull + Push hybrid).
+Event volume is small (a few dozen per day at most), so the in-memory dict is a
+runtime cache and StateBackend (Redis/File) is the SSOT (single source of truth).
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ STATE_KEY_EVENTS = "capacity_reservation:events"
 
 
 class EventStatus(str, Enum):
-    """예정 이벤트 상태."""
+    """Scheduled event status."""
 
     PENDING = "pending"
     WARMING = "warming"
@@ -43,7 +43,7 @@ class EventStatus(str, Enum):
 
 @dataclass
 class ScheduledEvent(SerializableMixin):
-    """예정 이벤트 정의."""
+    """Scheduled event definition."""
 
     name: str
     start_time: datetime
@@ -65,12 +65,12 @@ class ScheduledEvent(SerializableMixin):
 
     @property
     def warmup_time(self) -> datetime:
-        """워밍 시작 시각."""
+        """Warmup start time."""
         return self.start_time - timedelta(minutes=self.warmup_minutes)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ScheduledEvent:
-        """역직렬화."""
+        """Deserialize."""
         return cls(
             name=data["name"],
             start_time=datetime.fromisoformat(data["start_time"]),
@@ -86,7 +86,7 @@ class ScheduledEvent(SerializableMixin):
         )
 
     def to_event_context(self) -> dict:
-        """EventBus/ML context용 메타데이터."""
+        """Metadata for EventBus/ML context."""
         return {
             "event_id": self.event_id,
             "name": self.name,
@@ -100,7 +100,7 @@ class ScheduledEvent(SerializableMixin):
 
 @dataclass
 class EffectiveMultipliers:
-    """활성 이벤트들의 병합된 유효 배율."""
+    """Merged effective multipliers across active events."""
 
     rate_multiplier: float
     pool_multiplier: float
@@ -110,7 +110,7 @@ class EffectiveMultipliers:
 
 
 class EventCalendar:
-    """예정 이벤트 캘린더 — 등록/조회/스케줄링."""
+    """Scheduled event calendar — registration/lookup/scheduling."""
 
     def __init__(
         self,
@@ -126,7 +126,7 @@ class EventCalendar:
         self._last_load_time: float | None = None
 
     def initialize(self) -> None:
-        """Pod 기동 시 StateBackend에서 활성 이벤트 로드 (Pull)."""
+        """Load active events from StateBackend on pod startup (Pull)."""
         if not self._state_backend:
             return
         try:
@@ -145,7 +145,7 @@ class EventCalendar:
             )
 
     def register(self, event: ScheduledEvent) -> None:
-        """이벤트 등록. 시작 시간이 과거이면 ValueError."""
+        """Register an event. Raises ValueError if the start time is in the past."""
         now = utc_now()
         if event.start_time <= now:
             raise ValueError(
@@ -182,7 +182,7 @@ class EventCalendar:
         )
 
     def cancel(self, event_id: str) -> bool:
-        """이벤트 취소. 존재하지 않으면 False."""
+        """Cancel an event. Returns False if it does not exist."""
         with self._lock:
             event = self._events.get(event_id)
             if event is None:
@@ -199,7 +199,7 @@ class EventCalendar:
         return True
 
     def get_upcoming(self, within_minutes: int = 60) -> list[ScheduledEvent]:
-        """워밍 시작 시각이 N분 이내인 PENDING 이벤트 조회."""
+        """List PENDING events whose warmup start is within N minutes."""
         now = utc_now()
         cutoff = now + timedelta(minutes=within_minutes)
         with self._lock:
@@ -210,7 +210,7 @@ class EventCalendar:
             ]
 
     def get_needs_warmup(self) -> list[ScheduledEvent]:
-        """워밍 시작 시각에 도달한 PENDING 이벤트 조회."""
+        """List PENDING events that have reached their warmup start time."""
         now = utc_now()
         with self._lock:
             return [
@@ -220,7 +220,7 @@ class EventCalendar:
             ]
 
     def get_needs_cooldown(self) -> list[ScheduledEvent]:
-        """종료 시각 + 유예 시간(cooldown_grace_period_seconds) 경과한 ACTIVE 이벤트 조회."""
+        """List ACTIVE events past end time + cooldown_grace_period_seconds."""
         now = utc_now()
         grace = timedelta(seconds=self._settings.cooldown_grace_period_seconds)
         with self._lock:
@@ -231,7 +231,7 @@ class EventCalendar:
             ]
 
     def get_active(self) -> list[ScheduledEvent]:
-        """현재 ACTIVE 또는 WARMING 상태 이벤트 조회."""
+        """List events currently in ACTIVE or WARMING state."""
         with self._lock:
             return [
                 e
@@ -240,11 +240,11 @@ class EventCalendar:
             ]
 
     def is_event_period(self) -> bool:
-        """현재 시각이 이벤트 기간인지 여부. ML context 주입에 사용."""
+        """Whether the current time falls in an event period. Used for ML context."""
         return len(self.get_active()) > 0
 
     def get_effective_multipliers(self) -> EffectiveMultipliers:
-        """활성 이벤트 중 MAX 배율 계산 + Settings cap 적용."""
+        """Compute the MAX multiplier across active events, capped by Settings."""
         active = self.get_active()
         if not active:
             return EffectiveMultipliers(
@@ -273,7 +273,7 @@ class EventCalendar:
         )
 
     def update_status(self, event_id: str, status: EventStatus) -> None:
-        """이벤트 상태 업데이트."""
+        """Update an event's status."""
         with self._lock:
             event = self._events.get(event_id)
             if event is not None:
@@ -281,12 +281,12 @@ class EventCalendar:
                 self._persist()
 
     def get_event(self, event_id: str) -> ScheduledEvent | None:
-        """이벤트 ID로 조회."""
+        """Look up an event by ID."""
         with self._lock:
             return self._events.get(event_id)
 
     def remove_completed(self) -> int:
-        """완료/취소 이벤트 정리. 제거된 수 반환."""
+        """Purge completed/cancelled events. Returns the number removed."""
         with self._lock:
             to_remove = [
                 eid
@@ -300,7 +300,7 @@ class EventCalendar:
             return len(to_remove)
 
     def _find_overlapping(self, event: ScheduledEvent) -> list[ScheduledEvent]:
-        """시간이 겹치는 기존 이벤트 검색 (lock 내부 호출)."""
+        """Find existing events overlapping in time (called while holding the lock)."""
         overlapping = []
         for existing in self._events.values():
             if existing.status in (EventStatus.COMPLETED, EventStatus.CANCELLED):
@@ -312,10 +312,10 @@ class EventCalendar:
                 overlapping.append(existing)
         return overlapping
 
-    # ─── StateBackend 영속화 ──────────────────────────────────────────────────
+    # ─── StateBackend persistence ────────────────────────────────────────────
 
     def _persist(self) -> None:
-        """현재 이벤트 상태를 StateBackend에 영속화 (lock 내부 호출)."""
+        """Persist current event state to StateBackend (called while holding lock)."""
         if not self._state_backend:
             return
         try:
@@ -330,16 +330,16 @@ class EventCalendar:
 
     @staticmethod
     def _serialize(events: dict[str, ScheduledEvent]) -> dict[str, Any]:
-        """이벤트 dict → JSON-serializable dict."""
+        """Event dict -> JSON-serializable dict."""
         return {eid: e.to_dict() for eid, e in events.items()}
 
     @staticmethod
     def _deserialize(data: dict[str, Any]) -> dict[str, ScheduledEvent]:
-        """JSON dict → 이벤트 dict."""
+        """JSON dict -> event dict."""
         return {eid: ScheduledEvent.from_dict(d) for eid, d in data.items()}
 
     def check_drift(self) -> bool:
-        """인메모리 vs StateBackend 캐시 유효성 검증. True이면 refresh 수행됨."""
+        """Validate in-memory vs StateBackend cache. True if a refresh happened."""
         if not self._state_backend:
             return False
         if self._last_load_time is None:

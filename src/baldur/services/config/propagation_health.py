@@ -1,15 +1,13 @@
 """
 Propagation Health Monitor.
 
-글로벌 설정 전파 건강 모니터링.
+Health monitoring for global configuration propagation.
 
-코드 근거:
-- audit/integrity/health_score.py: IntegrityHealthScore 패턴
-- settings/propagation.py: Tier 1/2 SLA 정의
+Code basis:
+- audit/integrity/health_score.py: the IntegrityHealthScore pattern
+- settings/propagation.py: the Tier 1/2 SLA definitions
 
-"글로벌 정책 정합성" 자체가 시스템의 건강 지표가 됩니다.
-
-Reference: docs/baldur/middleware_system/70_MULTI_CLUSTER_ARCHITECTURE.md
+"Global policy consistency" itself becomes a health indicator of the system.
 """
 
 from __future__ import annotations
@@ -31,7 +29,7 @@ logger = structlog.get_logger()
 
 @dataclass
 class PropagationHealthMetrics(SerializableMixin):
-    """글로벌 설정 전파 건강 지표."""
+    """Health indicators for global configuration propagation."""
 
     # Latency (ms)
     last_propagation_latency_ms: float = 0.0
@@ -39,12 +37,12 @@ class PropagationHealthMetrics(SerializableMixin):
     p50_propagation_latency_ms: float = 0.0
     p99_propagation_latency_ms: float = 0.0
 
-    # SLA 준수
-    tier1_sla_violations: int = 0  # 1초 초과 횟수 (Audit/Governance)
-    tier2_sla_violations: int = 0  # 30초 초과 횟수 (Metrics/Stats)
+    # SLA compliance
+    tier1_sla_violations: int = 0  # Times over 1s (Audit/Governance)
+    tier2_sla_violations: int = 0  # Times over 30s (Metrics/Stats)
     total_propagations: int = 0
 
-    # 계산된 점수
+    # Computed score
     propagation_health_score: float = 100.0
 
     # Timestamps
@@ -54,7 +52,7 @@ class PropagationHealthMetrics(SerializableMixin):
 
 @dataclass
 class PropagationRecord:
-    """개별 전파 기록."""
+    """A single propagation record."""
 
     config_type: str
     latency_ms: float
@@ -66,21 +64,21 @@ class PropagationRecord:
 
 class PropagationHealthMonitor:
     """
-    글로벌 설정 전파 건강 모니터링.
+    Health monitoring for global configuration propagation.
 
-    IntegrityHealthScore와 통합하여 종합 HealthScore 제공.
+    Integrates with IntegrityHealthScore to provide a combined HealthScore.
 
-    감점 기준:
-    - Tier 1 SLA 위반 (>1초): -5점/회
-    - Tier 2 SLA 위반 (>30초): -1점/회
+    Penalty rules:
+    - Tier 1 SLA violation (>1s): -5 points each
+    - Tier 2 SLA violation (>30s): -1 point each
 
-    Prometheus 메트릭:
+    Prometheus metrics:
     - baldur_propagation_latency_ms (Histogram)
     - baldur_propagation_health_score (Gauge)
     - baldur_propagation_sla_violations_total (Counter)
     """
 
-    # Prometheus 메트릭 이름
+    # Prometheus metric names
     HISTOGRAM_LATENCY = "baldur_propagation_latency_ms"
     GAUGE_HEALTH_SCORE = "baldur_propagation_health_score"
     COUNTER_SLA_VIOLATIONS = "baldur_propagation_sla_violations_total"
@@ -95,9 +93,9 @@ class PropagationHealthMonitor:
         Initialize PropagationHealthMonitor.
 
         Args:
-            max_history: 유지할 최대 전파 기록 수
-            prometheus_registry: Prometheus 레지스트리 (옵션)
-            settings: PropagationSettings instance (None이면 자동 획득)
+            max_history: Maximum number of propagation records to retain
+            prometheus_registry: Prometheus registry (optional)
+            settings: PropagationSettings instance (auto-resolved if None)
         """
         if settings is None:
             from baldur.settings.propagation import get_propagation_settings
@@ -124,19 +122,19 @@ class PropagationHealthMonitor:
         target_cluster: str,
     ) -> None:
         """
-        전파 완료 기록.
+        Record a completed propagation.
 
         Args:
-            config_type: 설정 타입 (circuit_breaker, dlq 등)
-            latency_ms: 전파 지연 시간 (ms)
-            tier: 전파 등급 (Tier 1 또는 Tier 2)
-            source_cluster: 소스 클러스터 ID
-            target_cluster: 타겟 클러스터 ID
+            config_type: Setting type (circuit_breaker, dlq, ...)
+            latency_ms: Propagation latency (ms)
+            tier: Propagation tier (Tier 1 or Tier 2)
+            source_cluster: Source cluster ID
+            target_cluster: Target cluster ID
         """
         with self._lock:
             now = utc_now()
 
-            # 기록 추가
+            # Append the record
             self._latency_history.append(latency_ms)
             self._records.append(
                 PropagationRecord(
@@ -151,7 +149,7 @@ class PropagationHealthMonitor:
             self._total_propagations += 1
             self._last_propagation_at = now
 
-            # SLA 위반 체크
+            # Check for SLA violations
             ps = self._propagation_settings
             if tier == PropagationTier.TIER_1_IMMEDIATE:
                 if latency_ms > ps.tier1_max_latency_ms:
@@ -185,18 +183,18 @@ class PropagationHealthMonitor:
             )
 
     def get_current_metrics(self) -> PropagationHealthMetrics:
-        """현재 전파 건강 메트릭 반환."""
+        """Return the current propagation health metrics."""
         with self._lock:
             if not self._latency_history:
                 return PropagationHealthMetrics()
 
-            # 통계 계산
+            # Compute the statistics
             latencies = sorted(self._latency_history)
             avg_latency = sum(latencies) / len(latencies)
             p50_idx = int(len(latencies) * 0.50)
             p99_idx = min(int(len(latencies) * 0.99), len(latencies) - 1)
 
-            # HealthScore 계산
+            # Compute the HealthScore
             health_score = self._calculate_health_score()
 
             return PropagationHealthMetrics(
@@ -217,11 +215,11 @@ class PropagationHealthMonitor:
 
     def _calculate_health_score(self) -> float:
         """
-        HealthScore 계산.
+        Compute the HealthScore.
 
-        감점 기준:
-        - Tier 1 SLA 위반: -5점/회
-        - Tier 2 SLA 위반: -1점/회
+        Penalty rules:
+        - Tier 1 SLA violation: -5 points each
+        - Tier 2 SLA violation: -1 point each
 
         Returns:
             Health score (0-100)
@@ -238,14 +236,14 @@ class PropagationHealthMonitor:
         propagation_weight: float = 0.3,
     ) -> float:
         """
-        IntegrityHealthScore와 결합한 종합 점수.
+        Score combined with IntegrityHealthScore.
 
         Args:
             integrity_score: IntegrityHealthScore (0-100)
-            propagation_weight: Propagation 가중치 (기본 30%)
+            propagation_weight: Propagation weight (default 30%)
 
         Returns:
-            종합 HealthScore (0-100)
+            Combined HealthScore (0-100)
         """
         propagation_score = self._calculate_health_score()
         integrity_weight = 1.0 - propagation_weight
@@ -256,13 +254,13 @@ class PropagationHealthMonitor:
 
     def get_recent_records(self, count: int = 10) -> list[dict[str, Any]]:
         """
-        최근 전파 기록 반환.
+        Return the most recent propagation records.
 
         Args:
-            count: 반환할 기록 수
+            count: Number of records to return
 
         Returns:
-            최근 기록 목록
+            List of recent records
         """
         with self._lock:
             records = list(self._records)[-count:]
@@ -279,7 +277,7 @@ class PropagationHealthMonitor:
             ]
 
     def reset(self) -> None:
-        """모든 통계 초기화 (테스트용)."""
+        """Reset every statistic (test use)."""
         with self._lock:
             self._latency_history.clear()
             self._records.clear()
@@ -298,7 +296,7 @@ _monitor_lock = threading.Lock()
 
 
 def get_propagation_health_monitor() -> PropagationHealthMonitor:
-    """PropagationHealthMonitor 싱글톤 반환."""
+    """Return the PropagationHealthMonitor singleton."""
     global _monitor
     if _monitor is None:
         with _monitor_lock:
@@ -308,7 +306,7 @@ def get_propagation_health_monitor() -> PropagationHealthMonitor:
 
 
 def reset_propagation_health_monitor() -> None:
-    """테스트용 리셋."""
+    """Reset for tests."""
     global _monitor
     with _monitor_lock:
         _monitor = None

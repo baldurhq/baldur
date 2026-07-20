@@ -1,20 +1,23 @@
 """
-Cell 대피 정책 — Tick-Based State Machine + Hysteresis.
+Cell evacuation policy — tick-based state machine + hysteresis.
 
-LeaderScheduler의 aggregate_all() 루프에서 매 tick마다 호출되는
-멱등성 상태 전이 함수입니다.
+An idempotent state-transition function called on every tick of
+LeaderScheduler's aggregate_all() loop.
 
-아키텍처 결정:
-- 히스테리시스 — 연속 카운터(CellInfo.metadata) + 상태 전이 시 양방향 리셋
-- Tick-Based State Machine — threading.Thread/time.sleep() 제거
-- bulkhead.max_concurrent = 0 제거 — Hash Ring 라우팅이 전역 차단 담당
-- max_evacuated_ratio — Cascading Failure 방지 하드 리미트
-- CellRegistry = SoT — Gate/Blast는 Celery Fire-and-forget 통보
+Architectural decisions:
+- Hysteresis — consecutive counters (CellInfo.metadata) + bidirectional reset
+  on state transition
+- Tick-based state machine — no threading.Thread/time.sleep()
+- Dropped bulkhead.max_concurrent = 0 — Hash Ring routing handles global
+  blocking
+- max_evacuated_ratio — hard limit that prevents cascading failure
+- CellRegistry = SoT — Gate/Blast are notified fire-and-forget via Celery
 
-의존성:
-- CellRegistry: Cell 상태 관리 (SoT, Control Plane)
-- RegionalIsolationGate: 감사 로그/이벤트 발행 (통보, Fire-and-forget)
-- BlastRadiusService: 감사 로그 (통보, Fire-and-forget)
+Dependencies:
+- CellRegistry: cell state management (SoT, control plane)
+- RegionalIsolationGate: audit log / event emission (notification,
+  fire-and-forget)
+- BlastRadiusService: audit log (notification, fire-and-forget)
 """
 
 from __future__ import annotations
@@ -47,7 +50,7 @@ logger = structlog.get_logger()
 
 @dataclass
 class EvacuationRecord:
-    """대피 기록."""
+    """Evacuation record."""
 
     cell_id: str
     trigger_health_score: float
@@ -59,24 +62,25 @@ class EvacuationRecord:
 
 class CellEvacuationPolicy(EventEmitterMixin):
     """
-    Cell 대피 정책 — Tick-Based State Machine.
+    Cell evacuation policy — tick-based state machine.
 
-    evaluate()는 LeaderScheduler의 aggregate_all() 루프에서
-    매 tick(health_check_interval_seconds=10초)마다 호출됩니다.
+    evaluate() is called on every tick
+    (health_check_interval_seconds=10s) of LeaderScheduler's aggregate_all()
+    loop.
 
-    각 호출에서 Cell의 현재 상태(CellState)와 metadata를 읽고,
-    다음 상태 전이를 결정합니다. 스레드를 생성하지 않습니다.
+    Each call reads the cell's current state (CellState) and metadata, then
+    decides the next state transition. It never creates a thread.
 
-    Leader handoff safety: last_state_change, last_state_change_time은
-    L2(Redis)에 동기화됩니다 (doc 388, Q6). 히스테리시스 카운터
-    (evacuation_below_count, recovery_above_count)는 의도적으로
-    제외 — 리셋이 보수적 안전 경로입니다.
+    Leader handoff safety: last_state_change and last_state_change_time are
+    synced to L2 (Redis) (doc 388, Q6). The hysteresis counters
+    (evacuation_below_count, recovery_above_count) are deliberately
+    excluded — resetting them is the conservative, safe path.
 
-    토글:
-    - CellTopologySettings.evacuation_enabled=True일 때만 동작
-    - False이면 evaluate() 즉시 반환
+    Toggle:
+    - Only active when CellTopologySettings.evacuation_enabled=True
+    - When False, evaluate() returns immediately
 
-    사용:
+    Usage:
         policy = get_cell_evacuation_policy()
         for cell_id, info in registry.get_all_cells().items():
             policy.evaluate(cell_id, info.health_score)
@@ -93,22 +97,23 @@ class CellEvacuationPolicy(EventEmitterMixin):
         )
 
     # =========================================================================
-    # evaluate() — 상태 머신 Tick
+    # evaluate() — state machine tick
     # =========================================================================
 
     def evaluate(self, cell_id: str, health_score: float) -> bool:
         """
-        상태 머신 Tick — 매 호출마다 Cell의 다음 전이를 결정.
+        State machine tick — decides the cell's next transition on each call.
 
-        멱등성: 같은 상태에서 같은 입력이면 같은 결과.
-        리더 교체 안전: CellInfo.metadata에 모든 카운터/시간 영속화.
+        Idempotent: same state with the same input yields the same result.
+        Leader-handoff safe: every counter/timestamp is persisted in
+        CellInfo.metadata.
 
         Args:
-            cell_id: Cell 식별자
-            health_score: 현재 건강도 (0.0~1.0)
+            cell_id: Cell identifier
+            health_score: Current health score (0.0~1.0)
 
         Returns:
-            상태 전이 발생 여부
+            Whether a state transition occurred
         """
         if not self._settings.enabled or not self._settings.evacuation_enabled:
             return False
@@ -123,7 +128,7 @@ class CellEvacuationPolicy(EventEmitterMixin):
 
         state = cell.state
 
-        # WARMUP Cell은 대피 평가 대상 아님
+        # WARMUP cells are not subject to evacuation evaluation
         if state == CellState.WARMUP:
             return False
 
@@ -156,7 +161,7 @@ class CellEvacuationPolicy(EventEmitterMixin):
         return False
 
     # =========================================================================
-    # State: ACTIVE — 히스테리시스 기반 대피 판단
+    # State: ACTIVE — hysteresis-based evacuation decision
     # =========================================================================
 
     def _tick_active(
@@ -168,16 +173,17 @@ class CellEvacuationPolicy(EventEmitterMixin):
         CellState: type[_CellState],
     ) -> bool:
         """
-        ACTIVE 상태 Cell의 대피 필요 여부 평가.
+        Evaluate whether an ACTIVE cell needs to be evacuated.
 
-        히스테리시스: 연속 evacuation_consecutive_count(기본 3)회
-        임계치 이하일 때만 DRAINING으로 전환.
-        임계치를 초과하면 below_count를 즉시 0으로 리셋.
+        Hysteresis: transition to DRAINING only after
+        evacuation_consecutive_count (default 3) consecutive ticks at or below
+        the threshold. Exceeding the threshold resets below_count to 0
+        immediately.
         """
         threshold = self._settings.evacuation_health_threshold
 
         if health_score <= threshold:
-            # 임계치 이하 — 카운터 증가
+            # At or below the threshold — increment the counter
             below_count = cell.metadata.get("evacuation_below_count", 0) + 1
             cell.metadata["evacuation_below_count"] = below_count
 
@@ -192,11 +198,11 @@ class CellEvacuationPolicy(EventEmitterMixin):
                 )
                 return False
 
-            # === Global Evacuation Limit — Cascading Failure 방지 ===
+            # === Global evacuation limit — prevents cascading failure ===
             if not self._check_global_evacuation_limit(cell_id, registry):
                 return False
 
-            # === 연속 카운터 도달 — DRAINING 전환 ===
+            # === Consecutive count reached — transition to DRAINING ===
             reason = (
                 f"Health score {health_score:.2f} <= {threshold} "
                 f"for {below_count} consecutive ticks"
@@ -207,23 +213,24 @@ class CellEvacuationPolicy(EventEmitterMixin):
                 reason=reason,
             )
 
-            # 상태 전이 시 양방향 카운터 리셋 (유령 카운터 방지)
+            # Reset both counters on transition (prevents ghost counters)
             cell.metadata["evacuation_below_count"] = 0
             cell.metadata["recovery_above_count"] = 0
 
-            # 영향 서비스 목록 기록
+            # Record the list of affected services
             cell.metadata["evacuation_affected_services"] = list(cell.assigned_services)
             cell.metadata["evacuation_trigger_score"] = health_score
 
-            # SoT: CellRegistry 상태 전환
+            # SoT: CellRegistry state transition
             registry.set_cell_state(cell_id, CellState.DRAINING, reason)
 
-            # DRAINING 전환 시점을 즉시 기록 — _tick_draining()이
-            # 첫 tick에서 시간을 기록하는 지연 없이 바로 드레인 타이머 시작
+            # Record the DRAINING transition time right away, so the drain
+            # timer starts immediately instead of waiting for _tick_draining()
+            # to record the time on its first tick
             cell.metadata["last_state_change_time"] = time.time()
 
-            # 신규 트래픽 차단은 CellRegistry.get_cell_for_key()의
-            # Hash Ring 순회에서 DRAINING Cell이 자동 skip됨으로써 달성된다.
+            # Blocking new traffic is achieved by CellRegistry.get_cell_for_key()
+            # automatically skipping DRAINING cells during Hash Ring traversal.
             logger.info(
                 "cell_evacuation.draining_confirmed",
                 cell_id=cell_id,
@@ -237,7 +244,7 @@ class CellEvacuationPolicy(EventEmitterMixin):
                 },
             )
 
-            # 대피 이력 기록
+            # Record the evacuation history entry
             self._evacuation_history.append(
                 EvacuationRecord(
                     cell_id=cell_id,
@@ -247,7 +254,7 @@ class CellEvacuationPolicy(EventEmitterMixin):
                 )
             )
             return True
-        # 임계치 초과 — 카운터 리셋
+        # Above the threshold — reset the counter
         if cell.metadata.get("evacuation_below_count", 0) > 0:
             cell.metadata["evacuation_below_count"] = 0
         return False
@@ -258,12 +265,14 @@ class CellEvacuationPolicy(EventEmitterMixin):
         registry: CellRegistry,
     ) -> bool:
         """
-        전체 Cell 중 격리 비율이 max_evacuated_ratio를 초과하는지 확인.
+        Check whether the isolated ratio across all cells exceeds
+        max_evacuated_ratio.
 
-        Cascading Failure 방지를 위해 일정 비율 이상 격리를 거부한다.
+        Isolation beyond a certain ratio is refused to prevent cascading
+        failure.
 
         Returns:
-            True면 대피 진행 가능, False면 리미트 초과로 거부.
+            True if evacuation may proceed, False if the limit is exceeded.
         """
         total_cells = len(registry.get_all_cells())
         if total_cells == 0:
@@ -286,7 +295,7 @@ class CellEvacuationPolicy(EventEmitterMixin):
         return True
 
     # =========================================================================
-    # State: DRAINING — 드레인 시간 경과 기반 ISOLATED 전환
+    # State: DRAINING — transition to ISOLATED once the drain time elapses
     # =========================================================================
 
     def _tick_draining(
@@ -297,17 +306,18 @@ class CellEvacuationPolicy(EventEmitterMixin):
         CellState: type[_CellState],
     ) -> bool:
         """
-        DRAINING 상태 Cell의 드레인 시간 경과 확인.
+        Check whether the drain period of a DRAINING cell has elapsed.
 
-        metadata['last_state_change']의 시간값과 현재 시각을 비교하여,
-        drain_seconds + grace_buffer가 경과했으면 ISOLATED로 전환한다.
+        Compares the timestamp in metadata['last_state_change'] against the
+        current time, and transitions to ISOLATED once drain_seconds +
+        grace_buffer have elapsed.
 
-        리더 교체 시에도 Redis L2에 동기화된 metadata를 읽어
-        파이프라인을 안전하게 재개할 수 있다.
+        Even across a leader handoff, the metadata synced to Redis L2 can be
+        read to resume the pipeline safely.
         """
         last_change = cell.metadata.get("last_state_change", {})
         if last_change.get("to") != CellState.DRAINING.value:
-            # metadata가 없거나 불일치 — DRAINING이 외부에서 취소됨
+            # Metadata missing or mismatched — DRAINING was cancelled externally
             logger.warning(
                 "cell_evacuation.metadata_mismatch",
                 cell_id=cell_id,
@@ -321,10 +331,11 @@ class CellEvacuationPolicy(EventEmitterMixin):
             )
             return False
 
-        # 시간 경과 판단 — time.time() + Grace Buffer
+        # Elapsed-time check — time.time() + grace buffer
         drain_started = cell.metadata.get("last_state_change_time")
         if drain_started is None:
-            # 시간 기록이 없으면 현재 시각 기록 후 다음 tick 대기
+            # No timestamp recorded: record the current time and wait for the
+            # next tick
             cell.metadata["last_state_change_time"] = time.time()
             return False
 
@@ -343,18 +354,18 @@ class CellEvacuationPolicy(EventEmitterMixin):
             )
             return False
 
-        # === 드레인 완료 — ISOLATED 전환 ===
+        # === Drain complete — transition to ISOLATED ===
         reason = f"Drain period elapsed ({elapsed:.1f}s >= {required:.1f}s)"
         logger.info(
             "cell_evacuation.drain_completed",
             cell_id=cell_id,
         )
 
-        # 양방향 카운터 리셋
+        # Reset both counters
         cell.metadata["evacuation_below_count"] = 0
         cell.metadata["recovery_above_count"] = 0
 
-        # SoT: CellRegistry 상태 전환 (가장 먼저 실행)
+        # SoT: CellRegistry state transition (runs first)
         registry.set_cell_state(cell_id, CellState.ISOLATED, reason)
 
         self._emit_event(
@@ -364,7 +375,7 @@ class CellEvacuationPolicy(EventEmitterMixin):
             },
         )
 
-        # Fire-and-forget: 감사 로그 및 이벤트 발행
+        # Fire-and-forget: audit log and event emission
         self._notify_isolation_gate(
             cell_id,
             reason,
@@ -375,7 +386,7 @@ class CellEvacuationPolicy(EventEmitterMixin):
             cell.metadata.get("evacuation_affected_services", []),
         )
 
-        # 서비스 재배치 로깅
+        # Log the service redistribution
         affected = cell.metadata.get("evacuation_affected_services", [])
         logger.info(
             "cell_topology.cell_isolated_services_redistributed",
@@ -394,7 +405,7 @@ class CellEvacuationPolicy(EventEmitterMixin):
         return True
 
     # =========================================================================
-    # State: ISOLATED — 히스테리시스 기반 자동 복구
+    # State: ISOLATED — hysteresis-based automatic recovery
     # =========================================================================
 
     def _tick_isolated(
@@ -406,11 +417,13 @@ class CellEvacuationPolicy(EventEmitterMixin):
         CellState: type[_CellState],
     ) -> bool:
         """
-        ISOLATED 상태 Cell의 자동 복구 판단.
+        Decide whether an ISOLATED cell can recover automatically.
 
-        히스테리시스: 연속 recovery_consecutive_count(기본 5)회
-        recovery_health_threshold(기본 0.7) 이상일 때만 ACTIVE로 복구.
-        비대칭 설계: 대피(3회)는 빠르게, 복구(5회)는 보수적으로.
+        Hysteresis: recover to ACTIVE only after
+        recovery_consecutive_count (default 5) consecutive ticks at or above
+        recovery_health_threshold (default 0.7).
+        Asymmetric by design: evacuation (3 ticks) is fast, recovery
+        (5 ticks) is conservative.
         """
         recovery_threshold = self._settings.recovery_health_threshold
 
@@ -429,7 +442,7 @@ class CellEvacuationPolicy(EventEmitterMixin):
                 )
                 return False
 
-            # === 연속 카운터 도달 — ACTIVE 복구 ===
+            # === Consecutive count reached — recover to ACTIVE ===
             reason = (
                 f"Health score {health_score:.2f} >= {recovery_threshold} "
                 f"for {above_count} consecutive ticks"
@@ -440,17 +453,17 @@ class CellEvacuationPolicy(EventEmitterMixin):
                 reason=reason,
             )
 
-            # 상태 전이 시 양방향 카운터 리셋
+            # Reset both counters on transition
             cell.metadata["evacuation_below_count"] = 0
             cell.metadata["recovery_above_count"] = 0
 
-            # SoT: CellRegistry 상태 전환
+            # SoT: CellRegistry state transition
             registry.set_cell_state(cell_id, CellState.ACTIVE, reason)
 
-            # Fire-and-forget: 감사 로그 통보
+            # Fire-and-forget: audit log notification
             self._notify_restore_region(cell_id)
 
-            # 대피 이력 완료 기록 (최신순 역방향 탐색)
+            # Mark the evacuation history entry complete (newest-first scan)
             self._complete_evacuation_record(cell_id)
 
             logger.info(
@@ -465,27 +478,27 @@ class CellEvacuationPolicy(EventEmitterMixin):
                 },
             )
             return True
-        # 임계치 미달 — 카운터 리셋
+        # Below the threshold — reset the counter
         if cell.metadata.get("recovery_above_count", 0) > 0:
             cell.metadata["recovery_above_count"] = 0
         return False
 
     # =========================================================================
-    # 수동 복구
+    # Manual recovery
     # =========================================================================
 
     def restore_cell(self, cell_id: str) -> bool:
         """
-        Cell 수동 복구.
+        Manually restore a cell.
 
-        자동 복구 히스테리시스를 무시하고 즉시 ACTIVE로 전환합니다.
-        관리자 개입 시 사용.
+        Ignores the automatic recovery hysteresis and switches to ACTIVE
+        immediately. Used for administrator intervention.
 
         Args:
-            cell_id: Cell 식별자
+            cell_id: Cell identifier
 
         Returns:
-            복원 성공 여부
+            Whether the restoration succeeded
         """
         if not self._settings.enabled:
             return False
@@ -501,14 +514,14 @@ class CellEvacuationPolicy(EventEmitterMixin):
 
             old_state = cell.state
 
-            # 양방향 카운터 리셋
+            # Reset both counters
             cell.metadata["evacuation_below_count"] = 0
             cell.metadata["recovery_above_count"] = 0
 
-            # SoT: CellRegistry 상태 전환
+            # SoT: CellRegistry state transition
             registry.set_cell_state(cell_id, CellState.ACTIVE, "Manual restoration")
 
-            # DRAINING 중 수동 복구 → evacuation 취소 이벤트
+            # Manual restore during DRAINING -> evacuation cancelled event
             if old_state == CellState.DRAINING:
                 self._emit_event(
                     EventType.CELL_EVACUATION_CANCELLED,
@@ -518,7 +531,7 @@ class CellEvacuationPolicy(EventEmitterMixin):
                     },
                 )
 
-            # Fire-and-forget: 감사 로그 통보
+            # Fire-and-forget: audit log notification
             self._notify_restore_region(cell_id)
 
             logger.info(
@@ -543,7 +556,7 @@ class CellEvacuationPolicy(EventEmitterMixin):
             return False
 
     # =========================================================================
-    # Fire-and-forget 통보 — Celery apply_async
+    # Fire-and-forget notification — Celery apply_async
     # =========================================================================
 
     def _notify_isolation_gate(
@@ -553,7 +566,7 @@ class CellEvacuationPolicy(EventEmitterMixin):
         *,
         duration_seconds: int = 3600,
     ) -> None:
-        """RegionalIsolationGate 격리 통보 (Fire-and-forget)."""
+        """Notify RegionalIsolationGate of isolation (fire-and-forget)."""
         try:
             from baldur.adapters.celery.tasks import (
                 notify_cell_isolation,
@@ -567,7 +580,7 @@ class CellEvacuationPolicy(EventEmitterMixin):
                 },
             )
         except ImportError:
-            # Celery 미사용: 동기 폴백
+            # Celery not in use: synchronous fallback
             self._notify_isolation_gate_sync(
                 cell_id,
                 reason,
@@ -593,7 +606,7 @@ class CellEvacuationPolicy(EventEmitterMixin):
         *,
         duration_seconds: int = 3600,
     ) -> None:
-        """RegionalIsolationGate 동기 폴백."""
+        """RegionalIsolationGate synchronous fallback."""
         try:
             from baldur.services.isolation.regional_gate import (
                 get_regional_isolation_gate,
@@ -616,7 +629,7 @@ class CellEvacuationPolicy(EventEmitterMixin):
             )
 
     def _notify_blast_radius(self, cell_id: str, affected_services: list[str]) -> None:
-        """BlastRadiusService 정책 설정 통보 (Fire-and-forget)."""
+        """Notify BlastRadiusService of the policy setting (fire-and-forget)."""
         try:
             from baldur.adapters.celery.tasks import (
                 notify_cell_blast_radius,
@@ -642,7 +655,7 @@ class CellEvacuationPolicy(EventEmitterMixin):
     def _notify_blast_radius_sync(
         self, cell_id: str, affected_services: list[str]
     ) -> None:
-        """BlastRadiusService 동기 폴백."""
+        """BlastRadiusService synchronous fallback."""
         try:
             from baldur.services.blast_radius.models import (
                 BlastRadiusLevel,
@@ -670,7 +683,7 @@ class CellEvacuationPolicy(EventEmitterMixin):
             )
 
     def _notify_restore_region(self, cell_id: str) -> None:
-        """RegionalIsolationGate 복구 통보 (Fire-and-forget)."""
+        """Notify RegionalIsolationGate of restoration (fire-and-forget)."""
         try:
             from baldur.adapters.celery.tasks import (
                 notify_cell_restoration,
@@ -691,7 +704,7 @@ class CellEvacuationPolicy(EventEmitterMixin):
             self._notify_restore_region_sync(cell_id)
 
     def _notify_restore_region_sync(self, cell_id: str) -> None:
-        """RegionalIsolationGate 복구 동기 폴백."""
+        """RegionalIsolationGate restoration synchronous fallback."""
         try:
             from baldur.services.isolation.regional_gate import (
                 get_regional_isolation_gate,
@@ -710,22 +723,22 @@ class CellEvacuationPolicy(EventEmitterMixin):
             )
 
     # =========================================================================
-    # 내부 유틸리티
+    # Internal utilities
     # =========================================================================
 
     def _complete_evacuation_record(self, cell_id: str) -> None:
-        """Cell 대피 이력에서 해당 cell_id의 미완료 레코드를 완료로 표시."""
+        """Mark the open evacuation record for this cell_id as complete."""
         for record in reversed(self._evacuation_history):
             if record.cell_id == cell_id and record.completed_at is None:
                 record.completed_at = utc_now()
                 break
 
     # =========================================================================
-    # 조회
+    # Queries
     # =========================================================================
 
     def get_evacuation_history(self) -> list[EvacuationRecord]:
-        """대피 이력."""
+        """Evacuation history."""
         return list(self._evacuation_history)
 
 
@@ -738,7 +751,7 @@ _policy_lock = threading.Lock()
 
 
 def get_cell_evacuation_policy() -> CellEvacuationPolicy:
-    """CellEvacuationPolicy 싱글톤 반환."""
+    """Return the CellEvacuationPolicy singleton."""
     global _policy
     if _policy is None:
         with _policy_lock:
@@ -748,7 +761,7 @@ def get_cell_evacuation_policy() -> CellEvacuationPolicy:
 
 
 def reset_cell_evacuation_policy() -> None:
-    """싱글톤 초기화 (테스트용)."""
+    """Reset the singleton (for tests)."""
     global _policy
     with _policy_lock:
         _policy = None

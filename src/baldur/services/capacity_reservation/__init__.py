@@ -1,9 +1,9 @@
 """
-Capacity Reservation — 예정 이벤트 기반 사전 용량 확보.
+Capacity Reservation — pre-securing capacity for scheduled events.
 
-예정 이벤트(쿠폰 오픈, 타임세일 등)를 등록하고,
-이벤트 N분 전에 기존 모듈(RateController/PoolWatchdog/Bulkhead/GracefulDegradation)을
-사전 조정하는 오케스트레이터.
+Registers scheduled events (coupon drops, flash sales, etc.) and orchestrates
+pre-adjustment of existing modules (RateController/PoolWatchdog/Bulkhead/
+GracefulDegradation) N minutes before the event.
 """
 
 from baldur.services.capacity_reservation.event_calendar import (

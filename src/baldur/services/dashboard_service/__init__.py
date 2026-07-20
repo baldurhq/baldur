@@ -4,7 +4,8 @@ Dashboard Service Package
 Provides centralized dashboard statistics and monitoring operations.
 
 .. versionadded:: 2.1.0
-    ``dashboard_service.py`` 플랫 파일에서 ``dashboard_service/`` 패키지로 전환.
+    Converted from the flat ``dashboard_service.py`` file to the
+    ``dashboard_service/`` package.
 
 Usage:
     from baldur.services.dashboard_service import (
@@ -18,8 +19,8 @@ Usage:
 """
 
 # Dynamic forwarding (event_bus pattern)
-# service.py의 모든 속성을 패키지 레벨에 노출.
-# 기존 `from baldur.services.dashboard_service import ...` 패턴 호환 유지.
+# Expose every attribute of the service module at the package level, keeping the
+# existing `from baldur.services.dashboard_service import ...` pattern working.
 import sys as _sys
 
 from baldur.services.dashboard_service import service as _service_module

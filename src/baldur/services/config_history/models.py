@@ -10,7 +10,7 @@ from baldur.core.serializable import SerializableMixin
 
 @dataclass
 class ConfigVersion(SerializableMixin):
-    """설정 버전 정보."""
+    """Config version information."""
 
     version: int
     timestamp: float

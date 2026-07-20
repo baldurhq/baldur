@@ -1,8 +1,8 @@
 """
 Error Budget Evaluator.
 
-Error Budget Calculator의 burn rate 로직을 활용하여
-설정 변경이 예산 소모에 미치는 영향을 시뮬레이션한다.
+Uses the Error Budget Calculator's burn-rate logic to simulate how a config
+change affects budget consumption.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from baldur.services.config_shadow.models import (
 
 
 class ErrorBudgetEvaluator:
-    """Error Budget 설정 변경 효과 시뮬레이터."""
+    """Simulator for the effect of an Error Budget config change."""
 
     @property
     def name(self) -> str:
@@ -68,7 +68,7 @@ class ErrorBudgetEvaluator:
         events: list[JournalEntry],
         config: dict[str, Any],
     ) -> BudgetSimulationResult:
-        """Error Budget 이벤트를 기반으로 예산 소모를 시뮬레이션한다."""
+        """Simulate budget consumption from the Error Budget events."""
         critical_threshold = config.get("critical_threshold_percent", 10)
         burn_rate_fast_critical = config.get("burn_rate_fast_critical", 14.4)
         total_drain = 0.0
@@ -111,7 +111,7 @@ class ErrorBudgetEvaluator:
         return True
 
     def _calculate_confidence(self, events: list[JournalEntry]) -> float:
-        """이벤트 충분성 기반 신뢰도 계산."""
+        """Compute confidence from event sufficiency."""
         budget_events = [e for e in events if e.event_type == "error_budget_critical"]
 
         if len(budget_events) < 5:
