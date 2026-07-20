@@ -209,10 +209,24 @@ class RetryPolicyConfig:
     enable_dlq: bool = True
 
     # Result-predicate retry (constructor/decorator-only, synchronous callable)
-    # and cooperative wall-clock budget (seconds, None = disabled). See the
-    # matching fields on RetryConfig for the full contract.
+    # and cooperative wall-clock budget (seconds, None = disabled).
     retry_on_result: Callable[[Any], bool] | None = None
     max_elapsed: float | None = None
+
+    # --- Outbound 429 coordination (Baldur's *synchronous* retry stage only) ---
+    # rate_limit_aware: opt out of the default RateLimitCoordinator resolution
+    # for this policy. Default-True, but inert unless the call carries a domain
+    # identity: with no rate_limit_key and the placeholder domain ("default"),
+    # no coordinator is resolved — a shared placeholder key would merge
+    # unrelated downstreams into a single cooldown record.
+    # rate_limit_key: override the coordination key; unset falls back to domain.
+    #
+    # Neither field reaches the asynchronous retry stage. AsyncRetryPolicy
+    # consumes this same config class and its from_policy_config mapping does
+    # not carry them, so on aprotect() and the async @retry branch both are
+    # silently inert. Async 429 coordination is opt-in via the tenacity bridge.
+    rate_limit_aware: bool = True
+    rate_limit_key: str | None = None
 
     @classmethod
     def from_settings(cls, domain: str = "default") -> RetryPolicyConfig:
@@ -250,6 +264,8 @@ class RetryPolicyConfig:
                 max_elapsed=retry_config.get("max_elapsed"),
                 enable_dlq=dlq_config.get("enabled", True),
                 domain=domain,
+                rate_limit_aware=retry_config.get("rate_limit_aware", True),
+                rate_limit_key=retry_config.get("rate_limit_key"),
             )
         except Exception:
             pass
@@ -271,6 +287,8 @@ class RetryPolicyConfig:
             max_elapsed=domain_config.get("max_elapsed", retry_settings.max_elapsed),
             enable_dlq=dlq_settings.enabled,
             domain=domain,
+            rate_limit_aware=domain_config.get("rate_limit_aware", True),
+            rate_limit_key=domain_config.get("rate_limit_key"),
         )
 
     @classmethod
