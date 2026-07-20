@@ -14,7 +14,10 @@ Usage:
     calculator = ThrottleAwareBackoffCalculator(config, service_name="payment")
     strategy = ThrottleAwareBackoffStrategy(calculator)
 
-    # Use with retry_with_backoff()
+    # Use with retry_with_backoff(). Note this is the retry *primitive's*
+    # config, which is a different class from the policy's RetryPolicyConfig.
+    from baldur.core.retry import RetryConfig
+
     config = RetryConfig(backoff=strategy)
     outcome = retry_with_backoff(func, config)
 """

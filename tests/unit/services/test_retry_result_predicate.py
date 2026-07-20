@@ -30,7 +30,6 @@ from baldur.core.backoff import ConstantBackoff
 from baldur.interfaces.resilience_policy import PolicyOutcome
 from baldur.services.retry_handler.models import (
     MaxRetriesExceededError,
-    RetryConfig,
     RetryPolicyConfig,
 )
 from baldur.services.retry_handler.policy import RetryPolicy
@@ -312,19 +311,12 @@ class TestMaxRetriesExceededErrorContract:
 
 
 # =============================================================================
-# Behavior — retry_on_result mapping through the config dataclasses
+# Behavior — retry_on_result sourcing on the config dataclass
 # =============================================================================
 
 
 class TestRetryConfigMappingBehavior:
-    """``retry_on_result`` is copied by from_retry_config and never set by env."""
-
-    def test_from_retry_config_copies_retry_on_result(self):
-        """from_retry_config carries the predicate onto RetryPolicyConfig."""
-        predicate = lambda r: r is None  # noqa: E731
-        legacy = RetryConfig(domain="payment", retry_on_result=predicate)
-        copied = RetryPolicyConfig.from_retry_config(legacy)
-        assert copied.retry_on_result is predicate
+    """``retry_on_result`` is never set by env — it is constructor-only."""
 
     def test_from_settings_leaves_retry_on_result_none(self):
         """A callable cannot round-trip through settings, so from_settings never

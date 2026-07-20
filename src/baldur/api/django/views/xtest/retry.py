@@ -97,9 +97,9 @@ class BackoffPreviewView(XTestModeMixin, APIView):
             BackoffConfig,
             ThrottleAwareBackoffCalculator,
         )
-        from baldur.services.retry_handler import RetryConfig
+        from baldur.services.retry_handler import RetryPolicyConfig
 
-        default_config = RetryConfig.from_settings()
+        default_config = RetryPolicyConfig.from_settings()
 
         # Override with request parameters
         final_max_attempts = (
@@ -342,9 +342,9 @@ class RetrySimulateView(XTestModeMixin, APIView):
             BackoffConfig,
             ThrottleAwareBackoffCalculator,
         )
-        from baldur.services.retry_handler import RetryConfig
+        from baldur.services.retry_handler import RetryPolicyConfig
 
-        config = RetryConfig.from_settings(domain)
+        config = RetryPolicyConfig.from_settings(domain)
         if max_attempts is not None:
             try:
                 config.max_attempts = int(max_attempts)
@@ -668,10 +668,10 @@ class XTestRetryConfigView(XTestModeMixin, APIView):
             except Exception:
                 pass
 
-        # Load RetryConfig
-        from baldur.services.retry_handler import RetryConfig
+        # Load the retry policy configuration
+        from baldur.services.retry_handler import RetryPolicyConfig
 
-        config = RetryConfig.from_settings(domain)
+        config = RetryPolicyConfig.from_settings(domain)
 
         snapshot = collect_system_snapshot()
 

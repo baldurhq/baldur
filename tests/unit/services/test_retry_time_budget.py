@@ -28,7 +28,7 @@ from structlog.testing import capture_logs
 
 from baldur.core.backoff import ConstantBackoff
 from baldur.interfaces.resilience_policy import PolicyOutcome
-from baldur.services.retry_handler.models import RetryConfig, RetryPolicyConfig
+from baldur.services.retry_handler.models import RetryPolicyConfig
 from baldur.services.retry_handler.policy import RetryPolicy
 from baldur.settings.retry import (
     RetrySettings,
@@ -254,16 +254,12 @@ class TestRetrySettingsContract:
 
 
 # =============================================================================
-# Behavior — max_elapsed mapping through the config dataclasses
+# Behavior — max_elapsed sourcing on the config dataclass
 # =============================================================================
 
 
 class TestRetryBudgetConfigMappingBehavior:
-    """``max_elapsed`` flows through from_retry_config and from_settings."""
-
-    def test_from_retry_config_copies_max_elapsed(self):
-        legacy = RetryConfig(domain="payment", max_elapsed=30.0)
-        assert RetryPolicyConfig.from_retry_config(legacy).max_elapsed == 30.0
+    """``max_elapsed`` flows through from_settings onto the policy config."""
 
     def test_from_settings_maps_max_elapsed_via_static_path(self):
         """The settings-derived config carries ``max_elapsed`` from RetrySettings

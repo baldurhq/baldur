@@ -399,9 +399,11 @@ class FullSnapshotView(XTestModeMixin, APIView):
 
         # Retry 상태
         try:
-            from baldur.services.retry_handler import RetryConfig
+            from baldur.services.retry_handler import RetryPolicyConfig
 
-            retry_config = RetryConfig.from_settings(domain=service_name or "default")
+            retry_config = RetryPolicyConfig.from_settings(
+                domain=service_name or "default"
+            )
 
             snapshot["retry"] = {
                 "max_attempts": retry_config.max_attempts,

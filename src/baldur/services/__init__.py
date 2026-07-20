@@ -35,12 +35,12 @@ v2.0.0 narrows 62 exports down to 15 core APIs. Removed symbols are reachable
 via their canonical import paths below.
 
 Before (v1.x):
-    from baldur.services import RetryHandler, RetryConfig
+    from baldur.services import RetryHandler
     from baldur.services import IdempotencyService
     from baldur.services import ControlAPIService
 
 After (v2.0.0):
-    from baldur.services.retry_handler import RetryHandler, RetryConfig
+    from baldur.services.retry_handler import RetryHandler
     from baldur.services.idempotency import IdempotencyService
     from baldur.services.control_api_service import ControlAPIService
 
@@ -48,7 +48,6 @@ Removed symbols and their new import paths:
 
     # Retry (→ retry_handler.py)
     RetryHandler         → from baldur.services.retry_handler import RetryHandler
-    RetryConfig          → from baldur.services.retry_handler import RetryConfig
     RetryResult          → from baldur.services.retry_handler import RetryResult
     RetryAction          → from baldur.services.retry_handler import RetryAction
     MaxRetriesExceededError → from baldur.services.retry_handler import MaxRetriesExceededError
@@ -207,7 +206,6 @@ from .replay_service import (
 from .retry_handler import (
     MaxRetriesExceededError,
     RetryAction,
-    RetryConfig,
     RetryPolicy,
     RetryPolicyConfig,
     RetryResult,
@@ -265,7 +263,6 @@ __all__ = [
     # === Retry ===
     "RetryPolicy",
     "RetryPolicyConfig",
-    "RetryConfig",
     "RetryResult",
     "RetryAction",
     "MaxRetriesExceededError",

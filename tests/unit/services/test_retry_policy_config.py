@@ -3,7 +3,6 @@ Unit tests for the RetryPolicyConfig settings class and RetryResult conversion.
 
 Target: services/retry_handler/models.py
 - RetryPolicyConfig: pure retry-only settings (externally dependent fields removed)
-- RetryPolicyConfig.from_retry_config(): conversion from the legacy RetryConfig
 - RetryResult.to_policy_result(): conversion to the unified PolicyResult type
 """
 
@@ -12,7 +11,6 @@ from __future__ import annotations
 from baldur.interfaces.resilience_policy import PolicyOutcome
 from baldur.services.retry_handler.models import (
     RetryAction,
-    RetryConfig,
     RetryPolicyConfig,
     RetryResult,
 )
@@ -107,32 +105,6 @@ class TestRetryPolicyConfigBehavior:
         assert config.enable_dlq is False
         assert config.retryable_exceptions == (ConnectionError, TimeoutError)
         assert config.non_retryable_exceptions == (ValueError,)
-
-    def test_from_retry_config_extracts_pure_retry_fields(self):
-        """from_retry_config() extracts only the pure retry fields from RetryConfig."""
-        legacy = RetryConfig(
-            max_attempts=5,
-            backoff_base=2,
-            backoff_max=60,
-            jitter_percent=10,
-            domain="payment",
-            enable_dlq=False,
-            retryable_exceptions=(ConnectionError,),
-            non_retryable_exceptions=(ValueError,),
-            rate_limit_aware=True,
-            throttle_aware=True,
-            throttle_backoff_multiplier_cap=4.0,
-        )
-        policy_config = RetryPolicyConfig.from_retry_config(legacy)
-
-        assert policy_config.max_attempts == legacy.max_attempts
-        assert policy_config.backoff_base == legacy.backoff_base
-        assert policy_config.backoff_max == legacy.backoff_max
-        assert policy_config.jitter_percent == legacy.jitter_percent
-        assert policy_config.domain == legacy.domain
-        assert policy_config.enable_dlq == legacy.enable_dlq
-        assert policy_config.retryable_exceptions == legacy.retryable_exceptions
-        assert policy_config.non_retryable_exceptions == legacy.non_retryable_exceptions
 
 
 # =============================================================================
