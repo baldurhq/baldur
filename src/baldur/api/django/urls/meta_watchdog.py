@@ -1,6 +1,7 @@
 """Meta-watchdog URL patterns (Baldur self-monitoring liveness + status).
 
-Reference: docs/baldur/middleware_system/177_BALDUR_META_WATCHDOG.md
+Views: MetaWatchdogLivenessView, MetaWatchdogStatusView
+(baldur.api.django.views.meta_watchdog).
 """
 
 from __future__ import annotations

@@ -14,9 +14,6 @@ Environment Variables:
     BALDUR_SYSTEM_CONTROL_REDIS_KEY_PREFIX=baldur:state:
     BALDUR_SYSTEM_CONTROL_REDIS_SCAN_BATCH_SIZE=100
     BALDUR_SYSTEM_CONTROL_REDIS_MAX_SCAN_KEYS=10000
-
-Reference:
-- docs/baldur/middleware_system/339_SETTINGS_GAP_HEALTH_SHUTDOWN_CONTROL.md
 """
 
 from __future__ import annotations

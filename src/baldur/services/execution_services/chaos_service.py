@@ -12,9 +12,6 @@ Features:
     - Pre-flight safety checks (SafetyGuard integration)
     - Daily resilience report generation
     - Pending approval notifications
-
-Reference:
-- docs/baldur/CHAOS_ENGINEERING.md
 """
 
 from __future__ import annotations

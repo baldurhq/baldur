@@ -82,8 +82,8 @@ class PendingConfigService:
 
     Thread-safe singleton that tracks scheduled config changes.
 
-    Reference:
-        See 92_CONFIG_IMPLEMENTATION_GUIDE.md Week 4 [20] AuditSettings.
+    Configuration:
+        AuditSettings (baldur.settings.audit)
     """
 
     # Legacy single-blob key — migration source only (see _migrate_legacy_blob).

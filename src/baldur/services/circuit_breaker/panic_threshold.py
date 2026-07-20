@@ -95,10 +95,6 @@ class PanicThresholdMonitor:
         if result.triggered:
             # Panic triggered - already escalated to Emergency Level 3
             send_critical_alert(result)
-
-    Reference:
-        docs/baldur/middleware_system/21_CB_ADVANCED_PROTECTION.md
-        Section 14 - Panic Threshold
     """
 
     def __init__(

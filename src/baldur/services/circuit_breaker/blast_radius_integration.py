@@ -124,10 +124,6 @@ class BlastRadiusIntegration:
         if assessment.should_block_auto_open():
             # Hold OPEN, alert the operations team
             send_alert(assessment)
-
-    Reference:
-        docs/baldur/middleware_system/21_CB_ADVANCED_PROTECTION.md
-        Section 7 - Blast Radius integration
     """
 
     _instance: BlastRadiusIntegration | None = None

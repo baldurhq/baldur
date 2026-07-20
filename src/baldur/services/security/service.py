@@ -4,7 +4,7 @@ Security Violation Service.
 Handles security violations that should NEVER self-heal.
 Security incidents are immediately blocked and routed to the security team.
 
-Audit Integration (85_AUDIT_INTEGRATION_OVERVIEW.md Phase 1):
+Audit integration:
 - Security violation handling: log_security_violation_audit
 - IP blocking: log_security_violation_audit (action="block_ip")
 - Session invalidation: log_security_violation_audit (action="invalidate_session")

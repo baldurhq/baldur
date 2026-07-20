@@ -8,9 +8,6 @@ Templates:
 - cascade_depth_alert: chain depth exceeded alert
 - cascade_load_shedding_alert: Load Shedding activation alert
 - cascade_summary: daily Cascade Event summary
-
-Reference:
-    docs/baldur/middleware_system/76_CASCADE_EVENT_AUDIT.md
 """
 
 from __future__ import annotations

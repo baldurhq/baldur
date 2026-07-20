@@ -215,8 +215,8 @@ class IdempotencyGuard:
         # surfaces loudly here — propagating out of the facade's composer
         # build — rather than being swallowed by the fail-open ``check()``.
         # Idempotency is a correctness gate, not a side-effect, so it is
-        # fail-closed in prod (CROSS_SERVICE_STANDARDS §3). Gated on
-        # ``enabled`` so a globally-disabled feature never raises.
+        # fail-closed in prod. Gated on ``enabled`` so a globally-disabled
+        # feature never raises.
         if self._globally_enabled:
             _ensure_policy_gate()
 
@@ -278,10 +278,9 @@ class IdempotencyGuard:
             return GuardResult(allowed=True)
         except Exception as e:
             # Cache I/O fault (e.g. Redis down) or key-generation error. Log the
-            # fail-open/closed decision so a silent degradation is observable
-            # (LOGGING_STANDARDS §3.2). Fail CLOSED by default to prevent a
-            # duplicate side effect on a blip; opt-in fail-open trades that
-            # guarantee for availability.
+            # fail-open/closed decision so a silent degradation is observable.
+            # Fail CLOSED by default to prevent a duplicate side effect on a
+            # blip; opt-in fail-open trades that guarantee for availability.
             logger.warning(
                 "idempotency.guard_check_failed",
                 error=str(e),

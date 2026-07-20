@@ -58,10 +58,6 @@ class CriticalWorkerSettings(BaseSettings):
 
     Operates a small dedicated Worker group that processes only P0 tasks,
     separate from general Worker groups.
-
-    Reference:
-        k8s/celery-critical-worker.yaml
-        77_RECOVERY_COORDINATOR.md#11.2
     """
 
     model_config = make_settings_config("BALDUR_CRITICAL_WORKER_")

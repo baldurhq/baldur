@@ -5,13 +5,11 @@ Provides Redis clients for LOCAL and GLOBAL scopes.
 
 Problem:
 - Single Redis creates single-AZ dependency for all clusters
-- adapters/resilient/backend.py#L39: redis_url supports only single URL
+- adapters/resilient/backend.py: redis_url supports only a single URL
 
 Design:
 - LOCAL: Per-cluster Redis (CB, metrics, DLQ) - high speed
 - GLOBAL: Cross-region replicated Redis (config, anchors, Error Budget) - consistency
-
-Reference: docs/baldur/middleware_system/70_MULTI_CLUSTER_ARCHITECTURE.md
 """
 
 from __future__ import annotations

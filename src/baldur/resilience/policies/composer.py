@@ -812,8 +812,7 @@ class AsyncPolicyComposer(Generic[T]):
                     )
             except Exception as e:
                 # Fail-open: log symmetrically with the sync loop's
-                # guard_execution_failed — a guard bypass must not be silent
-                # (LOGGING_STANDARDS §3.2).
+                # guard_execution_failed — a guard bypass must not be silent.
                 logger.warning(
                     "policy_composer.guard_execution_failed",
                     guard_name=guard.name,

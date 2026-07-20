@@ -27,9 +27,6 @@ Usage:
     with DomainContext("order"):
         # Errors raised here are tagged with the "order" domain.
         ...
-
-Reference:
-    docs/baldur/middleware_system/75_CRISIS_BUDGET_MULTIPLIER.md §0.1 (items 6, 15)
 """
 
 from __future__ import annotations
@@ -54,8 +51,9 @@ def _validate_or_fallback(domain: object, site: str) -> str:
     """Validate ``domain`` and on rejection emit observability + return fallback.
 
     Used by the three runtime entry points (``DomainContext.__init__``,
-    ``set_domain_context``, and the Celery restore funnel) that must
-    fail-open per CROSS_SERVICE_STANDARDS §3.
+    ``set_domain_context``, and the Celery restore funnel) that must fail
+    open: domain tagging is a side-effect, so a rejected value falls back to
+    ``FALLBACK_DOMAIN`` instead of raising into the caller's request path.
     """
     try:
         return validate_and_normalize_domain(domain)
@@ -186,9 +184,6 @@ def domain_tag(domain: str) -> Callable[[F], F]:
         async def create_order():
             # Async functions are supported.
             ...
-
-    Reference:
-        docs/baldur/middleware_system/75_CRISIS_BUDGET_MULTIPLIER.md §0.1 (item 6)
     """
     # 545 D4: decoration-time validation raises loud so dev/CI catches bad
     # literals (e.g., ``@domain_tag("invalid name!")``) at module import.

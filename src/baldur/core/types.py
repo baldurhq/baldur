@@ -8,8 +8,7 @@ OperationStatus, RetryContext, MetricsSnapshot) that were superseded by:
 - interfaces/statistics.py: StatusCounts, CircuitBreakerSummary
 - services/metrics/definitions.py: Prometheus label-based domain metrics
 
-All dead types were removed per 194_DEAD_CODE_REMOVAL_PLAN.md. Per
-``504_DLQ_PROTECT_CONTEXT_CAPTURE.md`` D8, this module now hosts the shared
+All dead types were removed. Per 504 D8, this module now hosts the shared
 primitive whitelist consumed by ``@idempotent`` (cache key fold-in) and
 ``@protected`` / ``@dlq_protect`` (context auto-extract for DLQ visibility).
 """

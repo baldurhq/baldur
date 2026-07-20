@@ -4,16 +4,13 @@ Notification Settings - Pydantic v2.
 Single Source of Truth for notification configuration.
 
 Replaces:
-- core/config.py:NotificationConfig (lines 253-275)
+- core/config.py:NotificationConfig
 - core/safe_defaults.py:SAFE_DEFAULTS["notification"]
 - core/safe_defaults.py:VALIDATION_RULES["notification"]
 
 Environment Variables:
     BALDUR_NOTIFICATION_ENABLED=true
     BALDUR_NOTIFICATION_CRITICAL_THRESHOLD=10
-
-Reference:
-- docs/baldur/middleware_system/40_PYDANTIC_CONFIG_MIGRATION.md
 """
 
 from pydantic import Field
@@ -37,8 +34,8 @@ class NotificationSettings(BaseSettings):
     model_config = make_settings_config("BALDUR_NOTIFICATION_")
 
     # ==========================================================================
-    # Core Settings (from core/config.py lines 255-259)
-    # Validation rules from core/safe_defaults.py lines 274-280
+    # Core Settings (from core/config.py:NotificationConfig)
+    # Validation rules from core/safe_defaults.py:VALIDATION_RULES["notification"]
     # ==========================================================================
     enabled: bool = Field(
         default=True,
@@ -54,7 +51,7 @@ class NotificationSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Message Limits (from core/config.py lines 261-266)
+    # Message Limits (from core/config.py:NotificationConfig)
     # ==========================================================================
     description_max_length: int = Field(
         default=500,
@@ -80,7 +77,7 @@ class NotificationSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Slack Channels (from core/config.py lines 268-270)
+    # Slack Channels (from core/config.py:NotificationConfig)
     # ==========================================================================
     critical_channel: str = Field(
         default="#critical-alerts",

@@ -23,9 +23,6 @@ Channels:
 - circuit_breaker: CB state change events
 - throttle: Throttle events
 - global: Cross-service events (Error Budget, Security, Cell Topology, etc.)
-
-Reference:
-- docs/baldur/middleware_system/70_MULTI_CLUSTER_ARCHITECTURE.md
 """
 
 from __future__ import annotations

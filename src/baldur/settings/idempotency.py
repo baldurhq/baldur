@@ -11,9 +11,6 @@ Replaces:
 Environment Variables:
     BALDUR_IDEMPOTENCY_DEFAULT_CACHE_TTL=60
     BALDUR_IDEMPOTENCY_EXTENDED_CACHE_TTL=300
-
-Reference:
-- docs/baldur/middleware_system/40_PYDANTIC_CONFIG_MIGRATION.md
 """
 
 from pydantic import Field

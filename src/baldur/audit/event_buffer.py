@@ -119,7 +119,7 @@ class AuditEventType(str, Enum):
     ROLLBACK_PERFORMED = "rollback_performed"
 
     # ═══════════════════════════════════════════════════════════
-    # Security Violation-related (85_AUDIT_INTEGRATION_OVERVIEW.md Phase 1)
+    # Security Violation-related
     # ═══════════════════════════════════════════════════════════
     SECURITY_VIOLATION = "security_violation"
     """Security violation detection and handling."""
@@ -131,7 +131,7 @@ class AuditEventType(str, Enum):
     """User session invalidation."""
 
     # ═══════════════════════════════════════════════════════════
-    # Regional Isolation-related (85_AUDIT_INTEGRATION_OVERVIEW.md Phase 1)
+    # Regional Isolation-related
     # ═══════════════════════════════════════════════════════════
     REGION_ISOLATED = "region_isolated"
     """Region isolation activated."""
@@ -172,7 +172,7 @@ class AuditEventType(str, Enum):
     DATA_ACCESS = "data_access"
 
     # ═══════════════════════════════════════════════════════════
-    # CorruptionShield-related (Part 2: 27_IMPROVEMENT_PART2_AUDIT_INTEGRATION.md)
+    # CorruptionShield-related
     # ═══════════════════════════════════════════════════════════
     CORRUPTION_DETECTED = "corruption_detected"
     """Data integrity violation found (L1/L2/L3)."""
@@ -181,7 +181,7 @@ class AuditEventType(str, Enum):
     """Request blocked due to an integrity violation."""
 
     # ═══════════════════════════════════════════════════════════
-    # ShadowLogger/L2 Sync-related (Part 2: 27_IMPROVEMENT_PART2_AUDIT_INTEGRATION.md)
+    # ShadowLogger/L2 Sync-related
     # ═══════════════════════════════════════════════════════════
     SHADOW_LOG_SYNC_FAILED = "shadow_log_sync_failed"
     """L2 sync failure record."""
@@ -190,7 +190,7 @@ class AuditEventType(str, Enum):
     """Re-sync completed after L2 recovery."""
 
     # ═══════════════════════════════════════════════════════════
-    # WAL-related (Part 2: 27_IMPROVEMENT_PART2_AUDIT_INTEGRATION.md)
+    # WAL-related
     # ═══════════════════════════════════════════════════════════
     WAL_CORRUPTION_DETECTED = "wal_corruption_detected"
     """WAL CRC32 checksum mismatch found."""
@@ -202,7 +202,7 @@ class AuditEventType(str, Enum):
     """WAL file rotation occurred."""
 
     # ═══════════════════════════════════════════════════════════
-    # Forensic-related (Part 2: 27_IMPROVEMENT_PART2_AUDIT_INTEGRATION.md)
+    # Forensic-related
     # ═══════════════════════════════════════════════════════════
     FORENSIC_CAPTURE_STARTED = "forensic_capture_started"
     """Forensic capture started."""
@@ -214,7 +214,7 @@ class AuditEventType(str, Enum):
     """Anomalous pattern found during forensic analysis."""
 
     # ═══════════════════════════════════════════════════════════
-    # Reconciliation-related (30_SHADOW_BUDGET_WEIGHTED_CALCULATION.md)
+    # Reconciliation-related
     # ═══════════════════════════════════════════════════════════
     FAILSAFE_PERIOD_STARTED = "failsafe_period_started"
     """Fail-Safe period started."""

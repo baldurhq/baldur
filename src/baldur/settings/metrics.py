@@ -12,10 +12,6 @@ Replaces:
 Environment Variables:
     BALDUR_METRICS_ENABLED=true
     BALDUR_METRICS_ENABLED=true
-
-Reference:
-- docs/baldur/middleware_system/40_PYDANTIC_CONFIG_MIGRATION.md
-- docs/baldur/middleware_system/358_LARGE_SERVICE_IMPROVEMENT.md
 """
 
 from pydantic import Field

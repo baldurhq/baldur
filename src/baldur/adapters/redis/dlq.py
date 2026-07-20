@@ -97,8 +97,6 @@ class RedisDLQRepository(
     - self.lifecycle: RedisDLQLifecycle (state transitions + replay)
     - self.maintenance: RedisDLQMaintenance (archiving + cleanup)
     - self.compression: RedisDLQCompression (compression)
-
-    Reference: docs/baldur/middleware_system/70_MULTI_CLUSTER_ARCHITECTURE.md
     """
 
     _BASE_PREFIX = "dlq"

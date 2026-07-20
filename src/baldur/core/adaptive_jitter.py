@@ -1,4 +1,3 @@
-# packages/baldur-python/src/baldur/core/adaptive_jitter.py
 """
 Adaptive jitter calculator (Platinum SLA optimization)
 

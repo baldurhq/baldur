@@ -4,7 +4,7 @@ Retry Settings - Pydantic v2.
 Single Source of Truth for retry mechanism configuration.
 
 Replaces:
-- core/config.py:RetryConfig (lines 48-56)
+- core/config.py:RetryConfig
 - core/safe_defaults.py:SAFE_DEFAULTS["retry"]
 - core/safe_defaults.py:VALIDATION_RULES["retry"]
 
@@ -16,12 +16,9 @@ Environment Variables:
 
 Note:
     Legacy backoff fields (backoff_base, min_delay, jitter_percent) moved to
-    BackoffSettings.legacy_* per 359_SETTINGS_INTERNAL_QUALITY_IMPROVEMENT.md (Option B).
+    BackoffSettings.legacy_* (baldur.settings.backoff).
     Env vars: BALDUR_BACKOFF_LEGACY_BASE, BALDUR_BACKOFF_LEGACY_MIN_DELAY,
     BALDUR_BACKOFF_LEGACY_JITTER_PERCENT.
-
-Reference:
-- docs/baldur/middleware_system/40_PYDANTIC_CONFIG_MIGRATION.md
 """
 
 from pydantic import Field, field_validator

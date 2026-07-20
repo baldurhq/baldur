@@ -4,7 +4,7 @@ Async Persistence Tasks for Hybrid Storage Support.
 These tasks handle asynchronous persistence of DLQ entries to the statistics store
 (ORM) without blocking the critical path (Redis).
 
-Design Principle (07_HYBRID_STORAGE_ARCHITECTURE.md):
+Design Principle:
 - Runtime (Redis): Fast, synchronous, 1-2ms
 - Statistics (ORM): Async, can tolerate 10-100ms
 

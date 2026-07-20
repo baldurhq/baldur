@@ -10,8 +10,8 @@ from baldur.interfaces.web_framework import HttpMethod, PermissionLevel
 def _register_error_budget_routes(registry: AdminRegistry) -> None:
     # error_budget_status + deployment endpoints removed — the handler-module
     # surface (budget_status / deployment_verdict / ...) no longer matches the
-    # pre-existing route layer.  Tracked in OOS_INDEX as v1.1 admin surface
-    # expansion candidate.
+    # pre-existing route layer.  They stay unregistered until the two are
+    # reconciled.
 
     # --- reconciliation (imports OK) ---
     try:

@@ -12,7 +12,7 @@ Features:
 - Prometheus metrics for observability
 - Runtime-configurable via API (RateLimitConfig)
 
-Package structure (split from rate_limit.py per 358_LARGE_SERVICE_IMPROVEMENT.md):
+Package structure (split from the former single-module rate_limit.py):
 - config.py: Settings loader + Prometheus metrics
 - redis_health_checker.py: Redis health checker (mini CB)
 - shadow_audit.py: Shadow audit logger

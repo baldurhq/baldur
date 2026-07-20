@@ -9,8 +9,8 @@ from baldur.interfaces.web_framework import HttpMethod, PermissionLevel
 
 def _register_config_data_routes(registry: AdminRegistry) -> None:
     # --- tiering ---
-    # Removed endpoints (no current handler — tracked in OOS_INDEX for v1.1
-    # admin surface expansion): GET /tiering, GET /tiering/defaults, DELETE
+    # Removed endpoints (no current handler — deferred to a later admin
+    # surface expansion): GET /tiering, GET /tiering/defaults, DELETE
     # /tiering/mapping/{service_name}.
     try:
         from baldur.api.handlers.tiering import (

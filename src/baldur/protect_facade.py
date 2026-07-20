@@ -1448,7 +1448,7 @@ def _build_context_from_callsite(
     ``ALLOWED_PRIMITIVE_TYPES`` is the final gate. Non-primitive args are
     dropped from both named fields and ``request_data``; one DEBUG event per
     drop (``dlq_protect.context_capture_skipped``) keeps the surface in caplog
-    without dominating operator logs (the suffix tier from LOGGING_STANDARDS).
+    without dominating operator logs.
 
     ``sig.bind_partial`` failures (TypeError on truly weird signatures —
     Risk row 2) are caught, logged at WARNING as

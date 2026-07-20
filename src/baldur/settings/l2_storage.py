@@ -13,10 +13,6 @@ Replaces:
 Environment Variables:
     BALDUR_L2_STORAGE_REDIS_TIMEOUT_MS=50
     BALDUR_L2_STORAGE_RECONCILIATION_INTERVAL_SECONDS=300
-
-Reference:
-- docs/baldur/middleware_system/40_PYDANTIC_CONFIG_MIGRATION.md
-- docs/baldur/middleware_system/358_LARGE_SERVICE_IMPROVEMENT.md
 """
 
 from __future__ import annotations

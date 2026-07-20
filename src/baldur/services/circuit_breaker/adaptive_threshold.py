@@ -90,10 +90,6 @@ class AdaptiveThresholdManager:
         # Check whether automatic OPEN is allowed
         if manager.should_allow_auto_open():
             circuit_breaker.open()
-
-    Reference:
-        docs/baldur/middleware_system/21_CB_ADVANCED_PROTECTION.md
-        Section 5 - Adaptive Threshold (Emergency Level integration)
     """
 
     def __init__(

@@ -284,9 +284,6 @@ def flush_expired_jwt_tokens() -> dict[str, Any]:
             "message": str,
             "skipped": bool (optional, only when token_blacklist is not installed),
         }
-
-    Reference:
-        docs/baldur/middleware_system/217_JWT_BLACKLIST_AND_SECRETS_VALIDATION.md §7.3
     """
     try:
         from django.apps import apps

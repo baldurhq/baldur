@@ -82,7 +82,8 @@ def _create_metric_safe(
         )
         return None
 
-    # Decoration-time creation, two-tier fail-open (CROSS_SERVICE_STANDARDS split):
+    # Decoration-time creation, two-tier fail-open — ImportError is handled
+    # separately from every other exception.
     # ImportError is silent (honors the published "recording quietly no-ops when
     # prometheus_client is absent" contract — no per-function warning spam); any
     # other error is defense-in-depth after the pre-check.

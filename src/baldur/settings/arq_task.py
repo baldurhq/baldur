@@ -12,9 +12,6 @@ Environment Variables:
     BALDUR_ARQ_TASK_MAX_JOBS=10
     BALDUR_ARQ_TASK_JOB_TIMEOUT=300
     BALDUR_ARQ_TASK_QUEUE_NAME=arq:baldur
-
-Reference:
-- docs/baldur/middleware_system/340_ASYNC_TASK_QUEUE_INTERFACE.md
 """
 
 from __future__ import annotations

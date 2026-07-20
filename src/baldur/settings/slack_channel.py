@@ -10,10 +10,6 @@ Replaces:
 Environment Variables:
     BALDUR_SLACK_CHANNEL_DEFAULT_CHANNEL=#baldur-alerts
     BALDUR_SLACK_CHANNEL_CRITICAL_CHANNEL=#baldur-critical
-
-Reference:
-- docs/baldur/middleware_system/92_CONFIG_IMPLEMENTATION_GUIDE.md (Week 4 [24])
-- docs/baldur/middleware_system/91_CONFIG_INVENTORY.md §6.33
 """
 
 from pydantic import Field, field_validator

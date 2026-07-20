@@ -11,9 +11,6 @@ Replaces:
 Environment Variables:
     BALDUR_SECURITY_INJECTION_BAN_HOURS=24
     ... etc
-
-Reference:
-- docs/baldur/middleware_system/40_PYDANTIC_CONFIG_MIGRATION.md
 """
 
 from pydantic import Field, field_validator

@@ -1,7 +1,4 @@
-"""Canary rollout URL patterns (gradual config change deployment).
-
-Reference: docs/baldur/middleware_system/71_CANARY_CONFIG_ROLLOUT.md
-"""
+"""Canary rollout URL patterns (gradual config change deployment)."""
 
 from __future__ import annotations
 

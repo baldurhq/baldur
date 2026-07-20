@@ -1,7 +1,7 @@
 """
 Blast Radius DNA Service - failure impact range management service
 
-Audit Integration (85_AUDIT_INTEGRATION_OVERVIEW.md Phase 1):
+Audit Integration (via log_blast_radius_audit in baldur.audit.helpers):
 - Policy configuration: log_blast_radius_audit (action="set_policy")
 - Dependency addition: log_blast_radius_audit (action="add_dependency")
 - Service isolation: log_blast_radius_audit (action="isolate_service")

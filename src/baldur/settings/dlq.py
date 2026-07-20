@@ -4,7 +4,7 @@ DLQ (Dead Letter Queue) Settings - Pydantic v2.
 Single Source of Truth for DLQ configuration.
 
 Replaces:
-- core/config.py:DLQConfig (lines 36-45)
+- core/config.py:DLQConfig
 - core/safe_defaults.py:SAFE_DEFAULTS["dlq"]
 - core/safe_defaults.py:VALIDATION_RULES["dlq"]
 
@@ -12,9 +12,6 @@ Environment Variables:
     BALDUR_DLQ_ENABLED=true
     BALDUR_DLQ_RETRY_DELAY=60
     ... etc
-
-Reference:
-- docs/baldur/middleware_system/40_PYDANTIC_CONFIG_MIGRATION.md
 """
 
 from pydantic import Field, field_validator
@@ -40,8 +37,8 @@ class DLQSettings(BaseSettings):
     model_config = make_settings_config("BALDUR_DLQ_")
 
     # ==========================================================================
-    # Core Settings (from core/config.py lines 38-45)
-    # Validation rules from core/safe_defaults.py lines 238-244
+    # Core Settings (from core/config.py:DLQConfig)
+    # Validation rules from core/safe_defaults.py:VALIDATION_RULES["dlq"]
     # ==========================================================================
     enabled: bool = Field(
         default=True,

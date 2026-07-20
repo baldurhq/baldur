@@ -10,10 +10,6 @@ Environment Variables:
     BALDUR_THROTTLE_INITIAL_LIMIT=100
     BALDUR_THROTTLE_MIN_LIMIT=10
     BALDUR_THROTTLE_MAX_LIMIT=500
-
-Reference:
-- docs/baldur/middleware_system/92_CONFIG_IMPLEMENTATION_GUIDE.md (Week 2 [10])
-- docs/baldur/middleware_system/91_CONFIG_INVENTORY.md §7.1
 """
 
 import structlog

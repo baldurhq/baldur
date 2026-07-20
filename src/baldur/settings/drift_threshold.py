@@ -4,16 +4,13 @@ Drift Threshold Settings - Pydantic v2.
 Single Source of Truth for drift detection configuration.
 
 Replaces:
-- core/config.py:DriftThresholdConfig (lines 364-390)
+- core/config.py:DriftThresholdConfig
 - core/safe_defaults.py:SAFE_DEFAULTS["drift_threshold"]
 - core/safe_defaults.py:VALIDATION_RULES["drift_threshold"]
 
 Environment Variables:
     BALDUR_DRIFT_THRESHOLD_WARNING_THRESHOLD=0.05
     BALDUR_DRIFT_THRESHOLD_CRITICAL_THRESHOLD=0.20
-
-Reference:
-- docs/baldur/middleware_system/40_PYDANTIC_CONFIG_MIGRATION.md
 """
 
 from pydantic import AliasChoices, Field, field_validator
