@@ -1,12 +1,13 @@
 """
-Dependency Analyzer - 의존성 분석 및 Root Cause 억제.
+Dependency Analyzer - dependency analysis and root-cause suppression.
 
-복구 전 Blast Radius 평가, 연쇄 장애 시 Root Cause만 알림.
+Assesses blast radius before recovery and, during cascading failures, alerts
+only on the root cause.
 
-기능:
-1. 복구 전 Blast Radius 평가 (영향 범위 분석)
-2. Root Cause 기반 알림 억제 (연쇄 장애 시 중복 알림 방지)
-3. 복구 우선순위 결정 (인프라 → 애플리케이션)
+Capabilities:
+1. Blast-radius assessment before recovery (impact analysis)
+2. Root-cause based alert suppression (avoids duplicate alerts in a cascade)
+3. Recovery prioritization (infrastructure → application)
 """
 
 from __future__ import annotations
@@ -19,19 +20,20 @@ logger = structlog.get_logger()
 
 
 # =============================================================================
-# 컴포넌트 의존성 맵 (Meta-Watchdog 전용)
+# Component dependency map (Meta-Watchdog only)
 # =============================================================================
 
-# 인프라 컴포넌트가 의존하는 컴포넌트들 (인프라 → 애플리케이션)
-# redis가 죽으면 circuit_breaker, dlq, recovery_pipeline이 영향받음
+# Components that depend on each infrastructure component
+# (infrastructure → application).
+# If redis dies, circuit_breaker, dlq and recovery_pipeline are affected.
 COMPONENT_DEPENDENCIES: dict[str, list[str]] = {
     "redis": ["circuit_breaker", "dlq", "recovery_pipeline"],
     "database": ["recovery_pipeline"],
     "celery_broker": ["dlq"],
 }
 
-# 역방향 의존성 맵 (component -> root cause)
-# circuit_breaker가 문제일 때 redis가 root cause일 수 있음
+# Reverse dependency map (component -> root cause).
+# When circuit_breaker is failing, redis may be the root cause.
 REVERSE_DEPENDENCIES: dict[str, str] = {}
 for _root, _deps in COMPONENT_DEPENDENCIES.items():
     for _dep in _deps:
@@ -40,62 +42,62 @@ for _root, _deps in COMPONENT_DEPENDENCIES.items():
 
 @dataclass
 class RecoveryImpactAssessment:
-    """복구 영향 평가 결과."""
+    """Recovery impact assessment result."""
 
     component: str
-    """대상 컴포넌트."""
+    """Target component."""
 
     can_proceed: bool
-    """복구 진행 가능 여부."""
+    """Whether recovery may proceed."""
 
     blast_radius_level: str
-    """영향 범위 레벨 (MINIMAL/MODERATE/EXTENSIVE/CRITICAL)."""
+    """Blast radius level (MINIMAL/MODERATE/EXTENSIVE/CRITICAL)."""
 
     affected_components: list[str]
-    """영향받는 컴포넌트 목록."""
+    """Affected components."""
 
     block_reason: str | None = None
-    """차단 사유 (can_proceed=False 시)."""
+    """Reason recovery was blocked (when can_proceed=False)."""
 
     warnings: list[str] = field(default_factory=list)
-    """경고 메시지 목록."""
+    """Warning messages."""
 
 
 @dataclass
 class SuppressionResult:
-    """알림 억제 결과."""
+    """Alert suppression result."""
 
     component: str
-    """대상 컴포넌트."""
+    """Target component."""
 
     suppressed: bool
-    """억제 여부."""
+    """Whether the alert was suppressed."""
 
     root_cause: str | None
-    """Root Cause 컴포넌트."""
+    """Root cause component."""
 
     reason: str
-    """억제/비억제 사유."""
+    """Why the alert was (or was not) suppressed."""
 
 
 class DependencyAnalyzer:
     """
-    의존성 분석기.
+    Dependency analyzer.
 
-    기능:
-    1. 복구 전 Blast Radius 평가
-    2. Root Cause 기반 알림 억제
-    3. 복구 우선순위 결정
+    Capabilities:
+    1. Blast-radius assessment before recovery
+    2. Root-cause based alert suppression
+    3. Recovery prioritization
 
-    사용 예시:
+    Example:
         analyzer = DependencyAnalyzer()
 
-        # 복구 영향 평가
+        # Assess recovery impact
         assessment = analyzer.assess_recovery_impact("redis", {"dlq", "circuit_breaker"})
         if assessment.can_proceed:
             perform_recovery()
 
-        # 알림 억제 판단
+        # Decide whether to suppress the alert
         result = analyzer.should_suppress_alert("circuit_breaker", {"redis", "circuit_breaker"})
         if not result.suppressed:
             send_alert()
@@ -107,11 +109,11 @@ class DependencyAnalyzer:
         reverse_deps: dict[str, str] | None = None,
     ):
         """
-        초기화.
+        Initialize.
 
         Args:
-            dependencies: 컴포넌트 의존성 맵 (None이면 기본값)
-            reverse_deps: 역방향 의존성 맵 (None이면 기본값)
+            dependencies: component dependency map (defaults when None)
+            reverse_deps: reverse dependency map (defaults when None)
         """
         self._dependencies = dependencies or COMPONENT_DEPENDENCIES.copy()
         self._reverse_deps = reverse_deps or REVERSE_DEPENDENCIES.copy()
@@ -122,24 +124,24 @@ class DependencyAnalyzer:
         failing_components: set[str] | None = None,
     ) -> RecoveryImpactAssessment:
         """
-        복구 전 영향 평가.
+        Assess impact before recovery.
 
-        복구 대상 컴포넌트가 다른 컴포넌트에 미치는 영향을 평가합니다.
+        Evaluates the effect the recovery target has on other components.
 
         Args:
-            component: 복구 대상 컴포넌트
-            failing_components: 현재 실패 중인 컴포넌트 집합
+            component: recovery target component
+            failing_components: components currently failing
 
         Returns:
             RecoveryImpactAssessment
         """
         failing = failing_components or set()
 
-        # 해당 컴포넌트를 의존하는 컴포넌트 수집
+        # Collect the components that depend on this one
         affected = self._dependencies.get(component, [])
         affected_count = len(affected)
 
-        # 레벨 결정
+        # Determine the level
         if affected_count >= 5:
             level = "CRITICAL"
             can_proceed = False
@@ -157,12 +159,12 @@ class DependencyAnalyzer:
             can_proceed = True
             block_reason = None
 
-        # 경고 생성
+        # Build warnings
         warnings: list[str] = []
         if level in ("EXTENSIVE", "CRITICAL"):
             warnings.append(f"Recovery may affect {affected_count} components")
 
-        # 이미 실패 중인 컴포넌트와 겹치면 추가 경고
+        # Extra warning when the affected set overlaps already-failing components
         overlap = set(affected) & failing
         if overlap:
             warnings.append(f"Already failing components affected: {overlap}")
@@ -182,22 +184,23 @@ class DependencyAnalyzer:
         failed_components: set[str],
     ) -> SuppressionResult:
         """
-        Root Cause 기반 알림 억제 판단.
+        Decide alert suppression based on the root cause.
 
-        예: Redis 실패 시 CB/DLQ 알림 억제 (redis가 root cause이므로)
+        Example: when Redis fails, suppress the CB/DLQ alerts because redis is
+        the root cause.
 
         Args:
-            component: 알림 대상 컴포넌트
-            failed_components: 현재 실패 중인 모든 컴포넌트
+            component: component the alert is about
+            failed_components: all components currently failing
 
         Returns:
             SuppressionResult
         """
-        # 이 컴포넌트의 root cause 확인
+        # Look up this component's root cause
         root_cause = self._reverse_deps.get(component)
 
         if root_cause and root_cause in failed_components:
-            # Root cause도 실패 중이면 이 컴포넌트 알림 억제
+            # The root cause is failing too, so suppress this component's alert
             return SuppressionResult(
                 component=component,
                 suppressed=True,
@@ -217,25 +220,26 @@ class DependencyAnalyzer:
         failed_components: set[str],
     ) -> list[str]:
         """
-        복구 우선순위 결정.
+        Determine the recovery order.
 
-        Root cause (인프라)를 먼저 복구해야 의존 컴포넌트도 복구됩니다.
+        The root cause (infrastructure) must be recovered first so that the
+        dependent components recover with it.
 
         Args:
-            failed_components: 실패 컴포넌트 집합
+            failed_components: failing components
 
         Returns:
-            우선순위 정렬된 컴포넌트 목록 (먼저 복구해야 할 것이 앞)
+            Components ordered by priority (recover the first entries first)
         """
         priority: list[str] = []
 
-        # 1순위: Root cause 컴포넌트 (redis, database 등 인프라)
+        # First: root-cause components (infrastructure such as redis, database)
         root_causes = set(self._dependencies.keys())
         for root in root_causes:
             if root in failed_components:
                 priority.append(root)
 
-        # 2순위: 나머지 컴포넌트
+        # Second: the remaining components
         for comp in failed_components:
             if comp not in priority:
                 priority.append(comp)
@@ -244,35 +248,35 @@ class DependencyAnalyzer:
 
     def get_dependent_components(self, component: str) -> list[str]:
         """
-        특정 컴포넌트를 의존하는 컴포넌트 목록 반환.
+        Return the components that depend on the given component.
 
         Args:
-            component: 컴포넌트 이름
+            component: component name
 
         Returns:
-            의존 컴포넌트 목록
+            Dependent components
         """
         return self._dependencies.get(component, [])
 
     def get_root_cause(self, component: str) -> str | None:
         """
-        특정 컴포넌트의 root cause 반환.
+        Return the root cause of a component.
 
         Args:
-            component: 컴포넌트 이름
+            component: component name
 
         Returns:
-            Root cause 컴포넌트 이름 (없으면 None)
+            Root cause component name (None when there is none)
         """
         return self._reverse_deps.get(component)
 
     def add_dependency(self, root: str, dependent: str) -> None:
         """
-        의존성 추가.
+        Add a dependency.
 
         Args:
-            root: Root 컴포넌트 (인프라)
-            dependent: 의존 컴포넌트 (애플리케이션)
+            root: root component (infrastructure)
+            dependent: dependent component (application)
         """
         if root not in self._dependencies:
             self._dependencies[root] = []
@@ -282,11 +286,11 @@ class DependencyAnalyzer:
 
     def remove_dependency(self, root: str, dependent: str) -> None:
         """
-        의존성 제거.
+        Remove a dependency.
 
         Args:
-            root: Root 컴포넌트
-            dependent: 의존 컴포넌트
+            root: root component
+            dependent: dependent component
         """
         if root in self._dependencies:
             try:
@@ -298,7 +302,7 @@ class DependencyAnalyzer:
 
 
 # =============================================================================
-# 싱글톤
+# Singleton
 # =============================================================================
 
 from baldur.utils.singleton import make_singleton_factory

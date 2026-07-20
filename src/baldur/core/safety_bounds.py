@@ -1,17 +1,17 @@
 """
-Safety Bounds - 자율 조정 안전 한계
+Safety Bounds - autonomous tuning safety limits.
 
-자율 조정이 위험한 범위로 벗어나지 않도록 보호합니다.
+Guards autonomous tuning against drifting into a dangerous range.
 
-핵심 기능:
-- 파라미터별 min/max 범위 검증
-- 한 번에 변경 가능한 최대 비율 제한
-- 런타임 한계 업데이트 (관리자 전용)
+Key features:
+- Per-parameter min/max range validation
+- Maximum change ratio allowed in a single cycle
+- Runtime bound updates (admin only)
 
-설정값은 SafetyBoundsSettings를 통해 환경변수로 오버라이드 가능:
+Values are overridable via SafetyBoundsSettings environment variables:
 - BALDUR_SAFETY_BOUNDS_TIMEOUT_MS_MIN / MAX / MAX_CHANGE
 - BALDUR_SAFETY_BOUNDS_RETRY_COUNT_MIN / MAX / MAX_CHANGE
-- 기타 파라미터...
+- Other parameters...
 """
 
 from __future__ import annotations
@@ -28,14 +28,14 @@ logger = structlog.get_logger()
 
 @dataclass
 class ParameterBound:
-    """파라미터 한계"""
+    """Parameter bound."""
 
     min_value: float
     max_value: float
-    max_change_per_cycle: float  # 한 번에 변경 가능한 최대 비율 (0.3 = 30%)
+    max_change_per_cycle: float  # Max change ratio per cycle (0.3 = 30%)
 
     def validate(self) -> bool:
-        """한계 설정 유효성 검사"""
+        """Validate the bound configuration."""
         if self.min_value > self.max_value:
             return False
         return not (self.max_change_per_cycle <= 0 or self.max_change_per_cycle > 1)
@@ -43,22 +43,23 @@ class ParameterBound:
 
 class SafetyBounds:
     """
-    안전 한계 관리
+    Safety bound management.
 
-    자율 조정의 범위를 제한하여 시스템 안정성 보호
+    Protects system stability by constraining the range of autonomous tuning.
 
-    보호 메커니즘:
-    1. 절대 범위: min_value ~ max_value
-    2. 변경폭 제한: 한 번에 max_change_per_cycle % 이내
-    3. 알 수 없는 파라미터 거부
+    Protection mechanisms:
+    1. Absolute range: min_value ~ max_value
+    2. Change limit: within max_change_per_cycle % per cycle
+    3. Rejection of unknown parameters
     """
 
     @classmethod
     def _get_default_bounds(cls) -> dict[str, ParameterBound]:
         """
-        SafetyBoundsSettings에서 기본 한계 설정 로드.
+        Load the default bounds from SafetyBoundsSettings.
 
-        환경변수로 오버라이드 가능한 파라미터별 한계값 반환.
+        Returns the per-parameter bounds, overridable via environment
+        variables.
         """
         settings = get_safety_bounds_settings()
         return {
@@ -121,13 +122,13 @@ class SafetyBounds:
     ):
         """
         Args:
-            custom_bounds: 커스텀 한계 설정
-            strict_mode: True면 알 수 없는 파라미터 거부
+            custom_bounds: Custom bound configuration
+            strict_mode: True rejects unknown parameters
         """
         self._lock = RLock()
         self.strict_mode = strict_mode
 
-        # 기본 한계 복사 (settings에서 로드)
+        # Copy the defaults (loaded from settings)
         default_bounds = self._get_default_bounds()
         self.bounds: dict[str, ParameterBound] = {
             k: ParameterBound(
@@ -138,7 +139,7 @@ class SafetyBounds:
             for k, v in default_bounds.items()
         }
 
-        # 커스텀 한계 적용
+        # Apply custom bounds
         if custom_bounds:
             for param, config in custom_bounds.items():
                 self.update_bounds(param, config)
@@ -155,15 +156,15 @@ class SafetyBounds:
         current_value: float | None = None,
     ) -> bool:
         """
-        값이 안전 한계 내인지 확인
+        Check whether a value is within the safety bounds.
 
         Args:
-            parameter: 파라미터 이름
-            new_value: 새로운 값
-            current_value: 현재 값 (변경폭 검증용)
+            parameter: Parameter name
+            new_value: New value
+            current_value: Current value (for change-ratio validation)
 
         Returns:
-            안전 한계 내이면 True
+            True if within the safety bounds
         """
         with self._lock:
             bound = self.bounds.get(parameter)
@@ -181,7 +182,7 @@ class SafetyBounds:
                 )
                 return True
 
-            # 범위 검증
+            # Range validation
             if new_value < bound.min_value:
                 logger.warning(
                     "safety_bounds.below_minimum",
@@ -200,7 +201,7 @@ class SafetyBounds:
                 )
                 return False
 
-            # 변경폭 검증
+            # Change-ratio validation
             if current_value is not None and current_value > 0:
                 change_ratio = abs(new_value - current_value) / current_value
                 if change_ratio > bound.max_change_per_cycle:
@@ -221,15 +222,15 @@ class SafetyBounds:
         current_value: float | None = None,
     ) -> float:
         """
-        값을 안전 한계 내로 제한
+        Clamp a value into the safety bounds.
 
         Args:
-            parameter: 파라미터 이름
-            value: 원하는 값
-            current_value: 현재 값 (변경폭 제한용)
+            parameter: Parameter name
+            value: Desired value
+            current_value: Current value (for change-ratio limiting)
 
         Returns:
-            안전 한계 내로 조정된 값
+            The value adjusted into the safety bounds
         """
         with self._lock:
             bound = self.bounds.get(parameter)
@@ -237,14 +238,14 @@ class SafetyBounds:
             if bound is None:
                 return value
 
-            # 절대 범위 적용
+            # Apply the absolute range
             clamped = max(bound.min_value, min(value, bound.max_value))
 
-            # 변경폭 제한 적용
+            # Apply the change-ratio limit
             if current_value is not None and current_value > 0:
                 max_change = current_value * bound.max_change_per_cycle
                 if abs(clamped - current_value) > max_change:
-                    # 변경 방향 유지하면서 폭만 제한
+                    # Keep the direction of change, cap only the magnitude
                     if clamped > current_value:
                         clamped = current_value + max_change
                     else:
@@ -258,14 +259,14 @@ class SafetyBounds:
         config: dict[str, float],
     ) -> bool:
         """
-        런타임에 한계 업데이트 (관리자 전용)
+        Update a bound at runtime (admin only).
 
         Args:
-            parameter: 파라미터 이름
+            parameter: Parameter name
             config: {"min_value": x, "max_value": y, "max_change_per_cycle": z}
 
         Returns:
-            성공 여부
+            True on success
         """
         with self._lock:
             try:
@@ -299,7 +300,7 @@ class SafetyBounds:
                 return False
 
     def remove_bounds(self, parameter: str) -> bool:
-        """한계 제거"""
+        """Remove a bound."""
         with self._lock:
             if parameter in self.bounds:
                 del self.bounds[parameter]
@@ -311,7 +312,7 @@ class SafetyBounds:
             return False
 
     def get_bounds(self, parameter: str) -> dict[str, float] | None:
-        """특정 파라미터의 한계 조회"""
+        """Get the bound for a specific parameter."""
         with self._lock:
             bound = self.bounds.get(parameter)
             if bound is None:
@@ -323,7 +324,7 @@ class SafetyBounds:
             }
 
     def get_all_bounds(self) -> dict[str, dict[str, float]]:
-        """모든 한계 조회"""
+        """Get all bounds."""
         with self._lock:
             return {
                 param: {
@@ -339,7 +340,7 @@ class SafetyBounds:
         values: dict[str, float],
         current_values: dict[str, float] | None = None,
     ) -> dict[str, bool]:
-        """여러 값을 한 번에 검증"""
+        """Validate several values at once."""
         results = {}
         for param, value in values.items():
             current = current_values.get(param) if current_values else None
@@ -347,7 +348,7 @@ class SafetyBounds:
         return results
 
     def reset_to_defaults(self) -> None:
-        """기본 한계로 리셋 (settings에서 다시 로드)"""
+        """Reset to the default bounds (reloaded from settings)."""
         with self._lock:
             default_bounds = self._get_default_bounds()
             self.bounds = {

@@ -1,7 +1,7 @@
 """
-Meta-Watchdog 설정 (하위 호환 re-export).
+Meta-Watchdog settings (backward-compatible re-export).
 
-실제 정의: baldur.settings.meta_watchdog
+Defined in: baldur.settings.meta_watchdog
 """
 
 from baldur.settings.meta_watchdog import (  # noqa: F401

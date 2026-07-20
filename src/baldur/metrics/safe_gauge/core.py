@@ -15,9 +15,9 @@ Enhanced Features (Metric Reliability):
 - Stabilization Period: Gradual recovery from strict mode
 
 Memory Management (LRU Cache):
-- 레이블 조합이 무한 증가하는 것을 방지하기 위한 LRU 캐시
-- max_label_combinations로 최대 캐시 크기 설정
-- Eviction 시 경고 로그 및 메트릭 기록
+- LRU cache preventing unbounded growth of label combinations
+- max_label_combinations sets the maximum cache size
+- Eviction emits a warning log and records a metric
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ logger = structlog.get_logger()
 
 
 def _get_max_label_combinations() -> int:
-    """SafeGaugeSettings에서 최대 레이블 조합 수를 가져온다."""
+    """Read the max label-combination count from SafeGaugeSettings."""
     try:
         from baldur.settings.safe_gauge import get_safe_gauge_settings
 
@@ -84,8 +84,9 @@ class SafeGaugeChild:
         Args:
             gauge_child: The original Prometheus Gauge child (labeled)
             label_values: Label key-value pairs for logging
-            staleness_threshold: Seconds before data is considered stale (default: 5분)
-            stabilization_duration: Seconds for gradual recovery (default: 60초)
+            staleness_threshold: Seconds before data is considered stale
+                (default: 5 min)
+            stabilization_duration: Seconds for gradual recovery (default: 60s)
         """
         self._gauge_child = gauge_child
         self._label_values = label_values
@@ -104,28 +105,28 @@ class SafeGaugeChild:
 
     @property
     def sync_info(self) -> SyncInfo:
-        """동기화 정보 조회."""
+        """Sync info."""
         return self._sync_info
 
     @property
     def is_synced(self) -> bool:
-        """데이터 신뢰 가능 여부."""
+        """Whether the data can be trusted."""
         self._sync_info.check_staleness()
         return self._sync_info.is_synced
 
     @property
     def is_recovering(self) -> bool:
-        """복구 중 여부."""
+        """Whether recovery is in progress."""
         return self._sync_info.is_recovering
 
     @property
     def last_sync_time(self) -> float | None:
-        """마지막 동기화 시간."""
+        """Time of the last sync."""
         return self._sync_info.last_sync_time
 
     @property
     def sync_age_seconds(self) -> float | None:
-        """마지막 동기화 이후 경과 시간."""
+        """Time elapsed since the last sync."""
         return self._sync_info.age_seconds
 
     def inc(self, amount: float = 1) -> None:
@@ -240,20 +241,20 @@ class SafeGaugeChild:
 
     def mark_stale(self, reason: str = "external") -> None:
         """
-        수동으로 stale 상태 마킹.
+        Manually mark the value as stale.
 
         Args:
-            reason: Stale 이유
+            reason: Reason for going stale
         """
         with self._lock:
             self._sync_info.mark_stale(reason)
 
     def get_reliability_info(self) -> dict[str, Any]:
         """
-        메트릭 신뢰도 정보 반환.
+        Return metric reliability info.
 
         Returns:
-            신뢰도 정보 딕셔너리
+            Reliability info dict
         """
         with self._lock:
             self._sync_info.check_staleness()
@@ -283,9 +284,9 @@ class SafeGauge:
     - Eventual consistency (Reconciler syncs periodically)
 
     Memory Management:
-    - LRU 캐시로 레이블 조합 무한 증가 방지
-    - max_label_combinations 초과 시 가장 오래된 레이블 조합 제거
-    - Eviction 시 경고 로그 및 선택적 콜백 호출
+    - An LRU cache prevents unbounded growth of label combinations
+    - Past max_label_combinations, the oldest combination is dropped
+    - Eviction emits a warning log and calls the optional callback
 
     Example:
         >>> from prometheus_client import Gauge
@@ -297,12 +298,12 @@ class SafeGauge:
         >>> safe.labels(domain="payment").dec()  # Won't go below 0
 
     Environment Settings:
-        - 단일 서버: max_label_combinations=1000 (기본값)
+        - Single server: max_label_combinations=1000 (default)
         - K8s 10 Pods: max_label_combinations=500
         - K8s 100+ Pods: max_label_combinations=200
     """
 
-    # 하위 호환성용 레거시 상수
+    # Legacy constant kept for backward compatibility
     DEFAULT_MAX_LABEL_COMBINATIONS = 1000
 
     def __init__(
@@ -316,10 +317,11 @@ class SafeGauge:
 
         Args:
             gauge: Prometheus Gauge to wrap. If None, operations are no-ops.
-            max_label_combinations: 캐시할 최대 레이블 조합 수. None이면 Settings에서 가져옴.
-                                    초과 시 가장 오래된 조합 자동 제거.
-            on_eviction: 레이블 조합 제거 시 호출되는 콜백 (모니터링용).
-                        (evicted_key, evicted_child) -> None
+            max_label_combinations: Max label combinations to cache. Read from
+                Settings when None. Past the limit, the oldest combination is
+                dropped automatically.
+            on_eviction: Callback invoked when a label combination is evicted
+                (for monitoring). (evicted_key, evicted_child) -> None
         """
         self._gauge = gauge
         self._children: OrderedDict[tuple, SafeGaugeChild] = OrderedDict()
@@ -336,8 +338,8 @@ class SafeGauge:
         """
         Get a SafeGaugeChild for the given labels.
 
-        LRU 캐시 사용: 최근 접근한 레이블 조합은 보존되고,
-        max_label_combinations 초과 시 가장 오래된 조합 제거.
+        Uses an LRU cache: recently accessed label combinations are kept, and
+        past max_label_combinations the oldest combination is dropped.
 
         Args:
             **kwargs: Label key-value pairs
@@ -354,15 +356,15 @@ class SafeGauge:
 
         with self._lock:
             if key in self._children:
-                # LRU: 최근 접근으로 이동
+                # LRU: move to the most-recently-used end
                 self._children.move_to_end(key)
                 return self._children[key]
 
-            # 캐시 용량 초과 시 가장 오래된 항목 제거
+            # Over capacity: drop the oldest entry
             if len(self._children) >= self._max_label_combinations:
                 self._evict_oldest()
 
-            # 새 child 생성
+            # Create a new child
             gauge_child = self._gauge.labels(**kwargs)
             child = SafeGaugeChild(gauge_child, kwargs)
             self._children[key] = child
@@ -370,10 +372,10 @@ class SafeGauge:
 
     def _evict_oldest(self) -> None:
         """
-        가장 오래된 레이블 조합 제거 (LRU eviction).
+        Drop the oldest label combination (LRU eviction).
 
-        제거된 조합의 shadow_value는 손실됩니다.
-        경고 로그를 기록하고, on_eviction 콜백이 있으면 호출합니다.
+        The evicted combination's shadow_value is lost. Emits a warning log
+        and invokes the on_eviction callback when one is set.
         """
         if not self._children:
             return
@@ -381,7 +383,7 @@ class SafeGauge:
         oldest_key, oldest_child = self._children.popitem(last=False)
         self._eviction_count += 1
 
-        # 운영 인지를 위한 경고 로그
+        # Warning log for operator awareness
         logger.warning(
             "safe_gauge.lru_eviction",
             eviction_count=self._eviction_count,
@@ -390,17 +392,17 @@ class SafeGauge:
             max_label_combinations=self._max_label_combinations,
         )
 
-        # Eviction 메트릭 기록 (prometheus가 있는 경우)
+        # Record an eviction metric (when prometheus is present)
         try:
             from baldur.metrics.prometheus import PROMETHEUS_AVAILABLE
 
             if PROMETHEUS_AVAILABLE:
-                # 간단한 Counter로 기록 (별도 정의 필요 시 확장)
-                pass  # 메트릭은 선택적, 로그만으로도 충분
+                # Record via a simple Counter (extend if a dedicated one is needed)
+                pass  # The metric is optional; the log alone is sufficient
         except ImportError:
             pass
 
-        # 콜백 호출 (커스텀 처리용)
+        # Invoke the callback (for custom handling)
         if self._on_eviction:
             try:
                 self._on_eviction(oldest_key, oldest_child)
@@ -414,7 +416,7 @@ class SafeGauge:
         """
         Get existing SafeGaugeChild without creating new one.
 
-        LRU 순서는 업데이트하지 않음 (조회만).
+        Does not update the LRU order (read-only lookup).
 
         Args:
             **kwargs: Label key-value pairs
@@ -433,30 +435,30 @@ class SafeGauge:
 
     @property
     def current_size(self) -> int:
-        """현재 캐시된 레이블 조합 수."""
+        """Number of label combinations currently cached."""
         with self._lock:
             return len(self._children)
 
     @property
     def max_size(self) -> int:
-        """최대 캐시 가능한 레이블 조합 수."""
+        """Maximum number of label combinations that can be cached."""
         return self._max_label_combinations
 
     @property
     def eviction_count(self) -> int:
-        """생성 이후 총 eviction 횟수."""
+        """Total evictions since creation."""
         return self._eviction_count
 
     def get_cache_stats(self) -> dict[str, Any]:
         """
-        캐시 통계 정보 반환 (모니터링용).
+        Return cache statistics (for monitoring).
 
         Returns:
             Dict with cache stats:
-            - current_size: 현재 캐시 크기
-            - max_size: 최대 캐시 크기
-            - eviction_count: 총 eviction 횟수
-            - utilization_percent: 캐시 사용률 (%)
+            - current_size: Current cache size
+            - max_size: Maximum cache size
+            - eviction_count: Total evictions
+            - utilization_percent: Cache utilization (%)
         """
         with self._lock:
             current = len(self._children)

@@ -1,24 +1,28 @@
 """
-Fallback Policy — 실패 시 대체 응답 제공.
+Fallback Policy — serve a substitute response on failure.
 
-현재 3곳에 분산된 Fallback 로직을 통합하는 순수 Policy 구현:
-- core/fallback_strategy.py의 FallbackStrategy ABC + 3개 구현체
-- services/circuit_breaker/service.py의 should_allow_with_fallback()
-- resilience/bulkhead/decorator.py의 @bulkhead(fallback=...)
+A pure Policy implementation unifying the fallback logic currently spread
+across three places:
+- the FallbackStrategy ABC + its 3 implementations in core/fallback_strategy.py
+- should_allow_with_fallback() in services/circuit_breaker/service.py
+- @bulkhead(fallback=...) in resilience/bulkhead/decorator.py
 
-기존 FallbackStrategy 구현체를 래핑하지 않고,
-네이티브 fallback_chain + predicate 기반으로 새로 작성한다.
-RetryPolicy가 기존 RetryHandler를 재사용하지 않은 선례와 동일하다.
+Rather than wrapping the existing FallbackStrategy implementations, this is
+written fresh on a native fallback_chain + predicate basis — same precedent as
+RetryPolicy not reusing the existing RetryHandler.
 
-구성:
-- FallbackPolicy: 동기 Fallback (ResiliencePolicy Protocol 구현)
-- AsyncFallbackPolicy: 비동기 Fallback (AsyncResiliencePolicy Protocol 구현)
-- partition_aware_chain(): PartitionState Provider 기반 동적 fallback chain 생성기
-- _FALLBACK_MODE_TO_OUTCOME: FallbackMode → PolicyOutcome 하위 호환 매핑
+Contents:
+- FallbackPolicy: sync Fallback (implements the ResiliencePolicy Protocol)
+- AsyncFallbackPolicy: async Fallback (implements the AsyncResiliencePolicy
+  Protocol)
+- partition_aware_chain(): builds a dynamic fallback chain from a PartitionState
+  provider
+- _FALLBACK_MODE_TO_OUTCOME: FallbackMode → PolicyOutcome compatibility mapping
 
-두 가지 실행 경로:
-- execute(func): 단독 사용 — func 실행 후 실패 시 Fallback
-- _apply_fallback(error): Composer 전용 — func 재실행 없이 Fallback만 시도
+Two execution paths:
+- execute(func): standalone — run func, fall back on failure
+- _apply_fallback(error): Composer-only — try the fallback without re-running
+  func
 """
 
 from __future__ import annotations
@@ -106,11 +110,11 @@ def _fallback_accepts_error(fn: Callable[..., Any]) -> bool:
 
 
 # =============================================================================
-# FallbackMode → PolicyOutcome 하위 호환 매핑
+# FallbackMode → PolicyOutcome compatibility mapping
 # =============================================================================
 
-# FallbackMode(str, Enum) 값을 키로 사용하여 런타임 import 없이 매핑한다.
-# core/fallback_strategy.py의 FallbackMode 값과 1:1 대응한다.
+# Keyed on the FallbackMode(str, Enum) values so the mapping needs no runtime
+# import. 1:1 with the FallbackMode values in core/fallback_strategy.py.
 _FALLBACK_MODE_TO_OUTCOME: dict[str, PolicyOutcome] = {
     "fail_fast": PolicyOutcome.FAILURE,
     "use_cache": PolicyOutcome.SUCCESS_WITH_FALLBACK,
@@ -122,26 +126,29 @@ _FALLBACK_MODE_TO_OUTCOME: dict[str, PolicyOutcome] = {
 
 
 # =============================================================================
-# FallbackPolicy — 동기 Fallback Policy
+# FallbackPolicy — sync Fallback Policy
 # =============================================================================
 
 
 class FallbackPolicy(ResiliencePolicy[T], Generic[T]):
     """
-    동기 Fallback Policy — 실패 시 대체 응답 제공.
+    Sync Fallback Policy — serve a substitute response on failure.
 
-    순수 fallback_chain + predicate 기반.
-    Kill Switch, ErrorBudgetGate, Audit, DLQ 등 외부 관심사는
-    PolicyComposer의 Guard/Hook/Sink가 처리한다.
+    Purely fallback_chain + predicate based. External concerns such as Kill
+    Switch, ErrorBudgetGate, Audit, and DLQ are handled by PolicyComposer's
+    Guard/Hook/Sink.
 
-    두 가지 실행 경로:
-    - execute(func): 단독 사용 — func 실행 후 실패 시 Fallback
-    - _apply_fallback(error): Composer 전용 — func 재실행 없이 Fallback만 시도
+    Two execution paths:
+    - execute(func): standalone — run func, fall back on failure
+    - _apply_fallback(error): Composer-only — try the fallback without
+      re-running func
 
-    예외 처리 컨트랙트:
-    - execute()는 모든 예외를 흡수하여 PolicyResult로 반환한다.
-    - FallbackPolicy는 Policy 체인의 마지막 보루이므로 예외를 재전파하지 않는다.
-    - KeyboardInterrupt/SystemExit는 except Exception 패턴으로 자동 통과한다.
+    Exception-handling contract:
+    - execute() absorbs every exception and returns it as a PolicyResult.
+    - FallbackPolicy is the last line of the Policy chain, so it never
+      re-raises.
+    - KeyboardInterrupt/SystemExit pass through automatically via the
+      ``except Exception`` pattern.
     """
 
     def __init__(
@@ -187,12 +194,12 @@ class FallbackPolicy(ResiliencePolicy[T], Generic[T]):
 
     @property
     def name(self) -> str:
-        """Policy 식별자."""
+        """Policy identifier."""
         return "fallback"
 
     @staticmethod
     def _default_predicate(result: PolicyResult) -> bool:
-        """기본 조건: outcome이 SUCCESS가 아니면 Fallback 활성화."""
+        """Default condition: activate the fallback on any non-SUCCESS outcome."""
         return result.outcome != PolicyOutcome.SUCCESS
 
     def execute(
@@ -362,21 +369,23 @@ class FallbackPolicy(ResiliencePolicy[T], Generic[T]):
         original_error: Exception,
     ) -> PolicyResult[T] | None:
         """
-        기존 FallbackStrategy 구현체를 통한 과도기 Fallback 시도.
+        Transitional fallback attempt through an existing FallbackStrategy.
 
-        strategy.execute()에 예외를 던지는 더미 함수를 primary_fn으로 주입하여
-        fallback 경로를 유도한다.
+        Injects a dummy primary_fn that raises into strategy.execute(), driving
+        the strategy down its fallback path.
 
-        구조적 제약:
-        - SimpleFallback: primary_fn 실패 → fallback_fn/default_value 경로 동작
-        - PartitionAwareFallback: primary_fn 실패 → _handle_failure() 경로 동작
-        - CacheFirstFallback: primary_fn을 무시하므로 cache_fn이 항상 먼저 실행됨
+        Structural constraints:
+        - SimpleFallback: primary_fn fails → fallback_fn/default_value path runs
+        - PartitionAwareFallback: primary_fn fails → _handle_failure() path runs
+        - CacheFirstFallback: ignores primary_fn, so cache_fn always runs first
 
         Returns:
-            PolicyResult[T] | None: 변환된 결과, 또는 실패 시 None (네이티브 경로로 진행).
+            PolicyResult[T] | None: the converted result, or None on failure
+            (continue down the native path).
         """
         try:
-            # 원본 예외를 재발생시키는 더미 함수로 fallback 경로 유도
+            # Dummy function re-raising the original error to drive the
+            # fallback path
             def failing_primary() -> T:
                 raise original_error
 
@@ -397,10 +406,11 @@ class FallbackPolicy(ResiliencePolicy[T], Generic[T]):
         original_error: Exception,
     ) -> PolicyResult[T]:
         """
-        FallbackResult → PolicyResult 변환.
+        Convert a FallbackResult into a PolicyResult.
 
-        FallbackMode 값을 _FALLBACK_MODE_TO_OUTCOME 매핑으로 PolicyOutcome에 대응하고,
-        FallbackMode 정보를 metadata["fallback_mode"]에 보존한다.
+        Maps the FallbackMode value onto a PolicyOutcome via
+        _FALLBACK_MODE_TO_OUTCOME, and preserves the FallbackMode information in
+        metadata["fallback_mode"].
         """
         fallback_mode_value = (
             fallback_result.fallback_mode.value
@@ -414,7 +424,7 @@ class FallbackPolicy(ResiliencePolicy[T], Generic[T]):
             else PolicyOutcome.SUCCESS,
         )
 
-        # FAIL_FAST인 경우 FAILURE로 매핑
+        # FAIL_FAST maps to FAILURE
         if fallback_result.used_fallback and fallback_mode_value == "fail_fast":
             outcome = PolicyOutcome.FAILURE
 
@@ -437,7 +447,7 @@ class FallbackPolicy(ResiliencePolicy[T], Generic[T]):
 
 
 # =============================================================================
-# AsyncFallbackPolicy — 비동기 Fallback Policy
+# AsyncFallbackPolicy — async Fallback Policy
 # =============================================================================
 
 

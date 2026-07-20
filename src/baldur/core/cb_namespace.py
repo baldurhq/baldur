@@ -1,12 +1,12 @@
 """
-Cell-scoped Circuit Breaker Composite Key 관리.
+Cell-scoped Circuit Breaker composite key management.
 
-CB의 service_name을 ``{base_name}::{cell_id}`` 형태로 네임스페이스화하여
-Cell별로 물리적으로 분리된 CB 인스턴스를 생성한다.
+Namespaces a CB's service_name into the ``{base_name}::{cell_id}`` form so that
+each Cell gets a physically separate CB instance.
 
-기존 CB는 ``service_name=payment_api`` 형태로 유지되며,
-``parse_composite_cb_name()`` 이 구분자 없는 키를 ``("payment_api", "")`` 로
-처리하므로 레거시 코드에 영향 없음.
+Existing CBs keep the ``service_name=payment_api`` form: since
+``parse_composite_cb_name()`` maps a key without the separator to
+``("payment_api", "")``, legacy code is unaffected.
 """
 
 from __future__ import annotations
@@ -16,26 +16,26 @@ COMPOSITE_KEY_SEPARATOR = "::"
 
 def make_cell_scoped_cb_name(service_name: str, cell_id: str) -> str:
     """
-    Cell-scoped CB Composite Key 생성.
+    Build a cell-scoped CB composite key.
 
     Args:
-        service_name: 기본 서비스 이름 (예: ``"payment_api"``)
-        cell_id: Cell 식별자 (예: ``"cell-3"``)
+        service_name: Base service name (e.g. ``"payment_api"``)
+        cell_id: Cell identifier (e.g. ``"cell-3"``)
 
     Returns:
-        Composite Key (예: ``"payment_api::cell-3"``)
+        Composite key (e.g. ``"payment_api::cell-3"``)
     """
     return f"{service_name}{COMPOSITE_KEY_SEPARATOR}{cell_id}"
 
 
 def parse_composite_cb_name(composite_name: str) -> tuple[str, str]:
     """
-    Composite Key에서 ``(service_name, cell_id)`` 분리.
+    Split a composite key into ``(service_name, cell_id)``.
 
-    레거시 호환: 구분자가 없으면 ``cell_id=""`` 반환.
+    Legacy compatibility: returns ``cell_id=""`` when the separator is absent.
 
     Args:
-        composite_name: CB 식별자
+        composite_name: CB identifier
 
     Returns:
         ``(base_service_name, cell_id)``
@@ -43,4 +43,4 @@ def parse_composite_cb_name(composite_name: str) -> tuple[str, str]:
     if COMPOSITE_KEY_SEPARATOR in composite_name:
         parts = composite_name.split(COMPOSITE_KEY_SEPARATOR, 1)
         return parts[0], parts[1]
-    return composite_name, ""  # 레거시 단일 키 호환
+    return composite_name, ""  # Legacy single-key compatibility

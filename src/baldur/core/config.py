@@ -57,39 +57,39 @@ from baldur.settings import (
 @dataclass
 class ApprovalRequest:
     """
-    4-Eyes Approval Request (듀얼 승인 요청).
+    4-Eyes Approval Request (dual approval request).
 
-    Admin A가 요청 → Admin B가 승인/거부하는 워크플로우.
-    금융권 컴플라이언스 요구사항 충족.
+    Workflow where Admin A raises a request and Admin B approves or rejects it.
+    Satisfies financial-sector compliance requirements.
 
     Workflow:
-        1. Admin A: 요청 생성 (PENDING)
-        2. Admin B: 알림 수신
-        3. Admin B: 24시간 내 APPROVED/REJECTED
-        4. 만료 시: EXPIRED
+        1. Admin A: create the request (PENDING)
+        2. Admin B: receive the notification
+        3. Admin B: APPROVED/REJECTED within 24 hours
+        4. On expiry: EXPIRED
 
-    PCI-DSS Dual Control Requirements 준수.
+    Complies with PCI-DSS dual control requirements.
     """
 
     id: str = ""
     request_type: str = ""  # config_change, mode_change, emergency_action
     description: str = ""
 
-    # 요청자
+    # Requester
     requested_by: str = ""
     requested_at: str = ""  # ISO format
 
-    # 승인자
+    # Approver
     approved_by: str = ""
     approved_at: str = ""  # ISO format
 
-    # 상태: PENDING, APPROVED, REJECTED, EXPIRED
+    # Status: PENDING, APPROVED, REJECTED, EXPIRED
     status: str = "PENDING"
 
-    # 요청 데이터
+    # Request data
     payload: dict[str, Any] = field(default_factory=dict)
 
-    # 만료 시간 (기본 24시간)
+    # Expiry time (24 hours by default)
     expires_at: str = ""  # ISO format
 
 

@@ -1,7 +1,7 @@
 """
-Leader Election 설정 (하위 호환 re-export).
+Leader Election settings (backward-compatible re-export).
 
-실제 정의: baldur.settings.leader_election
+Actual definitions: baldur.settings.leader_election
 """
 
 from baldur.settings.leader_election import (  # noqa: F401

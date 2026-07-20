@@ -1,13 +1,13 @@
 """
 Fallback Escalation Handler.
 
-Slack/PagerDuty 전송 실패 시 로컬 디스크에 기록.
-나중에 drain하거나 수동으로 처리할 수 있도록 합니다.
+Records escalations on local disk when Slack/PagerDuty delivery fails, so they
+can be drained later or handled manually.
 
-기능:
-- 실패한 에스컬레이션을 JSONL 파일에 기록
-- 메모리 버퍼 폴백 (디스크 쓰기도 실패 시)
-- 대기 중인 에스컬레이션 조회 및 카운트
+Capabilities:
+- Records failed escalations to a JSONL file
+- Memory buffer fallback (when the disk write also fails)
+- Lookup and count of pending escalations
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from baldur.utils.time import utc_now
 
 logger = structlog.get_logger()
 
-# 폴백 로그 경로
+# Fallback log path
 DEFAULT_ESCALATION_LOG_PATH = Path(
     os.environ.get(
         "BALDUR_EMERGENCY_ESCALATION_LOG",
@@ -36,16 +36,16 @@ DEFAULT_ESCALATION_LOG_PATH = Path(
 
 class FallbackEscalationHandler:
     """
-    폴백 에스컬레이션 핸들러.
+    Fallback escalation handler.
 
-    Slack/PagerDuty API 장애 시 로컬 디스크에 기록합니다.
-    나중에 drain하거나 수동으로 처리 가능합니다.
+    Records to local disk when the Slack/PagerDuty API is unavailable. The
+    records can be drained later or handled manually.
 
-    저장 구조:
-    - 파일: JSONL (줄당 하나의 JSON 객체)
-    - 메모리 버퍼: 디스크 쓰기 실패 시 폴백
+    Storage layout:
+    - File: JSONL (one JSON object per line)
+    - Memory buffer: fallback when the disk write fails
 
-    사용 예시:
+    Example:
         handler = FallbackEscalationHandler()
 
         handler.record_failed_escalation(
@@ -58,7 +58,7 @@ class FallbackEscalationHandler:
             error_message="Connection timeout",
         )
 
-        # 대기 중인 에스컬레이션 확인
+        # Inspect the pending escalations
         count = handler.get_pending_count()
         entries = handler.get_pending_escalations()
     """
@@ -69,25 +69,25 @@ class FallbackEscalationHandler:
         max_buffer_size: int = 1000,
     ):
         """
-        초기화.
+        Initialize.
 
         Args:
-            log_path: 로그 파일 경로 (None이면 기본값)
-            max_buffer_size: 메모리 버퍼 최대 크기
+            log_path: log file path (default when None)
+            max_buffer_size: maximum memory buffer size
         """
         self._log_path = Path(log_path) if log_path else DEFAULT_ESCALATION_LOG_PATH
         self._lock = (
             threading.RLock()
-        )  # 재진입 가능 락 (drain_to_file에서 _write_to_file 호출 시 필요)
+        )  # reentrant: drain_to_file calls _write_to_file while holding it
         self._memory_buffer: list[dict[str, Any]] = []
         self._max_buffer_size = max_buffer_size
 
     def _ensure_directory(self) -> bool:
         """
-        로그 디렉토리 생성.
+        Create the log directory.
 
         Returns:
-            디렉토리 생성 성공 여부
+            Whether the directory is available
         """
         try:
             self._log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -110,19 +110,19 @@ class FallbackEscalationHandler:
         error_message: str,
     ) -> bool:
         """
-        실패한 에스컬레이션 기록.
+        Record a failed escalation.
 
         Args:
-            component: 컴포넌트 이름
-            title: 에스컬레이션 제목
-            description: 설명
-            level: 심각도 레벨
-            details: 상세 정보
-            failed_channels: 실패한 채널 목록
-            error_message: 에러 메시지
+            component: component name
+            title: escalation title
+            description: description
+            level: severity level
+            details: detailed information
+            failed_channels: channels that failed
+            error_message: error message
 
         Returns:
-            기록 성공 여부
+            Whether the record was stored
         """
         entry = {
             "timestamp": utc_now().isoformat(),
@@ -137,22 +137,22 @@ class FallbackEscalationHandler:
             "requires_manual_review": True,
         }
 
-        # 1. 파일에 기록 시도
+        # 1. Try writing to the file
         if self._write_to_file(entry):
             return True
 
-        # 2. 메모리 버퍼에 저장 (폴백)
+        # 2. Store in the memory buffer (fallback)
         return self._write_to_memory(entry)
 
     def _write_to_file(self, entry: dict[str, Any]) -> bool:
         """
-        파일에 기록.
+        Write to the file.
 
         Args:
-            entry: 기록할 엔트리
+            entry: entry to write
 
         Returns:
-            기록 성공 여부
+            Whether the write succeeded
         """
         if not self._ensure_directory():
             return False
@@ -176,17 +176,17 @@ class FallbackEscalationHandler:
 
     def _write_to_memory(self, entry: dict[str, Any]) -> bool:
         """
-        메모리 버퍼에 저장.
+        Store in the memory buffer.
 
         Args:
-            entry: 저장할 엔트리
+            entry: entry to store
 
         Returns:
-            저장 성공 여부
+            Whether the entry was stored
         """
         with self._lock:
             self._memory_buffer.append(entry)
-            # 버퍼 크기 제한
+            # Cap the buffer size
             if len(self._memory_buffer) > self._max_buffer_size:
                 self._memory_buffer = self._memory_buffer[-self._max_buffer_size :]
 
@@ -199,16 +199,16 @@ class FallbackEscalationHandler:
 
     def get_pending_escalations(self) -> list[dict[str, Any]]:
         """
-        대기 중인 에스컬레이션 조회.
+        Read the pending escalations.
 
-        파일과 메모리 버퍼 모두에서 조회합니다.
+        Reads from both the file and the memory buffer.
 
         Returns:
-            대기 중인 에스컬레이션 목록
+            Pending escalations
         """
         entries: list[dict[str, Any]] = []
 
-        # 파일에서 읽기
+        # Read from the file
         if self._log_path.exists():
             try:
                 with open(self._log_path, encoding="utf-8") as f:
@@ -222,7 +222,7 @@ class FallbackEscalationHandler:
                     error=e,
                 )
 
-        # 메모리 버퍼 추가
+        # Append the memory buffer
         with self._lock:
             entries.extend(self._memory_buffer)
 
@@ -230,14 +230,14 @@ class FallbackEscalationHandler:
 
     def get_pending_count(self) -> int:
         """
-        대기 중인 에스컬레이션 수.
+        Number of pending escalations.
 
         Returns:
-            대기 중인 에스컬레이션 수
+            Pending escalation count
         """
         count = 0
 
-        # 파일에서 라인 수 카운트
+        # Count the lines in the file
         if self._log_path.exists():
             try:
                 with open(self._log_path, encoding="utf-8") as f:
@@ -245,7 +245,7 @@ class FallbackEscalationHandler:
             except Exception:
                 pass
 
-        # 메모리 버퍼 카운트
+        # Count the memory buffer
         with self._lock:
             count += len(self._memory_buffer)
 
@@ -253,10 +253,10 @@ class FallbackEscalationHandler:
 
     def drain_to_file(self) -> int:
         """
-        메모리 버퍼를 파일로 drain.
+        Drain the memory buffer to the file.
 
         Returns:
-            drain된 엔트리 수
+            Number of entries drained
         """
         with self._lock:
             if not self._memory_buffer:
@@ -271,23 +271,23 @@ class FallbackEscalationHandler:
             return drained
 
     def clear_file(self) -> None:
-        """파일 초기화 (처리 완료 후)."""
+        """Clear the file (after the entries have been handled)."""
         if safe_unlink(self._log_path):
             logger.info("fallback_escalation.file_cleared")
 
     def clear_memory(self) -> None:
-        """메모리 버퍼 초기화."""
+        """Clear the memory buffer."""
         with self._lock:
             self._memory_buffer.clear()
 
     def clear_all(self) -> None:
-        """파일과 메모리 버퍼 모두 초기화."""
+        """Clear both the file and the memory buffer."""
         self.clear_file()
         self.clear_memory()
 
 
 # =============================================================================
-# 싱글톤
+# Singleton
 # =============================================================================
 
 from baldur.utils.singleton import make_singleton_factory

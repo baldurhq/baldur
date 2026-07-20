@@ -36,5 +36,5 @@ class OverrideIdentifierType(str, Enum):
     API_KEY = "api_key"
 
 
-# PatternType은 TierMatchType의 별칭 (tiering views에서 사용)
+# PatternType is an alias for TierMatchType (used by the tiering views)
 PatternType = TierMatchType

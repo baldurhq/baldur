@@ -1,11 +1,12 @@
 """
-EventBus Hook — EventBus CONFIG_UPDATED 이벤트를 Policy 설정 갱신에 중개.
+EventBus Hook — relays EventBus CONFIG_UPDATED events into Policy config
+refresh.
 
-PolicyComposer와 함께 사용하여 런타임 설정 변경을 Policy에 전파한다.
-EventBus가 없는 환경에서는 아무 동작도 하지 않는다 (Fail-Open).
+Used alongside PolicyComposer to propagate runtime configuration changes to
+Policies. In an environment without an EventBus it does nothing (fail-open).
 
-현재 HedgingConfigUpdateHook이 동일 기능을 수행하며,
-이 모듈은 범용 EventBus Hook 확장점으로 배치한다.
+HedgingConfigUpdateHook currently performs the same job; this module is placed
+here as the general-purpose EventBus Hook extension point.
 """
 
 from __future__ import annotations
@@ -23,23 +24,23 @@ logger = structlog.get_logger()
 
 
 class EventBusHook:
-    """EventBus 이벤트를 PolicyComposer Hook으로 관찰하는 범용 Hook.
+    """General-purpose Hook observing EventBus events as a PolicyComposer Hook.
 
-    파이프라인 성공/실패/거부 이벤트를 EventBus로 발행한다.
-    EventBus가 없는 환경에서는 아무 동작도 하지 않는다.
+    Publishes pipeline success/failure/rejection events to the EventBus. In an
+    environment without an EventBus it does nothing.
     """
 
     def __init__(self, event_prefix: str = "policy_pipeline") -> None:
         """
         Args:
-            event_prefix: EventBus 이벤트 키 접두사.
+            event_prefix: prefix for the EventBus event key.
         """
         self._event_prefix = event_prefix
         self._bus: Any = None
         self._initialized = False
 
     def _ensure_bus(self) -> bool:
-        """EventBus lazy 초기화. 사용 불가 시 False 반환."""
+        """Lazily initialize the EventBus. Returns False if unavailable."""
         if self._initialized:
             return self._bus is not None
 
@@ -62,7 +63,7 @@ class EventBusHook:
     def on_execute(
         self, policy_name: str, attempt: int, context: PolicyContext | None = None
     ) -> None:
-        """실행 시작."""
+        """Execution start."""
 
     def on_success(
         self,
@@ -70,7 +71,7 @@ class EventBusHook:
         result: PolicyResult,
         context: PolicyContext | None = None,
     ) -> None:
-        """파이프라인 성공 시 EventBus에 이벤트 발행."""
+        """On pipeline success, publish an event to the EventBus."""
         if not self._ensure_bus():
             return
 
@@ -96,7 +97,7 @@ class EventBusHook:
         attempt: int,
         context: PolicyContext | None = None,
     ) -> None:
-        """파이프라인 실패 시 EventBus에 이벤트 발행."""
+        """On pipeline failure, publish an event to the EventBus."""
         if not self._ensure_bus():
             return
 
@@ -122,12 +123,12 @@ class EventBusHook:
         delay: float,
         context: PolicyContext | None = None,
     ) -> None:
-        """재시도 — Composer 레벨에서는 미사용."""
+        """Retry — unused at the Composer level."""
 
     def on_reject(
         self, guard_name: str, reason: str, context: PolicyContext | None = None
     ) -> None:
-        """파이프라인 거부 시 EventBus에 이벤트 발행."""
+        """On pipeline rejection, publish an event to the EventBus."""
         if not self._ensure_bus():
             return
 

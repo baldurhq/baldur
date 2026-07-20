@@ -96,7 +96,7 @@ class SLO:
     warning_threshold: float | None = None  # Alert when dropping below this
     critical_threshold: float | None = None  # Critical alert threshold
 
-    # Error budget burn rate thresholds - Settings에서 기본값 사용
+    # Error budget burn rate thresholds - defaults come from settings
     fast_burn_rate: float = field(default_factory=lambda: _get_default_fast_burn_rate())
     slow_burn_rate: float = field(default_factory=lambda: _get_default_slow_burn_rate())
 
@@ -151,23 +151,23 @@ class SLO:
 
 
 def _get_default_fast_burn_rate() -> float:
-    """Settings에서 default_fast_burn_rate 조회."""
+    """Read default_fast_burn_rate from settings."""
     try:
         from baldur.settings.slo import get_slo_settings
 
         return get_slo_settings().default_fast_burn_rate
     except Exception:
-        return 14.4  # Google SRE 기본값
+        return 14.4  # Google SRE default
 
 
 def _get_default_slow_burn_rate() -> float:
-    """Settings에서 default_slow_burn_rate 조회."""
+    """Read default_slow_burn_rate from settings."""
     try:
         from baldur.settings.slo import get_slo_settings
 
         return get_slo_settings().default_slow_burn_rate
     except Exception:
-        return 3.0  # Google SRE 기본값
+        return 3.0  # Google SRE default
 
 
 @dataclass

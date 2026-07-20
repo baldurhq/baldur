@@ -1,23 +1,26 @@
 """
-Deadline Context — gRPC Deadline Propagation 패턴.
+Deadline Context — gRPC deadline propagation pattern.
 
-상위 서비스의 deadline을 하위 서비스에 ContextVar + HTTP 헤더로 전파한다.
-남은 시간이 예상 처리시간 미만이면 즉시 거절(Fast-Fail)하여
-무의미한 작업을 방지한다.
+Propagates an upstream service's deadline to downstream services via a
+ContextVar plus an HTTP header. When the remaining time is below the
+estimated processing time, the request is rejected immediately (Fast-Fail)
+to avoid pointless work.
 
-MSA 호출 체인 A → B → C 에서:
-- A가 3초 타임아웃으로 B를 호출
-- B가 2.5초 소요 후 C를 호출
-- C는 남은 시간 0.5초인데 예상 처리시간 2초 → Fast-Fail로 자원 절약
+In an MSA call chain A → B → C:
+- A calls B with a 3s timeout
+- B spends 2.5s, then calls C
+- C has 0.5s left but an estimated 2s of work → Fast-Fail saves resources
 
-ContextVar 기반 전파:
-- WSGI gthread 환경에서 스레드별 독립 컨텍스트 보장
-- ThreadPool(Bulkhead, Hedging)에서 copy_context().run()으로 자동 전파
-- Celery Task에는 전파하지 않음 (독립 라이프사이클)
+ContextVar-based propagation:
+- Guarantees a per-thread independent context under WSGI gthread
+- Propagates into thread pools (Bulkhead, Hedging) automatically via
+  copy_context().run()
+- Not propagated into Celery tasks (independent lifecycle)
 
-HTTP 헤더 규약:
-- X-Deadline-Remaining: 2500ms (밀리초 단위)
-- 외부 진입점(Nginx)에서 클라이언트 헤더 제거 (DoS 방지)
+HTTP header convention:
+- X-Deadline-Remaining: 2500ms (milliseconds)
+- The external entry point (Nginx) strips the client-supplied header
+  (DoS prevention)
 """
 
 from __future__ import annotations
@@ -33,31 +36,32 @@ import structlog
 
 logger = structlog.get_logger()
 
-# Deadline 기능 활성화 여부 (환경변수: BALDUR_DEADLINE_ENABLED)
+# Whether the deadline feature is enabled (env var: BALDUR_DEADLINE_ENABLED)
 DEADLINE_ENABLED: bool = os.environ.get("BALDUR_DEADLINE_ENABLED", "true").lower() in (
     "true",
     "1",
     "yes",
 )
 
-# HTTP 헤더 이름
+# HTTP header name
 DEADLINE_HEADER = "X-Deadline-Remaining"
 
-# Django META 키 (HTTP_X_DEADLINE_REMAINING)
+# Django META key (HTTP_X_DEADLINE_REMAINING)
 DEADLINE_META_KEY = "HTTP_X_DEADLINE_REMAINING"
 
-# ContextVar: 요청 deadline (monotonic clock 기준 절대 시각)
+# ContextVar: request deadline (absolute instant on the monotonic clock)
 _request_deadline: ContextVar[float | None] = ContextVar(
     "request_deadline", default=None
 )
 
-# 최소 유효 시간 (ms) — 이보다 적으면 Fast-Fail
+# Minimum useful time (ms) — below this, Fast-Fail
 DEFAULT_MINIMUM_USEFUL_TIME_MS: float = float(
     os.environ.get("BALDUR_DEADLINE_MINIMUM_USEFUL_MS", "50")
 )
 
-# 네트워크 레이턴시 보정 버퍼 (ms)
-# 같은 AZ 내 Pod 간 1~5ms, Cross-AZ 10~30ms, 안전 마진 2× Cross-AZ = 50ms
+# Network latency compensation buffer (ms)
+# 1~5ms between pods in the same AZ, 10~30ms cross-AZ; safety margin is
+# 2× cross-AZ = 50ms
 DEFAULT_NETWORK_LATENCY_BUFFER_MS: float = float(
     os.environ.get("BALDUR_DEADLINE_NETWORK_BUFFER_MS", "50")
 )
@@ -75,11 +79,11 @@ _RTT_SAMPLE_RATE: float = float(
     os.environ.get("BALDUR_DEADLINE_RTT_SAMPLE_RATE", "0.1")
 )
 
-# 헤더 파싱용 정규식: "2500ms", "2500", "1500.5ms" 등
+# Header parsing regex: "2500ms", "2500", "1500.5ms", etc.
 _DEADLINE_PATTERN = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*(?:ms)?\s*$", re.IGNORECASE)
 
 # ---------------------------------------------------------------------------
-# Prometheus 메트릭
+# Prometheus metrics
 # ---------------------------------------------------------------------------
 try:
     from baldur.metrics.registry import (
@@ -135,32 +139,32 @@ else:
 
 
 def record_fast_fail(tier: str = "unknown", path_prefix: str = "unknown") -> None:
-    """Fast-Fail 거절 메트릭 기록."""
+    """Record a Fast-Fail rejection metric."""
     if _HAS_PROMETHEUS and _fast_fail_counter is not None:
         _fast_fail_counter.labels(tier=tier, path_prefix=path_prefix).inc()
 
 
 def record_remaining_ms(remaining: float, tier: str = "unknown") -> None:
-    """수신 시점의 남은 시간 히스토그램 기록."""
+    """Record the remaining-time histogram at reception."""
     if _HAS_PROMETHEUS and _remaining_histogram is not None:
         _remaining_histogram.labels(tier=tier).observe(remaining)
 
 
 def record_exhausted_on_arrival(path_prefix: str = "unknown") -> None:
-    """도착 시점에 이미 만료된 요청 카운터 기록."""
+    """Record the counter for requests already expired on arrival."""
     if _HAS_PROMETHEUS and _exhausted_on_arrival_counter is not None:
         _exhausted_on_arrival_counter.labels(path_prefix=path_prefix).inc()
 
 
 def parse_deadline_header(header_value: str) -> float | None:
     """
-    X-Deadline-Remaining 헤더 값 파싱.
+    Parse an X-Deadline-Remaining header value.
 
     Args:
-        header_value: 헤더 값 (예: "2500ms", "2500", "1500.5ms")
+        header_value: Header value (e.g. "2500ms", "2500", "1500.5ms")
 
     Returns:
-        남은 시간(ms) 또는 파싱 실패 시 None
+        Remaining time (ms), or None if parsing fails
     """
     if not header_value:
         return None
@@ -178,11 +182,12 @@ def parse_deadline_header(header_value: str) -> float | None:
 
 def set_deadline(remaining_ms: float) -> None:
     """
-    현재 컨텍스트에 deadline 설정.
-    네트워크 레이턴시 Buffer를 차감하여 보수적으로 계산한다.
+    Set the deadline on the current context.
+
+    Subtracts the network latency buffer for a conservative estimate.
 
     Args:
-        remaining_ms: 남은 시간 (밀리초)
+        remaining_ms: Remaining time (milliseconds)
     """
     adjusted = remaining_ms - DEFAULT_NETWORK_LATENCY_BUFFER_MS
 
@@ -201,10 +206,10 @@ def set_deadline(remaining_ms: float) -> None:
 
 def get_remaining_ms() -> float | None:
     """
-    현재 컨텍스트의 남은 시간 반환.
+    Return the remaining time on the current context.
 
     Returns:
-        남은 시간(ms) 또는 deadline 미설정 시 None
+        Remaining time (ms), or None if no deadline is set
     """
     deadline = _request_deadline.get()
     if deadline is None:
@@ -215,10 +220,10 @@ def get_remaining_ms() -> float | None:
 
 def is_expired() -> bool:
     """
-    deadline이 만료되었는지 확인.
+    Check whether the deadline has expired.
 
     Returns:
-        만료 시 True, deadline 미설정 시 False
+        True if expired; False if no deadline is set
     """
     remaining = get_remaining_ms()
     if remaining is None:
@@ -231,27 +236,29 @@ def should_fast_fail(
     minimum_useful_ms: float = DEFAULT_MINIMUM_USEFUL_TIME_MS,
 ) -> bool:
     """
-    남은 시간이 예상 처리시간 미만이면 True (Fast-Fail 권장).
+    True when the remaining time is below the estimated processing time.
+
+    A True result means Fast-Fail is recommended.
 
     Args:
-        estimated_processing_ms: 예상 처리시간 (밀리초)
-        minimum_useful_ms: 최소 유효 시간 (밀리초)
+        estimated_processing_ms: Estimated processing time (milliseconds)
+        minimum_useful_ms: Minimum useful time (milliseconds)
 
     Returns:
-        True이면 Fast-Fail 권장
+        True if Fast-Fail is recommended
     """
     remaining = get_remaining_ms()
     if remaining is None:
-        return False  # deadline 미설정 시 Fast-Fail 하지 않음
+        return False  # no deadline set → do not Fast-Fail
 
     if remaining < minimum_useful_ms:
-        return True  # 최소 유효 시간 미만
+        return True  # below the minimum useful time
 
     return remaining < estimated_processing_ms
 
 
 def clear_deadline() -> None:
-    """현재 컨텍스트의 deadline 제거."""
+    """Remove the deadline from the current context."""
     _request_deadline.set(None)
 
 
@@ -264,10 +271,11 @@ def clear_deadline() -> None:
 # wall-clock wire form), plus wiring the dormant instrumentation.
 def get_propagation_header_value() -> str | None:
     """
-    하위 서비스로 전파할 헤더 값 생성.
+    Build the header value to propagate to downstream services.
 
     Returns:
-        "1234ms" 형식 또는 deadline 미설정/만료 시 None
+        A "1234ms"-formatted value, or None if no deadline is set or it has
+        expired
     """
     remaining = get_remaining_ms()
     if remaining is None or remaining <= 0:
@@ -279,31 +287,35 @@ def get_deadline_aware_statement_timeout(
     default_db_timeout_ms: int = 30_000,
 ) -> int | None:
     """
-    DeadlineContext 남은 시간과 기본 DB timeout 중 작은 값 반환.
-    deadline 미설정이거나 기본 DB timeout보다 넉넉하면 None (SET 불필요).
+    Return the smaller of the DeadlineContext remaining time and the default
+    DB timeout.
+
+    Returns None (no SET needed) when no deadline is set, or when the
+    remaining time is more generous than the default DB timeout.
 
     Args:
-        default_db_timeout_ms: DB 기본 statement_timeout (production.py 설정과 동기화)
+        default_db_timeout_ms: Default DB statement_timeout (kept in sync with
+            the production settings)
 
     Returns:
-        설정할 timeout(ms) 또는 None(SET 불필요)
+        Timeout (ms) to set, or None if no SET is needed
     """
     remaining = get_remaining_ms()
     if remaining is None:
-        return None  # deadline 미설정
+        return None  # no deadline set
 
     if remaining >= default_db_timeout_ms:
-        return None  # 넉넉하면 SET 스킵
+        return None  # generous enough → skip the SET
 
-    return max(1, int(remaining))  # 최소 1ms
+    return max(1, int(remaining))  # at least 1ms
 
 
 @contextmanager
 def deadline_scope(remaining_ms: float) -> Generator[None, None, None]:
     """
-    deadline 범위 컨텍스트 매니저.
+    Deadline scope context manager.
 
-    블록 진입 시 deadline을 설정하고, 블록 종료 시 이전 값을 복원한다.
+    Sets the deadline on block entry and restores the previous value on exit.
 
     Usage:
         with deadline_scope(3000):
@@ -312,7 +324,7 @@ def deadline_scope(remaining_ms: float) -> Generator[None, None, None]:
             process_request()
 
     Args:
-        remaining_ms: 남은 시간 (밀리초)
+        remaining_ms: Remaining time (milliseconds)
     """
     previous = _request_deadline.get()
     set_deadline(remaining_ms)
@@ -323,11 +335,11 @@ def deadline_scope(remaining_ms: float) -> Generator[None, None, None]:
 
 
 # =============================================================================
-# Tier별 Cold Start 기본 예상 처리시간 (ms)
-# RTT 데이터가 충분히 쌓이기 전까지 사용하는 Conservative Estimate.
-# critical: 빠른 경로 (인증, 결제 확인 등)
-# standard: 일반 CRUD 작업
-# non_essential: 무거운 쿼리 (통계, 리포트 등)
+# Per-tier cold-start default estimated processing time (ms)
+# A conservative estimate used until enough RTT data has accumulated.
+# critical: fast paths (authentication, payment confirmation, etc.)
+# standard: ordinary CRUD operations
+# non_essential: heavy queries (statistics, reports, etc.)
 # =============================================================================
 
 DEFAULT_ESTIMATED_MS_CRITICAL: float = float(
@@ -340,7 +352,7 @@ DEFAULT_ESTIMATED_MS_NON_ESSENTIAL: float = float(
     os.environ.get("BALDUR_DEADLINE_DEFAULT_ESTIMATED_MS_NON_ESSENTIAL", "500")
 )
 
-# 예상 처리시간 안전 계수 (기본 1.5 = 50% 여유)
+# Estimated processing time safety factor (default 1.5 = 50% headroom)
 DEFAULT_SAFETY_MARGIN: float = float(
     os.environ.get("BALDUR_DEADLINE_SAFETY_MARGIN", "1.5")
 )
@@ -354,15 +366,16 @@ _TIER_DEFAULT_ESTIMATED_MS: dict[str, float] = {
 
 def get_tier_default_estimated_ms(tier_id: str = "standard") -> float:
     """
-    Tier별 Cold Start 기본 예상 처리시간 반환.
+    Return the per-tier cold-start default estimated processing time.
 
-    GradientCalculator에 RTT 데이터가 없을 때 (Cold Start) Fallback으로 사용.
+    Used as the fallback when the GradientCalculator has no RTT data
+    (cold start).
 
     Args:
-        tier_id: Tier 식별자 (critical, standard, non_essential)
+        tier_id: Tier identifier (critical, standard, non_essential)
 
     Returns:
-        기본 예상 처리시간 (ms)
+        Default estimated processing time (ms)
     """
     return _TIER_DEFAULT_ESTIMATED_MS.get(tier_id, DEFAULT_ESTIMATED_MS_STANDARD)
 
@@ -373,20 +386,21 @@ def get_estimated_processing_ms(
     tier_id: str = "standard",
 ) -> float:
     """
-    GradientCalculator 기반 예상 처리시간 반환.
+    Return the estimated processing time based on the GradientCalculator.
 
-    현재 smoothed RTT × 안전 계수로 산출합니다.
-    gradient가 양수(RTT 증가 추세)이면 안전 계수를 더 높입니다.
-    RTT 데이터가 없으면(Cold Start) Tier별 기본값을 반환합니다.
+    Computed as the current smoothed RTT × safety factor. A positive gradient
+    (rising RTT trend) raises the safety factor further. When there is no RTT
+    data (cold start), the per-tier default is returned.
 
     Args:
-        calculator_name: GradientCalculator 이름
-        safety_margin: 안전 계수 (기본값: BALDUR_DEADLINE_SAFETY_MARGIN 환경변수, 미설정 시 1.5)
-        tier_id: Tier 식별자 (Cold Start fallback에 사용)
+        calculator_name: GradientCalculator name
+        safety_margin: Safety factor (default: the BALDUR_DEADLINE_SAFETY_MARGIN
+            env var, or 1.5 when unset)
+        tier_id: Tier identifier (used for the cold-start fallback)
 
     Returns:
-        예상 처리시간 (ms). Cold Start 시에도 기본값을 반환하므로
-        None을 반환하지 않습니다.
+        Estimated processing time (ms). Never None — a default is returned even
+        on cold start.
     """
     try:
         from baldur_pro.services.throttle.gradient import get_gradient_calculator
@@ -395,17 +409,17 @@ def get_estimated_processing_ms(
         rtt, gradient = calc.get_snapshot()
 
         if rtt is None:
-            # Cold Start: Tier별 기본값 반환
+            # Cold start: return the per-tier default
             return get_tier_default_estimated_ms(tier_id)
 
-        # RTT 증가 추세이면 안전 계수 상향
+        # Rising RTT trend → raise the safety factor
         effective_margin = safety_margin
-        if gradient > 0.1:  # 10% 이상 증가
-            effective_margin *= 1.0 + gradient  # gradient 비례 증가
+        if gradient > 0.1:  # increase of 10% or more
+            effective_margin *= 1.0 + gradient  # scale with the gradient
 
         estimated = rtt * effective_margin
 
-        # Prometheus 메트릭 기록
+        # Record Prometheus metrics
         if _HAS_PROMETHEUS:
             if _estimated_ms_histogram is not None:
                 _estimated_ms_histogram.labels(calculator=calculator_name).observe(

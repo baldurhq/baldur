@@ -11,19 +11,19 @@ from enum import Enum
 
 class MetricReliability(str, Enum):
     """
-    메트릭 신뢰도 레벨.
+    Metric reliability level.
 
-    각 메트릭이 제공하는 정확도 수준을 나타냅니다.
+    Indicates the accuracy level each metric provides.
     """
 
-    EXACT = "exact"  # 100% 정확, 원본과 동일
-    EVENTUAL = "eventual"  # ~99%, 재시작 시 동기화
-    APPROXIMATE = "approx"  # ~95%, 샘플링 또는 추정
+    EXACT = "exact"  # 100% accurate, identical to the source
+    EVENTUAL = "eventual"  # ~99%, synced on restart
+    APPROXIMATE = "approx"  # ~95%, sampled or estimated
 
 
-# 메트릭별 신뢰도 매핑
+# Per-metric reliability mapping
 METRIC_RELIABILITY_MAP: dict[str, MetricReliability] = {
-    # Counter: 누적값, 증가만 하므로 100% 정확
+    # Counter: cumulative and monotonic, so 100% accurate
     "dlq_items_total": MetricReliability.EXACT,
     "dlq_created_total": MetricReliability.EXACT,
     "retry_outcomes_total": MetricReliability.EXACT,
@@ -34,14 +34,14 @@ METRIC_RELIABILITY_MAP: dict[str, MetricReliability] = {
     "replay_attempts_total": MetricReliability.EXACT,
     "replay_outcomes_total": MetricReliability.EXACT,
     "security_incidents_total": MetricReliability.EXACT,
-    # Histogram: 관측 시점 기록, 100% 정확
+    # Histogram: recorded at observation time, 100% accurate
     "recovery_time_seconds": MetricReliability.EXACT,
     "retry_attempts_distribution": MetricReliability.EXACT,
     "retry_delay_seconds": MetricReliability.EXACT,
     "human_review_queue_time_seconds": MetricReliability.EXACT,
     "circuit_breaker_open_duration_seconds": MetricReliability.EXACT,
     "replay_duration_seconds": MetricReliability.EXACT,
-    # Gauge: 상태값, 재시작 시 동기화 (~99% 정확)
+    # Gauge: state value, synced on restart (~99% accurate)
     "dlq_pending_count": MetricReliability.EVENTUAL,
     "dlq_items_by_status": MetricReliability.EVENTUAL,
     "circuit_breaker_state": MetricReliability.EVENTUAL,
@@ -51,13 +51,13 @@ METRIC_RELIABILITY_MAP: dict[str, MetricReliability] = {
 
 def get_metric_reliability(metric_name: str) -> MetricReliability:
     """
-    메트릭 이름에 대한 신뢰도 레벨을 반환합니다.
+    Return the reliability level for a metric name.
 
     Args:
-        metric_name: 메트릭 이름 (prefix 제외)
+        metric_name: Metric name (without the prefix)
 
     Returns:
-        MetricReliability 레벨
+        MetricReliability level
 
     Example:
         >>> reliability = get_metric_reliability("dlq_items_total")
@@ -68,13 +68,13 @@ def get_metric_reliability(metric_name: str) -> MetricReliability:
 
 def get_reliability_description(reliability: MetricReliability) -> str:
     """
-    신뢰도 레벨에 대한 설명을 반환합니다.
+    Return a description of a reliability level.
 
     Args:
-        reliability: MetricReliability 레벨
+        reliability: MetricReliability level
 
     Returns:
-        사람이 읽을 수 있는 설명
+        Human-readable description
     """
     descriptions = {
         MetricReliability.EXACT: "100% accurate - matches source data exactly",

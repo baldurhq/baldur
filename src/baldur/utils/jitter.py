@@ -30,27 +30,29 @@ def with_jitter(
     min_delay_seconds: float | None = None,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """
-    동기화 함수에 무작위 지연을 추가하는 데코레이터.
+    Decorator that adds a random delay to a sync function.
 
-    분산 환경에서 동시 시작되는 인스턴스들의 DB 쿼리를
-    시간적으로 분산시켜 Thundering Herd를 방지합니다.
+    Spreads the DB queries of instances that start simultaneously in a
+    distributed environment over time, preventing a thundering herd.
 
     Args:
-        max_delay_seconds: 최대 지연 시간 (초). None이면 Settings에서 로드.
-        min_delay_seconds: 최소 지연 시간 (초). None이면 Settings에서 로드.
+        max_delay_seconds: Maximum delay (seconds). Loaded from Settings
+            when None.
+        min_delay_seconds: Minimum delay (seconds). Loaded from Settings
+            when None.
 
     Example:
         >>> @with_jitter(max_delay_seconds=30.0)
         ... def sync_metrics():
-        ...     # 0~30초 사이 무작위 지연 후 실행
+        ...     # Runs after a random delay of 0-30 seconds
         ...     return do_sync()
 
-    환경별 권장 설정:
-        - 단일 서버: 0초 (비활성화)
-        - K8s 10 Pods: 30초
-        - K8s 100+ Pods: 60초
+    Recommended settings per environment:
+        - Single server: 0s (disabled)
+        - K8s 10 pods: 30s
+        - K8s 100+ pods: 60s
     """
-    # Settings에서 기본값 로드
+    # Load defaults from Settings
     if max_delay_seconds is None or min_delay_seconds is None:
         from baldur.settings.jitter import get_jitter_settings
 
@@ -95,16 +97,18 @@ def calculate_jitter(
     min_delay_seconds: float | None = None,
 ) -> float:
     """
-    Jitter 지연 시간을 계산합니다.
+    Compute a jitter delay.
 
-    데코레이터를 사용할 수 없는 경우 직접 호출하여 사용합니다.
+    Call directly when the decorator cannot be used.
 
     Args:
-        max_delay_seconds: 최대 지연 시간 (초). None이면 Settings에서 로드.
-        min_delay_seconds: 최소 지연 시간 (초). None이면 Settings에서 로드.
+        max_delay_seconds: Maximum delay (seconds). Loaded from Settings
+            when None.
+        min_delay_seconds: Minimum delay (seconds). Loaded from Settings
+            when None.
 
     Returns:
-        계산된 지연 시간 (초)
+        Computed delay (seconds)
 
     Example:
         >>> delay = calculate_jitter(max_delay_seconds=30.0)
@@ -127,14 +131,16 @@ def sleep_with_jitter(
     min_delay_seconds: float | None = None,
 ) -> float:
     """
-    Jitter를 적용하여 동기적으로 대기합니다.
+    Sleep synchronously with jitter applied.
 
     Args:
-        max_delay_seconds: 최대 지연 시간 (초). None이면 Settings에서 로드.
-        min_delay_seconds: 최소 지연 시간 (초). None이면 Settings에서 로드.
+        max_delay_seconds: Maximum delay (seconds). Loaded from Settings
+            when None.
+        min_delay_seconds: Minimum delay (seconds). Loaded from Settings
+            when None.
 
     Returns:
-        실제 대기한 시간 (초)
+        Time actually waited (seconds)
 
     Example:
         >>> waited = sleep_with_jitter(max_delay_seconds=30.0)
@@ -150,14 +156,16 @@ async def async_sleep_with_jitter(
     min_delay_seconds: float | None = None,
 ) -> float:
     """
-    Jitter를 적용하여 비동기적으로 대기합니다.
+    Sleep asynchronously with jitter applied.
 
     Args:
-        max_delay_seconds: 최대 지연 시간 (초). None이면 Settings에서 로드.
-        min_delay_seconds: 최소 지연 시간 (초). None이면 Settings에서 로드.
+        max_delay_seconds: Maximum delay (seconds). Loaded from Settings
+            when None.
+        min_delay_seconds: Minimum delay (seconds). Loaded from Settings
+            when None.
 
     Returns:
-        실제 대기한 시간 (초)
+        Time actually waited (seconds)
 
     Example:
         >>> waited = await async_sleep_with_jitter(max_delay_seconds=30.0)
@@ -170,9 +178,9 @@ async def async_sleep_with_jitter(
 
 class JitterConfig:
     """
-    Jitter 설정 클래스.
+    Jitter configuration class.
 
-    환경 변수 또는 직접 설정으로 Jitter를 구성합니다.
+    Configures jitter from environment variables or direct settings.
     """
 
     def __init__(
@@ -185,9 +193,9 @@ class JitterConfig:
         Initialize JitterConfig.
 
         Args:
-            enabled: Jitter 활성화 여부
-            max_delay_seconds: 최대 지연 시간
-            min_delay_seconds: 최소 지연 시간
+            enabled: Whether jitter is enabled
+            max_delay_seconds: Maximum delay
+            min_delay_seconds: Minimum delay
         """
         self.enabled = enabled
         self.max_delay_seconds = max_delay_seconds
@@ -196,14 +204,14 @@ class JitterConfig:
     @classmethod
     def from_settings(cls, settings=None, **overrides) -> JitterConfig:
         """
-        Settings 기반 인스턴스 생성.
+        Create an instance from Settings.
 
         Args:
-            settings: JitterSettings 인스턴스 (None이면 자동 로드)
-            **overrides: 개별 필드 오버라이드
+            settings: JitterSettings instance (loaded automatically when None)
+            **overrides: Per-field overrides
 
         Returns:
-            JitterConfig: Settings 기반 인스턴스
+            JitterConfig: Settings-based instance
         """
         from baldur.settings.jitter import get_jitter_settings
 
@@ -215,20 +223,20 @@ class JitterConfig:
         )
 
     def get_delay(self) -> float:
-        """Jitter 지연 시간을 반환합니다 (비활성화 시 0)."""
+        """Return the jitter delay (0 when disabled)."""
         if not self.enabled:
             return 0.0
         return calculate_jitter(self.max_delay_seconds, self.min_delay_seconds)
 
     def sleep(self) -> float:
-        """Jitter를 적용하여 대기합니다."""
+        """Sleep with jitter applied."""
         delay = self.get_delay()
         if delay > 0:
             time.sleep(delay)
         return delay
 
     async def async_sleep(self) -> float:
-        """Jitter를 적용하여 비동기적으로 대기합니다."""
+        """Sleep asynchronously with jitter applied."""
         delay = self.get_delay()
         if delay > 0:
             await asyncio.sleep(delay)

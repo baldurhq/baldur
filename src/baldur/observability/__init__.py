@@ -275,7 +275,8 @@ def initialize_opentelemetry() -> bool:
             sampling_ratio_percent=_effective_base_sampling_ratio(settings) * 100,
         )
 
-        # Baggage Propagator 등록 — traceparent + baggage 헤더 자동 전파
+        # Register the baggage propagator — traceparent + baggage headers
+        # propagate automatically
         from baldur.observability.baggage import setup_baggage_propagation
 
         setup_baggage_propagation()
@@ -774,14 +775,14 @@ def instrument_django() -> bool:
     """
     Enable automatic instrumentation for Django.
 
-    WSGI 레벨에서 traceparent + baggage 헤더를 자동 추출하고,
-    Django 요청에 대한 span을 자동 생성한다.
+    Extracts the traceparent and baggage headers automatically at the WSGI
+    level and creates a span for each Django request.
 
-    DjangoInstrumentor는 내부적으로 MIDDLEWARE 최상단에
-    _DjangoMiddleware를 자동 삽입한다.
-    따라서 BaggageSyncMiddleware보다 반드시 먼저 실행된다.
+    DjangoInstrumentor internally inserts _DjangoMiddleware at the very top of
+    MIDDLEWARE, so it always runs before BaggageSyncMiddleware.
 
-    excluded_urls: /health, /metrics 등 불필요한 span/baggage 파싱 제외.
+    excluded_urls: skips unnecessary span/baggage parsing for /health,
+    /metrics, and similar endpoints.
 
     Returns:
         bool: True if instrumentation was successful, False otherwise
@@ -807,7 +808,8 @@ def instrument_django() -> bool:
             logger.debug("otel.django_instrumentation_disabled_config")
             return False
 
-        # excluded_urls 설정 적용 — 환경변수 OTEL_PYTHON_DJANGO_EXCLUDED_URLS 사용
+        # Apply the excluded_urls setting via the
+        # OTEL_PYTHON_DJANGO_EXCLUDED_URLS environment variable
         excluded = ",".join(settings.get_excluded_urls_list())
         if excluded:
             os.environ.setdefault("OTEL_PYTHON_DJANGO_EXCLUDED_URLS", excluded)

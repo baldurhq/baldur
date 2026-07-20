@@ -1,30 +1,31 @@
 """
-Policy Composer — 여러 ResiliencePolicy를 선언적으로 조합하는 엔진.
+Policy Composer — engine for composing multiple ResiliencePolicy declaratively.
 
-Guard(사전 검증) → Policy 체인(중첩 래핑) → Hook(이벤트 관찰) → Sink(최종 실패 처리)
-순서로 파이프라인을 구성한다.
+Builds the pipeline in this order: Guard (pre-check) → Policy chain (nested
+wrapping) → Hook (event observation) → Sink (terminal failure handling).
 
-동기/비동기 분리:
-- PolicyComposer: 동기 ResiliencePolicy만 허용
-- AsyncPolicyComposer: 비동기 AsyncResiliencePolicy만 허용
-  기존 SemaphoreBulkhead/AsyncSemaphoreBulkhead,
-  BulkheadPolicy/AsyncBulkheadPolicy 분리 선례와 동일 패턴.
+Sync/async split:
+- PolicyComposer: accepts sync ResiliencePolicy only
+- AsyncPolicyComposer: accepts async AsyncResiliencePolicy only
+  Same pattern as the existing SemaphoreBulkhead/AsyncSemaphoreBulkhead and
+  BulkheadPolicy/AsyncBulkheadPolicy splits.
 
-편의 함수:
-- compose(): 동기 Policy 조합
-- compose_async(): 비동기 Policy 조합
+Convenience functions:
+- compose(): compose sync policies
+- compose_async(): compose async policies
 
-Hook 관찰 범위 — 2계층 구조:
-- Composer Hook: 파이프라인 전체(End-to-End) 결과만 관찰
-- Policy 내부: 자체 로직 또는 없음 (Retry 각 시도 등은 Policy가 처리)
+Hook observation scope — 2-layer structure:
+- Composer Hook: observes only the end-to-end pipeline result
+- Inside a Policy: its own logic, or nothing (per-attempt retry events etc.
+  are handled by the Policy)
 
-Sink 처리:
-- 동기(Blocking)으로 수행 (FailureSink Protocol 준수)
-- DLQ 저장은 로컬 DB write이므로 수 ms 수준
+Sink handling:
+- Runs synchronously (blocking), per the FailureSink Protocol
+- A DLQ write is a local DB write, so it costs a few ms
 
-FallbackPolicy 중복 실행 방지:
-- Composer 체인 내에서는 execute() 대신 _apply_fallback() 호출
-- func 실행 1회만 보장
+Preventing duplicate FallbackPolicy execution:
+- Inside the composer chain, _apply_fallback() is called instead of execute()
+- Guarantees func runs exactly once
 """
 
 from __future__ import annotations
@@ -331,26 +332,27 @@ def _trace_structural_control(policy_name: str, result: PolicyResult) -> None:
 
 
 # =============================================================================
-# PolicyComposer — 동기 Policy 조합 엔진
+# PolicyComposer — sync Policy composition engine
 # =============================================================================
 
 
 class PolicyComposer(Generic[T]):
     """
-    동기 Policy 조합 엔진.
+    Sync Policy composition engine.
 
-    여러 ResiliencePolicy를 선언적으로 조합하여 단일 실행 파이프라인으로 구성한다.
-    Guard/Hook/Sink를 연결하여 인프라 레이어와 통합한다.
+    Composes multiple ResiliencePolicy declaratively into a single execution
+    pipeline, wiring Guard/Hook/Sink to integrate with the infrastructure layer.
 
-    실행 순서:
-    1. Guards 검증 (Kill Switch, ErrorBudgetGate 등)
-    2. Policies 순차 래핑 (추가 순서 = 바깥→안쪽 실행 순서)
-    3. Hooks 호출 (Audit, Metrics 등) — 파이프라인 전체 결과만 관찰
-    4. 실패 시 Sink 처리 (DLQ 등) — 동기 Blocking
+    Execution order:
+    1. Guard checks (Kill Switch, ErrorBudgetGate, etc.)
+    2. Policies wrapped in turn (add order = outer→inner execution order)
+    3. Hooks invoked (Audit, Metrics, etc.) — observe only the whole-pipeline
+       result
+    4. Sink handling on failure (DLQ, etc.) — synchronous, blocking
 
-    타입 안전성:
-    - ResiliencePolicy(동기)만 추가 가능
-    - AsyncResiliencePolicy 추가 시 런타임 TypeError 발생
+    Type safety:
+    - Only ResiliencePolicy (sync) can be added
+    - Adding an AsyncResiliencePolicy raises TypeError at runtime
     """
 
     def __init__(self) -> None:
@@ -362,7 +364,7 @@ class PolicyComposer(Generic[T]):
     # === Builder API ===
 
     def add(self, policy: ResiliencePolicy) -> PolicyComposer[T]:
-        """Policy 추가. 추가 순서가 바깥→안쪽 실행 순서."""
+        """Add a Policy. Add order is the outer→inner execution order."""
         if isinstance(policy, AsyncResiliencePolicy) and not isinstance(
             policy, ResiliencePolicy
         ):
@@ -374,17 +376,17 @@ class PolicyComposer(Generic[T]):
         return self
 
     def add_guard(self, guard: PolicyGuard) -> PolicyComposer[T]:
-        """Guard 추가. 모든 Policy 실행 전 검증."""
+        """Add a Guard. Checked before any Policy runs."""
         self._guards.append(guard)
         return self
 
     def add_hook(self, hook: PolicyHook) -> PolicyComposer[T]:
-        """Hook 추가. Policy 실행 이벤트 관찰."""
+        """Add a Hook. Observes Policy execution events."""
         self._hooks.append(hook)
         return self
 
     def add_sink(self, sink: FailureSink) -> PolicyComposer[T]:
-        """FailureSink 추가. 최종 실패 처리."""
+        """Add a FailureSink. Handles the terminal failure."""
         self._sinks.append(sink)
         return self
 
@@ -398,28 +400,28 @@ class PolicyComposer(Generic[T]):
         **kwargs: Any,
     ) -> PolicyResult[T]:
         """
-        조합된 Policy 파이프라인 실행.
+        Execute the composed Policy pipeline.
 
-        실행 흐름:
-        1. Guard 검증 → 하나라도 거부 시 REJECTED
-        2. Policy 체인 실행 (바깥→안쪽 중첩)
-        3. Hook 호출 (on_success / on_failure / on_reject)
-        4. 실패 시 Sink 처리 — 동기 Blocking
+        Execution flow:
+        1. Guard checks → REJECTED if any guard denies
+        2. Policy chain execution (outer→inner nesting)
+        3. Hook invocation (on_success / on_failure / on_reject)
+        4. Sink handling on failure — synchronous, blocking
 
         Args:
-            func: 실행할 함수
-            *args: 함수 위치 인자
-            context: 실행 컨텍스트 (Guard/Hook/Sink에 전파).
-                     None이면 Guard는 전역 상태만 체크하고,
-                     Sink는 비즈니스 식별자 없이 저장한다.
-            **kwargs: 함수 키워드 인자
+            func: the function to execute
+            *args: positional arguments for the function
+            context: execution context (propagated to Guard/Hook/Sink).
+                     If None, Guards check global state only and Sinks store
+                     without a business identifier.
+            **kwargs: keyword arguments for the function
 
         Returns:
-            PolicyResult[T]: 통합 결과. 예외를 던지지 않는다.
+            PolicyResult[T]: the composite result. Never raises.
         """
         start_time = time.perf_counter()
 
-        # Step 1: Guard 검증
+        # Step 1: Guard checks
         for guard in self._guards:
             try:
                 guard_result = guard.check(context=context)
@@ -441,7 +443,7 @@ class PolicyComposer(Generic[T]):
                         },
                     )
             except Exception as e:
-                # Fail-Open: Guard 실패 시 통과 허용
+                # Fail-open: a failing Guard lets the call through
                 logger.warning(
                     "policy_composer.guard_execution_failed",
                     guard_name=guard.name,
@@ -449,10 +451,10 @@ class PolicyComposer(Generic[T]):
                     mode="fail-open",
                 )
 
-        # Step 2: Policy 체인 실행
+        # Step 2: Policy chain execution
         result = self._execute_policy_chain(func, *args, context=context, **kwargs)
 
-        # Step 3: Hook 호출 — 파이프라인 전체 결과만 관찰
+        # Step 3: Hook invocation — observes only the whole-pipeline result
         duration_ms = (time.perf_counter() - start_time) * 1000
         result.total_duration_ms = duration_ms
 
@@ -461,7 +463,7 @@ class PolicyComposer(Generic[T]):
         else:
             self._notify_hooks_failure(result, context=context)
 
-            # Step 4: Sink 처리 — 동기 Blocking
+            # Step 4: Sink handling — synchronous, blocking
             if result.outcome == PolicyOutcome.FAILURE:
                 self._process_sinks(result, context, args, kwargs)
 
@@ -477,19 +479,20 @@ class PolicyComposer(Generic[T]):
         **kwargs: Any,
     ) -> PolicyResult[T]:
         """
-        Policy 체인을 중첩 실행.
+        Execute the Policy chain as nested wrappers.
 
-        policies = [P1, P2, P3]일 때:
+        For policies = [P1, P2, P3]:
         P1.execute(lambda: P2.execute(lambda: P3.execute(func)))
 
-        FallbackPolicy 특별 처리:
-        - execute() 대신 _apply_fallback() 호출 (func 중복 실행 방지)
-        - _apply_fallback()은 Composer 전용 내부 API
+        FallbackPolicy special case:
+        - Calls _apply_fallback() instead of execute() (prevents running func
+          twice)
+        - _apply_fallback() is a Composer-only internal API
         """
         from baldur.resilience.policies.fallback import FallbackPolicy
 
         if not self._policies:
-            # Policy 없음 → 직접 실행
+            # No Policy → run directly
             try:
                 value = func(*args, **kwargs)
                 return PolicyResult(value=value, outcome=PolicyOutcome.SUCCESS)
@@ -621,7 +624,7 @@ class PolicyComposer(Generic[T]):
     def _notify_hooks_success(
         self, result: PolicyResult, context: PolicyContext | None = None
     ) -> None:
-        """성공 시 모든 Hook의 on_success 호출 (Fail-Open)."""
+        """On success, call on_success on every Hook (fail-open)."""
         for hook in self._hooks:
             try:
                 hook.on_success("composer", result, context=context)
@@ -634,7 +637,7 @@ class PolicyComposer(Generic[T]):
     def _notify_hooks_failure(
         self, result: PolicyResult, context: PolicyContext | None = None
     ) -> None:
-        """실패 시 모든 Hook의 on_failure 호출 (Fail-Open)."""
+        """On failure, call on_failure on every Hook (fail-open)."""
         for hook in self._hooks:
             try:
                 hook.on_failure(
@@ -652,7 +655,7 @@ class PolicyComposer(Generic[T]):
     def _notify_hooks_reject(
         self, guard_name: str, reason: str, context: PolicyContext | None = None
     ) -> None:
-        """거부 시 모든 Hook의 on_reject 호출 (Fail-Open)."""
+        """On rejection, call on_reject on every Hook (fail-open)."""
         for hook in self._hooks:
             try:
                 hook.on_reject(guard_name, reason, context=context)
@@ -671,7 +674,7 @@ class PolicyComposer(Generic[T]):
         args: tuple,
         kwargs: dict,
     ) -> None:
-        """모든 Sink에 최종 실패를 전달 (동기 Blocking)."""
+        """Deliver the terminal failure to every Sink (synchronous, blocking)."""
         if result.error is None:
             return
 
@@ -692,7 +695,7 @@ class PolicyComposer(Generic[T]):
 
 
 # =============================================================================
-# AsyncPolicyComposer — 비동기 Policy 조합 엔진
+# AsyncPolicyComposer — async Policy composition engine
 # =============================================================================
 
 
@@ -724,24 +727,24 @@ class AsyncPolicyComposer(Generic[T]):
     # === Builder API ===
 
     def add(self, policy: AsyncResiliencePolicy) -> AsyncPolicyComposer[T]:
-        """비동기 Policy 추가. 추가 순서가 바깥→안쪽 실행 순서."""
+        """Add an async Policy. Add order is the outer→inner execution order."""
         self._policies.append(policy)
         return self
 
     def add_guard(
         self, guard: PolicyGuard | AsyncPolicyGuard
     ) -> AsyncPolicyComposer[T]:
-        """Guard 추가 (add-time normalize: native async pass-through / sync wrap)."""
+        """Add a Guard (add-time normalize: native async pass-through / sync wrap)."""
         self._guards.append(_normalize_guard(guard))
         return self
 
     def add_hook(self, hook: PolicyHook | AsyncPolicyHook) -> AsyncPolicyComposer[T]:
-        """Hook 추가 (add-time normalize: native async pass-through / sync wrap)."""
+        """Add a Hook (add-time normalize: native async pass-through / sync wrap)."""
         self._hooks.append(_normalize_hook(hook))
         return self
 
     def add_sink(self, sink: FailureSink | AsyncFailureSink) -> AsyncPolicyComposer[T]:
-        """FailureSink 추가 (add-time normalize: native async pass-through / sync wrap)."""
+        """Add a FailureSink (add-time normalize: async pass-through / sync wrap)."""
         self._sinks.append(_normalize_sink(sink))
         return self
 
@@ -848,10 +851,11 @@ class AsyncPolicyComposer(Generic[T]):
         **kwargs: Any,
     ) -> PolicyResult[T]:
         """
-        비동기 Policy 체인을 중첩 실행.
+        Execute the async Policy chain as nested wrappers.
 
-        AsyncFallbackPolicy 특별 처리:
-        - execute() 대신 _apply_fallback() 호출 (func 중복 실행 방지)
+        AsyncFallbackPolicy special case:
+        - Calls _apply_fallback() instead of execute() (prevents running func
+          twice)
         """
         from baldur.resilience.policies.fallback import AsyncFallbackPolicy
 
@@ -862,7 +866,7 @@ class AsyncPolicyComposer(Generic[T]):
             except Exception as e:
                 return PolicyResult(value=None, outcome=PolicyOutcome.FAILURE, error=e)
 
-        # 비동기 중첩 함수 구성 (역순으로 감싸기)
+        # Build the async nested execution (wrap in reverse order).
         async def initial_fn() -> T:
             return await func(*args, **kwargs)
 
@@ -977,7 +981,7 @@ class AsyncPolicyComposer(Generic[T]):
     async def _notify_hooks_success(
         self, result: PolicyResult, context: PolicyContext | None = None
     ) -> None:
-        """성공 시 모든 Hook의 on_success await (Fail-Open per hook)."""
+        """On success, await on_success on every Hook (fail-open per hook)."""
         for hook in self._hooks:
             try:
                 await hook.on_success("composer", result, context=context)
@@ -990,7 +994,7 @@ class AsyncPolicyComposer(Generic[T]):
     async def _notify_hooks_failure(
         self, result: PolicyResult, context: PolicyContext | None = None
     ) -> None:
-        """실패 시 모든 Hook의 on_failure await (Fail-Open per hook)."""
+        """On failure, await on_failure on every Hook (fail-open per hook)."""
         for hook in self._hooks:
             try:
                 await hook.on_failure(
@@ -1008,7 +1012,7 @@ class AsyncPolicyComposer(Generic[T]):
     async def _notify_hooks_reject(
         self, guard_name: str, reason: str, context: PolicyContext | None = None
     ) -> None:
-        """거부 시 모든 Hook의 on_reject await (Fail-Open per hook)."""
+        """On rejection, await on_reject on every Hook (fail-open per hook)."""
         for hook in self._hooks:
             try:
                 await hook.on_reject(guard_name, reason, context=context)
@@ -1027,7 +1031,7 @@ class AsyncPolicyComposer(Generic[T]):
         args: tuple,
         kwargs: dict,
     ) -> None:
-        """모든 Sink에 최종 실패를 전달 (Fail-Open per sink)."""
+        """Deliver the terminal failure to every Sink (fail-open per sink)."""
         if result.error is None:
             return
 
@@ -1048,15 +1052,15 @@ class AsyncPolicyComposer(Generic[T]):
 
 
 # =============================================================================
-# 편의 함수
+# Convenience functions
 # =============================================================================
 
 
 def compose(*policies: ResiliencePolicy) -> PolicyComposer:
     """
-    동기 Policy를 선언적으로 조합하는 편의 함수.
+    Convenience function for composing sync Policies declaratively.
 
-    policies 순서 = 바깥→안쪽 실행 순서:
+    policies order = outer→inner execution order:
     - compose(Retry, CB, Bulkhead).execute(func)
     - = Retry(CB(Bulkhead(func)))
 
@@ -1077,10 +1081,10 @@ def compose(*policies: ResiliencePolicy) -> PolicyComposer:
 
 def compose_async(*policies: AsyncResiliencePolicy) -> AsyncPolicyComposer:
     """
-    비동기 Policy를 선언적으로 조합하는 편의 함수.
+    Convenience function for composing async Policies declaratively.
 
-    policies 순서 = 바깥→안쪽 실행 순서.
-    동기 compose()와 동일한 선언적 패턴을 비동기로 제공한다.
+    policies order = outer→inner execution order.
+    Provides the same declarative pattern as the sync compose(), for async.
 
     Usage::
 

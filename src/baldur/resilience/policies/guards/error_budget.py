@@ -1,14 +1,15 @@
 """
-Error Budget Guard — 에러 버짓 잔여량 기반 실행 허용 검증.
+Error Budget Guard — admission check based on remaining error budget.
 
-ErrorBudgetGate의 check_automation_allowed()를 래핑하여
-PolicyComposer 파이프라인 실행 전 에러 버짓 소진 여부를 확인한다.
+Wraps ErrorBudgetGate's check_automation_allowed() to test whether the error
+budget is exhausted before the PolicyComposer pipeline runs.
 
-context.tier_id/region 기반 판정:
-- context=None이면 글로벌 판정 (tier_id=None → 전역 에러 버짓)
-- context.tier_id/region 지정 시 티어/리전별 판정
+Decision is context.tier_id/region based:
+- context=None → global decision (tier_id=None → the global error budget)
+- context.tier_id/region set → per-tier / per-region decision
 
-Fail-Open 원칙: ErrorBudgetGate import/호출 실패 시 통과 허용.
+Fail-open principle: if ErrorBudgetGate fails to import or call, the request
+passes.
 """
 
 from __future__ import annotations
@@ -24,26 +25,26 @@ logger = structlog.get_logger()
 
 
 class ErrorBudgetGuard:
-    """ErrorBudgetGate 가드.
+    """ErrorBudgetGate guard.
 
-    check_automation_allowed()의 GateCheckResult를
-    GuardResult로 변환하여 반환한다.
+    Converts the GateCheckResult from check_automation_allowed() into a
+    GuardResult.
     """
 
     @property
     def name(self) -> str:
-        """Guard 식별자."""
+        """Guard identifier."""
         return "error_budget_gate"
 
     def check(self, context: PolicyContext | None = None) -> GuardResult:
         """
-        에러 버짓 잔여량 체크.
+        Check the remaining error budget.
 
-        context.tier_id/region 기반 판정.
-        context=None이면 글로벌 판정 (tier_id=None → 전역 에러 버짓).
+        Decision is context.tier_id/region based; context=None means a global
+        decision (tier_id=None → the global error budget).
 
         Returns:
-            GuardResult: allowed=True면 통과, False면 거부
+            GuardResult: allowed=True passes, False rejects
         """
         try:
             from baldur_pro.services.error_budget_gate.gate import (

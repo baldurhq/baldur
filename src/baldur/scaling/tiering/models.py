@@ -95,7 +95,7 @@ class TierMapping(SerializableMixin):
             except re.error as e:
                 raise ValueError(f"Invalid regex pattern '{self.pattern}': {e}") from e
 
-        # methods 정규화: list/tuple/set → frozenset, 대소문자 → UPPER
+        # Normalize methods: list/tuple/set → frozenset, case → UPPER
         if self.methods is not None:
             if not isinstance(self.methods, frozenset):
                 self.methods = frozenset(m.upper() for m in self.methods)
@@ -110,13 +110,13 @@ class TierMapping(SerializableMixin):
 
         Args:
             path: API path to check
-            method: HTTP method (GET, POST, etc.) — None이면 method 무시
+            method: HTTP method (GET, POST, etc.) — None ignores the method
 
         Returns:
             True if path matches and method is compatible
         """
-        # Method 필터: mapping에 methods가 지정되어 있고,
-        # 요청 method가 해당 set에 없으면 불일치
+        # Method filter: if the mapping declares methods and the request
+        # method is not in that set, it does not match
         if (
             self.methods is not None
             and method is not None
@@ -124,7 +124,7 @@ class TierMapping(SerializableMixin):
         ):
             return False
 
-        # 기존 path 매칭 로직
+        # Path matching logic
         if self.pattern_type == TierMatchType.EXACT:
             return path == self.pattern
         if self.pattern_type == TierMatchType.WILDCARD:

@@ -1,33 +1,31 @@
 """
-structlog 프로세서 — 로그 볼륨 제어 및 이벤트명 검증.
+structlog processors — log volume control and event name validation.
 
 Event Name Validation (Q5, 314 Audit):
-    이벤트명이 ``{component}.{entity}_{action}`` 컨벤션을 따르는지 검증.
-    DEV/TEST: BALDUR_LOGGING_SETTINGS_STRICT_LOG_VALIDATION=true → ValueError (fail-fast)
-    Production: 위반을 Prometheus counter로 기록만.
+    Validates that event names follow the ``{component}.{entity}_{action}``
+    convention.
+    DEV/TEST: BALDUR_LOGGING_SETTINGS_STRICT_LOG_VALIDATION=true -> ValueError
+    (fail-fast)
+    Production: violations are only recorded on a Prometheus counter.
 
 Rate Limiter (De-dup):
-    동일 이벤트가 윈도우 내에 max_count 이상 반복되면 묵음 처리하고,
-    윈도우 종료 시 "suppressed N events" 요약 1건을 출력한다.
-    ERROR/CRITICAL 레벨은 절대 suppress하지 않는다.
+    Silences an event that repeats more than max_count times within the
+    window, and emits a single "suppressed N events" summary when the window
+    ends. ERROR/CRITICAL levels are never suppressed.
 
 Sampling:
-    Hot path 로그(INFO/DEBUG)를 확률적으로 샘플링하여 볼륨을 줄인다.
-    WARNING 이상은 항상 통과한다.
-    특정 이벤트 이름만 대상으로 하여 중요 로그를 보호한다.
+    Reduces volume by probabilistically sampling hot path logs (INFO/DEBUG).
+    WARNING and above always pass through.
+    Targeting specific event names only protects the important logs.
 
-설정:
-    LoggingSettings 에서 환경변수로 제어:
+Configuration:
+    Controlled via environment variables on LoggingSettings
+    (``baldur.settings.logging_settings``):
     - BALDUR_LOGGING_SETTINGS_STRICT_LOG_VALIDATION=true/false
     - BALDUR_LOGGING_SETTINGS_LOG_RATE_LIMIT_WINDOW=10
     - BALDUR_LOGGING_SETTINGS_LOG_RATE_LIMIT_MAX=100
     - BALDUR_LOGGING_SETTINGS_LOG_SAMPLING_RATE=1.0
     - BALDUR_LOGGING_SETTINGS_LOG_SAMPLING_EVENTS=event1,event2
-
-Reference:
-    - docs/baldur/middleware_system/281_LOG_RATE_LIMITER.md
-    - docs/baldur/middleware_system/282_LOG_SAMPLING.md
-    - docs/baldur/middleware_system/312_EXCEPTION_HIERARCHY_LOGGING_STANDARDIZATION.md
 """
 
 from __future__ import annotations
@@ -41,7 +39,7 @@ from typing import Any
 import structlog
 
 # =============================================================================
-# Event Name Validation 프로세서 (Q5)
+# Event name validation processor (Q5)
 # =============================================================================
 
 _EVENT_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$")
@@ -51,7 +49,7 @@ _violation_counter = None
 
 
 def _get_violation_counter():
-    """Prometheus counter를 lazy-init한다."""
+    """Lazy-init the Prometheus counter."""
     global _violation_counter_initialized, _violation_counter
     if _violation_counter_initialized:
         return _violation_counter
@@ -73,7 +71,7 @@ _strict_validation_cached: bool | None = None
 
 
 def _is_strict_validation() -> bool:
-    """LoggingSettings의 strict_log_validation 설정을 캐싱하여 O(1) 조회한다."""
+    """Cache the LoggingSettings strict_log_validation flag for O(1) lookup."""
     global _strict_validation_cached
     if _strict_validation_cached is not None:
         return _strict_validation_cached
@@ -87,7 +85,7 @@ def _is_strict_validation() -> bool:
 
 
 def reset_strict_validation_cache() -> None:
-    """strict validation 캐시를 초기화한다. 테스트용."""
+    """Reset the strict validation cache. For tests."""
     global _strict_validation_cached
     _strict_validation_cached = None
 
@@ -97,14 +95,16 @@ def event_name_validator(
     method_name: str,
     event_dict: dict[str, Any],
 ) -> dict[str, Any]:
-    """이벤트명이 ``component.entity_action`` 컨벤션을 따르는지 검증한다.
+    """Validate that the event name follows the ``component.entity_action``
+    convention.
 
-    Pipeline position: add_logger_name 직후 (무거운 처리 전).
+    Pipeline position: right after add_logger_name (before heavy processing).
 
     DEV/TEST (BALDUR_STRICT_LOG_VALIDATION=true):
-        컨벤션 위반 시 ValueError 발생 (fail-fast).
-    Production (기본값):
-        위반을 Prometheus counter로 기록만 하고 로그를 통과시킨다.
+        Raises ValueError on a convention violation (fail-fast).
+    Production (default):
+        Only records the violation on a Prometheus counter and lets the log
+        through.
     """
     event_name = event_dict.get("event", "")
     if not event_name or not isinstance(event_name, str):
@@ -128,19 +128,21 @@ def event_name_validator(
 
 
 # =============================================================================
-# Rate Limiter (De-dup) 프로세서
+# Rate limiter (de-dup) processor
 # =============================================================================
 
-# 이벤트별 카운터: {(logger_name, event): {"count": int, "window_start": float, "suppressed": int}}
+# Per-event counters:
+# {(logger_name, event): {"count": int, "window_start": float,
+#                         "suppressed": int}}
 _rate_limit_state: dict[tuple[str, str], dict[str, Any]] = {}
 _rate_limit_lock = threading.Lock()
 
-# suppress 하지 않는 레벨 (에러/장애 로그는 항상 통과)
+# Levels that are never suppressed (error/failure logs always pass through)
 _NEVER_SUPPRESS_LEVELS = frozenset({"error", "critical"})
 
 
 def _get_rate_limit_settings() -> tuple[int, int]:
-    """Rate limit 설정을 로드한다. 실패 시 안전한 기본값 반환."""
+    """Load the rate limit settings. Returns safe defaults on failure."""
     try:
         from baldur.settings.logging_settings import get_logging_settings
 
@@ -158,23 +160,25 @@ def rate_limit_processor(
     method_name: str,
     event_dict: dict[str, Any],
 ) -> dict[str, Any]:
-    """동일 이벤트 반복 시 de-dup하는 structlog 프로세서.
+    """structlog processor that de-dups a repeating event.
 
-    동작:
-    1. (logger_name, event) 키로 윈도우 내 발생 횟수를 추적
-    2. max_count 이하: 그대로 통과
-    3. max_count 초과: suppress하고 카운터 증가
-    4. 다음 윈도우 전환 시: "suppressed N similar events" 요약 로그 출력 후 카운터 리셋
+    Behavior:
+    1. Tracks the occurrence count within the window under the
+       (logger_name, event) key
+    2. At or below max_count: passes through unchanged
+    3. Above max_count: suppresses and increments the counter
+    4. On the next window transition: emits a "suppressed N similar events"
+       summary log, then resets the counter
 
-    ERROR/CRITICAL 레벨은 suppress하지 않는다.
+    ERROR/CRITICAL levels are not suppressed.
     """
-    # ERROR/CRITICAL은 절대 suppress하지 않음
+    # ERROR/CRITICAL are never suppressed
     if method_name in _NEVER_SUPPRESS_LEVELS:
         return event_dict
 
     window_seconds, max_count = _get_rate_limit_settings()
 
-    # rate limiting이 비활성화된 경우 (max=0이면 무제한)
+    # Rate limiting disabled (max=0 means unlimited)
     if max_count <= 0 or window_seconds <= 0:
         return event_dict
 
@@ -187,10 +191,10 @@ def rate_limit_processor(
         state = _rate_limit_state.get(key)
 
         if state is None or (now - state["window_start"]) >= window_seconds:
-            # 새 윈도우 시작 또는 윈도우 만료
+            # New window starting, or the window expired
             suppressed_count = state["suppressed"] if state else 0
 
-            # 이전 윈도우에서 suppress된 이벤트가 있으면 요약 로그를 주입
+            # Inject the summary when the previous window suppressed events
             if suppressed_count > 0:
                 event_dict["_rate_limit_suppressed_previous"] = suppressed_count
 
@@ -206,27 +210,27 @@ def rate_limit_processor(
         if state["count"] <= max_count:
             return event_dict
 
-        # max_count 초과: suppress
+        # Above max_count: suppress
         state["suppressed"] += 1
         raise structlog.DropEvent
 
 
 def reset_rate_limit_state() -> None:
-    """Rate limit 상태를 초기화한다. 테스트용."""
+    """Reset the rate limit state. For tests."""
     with _rate_limit_lock:
         _rate_limit_state.clear()
 
 
 # =============================================================================
-# Sampling 프로세서
+# Sampling processor
 # =============================================================================
 
-# DEBUG/INFO 레벨만 샘플링 대상 (WARNING 이상은 항상 통과)
+# Only DEBUG/INFO are sampled (WARNING and above always pass through)
 _SAMPLING_TARGET_LEVELS = frozenset({"debug", "info"})
 
 
 def _get_sampling_settings() -> tuple[float, frozenset[str]]:
-    """샘플링 설정을 로드한다. 실패 시 안전한 기본값 반환."""
+    """Load the sampling settings. Returns safe defaults on failure."""
     try:
         from baldur.settings.logging_settings import get_logging_settings
 
@@ -247,38 +251,38 @@ def sampling_processor(
     method_name: str,
     event_dict: dict[str, Any],
 ) -> dict[str, Any]:
-    """Hot path 로그를 확률적으로 샘플링하는 structlog 프로세서.
+    """structlog processor that probabilistically samples hot path logs.
 
-    동작:
-    1. WARNING 이상: 항상 통과
-    2. log_sampling_events가 비어있으면: 모든 DEBUG/INFO에 sample_rate 적용
-    3. log_sampling_events가 설정되어 있으면: 해당 이벤트에만 sample_rate 적용
-    4. random() > sample_rate이면 DropEvent
+    Behavior:
+    1. WARNING and above: always passes through
+    2. log_sampling_events empty: sample_rate applies to every DEBUG/INFO
+    3. log_sampling_events set: sample_rate applies only to those events
+    4. DropEvent when random() > sample_rate
 
-    설정:
-    - BALDUR_LOGGING_SETTINGS_LOG_SAMPLING_RATE=0.1  (10%만 기록)
+    Configuration:
+    - BALDUR_LOGGING_SETTINGS_LOG_SAMPLING_RATE=0.1  (record only 10%)
     - BALDUR_LOGGING_SETTINGS_LOG_SAMPLING_EVENTS=circuit_breaker.checked,action_executor.execute
     """
-    # WARNING 이상은 항상 통과
+    # WARNING and above always pass through
     if method_name not in _SAMPLING_TARGET_LEVELS:
         return event_dict
 
     sample_rate, target_events = _get_sampling_settings()
 
-    # sample_rate == 1.0이면 샘플링 비활성화
+    # sample_rate == 1.0 disables sampling
     if sample_rate >= 1.0:
         return event_dict
 
     event_name = event_dict.get("event", "")
 
-    # target_events가 설정되어 있으면 해당 이벤트만 샘플링
+    # When target_events is set, sample only those events
     if target_events and event_name not in target_events:
         return event_dict
 
-    # 확률적 샘플링
+    # Probabilistic sampling
     if random.random() > sample_rate:  # noqa: S311
         raise structlog.DropEvent
 
-    # 샘플링된 로그에 표시
+    # Mark the log as sampled
     event_dict["_sampled"] = True
     return event_dict

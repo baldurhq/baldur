@@ -53,10 +53,11 @@ DEFAULT_LABEL_MAX_LENGTH = 128
 
 def sanitize_label_value(value: str, max_length: int = DEFAULT_LABEL_MAX_LENGTH) -> str:
     """
-    Prometheus 메트릭 라벨 값을 안전한 형식으로 정규화.
+    Normalize a Prometheus metric label value into a safe form.
 
-    영숫자/언더스코어 이외 문자는 '_'로 치환하고,
-    최대 길이 128자로 절단하며, 빈 문자열은 'unknown'을 반환합니다.
+    Characters other than alphanumerics/underscore are replaced with '_',
+    the value is truncated to 128 characters, and an empty string yields
+    'unknown'.
 
     Examples:
         >>> sanitize_label_value("my-service.v2")
@@ -77,11 +78,11 @@ def sanitize_label_value(value: str, max_length: int = DEFAULT_LABEL_MAX_LENGTH)
 
 class MetricsBatchRecorder:
     """
-    핫 패스에서 메트릭 기록을 비동기 배치로 처리.
+    Record metrics on hot paths as an asynchronous batch.
 
-    호출 스레드는 SimpleQueue.put()만 수행 (Lock-free, ~50ns).
-    백그라운드 데몬 스레드가 100ms 간격 또는 배치 크기 256 도달 시 flush.
-    flush 실패 시 해당 배치를 drop하고 경고 로깅 (Fail-Open).
+    The calling thread only performs SimpleQueue.put() (lock-free, ~50ns).
+    A background daemon thread flushes every 100ms, or once the batch reaches
+    256 items. A failed flush drops that batch and logs a warning (fail-open).
     """
 
     __slots__ = (
@@ -117,16 +118,16 @@ class MetricsBatchRecorder:
         **kwargs: Any,
     ) -> None:
         """
-        메트릭 기록 요청을 큐에 적재 — Lock-free O(1).
+        Enqueue a metric recording request — lock-free O(1).
 
-        핫 패스에서 호출. SimpleQueue.put()은 Lock-free이므로
-        prometheus_client 내부 Lock 경합을 회피합니다.
+        Called from hot paths. SimpleQueue.put() is lock-free, so it avoids
+        contention on prometheus_client's internal lock.
         """
         if self._running:
             self._queue.put((metric_fn, args, kwargs))
 
     def _flush_loop(self) -> None:
-        """백그라운드 스레드: 배치 수집 후 일괄 기록."""
+        """Background thread: collect a batch, then record it in bulk."""
         while self._running:
             batch: list[tuple[Callable, tuple, dict]] = []
             deadline = time.monotonic() + self._flush_interval
@@ -151,7 +152,7 @@ class MetricsBatchRecorder:
                     )
 
     def shutdown(self) -> None:
-        """그레이스풀 셧다운 — 잔여 배치 flush."""
+        """Graceful shutdown — flush the remaining batch."""
         self._running = False
         if self._worker.is_alive():
             self._worker.join(timeout=2.0)

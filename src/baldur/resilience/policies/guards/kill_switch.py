@@ -1,10 +1,11 @@
 """
-Kill Switch Guard — 시스템 전역 활성/비활성 상태 검증.
+Kill Switch Guard — system-wide enabled/disabled state check.
 
-SystemControlManager의 is_enabled()를 래핑하여
-PolicyComposer 파이프라인 실행 전 전역 차단 여부를 확인한다.
+Wraps SystemControlManager's is_enabled() to test for a global block before the
+PolicyComposer pipeline runs.
 
-Fail-Open 원칙: SystemControlManager import/호출 실패 시 통과 허용.
+Fail-open principle: if SystemControlManager fails to import or call, the
+request passes.
 """
 
 from __future__ import annotations
@@ -20,23 +21,23 @@ logger = structlog.get_logger()
 
 
 class KillSwitchGuard:
-    """Kill Switch 가드 — SystemControlManager 래핑.
+    """Kill Switch guard — wraps SystemControlManager.
 
-    전역 상태만 체크하며 context는 무시한다.
-    SystemControlManager.is_enabled()가 False이면 실행을 거부한다.
+    Checks global state only; context is ignored. Rejects execution when
+    SystemControlManager.is_enabled() is False.
     """
 
     @property
     def name(self) -> str:
-        """Guard 식별자."""
+        """Guard identifier."""
         return "kill_switch"
 
     def check(self, context: PolicyContext | None = None) -> GuardResult:
         """
-        Kill Switch 전역 상태 체크.
+        Check the global Kill Switch state.
 
-        context는 무시한다 (전역 on/off만 판정).
-        SystemControlManager import/호출 실패 시 Fail-Open (통과 허용).
+        context is ignored (global on/off only). If SystemControlManager fails
+        to import or call, this is fail-open (the request passes).
         """
         try:
             from baldur.services.system_control import get_system_control

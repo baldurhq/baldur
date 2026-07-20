@@ -1,7 +1,8 @@
 """
-큐 크기 제공자 (캐싱 포함).
+Queue size provider (with caching).
 
-Redis 큐 조회 시 네트워크 지연이 RateController 병목이 되는 것을 방지.
+Prevents the network latency of Redis queue lookups from becoming a
+RateController bottleneck.
 """
 
 from __future__ import annotations
@@ -22,10 +23,10 @@ logger = structlog.get_logger()
 
 class CachedQueueSizeProvider:
     """
-    큐 크기 캐싱 Provider.
+    Queue size caching provider.
 
-    Redis 등 외부 큐 조회 시 빈번한 네트워크 호출을 방지합니다.
-    TTL 기반 캐싱으로 조회 빈도를 제한합니다.
+    Avoids frequent network calls when querying an external queue such as
+    Redis. TTL-based caching bounds the lookup frequency.
 
     Usage:
         def get_redis_queue_size() -> int:
@@ -33,7 +34,7 @@ class CachedQueueSizeProvider:
 
         provider = CachedQueueSizeProvider(get_redis_queue_size, cache_ttl=2.0)
 
-        # 2초 내 재호출 시 캐시된 값 반환
+        # A repeat call within 2 seconds returns the cached value
         size = provider()
     """
 
@@ -45,9 +46,9 @@ class CachedQueueSizeProvider:
     ):
         """
         Args:
-            provider: 실제 큐 크기 조회 함수
-            cache_ttl: 캐시 TTL (초). None이면 설정에서 로드.
-            settings: Backpressure 설정
+            provider: Actual queue size lookup function
+            cache_ttl: Cache TTL (seconds). Loaded from settings when None.
+            settings: Backpressure settings
         """
         self._provider = provider
         self._settings = settings or get_backpressure_settings()
@@ -59,13 +60,13 @@ class CachedQueueSizeProvider:
 
     def __call__(self) -> int:
         """
-        큐 크기 반환 (캐시 적용).
+        Return the queue size (cached).
 
-        TTL 내 재호출 시 캐시된 값 반환.
-        TTL 초과 시 실제 조회 후 캐시 갱신.
+        A repeat call within the TTL returns the cached value.
+        Past the TTL, the real lookup runs and refreshes the cache.
 
         Returns:
-            큐 크기
+            Queue size
         """
         now = time.time()
 
@@ -79,21 +80,21 @@ class CachedQueueSizeProvider:
                         "cached_queue_size_provider.fetch_failed_using_cached",
                         error=e,
                     )
-                    # 실패 시 기존 캐시 값 유지
+                    # On failure, keep the existing cached value
 
             return self._cached_value
 
     def invalidate(self) -> None:
-        """캐시 무효화. 다음 호출 시 즉시 조회."""
+        """Invalidate the cache. The next call looks up immediately."""
         with self._lock:
             self._last_fetch_time = 0.0
 
     def get_cache_info(self) -> dict:
         """
-        캐시 정보 반환.
+        Return cache information.
 
         Returns:
-            캐시 상태 정보
+            Cache state information
         """
         with self._lock:
             return {

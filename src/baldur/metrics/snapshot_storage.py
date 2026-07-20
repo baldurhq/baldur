@@ -54,12 +54,12 @@ def _get_snapshot_max_age() -> int:
 
 @dataclass
 class MetricSnapshot(SerializableMixin):
-    """메트릭 스냅샷 데이터."""
+    """Metric snapshot data."""
 
-    # 메트릭 값들 (도메인별)
+    # Metric values (per domain)
     values: dict[str, dict[str, Any]] = field(default_factory=dict)
 
-    # 메타데이터
+    # Metadata
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     version: str = "1.0"
@@ -67,20 +67,20 @@ class MetricSnapshot(SerializableMixin):
 
     @property
     def age_seconds(self) -> float:
-        """스냅샷 나이 (초)."""
+        """Snapshot age in seconds."""
         return time.time() - self.updated_at
 
     def get_value(self, category: str, key: str, default: Any = None) -> Any:
         """
-        스냅샷에서 값 조회.
+        Read a value from the snapshot.
 
         Args:
-            category: 카테고리 (예: "dlq_pending", "circuit_breaker")
-            key: 키 (예: "payment", "toss")
-            default: 기본값
+            category: Category (e.g. "dlq_pending", "circuit_breaker")
+            key: Key (e.g. "payment", "toss")
+            default: Default value
 
         Returns:
-            저장된 값 또는 기본값
+            Stored value, or the default
         """
         if category not in self.values:
             return default
@@ -88,12 +88,12 @@ class MetricSnapshot(SerializableMixin):
 
     def set_value(self, category: str, key: str, value: Any) -> None:
         """
-        스냅샷에 값 저장.
+        Store a value in the snapshot.
 
         Args:
-            category: 카테고리
-            key: 키
-            value: 값
+            category: Category
+            key: Key
+            value: Value
         """
         if category not in self.values:
             self.values[category] = {}
@@ -103,30 +103,30 @@ class MetricSnapshot(SerializableMixin):
 
 class MetricSnapshotStorage:
     """
-    L1 로컬 파일 스냅샷 저장소.
+    L1 local-file snapshot storage.
 
-    메트릭 값을 로컬 파일에 주기적으로 저장하여,
-    모든 데이터 소스가 실패해도 "마지막 알려진 값"을 사용할 수 있게 합니다.
+    Periodically persists metric values to a local file so the "last known
+    value" stays available even when every data source fails.
 
     Features:
-    - Atomic writes: Write-to-Temp-and-Rename 패턴
-    - Non-blocking: 실패해도 시스템 동작에 영향 없음
-    - Age tracking: 스냅샷 나이 추적
-    - Thread-safe: 동시 접근 안전
+    - Atomic writes: Write-to-Temp-and-Rename pattern
+    - Non-blocking: failures don't affect system operation
+    - Age tracking: tracks snapshot age
+    - Thread-safe: safe for concurrent access
 
     Example:
         >>> storage = MetricSnapshotStorage("/var/lib/baldur/metrics")
         >>>
-        >>> # 스냅샷 저장
+        >>> # Save a snapshot value
         >>> storage.save_value("dlq_pending", "payment", 5)
         >>>
-        >>> # 스냅샷 로드
+        >>> # Load a snapshot value
         >>> value = storage.load_value("dlq_pending", "payment")
         >>> age = storage.get_snapshot_age()
     """
 
     DEFAULT_FILENAME = "last_known_metrics.json"
-    DEFAULT_MAX_AGE = 3600  # 하위 호환성용 레거시 상수
+    DEFAULT_MAX_AGE = 3600  # Legacy constant kept for backward compatibility
 
     def __init__(
         self,
@@ -138,9 +138,10 @@ class MetricSnapshotStorage:
         Initialize MetricSnapshotStorage.
 
         Args:
-            storage_dir: 저장 디렉토리 (None이면 기본 위치 사용)
-            filename: 스냅샷 파일명
-            max_age_seconds: 스냅샷 최대 유효 기간 (초). None이면 Settings에서 가져옴.
+            storage_dir: Storage directory (default location when None)
+            filename: Snapshot file name
+            max_age_seconds: Max snapshot validity in seconds. Read from
+                Settings when None.
         """
         self._storage_dir = (
             Path(storage_dir) if storage_dir else self._get_default_dir()
@@ -153,24 +154,24 @@ class MetricSnapshotStorage:
         self._snapshot: MetricSnapshot | None = None
         self._dirty = False
 
-        # 디렉토리 생성
+        # Create the directory
         self._ensure_directory()
 
-        # 기존 스냅샷 로드
+        # Load any existing snapshot
         self._load_snapshot()
 
     @property
     def file_path(self) -> Path:
-        """스냅샷 파일 경로."""
+        """Snapshot file path."""
         return self._storage_dir / self._filename
 
     @property
     def snapshot(self) -> MetricSnapshot | None:
-        """현재 스냅샷."""
+        """Current snapshot."""
         return self._snapshot
 
     def _get_default_dir(self) -> Path:
-        """기본 저장 디렉토리."""
+        """Default storage directory."""
         try:
             from baldur.settings.metrics import get_metrics_settings
 
@@ -180,11 +181,11 @@ class MetricSnapshotStorage:
         except Exception:
             pass
 
-        # 기본: 현재 디렉토리 하위
+        # Default: under the current directory
         return Path.cwd() / ".baldur"
 
     def _ensure_directory(self) -> None:
-        """디렉토리 존재 확인 및 생성."""
+        """Ensure the directory exists, creating it if needed."""
         try:
             self._storage_dir.mkdir(parents=True, exist_ok=True)
         except Exception as e:
@@ -195,7 +196,7 @@ class MetricSnapshotStorage:
             )
 
     def _load_snapshot(self) -> None:
-        """파일에서 스냅샷 로드."""
+        """Load the snapshot from file."""
         try:
             if not self.file_path.exists():
                 self._snapshot = MetricSnapshot(source="new")
@@ -220,21 +221,21 @@ class MetricSnapshotStorage:
 
     def _save_snapshot_atomic(self) -> bool:
         """
-        원자적으로 스냅샷 저장.
+        Save the snapshot atomically.
 
-        Write-to-Temp-and-Rename 패턴 사용:
-        1. 임시 파일에 쓰기
-        2. fsync로 디스크 동기화
-        3. 원래 파일명으로 rename (원자적 연산)
+        Uses the Write-to-Temp-and-Rename pattern:
+        1. Write to a temp file
+        2. fsync to flush to disk
+        3. Rename onto the real filename (atomic operation)
 
         Returns:
-            성공 여부
+            Whether the save succeeded
         """
         if self._snapshot is None:
             return False
 
         try:
-            # 임시 파일 생성 (같은 디렉토리에)
+            # Create the temp file (in the same directory)
             fd, temp_path = tempfile.mkstemp(
                 suffix=".tmp",
                 prefix="snapshot_",
@@ -242,7 +243,7 @@ class MetricSnapshotStorage:
             )
 
             try:
-                # JSON 쓰기
+                # Write JSON
                 data = self._snapshot.to_dict()
                 json_str = json.dumps(data, indent=2, ensure_ascii=False)
 
@@ -251,7 +252,7 @@ class MetricSnapshotStorage:
                     f.flush()
                     os.fsync(f.fileno())
 
-                # 원자적 rename
+                # Atomic rename
                 os.replace(temp_path, self.file_path)
 
                 self._dirty = False
@@ -262,7 +263,7 @@ class MetricSnapshotStorage:
                 return True
 
             except Exception:
-                # 임시 파일 정리
+                # Clean up the temp file
                 safe_unlink(Path(temp_path))
                 raise
 
@@ -281,16 +282,16 @@ class MetricSnapshotStorage:
         immediate: bool = False,
     ) -> bool:
         """
-        값 저장.
+        Store a value.
 
         Args:
-            category: 카테고리 (예: "dlq_pending", "circuit_breaker")
-            key: 키 (예: "payment", "toss")
-            value: 값
-            immediate: 즉시 디스크에 저장할지 여부
+            category: Category (e.g. "dlq_pending", "circuit_breaker")
+            key: Key (e.g. "payment", "toss")
+            value: Value
+            immediate: Whether to persist to disk right away
 
         Returns:
-            성공 여부
+            Whether the operation succeeded
         """
         with self._lock:
             if self._snapshot is None:
@@ -309,14 +310,14 @@ class MetricSnapshotStorage:
         source: str = "bulk",
     ) -> bool:
         """
-        여러 값 일괄 저장.
+        Store several values at once.
 
         Args:
-            values: {category: {key: value}} 형태의 딕셔너리
-            source: 저장 소스 식별자
+            values: Dict of the form {category: {key: value}}
+            source: Identifier of the storing source
 
         Returns:
-            성공 여부
+            Whether the operation succeeded
         """
         with self._lock:
             if self._snapshot is None:
@@ -338,16 +339,17 @@ class MetricSnapshotStorage:
         max_age: float | None = None,
     ) -> Any:
         """
-        값 로드.
+        Load a value.
 
         Args:
-            category: 카테고리
-            key: 키
-            default: 기본값
-            max_age: 최대 허용 나이 (초), None이면 기본값 사용
+            category: Category
+            key: Key
+            default: Default value
+            max_age: Max acceptable age in seconds; the default is used
+                when None
 
         Returns:
-            저장된 값 또는 기본값 (너무 오래된 경우도 기본값)
+            Stored value, or the default (also when the snapshot is too old)
         """
         with self._lock:
             if self._snapshot is None:
@@ -367,13 +369,13 @@ class MetricSnapshotStorage:
 
     def load_all(self, max_age: float | None = None) -> dict[str, dict[str, Any]]:
         """
-        모든 값 로드.
+        Load every value.
 
         Args:
-            max_age: 최대 허용 나이 (초)
+            max_age: Max acceptable age in seconds
 
         Returns:
-            저장된 모든 값 또는 빈 딕셔너리
+            All stored values, or an empty dict
         """
         with self._lock:
             if self._snapshot is None:
@@ -388,10 +390,10 @@ class MetricSnapshotStorage:
 
     def get_snapshot_age(self) -> float | None:
         """
-        스냅샷 나이 조회.
+        Read the snapshot age.
 
         Returns:
-            스냅샷 나이 (초) 또는 None
+            Snapshot age in seconds, or None
         """
         with self._lock:
             if self._snapshot is None:
@@ -400,10 +402,10 @@ class MetricSnapshotStorage:
 
     def get_snapshot_info(self) -> dict[str, Any]:
         """
-        스냅샷 정보 조회.
+        Read snapshot info.
 
         Returns:
-            스냅샷 메타데이터
+            Snapshot metadata
         """
         with self._lock:
             if self._snapshot is None:
@@ -422,10 +424,10 @@ class MetricSnapshotStorage:
 
     def flush(self) -> bool:
         """
-        변경사항 디스크에 저장.
+        Persist pending changes to disk.
 
         Returns:
-            성공 여부
+            Whether the operation succeeded
         """
         with self._lock:
             if not self._dirty:
@@ -434,10 +436,10 @@ class MetricSnapshotStorage:
 
     def clear(self) -> bool:
         """
-        스냅샷 초기화.
+        Reset the snapshot.
 
         Returns:
-            성공 여부
+            Whether the operation succeeded
         """
         with self._lock:
             self._snapshot = MetricSnapshot(source="cleared")

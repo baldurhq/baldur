@@ -29,7 +29,7 @@ Usage:
     if should_bypass:
         audit_logger.log_bypass(reason, request)
 
-기업 감사 준수: 모든 바이패스 결정이 로그로 기록됩니다.
+Enterprise audit compliance: every bypass decision is recorded in the log.
 """
 
 from __future__ import annotations

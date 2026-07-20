@@ -1,26 +1,32 @@
 """
-structlog 전역 설정 — stdlib logging 호환 모드.
+structlog global configuration — stdlib logging compatibility mode.
 
-structlog를 stdlib logging의 wrapper로 구성하여 기존 인프라를 그대로 유지한다:
-- OTEL LoggingInstrumentor: structlog 아래에서 stdlib LogRecord를 가로채 Loki로 전송
-- IncidentLogHandler: stdlib logging.Handler 서브클래스이므로 변경 없이 작동
-- LoggingSettings: stdlib logger 레벨 설정 그대로 유지
-- Django/Celery 내부 로깅: foreign_pre_chain으로 structlog 파이프라인 통과
+Configures structlog as a wrapper around stdlib logging so the existing
+infrastructure is preserved as-is:
+- OTEL LoggingInstrumentor: intercepts the stdlib LogRecord beneath structlog
+  and ships it to Loki
+- IncidentLogHandler: a stdlib logging.Handler subclass, so it works unchanged
+- LoggingSettings: stdlib logger level configuration preserved as-is
+- Django/Celery internal logging: passes through the structlog pipeline via
+  foreign_pre_chain
 
-환경별 Renderer:
-- structured_json=True  (production):  JSONRenderer  → Loki/Datadog JSON 자동 파싱
-- structured_json=False (development): ConsoleRenderer → 터미널 가독성
+Renderer per environment:
+- structured_json=True  (production):  JSONRenderer  -> Loki/Datadog parse the
+  JSON automatically
+- structured_json=False (development): ConsoleRenderer -> terminal readability
 
-공통 프로세서 파이프라인 순서:
-  1. merge_contextvars  — contextvars에 bind된 값 자동 병합
-  2. add_log_level      — level 필드 자동 주입
-  3. add_logger_name    — logger 필드 자동 주입 (__name__ 기반)
-  4. _rate_limit_processor — 동일 이벤트 반복 시 de-dup (10초/100건)
-  5. _sampling_processor   — Hot path 로그 확률적 샘플링
-  6. TimeStamper(iso)   — timestamp ISO-8601 형식으로 주입
-  7. _inject_otel_trace_context — trace_id, span_id 자동 주입 (OTEL 활성 시)
-  8. StackInfoRenderer  — 스택 정보 렌더링
-  9. format_exc_info    — 예외 정보 렌더링
+Shared processor pipeline order:
+  1. merge_contextvars  — merges values bound to contextvars automatically
+  2. add_log_level      — injects the level field automatically
+  3. add_logger_name    — injects the logger field automatically (from
+     __name__)
+  4. _rate_limit_processor — de-dups a repeating event (10s / 100 events)
+  5. _sampling_processor   — probabilistically samples hot path logs
+  6. TimeStamper(iso)   — injects the timestamp in ISO-8601 format
+  7. _inject_otel_trace_context — injects trace_id and span_id automatically
+     (when OTEL is active)
+  8. StackInfoRenderer  — renders stack information
+  9. format_exc_info    — renders exception information
 """
 
 from __future__ import annotations
@@ -39,16 +45,16 @@ from baldur.observability.log_processors import (
     sampling_processor,
 )
 
-# OTEL trace context 주입 프로세서의 재진입을 방지하는 thread-local 플래그.
-# observability 초기화 함수 내부 로그가 다시 프로세서를 호출하여
-# 무한 재귀가 발생하는 것을 막는다.
+# Thread-local flag preventing re-entry into the OTEL trace context injection
+# processor. Stops a log emitted inside an observability initialization
+# function from calling the processor again and recursing infinitely.
 _otel_injection_in_progress = threading.local()
 
 # =============================================================================
-# LoggingSettings → stdlib logger 레벨 매핑.
-# LoggingSettings 의 8개 컴포넌트별 로그 레벨을 실제 stdlib 로거에 적용한다.
-# structlog.get_logger()는 내부적으로 stdlib LoggerFactory를 사용하므로
-# 모듈 경로(__name__)가 로거 이름이 된다.
+# LoggingSettings -> stdlib logger level mapping.
+# Applies the 8 per-component log levels from LoggingSettings to the actual
+# stdlib loggers. structlog.get_logger() uses the stdlib LoggerFactory
+# internally, so the module path (__name__) becomes the logger name.
 # =============================================================================
 _COMPONENT_LOGGER_MAP: dict[str, list[str]] = {
     "dlq_log_level": [
@@ -107,12 +113,12 @@ def _structlog_state() -> _StructlogState:
 
 
 def configure_structlog() -> None:
-    """structlog 전역 설정을 초기화한다.
+    """Initialize the global structlog configuration.
 
-    멱등성이 보장되며 중복 호출 시 즉시 반환한다.
-    `structured_json` 설정에 따라 렌더러를 선택한다.
+    Idempotent — a duplicate call returns immediately.
+    Selects the renderer according to the `structured_json` setting.
 
-    Thread-safe: Double-Checked Locking으로 concurrent 호출에 안전하다.
+    Thread-safe: double-checked locking makes concurrent calls safe.
     """
     state = _structlog_state()
     if state.configured:
@@ -179,7 +185,8 @@ def configure_structlog() -> None:
         )
 
         root_logger = logging.getLogger()
-        # 중복 핸들러 방지: structlog 포매터를 가진 핸들러만 교체
+        # Avoid duplicate handlers: replace only handlers carrying the
+        # structlog formatter
         root_logger.handlers = [
             h
             for h in root_logger.handlers
@@ -188,10 +195,11 @@ def configure_structlog() -> None:
             )
         ]
 
-        # 테스트 환경에서는 NullHandler로 콘솔 출력을 완전 차단한다.
-        # StreamHandler(sys.stdout)는 pytest_configure 시점에 원본 stdout 참조를 잡아
-        # pytest 캡처를 우회하므로, 테스트에서는 NullHandler가 유일한 해결책이다.
-        # pytest의 caplog는 자체 LogCaptureHandler를 사용하므로 영향 없음.
+        # In the test environment, NullHandler blocks console output entirely.
+        # StreamHandler(sys.stdout) grabs the original stdout reference at
+        # pytest_configure time and so bypasses pytest capture — NullHandler is
+        # the only workable answer under test. pytest's caplog uses its own
+        # LogCaptureHandler, so it is unaffected.
         _test_level_name = os.environ.get("BALDUR_TEST_LOG_LEVEL")
         handler: logging.Handler
         if _test_level_name:
@@ -211,9 +219,10 @@ def configure_structlog() -> None:
         root_logger.addHandler(handler)
 
         # =====================================================================
-        # 컴포넌트별 로그 레벨 적용 (280_LOGGING_SETTINGS_APPLY)
-        # LoggingSettings 의 8개 레벨 값을 실제 stdlib 로거에 setLevel()로 적용.
-        # 이렇게 하면 환경변수만으로 제어 가능:
+        # Apply the per-component log levels (see _apply_component_log_levels).
+        # Applies the 8 level values from LoggingSettings to the actual stdlib
+        # loggers via setLevel(), making them controllable by environment
+        # variable alone:
         #   BALDUR_LOGGING_SETTINGS_CIRCUIT_BREAKER_LOG_LEVEL=WARNING
         # =====================================================================
         _apply_component_log_levels(settings)
@@ -221,11 +230,11 @@ def configure_structlog() -> None:
 
 
 def reset_structlog_config() -> None:
-    """테스트에서 structlog 설정을 리셋한다.
+    """Reset the structlog configuration in tests.
 
-    configured 플래그뿐 아니라 root logger에 등록된
-    ProcessorFormatter 핸들러도 제거하여, 다음 configure_structlog() 호출이
-    새로운 설정값으로 완전히 재구성되도록 보장한다.
+    Clears the configured flag and also removes the ProcessorFormatter handlers
+    registered on the root logger, so the next configure_structlog() call
+    rebuilds everything from the new configuration values.
     """
     _structlog_state().configured = False
 
@@ -240,13 +249,15 @@ def reset_structlog_config() -> None:
 
 
 def _apply_component_log_levels(settings: Any) -> None:
-    """LoggingSettings의 컴포넌트별 로그 레벨을 stdlib 로거에 적용한다.
+    """Apply the per-component log levels from LoggingSettings to stdlib
+    loggers.
 
-    _COMPONENT_LOGGER_MAP 에 정의된 매핑에 따라 각 컴포넌트의 환경변수 값을
-    실제 logging.getLogger(name).setLevel()로 적용한다.
+    Following the mapping defined in _COMPONENT_LOGGER_MAP, applies each
+    component's environment variable value via
+    logging.getLogger(name).setLevel().
 
-    이 함수가 없으면 LoggingSettings에 정의된 레벨 값이
-    실제로 적용되지 않는 데드 코드 상태가 된다.
+    Without this function the level values defined on LoggingSettings would
+    never take effect — dead configuration.
     """
     for setting_name, logger_names in _COMPONENT_LOGGER_MAP.items():
         level_str = getattr(settings, setting_name, "INFO")
@@ -260,12 +271,14 @@ def _inject_otel_trace_context(
     method_name: str,
     event_dict: dict[str, Any],
 ) -> dict[str, Any]:
-    """활성 OTEL 스팬의 trace_id, span_id를 event_dict에 주입하는 프로세서.
+    """Processor injecting the active OTEL span's trace_id and span_id into
+    the event_dict.
 
-    OTEL이 설치되지 않았거나 활성 스팬이 없으면 event_dict를 그대로 반환한다.
+    Returns the event_dict unchanged when OTEL is not installed or there is no
+    active span.
 
-    재진입 방지: OTEL 초기화 내부에서 발생하는 로그가 이 프로세서를 다시
-    호출해 무한 재귀가 발생하는 것을 thread-local 플래그로 차단한다.
+    Re-entry guard: a thread-local flag blocks a log emitted inside OTEL
+    initialization from calling this processor again and recursing infinitely.
     """
     if getattr(_otel_injection_in_progress, "active", False):
         return event_dict

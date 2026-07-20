@@ -1,22 +1,26 @@
 """
-Celery 태스크 컨텍스트 통합 복원/정리.
+Unified Celery task context restoration/cleanup.
 
-Celery task_prerun/postrun 시그널에서 분산되어 있던 컨텍스트 복원 로직을
-단일 유틸리티로 통합한다:
-- trace_id / celery_context 복원/정리 (기존 signal_hooks.py on_task_prerun 내부)
-- causation context 복원/정리 (기존 signal_hooks.py _setup_causation_context)
-- cell_id 복원/정리 (기존 celery_cell_propagation.py extract_cell_id_on_prerun)
-- domain 복원/정리 (OTel Baggage 또는 레거시 헤더)
+Consolidates the context restoration logic that was scattered across the
+Celery task_prerun/postrun signals into a single utility:
+- trace_id / celery_context restore/cleanup (previously in signal_hooks.py
+  on_task_prerun)
+- causation context restore/cleanup (previously signal_hooks.py
+  _setup_causation_context)
+- cell_id restore/cleanup (previously celery_cell_propagation.py
+  extract_cell_id_on_prerun)
+- domain restore/cleanup (OTel Baggage or legacy header)
 
-토큰 저장:
-  task.request에 저장하여 요청별 격리.
-  (task는 워커 내 싱글톤이지만 request는 실행 요청별 Context 객체)
+Token storage:
+  Stored on task.request for per-request isolation.
+  (The task is a worker-level singleton, but request is a per-execution
+  Context object.)
 
-에러 정책:
-  ContextCriticality에 따라 CRITICAL은 Fail-Fast, OPTIONAL은 Fail-Open.
+Error policy:
+  Per ContextCriticality — CRITICAL is fail-fast, OPTIONAL is fail-open.
 
-의존 방향:
-  signal_hooks.py → celery_context_utils.py (단방향)
+Dependency direction:
+  signal_hooks.py → celery_context_utils.py (one-way)
   celery_context_utils.py → audit/trace.py, context/causation_context.py,
                              context/cell_context.py, decorators/domain_tag.py
 """
@@ -38,24 +42,26 @@ logger = structlog.get_logger()
 
 
 # =============================================================================
-# 컨텍스트 중요도 분류 — Fail-Open / Fail-Fast 정책
+# Context criticality classification — fail-open / fail-fast policy
 # =============================================================================
 
 
 class ContextCriticality(Enum):
-    """컨텍스트 복원 실패 시 정책."""
+    """Policy applied when context restoration fails."""
 
-    CRITICAL = "critical"  # 실패 → 태스크 중단 (Reject/Raise)
-    IMPORTANT = "important"  # 실패 → WARNING 로그 + 메트릭 증가, 태스크 계속
-    OPTIONAL = "optional"  # 실패 → DEBUG 로그, 태스크 계속
+    CRITICAL = "critical"  # Failure → abort task (reject/raise)
+    IMPORTANT = "important"  # Failure → WARNING log + metric, task continues
+    OPTIONAL = "optional"  # Failure → DEBUG log, task continues
 
 
-# 컨텍스트별 중요도 분류.
-# cell_id → DB 라우터, 캐시 격벽, DLQ 파티셔닝에 사용 → 누락 시 크로스-테넌트 오염 가능
-# tenant_id → 멀티테넌트 격리
-# causation → 인과관계 추적, 누락 시 추적 불가하나 비즈니스 동작에 영향 없음
-# trace_id → 관측용, 누락 시 비즈니스 영향 없음
-# domain → 태깅용
+# Criticality classification per context.
+# cell_id → used by the DB router, cache bulkhead and DLQ partitioning, so a
+#   missing value risks cross-tenant contamination
+# tenant_id → multi-tenant isolation
+# causation → causality tracking; missing breaks tracing but not business
+#   behaviour
+# trace_id → observability only, no business impact when missing
+# domain → tagging only
 CONTEXT_CRITICALITY: dict[str, ContextCriticality] = {
     "cell_id": ContextCriticality.CRITICAL,
     "tenant_id": ContextCriticality.CRITICAL,
@@ -95,17 +101,17 @@ class BaldurContextError(BaldurError):
 
 
 # =============================================================================
-# 토큰 저장 구조
+# Token storage structure
 # =============================================================================
 
 
 @dataclass
 class TaskContextTokens:
     """
-    태스크 수명 동안 보관할 ContextVar 토큰 모음.
+    ContextVar tokens held for the lifetime of a task.
 
-    task_postrun에서 일괄 정리(reset)하기 위해 토큰을 추적한다.
-    task.request에 저장하여 요청별 격리.
+    Tokens are tracked so task_postrun can reset them all in one pass.
+    Stored on task.request for per-request isolation.
     """
 
     cell_id_token: contextvars.Token[str | None] | None = None
@@ -115,16 +121,16 @@ class TaskContextTokens:
     baggage_tokens: dict[str, contextvars.Token] = field(default_factory=dict)
 
 
-# task.request에 토큰 저장용 속성명
+# Attribute name used to store the tokens on task.request
 _CONTEXT_TOKENS_ATTR = "_baldur_context_tokens"
 
 
 def _get_task_request(task: Any) -> Any | None:
     """
-    task.request를 안전하게 가져온다.
+    Fetch task.request safely.
 
-    단위 테스트에서 task()처럼 직접 호출 시 task.request가 빈 Context이거나
-    존재하지 않을 수 있으므로 방어적으로 처리한다.
+    When a task is called directly in a unit test, task.request may be an empty
+    Context or missing entirely, so handle it defensively.
     """
     if task is None:
         return None
@@ -135,23 +141,23 @@ def _get_task_request(task: Any) -> Any | None:
 
 
 # =============================================================================
-# 통합 리졸버 — Baggage 우선, Legacy Fallback, 1회만 Set
+# Unified resolvers — Baggage first, legacy fallback, set only once
 # =============================================================================
 
 
 def _resolve_cell_id(task: Any) -> tuple[str | None, str]:
     """
-    cell_id를 단일 진입점에서 결정. OTel Baggage 우선, Legacy Fallback.
+    Resolve cell_id from a single entry point. OTel Baggage first, then legacy.
 
-    우선순위:
+    Priority:
     1. OTel Baggage (baldur.cell_id)
-    2. Legacy 커스텀 헤더 (task.request.get("cell_id"))
-    3. None (복원 불가)
+    2. Legacy custom header (task.request.get("cell_id"))
+    3. None (cannot restore)
 
     Returns:
-        (cell_id, source) — source는 "baggage" | "legacy_header" | "none"
+        (cell_id, source) — source is "baggage" | "legacy_header" | "none"
     """
-    # ── 1순위: OTel Baggage ──
+    # ── Priority 1: OTel Baggage ──
     try:
         from opentelemetry import baggage as otel_baggage
 
@@ -159,11 +165,11 @@ def _resolve_cell_id(task: Any) -> tuple[str | None, str]:
         if isinstance(cell_id_obj, str) and cell_id_obj:
             return (cell_id_obj, "baggage")
     except ImportError:
-        pass  # OTel 미설치 환경
+        pass  # OTel not installed
     except Exception:
-        pass  # Baggage 파싱 실패
+        pass  # Baggage parsing failed
 
-    # ── 2순위: Legacy 커스텀 헤더 ──
+    # ── Priority 2: legacy custom header ──
     request = _get_task_request(task)
     if request and hasattr(request, "get"):
         cell_id = request.get("cell_id")
@@ -175,12 +181,12 @@ def _resolve_cell_id(task: Any) -> tuple[str | None, str]:
 
 def _resolve_domain(task: Any) -> tuple[str | None, str]:
     """
-    domain을 단일 진입점에서 결정. OTel Baggage 우선, Legacy Fallback.
+    Resolve domain from a single entry point. OTel Baggage first, then legacy.
 
     Returns:
-        (domain, source) — source는 "baggage" | "legacy_header" | "none"
+        (domain, source) — source is "baggage" | "legacy_header" | "none"
     """
-    # ── 1순위: OTel Baggage ──
+    # ── Priority 1: OTel Baggage ──
     try:
         from opentelemetry import baggage as otel_baggage
 
@@ -192,7 +198,7 @@ def _resolve_domain(task: Any) -> tuple[str | None, str]:
     except Exception:
         pass
 
-    # ── 2순위: Legacy 커스텀 헤더 ──
+    # ── Priority 2: legacy custom header ──
     request = _get_task_request(task)
     if request and hasattr(request, "get"):
         domain = request.get("domain")
@@ -203,20 +209,20 @@ def _resolve_domain(task: Any) -> tuple[str | None, str]:
 
 
 # =============================================================================
-# Causation 복원/정리 로직 (signal_hooks.py에서 이관)
+# Causation restore/cleanup logic (moved out of signal_hooks.py)
 # =============================================================================
 
 
-# Causation 컨텍스트 token 저장용 (task.request 속성)
+# Attribute on task.request holding the causation context token
 _CAUSATION_TOKEN_ATTR = "_baldur_causation_token"
 
 
 def _detect_causation_source(task_name: str) -> str:
     """
-    Task 이름에서 causation source 유형 추론.
+    Infer the causation source type from the task name.
 
     Returns:
-        source 문자열 (celery_beat, management_cmd, scheduler, worker)
+        Source string (celery_beat, management_cmd, scheduler, worker)
     """
     task_name_lower = task_name.lower()
 
@@ -238,11 +244,12 @@ def _setup_causation_context(
     task_name: str,
 ) -> contextvars.Token | None:
     """
-    Celery Task 시작 시 Causation Context 자동 복원 또는 시스템 Cascade 생성.
+    Restore CausationContext at Celery task start, or create a system cascade.
 
-    task.request.headers에서 causation 정보를 추출하여 CausationContext를 설정한다.
-    헤더가 없는 경우 (Celery Beat, 독립 실행 등) 시스템 Cascade를 자동 생성한다.
-    token을 반환하여 TaskContextTokens에서 추적 가능하게 한다.
+    Extracts causation info from task.request.headers and sets a
+    CausationContext. When the headers are absent (Celery Beat, standalone runs)
+    a system cascade is generated automatically. Returns the token so
+    TaskContextTokens can track it.
     """
     try:
         from baldur.context.causation_context import (
@@ -306,9 +313,10 @@ def _setup_causation_context(
 
 def _cleanup_causation_context(task: Any) -> None:
     """
-    Celery Task 종료 시 Causation Context 정리.
+    Clean up CausationContext at Celery task end.
 
-    Worker 재사용 시 이전 Task의 causation 컨텍스트 잔존 방지.
+    Prevents the previous task's causation context from surviving into a reused
+    worker.
     """
     try:
         from baldur.context.causation_context import _current_causation
@@ -335,7 +343,7 @@ def _cleanup_causation_context(task: Any) -> None:
 
 
 # =============================================================================
-# Strict Mode 설정
+# Strict mode configuration
 # =============================================================================
 
 
@@ -344,10 +352,10 @@ _strict_cell_context: bool | None = None
 
 def _is_strict_context_enabled() -> bool:
     """
-    BALDUR_STRICT_CELL_CONTEXT 환경변수 확인. 캐싱 포함.
+    Read the BALDUR_STRICT_CELL_CONTEXT env var. Result is cached.
 
     Returns:
-        True이면 CRITICAL 컨텍스트 누락 시 BaldurContextError 발생.
+        True if a missing CRITICAL context must raise BaldurContextError.
     """
     global _strict_cell_context
     if _strict_cell_context is None:
@@ -360,13 +368,13 @@ def _is_strict_context_enabled() -> bool:
 
 
 def _reset_strict_cell_context_cache() -> None:
-    """strict_cell_context 캐시를 초기화한다. 테스트 용도."""
+    """Reset the strict_cell_context cache. For test use."""
     global _strict_cell_context
     _strict_cell_context = None
 
 
 # =============================================================================
-# Actor Context 복원/정리
+# Actor context restore/cleanup
 # =============================================================================
 
 
@@ -375,16 +383,16 @@ def _restore_actor_context(
     kwargs: dict | None = None,
 ) -> contextvars.Token | None:
     """
-    Celery Task 시작 시 ActorContext 복원.
+    Restore ActorContext at Celery task start.
 
-    우선순위:
-    1. kwargs["actor_info"] — 명시적 override (테스트, 특수 케이스)
-    2. task.request.headers — 자동 전파된 ActorContext
-    3. SYSTEM_ACTOR — fallback (Beat 태스크 등)
+    Priority:
+    1. kwargs["actor_info"] — explicit override (tests, special cases)
+    2. task.request.headers — auto-propagated ActorContext
+    3. SYSTEM_ACTOR — fallback (Beat tasks, etc.)
 
     Args:
-        task: Celery task 인스턴스
-        kwargs: 태스크 kwargs
+        task: Celery task instance
+        kwargs: Task kwargs
 
     Returns:
         ContextVar token for cleanup, or None
@@ -483,7 +491,7 @@ def _restore_actor_from_dict(actor_info: dict) -> contextvars.Token | None:
 
 
 # =============================================================================
-# 메인 복원 함수
+# Main restore function
 # =============================================================================
 
 
@@ -494,36 +502,36 @@ def restore_all_task_context(  # noqa: C901, PLR0912, PLR0915
     kwargs: dict | None = None,
 ) -> TaskContextTokens:
     """
-    Celery 태스크의 모든 ContextVar를 일괄 복원.
+    Restore every ContextVar of a Celery task in one pass.
 
-    호출 위치: on_task_prerun() 내부 (signal_hooks.py)
-    기존 개별 핸들러를 대체한다.
+    Call site: inside on_task_prerun() (signal_hooks.py).
+    Replaces the previous per-context handlers.
 
-    복원 순서:
+    Restoration order:
     1. trace_id (kwargs → task_id fallback)           [OPTIONAL]
     2. celery_context                                 [OPTIONAL]
-    3. causation (본 모듈 내부)                        [IMPORTANT]
-    4. cell_id (통합 리졸버 — Baggage 우선)            [CRITICAL]
-    5. domain (통합 리졸버 — Baggage 우선)             [OPTIONAL]
-    6. actor (kwargs["actor_info"] → headers 우선)   [IMPORTANT]
+    3. causation (within this module)                 [IMPORTANT]
+    4. cell_id (unified resolver — Baggage first)     [CRITICAL]
+    5. domain (unified resolver — Baggage first)      [OPTIONAL]
+    6. actor (kwargs["actor_info"] → headers first)   [IMPORTANT]
 
     Args:
-        task: Celery task 인스턴스 (sender)
-        task_id: 태스크 ID
-        task_name: 태스크 이름
-        kwargs: 태스크 kwargs
+        task: Celery task instance (sender)
+        task_id: Task ID
+        task_name: Task name
+        kwargs: Task kwargs
 
     Returns:
-        TaskContextTokens — cleanup_all_task_context()에 전달
+        TaskContextTokens — pass this to cleanup_all_task_context()
 
     Raises:
-        BaldurContextError: CRITICAL 컨텍스트 복원 실패 시
-            (BALDUR_STRICT_CELL_CONTEXT=true인 경우에만)
+        BaldurContextError: when a CRITICAL context fails to restore
+            (only when BALDUR_STRICT_CELL_CONTEXT=true)
     """
     tokens = TaskContextTokens()
     request = _get_task_request(task)
 
-    # ── 1. trace_id 복원 [OPTIONAL] ──
+    # ── 1. Restore trace_id [OPTIONAL] ──
     try:
         from baldur.audit.trace import (
             _celery_context_var,
@@ -537,7 +545,7 @@ def restore_all_task_context(  # noqa: C901, PLR0912, PLR0915
         else:
             set_trace_id(generate_celery_trace_id(task_id))
 
-        # celery_context 설정
+        # Set celery_context
         retries = getattr(request, "retries", 0) if request else 0
         _celery_context_var.set(
             {
@@ -552,7 +560,7 @@ def restore_all_task_context(  # noqa: C901, PLR0912, PLR0915
             error=e,
         )
 
-    # ── 2. causation 복원 [IMPORTANT] ──
+    # ── 2. Restore causation [IMPORTANT] ──
     try:
         tokens.causation_token = _setup_causation_context(task, task_id, task_name)
     except Exception as e:
@@ -561,7 +569,7 @@ def restore_all_task_context(  # noqa: C901, PLR0912, PLR0915
             error=e,
         )
 
-    # ── 3. cell_id 복원 [CRITICAL] — 통합 리졸버 ──
+    # ── 3. Restore cell_id [CRITICAL] — unified resolver ──
     try:
         cell_id, source = _resolve_cell_id(task)
         if cell_id:
@@ -594,7 +602,7 @@ def restore_all_task_context(  # noqa: C901, PLR0912, PLR0915
             error=e,
         )
 
-    # ── 4. domain 복원 [OPTIONAL] — 통합 리졸버 ──
+    # ── 4. Restore domain [OPTIONAL] — unified resolver ──
     # 545 chokepoint 5: route through set_domain_context() so OTel baggage /
     # legacy-header injected values inherit validation + fallback.
     try:
@@ -609,14 +617,14 @@ def restore_all_task_context(  # noqa: C901, PLR0912, PLR0915
                 domain_source=domain_source,
             )
     except ImportError:
-        pass  # domain_tag 모듈 미존재 시 무시
+        pass  # Ignore when the domain_tag module is absent
     except Exception as e:
         logger.debug(
             "context_utils.domain_restore_failed",
             error=e,
         )
 
-    # ── 5. actor 복원 [IMPORTANT] ──
+    # ── 5. Restore actor [IMPORTANT] ──
     try:
         tokens.actor_token = _restore_actor_context(task, kwargs)
     except Exception as e:
@@ -625,7 +633,7 @@ def restore_all_task_context(  # noqa: C901, PLR0912, PLR0915
             error=e,
         )
 
-    # ── 토큰을 task.request에 저장 (postrun 정리용) ──
+    # ── Store the tokens on task.request (for postrun cleanup) ──
     if request is not None:
         try:
             setattr(request, _CONTEXT_TOKENS_ATTR, tokens)
@@ -636,23 +644,23 @@ def restore_all_task_context(  # noqa: C901, PLR0912, PLR0915
 
 
 # =============================================================================
-# 메인 정리 함수
+# Main cleanup function
 # =============================================================================
 
 
 def cleanup_all_task_context(task: Any) -> None:  # noqa: C901, PLR0912
     """
-    Celery 태스크 종료 시 모든 ContextVar 일괄 정리.
+    Clean up every ContextVar at Celery task end in one pass.
 
-    호출 위치: on_task_postrun() 내부 (signal_hooks.py)
-    기존 개별 정리 핸들러를 대체한다.
+    Call site: inside on_task_postrun() (signal_hooks.py).
+    Replaces the previous per-context cleanup handlers.
     """
     request = _get_task_request(task)
     tokens: TaskContextTokens | None = (
         getattr(request, _CONTEXT_TOKENS_ATTR, None) if request else None
     )
 
-    # ── 1. cell_id 정리 ──
+    # ── 1. Clean up cell_id ──
     if tokens and tokens.cell_id_token:
         try:
             from baldur.context.cell_context import _current_cell_id
@@ -664,7 +672,7 @@ def cleanup_all_task_context(task: Any) -> None:  # noqa: C901, PLR0912
                 error=e,
             )
 
-    # ── 2. domain 정리 ──
+    # ── 2. Clean up domain ──
     if tokens and tokens.domain_token:
         try:
             from baldur.decorators.domain_tag import _current_domain
@@ -676,7 +684,7 @@ def cleanup_all_task_context(task: Any) -> None:  # noqa: C901, PLR0912
                 error=e,
             )
 
-    # ── 3. actor 정리 ──
+    # ── 3. Clean up actor ──
     if tokens and tokens.actor_token:
         try:
             from baldur.context.actor_context import _current_actor
@@ -688,11 +696,11 @@ def cleanup_all_task_context(task: Any) -> None:  # noqa: C901, PLR0912
                 error=e,
             )
 
-    # ── 4. baggage_tokens 일괄 정리 ──
+    # ── 4. Clean up baggage_tokens in one pass ──
     if tokens and tokens.baggage_tokens:
         for key, _token in tokens.baggage_tokens.items():
             try:
-                pass  # 266 구현 시 활성화
+                pass  # Activated once 266 is implemented
             except Exception as e:
                 logger.debug(
                     "context_utils.baggage_token_cleanup_failed",
@@ -700,7 +708,7 @@ def cleanup_all_task_context(task: Any) -> None:  # noqa: C901, PLR0912
                     error=e,
                 )
 
-    # ── 5. causation 정리 ──
+    # ── 5. Clean up causation ──
     try:
         _cleanup_causation_context(task)
     except Exception as e:
@@ -709,7 +717,7 @@ def cleanup_all_task_context(task: Any) -> None:  # noqa: C901, PLR0912
             error=e,
         )
 
-    # ── 6. trace_id / celery_context 정리 ──
+    # ── 6. Clean up trace_id / celery_context ──
     try:
         from baldur.audit.trace import clear_celery_context, clear_trace_id
 
@@ -721,7 +729,7 @@ def cleanup_all_task_context(task: Any) -> None:  # noqa: C901, PLR0912
             error=e,
         )
 
-    # ── 7. request 속성 정리 ──
+    # ── 7. Clean up the request attribute ──
     if request is not None:
         try:
             delattr(request, _CONTEXT_TOKENS_ATTR)
