@@ -1,20 +1,20 @@
 """
 Namespace Settings - Multi-Cluster Support.
 
-환경변수로 클러스터/리전/테넌트 등의 네임스페이스를 설정합니다.
+Configures cluster/region/tenant namespaces from environment variables.
 
 Usage:
-    # 방법 1: 통합 네임스페이스
+    # Option 1: unified namespace
     BALDUR_NAMESPACE_NAMESPACE=seoul
 
-    # 방법 2: 개별 설정 (우선순위: NAMESPACE > REGION > TENANT > ENV)
+    # Option 2: individual parts (priority: NAMESPACE > REGION > TENANT > ENV)
     BALDUR_NAMESPACE_REGION=seoul
     BALDUR_NAMESPACE_TENANT=customer123
     BALDUR_NAMESPACE_ENV=production
 
-동적 Namespace (X-Test-Mode 지원):
-    - 운영 요청: baldur:*
-    - 합성 요청: xtest:baldur:* (TestModeContext 활성화 시)
+Dynamic namespace (X-Test-Mode support):
+    - Production requests: baldur:*
+    - Synthetic requests: xtest:baldur:* (when TestModeContext is active)
 """
 
 from pydantic import Field
@@ -26,20 +26,20 @@ from baldur.settings.base import make_settings_config
 
 class NamespaceSettings(BaseSettings):
     """
-    네임스페이스 설정.
+    Namespace settings.
 
-    다중 클러스터/리전/테넌트 환경에서 Redis 키를 분리합니다.
+    Separates Redis keys across multi-cluster/region/tenant deployments.
     """
 
     model_config = make_settings_config("BALDUR_NAMESPACE_")
 
-    # 통합 네임스페이스 (최우선)
+    # Unified namespace (highest priority)
     namespace: str | None = Field(
         default=None,
         description="Unified namespace (highest priority)",
     )
 
-    # 개별 설정 (우선순위 순)
+    # Individual parts, in priority order
     region: str | None = Field(
         default=None,
         description="Region identifier (e.g., seoul, tokyo)",
@@ -53,13 +53,13 @@ class NamespaceSettings(BaseSettings):
         description="Environment (dev, staging, production)",
     )
 
-    # 기본값 (아무것도 설정 안 된 경우)
+    # Fallback when nothing is configured
     default_namespace: str = Field(
         default="default",
         description="Fallback namespace when nothing is set",
     )
 
-    # 네임스페이스 활성화 여부
+    # Whether namespacing is active at all
     namespace_enabled: bool = Field(
         default=False,
         description="Enable namespace-based key prefixing",
@@ -67,15 +67,15 @@ class NamespaceSettings(BaseSettings):
 
     def get_effective_namespace(self) -> str:
         """
-        유효 네임스페이스 반환.
+        Return the effective namespace.
 
-        우선순위: namespace > region > tenant > env > default
+        Priority: namespace > region > tenant > env > default
 
         Returns:
-            유효한 네임스페이스 문자열. 비활성화 시 빈 문자열.
+            The effective namespace string. Empty string when disabled.
         """
         if not self.namespace_enabled:
-            return ""  # 비활성화 시 빈 문자열 (기존 동작 유지)
+            return ""  # Disabled: empty string (preserves existing behavior)
 
         return (
             self.namespace
@@ -87,13 +87,13 @@ class NamespaceSettings(BaseSettings):
 
     def get_key_prefix(self, base_prefix: str = "baldur") -> str:
         """
-        Redis 키 프리픽스 생성.
+        Build the Redis key prefix.
 
         Args:
-            base_prefix: 기본 프리픽스
+            base_prefix: Base prefix.
 
         Returns:
-            완전한 키 프리픽스 (예: "baldur:seoul:" 또는 "baldur:")
+            The full key prefix (e.g., "baldur:seoul:" or "baldur:").
         """
         ns = self.get_effective_namespace()
         if ns:
@@ -102,7 +102,7 @@ class NamespaceSettings(BaseSettings):
 
 
 # =============================================================================
-# Synthetic Mode Key Prefix (X-Test-Mode 지원)
+# Synthetic Mode Key Prefix (X-Test-Mode support)
 # =============================================================================
 
 SYNTHETIC_KEY_PREFIX = "xtest"
@@ -110,24 +110,24 @@ SYNTHETIC_KEY_PREFIX = "xtest"
 
 def get_effective_key_prefix(base_prefix: str = "baldur") -> str:
     """
-    현재 컨텍스트 기반 동적 키 프리픽스 반환.
+    Return the dynamic key prefix for the current context.
 
-    TestModeContext가 활성화된 경우 xtest: 프리픽스가 자동 추가되어
-    운영 데이터와 테스트 데이터가 분리됩니다.
+    When TestModeContext is active, an ``xtest:`` prefix is prepended so that
+    synthetic data stays separated from production data.
 
     Args:
-        base_prefix: 기본 프리픽스
+        base_prefix: Base prefix.
 
     Returns:
-        동적 키 프리픽스:
-        - 운영 모드: "baldur:*" 또는 "baldur:seoul:*"
-        - 합성 모드: "xtest:baldur:*" 또는 "xtest:baldur:seoul:*"
+        The dynamic key prefix:
+        - Production mode: "baldur:*" or "baldur:seoul:*"
+        - Synthetic mode: "xtest:baldur:*" or "xtest:baldur:seoul:*"
 
     Example:
-        # 운영 요청
+        # Production request
         prefix = get_effective_key_prefix()  # "baldur:"
 
-        # X-Test-Mode 요청
+        # X-Test-Mode request
         with TestModeContext.start():
             prefix = get_effective_key_prefix()  # "xtest:baldur:"
     """
@@ -141,14 +141,14 @@ def get_effective_key_prefix(base_prefix: str = "baldur") -> str:
 
 
 def get_namespace_settings() -> "NamespaceSettings":
-    """NamespaceSettings 싱글톤 반환."""
+    """Return the NamespaceSettings singleton."""
     from baldur.settings.root import get_config
 
     return get_config().multi_region.namespace
 
 
 def reset_namespace_settings() -> None:
-    """테스트용 싱글톤 리셋."""
+    """Reset the singleton (test helper)."""
     from baldur.settings.root import get_config
 
     try:
@@ -159,14 +159,14 @@ def reset_namespace_settings() -> None:
 
 def get_key_prefix(base_prefix: str = "baldur") -> str:
     """
-    현재 네임스페이스 기반 키 프리픽스 반환.
+    Return the key prefix for the current namespace.
 
-    편의 함수로, 어디서든 호출 가능.
+    Convenience wrapper, callable from anywhere.
 
     Args:
-        base_prefix: 기본 프리픽스
+        base_prefix: Base prefix.
 
     Returns:
-        완전한 키 프리픽스
+        The full key prefix.
     """
     return get_namespace_settings().get_key_prefix(base_prefix)
