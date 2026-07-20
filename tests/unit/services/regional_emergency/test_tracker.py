@@ -273,6 +273,36 @@ class TestEffectiveState:
         assert state.governance_mode == "STRICT"
         assert state.scope == EmergencyScope.REGIONAL
 
+    def test_global_wins_when_both_strict(self, tracker, mock_backend):
+        """Global takes priority when both sides are STRICT (broader scope)."""
+
+        def get_side_effect(key):
+            if key == "baldur:governance:emergency_state":
+                return {
+                    "namespace": "global",
+                    "emergency_level": "level_2",
+                    "governance_mode": "STRICT",
+                    "scope": "global",
+                }
+            else:
+                return {
+                    "namespace": "seoul",
+                    "emergency_level": "level_3",
+                    "governance_mode": "STRICT",
+                    "scope": "regional",
+                }
+
+        mock_backend.get.side_effect = get_side_effect
+        tracker.invalidate_cache()
+
+        state = tracker.get_effective_state("seoul")
+
+        # Global wins on scope alone -- the Regional level is not compared, even
+        # though it is higher here. Matches the atomic query's both-STRICT branch.
+        assert state.governance_mode == "STRICT"
+        assert state.scope == EmergencyScope.GLOBAL
+        assert state.emergency_level == EmergencyLevel.LEVEL_2
+
     def test_admin_override_ignores_global(self, tracker, mock_backend):
         """ADMIN_OVERRIDE 시 Global 무시하고 Regional 사용."""
 
