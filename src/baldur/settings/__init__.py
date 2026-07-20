@@ -1421,7 +1421,7 @@ __all__ = [
     "reset_config",
     "reload_config",
     "configure",
-    # 핵심 설정 (5)
+    # Core settings (5)
     # Circuit Breaker
     "CircuitBreakerSettings",
     "get_circuit_breaker_settings",
@@ -1446,7 +1446,7 @@ __all__ = [
     "RateLimitBackoffSettings",
     "get_rate_limit_backoff_settings",
     "reset_rate_limit_backoff_settings",
-    # Runbook Executor (272_RUNBOOK_ARCHITECTURE_OVERVIEW.md)
+    # Runbook Executor
     "RunbookSettings",
     "get_runbook_settings",
     "reset_runbook_settings",
@@ -1454,7 +1454,7 @@ __all__ = [
     "SecuritySettings",
     "get_security_settings",
     "reset_security_settings",
-    # 확장 설정 (12)
+    # Extended settings (12)
     # SLA
     "SLASettings",
     "get_sla_settings",
@@ -1510,7 +1510,7 @@ __all__ = [
     "ReplayAutomationSettings",
     "get_replay_automation_settings",
     "reset_replay_automation_settings",
-    # 계층형 Provider
+    # Layered Provider
     "get_layered_settings",
     "set_request_override",
     "get_request_override",
@@ -1523,16 +1523,16 @@ __all__ = [
     "get_retry_layered",
     "get_dlq_layered",
     "get_rate_limit_layered",
-    # 보안 설정
+    # Security settings
     "SecretsSettings",
     "get_secrets",
     "reset_secrets",
-    # Week 1 CRITICAL Settings (92_CONFIG_IMPLEMENTATION_GUIDE.md)
+    # Week 1 CRITICAL Settings
     # Recovery Circuit Breaker
     "RecoveryCircuitBreakerSettings",
     "get_recovery_circuit_breaker_settings",
     "reset_recovery_circuit_breaker_settings",
-    # Redis Connection (328_REDIS_CONNECTION_FACTORY.md)
+    # Redis Connection
     "RedisSettings",
     "get_redis_settings",
     "reset_redis_settings",
@@ -1548,7 +1548,7 @@ __all__ = [
     "ResilientRecorderSettings",
     "get_resilient_recorder_settings",
     "reset_resilient_recorder_settings",
-    # Week 2 HIGH Settings (92_CONFIG_IMPLEMENTATION_GUIDE.md)
+    # Week 2 HIGH Settings
     # Error Budget Propagation
     "ErrorBudgetPropagationSettings",
     "get_error_budget_propagation_settings",
@@ -1565,7 +1565,7 @@ __all__ = [
     "CriticalWorkerSettings",
     "get_critical_worker_settings",
     "reset_critical_worker_settings",
-    # Week 3 MEDIUM Settings (92_CONFIG_IMPLEMENTATION_GUIDE.md)
+    # Week 3 MEDIUM Settings
     # Chaos Experiment
     "ChaosExperimentSettings",
     "get_chaos_experiment_settings",
@@ -1595,7 +1595,7 @@ __all__ = [
     "DistributedLockSettings",
     "get_distributed_lock_settings",
     "reset_distributed_lock_settings",
-    # Week 4 LOW Settings (92_CONFIG_IMPLEMENTATION_GUIDE.md)
+    # Week 4 LOW Settings
     # Dashboard
     "DashboardSettings",
     "get_dashboard_settings",
@@ -1644,7 +1644,7 @@ __all__ = [
     "RegionalRecoveryPolicySettings",
     "get_regional_recovery_policy_settings",
     "reset_regional_recovery_policy_settings",
-    # Coordination Settings (104_HARDCODED_CONFIG_COORDINATION_REFACTORING.md)
+    # Coordination Settings
     # Recovery Tasks
     "RecoveryTasksSettings",
     "get_recovery_tasks_settings",
@@ -1681,11 +1681,11 @@ __all__ = [
     "DecisionEngineSettings",
     "get_decision_engine_settings",
     "reset_decision_engine_settings",
-    # Hash Chain (105_HARDCODED_CONFIG_AUDIT_REFACTORING.md Step 2)
+    # Hash Chain
     "HashChainSettings",
     "get_hash_chain_settings",
     "reset_hash_chain_settings",
-    # API Rate Limit (106_HARDCODED_CONFIG_API_REFACTORING.md Step 1)
+    # API Rate Limit
     "ApiRateLimitSettings",
     "get_api_rate_limit_settings",
     "reset_api_rate_limit_settings",
@@ -1693,40 +1693,40 @@ __all__ = [
     "PoolCircuitBreakerSettings",
     "get_pool_circuit_breaker_settings",
     "reset_pool_circuit_breaker_settings",
-    # Daily Report Task Settings (108_HARDCODED_CONFIG_REFACTORING_PART1_CELERY_TASKS.md)
+    # Daily Report Task Settings
     "DailyReportSettings",
     "get_daily_report_settings",
     "reset_daily_report_settings",
-    # Entitlement Settings (427_DISTRIBUTION_ENTITLEMENT.md)
+    # Entitlement Settings
     "EntitlementSettings",
     "get_entitlement_settings",
     "reset_entitlement_settings",
-    # Cleanup Task Settings (108_HARDCODED_CONFIG_REFACTORING_PART1_CELERY_TASKS.md)
+    # Cleanup Task Settings
     "CleanupSettings",
     "get_cleanup_settings",
     "reset_cleanup_settings",
-    # X-Test Resource Guard Settings (143_XTEST_RESOURCE_AWARE_INTERLOCK.md)
+    # X-Test Resource Guard Settings
     "ResourceGuardSettings",
     "get_resource_guard_settings",
     "reset_resource_guard_settings",
-    # Event Buffer Settings (169_SETTINGS_SCALE_LIMITS.md)
+    # Event Buffer Settings
     "EventBufferSettings",
     "get_event_buffer_settings",
     "reset_event_buffer_settings",
-    # Enterprise Scale Settings (169_SETTINGS_SCALE_LIMITS.md)
+    # Enterprise Scale Settings
     "ScaleProfile",
     "ScaleSettings",
     "PROFILE_DEFAULTS",
     "get_scale_settings",
     "reset_scale_settings",
-    # 207 위치통일: Backpressure (scaling/config.py → settings/backpressure.py)
+    # 207 moved: Backpressure (scaling/config.py → settings/backpressure.py)
     "BackpressureLevel",
     "BackpressureStrategy",
     "LEVEL_RATE_MULTIPLIERS",
     "BackpressureSettings",
     "get_backpressure_settings",
     "reset_backpressure_settings",
-    # Admission Control (HTTP 유입 제어)
+    # Admission Control (HTTP ingress control)
     "AdmissionControlSettings",
     "get_admission_control_settings",
     "reset_admission_control_settings",
@@ -1734,15 +1734,16 @@ __all__ = [
     "AdminIdentitySettings",
     "get_admin_identity_settings",
     "reset_admin_identity_settings",
-    # 207 위치통일: Leader Election (coordination/config.py → settings/leader_election.py)
+    # 207 moved: Leader Election (coordination/config.py → settings/leader_election.py)
     "LeaderElectionSettings",
     "get_leader_election_settings",
     "reset_leader_election_settings",
-    # 207 위치통일: Meta Watchdog (meta/config.py → settings/meta_watchdog.py)
+    # 207 moved: Meta Watchdog (meta/config.py → settings/meta_watchdog.py)
     "MetaWatchdogSettings",
     "get_meta_watchdog_settings",
     "reset_meta_watchdog_settings",
-    # 207 위치통일: Error Budget Gate (services/error_budget_gate/config.py → settings/error_budget_gate.py)
+    # 207 moved: Error Budget Gate
+    # (services/error_budget_gate/config.py → settings/error_budget_gate.py)
     "ErrorBudgetGateSettings",
     "get_error_budget_gate_settings",
     "reset_error_budget_gate_settings",

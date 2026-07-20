@@ -1,7 +1,7 @@
 """
 Pool Monitor Settings - Pydantic v2.
 
-DB Connection Pool 모니터링 및 누수 감지 설정.
+DB connection pool monitoring and leak detection settings.
 
 Source:
 - core/pool_monitor.py
@@ -24,9 +24,10 @@ from baldur.settings.field_types import SmallCount
 
 class PoolMonitorSettings(BaseSettings):
     """
-    Connection Pool 모니터링 설정.
+    Connection pool monitoring settings.
 
-    Pool 사용률 임계값, 누수 감지 기준 등을 정의합니다.
+    Defines pool utilization thresholds, leak detection criteria, and related
+    values.
     """
 
     model_config = make_settings_config("BALDUR_POOL_MONITOR_")
@@ -87,7 +88,7 @@ class PoolMonitorSettings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_thresholds(self) -> "PoolMonitorSettings":
-        """warning_threshold가 critical_threshold보다 작은지 확인."""
+        """Ensure warning_threshold is less than critical_threshold."""
         if self.warning_threshold >= self.critical_threshold:
             raise ValueError(
                 f"warning_threshold ({self.warning_threshold}) must be less than "

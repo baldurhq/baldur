@@ -1,12 +1,13 @@
 """
 Jitter Settings - Pydantic v2.
 
-Thundering Herd 방지를 위한 Jitter 설정.
-분산 환경에서 동시 시작되는 인스턴스들의 DB 쿼리를 시간적으로 분산시킵니다.
+Jitter settings for thundering herd prevention.
+Spreads DB queries over time across instances that start simultaneously in a
+distributed deployment.
 
-AdaptiveJitter 임계값도 포함:
-- 에러 버짓 기반 위험/안전 판단
-- 시스템 부하 기반 고부하/저부하 판단
+Also holds the AdaptiveJitter thresholds:
+- Danger/safe classification from the error budget
+- High/low load classification from system load
 
 Environment Variables:
     BALDUR_JITTER_MAX_DELAY_SECONDS=60.0
@@ -25,19 +26,19 @@ from baldur.settings.base import make_settings_config
 
 class JitterSettings(BaseSettings):
     """
-    Jitter 설정.
+    Jitter settings.
 
-    Thundering Herd 방지를 위한 무작위 지연 설정을 정의합니다.
-    환경별 권장 설정:
-    - 단일 서버: 0초 (비활성화)
-    - K8s 10 Pods: 30초
-    - K8s 100+ Pods: 60초
+    Defines the random delay used to prevent a thundering herd.
+    Recommended values per environment:
+    - Single server: 0s (disabled)
+    - K8s 10 pods: 30s
+    - K8s 100+ pods: 60s
     """
 
     model_config = make_settings_config("BALDUR_JITTER_")
 
     # ==========================================================================
-    # Delay Settings (from utils/jitter.py lines 27-28, 75-76, 99-100, 122-123)
+    # Delay Settings (from utils/jitter.py)
     # ==========================================================================
     max_delay_seconds: float = Field(
         default=60.0,
@@ -71,7 +72,7 @@ class JitterSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # AdaptiveJitter 임계값 (에러 버짓 기반)
+    # AdaptiveJitter thresholds (error budget based)
     # ==========================================================================
     error_budget_danger_threshold: float = Field(
         default=0.2,
@@ -87,7 +88,7 @@ class JitterSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # AdaptiveJitter 임계값 (부하 기반)
+    # AdaptiveJitter thresholds (load based)
     # ==========================================================================
     load_high_threshold: float = Field(
         default=0.8,
@@ -104,7 +105,7 @@ class JitterSettings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_delay_range(self) -> "JitterSettings":
-        """min_delay가 max_delay보다 작은지 확인, 임계값 순서 검증."""
+        """Check min_delay <= max_delay and validate threshold ordering."""
         if self.min_delay_seconds > self.max_delay_seconds:
             raise ValueError(
                 f"min_delay_seconds ({self.min_delay_seconds}) cannot be greater than "

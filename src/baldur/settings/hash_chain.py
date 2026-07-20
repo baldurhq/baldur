@@ -1,12 +1,12 @@
 """
 Hash Chain Settings - Pydantic v2.
 
-해시 체인 무결성 관련 분산 락 및 감사 추적 설정입니다.
+Distributed lock and audit trail settings for hash chain integrity.
 
 Source:
-- audit/hash_chain_safety.py:AtomicMergeSwap.DEFAULT_TIMEOUT_SECONDS (300초)
-- audit/hash_chain_safety.py:ShardedDateLock.DEFAULT_TIMEOUT_SECONDS (120초)
-- audit/hash_chain_safety.py:IntegrityAuditTrail.MAX_REDIS_ENTRIES (1000개)
+- audit/hash_chain_safety.py:AtomicMergeSwap.DEFAULT_TIMEOUT_SECONDS (300s)
+- audit/hash_chain_safety.py:ShardedDateLock.DEFAULT_TIMEOUT_SECONDS (120s)
+- audit/hash_chain_safety.py:IntegrityAuditTrail.MAX_REDIS_ENTRIES (1000 entries)
 
 Environment Variables:
     BALDUR_HASH_CHAIN_MERGE_SWAP_TIMEOUT_SECONDS=300
@@ -26,20 +26,20 @@ logger = structlog.get_logger()
 
 class HashChainSettings(BaseSettings):
     """
-    해시 체인 무결성 관련 설정.
+    Hash chain integrity settings.
 
-    분산 락:
-    - merge_swap_timeout_seconds: 전역 조정 락 타임아웃 (5분)
-    - date_lock_timeout_seconds: 날짜별 락 타임아웃 (2분)
+    Distributed locks:
+    - merge_swap_timeout_seconds: global coordination lock timeout (5 min)
+    - date_lock_timeout_seconds: per-date lock timeout (2 min)
 
-    감사 추적:
-    - integrity_trail_max_redis_entries: Redis 저장 무결성 이벤트 최대 수
+    Audit trail:
+    - integrity_trail_max_redis_entries: max integrity events stored in Redis
     """
 
     model_config = make_settings_config("BALDUR_HASH_CHAIN_")
 
     # ==========================================================================
-    # AtomicMergeSwap - 전역 조정 락 (from hash_chain_safety.py)
+    # AtomicMergeSwap - global coordination lock (from hash_chain_safety.py)
     # ==========================================================================
     merge_swap_timeout_seconds: int = Field(
         default=300,
@@ -56,7 +56,7 @@ class HashChainSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # ShardedDateLock - 날짜별 분산 락 (from hash_chain_safety.py)
+    # ShardedDateLock - per-date distributed lock (from hash_chain_safety.py)
     # ==========================================================================
     date_lock_timeout_seconds: int = Field(
         default=120,
@@ -73,7 +73,7 @@ class HashChainSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # IntegrityAuditTrail - 무결성 감사 추적 (from hash_chain_safety.py)
+    # IntegrityAuditTrail - integrity audit trail (from hash_chain_safety.py)
     # ==========================================================================
     integrity_trail_max_redis_entries: int = Field(
         default=1000,
@@ -84,7 +84,7 @@ class HashChainSettings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_lock_timeouts(self) -> "HashChainSettings":
-        """락 타임아웃이 블로킹 타임아웃보다 커야 함."""
+        """Lock timeout must be greater than the blocking timeout."""
         if self.merge_swap_timeout_seconds <= self.merge_swap_blocking_timeout_seconds:
             logger.warning(
                 "hash_chain_settings.greater_than",

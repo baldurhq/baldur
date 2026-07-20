@@ -1,7 +1,7 @@
 """
 Sampling Settings - Pydantic v2.
 
-확률적 체인 검증을 위한 샘플링 설정입니다.
+Sampling settings for probabilistic chain verification.
 
 Replaces:
 - audit/performance/sampling.py:SamplingConfig
@@ -24,16 +24,16 @@ logger = structlog.get_logger()
 
 class SamplingSettings(BaseSettings):
     """
-    샘플링 검증 설정.
+    Sampling verification settings.
 
-    전체 체인 검증 대신 확률적 샘플링을 사용하여 성능을 개선합니다.
-    O(n) → O(k) 복잡도 감소 (k = n × sample_rate).
+    Improves performance by using probabilistic sampling instead of full chain
+    verification. Reduces complexity from O(n) to O(k) (k = n x sample_rate).
 
     Attributes:
-        sample_rate: 샘플링 비율 (0.1 = 10%)
-        min_samples: 최소 샘플 수 (작은 데이터셋 보호)
-        max_samples: 최대 샘플 수 (성능 제한)
-        full_verify_on_failure: 샘플 검증 실패 시 전체 검증 수행 여부
+        sample_rate: sampling rate (0.1 = 10%)
+        min_samples: minimum sample count (protects small datasets)
+        max_samples: maximum sample count (bounds performance impact)
+        full_verify_on_failure: run full verification when a sample fails
     """
 
     model_config = make_settings_config("BALDUR_SAMPLING_")
@@ -70,8 +70,8 @@ class SamplingSettings(BaseSettings):
     @field_validator("max_samples")
     @classmethod
     def validate_max_samples(cls, v: int, info) -> int:
-        """max_samples가 min_samples보다 커야 함."""
-        # Note: min_samples 기본값(10)보다 작으면 경고
+        """max_samples must be greater than min_samples."""
+        # Note: warn when below the min_samples default (10)
         if v < 10:
             logger.warning(
                 "safe_default.very_low_reduce_accuracy",
@@ -82,7 +82,7 @@ class SamplingSettings(BaseSettings):
     @field_validator("sample_rate")
     @classmethod
     def validate_sample_rate(cls, v: float) -> float:
-        """샘플링 비율 경고."""
+        """Warn on an out-of-band sampling rate."""
         if v < 0.05:
             logger.warning(
                 "safe_default.very_low_miss_issues",

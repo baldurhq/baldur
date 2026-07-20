@@ -1,8 +1,9 @@
 """
 SafetyBounds Settings - Pydantic v2.
 
-자율 조정 안전 한계 설정.
-파라미터별 min/max 범위 및 한 사이클당 최대 변경 비율을 환경변수로 설정 가능.
+Safety limits for autonomous tuning.
+Per-parameter min/max ranges and the maximum change ratio per cycle are
+configurable through environment variables.
 
 Relationship with Field constraints (field_types.py):
     - Field constraints (ge/le via Annotated types) define the **user-configurable range**
@@ -15,11 +16,11 @@ Relationship with Field constraints (field_types.py):
     - Example: retry_count Field allows 0-20 (SmallCount), but SafetyBounds restricts
       auto-tuning to 0-10 with max 50% change per cycle.
 
-Environment Variables (각 파라미터별):
+Environment Variables (per parameter):
     BALDUR_SAFETY_BOUNDS_TIMEOUT_MS_MIN=100
     BALDUR_SAFETY_BOUNDS_TIMEOUT_MS_MAX=30000
     BALDUR_SAFETY_BOUNDS_TIMEOUT_MS_MAX_CHANGE=0.3
-    ... (다른 파라미터도 동일 패턴)
+    ... (other parameters follow the same pattern)
 """
 
 from pydantic import BaseModel, Field, model_validator
@@ -29,7 +30,7 @@ from baldur.settings.base import make_settings_config
 
 
 class ParameterBoundConfig(BaseModel):
-    """개별 파라미터 한계 설정."""
+    """Bound configuration for a single parameter."""
 
     min_value: float = Field(description="Minimum allowed value")
     max_value: float = Field(description="Maximum allowed value")
@@ -41,7 +42,7 @@ class ParameterBoundConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_bounds(self) -> "ParameterBoundConfig":
-        """min < max 검증."""
+        """Validate that min < max."""
         if self.min_value > self.max_value:
             raise ValueError(
                 f"min_value ({self.min_value}) cannot be greater than "
@@ -52,15 +53,15 @@ class ParameterBoundConfig(BaseModel):
 
 class SafetyBoundsSettings(BaseSettings):
     """
-    SafetyBounds 전체 설정.
+    Full SafetyBounds configuration.
 
-    자율 조정이 위험한 범위로 벗어나지 않도록 보호하는 한계 설정.
+    Limits that keep autonomous tuning from drifting into a dangerous range.
     """
 
     model_config = make_settings_config("BALDUR_SAFETY_BOUNDS_")
 
     # ==========================================================================
-    # timeout_ms 한계
+    # timeout_ms bounds
     # ==========================================================================
     timeout_ms_min: float = Field(
         default=100,
@@ -80,7 +81,7 @@ class SafetyBoundsSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # retry_count 한계
+    # retry_count bounds
     # ==========================================================================
     retry_count_min: float = Field(
         default=0,
@@ -100,7 +101,7 @@ class SafetyBoundsSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # circuit_breaker_threshold 한계
+    # circuit_breaker_threshold bounds
     # ==========================================================================
     circuit_breaker_threshold_min: float = Field(
         default=0.1,
@@ -122,7 +123,7 @@ class SafetyBoundsSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # jitter_range 한계
+    # jitter_range bounds
     # ==========================================================================
     jitter_range_min: float = Field(
         default=0.01,
@@ -142,7 +143,7 @@ class SafetyBoundsSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # rate_limit_rps 한계
+    # rate_limit_rps bounds
     # ==========================================================================
     rate_limit_rps_min: float = Field(
         default=10,
@@ -162,7 +163,7 @@ class SafetyBoundsSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # throttle_sla_warning_ms 한계
+    # throttle_sla_warning_ms bounds
     # ==========================================================================
     throttle_sla_warning_ms_min: float = Field(
         default=50,
@@ -182,7 +183,7 @@ class SafetyBoundsSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # throttle_sla_critical_ms 한계
+    # throttle_sla_critical_ms bounds
     # ==========================================================================
     throttle_sla_critical_ms_min: float = Field(
         default=100,
@@ -202,7 +203,7 @@ class SafetyBoundsSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # backoff_base_ms 한계
+    # backoff_base_ms bounds
     # ==========================================================================
     backoff_base_ms_min: float = Field(
         default=10,
@@ -222,7 +223,7 @@ class SafetyBoundsSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # backoff_max_ms 한계
+    # backoff_max_ms bounds
     # ==========================================================================
     backoff_max_ms_min: float = Field(
         default=1000,
@@ -242,7 +243,7 @@ class SafetyBoundsSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # connection_pool_size 한계
+    # connection_pool_size bounds
     # ==========================================================================
     connection_pool_size_min: float = Field(
         default=1,
@@ -263,15 +264,15 @@ class SafetyBoundsSettings(BaseSettings):
 
     def get_bounds(self, parameter: str) -> ParameterBoundConfig | None:
         """
-        파라미터명으로 한계 설정 조회.
+        Look up the bound configuration by parameter name.
 
         Args:
-            parameter: 파라미터명 (예: "timeout_ms", "retry_count")
+            parameter: Parameter name (e.g., "timeout_ms", "retry_count")
 
         Returns:
-            ParameterBoundConfig 또는 None (알 수 없는 파라미터)
+            ParameterBoundConfig, or None for an unknown parameter
         """
-        # 파라미터명 정규화 (하이픈 → 언더스코어)
+        # Normalize the parameter name (hyphen → underscore)
         normalized = parameter.replace("-", "_")
 
         min_attr = f"{normalized}_min"

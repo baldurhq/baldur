@@ -1,8 +1,9 @@
 """
 Thread Management Settings — Pydantic v2.
 
-Thread join 및 background worker timeout 설정.
-하드코딩된 thread.join(timeout=N) 값을 환경변수로 제어 가능하게 한다.
+Thread join and background worker timeout settings.
+Makes the previously hardcoded thread.join(timeout=N) values controllable
+through environment variables.
 
 Environment Variables:
     BALDUR_THREAD_MANAGEMENT_JOIN_TIMEOUT=5.0
@@ -16,7 +17,7 @@ from baldur.settings.base import make_settings_config
 
 
 class ThreadManagementSettings(BaseSettings):
-    """Thread join 및 background worker timeout 설정."""
+    """Thread join and background worker timeout settings."""
 
     model_config = make_settings_config("BALDUR_THREAD_MANAGEMENT_")
 
@@ -36,14 +37,14 @@ class ThreadManagementSettings(BaseSettings):
 
 
 def get_thread_management_settings() -> "ThreadManagementSettings":
-    """Root settings 경유 단일 진입점 (SSOT)."""
+    """Single entry point via the root settings (SSOT)."""
     from baldur.settings.root import get_config
 
     return get_config().core.thread_management
 
 
 def reset_thread_management_settings() -> None:
-    """Root reset으로 위임 (테스트용)."""
+    """Delegate to the root reset (for tests)."""
     from baldur.settings.root import get_config
 
     try:

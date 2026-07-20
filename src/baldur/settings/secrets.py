@@ -1,18 +1,18 @@
 """
-Secrets Settings - SecretStr 기반 민감 정보 설정.
+Secrets Settings - SecretStr-based sensitive configuration.
 
-Pydantic SecretStr 특징:
-- repr(): '**********' 출력
-- str(): '**********' 출력
-- get_secret_value(): 실제 값 반환
+Pydantic SecretStr characteristics:
+- repr(): prints '**********'
+- str(): prints '**********'
+- get_secret_value(): returns the actual value
 
-이점:
-- print(settings) 시 자동 마스킹
-- JSON 로깅 시 자동 마스킹
-- 감사(Audit) 로그 안전
+Benefits:
+- Automatic masking in print(settings)
+- Automatic masking in JSON logging
+- Safe for audit logs
 
-Security Hardening (214_SECURITY_VULNERABILITY_FIXES):
-- validate_required_secrets() 추가: 핵심 시크릿 미설정 시 경고/에러
+Security hardening:
+- validate_required_secrets(): warns/errors when core secrets are unset
 """
 
 import structlog
@@ -26,10 +26,10 @@ logger = structlog.get_logger()
 
 class SecretsSettings(BaseSettings):
     """
-    민감 정보 전용 설정.
+    Configuration dedicated to sensitive values.
 
-    모든 비밀번호, API 키, 토큰은 이 클래스에서 관리합니다.
-    SecretStr을 사용하여 로깅 시 자동으로 마스킹됩니다.
+    All passwords, API keys, and tokens are managed by this class.
+    SecretStr is used so values are masked automatically when logged.
 
     Environment variables:
         BALDUR_SECRETS_DATABASE_PASSWORD=...
@@ -43,10 +43,10 @@ class SecretsSettings(BaseSettings):
 
         secrets = get_secrets()
 
-        # 안전한 출력 (마스킹됨)
+        # Safe output (masked)
         print(secrets)  # database_password=SecretStr('**********')
 
-        # 실제 값 접근
+        # Access the actual value
         actual_password = secrets.database_password.get_secret_value()
     """
 
@@ -121,27 +121,27 @@ class SecretsSettings(BaseSettings):
     # Helper methods
     # ==========================================================================
     def has_database_password(self) -> bool:
-        """Database password가 설정되었는지 확인."""
+        """Check whether the database password is set."""
         return bool(self.database_password.get_secret_value())
 
     def has_redis_password(self) -> bool:
-        """Redis password가 설정되었는지 확인."""
+        """Check whether the Redis password is set."""
         return bool(self.redis_password.get_secret_value())
 
     def has_toss_secret(self) -> bool:
-        """Toss secret key가 설정되었는지 확인."""
+        """Check whether the Toss secret key is set."""
         return bool(self.toss_secret_key.get_secret_value())
 
     def has_slack_webhook(self) -> bool:
-        """Slack webhook token이 설정되었는지 확인."""
+        """Check whether the Slack webhook token is set."""
         return bool(self.slack_webhook_token.get_secret_value())
 
     def get_masked_summary(self) -> dict:
         """
-        모든 시크릿의 마스킹된 요약 반환.
+        Return a masked summary of every secret.
 
         Returns:
-            {field_name: is_set (bool)} 딕셔너리
+            {field_name: is_set (bool)} dictionary
         """
         return {
             "database_password": self.has_database_password(),
@@ -184,28 +184,28 @@ reset_secrets = reset_secrets_settings
 
 def validate_required_secrets(secrets: SecretsSettings | None = None) -> dict:
     """
-    핵심 시크릿이 설정되었는지 검증.
+    Verify that the core secrets are configured.
 
-    Security Hardening (214_SECURITY_VULNERABILITY_FIXES):
-    - CRITICAL 시크릿 (encryption_key, audit_signing_key): 미설정 시 ERROR 로그
-    - IMPORTANT 시크릿 (database_password, redis_password): 미설정 시 WARNING 로그
-    - OPTIONAL 시크릿: 미설정 시 INFO 로그
+    Security hardening:
+    - CRITICAL secrets (encryption_key, audit_signing_key): ERROR log when unset
+    - IMPORTANT secrets (database_password, redis_password): WARNING log when unset
+    - OPTIONAL secrets: INFO log when unset
 
-    프로덕션 환경에서 CRITICAL 시크릿 미설정 시 RuntimeError 발생.
+    In production, a missing CRITICAL secret raises RuntimeError.
 
     Args:
-        secrets: 검증할 SecretsSettings 인스턴스 (None이면 싱글톤 사용)
+        secrets: SecretsSettings instance to validate (uses the singleton if None)
 
     Returns:
-        {"critical": [...], "warning": [...], "info": [...]} 미설정 시크릿 목록
+        {"critical": [...], "warning": [...], "info": [...]} list of unset secrets
 
     Raises:
-        RuntimeError: 프로덕션에서 CRITICAL 시크릿 미설정 시
+        RuntimeError: When a CRITICAL secret is unset in production
     """
     if secrets is None:
         secrets = get_secrets()
 
-    # 시크릿 분류
+    # Secret classification
     critical_secrets = {
         "encryption_key": secrets.encryption_key,
         "audit_signing_key": secrets.audit_signing_key,
@@ -225,7 +225,7 @@ def validate_required_secrets(secrets: SecretsSettings | None = None) -> dict:
 
     result: dict[str, list[str]] = {"critical": [], "warning": [], "info": []}
 
-    # CRITICAL 시크릿 검증
+    # CRITICAL secret validation
     for name, secret in critical_secrets.items():
         if not secret.get_secret_value():
             result["critical"].append(name)
@@ -234,7 +234,7 @@ def validate_required_secrets(secrets: SecretsSettings | None = None) -> dict:
                 secret_name=name,
             )
 
-    # IMPORTANT 시크릿 검증
+    # IMPORTANT secret validation
     for name, secret in important_secrets.items():
         if not secret.get_secret_value():
             result["warning"].append(name)
@@ -243,7 +243,7 @@ def validate_required_secrets(secrets: SecretsSettings | None = None) -> dict:
                 secret_name=name,
             )
 
-    # OPTIONAL 시크릿 검증
+    # OPTIONAL secret validation
     for name, secret in optional_secrets.items():
         if not secret.get_secret_value():
             result["info"].append(name)

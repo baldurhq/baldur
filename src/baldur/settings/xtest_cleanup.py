@@ -1,7 +1,8 @@
 """
 X-Test Artifact Cleanup Settings
 
-X-Test 세션 종료 후 테스트 아티팩트(CB 상태, DLQ 항목, Idempotency 키 등) 자동 정리 설정.
+Settings for automatic cleanup of test artifacts (CB state, DLQ entries,
+Idempotency keys, etc.) after an X-Test session ends.
 
 Environment Variables:
     BALDUR_XTEST_CLEANUP_SESSION_TTL_HOURS=4
@@ -27,15 +28,16 @@ logger = structlog.get_logger()
 
 class XTestCleanupSettings(BaseSettings):
     """
-    X-Test 아티팩트 자동 정리 설정.
+    X-Test artifact auto-cleanup settings.
 
-    X-Test 세션 만료 시간, 정리 주기, 컴포넌트별 자동 정리 활성화 여부를 정의합니다.
+    Defines the X-Test session expiration time, the cleanup interval, and
+    whether auto-cleanup is enabled per component.
     """
 
     model_config = make_settings_config("BALDUR_XTEST_CLEANUP_")
 
     # ==========================================================================
-    # 세션 TTL 설정
+    # Session TTL settings
     # ==========================================================================
     session_ttl_hours: int = Field(
         default=4,
@@ -45,7 +47,7 @@ class XTestCleanupSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # 정리 주기 설정
+    # Cleanup interval settings
     # ==========================================================================
     cleanup_interval_minutes: int = Field(
         default=30,
@@ -55,7 +57,7 @@ class XTestCleanupSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # 컴포넌트별 자동 정리 활성화
+    # Per-component auto-cleanup toggles
     # ==========================================================================
     cb_auto_restore: bool = Field(
         default=True,
@@ -78,7 +80,7 @@ class XTestCleanupSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Celery Task 재시도 설정
+    # Celery task retry settings
     # ==========================================================================
     max_retries: int = Field(
         default=2,
@@ -95,7 +97,7 @@ class XTestCleanupSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Redis 키 접두사
+    # Redis key prefixes
     # ==========================================================================
     redis_session_prefix: str = Field(
         default="xtest:session:",
@@ -110,7 +112,7 @@ class XTestCleanupSettings(BaseSettings):
     @field_validator("session_ttl_hours")
     @classmethod
     def validate_session_ttl(cls, v: int) -> int:
-        """세션 TTL 검증."""
+        """Validate the session TTL."""
         if v < 1:
             logger.warning(
                 "x_test_cleanup.too_low_using",
@@ -122,7 +124,7 @@ class XTestCleanupSettings(BaseSettings):
     @field_validator("cleanup_interval_minutes")
     @classmethod
     def validate_cleanup_interval(cls, v: int) -> int:
-        """정리 주기 검증."""
+        """Validate the cleanup interval."""
         if v < 5:
             logger.warning(
                 "x_test_cleanup.too_low_using",

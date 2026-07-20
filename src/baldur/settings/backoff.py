@@ -1,7 +1,7 @@
 """
 Backoff Settings - Pydantic v2.
 
-재시도 메커니즘의 Backoff 전략 설정.
+Backoff strategy settings for the retry mechanism.
 
 Source:
 - core/backoff.py
@@ -35,10 +35,10 @@ from baldur.settings.validators import warn_above
 
 class BackoffSettings(BaseSettings):
     """
-    Backoff 전략 설정.
+    Backoff strategy settings.
 
-    Exponential, Linear, Constant, Decorrelated Jitter 전략의
-    기본값을 정의합니다.
+    Defines the defaults for the Exponential, Linear, Constant, and
+    Decorrelated Jitter strategies.
     """
 
     model_config = make_settings_config("BALDUR_BACKOFF_")
@@ -132,7 +132,7 @@ class BackoffSettings(BaseSettings):
     @field_validator("exponential_max_delay")
     @classmethod
     def _warn_exponential_max_delay(cls, v: float) -> float:
-        """max_delay가 너무 크면 경고."""
+        """Warn when max_delay is too large."""
         return warn_above(600, "backoff_settings.high_consider_using_responsiveness")(v)
 
 

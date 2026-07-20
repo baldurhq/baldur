@@ -1,8 +1,8 @@
 """
 CBStateCache Settings - Pydantic v2.
 
-Circuit Breaker 상태 캐시 설정.
-TTL 및 Jitter 범위를 환경변수로 설정 가능.
+Circuit breaker state cache settings.
+TTL and jitter range are configurable via environment variables.
 
 Environment Variables:
     BALDUR_STATE_CACHE_BASE_TTL=5.0
@@ -17,16 +17,16 @@ from baldur.settings.base import make_settings_config
 
 class StateCacheSettings(BaseSettings):
     """
-    CBStateCache 설정.
+    CBStateCache settings.
 
-    TTL 기반 로컬 캐싱으로 네트워크 호출 최소화.
-    Polling Jitter로 Thundering Herd 방지.
+    TTL-based local caching to minimize network calls.
+    Polling jitter to prevent a thundering herd.
     """
 
     model_config = make_settings_config("BALDUR_STATE_CACHE_")
 
     # ==========================================================================
-    # TTL 설정
+    # TTL settings
     # ==========================================================================
     base_ttl: float = Field(
         default=5.0,
@@ -36,7 +36,7 @@ class StateCacheSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Jitter 설정
+    # Jitter settings
     # ==========================================================================
     jitter_range: float = Field(
         default=0.5,
@@ -47,7 +47,7 @@ class StateCacheSettings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_jitter(self) -> "StateCacheSettings":
-        """jitter_range가 base_ttl보다 크면 안됨."""
+        """jitter_range must not exceed base_ttl."""
         if self.jitter_range > self.base_ttl:
             raise ValueError(
                 f"jitter_range ({self.jitter_range}) should not exceed "
@@ -63,10 +63,10 @@ class StateCacheSettings(BaseSettings):
 
 def get_state_cache_settings() -> "StateCacheSettings":
     """
-    캐시된 StateCacheSettings 인스턴스 반환.
+    Return the cached StateCacheSettings instance.
 
     Returns:
-        StateCacheSettings: 싱글톤 인스턴스
+        StateCacheSettings: singleton instance
     """
     from baldur.settings.root import get_config
 
@@ -75,7 +75,7 @@ def get_state_cache_settings() -> "StateCacheSettings":
 
 def reset_state_cache_settings() -> None:
     """
-    캐시된 설정 초기화 (테스트용).
+    Reset cached settings (for testing).
     """
     from baldur.settings.root import get_config
 

@@ -1,7 +1,7 @@
 """
 Audit Settings - Pydantic v2.
 
-감사 로그 및 설정 이력 관련 설정입니다.
+Settings for audit logs and configuration history.
 
 Replaces:
 - services/pending_config.py:MAX_HISTORY
@@ -19,8 +19,6 @@ Environment Variables:
 
 Reference:
 - 416 (D18, D22, D23)
-- docs/baldur/middleware_system/92_CONFIG_IMPLEMENTATION_GUIDE.md (Week 4 [20])
-- docs/baldur/middleware_system/91_CONFIG_INVENTORY.md §3.9
 """
 
 from collections.abc import Iterator
@@ -36,12 +34,12 @@ from baldur.settings.field_types import StrictProbability
 
 class AuditSettings(BaseSettings):
     """
-    감사 로그 및 이력 관리 설정.
+    Audit log and history management settings.
 
-    보관 정책:
-    - max_history: Pending Config 변경 이력 (100개)
-    - config_history_entries: 설정 버전 이력 (50개)
-    - retention_days: 감사 로그 보관 기간 (90일)
+    Retention policy:
+    - max_history: Pending Config change history (100 entries)
+    - config_history_entries: Config version history (50 entries)
+    - retention_days: Audit log retention period (90 days)
     """
 
     model_config = make_settings_config("BALDUR_AUDIT_")
@@ -174,7 +172,7 @@ class AuditSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Self-Audit - from self_audit.py (Phase 3 리팩토링)
+    # Self-Audit - from self_audit.py (Phase 3 refactoring)
     # ==========================================================================
     self_audit_max_recent_events: int = Field(
         default=100,
@@ -196,7 +194,7 @@ class AuditSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Cascade Load Shedding - from cascade_load_shedding.py (Phase 3 리팩토링)
+    # Cascade Load Shedding - from cascade_load_shedding.py (Phase 3 refactoring)
     # ==========================================================================
     cascade_rate_window_seconds: float = Field(
         default=1.0,

@@ -11,9 +11,6 @@ Replaces:
 Environment Variables:
     BALDUR_ERROR_BUDGET_THRESHOLD_HEALTHY=75.0
     BALDUR_ERROR_BUDGET_BURN_RATE_FAST_CRITICAL=14.4
-
-Reference:
-- docs/baldur/middleware_system/40_PYDANTIC_CONFIG_MIGRATION.md
 """
 
 from pydantic import Field, field_validator
@@ -178,7 +175,7 @@ class ErrorBudgetSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Exception Budget Weight Settings - Q12 구현
+    # Exception Budget Weight Settings - Q12 implementation
     # ==========================================================================
     weight_combine_policy: str = Field(
         default="MAX",
@@ -202,7 +199,7 @@ class ErrorBudgetSettings(BaseSettings):
     @field_validator("weight_combine_policy")
     @classmethod
     def validate_weight_combine_policy(cls, v: str) -> str:
-        """가중치 결합 정책 검증."""
+        """Validate the weight combine policy."""
         valid_policies = {"MAX", "SUM", "MULTIPLY"}
         v_upper = v.upper()
         if v_upper not in valid_policies:

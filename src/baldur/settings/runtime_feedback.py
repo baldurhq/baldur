@@ -1,8 +1,9 @@
 """
 RuntimeFeedbackLoop Settings - Pydantic v2.
 
-실시간 피드백 루프 자율 조정 설정.
-연속 실패, 롤백 쿨다운, 조정 후 대기 시간 등을 환경변수로 설정 가능.
+Autonomous adjustment settings for the real-time feedback loop.
+Consecutive failures, rollback cooldown, post-adjustment wait time, and more
+are configurable through environment variables.
 
 Environment Variables:
     BALDUR_RUNTIME_FEEDBACK_MAX_CONSECUTIVE_FAILURES=3
@@ -19,15 +20,16 @@ from baldur.settings.field_types import SmallCount
 
 class RuntimeFeedbackSettings(BaseSettings):
     """
-    RuntimeFeedbackLoop 설정.
+    RuntimeFeedbackLoop settings.
 
-    자율 조정 실패 시 자동 롤백 및 피드백 루프 일시 정지를 위한 설정.
+    Settings for automatic rollback and pausing the feedback loop when
+    autonomous adjustment fails.
     """
 
     model_config = make_settings_config("BALDUR_RUNTIME_FEEDBACK_")
 
     # ==========================================================================
-    # 연속 실패 관련 설정
+    # Consecutive failure settings
     # ==========================================================================
     max_consecutive_failures: SmallCount = Field(
         default=3,
@@ -35,7 +37,7 @@ class RuntimeFeedbackSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # 롤백 관련 설정
+    # Rollback settings
     # ==========================================================================
     rollback_cooldown: int = Field(
         default=120,
@@ -45,7 +47,7 @@ class RuntimeFeedbackSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # 조정 후 대기 설정
+    # Post-adjustment wait settings
     # ==========================================================================
     adjustment_wait: int = Field(
         default=30,
@@ -55,7 +57,7 @@ class RuntimeFeedbackSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # 저하 감지 임계값 (338: Settings Gap Phase 2)
+    # Degradation detection thresholds (338: Settings Gap Phase 2)
     # ==========================================================================
     error_increase_threshold: float = Field(
         default=0.2,

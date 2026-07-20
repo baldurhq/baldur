@@ -1,11 +1,11 @@
 """
 Chaos Blast Radius Settings - Pydantic v2.
 
-Chaos 실험의 폭발 반경(Blast Radius) 제어 설정입니다.
+Blast radius control settings for chaos experiments.
 
 Replaces:
-- services/chaos/blast_radius.py:BlastRadiusPolicy (하드코딩된 기본값)
-- services/chaos/base/models.py:max_traffic_percent 관련 설정
+- services/chaos/blast_radius.py:BlastRadiusPolicy (hardcoded defaults)
+- services/chaos/base/models.py:max_traffic_percent settings
 
 Environment Variables:
     BALDUR_CHAOS_BLAST_RADIUS_INSTANCE_MAX_CONCURRENT=5
@@ -13,10 +13,6 @@ Environment Variables:
     BALDUR_CHAOS_BLAST_RADIUS_REGION_MAX_CONCURRENT=1
     BALDUR_CHAOS_BLAST_RADIUS_MAX_TRAFFIC_PERCENT_SERVICE=50.0
     BALDUR_CHAOS_BLAST_RADIUS_MAX_TRAFFIC_PERCENT_REGION=10.0
-
-Reference:
-- docs/baldur/middleware_system/92_CONFIG_IMPLEMENTATION_GUIDE.md (Week 3 [13])
-- docs/baldur/middleware_system/91_CONFIG_INVENTORY.md §6.12, §12.1, §16.6
 """
 
 import structlog
@@ -36,20 +32,20 @@ logger = structlog.get_logger()
 
 class ChaosBlastRadiusSettings(BaseSettings):
     """
-    Chaos 폭발 반경(Blast Radius) 설정.
+    Chaos blast radius settings.
 
-    Chaos 실험의 영향 범위를 제한하여 안전한 실험을 보장합니다.
+    Bounds the impact scope of a chaos experiment to keep it safe.
 
     Levels:
-    - INSTANCE: 단일 Pod/인스턴스 (최저 위험)
-    - SERVICE: 전체 서비스 (중간 위험)
-    - REGION: 전체 리전/AZ (최고 위험, 승인 필요)
+    - INSTANCE: a single pod/instance (lowest risk)
+    - SERVICE: the whole service (medium risk)
+    - REGION: the whole region/AZ (highest risk, approval required)
     """
 
     model_config = make_settings_config("BALDUR_CHAOS_BLAST_RADIUS_")
 
     # ==========================================================================
-    # Concurrent Limits (from blast_radius.py#L65-71)
+    # Concurrent Limits (from blast_radius.py)
     # ==========================================================================
     instance_max_concurrent: SmallCount = Field(
         default=5,
@@ -69,7 +65,7 @@ class ChaosBlastRadiusSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Auto-Approval (from blast_radius.py#L75-81)
+    # Auto-Approval (from blast_radius.py)
     # ==========================================================================
     instance_auto_approve: bool = Field(
         default=True,
@@ -87,7 +83,7 @@ class ChaosBlastRadiusSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Time-based Restrictions (from blast_radius.py#L85-91)
+    # Time-based Restrictions (from blast_radius.py)
     # ==========================================================================
     allowed_hours_start: int = Field(
         default=2,
@@ -109,7 +105,7 @@ class ChaosBlastRadiusSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Traffic Restrictions (from blast_radius.py#L95-101)
+    # Traffic Restrictions (from blast_radius.py)
     # ==========================================================================
     max_traffic_percent_instance: Percentage = Field(
         default=100.0,
@@ -129,7 +125,7 @@ class ChaosBlastRadiusSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Safety Limits (from blast_radius.py#L104-107)
+    # Safety Limits (from blast_radius.py)
     # ==========================================================================
     excluded_services: list[str] = Field(
         default_factory=list,
@@ -144,7 +140,7 @@ class ChaosBlastRadiusSettings(BaseSettings):
     @field_validator("region_auto_approve")
     @classmethod
     def warn_region_auto_approve(cls, v: bool) -> bool:
-        """REGION 자동 승인은 위험함."""
+        """Auto-approving REGION level experiments is dangerous."""
         if v:
             logger.warning("chaos_blast_radius.region_auto_approve_dangerous")
         return v
@@ -152,7 +148,7 @@ class ChaosBlastRadiusSettings(BaseSettings):
     @field_validator("max_traffic_percent_region")
     @classmethod
     def _warn_high_region_traffic(cls, v: float) -> float:
-        """REGION 트래픽이 높으면 경고."""
+        """Warn when REGION level traffic impact is high."""
         return warn_above(20.0, "chaos_blast_radius.region_traffic_percent_high")(v)
 
 

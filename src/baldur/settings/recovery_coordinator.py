@@ -1,15 +1,15 @@
 """
 Recovery Coordinator Settings - Pydantic v2.
 
-RecoveryCoordinator의 복구 단계별 기본 설정입니다.
+Default per-stage settings for the RecoveryCoordinator.
 
-각 복구 레벨(LEVEL_1, LEVEL_2, LEVEL_3)별 단계 파라미터:
-- wait_after_seconds: 단계 완료 후 대기 시간
-- duration_minutes: 헬스 체크 지속 시간
-- success_threshold: 성공률 임계값
-- error_rate_threshold: 에러율 임계값
+Step parameters for each recovery level (LEVEL_1, LEVEL_2, LEVEL_3):
+- wait_after_seconds: Wait time after the step completes
+- duration_minutes: Health check duration
+- success_threshold: Success rate threshold
+- error_rate_threshold: Error rate threshold
 
-또한 안정성 검사 기본값도 포함합니다.
+Stability check defaults are included as well.
 
 Environment Variables:
     BALDUR_RECOVERY_COORDINATOR_LEVEL3_HEALTH_CHECK_DURATION_MINUTES=5
@@ -34,16 +34,17 @@ logger = structlog.get_logger()
 
 class RecoveryCoordinatorSettings(BaseSettings):
     """
-    RecoveryCoordinator 복구 단계 설정.
+    RecoveryCoordinator recovery stage configuration.
 
-    LEVEL별 RecoveryStep 파라미터와 안정성 검사 기본값을 정의합니다.
-    RecoveryCoordinator.DEFAULT_RECOVERY_STEPS의 기본값을 환경변수로 오버라이드 가능하게 합니다.
+    Defines the per-LEVEL RecoveryStep parameters and the stability check
+    defaults. Makes the defaults in RecoveryCoordinator.DEFAULT_RECOVERY_STEPS
+    overridable through environment variables.
     """
 
     model_config = make_settings_config("BALDUR_RECOVERY_COORDINATOR_")
 
     # ==========================================================================
-    # LEVEL_3 (가장 심각한 레벨) 복구 단계 설정
+    # LEVEL_3 (most severe level) recovery stage settings
     # ==========================================================================
     level3_budget_reset_wait_after: int = Field(
         default=0,
@@ -89,7 +90,7 @@ class RecoveryCoordinatorSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # LEVEL_2 (중간 레벨) 복구 단계 설정
+    # LEVEL_2 (intermediate level) recovery stage settings
     # ==========================================================================
     level2_budget_reset_wait_after: int = Field(
         default=0,
@@ -129,7 +130,7 @@ class RecoveryCoordinatorSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # LEVEL_1 (경미한 레벨) 복구 단계 설정
+    # LEVEL_1 (mild level) recovery stage settings
     # ==========================================================================
     level1_budget_reset_wait_after: int = Field(
         default=0,
@@ -163,7 +164,7 @@ class RecoveryCoordinatorSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # 안정성 검사 기본 설정 (전체 복구 세션 수준)
+    # Stability check defaults (whole recovery session level)
     # ==========================================================================
     stability_check_duration_minutes: int = Field(
         default=10,
@@ -185,7 +186,7 @@ class RecoveryCoordinatorSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # 복구 세션 전역 설정
+    # Recovery session global settings
     # ==========================================================================
     max_recovery_session_duration_minutes: int = Field(
         default=120,
@@ -201,7 +202,7 @@ class RecoveryCoordinatorSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Step 유형별 타임아웃 설정
+    # Per-step-type timeout settings
     # ==========================================================================
     budget_reset_timeout_seconds: int = Field(
         default=60,
@@ -246,15 +247,15 @@ class RecoveryCoordinatorSettings(BaseSettings):
     )
     @classmethod
     def _warn_success_threshold(cls, v: float) -> float:
-        """성공률 임계값이 너무 낮으면 경고."""
+        """Warn when the success rate threshold is too low."""
         return warn_below(
             0.9, "recovery_coordinator_settings.success_threshold_low_consider"
         )(v)
 
     @model_validator(mode="after")
     def validate_level_consistency(self) -> "RecoveryCoordinatorSettings":
-        """레벨별 설정 일관성 검증 (LEVEL_3 > LEVEL_2 > LEVEL_1)."""
-        # LEVEL_3가 가장 엄격해야 함
+        """Validate per-level consistency (LEVEL_3 > LEVEL_2 > LEVEL_1)."""
+        # LEVEL_3 must be the strictest
         if (
             self.level3_health_check_success_threshold
             < self.level2_health_check_success_threshold
@@ -282,14 +283,14 @@ class RecoveryCoordinatorSettings(BaseSettings):
 
 
 def get_recovery_coordinator_settings() -> "RecoveryCoordinatorSettings":
-    """캐시된 RecoveryCoordinatorSettings 인스턴스 반환."""
+    """Return the cached RecoveryCoordinatorSettings instance."""
     from baldur.settings.root import get_config
 
     return get_config().services_group.recovery_coordinator
 
 
 def reset_recovery_coordinator_settings() -> None:
-    """캐시 초기화 (테스트용)."""
+    """Reset the cache (for testing)."""
     from baldur.settings.root import get_config
 
     try:

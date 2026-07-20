@@ -1,9 +1,10 @@
 """
 System Metrics Cache Settings - Pydantic v2.
 
-psutil CPU/Memory 백그라운드 캐시의 동작을 제어하는 설정.
-캐시는 1초 주기로 psutil.cpu_percent(interval=0.1)을 호출하여 캐시하며,
-소비자(collect_system_snapshot, ResourceGuard 등)가 ~0ms에 읽을 수 있도록 한다.
+Settings controlling the psutil CPU/memory background cache.
+The cache calls psutil.cpu_percent(interval=0.1) once per second and stores the
+result, so consumers (collect_system_snapshot, ResourceGuard, etc.) can read it
+in ~0ms.
 
 Environment Variables:
     BALDUR_SYSTEM_METRICS_CACHE_ENABLED=true
@@ -19,7 +20,7 @@ from baldur.settings.base import make_settings_config
 
 
 class SystemMetricsCacheSettings(BaseSettings):
-    """psutil CPU/Memory 백그라운드 캐시 설정."""
+    """psutil CPU/memory background cache settings."""
 
     model_config = make_settings_config("BALDUR_SYSTEM_METRICS_CACHE_")
 

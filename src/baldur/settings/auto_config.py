@@ -11,7 +11,7 @@ from baldur.settings.base import make_settings_config
 
 
 class AutoConfigSettings(BaseSettings):
-    """configure_baldur() 래퍼의 동작을 제어하는 설정."""
+    """Settings controlling the behavior of the configure_baldur() wrapper."""
 
     model_config = make_settings_config("BALDUR_AUTO_CONFIG_")
 

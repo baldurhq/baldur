@@ -1,8 +1,8 @@
 """
 Saga Settings - Pydantic v2.
 
-Saga 오케스트레이터의 Lock heartbeat, TTL, stale 임계값,
-Beat 스케줄, 기본 타임아웃 등을 환경변수로 외부화.
+Externalizes the Saga orchestrator's lock heartbeat, TTL, stale threshold,
+Beat schedule, default timeouts, and more into environment variables.
 
 Source:
 - services/saga/orchestrator.py (HEARTBEAT_INTERVAL, EXTEND_SECONDS, etc.)
@@ -39,10 +39,10 @@ from baldur.settings.field_types import (
 
 class SagaSettings(BaseSettings):
     """
-    Saga Orchestrator 설정.
+    Saga Orchestrator settings.
 
-    Lock heartbeat, TTL, stale 임계값, Beat 스케줄,
-    기본 타임아웃 등을 정의합니다.
+    Defines the lock heartbeat, TTL, stale threshold, Beat schedule, default
+    timeouts, and related values.
     """
 
     model_config = make_settings_config("BALDUR_SAGA_")

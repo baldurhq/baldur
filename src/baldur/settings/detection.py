@@ -1,8 +1,9 @@
 """
 Detection Settings — Pydantic v2.
 
-Anomaly detection 및 correlation engine 설정.
-하드코딩된 window/threshold 값을 환경변수로 제어 가능하게 한다.
+Anomaly detection and correlation engine settings.
+Makes the previously hardcoded window/threshold values controllable through
+environment variables.
 
 Environment Variables:
     BALDUR_DETECTION_ANOMALY_WINDOW_SIZE=100
@@ -18,7 +19,7 @@ from baldur.settings.base import make_settings_config
 
 
 class DetectionSettings(BaseSettings):
-    """Anomaly detection 및 correlation engine 설정."""
+    """Anomaly detection and correlation engine settings."""
 
     model_config = make_settings_config("BALDUR_DETECTION_")
 
@@ -53,14 +54,14 @@ class DetectionSettings(BaseSettings):
 
 
 def get_detection_settings() -> "DetectionSettings":
-    """Root settings 경유 단일 진입점 (SSOT)."""
+    """Single entry point via the root settings (SSOT)."""
     from baldur.settings.root import get_config
 
     return get_config().metrics_group.detection
 
 
 def reset_detection_settings() -> None:
-    """Root reset으로 위임 (테스트용)."""
+    """Delegate to the root reset (for tests)."""
     from baldur.settings.root import get_config
 
     try:

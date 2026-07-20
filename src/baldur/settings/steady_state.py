@@ -1,10 +1,10 @@
 """
 Steady State Settings - Pydantic v2.
 
-Chaos 실험의 정상 상태(Steady State) 가설 검증 설정입니다.
+Steady state hypothesis validation settings for chaos experiments.
 
 Replaces:
-- services/chaos/base/models.py:SteadyStateHypothesis 기본값
+- services/chaos/base/models.py:SteadyStateHypothesis defaults
 
 Environment Variables:
     BALDUR_STEADY_STATE_P50_LATENCY_MAX_MS=100.0
@@ -24,16 +24,16 @@ logger = structlog.get_logger()
 
 class SteadyStateSettings(BaseSettings):
     """
-    Steady State 가설 설정.
+    Steady state hypothesis settings.
 
-    Chaos 실험 전후 시스템의 '정상' 상태를 정의합니다.
-    SteadyStateHypothesis.validate()에서 이 설정과 비교하여 검증합니다.
+    Defines what "normal" means for the system before and after a chaos
+    experiment. SteadyStateHypothesis.validate() checks against these values.
 
     Attributes:
-        p50_latency_max_ms: P50 레이턴시 최대 허용값 (ms)
-        p99_latency_max_ms: P99 레이턴시 최대 허용값 (ms)
-        error_rate_max_percent: 에러율 최대 허용값 (%)
-        throughput_min_rps: 최소 처리량 (requests per second)
+        p50_latency_max_ms: maximum allowed P50 latency (ms)
+        p99_latency_max_ms: maximum allowed P99 latency (ms)
+        error_rate_max_percent: maximum allowed error rate (%)
+        throughput_min_rps: minimum throughput (requests per second)
     """
 
     model_config = make_settings_config("BALDUR_STEADY_STATE_")
@@ -78,8 +78,8 @@ class SteadyStateSettings(BaseSettings):
     @field_validator("p99_latency_max_ms")
     @classmethod
     def validate_p99_latency(cls, v: float, info) -> float:
-        """P99이 P50보다 커야 함."""
-        # Note: cross-field validation은 model_validator에서 처리
+        """P99 must be greater than P50."""
+        # Note: cross-field validation is handled in model_validator
         if v < 100.0:
             logger.warning(
                 "safe_default.very_tight_ms_cause",
@@ -90,7 +90,7 @@ class SteadyStateSettings(BaseSettings):
     @field_validator("error_rate_max_percent")
     @classmethod
     def validate_error_rate(cls, v: float) -> float:
-        """에러율 경고."""
+        """Warn on a high error rate threshold."""
         if v > 5.0:
             logger.warning(
                 "safe_default.high_miss_real_issues",
@@ -101,7 +101,7 @@ class SteadyStateSettings(BaseSettings):
     @field_validator("throughput_min_rps")
     @classmethod
     def validate_throughput(cls, v: float) -> float:
-        """처리량 경고."""
+        """Warn on a disabled throughput check."""
         if v == 0.0:
             logger.warning("safe_default.throughput_check_effectively_disabled")
         return v

@@ -12,7 +12,7 @@ Environment Variables:
     BALDUR_CHAOS_MAX_BLAST_RADIUS=0.10
     BALDUR_CHAOS_DRY_RUN_DEFAULT=true
 
-    # Chaos Scheduler Celery Task 재시도 설정
+    # Chaos Scheduler Celery task retry settings
     BALDUR_CHAOS_SCHEDULER_EXPERIMENT_MAX_RETRIES=0
     BALDUR_CHAOS_SCHEDULER_EXPERIMENT_SOFT_TIME_LIMIT=300
     BALDUR_CHAOS_SCHEDULER_EXPERIMENT_TIME_LIMIT=360
@@ -124,8 +124,8 @@ class ChaosSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Chaos Scheduler Celery Task 재시도 설정 (run_scheduled_experiments_task)
-    # Chaos 실험은 재시도하지 않음 (안전을 위해)
+    # Chaos Scheduler Celery task retry settings (run_scheduled_experiments_task)
+    # Chaos experiments are never retried (for safety)
     # ==========================================================================
     scheduler_experiment_max_retries: int = Field(
         default=0,
@@ -147,7 +147,7 @@ class ChaosSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Chaos Scheduler Celery Task 재시도 설정 (generate_daily_resilience_report_task)
+    # Chaos Scheduler Celery task retry settings (generate_daily_resilience_report_task)
     # ==========================================================================
     scheduler_report_max_retries: int = Field(
         default=3,
@@ -163,7 +163,7 @@ class ChaosSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Chaos Scheduler Celery Task 재시도 설정 (cleanup_expired_approvals_task)
+    # Chaos Scheduler Celery task retry settings (cleanup_expired_approvals_task)
     # ==========================================================================
     scheduler_cleanup_max_retries: int = Field(
         default=1,
@@ -173,7 +173,7 @@ class ChaosSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Chaos Scheduler Celery Task 재시도 설정 (check_pending_approvals_task)
+    # Chaos Scheduler Celery task retry settings (check_pending_approvals_task)
     # ==========================================================================
     scheduler_pending_check_max_retries: int = Field(
         default=1,

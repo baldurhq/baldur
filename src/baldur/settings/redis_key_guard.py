@@ -10,10 +10,6 @@ Environment Variables:
     BALDUR_REDIS_KEY_GUARD_MEMORY_WARNING_THRESHOLD=80.0
     BALDUR_REDIS_KEY_GUARD_MEMORY_CRITICAL_THRESHOLD=90.0
     ... etc
-
-Reference:
-- docs/baldur/middleware_system/92_CONFIG_IMPLEMENTATION_GUIDE.md
-- docs/baldur/middleware_system/77_RECOVERY_COORDINATOR.md#11.1
 """
 
 from pydantic import Field, field_validator
@@ -26,7 +22,7 @@ class RedisKeyGuardSettings(BaseSettings):
     """
     Redis Key Priority Eviction configuration with validation.
 
-    Redis maxmemory 상황에서 핵심 거버넌스 키(P0)를 보호합니다.
+    Protects core governance keys (P0) under Redis maxmemory pressure.
 
     All defaults match:
     - services/coordination/redis_key_guard.py:RedisKeyPriorityEviction
@@ -98,7 +94,7 @@ class RedisKeyGuardSettings(BaseSettings):
     @classmethod
     def validate_critical_gt_warning(cls, v: float, info) -> float:
         """Ensure critical threshold > warning threshold."""
-        # info.data는 이미 검증된 필드들을 포함
+        # info.data holds the already-validated fields
         warning = info.data.get("memory_warning_threshold", 80.0)
         if v <= warning:
             raise ValueError(

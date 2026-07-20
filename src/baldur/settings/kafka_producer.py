@@ -1,9 +1,9 @@
 """
 Kafka Producer Settings — Pydantic v2.
 
-Kafka producer 타임아웃 및 연결 설정.
-하드코딩된 request_timeout_ms, send/flush/close timeout 값을
-환경변수로 제어 가능하게 한다.
+Kafka producer timeout and connection settings.
+Makes the previously hardcoded request_timeout_ms and send/flush/close timeout
+values controllable through environment variables.
 
 Environment Variables:
     BALDUR_KAFKA_PRODUCER_REQUEST_TIMEOUT_MS=10000
@@ -18,7 +18,7 @@ from baldur.settings.base import make_settings_config
 
 
 class KafkaProducerSettings(BaseSettings):
-    """Kafka producer 타임아웃 설정."""
+    """Kafka producer timeout settings."""
 
     model_config = make_settings_config("BALDUR_KAFKA_PRODUCER_")
 
@@ -45,14 +45,14 @@ class KafkaProducerSettings(BaseSettings):
 
 
 def get_kafka_producer_settings() -> "KafkaProducerSettings":
-    """Root settings 경유 단일 진입점 (SSOT)."""
+    """Single entry point via the root settings (SSOT)."""
     from baldur.settings.root import get_config
 
     return get_config().adapters.kafka_producer
 
 
 def reset_kafka_producer_settings() -> None:
-    """Root reset으로 위임 (테스트용)."""
+    """Delegate to the root reset (for tests)."""
     from baldur.settings.root import get_config
 
     try:

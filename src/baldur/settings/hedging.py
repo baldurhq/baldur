@@ -1,7 +1,7 @@
 """
-Hedging Settings - Pydantic v2 기반 설정.
+Hedging Settings - Pydantic v2 based settings.
 
-환경변수로 헷징 전략의 기본 설정을 구성할 수 있습니다.
+The hedging strategy defaults are configurable through environment variables.
 
 Environment Variables:
     BALDUR_HEDGING_DEFAULT_MODE=delayed
@@ -26,10 +26,10 @@ from baldur.settings.field_types import (
 
 class HedgingSettings(BaseSettings):
     """
-    헷징 설정.
+    Hedging settings.
 
-    환경변수로 설정을 구성할 수 있습니다.
-    접두사: BALDUR_HEDGING_
+    Configurable through environment variables.
+    Prefix: BALDUR_HEDGING_
     """
 
     model_config = make_settings_config("BALDUR_HEDGING_")
@@ -69,7 +69,7 @@ class HedgingSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # 스레드 풀
+    # Thread pool
     # ==========================================================================
     executor_max_workers: int = Field(
         default=STANDARD_POOL_SIZE,
@@ -79,7 +79,7 @@ class HedgingSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Backpressure 연동
+    # Backpressure integration
     # ==========================================================================
     disable_on_load_level: str = Field(
         default="high",

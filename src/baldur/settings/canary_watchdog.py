@@ -1,8 +1,8 @@
 """
 Canary Watchdog Settings - Pydantic v2.
 
-Canary Rollout Watchdog 태스크 설정.
-Zombie 롤아웃 감지, 자동 롤백, 자동 프로모션 설정.
+Canary Rollout Watchdog task settings.
+Zombie rollout detection, automatic rollback, and automatic promotion.
 
 Source:
 - tasks/canary_watchdog.py
@@ -24,9 +24,10 @@ from baldur.settings.base import make_settings_config
 
 class CanaryWatchdogSettings(BaseSettings):
     """
-    Canary Watchdog 설정.
+    Canary Watchdog settings.
 
-    Zombie 롤아웃 감지 임계값, 자동 롤백/프로모션, 알림 설정을 정의합니다.
+    Defines the zombie rollout detection threshold, automatic
+    rollback/promotion, and notification settings.
     """
 
     model_config = make_settings_config("BALDUR_CANARY_WATCHDOG_")
@@ -89,7 +90,7 @@ class CanaryWatchdogSettings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_timing(self) -> "CanaryWatchdogSettings":
-        """auto_rollback이 zombie_threshold보다 큰지 확인."""
+        """Ensure auto_rollback is greater than zombie_threshold."""
         if self.auto_rollback_after_minutes <= self.zombie_threshold_minutes:
             raise ValueError(
                 f"auto_rollback_after_minutes ({self.auto_rollback_after_minutes}) "
@@ -105,10 +106,10 @@ class CanaryWatchdogSettings(BaseSettings):
 
 def get_canary_watchdog_settings() -> "CanaryWatchdogSettings":
     """
-    캐시된 CanaryWatchdogSettings 인스턴스 반환.
+    Return the cached CanaryWatchdogSettings instance.
 
     Returns:
-        CanaryWatchdogSettings: 싱글톤 인스턴스
+        CanaryWatchdogSettings: The singleton instance
     """
     from baldur.settings.root import get_config
 
@@ -117,9 +118,9 @@ def get_canary_watchdog_settings() -> "CanaryWatchdogSettings":
 
 def reset_canary_watchdog_settings() -> None:
     """
-    캐시된 설정 초기화 (테스트용).
+    Reset the cached settings (for tests).
 
-    환경 변수 변경 후 설정을 다시 로드하려면 이 함수를 호출하세요.
+    Call this to reload the settings after changing environment variables.
     """
     from baldur.settings.root import get_config
 

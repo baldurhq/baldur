@@ -1,8 +1,8 @@
 """
 Stress Test Settings - Pydantic v2.
 
-Pool 스트레스 테스트 관련 설정.
-테스트 환경에서 DB Connection Pool 고갈 시뮬레이션에 사용됩니다.
+Pool stress test settings.
+Used to simulate DB connection pool exhaustion in test environments.
 
 Source:
 - services/stress_test_service.py
@@ -24,10 +24,10 @@ logger = structlog.get_logger()
 
 class StressTestSettings(BaseSettings):
     """
-    스트레스 테스트 설정.
+    Stress test settings.
 
-    Pool 고갈, Lock Contention 등 스트레스 테스트에 사용되는 설정값입니다.
-    테스트 전용이며, 프로덕션에서는 사용되지 않습니다.
+    Values used by stress tests such as pool exhaustion and lock contention.
+    Test-only; never used in production.
     """
 
     model_config = make_settings_config("BALDUR_STRESS_TEST_")
@@ -163,7 +163,7 @@ class StressTestSettings(BaseSettings):
     @field_validator("max_burst_duration_seconds")
     @classmethod
     def validate_burst_duration(cls, v: int) -> int:
-        """Burst duration이 너무 길면 경고."""
+        """Warn when the burst duration is too long."""
         if v > 60:
             logger.warning(
                 "stress_test_settings.high_consider_using_safety",

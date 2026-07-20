@@ -1,7 +1,8 @@
 """
 Regional Emergency Settings - Pydantic v2.
 
-리전별 독립적인 Emergency 상태 관리 및 연쇄 장애 감지 설정.
+Settings for per-region independent Emergency state management and cascading
+failure detection.
 
 Source:
 - services/regional_emergency/cascade_detector.py
@@ -27,9 +28,10 @@ logger = structlog.get_logger()
 
 class RegionalEmergencySettings(BaseSettings):
     """
-    네임스페이스 Emergency 설정.
+    Namespace Emergency settings.
 
-    다중 리전 연쇄 장애 감지, 상태 추적, 감사 추적 설정을 정의합니다.
+    Defines multi-region cascading failure detection, state tracking, and audit
+    trail settings.
     """
 
     model_config = make_settings_config("BALDUR_REGIONAL_EMERGENCY_")
@@ -79,7 +81,7 @@ class RegionalEmergencySettings(BaseSettings):
     @field_validator("escalation_threshold")
     @classmethod
     def validate_escalation_threshold(cls, v: int) -> int:
-        """escalation_threshold가 너무 작으면 경고."""
+        """Warn when escalation_threshold is too small."""
         if v < 2:
             logger.warning(
                 "regional_emergency_settings.low_consider_using_avoid",

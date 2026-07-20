@@ -1,7 +1,7 @@
 """
 Config Shadow Evaluation Settings.
 
-Shadow Evaluation 및 Shadow Gate 관련 설정.
+Settings for Shadow Evaluation and the Shadow Gate.
 
 Environment Variables:
     BALDUR_CONFIG_SHADOW_GATE_ENABLED=true
@@ -21,7 +21,7 @@ from baldur.settings.base import make_settings_config
 
 
 class ConfigShadowSettings(BaseSettings):
-    """Config Shadow Evaluation 설정."""
+    """Config Shadow Evaluation settings."""
 
     model_config = make_settings_config("BALDUR_CONFIG_SHADOW_")
 

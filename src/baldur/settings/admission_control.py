@@ -1,8 +1,8 @@
 """
 Admission Control Settings - Pydantic v2.
 
-HTTP 요청 유입 제어(Admission Control) 설정입니다.
-Tier별 Bulkhead 격벽 동시 실행 수와 활성화 여부를 관리합니다.
+Admission control settings for inbound HTTP requests.
+Manages per-tier bulkhead concurrency limits and enablement.
 
 Environment Variables:
     BALDUR_ADMISSION_CONTROL_ENABLED=true
@@ -21,7 +21,7 @@ from baldur.settings.field_types import LargeCount
 
 
 class AdmissionControlSettings(BaseSettings):
-    """HTTP 유입 제어 설정."""
+    """Inbound HTTP admission control settings."""
 
     model_config = make_settings_config("BALDUR_ADMISSION_CONTROL_")
 
@@ -31,7 +31,7 @@ class AdmissionControlSettings(BaseSettings):
     )
 
     # =========================================================================
-    # Tier별 Bulkhead 최대 동시 실행 수
+    # Per-tier bulkhead maximum concurrent executions
     # =========================================================================
     tier_critical_max_concurrent: LargeCount = Field(
         default=100,
@@ -53,10 +53,10 @@ class AdmissionControlSettings(BaseSettings):
     )
 
     # =========================================================================
-    # Tier별 Bulkhead 획득 대기 Timeout (초)
-    # 0이면 즉시 실패 (Zero-Wait). Micro-burst 흡수를 위해
-    # critical/standard에만 짧은 대기를 부여하고,
-    # non_essential은 부하 시 가장 먼저 차단되므로 Zero-Wait 유지.
+    # Per-tier bulkhead acquire timeout (seconds)
+    # 0 means fail immediately (zero-wait). To absorb micro-bursts, only
+    # critical/standard get a short wait; non_essential stays zero-wait
+    # because it is the first to be shed under load.
     # =========================================================================
     tier_critical_bulkhead_timeout_seconds: float = Field(
         default=0.05,
@@ -80,7 +80,7 @@ class AdmissionControlSettings(BaseSettings):
     )
 
     def get_tier_max_concurrent(self, tier_id: str) -> int:
-        """tier_id에 대응하는 Bulkhead 최대 동시 실행 수 반환."""
+        """Return the bulkhead max concurrency for the given tier_id."""
         tier_map = {
             "critical": self.tier_critical_max_concurrent,
             "standard": self.tier_standard_max_concurrent,
@@ -89,7 +89,7 @@ class AdmissionControlSettings(BaseSettings):
         return tier_map.get(tier_id, self.tier_standard_max_concurrent)
 
     def get_tier_bulkhead_timeout(self, tier_id: str) -> float | None:
-        """tier별 Bulkhead 대기 timeout 반환. 0이면 None(즉시 실패)."""
+        """Return the per-tier bulkhead wait timeout. 0 maps to None (fail fast)."""
         tier_map = {
             "critical": self.tier_critical_bulkhead_timeout_seconds,
             "standard": self.tier_standard_bulkhead_timeout_seconds,

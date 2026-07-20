@@ -1,20 +1,15 @@
 """
 Distributed Lock Settings - Pydantic v2.
 
-분산 환경에서의 락(Lock) 관련 설정입니다.
+Lock settings for distributed deployments.
 
 Replaces:
 - services/coordination/distributed_recovery_lock.py:DEFAULT_LOCK_TIMEOUT
-- adapters/cache/redis_adapter.py:RedisDistributedLock 설정
+- adapters/cache/redis_adapter.py:RedisDistributedLock settings
 
 Environment Variables:
     BALDUR_DISTRIBUTED_LOCK_TIMEOUT_MINUTES=30
     BALDUR_DISTRIBUTED_LOCK_RETRY_INTERVAL_SECONDS=0.1
-
-Reference:
-- docs/baldur/middleware_system/92_CONFIG_IMPLEMENTATION_GUIDE.md (Week 3 [17])
-- docs/baldur/middleware_system/91_CONFIG_INVENTORY.md §6.31, §13.4
-- docs/baldur/middleware_system/77_RECOVERY_COORDINATOR.md#8.3
 """
 
 from pydantic import Field, field_validator
@@ -27,20 +22,20 @@ from baldur.settings.validators import warn_above, warn_below
 
 class DistributedLockSettings(BaseSettings):
     """
-    분산 락 설정.
+    Distributed lock settings.
 
-    Redis 기반 분산 락의 타임아웃 및 재시도 정책을 관리합니다.
+    Manages the timeout and retry policy of the Redis-based distributed lock.
 
     Features:
-    - 락 자동 만료로 좀비 락 방지
-    - 재시도 간격 및 최대 횟수 설정
-    - 연장(Extend) 설정
+    - Automatic lock expiry to prevent zombie locks
+    - Retry interval and maximum attempt settings
+    - Extend settings
     """
 
     model_config = make_settings_config("BALDUR_DISTRIBUTED_LOCK_")
 
     # ==========================================================================
-    # Lock Timeout (from distributed_recovery_lock.py#L92)
+    # Lock Timeout (from distributed_recovery_lock.py)
     # ==========================================================================
     timeout_minutes: int = Field(
         default=30,
@@ -87,7 +82,7 @@ class DistributedLockSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Key Prefix (IMMUTABLE - 참조용으로만 포함)
+    # Key Prefix (IMMUTABLE - included for reference only)
     # ==========================================================================
     key_prefix: str = Field(
         default="baldur:",
@@ -97,21 +92,21 @@ class DistributedLockSettings(BaseSettings):
     @field_validator("timeout_minutes")
     @classmethod
     def _warn_timeout_minutes(cls, v: int) -> int:
-        """타임아웃이 너무 길면 경고."""
+        """Warn when the timeout is too long."""
         return warn_above(60, "distributed_lock.timeout_too_long")(v)
 
     @field_validator("retry_interval_seconds")
     @classmethod
     def _warn_retry_interval_seconds(cls, v: float) -> float:
-        """재시도 간격이 너무 짧으면 경고."""
+        """Warn when the retry interval is too short."""
         return warn_below(0.05, "distributed_lock.retry_interval_too_short")(v)
 
     def get_timeout_seconds(self) -> int:
-        """타임아웃을 초 단위로 반환."""
+        """Return the timeout in seconds."""
         return self.timeout_minutes * 60
 
     def get_timeout_ms(self) -> int:
-        """타임아웃을 밀리초 단위로 반환."""
+        """Return the timeout in milliseconds."""
         return self.timeout_minutes * 60 * 1000
 
 

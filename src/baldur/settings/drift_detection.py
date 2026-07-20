@@ -1,7 +1,7 @@
 """
 Drift Detection Settings - Pydantic v2.
 
-SLA 드리프트 감지 태스크 관련 설정.
+Settings for the SLA drift detection task.
 
 Source:
 - tasks/drift_detection.py
@@ -21,9 +21,10 @@ from baldur.settings.base import make_settings_config
 
 class DriftDetectionSettings(BaseSettings):
     """
-    SLA 드리프트 감지 설정.
+    SLA drift detection settings.
 
-    SLA 위반 감지, 분석 윈도우, 경고 임계값 등을 정의합니다.
+    Defines SLA breach detection, the analysis window, warning thresholds, and
+    related values.
     """
 
     model_config = make_settings_config("BALDUR_DRIFT_DETECTION_")
@@ -78,8 +79,8 @@ class DriftDetectionSettings(BaseSettings):
     @field_validator("sla_breach_rate_critical_threshold")
     @classmethod
     def validate_critical_threshold(cls, v: float, info) -> float:
-        """critical_threshold가 breach_rate_threshold보다 커야 함."""
-        # Note: 이 검증은 model_validator로 더 정확하게 할 수 있음
+        """critical_threshold must be greater than breach_rate_threshold."""
+        # Note: this validation would be more accurate as a model_validator
         return v
 
 
