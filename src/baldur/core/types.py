@@ -4,7 +4,7 @@ Common type definitions for the baldur system.
 History: this module previously contained early-design types (FailureType,
 OperationStatus, RetryContext, MetricsSnapshot) that were superseded by:
 - interfaces/repositories.py: FailedOperationStatus, FailedOperationDomain
-- services/retry_handler/models.py: RetryConfig, RetryResult
+- services/retry_handler/models.py: RetryPolicyConfig, RetryResult
 - interfaces/statistics.py: StatusCounts, CircuitBreakerSummary
 - services/metrics/definitions.py: Prometheus label-based domain metrics
 

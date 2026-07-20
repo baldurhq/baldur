@@ -163,7 +163,7 @@ class PolicyContext:
         user_id: User identifier (read by DLQ sink as ``user_id`` column).
         tier_id: Service tier ("critical" | "standard" | "non_essential").
         region: Region identifier (input to ErrorBudgetGate).
-        domain: Domain identifier (mirrors ``RetryConfig.domain``).
+        domain: Domain identifier (mirrors ``RetryPolicyConfig.domain``).
         trace_id: Distributed-trace ID (OTel ``trace_id``).
         extra: Open-ended extension dict. Conventional keys:
             - ``request_data`` (dict): Per-call payload snapshot written by

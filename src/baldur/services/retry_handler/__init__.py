@@ -28,7 +28,6 @@ from .guards import ErrorBudgetGuard, KillSwitchGuard
 from .models import (
     MaxRetriesExceededError,
     RetryAction,
-    RetryConfig,
     RetryPolicyConfig,
     RetryResult,
     T,
@@ -47,7 +46,6 @@ __all__ = [
     # models
     "RetryAction",
     "MaxRetriesExceededError",
-    "RetryConfig",
     "RetryPolicyConfig",
     "RetryResult",
     "T",

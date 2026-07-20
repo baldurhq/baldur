@@ -353,7 +353,7 @@ class TestRetryPolicyRateLimitCoordinatorBehavior:
 
     def test_on_success_called_after_success_following_a_wait(self):
         """A success that followed an honored cooldown does call on_success."""
-        mock_coord = MagicMock()
+        mock_coord = MagicMock(spec=RateLimitCoordinator)
         mock_coord.wait_if_needed.return_value = RateLimitResult(
             waited=True, wait_time=0.01, was_rate_limited=True
         )

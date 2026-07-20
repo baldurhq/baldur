@@ -7,8 +7,6 @@ and the exhaustion exception.
 
 ::: baldur.services.RetryPolicyConfig
 
-::: baldur.services.RetryConfig
-
 ::: baldur.services.RetryResult
 
 ::: baldur.services.RetryAction
