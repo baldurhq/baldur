@@ -557,7 +557,7 @@ class TTLConfigSerializer(serializers.Serializer):
 
 
 class StopConditionsConfigSerializer(serializers.Serializer):
-    """Serializer for Stop Conditions (자동 중단) configuration."""
+    """Serializer for Stop Conditions (automatic abort) configuration."""
 
     max_error_rate_percent = serializers.FloatField(
         required=False,

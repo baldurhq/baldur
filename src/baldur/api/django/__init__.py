@@ -21,7 +21,7 @@ Usage:
         # ... Django Core Middlewares ...
         "baldur.api.django.pool_circuit_breaker.PoolCircuitBreakerMiddleware",  # [8] Pool CB
         # ... other middlewares ...
-        "baldur.api.django.audit_middleware.AuditMiddleware",      # [11] Audit (맨 마지막!)
+        "baldur.api.django.audit_middleware.AuditMiddleware",      # [11] Audit (last!)
     ]
 """
 

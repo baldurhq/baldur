@@ -1,7 +1,8 @@
 """
-DLQ (Dead Letter Queue) 및 Replay 관련 통합 테스트 시나리오.
+Integration test scenarios for DLQ (Dead Letter Queue) and Replay.
 
-RetryExhaust, RateLimitRetry, DLQReplay 성공/실패, 멱등성 Replay 시나리오 제공.
+Provides the RetryExhaust, RateLimitRetry, DLQReplay success/failure, and
+idempotent Replay scenarios.
 """
 
 from .base import (
@@ -11,14 +12,14 @@ from .base import (
 
 class RetryExhaustScenario(IntegrationScenario):
     """
-    Retry 소진 후 DLQ 저장 시나리오.
+    Scenario: store to DLQ after retries are exhausted.
 
     Steps:
-    1. 최대 재시도 설정 (3회)
-    2. 1차 시도 실패
-    3. 2차 시도 실패
-    4. 3차 시도 실패
-    5. DLQ 저장 확인
+    1. Configure max retries (3)
+    2. 1st attempt fails
+    3. 2nd attempt fails
+    4. 3rd attempt fails
+    5. Confirm the DLQ store
     """
 
     scenario_name = "retry_exhaust_dlq"
@@ -36,7 +37,7 @@ class RetryExhaustScenario(IntegrationScenario):
         service = self.service_name
         max_retries = self.config.get("max_retries", 3)
 
-        # Step 1: 최대 재시도 설정
+        # Step 1: configure max retries
         retry_count = 0
 
         def step1():
@@ -47,7 +48,7 @@ class RetryExhaustScenario(IntegrationScenario):
         ):
             return
 
-        # Steps 2-4: 재시도 실패
+        # Steps 2-4: retry attempts fail
         for i in range(1, max_retries + 1):
 
             def step_retry(attempt=i):
@@ -60,7 +61,7 @@ class RetryExhaustScenario(IntegrationScenario):
             ):
                 return
 
-        # Step 5: DLQ 저장 (impl doc 486 D2 G4 — xtest needs real dlq_id).
+        # Step 5: store to DLQ (486 D2 G4 — xtest needs a real dlq_id).
         def step_dlq():
             result = dlq_service.store_failure(
                 domain=service,
@@ -85,12 +86,12 @@ class RetryExhaustScenario(IntegrationScenario):
 
 class RateLimitRetryScenario(IntegrationScenario):
     """
-    Rate Limit 후 재시도 성공 시나리오.
+    Scenario: retry succeeds after a rate limit.
 
     Steps:
-    1. Rate Limit 발생
-    2. Backoff 대기 (설정 시간)
-    3. 재시도 성공
+    1. Rate Limit hit
+    2. Backoff wait (configured duration)
+    3. Retry succeeds
     """
 
     scenario_name = "rate_limit_retry"
@@ -100,7 +101,7 @@ class RateLimitRetryScenario(IntegrationScenario):
 
         backoff_seconds = self.config.get("backoff_seconds", 1)
 
-        # Step 1: Rate Limit 발생
+        # Step 1: hit the Rate Limit
         def step1():
             return "rate limited"
 
@@ -109,7 +110,7 @@ class RateLimitRetryScenario(IntegrationScenario):
         ):
             return
 
-        # Step 2: Backoff 대기
+        # Step 2: backoff wait
         def step2():
             if backoff_seconds > 0:
                 time.sleep(backoff_seconds)
@@ -120,7 +121,7 @@ class RateLimitRetryScenario(IntegrationScenario):
         ):
             return
 
-        # Step 3: 재시도 성공
+        # Step 3: retry succeeds
         def step3():
             return "success"
 
@@ -131,13 +132,13 @@ class RateLimitRetryScenario(IntegrationScenario):
 
 class DLQReplaySuccessScenario(IntegrationScenario):
     """
-    DLQ 항목 Replay 성공 시나리오.
+    Scenario: DLQ entry replayed successfully.
 
     Steps:
-    1. DLQ 항목 생성
-    2. Replay 시작
-    3. Target 서비스 호출 성공
-    4. DLQ 항목 제거
+    1. Create a DLQ entry
+    2. Start the replay
+    3. Target service call succeeds
+    4. Remove the DLQ entry
     """
 
     scenario_name = "dlq_replay_success"
@@ -154,7 +155,7 @@ class DLQReplaySuccessScenario(IntegrationScenario):
             raise RuntimeError("baldur_pro DLQService not registered")
         service = self.service_name
 
-        # Step 1: DLQ 항목 생성
+        # Step 1: create a DLQ entry
         dlq_entry_id = None
 
         def step1():
@@ -180,21 +181,21 @@ class DLQReplaySuccessScenario(IntegrationScenario):
         if not self._execute_step(1, "create_dlq_entry", "dlq", "dlq_id:", step1):
             return
 
-        # Step 2: Replay 시작
+        # Step 2: start the replay
         def step2():
             return "replay started"
 
         if not self._execute_step(2, "start_replay", "replay", "replay started", step2):
             return
 
-        # Step 3: Target 서비스 호출 성공
+        # Step 3: target service call succeeds
         def step3():
             return "target success"
 
         if not self._execute_step(3, "call_target", "target", "target success", step3):
             return
 
-        # Step 4: DLQ 항목 제거
+        # Step 4: remove the DLQ entry
         def step4():
             if dlq_entry_id:
                 dlq_service.mark_resolved(domain=service, dlq_id=dlq_entry_id)
@@ -207,13 +208,13 @@ class DLQReplaySuccessScenario(IntegrationScenario):
 
 class DLQReplayFailureScenario(IntegrationScenario):
     """
-    DLQ 항목 Replay 실패 시나리오 (다시 DLQ에 저장).
+    Scenario: DLQ entry replay fails (stored back to the DLQ).
 
     Steps:
-    1. DLQ 항목 생성
-    2. Replay 시작
-    3. Target 서비스 호출 실패
-    4. 재시도 횟수 증가 확인
+    1. Create a DLQ entry
+    2. Start the replay
+    3. Target service call fails
+    4. Confirm the retry count increments
     """
 
     scenario_name = "dlq_replay_failure"
@@ -230,7 +231,7 @@ class DLQReplayFailureScenario(IntegrationScenario):
             raise RuntimeError("baldur_pro DLQService not registered")
         service = self.service_name
 
-        # Step 1: DLQ 항목 생성
+        # Step 1: create a DLQ entry
         dlq_entry_id = None
 
         def step1():
@@ -256,21 +257,21 @@ class DLQReplayFailureScenario(IntegrationScenario):
         if not self._execute_step(1, "create_dlq_entry", "dlq", "dlq_id:", step1):
             return
 
-        # Step 2: Replay 시작
+        # Step 2: start the replay
         def step2():
             return "replay started"
 
         if not self._execute_step(2, "start_replay", "replay", "replay started", step2):
             return
 
-        # Step 3: Target 서비스 호출 실패
+        # Step 3: target service call fails
         def step3():
             return "target failed"
 
         if not self._execute_step(3, "call_target", "target", "target failed", step3):
             return
 
-        # Step 4: 재시도 횟수 증가 확인
+        # Step 4: confirm the retry count increments
         def step4():
             return "retry_count: 1"
 
@@ -281,15 +282,15 @@ class DLQReplayFailureScenario(IntegrationScenario):
 
 class IdempotentReplayScenario(IntegrationScenario):
     """
-    Replay 멱등성 보장 시나리오.
+    Scenario: replay idempotency guarantee.
 
     Steps:
-    1. DLQ 항목 생성 (idempotency_key 포함)
-    2. 첫 번째 Replay 실행
-    3. Idempotency 키 등록 확인
-    4. 동일 항목 재Replay 시도
-    5. 중복 감지 결과 확인
-    6. 실제 처리 횟수 확인 (1회만)
+    1. Create a DLQ entry (with an idempotency_key)
+    2. Run the first replay
+    3. Confirm the idempotency key is registered
+    4. Attempt to replay the same entry again
+    5. Confirm the duplicate-detection result
+    6. Confirm the actual processing count (exactly once)
     """
 
     scenario_name = "idempotent_replay"
@@ -313,7 +314,7 @@ class IdempotentReplayScenario(IntegrationScenario):
         service = self.service_name
         idempotency_key = f"replay_{self.scenario_id}"
 
-        # Step 1: DLQ 항목 생성
+        # Step 1: create a DLQ entry
         dlq_entry_id = None
 
         def step1():
@@ -342,7 +343,7 @@ class IdempotentReplayScenario(IntegrationScenario):
         ):
             return
 
-        # Step 2: 첫 번째 Replay
+        # Step 2: first replay
         def step2():
             return "first replay executed"
 
@@ -351,14 +352,14 @@ class IdempotentReplayScenario(IntegrationScenario):
         ):
             return
 
-        # Step 3: Idempotency 키 등록 확인
+        # Step 3: confirm the idempotency key is registered
         def step3():
             IdempotencyKey.for_operation(
                 entity_type="replay",
                 entity_id=str(dlq_entry_id) if dlq_entry_id else self.scenario_id,
                 action="process",
             )
-            # 키 등록 시뮬레이션
+            # Simulate key registration
             return "key registered"
 
         if not self._execute_step(
@@ -366,7 +367,7 @@ class IdempotentReplayScenario(IntegrationScenario):
         ):
             return
 
-        # Step 4: 동일 항목 재Replay
+        # Step 4: replay the same entry again
         def step4():
             return "duplicate replay attempted"
 
@@ -375,7 +376,7 @@ class IdempotentReplayScenario(IntegrationScenario):
         ):
             return
 
-        # Step 5: 중복 감지 결과
+        # Step 5: duplicate-detection result
         def step5():
             return "duplicate detected, previous result returned"
 
@@ -384,7 +385,7 @@ class IdempotentReplayScenario(IntegrationScenario):
         ):
             return
 
-        # Step 6: 처리 횟수 확인
+        # Step 6: confirm the processing count
         def step6():
             return "actual_processing: 1"
 

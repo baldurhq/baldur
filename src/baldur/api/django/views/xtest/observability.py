@@ -1,15 +1,15 @@
 """
 X-Test-Mode Observability & Blast Radius Views
 
-테스트용 Observability 관련 API:
-- HealingTimelineView: 힐링 타임라인 조회
-- BlastRadiusTestView: 단일 서비스 Blast Radius 격리 테스트
-- MultiServiceBlastRadiusView: 다중 서비스 격리 매트릭스 테스트
-- RecordHealingEventView: 힐링 이벤트 기록
+Test-only Observability APIs:
+- HealingTimelineView: query the healing timeline
+- BlastRadiusTestView: single-service Blast Radius isolation test
+- MultiServiceBlastRadiusView: multi-service isolation matrix test
+- RecordHealingEventView: record a healing event
 
-Production Post-mortem API는 views/postmortem.py를 참조하세요:
-- POST /postmortem/generate/ - Post-mortem 생성
-- GET /postmortem/incidents/ - 인시던트 목록 조회
+For the production Post-mortem API, see views/postmortem.py:
+- POST /postmortem/generate/ - generate a post-mortem
+- GET /postmortem/incidents/ - list incidents
 """
 
 import structlog
@@ -32,22 +32,23 @@ logger = structlog.get_logger()
 
 class HealingTimelineView(XTestModeMixin, APIView):
     """
-    Stage 51: Baldur 타임라인 조회 API.
+    Stage 51: Baldur timeline query API.
 
     GET /api/baldur/xtest/healing-timeline/?service=database&limit=50
 
-    장애 감지, CB 상태 변경, 복구 등의 이벤트 타임라인을 조회합니다.
+    Returns the event timeline for failure detection, CB state changes,
+    recovery, and so on.
     """
 
     @staticmethod
     def _get_timeline_default_limit() -> int:
-        """Settings에서 timeline_default_limit 조회."""
+        """Look up timeline_default_limit from Settings."""
         try:
             from baldur.settings.api_view import get_api_view_settings
 
             return get_api_view_settings().xtest_timeline_default_limit
         except Exception:
-            return 50  # 기본값
+            return 50  # default
 
     def get(self, request: Request) -> Response:
         denied = self.check_chaos_permission(request)
@@ -58,16 +59,16 @@ class HealingTimelineView(XTestModeMixin, APIView):
         default_limit = self._get_timeline_default_limit()
         limit = int(request.query_params.get("limit", default_limit))
 
-        # 이벤트 버스에서 히스토리 조회
+        # Query the history from the event bus
         from baldur.services.event_bus import get_event_bus
 
         bus = get_event_bus()
         history = bus.get_history(event_type=None, limit=limit)
 
-        # 로컬 이벤트 추가
+        # Add local events
         local_events = get_healing_events(limit)
 
-        # 필터링
+        # Filtering
         if service_filter:
             history = [
                 e
@@ -79,7 +80,7 @@ class HealingTimelineView(XTestModeMixin, APIView):
                 e for e in local_events if e.get("service") == service_filter
             ]
 
-        # CB 상태 정보 추가
+        # Add CB state information
         from baldur.services.circuit_breaker import (
             get_circuit_breaker_service,
         )
@@ -111,15 +112,17 @@ class HealingTimelineView(XTestModeMixin, APIView):
 
 class BlastRadiusTestView(XTestModeMixin, APIView):
     """
-    Stage 51: Blast Radius (영향 범위) 격리 테스트 API.
+    Stage 51: Blast Radius (impact scope) isolation test API.
 
     POST /api/baldur/xtest/blast-radius-test/
     Body: {"affected_service": "service_a", "check_services": ["service_b", "service_c"]}
 
-    특정 서비스에 장애를 주입하고, 다른 서비스들이 영향받지 않는지 확인합니다.
+    Injects a failure into a specific service and checks that other services are
+    unaffected.
 
-    - affected_service: 장애를 주입할 서비스 (필수)
-    - check_services: 영향 확인할 서비스 목록 (생략 시 CB에 등록된 모든 서비스)
+    - affected_service: service to inject the failure into (required)
+    - check_services: services to check for impact (defaults to every service
+      registered with the CB)
     """
 
     def post(self, request: Request) -> Response:
@@ -151,14 +154,14 @@ class BlastRadiusTestView(XTestModeMixin, APIView):
 
         cb_service = get_circuit_breaker_service()
 
-        # check_services가 비어있으면 CB에 등록된 모든 서비스 조회
+        # If check_services is empty, query every service registered with the CB
         if not check_services:
             all_states = cb_service.repository.get_all_states()
             check_services = [
                 s.service_name for s in all_states if s.service_name != affected_service
             ]
 
-        # Step 1: 대상 서비스에 장애 주입
+        # Step 1: inject the failure into the target service
         for _ in range(failure_count):
             cb_service.record_failure(
                 affected_service, error_context={"source": "blast-radius-test"}
@@ -168,7 +171,7 @@ class BlastRadiusTestView(XTestModeMixin, APIView):
         results["affected_service_state"] = affected_state
         results["affected_services"].append(affected_service)
 
-        # 이벤트 기록
+        # Record the event
         add_healing_event(
             {
                 "event_type": "blast_radius_test_started",
@@ -178,7 +181,7 @@ class BlastRadiusTestView(XTestModeMixin, APIView):
             }
         )
 
-        # Step 2: 다른 서비스들의 상태 확인
+        # Step 2: check the state of the other services
         for service in check_services:
             if service == affected_service:
                 continue
@@ -198,10 +201,10 @@ class BlastRadiusTestView(XTestModeMixin, APIView):
             else:
                 results["unaffected_services"].append(service)
 
-        # Step 3: 결과 스냅샷 저장
+        # Step 3: save a snapshot of the result
         snapshot = collect_system_snapshot()
 
-        # 이벤트 기록
+        # Record the event
         add_healing_event(
             {
                 "event_type": "blast_radius_test_completed",
@@ -212,7 +215,7 @@ class BlastRadiusTestView(XTestModeMixin, APIView):
             }
         )
 
-        # Step 4: 대상 서비스 복구 (테스트 종료)
+        # Step 4: recover the target service (test teardown)
         cb_service.force_close(affected_service, reason="Blast radius test cleanup")
 
         logger.info(
@@ -222,7 +225,7 @@ class BlastRadiusTestView(XTestModeMixin, APIView):
             items_count=len(results["unaffected_services"]),
         )
 
-        # WAL Audit 기록
+        # WAL Audit record
         self.log_xtest_audit(
             request=request,
             action="blast_radius_test",
@@ -252,7 +255,7 @@ class BlastRadiusTestView(XTestModeMixin, APIView):
 
 
 def _get_test_services(cb_service, requested_services: list) -> list:
-    """테스트할 서비스 목록 조회. 비어있으면 CB에 등록된 모든 서비스 반환."""
+    """Query the services to test. If empty, return every service on the CB."""
     if requested_services:
         return requested_services
     all_states = cb_service.repository.get_all_states()
@@ -260,13 +263,13 @@ def _get_test_services(cb_service, requested_services: list) -> list:
 
 
 def _reset_all_services(cb_service, services: list, reason: str) -> None:
-    """모든 서비스를 CLOSED 상태로 리셋."""
+    """Reset every service to the CLOSED state."""
     for svc in services:
         cb_service.force_close(svc, reason=reason)
 
 
 def _inject_failures(cb_service, service: str, failure_count: int, source: str) -> None:
-    """특정 서비스에 장애 주입."""
+    """Inject failures into a specific service."""
     for _ in range(failure_count):
         cb_service.record_failure(service, error_context={"source": source})
 
@@ -274,7 +277,7 @@ def _inject_failures(cb_service, service: str, failure_count: int, source: str) 
 def _check_service_isolation(
     cb_service, affected_service: str, check_service: str
 ) -> bool:
-    """다른 서비스가 영향 받았는지 확인. True면 격리됨(영향 없음)."""
+    """Check whether another service was impacted. True means isolated (no impact)."""
     state = cb_service.get_state(check_service)
     allowed = cb_service.should_allow(check_service)
     return bool(state != "open" and allowed)
@@ -285,21 +288,21 @@ def _build_isolation_matrix(
     test_services: list,
     failure_count: int,
 ) -> dict:
-    """각 서비스별 영향 매트릭스 구성."""
+    """Build the per-service impact matrix."""
     matrix: dict[str, dict[str, list[str]]] = {}
 
     for affected_service in test_services:
         matrix[affected_service] = {"affects": [], "does_not_affect": []}
 
-        # 모든 서비스 초기화
+        # Reset every service
         _reset_all_services(cb_service, test_services, "matrix test reset")
 
-        # 대상 서비스에 장애 주입
+        # Inject the failure into the target service
         _inject_failures(
             cb_service, affected_service, failure_count, "multi-blast-radius-test"
         )
 
-        # 다른 서비스 확인
+        # Check the other services
         for check_service in test_services:
             if check_service == affected_service:
                 continue
@@ -313,7 +316,7 @@ def _build_isolation_matrix(
 
 
 def _calculate_isolation_score(matrix: dict, total_services: int) -> float:
-    """격리 점수 계산 (백분율)."""
+    """Calculate the isolation score (percentage)."""
     total_checks = total_services * (total_services - 1)
     if total_checks == 0:
         return 100.0
@@ -323,14 +326,15 @@ def _calculate_isolation_score(matrix: dict, total_services: int) -> float:
 
 class MultiServiceBlastRadiusView(XTestModeMixin, APIView):
     """
-    Stage 51: 다중 서비스 Blast Radius 격리 매트릭스 테스트.
+    Stage 51: multi-service Blast Radius isolation matrix test.
 
     POST /api/baldur/xtest/multi-blast-radius/
     Body: {"test_services": ["service_a", "service_b", "service_c"]}
 
-    각 서비스 장애가 다른 서비스에 미치는 영향을 매트릭스로 분석합니다.
+    Analyzes, as a matrix, the impact each service failure has on the others.
 
-    - test_services: 테스트할 서비스 목록 (생략 시 CB에 등록된 모든 서비스)
+    - test_services: services to test (defaults to every service registered
+      with the CB)
     """
 
     def post(self, request: Request) -> Response:
@@ -347,7 +351,7 @@ class MultiServiceBlastRadiusView(XTestModeMixin, APIView):
 
         cb_service = get_circuit_breaker_service()
 
-        # 테스트할 서비스 목록 조회
+        # Query the services to test
         test_services = _get_test_services(cb_service, requested_services)
 
         if len(test_services) < 2:
@@ -356,13 +360,13 @@ class MultiServiceBlastRadiusView(XTestModeMixin, APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # 매트릭스 구성
+        # Build the matrix
         matrix = _build_isolation_matrix(cb_service, test_services, failure_count)
 
-        # 모든 서비스 복구
+        # Recover every service
         _reset_all_services(cb_service, test_services, "matrix test cleanup")
 
-        # 격리 점수 계산
+        # Calculate the isolation score
         isolation_score = _calculate_isolation_score(matrix, len(test_services))
 
         logger.info(
@@ -370,7 +374,7 @@ class MultiServiceBlastRadiusView(XTestModeMixin, APIView):
             isolation_score=isolation_score,
         )
 
-        # WAL Audit 기록
+        # WAL Audit record
         self.log_xtest_audit(
             request=request,
             action="multi_blast_radius_test",
@@ -413,7 +417,7 @@ def _calculate_incident_duration(
     timeline: list,
 ) -> tuple[str | None, str | None, float | None]:
     """
-    타임라인에서 인시던트 시작/종료 시점 및 지속 시간 계산.
+    Calculate the incident start/end points and duration from the timeline.
 
     Returns:
         tuple: (started_at, resolved_at, duration_seconds)
@@ -424,15 +428,15 @@ def _calculate_incident_duration(
 
 def calculate_incident_duration_detailed(timeline: list) -> IncidentDurationResult:
     """
-    타임라인에서 인시던트 지속 시간 세부 정보 계산.
+    Calculate detailed incident duration information from the timeline.
 
-    CB 상태별 시간 세분화:
-    - duration_seconds: 전체 소요 시간 (OPEN → CLOSED)
-    - downtime_seconds: 실제 서비스 중단 시간 (OPEN → HALF_OPEN)
-    - validation_seconds: 복구 검증 시간 (HALF_OPEN → CLOSED)
+    Time broken down by CB state:
+    - duration_seconds: total elapsed time (OPEN → CLOSED)
+    - downtime_seconds: actual service outage time (OPEN → HALF_OPEN)
+    - validation_seconds: recovery validation time (HALF_OPEN → CLOSED)
 
     Returns:
-        IncidentDurationResult: 시작/종료 시각 및 세분화된 duration 정보
+        IncidentDurationResult: start/end times and the broken-down duration info
     """
     current_time = timezone.now().isoformat()
     return calculate_incident_duration(timeline, current_time)
@@ -444,9 +448,10 @@ def _generate_dynamic_actions(
     duration_seconds: float | None,
 ) -> tuple[list, list]:
     """
-    타임라인과 분석 결과를 기반으로 동적 action items 및 recommendations 생성.
+    Generate dynamic action items and recommendations from the timeline and
+    analysis results.
 
-    순수 함수 generate_dynamic_actions를 래핑하여 Django timezone을 사용.
+    Wraps the pure function generate_dynamic_actions to use the Django timezone.
 
     Returns:
         tuple: (auto_actions, recommendations)
@@ -463,12 +468,12 @@ def _generate_dynamic_actions(
 
 class RecordHealingEventView(XTestModeMixin, APIView):
     """
-    Stage 51: 힐링 이벤트 기록 API.
+    Stage 51: healing event recording API.
 
     POST /api/baldur/xtest/record-healing-event/
     Body: {"event_type": "cb_opened", "service": "my_service", "details": {...}}
 
-    커스텀 힐링 이벤트를 기록합니다.
+    Records a custom healing event.
     """
 
     def post(self, request: Request) -> Response:
@@ -488,7 +493,7 @@ class RecordHealingEventView(XTestModeMixin, APIView):
             "timestamp": timezone.now().isoformat(),
         }
 
-        # 스냅샷 추가 (옵션)
+        # Add a snapshot (optional)
         if request.data.get("include_snapshot", False):
             event["snapshot"] = collect_system_snapshot()
 
@@ -500,7 +505,7 @@ class RecordHealingEventView(XTestModeMixin, APIView):
             service=service,
         )
 
-        # WAL Audit 기록
+        # WAL Audit record
         self.log_xtest_audit(
             request=request,
             action="record_healing_event",

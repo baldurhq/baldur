@@ -1,28 +1,29 @@
 """
 Baldur Exception Handler.
 
-통합 예외 처리 시스템으로, API 예외 응답을 표준화하고 Audit 로그에 기록합니다.
+A unified exception handling system that standardizes API error responses and
+records them in the audit log.
 
-주요 컴포넌트:
-    - ErrorCode: 표준 에러 코드 Enum
-    - ExceptionClassifier: 예외를 카테고리와 코드로 분류
-    - StandardErrorResponse: 표준화된 에러 응답 포맷
-    - baldur_exception_handler: DRF 예외 핸들러
+Key components:
+    - ErrorCode: standard error code Enum
+    - ExceptionClassifier: classifies exceptions into a category and a code
+    - StandardErrorResponse: standardized error response format
+    - baldur_exception_handler: DRF exception handler
 
-사용 방법:
-    # settings.py에서 DRF 예외 핸들러 설정
+Usage:
+    # Configure the DRF exception handler in settings.py
     REST_FRAMEWORK = {
         'EXCEPTION_HANDLER': 'baldur.api.django.exceptions.baldur_exception_handler',
     }
 
-    # 코드에서 직접 표준 응답 생성
+    # Build a standard response directly in code
     from baldur.api.django.exceptions import (
         ErrorCode,
         StandardErrorResponse,
         create_error_response,
     )
 
-    # 에러 코드로 직접 응답 생성
+    # Build a response straight from an error code
     response = create_error_response(
         code=ErrorCode.VALIDATION_FIELD_REQUIRED,
         field="amount",
@@ -30,7 +31,7 @@ Baldur Exception Handler.
     )
     return Response(response.to_dict(), status=response.http_status)
 
-    # 예외로부터 응답 생성
+    # Build a response from an exception
     try:
         ...
     except Exception as e:
@@ -65,7 +66,7 @@ from .response import (
 )
 
 __all__ = [
-    # === 에러 코드 ===
+    # === Error codes ===
     "ErrorCode",
     "ERROR_CODE_TO_HTTP_STATUS",
     "ERROR_CODE_RETRYABLE",
@@ -74,16 +75,16 @@ __all__ = [
     "is_retryable",
     "get_default_message",
     "get_error_info",
-    # === 예외 분류기 ===
+    # === Exception classifier ===
     "ExceptionCategory",
     "ClassifiedError",
     "ExceptionClassifier",
     "get_exception_classifier",
-    # === 표준 응답 ===
+    # === Standard response ===
     "ErrorInfo",
     "ResponseMeta",
     "StandardErrorResponse",
     "create_error_response",
-    # === DRF 핸들러 ===
+    # === DRF handler ===
     "baldur_exception_handler",
 ]

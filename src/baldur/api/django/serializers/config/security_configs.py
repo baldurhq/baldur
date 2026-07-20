@@ -3,7 +3,7 @@ Security and Notification Configuration Serializers.
 
 Security and Notification config serializers.
 
-Fail-Safe Default 강화 추가.
+Adds Fail-Safe Default hardening.
 """
 
 from rest_framework import serializers
@@ -15,7 +15,7 @@ class SecurityConfigSerializer(ApplyStrategyMixin):
     """
     Serializer for Security configuration.
 
-    Safe Default 폴백 적용.
+    Applies the Safe Default fallback.
     """
 
     _config_type = "security"
@@ -34,7 +34,7 @@ class SecurityConfigSerializer(ApplyStrategyMixin):
     )
 
     def validate(self, attrs):
-        """검증 + Safe Default 폴백."""
+        """Validate + Safe Default fallback."""
         validated = super().validate(attrs)
         return self.validate_with_safe_fallback(validated)
 
@@ -43,7 +43,7 @@ class NotificationConfigSerializer(ApplyStrategyMixin):
     """
     Serializer for Notification configuration.
 
-    Safe Default 폴백 적용.
+    Applies the Safe Default fallback.
     """
 
     _config_type = "notification"
@@ -76,6 +76,6 @@ class NotificationConfigSerializer(ApplyStrategyMixin):
     )
 
     def validate(self, attrs):
-        """검증 + Safe Default 폴백."""
+        """Validate + Safe Default fallback."""
         validated = super().validate(attrs)
         return self.validate_with_safe_fallback(validated)

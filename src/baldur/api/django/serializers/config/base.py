@@ -3,7 +3,7 @@ Base Mixin for Configuration Serializers.
 
 Provides apply strategy and safe fallback validation.
 
-Fail-Safe Default 강화 추가.
+Adds Fail-Safe Default hardening.
 """
 
 from rest_framework import serializers
@@ -13,10 +13,10 @@ class ApplyStrategyMixin(serializers.Serializer):
     """
     Mixin that adds apply strategy fields to config serializers.
 
-    Safe Default 검증 및 폴백 기능 추가.
+    Adds Safe Default validation and fallback.
     """
 
-    # 서브클래스에서 오버라이드하여 config_type 지정
+    # Override in subclasses to specify config_type
     _config_type: str = ""
 
     apply_strategy = serializers.ChoiceField(
@@ -68,16 +68,16 @@ class ApplyStrategyMixin(serializers.Serializer):
 
     def validate_with_safe_fallback(self, data: dict) -> dict:
         """
-        Safe Default 검증 및 폴백 적용.
+        Apply Safe Default validation and fallback.
 
-        잘못된 값은 Safe Default로 대체됩니다.
-        서브클래스에서 _config_type을 설정해야 합니다.
+        Invalid values are replaced with the Safe Default.
+        Subclasses must set _config_type.
 
         Args:
-            data: 검증할 데이터
+            data: data to validate
 
         Returns:
-            Safe Default가 적용된 데이터
+            The data with Safe Defaults applied
         """
         if not self._config_type:
             return data

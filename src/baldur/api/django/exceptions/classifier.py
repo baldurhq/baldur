@@ -1,18 +1,18 @@
 """
-예외 분류기.
+Exception classifier.
 
-발생한 예외를 카테고리와 표준 에러 코드로 분류합니다.
-DRF, Django, 커스텀 예외 및 일반 Python 예외를 처리합니다.
+Classifies raised exceptions into categories and standard error codes.
+Handles DRF, Django, custom, and plain Python exceptions.
 
-분류 기준:
-    - VALIDATION: ValidationError, ValueError, Serializer 에러
+Classification criteria:
+    - VALIDATION: ValidationError, ValueError, Serializer errors
     - AUTH: AuthenticationFailed
     - AUTHZ: PermissionDenied
     - NOT_FOUND: Http404, NotFound
     - CONFLICT: ConfigLockError, IntegrityError
     - RATE_LIMIT: Throttled
-    - INTERNAL: Exception (기타)
-    - SERVICE: 외부 서비스 에러
+    - INTERNAL: Exception (other)
+    - SERVICE: external service errors
 """
 
 from __future__ import annotations
@@ -26,110 +26,111 @@ from .codes import ErrorCode, get_default_message, is_retryable
 
 
 class ExceptionCategory(str, Enum):
-    """예외 카테고리."""
+    """Exception category."""
 
     VALIDATION = "validation"
-    """입력값 검증 실패."""
+    """Input validation failure."""
 
     AUTH = "auth"
-    """인증 실패."""
+    """Authentication failure."""
 
     AUTHZ = "authz"
-    """인가(권한) 실패."""
+    """Authorization (permission) failure."""
 
     NOT_FOUND = "not_found"
-    """리소스 없음."""
+    """Resource not found."""
 
     CONFLICT = "conflict"
-    """리소스 상태 충돌."""
+    """Resource state conflict."""
 
     RATE_LIMIT = "rate_limit"
-    """요청 제한."""
+    """Request throttled."""
 
     INTERNAL = "internal"
-    """시스템 내부 오류."""
+    """Internal system error."""
 
     SERVICE = "service"
-    """외부 서비스 오류."""
+    """External service error."""
 
 
 @dataclass
 class ClassifiedError:
     """
-    분류된 예외 정보.
+    Classified exception information.
 
-    예외 분류기가 반환하는 구조화된 에러 정보입니다.
+    The structured error information returned by the exception classifier.
     """
 
     category: ExceptionCategory
-    """예외 카테고리."""
+    """Exception category."""
 
     code: ErrorCode
-    """표준 에러 코드."""
+    """Standard error code."""
 
     http_status: int
-    """HTTP 상태 코드."""
+    """HTTP status code."""
 
     message: str
-    """사용자 친화적 메시지."""
+    """User-friendly message."""
 
     detail: str | None = None
-    """기술적 상세 정보 (str(exception))."""
+    """Technical detail information (str(exception))."""
 
     field: str | None = None
-    """필드 관련 에러 시 필드명."""
+    """Field name, for field-related errors."""
 
     retryable: bool = False
-    """재시도 가능 여부."""
+    """Whether the operation is retryable."""
 
     exception_class: str = ""
-    """원본 예외 클래스명."""
+    """Original exception class name."""
 
     extra: dict[str, Any] | None = None
-    """추가 메타데이터 (ConfigLockError의 current_owner 등)."""
+    """Extra metadata (e.g. current_owner of ConfigLockError)."""
 
 
 class ExceptionClassifier:
     """
-    예외 분류기.
+    Exception classifier.
 
-    다양한 예외 유형을 표준화된 에러 코드와 카테고리로 분류합니다.
-    DRF 예외 → Django 예외 → 커스텀 예외 → Python 예외 순으로 검사합니다.
+    Classifies various exception types into standardized error codes and
+    categories.
+    Checks in the order DRF → Django → custom → plain Python exceptions.
 
-    사용 예시:
+    Example:
         classifier = ExceptionClassifier()
         classified = classifier.classify(exception)
-        # classified.code, classified.http_status 등 사용
+        # use classified.code, classified.http_status, etc.
     """
 
     def classify(self, exc: BaseException) -> ClassifiedError:
         """
-        예외를 분류하여 표준화된 에러 정보 반환.
+        Classify an exception and return standardized error information.
 
         Args:
-            exc: 분류할 예외
+            exc: The exception to classify
 
         Returns:
-            ClassifiedError 인스턴스
+            ClassifiedError instance
         """
         exception_class = type(exc).__name__
 
-        # 1. DRF 예외 체크
+        # 1. Check DRF exceptions
         result = self._classify_drf_exception(exc)
         if result:
             return self._with_exception_class(result, exception_class)
 
-        # 2. Django 예외 체크
+        # 2. Check Django exceptions
         result = self._classify_django_exception(exc)
         if result:
             return self._with_exception_class(result, exception_class)
 
-        # 3. 커스텀 예외 체크 (baldur 패키지)
+        # 3. Check custom exceptions (baldur package)
         result = self._classify_custom_exception(exc)
         if result:
             return self._with_exception_class(result, exception_class)
 
-        # 4. 일반 Python 예외
+        # 4. Plain Python exceptions
         result = self._classify_python_exception(exc)
         return self._with_exception_class(result, exception_class)
 
@@ -138,12 +139,12 @@ class ExceptionClassifier:
         result: ClassifiedError,
         exception_class: str,
     ) -> ClassifiedError:
-        """예외 클래스명을 결과에 추가."""
+        """Add the exception class name to the result."""
         result.exception_class = exception_class
         return result
 
     def _classify_drf_exception(self, exc: BaseException) -> ClassifiedError | None:
-        """DRF 예외 분류."""
+        """Classify DRF exceptions."""
         try:
             from rest_framework.exceptions import (
                 APIException,
@@ -164,11 +165,11 @@ class ExceptionClassifier:
         if not isinstance(exc, APIException):
             return None
 
-        # ValidationError 특수 처리
+        # Special handling for ValidationError
         if isinstance(exc, ValidationError):
             return self._handle_validation_error(exc)
 
-        # 예외 타입별 핸들러 매핑
+        # Per-exception-type handler mapping
         handler_result = self._try_drf_exception_handlers(
             exc,
             ParseError,
@@ -181,7 +182,7 @@ class ExceptionClassifier:
         if handler_result:
             return handler_result
 
-        # 기타 DRF 예외 → 상태 코드 기반 분류
+        # Other DRF exceptions → classify by status code
         status_code = getattr(exc, "status_code", 500)
         return self._classify_by_status_code(exc, status_code)
 
@@ -195,7 +196,7 @@ class ExceptionClassifier:
         NotFound,
         Throttled,
     ) -> ClassifiedError | None:
-        """DRF 예외 타입별 핸들러 시도."""
+        """Try the per-type DRF exception handlers."""
         detail = str(exc.detail) if hasattr(exc, "detail") else str(exc)
 
         # ParseError
@@ -262,14 +263,14 @@ class ExceptionClassifier:
         return None
 
     def _handle_validation_error(self, exc: BaseException) -> ClassifiedError:
-        """ValidationError 상세 처리."""
+        """Detailed handling for ValidationError."""
         detail = getattr(exc, "detail", str(exc))
         field = None
         message = get_default_message(ErrorCode.VALIDATION_SERIALIZER_ERROR)
 
-        # DRF ValidationError는 detail이 dict 또는 list일 수 있음
+        # A DRF ValidationError detail may be a dict or a list
         if isinstance(detail, dict):
-            # 첫 번째 필드 에러 추출
+            # Extract the first field error
             for field_name, errors in detail.items():
                 field = field_name
                 if isinstance(errors, list) and errors:
@@ -295,7 +296,7 @@ class ExceptionClassifier:
         )
 
     def _classify_django_exception(self, exc: BaseException) -> ClassifiedError | None:
-        """Django 예외 분류."""
+        """Classify Django exceptions."""
         try:
             from django.core.exceptions import (
                 PermissionDenied as DjangoPermissionDenied,
@@ -341,7 +342,7 @@ class ExceptionClassifier:
                 retryable=False,
             )
 
-        # IntegrityError (unique constraint 등)
+        # IntegrityError (unique constraint, etc.)
         if isinstance(exc, IntegrityError):
             return ClassifiedError(
                 category=ExceptionCategory.CONFLICT,
@@ -366,7 +367,7 @@ class ExceptionClassifier:
         return None
 
     def _classify_custom_exception(self, exc: BaseException) -> ClassifiedError | None:
-        """baldur 패키지 커스텀 예외 분류."""
+        """Classify baldur package custom exceptions."""
         exception_class = type(exc).__name__
 
         # ConfigLockError
@@ -416,7 +417,7 @@ class ExceptionClassifier:
                 extra={"service_name": service_name},
             )
 
-        # PaymentRecoveryError (shopping 패키지)
+        # PaymentRecoveryError (shopping package)
         if exception_class == "PaymentRecoveryError":
             code_attr = getattr(exc, "code", "RECOVERY_ERROR")
             recoverable = getattr(exc, "recoverable", True)
@@ -433,7 +434,7 @@ class ExceptionClassifier:
         return None
 
     def _classify_python_exception(self, exc: BaseException) -> ClassifiedError:
-        """일반 Python 예외 분류."""
+        """Classify plain Python exceptions."""
 
         # ValueError
         if isinstance(exc, ValueError):
@@ -491,7 +492,7 @@ class ExceptionClassifier:
                 retryable=True,
             )
 
-        # 기본: 내부 서버 오류
+        # Default: internal server error
         return ClassifiedError(
             category=ExceptionCategory.INTERNAL,
             code=ErrorCode.SYSTEM_INTERNAL_ERROR,
@@ -506,7 +507,7 @@ class ExceptionClassifier:
         exc: BaseException,
         status_code: int,
     ) -> ClassifiedError:
-        """HTTP 상태 코드 기반 분류 (fallback)."""
+        """Classify by HTTP status code (fallback)."""
         detail = str(exc)
 
         if 400 <= status_code < 500:
@@ -555,13 +556,13 @@ class ExceptionClassifier:
         )
 
 
-# 싱글톤 인스턴스
+# Singleton instance
 _classifier: ExceptionClassifier | None = None
 _classifier_lock = threading.Lock()
 
 
 def get_exception_classifier() -> ExceptionClassifier:
-    """ExceptionClassifier 싱글톤 인스턴스 반환."""
+    """Return the ExceptionClassifier singleton instance."""
     global _classifier
     if _classifier is None:
         with _classifier_lock:

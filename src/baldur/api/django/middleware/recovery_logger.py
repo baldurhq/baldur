@@ -1,25 +1,25 @@
 """
 Baldur Recovery Event Logger.
 
-DB 붕괴 → 서킷 오픈 → DLQ 적재 → 복구 → 리플레이 완료 과정을
-해시 체인으로 기록하여 감사 증적을 제공합니다.
+Records the DB collapse -> circuit open -> DLQ accumulation -> recovery ->
+replay completion sequence as a hash chain, providing an audit trail.
 
 Usage:
     recovery_logger = get_recovery_logger()
 
-    # 복구 이벤트 체인 시작
+    # Start a recovery event chain
     chain_id = recovery_logger.start_recovery_chain(
         trigger="db_connection_exhausted",
         affected_services=["database"],
     )
 
-    # 이벤트 기록
+    # Record events
     recovery_logger.log_event(chain_id, "circuit_opened", {...})
     recovery_logger.log_event(chain_id, "dlq_items_stored", {...})
     recovery_logger.log_event(chain_id, "system_recovered", {...})
     recovery_logger.log_event(chain_id, "dlq_replay_completed", {...})
 
-    # 체인 완료
+    # Complete the chain
     summary = recovery_logger.complete_chain(chain_id)
 """
 
@@ -41,10 +41,10 @@ logger = structlog.get_logger()
 
 class BaldurRecoveryLogger:
     """
-    Baldur 복구 이벤트 로거.
+    Baldur recovery event logger.
 
-    DB 붕괴 → 서킷 오픈 → DLQ 적재 → 복구 → 리플레이 완료 과정을
-    해시 체인으로 기록하여 감사 증적을 제공합니다.
+    Records the DB collapse -> circuit open -> DLQ accumulation -> recovery ->
+    replay completion sequence as a hash chain, providing an audit trail.
     """
 
     def __init__(self):
@@ -94,7 +94,7 @@ class BaldurRecoveryLogger:
         with self._lock:
             self._chains[chain_id] = chain_data
 
-        # 시작 이벤트 기록
+        # Record the start event
         self.log_event(
             chain_id,
             "recovery_chain_started",
@@ -116,8 +116,9 @@ class BaldurRecoveryLogger:
         """
         Log an event to the recovery chain.
 
-        request 파라미터 추가하여 AuditMiddleware 버퍼 패턴 지원
-        (복구 체인은 대부분 비동기 컨텍스트에서 실행되므로 request가 없는 경우가 많음)
+        The request parameter enables the AuditMiddleware buffer pattern
+        (recovery chains mostly run in async contexts, so request is often
+        absent).
         """
         self._lazy_init()
 
@@ -139,7 +140,7 @@ class BaldurRecoveryLogger:
 
             chain["events"].append(event)
 
-        # === 버퍼 패턴 우선 ===
+        # === Buffer pattern first ===
         if request is not None:
             try:
                 from baldur.audit.event_buffer import (
@@ -163,7 +164,7 @@ class BaldurRecoveryLogger:
             except ImportError:
                 pass
 
-        # === Fallback: 기존 방식 ===
+        # === Fallback: legacy path ===
         try:
             if self._audit_logger:
                 self._audit_logger.log(
@@ -201,7 +202,7 @@ class BaldurRecoveryLogger:
             chain["completed_at"] = utc_now().isoformat()
             chain["success"] = success
 
-            # 소요 시간 계산
+            # Compute elapsed time
             started = datetime.fromisoformat(chain["started_at"].replace("Z", "+00:00"))
             completed = datetime.fromisoformat(
                 chain["completed_at"].replace("Z", "+00:00")
@@ -211,7 +212,7 @@ class BaldurRecoveryLogger:
             if summary:
                 chain["summary"] = summary
 
-        # 완료 이벤트 기록
+        # Record the completion event
         self.log_event(
             chain_id,
             "recovery_chain_completed",
@@ -237,7 +238,7 @@ class BaldurRecoveryLogger:
         if not chain:
             return {"error": f"Chain not found: {chain_id}"}
 
-        # 이벤트 타임라인 생성
+        # Build the event timeline
         timeline = []
         for event in chain.get("events", []):
             timeline.append(

@@ -4,7 +4,8 @@ Baldur API Middleware Package.
 Provides middleware components for security, logging, and performance.
 
 Features:
-- HealthBridgeMiddleware: DB-independent health endpoints (Worker Saturation 방지)
+- HealthBridgeMiddleware: DB-independent health endpoints (prevents Worker
+  Saturation)
 - SensitiveEndpointAccessLogger: Logs access to sensitive endpoints
 - BaldurMiddleware: Automatic failure detection and DLQ storage
 - BaldurRecoveryLogger: Recovery event chain logging

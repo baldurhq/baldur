@@ -3,7 +3,7 @@ SLA/SLO Configuration Serializers.
 
 SLA, SLO Definition, SLO Config, ErrorBudget serializers.
 
-Fail-Safe Default 강화 추가.
+Adds Fail-Safe Default hardening.
 """
 
 from rest_framework import serializers
@@ -15,7 +15,7 @@ class SLAConfigSerializer(ApplyStrategyMixin):
     """
     Serializer for SLA configuration.
 
-    Safe Default 폴백 적용.
+    Applies the Safe Default fallback.
     """
 
     _config_type = "sla"
@@ -27,7 +27,7 @@ class SLAConfigSerializer(ApplyStrategyMixin):
     )
 
     def validate(self, attrs):
-        """검증 + Safe Default 폴백."""
+        """Validate + Safe Default fallback."""
         validated = super().validate(attrs)
         return self.validate_with_safe_fallback(validated)
 
@@ -36,7 +36,7 @@ class SLODefinitionSerializer(serializers.Serializer):
     """
     Serializer for a single SLO definition.
 
-    API를 통해 SLO를 생성/수정할 때 사용됩니다.
+    Used when creating/updating an SLO through the API.
     """
 
     name = serializers.CharField(
@@ -113,7 +113,7 @@ class SLODefinitionSerializer(serializers.Serializer):
     )
 
     def validate_name(self, value):
-        """SLO 이름 검증: 영문, 숫자, 언더스코어만 허용."""
+        """Validate the SLO name: letters, digits, and underscores only."""
         import re
 
         if not re.match(r"^[a-zA-Z][a-zA-Z0-9_]*$", value):
@@ -123,8 +123,8 @@ class SLODefinitionSerializer(serializers.Serializer):
         return value
 
     def validate(self, data):
-        """SLO 정의 전체 검증."""
-        # warning_threshold와 critical_threshold 순서 검증
+        """Validate the whole SLO definition."""
+        # Validate warning_threshold / critical_threshold ordering
         warning = data.get("warning_threshold")
         critical = data.get("critical_threshold")
         target = data.get("target", 0.999)
@@ -144,7 +144,7 @@ class SLODefinitionSerializer(serializers.Serializer):
                 "critical_threshold must be greater than or equal to target."
             )
 
-        # burn_rate 순서 검증
+        # Validate burn_rate ordering
         fast = data.get("fast_burn_rate", 14.4)
         slow = data.get("slow_burn_rate", 3.0)
         if fast <= slow:
@@ -159,17 +159,17 @@ class SLOConfigSerializer(ApplyStrategyMixin):
     """
     Serializer for SLO configuration.
 
-    SLO 정의를 API를 통해 동적으로 관리할 수 있습니다.
-    - GET: 현재 등록된 모든 SLO 조회
-    - PUT: SLO 기본값 업데이트 및 SLO 추가/수정
-    - DELETE: 특정 SLO 삭제 (별도 엔드포인트)
+    Lets SLO definitions be managed dynamically through the API.
+    - GET: list all currently registered SLOs
+    - PUT: update SLO defaults and add/update SLOs
+    - DELETE: delete a specific SLO (separate endpoint)
 
-    Safe Default 폴백 적용.
+    Applies the Safe Default fallback.
     """
 
     _config_type = "slo"
 
-    # 기본값 설정
+    # Default settings
     default_window_days = serializers.IntegerField(
         required=False,
         min_value=1,
@@ -195,7 +195,7 @@ class SLOConfigSerializer(ApplyStrategyMixin):
         help_text="Default slow burn rate when creating a new SLO",
     )
 
-    # SLO 추가/수정용 (단일 SLO 또는 리스트)
+    # For adding/updating SLOs (a single SLO or a list)
     slo = SLODefinitionSerializer(
         required=False, help_text="SLO definition to add/update (single)"
     )
@@ -206,7 +206,7 @@ class SLOConfigSerializer(ApplyStrategyMixin):
     )
 
     def validate(self, data):
-        """기본값 burn_rate 순서 검증 + Safe Default 폴백."""
+        """Validate default burn_rate ordering + Safe Default fallback."""
         fast = data.get("default_fast_burn_rate")
         slow = data.get("default_slow_burn_rate")
         if fast is not None and slow is not None and fast <= slow:
@@ -220,13 +220,13 @@ class ErrorBudgetConfigSerializer(ApplyStrategyMixin):
     """
     Serializer for Error Budget configuration.
 
-    Error Budget 및 Burn Rate 임계값 설정.
-    Safe Default 폴백 적용.
+    Error Budget and Burn Rate threshold settings.
+    Applies the Safe Default fallback.
     """
 
     _config_type = "error_budget"
 
-    # Error Budget 임계값 (%)
+    # Error Budget thresholds (%)
     threshold_healthy = serializers.FloatField(
         required=False,
         min_value=50.0,
@@ -252,7 +252,7 @@ class ErrorBudgetConfigSerializer(ApplyStrategyMixin):
         help_text="Critical state threshold (Default: 0%)",
     )
 
-    # Burn Rate 임계값
+    # Burn Rate thresholds
     burn_rate_fast_critical = serializers.FloatField(
         required=False,
         min_value=10.0,
@@ -278,7 +278,7 @@ class ErrorBudgetConfigSerializer(ApplyStrategyMixin):
         help_text="Normal burn rate threshold (Default: 1.0x)",
     )
 
-    # Fail-Safe 설정
+    # Fail-Safe settings
     failsafe_alert_enabled = serializers.BooleanField(
         required=False, help_text="Whether to send alerts on Fail-Safe activation"
     )
@@ -289,7 +289,7 @@ class ErrorBudgetConfigSerializer(ApplyStrategyMixin):
         help_text="Cooldown to prevent consecutive alerts (seconds)",
     )
 
-    # Heartbeat (Dead Man's Snitch) 설정
+    # Heartbeat (Dead Man's Snitch) settings
     heartbeat_enabled = serializers.BooleanField(
         required=False,
         help_text="Whether to enable Heartbeat (Dead Man's Snitch). Default: True",
@@ -307,7 +307,7 @@ class ErrorBudgetConfigSerializer(ApplyStrategyMixin):
         help_text="Heartbeat timeout (seconds, Default: 120s, considered Dead if no response within this time)",
     )
 
-    # 복구 알림 (Recovery Notification) 설정
+    # Recovery Notification settings
     recovery_alert_enabled = serializers.BooleanField(
         required=False,
         help_text="Whether to send recovery completion alerts. Default: True",
@@ -317,7 +317,7 @@ class ErrorBudgetConfigSerializer(ApplyStrategyMixin):
         help_text="Whether to include downtime duration in recovery alerts. Default: True",
     )
 
-    # Override 에스컬레이션 설정
+    # Override escalation settings
     escalation_enabled = serializers.BooleanField(
         required=False, help_text="Whether to enable override escalation. Default: True"
     )
@@ -333,8 +333,8 @@ class ErrorBudgetConfigSerializer(ApplyStrategyMixin):
     )
 
     def validate(self, data):
-        """Validate threshold ordering and heartbeat settings + Safe Default 폴백."""
-        # 임계값 순서 검증: healthy > caution > warning > critical
+        """Validate threshold ordering and heartbeat settings + Safe Default."""
+        # Validate threshold ordering: healthy > caution > warning > critical
         thresholds = [
             ("threshold_healthy", data.get("threshold_healthy", 75.0)),
             ("threshold_caution", data.get("threshold_caution", 50.0)),
@@ -347,7 +347,7 @@ class ErrorBudgetConfigSerializer(ApplyStrategyMixin):
                     f"{thresholds[i][0]} must be greater than {thresholds[i + 1][0]}."
                 )
 
-        # Heartbeat 타임아웃은 interval보다 커야 함
+        # The heartbeat timeout must be greater than the interval
         interval = data.get("heartbeat_interval_seconds", 60)
         timeout = data.get("heartbeat_timeout_seconds", 120)
         if timeout <= interval:

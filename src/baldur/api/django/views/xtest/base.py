@@ -1,21 +1,21 @@
 """
 X-Test-Mode Base Module
 
-공통 유틸리티, Mixin, 헬퍼 함수들을 정의합니다.
+Defines shared utilities, mixins, and helper functions.
 
-Security (2중 보안 장치):
-1차 - Django RBAC: HasChaosTestPermission 권한 클래스
-2차 - XTestModeMixin: X-Test-Mode 헤더 + 환경 변수 검증
+Security (two layers):
+Layer 1 - Django RBAC: HasChaosTestPermission permission class
+Layer 2 - XTestModeMixin: X-Test-Mode header + environment variable checks
 
 Requirements:
-- X-Test-Mode: chaos-monkey 헤더 필수
-- DEBUG 또는 CHAOS_ENABLED 환경 변수 필요
-- production 환경에서는 완전 차단
+- X-Test-Mode: chaos-monkey header required
+- DEBUG or the CHAOS_ENABLED environment variable required
+- Fully blocked in production environments
 
 Regional Scope:
-- GLOBAL scope API는 X-Region 헤더 필수
-- X-Region 값이 현재 클러스터 리전과 일치해야 허용
-- 리전 불일치 시 403 Forbidden 반환
+- GLOBAL scope APIs require the X-Region header
+- The X-Region value must match the current cluster region
+- Returns 403 Forbidden on region mismatch
 """
 
 import os
@@ -45,18 +45,19 @@ logger = structlog.get_logger()
 
 
 # =============================================================================
-# Global Scope Endpoint Patterns (리전 경계 강제 필요)
+# Global Scope Endpoint Patterns (region boundary must be enforced)
 # =============================================================================
 
-# GLOBAL scope API: 다른 리전에 영향을 줄 수 있는 엔드포인트
-# 이 패턴과 매칭되는 API는 X-Region 헤더 필수 + 현재 리전 일치 검증
+# GLOBAL scope APIs: endpoints that can affect other regions.
+# APIs matching these patterns require the X-Region header and a match against
+# the current region.
 GLOBAL_SCOPE_ENDPOINT_PATTERNS: list[str] = [
-    r"xtest/emergency/global/.*",  # 전역 Emergency 상태 변경
-    r"xtest/isolation/region/.*",  # 리전 격리 조작
-    r"xtest/governance/global/.*",  # 전역 거버넌스 설정
+    r"xtest/emergency/global/.*",  # Global Emergency state change
+    r"xtest/isolation/region/.*",  # Region isolation control
+    r"xtest/governance/global/.*",  # Global governance settings
 ]
 
-# 컴파일된 패턴 (성능 최적화)
+# Compiled patterns (performance optimization)
 _COMPILED_GLOBAL_PATTERNS: list[re.Pattern] = [
     re.compile(pattern, re.IGNORECASE) for pattern in GLOBAL_SCOPE_ENDPOINT_PATTERNS
 ]
@@ -69,45 +70,45 @@ _COMPILED_GLOBAL_PATTERNS: list[re.Pattern] = [
 
 class XTestModeMixin:
     """
-    X-Test-Mode 2중 보안 검증 믹스인.
+    Two-layer X-Test-Mode security mixin.
 
-    Security (2중 보안 장치):
-    1차 - Django RBAC: HasChaosTestPermission (인증/그룹 기반)
-    2차 - XTestModeMixin: 헤더 + 환경 변수 검증
+    Security (two layers):
+    Layer 1 - Django RBAC: HasChaosTestPermission (auth/group based)
+    Layer 2 - XTestModeMixin: header + environment variable checks
 
     Requirements:
-    1. Django 인증 + HasChaosTestPermission 권한
-    2. X-Test-Mode: chaos-monkey 헤더
-    3. DEBUG=True 또는 CHAOS_ENABLED=true
+    1. Django authentication + HasChaosTestPermission
+    2. X-Test-Mode: chaos-monkey header
+    3. DEBUG=True or CHAOS_ENABLED=true
     4. ENVIRONMENT != production
     """
 
-    # 1차 보안: Django RBAC 기반 인증/권한
+    # Layer 1 security: Django RBAC based authentication/permission
     authentication_classes = [SessionAuthentication, BasicAuthentication]
     permission_classes = [HasChaosTestPermission]
 
-    # 2차 보안: 헤더 검증용 상수
+    # Layer 2 security: header validation constants
     CHAOS_HEADER = "X-Test-Mode"
     CHAOS_VALUE = "chaos-monkey"
 
     def is_chaos_allowed(self, request: Request) -> tuple[bool, str]:
         """
-        Chaos 모드 허용 여부 검증.
+        Check whether chaos mode is allowed.
 
         Returns:
             (allowed: bool, reason: str)
         """
-        # 1. 헤더 확인
+        # 1. Check the header
         header_value = request.headers.get(self.CHAOS_HEADER, "")
         if header_value != self.CHAOS_VALUE:
             return False, f"Missing or invalid {self.CHAOS_HEADER} header"
 
-        # 2. 프로덕션 차단
+        # 2. Block production
         environment = os.getenv("ENVIRONMENT", "development").lower()
         if environment == "production":
             return False, "X-Test-Mode is disabled in production"
 
-        # 3. DEBUG 또는 CHAOS_ENABLED 확인
+        # 3. Check DEBUG or CHAOS_ENABLED
         debug_mode = getattr(settings, "DEBUG", False)
         chaos_enabled = os.getenv("CHAOS_ENABLED", "false").lower() == "true"
 
@@ -118,19 +119,20 @@ class XTestModeMixin:
 
     def get_current_region(self) -> str | None:
         """
-        현재 클러스터의 리전 조회.
+        Look up the current cluster's region.
 
-        환경변수 BALDUR_NAMESPACE_REGION 또는 ClusterIdentity에서 리전 정보를 가져옵니다.
+        Reads the region from the BALDUR_NAMESPACE_REGION environment variable
+        or from ClusterIdentity.
 
         Returns:
-            리전 식별자 (예: 'seoul', 'tokyo') 또는 None
+            Region identifier (e.g. 'seoul', 'tokyo') or None
         """
-        # 1. 환경변수에서 직접 조회 (가장 빠름)
+        # 1. Read directly from the environment variable (fastest)
         region = os.getenv("BALDUR_NAMESPACE_REGION")
         if region:
             return region
 
-        # 2. ClusterIdentity에서 조회
+        # 2. Read from ClusterIdentity
         try:
             from baldur.core.cluster_identity import get_cluster_identity
 
@@ -145,18 +147,18 @@ class XTestModeMixin:
 
     def is_global_scope_endpoint(self, request: Request) -> bool:
         """
-        현재 요청이 GLOBAL scope API인지 판정.
+        Determine whether the current request targets a GLOBAL scope API.
 
-        GLOBAL scope API는 다른 리전에 영향을 줄 수 있는 엔드포인트입니다:
-        - xtest/emergency/global/* : 전역 Emergency 상태 변경
-        - xtest/isolation/region/* : 리전 격리 조작
-        - xtest/governance/global/* : 전역 거버넌스 설정
+        GLOBAL scope APIs are endpoints that can affect other regions:
+        - xtest/emergency/global/* : global Emergency state change
+        - xtest/isolation/region/* : region isolation control
+        - xtest/governance/global/* : global governance settings
 
         Args:
-            request: HTTP 요청 객체
+            request: HTTP request object
 
         Returns:
-            GLOBAL scope이면 True, LOCAL scope이면 False
+            True for GLOBAL scope, False for LOCAL scope
         """
         path = request.path.lstrip("/")
 
@@ -164,13 +166,13 @@ class XTestModeMixin:
 
     def _get_endpoint_pattern_name(self, request: Request) -> str:
         """
-        GLOBAL scope 엔드포인트 패턴 이름 추출.
+        Extract the GLOBAL scope endpoint pattern name.
 
         Args:
-            request: HTTP 요청 객체
+            request: HTTP request object
 
         Returns:
-            패턴 이름 (e.g., 'emergency', 'isolation', 'governance')
+            Pattern name (e.g., 'emergency', 'isolation', 'governance')
         """
         path = request.path.lower()
         if "emergency" in path:
@@ -189,13 +191,14 @@ class XTestModeMixin:
         result: str,
     ) -> None:
         """
-        리전 스코프 관련 메트릭 기록.
+        Record region scope related metrics.
 
         Args:
-            request: HTTP 요청 객체
-            current_region: 현재 클러스터 리전
-            target_region: 요청된 타겟 리전
-            result: 결과 ('allowed', 'denied_no_header', 'denied_mismatch', 'denied_no_region')
+            request: HTTP request object
+            current_region: current cluster region
+            target_region: requested target region
+            result: outcome ('allowed', 'denied_no_header', 'denied_mismatch',
+                'denied_no_region')
         """
         try:
             from baldur.services.metrics.recorders import (
@@ -206,14 +209,14 @@ class XTestModeMixin:
             pattern_name = self._get_endpoint_pattern_name(request)
             region = current_region or "unknown"
 
-            # GLOBAL scope 요청 메트릭 기록
+            # Record the GLOBAL scope request metric
             record_xtest_global_scope_request(
                 endpoint_pattern=pattern_name,
                 region=region,
                 result=result,
             )
 
-            # cross-region 거부 시 추가 메트릭
+            # Extra metric when a cross-region request is denied
             if result == "denied_mismatch" and current_region and target_region:
                 record_xtest_cross_region_denied(
                     current_region=current_region,
@@ -228,31 +231,31 @@ class XTestModeMixin:
 
     def check_regional_scope(self, request: Request) -> tuple[bool, Response | None]:
         """
-        GLOBAL scope API에 대한 리전 경계 검증.
+        Validate the region boundary for GLOBAL scope APIs.
 
-        GLOBAL scope API 호출 시:
-        1. X-Region 헤더 존재 확인
-        2. 헤더 값과 현재 클러스터 리전 일치 확인
-        3. 불일치 시 403 Forbidden 반환
+        On a GLOBAL scope API call:
+        1. Verify the X-Region header is present
+        2. Verify the header value matches the current cluster region
+        3. Return 403 Forbidden on mismatch
 
         Args:
-            request: HTTP 요청 객체
+            request: HTTP request object
 
         Returns:
-            (is_allowed, response): 허용 여부와 거부 시 Response
+            (is_allowed, response): whether allowed, plus the Response on denial
         """
-        # LOCAL scope API는 리전 체크 불필요
+        # LOCAL scope APIs do not need a region check
         if not self.is_global_scope_endpoint(request):
             return True, None
 
-        # 현재 클러스터 리전 조회
+        # Look up the current cluster region
         current_region = self.get_current_region()
 
-        # 리전 미설정 환경에서는 GLOBAL scope 차단
+        # Block GLOBAL scope when no region is configured
         if not current_region:
             environment = os.getenv("ENVIRONMENT", "development").lower()
             if environment == "development":
-                # 개발 환경에서는 경고만 출력
+                # Only warn in development environments
                 logger.warning("testmode.development_flag_set")
                 return True, None
 
@@ -267,7 +270,7 @@ class XTestModeMixin:
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        # X-Region 헤더 확인
+        # Check the X-Region header
         target_region = request.headers.get("X-Region")
 
         if not target_region:
@@ -290,7 +293,7 @@ class XTestModeMixin:
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        # 리전 일치 확인
+        # Check that the regions match
         if target_region.lower() != current_region.lower():
             logger.warning(
                 "testmode.cross_region_denied",
@@ -328,10 +331,10 @@ class XTestModeMixin:
 
     def check_resource_constraints(self, request: Request) -> Response | None:
         """
-        시스템 리소스 제약 체크.
+        Check system resource constraints.
 
-        CPU 80% 초과 또는 메모리 85% 초과 시 429 응답 반환.
-        시스템 과부하 상태에서 X-Test가 추가 부담을 주는 것을 방지.
+        Returns a 429 response when CPU exceeds 80% or memory exceeds 85%.
+        Prevents X-Test from adding load while the system is already saturated.
 
         Returns:
             None if allowed, 429 Response if resource overloaded
@@ -376,27 +379,27 @@ class XTestModeMixin:
                 "test.mode_resource_check",
                 error=e,
             )
-            # 체크 실패 시 보수적으로 허용 (가용성 우선)
+            # Allow conservatively when the check fails (availability first)
             return None
 
     def check_chaos_permission(self, request: Request) -> Response | None:
         """
-        Chaos 권한 체크. 실패시 Response 반환.
+        Check chaos permission. Returns a Response on failure.
 
-        검증 순서:
-        1. 리소스 제약 체크 (CPU/메모리 과부하)
-        2. Chaos 모드 허용 여부 (헤더, 환경변수)
-        3. GLOBAL scope API인 경우 리전 경계 검증
+        Validation order:
+        1. Resource constraint check (CPU/memory saturation)
+        2. Chaos mode allowance (header, environment variables)
+        3. Region boundary check for GLOBAL scope APIs
 
         Returns:
             None if allowed, Response if denied
         """
-        # 1. 리소스 제약 체크 (CPU/메모리)
+        # 1. Resource constraint check (CPU/memory)
         resource_response = self.check_resource_constraints(request)
         if resource_response is not None:
             return resource_response
 
-        # 2. Chaos 모드 기본 검증
+        # 2. Baseline chaos mode validation
         allowed, reason = self.is_chaos_allowed(request)
         if not allowed:
             logger.warning(
@@ -414,7 +417,7 @@ class XTestModeMixin:
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        # 3. GLOBAL scope API 리전 경계 검증
+        # 3. Region boundary check for GLOBAL scope APIs
         region_allowed, region_response = self.check_regional_scope(request)
         if not region_allowed:
             return region_response
@@ -422,22 +425,22 @@ class XTestModeMixin:
         return None
 
     def get_xtest_session_id(self, request: Request) -> str:
-        """X-Test 세션 ID 추출. 헤더가 없으면 자동 생성."""
+        """Extract the X-Test session ID. Auto-generated when the header is absent."""
         header = request.headers.get("X-Test-Session")
         return str(header) if header else str(uuid.uuid4())[:8]
 
     def ensure_xtest_session(self, request: Request) -> str:
         """
-        X-Test 세션 생성 또는 갱신.
+        Create or refresh the X-Test session.
 
-        세션이 없으면 새로 생성하고, 있으면 기존 세션을 반환합니다.
-        세션 메타데이터는 Redis에 저장되어 자동 정리 시 사용됩니다.
+        Creates a new session when none exists, otherwise returns the existing
+        one. Session metadata is stored in Redis and used during auto-cleanup.
 
         Args:
-            request: HTTP 요청 객체
+            request: HTTP request object
 
         Returns:
-            세션 ID
+            Session ID
         """
         session_id = self.get_xtest_session_id(request)
         user = self.get_xtest_user(request)
@@ -449,10 +452,10 @@ class XTestModeMixin:
 
             session_manager = get_xtest_session_manager()
 
-            # 기존 세션 확인
+            # Check for an existing session
             existing = session_manager.get_session(session_id)
             if not existing:
-                # 새 세션 생성
+                # Create a new session
                 session_manager.create_session(session_id=session_id, user=user)
                 logger.debug(
                     "test.mode_created_new",
@@ -476,18 +479,19 @@ class XTestModeMixin:
         component: str,
     ) -> bool:
         """
-        X-Test 아티팩트를 세션에 등록.
+        Register an X-Test artifact with the session.
 
-        테스트 중 생성된 DLQ 항목, CB 상태 변경 등을 세션에 등록하여
-        세션 만료 시 자동으로 정리될 수 있도록 합니다.
+        Registers DLQ entries, CB state changes, and similar objects created
+        during a test so they can be cleaned up automatically when the session
+        expires.
 
         Args:
-            request: HTTP 요청 객체
-            artifact_id: 아티팩트 ID (DLQ entry ID, CB service name 등)
-            component: 컴포넌트 이름 (dlq, cb, idempotency 등)
+            request: HTTP request object
+            artifact_id: artifact ID (DLQ entry ID, CB service name, etc.)
+            component: component name (dlq, cb, idempotency, etc.)
 
         Returns:
-            등록 성공 여부
+            Whether registration succeeded
         """
         session_id = self.get_xtest_session_id(request)
 
@@ -525,14 +529,14 @@ class XTestModeMixin:
 
     def enter_synthetic_context(self, request: Request) -> None:
         """
-        합성 요청 컨텍스트 진입.
+        Enter the synthetic request context.
 
-        X-Test 요청 처리 시작 시 호출하여 TestModeContext를 활성화합니다.
-        이후 모든 메트릭과 Redis 키가 합성 요청으로 태깅됩니다.
-        세션이 없으면 자동으로 생성합니다.
+        Called when X-Test request handling begins, to activate
+        TestModeContext. From then on all metrics and Redis keys are tagged as
+        synthetic requests. A session is created automatically if none exists.
 
         Args:
-            request: HTTP 요청 객체
+            request: HTTP request object
         """
         session_id = self.ensure_xtest_session(request)
         TestModeContext.enter_synthetic_mode(session_id=session_id)
@@ -543,15 +547,16 @@ class XTestModeMixin:
 
     def exit_synthetic_context(self) -> None:
         """
-        합성 요청 컨텍스트 종료.
+        Exit the synthetic request context.
 
-        X-Test 요청 처리 완료 시 호출하여 TestModeContext를 비활성화합니다.
+        Called when X-Test request handling completes, to deactivate
+        TestModeContext.
         """
         TestModeContext.exit_synthetic_mode()
         logger.debug("test_mode.synthetic_context_unavailable")
 
     def get_xtest_user(self, request: Request) -> str:
-        """X-Test 사용자 추출."""
+        """Extract the X-Test user."""
         if hasattr(request, "user") and request.user.is_authenticated:
             return str(request.user)
         return "anonymous"
@@ -566,18 +571,18 @@ class XTestModeMixin:
         error_message: str | None = None,
     ) -> int | None:
         """
-        X-Test 작업을 WAL Audit 로그에 기록.
+        Record an X-Test operation in the WAL audit log.
 
         Args:
-            request: HTTP 요청 객체
-            action: 수행 작업 (inject, force_status, reset, query 등)
-            component: 대상 컴포넌트 (dlq, cb, idempotency 등)
-            details: 응답 데이터 또는 작업 상세
-            result: 결과 상태 (success, failed, error)
-            error_message: 실패 시 에러 메시지
+            request: HTTP request object
+            action: operation performed (inject, force_status, reset, query, etc.)
+            component: target component (dlq, cb, idempotency, etc.)
+            details: response data or operation details
+            result: result status (success, failed, error)
+            error_message: error message on failure
 
         Returns:
-            WAL 시퀀스 번호
+            WAL sequence number
         """
         session_id = self.get_xtest_session_id(request)
         user = self.get_xtest_user(request)
@@ -603,14 +608,14 @@ class XTestModeMixin:
         target_ids: list,
     ) -> int | None:
         """
-        X-Test 데이터 주입을 WAL Audit 로그에 기록.
+        Record an X-Test data injection in the WAL audit log.
 
         Args:
-            request: HTTP 요청 객체
-            component: 대상 컴포넌트
-            injection_type: 주입 유형 (create, override 등)
-            count: 주입된 항목 수
-            target_ids: 생성된 ID 목록
+            request: HTTP request object
+            component: target component
+            injection_type: injection type (create, override, etc.)
+            count: number of injected items
+            target_ids: list of created IDs
         """
         session_id = self.get_xtest_session_id(request)
         user = self.get_xtest_user(request)
@@ -632,13 +637,13 @@ class XTestModeMixin:
         cleaned_ids: list,
     ) -> int | None:
         """
-        X-Test 정리(Reset)를 WAL Audit 로그에 기록.
+        Record an X-Test cleanup (reset) in the WAL audit log.
 
         Args:
-            request: HTTP 요청 객체
-            component: 대상 컴포넌트
-            cleaned_count: 정리된 항목 수
-            cleaned_ids: 정리된 ID 목록
+            request: HTTP request object
+            component: target component
+            cleaned_count: number of cleaned items
+            cleaned_ids: list of cleaned IDs
         """
         session_id = self.get_xtest_session_id(request)
         user = self.get_xtest_user(request)
@@ -658,23 +663,24 @@ class XTestModeMixin:
 
 
 def collect_system_snapshot() -> dict[str, Any]:  # noqa: C901, PLR0912
-    """시스템 스냅샷 수집 (CPU, Memory, Connections, Error/Request Rate).
+    """Collect a system snapshot (CPU, memory, connections, error/request rate).
 
-    Postmortem 타임라인 스냅샷에 포함될 시스템 상태를 수집합니다.
+    Collects the system state to embed in a postmortem timeline snapshot.
 
     Returns:
-        시스템 스냅샷 딕셔너리:
-        - timestamp: 캡처 시각
-        - cpu_percent: CPU 사용률
-        - memory_percent: 메모리 사용률
-        - memory_used_mb: 사용 메모리 (MB)
-        - memory_available_mb: 가용 메모리 (MB)
-        - db_active_connections: DB 활성 연결 수
-        - error_rate: 에러율 (있는 경우)
-        - request_rate: 요청률 (있는 경우)
+        System snapshot dictionary:
+        - timestamp: capture time
+        - cpu_percent: CPU utilization
+        - memory_percent: memory utilization
+        - memory_used_mb: used memory (MB)
+        - memory_available_mb: available memory (MB)
+        - db_active_connections: number of active DB connections
+        - error_rate: error rate (when available)
+        - request_rate: request rate (when available)
     """
     try:
-        # 캐시에서 CPU/Memory 조회 (~0ms), 캐시 미가동 시 직접 측정으로 fallback (100ms)
+        # Read CPU/memory from the cache (~0ms); fall back to direct measurement
+        # (100ms) when the cache is not running.
         try:
             from baldur.services.system_metrics_cache import (
                 get_system_metrics_cache,
@@ -694,7 +700,7 @@ def collect_system_snapshot() -> dict[str, Any]:  # noqa: C901, PLR0912
             else:
                 raise RuntimeError("Cache not running")
         except Exception:
-            # Fallback: 직접 측정 (기존 동작 유지)
+            # Fallback: direct measurement (preserves the previous behavior)
             cpu_percent = psutil.cpu_percent(interval=0.1)
             memory = psutil.virtual_memory()
             snapshot = {
@@ -720,7 +726,7 @@ def collect_system_snapshot() -> dict[str, Any]:  # noqa: C901, PLR0912
         except Exception:
             snapshot["db_active_connections"] = None
 
-        # Error Budget에서 에러율 조회
+        # Read the error rate from the error budget
         try:
             from baldur_pro.services.error_budget import (
                 get_error_budget_service,
@@ -736,12 +742,12 @@ def collect_system_snapshot() -> dict[str, Any]:  # noqa: C901, PLR0912
         except Exception:
             snapshot["error_rate"] = None
 
-        # 메트릭 어댑터에서 요청률 조회
+        # Read the request rate from the metric adapter
         try:
             from baldur.adapters.metrics import get_metric_adapter
 
             adapter = get_metric_adapter()
-            # MetricSourceAdapter에서 요청 카운터 조회 시도
+            # Try to read the request counter from the MetricSourceAdapter
             if hasattr(adapter, "get_counter_value"):
                 request_counter = adapter.get_counter_value(
                     "baldur_http_requests_total"
@@ -773,14 +779,14 @@ _max_events = 500
 
 def add_healing_event(event: dict[str, Any]) -> None:
     """
-    힐링 이벤트 기록.
+    Record a healing event.
 
-    Redis에 저장하여 다중 워커 간 동기화를 지원합니다.
-    Redis 실패 시 In-Memory에만 저장됩니다.
+    Stores the event in Redis to keep multiple workers in sync.
+    Falls back to in-memory-only storage when Redis fails.
     """
     global _healing_events
 
-    # Redis 저장 시도
+    # Try to store in Redis
     try:
         from baldur.services.healing_events_store import add_healing_event_redis
 
@@ -793,7 +799,7 @@ def add_healing_event(event: dict[str, Any]) -> None:
             error=e,
         )
 
-    # In-Memory에도 저장 (빠른 조회용 캐시)
+    # Also store in memory (fast-lookup cache)
     with _healing_events_lock:
         if "recorded_at" not in event:
             event["recorded_at"] = timezone.now().isoformat()
@@ -804,16 +810,16 @@ def add_healing_event(event: dict[str, Any]) -> None:
 
 def get_healing_events(limit: int = 50, use_redis: bool = True) -> list[dict[str, Any]]:
     """
-    힐링 이벤트 조회.
+    Query healing events.
 
-    Redis에서 조회를 시도하고, 실패 시 In-Memory에서 조회합니다.
+    Tries Redis first and falls back to the in-memory store on failure.
 
     Args:
-        limit: 반환할 최대 이벤트 수
-        use_redis: Redis 조회 사용 여부
+        limit: maximum number of events to return
+        use_redis: whether to query Redis
 
     Returns:
-        이벤트 딕셔너리 리스트 (최신순)
+        List of event dictionaries (newest first)
     """
     if use_redis:
         try:
@@ -837,13 +843,13 @@ def get_healing_events(limit: int = 50, use_redis: bool = True) -> list[dict[str
 
 def get_healing_events_count(use_redis: bool = True) -> int:
     """
-    힐링 이벤트 총 개수.
+    Total number of healing events.
 
     Args:
-        use_redis: Redis 조회 사용 여부
+        use_redis: whether to query Redis
 
     Returns:
-        이벤트 총 개수
+        Total event count
     """
     if use_redis:
         try:
@@ -867,14 +873,14 @@ def get_healing_events_count(use_redis: bool = True) -> int:
 
 def clear_healing_events() -> int:
     """
-    힐링 이벤트 초기화 (테스트용).
+    Clear healing events (for testing).
 
     Returns:
-        초기화된 이벤트 개수
+        Number of events cleared
     """
     global _healing_events
 
-    # Redis 초기화 시도
+    # Try to clear Redis
     try:
         from baldur.services.healing_events_store import clear_healing_events_redis
 
@@ -887,7 +893,7 @@ def clear_healing_events() -> int:
             error=e,
         )
 
-    # In-Memory 초기화
+    # Clear in-memory storage
     with _healing_events_lock:
         count = len(_healing_events)
         _healing_events = []

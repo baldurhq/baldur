@@ -3,7 +3,7 @@ Advanced Configuration Serializers.
 
 Forensic, Metrics, Logging config serializers.
 
-Fail-Safe Default 강화 추가.
+Adds Fail-Safe Default hardening.
 """
 
 from rest_framework import serializers
@@ -15,12 +15,12 @@ class ForensicConfigSerializer(ApplyStrategyMixin):
     """
     Serializer for Forensic configuration.
 
-    Forensic 분석 및 디버깅 관련 설정.
+    Settings for forensic analysis and debugging.
     """
 
     _config_type = "forensic"
 
-    # 기존 필드
+    # Existing fields
     error_message_max_length = serializers.IntegerField(
         required=False, min_value=50, max_value=5000
     )
@@ -31,7 +31,7 @@ class ForensicConfigSerializer(ApplyStrategyMixin):
         required=False, min_value=50, max_value=2000
     )
 
-    # 추가 Forensic 설정 (이전 env만 노출되었던 설정들)
+    # Additional Forensic settings (previously exposed via env vars only)
     max_stack_frames = serializers.IntegerField(
         required=False,
         min_value=10,
@@ -41,7 +41,7 @@ class ForensicConfigSerializer(ApplyStrategyMixin):
     max_context_size_bytes = serializers.IntegerField(
         required=False,
         min_value=1024,
-        max_value=1048576,  # 1MB 상한
+        max_value=1048576,  # 1MB ceiling
         help_text="Maximum context data size (bytes). Default: 65536 (64KB)",
     )
     include_local_variables = serializers.BooleanField(
@@ -59,7 +59,7 @@ class ForensicConfigSerializer(ApplyStrategyMixin):
     )
 
     def validate(self, attrs):
-        """검증 + Safe Default 폴백."""
+        """Validate + Safe Default fallback."""
         validated = super().validate(attrs)
         return self.validate_with_safe_fallback(validated)
 
@@ -68,7 +68,7 @@ class MetricsConfigSerializer(ApplyStrategyMixin):
     """
     Serializer for Metrics configuration.
 
-    Safe Default 폴백 적용.
+    Applies the Safe Default fallback.
     """
 
     _config_type = "metrics"
@@ -76,20 +76,20 @@ class MetricsConfigSerializer(ApplyStrategyMixin):
     enabled = serializers.BooleanField(required=False)
     prefix = serializers.CharField(required=False, max_length=50)
     # Jitter settings (Thundering Herd prevention)
-    # Clamping: min=0.0 (음수 방지), max=300.0 (5분 상한)
+    # Clamping: min=0.0 (prevents negatives), max=300.0 (5-minute ceiling)
     jitter_enabled = serializers.BooleanField(
         required=False,
         help_text="Whether to enable Jitter (Default: True). Prevents Thundering Herd in distributed environments",
     )
     jitter_max_delay_seconds = serializers.FloatField(
         required=False,
-        min_value=0.0,  # 음수 방지 (Clamping)
-        max_value=300.0,  # 5분 상한
+        min_value=0.0,  # prevents negatives (clamping)
+        max_value=300.0,  # 5-minute ceiling
         help_text="Maximum Jitter delay time (seconds). Range: 0-300 (Default: 60.0)",
     )
 
     def validate(self, attrs):
-        """검증 + Safe Default 폴백."""
+        """Validate + Safe Default fallback."""
         validated = super().validate(attrs)
         return self.validate_with_safe_fallback(validated)
 
@@ -98,15 +98,15 @@ class LoggingConfigSerializer(ApplyStrategyMixin):
     """
     Serializer for Logging configuration.
 
-    각 Baldur 컴포넌트별 로깅 레벨 설정.
-    이전에는 환경변수로만 제어 가능했던 설정들을 API로 노출.
+    Per-component logging level settings for Baldur.
+    Exposes settings that were previously controllable via env vars only.
     """
 
     _config_type = "logging"
 
     LEVEL_CHOICES = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
-    # 컴포넌트별 로그 레벨
+    # Per-component log levels
     dlq_log_level = serializers.ChoiceField(
         required=False,
         choices=LEVEL_CHOICES,
@@ -148,7 +148,7 @@ class LoggingConfigSerializer(ApplyStrategyMixin):
         help_text="L2 Storage Resilience log level. Default: INFO",
     )
 
-    # 로그 포맷 설정
+    # Log format settings
     include_timestamps = serializers.BooleanField(
         required=False,
         help_text="Whether to include timestamps in logs. Default: True",
@@ -162,13 +162,13 @@ class LoggingConfigSerializer(ApplyStrategyMixin):
         help_text="Whether to include user info in logs. Default: False (disabled for security)",
     )
 
-    # 로그 출력 설정
+    # Log output settings
     structured_json = serializers.BooleanField(
         required=False,
         help_text="Use structured JSON log format. Default: True (production)",
     )
 
     def validate(self, attrs):
-        """검증 + Safe Default 폴백."""
+        """Validate + Safe Default fallback."""
         validated = super().validate(attrs)
         return self.validate_with_safe_fallback(validated)

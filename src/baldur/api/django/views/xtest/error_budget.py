@@ -1,8 +1,8 @@
 """
 X-Test-Mode Error Budget Views
 
-Error Budget 관련 테스트 API:
-- InjectErrorBudgetView: Error Budget 차감 주입
+Error Budget-related test APIs:
+- InjectErrorBudgetView: inject Error Budget consumption
 """
 
 import structlog
@@ -19,7 +19,7 @@ logger = structlog.get_logger()
 
 class InjectErrorBudgetView(XTestModeMixin, APIView):
     """
-    Error Budget 차감 주입 API.
+    API for injecting Error Budget consumption.
 
     POST /api/baldur/xtest/inject-error-budget/
 
@@ -38,7 +38,7 @@ class InjectErrorBudgetView(XTestModeMixin, APIView):
         error_type = request.data.get("error_type", "critical")
         count = int(request.data.get("count", 10))
 
-        # 최대 주입 횟수 제한
+        # Cap the injection count
         max_injection = 100
         if count > max_injection:
             return Response(
@@ -50,7 +50,8 @@ class InjectErrorBudgetView(XTestModeMixin, APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Exception은 exception handler가 처리 (ImportError는 모듈 미설치 케이스로 별도 처리)
+        # Exceptions are handled by the exception handler (ImportError is
+        # handled separately as the module-not-installed case)
         try:
             from baldur_pro.services.error_budget import (
                 get_error_budget_service,
@@ -66,11 +67,11 @@ class InjectErrorBudgetView(XTestModeMixin, APIView):
 
         eb_service = get_error_budget_service()
 
-        # 이전 상태 — ``ErrorBudgetStatus`` is the canonical surface and
+        # Previous state — ``ErrorBudgetStatus`` is the canonical surface and
         # exposes ``budget_remaining_percent`` directly.
         initial_budget = eb_service.get_budget_status().budget_remaining_percent
 
-        # 에러 주입 — ``record_error`` API is (error_count, error_type,
+        # Inject errors — ``record_error`` API is (error_count, error_type,
         # service_name); the previous ``context`` kwarg never existed.
         for _ in range(count):
             eb_service.record_error(
@@ -78,7 +79,7 @@ class InjectErrorBudgetView(XTestModeMixin, APIView):
                 service_name="x-test-mode",
             )
 
-        # 현재 상태
+        # Current state
         budget_status = eb_service.get_budget_status()
         current_budget = budget_status.budget_remaining_percent
 

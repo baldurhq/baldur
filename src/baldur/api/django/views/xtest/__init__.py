@@ -1,48 +1,50 @@
 """
 X-Test-Mode (Chaos Monkey) Control Views Package
 
-Rate Limiter(L1)를 우회하여 L2/L3 동작을 직접 관찰하기 위한 테스트 전용 API.
+Test-only API that bypasses the Rate Limiter (L1) to observe L2/L3 behavior
+directly.
 
 Security:
-- X-Test-Mode: chaos-monkey 헤더 필수
-- DEBUG 또는 CHAOS_ENABLED 환경 변수 필요
-- production 환경에서는 완전 차단
+- X-Test-Mode: chaos-monkey header required
+- DEBUG or the CHAOS_ENABLED environment variable required
+- Fully blocked in production environments
 
-Regional Scope (리전 경계 강제):
-- GLOBAL scope API는 X-Region 헤더 필수
-- X-Region 값이 현재 클러스터 리전(BALDUR_NAMESPACE_REGION)과 일치해야 허용
-- 리전 불일치 시 403 Forbidden (cross_region_xtest_denied)
+Regional Scope (region boundary enforcement):
+- GLOBAL scope APIs require the X-Region header
+- The X-Region value must match the current cluster region
+  (BALDUR_NAMESPACE_REGION) to be allowed
+- On region mismatch, 403 Forbidden (cross_region_xtest_denied)
 
-GLOBAL Scope API (X-Region 헤더 필수):
-- xtest/emergency/global/* : 전역 Emergency 상태 변경
-- xtest/isolation/region/* : 리전 격리 조작
-- xtest/governance/global/* : 전역 거버넌스 설정
+GLOBAL Scope APIs (X-Region header required):
+- xtest/emergency/global/* : global Emergency state changes
+- xtest/isolation/region/* : region isolation operations
+- xtest/governance/global/* : global governance settings
 
-LOCAL Scope API (X-Region 헤더 불필요):
-- 그 외 모든 X-Test API (DLQ, CB, Replay 등)
+LOCAL Scope APIs (X-Region header not required):
+- All other X-Test APIs (DLQ, CB, Replay, etc.)
 
 Endpoints:
-- POST /api/baldur/xtest/inject-cb-failure/ - CB 장애 주입
-- POST /api/baldur/xtest/reset-cb/ - CB 상태 초기화
-- GET  /api/baldur/xtest/cb-status/ - CB 상태 확인 (상세)
-- POST /api/baldur/xtest/inject-error-budget/ - Error Budget 차감
-- GET  /api/baldur/xtest/snapshot/ - 시스템 스냅샷
-- GET  /api/baldur/xtest/fast-fail-test/ - Fast Fail 검증
-- POST /api/baldur/xtest/trigger-cb-recovery/ - CB 복구 트리거
+- POST /api/baldur/xtest/inject-cb-failure/ - inject a CB failure
+- POST /api/baldur/xtest/reset-cb/ - reset CB state
+- GET  /api/baldur/xtest/cb-status/ - check CB state (detailed)
+- POST /api/baldur/xtest/inject-error-budget/ - consume error budget
+- GET  /api/baldur/xtest/snapshot/ - system snapshot
+- GET  /api/baldur/xtest/fast-fail-test/ - fast-fail verification
+- POST /api/baldur/xtest/trigger-cb-recovery/ - trigger CB recovery
 
 Stage 51 Observability:
-- GET  /api/baldur/xtest/healing-timeline/ - 힐링 타임라인
-- POST /api/baldur/xtest/blast-radius-test/ - Blast Radius 테스트
-- POST /api/baldur/xtest/multi-blast-radius/ - 다중 서비스 격리 매트릭스
-- POST /api/baldur/xtest/generate-postmortem/ - Post-mortem 생성
-- POST /api/baldur/xtest/record-healing-event/ - 힐링 이벤트 기록
-- GET  /api/baldur/xtest/healing-incidents/ - 인시던트 목록
+- GET  /api/baldur/xtest/healing-timeline/ - healing timeline
+- POST /api/baldur/xtest/blast-radius-test/ - blast radius test
+- POST /api/baldur/xtest/multi-blast-radius/ - multi-service isolation matrix
+- POST /api/baldur/xtest/generate-postmortem/ - generate a post-mortem
+- POST /api/baldur/xtest/record-healing-event/ - record a healing event
+- GET  /api/baldur/xtest/healing-incidents/ - incident list
 
 DLQ Test Endpoints:
-- POST /api/baldur/xtest/dlq/inject/ - DLQ 테스트 항목 생성
-- GET  /api/baldur/xtest/dlq/status/ - DLQ 현황 조회
-- POST /api/baldur/xtest/dlq/force-status/ - DLQ 상태 강제 변경
-- POST /api/baldur/xtest/dlq/reset/ - X-Test-Mode 생성 항목 초기화
+- POST /api/baldur/xtest/dlq/inject/ - create DLQ test entries
+- GET  /api/baldur/xtest/dlq/status/ - query DLQ status
+- POST /api/baldur/xtest/dlq/force-status/ - force a DLQ status change
+- POST /api/baldur/xtest/dlq/reset/ - reset entries created by X-Test-Mode
 """
 
 # Base utilities and Regional Scope constants

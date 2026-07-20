@@ -6,7 +6,7 @@ Provides backward-compatible re-exports of all config serializers.
 Serializers for validating and serializing runtime configuration updates.
 Includes apply strategy support (immediate, delayed, graceful).
 
-Fail-Safe Default 강화 추가.
+Adds Fail-Safe Default hardening.
 """
 
 # Advanced configs

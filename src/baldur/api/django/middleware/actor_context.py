@@ -1,13 +1,13 @@
 """
 Actor Context Middleware.
 
-모든 HTTP 요청에서 "누가" 이 작업을 수행하는지 자동 추적.
+Automatically tracks "who" performs an operation on every HTTP request.
 
-이 미들웨어를 사용하면:
-1. 모든 AuditEntry에 자동으로 actor_id, actor_type이 채워짐
-2. Admin 페이지에서 설정 변경 시 누가 변경했는지 기록
-3. API 호출 시 어느 사용자가 호출했는지 추적
-4. IP 주소, 세션 ID 등 보안 감사 정보도 자동 수집
+With this middleware:
+1. actor_id and actor_type are filled in automatically on every AuditEntry
+2. Config changes made from the admin pages record who made them
+3. API calls record which user made them
+4. Security audit data such as IP address and session ID is collected too
 
 Usage in settings.py:
     MIDDLEWARE = [
@@ -16,12 +16,12 @@ Usage in settings.py:
         ...
     ]
 
-비활성화:
+To disable:
     BALDUR_ACTOR_MIDDLEWARE_ENABLED = False (settings.py)
-    또는
-    BALDUR_ACTOR_MIDDLEWARE_ENABLED=false (환경변수)
+    or
+    BALDUR_ACTOR_MIDDLEWARE_ENABLED=false (environment variable)
 
-설정 후 어디서든:
+Once configured, from anywhere:
     from baldur.context import ActorContext
 
     actor = ActorContext.get_current()
@@ -62,13 +62,13 @@ class ActorContextMiddleware:
         )
 
     def _check_enabled(self) -> bool:
-        """미들웨어 활성화 여부 확인."""
+        """Check whether the middleware is enabled."""
         try:
             from django.conf import settings
 
             return getattr(settings, "BALDUR_ACTOR_MIDDLEWARE_ENABLED", True)
         except Exception:
-            # settings 접근 불가 시 환경변수 확인
+            # Fall back to the environment variable if settings are unreachable
             return os.getenv("BALDUR_ACTOR_MIDDLEWARE_ENABLED", "true").lower() in (
                 "true",
                 "1",
@@ -76,14 +76,14 @@ class ActorContextMiddleware:
             )
 
     def __call__(self, request: HttpRequest) -> HttpResponse:
-        # 미들웨어 비활성화 시 바이패스
+        # Bypass when the middleware is disabled
         if not self._enabled:
             return self.get_response(request)
 
         from baldur.context.actor_context import ActorContext
 
         # Use context manager to set actor for this request
-        # Fail-Open: Actor 설정 실패 시 요청은 계속 처리 (500 방지)
+        # Fail-Open: keep serving the request if actor setup fails (avoids 500)
         try:
             with ActorContext.set_actor_from_django_request(request):
                 response = self.get_response(request)

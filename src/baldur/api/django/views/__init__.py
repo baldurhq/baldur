@@ -304,7 +304,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
         "GovernanceModeView",
     ),
     # -------------------------------------------------------------------------
-    # xtest/ package (11 symbols) - 직접 import 패턴 사용
+    # xtest/ package (11 symbols) - uses the direct-import pattern
     # -------------------------------------------------------------------------
     "XTestModeMixin": ("baldur.api.django.views.xtest", "XTestModeMixin"),
     "InjectCBFailureView": (
@@ -719,7 +719,7 @@ if TYPE_CHECKING:
     )
 
     # X-Test-Mode Views (Stage 48: Chaos Proof)
-    # 직접 import 패턴 사용 (xtest_mode.py re-export 대신)
+    # Uses the direct-import pattern (instead of the xtest_mode.py re-export)
     from baldur.api.django.views.xtest import (  # DLQ X-Test Views
         CBStatusDetailView,
         DLQXTestStatusView,

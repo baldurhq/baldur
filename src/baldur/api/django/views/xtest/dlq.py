@@ -1,18 +1,18 @@
 """
 X-Test-Mode DLQ (Dead Letter Queue) Views
 
-DLQ 동작을 X-Test-Mode 환경에서 테스트하기 위한 API.
+API for exercising DLQ behavior in the X-Test-Mode environment.
 
 Endpoints:
-- POST /api/baldur/xtest/dlq/inject/ - 테스트용 DLQ 항목 생성
-- GET  /api/baldur/xtest/dlq/status/ - DLQ 현황 조회
-- POST /api/baldur/xtest/dlq/force-status/ - DLQ 상태 강제 변경
-- POST /api/baldur/xtest/dlq/reset/ - X-Test-Mode 생성 항목 초기화
+- POST /api/baldur/xtest/dlq/inject/ - create DLQ entries for testing
+- GET  /api/baldur/xtest/dlq/status/ - query the DLQ overview
+- POST /api/baldur/xtest/dlq/force-status/ - force a DLQ status change
+- POST /api/baldur/xtest/dlq/reset/ - clear X-Test-Mode-created entries
 
 Security:
-- X-Test-Mode: chaos-monkey 헤더 필수
-- DEBUG 또는 CHAOS_ENABLED 환경 변수 필요
-- production 환경에서는 완전 차단
+- X-Test-Mode: chaos-monkey header required
+- DEBUG or the CHAOS_ENABLED environment variable required
+- Fully blocked in production environments
 """
 
 import uuid
@@ -29,14 +29,14 @@ from .base import XTestModeMixin, collect_system_snapshot
 
 logger = structlog.get_logger()
 
-# X-Test-Mode 메타데이터 식별자
+# X-Test-Mode metadata identifier
 XTEST_SOURCE = "x-test-mode"
 MAX_INJECT_COUNT = 20
 
 
 class InjectDLQEntryView(XTestModeMixin, APIView):
     """
-    테스트용 DLQ 항목 생성 API.
+    API that creates DLQ entries for testing.
 
     POST /api/baldur/xtest/dlq/inject/
 
@@ -86,7 +86,7 @@ class InjectDLQEntryView(XTestModeMixin, APIView):
         )
         count = int(request.data.get("count", 1))
 
-        # 최대 주입 횟수 제한 (안전 장치)
+        # Cap the injection count (safety guard)
         if count > MAX_INJECT_COUNT:
             return Response(
                 {
@@ -102,7 +102,7 @@ class InjectDLQEntryView(XTestModeMixin, APIView):
         if count < 1:
             count = 1
 
-        # X-Test-Mode 세션 식별자 생성
+        # Generate the X-Test-Mode session identifier
         xtest_session = str(uuid.uuid4())[:8]
         user_str = (
             str(request.user)
@@ -110,7 +110,7 @@ class InjectDLQEntryView(XTestModeMixin, APIView):
             else "anonymous"
         )
 
-        # DLQ 서비스를 통한 항목 생성
+        # Create the entries through the DLQ service
         try:
             from baldur.factory.registry import ProviderRegistry
 
@@ -123,7 +123,7 @@ class InjectDLQEntryView(XTestModeMixin, APIView):
         created_ids: list[str] = []
 
         for i in range(count):
-            # X-Test-Mode 메타데이터 추가
+            # Attach the X-Test-Mode metadata
             metadata = {
                 "source": XTEST_SOURCE,
                 "created_by": user_str,
@@ -132,7 +132,7 @@ class InjectDLQEntryView(XTestModeMixin, APIView):
                 "total_injections": count,
             }
 
-            # impl doc 486 D2 G4 — xtest needs the real ``dlq_id`` to stage
+            # 486 D2 G4 — xtest needs the real ``dlq_id`` to stage
             # for replay, so opt into sync dispatch explicitly.
             result = dlq_service.store_failure(
                 healing_domain=domain,
@@ -154,7 +154,7 @@ class InjectDLQEntryView(XTestModeMixin, APIView):
             if result.success:
                 created_ids.append(result.dlq_id)
 
-        # 스냅샷 수집
+        # Collect the snapshot
         snapshot = collect_system_snapshot()
 
         logger.info(
@@ -177,7 +177,7 @@ class InjectDLQEntryView(XTestModeMixin, APIView):
             "snapshot": snapshot,
         }
 
-        # WAL Audit 기록
+        # Record the WAL audit entry
         self.log_xtest_injection(
             request=request,
             component="dlq",
@@ -191,14 +191,14 @@ class InjectDLQEntryView(XTestModeMixin, APIView):
 
 class DLQXTestStatusView(XTestModeMixin, APIView):
     """
-    X-Test-Mode DLQ 현황 조회 API.
+    X-Test-Mode DLQ overview API.
 
     GET /api/baldur/xtest/dlq/status/
 
     Query Parameters:
-        - domain: 필터링할 도메인 (optional)
-        - status: 필터링할 상태 (optional)
-        - limit: 최대 조회 수 (default 50)
+        - domain: domain to filter on (optional)
+        - status: status to filter on (optional)
+        - limit: maximum number of entries to return (default 50)
 
     Response:
         {
@@ -221,7 +221,7 @@ class DLQXTestStatusView(XTestModeMixin, APIView):
         status_filter = request.query_params.get("status")
         limit = int(request.query_params.get("limit", 50))
 
-        # 최대 조회 수 제한
+        # Cap the number of entries returned
         if limit > 200:
             limit = 200
 
@@ -235,17 +235,17 @@ class DLQXTestStatusView(XTestModeMixin, APIView):
         if dlq_service is None:
             raise RuntimeError("baldur_pro DLQService not registered")
 
-        # 전체 통계 조회
+        # Query the overall stats
         stats = dlq_service.get_stats()
 
-        # 필터링된 항목 목록 조회
+        # Query the filtered entry list
         filters: dict[str, Any] = {}
         if domain_filter:
             filters["domain"] = domain_filter
         if status_filter:
             filters["status"] = status_filter
 
-        # Repository를 통한 직접 조회
+        # Direct lookup through the repository
         recent_entries: list[dict[str, Any]] = []
         xtest_entries_count = 0
 
@@ -259,11 +259,11 @@ class DLQXTestStatusView(XTestModeMixin, APIView):
                     "domain": entry.get("domain"),
                     "failure_type": entry.get("failure_type"),
                     "created_at": entry.get("created_at"),
-                    "error_message": entry.get("error_message", "")[:100],  # 요약
+                    "error_message": entry.get("error_message", "")[:100],  # summary
                 }
                 recent_entries.append(entry_dict)
 
-                # X-Test-Mode 생성 항목 카운트
+                # Count the X-Test-Mode-created entries
                 metadata = entry.get("metadata", {})
                 if (
                     isinstance(metadata, dict)
@@ -299,7 +299,7 @@ class DLQXTestStatusView(XTestModeMixin, APIView):
             "timestamp": timezone.now().isoformat(),
         }
 
-        # WAL Audit 기록
+        # Record the WAL audit entry
         self.log_xtest_audit(
             request=request,
             action="query_status",
@@ -316,7 +316,7 @@ class DLQXTestStatusView(XTestModeMixin, APIView):
 
 class ForceStatusView(XTestModeMixin, APIView):
     """
-    DLQ 상태 강제 변경 API.
+    API that forces a DLQ status change.
 
     POST /api/baldur/xtest/dlq/force-status/
 
@@ -337,7 +337,7 @@ class ForceStatusView(XTestModeMixin, APIView):
         }
     """
 
-    # 허용되는 상태 목록
+    # Allowed statuses
     ALLOWED_STATUSES = [
         "pending",
         "reviewing",
@@ -386,7 +386,7 @@ class ForceStatusView(XTestModeMixin, APIView):
         if dlq_service is None:
             raise RuntimeError("baldur_pro DLQService not registered")
 
-        # 기존 항목 조회
+        # Look up the existing entry
         entry = dlq_service.get_entry(dlq_id)
         if entry is None:
             return Response(
@@ -400,13 +400,13 @@ class ForceStatusView(XTestModeMixin, APIView):
 
         previous_status = entry.get("status")
 
-        # Repository를 통한 직접 상태 변경
+        # Direct status change through the repository
         try:
             if new_status == "resolved":
-                # resolve_entry 메서드 사용
+                # Use the resolve_entry method
                 dlq_service.resolve_entry(dlq_id, notes=reason)
             else:
-                # Repository 직접 업데이트
+                # Update the repository directly
                 success = dlq_service.repository.update_status(dlq_id, new_status)
                 if not success:
                     raise ValueError(f"Failed to update status for entry {dlq_id}")
@@ -448,7 +448,7 @@ class ForceStatusView(XTestModeMixin, APIView):
             "changed_at": timezone.now().isoformat(),
         }
 
-        # WAL Audit 기록
+        # Record the WAL audit entry
         self.log_xtest_audit(
             request=request,
             action="force_status",
@@ -474,7 +474,7 @@ def _find_xtest_entries(
     domain_filter: str | None,
     created_by_xtest: bool,
 ) -> list[str]:
-    """X-Test 생성 DLQ 항목 ID 조회."""
+    """Look up the IDs of DLQ entries created by X-Test."""
     filters: dict[str, Any] = {}
     if domain_filter:
         filters["domain"] = domain_filter
@@ -498,7 +498,7 @@ def _find_xtest_entries(
 
 
 def _delete_dlq_entries(dlq_service, entry_ids: list[str]) -> int:
-    """DLQ 항목 삭제 실행. 삭제된 개수 반환."""
+    """Delete DLQ entries. Returns the number deleted."""
     deleted_count = 0
     for entry_id in entry_ids:
         try:
@@ -515,14 +515,15 @@ def _delete_dlq_entries(dlq_service, entry_ids: list[str]) -> int:
 
 class ResetDLQXTestView(XTestModeMixin, APIView):
     """
-    X-Test-Mode 생성 DLQ 항목 초기화 API.
+    API that clears DLQ entries created by X-Test-Mode.
 
     POST /api/baldur/xtest/dlq/reset/
 
     Request:
         {
-            "domain": "external_service",  // optional, 특정 도메인만 초기화
-            "created_by_xtest": true       // optional, default true (X-Test 항목만)
+            "domain": "external_service",  // optional, clear one domain only
+            "created_by_xtest": true       // optional, default true
+                                           //   (X-Test entries only)
         }
 
     Response:
@@ -553,12 +554,12 @@ class ResetDLQXTestView(XTestModeMixin, APIView):
             raise RuntimeError("baldur_pro DLQService not registered")
 
         try:
-            # X-Test-Mode 생성 항목 조회
+            # Look up the X-Test-Mode-created entries
             ids_to_delete = _find_xtest_entries(
                 dlq_service, domain_filter, created_by_xtest
             )
 
-            # 삭제 실행
+            # Perform the deletion
             deleted_count = _delete_dlq_entries(dlq_service, ids_to_delete)
 
         except Exception as e:
@@ -597,7 +598,7 @@ class ResetDLQXTestView(XTestModeMixin, APIView):
             "timestamp": timezone.now().isoformat(),
         }
 
-        # WAL Audit 기록
+        # Record the WAL audit entry
         self.log_xtest_cleanup(
             request=request,
             component="dlq",
