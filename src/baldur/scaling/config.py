@@ -1,7 +1,7 @@
 """
-Auto-Scaling & Backpressure 설정 (하위 호환 re-export).
+Auto-Scaling & Backpressure settings (backward-compatible re-export).
 
-실제 정의: baldur.settings.backpressure
+Actual definitions: baldur.settings.backpressure
 """
 
 from baldur.settings.backpressure import (  # noqa: F401

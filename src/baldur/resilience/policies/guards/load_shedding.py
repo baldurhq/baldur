@@ -1,16 +1,16 @@
 """
-LoadSheddingGuard — 우선순위 기반 Load Shedding Guard.
+LoadSheddingGuard — priority-based Load Shedding Guard.
 
-TrafficGate의 Load Shedding 체크(CascadeLoadShedding.should_accept)를
-PolicyComposer Guard로 분리한다.
+Extracts TrafficGate's load-shedding check
+(CascadeLoadShedding.should_accept) into a PolicyComposer Guard.
 
-ThrottlePolicy는 요청의 priority 정보를 알 필요가 없다.
-우선순위 기반 거부는 이 Guard가 context.extra["priority"]에서 읽어 판단한다.
+ThrottlePolicy has no need to know a request's priority. Priority-based
+rejection is decided here, reading context.extra["priority"].
 
-Fail-Open 원칙:
-    CascadeLoadShedding import/호출 실패 시 통과 허용.
+Fail-open principle:
+    If CascadeLoadShedding fails to import or call, the request passes.
 
-사용 예시::
+Usage::
 
     from baldur.resilience.policies.guards.load_shedding import (
         LoadSheddingGuard,
@@ -34,41 +34,41 @@ logger = structlog.get_logger()
 
 class LoadSheddingGuard:
     """
-    우선순위 기반 Load Shedding Guard.
+    Priority-based Load Shedding Guard.
 
-    CascadeLoadShedding.should_accept(priority=priority)를 래핑하여
-    현재 shedding 레벨에서 해당 우선순위 요청의 허용 여부를 판정한다.
+    Wraps CascadeLoadShedding.should_accept(priority=priority) to decide whether
+    a request of that priority is admitted at the current shedding level.
 
-    context.extra["priority"]에서 요청 우선순위를 읽는다.
-    context=None 또는 priority 미지정 시 통과 허용.
+    Reads the request priority from context.extra["priority"]. If context is
+    None or no priority is given, the request passes.
     """
 
     def __init__(self, load_shedding: Any | None = None) -> None:
         """
-        초기화.
+        Initialize.
 
         Args:
-            load_shedding: CascadeLoadShedding 인스턴스.
-                None이면 lazy import로 글로벌 인스턴스를 획득한다.
+            load_shedding: a CascadeLoadShedding instance. If None, the global
+                instance is obtained via lazy import.
         """
         self._load_shedding = load_shedding
         self._initialized = load_shedding is not None
 
     @property
     def name(self) -> str:
-        """Guard 식별자."""
+        """Guard identifier."""
         return "load_shedding"
 
     def check(self, context: PolicyContext | None = None) -> GuardResult:
         """
-        우선순위 기반 Load Shedding 체크.
+        Priority-based load shedding check.
 
-        context.extra["priority"]에서 요청 우선순위를 읽는다.
-        context=None이면 전역 체크 (priority=0, 통과 허용).
+        Reads the request priority from context.extra["priority"]. If context is
+        None the check is global (priority=0, request passes).
 
         Returns:
-            GuardResult(allowed=True) — 통과
-            GuardResult(allowed=False, reason=...) — shedding 거부
+            GuardResult(allowed=True) — passed
+            GuardResult(allowed=False, reason=...) — shedding rejection
         """
         shedding = self._get_load_shedding()
         if shedding is None:
@@ -98,7 +98,7 @@ class LoadSheddingGuard:
         return GuardResult(allowed=True)
 
     def _get_load_shedding(self) -> Any | None:
-        """CascadeLoadShedding 인스턴스 획득 (lazy import, Fail-Open)."""
+        """Obtain the CascadeLoadShedding instance (lazy import, fail-open)."""
         if self._initialized:
             return self._load_shedding
 

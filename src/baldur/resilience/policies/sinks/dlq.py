@@ -1,8 +1,8 @@
 """
-DLQ Sink — 최종 실패를 DLQ(Dead Letter Queue)에 저장.
+DLQ Sink — store the terminal failure in the DLQ (Dead Letter Queue).
 
-기존 services/retry_handler/sinks.py의 DLQSink를 re-export한다.
-PolicyComposer의 FailureSink로 사용한다.
+Re-exports the existing DLQSink from services/retry_handler/sinks.py.
+Used as PolicyComposer's FailureSink.
 """
 
 from baldur.services.retry_handler.sinks import DLQSink

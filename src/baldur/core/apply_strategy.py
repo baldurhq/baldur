@@ -97,9 +97,9 @@ class DefaultApplyConfig:
 
 def _get_default_apply_strategies() -> dict[str, DefaultApplyConfig]:
     """
-    ApplyStrategySettings에서 delay 값을 로드하여 기본 전략 딕셔너리 생성.
+    Build the default strategy dict from the delays in ApplyStrategySettings.
 
-    환경변수로 config 타입별 delay_seconds 오버라이드 가능.
+    delay_seconds is overridable per config type via environment variables.
     """
     settings = get_apply_strategy_settings()
     return {

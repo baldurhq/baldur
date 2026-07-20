@@ -8,9 +8,9 @@ Usage:
 
     mode = get_execution_mode()
     if mode.is_active:
-        # 실제 액션 실행
+        # Execute the real action
     else:
-        # 로깅만
+        # Log only
 
 Environment Variable:
     BALDUR_EXECUTION_MODE: "active" | "shadow" | "evaluation"
@@ -34,13 +34,13 @@ logger = structlog.get_logger()
 class ExecutionModeType(str, Enum):
     """Execution mode types."""
 
-    # 실제 액션 실행 (프로덕션 기본값)
+    # Execute real actions (production default)
     ACTIVE = "active"
 
-    # 결정만 로깅, 액션 실행 안함 (관찰 모드)
+    # Log decisions only, do not execute actions (observe mode)
     SHADOW = "shadow"
 
-    # 결정 + 검증 로깅, 액션 실행 안함 (평가 모드)
+    # Log decisions + validation, do not execute actions (evaluation mode)
     EVALUATION = "evaluation"
 
 

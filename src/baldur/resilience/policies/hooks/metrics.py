@@ -1,10 +1,12 @@
 """
-Metrics Hook — 파이프라인 실행 결과를 Prometheus 메트릭으로 기록.
+Metrics Hook — record the pipeline execution result as Prometheus metrics.
 
-PolicyComposer의 Hook으로 등록하여 성공/실패/거부 메트릭을 수집한다.
-prometheus_client를 lazy import하여 미설치 환경에서도 오류 없이 동작한다.
+Registered as a PolicyComposer Hook to collect success/failure/rejection
+metrics. prometheus_client is lazily imported so the hook works without error
+where it is not installed.
 
-Fail-Open 원칙: prometheus_client import 실패 시 메트릭 수집을 건너뛴다.
+Fail-open principle: if prometheus_client fails to import, metric collection is
+skipped.
 """
 
 from __future__ import annotations
@@ -29,7 +31,7 @@ _pipeline_duration_seconds = None
 
 
 def _ensure_metrics() -> bool:
-    """Prometheus 메트릭 인스턴스를 lazy 초기화. 사용 불가 시 False 반환."""
+    """Lazily initialize the Prometheus instruments. False if unavailable."""
     global _metrics_initialized, _pipeline_success_total, _pipeline_failure_total
     global _pipeline_rejected_total, _pipeline_duration_seconds
 
@@ -71,16 +73,16 @@ def _ensure_metrics() -> bool:
 
 
 class MetricsHook:
-    """Prometheus 메트릭 훅.
+    """Prometheus metrics hook.
 
-    파이프라인 전체(End-to-End) 결과만 관찰한다.
-    prometheus_client 미설치 시 메트릭 수집을 건너뛴다.
+    Observes only the end-to-end pipeline result. Metric collection is skipped
+    when prometheus_client is not installed.
     """
 
     def on_execute(
         self, policy_name: str, attempt: int, context: PolicyContext | None = None
     ) -> None:
-        """실행 시작 — 메트릭 없음."""
+        """Execution start — no metric."""
 
     def on_success(
         self,
@@ -88,7 +90,7 @@ class MetricsHook:
         result: PolicyResult,
         context: PolicyContext | None = None,
     ) -> None:
-        """파이프라인 성공 시 메트릭 기록."""
+        """Record metrics on pipeline success."""
         if not _ensure_metrics():
             return
 
@@ -104,7 +106,7 @@ class MetricsHook:
         attempt: int,
         context: PolicyContext | None = None,
     ) -> None:
-        """파이프라인 실패 시 메트릭 기록."""
+        """Record metrics on pipeline failure."""
         if not _ensure_metrics():
             return
 
@@ -121,12 +123,12 @@ class MetricsHook:
         delay: float,
         context: PolicyContext | None = None,
     ) -> None:
-        """재시도 — Composer 레벨에서는 미사용."""
+        """Retry — unused at the Composer level."""
 
     def on_reject(
         self, guard_name: str, reason: str, context: PolicyContext | None = None
     ) -> None:
-        """파이프라인 거부 시 메트릭 기록."""
+        """Record metrics on pipeline rejection."""
         if not _ensure_metrics():
             return
 

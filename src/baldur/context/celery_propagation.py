@@ -1,28 +1,30 @@
 """
-Celery Causation Context 자동 전파.
+Automatic Celery causation context propagation.
 
-API 요청에서 시작된 인과관계 정보를 Celery Task로 자동 전파합니다.
+Automatically propagates causality information originating from an API request
+into Celery tasks.
 
 Features:
-    - before_task_publish: Task 발행 시 causation 헤더 자동 주입
-    - task_prerun: Task 시작 시 causation 복원 (미설정 시 시스템 cascade 자동 생성)
-    - task_postrun: Task 종료 시 causation 정리
+    - before_task_publish: inject causation headers when a task is published
+    - task_prerun: restore causation at task start (auto-creates a system
+      cascade when none is set)
+    - task_postrun: clean up causation at task end
 
 Usage:
-    # Celery 앱에서 초기화
+    # Initialize from the Celery app
     from baldur.context.celery_propagation import setup_celery_causation_propagation
     setup_celery_causation_propagation()
 
-    # 또는 signal_hooks.py의 setup_baldur_signals()에서 자동 호출됨
+    # Or it is called automatically by setup_baldur_signals() in signal_hooks.py
 
-데이터 흐름:
+Data flow:
     API Request → ExceptionHandler → CausationContext.start_cascade()
            ↓
-    before_task_publish → headers에 causation 정보 자동 주입
+    before_task_publish → causation info injected into the headers
            ↓
-    Celery Task → task_prerun → CausationContext 복원 (깊이 증가)
+    Celery Task → task_prerun → CausationContext restored (depth incremented)
            ↓
-    task_postrun → CausationContext 정리
+    task_postrun → CausationContext cleaned up
 """
 
 from __future__ import annotations
@@ -45,7 +47,7 @@ logger = structlog.get_logger()
 
 
 # =============================================================================
-# before_task_publish 시그널 핸들러
+# before_task_publish signal handler
 # =============================================================================
 
 
@@ -60,20 +62,21 @@ def on_before_task_publish(
     **kwargs,
 ) -> None:
     """
-    Celery Task 발행 전 causation 헤더 자동 주입.
+    Inject causation headers automatically before a Celery task is published.
 
-    현재 CausationContext가 설정되어 있으면 헤더에 자동으로 포함합니다.
-    개발자가 수동으로 headers=get_causation_for_celery()를 호출할 필요 없습니다.
+    When a CausationContext is set, it is included in the headers
+    automatically. Developers do not need to pass
+    headers=get_causation_for_celery() by hand.
 
     Args:
-        sender: Task 이름
-        body: Task 메시지 본문
-        headers: Task 메시지 헤더 (수정 가능)
+        sender: Task name
+        body: Task message body
+        headers: Task message headers (mutable)
     """
     if headers is None:
         return
 
-    # 이미 causation 헤더가 있으면 덮어쓰지 않음 (명시적 설정 우선)
+    # Do not overwrite existing causation headers (explicit setting wins)
     if headers.get(CELERY_HEADER_CASCADE_ID):
         logger.debug(
             "causation_propagation.causation_headers_already_set",
@@ -81,7 +84,7 @@ def on_before_task_publish(
         )
         return
 
-    # 현재 CausationContext에서 헤더 생성
+    # Build the headers from the current CausationContext
     causation_headers = get_causation_for_celery()
 
     if causation_headers:
@@ -94,7 +97,7 @@ def on_before_task_publish(
 
 
 # =============================================================================
-# System-initiated Cascade 자동 생성 (task_prerun용 헬퍼)
+# Auto-creation of a system-initiated cascade (task_prerun helper)
 # =============================================================================
 
 
@@ -103,31 +106,32 @@ def ensure_causation_context_for_task(
     task_id: str,
 ) -> Any | None:
     """
-    Celery Task 시작 시 CausationContext 보장.
+    Guarantee a CausationContext at Celery task start.
 
-    호출 체인에서 전파된 causation이 없으면 시스템 cascade를 자동 생성합니다.
-    X-Test-Mode에서는 XTC- 프리픽스가 자동 추가됩니다.
+    When no causation was propagated through the call chain, a system cascade
+    is created automatically. In X-Test-Mode the XTC- prefix is added
+    automatically.
 
     Args:
-        task_name: Task 이름
+        task_name: Task name
         task_id: Task ID
 
     Returns:
-        설정된 causation ContextVar token (정리용)
+        The causation ContextVar token that was set (for cleanup)
     """
-    # 이미 설정되어 있으면 건드리지 않음
+    # Leave it alone when it is already set
     if CausationContext.is_set():
         return None
 
-    # 시스템 cascade 생성 (Celery Beat, 독립 실행 등)
+    # Create a system cascade (Celery Beat, standalone runs, etc.)
     import uuid
 
     from baldur.context.causation_context import _get_xtest_id_prefix
 
-    # source 결정: 스케줄러 여부 확인
+    # Determine the source: check whether this is a scheduler task
     source = _detect_task_source(task_name)
 
-    # X-Test-Mode 시 XTC- 프리픽스 적용
+    # Apply the XTC- prefix in X-Test-Mode
     prefix = _get_xtest_id_prefix()
     system_event_id = f"{prefix}SYSTEM_ROOT_{source}_{uuid.uuid4().hex[:8]}"
     cascade_id = f"{prefix}cascade-{uuid.uuid4().hex[:12]}"
@@ -160,50 +164,50 @@ def ensure_causation_context_for_task(
 
 def _detect_task_source(task_name: str) -> str:
     """
-    Task 이름에서 source 유형 추론.
+    Infer the source type from the task name.
 
     Args:
-        task_name: Celery Task 이름
+        task_name: Celery task name
 
     Returns:
-        source 문자열 (celery_beat, management_cmd, worker 등)
+        Source string (celery_beat, management_cmd, worker, etc.)
     """
     task_name_lower = task_name.lower()
 
-    # 스케줄러 관련 패턴
+    # Scheduler-related patterns
     if any(pattern in task_name_lower for pattern in ["beat", "schedule", "periodic"]):
         return "celery_beat"
 
-    # 관리 명령 관련 패턴
+    # Management-command-related patterns
     if any(pattern in task_name_lower for pattern in ["manage", "command", "admin"]):
         return "management_cmd"
 
-    # 크론/스케줄러 패턴
+    # Cron/scheduler patterns
     if any(pattern in task_name_lower for pattern in ["cron", "cleanup", "expire"]):
         return "scheduler"
 
-    # 기본값
+    # Default
     return "worker"
 
 
 # =============================================================================
-# Setup 함수
+# Setup function
 # =============================================================================
 
 
 def setup_celery_causation_propagation() -> None:
     """
-    Celery causation 자동 전파 설정.
+    Enable automatic Celery causation propagation.
 
-    before_task_publish 시그널을 연결하여 모든 Task 발행 시
-    현재 CausationContext를 자동으로 헤더에 포함합니다.
+    Connects the before_task_publish signal so that the current
+    CausationContext is included in the headers of every published task.
 
     Usage:
         from baldur.context.celery_propagation import setup_celery_causation_propagation
         setup_celery_causation_propagation()
 
     Note:
-        signal_hooks.py의 setup_baldur_signals()에서 자동으로 호출됩니다.
+        Called automatically by setup_baldur_signals() in signal_hooks.py.
     """
     global _before_task_publish_connected
 
@@ -211,8 +215,8 @@ def setup_celery_causation_propagation() -> None:
         logger.debug("causation_propagation.already_connected")
         return
 
-    # before_task_publish는 @before_task_publish.connect 데코레이터로 이미 연결됨
-    # 여기서는 연결 상태만 표시
+    # before_task_publish is already wired by the @before_task_publish.connect
+    # decorator; here we only record the connection state.
     _before_task_publish_connected = True
 
     logger.info("causation_propagation.celery_causation_propagation_enabled")

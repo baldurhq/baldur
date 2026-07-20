@@ -1,13 +1,13 @@
 """
 HPA Metrics Exporter.
 
-Kubernetes HPA용 커스텀 메트릭을 Prometheus 형식으로 노출합니다.
-백그라운드 스레드에서 주기적으로 메트릭을 업데이트합니다.
+Exposes custom metrics for the Kubernetes HPA in Prometheus format.
+A background thread refreshes the metrics periodically.
 
-주요 메트릭:
-- baldur_queue_depth: 현재 큐 깊이
-- baldur_processing_rate: 처리율 (항목/초)
-- baldur_backpressure_level: Backpressure 레벨 (0-4)
+Main metrics:
+- baldur_queue_depth: current queue depth
+- baldur_processing_rate: processing rate (items/second)
+- baldur_backpressure_level: backpressure level (0-4)
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 
-# Backpressure 레벨을 정수로 변환 (Prometheus 메트릭용)
+# Backpressure level as an integer (for the Prometheus metric)
 LEVEL_TO_INT: dict[BackpressureLevel, int] = {
     BackpressureLevel.NONE: 0,
     BackpressureLevel.LOW: 1,
@@ -48,8 +48,8 @@ class HPAMetricsExporter:
     """
     HPA Metrics Exporter.
 
-    백그라운드에서 주기적으로 Prometheus 메트릭을 업데이트합니다.
-    Kubernetes HPA가 이 메트릭을 사용하여 Pod 수를 조절합니다.
+    Refreshes Prometheus metrics periodically in the background.
+    The Kubernetes HPA uses these metrics to adjust the pod count.
 
     Usage:
         def get_queue_size() -> int:
@@ -58,13 +58,13 @@ class HPAMetricsExporter:
         exporter = HPAMetricsExporter(queue_size_provider=get_queue_size)
         exporter.start()
 
-        # 애플리케이션 종료 시
+        # On application shutdown
         exporter.stop()
     """
 
     DEFAULT_COMPONENT_NAME = "baldur"
     DEFAULT_QUEUE_NAME = "default"
-    DEFAULT_UPDATE_INTERVAL = 5.0  # 초
+    DEFAULT_UPDATE_INTERVAL = 5.0  # seconds
 
     def __init__(
         self,
@@ -78,13 +78,13 @@ class HPAMetricsExporter:
     ):
         """
         Args:
-            queue_size_provider: 큐 크기 조회 함수
-            rate_controller: RateController 인스턴스
-            metrics: BackpressureMetrics 인스턴스
-            settings: Backpressure 설정
-            component_name: 컴포넌트 이름 (메트릭 라벨)
-            queue_name: 큐 이름 (메트릭 라벨)
-            update_interval: 메트릭 업데이트 주기 (초)
+            queue_size_provider: Queue size lookup function
+            rate_controller: RateController instance
+            metrics: BackpressureMetrics instance
+            settings: Backpressure settings
+            component_name: Component name (metric label)
+            queue_name: Queue name (metric label)
+            update_interval: Metric refresh interval (seconds)
         """
         self._settings = settings or get_backpressure_settings()
         self._queue_size_provider = queue_size_provider or (lambda: 0)
@@ -101,19 +101,19 @@ class HPAMetricsExporter:
         self._handle: DaemonWorkerHandle | None = None  # impl 489 D9
 
     def _update_metrics(self) -> None:
-        """Prometheus 메트릭 업데이트."""
+        """Refresh the Prometheus metrics."""
         try:
-            # 큐 깊이
+            # Queue depth
             queue_size = self._queue_size_provider()
             self._metrics.set_queue_depth(self._queue_name, queue_size)
 
-            # 현재 상태 조회
+            # Current state
             state = self._rate_controller.get_state()
 
-            # 처리율
+            # Processing rate
             self._metrics.set_processing_rate(self._component_name, state.current_rate)
 
-            # Backpressure 레벨 (정수로 변환)
+            # Backpressure level (converted to an integer)
             level_int = LEVEL_TO_INT.get(state.level, 0)
             self._metrics.set_backpressure_level(self._component_name, level_int)
 
@@ -131,7 +131,7 @@ class HPAMetricsExporter:
             )
 
     def _run_loop(self) -> None:
-        """메트릭 업데이트 루프."""
+        """Metric refresh loop."""
         import time as _time
 
         while self._running:
@@ -155,7 +155,7 @@ class HPAMetricsExporter:
             raise
 
     def start(self) -> None:
-        """Exporter 시작."""
+        """Start the exporter."""
         from baldur.meta.daemon_worker import DaemonWorkerHandle
         from baldur.metrics.recorders.daemon_worker import register_daemon_worker
 
@@ -195,7 +195,7 @@ class HPAMetricsExporter:
             self._handle.thread = self._worker
 
     def stop(self) -> None:
-        """Exporter 중지."""
+        """Stop the exporter."""
         from baldur.metrics.recorders.daemon_worker import unregister_daemon_worker
 
         with self._lock:
@@ -218,11 +218,11 @@ class HPAMetricsExporter:
         logger.info("hpa_exporter.stopped")
 
     def is_running(self) -> bool:
-        """실행 중 여부 반환."""
+        """Return whether the exporter is running."""
         return self._running
 
     def update_now(self) -> None:
-        """즉시 메트릭 업데이트 (테스트/디버깅용)."""
+        """Refresh the metrics immediately (for testing/debugging)."""
         self._update_metrics()
 
 

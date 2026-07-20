@@ -1,8 +1,8 @@
 """
-Health Probe Manager - 서브시스템 건강 상태 수집.
+Health Probe Manager - subsystem health collection.
 
-Baldur 시스템의 각 컴포넌트(Circuit Breaker, DLQ, Redis 등)의
-건강 상태를 주기적으로 프로브하고 수집합니다.
+Periodically probes and collects the health status of each Baldur component
+(Circuit Breaker, DLQ, Redis, etc.).
 """
 
 from __future__ import annotations
@@ -31,68 +31,67 @@ logger = structlog.get_logger()
 
 
 class HealthStatus(str, Enum):
-    """서브시스템 건강 상태."""
+    """Subsystem health status."""
 
     HEALTHY = "healthy"
-    """정상 상태."""
+    """Normal."""
 
     DEGRADED = "degraded"
-    """성능 저하 상태 (동작은 하지만 주의 필요)."""
+    """Degraded performance (still working, but needs attention)."""
 
     UNHEALTHY = "unhealthy"
-    """비정상 상태 (복구 필요)."""
+    """Failing (recovery required)."""
 
     UNKNOWN = "unknown"
-    """상태 확인 불가."""
+    """Status could not be determined."""
 
 
 @dataclass
 class ProbeResult:
-    """건강 프로브 결과."""
+    """Health probe result."""
 
     component: str
-    """컴포넌트 이름."""
+    """Component name."""
 
     status: HealthStatus
-    """건강 상태."""
+    """Health status."""
 
     latency_ms: float
-    """응답 시간 (밀리초)."""
+    """Response time in milliseconds."""
 
     timestamp: datetime
-    """프로브 수행 시각."""
+    """When the probe ran."""
 
     details: dict[str, Any] = field(default_factory=dict)
-    """상세 정보."""
+    """Detailed information."""
 
     reason: str = ""
     """Human-readable context for the status determination."""
 
     error: str | None = None
-    """에러 메시지 (실패 시)."""
+    """Error message (on failure)."""
 
 
 class HealthProbe(ABC):
     """
-    건강 프로브 인터페이스.
+    Health probe interface.
 
-    각 서브시스템에 대해 이 인터페이스를 구현하여
-    건강 상태를 확인합니다.
+    Implement this interface per subsystem to report its health status.
     """
 
     @property
     @abstractmethod
     def component_name(self) -> str:
-        """컴포넌트 이름 반환."""
+        """Return the component name."""
         pass
 
     @abstractmethod
     def probe(self) -> ProbeResult:
         """
-        건강 상태 프로브 수행.
+        Run the health probe.
 
         Returns:
-            ProbeResult: 프로브 결과
+            ProbeResult: probe result
         """
         pass
 
@@ -129,7 +128,7 @@ class CircuitBreakerProbe(HealthProbe):
     def probe(self) -> ProbeResult:
         start = time.time()
         try:
-            # Circuit Breaker 상태 확인 시도
+            # Try to read Circuit Breaker state
             open_count = 0
             stuck_count = 0
             all_states: dict[str, str] = {}
@@ -140,7 +139,7 @@ class CircuitBreakerProbe(HealthProbe):
                 )
 
                 cb_service = get_circuit_breaker_service()
-                # CB 서비스 상태 확인
+                # Read the CB service state
                 cb_states = cb_service.get_all_states()
                 open_count = sum(
                     1
@@ -161,11 +160,11 @@ class CircuitBreakerProbe(HealthProbe):
             except Exception as e:
                 all_states["manager_error"] = str(e)
 
-            # 상태 결정
+            # Determine the status
             status = HealthStatus.HEALTHY
             reason = ""
 
-            # OPEN 상태 CB가 많으면 DEGRADED
+            # Many OPEN breakers → DEGRADED
             from baldur.settings.health_check import get_health_check_settings
 
             hc_settings = get_health_check_settings()
@@ -174,7 +173,7 @@ class CircuitBreakerProbe(HealthProbe):
                 status = HealthStatus.DEGRADED
                 reason = f"{open_count} circuit breakers open (threshold: {threshold})"
 
-            # Stuck CB가 있으면 UNHEALTHY
+            # Any stuck breaker → UNHEALTHY
             if stuck_count > 0:
                 status = HealthStatus.UNHEALTHY
                 reason = f"{stuck_count} circuit breakers stuck in OPEN state"
@@ -508,12 +507,12 @@ class DaemonWorkerProbe(HealthProbe):
 
 class DLQProbe(HealthProbe):
     """
-    DLQ(Dead Letter Queue) 건강 프로브.
+    DLQ (Dead Letter Queue) health probe.
 
-    확인 항목:
-    - DLQ 대기 큐 크기
-    - 처리 속도 (entries/sec)
-    - Consumer 생존 여부
+    Checks:
+    - DLQ pending queue size
+    - Processing rate (entries/sec)
+    - Consumer liveness
     """
 
     @property
@@ -552,14 +551,14 @@ class DLQProbe(HealthProbe):
             reason = ""
             threshold = settings.dlq_stuck_threshold_entries
 
-            # 대기 중인 항목이 많으면 DEGRADED
+            # Large pending backlog → DEGRADED
             if pending_count > threshold:
                 status = HealthStatus.DEGRADED
                 reason = (
                     f"DLQ backlog: {pending_count} entries (threshold: {threshold})"
                 )
 
-            # 처리율 0이고 대기 항목이 매우 많으면 UNHEALTHY
+            # No throughput with a very large backlog → UNHEALTHY
             if pending_count > threshold * 2:
                 status = HealthStatus.UNHEALTHY
                 reason = f"DLQ critically backed up: {pending_count} entries"
@@ -615,12 +614,12 @@ class DLQProbe(HealthProbe):
 
 class RecoveryPipelineProbe(HealthProbe):
     """
-    Recovery Pipeline 건강 프로브.
+    Recovery pipeline health probe.
 
-    확인 항목:
-    - 활성 복구 작업 수
-    - Stuck 복구 작업 (너무 오래 걸림)
-    - 실패율
+    Checks:
+    - Active recovery job count
+    - Stuck recovery jobs (running too long)
+    - Failure rate
     """
 
     @property
@@ -630,18 +629,18 @@ class RecoveryPipelineProbe(HealthProbe):
     def probe(self) -> ProbeResult:
         start = time.time()
         try:
-            # Recovery Pipeline 상태 확인
+            # Read the recovery pipeline state
             active_recoveries = 0
             stuck_recoveries = 0
 
-            # RecoveryCoordinator가 있으면 상태 확인
+            # Read state from the recovery coordinator when one is available
             try:
                 from baldur_pro.services.coordination.recovery_coordinator import (
                     get_recovery_coordinator,
                 )
 
                 get_recovery_coordinator()
-                # 기본 상태 확인
+                # Basic availability check
             except ImportError:
                 pass
             except Exception:
@@ -686,12 +685,12 @@ class RecoveryPipelineProbe(HealthProbe):
 
 class RedisProbe(HealthProbe):
     """
-    Redis 건강 프로브.
+    Redis health probe.
 
-    확인 항목:
-    - 연결 상태 (PING 테스트)
-    - 응답 시간
-    - 메모리 사용량
+    Checks:
+    - Connectivity (PING)
+    - Response time
+    - Memory usage
     """
 
     @property
@@ -701,7 +700,7 @@ class RedisProbe(HealthProbe):
     def probe(self) -> ProbeResult:
         start = time.time()
         try:
-            # Redis 클라이언트 획득 시도
+            # Try to obtain a Redis client
             redis_client = None
             try:
                 from baldur.adapters.cache.redis_adapter import RedisCacheAdapter
@@ -722,10 +721,10 @@ class RedisProbe(HealthProbe):
                     error="Redis client not available",
                 )
 
-            # PING 테스트
+            # PING test
             redis_client.ping()
 
-            # INFO 조회
+            # INFO lookup
             used_memory = 0
             max_memory = 0
             memory_usage_ratio = 0.0
@@ -746,7 +745,7 @@ class RedisProbe(HealthProbe):
             reason = ""
             threshold = hc_settings.probe_memory_usage_threshold
 
-            # 메모리 사용량 threshold 초과 시 DEGRADED
+            # Memory usage above the threshold → DEGRADED
             if memory_usage_ratio > threshold:
                 status = HealthStatus.DEGRADED
                 reason = f"Redis memory usage at {memory_usage_ratio:.0%} (threshold: {threshold:.0%})"
@@ -886,18 +885,18 @@ class HealthProbeManager:
     """
     Health Probe Manager.
 
-    여러 프로브를 관리하고 주기적으로 실행하여
-    서브시스템들의 건강 상태를 수집합니다.
+    Manages a set of probes and runs them periodically to collect the health
+    status of the subsystems.
 
-    사용 예시:
+    Example:
         manager = HealthProbeManager()
-        manager.start()  # 백그라운드 프로브 시작
+        manager.start()  # start background probing
 
-        # 현재 상태 조회
+        # Query the current status
         results = manager.get_last_results()
         overall = manager.get_overall_status()
 
-        manager.stop()  # 프로브 중지
+        manager.stop()  # stop probing
     """
 
     def __init__(
@@ -906,11 +905,11 @@ class HealthProbeManager:
         probes: list[HealthProbe] | None = None,
     ):
         """
-        초기화.
+        Initialize.
 
         Args:
-            settings: Meta-Watchdog 설정 (None이면 기본값)
-            probes: 사용할 프로브 목록 (None이면 기본 프로브)
+            settings: Meta-Watchdog settings (defaults when None)
+            probes: probes to run (default probe set when None)
         """
         self._settings = settings or get_meta_watchdog_settings()
         self._probes = probes if probes is not None else self._create_default_probes()
@@ -922,7 +921,7 @@ class HealthProbeManager:
         self._handle: DaemonWorkerHandle | None = None  # impl 489 D9
 
     def _create_default_probes(self) -> list[HealthProbe]:
-        """기본 프로브 목록 생성."""
+        """Build the default probe list."""
         from baldur.meta.audit_probe import AuditSystemProbe
         from baldur.meta.cache_probe import PrecomputedCacheProbe
         from baldur.meta.canary_stuck_probe import CanaryStuckProbe
@@ -958,23 +957,23 @@ class HealthProbeManager:
 
     def add_probe(self, probe: HealthProbe) -> None:
         """
-        프로브 추가.
+        Add a probe.
 
         Args:
-            probe: 추가할 프로브
+            probe: probe to add
         """
         with self._lock:
             self._probes.append(probe)
 
     def remove_probe(self, component_name: str) -> bool:
         """
-        프로브 제거.
+        Remove a probe.
 
         Args:
-            component_name: 제거할 프로브의 컴포넌트 이름
+            component_name: component name of the probe to remove
 
         Returns:
-            제거 성공 여부
+            Whether the probe was removed
         """
         with self._lock:
             for i, probe in enumerate(self._probes):
@@ -1044,13 +1043,13 @@ class HealthProbeManager:
 
     def get_overall_status(self) -> HealthStatus:
         """
-        전체 건강 상태 반환.
+        Return the overall health status.
 
-        가장 심각한 상태를 반환합니다.
+        Returns the most severe status observed.
         UNHEALTHY > DEGRADED > UNKNOWN > HEALTHY
 
         Returns:
-            전체 건강 상태
+            Overall health status
         """
         with self._lock:
             results = self._last_results
@@ -1071,23 +1070,23 @@ class HealthProbeManager:
 
     def get_last_results(self) -> dict[str, ProbeResult]:
         """
-        마지막 프로브 결과 반환.
+        Return the last probe results.
 
         Returns:
-            컴포넌트별 마지막 프로브 결과
+            Last probe result per component
         """
         with self._lock:
             return dict(self._last_results)
 
     def get_component_status(self, component: str) -> HealthStatus | None:
         """
-        특정 컴포넌트 상태 반환.
+        Return the status of a single component.
 
         Args:
-            component: 컴포넌트 이름
+            component: component name
 
         Returns:
-            해당 컴포넌트 상태 (없으면 None)
+            That component's status (None when unknown)
         """
         with self._lock:
             result = self._last_results.get(component)
@@ -1126,7 +1125,7 @@ class HealthProbeManager:
             raise
 
     def start(self) -> None:
-        """백그라운드 프로브 시작."""
+        """Start background probing."""
         from baldur.meta.daemon_worker import DaemonWorkerHandle
         from baldur.metrics.recorders.daemon_worker import register_daemon_worker
 
@@ -1157,7 +1156,7 @@ class HealthProbeManager:
             self._handle.thread = self._worker
 
     def stop(self) -> None:
-        """프로브 중지."""
+        """Stop probing."""
         from baldur.metrics.recorders.daemon_worker import unregister_daemon_worker
         from baldur.settings.health_check import get_health_check_settings
 
@@ -1179,5 +1178,5 @@ class HealthProbeManager:
         logger.info("health_probe_manager.stopped")
 
     def is_running(self) -> bool:
-        """실행 중 여부 반환."""
+        """Return whether the probe loop is running."""
         return self._running

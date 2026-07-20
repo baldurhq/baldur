@@ -1,34 +1,34 @@
 """
 Configuration Change Tracker
 
-설정 변경 시 자동으로 감사 로그를 남기는 유틸리티.
+Utility that automatically writes an audit log entry on configuration changes.
 
-문제점 (사용자 우려):
-- 설정을 변경했는데 캐시 때문에 적용이 안 됨
-- 누가 언제 어떤 설정을 변경했는지 추적 불가
-- 대형 사고 발생 시 원인 분석 어려움
+Problems (operator concerns):
+- A setting was changed but never took effect because of caching
+- No way to trace who changed which setting, and when
+- Root-cause analysis is hard after a major incident
 
-해결책:
-- 설정 변경 전/후 값을 자동 기록
-- 누가 언제 변경했는지 ActorContext에서 자동 추출
-- 캐시 무효화 여부도 기록
+Solution:
+- Automatically record the before/after values of a change
+- Automatically resolve who changed it, and when, from ActorContext
+- Record whether the cache was invalidated
 
 Usage:
     from baldur.config_tracker import ConfigChangeTracker
 
     tracker = ConfigChangeTracker(audit_adapter)
 
-    # 설정 변경 추적
+    # Track a configuration change
     with tracker.track_change(
         config_key="circuit_breaker.external_api.threshold",
         old_value=10,
         new_value=50,
-        reason="트래픽 증가에 따른 임계값 조정",
+        reason="Threshold raised for increased traffic",
     ):
-        # 실제 설정 변경
+        # The actual configuration change
         update_config("circuit_breaker.external_api.threshold", 50)
 
-    # 또는 데코레이터로
+    # Or as a decorator
     @tracker.track_config_change("service.timeout")
     def update_service_timeout(new_value):
         settings.SERVICE_TIMEOUT = new_value
@@ -60,7 +60,7 @@ T = TypeVar("T")
 
 @dataclass
 class ConfigChange(SerializableMixin):
-    """설정 변경 정보."""
+    """Configuration change record."""
 
     config_key: str
     old_value: Any
@@ -81,13 +81,13 @@ class ConfigChange(SerializableMixin):
 
 class ConfigChangeTracker:
     """
-    설정 변경을 추적하고 감사 로그를 남기는 클래스.
+    Tracks configuration changes and writes audit log entries.
 
     Features:
-    - 변경 전/후 값 기록
-    - 누가 변경했는지 자동 추적 (ActorContext 사용)
-    - 캐시 무효화 여부 기록
-    - 변경 실패 시에도 시도 기록
+    - Records before/after values
+    - Automatically tracks who made the change (via ActorContext)
+    - Records whether the cache was invalidated
+    - Records the attempt even when the change fails
     """
 
     def __init__(
@@ -122,7 +122,7 @@ class ConfigChangeTracker:
                 config_key="circuit_breaker.threshold",
                 old_value=10,
                 new_value=50,
-                reason="트래픽 증가",
+                reason="Traffic increase",
             ) as change:
                 update_config(...)
 
@@ -196,9 +196,9 @@ class ConfigChangeTracker:
         """
         Log configuration change to audit adapter.
 
-        request 파라미터 추가하여 AuditMiddleware 버퍼 패턴 지원
+        The request parameter enables the AuditMiddleware buffer pattern.
         """
-        # === 버퍼 패턴 우선 ===
+        # === Buffer pattern first ===
         if request is not None:
             try:
                 from baldur.audit.event_buffer import (
@@ -221,11 +221,11 @@ class ConfigChangeTracker:
                     error_message=change.error_message,
                     target_id=change.config_key,
                 )
-                return  # 버퍼에 추가됨 - AuditMiddleware에서 기록
+                return  # Added to the buffer - AuditMiddleware records it
             except ImportError:
-                pass  # event_buffer 사용 불가 - fallback
+                pass  # event_buffer unavailable - fall back
 
-        # === Fallback: 기존 방식 ===
+        # === Fallback: legacy path ===
         entry = AuditEntry(
             action=AuditAction.CONFIG_CHANGE,
             target_type="config",
@@ -255,9 +255,9 @@ class ConfigChangeTracker:
 
         Use this for one-off overrides that bypass normal config flow.
 
-        request 파라미터 추가하여 AuditMiddleware 버퍼 패턴 지원
+        The request parameter enables the AuditMiddleware buffer pattern.
         """
-        # === 버퍼 패턴 우선 ===
+        # === Buffer pattern first ===
         if request is not None:
             try:
                 from baldur.audit.event_buffer import (
@@ -285,11 +285,11 @@ class ConfigChangeTracker:
                     new_value=new_value,
                     reason=reason,
                 )
-                return  # 버퍼에 추가됨 - AuditMiddleware에서 기록
+                return  # Added to the buffer - AuditMiddleware records it
             except ImportError:
-                pass  # event_buffer 사용 불가 - fallback
+                pass  # event_buffer unavailable - fall back
 
-        # === Fallback: 기존 방식 ===
+        # === Fallback: legacy path ===
         entry = AuditEntry(
             action=AuditAction.MANUAL_OVERRIDE,
             target_type=override_type,

@@ -1,34 +1,34 @@
 """
-Causation Context - 인과관계 추적 컨텍스트.
+Causation Context - causality tracking context.
 
-비동기 경계(Celery/Kafka)에서 인과관계 정보를 안전하게 전파합니다.
+Safely propagates causality information across async boundaries
+(Celery/Kafka).
 
 Features:
-- contextvars 기반 스레드/async 안전한 컨텍스트 관리
-- Celery 태스크 간 인과관계 정보 전파
-- cascade_id, parent_event_id, chain_depth 추적
+- contextvars-based thread/async-safe context management
+- Causality propagation between Celery tasks
+- cascade_id, parent_event_id, chain_depth tracking
 
 Usage:
-    # 새 Cascade 시작
+    # Start a new cascade
     with CausationContext.start_cascade(namespace="seoul") as ctx:
         print(f"Cascade ID: {ctx.cascade_id}")
         do_work()
 
-    # Celery 태스크 호출 시
+    # When calling a Celery task
     my_task.apply_async(
         args=[...],
         headers=get_causation_for_celery(),
     )
 
-    # Celery 태스크 내에서 복원
+    # Restoring inside a Celery task
     @shared_task(bind=True)
     def my_task(self, ...):
         with restore_causation_from_celery(self.request.headers or {}):
             do_work()
 
 Reference:
-    docs/baldur/middleware_system/76_CASCADE_EVENT_AUDIT.md
-    context/actor_context.py (패턴 참조)
+    context/actor_context.py — the ContextVar pattern this module follows.
 """
 
 from __future__ import annotations
@@ -49,23 +49,23 @@ logger = structlog.get_logger()
 
 
 # =============================================================================
-# X-Test Causation ID 프리픽스 상수 및 헬퍼
+# X-Test causation ID prefix constant and helpers
 # =============================================================================
 
 
 XTEST_CAUSATION_PREFIX = "XTC-"
-"""X-Test-Mode causation ID 프리픽스. 로그에서 테스트 요청 식별용."""
+"""X-Test-Mode causation ID prefix. Identifies test requests in logs."""
 
 
 def _get_xtest_id_prefix() -> str:
     """
-    X-Test-Mode 여부에 따라 ID 프리픽스 반환.
+    Return the ID prefix according to X-Test-Mode.
 
-    TestModeContext.is_synthetic()이 True이면 'XTC-' 반환,
-    그렇지 않으면 빈 문자열 반환.
+    Returns 'XTC-' when TestModeContext.is_synthetic() is True, otherwise an
+    empty string.
 
     Returns:
-        'XTC-' (X-Test-Mode) 또는 '' (운영 모드)
+        'XTC-' (X-Test-Mode) or '' (production mode)
     """
     try:
         from baldur.core.test_mode_context import TestModeContext
@@ -79,13 +79,13 @@ def _get_xtest_id_prefix() -> str:
 
 def is_xtest_id(causation_id: str) -> bool:
     """
-    주어진 ID가 X-Test causation ID인지 확인.
+    Check whether the given ID is an X-Test causation ID.
 
     Args:
-        causation_id: 확인할 causation ID (cascade_id 또는 event_id)
+        causation_id: Causation ID to check (cascade_id or event_id)
 
     Returns:
-        True if ID가 XTC- 프리픽스로 시작함
+        True if the ID starts with the XTC- prefix
 
     Examples:
         >>> is_xtest_id("XTC-cascade-a1b2c3d4e5f6")
@@ -98,16 +98,16 @@ def is_xtest_id(causation_id: str) -> bool:
 
 def normalize_causation_id(causation_id: str) -> str:
     """
-    Causation ID에서 XTC- 프리픽스 제거.
+    Strip the XTC- prefix from a causation ID.
 
-    역호환성을 위해 기존 ID 파싱 로직에서 사용합니다.
-    프리픽스가 없는 ID는 그대로 반환합니다.
+    Used by existing ID parsing logic for backward compatibility.
+    An ID without the prefix is returned unchanged.
 
     Args:
-        causation_id: 정규화할 causation ID
+        causation_id: Causation ID to normalize
 
     Returns:
-        XTC- 프리픽스가 제거된 순수 ID
+        The bare ID with the XTC- prefix removed
 
     Examples:
         >>> normalize_causation_id("XTC-cascade-a1b2c3d4e5f6")
@@ -121,26 +121,26 @@ def normalize_causation_id(causation_id: str) -> str:
 
 
 # =============================================================================
-# Celery 헤더 상수
+# Celery header constants
 # =============================================================================
 
 
 CELERY_HEADER_CASCADE_ID = "x-baldur-cascade-id"
-"""Celery 메시지 헤더: Cascade ID."""
+"""Celery message header: cascade ID."""
 
 CELERY_HEADER_PARENT_EVENT = "x-baldur-parent-event"
-"""Celery 메시지 헤더: 부모 이벤트 ID."""
+"""Celery message header: parent event ID."""
 
 CELERY_HEADER_CHAIN_DEPTH = "x-baldur-chain-depth"
-"""Celery 메시지 헤더: 체인 깊이."""
+"""Celery message header: chain depth."""
 
 CELERY_HEADER_NAMESPACE = "x-baldur-namespace"
-"""Celery 메시지 헤더: 네임스페이스."""
+"""Celery message header: namespace."""
 
 
-# Kafka 헤더 (동일 구조)
+# Kafka headers (same structure)
 KAFKA_HEADER_PREFIX = "baldur."
-"""Kafka 메시지 헤더 접두사."""
+"""Kafka message header prefix."""
 
 
 # =============================================================================
@@ -151,39 +151,39 @@ KAFKA_HEADER_PREFIX = "baldur."
 @dataclass
 class CausationInfo(SerializableMixin):
     """
-    인과관계 추적 정보.
+    Causality tracking information.
 
-    contextvars를 사용하여 스레드/async 안전을 보장합니다.
+    Uses contextvars to guarantee thread/async safety.
 
     Attributes:
-        cascade_id: 현재 Cascade Event ID
-        parent_event_id: 부모 이벤트 ID (인과관계 체인)
-        chain_depth: 현재 체인 깊이 (순환 참조 방지용)
-        namespace: 네임스페이스
-        metadata: 추가 메타데이터
+        cascade_id: Current cascade event ID
+        parent_event_id: Parent event ID (causality chain)
+        chain_depth: Current chain depth (guards against cycles)
+        namespace: Namespace
+        metadata: Additional metadata
 
     Code reference:
-        context/actor_context.py#L48 (_current_actor ContextVar 패턴)
+        context/actor_context.py (the _current_actor ContextVar pattern)
     """
 
     cascade_id: str
-    """현재 Cascade Event ID."""
+    """Current cascade event ID."""
 
     parent_event_id: str
-    """부모 이벤트 ID (인과관계 체인)."""
+    """Parent event ID (causality chain)."""
 
     chain_depth: int = 0
-    """현재 체인 깊이 (순환 참조 방지용)."""
+    """Current chain depth (guards against cycles)."""
 
     namespace: str = "global"
-    """네임스페이스."""
+    """Namespace."""
 
     metadata: dict[str, Any] = field(default_factory=dict)
-    """추가 메타데이터."""
+    """Additional metadata."""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> CausationInfo:
-        """역직렬화 (수신 측 복원용)."""
+        """Deserialize (for restoration on the receiving side)."""
         return cls(
             cascade_id=data.get("cascade_id", ""),
             parent_event_id=data.get("parent_event_id", ""),
@@ -194,14 +194,14 @@ class CausationInfo(SerializableMixin):
 
 
 # =============================================================================
-# ContextVar 선언
+# ContextVar declaration
 # =============================================================================
 
 
 _current_causation: ContextVar[CausationInfo | None] = ContextVar(
     "current_causation", default=None
 )
-"""현재 인과관계 컨텍스트 (actor_context.py 패턴 준수)."""
+"""Current causality context (follows the actor_context.py pattern)."""
 
 
 # =============================================================================
@@ -211,29 +211,29 @@ _current_causation: ContextVar[CausationInfo | None] = ContextVar(
 
 class CausationContext:
     """
-    인과관계 컨텍스트 관리자.
+    Causality context manager.
 
-    Python의 contextvars를 사용하여 스레드 및 async 환경에서
-    안전하게 인과관계 정보를 추적합니다.
+    Uses Python's contextvars to track causality information safely in
+    threaded and async environments.
 
     Usage:
-        # 새 Cascade 시작
+        # Start a new cascade
         with CausationContext.start_cascade(namespace="seoul") as ctx:
             print(f"Cascade: {ctx.cascade_id}")
-            # ctx.cascade_id 사용 가능
+            # ctx.cascade_id is available here
             do_work()
 
-        # 기존 Cascade 계속 (비동기 경계 복원)
+        # Continue an existing cascade (restore across an async boundary)
         with CausationContext.continue_cascade(causation_info):
             do_work()
 
-        # 현재 컨텍스트 조회
+        # Read the current context
         info = CausationContext.get_current()
         if info:
             print(f"Current cascade: {info.cascade_id}")
 
     Code reference:
-        context/actor_context.py (ActorContext 패턴)
+        context/actor_context.py (the ActorContext pattern)
     """
 
     @classmethod
@@ -245,17 +245,17 @@ class CausationContext:
         metadata: dict[str, Any] | None = None,
     ) -> Generator[CausationInfo, None, None]:
         """
-        새 Cascade 시작.
+        Start a new cascade.
 
-        X-Test-Mode에서는 모든 ID에 XTC- 프리픽스가 자동 추가됩니다.
+        In X-Test-Mode the XTC- prefix is added to every ID automatically.
 
         Args:
-            namespace: 네임스페이스
-            trigger_event_id: 트리거 이벤트 ID (없으면 자동 생성)
-            metadata: 추가 메타데이터
+            namespace: Namespace
+            trigger_event_id: Trigger event ID (generated when omitted)
+            metadata: Additional metadata
 
         Yields:
-            CausationInfo 인스턴스
+            CausationInfo instance
         """
         prefix = _get_xtest_id_prefix()
         cascade_id = f"{prefix}cascade-{uuid.uuid4().hex[:12]}"
@@ -293,19 +293,21 @@ class CausationContext:
         metadata: dict[str, Any] | None = None,
     ) -> Generator[CausationInfo, None, None]:
         """
-        시스템 트리거용 Cascade 시작 (Celery Beat / Management Command).
+        Start a cascade for a system trigger (Celery Beat / management command).
 
-        API 요청이 아닌 시스템 자동화 작업의 인과관계 추적에 사용합니다.
-        trigger_event_id를 SYSTEM_ROOT_{source}_{uuid} 형식으로 생성합니다.
-        X-Test-Mode에서는 XTC- 프리픽스가 자동 추가됩니다.
+        Used to track causality for automated system work rather than API
+        requests. The trigger_event_id is generated in the form
+        SYSTEM_ROOT_{source}_{uuid}. In X-Test-Mode the XTC- prefix is added
+        automatically.
 
         Args:
-            source: 트리거 소스 (celery_beat, management_cmd, cron, scheduler)
-            namespace: 네임스페이스
-            metadata: 추가 메타데이터
+            source: Trigger source (celery_beat, management_cmd, cron,
+                scheduler)
+            namespace: Namespace
+            metadata: Additional metadata
 
         Yields:
-            CausationInfo 인스턴스
+            CausationInfo instance
 
         Examples:
             with CausationContext.start_system_cascade(source="celery_beat") as ctx:
@@ -335,14 +337,14 @@ class CausationContext:
         increment_depth: bool = True,
     ) -> Generator[CausationInfo, None, None]:
         """
-        기존 Cascade 계속 (비동기 경계 복원).
+        Continue an existing cascade (restore across an async boundary).
 
         Args:
-            info: 복원할 CausationInfo
-            increment_depth: 체인 깊이 증가 여부
+            info: CausationInfo to restore
+            increment_depth: Whether to increment the chain depth
 
         Yields:
-            CausationInfo 인스턴스 (깊이 증가됨)
+            CausationInfo instance (with the depth incremented)
         """
         new_depth = info.chain_depth + 1 if increment_depth else info.chain_depth
 
@@ -351,7 +353,7 @@ class CausationContext:
             parent_event_id=info.parent_event_id,
             chain_depth=new_depth,
             namespace=info.namespace,
-            metadata=dict(info.metadata),  # 복사
+            metadata=dict(info.metadata),  # copy
         )
 
         token = _current_causation.set(continued_info)
@@ -368,30 +370,30 @@ class CausationContext:
     @classmethod
     def get_current(cls) -> CausationInfo | None:
         """
-        현재 컨텍스트 조회.
+        Read the current context.
 
         Returns:
-            현재 CausationInfo 또는 None
+            The current CausationInfo, or None
         """
         return _current_causation.get()
 
     @classmethod
     def is_set(cls) -> bool:
         """
-        컨텍스트 설정 여부 확인.
+        Check whether a context is set.
 
         Returns:
-            컨텍스트가 설정되어 있으면 True
+            True if a context is set
         """
         return _current_causation.get() is not None
 
     @classmethod
     def get_current_cascade_id(cls) -> str | None:
         """
-        현재 Cascade ID 조회.
+        Read the current cascade ID.
 
         Returns:
-            현재 cascade_id 또는 None
+            The current cascade_id, or None
         """
         info = cls.get_current()
         return info.cascade_id if info else None
@@ -399,10 +401,10 @@ class CausationContext:
     @classmethod
     def get_current_depth(cls) -> int:
         """
-        현재 체인 깊이 조회.
+        Read the current chain depth.
 
         Returns:
-            현재 chain_depth (컨텍스트 없으면 0)
+            The current chain_depth (0 when no context is set)
         """
         info = cls.get_current()
         return info.chain_depth if info else 0
@@ -414,15 +416,15 @@ class CausationContext:
         new_event_id: str,
     ) -> Generator[CausationInfo, None, None]:
         """
-        부모 이벤트 ID 변경.
+        Change the parent event ID.
 
-        현재 컨텍스트 내에서 새 효과를 기록할 때 사용합니다.
+        Used when recording a new effect within the current context.
 
         Args:
-            new_event_id: 새 부모 이벤트 ID
+            new_event_id: New parent event ID
 
         Yields:
-            업데이트된 CausationInfo
+            The updated CausationInfo
         """
         current = cls.get_current()
         if not current:
@@ -444,13 +446,13 @@ class CausationContext:
 
 
 # =============================================================================
-# Celery 전파 함수
+# Celery propagation functions
 # =============================================================================
 
 
 def get_causation_for_celery() -> dict[str, str]:
     """
-    Celery Task 호출 시 전달할 causation 헤더 생성.
+    Build the causation headers to pass when calling a Celery task.
 
     Usage:
         my_task.apply_async(
@@ -459,10 +461,10 @@ def get_causation_for_celery() -> dict[str, str]:
         )
 
     Returns:
-        Celery 메시지 헤더 딕셔너리
+        Celery message header dict
 
     Code reference:
-        context/actor_context.py (get_actor_for_celery 패턴)
+        context/actor_context.py (the get_actor_for_celery pattern)
     """
     info = CausationContext.get_current()
     if not info:
@@ -481,7 +483,7 @@ def restore_causation_from_celery(
     headers: dict[str, str],
 ) -> Generator[CausationInfo | None, None, None]:
     """
-    Celery Task에서 causation 복원.
+    Restore causation inside a Celery task.
 
     Usage:
         @shared_task(bind=True)
@@ -493,10 +495,10 @@ def restore_causation_from_celery(
         headers: Celery request headers
 
     Yields:
-        복원된 CausationInfo 또는 None
+        The restored CausationInfo, or None
 
     Code reference:
-        context/actor_context.py (restore_actor_from_celery 패턴)
+        context/actor_context.py (the restore_actor_from_celery pattern)
     """
     cascade_id = headers.get(CELERY_HEADER_CASCADE_ID)
 
@@ -521,7 +523,7 @@ def restore_causation_from_celery(
 
 def get_causation_for_kafka() -> dict[str, bytes]:
     """
-    Kafka 메시지 전송 시 전달할 causation 헤더 생성.
+    Build the causation headers to pass when sending a Kafka message.
 
     Usage:
         producer.send(
@@ -531,7 +533,7 @@ def get_causation_for_kafka() -> dict[str, bytes]:
         )
 
     Returns:
-        Kafka 메시지 헤더 딕셔너리 (bytes 값)
+        Kafka message header dict (bytes values)
     """
     info = CausationContext.get_current()
     if not info:
@@ -550,7 +552,7 @@ def restore_causation_from_kafka(
     headers: list | None = None,
 ) -> Generator[CausationInfo | None, None, None]:
     """
-    Kafka Consumer에서 causation 복원.
+    Restore causation in a Kafka consumer.
 
     Usage:
         for message in consumer:
@@ -558,16 +560,16 @@ def restore_causation_from_kafka(
                 process_message(message)
 
     Args:
-        headers: Kafka 메시지 헤더 리스트 [(key, value), ...]
+        headers: Kafka message header list [(key, value), ...]
 
     Yields:
-        복원된 CausationInfo 또는 None
+        The restored CausationInfo, or None
     """
     if not headers:
         yield None
         return
 
-    # 헤더를 딕셔너리로 변환
+    # Convert the headers into a dict
     header_dict = {}
     for key, value in headers:
         if key.startswith(KAFKA_HEADER_PREFIX):

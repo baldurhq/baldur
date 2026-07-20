@@ -1,8 +1,8 @@
 """
 DLQ Consumer with Leader Election.
 
-분산 환경에서 단일 노드만 DLQ를 처리하도록 보장.
-Leader Election을 통해 여러 Pod 중 하나만 활성화됩니다.
+Guarantees that only a single node processes the DLQ in a distributed
+deployment. Leader election activates exactly one of several pods.
 
 Usage:
     from baldur.coordination.dlq_consumer import DLQConsumerCoordinator
@@ -35,20 +35,21 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
-# DLQ Consumer 리소스 이름 (Leader Election 키)
+# DLQ Consumer resource name (leader-election key)
 DLQ_CONSUMER_RESOURCE = "dlq-consumer"
 
 
 class DLQConsumerCoordinator(EventEmitterMixin):
     """
-    DLQ Consumer 리더 선출 코디네이터.
+    DLQ Consumer leader-election coordinator.
 
-    분산 환경에서 단일 DLQ Consumer만 활성화되도록 보장합니다.
-    리더가 되면 DLQ 처리를 시작하고, 리더십을 잃으면 중단합니다.
+    Guarantees that only one DLQ Consumer is active in a distributed
+    deployment. Starts DLQ processing on becoming leader, and stops it on
+    losing leadership.
 
     Attributes:
-        elector: Leader Elector 인스턴스
-        is_consuming: 현재 DLQ 처리 중인지 여부
+        elector: Leader Elector instance
+        is_consuming: Whether the DLQ is currently being processed
     """
 
     _event_source = "dlq_consumer"
@@ -60,12 +61,12 @@ class DLQConsumerCoordinator(EventEmitterMixin):
         batch_size: int = 50,
     ):
         """
-        초기화.
+        Initialize.
 
         Args:
-            resource_name: 리소스 이름 (리더 선출 키)
-            process_interval_seconds: DLQ 처리 주기 (초)
-            batch_size: 한 번에 처리할 DLQ 항목 수
+            resource_name: Resource name (leader-election key)
+            process_interval_seconds: DLQ processing interval (seconds)
+            batch_size: Number of DLQ entries to process per batch
         """
         self._resource_name = resource_name
         self._process_interval = process_interval_seconds
@@ -77,25 +78,25 @@ class DLQConsumerCoordinator(EventEmitterMixin):
         self._stop_event = threading.Event()
         self._handle: DaemonWorkerHandle | None = None  # impl 489 D9
 
-        # 콜백 등록
+        # Register callbacks
         self._elector.on_become_leader(self._on_become_leader)
         self._elector.on_lose_leader(self._on_lose_leader)
 
-        # Graceful Shutdown 등록
+        # Register for graceful shutdown
         register_for_graceful_shutdown(self._elector)
 
     @property
     def is_consuming(self) -> bool:
-        """현재 DLQ 처리 중인지 여부."""
+        """Whether the DLQ is currently being processed."""
         return self._consuming
 
     @property
     def is_leader(self) -> bool:
-        """현재 리더인지 여부."""
+        """Whether this node is currently the leader."""
         return self._elector.is_leader()
 
     def start(self) -> None:
-        """DLQ Consumer 시작 (Leader Election 시작)."""
+        """Start the DLQ Consumer (starts leader election)."""
         logger.info(
             "dlq_consumer.started",
             resource_name=self._resource_name,
@@ -108,7 +109,7 @@ class DLQConsumerCoordinator(EventEmitterMixin):
         )
 
     def stop(self) -> None:
-        """DLQ Consumer 중지 (Leader Election 중지)."""
+        """Stop the DLQ Consumer (stops leader election)."""
         from baldur.metrics.recorders.daemon_worker import unregister_daemon_worker
 
         logger.info(
@@ -120,7 +121,7 @@ class DLQConsumerCoordinator(EventEmitterMixin):
         self._stop_event.set()
         self._consuming = False
 
-        # 소비 스레드 종료 대기
+        # Wait for the consume thread to finish
         from baldur.settings.thread_management import (
             get_thread_management_settings,
         )
@@ -149,7 +150,7 @@ class DLQConsumerCoordinator(EventEmitterMixin):
         )
 
     def _on_become_leader(self) -> None:
-        """리더가 되었을 때 DLQ 처리 시작."""
+        """Start DLQ processing on becoming leader."""
         logger.info(
             "dlq_consumer.leader_dlq_processing_started",
         )
@@ -161,7 +162,7 @@ class DLQConsumerCoordinator(EventEmitterMixin):
         )
 
     def _on_lose_leader(self) -> None:
-        """리더십을 잃었을 때 DLQ 처리 중단."""
+        """Stop DLQ processing on losing leadership."""
         logger.info(
             "dlq_consumer.leadership_lost_dlq_processing",
         )
@@ -172,7 +173,7 @@ class DLQConsumerCoordinator(EventEmitterMixin):
         )
 
     def _start_consume_loop(self) -> None:
-        """DLQ 소비 루프 시작 (별도 스레드)."""
+        """Start the DLQ consume loop (on a separate thread)."""
         from baldur.meta.daemon_worker import DaemonWorkerHandle
         from baldur.metrics.recorders.daemon_worker import register_daemon_worker
 
@@ -213,7 +214,7 @@ class DLQConsumerCoordinator(EventEmitterMixin):
             raise
 
     def _consume_loop(self) -> None:
-        """DLQ 소비 루프."""
+        """DLQ consume loop."""
         import time as _time
 
         logger.info("dlq_consumer.consume_loop_started")
@@ -221,12 +222,12 @@ class DLQConsumerCoordinator(EventEmitterMixin):
         while self._consuming and not self._stop_event.is_set():
             iter_start = _time.monotonic()
             try:
-                # Lease 유효성 확인 (Self-Fencing)
+                # Check lease validity (self-fencing)
                 if not self._elector.is_leader():
                     logger.warning("dlq_consumer.leadership_check_failed")
                     break
 
-                # DLQ 처리
+                # Process the DLQ
                 processed = self._process_dlq_batch()
 
                 if processed > 0:
@@ -239,7 +240,7 @@ class DLQConsumerCoordinator(EventEmitterMixin):
                     self._handle.observe_iteration(_time.monotonic() - iter_start)
                     self._handle.heartbeat()
 
-                # 다음 처리까지 대기
+                # Wait until the next processing cycle
                 self._stop_event.wait(timeout=self._process_interval)
 
             except Exception as e:

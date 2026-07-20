@@ -1,17 +1,20 @@
 """
-BackpressureGuard — RateController 기반 Backpressure Guard.
+BackpressureGuard — RateController-based Backpressure Guard.
 
-TrafficGate의 3번째 구성요소인 RateController를
-PolicyComposer Guard로 분리한다.
+Extracts RateController, TrafficGate's third component, into a PolicyComposer
+Guard.
 
-ThrottlePolicy(SlidingWindowThrottle)와는 알고리즘/목적이 완전히 다르다:
-    - SlidingWindowThrottle: 외부 API 호출 제한 (서비스 보호), Sliding Window
-    - RateController: 내부 큐 과부하 방지 (backpressure), Token Bucket + AIMD
+Its algorithm and purpose differ entirely from ThrottlePolicy
+(SlidingWindowThrottle):
+    - SlidingWindowThrottle: limits outbound API calls (protects the service),
+      sliding window
+    - RateController: prevents internal queue overload (backpressure),
+      token bucket + AIMD
 
-Fail-Open 원칙:
-    RateController 미설치/호출 실패 시 통과 허용.
+Fail-open principle:
+    If RateController is not installed or the call fails, the request passes.
 
-사용 예시::
+Usage::
 
     from baldur.resilience.policies.guards.backpressure import (
         BackpressureGuard,
@@ -35,40 +38,40 @@ logger = structlog.get_logger()
 
 class BackpressureGuard:
     """
-    RateController 기반 Backpressure Guard.
+    RateController-based Backpressure Guard.
 
-    Token Bucket + AIMD 패턴의 큐 기반 backpressure를 Guard로 래핑.
-    RateController.should_process()가 False이면 거부한다.
+    Wraps token-bucket + AIMD queue-based backpressure as a Guard. Rejects when
+    RateController.should_process() returns False.
 
-    ThrottlePolicy와 독립적이며, PolicyComposer에서 add_guard()로 등록한다.
+    Independent of ThrottlePolicy; registered on PolicyComposer via add_guard().
     """
 
     def __init__(self, rate_controller: Any | None = None) -> None:
         """
-        초기화.
+        Initialize.
 
         Args:
-            rate_controller: RateController 인스턴스.
-                None이면 lazy import로 글로벌 인스턴스를 획득한다.
+            rate_controller: a RateController instance. If None, the global
+                instance is obtained via lazy import.
         """
         self._controller = rate_controller
         self._initialized = rate_controller is not None
 
     @property
     def name(self) -> str:
-        """Guard 식별자."""
+        """Guard identifier."""
         return "backpressure"
 
     def check(self, context: PolicyContext | None = None) -> GuardResult:
         """
-        Backpressure 체크.
+        Backpressure check.
 
-        RateController.should_process()가 False이면
-        큐 과부하로 인한 거부를 반환한다.
+        Returns a queue-overload rejection when
+        RateController.should_process() is False.
 
         Returns:
-            GuardResult(allowed=True) — 처리 허용
-            GuardResult(allowed=False, reason=...) — backpressure 거부
+            GuardResult(allowed=True) — processing allowed
+            GuardResult(allowed=False, reason=...) — backpressure rejection
         """
         controller = self._get_rate_controller()
         if controller is None:
@@ -103,7 +106,7 @@ class BackpressureGuard:
         return GuardResult(allowed=True)
 
     def _get_rate_controller(self) -> Any | None:
-        """RateController 인스턴스 획득 (lazy import, Fail-Open)."""
+        """Obtain the RateController instance (lazy import, fail-open)."""
         if self._initialized:
             return self._controller
 

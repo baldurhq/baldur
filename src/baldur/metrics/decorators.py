@@ -4,9 +4,9 @@ Metric Tracking Decorators.
 Provides decorators for automatic metric tracking.
 
 Universal Async Support:
-- 모든 데코레이터가 동기/비동기 함수 모두 지원
-- asyncio.iscoroutinefunction()으로 자동 분기
-- with_jitter 패턴과 동일한 구조
+- Every decorator supports both sync and async functions
+- Dispatch is automatic via asyncio.iscoroutinefunction()
+- Same structure as the with_jitter pattern
 """
 
 from __future__ import annotations
@@ -178,13 +178,13 @@ def _record_histogram(
 
 def track_dlq_creation(domain: str) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """
-    DLQ 생성 함수에 메트릭 추적을 추가하는 데코레이터 (동기/비동기 지원).
+    Add metric tracking to a DLQ creation function (sync/async).
 
-    데코레이터가 적용된 함수가 성공적으로 실행되면
-    DLQ 생성 메트릭을 자동으로 기록합니다.
+    When the decorated function runs successfully, the DLQ creation metric
+    is recorded automatically.
 
     Args:
-        domain: 도메인 이름 (payment, point 등)
+        domain: Domain name (payment, point, etc.)
 
     Example:
         >>> @track_dlq_creation(domain="payment")
@@ -222,13 +222,13 @@ def track_dlq_creation(domain: str) -> Callable[[Callable[P, R]], Callable[P, R]
 
 def track_dlq_resolution(domain: str) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """
-    DLQ 해결 함수에 메트릭 추적을 추가하는 데코레이터 (동기/비동기 지원).
+    Add metric tracking to a DLQ resolution function (sync/async).
 
-    데코레이터가 적용된 함수가 성공적으로 실행되면
-    DLQ 해결 메트릭을 자동으로 기록합니다.
+    When the decorated function runs successfully, the DLQ resolution metric
+    is recorded automatically.
 
     Args:
-        domain: 도메인 이름
+        domain: Domain name
 
     Example:
         >>> @track_dlq_resolution(domain="payment")
@@ -281,13 +281,13 @@ def track_replay(
     replay_type: str = "auto",
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """
-    Replay 함수에 메트릭 추적을 추가하는 데코레이터 (동기/비동기 지원).
+    Add metric tracking to a replay function (sync/async).
 
-    Replay 시작/완료를 자동으로 추적하고 소요 시간을 기록합니다.
+    Tracks replay start/completion automatically and records the duration.
 
     Args:
-        domain: 도메인 이름 (빈 문자열이면 kwargs에서 추출)
-        replay_type: Replay 유형 (auto, manual, batch)
+        domain: Domain name (extracted from kwargs when empty)
+        replay_type: Replay type (auto, manual, batch)
 
     Example:
         >>> @track_replay(domain="payment")
@@ -352,16 +352,16 @@ def track_execution_time(
     labels: dict[str, str] | None = None,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """
-    함수 실행 시간을 Histogram으로 기록하는 데코레이터.
+    Record a function's execution time as a Histogram.
 
     Args:
-        metric_name: 메트릭 이름 (예: "processing_time_seconds")
-        labels: 추가할 라벨
+        metric_name: Metric name (e.g. "processing_time_seconds")
+        labels: Labels to attach
 
     Example:
         >>> @track_execution_time("payment_processing_seconds", labels={"type": "credit"})
         ... def process_payment(amount: float):
-        ...     # 결제 처리
+        ...     # Process the payment
         ...     pass
     """
     # Label values are decoration-time constants; normalize to str once so a
@@ -412,13 +412,13 @@ def track_counter(
     on_failure: bool = False,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """
-    함수 호출을 Counter로 기록하는 데코레이터.
+    Record function calls as a Counter.
 
     Args:
-        metric_name: 메트릭 이름
-        labels: 추가할 라벨
-        on_success: 성공 시 카운트 증가
-        on_failure: 실패 시 카운트 증가
+        metric_name: Metric name
+        labels: Labels to attach
+        on_success: Increment the count on success
+        on_failure: Increment the count on failure
 
     Example:
         >>> @track_counter("api_calls_total", labels={"endpoint": "/payment"})

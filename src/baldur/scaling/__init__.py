@@ -1,17 +1,17 @@
 """
 Kubernetes Auto-Scaling & Backpressure Integration.
 
-트래픽 폭증 시 자동으로 Pod 스케일 아웃,
-과부하 시 Rate-aware Backpressure로 시스템 보호.
+Scales pods out automatically on traffic spikes, and protects the system
+under overload with rate-aware backpressure.
 
 Components:
-    - BackpressureSettings: Backpressure 설정
-    - RateController: 동적 처리율 조절 (Token Bucket + AIMD)
-    - TrafficGate: RateController + LoadShedding 통합 파이프라인
-    - BackpressureMetrics: Prometheus 메트릭 노출
-    - HPAMetricsExporter: HPA용 메트릭 내보내기
-    - GracefulDegradation: 단계별 기능 축소
-    - CachedQueueSizeProvider: 큐 크기 캐싱
+    - BackpressureSettings: backpressure settings
+    - RateController: dynamic rate control (Token Bucket + AIMD)
+    - TrafficGate: combined RateController + LoadShedding pipeline
+    - BackpressureMetrics: Prometheus metric exposure
+    - HPAMetricsExporter: metric export for the HPA
+    - GracefulDegradation: staged feature reduction
+    - CachedQueueSizeProvider: queue size caching
 
 Usage:
     from baldur.scaling import (
@@ -21,13 +21,13 @@ Usage:
         get_hpa_metrics_exporter,
     )
 
-    # 트래픽 제어
+    # Traffic control
     gate = get_traffic_gate()
     decision = gate.should_allow(priority=5)
     if decision.allowed:
         process_request()
 
-    # Rate 제어
+    # Rate control
     controller = get_rate_controller()
     if controller.should_process():
         process_item()

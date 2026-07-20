@@ -1,11 +1,10 @@
 """
 Cluster Identity - Multi-Cluster SSOT.
 
-각 Pod가 자신의 클러스터 정보를 인지하는 단일 진실 소스(SSOT).
+Single source of truth through which each Pod knows its own cluster.
 
-코드 근거:
-- redis_manager.py#L146-147: pod_id = os.environ.get("HOSTNAME", ...)
-- 기존에 Pod ID만 인식, 클러스터/리전 정보 없음
+Background: the Redis manager only derived a pod ID from the ``HOSTNAME``
+environment variable — it had no notion of cluster or region.
 
 Usage:
     from baldur.core.cluster_identity import get_cluster_identity
@@ -14,8 +13,6 @@ Usage:
     print(identity.cluster_id)    # "seoul-prod-01"
     print(identity.region)        # "seoul"
     print(identity.full_prefix)   # "baldur:seoul:"
-
-Reference: docs/baldur/middleware_system/70_MULTI_CLUSTER_ARCHITECTURE.md
 """
 
 from __future__ import annotations
@@ -29,16 +26,17 @@ logger = structlog.get_logger()
 
 class ClusterIdentity(BaseSettings):
     """
-    클러스터 식별 정보 (Immutable BaseSettings).
+    Cluster identification (immutable BaseSettings).
 
-    환경변수 자동 파싱으로 os.environ.get() 수동 파싱 제거 (202 패러다임 통일).
+    Automatic environment-variable parsing replaces manual os.environ.get()
+    parsing (202 paradigm unification).
 
     Attributes:
-        cluster_id: 클러스터 고유 ID (필수)
-        region: 리전 식별자 (예: seoul, tokyo)
-        environment: 환경 (dev, staging, prod)
-        tenant: SaaS 테넌트 ID (옵션)
-        pod_id: 현재 Pod ID
+        cluster_id: Unique cluster ID (required)
+        region: Region identifier (e.g. seoul, tokyo)
+        environment: Environment (dev, staging, prod)
+        tenant: SaaS tenant ID (optional)
+        pod_id: Current Pod ID
     """
 
     model_config = SettingsConfigDict(
@@ -86,19 +84,19 @@ class ClusterIdentity(BaseSettings):
 
     @property
     def namespace(self) -> str:
-        """Redis 키 네임스페이스 반환."""
-        # 우선순위: region > tenant > environment
+        """Return the Redis key namespace."""
+        # Precedence: region > tenant > environment
         return self.region or self.tenant or self.environment
 
     @property
     def full_prefix(self) -> str:
-        """완전한 Redis 키 프리픽스 반환."""
+        """Return the full Redis key prefix."""
         return f"baldur:{self.namespace}:"
 
     @property
     def trace_id_prefix(self) -> str:
-        """Trace ID용 클러스터 접두사."""
-        # 짧게: 리전 앞 3글자 + 환경 앞 1글자
+        """Cluster prefix for trace IDs."""
+        # Kept short: first 3 chars of region + first char of environment
         region_short = (self.region or "unk")[:3]
         env_short = self.environment[0] if self.environment else "u"
         return f"{region_short}{env_short}"
@@ -128,18 +126,18 @@ class ClusterIdentity(BaseSettings):
 
         errors = []
 
-        # 1. cluster_id 검증
+        # 1. cluster_id validation
         if not self.cluster_id or self.cluster_id in ("unknown", "default"):
             errors.append(f"BALDUR_CLUSTER_ID not set or invalid: '{self.cluster_id}'")
 
-        # 2. region 검증 (Phase 1 추가 - 필수!)
+        # 2. region validation (added in Phase 1 - required!)
         if not self.region:
             errors.append(
                 "BALDUR_NAMESPACE_REGION not set. "
                 "Cannot determine namespace - refusing to start."
             )
 
-        # 검증 실패 처리
+        # Handle validation failure
         if errors:
             error_msg = (
                 "[FATAL] ClusterIdentity validation failed:\n"
@@ -149,7 +147,7 @@ class ClusterIdentity(BaseSettings):
 
             if fail_fast:
                 logger.critical(error_msg)
-                sys.exit(1)  # Fail-Fast: 즉시 종료
+                sys.exit(1)  # Fail-Fast: terminate immediately
             else:
                 logger.error(
                     "running.quarantine_mode",

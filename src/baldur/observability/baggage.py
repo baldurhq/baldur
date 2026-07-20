@@ -30,12 +30,12 @@ import structlog
 
 logger = structlog.get_logger()
 
-# Baggage 키 접두사 — baldur 네임스페이스
+# Baggage key prefix — the baldur namespace
 BAGGAGE_PREFIX = "baldur"
 
-# ContextVar 매핑 — Baggage 키별 getter(읽기)와 contextvar(쓰기) 경로
-# 단일 소스로 관리하여 sync/restore 비대칭 방지
-# 지연 import로 순환 의존 방지
+# ContextVar mapping — per Baggage key, the getter (read) and contextvar
+# (write) paths. Kept as a single source to prevent sync/restore asymmetry.
+# Imported lazily to avoid circular dependencies.
 _CONTEXTVAR_BAGGAGE_MAP: dict[str, dict[str, str]] = {
     "cell_id": {
         "getter": "baldur.context.cell_context:get_current_cell_id",
@@ -50,12 +50,12 @@ _CONTEXTVAR_BAGGAGE_MAP: dict[str, dict[str, str]] = {
 
 def setup_baggage_propagation() -> None:
     """
-    W3C TraceContext + Baggage CompositePropagator 등록.
+    Register the W3C TraceContext + Baggage CompositePropagator.
 
-    이 함수 호출 후 RequestsInstrumentor가 inject()를 실행할 때
-    traceparent + baggage 헤더가 함께 전파된다.
+    After this function is called, the traceparent and baggage headers are
+    propagated together whenever RequestsInstrumentor runs inject().
 
-    호출 시점: initialize_opentelemetry() 성공 후
+    Call site: after initialize_opentelemetry() succeeds.
     """
     try:
         from opentelemetry import propagate
@@ -86,10 +86,11 @@ def setup_baggage_propagation() -> None:
 @cache
 def _resolve_import(path: str) -> Any:
     """
-    'module.path:attribute_name' 문자열에서 attribute를 동적 import하고 캐싱.
+    Dynamically import and cache the attribute named by a
+    'module.path:attribute_name' string.
 
-    순환 의존 방지를 위해 최초 호출 시에만 지연 import 실행.
-    이후 호출은 lru_cache에서 즉시 반환.
+    The lazy import runs only on the first call, avoiding circular
+    dependencies. Later calls return immediately from the cache.
     """
     module_path, attr_name = path.rsplit(":", 1)
     module = importlib.import_module(module_path)
@@ -122,20 +123,20 @@ def sync_contextvars_to_baggage() -> object | None:
                         f"{BAGGAGE_PREFIX}.{key}", str(value), context=ctx
                     )
             except Exception:
-                # 개별 ContextVar 실패가 전체 동기화를 중단하지 않음
+                # One failing ContextVar must not abort the whole sync
                 logger.debug("baggage.contextvar_sync_failed", key=key, exc_info=True)
 
         return context.attach(ctx)
     except ImportError:
-        # OTel 미설치 — no-op token 반환
+        # OTel not installed — return a no-op token
         return None
 
 
 def detach_baggage_token(token: object) -> None:
     """
-    sync_contextvars_to_baggage()가 반환한 token을 안전하게 해제.
+    Safely release the token returned by sync_contextvars_to_baggage().
 
-    OTel 미설치 환경(token=None)에서도 에러 없이 동작.
+    Works without error even where OTel is not installed (token=None).
     """
     if token is None:
         return
@@ -151,15 +152,15 @@ def detach_baggage_token(token: object) -> None:
 
 def restore_contextvars_from_baggage() -> None:
     """
-    수신된 OTel Baggage에서 ContextVar 값 복원.
+    Restore ContextVar values from the received OTel Baggage.
 
-    _CONTEXTVAR_BAGGAGE_MAP의 contextvar 경로를 사용하여
-    sync_contextvars_to_baggage()와 동일한 매핑에서 읽고 쓴다.
+    Uses the contextvar paths in _CONTEXTVAR_BAGGAGE_MAP, so it reads and
+    writes through the same mapping as sync_contextvars_to_baggage().
 
-    DjangoInstrumentor가 baggage HTTP 헤더를 OTel Context에 적재한 후
-    호출되어야 유효한 값을 읽을 수 있다.
+    Must be called after DjangoInstrumentor has loaded the baggage HTTP header
+    into the OTel context; otherwise there are no valid values to read.
 
-    Django BaggageSyncMiddleware 또는 Celery task_prerun에서 호출.
+    Called from the Django BaggageSyncMiddleware or from Celery task_prerun.
     """
     try:
         from opentelemetry import baggage

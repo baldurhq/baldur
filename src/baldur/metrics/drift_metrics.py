@@ -1,18 +1,18 @@
 """
 Drift Detection Metrics for Baldur System.
 
-이 모듈은 캐시, 계층형 저장소, 분산 복제 등에서 발생하는
-불일치(Drift)를 추적하기 위한 Prometheus 메트릭을 정의합니다.
+This module defines the Prometheus metrics used to track drift arising in
+caches, layered storage, distributed replication, and similar paths.
 
-메트릭 카테고리:
-- PoolCircuitBreaker: 커넥션 풀 서킷 브레이커 캐시 상태
-- PrecomputedCache: L1/L2 캐시 일관성 및 Drift 감지
-- EmergencyMode Cache: 비상 모드 캐시 상태
-- RateLimiter: Redis 상태 및 Fallback 모드
-- Config Cache: 설정 캐시 및 환경변수 변경 감지
-- WAL Sync: Write-Ahead Log 동기화 상태
-- ShadowLogger: L2 동기화 실패 추적
-- TTLCache: TTL 기반 캐시 만료/퇴거
+Metric categories:
+- PoolCircuitBreaker: connection-pool circuit breaker cache state
+- PrecomputedCache: L1/L2 cache consistency and drift detection
+- EmergencyMode Cache: emergency-mode cache state
+- RateLimiter: Redis state and fallback mode
+- Config Cache: config cache and environment-variable change detection
+- WAL Sync: Write-Ahead Log sync state
+- ShadowLogger: L2 sync failure tracking
+- TTLCache: TTL-based cache expiry/eviction
 """
 
 from __future__ import annotations
@@ -99,10 +99,10 @@ METRIC_PREFIX = "baldur"
 
 
 # =============================================================================
-# PoolCircuitBreaker Metrics - 커넥션 풀 서킷 브레이커 캐시 상태
+# PoolCircuitBreaker Metrics - connection-pool circuit breaker cache state
 # =============================================================================
 
-# PoolCircuitBreaker Stale Cache 메트릭
+# PoolCircuitBreaker stale-cache metrics
 pool_cb_cache_stale_total = _get_or_create_counter(
     f"{METRIC_PREFIX}_pool_cb_cache_stale_total",
     "Total stale cache events in PoolCircuitBreaker",
@@ -128,10 +128,10 @@ pool_cb_background_restarts_total = _get_or_create_counter(
 
 
 # =============================================================================
-# PrecomputedCache Metrics - L1/L2 캐시 일관성 및 Drift 감지
+# PrecomputedCache Metrics - L1/L2 cache consistency and drift detection
 # =============================================================================
 
-# PrecomputedCache Drift 메트릭
+# PrecomputedCache drift metrics
 cache_drift_detected_total = _get_or_create_counter(
     f"{METRIC_PREFIX}_cache_drift_detected_total",
     "Total cache drift detections between L1 and L2",
@@ -158,10 +158,10 @@ cache_refresh_total = _get_or_create_counter(
 
 
 # =============================================================================
-# EmergencyMode Cache Metrics - 비상 모드 캐시 상태
+# EmergencyMode Cache Metrics - emergency-mode cache state
 # =============================================================================
 
-# EmergencyMode Cache 메트릭
+# EmergencyMode cache metrics
 emergency_cache_stale_total = _get_or_create_counter(
     f"{METRIC_PREFIX}_emergency_cache_stale_total",
     "Number of times emergency mode cache became stale",
@@ -185,10 +185,10 @@ emergency_cache_load_total = _get_or_create_counter(
 
 
 # =============================================================================
-# RateLimiter Metrics - Redis 상태 및 Fallback 모드
+# RateLimiter Metrics - Redis state and fallback mode
 # =============================================================================
 
-# RateLimiter Redis Drift 메트릭
+# RateLimiter Redis drift metrics
 ratelimit_redis_unavailable_total = _get_or_create_counter(
     f"{METRIC_PREFIX}_ratelimit_redis_unavailable_total",
     "Number of times Redis was unavailable for rate limiting",
@@ -213,10 +213,10 @@ ratelimit_reconciliation_total = _get_or_create_counter(
 
 
 # =============================================================================
-# Config Cache Metrics - 설정 캐시 및 환경변수 변경 감지
+# Config Cache Metrics - config cache and environment-variable change detection
 # =============================================================================
 
-# Config lru_cache 메트릭
+# Config lru_cache metrics
 config_env_changed_total = _get_or_create_counter(
     f"{METRIC_PREFIX}_config_env_changed_total",
     "Number of environment variable changes detected",
@@ -243,10 +243,10 @@ config_cache_miss_total = _get_or_create_counter(
 
 
 # =============================================================================
-# WAL Sync Metrics - Write-Ahead Log 동기화 상태
+# WAL Sync Metrics - Write-Ahead Log sync state
 # =============================================================================
 
-# WAL 동기화 Drift 메트릭
+# WAL sync drift metrics
 wal_entries_written_total = _get_or_create_counter(
     f"{METRIC_PREFIX}_wal_entries_written_total",
     "Total WAL entries written",
@@ -310,10 +310,10 @@ wal_sync_cursor_stalled = _get_or_create_gauge(
 
 
 # =============================================================================
-# ShadowLogger Metrics - L2 동기화 실패 추적
+# ShadowLogger Metrics - L2 sync failure tracking
 # =============================================================================
 
-# ShadowLogger L2 동기화 Drift 메트릭
+# ShadowLogger L2 sync drift metrics
 shadow_log_sync_failures_total = _get_or_create_counter(
     f"{METRIC_PREFIX}_shadow_log_sync_failures_total",
     "Total L2 sync failures recorded in shadow log",
@@ -362,10 +362,10 @@ cache_operation_errors_total = _get_or_create_counter(
 
 
 # =============================================================================
-# TTLCache Metrics - TTL 기반 캐시 만료/퇴거
+# TTLCache Metrics - TTL-based cache expiry/eviction
 # =============================================================================
 
-# TTLCache Strategy Drift 메트릭
+# TTLCache strategy drift metrics
 cache_ttl_expired_total = _get_or_create_counter(
     f"{METRIC_PREFIX}_cache_ttl_expired_total",
     "Total cache entries expired by TTL",

@@ -1,16 +1,16 @@
 """
-Stuck Detector - Zero-variance 기반 Stuck 감지.
+Stuck Detector - zero-variance based stuck detection.
 
-메트릭의 분산이 0에 가깝고 에러율이 높으면 시스템이
-논리적으로 멈춘(Stuck) 것으로 판단합니다.
+When a metric's variance stays near zero while the error rate is high, the
+system is considered logically stuck.
 
-Zero-variance Stuck 조건:
-- 특정 메트릭 X가 일정 시간 동안 σ²(X) ≈ 0 (변화량 없음)
-- 동시에 에러율이 임계치 이상
+Zero-variance stuck condition:
+- A metric X holds σ²(X) ≈ 0 over a period (no movement)
+- and the error rate is at or above the threshold
 
-예시:
-- DLQ pending_count가 계속 1000에서 변하지 않고 처리 실패 중
-- Circuit Breaker가 OPEN 상태에서 계속 고정
+Examples:
+- DLQ pending_count pinned at 1000 while processing keeps failing
+- A circuit breaker held in the OPEN state
 """
 
 from __future__ import annotations
@@ -28,39 +28,39 @@ logger = structlog.get_logger()
 
 @dataclass
 class MetricSample:
-    """메트릭 샘플."""
+    """A metric sample."""
 
     value: float
-    """메트릭 값."""
+    """Metric value."""
 
     timestamp: float
-    """수집 시각 (Unix timestamp)."""
+    """Collection time (Unix timestamp)."""
 
     error: bool = False
-    """이 샘플이 에러 상태인지."""
+    """Whether this sample was in an error state."""
 
 
 @dataclass
 class MetricWindow:
     """
-    슬라이딩 윈도우 메트릭 컨테이너.
+    Sliding-window metric container.
 
-    최근 N개의 샘플을 유지하며 분산과 에러율을 계산합니다.
+    Retains the most recent N samples and computes variance and error rate.
     """
 
     samples: deque[MetricSample] = field(default_factory=deque)
-    """샘플 큐."""
+    """Sample queue."""
 
     max_size: int = 20
-    """최대 샘플 수."""
+    """Maximum number of samples."""
 
     def add(self, value: float, error: bool = False) -> None:
         """
-        샘플 추가.
+        Add a sample.
 
         Args:
-            value: 메트릭 값
-            error: 에러 상태 여부
+            value: metric value
+            error: whether the sample is in an error state
         """
         self.samples.append(
             MetricSample(value=value, timestamp=time.time(), error=error)
@@ -70,13 +70,13 @@ class MetricWindow:
 
     def variance(self) -> float:
         """
-        분산 계산.
+        Compute the variance.
 
         Returns:
-            샘플들의 분산 (샘플 부족 시 무한대)
+            Variance of the samples (infinity when there are too few)
         """
         if len(self.samples) < 2:
-            return float("inf")  # 샘플 부족 시 무한대 반환
+            return float("inf")  # too few samples: return infinity
 
         values = [s.value for s in self.samples]
         n = len(values)
@@ -85,10 +85,10 @@ class MetricWindow:
 
     def error_rate(self) -> float:
         """
-        에러율 계산.
+        Compute the error rate.
 
         Returns:
-            에러 샘플 비율 (0.0 ~ 1.0)
+            Fraction of error samples (0.0 ~ 1.0)
         """
         if not self.samples:
             return 0.0
@@ -97,10 +97,10 @@ class MetricWindow:
 
     def mean(self) -> float:
         """
-        평균 계산.
+        Compute the mean.
 
         Returns:
-            샘플들의 평균 (샘플 없으면 0)
+            Mean of the samples (0 when there are none)
         """
         if not self.samples:
             return 0.0
@@ -112,74 +112,74 @@ class MetricWindow:
         error_rate_threshold: float = 0.5,
     ) -> bool:
         """
-        Stuck 여부 판단.
+        Decide whether the window is stuck.
 
-        조건: 분산 ≈ 0 AND 에러율 > 임계치
+        Condition: variance ≈ 0 AND error rate > threshold
 
         Args:
-            variance_threshold: 분산 임계치 (기본 0.001)
-            error_rate_threshold: 에러율 임계치 (기본 50%)
+            variance_threshold: variance threshold (default 0.001)
+            error_rate_threshold: error-rate threshold (default 50%)
 
         Returns:
-            Stuck 여부
+            Whether the window is stuck
         """
         if len(self.samples) < 5:
-            return False  # 최소 샘플 필요
+            return False  # minimum sample count not reached
 
         var = self.variance()
         err_rate = self.error_rate()
 
-        # 분산이 매우 낮고 에러율이 높으면 Stuck
+        # Very low variance with a high error rate means stuck
         return var < variance_threshold and err_rate > error_rate_threshold
 
     def clear(self) -> None:
-        """샘플 초기화."""
+        """Clear the samples."""
         self.samples.clear()
 
 
 @dataclass
 class StuckDetectionResult:
-    """Stuck 감지 결과."""
+    """Stuck detection result."""
 
     component: str
-    """컴포넌트 이름."""
+    """Component name."""
 
     is_stuck: bool
-    """Stuck 여부."""
+    """Whether the component is stuck."""
 
     variance: float
-    """현재 분산."""
+    """Current variance."""
 
     error_rate: float
-    """현재 에러율."""
+    """Current error rate."""
 
     sample_count: int
-    """샘플 수."""
+    """Number of samples."""
 
     duration_seconds: float
-    """첫 샘플 이후 경과 시간."""
+    """Elapsed time since the first sample."""
 
     mean_value: float = 0.0
-    """평균값."""
+    """Mean value."""
 
     details: dict[str, Any] = field(default_factory=dict)
-    """추가 상세 정보."""
+    """Additional details."""
 
 
 class StuckDetector:
     """
-    Stuck 감지기.
+    Stuck detector.
 
-    각 컴포넌트의 메트릭을 추적하고 Zero-variance 상태를 감지합니다.
+    Tracks each component's metric and detects the zero-variance state.
 
-    사용 예시:
+    Example:
         detector = StuckDetector()
 
-        # 메트릭 기록 (주기적으로)
+        # Record metrics (periodically)
         detector.record("dlq", pending_count=100, error=False)
         detector.record("dlq", pending_count=100, error=True)
 
-        # Stuck 확인
+        # Check for stuck
         result = detector.check("dlq")
         if result.is_stuck:
             trigger_recovery()
@@ -192,12 +192,12 @@ class StuckDetector:
         error_rate_threshold: float = 0.5,
     ):
         """
-        초기화.
+        Initialize.
 
         Args:
-            window_size: 샘플 윈도우 크기
-            variance_threshold: Stuck 판단 분산 임계치
-            error_rate_threshold: Stuck 판단 에러율 임계치
+            window_size: sample window size
+            variance_threshold: variance threshold for the stuck verdict
+            error_rate_threshold: error-rate threshold for the stuck verdict
         """
         self._window_size = window_size
         self._variance_threshold = variance_threshold
@@ -214,12 +214,12 @@ class StuckDetector:
         error: bool = False,
     ) -> None:
         """
-        메트릭 기록.
+        Record a metric.
 
         Args:
-            component: 컴포넌트 이름
-            value: 메트릭 값 (예: pending_count, queue_size)
-            error: 이 샘플이 에러 상태인지
+            component: component name
+            value: metric value (e.g. pending_count, queue_size)
+            error: whether the sample is in an error state
         """
         with self._lock:
             if component not in self._windows:
@@ -233,10 +233,10 @@ class StuckDetector:
 
     def check(self, component: str) -> StuckDetectionResult:
         """
-        Stuck 여부 확인.
+        Check whether a component is stuck.
 
         Args:
-            component: 컴포넌트 이름
+            component: component name
 
         Returns:
             StuckDetectionResult
@@ -294,30 +294,30 @@ class StuckDetector:
 
     def check_all(self) -> dict[str, StuckDetectionResult]:
         """
-        모든 컴포넌트 Stuck 확인.
+        Check every component for stuck.
 
         Returns:
-            컴포넌트별 Stuck 감지 결과
+            Stuck detection result per component
         """
         with self._lock:
             return {comp: self.check(comp) for comp in self._windows}
 
     def get_stuck_components(self) -> list[str]:
         """
-        Stuck 상태인 컴포넌트 목록 반환.
+        Return the components currently stuck.
 
         Returns:
-            Stuck 컴포넌트 이름 목록
+            Names of the stuck components
         """
         results = self.check_all()
         return [comp for comp, result in results.items() if result.is_stuck]
 
     def clear(self, component: str | None = None) -> None:
         """
-        메트릭 초기화.
+        Clear recorded metrics.
 
         Args:
-            component: 특정 컴포넌트만 초기화 (None이면 전체)
+            component: clear only this component (all components when None)
         """
         with self._lock:
             if component:
@@ -329,17 +329,17 @@ class StuckDetector:
 
     def get_component_names(self) -> list[str]:
         """
-        등록된 컴포넌트 이름 목록 반환.
+        Return the registered component names.
 
         Returns:
-            컴포넌트 이름 목록
+            Component names
         """
         with self._lock:
             return list(self._windows.keys())
 
 
 # =============================================================================
-# 싱글톤
+# Singleton
 # =============================================================================
 
 from baldur.utils.singleton import make_singleton_factory

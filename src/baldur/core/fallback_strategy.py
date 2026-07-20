@@ -27,12 +27,12 @@ T = TypeVar("T")
 class FallbackMode(str, Enum):
     """Fallback behavior modes"""
 
-    FAIL_FAST = "fail_fast"  # 즉시 실패
-    USE_CACHE = "use_cache"  # 캐시된 값 사용
-    USE_DEFAULT = "use_default"  # 기본값 사용
-    DEGRADE_GRACEFULLY = "degrade"  # 기능 축소
-    RETRY_ALTERNATIVE = "retry_alt"  # 대체 경로 시도
-    HEDGE = "hedge"  # 병렬 헷징으로 인한 대체 응답
+    FAIL_FAST = "fail_fast"  # Fail immediately
+    USE_CACHE = "use_cache"  # Use the cached value
+    USE_DEFAULT = "use_default"  # Use the default value
+    DEGRADE_GRACEFULLY = "degrade"  # Reduced functionality
+    RETRY_ALTERNATIVE = "retry_alt"  # Try an alternative path
+    HEDGE = "hedge"  # Alternative response from parallel hedging
 
 
 @dataclass
@@ -164,7 +164,7 @@ class PartitionAwareFallback(FallbackStrategy):
         fallback_fn: Callable[[], T] | None,
         default_value: T | None,
     ) -> FallbackResult[T]:
-        # 1. 명시적 fallback 함수가 있으면 시도
+        # 1. Try the explicit fallback function if one was given
         if fallback_fn:
             try:
                 result = fallback_fn()
@@ -180,7 +180,7 @@ class PartitionAwareFallback(FallbackStrategy):
                     error=e,
                 )
 
-        # 2. 캐시 사용 불가 + DB 가용 → DB fallback
+        # 2. Cache unavailable + DB available -> DB fallback
         if (
             not self._partition_state.cache_available
             and self._partition_state.db_available
@@ -200,7 +200,7 @@ class PartitionAwareFallback(FallbackStrategy):
                     error=e,
                 )
 
-        # 3. DB 사용 불가 + 캐시 가용 → 캐시 fallback
+        # 3. DB unavailable + cache available -> cache fallback
         if (
             not self._partition_state.db_available
             and self._partition_state.cache_available
@@ -220,7 +220,7 @@ class PartitionAwareFallback(FallbackStrategy):
                     error=e,
                 )
 
-        # 4. 기본값 반환
+        # 4. Return the default value
         if default_value is not None:
             logger.info("fallback_strategy.default_value_used")
             return FallbackResult(
@@ -230,7 +230,7 @@ class PartitionAwareFallback(FallbackStrategy):
                 original_error=str(error),
             )
 
-        # 5. 모든 fallback 실패
+        # 5. All fallbacks failed
         logger.error(
             "all.fallback_strategies_failed",
             error=error,

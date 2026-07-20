@@ -1,18 +1,20 @@
 """
-FullStopGuard — Emergency LEVEL_3 + DB CB OPEN + Error Budget 소진 3중 조건 Guard.
+FullStopGuard — triple-condition Guard: Emergency LEVEL_3 + DB CB OPEN + error
+budget exhausted.
 
-AdaptiveThrottle.check_full_stop_conditions()에서 하드코딩된
-CircuitBreakerService, ErrorBudgetService, EmergencyMode 직접 참조를
-생성자 주입 기반 Guard로 분리한다.
+Extracts the direct CircuitBreakerService / ErrorBudgetService / EmergencyMode
+references hardcoded in AdaptiveThrottle.check_full_stop_conditions() into a
+constructor-injected Guard.
 
-3중 조건이 모두 충족되어야 거부되므로 단일 조건 실패 시에도
-다른 Guard(ThrottleGovernanceGuard 등)가 개별적으로 차단할 수 있다.
+All three conditions must hold to reject, so when only one holds another Guard
+(ThrottleGovernanceGuard, etc.) can still block on its own.
 
-Fail-Open 원칙:
-    각 provider가 import/호출 실패 시 조건 미충족으로 간주 (통과 허용).
-    create_default_full_stop_guard() 팩토리 함수로 기본 provider를 자동 구성.
+Fail-open principle:
+    A provider that fails to import or call is treated as an unmet condition
+    (the call is allowed through). The create_default_full_stop_guard() factory
+    wires the default providers automatically.
 
-사용 예시::
+Usage::
 
     from baldur.resilience.policies.guards.full_stop import (
         create_default_full_stop_guard,
@@ -36,15 +38,15 @@ logger = structlog.get_logger()
 
 class FullStopGuard:
     """
-    Full Stop 3중 조건 Guard.
+    Full Stop triple-condition Guard.
 
-    3개 조건이 모두 참일 때만 거부한다:
-    1. Emergency LEVEL_3 이상
-    2. 핵심 DB Circuit Breaker OPEN
-    3. Error Budget 완전 소진 (0% 이하)
+    Rejects only when all three conditions hold:
+    1. Emergency LEVEL_3 or above
+    2. A core DB Circuit Breaker is OPEN
+    3. Error Budget fully exhausted (at or below 0%)
 
-    각 조건은 Callable provider로 주입받으며,
-    create_default_full_stop_guard()에서 lazy import 기반으로 자동 구성된다.
+    Each condition is injected as a Callable provider;
+    create_default_full_stop_guard() wires them automatically via lazy import.
     """
 
     def __init__(
@@ -54,12 +56,13 @@ class FullStopGuard:
         budget_provider: Callable[[], float],
     ) -> None:
         """
-        생성자 주입으로 외부 시스템 의존성을 Callable로 추상화.
+        Abstract external system dependencies as injected Callables.
 
         Args:
-            emergency_provider: Emergency Level 반환 (0=NORMAL, 3=CRITICAL)
-            cb_state_provider: 서비스명 → CB 상태 ("open"/"closed") 반환
-            budget_provider: Error Budget 잔여 퍼센트 반환
+            emergency_provider: returns the Emergency Level (0=NORMAL,
+                3=CRITICAL)
+            cb_state_provider: service name → CB state ("open"/"closed")
+            budget_provider: returns the remaining Error Budget percent
         """
         self._get_emergency_level = emergency_provider
         self._get_cb_state = cb_state_provider
@@ -67,19 +70,19 @@ class FullStopGuard:
 
     @property
     def name(self) -> str:
-        """Guard 식별자."""
+        """Guard identifier."""
         return "full_stop"
 
     def check(self, context: PolicyContext | None = None) -> GuardResult:
         """
-        Full Stop 3중 조건 체크.
+        Check the Full Stop triple condition.
 
-        3개 조건이 모두 충족될 때만 거부한다.
-        개별 조건 실패 시 통과 (다른 Guard가 개별 차단 담당).
+        Rejects only when all three conditions hold. When any single condition
+        is unmet the call passes (another Guard owns that individual block).
 
         Returns:
-            GuardResult(allowed=False) — 3중 조건 모두 충족 시
-            GuardResult(allowed=True) — 그 외
+            GuardResult(allowed=False) — all three conditions hold
+            GuardResult(allowed=True) — otherwise
         """
         is_level_3 = self._get_emergency_level() >= 3
         db_cb_open = self._get_cb_state("database") == "open"
@@ -101,14 +104,14 @@ class FullStopGuard:
 
 def create_default_full_stop_guard() -> FullStopGuard:  # noqa: C901
     """
-    기본 FullStopGuard 생성.
+    Build the default FullStopGuard.
 
-    CircuitBreakerService, ErrorBudgetService, EmergencyMode를
-    lazy import하여 provider를 자동 구성한다.
-    각 provider가 import 실패 시 Fail-Open (조건 미충족 = 통과 허용).
+    Lazily imports CircuitBreakerService, ErrorBudgetService, and EmergencyMode
+    to wire the providers automatically. A provider that fails to import is
+    fail-open (condition unmet = call allowed through).
 
     Returns:
-        FullStopGuard 인스턴스
+        a FullStopGuard instance
     """
 
     def _get_emergency_level() -> int:
@@ -124,7 +127,7 @@ def create_default_full_stop_guard() -> FullStopGuard:  # noqa: C901
             return 0
 
     def _get_cb_state(service: str) -> str:
-        """핵심 DB Circuit Breaker 상태 조회 (Fail-Open → "closed")."""
+        """Core DB Circuit Breaker state lookup (fail-open: "closed")."""
         try:
             from baldur.services.circuit_breaker import (
                 get_circuit_breaker_service,

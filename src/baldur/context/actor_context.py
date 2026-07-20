@@ -1,18 +1,18 @@
 """
-Actor Context - 누가 이 작업을 수행했는지 자동 추적
+Actor Context - automatically tracks who performed an action
 
-문제:
-- AuditEntry에 actor_id를 수동으로 넣어야 함
-- 잊어버리면 누가 설정을 변경했는지 추적 불가
-- 캐시 문제로 설정이 안 바뀐 채 남아있으면 대형 사고
+Problem:
+- actor_id has to be filled into AuditEntry by hand
+- Forget it and there is no way to trace who changed a setting
+- A cache issue leaving a setting unchanged becomes a major incident
 
-해결:
-- ActorContext로 현재 사용자를 thread-local하게 추적
-- Django middleware에서 자동으로 설정
-- Admin 페이지, API 호출 모두 커버
+Solution:
+- ActorContext tracks the current user thread-locally
+- Set automatically by Django middleware
+- Covers both the admin pages and API calls
 
 Usage:
-    # Django middleware에서 자동 설정
+    # Set automatically from Django middleware
     class ActorMiddleware:
         def __call__(self, request):
             with ActorContext.set_actor(
@@ -22,11 +22,11 @@ Usage:
             ):
                 return self.get_response(request)
 
-    # 어디서든 현재 actor 조회
+    # Read the current actor from anywhere
     actor = ActorContext.get_current()
     print(f"Current user: {actor.actor_id}")
 
-    # Celery task에서 명시적 설정
+    # Explicit setting inside a Celery task
     @task
     def my_task(actor_id: str):
         with ActorContext.set_actor(actor_id=actor_id, actor_type="scheduler"):
@@ -67,7 +67,7 @@ _current_actor: contextvars.ContextVar[Actor | None] = contextvars.ContextVar(
 )
 
 
-# RBAC 역할 우선순위 상수
+# RBAC role priority constants
 RBAC_ROLE_PRIORITY: dict[str, int] = {
     "baldur_admin": 3,
     "baldur_operator": 2,
@@ -78,17 +78,17 @@ RBAC_ROLE_PRIORITY: dict[str, int] = {
 @dataclass
 class Actor(SerializableMixin):
     """
-    현재 작업을 수행하는 주체 정보.
+    Information about the principal performing the current action.
 
     Attributes:
-        actor_id: 사용자 식별자 (email, username, user_id 등)
-        actor_type: 주체 유형 (user, system, scheduler, api_client 등)
-        source: 요청 출처 (web, api, celery, management_command 등)
-        ip_address: 요청 IP (보안 감사용)
-        session_id: 세션 ID (같은 세션 내 작업 연결)
-        set_at: Actor가 설정된 시점
-        metadata: 추가 정보 (user-agent, request_id 등)
-        roles: RBAC 역할 목록 (RBAC-Audit 연동)
+        actor_id: User identifier (email, username, user_id, etc.)
+        actor_type: Principal type (user, system, scheduler, api_client, etc.)
+        source: Request origin (web, api, celery, management_command, etc.)
+        ip_address: Request IP (for security auditing)
+        session_id: Session ID (links actions within the same session)
+        set_at: When the actor was set
+        metadata: Extra information (user-agent, request_id, etc.)
+        roles: RBAC role list (RBAC-audit integration)
     """
 
     actor_id: str
@@ -102,7 +102,7 @@ class Actor(SerializableMixin):
 
     @property
     def highest_role(self) -> str:
-        """RBAC 역할 중 가장 높은 권한 반환."""
+        """Return the highest-privilege RBAC role."""
         if not self.roles:
             return self.actor_type  # fallback to actor_type
         return max(
@@ -191,16 +191,17 @@ class ActorContext:
 
         Extracts user info, IP address, session ID, and RBAC roles automatically.
 
-        RBAC: 역할도 함께 추출하여 actor_type에 가장 높은 권한을 설정.
+        RBAC: roles are extracted too, and actor_type is set to the highest
+        privilege among them.
         """
         # Extract user info
         if hasattr(request, "user") and request.user.is_authenticated:
             actor_id = getattr(request.user, "email", None) or str(request.user.pk)
 
-            # RBAC 역할 추출
+            # Extract RBAC roles
             roles = cls._extract_baldur_roles(request.user)
 
-            # actor_type을 가장 높은 RBAC 역할로 설정 (있는 경우)
+            # Set actor_type to the highest RBAC role (when one exists)
             actor_type = cls._get_highest_role(roles) if roles else "user"
         else:
             actor_id = "anonymous"
@@ -233,15 +234,15 @@ class ActorContext:
     @classmethod
     def _extract_baldur_roles(cls, user: Any) -> list[str]:
         """
-        사용자의 baldur RBAC 그룹 추출.
+        Extract the user's baldur RBAC groups.
 
-        Django User의 groups에서 baldur_ 접두사 그룹만 필터링.
+        Filters the Django User's groups down to those with the baldur_ prefix.
 
         Args:
-            user: Django User 객체
+            user: Django User object
 
         Returns:
-            baldur_ 접두사를 가진 그룹 이름 리스트
+            List of group names carrying the baldur_ prefix
         """
         try:
             if hasattr(user, "groups"):
@@ -260,15 +261,15 @@ class ActorContext:
     @classmethod
     def _get_highest_role(cls, roles: list[str]) -> str:
         """
-        RBAC 역할 중 가장 높은 권한 반환.
+        Return the highest-privilege RBAC role.
 
-        baldur_admin > baldur_operator > baldur_viewer 순.
+        Ordering: baldur_admin > baldur_operator > baldur_viewer.
 
         Args:
-            roles: RBAC 역할 리스트
+            roles: RBAC role list
 
         Returns:
-            가장 높은 권한의 역할 이름, 없으면 'user'
+            Name of the highest-privilege role, or 'user' when there is none
         """
         if not roles:
             return "user"
@@ -282,8 +283,8 @@ class ActorContext:
     def _get_client_ip(cls, request: Any) -> str | None:
         """Extract client IP from Django request.
 
-        Fail-Open: IP 추출 실패 시 None 반환하여 Actor 생성은 계속 진행.
-        Actor.ip_address는 Optional[str]이므로 None이 안전한 기본값.
+        Fail-open: on extraction failure it returns None so Actor creation still
+        proceeds. Actor.ip_address is Optional[str], so None is a safe default.
         """
         try:
             from baldur.utils.network import extract_client_ip
@@ -415,7 +416,7 @@ def get_audit_actor_info() -> dict[str, Any]:
 
     Returns dict with actor_id, actor_type, actor_roles that can be unpacked into AuditEntry.
 
-    actor_roles도 포함하여 RBAC-Audit 연동 지원.
+    Includes actor_roles as well, to support RBAC-audit integration.
 
     Usage:
         entry = AuditEntry(
@@ -433,7 +434,7 @@ def get_audit_actor_info() -> dict[str, Any]:
 
 
 # =============================================================================
-# Celery Task 지원
+# Celery task support
 # =============================================================================
 
 
@@ -441,7 +442,7 @@ def get_actor_for_celery() -> dict[str, Any]:
     """
     Get current actor info for passing to Celery task.
 
-    roles 정보도 함께 전달하여 Celery Task에서 RBAC 역할 유지.
+    Passes the roles along as well, so RBAC roles survive into the Celery task.
 
     Usage (in view/api):
         from baldur.context import get_actor_for_celery
@@ -466,7 +467,7 @@ def get_actor_for_celery() -> dict[str, Any]:
         "ip_address": actor.ip_address,
         "session_id": actor.session_id,
         "original_set_at": actor.set_at.isoformat(),
-        "roles": actor.roles,  # RBAC 역할 전달
+        "roles": actor.roles,  # propagate RBAC roles
     }
 
 
@@ -477,7 +478,7 @@ def restore_actor_from_celery(
     """
     Restore actor context in Celery task from passed info.
 
-    roles 정보도 함께 복원하여 RBAC 역할 유지.
+    Restores the roles as well, so RBAC roles are preserved.
 
     Usage:
         @app.task
@@ -499,14 +500,14 @@ def restore_actor_from_celery(
         source=actor_info.get("source", "celery"),
         ip_address=actor_info.get("ip_address"),
         session_id=actor_info.get("session_id"),
-        roles=actor_info.get("roles", []),  # RBAC 역할 복원
+        roles=actor_info.get("roles", []),  # restore RBAC roles
         original_request_time=actor_info.get("original_set_at"),
     ) as actor:
         yield actor
 
 
 # =============================================================================
-# Management Command 지원
+# Management command support
 # =============================================================================
 
 

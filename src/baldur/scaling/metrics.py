@@ -1,8 +1,8 @@
 """
-Prometheus 메트릭 노출.
+Prometheus metric exposure.
 
-Backpressure 관련 메트릭을 Prometheus 형식으로 노출합니다.
-prometheus_client 라이브러리가 없으면 no-op으로 동작합니다.
+Exposes backpressure-related metrics in Prometheus format.
+Degrades to a no-op when the prometheus_client library is absent.
 """
 
 from __future__ import annotations
@@ -15,21 +15,21 @@ from baldur.scaling.config import BackpressureSettings, get_backpressure_setting
 
 logger = structlog.get_logger()
 
-# prometheus_client가 있으면 사용
+# Use prometheus_client when it is available
 HAS_PROMETHEUS = importlib.util.find_spec("prometheus_client") is not None
 
 
 class BackpressureMetrics:
     """
-    Backpressure Prometheus 메트릭.
+    Backpressure Prometheus metrics.
 
-    메트릭:
-    - baldur_queue_depth: 현재 큐 깊이
-    - baldur_processing_rate: 처리율 (항목/초)
-    - baldur_backpressure_level: Backpressure 레벨 (0-4)
-    - baldur_processed_total: 처리된 총 항목 수
-    - baldur_dropped_total: 버려진 총 항목 수
-    - baldur_processing_duration_seconds: 처리 시간 히스토그램
+    Metrics:
+    - baldur_queue_depth: current queue depth
+    - baldur_processing_rate: processing rate (items/second)
+    - baldur_backpressure_level: backpressure level (0-4)
+    - baldur_processed_total: total items processed
+    - baldur_dropped_total: total items dropped
+    - baldur_processing_duration_seconds: processing duration histogram
     """
 
     def __init__(
@@ -38,7 +38,7 @@ class BackpressureMetrics:
     ):
         """
         Args:
-            settings: Backpressure 설정
+            settings: Backpressure settings
         """
         self._settings = settings or get_backpressure_settings()
         self._prefix = self._settings.metrics_prefix
@@ -106,43 +106,43 @@ class BackpressureMetrics:
         )
 
     def set_queue_depth(self, queue_name: str, depth: int) -> None:
-        """큐 깊이 설정."""
+        """Set the queue depth."""
         if HAS_PROMETHEUS and self._settings.metrics_enabled:
             self.queue_depth.labels(queue_name=queue_name).set(depth)
 
     def set_processing_rate(self, component: str, rate: float) -> None:
-        """처리율 설정."""
+        """Set the processing rate."""
         if HAS_PROMETHEUS and self._settings.metrics_enabled:
             self.processing_rate.labels(component=component).set(rate)
 
     def set_backpressure_level(self, component: str, level: int) -> None:
         """
-        Backpressure 레벨 설정.
+        Set the backpressure level.
 
         Args:
-            component: 컴포넌트 이름
-            level: 레벨 값 (0=NONE, 1=LOW, 2=MEDIUM, 3=HIGH, 4=CRITICAL)
+            component: Component name
+            level: Level value (0=NONE, 1=LOW, 2=MEDIUM, 3=HIGH, 4=CRITICAL)
         """
         if HAS_PROMETHEUS and self._settings.metrics_enabled:
             self.backpressure_level.labels(component=component).set(level)
 
     def inc_processed(self, component: str, status: str = "success") -> None:
-        """처리 카운터 증가."""
+        """Increment the processed counter."""
         if HAS_PROMETHEUS and self._settings.metrics_enabled:
             self.processed_total.labels(component=component, status=status).inc()
 
     def inc_dropped(self, component: str, reason: str = "backpressure") -> None:
-        """드롭 카운터 증가."""
+        """Increment the dropped counter."""
         if HAS_PROMETHEUS and self._settings.metrics_enabled:
             self.dropped_total.labels(component=component, reason=reason).inc()
 
     def inc_dropped_by_tier(self, tier: str) -> None:
-        """Tier별 거부 카운터 증가 (Starvation 감지용)."""
+        """Increment the per-tier rejection counter (for starvation detection)."""
         if HAS_PROMETHEUS and self._settings.metrics_enabled:
             self.dropped_by_tier_total.labels(tier=tier).inc()
 
     def inc_processed_by_tier(self, tier: str) -> None:
-        """Tier별 처리 카운터 증가 (Starvation Alert 분모용)."""
+        """Increment the per-tier processed counter (starvation-alert denominator)."""
         if HAS_PROMETHEUS and self._settings.metrics_enabled:
             self.processed_by_tier_total.labels(tier=tier).inc()
 
@@ -153,12 +153,12 @@ class BackpressureMetrics:
         duration: float,
     ) -> None:
         """
-        처리 시간 기록.
+        Record the processing duration.
 
         Args:
-            component: 컴포넌트 이름
-            operation: 작업 이름
-            duration: 소요 시간 (초)
+            component: Component name
+            operation: Operation name
+            duration: Elapsed time (seconds)
         """
         if HAS_PROMETHEUS and self._settings.metrics_enabled:
             self.processing_duration.labels(

@@ -8,11 +8,12 @@ Provides thread-safe, async-safe context tracking for:
 - Causation context (cascade event causality tracking)
 
 Failure Protection:
-- warn_if_untracked(): 추적 안 된 민감 작업 경고
-- require_actor_for_action(): 추적 필수 작업에서 강제
-- get_actor_for_celery() / restore_actor_from_celery(): Celery task 지원
-- set_management_command_actor(): Management command 지원
-- get_causation_for_celery() / restore_causation_from_celery(): Cascade 인과관계 전파
+- warn_if_untracked(): warns on untracked sensitive operations
+- require_actor_for_action(): enforces tracking where it is mandatory
+- get_actor_for_celery() / restore_actor_from_celery(): Celery task support
+- set_management_command_actor(): management command support
+- get_causation_for_celery() / restore_causation_from_celery(): cascade
+  causality propagation
 
 Status: Internal
 """
@@ -30,7 +31,7 @@ from baldur.context.actor_context import (
     set_management_command_actor,
     warn_if_untracked,
 )
-from baldur.context.causation_context import (  # X-Test Causation ID 프리픽스 관련
+from baldur.context.causation_context import (  # X-Test causation ID prefix helpers
     CELERY_HEADER_CASCADE_ID,
     CELERY_HEADER_CHAIN_DEPTH,
     CELERY_HEADER_NAMESPACE,
@@ -75,7 +76,7 @@ __all__ = [
     "CELERY_HEADER_PARENT_EVENT",
     "CELERY_HEADER_CHAIN_DEPTH",
     "CELERY_HEADER_NAMESPACE",
-    # X-Test Causation ID 프리픽스 관련
+    # X-Test causation ID prefix helpers
     "XTEST_CAUSATION_PREFIX",
     "is_xtest_id",
     "normalize_causation_id",

@@ -45,10 +45,10 @@ class TLSErrorType(str, Enum):
 class TLSErrorSeverity(str, Enum):
     """Severity level for TLS errors"""
 
-    CRITICAL = "critical"  # 즉시 알림 필요 (인증서 만료)
-    HIGH = "high"  # 조속한 조치 필요
-    MEDIUM = "medium"  # 모니터링 필요
-    LOW = "low"  # 일시적, 재시도로 해결 가능
+    CRITICAL = "critical"  # Immediate alert needed (certificate expired)
+    HIGH = "high"  # Prompt action needed
+    MEDIUM = "medium"  # Monitoring needed
+    LOW = "low"  # Transient, resolvable by retry
 
 
 @dataclass

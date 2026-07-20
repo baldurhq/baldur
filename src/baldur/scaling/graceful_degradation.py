@@ -1,8 +1,9 @@
 """
-Graceful Degradation - 단계별 기능 축소.
+Graceful Degradation - staged feature reduction.
 
-과부하 시 비필수 기능부터 순차적으로 비활성화합니다.
-Backpressure 레벨에 따라 자동으로 기능을 활성화/비활성화합니다.
+Disables non-essential features one step at a time under overload.
+Features are enabled/disabled automatically according to the backpressure
+level.
 """
 
 from __future__ import annotations
@@ -24,76 +25,77 @@ logger = structlog.get_logger()
 
 class FeaturePriority(IntEnum):
     """
-    기능 우선순위.
+    Feature priority.
 
-    값이 낮을수록 높은 우선순위 (비활성화 대상에서 제외됨).
+    Lower value = higher priority (excluded from disabling).
     """
 
-    CRITICAL = 0  # 항상 유지 (핵심 기능)
-    HIGH = 1  # 높음 (DLQ 처리 등)
-    MEDIUM = 2  # 중간 (알림)
-    LOW = 3  # 낮음 (로깅, 통계)
-    OPTIONAL = 4  # 선택 (디버그, 추적)
+    CRITICAL = 0  # always kept (core functionality)
+    HIGH = 1  # high (DLQ processing, etc.)
+    MEDIUM = 2  # medium (notifications)
+    LOW = 3  # low (logging, statistics)
+    OPTIONAL = 4  # optional (debugging, tracing)
 
 
 @dataclass
 class Feature:
-    """기능 정의."""
+    """Feature definition."""
 
     name: str
-    """기능 이름 (고유 식별자)."""
+    """Feature name (unique identifier)."""
 
     priority: FeaturePriority
-    """우선순위."""
+    """Priority."""
 
     enabled: bool = True
-    """현재 활성화 상태."""
+    """Current enabled state."""
 
     on_disable: Callable[[], None] | None = None
-    """비활성화 시 호출될 콜백."""
+    """Callback invoked on disable."""
 
     on_enable: Callable[[], None] | None = None
-    """활성화 시 호출될 콜백."""
+    """Callback invoked on enable."""
 
 
 class GracefulDegradation:
     """
     Graceful Degradation Manager.
 
-    Backpressure 레벨에 따라 기능 활성화/비활성화.
+    Enables/disables features according to the backpressure level.
 
-    레벨별 동작:
-    - NONE: 모든 기능 활성화
-    - LOW: OPTIONAL 비활성화
-    - MEDIUM: LOW 이하 비활성화
-    - HIGH: MEDIUM 이하 비활성화
-    - CRITICAL: CRITICAL만 유지
+    Behavior per level:
+    - NONE: all features enabled
+    - LOW: OPTIONAL disabled
+    - MEDIUM: LOW and below disabled
+    - HIGH: MEDIUM and below disabled
+    - CRITICAL: only CRITICAL kept
 
     Usage:
         degradation = GracefulDegradation()
 
-        # 기능 등록
+        # Register a feature
         degradation.register_feature(Feature(
             name="detailed_logging",
             priority=FeaturePriority.OPTIONAL,
         ))
 
-        # 레벨 업데이트
+        # Update the level
         degradation.update_level(BackpressureLevel.HIGH)
 
-        # 기능 사용 가능 여부 확인
+        # Check whether a feature is usable
         if degradation.is_enabled("detailed_logging"):
             log_details()
     """
 
-    # 레벨별 활성화 우선순위 임계치
-    # 해당 레벨에서는 이 우선순위 이하(값이 큰 것)는 비활성화
+    # Per-level enablement priority threshold.
+    # At a given level, anything at or below this priority (larger value) is
+    # disabled.
     LEVEL_THRESHOLDS: dict[BackpressureLevel, FeaturePriority] = {
-        BackpressureLevel.NONE: FeaturePriority.OPTIONAL,  # 모두 유지
-        BackpressureLevel.LOW: FeaturePriority.LOW,  # OPTIONAL 비활성화
-        BackpressureLevel.MEDIUM: FeaturePriority.MEDIUM,  # LOW 이하 비활성화
-        BackpressureLevel.HIGH: FeaturePriority.HIGH,  # MEDIUM 이하 비활성화
-        BackpressureLevel.CRITICAL: FeaturePriority.CRITICAL,  # CRITICAL만 유지
+        BackpressureLevel.NONE: FeaturePriority.OPTIONAL,  # keep everything
+        BackpressureLevel.LOW: FeaturePriority.LOW,  # disable OPTIONAL
+        BackpressureLevel.MEDIUM: FeaturePriority.MEDIUM,  # disable LOW and below
+        BackpressureLevel.HIGH: FeaturePriority.HIGH,  # disable MEDIUM and below
+        BackpressureLevel.CRITICAL: FeaturePriority.CRITICAL,  # keep CRITICAL only
     }
 
     def __init__(
@@ -102,7 +104,7 @@ class GracefulDegradation:
     ):
         """
         Args:
-            settings: Backpressure 설정
+            settings: Backpressure settings
         """
         self._settings = settings or get_backpressure_settings()
         self._features: dict[str, Feature] = {}
@@ -110,10 +112,10 @@ class GracefulDegradation:
 
     def register_feature(self, feature: Feature) -> None:
         """
-        기능 등록.
+        Register a feature.
 
         Args:
-            feature: 등록할 기능
+            feature: Feature to register
         """
         self._features[feature.name] = feature
         logger.debug(
@@ -123,23 +125,23 @@ class GracefulDegradation:
 
     def unregister_feature(self, name: str) -> None:
         """
-        기능 등록 해제.
+        Unregister a feature.
 
         Args:
-            name: 기능 이름
+            name: Feature name
         """
         if name in self._features:
             del self._features[name]
 
     def is_enabled(self, name: str) -> bool:
         """
-        기능 활성화 여부 확인.
+        Check whether a feature is enabled.
 
         Args:
-            name: 기능 이름
+            name: Feature name
 
         Returns:
-            활성화 여부 (등록되지 않은 기능은 True 반환)
+            Whether the feature is enabled (unregistered features return True)
         """
         if not self._settings.graceful_degradation_enabled:
             return True
@@ -152,12 +154,12 @@ class GracefulDegradation:
 
     def update_level(self, level: BackpressureLevel) -> None:
         """
-        Backpressure 레벨 업데이트.
+        Update the backpressure level.
 
-        레벨에 따라 기능 활성화/비활성화.
+        Enables/disables features according to the level.
 
         Args:
-            level: 새 Backpressure 레벨
+            level: New backpressure level
         """
         if not self._settings.graceful_degradation_enabled:
             return
@@ -171,7 +173,8 @@ class GracefulDegradation:
         threshold = self.LEVEL_THRESHOLDS.get(level, FeaturePriority.OPTIONAL)
 
         for feature in self._features.values():
-            # 우선순위 값이 임계치 이하면 활성화 (값이 작을수록 높은 우선순위)
+            # Enable when the priority value is at or below the threshold
+            # (smaller value = higher priority)
             should_enable = feature.priority.value <= threshold.value
 
             if should_enable and not feature.enabled:
@@ -212,24 +215,24 @@ class GracefulDegradation:
 
     def get_enabled_features(self) -> list[str]:
         """
-        활성화된 기능 목록 반환.
+        Return the list of enabled features.
 
         Returns:
-            활성화된 기능 이름 목록
+            Names of the enabled features
         """
         return [name for name, feature in self._features.items() if feature.enabled]
 
     def get_disabled_features(self) -> list[str]:
         """
-        비활성화된 기능 목록 반환.
+        Return the list of disabled features.
 
         Returns:
-            비활성화된 기능 이름 목록
+            Names of the disabled features
         """
         return [name for name, feature in self._features.items() if not feature.enabled]
 
     def get_current_level(self) -> BackpressureLevel:
-        """현재 레벨 반환."""
+        """Return the current level."""
         return self._current_level
 
 

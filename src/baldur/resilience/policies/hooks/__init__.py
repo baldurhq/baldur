@@ -1,13 +1,13 @@
 """
-Policy Hooks — 실행 이벤트 관찰 모듈.
+Policy Hooks — execution event observation module.
 
-PolicyComposer 파이프라인의 성공/실패/거부 이벤트를 관찰하는
-Hook 구현체를 제공한다. 모든 Hook은 Fail-Open 원칙을 따른다.
+Provides Hook implementations that observe the PolicyComposer pipeline's
+success/failure/rejection events. Every Hook follows the fail-open principle.
 
-- AuditHook: 감사 로깅
-- SampledAuditHook: 샘플링 기반 감사 로깅
-- MetricsHook: Prometheus 메트릭 수집
-- EventBusHook: EventBus 이벤트 발행
+- AuditHook: audit logging
+- SampledAuditHook: sampling-based audit logging
+- MetricsHook: Prometheus metric collection
+- EventBusHook: EventBus event publication
 """
 
 from baldur.resilience.policies.hooks.audit import AuditHook

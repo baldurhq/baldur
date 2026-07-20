@@ -1,17 +1,18 @@
 """
 X-Test Artifact Cleanup Celery Tasks
 
-X-Test 세션 종료 후 테스트 아티팩트 자동 정리를 위한 Celery 태스크.
+Celery tasks that automatically clean up test artifacts after an X-Test session
+ends.
 
-Thin Task, Fat Service 원칙:
-- 이 파일의 함수들은 단순 위임자 역할만 수행
-- 모든 비즈니스 로직은 XTestCleanupService에서 처리
+Thin Task, Fat Service principle:
+- The functions in this file act purely as delegators
+- All business logic lives in XTestCleanupService
 
 Tasks:
-1. cleanup_xtest_artifacts - 만료된 X-Test 세션 및 아티팩트 정리
+1. cleanup_xtest_artifacts - clean up expired X-Test sessions and artifacts
 
 Schedule:
-- 30분마다 실행 (설정 가능)
+- Runs every 30 minutes (configurable)
 """
 
 from __future__ import annotations
@@ -30,17 +31,17 @@ logger = structlog.get_logger()
 
 def cleanup_xtest_artifacts() -> dict[str, Any]:
     """
-    만료된 X-Test 세션 및 관련 아티팩트 정리.
+    Clean up expired X-Test sessions and their artifacts.
 
-    Thin wrapper로 XTestCleanupService에 위임합니다.
+    Thin wrapper delegating to XTestCleanupService.
 
-    정리 대상:
-    - 만료된 X-Test 세션 메타데이터
-    - Circuit Breaker xtest_mode 상태 원복
-    - DLQ x-test-mode 항목 삭제
-    - Idempotency xtest 키 삭제
-    - Rate Limit xtest 카운터 초기화
-    - 시나리오 결과 정리
+    Cleanup targets:
+    - Expired X-Test session metadata
+    - Circuit Breaker xtest_mode state restoration
+    - DLQ x-test-mode entry deletion
+    - Idempotency xtest key deletion
+    - Rate Limit xtest counter reset
+    - Scenario result cleanup
 
     Returns:
         dict: {
@@ -80,10 +81,10 @@ def cleanup_xtest_artifacts() -> dict[str, Any]:
 
 def get_xtest_cleanup_stats() -> dict[str, Any]:
     """
-    X-Test 정리 대상 통계 조회.
+    Get statistics about the X-Test cleanup targets.
 
     Returns:
-        dict: 정리 대상 통계
+        dict: cleanup target statistics
     """
     from baldur.services.xtest_cleanup_service import get_xtest_cleanup_service
 
@@ -108,7 +109,7 @@ try:
 
     from baldur.settings.xtest_cleanup import get_xtest_cleanup_settings
 
-    # 모듈 로드 시점에 설정값 캐싱
+    # Cache the settings at module load time
     _xtest_cleanup_settings = get_xtest_cleanup_settings()
 
     @shared_task(
@@ -137,16 +138,16 @@ except ImportError:
 
 
 # =============================================================================
-# Beat Schedule 정의
+# Beat Schedule definition
 # =============================================================================
 
 
 def get_xtest_cleanup_beat_schedule() -> dict[str, Any]:
     """
-    X-Test Cleanup Beat Schedule 반환.
+    Return the X-Test cleanup Beat schedule.
 
     Returns:
-        dict: Celery Beat Schedule 설정
+        dict: Celery Beat schedule configuration
     """
     try:
         from celery.schedules import crontab
@@ -157,7 +158,7 @@ def get_xtest_cleanup_beat_schedule() -> dict[str, Any]:
         interval_minutes = settings.cleanup_interval_minutes
 
         return {
-            # 30분마다 (기본값) - X-Test 아티팩트 정리
+            # Every 30 minutes (default) - X-Test artifact cleanup
             "cleanup-xtest-artifacts": {
                 "task": "baldur.cleanup_xtest_artifacts",
                 "schedule": crontab(minute=f"*/{interval_minutes}"),

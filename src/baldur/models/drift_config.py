@@ -16,47 +16,47 @@ from baldur.utils.time import utc_now
 @dataclass
 class DriftThresholdConfig(SerializableMixin):
     """
-    Drift 임계값 설정.
+    Drift threshold configuration.
 
-    운영자가 동적으로 조정할 수 있으며,
-    변경 시 Audit 로그가 기록됩니다.
+    Operators can adjust these dynamically; every change is written to the
+    audit log.
 
-    Thresholds (임계값):
-        - warning: 5% - 경고, 로그만 기록
-        - critical: 20% - 심각, 알림 발송
-        - incident: 50% - 인시던트, 이벤트 유실 의심
+    Thresholds:
+        - warning: 5% - warning, log only
+        - critical: 20% - critical, send a notification
+        - incident: 50% - incident, suspected event loss
 
     Example:
         >>> config = DriftThresholdConfig()
         >>> print(f"Warning at: {config.warning_threshold * 100}%")
         Warning at: 5.0%
         >>>
-        >>> # 사용자 정의 임계값
+        >>> # Custom thresholds
         >>> config = DriftThresholdConfig(
         ...     warning_threshold=0.10,
         ...     critical_threshold=0.30,
         ... )
     """
 
-    # 임계값 (0.0 ~ 1.0)
+    # Thresholds (0.0 - 1.0)
     warning_threshold: float = 0.05  # 5%
     critical_threshold: float = 0.20  # 20%
     incident_threshold: float = 0.50  # 50%
 
-    # 알림 설정
+    # Notification settings
     alert_enabled: bool = True
     incident_auto_create: bool = True
 
-    # 메타데이터
+    # Metadata
     updated_at: str | None = None
     updated_by: str | None = None
 
     def __post_init__(self) -> None:
-        """생성 후 유효성 검사 수행."""
+        """Run validation after construction."""
         self._validate()
 
     def _validate(self) -> None:
-        """임계값 유효성 검사."""
+        """Validate the thresholds."""
         if not (
             0
             < self.warning_threshold
@@ -72,10 +72,10 @@ class DriftThresholdConfig(SerializableMixin):
 
     @classmethod
     def from_env(cls) -> DriftThresholdConfig:
-        """환경 변수에서 생성 (BaseSettings 위임).
+        """Build from environment variables (delegated to BaseSettings).
 
-        환경변수 파싱을 DriftThresholdSettings(BaseSettings)에 위임하여
-        os.environ.get() 수동 파싱 제거 (202 패러다임 통일).
+        Env-var parsing is delegated to DriftThresholdSettings(BaseSettings),
+        removing manual os.environ.get() parsing (202 paradigm unification).
         """
         from baldur.settings.drift_threshold import DriftThresholdSettings
 
@@ -94,14 +94,14 @@ class DriftThresholdConfig(SerializableMixin):
         **kwargs: Any,
     ) -> DriftThresholdConfig:
         """
-        새로운 값으로 업데이트된 설정을 반환합니다.
+        Return a config updated with the new values.
 
         Args:
-            actor_id: 업데이트를 수행한 사용자 ID
-            **kwargs: 업데이트할 필드들
+            actor_id: ID of the user performing the update
+            **kwargs: Fields to update
 
         Returns:
-            업데이트된 새 DriftThresholdConfig 인스턴스
+            A new DriftThresholdConfig instance with the updates applied
         """
         current = self.to_dict()
         current.update(kwargs)
@@ -110,7 +110,7 @@ class DriftThresholdConfig(SerializableMixin):
         return self.from_dict(current)
 
     def get_threshold_percent_display(self) -> dict[str, str]:
-        """임계값을 퍼센트 문자열로 반환."""
+        """Return the thresholds as percentage strings."""
         return {
             "warning": f"{self.warning_threshold * 100:.1f}%",
             "critical": f"{self.critical_threshold * 100:.1f}%",
