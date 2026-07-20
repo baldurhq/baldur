@@ -418,11 +418,13 @@ class NamespacedEmergencyTracker(EventEmitterMixin):
             if precedence in ("ADMIN_OVERRIDE", "KILL_SWITCH"):
                 return regional_state
 
-            # Safety-Max: the stricter of the two states
+            # Safety-Max: the stricter of the two states. Only the Global side
+            # needs testing here -- when Global is not STRICT the Regional state
+            # is returned as-is, which is already the answer for both a STRICT
+            # and a non-STRICT Regional.
             global_is_strict = (
                 global_state.is_active() and global_state.governance_mode == "STRICT"
             )
-            (regional_state.is_active() and regional_state.governance_mode == "STRICT")
 
             if global_is_strict:
                 # Global STRICT overrides Regional
