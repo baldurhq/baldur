@@ -1006,6 +1006,33 @@ def _reset_runtime_caches():
         pass
 
 
+def _reset_rate_limit_coordinator():
+    """Drop the RateLimitCoordinator singleton and its warn-once dedup state.
+
+    The synchronous retry stage resolves this process-global singleton by
+    default, so any test that drives the retry loop with a 429-classified
+    failure and an identified domain touches it without asking. Left standing,
+    the instance carries cooldown state (and pending cooldown ``Timer`` threads)
+    into unrelated tests on the same xdist worker. ``reset_instance()`` cancels
+    those timers, which also serves the daemon-thread-leak watch.
+
+    The dedup set behind the unidentified-domain WARNING is process-global for
+    the same reason and is cleared here so a test can assert the log fires.
+    """
+    coord_mod = sys.modules.get("baldur.services.rate_limit_coordinator.coordinator")
+    if coord_mod is not None:
+        try:
+            coord_mod.RateLimitCoordinator.reset_instance()
+        except (AttributeError, TypeError):
+            pass
+
+    policy_mod = sys.modules.get("baldur.services.retry_handler.policy")
+    if policy_mod is not None:
+        warned = getattr(policy_mod, "_unidentified_key_warned", None)
+        if warned is not None:
+            warned.clear()
+
+
 def _iter_provider_registry_slots():
     """Yield the ProviderRegistry's GenericProviderRegistry slots (``[]`` if the
     factory package is not imported yet)."""
@@ -1065,11 +1092,13 @@ def auto_reset_all_state():
     _invalidate_governance_cache()
     _reset_system_control_light()
     _reset_runtime_caches()
+    _reset_rate_limit_coordinator()
     _registration_snapshot = _snapshot_provider_registrations()
 
     yield
 
     _reset_runtime_caches()
+    _reset_rate_limit_coordinator()
     _restore_provider_registrations(_registration_snapshot)
     _repin_observability_profile()
     _reset_root_config()
