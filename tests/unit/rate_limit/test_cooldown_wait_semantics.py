@@ -409,6 +409,30 @@ class TestRateLimitAwareDecoratorBehavior:
         with pytest.raises(ValueError, match="user predicate bug"):
             protected()
 
+    def test_deferral_is_not_detected_as_a_provider_429(self, mock_storage):
+        """A deferral must never be read back as evidence of a provider 429.
+
+        The deferral means the provider was never contacted. A decorated client
+        composed inside a retry loop raises this error into the loop's 429
+        classifier, which matches on the exception's *type name* — so nothing in
+        the message can prevent it. Left unguarded, Baldur's own refusal escalates
+        ``consecutive_429s`` and installs a phantom cooldown on the loop's domain.
+        """
+        from baldur.services.retry_handler.rate_limit_detection import (
+            detect_rate_limit,
+        )
+
+        err = RateLimitDeferredError(key="payment_api", not_before=time.time() + 300)
+
+        is_rate_limited, retry_after = detect_rate_limit(err)
+
+        assert is_rate_limited is False
+        assert retry_after is None
+        # The naive heuristic would match on either of these — pin why the guard
+        # cannot be replaced by message wording alone.
+        assert "rate limit" in str(err).lower()
+        assert "ratelimit" in type(err).__name__.lower()
+
     def test_deferral_survives_a_healthy_coordinator(self, mock_storage):
         """The deferral raise is never downgraded to a fail-open no-op (D9 ordering)."""
         coord = _make_coordinator(mock_storage)

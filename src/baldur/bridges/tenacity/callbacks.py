@@ -236,11 +236,17 @@ def make_after_callback(
         if exc is None or not isinstance(exc, BaseException):
             return
 
-        is_rate_limited, retry_after = detect_rate_limit(exc)  # type: ignore[arg-type]
-        if not is_rate_limited:
-            return
-
+        # Detection is INSIDE the wrap, matching the retry loop, whose equivalent
+        # wrap covers ``_notify_rate_limit_cooldown`` (detection included). It
+        # reads attributes off a caller-supplied exception — ``retry_after`` and
+        # ``response.headers`` may be properties that raise, or objects without
+        # the expected shape — so it is part of this site's fault surface, not a
+        # safe prelude to it.
         try:
+            is_rate_limited, retry_after = detect_rate_limit(exc)  # type: ignore[arg-type]
+            if not is_rate_limited:
+                return
+
             cooldown = ctx.rate_limit_coordinator.on_rate_limited(
                 key=ctx.rate_limit_key,
                 retry_after=retry_after,

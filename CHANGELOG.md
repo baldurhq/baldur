@@ -38,7 +38,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 ### Fixed
 
 - Jittered `ExponentialBackoff`/`LinearBackoff` delays no longer exceed `max_delay` — jitter was applied after the cap, overshooting it by up to `jitter_factor`.
-- A provider `Retry-After` is never undercut: jitter could schedule the next request before the provider's stated earliest time.
+- A provider `Retry-After` is no longer undercut by jitter, which could schedule the next request before the provider's stated earliest time.
 - A rate-limit coordinator or storage fault no longer changes the business outcome on the retry loop, tenacity bridge, or `@rate_limit_aware` decorator — it degrades to a logged no-op.
 - `configure_baldur_celery(app)` raised `TypeError` on every call and registered nothing.
 - Compressed DLQ entries now age ACTIVE→STALE→ARCHIVED on a daily schedule (was never run).

@@ -37,10 +37,22 @@ def detect_rate_limit(exception: Exception) -> tuple[bool, float | None]:
     Args:
         exception: The exception to check.
 
+    Baldur's own outbound-cooldown deferral is explicitly NOT a provider rate
+    limit: it means the provider was never contacted, so it is no evidence of a
+    429 and must not escalate a cooldown. The heuristic below would otherwise
+    match it on its type name alone, whatever its message says.
+
     Returns:
         Tuple of (is_rate_limited, retry_after_seconds).
         retry_after_seconds is None if not available.
     """
+    # Local import: keeps the coordinator package out of this module's import
+    # graph, matching how the retry policy defers the same symbol.
+    from baldur.services.rate_limit_coordinator.models import RateLimitDeferredError
+
+    if isinstance(exception, RateLimitDeferredError):
+        return False, None
+
     error_str = str(exception).lower()
     error_type = type(exception).__name__.lower()
 
