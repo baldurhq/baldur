@@ -333,10 +333,30 @@ class TestRetryPolicyRateLimitCoordinatorBehavior:
         # No budget configured -> unbounded wait bound is forwarded as None.
         mock_coord.wait_if_needed.assert_called_once_with("payment", max_wait=None)
 
-    def test_on_success_called_after_success(self):
-        """on_success() is called on the coordinator after a successful call."""
+    def test_on_success_skipped_when_no_rate_limit_signal(self):
+        """A clean success owes no on_success — it costs a storage round trip.
+
+        ``on_success`` reads state and, when a counter is standing, writes a
+        reset. Neither is owed by a call that never observed a rate-limit
+        signal, so the clean path stays at one storage read per attempt (the
+        pre-attempt cooldown consult).
+        """
         mock_coord = MagicMock()
         mock_coord.wait_if_needed.return_value = RateLimitResult(waited=False)
+
+        policy = RetryPolicy(
+            config=RetryPolicyConfig(max_attempts=1, domain="payment"),
+            rate_limit_coordinator=mock_coord,
+        )
+        policy.execute(lambda: "ok")
+        mock_coord.on_success.assert_not_called()
+
+    def test_on_success_called_after_success_following_a_wait(self):
+        """A success that followed an honored cooldown does call on_success."""
+        mock_coord = MagicMock()
+        mock_coord.wait_if_needed.return_value = RateLimitResult(
+            waited=True, wait_time=0.01, was_rate_limited=True
+        )
 
         policy = RetryPolicy(
             config=RetryPolicyConfig(max_attempts=1, domain="payment"),

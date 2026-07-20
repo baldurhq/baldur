@@ -7,7 +7,9 @@ Audit, DLQ) from the legacy RetryHandler and keeps only the retry loop.
 External concerns are injected via PolicyComposer's Guard/Hook/Sink.
 Internal collaborators are injected via the constructor:
 - backoff: backoff calculation strategy (core/backoff.py BackoffStrategy ABC)
-- rate_limit_coordinator: 429 wait / success notify / cooldown
+- rate_limit_coordinator: 429 wait / success notify / cooldown. This one is
+  also *resolved by default* at use time when it is not injected — see
+  ``RetryPolicy._resolve_rate_limit_coordinator``. Injection always wins.
 - retry_budget: adaptive retry budget (state-mutating in-loop, Guard-unsuitable)
 - sleeper: between-attempt wait function. Defaults to ``time.sleep`` so sync
   callers get backoff-honouring behaviour out of the box. Pass an explicit
@@ -18,6 +20,7 @@ Internal collaborators are injected via the constructor:
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -28,6 +31,19 @@ import structlog
 # wall-clock wait. Pass an explicit no-op (``lambda _: None``) at construction
 # to defer waiting to an external scheduler such as Celery.
 _DEFAULT_SLEEPER: Callable[[float], None] = time.sleep
+
+# Placeholder domain meaning "the caller did not identify a downstream".
+# It is the default of RetryPolicyConfig.domain, of the @retry decorator, and
+# of both pipeline presets, so every caller who did not choose a name shares it.
+# Outbound 429 coordination therefore refuses to key on it: the storage key
+# carries no per-service namespace, so one shared placeholder record would let a
+# 429 from one provider stall calls to an unrelated one.
+_UNIDENTIFIED_DOMAIN = "default"
+
+# Coordination keys already warned about, so the unidentified-domain diagnostic
+# costs one WARNING line per key per process rather than one per call.
+_unidentified_key_warned: set[str] = set()
+_unidentified_key_warned_lock = threading.Lock()
 
 # Exhaustion-reason -> Prometheus outcome-label value. ``max_attempts`` keeps
 # the historical ``"exhausted"`` value for dashboard/alert continuity; every
@@ -77,7 +93,13 @@ class RetryPolicy(ResiliencePolicy[T]):
 
     Collaborator:
     - retry_budget: state mutates on every in-loop attempt (Guard-unsuitable)
-    - rate_limit_coordinator: bundles wait / success-signal / cooldown
+    - rate_limit_coordinator: bundles wait / success-signal / cooldown. Unlike
+      the others this one is optional *at construction*: when it is not passed,
+      the loop resolves the shared coordinator at use time so a settings-derived
+      policy coordinates outbound 429s by default. Passing one always wins, and
+      two levers turn the default off — ``rate_limit_aware=False`` on the config
+      and ``BALDUR_RATE_LIMIT_BACKOFF_COORDINATION_ENABLED=false``. The default
+      also requires an identified domain (see the config field docs).
     - backoff: reuses ``core/backoff.py`` BackoffStrategy ABC
     - sleeper: between-attempt wait function. ``None`` (default) -> ``time.sleep``;
       pass ``lambda _: None`` to defer waiting to an external scheduler.
@@ -130,6 +152,82 @@ class RetryPolicy(ResiliencePolicy[T]):
     def name(self) -> str:
         return "retry"
 
+    def _resolve_rate_limit_coordinator(self) -> RateLimitCoordinator | None:
+        """Resolve the coordinator that this call should coordinate 429s through.
+
+        An explicitly injected coordinator always wins — it bypasses both
+        opt-out levers, because a caller who constructed one asked for it.
+        Otherwise the process-wide singleton is resolved when all three hold:
+
+        1. ``coordination_enabled`` (deployment kill switch), then
+        2. ``config.rate_limit_aware`` (per-policy / per-domain opt-out), then
+        3. the coordination key is *identified* (not the placeholder domain).
+
+        The order is load-bearing rather than incidental. Both levers are
+        checked before the identity gate because the identity gate is the only
+        conjunct that logs: an operator who deliberately turned coordination off
+        must not be told to configure the thing they just disabled.
+
+        Fail-open: any resolution fault (settings read, storage auto-detect,
+        Redis connect) degrades to ``None`` — no coordination — never to a
+        failed business call.
+        """
+        if self._rate_limit_coordinator is not None:
+            return self._rate_limit_coordinator
+
+        try:
+            if not self._config.rate_limit_aware:
+                return None
+
+            from baldur.settings.rate_limit_backoff import (
+                get_rate_limit_backoff_settings,
+            )
+
+            if not get_rate_limit_backoff_settings().coordination_enabled:
+                return None
+
+            if self._config.rate_limit_key is None and (
+                self._config.domain == _UNIDENTIFIED_DOMAIN
+            ):
+                self._warn_unidentified_coordination_key()
+                return None
+
+            from baldur.services.rate_limit_coordinator import RateLimitCoordinator
+
+            return RateLimitCoordinator.get_instance()
+        except Exception as resolution_error:
+            logger.warning(
+                "retry.rate_limit_coordinator_resolution_failed",
+                error=str(resolution_error),
+                domain=self._config.domain,
+            )
+            return None
+
+    def _warn_unidentified_coordination_key(self) -> None:
+        """Warn once per key that outbound 429 coordination is inert here.
+
+        WARNING rather than DEBUG on purpose: this is the only runtime signal
+        that a default-on protection is not actually protecting this call site,
+        and DEBUG is off under any production log configuration — the operator
+        who most needs the line would never see it. The once-per-key dedup is
+        what makes that level affordable.
+        """
+        key = self._config.domain
+        with _unidentified_key_warned_lock:
+            if key in _unidentified_key_warned:
+                return
+            _unidentified_key_warned.add(key)
+
+        logger.warning(
+            "retry.rate_limit_coordination_skipped",
+            reason="unidentified_domain",
+            domain=key,
+            remedy=(
+                "pass an explicit domain (or a RetryPolicyConfig.rate_limit_key) "
+                "so outbound 429 cooldowns are shared per downstream"
+            ),
+        )
+
     def execute(  # noqa: C901, PLR0912, PLR0915
         self,
         func: Callable[..., T],
@@ -156,6 +254,20 @@ class RetryPolicy(ResiliencePolicy[T]):
             max_attempts=self._config.max_attempts,
         ):
             return self._single_attempt(func, *args, **kwargs)
+
+        # Outbound 429 coordination, resolved once per call. Deliberately placed
+        # after the two suppression returns above: both take the single-attempt
+        # path, which coordinates nothing, so resolving at method entry would
+        # build the coordinator singleton — and with it storage auto-detect and
+        # a Redis connect — on paths that never use it. Coverage statement:
+        # retry-disabled and observe-only/shadow calls do not coordinate.
+        coordinator = self._resolve_rate_limit_coordinator()
+        rate_limit_key = self._config.rate_limit_key or self._config.domain
+        # D5 cost containment: on_success costs a storage read (plus a reset
+        # write when a counter is standing), so it is owed only once this call
+        # has actually observed a rate-limit signal — a detected 429, an
+        # honored cooldown wait, or a coordinator that reported one.
+        rate_limit_signal = False
 
         attempt = 0
         last_error: Exception | None = None
@@ -209,17 +321,23 @@ class RetryPolicy(ResiliencePolicy[T]):
             # A cooldown longer than the remaining budget is deferred rather
             # than slept: sleeping it would blow the budget and the attempt
             # would be aborted afterwards anyway.
-            if self._rate_limit_coordinator:
+            if coordinator:
                 rl_bound = (
                     None
                     if budget is None
                     else max(0.0, budget - (time.monotonic() - start))
                 )
-                rl_result = self._wait_for_rate_limit_cooldown(rl_bound)
+                rl_result = self._wait_for_rate_limit_cooldown(
+                    coordinator, rate_limit_key, rl_bound
+                )
                 if rl_result is not None and rl_result.deferred:
                     reason = "rate_limit_deferred"
                     not_before = rl_result.not_before
                     break
+                if rl_result is not None and (
+                    rl_result.waited or rl_result.was_rate_limited
+                ):
+                    rate_limit_signal = True
                 if rl_result is not None and rl_result.waited:
                     logger.debug(
                         "retry.rate_limit_cooldown_waited",
@@ -243,9 +361,12 @@ class RetryPolicy(ResiliencePolicy[T]):
                 # 429 detected → request a cooldown from RateLimitCoordinator.
                 # Fail-open: a coordinator fault here must never replace the
                 # business error that is being classified below.
-                if self._rate_limit_coordinator:
+                if coordinator:
                     try:
-                        self._notify_rate_limit_cooldown(e)
+                        if self._notify_rate_limit_cooldown(
+                            coordinator, rate_limit_key, e
+                        ):
+                            rate_limit_signal = True
                     except Exception as coordinator_error:
                         logger.warning(
                             "retry.rate_limit_cooldown_notify_failed",
@@ -264,9 +385,9 @@ class RetryPolicy(ResiliencePolicy[T]):
                 if not self._evaluate_result_rejected(result):
                     # Fail-open: a coordinator fault must never destroy a
                     # successful business result.
-                    if self._rate_limit_coordinator:
+                    if coordinator and rate_limit_signal:
                         try:
-                            self._rate_limit_coordinator.on_success(self._config.domain)
+                            coordinator.on_success(rate_limit_key)
                         except Exception as coordinator_error:
                             logger.warning(
                                 "retry.rate_limit_success_notify_failed",
@@ -380,7 +501,10 @@ class RetryPolicy(ResiliencePolicy[T]):
         )
 
     def _wait_for_rate_limit_cooldown(
-        self, max_wait: float | None
+        self,
+        coordinator: RateLimitCoordinator,
+        key: str,
+        max_wait: float | None,
     ) -> RateLimitResult | None:
         """Wait out an active 429 cooldown, bounded by ``max_wait``. Fail-open.
 
@@ -390,9 +514,7 @@ class RetryPolicy(ResiliencePolicy[T]):
         fault: it is returned as a normal result for the caller to act on.
         """
         try:
-            return self._rate_limit_coordinator.wait_if_needed(  # type: ignore[union-attr]
-                self._config.domain, max_wait=max_wait
-            )
+            return coordinator.wait_if_needed(key, max_wait=max_wait)
         except Exception as coordinator_error:
             logger.warning(
                 "retry.rate_limit_wait_failed",
@@ -559,19 +681,29 @@ class RetryPolicy(ResiliencePolicy[T]):
             logger.warning("retry.result_predicate_failed", error=str(e))
             return False
 
-    def _notify_rate_limit_cooldown(self, exception: Exception) -> None:
-        """Set a cooldown on the RateLimitCoordinator when a 429 response is detected."""
-        is_rate_limited, retry_after = self._detect_rate_limit(exception)
+    def _notify_rate_limit_cooldown(
+        self,
+        coordinator: RateLimitCoordinator,
+        key: str,
+        exception: Exception,
+    ) -> bool:
+        """Set a cooldown when ``exception`` is a 429; report whether it was one.
 
-        if is_rate_limited and self._rate_limit_coordinator:
-            cooldown = self._rate_limit_coordinator.on_rate_limited(
-                key=self._config.domain,
-                retry_after=retry_after,
-            )
-            logger.info(
-                "retry.rate_limit_cooldown_set",
-                cooldown=cooldown,
-            )
+        The coordinator is a parameter rather than an attribute read because the
+        effective coordinator is resolved per call and may not be the injected
+        one. The returned flag is also what tells the loop a rate-limit signal
+        was observed, which is the condition for owing an ``on_success`` reset.
+        """
+        is_rate_limited, retry_after = self._detect_rate_limit(exception)
+        if not is_rate_limited:
+            return False
+
+        cooldown = coordinator.on_rate_limited(key=key, retry_after=retry_after)
+        logger.info(
+            "retry.rate_limit_cooldown_set",
+            cooldown=cooldown,
+        )
+        return True
 
     @staticmethod
     def _detect_rate_limit(exception: Exception) -> tuple[bool, float | None]:
