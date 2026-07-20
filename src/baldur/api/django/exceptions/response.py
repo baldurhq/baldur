@@ -1,14 +1,14 @@
 """
-표준 에러 응답 생성기.
+Standard error response builder.
 
-모든 API 예외 응답에 사용되는 표준화된 응답 포맷을 생성합니다.
+Builds the standardized response format used by every API exception response.
 
-응답 구조:
+Response structure:
     {
         "success": false,
         "error": {
             "code": "VALIDATION_FIELD_REQUIRED",
-            "message": "필수 필드가 누락되었습니다.",
+            "message": "A required field is missing.",
             "detail": "The 'amount' field is required.",
             "field": "amount",
             "retryable": false
@@ -38,12 +38,13 @@ from .codes import ErrorCode
 
 def _get_current_region() -> str | None:
     """
-    현재 리전 정보 조회.
+    Look up the current region.
 
-    ClusterIdentity가 있으면 해당 값 사용, 없으면 환경변수 직접 조회.
+    Uses the ClusterIdentity value if available, otherwise reads the environment
+    variable directly.
 
     Returns:
-        리전 식별자 (seoul, tokyo 등) 또는 None
+        Region identifier (seoul, tokyo, etc.) or None
     """
     try:
         from baldur.core.cluster_identity import get_cluster_identity
@@ -51,7 +52,7 @@ def _get_current_region() -> str | None:
         identity = get_cluster_identity()
         return identity.region
     except ImportError:
-        # ClusterIdentity 모듈 없음 - 환경변수 직접 조회
+        # ClusterIdentity module unavailable - read the environment variable
         return os.environ.get("BALDUR_NAMESPACE_REGION")
     except Exception:
         return os.environ.get("BALDUR_NAMESPACE_REGION")
@@ -60,69 +61,70 @@ def _get_current_region() -> str | None:
 @dataclass
 class ErrorInfo(SerializableMixin):
     """
-    에러 상세 정보.
+    Error detail information.
 
-    응답의 "error" 필드에 해당합니다.
+    Corresponds to the "error" field of the response.
     """
 
     exclude_none = True
 
     code: str
-    """표준 에러 코드 문자열."""
+    """Standard error code string."""
 
     message: str
-    """사용자 친화적 메시지."""
+    """User-friendly message."""
 
     detail: str | None = None
-    """기술적 상세 정보."""
+    """Technical detail information."""
 
     field: str | None = None
-    """필드 관련 에러 시 필드명."""
+    """Field name, for field-related errors."""
 
     retryable: bool = False
-    """재시도 가능 여부."""
+    """Whether the operation is retryable."""
 
 
 @dataclass
 class ResponseMeta(SerializableMixin):
     """
-    응답 메타데이터.
+    Response metadata.
 
-    응답의 "meta" 필드에 해당합니다.
-    멀티 리전 환경에서는 region 필드로 에러 발생 리전을 식별합니다.
+    Corresponds to the "meta" field of the response.
+    In multi-region environments the region field identifies where the error
+    occurred.
     """
 
     exclude_none = True
 
     request_id: str | None = None
-    """요청 추적 ID."""
+    """Request tracing ID."""
 
     timestamp: datetime = field(default_factory=lambda: utc_now())
-    """에러 발생 시간."""
+    """Time the error occurred."""
 
     path: str | None = None
-    """요청 경로."""
+    """Request path."""
 
     method: str | None = None
-    """HTTP 메서드."""
+    """HTTP method."""
 
     causation_id: str | None = None
-    """인과관계 추적용 Cascade ID (API-Celery 인과관계 연결)."""
+    """Cascade ID for causation tracing (links API and Celery causation)."""
 
     region: str | None = None
-    """에러 발생 리전 (멀티 리전 환경에서 BALDUR_NAMESPACE_REGION 값)."""
+    """Region where the error occurred (BALDUR_NAMESPACE_REGION in multi-region)."""
 
 
 @dataclass
 class StandardErrorResponse:
     """
-    표준 에러 응답.
+    Standard error response.
 
-    모든 API 예외가 이 형식으로 응답됩니다.
+    Every API exception is returned in this format.
     """
 
     success: bool = False
-    """항상 False."""
+    """Always False."""
 
     error: ErrorInfo = field(
         default_factory=lambda: ErrorInfo(
@@ -130,22 +132,22 @@ class StandardErrorResponse:
             message="An error occurred.",
         )
     )
-    """에러 상세 정보."""
+    """Error detail information."""
 
     meta: ResponseMeta = field(default_factory=ResponseMeta)
-    """응답 메타데이터."""
+    """Response metadata."""
 
     http_status: int = 500
-    """HTTP 상태 코드 (응답 객체 생성 시 사용)."""
+    """HTTP status code (used when building the response object)."""
 
     extra: dict[str, Any] | None = None
-    """추가 정보 (ConfigLockError의 current_owner 등)."""
+    """Extra information (e.g. current_owner of ConfigLockError)."""
 
     def to_dict(self) -> dict[str, Any]:
         """
-        딕셔너리로 변환 (JSON 직렬화용).
+        Convert to a dictionary (for JSON serialization).
 
-        http_status와 extra는 응답 본문에 포함되지 않습니다.
+        http_status and extra are not included in the response body.
         """
         result: dict[str, Any] = {
             "success": self.success,
@@ -153,7 +155,7 @@ class StandardErrorResponse:
             "meta": self.meta.to_dict(),
         }
 
-        # extra 정보가 있으면 error 객체에 병합
+        # Merge extra information into the error object when present
         if self.extra:
             result["error"].update(self.extra)
 
@@ -170,20 +172,21 @@ class StandardErrorResponse:
         region: str | None = None,
     ) -> StandardErrorResponse:
         """
-        ClassifiedError로부터 표준 응답 생성.
+        Build a standard response from a ClassifiedError.
 
         Args:
-            classified: 분류된 예외 정보
-            request_id: 요청 추적 ID
-            path: 요청 경로
-            method: HTTP 메서드
-            causation_id: 인과관계 추적용 Cascade ID
-            region: 에러 발생 리전 (None이면 BALDUR_NAMESPACE_REGION 환경변수 사용)
+            classified: Classified exception information
+            request_id: Request tracing ID
+            path: Request path
+            method: HTTP method
+            causation_id: Cascade ID for causation tracing
+            region: Region where the error occurred (None uses the
+                BALDUR_NAMESPACE_REGION environment variable)
 
         Returns:
-            StandardErrorResponse 인스턴스
+            StandardErrorResponse instance
         """
-        # region 자동 설정 (환경변수에서 읽기)
+        # Resolve region automatically (read from the environment variable)
         resolved_region = region
         if resolved_region is None:
             resolved_region = _get_current_region()
@@ -221,16 +224,16 @@ class StandardErrorResponse:
         method: str | None = None,
     ) -> StandardErrorResponse:
         """
-        예외로부터 표준 응답 생성 (분류 포함).
+        Build a standard response from an exception (classification included).
 
         Args:
-            exc: 발생한 예외
-            request_id: 요청 추적 ID
-            path: 요청 경로
-            method: HTTP 메서드
+            exc: The raised exception
+            request_id: Request tracing ID
+            path: Request path
+            method: HTTP method
 
         Returns:
-            StandardErrorResponse 인스턴스
+            StandardErrorResponse instance
         """
         from .classifier import get_exception_classifier
 
@@ -257,25 +260,26 @@ def create_error_response(
     region: str | None = None,
 ) -> StandardErrorResponse:
     """
-    에러 코드로부터 표준 응답 생성 (편의 함수).
+    Build a standard response from an error code (convenience function).
 
     Args:
-        code: 에러 코드
-        message: 사용자 메시지 (없으면 기본 메시지 사용)
-        detail: 기술적 상세 정보
-        field: 필드명
-        request_id: 요청 ID
-        path: 요청 경로
-        method: HTTP 메서드
-        extra: 추가 정보
-        region: 에러 발생 리전 (None이면 BALDUR_NAMESPACE_REGION 환경변수 사용)
+        code: Error code
+        message: User-facing message (falls back to the default message)
+        detail: Technical detail information
+        field: Field name
+        request_id: Request ID
+        path: Request path
+        method: HTTP method
+        extra: Extra information
+        region: Region where the error occurred (None uses the
+            BALDUR_NAMESPACE_REGION environment variable)
 
     Returns:
-        StandardErrorResponse 인스턴스
+        StandardErrorResponse instance
     """
     from .codes import get_default_message, get_http_status, is_retryable
 
-    # region 자동 설정
+    # Resolve region automatically
     resolved_region = region if region is not None else _get_current_region()
 
     if message is None:

@@ -1,12 +1,12 @@
 """
-Health Bridge Middleware (Stage 50: Worker Saturation 방지)
+Health Bridge Middleware (Stage 50: Worker Saturation prevention)
 
-DB-independent health endpoint를 제공하여 DB 장애 시에도
-CircuitBreaker 상태를 외부에서 관찰할 수 있도록 합니다.
+Provides a DB-independent health endpoint so that CircuitBreaker state stays
+observable from outside even during a DB outage.
 
 Usage in settings.py:
     MIDDLEWARE = [
-        "baldur.api.django.middleware.HealthBridgeMiddleware",  # 최상단!
+        "baldur.api.django.middleware.HealthBridgeMiddleware",  # must be first!
         "django.middleware.security.SecurityMiddleware",
         ...
     ]
@@ -35,20 +35,20 @@ class HealthBridgeMiddleware:
     """
     DB-independent Health Endpoint Middleware.
 
-    문제 상황:
-    - DB 죽음 → 모든 Django Worker가 DB 연결 대기
-    - /health/l3도 Worker를 사용하므로 타임아웃
-    - CB 상태를 외부에서 관찰 불가
+    Problem:
+    - DB down -> every Django worker waits on a DB connection
+    - /health/l3 also consumes a worker, so it times out
+    - CB state becomes unobservable from outside
 
-    해결책:
-    - Middleware에서 DB 엔진 로드 전에 즉시 반환
-    - CB 스냅샷을 메모리에 저장 (매 요청마다 갱신)
-    - Prometheus 메트릭은 기존 인프라 활용
+    Solution:
+    - Return from the middleware before the DB engine is loaded
+    - Keep a CB snapshot in memory (refreshed on every request)
+    - Reuse the existing Prometheus metrics infrastructure
 
-    CRITICAL: 이 Middleware는 MIDDLEWARE 리스트 최상단에 위치해야 함!
+    CRITICAL: this middleware must be first in the MIDDLEWARE list!
     """
 
-    # 클래스 변수: CB 스냅샷 저장 (모든 인스턴스가 공유)
+    # Class variable: CB snapshot storage (shared by all instances)
     _cb_snapshot: dict[str, Any] = {
         "states": {},
         "last_updated": None,
@@ -57,7 +57,7 @@ class HealthBridgeMiddleware:
     # ``threading.Lock`` returns an opaque LockType — initialised in __init__.
     _snapshot_lock: ClassVar[LockType | None] = None
 
-    # Health Bridge 대상 경로
+    # Paths served by the Health Bridge
     BRIDGE_PATHS = [
         "/api/baldur/health/l3/",
         "/api/baldur/health/bridge/",
@@ -84,7 +84,7 @@ class HealthBridgeMiddleware:
         response: HttpResponse = self.get_response(request)
 
         # === Update CB Snapshot (best-effort) ===
-        # Non-blocking: 실패해도 요청은 정상 처리
+        # Non-blocking: the request is served normally even on failure
         self._try_update_snapshot()
 
         return response

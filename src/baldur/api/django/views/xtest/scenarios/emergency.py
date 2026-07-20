@@ -1,7 +1,8 @@
 """
-Emergency 및 SafetyInterlock 관련 통합 테스트 시나리오.
+Integration test scenarios for Emergency and SafetyInterlock.
 
-Emergency Recovery Flow, SafetyInterlock Canary Rollback 시나리오 제공.
+Provides the Emergency Recovery Flow and SafetyInterlock Canary Rollback
+scenarios.
 """
 
 import time
@@ -14,23 +15,25 @@ from .base import (
 
 class FullEmergencyRecoveryScenario(IntegrationScenario):
     """
-    Emergency LEVEL_3 → SafetyInterlock 롤백 → RecoveryCoordinator 4단계 역순 복구 시나리오.
+    Scenario: Emergency LEVEL_3 -> SafetyInterlock rollback -> the
+    RecoveryCoordinator's 4-step reverse-order recovery.
 
     Steps:
-    1. 초기 상태 확인 (Emergency: NORMAL)
-    2. Emergency LEVEL_3 주입
-    3. SafetyInterlock 체크 (action: ROLLBACK)
-    4. Canary ROLLBACK 확인
-    5. RecoveryCoordinator.start_recovery() 호출
-    6. Step 1: BUDGET_RESET 실행 (multiplier: 1.0x)
-    7. Step 2: HEALTH_CHECK 실행 (health_passed: true)
-    8. Step 3: CANARY_RESUME 실행 (canary_resumed: true)
-    9. Step 4: GOVERNANCE_NORMAL 실행 (governance: NORMAL)
-    10. 최종 상태 확인 (모든 컴포넌트 정상)
+    1. Check the initial state (Emergency: NORMAL)
+    2. Inject Emergency LEVEL_3
+    3. SafetyInterlock check (action: ROLLBACK)
+    4. Confirm the Canary ROLLBACK
+    5. Call RecoveryCoordinator.start_recovery()
+    6. Step 1: run BUDGET_RESET (multiplier: 1.0x)
+    7. Step 2: run HEALTH_CHECK (health_passed: true)
+    8. Step 3: run CANARY_RESUME (canary_resumed: true)
+    9. Step 4: run GOVERNANCE_NORMAL (governance: NORMAL)
+    10. Check the final state (all components healthy)
 
     Config options:
-    - skip_wait: bool - HEALTH_CHECK 대기 스킵 (테스트 속도 향상)
-    - wait_seconds: int - 커스텀 대기 시간 (기본: 5초, skip_wait=True면 0)
+    - skip_wait: bool - skip the HEALTH_CHECK wait (faster tests)
+    - wait_seconds: int - custom wait duration (default: 5s, 0 when
+      skip_wait=True)
     """
 
     scenario_name = "full_emergency_recovery_flow"
@@ -58,11 +61,11 @@ class FullEmergencyRecoveryScenario(IntegrationScenario):
         skip_wait = self.config.get("skip_wait", True)
         wait_seconds = self.config.get("wait_seconds", 0 if skip_wait else 5)
 
-        # Mock 의존성 설정
+        # Set up the mock dependencies
         mock_tracker = None
 
         class MockEmergencyTracker:
-            """Emergency 상태를 시뮬레이션하는 Mock 트래커."""
+            """Mock tracker that simulates the Emergency state."""
 
             def __init__(self):
                 self._level = EmergencyLevel.NORMAL
@@ -81,12 +84,12 @@ class FullEmergencyRecoveryScenario(IntegrationScenario):
 
         mock_tracker = MockEmergencyTracker()
 
-        # Canary 롤백 상태 추적
+        # Track the Canary rollback state
         rollback_triggered = False
         canary_resumed = False
 
         class MockCanaryService:
-            """Canary 서비스 Mock."""
+            """Canary service mock."""
 
             def rollback(
                 inner_self, rollout_id: str, reason: str = "", **kwargs
@@ -105,12 +108,12 @@ class FullEmergencyRecoveryScenario(IntegrationScenario):
 
         mock_canary_service = MockCanaryService()
 
-        # 복구 세션 추적
+        # Track the recovery session
         recovery_session_id = None
         recovery_steps_completed = []
 
         class MockRecoveryCoordinator:
-            """RecoveryCoordinator Mock - 4단계 역순 복구 시뮬레이션."""
+            """RecoveryCoordinator mock - simulates 4-step reverse recovery."""
 
             def __init__(inner_self):
                 inner_self.current_step = 0
@@ -170,7 +173,7 @@ class FullEmergencyRecoveryScenario(IntegrationScenario):
         mock_coordinator = MockRecoveryCoordinator()
 
         # =====================================================================
-        # Step 1: 초기 상태 확인 (Emergency: NORMAL)
+        # Step 1: check the initial state (Emergency: NORMAL)
         # =====================================================================
         def step1():
             state = mock_tracker.get_effective_state()
@@ -182,7 +185,7 @@ class FullEmergencyRecoveryScenario(IntegrationScenario):
             return
 
         # =====================================================================
-        # Step 2: Emergency LEVEL_3 주입
+        # Step 2: inject Emergency LEVEL_3
         # =====================================================================
         def step2():
             mock_tracker.set_level(EmergencyLevel.LEVEL_3)
@@ -195,7 +198,7 @@ class FullEmergencyRecoveryScenario(IntegrationScenario):
             return
 
         # =====================================================================
-        # Step 3: SafetyInterlock 체크 (action: ROLLBACK)
+        # Step 3: SafetyInterlock check (action: ROLLBACK)
         # =====================================================================
         def step3():
             interlock = CanarySafetyInterlock(
@@ -210,7 +213,7 @@ class FullEmergencyRecoveryScenario(IntegrationScenario):
             return
 
         # =====================================================================
-        # Step 4: Canary ROLLBACK 확인
+        # Step 4: confirm the Canary ROLLBACK
         # =====================================================================
         def step4():
             interlock = CanarySafetyInterlock(
@@ -229,7 +232,7 @@ class FullEmergencyRecoveryScenario(IntegrationScenario):
             return
 
         # =====================================================================
-        # Step 5: RecoveryCoordinator.start_recovery() 호출
+        # Step 5: call RecoveryCoordinator.start_recovery()
         # =====================================================================
         def step5():
             nonlocal recovery_session_id
@@ -246,13 +249,13 @@ class FullEmergencyRecoveryScenario(IntegrationScenario):
         ):
             return
 
-        # Recovery session ID 저장
+        # Store the recovery session ID
         if self.result:
             self.result.config = self.result.config or {}
             self.result.config["recovery_session_id"] = recovery_session_id
 
         # =====================================================================
-        # Step 6: BUDGET_RESET 실행 (multiplier: 1.0x)
+        # Step 6: run BUDGET_RESET (multiplier: 1.0x)
         # =====================================================================
         def step6():
             step = mock_coordinator.execute_next_step("global")
@@ -267,10 +270,10 @@ class FullEmergencyRecoveryScenario(IntegrationScenario):
             return
 
         # =====================================================================
-        # Step 7: HEALTH_CHECK 실행 (health_passed: true)
+        # Step 7: run HEALTH_CHECK (health_passed: true)
         # =====================================================================
         def step7():
-            # 시간 시뮬레이션: skip_wait이 아니면 대기
+            # Time simulation: wait unless skip_wait is set
             if not skip_wait and wait_seconds > 0:
                 time.sleep(wait_seconds)
 
@@ -286,13 +289,13 @@ class FullEmergencyRecoveryScenario(IntegrationScenario):
             return
 
         # =====================================================================
-        # Step 8: CANARY_RESUME 실행 (canary_resumed: true)
+        # Step 8: run CANARY_RESUME (canary_resumed: true)
         # =====================================================================
         def step8():
             step = mock_coordinator.execute_next_step("global")
             if step and step.step_type == RecoveryStepType.CANARY_RESUME:
                 recovery_steps_completed.append("CANARY_RESUME")
-                # Mock에서 resume 호출
+                # Call resume on the mock
                 mock_canary_service.resume("test-rollout-001")
                 return f"canary_resumed: {str(canary_resumed).lower()}"
             return "CANARY_RESUME failed"
@@ -303,13 +306,13 @@ class FullEmergencyRecoveryScenario(IntegrationScenario):
             return
 
         # =====================================================================
-        # Step 9: GOVERNANCE_NORMAL 실행 (governance: NORMAL)
+        # Step 9: run GOVERNANCE_NORMAL (governance: NORMAL)
         # =====================================================================
         def step9():
             step = mock_coordinator.execute_next_step("global")
             if step and step.step_type == RecoveryStepType.GOVERNANCE_NORMAL:
                 recovery_steps_completed.append("GOVERNANCE_NORMAL")
-                # Emergency 레벨 복구
+                # Restore the Emergency level
                 mock_tracker.set_level(EmergencyLevel.NORMAL)
                 return f"governance: {step.result['governance']}"
             return "GOVERNANCE_NORMAL failed"
@@ -320,7 +323,7 @@ class FullEmergencyRecoveryScenario(IntegrationScenario):
             return
 
         # =====================================================================
-        # Step 10: 최종 상태 확인 (모든 컴포넌트 정상)
+        # Step 10: check the final state (all components healthy)
         # =====================================================================
         def step10():
             state = mock_tracker.get_effective_state()
@@ -340,16 +343,17 @@ class FullEmergencyRecoveryScenario(IntegrationScenario):
 
 class SafetyInterlockCanaryRollbackScenario(IntegrationScenario):
     """
-    SafetyInterlock LEVEL_2→PAUSE→LEVEL_3→ROLLBACK 에스컬레이션 시나리오.
+    Scenario: SafetyInterlock LEVEL_2 -> PAUSE -> LEVEL_3 -> ROLLBACK
+    escalation.
 
     Steps:
-    1. Canary 롤아웃 진행 중 시뮬레이션 (canary_active: true)
-    2. Emergency LEVEL_2 주입 (state: LEVEL_2)
+    1. Simulate a Canary rollout in progress (canary_active: true)
+    2. Inject Emergency LEVEL_2 (state: LEVEL_2)
     3. SafetyInterlock.check_and_apply() (action: PAUSE)
-    4. Canary 일시 중지 확인 (canary_paused: true)
-    5. Emergency LEVEL_3 에스컬레이션 (state: LEVEL_3)
+    4. Confirm the Canary is paused (canary_paused: true)
+    5. Escalate Emergency to LEVEL_3 (state: LEVEL_3)
     6. SafetyInterlock.check_and_apply() (action: ROLLBACK)
-    7. Canary 롤백 확인 (canary_rollback: true)
+    7. Confirm the Canary rollback (canary_rollback: true)
     """
 
     scenario_name = "safety_interlock_canary_rollback"
@@ -364,9 +368,9 @@ class SafetyInterlockCanaryRollbackScenario(IntegrationScenario):
             CanarySafetyInterlock = None  # type: ignore[assignment,misc]
         from baldur.models.emergency import EmergencyLevel
 
-        # Mock 의존성 설정
+        # Set up the mock dependencies
         class MockEmergencyTracker:
-            """Emergency 상태를 시뮬레이션하는 Mock 트래커."""
+            """Mock tracker that simulates the Emergency state."""
 
             def __init__(self):
                 self._level = EmergencyLevel.NORMAL
@@ -385,13 +389,13 @@ class SafetyInterlockCanaryRollbackScenario(IntegrationScenario):
 
         mock_tracker = MockEmergencyTracker()
 
-        # Canary 상태 추적
+        # Track the Canary state
         canary_active = False
         canary_paused = False
         canary_rollback = False
 
         class MockCanaryService:
-            """Canary 서비스 Mock."""
+            """Canary service mock."""
 
             def start(inner_self, rollout_id: str) -> bool:
                 nonlocal canary_active
@@ -413,7 +417,7 @@ class SafetyInterlockCanaryRollbackScenario(IntegrationScenario):
         mock_canary_service = MockCanaryService()
 
         # =====================================================================
-        # Step 1: Canary 롤아웃 진행 중 시뮬레이션
+        # Step 1: simulate a Canary rollout in progress
         # =====================================================================
         def step1():
             mock_canary_service.start("test-rollout-001")
@@ -425,7 +429,7 @@ class SafetyInterlockCanaryRollbackScenario(IntegrationScenario):
             return
 
         # =====================================================================
-        # Step 2: Emergency LEVEL_2 주입
+        # Step 2: inject Emergency LEVEL_2
         # =====================================================================
         def step2():
             mock_tracker.set_level(EmergencyLevel.LEVEL_2)
@@ -457,7 +461,7 @@ class SafetyInterlockCanaryRollbackScenario(IntegrationScenario):
             return
 
         # =====================================================================
-        # Step 4: Canary 일시 중지 확인
+        # Step 4: confirm the Canary is paused
         # =====================================================================
         def step4():
             return f"canary_paused: {str(canary_paused).lower()}"
@@ -468,7 +472,7 @@ class SafetyInterlockCanaryRollbackScenario(IntegrationScenario):
             return
 
         # =====================================================================
-        # Step 5: Emergency LEVEL_3 에스컬레이션
+        # Step 5: escalate Emergency to LEVEL_3
         # =====================================================================
         def step5():
             mock_tracker.set_level(EmergencyLevel.LEVEL_3)
@@ -500,7 +504,7 @@ class SafetyInterlockCanaryRollbackScenario(IntegrationScenario):
             return
 
         # =====================================================================
-        # Step 7: Canary 롤백 확인
+        # Step 7: confirm the Canary rollback
         # =====================================================================
         def step7():
             return f"canary_rollback: {str(canary_rollback).lower()}"

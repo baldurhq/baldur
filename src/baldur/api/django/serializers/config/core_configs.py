@@ -3,7 +3,7 @@ Core Baldur Configuration Serializers.
 
 CircuitBreaker, DLQ, Retry, RateLimit, Idempotency config serializers.
 
-Fail-Safe Default 강화 추가.
+Adds Fail-Safe Default hardening.
 """
 
 from rest_framework import serializers
@@ -15,7 +15,7 @@ class CircuitBreakerConfigSerializer(ApplyStrategyMixin):
     """
     Serializer for Circuit Breaker configuration.
 
-    Safe Default 폴백 적용.
+    Applies the Safe Default fallback.
     """
 
     _config_type = "circuit_breaker"
@@ -57,7 +57,7 @@ class CircuitBreakerConfigSerializer(ApplyStrategyMixin):
     )
 
     def validate(self, attrs):
-        """검증 + Safe Default 폴백."""
+        """Validate + Safe Default fallback."""
         validated = super().validate(attrs)
         return self.validate_with_safe_fallback(validated)
 
@@ -66,7 +66,7 @@ class DLQConfigSerializer(ApplyStrategyMixin):
     """
     Serializer for DLQ configuration.
 
-    Safe Default 폴백 적용.
+    Applies the Safe Default fallback.
     """
 
     _config_type = "dlq"
@@ -84,7 +84,7 @@ class DLQConfigSerializer(ApplyStrategyMixin):
     )
 
     def validate(self, attrs):
-        """검증 + Safe Default 폴백."""
+        """Validate + Safe Default fallback."""
         validated = super().validate(attrs)
         return self.validate_with_safe_fallback(validated)
 
@@ -93,7 +93,7 @@ class RetryConfigSerializer(ApplyStrategyMixin):
     """
     Serializer for Retry configuration.
 
-    Safe Default 폴백 적용.
+    Applies the Safe Default fallback.
     """
 
     _config_type = "retry"
@@ -113,7 +113,7 @@ class RetryConfigSerializer(ApplyStrategyMixin):
     )
 
     def validate(self, attrs):
-        """검증 + Safe Default 폴백."""
+        """Validate + Safe Default fallback."""
         validated = super().validate(attrs)
         return self.validate_with_safe_fallback(validated)
 
@@ -159,7 +159,7 @@ class IdempotencyConfigSerializer(ApplyStrategyMixin):
     """
     Serializer for Idempotency configuration.
 
-    Safe Default 폴백 적용.
+    Applies the Safe Default fallback.
     """
 
     _config_type = "idempotency"
@@ -175,6 +175,6 @@ class IdempotencyConfigSerializer(ApplyStrategyMixin):
     )
 
     def validate(self, attrs):
-        """검증 + Safe Default 폴백."""
+        """Validate + Safe Default fallback."""
         validated = super().validate(attrs)
         return self.validate_with_safe_fallback(validated)

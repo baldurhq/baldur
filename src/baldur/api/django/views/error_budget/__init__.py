@@ -3,12 +3,13 @@ Error Budget API Views Package.
 
 REST API endpoints for Error Budget management and Deployment Policy.
 
-REFACTORED: 이 패키지는 기존 error_budget.py (1179줄)를 3개 모듈로 분리했습니다.
+REFACTORED: this package splits the former error_budget.py (1179 lines) into
+three modules.
 
 Modules:
-- status.py: Error Budget 상태 조회/기록 (5개 View)
-- deployment.py: 배포 정책 결정 기록 (5개 View)
-- reconciliation.py: Shadow Budget 관리 (9개 View)
+- status.py: Error Budget status query/recording (5 views)
+- deployment.py: deployment policy decision recording (5 views)
+- reconciliation.py: Shadow Budget management (9 views)
 
 Endpoints:
 - GET  /api/baldur/error-budget/status/
@@ -30,8 +31,8 @@ Endpoints:
 - DELETE /api/baldur/reconciliation/excluded-periods/{id}/
 - GET/PUT /api/baldur/reconciliation/config/
 
-Core Principle: "시스템은 조언하고, 결정은 사람이 한다."
-FAIL-SAFE DESIGN: 시스템 장애 시 → 기본값 PROCEED (fail-open)
+Core Principle: "the system advises, humans decide."
+FAIL-SAFE DESIGN: on system failure -> default to PROCEED (fail-open)
 """
 
 # Deployment policy views

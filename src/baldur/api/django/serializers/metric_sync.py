@@ -1,10 +1,10 @@
 """
 Metric Sync API Serializers.
 
-Serializers for Poll 제거 + Manual API
+Serializers for the poll-removal + manual API.
 
-POST /api/baldur/metrics/sync/ - 수동 메트릭 동기화
-GET /api/baldur/metrics/drift-report/ - Drift 상태 조회
+POST /api/baldur/metrics/sync/ - manual metric sync
+GET /api/baldur/metrics/drift-report/ - query drift status
 """
 
 from rest_framework import serializers
@@ -16,9 +16,9 @@ from rest_framework import serializers
 
 class MetricSyncRequestSerializer(serializers.Serializer):
     """
-    POST /api/baldur/metrics/sync/ 요청 Serializer.
+    Request serializer for POST /api/baldur/metrics/sync/.
 
-    운영자가 수동으로 메트릭 동기화를 트리거할 때 사용.
+    Used when an operator manually triggers a metric sync.
     """
 
     domains = serializers.ListField(
@@ -48,7 +48,7 @@ class MetricSyncRequestSerializer(serializers.Serializer):
 
 
 class DriftDetailSerializer(serializers.Serializer):
-    """단일 메트릭의 Drift 상세 정보."""
+    """Drift details for a single metric."""
 
     before = serializers.FloatField(help_text="In-memory value before sync")
     after = serializers.FloatField(help_text="Actual value after sync")
@@ -64,7 +64,7 @@ class DomainSyncResultSerializer(serializers.Serializer):
 
 
 class SyncSummarySerializer(serializers.Serializer):
-    """동기화 요약 정보."""
+    """Sync summary information."""
 
     total_drifts_detected = serializers.IntegerField(
         help_text="Total number of drifts detected"
@@ -79,7 +79,7 @@ class SyncSummarySerializer(serializers.Serializer):
 
 class MetricSyncResponseSerializer(serializers.Serializer):
     """
-    POST /api/baldur/metrics/sync/ 응답 Serializer.
+    Response serializer for POST /api/baldur/metrics/sync/.
     """
 
     status = serializers.ChoiceField(
@@ -102,7 +102,7 @@ class MetricSyncResponseSerializer(serializers.Serializer):
 
 
 class MetricDriftItemSerializer(serializers.Serializer):
-    """개별 메트릭의 Drift 정보."""
+    """Drift information for an individual metric."""
 
     in_memory = serializers.FloatField(help_text="Current in-memory (Gauge) value")
     actual = serializers.FloatField(help_text="Actual value retrieved from DB")
@@ -114,7 +114,7 @@ class MetricDriftItemSerializer(serializers.Serializer):
 
 
 class DriftReportMetricsSerializer(serializers.Serializer):
-    """메트릭 유형별 Drift 정보."""
+    """Drift information per metric type."""
 
     dlq_pending_count = serializers.DictField(
         child=MetricDriftItemSerializer(),
@@ -135,10 +135,10 @@ class DriftReportMetricsSerializer(serializers.Serializer):
 
 class DriftReportResponseSerializer(serializers.Serializer):
     """
-    GET /api/baldur/metrics/drift-report/ 응답 Serializer.
+    Response serializer for GET /api/baldur/metrics/drift-report/.
 
-    현재 Drift 상태를 조회합니다 (읽기 전용).
-    DB 조회는 수행하지만 Gauge 값은 변경하지 않습니다.
+    Queries the current drift status (read-only).
+    It reads from the DB but does not change any Gauge values.
     """
 
     generated_at = serializers.DateTimeField(

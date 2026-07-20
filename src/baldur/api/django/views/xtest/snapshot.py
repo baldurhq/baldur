@@ -1,8 +1,8 @@
 """
 X-Test-Mode Snapshot Views
 
-시스템 스냅샷 관련 테스트 API:
-- SystemSnapshotView: 시스템 스냅샷 조회
+System snapshot-related test APIs:
+- SystemSnapshotView: query the system snapshot
 """
 
 import structlog
@@ -17,7 +17,7 @@ logger = structlog.get_logger()
 
 class SystemSnapshotView(XTestModeMixin, APIView):
     """
-    시스템 스냅샷 조회 API.
+    API for querying the system snapshot.
 
     GET /api/baldur/xtest/snapshot/
     """
@@ -29,7 +29,7 @@ class SystemSnapshotView(XTestModeMixin, APIView):
 
         snapshot = collect_system_snapshot()
 
-        # CB 상태 추가
+        # Add CB state
         try:
             from baldur.services.circuit_breaker import (
                 get_circuit_breaker_service,
@@ -48,7 +48,7 @@ class SystemSnapshotView(XTestModeMixin, APIView):
         except Exception as e:
             snapshot["circuit_breakers"] = {"error": str(e)}
 
-        # Error Budget 상태 추가
+        # Add Error Budget state
         try:
             from baldur_pro.services.error_budget import (
                 get_error_budget_service,

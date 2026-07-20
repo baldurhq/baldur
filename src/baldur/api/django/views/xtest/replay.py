@@ -1,18 +1,18 @@
 """
 X-Test-Mode Replay Views
 
-DLQ Replay 동작을 X-Test-Mode 환경에서 테스트하기 위한 API.
+API for testing DLQ replay behavior under X-Test-Mode.
 
 Endpoints:
-- POST /api/baldur/xtest/replay/single/ - 단일 DLQ 항목 재생
-- POST /api/baldur/xtest/replay/batch/ - 다수 항목 배치 재생
-- POST /api/baldur/xtest/replay/trigger-on-cb-close/ - CB 복구 시 자동 재생 시뮬레이션
-- GET  /api/baldur/xtest/replay/status/ - 재생 가능 항목 및 상태 조회
+- POST /api/baldur/xtest/replay/single/ - Replay a single DLQ entry
+- POST /api/baldur/xtest/replay/batch/ - Replay multiple entries as a batch
+- POST /api/baldur/xtest/replay/trigger-on-cb-close/ - Simulate auto-replay on CB close
+- GET  /api/baldur/xtest/replay/status/ - Query replayable entries and status
 
 Security:
-- X-Test-Mode: chaos-monkey 헤더 필수
-- DEBUG 또는 CHAOS_ENABLED 환경 변수 필요
-- production 환경에서는 완전 차단
+- X-Test-Mode: chaos-monkey header required
+- DEBUG or CHAOS_ENABLED environment variable required
+- Fully blocked in production environments
 """
 
 import time
@@ -31,21 +31,21 @@ logger = structlog.get_logger()
 
 
 # =============================================================================
-# 단일 항목 재생 View
+# Single-entry replay view
 # =============================================================================
 
 
 class ReplaySingleView(XTestModeMixin, APIView):
     """
-    단일 DLQ 항목 재생 API.
+    Single DLQ entry replay API.
 
     POST /api/baldur/xtest/replay/single/
 
     Request:
         {
-            "dlq_id": 123,               // 재생할 DLQ 항목 ID (필수)
-            "dry_run": false,            // 실제 실행 없이 검증만 (선택, 기본 false)
-            "skip_governance": false     // 거버넌스 체크 스킵 (선택, 기본 false)
+            "dlq_id": 123,  // ID of the DLQ entry to replay (required)
+            "dry_run": false,  // Validate only, no execution (optional, default false)
+            "skip_governance": false  // Skip governance check (optional, default false)
         }
 
     Response:
@@ -89,7 +89,7 @@ class ReplaySingleView(XTestModeMixin, APIView):
         dry_run = request.data.get("dry_run", False)
         skip_governance = request.data.get("skip_governance", False)
 
-        # 거버넌스 체크 수행 (skip_governance=False인 경우)
+        # Run the governance check (when skip_governance=False)
         governance_result = self._check_governance(skip_governance)
 
         if not governance_result["allowed"]:
@@ -108,7 +108,7 @@ class ReplaySingleView(XTestModeMixin, APIView):
             )
 
         if dry_run:
-            # dry_run 모드: 실제 실행 없이 검증만 수행
+            # dry_run mode: validate only, without executing
             snapshot = collect_system_snapshot()
             validation_result = self._validate_replay(dlq_id)
 
@@ -126,7 +126,7 @@ class ReplaySingleView(XTestModeMixin, APIView):
                 status=status.HTTP_200_OK,
             )
 
-        # 실제 재생 수행
+        # Perform the actual replay
         start_time = time.time()
         result = self._execute_replay(dlq_id)
         duration_ms = int((time.time() - start_time) * 1000)
@@ -151,7 +151,7 @@ class ReplaySingleView(XTestModeMixin, APIView):
             "snapshot": snapshot,
         }
 
-        # WAL Audit 기록
+        # WAL audit record
         self.log_xtest_audit(
             request=request,
             action="replay_single",
@@ -164,7 +164,7 @@ class ReplaySingleView(XTestModeMixin, APIView):
         return Response(response_data, status=status.HTTP_200_OK)
 
     def _check_governance(self, skip: bool) -> dict[str, Any]:
-        """거버넌스 체크 수행."""
+        """Run the governance check."""
         if skip:
             return {
                 "allowed": True,
@@ -185,7 +185,7 @@ class ReplaySingleView(XTestModeMixin, APIView):
                 operation_name="xtest_replay_single",
                 service_name="XTestReplayService",
                 domain="dlq",
-                audit_on_block=False,  # X-Test-Mode에서는 audit 비활성화
+                audit_on_block=False,  # audit disabled under X-Test-Mode
             )
 
             checks_passed = []
@@ -196,7 +196,7 @@ class ReplaySingleView(XTestModeMixin, APIView):
             else:
                 if result.block_reason:
                     checks_failed.append(result.block_reason.value)
-                    # 나머지는 passed로 처리 (첫 번째 실패에서 중단되므로)
+                    # Treat the rest as passed (checks stop at the first failure)
                     if result.block_reason.value == "kill_switch":
                         pass
                     elif result.block_reason.value == "emergency_mode":
@@ -218,7 +218,7 @@ class ReplaySingleView(XTestModeMixin, APIView):
                 "test.mode_governance_check",
                 error=e,
             )
-            # fail-open: 체크 실패 시 허용
+            # fail-open: allow when the check itself fails
             return {
                 "allowed": True,
                 "checks_passed": [],
@@ -228,7 +228,7 @@ class ReplaySingleView(XTestModeMixin, APIView):
             }
 
     def _validate_replay(self, dlq_id: str) -> dict[str, Any]:
-        """재생 가능 여부 검증 (dry_run용)."""
+        """Validate replay eligibility (for dry_run)."""
         try:
             from baldur.services.replay_service import get_replay_service
 
@@ -275,7 +275,7 @@ class ReplaySingleView(XTestModeMixin, APIView):
             }
 
     def _execute_replay(self, dlq_id: str) -> dict[str, Any]:
-        """실제 재생 수행."""
+        """Perform the actual replay."""
         try:
             from baldur.services.replay_service import get_replay_service
 
@@ -302,22 +302,22 @@ class ReplaySingleView(XTestModeMixin, APIView):
 
 
 # =============================================================================
-# 배치 재생 View
+# Batch replay view
 # =============================================================================
 
 
 class ReplayBatchView(XTestModeMixin, APIView):
     """
-    다수 DLQ 항목 배치 재생 API.
+    Batch replay API for multiple DLQ entries.
 
     POST /api/baldur/xtest/replay/batch/
 
     Request:
         {
-            "domain": "external_service",  // 도메인 필터 (선택)
-            "status": "pending",           // 상태 필터 (선택, 기본 pending)
-            "batch_size": 10,              // 배치 크기 (선택, 기본 10, 최대 50)
-            "dry_run": false               // 검증만 (선택, 기본 false)
+            "domain": "external_service",  // Domain filter (optional)
+            "status": "pending",           // Status filter (optional, default pending)
+            "batch_size": 10,              // Batch size (optional, default 10, max 50)
+            "dry_run": false               // Validate only (optional, default false)
         }
 
     Response:
@@ -349,7 +349,7 @@ class ReplayBatchView(XTestModeMixin, APIView):
         batch_size = int(request.data.get("batch_size", self.DEFAULT_BATCH_SIZE))
         dry_run = request.data.get("dry_run", False)
 
-        # 배치 크기 제한
+        # Batch size limit
         if batch_size > self.MAX_BATCH_SIZE:
             return Response(
                 {
@@ -366,7 +366,7 @@ class ReplayBatchView(XTestModeMixin, APIView):
             batch_size = 1
 
         if dry_run:
-            # dry_run 모드: 재생 대상 항목만 조회
+            # dry_run mode: only look up the entries eligible for replay
             result = self._get_eligible_entries(domain, batch_size)
             snapshot = collect_system_snapshot()
 
@@ -381,7 +381,7 @@ class ReplayBatchView(XTestModeMixin, APIView):
                 status=status.HTTP_200_OK,
             )
 
-        # 실제 배치 재생 수행
+        # Perform the actual batch replay
         result = self._execute_batch_replay(domain, batch_size)
         snapshot = collect_system_snapshot()
 
@@ -405,7 +405,7 @@ class ReplayBatchView(XTestModeMixin, APIView):
             "snapshot": snapshot,
         }
 
-        # WAL Audit 기록
+        # WAL audit record
         self.log_xtest_audit(
             request=request,
             action="replay_batch",
@@ -421,7 +421,7 @@ class ReplayBatchView(XTestModeMixin, APIView):
         return Response(response_data, status=status.HTTP_200_OK)
 
     def _get_eligible_entries(self, domain: str | None, limit: int) -> dict[str, Any]:
-        """재생 가능한 항목 목록 조회."""
+        """Look up the list of entries eligible for replay."""
         try:
             from baldur.services.replay_service import get_replay_service
 
@@ -460,7 +460,7 @@ class ReplayBatchView(XTestModeMixin, APIView):
             return {"count": 0, "entries": [], "error": str(e)}
 
     def _get_governance_status(self) -> dict[str, Any]:
-        """현재 거버넌스 상태 조회."""
+        """Look up the current governance status."""
         try:
             from baldur.factory.registry import ProviderRegistry
 
@@ -482,7 +482,7 @@ class ReplayBatchView(XTestModeMixin, APIView):
     def _execute_batch_replay(
         self, domain: str | None, batch_size: int
     ) -> dict[str, Any]:
-        """배치 재생 실행."""
+        """Execute the batch replay."""
         try:
             from baldur.services.replay_service import get_replay_service
 
@@ -493,7 +493,7 @@ class ReplayBatchView(XTestModeMixin, APIView):
                 max_items=batch_size,
             )
 
-            # 결과 요약 생성
+            # Build the result summary
             results_summary = []
             if result.results:
                 results_summary = [
@@ -502,7 +502,7 @@ class ReplayBatchView(XTestModeMixin, APIView):
                         "success": r.success,
                         "message": r.message or r.error or "",
                     }
-                    for r in result.results[:20]  # 최대 20개만 포함
+                    for r in result.results[:20]  # include at most 20
                 ]
 
             return {
@@ -531,21 +531,21 @@ class ReplayBatchView(XTestModeMixin, APIView):
 
 
 # =============================================================================
-# CB 복구 시 자동 재생 트리거 View
+# Auto-replay-on-CB-recovery trigger view
 # =============================================================================
 
 
 class TriggerReplayOnCBCloseView(XTestModeMixin, APIView):
     """
-    CB 복구 시 자동 재생 동작 시뮬레이션 API.
+    API that simulates automatic replay on CB recovery.
 
     POST /api/baldur/xtest/replay/trigger-on-cb-close/
 
     Request:
         {
-            "service_name": "database",      // CB 서비스 이름 (필수)
-            "simulate_close": true,          // CB CLOSE 시뮬레이션 (선택, 기본 true)
-            "max_items": 50                  // 최대 재생 항목 수 (선택, 기본 50)
+            "service_name": "database",  // CB service name (required)
+            "simulate_close": true,      // Simulate CB CLOSE (optional, default true)
+            "max_items": 50              // Max entries to replay (optional, default 50)
         }
 
     Response:
@@ -580,19 +580,19 @@ class TriggerReplayOnCBCloseView(XTestModeMixin, APIView):
         simulate_close = request.data.get("simulate_close", True)
         max_items = int(request.data.get("max_items", 50))
 
-        # CB 이전 상태 조회
+        # Look up the previous CB state
         cb_previous_state = self._get_cb_state(service_name)
 
-        # simulate_close가 true면 CB 상태를 CLOSED로 전환 시뮬레이션
+        # If simulate_close is true, simulate a CB transition to CLOSED
         if simulate_close:
             self._simulate_cb_close(service_name)
 
         cb_current_state = self._get_cb_state(service_name)
 
-        # 재생 대상 항목 수 조회
+        # Look up the number of entries eligible for replay
         eligible_count = self._get_eligible_count(service_name)
 
-        # 조건부 재생 실행
+        # Run the conditional replay
         replay_result = self._execute_conditional_replay(service_name, max_items)
 
         snapshot = collect_system_snapshot()
@@ -616,7 +616,7 @@ class TriggerReplayOnCBCloseView(XTestModeMixin, APIView):
             "snapshot": snapshot,
         }
 
-        # WAL Audit 기록
+        # WAL audit record
         self.log_xtest_audit(
             request=request,
             action="trigger_cb_close_replay",
@@ -632,7 +632,7 @@ class TriggerReplayOnCBCloseView(XTestModeMixin, APIView):
         return Response(response_data, status=status.HTTP_200_OK)
 
     def _get_cb_state(self, service_name: str) -> str:
-        """CB 상태 조회."""
+        """Look up the CB state."""
         try:
             from baldur.services.circuit_breaker import (
                 get_circuit_breaker_service,
@@ -649,14 +649,14 @@ class TriggerReplayOnCBCloseView(XTestModeMixin, APIView):
             return "UNKNOWN"
 
     def _simulate_cb_close(self, service_name: str) -> bool:
-        """CB CLOSE 시뮬레이션."""
+        """Simulate a CB CLOSE."""
         try:
             from baldur.services.circuit_breaker import (
                 get_circuit_breaker_service,
             )
 
             cb_service = get_circuit_breaker_service()
-            # force_close 메서드가 있으면 사용
+            # Use the force_close method if available
             if hasattr(cb_service, "force_close"):
                 cb_service.force_close(service_name, trigger_replay=False)
                 return True
@@ -672,12 +672,12 @@ class TriggerReplayOnCBCloseView(XTestModeMixin, APIView):
             return False
 
     def _get_eligible_count(self, service_name: str) -> int:
-        """재생 대상 항목 수 조회."""
+        """Look up the number of entries eligible for replay."""
         try:
             from baldur.services.replay_service import get_replay_service
 
             service = get_replay_service()
-            # 서비스 이름으로 도메인 매핑
+            # Map the service name to a domain
             entries = service.repository.find_replayable(
                 max_retries=service.config.get("max_replay_attempts", 2),
                 domain=None,
@@ -695,7 +695,7 @@ class TriggerReplayOnCBCloseView(XTestModeMixin, APIView):
     def _execute_conditional_replay(
         self, service_name: str, max_items: int
     ) -> dict[str, Any]:
-        """조건부 재생 실행."""
+        """Run the conditional replay."""
         try:
             from baldur.services.replay_service import get_replay_service
 
@@ -703,7 +703,7 @@ class TriggerReplayOnCBCloseView(XTestModeMixin, APIView):
             result = service.replay_on_circuit_close(
                 service_name=service_name,
                 max_items=max_items,
-                escalate_failures=False,  # X-Test-Mode에서는 escalate 비활성화
+                escalate_failures=False,  # escalation disabled under X-Test-Mode
             )
 
             return {
@@ -727,18 +727,18 @@ class TriggerReplayOnCBCloseView(XTestModeMixin, APIView):
 
 
 # =============================================================================
-# 재생 상태 조회 View
+# Replay status view
 # =============================================================================
 
 
 class ReplayStatusView(XTestModeMixin, APIView):
     """
-    재생 가능 항목 및 상태 조회 API.
+    API for querying replayable entries and their status.
 
     GET /api/baldur/xtest/replay/status/
 
     Query Parameters:
-        - domain: 도메인 필터 (선택)
+        - domain: Domain filter (optional)
 
     Response:
         {
@@ -769,13 +769,13 @@ class ReplayStatusView(XTestModeMixin, APIView):
 
         domain_filter = request.query_params.get("domain")
 
-        # 대기 중인 항목 수 조회
+        # Look up the number of pending entries
         pending_stats = self._get_pending_stats(domain_filter)
 
-        # 거버넌스 상태 조회
+        # Look up the governance status
         governance_status = self._get_governance_status()
 
-        # CB 상태 목록 조회
+        # Look up the list of CB states
         cb_states = self._get_cb_states()
 
         snapshot = collect_system_snapshot()
@@ -791,7 +791,7 @@ class ReplayStatusView(XTestModeMixin, APIView):
             "snapshot": snapshot,
         }
 
-        # WAL Audit 기록
+        # WAL audit record
         self.log_xtest_audit(
             request=request,
             action="query_status",
@@ -803,7 +803,7 @@ class ReplayStatusView(XTestModeMixin, APIView):
         return Response(response_data, status=status.HTTP_200_OK)
 
     def _get_pending_stats(self, domain: str | None) -> dict[str, Any]:
-        """대기 중인 DLQ 항목 통계 조회."""
+        """Look up statistics for pending DLQ entries."""
         try:
             from baldur.factory.registry import ProviderRegistry
 
@@ -815,7 +815,7 @@ class ReplayStatusView(XTestModeMixin, APIView):
             by_domain = stats.get("by_domain", {})
             by_status = stats.get("by_status", {})
 
-            # 도메인 필터 적용
+            # Apply the domain filter
             if domain:
                 filtered_count = by_domain.get(domain, 0)
                 by_domain = {domain: filtered_count}
@@ -836,7 +836,7 @@ class ReplayStatusView(XTestModeMixin, APIView):
             return {"total": 0, "by_domain": {}, "error": str(e)}
 
     def _get_governance_status(self) -> dict[str, Any]:
-        """거버넌스 상태 조회."""
+        """Look up the governance status."""
         try:
             from baldur.factory.registry import ProviderRegistry
 
@@ -859,14 +859,14 @@ class ReplayStatusView(XTestModeMixin, APIView):
             return {"error": str(e), "replay_allowed": True}
 
     def _get_cb_states(self) -> dict[str, str]:
-        """등록된 CB 상태 목록 조회."""
+        """Look up the list of registered CB states."""
         try:
             from baldur.services.circuit_breaker import (
                 get_circuit_breaker_service,
             )
 
             cb_service = get_circuit_breaker_service()
-            # get_all_status 메서드가 있으면 사용
+            # Use the get_all_status method if available
             if hasattr(cb_service, "get_all_status"):
                 all_status = cb_service.get_all_status()
                 return {

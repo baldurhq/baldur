@@ -1,8 +1,8 @@
 """
 Sensitive Endpoint Access Logging Middleware.
 
-민감한 엔드포인트(audit, config, chaos)에 대한 접근을 로깅하여
-컴플라이언스 감사 증적을 제공합니다.
+Logs access to sensitive endpoints (audit, config, chaos) to provide a
+compliance audit trail.
 
 Features:
 - Sensitive endpoints detection

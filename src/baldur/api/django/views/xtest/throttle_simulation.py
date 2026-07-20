@@ -1,19 +1,21 @@
 """
 X-Test-Mode Throttle Simulation Views.
 
-Adaptive Throttle의 Emergency/CB 연동 동작을 X-Test 환경에서 시뮬레이션하는 API.
+API that simulates the Adaptive Throttle's Emergency/CB integration behavior
+in the X-Test environment.
 
 Endpoints:
-- POST /api/baldur/xtest/throttle/simulate-emergency/ - Emergency 레벨 상승 시뮬레이션
-- POST /api/baldur/xtest/throttle/simulate-cb-open/ - CB OPEN 시뮬레이션
-- POST /api/baldur/xtest/throttle/inject-rtt-delay/ - RTT 지연 주입
-- GET  /api/baldur/xtest/throttle/status/ - Throttle 상태 조회
-- POST /api/baldur/xtest/throttle/reset/ - Throttle 상태 초기화
+- POST /api/baldur/xtest/throttle/simulate-emergency/ - simulate an Emergency
+  level increase
+- POST /api/baldur/xtest/throttle/simulate-cb-open/ - simulate CB OPEN
+- POST /api/baldur/xtest/throttle/inject-rtt-delay/ - inject RTT delay
+- GET  /api/baldur/xtest/throttle/status/ - query Throttle state
+- POST /api/baldur/xtest/throttle/reset/ - reset Throttle state
 
 Security:
-- X-Test-Mode: chaos-monkey 헤더 필수
-- DEBUG 또는 CHAOS_ENABLED 환경 변수 필요
-- production 환경에서는 완전 차단
+- X-Test-Mode: chaos-monkey header required
+- DEBUG or the CHAOS_ENABLED environment variable required
+- Fully blocked in production environments
 """
 
 import time
@@ -41,17 +43,18 @@ def _as_any(throttle: object) -> Any:
 
 class ThrottleEmergencySimulationView(XTestModeMixin, APIView):
     """
-    Emergency 레벨 상승 시뮬레이션 API.
+    Emergency level increase simulation API.
 
     POST /api/baldur/xtest/throttle/simulate-emergency/
 
-    Emergency Level에 따른 Throttle limit 조정을 시뮬레이션합니다.
-    실제 Emergency Manager 상태와는 독립적으로 Throttle만 조정합니다.
+    Simulates the Throttle limit adjustment for a given Emergency Level.
+    Adjusts only the Throttle, independently of the real Emergency Manager
+    state.
 
     Request Body:
         {
             "level": 2,           // Emergency Level (0=NORMAL, 1-3)
-            "service": "default"  // 서비스 이름 (선택, 기본: default)
+            "service": "default"  // service name (optional, default: default)
         }
 
     Response:
@@ -75,7 +78,7 @@ class ThrottleEmergencySimulationView(XTestModeMixin, APIView):
         level = request.data.get("level", 0)
         service = request.data.get("service", "default")
 
-        # 레벨 유효성 검증
+        # Validate the level
         if not isinstance(level, int) or level < 0 or level > 3:
             return Response(
                 {
@@ -86,7 +89,7 @@ class ThrottleEmergencySimulationView(XTestModeMixin, APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Exception은 DRF exception handler가 처리
+        # Exceptions are handled by the DRF exception handler
         # settings.py: EXCEPTION_HANDLER = 'baldur.api.django.exceptions.handler.baldur_exception_handler'
         try:
             from baldur.factory.registry import ProviderRegistry
@@ -101,13 +104,13 @@ class ThrottleEmergencySimulationView(XTestModeMixin, APIView):
         previous_limit = throttle.current_limit
         previous_level = throttle.get_emergency_level()
 
-        # Emergency 레벨 조정 시뮬레이션
+        # Simulate the Emergency level adjustment
         throttle.adjust_for_emergency(level)
 
         new_limit = throttle.current_limit
         gradient_frozen = throttle.is_gradient_frozen()
 
-        # 배율 계산
+        # Compute the multiplier
         multiplier_map = {0: 1.0, 1: 0.8, 2: 0.5, 3: 0.0}
         multiplier = multiplier_map.get(level, 1.0)
 
@@ -119,7 +122,7 @@ class ThrottleEmergencySimulationView(XTestModeMixin, APIView):
             new_limit=new_limit,
         )
 
-        # 감사 로그 기록
+        # Record the audit log
         self.log_xtest_audit(
             request=request,
             action="simulate_emergency",
@@ -154,17 +157,18 @@ class ThrottleEmergencySimulationView(XTestModeMixin, APIView):
 
 class ThrottleCBOpenSimulationView(XTestModeMixin, APIView):
     """
-    Circuit Breaker OPEN 시뮬레이션 API.
+    Circuit Breaker OPEN simulation API.
 
     POST /api/baldur/xtest/throttle/simulate-cb-open/
 
-    CB OPEN 상태에 따른 Throttle limit 조정을 시뮬레이션합니다.
-    실제 Circuit Breaker 상태와는 독립적으로 Throttle만 조정합니다.
+    Simulates the Throttle limit adjustment for a given CB OPEN state.
+    Adjusts only the Throttle, independently of the real Circuit Breaker
+    state.
 
     Request Body:
         {
-            "service": "payment-api",  // CB 서비스 이름
-            "state": "open"            // CB 상태: open, half_open, closed
+            "service": "payment-api",  // CB service name
+            "state": "open"            // CB state: open, half_open, closed
         }
 
     Response:
@@ -187,7 +191,7 @@ class ThrottleCBOpenSimulationView(XTestModeMixin, APIView):
         service = request.data.get("service", "default")
         cb_state = request.data.get("state", "open").lower()
 
-        # 상태 유효성 검증
+        # Validate the state
         valid_states = ["open", "half_open", "closed"]
         if cb_state not in valid_states:
             return Response(
@@ -199,7 +203,7 @@ class ThrottleCBOpenSimulationView(XTestModeMixin, APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Exception은 DRF exception handler가 처리
+        # Exceptions are handled by the DRF exception handler
         from baldur.settings import get_throttle_settings
 
         try:
@@ -217,23 +221,23 @@ class ThrottleCBOpenSimulationView(XTestModeMixin, APIView):
         previous_limit = throttle.current_limit
         base_limit = throttle._base_limit_before_emergency
 
-        # CB 상태에 따른 limit 계산
+        # Compute the limit for the CB state
         if cb_state == "open":
-            # CB OPEN: cb_open_limit_percent (기본 0 = min_limit)
+            # CB OPEN: cb_open_limit_percent (default 0 = min_limit)
             percent = settings.cb_open_limit_percent
             if percent == 0.0:
                 new_limit = settings.min_limit
             else:
                 new_limit = int(base_limit * percent)
         elif cb_state == "half_open":
-            # CB HALF_OPEN: cb_half_open_limit_percent (기본 50%)
+            # CB HALF_OPEN: cb_half_open_limit_percent (default 50%)
             percent = settings.cb_half_open_limit_percent
             new_limit = int(base_limit * percent)
         else:
-            # CB CLOSED: 정상 limit 복구
+            # CB CLOSED: restore the normal limit
             new_limit = base_limit
 
-        # limit 적용
+        # Apply the limit
         throttle.current_limit = max(new_limit, settings.min_limit)
         actual_new_limit = throttle.current_limit
 
@@ -245,7 +249,7 @@ class ThrottleCBOpenSimulationView(XTestModeMixin, APIView):
             actual_new_limit=actual_new_limit,
         )
 
-        # 감사 로그 기록
+        # Record the audit log
         self.log_xtest_audit(
             request=request,
             action="simulate_cb_open",
@@ -276,17 +280,17 @@ class ThrottleCBOpenSimulationView(XTestModeMixin, APIView):
 
 class ThrottleRTTDelayInjectionView(XTestModeMixin, APIView):
     """
-    RTT 지연 주입 API.
+    RTT delay injection API.
 
     POST /api/baldur/xtest/throttle/inject-rtt-delay/
 
-    RTT 샘플을 주입하여 Gradient 알고리즘의 동작을 테스트합니다.
+    Injects RTT samples to exercise the Gradient algorithm's behavior.
 
     Request Body:
         {
-            "rtt_ms": 300,       // 주입할 RTT 값 (ms)
-            "count": 5,          // 주입 횟수 (기본: 1)
-            "interval_ms": 100   // 주입 간격 (ms, 기본: 0)
+            "rtt_ms": 300,       // RTT value to inject (ms)
+            "count": 5,          // number of injections (default: 1)
+            "interval_ms": 100   // injection interval (ms, default: 0)
         }
 
     Response:
@@ -312,7 +316,7 @@ class ThrottleRTTDelayInjectionView(XTestModeMixin, APIView):
         count = request.data.get("count", 1)
         interval_ms = request.data.get("interval_ms", 0)
 
-        # 유효성 검증
+        # Validation
         if not isinstance(rtt_ms, (int, float)) or rtt_ms <= 0:
             return Response(
                 {
@@ -333,7 +337,7 @@ class ThrottleRTTDelayInjectionView(XTestModeMixin, APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Exception은 DRF exception handler가 처리
+        # Exceptions are handled by the DRF exception handler
         from baldur.settings import get_throttle_settings
 
         try:
@@ -351,7 +355,7 @@ class ThrottleRTTDelayInjectionView(XTestModeMixin, APIView):
         previous_limit = throttle.current_limit
         previous_gradient = throttle._gradient_calculator.get_gradient()
 
-        # RTT 샘플 주입
+        # Inject the RTT samples
         interval_seconds = interval_ms / 1000.0
         for i in range(count):
             throttle.record_response(float(rtt_ms))
@@ -362,7 +366,7 @@ class ThrottleRTTDelayInjectionView(XTestModeMixin, APIView):
         new_gradient = throttle._gradient_calculator.get_gradient()
         current_rtt = throttle._gradient_calculator.get_current_rtt()
 
-        # SLA 상태 판단
+        # Determine the SLA status
         if rtt_ms >= settings.sla_critical_ms:
             sla_status = "critical"
         elif rtt_ms >= settings.sla_warning_ms:
@@ -379,7 +383,7 @@ class ThrottleRTTDelayInjectionView(XTestModeMixin, APIView):
             new_gradient=new_gradient,
         )
 
-        # 감사 로그 기록
+        # Record the audit log
         self.log_xtest_audit(
             request=request,
             action="inject_rtt_delay",
@@ -418,7 +422,7 @@ class ThrottleRTTDelayInjectionView(XTestModeMixin, APIView):
 
 class ThrottleStatusView(XTestModeMixin, APIView):
     """
-    Throttle 전체 상태 조회 API.
+    Full Throttle state query API.
 
     GET /api/baldur/xtest/throttle/status/
 
@@ -444,7 +448,7 @@ class ThrottleStatusView(XTestModeMixin, APIView):
         if denied:
             return denied
 
-        # Exception은 DRF exception handler가 처리
+        # Exceptions are handled by the DRF exception handler
         from baldur.settings import get_throttle_settings
 
         try:
@@ -498,12 +502,13 @@ class ThrottleStatusView(XTestModeMixin, APIView):
 
 class ThrottleResetView(XTestModeMixin, APIView):
     """
-    Throttle 상태 초기화 API.
+    Throttle state reset API.
 
     POST /api/baldur/xtest/throttle/reset/
 
-    Throttle 상태를 초기 상태로 리셋합니다.
-    Emergency, Recovery Dampening, Gradient 계산 등 모든 상태가 초기화됩니다.
+    Resets the Throttle back to its initial state.
+    All state is cleared — Emergency, Recovery Dampening, Gradient
+    calculation, and so on.
 
     Response:
         {
@@ -520,7 +525,7 @@ class ThrottleResetView(XTestModeMixin, APIView):
         if denied:
             return denied
 
-        # Exception은 DRF exception handler가 처리
+        # Exceptions are handled by the DRF exception handler
         try:
             from baldur_pro.services.throttle.adaptive import (
                 get_adaptive_throttle,
@@ -530,15 +535,15 @@ class ThrottleResetView(XTestModeMixin, APIView):
             get_adaptive_throttle = None  # type: ignore[assignment,misc]
             reset_adaptive_throttle = None  # type: ignore[assignment,misc]
 
-        # 현재 상태 저장
+        # Capture the current state
         throttle = get_adaptive_throttle()
         previous_limit = throttle.current_limit
         previous_level = throttle.get_emergency_level()
 
-        # 리셋
+        # Reset
         reset_adaptive_throttle()
 
-        # 새로운 인스턴스 가져오기
+        # Fetch the new instance
         new_throttle = get_adaptive_throttle()
         new_limit = new_throttle.current_limit
 

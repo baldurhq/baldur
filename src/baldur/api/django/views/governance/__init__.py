@@ -1,16 +1,16 @@
 """
-Governance API Views Package - 통합 거버넌스 허브.
+Governance API Views Package - the unified governance hub.
 
-API 구조:
-- GET /api/baldur/metrics/status/ - 통합 상태 조회 (Observability)
-- POST /api/baldur/governance/reconcile/ - 수동 정합성 조정 (Control)
-- POST /api/baldur/governance/mode/ - 운영 모드 강제 전환 (Control)
-- GET /api/baldur/governance/status/ - RBAC 상태 조회
-- GET/PUT /api/baldur/config/governance/ - 거버넌스 설정
+API structure:
+- GET /api/baldur/metrics/status/ - unified status query (Observability)
+- POST /api/baldur/governance/reconcile/ - manual reconciliation (Control)
+- POST /api/baldur/governance/mode/ - force an operating mode change (Control)
+- GET /api/baldur/governance/status/ - RBAC status query
+- GET/PUT /api/baldur/config/governance/ - governance settings
 
 Design Philosophy:
-- 관찰(Observability)과 제어(Control) 분리
-- 엔드포인트 파편화 방지
+- Separate observability from control
+- Prevent endpoint fragmentation
 """
 
 # Approval Views (4-Eyes)

@@ -2,25 +2,25 @@
 Cell Tagging & Baggage Sync Django Middlewares.
 
 CellTaggingMiddleware:
-    HTTP 요청에 cell_id 어트리뷰트를 추가하고,
-    ContextVar에 설정하여 서비스 레이어에서도 접근 가능하게 합니다.
-    수신 측 cell_id 전파 수용 시 Trust Boundary(CIDR) 검증 및
-    Topology Mismatch(Registry 유효성) 검증을 수행합니다.
+    Adds a cell_id attribute to the HTTP request and sets it on a ContextVar
+    so that the service layer can access it too.
+    When an incoming cell_id propagation is accepted, performs Trust Boundary
+    (CIDR) validation and Topology Mismatch (Registry validity) validation.
 
 BaggageSyncMiddleware:
-    ContextVar ↔ OTel Baggage 양방향 동기화.
-    수신: Baggage → ContextVar 복원
-    송신: ContextVar → Baggage 동기화 (outgoing 요청에 자동 전파)
+    Bidirectional ContextVar ↔ OTel Baggage sync.
+    Inbound: Baggage → ContextVar restore
+    Outbound: ContextVar → Baggage sync (auto-propagated to outgoing requests)
 
-활성화:
+Enabling:
     BALDUR_CELL_TOPOLOGY_ENABLED=true
     BALDUR_CELL_TAGGING_ENABLED=true
 
-MIDDLEWARE 설정:
+MIDDLEWARE configuration:
     "baldur.api.django.cell.middleware.CellTaggingMiddleware"
-    → AuthenticationMiddleware 이후, BaggageSyncMiddleware 이전 배치
+    → place after AuthenticationMiddleware, before BaggageSyncMiddleware
     "baldur.api.django.cell.middleware.BaggageSyncMiddleware"
-    → CellTaggingMiddleware 직후 배치
+    → place directly after CellTaggingMiddleware
 """
 
 from __future__ import annotations
@@ -34,29 +34,32 @@ from django.http import HttpRequest, HttpResponse
 
 logger = structlog.get_logger()
 
-# CIDR 캐시 갱신 주기 (초) — WSGI 프로세스 재시작 없이 Settings 변경을 반영
+# CIDR cache refresh interval (seconds) — picks up Settings changes without
+# restarting the WSGI process
 _TRUSTED_CIDRS_CACHE_TTL_SECONDS = 300.0
 
-# Topology Mismatch Counter 싱글톤 — 중복 등록 방지
+# Topology Mismatch counter singleton — prevents duplicate registration
 _topology_mismatch_counter = None
 
 
 class CellTaggingMiddleware:
     """
-    요청에 cell_id를 태깅하는 Django 미들웨어.
+    Django middleware that tags the request with a cell_id.
 
-    토글 패턴: TieringMiddleware와 동일
-    - BALDUR_CELL_TOPOLOGY_ENABLED=false → 즉시 패스스루
-    - BALDUR_CELL_TAGGING_ENABLED=false → 즉시 패스스루
+    Toggle pattern: same as TieringMiddleware
+    - BALDUR_CELL_TOPOLOGY_ENABLED=false → immediate pass-through
+    - BALDUR_CELL_TAGGING_ENABLED=false → immediate pass-through
 
-    수신 cell_id 전파 수용:
-    - BaggageSyncMiddleware가 복원한 ContextVar에서 incoming cell_id를 읽음
-    - CIDR 기반 Trust 검증 후, CellRegistry Topology 검증 통과 시 수용
-    - 검증 실패 시 로컬 해싱으로 폴백
+    Accepting an incoming cell_id propagation:
+    - Reads the incoming cell_id from the ContextVar restored by
+      BaggageSyncMiddleware
+    - Accepted after CIDR-based Trust validation and CellRegistry Topology
+      validation pass
+    - Falls back to local hashing when validation fails
 
-    ContextVar 전파:
-    - request.cell_id 어트리뷰트 + _current_cell_id ContextVar 동시 설정
-    - 요청 종료 시 ContextVar 자동 복원 (token.reset)
+    ContextVar propagation:
+    - Sets both the request.cell_id attribute and the _current_cell_id ContextVar
+    - ContextVar is automatically restored when the request ends (token.reset)
     """
 
     def __init__(self, get_response: Any):
@@ -69,7 +72,7 @@ class CellTaggingMiddleware:
         if not self._check_enabled():
             return cast(HttpResponse, self.get_response(request))
 
-        # 317: Regional Isolation — 격리된 리전의 트래픽 차단
+        # 317: Regional Isolation — block traffic from an isolated region
         isolation_response = self._check_regional_isolation(request)
         if isolation_response is not None:
             return isolation_response
@@ -78,40 +81,41 @@ class CellTaggingMiddleware:
 
         tagger = self._get_tagger()
 
-        # 수신 측 cell_id 전파 수용 (Trust 검증 + Topology 검증)
+        # Accept incoming cell_id propagation (Trust + Topology validation)
         cell_id = self._accept_incoming_cell_id(request)
 
         if cell_id is None:
-            # 수신 전파 없음 또는 검증 실패 → 로컬 해싱
+            # No incoming propagation, or validation failed → local hashing
             cell_id = tagger.resolve_cell_id_from_request(request)
 
-        # 요청에 cell_id 어트리뷰트 추가
+        # Add the cell_id attribute to the request
         request.cell_id = cell_id  # type: ignore[attr-defined]
 
-        # ContextVar 설정 — 서비스 레이어 및 Celery 발행 시점에서 접근 가능
+        # Set the ContextVar — accessible from the service layer and at Celery
+        # publish time
         token = _current_cell_id.set(cell_id)
 
         try:
             response: HttpResponse = self.get_response(request)
         finally:
-            # 요청 종료 시 ContextVar 복원 (actor_context.py 패턴)
+            # Restore the ContextVar when the request ends (actor_context pattern)
             _current_cell_id.reset(token)
 
-        # 응답 헤더에 Cell 정보 추가 (디버깅용)
+        # Add Cell info to the response headers (for debugging)
         response["X-Cell-Id"] = cell_id
 
         return response
 
     # =========================================================================
-    # 수신 측 cell_id 전파 수용
+    # Accepting an incoming cell_id propagation
     # =========================================================================
 
     def _accept_incoming_cell_id(self, request: HttpRequest) -> str | None:
         """
-        수신된 cell_id를 Trust 검증 + Topology 검증 후 수용 또는 거부.
+        Accept or reject the incoming cell_id after Trust and Topology validation.
 
         Returns:
-            유효한 cell_id 또는 None (로컬 해싱으로 폴백)
+            A valid cell_id, or None (fall back to local hashing)
         """
         from baldur.context.cell_context import get_current_cell_id
 
@@ -120,7 +124,7 @@ class CellTaggingMiddleware:
         if not incoming_cell_id:
             return None
 
-        # CIDR Trust 검증 — 신뢰할 수 있는 내부 네트워크인지 확인
+        # CIDR Trust validation — check the source is a trusted internal network
         if not self._is_trusted_source(request):
             logger.debug(
                 "cell_middleware.untrusted_source",
@@ -128,15 +132,16 @@ class CellTaggingMiddleware:
             )
             return None
 
-        # Topology Mismatch 검증 — 로컬 Registry에 유효한 Cell인지 확인
+        # Topology Mismatch validation — check the Cell is valid in the local
+        # Registry
         return self._validate_cell_id(incoming_cell_id)
 
     def _is_trusted_source(self, request: HttpRequest) -> bool:
         """
-        요청 소스가 신뢰할 수 있는 내부 네트워크인지 CIDR로 검증.
+        Validate via CIDR whether the request source is a trusted internal network.
 
-        IP 추출은 extract_client_ip()를 사용하여 X-Forwarded-For,
-        X-Real-IP, REMOTE_ADDR 순서로 해석한다.
+        IP extraction uses extract_client_ip(), which resolves in the order
+        X-Forwarded-For, X-Real-IP, REMOTE_ADDR.
         """
         from baldur.utils.network import extract_client_ip
 
@@ -154,7 +159,7 @@ class CellTaggingMiddleware:
             return False
 
     def _get_trusted_cidrs(self) -> list[str]:
-        """trusted_source_cidrs 지연 로딩 (TTL 기반 갱신)."""
+        """Lazy-load trusted_source_cidrs (TTL-based refresh)."""
         now = time.monotonic()
         if (
             self._trusted_cidrs is None
@@ -169,13 +174,14 @@ class CellTaggingMiddleware:
 
     def _validate_cell_id(self, incoming_cell_id: str) -> str | None:
         """
-        수신된 cell_id가 로컬 CellRegistry에서 유효한지 검증.
+        Validate that the incoming cell_id is valid in the local CellRegistry.
 
-        검증 기준:
-        1. Registry에 존재하는 Cell인지 (get_cell_info != None)
-        2. ACTIVE 또는 WARMUP 상태인지 (DRAINING/ISOLATED은 격리 정책 우회 방지)
+        Validation criteria:
+        1. The Cell exists in the Registry (get_cell_info != None)
+        2. Its state is ACTIVE or WARMUP (DRAINING/ISOLATED are rejected to
+           prevent bypassing the isolation policy)
 
-        검증 실패 시 topology_mismatch 메트릭 증가 + 로깅.
+        On validation failure, increments the topology_mismatch metric and logs.
         """
         from baldur.services.cell_topology.models import CellState
         from baldur.services.cell_topology.registry import get_cell_registry
@@ -207,7 +213,7 @@ class CellTaggingMiddleware:
 
     @staticmethod
     def _record_topology_mismatch(incoming_cell_id: str, reason: str) -> None:
-        """Topology Mismatch Prometheus 카운터 기록 (모듈 싱글톤)."""
+        """Record the Topology Mismatch Prometheus counter (module singleton)."""
         global _topology_mismatch_counter  # noqa: PLW0603
         try:
             if _topology_mismatch_counter is None:
@@ -224,14 +230,14 @@ class CellTaggingMiddleware:
                     reason=reason,
                 ).inc()
         except Exception:
-            pass  # 메트릭 실패가 요청을 중단하지 않음
+            pass  # A metric failure must not abort the request
 
     # =========================================================================
-    # 기존 헬퍼
+    # Existing helpers
     # =========================================================================
 
     def _check_enabled(self) -> bool:
-        """토글 확인."""
+        """Check the toggles."""
         try:
             from django.conf import settings as django_settings
 
@@ -242,7 +248,7 @@ class CellTaggingMiddleware:
             return False
 
     def _get_tagger(self) -> Any:
-        """CellTagger 지연 로딩."""
+        """Lazy-load the CellTagger."""
         if self._tagger is None:
             from baldur.services.cell_topology.tagger import CellTagger
 
@@ -255,7 +261,7 @@ class CellTaggingMiddleware:
 
     @staticmethod
     def _check_regional_isolation(request: HttpRequest) -> HttpResponse | None:
-        """317: 현재 리전이 격리 상태이면 503 반환."""
+        """317: Return 503 if the current region is isolated."""
         try:
             from django.conf import settings as django_settings
 
@@ -301,15 +307,15 @@ class CellTaggingMiddleware:
 
 class BaggageSyncMiddleware:
     """
-    ContextVar ↔ OTel Baggage 양방향 동기화 미들웨어.
+    Middleware for bidirectional ContextVar ↔ OTel Baggage sync.
 
-    실행 순서:
-    1. 수신 측: DjangoInstrumentor가 파싱한 Baggage → ContextVar 복원
-    2. 송신 측: ContextVar 값 → OTel Baggage 동기화
+    Execution order:
+    1. Inbound: Baggage parsed by DjangoInstrumentor → ContextVar restore
+    2. Outbound: ContextVar values → OTel Baggage sync
 
-    배치: CellTaggingMiddleware 직후
-    - 모든 ContextVar가 설정된 후 실행되어야 Baggage에 최신값이 반영됨
-    - try/finally로 OTel Context token의 격리를 보장
+    Placement: directly after CellTaggingMiddleware
+    - Must run after every ContextVar is set so Baggage reflects the latest values
+    - try/finally guarantees isolation of the OTel Context token
     """
 
     def __init__(self, get_response: Any):
@@ -322,14 +328,14 @@ class BaggageSyncMiddleware:
             sync_contextvars_to_baggage,
         )
 
-        # 수신 측: Baggage → ContextVar 복원
+        # Inbound: Baggage → ContextVar restore
         restore_contextvars_from_baggage()
 
-        # 송신 측: ContextVar → Baggage 동기화
+        # Outbound: ContextVar → Baggage sync
         token = sync_contextvars_to_baggage()
         try:
             response: HttpResponse = self.get_response(request)
         finally:
-            # 요청 종료 시 OTel Context 복원 — 누수 방지
+            # Restore the OTel Context when the request ends — prevents leaks
             detach_baggage_token(token)
         return response

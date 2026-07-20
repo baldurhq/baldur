@@ -1,12 +1,13 @@
 """
 Pydantic-DRF Serializer Integration Helper.
 
-DRF Serializer 자동 생성 및 Pydantic 모델 통합.
+Automatic DRF Serializer generation and Pydantic model integration.
 
-이 모듈은 Pydantic Settings에서 DRF Serializer 필드를 자동으로 생성합니다.
-- Pydantic 스키마 → DRF 필드 변환
-- 검증은 Pydantic 모델에 위임
-- 중복 코드 제거
+This module generates DRF Serializer fields automatically from Pydantic
+Settings.
+- Pydantic schema -> DRF field conversion
+- Validation delegated to the Pydantic model
+- Removes duplicated code
 """
 
 from collections.abc import Callable
@@ -127,12 +128,12 @@ def pydantic_schema_to_drf_field(
     required: bool = False,
 ) -> serializers.Field:
     """
-    Pydantic JSON Schema property를 DRF Field로 변환.
+    Convert a Pydantic JSON Schema property into a DRF Field.
 
     Args:
-        props: Pydantic 스키마의 property 정보
-        field_name: 필드 이름
-        required: 필수 여부
+        props: property information from the Pydantic schema
+        field_name: field name
+        required: whether the field is required
 
     Returns:
         DRF Serializer Field
@@ -159,14 +160,14 @@ def generate_serializer_fields_from_pydantic(
     exclude_fields: set | None = None,
 ) -> dict[str, serializers.Field]:
     """
-    Pydantic 모델에서 DRF Serializer 필드 딕셔너리 생성.
+    Build a DRF Serializer field dict from a Pydantic model.
 
     Args:
-        pydantic_model: Pydantic BaseModel 클래스
-        exclude_fields: 제외할 필드 이름 set
+        pydantic_model: Pydantic BaseModel class
+        exclude_fields: set of field names to exclude
 
     Returns:
-        {field_name: DRF Field} 딕셔너리
+        {field_name: DRF Field} dict
     """
     exclude = exclude_fields or set()
     schema = pydantic_model.model_json_schema()
@@ -186,9 +187,9 @@ def generate_serializer_fields_from_pydantic(
 
 class PydanticSerializerMixin:
     """
-    Pydantic 모델과 통합되는 DRF Serializer Mixin.
+    DRF Serializer Mixin integrated with a Pydantic model.
 
-    사용법:
+    Usage:
         class MySerializer(PydanticSerializerMixin, serializers.Serializer):
             _pydantic_model = MyPydanticSettings
             _exclude_fields = {"internal_field"}
@@ -205,37 +206,37 @@ class PydanticSerializerMixin:
         super().__init__(*args, **kwargs)
 
         if self._pydantic_model:
-            # Pydantic 스키마에서 필드 자동 생성
+            # Generate fields automatically from the Pydantic schema
             pydantic_fields = generate_serializer_fields_from_pydantic(
                 self._pydantic_model,
                 exclude_fields=self._exclude_fields,
             )
 
-            # 기존 필드와 병합 (기존 필드 우선)
+            # Merge with existing fields (existing fields win)
             for name, field in pydantic_fields.items():
                 if name not in self.fields:
                     self.fields[name] = field
 
     def validate_with_pydantic(self, data: dict) -> dict:
         """
-        Pydantic 모델로 검증 위임.
+        Delegate validation to the Pydantic model.
 
         Args:
-            data: 검증할 데이터
+            data: data to validate
 
         Returns:
-            검증된 데이터 (Pydantic 모델에서 변환됨)
+            validated data (converted by the Pydantic model)
 
         Raises:
-            serializers.ValidationError: 검증 실패 시
+            serializers.ValidationError: on validation failure
         """
         if not self._pydantic_model:
             return data
 
         try:
-            # 부분 업데이트: 현재 설정과 병합
+            # Partial update: merge with the current settings
             validated_model = self._pydantic_model(**data)
-            # 실제로 전달된 필드만 반환 (exclude_unset)
+            # Return only the fields actually supplied (exclude_unset)
             return validated_model.model_dump(
                 exclude_unset=True,
                 exclude=self._exclude_fields,
@@ -251,48 +252,51 @@ class PydanticSerializerMixin:
         current_settings: BaseModel | None = None,
     ) -> dict:
         """
-        부분 업데이트를 지원하는 Pydantic 검증.
+        Pydantic validation with partial-update support.
 
-        PATCH 요청 시 변경된 필드만 검증하고 현재 값과 병합합니다.
+        On a PATCH request, validates only the changed fields and merges them
+        with the current values.
 
         Args:
-            data: 변경할 필드만 포함된 dict
-            current_settings: 현재 설정 인스턴스 (없으면 기본값 사용)
+            data: dict containing only the fields to change
+            current_settings: current settings instance (defaults are used
+                when omitted)
 
         Returns:
-            병합된 검증 완료 데이터 (변경된 필드만)
+            merged validated data (changed fields only)
 
         Raises:
-            serializers.ValidationError: 검증 실패 시
+            serializers.ValidationError: on validation failure
 
         Example:
             # PATCH /api/v1/config/circuit-breaker/
             # Body: {"failure_threshold": 10}
 
-            current = CircuitBreakerSettings()  # 현재 설정 로드
+            current = CircuitBreakerSettings()  # load current settings
             changes = serializer.validate_with_pydantic_partial(
                 data={"failure_threshold": 10},
                 current_settings=current,
             )
-            # changes = {"failure_threshold": 10}  # 변경된 것만
+            # changes = {"failure_threshold": 10}  # changed fields only
         """
         if not self._pydantic_model:
             return data
 
         try:
             if current_settings:
-                # 현재 값과 병합 후 검증
+                # Merge with the current values, then validate
                 current_dict = current_settings.model_dump()
                 current_dict.update(data)
                 validated = self._pydantic_model.model_validate(current_dict)
             else:
-                # 기본값과 병합 (전체 모델 생성 후 전달된 데이터만 오버라이드)
+                # Merge with the defaults (build the full model, then override
+                # only the supplied data)
                 defaults = self._pydantic_model()
                 merged = defaults.model_dump()
                 merged.update(data)
                 validated = self._pydantic_model.model_validate(merged)
 
-            # 실제로 변경된 필드만 반환
+            # Return only the fields that actually changed
             return {k: v for k, v in validated.model_dump().items() if k in data}
         except ValidationError as e:
             raise serializers.ValidationError(str(e)) from e
@@ -305,16 +309,16 @@ def create_pydantic_serializer(
     exclude_fields: set | None = None,
 ) -> type[serializers.Serializer]:
     """
-    Pydantic 모델에서 DRF Serializer 클래스 동적 생성.
+    Build a DRF Serializer class dynamically from a Pydantic model.
 
     Args:
-        pydantic_model: Pydantic BaseModel 클래스
-        serializer_name: 생성할 Serializer 클래스 이름
-        mixin_class: 추가할 Mixin 클래스 (예: ApplyStrategyMixin)
-        exclude_fields: 제외할 필드 이름 set
+        pydantic_model: Pydantic BaseModel class
+        serializer_name: name of the Serializer class to create
+        mixin_class: extra Mixin class to add (e.g. ApplyStrategyMixin)
+        exclude_fields: set of field names to exclude
 
     Returns:
-        동적으로 생성된 Serializer 클래스
+        the dynamically created Serializer class
 
     Example:
         >>> from baldur.settings import CircuitBreakerSettings
@@ -326,25 +330,25 @@ def create_pydantic_serializer(
     """
     exclude = exclude_fields or set()
 
-    # 필드 생성
+    # Build the fields
     fields = generate_serializer_fields_from_pydantic(
         pydantic_model, exclude_fields=exclude
     )
 
-    # 클래스 속성
+    # Class attributes
     attrs = {
         "_pydantic_model": pydantic_model,
         "_exclude_fields": exclude,
         **fields,
     }
 
-    # validate 메서드 추가
+    # Add the validate method
     def validate(self, data):
-        # Mixin의 validate 호출 (있는 경우)
+        # Call the Mixin's validate, if any
         if hasattr(super(self.__class__, self), "validate"):
             data = super(self.__class__, self).validate(data)
 
-        # Pydantic 모델로 검증
+        # Validate through the Pydantic model
         if self._pydantic_model:
             try:
                 validated_model = self._pydantic_model(**data)
@@ -358,24 +362,24 @@ def create_pydantic_serializer(
 
     attrs["validate"] = validate
 
-    # 베이스 클래스 결정
+    # Decide the base classes
     bases: tuple[type, ...] = (serializers.Serializer,)
     if mixin_class:
         bases = (mixin_class, serializers.Serializer)
 
-    # 동적 클래스 생성
+    # Create the class dynamically
     return type(serializer_name, bases, attrs)
 
 
 # =============================================================================
 # Pre-generated Pydantic-based Serializers
-# 기존 Serializer를 Pydantic 기반으로 대체
+# Replaces the existing Serializers with Pydantic-based ones
 # =============================================================================
 
-# 이 섹션에서는 settings 모듈의 Pydantic 모델을 사용하여
-# 간소화된 Serializer를 제공할 수 있습니다.
+# This section can provide simplified Serializers built from the Pydantic
+# models in the settings module.
 #
-# 예시:
+# Example:
 # from baldur.settings import CircuitBreakerSettings
 #
 # CircuitBreakerPydanticSerializer = create_pydantic_serializer(

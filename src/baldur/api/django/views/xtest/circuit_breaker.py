@@ -1,12 +1,12 @@
 """
 X-Test-Mode Circuit Breaker Views
 
-Circuit Breaker 관련 테스트 API:
-- InjectCBFailureView: CB 장애 주입
-- ResetCBView: CB 상태 초기화
-- CBStatusDetailView: CB 상태 조회
-- FastFailTestView: Fast Fail 검증
-- TriggerCBRecoveryView: CB 복구 트리거
+Circuit Breaker test APIs:
+- InjectCBFailureView: inject CB failures
+- ResetCBView: reset CB state
+- CBStatusDetailView: query CB state
+- FastFailTestView: verify fast fail
+- TriggerCBRecoveryView: trigger CB recovery
 """
 
 import time
@@ -25,7 +25,7 @@ logger = structlog.get_logger()
 
 class InjectCBFailureView(XTestModeMixin, APIView):
     """
-    Circuit Breaker 장애 주입 API.
+    Circuit Breaker failure injection API.
 
     POST /api/baldur/xtest/inject-cb-failure/
 
@@ -54,7 +54,7 @@ class InjectCBFailureView(XTestModeMixin, APIView):
         service_name = request.data.get("service", "database")
         failure_count = int(request.data.get("count", 5))
 
-        # 최대 주입 횟수 제한 (안전 장치)
+        # Cap the injection count (safety guard)
         max_injection = 20
         if failure_count > max_injection:
             return Response(
@@ -68,7 +68,7 @@ class InjectCBFailureView(XTestModeMixin, APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Exception은 exception handler가 처리
+        # Exceptions are handled by the exception handler
         from baldur.services.circuit_breaker import (
             force_open_circuit,
             get_circuit_breaker_service,
@@ -76,10 +76,10 @@ class InjectCBFailureView(XTestModeMixin, APIView):
 
         cb_service = get_circuit_breaker_service()
 
-        # 이전 상태 기록
+        # Record the previous state
         previous_state = cb_service.get_state(service_name)
 
-        # L1 우회하여 직접 실패 기록
+        # Bypass L1 and record the failures directly
         for i in range(failure_count):
             cb_service.record_failure(
                 service_name,
@@ -91,10 +91,10 @@ class InjectCBFailureView(XTestModeMixin, APIView):
                 },
             )
 
-        # 현재 상태 확인 (실패 주입 후)
+        # Check the current state (after failure injection)
         current_state = cb_service.get_state(service_name)
 
-        # minimum_calls 조건 때문에 OPEN이 안 된 경우, 강제로 OPEN
+        # Force OPEN when the minimum_calls condition kept it from opening
         force_opened = False
         if current_state != "open" and request.data.get("force_open", True):
             result = force_open_circuit(
@@ -105,7 +105,7 @@ class InjectCBFailureView(XTestModeMixin, APIView):
                 current_state = "open"
                 force_opened = True
 
-        # 스냅샷 수집
+        # Collect a snapshot
         snapshot = collect_system_snapshot()
 
         logger.info(
@@ -129,7 +129,7 @@ class InjectCBFailureView(XTestModeMixin, APIView):
             "snapshot": snapshot,
         }
 
-        # WAL Audit 기록
+        # WAL audit record
         self.log_xtest_injection(
             request=request,
             component="cb",
@@ -143,7 +143,7 @@ class InjectCBFailureView(XTestModeMixin, APIView):
 
 class ResetCBView(XTestModeMixin, APIView):
     """
-    Circuit Breaker 상태 초기화 API.
+    Circuit Breaker state reset API.
 
     POST /api/baldur/xtest/reset-cb/
 
@@ -160,17 +160,17 @@ class ResetCBView(XTestModeMixin, APIView):
 
         service_name = request.data.get("service", "database")
 
-        # Exception은 exception handler가 처리
+        # Exceptions are handled by the exception handler
         from baldur.services.circuit_breaker import (
             get_circuit_breaker_service,
         )
 
         cb_service = get_circuit_breaker_service()
 
-        # 이전 상태 기록
+        # Record the previous state
         previous_state = cb_service.get_state(service_name)
 
-        # 강제 닫기 — Actor information is read from ActorContext.
+        # Force close - actor information is read from ActorContext.
         result = cb_service.force_close(
             service_name=service_name,
             reason=f"X-Test-Mode reset by {request.user}",
@@ -195,7 +195,7 @@ class ResetCBView(XTestModeMixin, APIView):
             "timestamp": timezone.now().isoformat(),
         }
 
-        # WAL Audit 기록
+        # WAL audit record
         self.log_xtest_cleanup(
             request=request,
             component="cb",
@@ -208,7 +208,7 @@ class ResetCBView(XTestModeMixin, APIView):
 
 class CBStatusDetailView(XTestModeMixin, APIView):
     """
-    Circuit Breaker 상세 상태 조회 API.
+    Circuit Breaker detailed status API.
 
     GET /api/baldur/xtest/cb-status/?service=database
     """
@@ -220,7 +220,7 @@ class CBStatusDetailView(XTestModeMixin, APIView):
 
         service_name = request.query_params.get("service")
 
-        # Exception은 exception handler가 처리
+        # Exceptions are handled by the exception handler
         from baldur.services.circuit_breaker import (
             get_circuit_breaker_service,
         )
@@ -228,7 +228,7 @@ class CBStatusDetailView(XTestModeMixin, APIView):
         cb_service = get_circuit_breaker_service()
 
         if service_name:
-            # 특정 서비스 상태
+            # State of one specific service
             state_data = cb_service.get_or_create_state(service_name)
 
             return Response(
@@ -252,7 +252,7 @@ class CBStatusDetailView(XTestModeMixin, APIView):
                     "timestamp": timezone.now().isoformat(),
                 }
             )
-        # 전체 서비스 상태 (repository에서 조회)
+        # State of all services (queried from the repository)
         all_states = cb_service.repository.get_all_states()
 
         services = {}
@@ -280,7 +280,7 @@ class CBStatusDetailView(XTestModeMixin, APIView):
 
 class FastFailTestView(XTestModeMixin, APIView):
     """
-    Fast Fail 검증 API - CB OPEN 상태에서 응답 시간 측정.
+    Fast fail verification API - measures response time while the CB is OPEN.
 
     GET /api/baldur/xtest/fast-fail-test/?service=database
     """
@@ -292,22 +292,22 @@ class FastFailTestView(XTestModeMixin, APIView):
 
         service_name = request.query_params.get("service", "database")
 
-        # Exception은 exception handler가 처리
+        # Exceptions are handled by the exception handler
         from baldur.services.circuit_breaker import (
             get_circuit_breaker_service,
         )
 
         cb_service = get_circuit_breaker_service()
 
-        # 상태 확인
+        # Check the state
         current_state = cb_service.get_state(service_name)
 
-        # should_allow 체크 시간 측정
+        # Measure the should_allow check time
         start_time = time.time()
         allowed = cb_service.should_allow(service_name)
         elapsed_ms = (time.time() - start_time) * 1000
 
-        is_fast_fail = elapsed_ms < 100  # 100ms 미만
+        is_fast_fail = elapsed_ms < 100  # under 100ms
 
         return Response(
             {
@@ -325,16 +325,16 @@ class FastFailTestView(XTestModeMixin, APIView):
 
 class TriggerCBRecoveryView(XTestModeMixin, APIView):
     """
-    CB Recovery 트리거 API - HALF_OPEN 상태에서 성공 기록하여 CLOSED로 복구.
+    CB recovery trigger API - records successes in HALF_OPEN to recover to CLOSED.
 
     POST /api/baldur/xtest/trigger-cb-recovery/
     Body: {"service": "database", "success_count": 3, "force": false}
 
-    HALF_OPEN 상태에서 record_success를 호출하여 CB를 CLOSED 상태로 복구시킵니다.
-    - force=true: 직접 CLOSED로 전환 (테스트용)
-    - force=false: record_success 호출 (정상 흐름)
+    Calls record_success while in HALF_OPEN to bring the CB back to CLOSED.
+    - force=true: transition straight to CLOSED (for testing)
+    - force=false: call record_success (normal flow)
 
-    Note: DB 모델의 half_open_max_calls 기본값은 3입니다.
+    Note: The DB model's half_open_max_calls default is 3.
     """
 
     def post(self, request: Request) -> Response:
@@ -346,20 +346,20 @@ class TriggerCBRecoveryView(XTestModeMixin, APIView):
         success_count = request.data.get("success_count", 3)
         force_close = request.data.get("force", False)
 
-        # Exception은 exception handler가 처리
+        # Exceptions are handled by the exception handler
         from baldur.services.circuit_breaker import (
             get_circuit_breaker_service,
         )
 
         cb_service = get_circuit_breaker_service()
 
-        # 현재 상태 확인
+        # Check the current state
         state_before = cb_service.get_state(service_name)
 
         successes_recorded = 0
 
         if force_close and state_before in ("half_open", "open"):
-            # 강제 CLOSED 전환 (테스트 전용)
+            # Forced transition to CLOSED (test-only)
             cb_service.repository.update_state(
                 service_name=service_name,
                 state="closed",
@@ -372,7 +372,7 @@ class TriggerCBRecoveryView(XTestModeMixin, APIView):
                 service_name=service_name,
             )
         else:
-            # 정상 복구 흐름: record_success 호출
+            # Normal recovery flow: call record_success
             for _i in range(success_count):
                 current_state = cb_service.get_state(service_name)
                 if current_state == "half_open":
@@ -383,7 +383,7 @@ class TriggerCBRecoveryView(XTestModeMixin, APIView):
                 else:
                     break
 
-        # 최종 상태 확인
+        # Check the final state
         state_after = cb_service.get_state(service_name)
 
         recovery_success = state_after == "closed"
@@ -408,7 +408,7 @@ class TriggerCBRecoveryView(XTestModeMixin, APIView):
             "timestamp": timezone.now().isoformat(),
         }
 
-        # WAL Audit 기록
+        # WAL audit record
         self.log_xtest_audit(
             request=request,
             action="trigger_recovery",
@@ -426,18 +426,18 @@ class TriggerCBRecoveryView(XTestModeMixin, APIView):
 
 class TryRecoveryTransitionView(XTestModeMixin, APIView):
     """
-    CB OPEN → HALF_OPEN 전환 시도 API (도메인 프리).
+    CB OPEN → HALF_OPEN transition attempt API (domain-free).
 
     POST /api/baldur/xtest/try-recovery-transition/
     Body: {"service": "stage15_platinum"}
 
-    **사람이 개입하는 명시적 전환 API**:
-    - recovery_timeout이 지났으면 OPEN → HALF_OPEN으로 전환
-    - recovery_timeout이 안 지났으면 대기 시간 반환
-    - 도메인 프리: payment/order 등 특정 도메인에 종속되지 않음
+    **Explicit human-driven transition API**:
+    - Transitions OPEN → HALF_OPEN once recovery_timeout has elapsed
+    - Returns the remaining wait time if recovery_timeout has not elapsed
+    - Domain-free: not tied to a specific domain such as payment/order
 
-    이 API는 should_allow()를 명시적으로 호출하여
-    CB의 자동 전환 로직을 트리거합니다.
+    This API explicitly calls should_allow() to trigger the CB's
+    automatic transition logic.
     """
 
     def post(self, request: Request) -> Response:
@@ -447,19 +447,19 @@ class TryRecoveryTransitionView(XTestModeMixin, APIView):
 
         service_name = request.data.get("service", "database")
 
-        # Exception은 exception handler가 처리
+        # Exceptions are handled by the exception handler
         from baldur.services.circuit_breaker import (
             get_circuit_breaker_service,
         )
 
         cb_service = get_circuit_breaker_service()
 
-        # 현재 상태 확인
+        # Check the current state
         state_before = cb_service.get_or_create_state(service_name)
         state_str_before = state_before.state
         opened_at = state_before.opened_at
 
-        # recovery_timeout 계산
+        # Compute recovery_timeout
         remaining_seconds = None
         recovery_timeout = cb_service.config.recovery_timeout
 
@@ -467,10 +467,10 @@ class TryRecoveryTransitionView(XTestModeMixin, APIView):
             elapsed = (timezone.now() - opened_at).total_seconds()
             remaining_seconds = max(0, recovery_timeout - elapsed)
 
-        # should_allow 호출 - 이것이 OPEN → HALF_OPEN 전환을 트리거함
+        # Call should_allow - this triggers the OPEN → HALF_OPEN transition
         allowed = cb_service.should_allow(service_name)
 
-        # 전환 후 상태 확인
+        # Check the state after the transition
         state_after = cb_service.get_or_create_state(service_name)
         state_str_after = state_after.state
 
@@ -507,7 +507,7 @@ class TryRecoveryTransitionView(XTestModeMixin, APIView):
             "timestamp": timezone.now().isoformat(),
         }
 
-        # WAL Audit 기록
+        # WAL audit record
         self.log_xtest_audit(
             request=request,
             action="try_recovery_transition",
@@ -526,13 +526,13 @@ class TryRecoveryTransitionView(XTestModeMixin, APIView):
 
 class SwitchToAutoModeView(XTestModeMixin, APIView):
     """
-    CB를 자동 모드로 전환하는 API (manually_controlled=False 설정).
+    API that switches a CB to auto mode (sets manually_controlled=False).
 
     POST /api/baldur/xtest/switch-to-auto/
     Body: {"service": "database"}
 
-    force_open 후 manually_controlled=True 상태를 해제하여
-    recovery_timeout 후 자동으로 HALF_OPEN으로 전환되도록 함.
+    Clears the manually_controlled=True state left behind by force_open so the
+    CB automatically transitions to HALF_OPEN after recovery_timeout.
     """
 
     def post(self, request: Request) -> Response:
@@ -542,25 +542,25 @@ class SwitchToAutoModeView(XTestModeMixin, APIView):
 
         service_name = request.data.get("service", "database")
 
-        # Exception은 exception handler가 처리
+        # Exceptions are handled by the exception handler
         from baldur.services.circuit_breaker import (
             get_circuit_breaker_service,
         )
 
         cb_service = get_circuit_breaker_service()
 
-        # 현재 상태 확인
+        # Check the current state
         state_before = cb_service.get_or_create_state(service_name)
         was_manually_controlled = state_before.manually_controlled
 
-        # manually_controlled=False로 설정 (auto mode 전환)
-        # clear_manual_control 메서드 사용 (preserve_reason=True로 상태 보존)
+        # Set manually_controlled=False (switch to auto mode)
+        # Use clear_manual_control (preserve_reason=True keeps the state)
         cb_service.repository.clear_manual_control(
             service_name=service_name,
-            preserve_reason=True,  # 이유는 보존하되 수동 제어만 해제
+            preserve_reason=True,  # keep the reason, release only manual control
         )
 
-        # 최종 상태 확인
+        # Check the final state
         state_after = cb_service.get_or_create_state(service_name)
 
         logger.info(
@@ -579,7 +579,7 @@ class SwitchToAutoModeView(XTestModeMixin, APIView):
             "timestamp": timezone.now().isoformat(),
         }
 
-        # WAL Audit 기록
+        # WAL audit record
         self.log_xtest_audit(
             request=request,
             action="switch_to_auto",

@@ -1,7 +1,7 @@
 """
-Circuit Breaker 관련 통합 테스트 시나리오.
+Circuit Breaker-related integration test scenarios.
 
-CB Open 후 DLQ 저장 시나리오 제공.
+Provides the "DLQ store after CB Open" scenario.
 """
 
 from .base import (
@@ -11,15 +11,15 @@ from .base import (
 
 class CBOpenDLQScenario(IntegrationScenario):
     """
-    Circuit Breaker Open 후 DLQ 저장 시나리오.
+    Scenario: store to DLQ after the Circuit Breaker opens.
 
     Steps:
-    1. CB Closed 확인
-    2. 실패 주입
-    3. CB Open 확인
-    4. 요청 전송 → 차단 확인
-    5. DLQ 저장
-    6. DLQ 항목 상세 확인
+    1. Verify CB Closed
+    2. Inject failures
+    3. Verify CB Open
+    4. Send a request -> verify it is blocked
+    5. Store to DLQ
+    6. Verify the DLQ entry details
     """
 
     scenario_name = "cb_open_dlq_flow"
@@ -38,11 +38,11 @@ class CBOpenDLQScenario(IntegrationScenario):
         service = self.service_name
         failure_count = self.config.get("failure_count", 5)
 
-        # Step 1: CB Closed 확인
+        # Step 1: verify CB Closed
         def step1():
             state = cb_service.get_state(service)
             if state != CircuitState.CLOSED:
-                # 테스트를 위해 리셋
+                # Reset for the test
                 cb_service.reset_circuit(service)
                 state = cb_service.get_state(service)
             return f"state: {state.value}"
@@ -52,7 +52,7 @@ class CBOpenDLQScenario(IntegrationScenario):
         ):
             return
 
-        # Step 2: 실패 주입
+        # Step 2: inject failures
         def step2():
             for _i in range(failure_count):
                 cb_service.record_failure(
@@ -69,7 +69,7 @@ class CBOpenDLQScenario(IntegrationScenario):
         ):
             return
 
-        # Step 3: CB Open 확인
+        # Step 3: verify CB Open
         def step3():
             state = cb_service.get_state(service)
             return f"state: {state.value}"
@@ -79,7 +79,7 @@ class CBOpenDLQScenario(IntegrationScenario):
         ):
             return
 
-        # Step 4: 요청 전송 → 차단 확인
+        # Step 4: send a request -> verify it is blocked
         def step4():
             result = cb_service.should_allow_request(service)
             if result.allowed:
@@ -91,7 +91,7 @@ class CBOpenDLQScenario(IntegrationScenario):
         ):
             return
 
-        # Step 5: DLQ 저장
+        # Step 5: store to DLQ
         dlq_entry_id = None
 
         def step5():
@@ -118,7 +118,7 @@ class CBOpenDLQScenario(IntegrationScenario):
         if not self._execute_step(5, "store_to_dlq", "dlq", "DLQ entry created", step5):
             return
 
-        # Step 6: DLQ 항목 상세 확인
+        # Step 6: verify the DLQ entry details
         def step6():
             if not dlq_entry_id:
                 raise ValueError("No DLQ entry ID from previous step")

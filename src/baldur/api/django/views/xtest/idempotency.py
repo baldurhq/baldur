@@ -1,24 +1,24 @@
 """
 X-Test-Mode Idempotency Views
 
-멱등성 보장(Idempotency Service) 동작을 X-Test-Mode 환경에서 관찰할 수 있는 API.
+APIs for observing idempotency service behavior under X-Test-Mode.
 
 Endpoints:
-- POST /api/baldur/xtest/idempotency/generate-key/ - 멱등성 키 생성 및 해시 미리보기
-- POST /api/baldur/xtest/idempotency/check-duplicate/ - 중복 요청 감지 테스트
-- GET  /api/baldur/xtest/idempotency/status/ - 현재 등록된 키 상태 조회
-- POST /api/baldur/xtest/idempotency/register/ - 테스트용 키 수동 등록
-- POST /api/baldur/xtest/idempotency/clear/ - 테스트 키 삭제
+- POST /api/baldur/xtest/idempotency/generate-key/ - generate a key and preview its hash
+- POST /api/baldur/xtest/idempotency/check-duplicate/ - test duplicate request detection
+- GET  /api/baldur/xtest/idempotency/status/ - query currently registered key state
+- POST /api/baldur/xtest/idempotency/register/ - manually register a key for testing
+- POST /api/baldur/xtest/idempotency/clear/ - delete test keys
 
 Components:
-- IdempotencyKey: 멱등성 키 생성 (entity_type, entity_id, action 조합)
-- IdempotencyDomain: 도메인 열거형 (EXTERNAL_SERVICE, ASYNC_TASK 등)
-- IdempotencyService: 중복 체크 및 등록 서비스
+- IdempotencyKey: idempotency key generation (entity_type, entity_id, action)
+- IdempotencyDomain: domain enum (EXTERNAL_SERVICE, ASYNC_TASK, etc.)
+- IdempotencyService: duplicate check and registration service
 
 Security:
-- X-Test-Mode: chaos-monkey 헤더 필수
-- DEBUG 또는 CHAOS_ENABLED 환경 변수 필요
-- production 환경에서는 완전 차단
+- X-Test-Mode: chaos-monkey header required
+- DEBUG or the CHAOS_ENABLED environment variable required
+- Fully blocked in production environments
 """
 
 from typing import Any
@@ -36,15 +36,15 @@ from .base import XTestModeMixin, collect_system_snapshot
 logger = structlog.get_logger()
 
 
-# X-Test-Mode로 생성된 키 식별용 상수
+# Constants identifying keys created by X-Test-Mode
 XTEST_SOURCE = "x-test-mode"
-XTEST_METADATA_KEY = "idempotency:xtest:keys"  # X-Test에서 생성한 키 추적용
-DEFAULT_TTL_SECONDS = 3600  # 1시간 기본 TTL
-MAX_STATUS_RESULTS = 50  # 상태 조회 시 최대 결과 수
+XTEST_METADATA_KEY = "idempotency:xtest:keys"  # Tracks keys created by X-Test
+DEFAULT_TTL_SECONDS = 3600  # Default TTL of 1 hour
+MAX_STATUS_RESULTS = 50  # Maximum number of results in a status query
 
 
 def _get_xtest_tracked_keys() -> list[str]:
-    """X-Test-Mode로 등록된 키 목록 조회."""
+    """Query the list of keys registered by X-Test-Mode."""
     try:
         keys = cache.get(XTEST_METADATA_KEY) or []
         return list(keys)
@@ -53,12 +53,12 @@ def _get_xtest_tracked_keys() -> list[str]:
 
 
 def _track_xtest_key(cache_key: str) -> None:
-    """X-Test-Mode로 생성한 키를 추적 목록에 추가."""
+    """Add a key created by X-Test-Mode to the tracking list."""
     try:
         keys = _get_xtest_tracked_keys()
         if cache_key not in keys:
             keys.append(cache_key)
-            cache.set(XTEST_METADATA_KEY, keys, timeout=86400)  # 24시간
+            cache.set(XTEST_METADATA_KEY, keys, timeout=86400)  # 24 hours
     except Exception as e:
         logger.warning(
             "test.idempotency_failed_track",
@@ -67,7 +67,7 @@ def _track_xtest_key(cache_key: str) -> None:
 
 
 def _untrack_xtest_key(cache_key: str) -> None:
-    """추적 목록에서 키 제거."""
+    """Remove a key from the tracking list."""
     try:
         keys = _get_xtest_tracked_keys()
         if cache_key in keys:
@@ -81,13 +81,13 @@ def _untrack_xtest_key(cache_key: str) -> None:
 
 
 # =============================================================================
-# 멱등성 키 생성 View
+# Idempotency Key Generation View
 # =============================================================================
 
 
 class GenerateKeyView(XTestModeMixin, APIView):
     """
-    멱등성 키 생성 및 해시값 미리보기 API.
+    API for generating an idempotency key and previewing its hash.
 
     POST /api/baldur/xtest/idempotency/generate-key/
 
@@ -96,7 +96,7 @@ class GenerateKeyView(XTestModeMixin, APIView):
             "entity_type": "order",
             "entity_id": "123",
             "action": "process",
-            "domain": "EXTERNAL_SERVICE"  // 선택, 기본값
+            "domain": "EXTERNAL_SERVICE"  // optional, has a default
         }
 
     Response:
@@ -126,7 +126,7 @@ class GenerateKeyView(XTestModeMixin, APIView):
             get_idempotency_service,
         )
 
-        # 필수 파라미터 검증
+        # Validate required parameters
         entity_type = request.data.get("entity_type")
         entity_id = request.data.get("entity_id")
         action = request.data.get("action")
@@ -150,7 +150,7 @@ class GenerateKeyView(XTestModeMixin, APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # 도메인 파싱 (기본값: EXTERNAL_SERVICE)
+        # Parse the domain (default: EXTERNAL_SERVICE)
         domain_str = request.data.get("domain", "EXTERNAL_SERVICE").upper()
         try:
             domain = IdempotencyDomain[domain_str]
@@ -166,13 +166,13 @@ class GenerateKeyView(XTestModeMixin, APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # 키 생성
+        # Generate the key
         try:
-            # entity_id를 문자열에서 정수로 변환 시도
+            # Try to convert entity_id from string to int
             try:
                 entity_id_int = int(entity_id)
             except (ValueError, TypeError):
-                # 변환 실패 시 custom 키 사용
+                # Use a custom key when conversion fails
                 key = IdempotencyKey.custom(
                     f"{entity_type}:{entity_id}:{action}",
                     entity_type=entity_type,
@@ -188,7 +188,7 @@ class GenerateKeyView(XTestModeMixin, APIView):
                     domain=domain,
                 )
 
-            # TTL 조회
+            # Read the TTL
             service = get_idempotency_service()
             ttl = service.cache_ttl
 
@@ -203,7 +203,7 @@ class GenerateKeyView(XTestModeMixin, APIView):
                 "timestamp": timezone.now().isoformat(),
             }
 
-            # WAL Audit 기록
+            # WAL audit record
             self.log_xtest_audit(
                 request=request,
                 action="generate_key",
@@ -230,30 +230,30 @@ class GenerateKeyView(XTestModeMixin, APIView):
 
 
 # =============================================================================
-# 중복 감지 시뮬레이션 View
+# Duplicate Detection Simulation View
 # =============================================================================
 
 
 class CheckDuplicateView(XTestModeMixin, APIView):
     """
-    중복 요청 감지 동작 테스트 API.
+    API for testing duplicate request detection behavior.
 
     POST /api/baldur/xtest/idempotency/check-duplicate/
 
     Request Body:
         {
             "key": "order:123:process",
-            "domain": "EXTERNAL_SERVICE",  // 선택
-            "register": false  // 선택, true면 체크 후 등록
+            "domain": "EXTERNAL_SERVICE",  // optional
+            "register": false  // optional, register after checking when true
         }
 
     Response:
         {
             "status": "success",
             "is_duplicate": true,
-            "first_seen_at": "2026-01-26T10:00:00Z",  // 중복 시
-            "ttl_remaining": 3540,  // 남은 TTL (초)
-            "registered": false,  // 등록 수행 여부
+            "first_seen_at": "2026-01-26T10:00:00Z",  // when duplicate
+            "ttl_remaining": 3540,  // remaining TTL (seconds)
+            "registered": false,  // whether registration was performed
             "cache_key": "idempotency:external_service:order:123:process"
         }
     """
@@ -269,7 +269,7 @@ class CheckDuplicateView(XTestModeMixin, APIView):
             get_idempotency_service,
         )
 
-        # 필수 파라미터 검증
+        # Validate required parameters
         key_string = request.data.get("key")
         if not key_string:
             return Response(
@@ -282,7 +282,7 @@ class CheckDuplicateView(XTestModeMixin, APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # 도메인 파싱
+        # Parse the domain
         domain_str = request.data.get("domain", "EXTERNAL_SERVICE").upper()
         try:
             domain = IdempotencyDomain[domain_str]
@@ -301,12 +301,12 @@ class CheckDuplicateView(XTestModeMixin, APIView):
         register = request.data.get("register", False)
 
         try:
-            # IdempotencyKey 생성 (custom 타입 사용)
+            # Build the IdempotencyKey (custom type)
             key = IdempotencyKey.custom(key_string, raw_key=key_string)
             key.domain = domain
             cache_key = key.cache_key
 
-            # 캐시에서 확인
+            # Check the cache
             cached_value = None
             is_duplicate = False
             first_seen_at = None
@@ -316,10 +316,10 @@ class CheckDuplicateView(XTestModeMixin, APIView):
                 cached_value = cache.get(cache_key)
                 if cached_value:
                     is_duplicate = True
-                    # 메타데이터에서 first_seen_at 추출
+                    # Extract first_seen_at from the metadata
                     if isinstance(cached_value, dict):
                         first_seen_at = cached_value.get("first_seen_at")
-                    # TTL 조회 시도 (Django ``BaseCache`` does not expose a
+                    # TTL lookup attempt (Django ``BaseCache`` does not expose a
                     # ``ttl`` method; backends that do, such as Redis, surface
                     # it dynamically — fall back to ``None`` when unavailable.)
                     ttl_fn = getattr(cache, "ttl", None)
@@ -334,7 +334,7 @@ class CheckDuplicateView(XTestModeMixin, APIView):
                     error=e,
                 )
 
-            # 등록 수행 여부
+            # Whether registration was performed
             registered = False
             if register and not is_duplicate:
                 try:
@@ -365,7 +365,7 @@ class CheckDuplicateView(XTestModeMixin, APIView):
                 "timestamp": timezone.now().isoformat(),
             }
 
-            # WAL Audit 기록
+            # WAL audit record
             self.log_xtest_audit(
                 request=request,
                 action="check_duplicate",
@@ -405,7 +405,7 @@ def _filter_tracked_keys(
     domain_filter: str,
     prefix_filter: str,
 ) -> list[str]:
-    """도메인 및 프리픽스 필터 적용."""
+    """Apply the domain and prefix filters."""
     from baldur.services.idempotency import IdempotencyDomain
 
     result = tracked_keys
@@ -424,7 +424,7 @@ def _filter_tracked_keys(
 
 
 def _aggregate_by_domain(tracked_keys: list[str]) -> dict[str, int]:
-    """도메인별 키 집계."""
+    """Aggregate key counts per domain."""
     from baldur.services.idempotency import IdempotencyDomain
 
     by_domain: dict[str, int] = {}
@@ -439,7 +439,7 @@ def _aggregate_by_domain(tracked_keys: list[str]) -> dict[str, int]:
 def _get_recent_keys_details(
     tracked_keys: list[str], limit: int
 ) -> list[dict[str, Any]]:
-    """최근 키 상세 정보 조회."""
+    """Query details for the most recent keys."""
     recent_keys = []
     for cache_key in tracked_keys[:limit]:
         try:
@@ -466,7 +466,7 @@ def _get_recent_keys_details(
 
 
 def _get_cache_backend_name() -> str:
-    """캐시 백엔드 이름 조회."""
+    """Query the cache backend name."""
     from django.conf import settings
 
     try:
@@ -477,20 +477,20 @@ def _get_cache_backend_name() -> str:
 
 
 # =============================================================================
-# 멱등성 상태 조회 View
+# Idempotency Status View
 # =============================================================================
 
 
 class IdempotencyStatusView(XTestModeMixin, APIView):
     """
-    현재 등록된 Idempotency 키 상태 조회 API.
+    API for querying the state of currently registered idempotency keys.
 
     GET /api/baldur/xtest/idempotency/status/
 
     Query Parameters:
-        domain: 도메인 필터 (선택)
-        prefix: 키 프리픽스 필터 (선택)
-        limit: 조회 개수 (기본 50)
+        domain: domain filter (optional)
+        prefix: key prefix filter (optional)
+        limit: number of results (default 50)
 
     Response:
         {
@@ -513,7 +513,7 @@ class IdempotencyStatusView(XTestModeMixin, APIView):
         if denied:
             return denied
 
-        # 쿼리 파라미터 파싱
+        # Parse query parameters
         domain_filter = request.query_params.get("domain", "").upper()
         prefix_filter = request.query_params.get("prefix", "")
         try:
@@ -525,19 +525,19 @@ class IdempotencyStatusView(XTestModeMixin, APIView):
             limit = MAX_STATUS_RESULTS
 
         try:
-            # X-Test로 등록된 키 조회 및 필터링
+            # Query and filter keys registered by X-Test
             tracked_keys = _get_xtest_tracked_keys()
             tracked_keys = _filter_tracked_keys(
                 tracked_keys, domain_filter, prefix_filter
             )
 
-            # 도메인별 집계
+            # Aggregate per domain
             by_domain = _aggregate_by_domain(tracked_keys)
 
-            # 최근 키 상세 정보
+            # Details of the most recent keys
             recent_keys = _get_recent_keys_details(tracked_keys, limit)
 
-            # 캐시 백엔드 정보
+            # Cache backend information
             cache_backend = _get_cache_backend_name()
 
             response_data = {
@@ -555,7 +555,7 @@ class IdempotencyStatusView(XTestModeMixin, APIView):
                 "timestamp": timezone.now().isoformat(),
             }
 
-            # WAL Audit 기록
+            # WAL audit record
             self.log_xtest_audit(
                 request=request,
                 action="query_status",
@@ -582,22 +582,22 @@ class IdempotencyStatusView(XTestModeMixin, APIView):
 
 
 # =============================================================================
-# 멱등성 키 등록 View
+# Idempotency Key Registration View
 # =============================================================================
 
 
 class RegisterKeyView(XTestModeMixin, APIView):
     """
-    테스트용 Idempotency 키 수동 등록 API.
+    API for manually registering an idempotency key for testing.
 
     POST /api/baldur/xtest/idempotency/register/
 
     Request Body:
         {
             "key": "order:123:process",
-            "domain": "EXTERNAL_SERVICE",  // 선택
-            "ttl_seconds": 3600,  // 선택, 기본값
-            "result_data": {"order_id": 123}  // 선택, 저장할 데이터
+            "domain": "EXTERNAL_SERVICE",  // optional
+            "ttl_seconds": 3600,  // optional, has a default
+            "result_data": {"order_id": 123}  // optional, data to store
         }
 
     Response:
@@ -620,7 +620,7 @@ class RegisterKeyView(XTestModeMixin, APIView):
             get_idempotency_service,
         )
 
-        # 필수 파라미터 검증
+        # Validate required parameters
         key_string = request.data.get("key")
         if not key_string:
             return Response(
@@ -633,7 +633,7 @@ class RegisterKeyView(XTestModeMixin, APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # 도메인 파싱
+        # Parse the domain
         domain_str = request.data.get("domain", "EXTERNAL_SERVICE").upper()
         try:
             domain = IdempotencyDomain[domain_str]
@@ -649,7 +649,7 @@ class RegisterKeyView(XTestModeMixin, APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # TTL 설정
+        # TTL configuration
         service = get_idempotency_service()
         try:
             ttl_seconds = int(request.data.get("ttl_seconds", service.cache_ttl))
@@ -659,12 +659,12 @@ class RegisterKeyView(XTestModeMixin, APIView):
         result_data = request.data.get("result_data", {})
 
         try:
-            # 키 생성
+            # Generate the key
             key = IdempotencyKey.custom(key_string, raw_key=key_string)
             key.domain = domain
             cache_key = key.cache_key
 
-            # 캐시에 등록
+            # Register in the cache
             now = timezone.now()
             metadata = {
                 "first_seen_at": now.isoformat(),
@@ -675,7 +675,7 @@ class RegisterKeyView(XTestModeMixin, APIView):
             cache.set(cache_key, metadata, timeout=ttl_seconds)
             _track_xtest_key(cache_key)
 
-            # 만료 시간 계산
+            # Compute the expiry time
             from datetime import timedelta
 
             expires_at = now + timedelta(seconds=ttl_seconds)
@@ -695,7 +695,7 @@ class RegisterKeyView(XTestModeMixin, APIView):
                 "timestamp": now.isoformat(),
             }
 
-            # WAL Audit 기록
+            # WAL audit record
             self.log_xtest_injection(
                 request=request,
                 component="idempotency",
@@ -722,29 +722,29 @@ class RegisterKeyView(XTestModeMixin, APIView):
 
 
 # =============================================================================
-# 멱등성 키 삭제 View
+# Idempotency Key Deletion View
 # =============================================================================
 
 
 class ClearKeysView(XTestModeMixin, APIView):
     """
-    테스트 키 정리 API.
+    API for cleaning up test keys.
 
     POST /api/baldur/xtest/idempotency/clear/
 
     Request Body:
         {
-            "key": "order:123:process",  // 특정 키 삭제
-            "domain": "EXTERNAL_SERVICE",  // 키 삭제 시 도메인
+            "key": "order:123:process",  // delete a specific key
+            "domain": "EXTERNAL_SERVICE",  // domain used when deleting a key
             // OR
-            "clear_all_xtest": true  // X-Test 생성 키만 전체 삭제
+            "clear_all_xtest": true  // delete all X-Test created keys only
         }
 
     Response:
         {
             "status": "success",
             "cleared_count": 10,
-            "cleared_keys": ["idempotency:..."]  // 삭제된 키 목록
+            "cleared_keys": ["idempotency:..."]  // list of deleted keys
         }
     """
 
@@ -767,7 +767,7 @@ class ClearKeysView(XTestModeMixin, APIView):
 
         try:
             if clear_all_xtest:
-                # X-Test 생성 키 전체 삭제
+                # Delete all X-Test created keys
                 tracked_keys = _get_xtest_tracked_keys()
                 for cache_key in tracked_keys:
                     try:
@@ -776,14 +776,14 @@ class ClearKeysView(XTestModeMixin, APIView):
                     except Exception as e:
                         errors.append(f"{cache_key}: {str(e)}")
 
-                # 추적 목록 초기화
+                # Reset the tracking list
                 try:
                     cache.delete(XTEST_METADATA_KEY)
                 except Exception:
                     pass
 
             elif key_string:
-                # 특정 키 삭제
+                # Delete a specific key
                 try:
                     domain = IdempotencyDomain[domain_str]
                 except KeyError:
@@ -822,12 +822,12 @@ class ClearKeysView(XTestModeMixin, APIView):
             response_data = {
                 "status": "success",
                 "cleared_count": len(cleared_keys),
-                "cleared_keys": cleared_keys[:MAX_STATUS_RESULTS],  # 최대 50개만 표시
+                "cleared_keys": cleared_keys[:MAX_STATUS_RESULTS],  # show at most 50
                 "errors": errors if errors else None,
                 "timestamp": timezone.now().isoformat(),
             }
 
-            # WAL Audit 기록
+            # WAL audit record
             self.log_xtest_cleanup(
                 request=request,
                 component="idempotency",

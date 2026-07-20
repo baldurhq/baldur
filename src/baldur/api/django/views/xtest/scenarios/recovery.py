@@ -1,7 +1,7 @@
 """
-Recovery 관련 통합 테스트 시나리오.
+Recovery-related integration test scenarios.
 
-Full Recovery Cycle 시나리오 제공.
+Provides the Full Recovery Cycle scenario.
 """
 
 from .base import (
@@ -11,20 +11,20 @@ from .base import (
 
 class FullRecoveryScenario(IntegrationScenario):
     """
-    전체 복구 사이클 시나리오.
+    Full recovery cycle scenario.
 
     Steps:
-    1. 초기 상태 스냅샷
-    2. 대량 실패 주입
-    3. CB Open 확인
-    4. EB 소진 확인
-    5. DLQ 누적 확인
-    6. 서비스 복구 시뮬레이션
+    1. Initial state snapshot
+    2. Inject mass failures
+    3. Verify CB Open
+    4. Verify EB exhaustion
+    5. Verify DLQ accumulation
+    6. Simulate service recovery
     7. CB Half-Open
-    8. 성공 요청 → CB Closed
-    9. DLQ Replay 배치
-    10. EB 회복 확인
-    11. 최종 스냅샷 (모든 정상)
+    8. Successful request -> CB Closed
+    9. DLQ Replay batch
+    10. Verify EB recovery
+    11. Final snapshot (all normal)
     """
 
     scenario_name = "full_recovery_cycle"
@@ -43,7 +43,7 @@ class FullRecoveryScenario(IntegrationScenario):
         service = self.service_name
         failure_count = self.config.get("failure_count", 10)
 
-        # Step 1: 초기 상태 스냅샷
+        # Step 1: initial state snapshot
         def step1():
             cb_service.reset_circuit(service)
             state = cb_service.get_state(service)
@@ -52,7 +52,7 @@ class FullRecoveryScenario(IntegrationScenario):
         if not self._execute_step(1, "initial_snapshot", "all", "all normal", step1):
             return
 
-        # Step 2: 대량 실패 주입
+        # Step 2: inject mass failures
         def step2():
             for _i in range(failure_count):
                 cb_service.record_failure(
@@ -69,7 +69,7 @@ class FullRecoveryScenario(IntegrationScenario):
         ):
             return
 
-        # Step 3: CB Open 확인
+        # Step 3: verify CB Open
         def step3():
             state = cb_service.get_state(service)
             return f"state: {state.value}"
@@ -96,7 +96,7 @@ class FullRecoveryScenario(IntegrationScenario):
         ):
             return
 
-        # Step 5: DLQ 누적 확인
+        # Step 5: verify DLQ accumulation
         def step5():
             stats = dlq_service.get_stats(domain=service)
             pending = stats.get("by_status", {}).get("pending", 0)
@@ -107,7 +107,7 @@ class FullRecoveryScenario(IntegrationScenario):
         ):
             return
 
-        # Step 6: 서비스 복구 시뮬레이션
+        # Step 6: simulate service recovery
         def step6():
             return "service recovered"
 
@@ -125,7 +125,7 @@ class FullRecoveryScenario(IntegrationScenario):
         ):
             return
 
-        # Step 8: 성공 요청 → CB Closed
+        # Step 8: successful request -> CB Closed
         def step8():
             cb_service.record_success(service)
             state = cb_service.get_state(service)
@@ -136,14 +136,14 @@ class FullRecoveryScenario(IntegrationScenario):
         ):
             return
 
-        # Step 9: DLQ Replay 배치 (시뮬레이션)
+        # Step 9: DLQ Replay batch (simulated)
         def step9():
             return "batch_replay completed"
 
         if not self._execute_step(9, "batch_replay", "replay", "completed", step9):
             return
 
-        # Step 10: EB 회복 확인
+        # Step 10: verify EB recovery
         def step10():
             return "EB recovering"
 
@@ -152,7 +152,7 @@ class FullRecoveryScenario(IntegrationScenario):
         ):
             return
 
-        # Step 11: 최종 스냅샷
+        # Step 11: final snapshot
         def step11():
             state = cb_service.get_state(service)
             return f"final snapshot: CB={state.value}"

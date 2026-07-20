@@ -1,7 +1,7 @@
 """
-X-Test 통합 테스트 시나리오 패키지.
+X-Test integration test scenario package.
 
-도메인별로 분리된 시나리오 모듈을 통합하여 제공합니다.
+Aggregates the scenario modules that are split by domain.
 """
 
 # Base classes and models
@@ -41,14 +41,14 @@ from .recovery import (
     FullRecoveryScenario,
 )
 
-# Regional scenarios (144 문서 구현)
+# Regional scenarios (144 implementation)
 from .regional import (
     MultiRegionIsolationTestScenario,
     RegionalOverrideConflictScenario,
 )
 
 # =============================================================================
-# 시나리오 레지스트리
+# Scenario registry
 # =============================================================================
 
 
@@ -66,19 +66,19 @@ SCENARIO_REGISTRY: dict[str, type] = {
     # Emergency scenarios
     "full_emergency_recovery_flow": FullEmergencyRecoveryScenario,
     "safety_interlock_canary_rollback": SafetyInterlockCanaryRollbackScenario,
-    # Regional scenarios (144 문서 구현)
+    # Regional scenarios (144 implementation)
     "regional_override_conflict": RegionalOverrideConflictScenario,
     "multi_region_isolation_test": MultiRegionIsolationTestScenario,
 }
 
 
 def get_scenario_class(scenario_name: str) -> type | None:
-    """시나리오 이름으로 클래스 조회."""
+    """Look up a scenario class by name."""
     return SCENARIO_REGISTRY.get(scenario_name)
 
 
 def list_available_scenarios() -> list[str]:
-    """사용 가능한 시나리오 목록 반환."""
+    """Return the list of available scenarios."""
     return list(SCENARIO_REGISTRY.keys())
 
 

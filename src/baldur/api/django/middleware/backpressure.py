@@ -1,13 +1,13 @@
 """
 Backpressure Middleware for Django.
 
-과부하 시 503 응답을 반환하고 커스텀 헤더를 추가합니다.
-RateController와 GracefulDegradation을 통합합니다.
+Returns a 503 response under overload and adds custom headers.
+Integrates RateController and GracefulDegradation.
 
-헤더 규약:
-- X-Baldur-Backpressure-Level: 현재 Backpressure 레벨
-- X-Baldur-Degraded-Features: 비활성화된 기능 목록 (콤마 구분)
-- Retry-After: 재시도 권장 시간 (초)
+Header contract:
+- X-Baldur-Backpressure-Level: current Backpressure level
+- X-Baldur-Degraded-Features: list of disabled features (comma-separated)
+- Retry-After: recommended retry delay (seconds)
 """
 
 from __future__ import annotations
@@ -33,15 +33,15 @@ logger = structlog.get_logger()
 
 class BackpressureMiddleware:
     """
-    Backpressure 미들웨어.
+    Backpressure middleware.
 
-    기능:
-    - 과부하 시 503 응답 반환
-    - 커스텀 메시지 지원 (다국어/브랜딩)
-    - 비활성화된 기능 목록을 헤더로 전달
-    - Retry-After 헤더 제공
+    Features:
+    - Returns a 503 response under overload
+    - Custom message support (localization/branding)
+    - Passes the list of disabled features via a header
+    - Provides a Retry-After header
 
-    설정 (환경변수):
+    Configuration (environment variables):
         BALDUR_BACKPRESSURE_ENABLED=true
         BALDUR_BACKPRESSURE_REJECT_MESSAGE="..."
         BALDUR_BACKPRESSURE_REJECT_RETRY_AFTER_SECONDS=5
@@ -57,7 +57,7 @@ class BackpressureMiddleware:
     def __init__(self, get_response: Callable[[HttpRequest], HttpResponse]):
         """
         Args:
-            get_response: 다음 미들웨어/뷰 호출 함수
+            get_response: callable invoking the next middleware/view
         """
         self.get_response = get_response
         if _SCALING_AVAILABLE:
@@ -66,9 +66,9 @@ class BackpressureMiddleware:
 
     def __call__(self, request: HttpRequest) -> HttpResponse:
         """
-        요청 처리.
+        Handle the request.
 
-        과부하 시 503을 반환하고, 정상 시 응답에 헤더를 추가합니다.
+        Returns 503 under overload; otherwise adds headers to the response.
         """
         if not _SCALING_AVAILABLE:
             return cast(HttpResponse, self.get_response(request))
@@ -77,26 +77,26 @@ class BackpressureMiddleware:
         if not settings.backpressure_enabled:
             return cast(HttpResponse, self.get_response(request))
 
-        # Rate 체크
+        # Rate check
         if not self._controller.should_process():
             return self._create_overload_response()
 
-        # 정상 처리
+        # Normal processing
         response: HttpResponse = self.get_response(request)
 
-        # 비활성화된 기능 헤더 추가
+        # Add the disabled-features header
         disabled_features = self._degradation.get_disabled_features()
         if disabled_features:
             response["X-Baldur-Degraded-Features"] = ",".join(disabled_features)
 
-        # 현재 레벨 헤더 추가
+        # Add the current-level header
         current_level = self._controller.get_state().level
         response["X-Baldur-Backpressure-Level"] = current_level.value
 
         return response
 
     def _create_overload_response(self) -> HttpResponse:
-        """과부하 시 503 응답 생성."""
+        """Build the 503 overload response."""
         settings = get_backpressure_settings()
         current_level = self._controller.get_state().level
 
@@ -118,9 +118,9 @@ class BackpressureMiddleware:
 
 class AsyncBackpressureMiddleware:
     """
-    비동기 Backpressure 미들웨어.
+    Asynchronous Backpressure middleware.
 
-    ASGI 환경에서 사용합니다.
+    For use in ASGI environments.
 
     Usage (settings.py):
         MIDDLEWARE = [
@@ -136,7 +136,7 @@ class AsyncBackpressureMiddleware:
     def __init__(self, get_response: Callable[[HttpRequest], Any]):
         """
         Args:
-            get_response: 다음 미들웨어/뷰 호출 함수 (async)
+            get_response: callable invoking the next middleware/view (async)
         """
         self.get_response = get_response
         if _SCALING_AVAILABLE:
@@ -144,7 +144,7 @@ class AsyncBackpressureMiddleware:
             self._degradation = get_graceful_degradation()
 
     async def __call__(self, request: HttpRequest) -> HttpResponse:
-        """요청 처리 (비동기)."""
+        """Handle the request (async)."""
         if not _SCALING_AVAILABLE:
             return cast(HttpResponse, await self.get_response(request))
 
@@ -152,26 +152,26 @@ class AsyncBackpressureMiddleware:
         if not settings.backpressure_enabled:
             return cast(HttpResponse, await self.get_response(request))
 
-        # Rate 체크 (동기 호출이지만 빠름)
+        # Rate check (a sync call, but fast)
         if not self._controller.should_process():
             return self._create_overload_response()
 
-        # 정상 처리
+        # Normal processing
         response: HttpResponse = await self.get_response(request)
 
-        # 비활성화된 기능 헤더 추가
+        # Add the disabled-features header
         disabled_features = self._degradation.get_disabled_features()
         if disabled_features:
             response["X-Baldur-Degraded-Features"] = ",".join(disabled_features)
 
-        # 현재 레벨 헤더 추가
+        # Add the current-level header
         current_level = self._controller.get_state().level
         response["X-Baldur-Backpressure-Level"] = current_level.value
 
         return response
 
     def _create_overload_response(self) -> HttpResponse:
-        """과부하 시 503 응답 생성."""
+        """Build the 503 overload response."""
         settings = get_backpressure_settings()
         current_level = self._controller.get_state().level
 

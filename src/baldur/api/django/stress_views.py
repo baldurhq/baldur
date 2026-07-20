@@ -1,12 +1,13 @@
 """
 Baldur Pool Stress Test Endpoints.
 
-이 엔드포인트들은 의도적으로 DB Connection Pool을 고갈시킵니다.
-테스트 전용이며, 프로덕션에서는 절대 사용하지 마세요!
+These endpoints intentionally exhaust the DB connection pool.
+Test-only — never use them in production!
 
 Note:
-- 비즈니스 로직은 StressTestService(services/stress_test_service.py)로 분리됨
-- View는 Request/Response 처리만 담당
+- Business logic is split out into StressTestService
+  (services/stress_test_service.py)
+- Views only handle request/response
 """
 
 import json
@@ -28,7 +29,7 @@ logger = structlog.get_logger()
 
 
 def get_pool_info():
-    """SQLAlchemy Pool 정보 조회 (backward compatibility)."""
+    """Look up SQLAlchemy pool info (backward compatibility)."""
     service = get_stress_test_service()
     return service.get_pool_info()
 
@@ -41,7 +42,7 @@ def get_pool_info():
 @require_GET
 def slow_query_5s(request):
     """
-    5초 동안 DB 연결을 점유하는 느린 쿼리.
+    Slow query that holds a DB connection for 5 seconds.
 
     GET /api/baldur/stress/slow-5s/
     """
@@ -56,7 +57,7 @@ def slow_query_5s(request):
 @require_GET
 def slow_query_10s(request):
     """
-    10초 동안 DB 연결을 점유하는 매우 느린 쿼리.
+    Very slow query that holds a DB connection for 10 seconds.
 
     GET /api/baldur/stress/slow-10s/
     """
@@ -71,12 +72,12 @@ def slow_query_10s(request):
 @require_GET
 def connection_leak_simulation(request):
     """
-    의도적으로 연결을 '누수'시키는 시뮬레이션.
-    연결을 열고 닫지 않은 채로 유지합니다.
+    Simulation that intentionally "leaks" connections.
+    Opens connections and holds them without closing.
 
     GET /api/baldur/stress/leak/
 
-    ⚠️ 테스트 전용! 프로덕션에서 절대 사용 금지!
+    ⚠️ Test-only! Never use in production!
     """
     settings = get_stress_test_settings()
     hold_seconds = int(request.GET.get("seconds", settings.default_leak_hold_seconds))
@@ -92,8 +93,9 @@ def connection_leak_simulation(request):
 @require_GET
 def pool_status(request):
     """
-    현재 Connection Pool 상태 조회.
-    SQLAlchemy Pool 사용 시 실제 Pool 상태를, 아니면 PostgreSQL 통계를 반환.
+    Look up the current connection pool status.
+    Returns the real pool state when an SQLAlchemy pool is in use, otherwise
+    PostgreSQL statistics.
 
     GET /api/baldur/stress/pool-status/
 
@@ -110,7 +112,7 @@ def pool_status(request):
 
             data = get_cached_pool_status()
 
-            # Pool 고갈 시 503 반환
+            # Return 503 when the pool is exhausted
             if data.get("status") == "exhausted":
                 return JsonResponse(data, status=503)
             return JsonResponse(data)
@@ -129,7 +131,7 @@ def pool_status(request):
 @require_GET
 def heavy_concurrent_query(request):
     """
-    여러 테이블을 JOIN하는 무거운 쿼리.
+    Heavy query that JOINs several tables.
 
     GET /api/baldur/stress/heavy-query/
     """
@@ -142,7 +144,7 @@ def heavy_concurrent_query(request):
 
 
 # =============================================================================
-# ��� Advisory Lock API - 비침투적 DB 락 테스트
+# Advisory Lock API - non-invasive DB lock testing
 # =============================================================================
 
 
@@ -168,25 +170,28 @@ def _parse_lock_request_body(request) -> dict:
 @csrf_exempt
 def advisory_lock_acquire(request):
     """
-    PostgreSQL Advisory Lock 획득 - 비침투적 락 테스트.
+    Acquire a PostgreSQL advisory lock - non-invasive lock testing.
 
     POST /api/baldur/stress/advisory-lock/acquire/
 
-    비즈니스 데이터를 전혀 건드리지 않고, DB 엔진 수준의 락 경합만 발생시킵니다.
-    이를 통해 시스템의 락 감지 및 복구 능력을 검증할 수 있습니다.
+    Produces lock contention purely at the DB engine level without touching
+    any business data. This verifies the system's lock detection and
+    recovery capabilities.
 
     Parameters:
-        lock_id (int): 락 식별자 (1-1000000). 같은 ID로 다수 요청 시 경합 발생
-        hold_seconds (int): 락 유지 시간 (1-60초, 기본값: 5초)
-        exclusive (bool): 배타적 락 여부 (기본값: true)
-        wait (bool): 락 획득 대기 여부. false면 즉시 실패 반환 (기본값: true)
+        lock_id (int): Lock identifier (1-1000000). Concurrent requests with
+            the same ID create contention
+        hold_seconds (int): Lock hold time (1-60s, default: 5s)
+        exclusive (bool): Whether the lock is exclusive (default: true)
+        wait (bool): Whether to wait for the lock. If false, fails immediately
+            (default: true)
 
     Response:
-        - 200: 락 획득 성공
-        - 409: 락 획득 실패 (다른 세션이 보유 중, wait=false인 경우)
-        - 503: DB 오류 또는 타임아웃
+        - 200: Lock acquired
+        - 409: Lock acquisition failed (held by another session, wait=false)
+        - 503: DB error or timeout
 
-    ⚠️ 테스트 전용! 프로덕션에서 절대 사용 금지!
+    ⚠️ Test-only! Never use in production!
     """
     if request.method != "POST":
         return JsonResponse({"error": "POST method required"}, status=405)
@@ -214,20 +219,20 @@ def advisory_lock_acquire(request):
 @csrf_exempt
 def advisory_lock_contention(request):
     """
-    Advisory Lock 경합 시뮬레이션 - 다수의 세션이 동일 락을 놓고 경쟁.
+    Advisory lock contention simulation - many sessions compete for one lock.
 
     POST /api/baldur/stress/advisory-lock/contention/
 
-    지정된 시간 동안 동일한 락 ID에 대해 반복적으로 획득/해제를 시도합니다.
-    이는 실제 DB 락 경합 상황을 시뮬레이션합니다.
+    Repeatedly acquires and releases the same lock ID for the given duration.
+    This simulates real DB lock contention.
 
     Parameters:
-        lock_id (int): 락 식별자
-        duration_seconds (int): 경합 지속 시간 (1-30초, 기본값: 5초)
-        lock_hold_ms (int): 각 락 유지 시간 (ms, 기본값: 100ms)
+        lock_id (int): Lock identifier
+        duration_seconds (int): Contention duration (1-30s, default: 5s)
+        lock_hold_ms (int): Hold time per lock (ms, default: 100ms)
 
     Response:
-        경합 통계 (성공/실패 횟수, 평균 대기 시간 등)
+        Contention statistics (success/failure counts, average wait time, etc.)
     """
     if request.method != "POST":
         return JsonResponse({"error": "POST method required"}, status=405)
@@ -260,26 +265,27 @@ def advisory_lock_contention(request):
 @csrf_exempt
 def controlled_burst_failure(request):
     """
-    Controlled Burst Failure - "폭풍 전야 -> 시스템 붕괴 -> 자율 복구" 연출.
+    Controlled Burst Failure - stages "calm before the storm -> system
+    collapse -> autonomous recovery".
 
     POST /api/baldur/stress/burst-failure/
 
-    지정된 시간 동안 극단적인 락 타임아웃과 부하를 발생시켜
-    100건 이상의 DLQ 항목을 강제로 생성합니다.
+    Generates extreme lock timeouts and load for the given duration, forcing
+    the creation of 100+ DLQ entries.
 
     Parameters:
         lock_id (int): Advisory Lock ID
-        lock_timeout_ms (int): 극단적으로 짧은 락 타임아웃 (기본값: 1ms!)
-        burst_duration_seconds (int): burst 지속 시간 (기본값: 10초)
-        concurrent_locks (int): 동시 락 시도 수 (기본값: 50)
+        lock_timeout_ms (int): Extremely short lock timeout (default: 1ms!)
+        burst_duration_seconds (int): Burst duration (default: 10s)
+        concurrent_locks (int): Concurrent lock attempts (default: 50)
 
-    이 API는 다음을 수행합니다:
-    1. lock_timeout을 1ms로 축소
-    2. 지정된 시간 동안 동시에 많은 락 획득 시도
-    3. 대부분의 요청이 타임아웃으로 실패
-    4. 실패한 요청들이 DLQ로 자동 라우팅됨
+    This API does the following:
+    1. Shrinks lock_timeout to 1ms
+    2. Attempts many concurrent lock acquisitions for the given duration
+    3. Most requests fail with a timeout
+    4. The failed requests are automatically routed to the DLQ
 
-    ⚠️ 테스트 전용! 시스템에 의도적으로 장애를 발생시킵니다!
+    ⚠️ Test-only! Intentionally induces failures in the system!
     """
     if request.method != "POST":
         return JsonResponse({"error": "POST method required"}, status=405)
@@ -314,28 +320,28 @@ def controlled_burst_failure(request):
 
 
 # =============================================================================
-# ��� Pool Exhaustion API - CB 트리거를 위한 실제 풀 고갈
+# Pool Exhaustion API - real pool exhaustion to trigger the CB
 # =============================================================================
 
 
 @csrf_exempt
 def pool_exhaust(request):
     """
-    DB 커넥션 풀을 의도적으로 고갈시켜 CB를 트리거합니다.
+    Intentionally exhausts the DB connection pool to trigger the CB.
 
     POST /api/baldur/stress/pool-exhaust/
 
     Parameters:
-        connections_to_hold (int): 점유할 커넥션 수 (기본값: 10)
-        hold_seconds (int): 커넥션 유지 시간 (기본값: 30초, 최대 60초)
+        connections_to_hold (int): Connections to hold (default: 10)
+        hold_seconds (int): Connection hold time (default: 30s, max 60s)
 
-    이 API는:
-    1. 여러 개의 DB 커넥션을 열고 유지
-    2. 다른 요청들이 커넥션을 얻지 못해 503 에러 발생
-    3. BaldurMiddleware가 이 에러를 감지하고 CB를 OPEN으로 전환
-    4. 지정된 시간 후 커넥션 반환
+    This API:
+    1. Opens and holds several DB connections
+    2. Other requests fail with 503 because they cannot get a connection
+    3. BaldurMiddleware detects those errors and flips the CB to OPEN
+    4. Connections are released after the given time
 
-    ⚠️ 테스트 전용! 시스템에 의도적으로 장애를 발생시킵니다!
+    ⚠️ Test-only! Intentionally induces failures in the system!
     """
     if request.method != "POST":
         return JsonResponse({"error": "POST method required"}, status=405)
@@ -366,18 +372,19 @@ def pool_exhaust(request):
 @csrf_exempt
 def trigger_cb_failure(request):
     """
-    Circuit Breaker를 직접 트리거하기 위한 의도적 실패 엔드포인트.
+    Intentional-failure endpoint for directly triggering the Circuit Breaker.
 
     POST /api/baldur/stress/trigger-cb-failure/
 
     Parameters:
-        failure_count (int): 연속 실패 횟수 (기본값: 10)
-        error_type (str): 에러 유형 - "db_error", "timeout", "exception" (기본값: "db_error")
+        failure_count (int): Consecutive failure count (default: 10)
+        error_type (str): Error type - "db_error", "timeout", "exception"
+            (default: "db_error")
 
-    이 API는 BaldurMiddleware를 통해 처리되는 실패를 발생시킵니다.
-    연속된 실패가 CB threshold를 초과하면 CB가 OPEN 상태로 전환됩니다.
+    This API produces failures that are handled through BaldurMiddleware.
+    Once consecutive failures exceed the CB threshold, the CB flips to OPEN.
 
-    ⚠️ 테스트 전용!
+    ⚠️ Test-only!
     """
     if request.method != "POST":
         return JsonResponse({"error": "POST method required"}, status=405)
@@ -392,7 +399,7 @@ def trigger_cb_failure(request):
     service = get_stress_test_service()
     result = service.trigger_cb_failure(error_type=error_type)
 
-    # 의도적 실패이므로 503 반환하여 CB가 카운트하도록 함
+    # Intentional failure: return 503 so the CB counts it
     if result.status == "intentional_failure":
         return JsonResponse(result.to_dict(), status=503)
 
