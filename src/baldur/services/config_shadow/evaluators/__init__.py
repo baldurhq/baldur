@@ -1,7 +1,7 @@
 """
 Config Shadow Evaluators.
 
-ConfigEvaluator Protocol 및 구현체.
+The ConfigEvaluator protocol and its implementations.
 """
 
 from __future__ import annotations
@@ -13,25 +13,25 @@ from baldur.services.config_shadow.models import EvaluationContext, EvaluatorRes
 
 @runtime_checkable
 class ConfigEvaluator(Protocol):
-    """설정 변경 효과를 시뮬레이션하는 Evaluator 프로토콜."""
+    """Protocol for evaluators that simulate the effect of a config change."""
 
     @property
     def name(self) -> str:
-        """Evaluator 이름 (예: "circuit_breaker")."""
+        """Evaluator name (e.g. "circuit_breaker")."""
         ...
 
     @property
     def event_types(self) -> list[str]:
-        """이 Evaluator가 처리하는 이벤트 타입 리스트."""
+        """Event types this evaluator handles."""
         ...
 
     def evaluate(self, context: EvaluationContext) -> EvaluatorResult:
-        """EvaluationContext를 기반으로 baseline과 candidate 설정을 비교 평가한다.
+        """Compare the baseline and candidate configs using an EvaluationContext.
 
-        Shadow Evaluator는 context.events를 사용하고,
-        Live Evaluator는 context.time_window_seconds + context.*_labels를 사용한다.
+        The Shadow evaluator uses context.events; the Live evaluator uses
+        context.time_window_seconds + context.*_labels.
 
         Returns:
-            비교 결과
+            The comparison result
         """
         ...

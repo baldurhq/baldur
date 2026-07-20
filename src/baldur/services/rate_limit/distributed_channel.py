@@ -1,22 +1,22 @@
 """
-분산 Rate Limit 이벤트 채널.
+Distributed rate limit event channel.
 
-Kafka를 통해 429 이벤트를 전체 클러스터에 전파합니다.
-단일 Pod가 외부 API의 429 응답을 받으면, 다른 모든 Pod에서도
-해당 API에 대한 요청을 자제하도록 합니다 (집단 방어).
+Propagates 429 events across the entire cluster via Kafka.
+When a single pod receives a 429 response from an external API, every other
+pod also holds back requests to that API (collective defense).
 
 Features:
-    - Kafka 기반 클러스터 전체 429 이벤트 전파
-    - 파티션 키로 순서 보장 (동일 API key는 같은 파티션)
-    - 다중 핸들러 지원
+    - Cluster-wide 429 event propagation over Kafka
+    - Ordering guaranteed by partition key (same API key -> same partition)
+    - Multiple handler support
 
 Usage:
     from baldur.services.rate_limit import DistributedRateLimitChannel
 
-    # 채널 초기화
+    # Initialize the channel
     channel = DistributedRateLimitChannel()
 
-    # 429 발생 시 전체 클러스터에 전파
+    # Propagate to the whole cluster when a 429 occurs
     channel.broadcast_rate_limit_429(
         key="payment_api",
         consecutive_429s=3,
@@ -24,7 +24,7 @@ Usage:
         calculated_delay=60.0,
     )
 
-    # 구독 (각 Pod에서 호출)
+    # Subscribe (called on each pod)
     def my_handler(event_data: dict) -> None:
         print(f"Received 429 for {event_data['key']}")
 
@@ -60,15 +60,15 @@ RATE_LIMIT_TOPIC = "baldur.rate_limit.events"
 
 class DistributedRateLimitChannel:
     """
-    Kafka 기반 분산 Rate Limit 이벤트 채널.
+    Kafka-based distributed rate limit event channel.
 
-    In-memory EventBus와 달리 Kafka Topic을 통해
-    전체 클러스터에 429 이벤트를 전파합니다.
+    Unlike the in-memory EventBus, this propagates 429 events
+    to the entire cluster through a Kafka topic.
 
     Attributes:
-        _kafka_bus: Kafka EventBus 인스턴스
-        _handlers: 등록된 이벤트 핸들러 목록
-        _running: 채널 실행 상태
+        _kafka_bus: Kafka EventBus instance
+        _handlers: Registered event handlers
+        _running: Channel running state
     """
 
     _instance: DistributedRateLimitChannel | None = None
@@ -76,10 +76,10 @@ class DistributedRateLimitChannel:
 
     def __init__(self, kafka_bus: KafkaEventBus | None = None):
         """
-        분산 Rate Limit 채널 초기화.
+        Initialize the distributed rate limit channel.
 
         Args:
-            kafka_bus: Kafka EventBus (None이면 기본 설정으로 생성)
+            kafka_bus: Kafka EventBus (created with defaults if None)
         """
         self._kafka_bus: KafkaEventBus | None = kafka_bus
         self._handlers: list[Callable[[dict[str, Any]], None]] = []
@@ -88,7 +88,7 @@ class DistributedRateLimitChannel:
 
     @classmethod
     def get_instance(cls) -> DistributedRateLimitChannel:
-        """싱글톤 인스턴스 반환."""
+        """Return the singleton instance."""
         if cls._instance is None:
             with cls._instance_lock:
                 if cls._instance is None:
@@ -97,7 +97,7 @@ class DistributedRateLimitChannel:
 
     @classmethod
     def reset_instance(cls) -> None:
-        """싱글톤 인스턴스 초기화 (테스트용)."""
+        """Reset the singleton instance (test use)."""
         with cls._instance_lock:
             if cls._instance is not None:
                 cls._instance.stop()
@@ -132,19 +132,20 @@ class DistributedRateLimitChannel:
         calculated_delay: float,
     ) -> bool:
         """
-        429 이벤트를 전체 클러스터에 비동기 브로드캐스트.
+        Broadcast a 429 event asynchronously to the entire cluster.
 
-        confluent-kafka produce()는 내부 버퍼에 이벤트를 넣고 즉시 반환하므로
-        Kafka 브로커 장애가 API 응답 지연으로 전파되지 않는다 (Fire-and-Forget).
+        confluent-kafka produce() puts the event into an internal buffer and
+        returns immediately, so a Kafka broker outage does not propagate into
+        API response latency (fire-and-forget).
 
         Args:
-            key: Rate limit key (예: "payment_api")
-            consecutive_429s: 연속 429 횟수
-            cooldown_until: Cooldown 종료 시각 (Unix timestamp)
-            calculated_delay: 계산된 지연 시간 (초)
+            key: Rate limit key (e.g. "payment_api")
+            consecutive_429s: Number of consecutive 429s
+            cooldown_until: Cooldown end time (Unix timestamp)
+            calculated_delay: Calculated delay (seconds)
 
         Returns:
-            내부 버퍼 전송 성공 여부
+            Whether the send to the internal buffer succeeded
         """
         try:
             kafka_bus = self._ensure_kafka_bus()
@@ -160,7 +161,7 @@ class DistributedRateLimitChannel:
             return kafka_bus.publish(
                 topic=RATE_LIMIT_TOPIC,
                 event=event,
-                key=key,  # 동일 key는 동일 파티션으로 순서 보장
+                key=key,  # same key -> same partition, preserving order
                 on_delivery=self._on_broadcast_delivery,
             )
 
@@ -173,7 +174,7 @@ class DistributedRateLimitChannel:
 
     @staticmethod
     def _on_broadcast_delivery(report) -> None:
-        """Kafka 전송 결과 콜백 (Fire-and-Forget)."""
+        """Kafka delivery result callback (fire-and-forget)."""
         if report.error:
             logger.warning(
                 "distributed_rate_limit_channel.delivery_failed",
@@ -191,10 +192,10 @@ class DistributedRateLimitChannel:
         handler: Callable[[dict[str, Any]], None],
     ) -> None:
         """
-        429 이벤트 구독 등록.
+        Register a subscription for 429 events.
 
         Args:
-            handler: 이벤트 핸들러 (event_data dict를 받음)
+            handler: Event handler (receives an event_data dict)
         """
         with self._lock:
             self._handlers.append(handler)
@@ -203,7 +204,7 @@ class DistributedRateLimitChannel:
                 handlers_count=len(self._handlers),
             )
 
-        # 아직 구독 설정 안 됐으면 Kafka 구독 설정
+        # Set up the Kafka subscription if it is not configured yet
         try:
             kafka_bus = self._ensure_kafka_bus()
             kafka_bus.subscribe(RATE_LIMIT_TOPIC, self._dispatch_to_handlers)
@@ -215,13 +216,13 @@ class DistributedRateLimitChannel:
 
     def _dispatch_to_handlers(self, event: ConsumedEvent) -> bool:
         """
-        Kafka 이벤트를 등록된 핸들러들에 전달.
+        Deliver a Kafka event to the registered handlers.
 
         Args:
-            event: Kafka에서 수신한 이벤트
+            event: Event received from Kafka
 
         Returns:
-            처리 성공 여부
+            Whether processing succeeded
         """
         event_data = event.value if hasattr(event, "value") else event
 
@@ -242,7 +243,7 @@ class DistributedRateLimitChannel:
         return success
 
     def start(self) -> None:
-        """Kafka Consumer 시작."""
+        """Start the Kafka consumer."""
         if self._running:
             logger.warning("distributed_rate_limit_channel.already_running")
             return
@@ -259,7 +260,7 @@ class DistributedRateLimitChannel:
             )
 
     def stop(self) -> None:
-        """Kafka Consumer 정지."""
+        """Stop the Kafka consumer."""
         if not self._running:
             return
 
@@ -276,21 +277,21 @@ class DistributedRateLimitChannel:
 
     @property
     def is_running(self) -> bool:
-        """채널 실행 상태 확인."""
+        """Check the channel running state."""
         return self._running
 
     @property
     def handler_count(self) -> int:
-        """등록된 핸들러 수."""
+        """Number of registered handlers."""
         with self._lock:
             return len(self._handlers)
 
 
 def get_distributed_rate_limit_channel() -> DistributedRateLimitChannel:
     """
-    분산 Rate Limit 채널 싱글톤 반환.
+    Return the distributed rate limit channel singleton.
 
     Returns:
-        DistributedRateLimitChannel 인스턴스
+        DistributedRateLimitChannel instance
     """
     return DistributedRateLimitChannel.get_instance()

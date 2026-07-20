@@ -24,14 +24,14 @@ def _emit_rate_limit_event(
     priority_name: str = "HIGH",
 ) -> None:
     """
-    Rate Limit 관련 이벤트를 EventBus에 발행.
+    Emit a rate-limit event to the EventBus.
 
-    EventBus import 실패 또는 발행 실패 시에도 주요 기능에 영향 없음 (Fail-Open).
+    An EventBus import or emit failure does not affect core behavior (fail-open).
 
     Args:
-        event_type_name: EventType 이름 (예: "RATE_LIMIT_429")
-        data: 이벤트 데이터
-        priority_name: 우선순위 이름 (예: "HIGH", "CRITICAL")
+        event_type_name: EventType name (e.g. "RATE_LIMIT_429")
+        data: Event data
+        priority_name: Priority name (e.g. "HIGH", "CRITICAL")
     """
     try:
         from baldur.services.event_bus import (
@@ -76,9 +76,9 @@ def _record_rate_limit_metrics(
     consecutive_429s: int | None = None,
 ) -> None:
     """
-    Rate Limit 관련 Prometheus 메트릭 기록.
+    Record rate-limit Prometheus metrics.
 
-    메트릭 정의가 없거나 import 실패 시 무시 (Fail-Open).
+    Ignored if the metric definitions are missing or the import fails (fail-open).
     """
     try:
         from baldur.services.metrics.definitions import (

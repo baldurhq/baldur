@@ -1,9 +1,10 @@
 """
-PreWarmer — 이벤트 전 기존 모듈에 사전 조정 신호를 보내는 오케스트레이터.
+PreWarmer — orchestrator that signals pre-adjustments to existing modules
+ahead of an event.
 
-새 로직을 구현하지 않고, 기존 모듈의 public API만 호출한다.
-Global Baseline 패턴으로 평시 원본값을 단일 스냅샷으로 관리하고,
-이벤트 추가/종료 시 선언적 재계산(Re-evaluation)을 수행한다.
+It implements no new logic; it only calls the public APIs of existing modules.
+The Global Baseline pattern keeps steady-state original values in a single
+snapshot, and adding/ending an event triggers a declarative re-evaluation.
 """
 
 from __future__ import annotations
@@ -30,25 +31,25 @@ logger = structlog.get_logger()
 STATE_KEY_GLOBAL_BASELINE = "capacity_reservation:global_baseline"
 
 POOL_EXPANSION_BASE_CONNECTIONS = 10
-"""pool_multiplier 1x당 추가할 기본 커넥션 수. 예: 1.5x → 15개, 3.0x → 30개."""
+"""Base connections added per 1x of pool_multiplier. e.g. 1.5x -> 15, 3.0x -> 30."""
 
 
 @runtime_checkable
 class SafetyValveMetricsProvider(Protocol):
-    """Safety Valve 판단에 필요한 메트릭 제공자."""
+    """Provider of the metrics the Safety Valve decision needs."""
 
     def get_cpu_usage(self) -> float:
-        """현재 CPU 사용률 (0.0 ~ 1.0)."""
+        """Current CPU usage (0.0 ~ 1.0)."""
         ...
 
     def get_error_rate(self) -> float:
-        """현재 에러율 (0.0 ~ 1.0)."""
+        """Current error rate (0.0 ~ 1.0)."""
         ...
 
 
 @dataclass
 class AdjustmentRecord:
-    """개별 조정 기록."""
+    """A single adjustment record."""
 
     target: str
     original_value: Any
@@ -58,7 +59,7 @@ class AdjustmentRecord:
 
 @dataclass
 class WarmUpResult:
-    """워밍 실행 결과."""
+    """Warm-up execution result."""
 
     event_id: str
     success: bool
@@ -69,7 +70,7 @@ class WarmUpResult:
 
 @dataclass
 class CoolDownResult:
-    """쿨다운 실행 결과."""
+    """Cool-down execution result."""
 
     event_id: str
     success: bool
@@ -79,7 +80,7 @@ class CoolDownResult:
 
 
 class PreWarmer:
-    """이벤트 전 기존 모듈에 사전 조정 신호를 보내는 오케스트레이터."""
+    """Orchestrator that signals pre-adjustments to existing modules."""
 
     def __init__(
         self,
@@ -110,7 +111,7 @@ class PreWarmer:
         self._current_multipliers: EffectiveMultipliers | None = None
 
     def initialize(self) -> None:
-        """시스템 기동 시 고아 베이스라인 검출 및 복원."""
+        """Detect and restore an orphaned baseline on system startup."""
         if not self._state_backend:
             return
 
@@ -136,7 +137,7 @@ class PreWarmer:
             )
 
     def warm_up(self, event: ScheduledEvent) -> WarmUpResult:
-        """이벤트 시작 N분 전에 호출. 기존 모듈의 설정을 임시로 조정한다."""
+        """Called N minutes before an event starts. Temporarily adjusts settings."""
         start = time.monotonic()
         adjustments: list[AdjustmentRecord] = []
         errors: list[str] = []
@@ -200,8 +201,8 @@ class PreWarmer:
 
     def cool_down(self, event: ScheduledEvent) -> CoolDownResult:
         """
-        이벤트 종료 시 호출.
-        이벤트별 원복이 아닌, 선언적 재계산(Re-evaluation)을 수행한다.
+        Called when an event ends.
+        Performs a declarative re-evaluation rather than a per-event revert.
         """
         start = time.monotonic()
         restored: list[str] = []
@@ -260,7 +261,7 @@ class PreWarmer:
         )
 
     def get_active_adjustments(self) -> dict[str, Any]:
-        """현재 적용 중인 조정 상태."""
+        """Currently applied adjustment state."""
         with self._lock:
             result: dict[str, Any] = {}
             if self._global_baseline is not None:
@@ -279,7 +280,7 @@ class PreWarmer:
     # ─── Safety Valve ─────────────────────────────────────────────────────────
 
     def check_safety_valve(self) -> bool:
-        """하드 리밋 초과 시 True 반환. 스케줄러가 매 주기 호출."""
+        """True when a hard limit is exceeded. Called by the scheduler each cycle."""
         if self._metrics_provider is None:
             return False
         try:
@@ -327,7 +328,7 @@ class PreWarmer:
         logger.warning("capacity_reservation.safety_valve_activated")
 
     def check_safety_valve_recovery(self) -> bool:
-        """min_hold_seconds 경과 + 안전 조건 시 이벤트 모드 복귀."""
+        """Return to event mode once min_hold_seconds has elapsed and it is safe."""
         if self._safety_valve_activated_at is None:
             return False
 
@@ -355,14 +356,14 @@ class PreWarmer:
     def safety_valve_active(self) -> bool:
         return self._safety_valve_activated_at is not None
 
-    # ─── Reconciliation (선언적 재계산) ──────────────────────────────────────
+    # ─── Reconciliation (declarative re-evaluation) ──────────────────────────
 
     def _reconcile_settings(
         self,
         adjustments: list[AdjustmentRecord] | None = None,
         errors: list[str] | None = None,
     ) -> None:
-        """활성 이벤트 기반 설정 재계산 (Reconciliation Loop)."""
+        """Recompute settings from the active events (reconciliation loop)."""
         if adjustments is None:
             adjustments = []
         if errors is None:
@@ -502,7 +503,7 @@ class PreWarmer:
     # ─── Global Baseline ─────────────────────────────────────────────────────
 
     def _capture_current_settings(self) -> dict[str, Any]:
-        """현재 모듈 설정을 단일 스냅샷(Global Baseline)으로 캡처."""
+        """Capture current module settings into one snapshot (Global Baseline)."""
         baseline: dict[str, Any] = {}
 
         if self._rate_controller is not None:
@@ -529,7 +530,7 @@ class PreWarmer:
         return baseline
 
     def _persist_baseline(self) -> None:
-        """Global Baseline을 StateBackend에 저장."""
+        """Save the Global Baseline to the StateBackend."""
         if not self._state_backend or not self._global_baseline:
             return
         try:
@@ -547,7 +548,7 @@ class PreWarmer:
             )
 
     def _calculate_max_event_horizon(self) -> float:
-        """가장 늦게 끝나는 활성 이벤트까지의 초 계산."""
+        """Seconds until the latest-ending active event."""
         import datetime as dt
 
         active = self._calendar.get_active()
@@ -562,7 +563,7 @@ class PreWarmer:
         restored: list[str],
         errors: list[str],
     ) -> None:
-        """Global Baseline에서 전체 설정 복원."""
+        """Restore all settings from the Global Baseline."""
         with self._lock:
             baseline = self._global_baseline
         if baseline is None:
@@ -575,7 +576,7 @@ class PreWarmer:
         restored: list[str] | None = None,
         errors: list[str] | None = None,
     ) -> None:
-        """지정된 baseline 딕셔너리에서 설정 복원."""
+        """Restore settings from the given baseline dict."""
         if restored is None:
             restored = []
         if errors is None:
@@ -649,7 +650,7 @@ class PreWarmer:
     # ─── Rollback ─────────────────────────────────────────────────────────────
 
     def _rollback_all(self, adjustments: list[AdjustmentRecord]) -> None:
-        """이미 적용된 조정을 rollback하고 Global Baseline으로 복원."""
+        """Roll back applied adjustments and restore the Global Baseline."""
         logger.warning(
             "capacity_reservation.rollback_started",
             adjustment_count=len([a for a in adjustments if a.applied]),

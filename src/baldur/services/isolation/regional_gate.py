@@ -1,20 +1,18 @@
 """
 Regional Isolation Gate.
 
-리전 단위 트래픽 차단 게이트.
+Region-level traffic blocking gate.
 
-특정 리전(클러스터 그룹)이 불안정할 때
-해당 리전으로의 트래픽을 전역적으로 차단.
+Blocks traffic to a region globally when that region
+(a cluster group) becomes unstable.
 
-Audit Integration (85_AUDIT_INTEGRATION_OVERVIEW.md Phase 1):
-- 리전 격리: log_region_isolation_audit (action="isolate")
-- 리전 복원: log_region_isolation_audit (action="restore")
+Audit Integration:
+- Region isolation: log_region_isolation_audit (action="isolate")
+- Region restore: log_region_isolation_audit (action="restore")
 
-코드 근거:
-- blast_radius.py#L40: REGION 레벨 이미 존재
-- guard.py#L827-836: 전역 차단 패턴 존재
-
-Reference: docs/baldur/middleware_system/70_MULTI_CLUSTER_ARCHITECTURE.md
+Code basis:
+- blast_radius.py: the REGION level already exists
+- guard.py: the global blocking pattern already exists
 """
 
 from __future__ import annotations
@@ -39,7 +37,7 @@ logger = structlog.get_logger()
 
 @dataclass
 class IsolationInfo(SerializableMixin):
-    """리전 격리 정보."""
+    """Region isolation information."""
 
     region: str
     isolated: bool
@@ -51,31 +49,31 @@ class IsolationInfo(SerializableMixin):
 
 class RegionalIsolationGate:
     """
-    리전 단위 트래픽 차단 게이트.
+    Region-level traffic blocking gate.
 
-    특정 리전(클러스터 그룹)이 불안정할 때
-    해당 리전으로의 트래픽을 전역적으로 차단.
+    Blocks traffic to a region globally when that region
+    (a cluster group) becomes unstable.
 
     Usage:
         gate = get_regional_isolation_gate()
 
-        # 리전 격리
+        # Isolate a region
         gate.isolate_region("tokyo", reason="High error rate", duration_seconds=300)
 
-        # 격리 상태 확인
+        # Check isolation state
         is_isolated, reason = gate.is_region_isolated("tokyo")
         if is_isolated:
             return redirect_to_fallback()
 
-        # 격리 해제
+        # Lift the isolation
         gate.restore_region("tokyo")
     """
 
-    # Redis 키 패턴
+    # Redis key patterns
     GATE_KEY_TEMPLATE = "baldur:global:isolation:{region}"
     ISOLATION_LIST_KEY = "baldur:global:isolation:list"
 
-    # 이벤트 채널
+    # Event channel
     ISOLATION_EVENT_CHANNEL = "baldur:global:isolation:events"
 
     def __init__(
@@ -87,19 +85,19 @@ class RegionalIsolationGate:
         Initialize RegionalIsolationGate.
 
         Args:
-            global_redis: 글로벌 Redis 클라이언트
-            cluster_identity: 클러스터 식별 정보
+            global_redis: Global Redis client
+            cluster_identity: Cluster identity information
         """
         self._redis = global_redis
         self._identity = cluster_identity
         self._initialized = False
 
     def _ensure_initialized(self) -> None:
-        """지연 초기화 수행."""
+        """Perform lazy initialization."""
         if self._initialized:
             return
 
-        # ClusterIdentity 초기화
+        # Initialize ClusterIdentity
         if self._identity is None:
             try:
                 from baldur.core.cluster_identity import get_cluster_identity
@@ -111,7 +109,7 @@ class RegionalIsolationGate:
                     error=e,
                 )
 
-        # Redis 클라이언트 초기화
+        # Initialize the Redis client
         if self._redis is None:
             try:
                 from baldur.core.tiered_redis import (
@@ -136,15 +134,15 @@ class RegionalIsolationGate:
         duration_seconds: int = 300,
     ) -> bool:
         """
-        리전 격리 활성화.
+        Activate region isolation.
 
         Args:
-            region: 격리할 리전
-            reason: 격리 사유
-            duration_seconds: 격리 지속 시간 (초, 기본 5분)
+            region: Region to isolate
+            reason: Isolation reason
+            duration_seconds: Isolation duration in seconds (default 5 minutes)
 
         Returns:
-            격리 성공 여부
+            Whether the isolation succeeded
         """
         self._ensure_initialized()
 
@@ -170,15 +168,15 @@ class RegionalIsolationGate:
                 expires_at=expires_at,
             )
 
-            # 저장
+            # Store
             self._redis.set(
                 key, fast_dumps_str(isolation_info.to_dict()), ex=duration_seconds
             )
 
-            # 목록에 추가
+            # Add to the list
             self._redis.sadd(self.ISOLATION_LIST_KEY, region)
 
-            # 이벤트 발행
+            # Publish the event
             self._publish_event("isolated", isolation_info)
 
             logger.warning(
@@ -189,7 +187,7 @@ class RegionalIsolationGate:
                 operator=operator,
             )
 
-            # === Audit 기록: 리전 격리 (85_AUDIT_INTEGRATION Phase 1) ===
+            # === Audit record: region isolation ===
             log_region_isolation_audit(
                 region=region,
                 action="isolate",
@@ -208,7 +206,7 @@ class RegionalIsolationGate:
                 error=e,
             )
 
-            # === Audit 기록: 리전 격리 실패 ===
+            # === Audit record: region isolation failed ===
             log_region_isolation_audit(
                 region=region,
                 action="isolate",
@@ -223,13 +221,13 @@ class RegionalIsolationGate:
 
     def is_region_isolated(self, region: str) -> tuple[bool, str | None]:
         """
-        리전 격리 상태 확인.
+        Check the isolation state of a region.
 
         Args:
-            region: 확인할 리전
+            region: Region to check
 
         Returns:
-            (격리 여부, 격리 사유) 튜플
+            Tuple of (is isolated, isolation reason)
         """
         self._ensure_initialized()
 
@@ -257,13 +255,13 @@ class RegionalIsolationGate:
 
     def get_isolation_info(self, region: str) -> IsolationInfo | None:
         """
-        리전 격리 상세 정보 조회.
+        Query detailed isolation information for a region.
 
         Args:
-            region: 조회할 리전
+            region: Region to query
 
         Returns:
-            격리 정보 또는 None
+            Isolation information, or None
         """
         self._ensure_initialized()
 
@@ -290,13 +288,13 @@ class RegionalIsolationGate:
 
     def restore_region(self, region: str) -> bool:
         """
-        리전 격리 해제.
+        Lift the isolation of a region.
 
         Args:
-            region: 해제할 리전
+            region: Region to restore
 
         Returns:
-            해제 성공 여부
+            Whether the restore succeeded
         """
         self._ensure_initialized()
 
@@ -308,15 +306,15 @@ class RegionalIsolationGate:
         try:
             key = self.GATE_KEY_TEMPLATE.format(region=region)
 
-            # 기존 정보 조회
+            # Query the existing information
             existing = self.get_isolation_info(region)
 
-            # 삭제
+            # Delete
             deleted = self._redis.delete(key)
             self._redis.srem(self.ISOLATION_LIST_KEY, region)
 
             if deleted:
-                # 이벤트 발행
+                # Publish the event
                 restore_info = IsolationInfo(
                     region=region,
                     isolated=False,
@@ -330,7 +328,7 @@ class RegionalIsolationGate:
                     target_region=region,
                 )
 
-                # === Audit 기록: 리전 복원 (85_AUDIT_INTEGRATION Phase 1) ===
+                # === Audit record: region restore ===
                 log_region_isolation_audit(
                     region=region,
                     action="restore",
@@ -354,7 +352,7 @@ class RegionalIsolationGate:
                 error=e,
             )
 
-            # === Audit 기록: 리전 복원 실패 ===
+            # === Audit record: region restore failed ===
             log_region_isolation_audit(
                 region=region,
                 action="restore",
@@ -368,10 +366,10 @@ class RegionalIsolationGate:
 
     def list_isolated_regions(self) -> dict[str, IsolationInfo]:
         """
-        현재 격리 중인 모든 리전 목록.
+        List every region currently isolated.
 
         Returns:
-            {region: IsolationInfo} 딕셔너리
+            {region: IsolationInfo} dictionary
         """
         self._ensure_initialized()
 
@@ -390,7 +388,7 @@ class RegionalIsolationGate:
                 if info and info.isolated:
                     result[region] = info
                 else:
-                    # 만료된 항목 정리
+                    # Clean up expired entries
                     self._redis.srem(self.ISOLATION_LIST_KEY, region)
 
             return result
@@ -403,7 +401,7 @@ class RegionalIsolationGate:
             return {}
 
     def _publish_event(self, event_type: str, info: IsolationInfo) -> None:
-        """격리 이벤트 발행."""
+        """Publish an isolation event."""
         if not self._redis:
             return
 
@@ -422,10 +420,10 @@ class RegionalIsolationGate:
 
     def is_current_region_isolated(self) -> tuple[bool, str | None]:
         """
-        현재 클러스터가 속한 리전의 격리 상태 확인.
+        Check the isolation state of the region this cluster belongs to.
 
         Returns:
-            (격리 여부, 격리 사유) 튜플
+            Tuple of (is isolated, isolation reason)
         """
         self._ensure_initialized()
 
@@ -444,7 +442,7 @@ _gate_lock = threading.Lock()
 
 
 def get_regional_isolation_gate() -> RegionalIsolationGate:
-    """RegionalIsolationGate 싱글톤 반환."""
+    """Return the RegionalIsolationGate singleton."""
     global _gate
     if _gate is None:
         with _gate_lock:
@@ -454,6 +452,6 @@ def get_regional_isolation_gate() -> RegionalIsolationGate:
 
 
 def reset_regional_isolation_gate() -> None:
-    """테스트용 싱글톤 리셋."""
+    """Reset the singleton (test use)."""
     global _gate
     _gate = None

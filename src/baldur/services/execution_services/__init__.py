@@ -1,8 +1,9 @@
 """
 Execution Services Package
 
-``execution_services.py`` 플랫 파일에서 ``execution_services/`` 패키지로 전환.
-기존 ``from baldur.services.execution_services import X`` 임포트 호환 유지.
+Converted from the flat ``execution_services.py`` file to the
+``execution_services/`` package, keeping existing
+``from baldur.services.execution_services import X`` imports working.
 """
 
 from __future__ import annotations

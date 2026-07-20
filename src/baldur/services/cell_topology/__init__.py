@@ -1,11 +1,11 @@
 """
-Cell Topology — 논리적 트래픽 격벽 관리.
+Cell Topology — logical traffic bulkhead management.
 
-Consistent Hash Ring 기반으로 서비스/테넌트를 Cell에 할당하고,
-Cell별 Bulkhead 격벽을 통해 논리적 트래픽 격리를 구현합니다.
+Assigns services/tenants to cells over a consistent hash ring and enforces
+logical traffic isolation through a per-cell bulkhead.
 
-Cell은 논리적 동시성 풀이며, DB/Redis/캐시 클러스터를 공유합니다.
-물리적 리전 분리는 multiregion/ 모듈이 담당합니다.
+A cell is a logical concurrency pool and shares the DB/Redis/cache cluster.
+Physical region separation is handled by the multiregion module.
 """
 
 from baldur.services.cell_topology.health import (

@@ -1,7 +1,7 @@
 """
 Execution Services - Result Types
 
-Chaos 실험 및 설정 적용 서비스에서 사용하는 결과 데이터 클래스.
+Result dataclasses used by the chaos-experiment and config-apply services.
 """
 
 from __future__ import annotations
@@ -18,36 +18,36 @@ from baldur.core.serializable import SerializableMixin
 
 @dataclass
 class ExperimentExecutionResult(SerializableMixin):
-    """실험 실행 결과."""
+    """Experiment execution result."""
 
     checked: int = 0
-    """체크된 실험 수."""
+    """Number of experiments checked."""
 
     executed: int = 0
-    """실행된 실험 수."""
+    """Number of experiments executed."""
 
     skipped: int = 0
-    """스킵된 실험 수."""
+    """Number of experiments skipped."""
 
     blocked: int = 0
-    """차단된 실험 수."""
+    """Number of experiments blocked."""
 
     errors: list[dict[str, Any]] = field(default_factory=list)
-    """에러 목록."""
+    """Errors."""
 
     experiments: list[dict[str, Any]] = field(default_factory=list)
-    """개별 실험 결과."""
+    """Per-experiment results."""
 
     governance_blocked: bool = False
-    """거버넌스에 의해 전체 차단되었는지."""
+    """Whether governance blocked the whole run."""
 
     governance_block_reason: str = ""
-    """거버넌스 차단 사유."""
+    """Governance block reason."""
 
 
 @dataclass
 class DailyReportResult(SerializableMixin):
-    """일일 보고서 결과."""
+    """Daily report result."""
 
     success: bool
     report_id: str | None = None
@@ -58,7 +58,7 @@ class DailyReportResult(SerializableMixin):
 
 @dataclass
 class ApprovalCleanupResult(SerializableMixin):
-    """승인 정리 결과."""
+    """Approval cleanup result."""
 
     schedule_expired: int = 0
     blast_radius_expired: int = 0
@@ -67,7 +67,7 @@ class ApprovalCleanupResult(SerializableMixin):
 
 @dataclass
 class PendingApprovalCheckResult(SerializableMixin):
-    """대기 중인 승인 체크 결과."""
+    """Pending-approval check result."""
 
     pending_schedules: int = 0
     pending_blast_radius: int = 0

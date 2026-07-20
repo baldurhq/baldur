@@ -1,8 +1,9 @@
 """
 Config Shadow Evaluator Data Models.
 
-Shadow Evaluation 엔티티 및 비교 리포트 모델.
-Canary 서비스와 독립적으로 설정 변경 효과를 사전 시뮬레이션한다.
+Shadow Evaluation entities and comparison-report models.
+Simulates the effect of a config change up front, independently of the canary
+service.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ if TYPE_CHECKING:
 
 
 class EvaluationStatus(str, Enum):
-    """Shadow Evaluation 상태."""
+    """Shadow Evaluation status."""
 
     PENDING = "pending"
     RUNNING = "running"
@@ -27,7 +28,7 @@ class EvaluationStatus(str, Enum):
 
 @dataclass
 class EvaluatorResult:
-    """개별 Evaluator의 비교 결과."""
+    """Comparison result of a single evaluator."""
 
     evaluator_name: str
     passed: bool
@@ -43,7 +44,7 @@ class EvaluatorResult:
 
 @dataclass
 class EvaluationReport:
-    """시뮬레이션 비교 결과 리포트."""
+    """Simulation comparison report."""
 
     events_analyzed: int
     time_range_start: datetime
@@ -59,7 +60,7 @@ class EvaluationReport:
 
 @dataclass
 class ShadowEvaluation:
-    """단일 Shadow Evaluation 실행."""
+    """A single Shadow Evaluation run."""
 
     evaluation_id: str
     rollout_id: str | None
@@ -80,7 +81,7 @@ class ShadowEvaluation:
 
 @dataclass
 class SimulationResult:
-    """CB 시뮬레이션 집계 결과."""
+    """Aggregated CB simulation result."""
 
     open_count: int = 0
     total_open_seconds: float = 0.0
@@ -89,7 +90,7 @@ class SimulationResult:
 
 @dataclass
 class BudgetSimulationResult:
-    """Error Budget 시뮬레이션 집계 결과."""
+    """Aggregated Error Budget simulation result."""
 
     total_drain_percent: float = 0.0
     critical_episodes: int = 0
@@ -98,22 +99,22 @@ class BudgetSimulationResult:
 
 @dataclass
 class EvaluationContext:
-    """Evaluator에 전달되는 통합 평가 컨텍스트.
+    """Unified evaluation context passed to an evaluator.
 
-    Shadow Evaluator는 events를 사용하고,
-    Live Evaluator는 time_window_seconds + labels를 사용한다.
+    The Shadow evaluator uses events; the Live evaluator uses
+    time_window_seconds + labels.
     """
 
     baseline_config: dict[str, Any]
     candidate_config: dict[str, Any]
 
-    # Shadow 용 (과거 이벤트 리플레이)
+    # For Shadow (past-event replay)
     events: list[JournalEntry] = field(default_factory=list)
 
-    # Live 용 (실시간 메트릭 쿼리)
+    # For Live (real-time metric queries)
     time_window_seconds: int = 300
     baseline_labels: dict[str, str] = field(default_factory=dict)
     candidate_labels: dict[str, str] = field(default_factory=dict)
 
-    # 공통
+    # Common
     service_name: str = ""

@@ -1,9 +1,9 @@
 """
-Cell 토폴로지 모델.
+Cell topology models.
 
-Cell 상태(CellState)와 Cell 정보(CellInfo)를 정의합니다.
-Cell은 논리적 트래픽 격벽으로, DB/Redis/캐시를 공유하며
-물리적 데이터 파티셔닝이 아닙니다.
+Defines cell state (CellState) and cell information (CellInfo).
+A cell is a logical traffic bulkhead that shares DB/Redis/cache — it is not
+physical data partitioning.
 """
 
 from __future__ import annotations
@@ -23,22 +23,22 @@ logger = structlog.get_logger()
 
 
 class CellState(str, Enum):
-    """Cell 상태."""
+    """Cell state."""
 
     ACTIVE = "active"
-    """정상 동작 — 트래픽 100% 수신 중."""
+    """Operating normally — receiving 100% of traffic."""
 
     WARMUP = "warmup"
-    """예열 중 — 트래픽 점진적 투입 (percentage 기반)."""
+    """Warming up — traffic ramped in gradually (percentage-based)."""
 
     DRAINING = "draining"
-    """대피 중 — 신규 트래픽 차단, 기존 요청 완료 대기."""
+    """Draining — new traffic blocked, waiting for in-flight requests."""
 
     ISOLATED = "isolated"
-    """격리됨 — 모든 트래픽 차단."""
+    """Isolated — all traffic blocked."""
 
 
-# Cell 상태 우선순위 (Most Restrictive Wins)
+# Cell state priority (Most Restrictive Wins)
 # ISOLATED(3) > DRAINING(2) > WARMUP(1) > ACTIVE(0)
 CELL_STATE_PRIORITY: dict[CellState, int] = {
     CellState.ACTIVE: 0,
@@ -50,9 +50,9 @@ CELL_STATE_PRIORITY: dict[CellState, int] = {
 
 @dataclass
 class CellInfo:
-    """Cell 정보."""
+    """Cell information."""
 
-    # L1↔L2 sync contract (CLAUDE.md pattern)
+    # L1<->L2 sync contract (project pattern)
     _L2_SYNCED_FIELDS: ClassVar[tuple[str, ...]] = (
         "state",
         "health_score",
@@ -67,25 +67,25 @@ class CellInfo:
     """Metadata fields synced to Redis L2 hash (meta: prefix)."""
 
     cell_id: str
-    """Cell 식별자. 예: 'cell-0', 'cell-3'."""
+    """Cell identifier. e.g. 'cell-0', 'cell-3'."""
 
     state: CellState = CellState.ACTIVE
-    """현재 상태."""
+    """Current state."""
 
     assigned_services: set[str] = field(default_factory=set)
-    """할당된 서비스 목록."""
+    """Assigned services."""
 
     health_score: float = 1.0
-    """건강도 (0.0~1.0). CellHealthAggregator가 갱신."""
+    """Health score (0.0~1.0). Updated by CellHealthAggregator."""
 
     warmup_percentage: float = 0.0
-    """WARMUP 상태일 때 트래픽 투입 비율 (0.0~100.0). ACTIVE일 때는 무시."""
+    """Traffic ramp-in ratio while WARMUP (0.0~100.0). Ignored when ACTIVE."""
 
     created_at: datetime = field(default_factory=lambda: utc_now())
-    """생성 시각."""
+    """Creation time."""
 
     metadata: dict[str, Any] = field(default_factory=dict)
-    """추가 메타데이터."""
+    """Additional metadata."""
 
     updated_at: float = field(default_factory=time.time)
     """L2 sync timestamp for LWW comparison (time.time())."""

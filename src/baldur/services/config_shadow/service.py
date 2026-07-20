@@ -1,8 +1,8 @@
 """
 Config Shadow Evaluator Service.
 
-설정 변경 사전 시뮬레이션 엔진. 과거 이벤트를 리플레이하여
-"새 설정이었다면 어떤 결과가 나왔을까"를 시뮬레이션한다.
+Pre-flight simulation engine for config changes. Replays past events to
+simulate "what would have happened under the new config".
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ logger = structlog.get_logger(__name__)
 
 
 class ShadowEvaluatorService:
-    """Config Shadow Evaluation 서비스."""
+    """Config Shadow Evaluation service."""
 
     def __init__(
         self,
@@ -73,14 +73,14 @@ class ShadowEvaluatorService:
         rollout_id: str | None = None,
         region: str = "",
     ) -> ShadowEvaluation:
-        """Shadow Evaluation을 생성하고 비동기 실행을 예약한다.
+        """Create a Shadow Evaluation and schedule it for async execution.
 
-        즉시 PENDING 상태의 ShadowEvaluation을 반환한다.
-        실제 시뮬레이션은 Celery 워커가 수행한다.
-        클라이언트는 get_evaluation()으로 상태를 폴링한다.
+        Returns a PENDING ShadowEvaluation immediately.
+        The actual simulation runs on a Celery worker.
+        Clients poll for status via get_evaluation().
 
         Returns:
-            PENDING 상태의 ShadowEvaluation (evaluation_id 포함)
+            A PENDING ShadowEvaluation (including evaluation_id)
         """
         evaluation = ShadowEvaluation(
             evaluation_id=uuid4().hex[:12],
@@ -114,7 +114,7 @@ class ShadowEvaluatorService:
         return evaluation
 
     def execute_evaluation(self, evaluation_id: str) -> ShadowEvaluation:
-        """인프로세스 시뮬레이션 실행. 로컬 dict에서 evaluation을 조회한다."""
+        """Run the simulation in-process, looking the evaluation up locally."""
         evaluation = self._evaluations.get(evaluation_id)
         if evaluation is None:
             raise ValueError(f"Unknown evaluation_id: {evaluation_id}")
@@ -131,7 +131,7 @@ class ShadowEvaluatorService:
         region: str = "",
         rollout_id: str | None = None,
     ) -> ShadowEvaluation:
-        """Celery 워커에서 호출. 파라미터로부터 evaluation을 생성하고 실행한다."""
+        """Called from a Celery worker. Builds an evaluation from params and runs it."""
         evaluation = ShadowEvaluation(
             evaluation_id=evaluation_id,
             rollout_id=rollout_id,
@@ -148,7 +148,7 @@ class ShadowEvaluatorService:
         return self._run_evaluation(evaluation)
 
     def _run_evaluation(self, evaluation: ShadowEvaluation) -> ShadowEvaluation:
-        """실제 시뮬레이션 로직. submit/execute/execute_from_params에서 호출."""
+        """The actual simulation logic. Called by submit/execute/execute_from_params."""
         evaluation.status = EvaluationStatus.RUNNING
 
         try:
@@ -205,7 +205,7 @@ class ShadowEvaluatorService:
         return evaluation
 
     def get_evaluation(self, evaluation_id: str) -> ShadowEvaluation | None:
-        """evaluation_id로 상태를 조회한다. 클라이언트 폴링용."""
+        """Look up status by evaluation_id. For client polling."""
         return self._evaluations.get(evaluation_id)
 
     def compare_candidates(
@@ -216,7 +216,7 @@ class ShadowEvaluatorService:
         service_name: str = "",
         time_window_hours: int = 336,
     ) -> list[ShadowEvaluation]:
-        """여러 후보 설정을 baseline과 비교한다."""
+        """Compare multiple candidate configs against the baseline."""
         results = []
         for candidate in candidates:
             result = self.submit_evaluation(
@@ -238,10 +238,10 @@ class ShadowEvaluatorService:
         service_name: str = "",
         time_window_hours: int = 336,
     ) -> ShadowEvaluation:
-        """Canary rollout에 연결된 Shadow Evaluation을 실행한다.
+        """Run a Shadow Evaluation linked to a canary rollout.
 
-        submit_evaluation()과 동일하되 rollout_id를 연결하고 결과를 캐시한다.
-        이후 start_rollout()의 _check_shadow_evaluation()에서 조회된다.
+        Same as submit_evaluation() but links a rollout_id and caches the result,
+        which _check_shadow_evaluation() in start_rollout() later reads.
         """
         evaluation = self.submit_evaluation(
             config_type=config_type,
@@ -257,7 +257,7 @@ class ShadowEvaluatorService:
         return evaluation
 
     def get_latest_for_rollout(self, rollout_id: str) -> ShadowEvaluation | None:
-        """rollout에 연결된 최신 Shadow Evaluation을 반환한다."""
+        """Return the latest Shadow Evaluation linked to a rollout."""
         return self._rollout_evaluations.get(rollout_id)
 
     def has_rollout_evaluation_trigger(self) -> bool:

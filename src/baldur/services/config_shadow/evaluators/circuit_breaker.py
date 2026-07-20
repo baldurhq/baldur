@@ -1,8 +1,8 @@
 """
 Circuit Breaker Evaluator.
 
-CB 서비스의 _should_open() 로직을 가상 상태에 대해 재실행하여
-설정 변경 효과를 시뮬레이션한다.
+Re-runs the CB service's _should_open() logic against a virtual state to
+simulate the effect of a config change.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from baldur.services.config_shadow.models import (
 
 
 class CircuitBreakerEvaluator:
-    """CB 설정 변경 효과 시뮬레이터."""
+    """Simulator for the effect of a CB config change."""
 
     @property
     def name(self) -> str:
@@ -81,7 +81,7 @@ class CircuitBreakerEvaluator:
         events: list[JournalEntry],
         config: dict[str, Any],
     ) -> SimulationResult:
-        """이벤트 스트림에 대해 가상 CB 상태 머신을 구동한다."""
+        """Drive a virtual CB state machine over the event stream."""
         failure_threshold = config.get("failure_threshold", 5)
         recovery_timeout = config.get("recovery_timeout", 30)
         minimum_calls = config.get("minimum_calls", 5)
@@ -162,7 +162,7 @@ class CircuitBreakerEvaluator:
         baseline: SimulationResult,
         candidate: SimulationResult,
     ) -> bool:
-        """후보 설정이 기존보다 나쁘지 않은지 판정한다."""
+        """Decide whether the candidate config is no worse than the baseline."""
         if baseline.open_count > 0:
             increase_ratio = candidate.open_count / baseline.open_count
             if increase_ratio > 2.0:
@@ -183,7 +183,7 @@ class CircuitBreakerEvaluator:
         baseline_config: dict[str, Any],
         candidate_config: dict[str, Any],
     ) -> tuple[float, list[str]]:
-        """이벤트 충분성 + 방향성 기반 신뢰도 계산."""
+        """Compute confidence from event sufficiency plus change direction."""
         cb_events = [e for e in events if e.event_type.startswith("circuit_breaker_")]
         warnings: list[str] = []
 

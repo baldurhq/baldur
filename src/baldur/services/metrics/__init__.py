@@ -10,8 +10,6 @@ This package has been refactored from a single 1,247-line file into:
 - updaters.py: update_* functions, context managers, decorators
 
 All exports are maintained for backward compatibility.
-
-DLQ, 재시도, 복구, Circuit Breaker 운영에 대한 포괄적인 관측성을 제공합니다.
 """
 
 from __future__ import annotations

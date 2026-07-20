@@ -1,7 +1,7 @@
 """
 Stress Test Service - Data Models.
 
-스트레스 테스트 결과를 표현하는 데이터 클래스 모음.
+Dataclasses representing stress test results.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from baldur.core.serializable import SerializableMixin
 
 @dataclass
 class StressTestResult(SerializableMixin):
-    """스트레스 테스트 결과 데이터 클래스."""
+    """Stress test result dataclass."""
 
     status: str
     elapsed_seconds: float = 0.0
@@ -45,7 +45,7 @@ class StressTestResult(SerializableMixin):
 
 @dataclass
 class PoolStatusResult(SerializableMixin):
-    """커넥션 풀 상태 결과."""
+    """Connection pool status result."""
 
     status: str
     sqlalchemy_pool: dict = field(default_factory=dict)
@@ -66,7 +66,7 @@ class PoolStatusResult(SerializableMixin):
 
 @dataclass
 class LockContentionResult(SerializableMixin):
-    """락 경합 테스트 결과."""
+    """Lock contention test result."""
 
     status: str
     lock_id: int
@@ -99,7 +99,7 @@ class LockContentionResult(SerializableMixin):
 
 @dataclass
 class BurstFailureResult(SerializableMixin):
-    """Burst 장애 테스트 결과."""
+    """Burst failure test result."""
 
     status: str
     lock_id: int

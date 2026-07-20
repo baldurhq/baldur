@@ -1,5 +1,5 @@
 """
-Blast Radius DNA Models - 장애 영향 범위 관련 데이터 모델
+Blast Radius DNA Models - data models for failure impact scope
 """
 
 from dataclasses import dataclass, field
@@ -11,7 +11,7 @@ from baldur.models.blast_radius import BlastRadiusLevel
 
 @dataclass
 class ServiceDependencyEdge(SerializableMixin):
-    """서비스 의존성 엣지"""
+    """Service dependency edge"""
 
     source_service: str
     target_service: str
@@ -22,13 +22,13 @@ class ServiceDependencyEdge(SerializableMixin):
 
 @dataclass
 class BlastRadiusPolicy(SerializableMixin):
-    """영향 범위 정책"""
+    """Impact scope policy"""
 
     policy_id: str
     service_name: str
     level: BlastRadiusLevel = BlastRadiusLevel.MINIMAL
     affected_services: list[str] = field(default_factory=list)
-    max_affected_percentage: float = 10.0  # 최대 영향 비율 (%)
+    max_affected_percentage: float = 10.0  # Maximum affected ratio (%)
     auto_isolate: bool = True
     isolation_timeout_seconds: int = 300
     notify_threshold: BlastRadiusLevel = BlastRadiusLevel.MODERATE
@@ -38,7 +38,7 @@ class BlastRadiusPolicy(SerializableMixin):
 
 @dataclass
 class ImpactAssessment(SerializableMixin):
-    """영향 평가 결과"""
+    """Impact assessment result"""
 
     assessment_id: str
     service_name: str

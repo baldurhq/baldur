@@ -1,11 +1,11 @@
 """
 Event Bus Package - Component Decoupling System.
 
-이벤트 기반 아키텍처를 통해 컴포넌트 간 느슨한 결합을 제공합니다.
+Provides loose coupling between components via an event-driven architecture.
 
 Modules:
     - bus: In-memory event bus (BaldurEventBus)
-    - redis_bus: Redis Pub/Sub 기반 분산 이벤트 버스 (RedisEventBus)
+    - redis_bus: Redis Pub/Sub-based distributed event bus (RedisEventBus)
 
 Usage:
     from baldur.services.event_bus import (
@@ -15,11 +15,12 @@ Usage:
     )
 
 .. versionadded:: 2.1.0
-    ``event_bus.py`` 플랫 파일에서 ``event_bus/`` 패키지로 전환.
+    Converted from the flat ``event_bus.py`` file to the ``event_bus/`` package.
 """
 
-# bus.py의 모든 속성(private handler 포함)을 패키지 레벨에 노출.
-# 기존 `from baldur.services.event_bus import _on_*` 패턴 호환 유지.
+# Expose every attribute of the bus module (including private handlers) at the
+# package level, keeping the existing
+# `from baldur.services.event_bus import _on_*` pattern working.
 import sys as _sys
 
 from baldur.services.event_bus import bus as _bus_module

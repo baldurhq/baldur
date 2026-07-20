@@ -43,7 +43,7 @@ class DashboardSummary:
     alerts: AlertInfo
     resolution_rate_percent: float = 0.0
     recommendations: list[str] = field(default_factory=list)
-    # Recovery Coordinator 통합 (77_RECOVERY_COORDINATOR.md#10.2.4.13)
+    # Recovery Coordinator integration
     recovery_summary: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -75,7 +75,7 @@ class DashboardSummary:
             },
             "recommendations": self.recommendations,
         }
-        # Recovery 요약 추가 (있을 경우)
+        # Add the recovery summary when present
         if self.recovery_summary:
             result["recovery"] = self.recovery_summary
         return result

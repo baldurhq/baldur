@@ -1,26 +1,23 @@
 """
 Emergency Health Penalty.
 
-Emergency 상태에 따른 Health Score 감점 계산.
+Health Score penalty calculation based on Emergency state.
 
-주요 기능:
-- calculate_penalty(namespace): Emergency 상태에 따른 감점 계산
-- get_health_score_with_emergency(base_score, namespace): 감점 적용된 점수 반환
-- get_penalty_breakdown(namespace): 감점 상세 내역 (대시보드용)
+Main features:
+- calculate_penalty(namespace): calculate the penalty for the Emergency state
+- get_health_score_with_emergency(base_score, namespace): return the adjusted score
+- get_penalty_breakdown(namespace): penalty details (for dashboards)
 
-감점 가중치:
-- Regional STRICT: -20점
-- Global STRICT: -30점
+Penalty weights:
+- Regional STRICT: -20 points
+- Global STRICT: -30 points
 
-PropagationHealthMonitor와 통합하여 Emergency 상태가
-Health Score에 자동 반영됩니다.
+Integrates with PropagationHealthMonitor so that the Emergency state is
+automatically reflected in the Health Score.
 
 Code reference:
-    services/config/propagation_health.py (감점 패턴)
+    services/config/propagation_health.py (penalty pattern)
     services/regional_emergency/tracker.py (NamespacedEmergencyTracker)
-
-Reference:
-    docs/baldur/middleware_system/73_NAMESPACE_AWARE_EMERGENCY.md
 """
 
 from __future__ import annotations
@@ -43,80 +40,80 @@ logger = structlog.get_logger()
 # =============================================================================
 
 REGIONAL_STRICT_PENALTY: float = 20.0
-"""Regional STRICT 모드 감점: default -20점."""
+"""Regional STRICT mode penalty: default -20 points."""
 
 GLOBAL_STRICT_PENALTY: float = 30.0
-"""Global STRICT 모드 감점: default -30점."""
+"""Global STRICT mode penalty: default -30 points."""
 
 LEVEL_1_PENALTY: float = 5.0
-"""LEVEL_1 (경고 수준) 감점: default -5점."""
+"""LEVEL_1 (warning level) penalty: default -5 points."""
 
 LEVEL_2_PENALTY: float = 10.0
-"""LEVEL_2 (주의 수준) 감점: default -10점 (STRICT 미적용 시)."""
+"""LEVEL_2 (caution level) penalty: default -10 points (when STRICT not applied)."""
 
 
 @dataclass
 class PenaltyBreakdown(SerializableMixin):
     """
-    감점 상세 내역.
+    Penalty details.
 
-    대시보드에서 "왜 점수가 떨어졌는지" 표시용.
+    Used by the dashboard to show "why the score dropped".
     """
 
     penalty: float = 0.0
-    """적용된 감점 (-점수)."""
+    """Applied penalty (points deducted)."""
 
     reason: str | None = None
-    """감점 사유 (예: 'Global STRICT active since 2026-01-22T...')."""
+    """Penalty reason (e.g. 'Global STRICT active since 2026-01-22T...')."""
 
     scope: str | None = None
-    """Emergency 적용 범위 ('global' 또는 'regional')."""
+    """Emergency scope ('global' or 'regional')."""
 
     emergency_level: str = "NORMAL"
-    """Emergency 레벨 이름."""
+    """Emergency level name."""
 
     governance_mode: str = "NORMAL"
-    """Governance 모드 ('NORMAL' 또는 'STRICT')."""
+    """Governance mode ('NORMAL' or 'STRICT')."""
 
     activated_by: str | None = None
-    """Emergency 활성화 주체."""
+    """Who activated the Emergency."""
 
     activated_at: str | None = None
-    """Emergency 활성화 시각."""
+    """When the Emergency was activated."""
 
     namespace: str | None = None
-    """대상 네임스페이스."""
+    """Target namespace."""
 
     calculated_at: str = field(default_factory=lambda: utc_now().isoformat())
-    """계산 시각."""
+    """Calculation time."""
 
 
 class EmergencyHealthPenalty:
     """
-    Emergency 상태에 따른 Health Score 감점 계산기.
+    Health Score penalty calculator based on Emergency state.
 
-    Emergency 상태가 활성화되면 Health Score에 감점을 적용합니다.
-    PropagationHealthMonitor와 통합하여 사용됩니다.
+    Applies a penalty to the Health Score while an Emergency is active.
+    Used in combination with PropagationHealthMonitor.
 
-    감점 가중치:
-    - LEVEL_1: -5점 (경고 수준)
-    - LEVEL_2: -10점 (STRICT 미적용 시)
-    - Regional STRICT: -20점
-    - Global STRICT: -30점
+    Penalty weights:
+    - LEVEL_1: -5 points (warning level)
+    - LEVEL_2: -10 points (when STRICT not applied)
+    - Regional STRICT: -20 points
+    - Global STRICT: -30 points
 
     Usage:
         penalty = EmergencyHealthPenalty()
 
-        # 감점 계산
+        # Calculate the penalty
         points = penalty.calculate_penalty("seoul")
 
-        # 감점 적용
+        # Apply the penalty
         adjusted_score = penalty.get_health_score_with_emergency(
             base_score=95.0,
             namespace="seoul"
         )
 
-        # 감점 상세 (대시보드용)
+        # Penalty details (for dashboards)
         breakdown = penalty.get_penalty_breakdown("seoul")
     """
 
@@ -127,17 +124,17 @@ class EmergencyHealthPenalty:
         global_penalty: float | None = None,
     ):
         """
-        EmergencyHealthPenalty 초기화.
+        Initialize EmergencyHealthPenalty.
 
         Args:
-            tracker: NamespacedEmergencyTracker 인스턴스 (None이면 자동 획득)
-            regional_penalty: Regional STRICT 감점 (None이면 settings에서 로드)
-            global_penalty: Global STRICT 감점 (None이면 settings에서 로드)
+            tracker: NamespacedEmergencyTracker instance (auto-resolved if None)
+            regional_penalty: Regional STRICT penalty (loaded from settings if None)
+            global_penalty: Global STRICT penalty (loaded from settings if None)
         """
         self._tracker = tracker
         self._lock = threading.Lock()
 
-        # Settings에서 penalty 값 로드 (인스턴스 생성 시점)
+        # Load penalty values from settings (at instance creation time)
         try:
             from baldur.settings.emergency_mode import get_emergency_mode_settings
 
@@ -168,12 +165,12 @@ class EmergencyHealthPenalty:
             self._level_2_penalty = LEVEL_2_PENALTY
             self._cache_ttl_seconds = 5.0
 
-        # 캐시 (빈번한 호출 최적화)
+        # Cache (optimization for frequent calls)
         self._cached_penalty: dict[str, float] = {}
         self._cache_timestamp: dict[str, float] = {}
 
     def _get_tracker(self) -> Any:
-        """NamespacedEmergencyTracker 인스턴스 획득."""
+        """Obtain the NamespacedEmergencyTracker instance."""
         if self._tracker is None:
             from baldur.services.regional_emergency.tracker import (
                 get_namespaced_emergency_tracker,
@@ -184,20 +181,20 @@ class EmergencyHealthPenalty:
 
     def calculate_penalty(self, namespace: str | None = None) -> float:
         """
-        현재 Emergency 상태에 따른 감점 계산.
+        Calculate the penalty for the current Emergency state.
 
-        감점 기준:
-        - Global STRICT: -30점
-        - Regional STRICT: -20점
-        - LEVEL_2 (non-STRICT): -10점
-        - LEVEL_1: -5점
-        - NORMAL: 0점
+        Penalty rules:
+        - Global STRICT: -30 points
+        - Regional STRICT: -20 points
+        - LEVEL_2 (non-STRICT): -10 points
+        - LEVEL_1: -5 points
+        - NORMAL: 0 points
 
         Args:
-            namespace: 대상 네임스페이스 (None이면 현재 인스턴스)
+            namespace: target namespace (current instance if None)
 
         Returns:
-            감점 점수 (0 이상, 양수)
+            Penalty points (non-negative)
         """
         import time
 
@@ -205,18 +202,18 @@ class EmergencyHealthPenalty:
         cache_key = f"penalty:{ns}"
         now = time.time()
 
-        # 캐시 확인
+        # Check the cache
         with self._lock:
             if cache_key in self._cached_penalty:
                 cache_time = self._cache_timestamp.get(cache_key, 0)
                 if now - cache_time < self._cache_ttl_seconds:
                     return self._cached_penalty[cache_key]
 
-        # Emergency 상태 조회
+        # Look up the Emergency state
         tracker = self._get_tracker()
         state = tracker.get_effective_state(namespace=namespace)
 
-        # 감점 계산
+        # Calculate the penalty
         penalty = 0.0
 
         if not state.is_active:
@@ -227,15 +224,15 @@ class EmergencyHealthPenalty:
             else:
                 penalty = self._regional_penalty
         else:
-            # STRICT는 아니지만 Emergency 활성화 상태
-            # LEVEL에 따른 경감 감점
+            # Not STRICT, but the Emergency is active:
+            # apply the reduced penalty for the level
             level_severity = getattr(state.emergency_level, "severity", 0)
             if level_severity >= 2:
                 penalty = self._level_2_penalty
             elif level_severity >= 1:
                 penalty = self._level_1_penalty
 
-        # 캐시 저장
+        # Store in the cache
         with self._lock:
             self._cached_penalty[cache_key] = penalty
             self._cache_timestamp[cache_key] = now
@@ -255,19 +252,19 @@ class EmergencyHealthPenalty:
         namespace: str | None = None,
     ) -> float:
         """
-        Emergency 감점이 반영된 Health Score 반환.
+        Return the Health Score with the Emergency penalty applied.
 
         Args:
-            base_score: 기본 Health Score (0-100)
-            namespace: 대상 네임스페이스
+            base_score: base Health Score (0-100)
+            namespace: target namespace
 
         Returns:
-            감점 적용된 Health Score (0-100, 클램프됨)
+            Health Score with the penalty applied (0-100, clamped)
         """
         penalty = self.calculate_penalty(namespace=namespace)
         adjusted_score = base_score - penalty
 
-        # 클램프: 0-100 범위
+        # Clamp to the 0-100 range
         result = max(0.0, min(100.0, adjusted_score))
 
         if penalty > 0:
@@ -285,15 +282,15 @@ class EmergencyHealthPenalty:
         namespace: str | None = None,
     ) -> PenaltyBreakdown:
         """
-        감점 상세 내역 반환.
+        Return the penalty details.
 
-        대시보드에서 "왜 점수가 떨어졌는지" 표시용.
+        Used by the dashboard to show "why the score dropped".
 
         Args:
-            namespace: 대상 네임스페이스
+            namespace: target namespace
 
         Returns:
-            PenaltyBreakdown 인스턴스
+            PenaltyBreakdown instance
         """
         tracker = self._get_tracker()
         state = tracker.get_effective_state(namespace=namespace)
@@ -309,7 +306,7 @@ class EmergencyHealthPenalty:
                 namespace=namespace,
             )
 
-        # 상세 사유 생성
+        # Build the detailed reason
         scope_str = (
             state.scope.value if hasattr(state.scope, "value") else str(state.scope)
         )
@@ -335,12 +332,12 @@ class EmergencyHealthPenalty:
 
     def invalidate_cache(self, namespace: str | None = None) -> None:
         """
-        캐시 무효화.
+        Invalidate the cache.
 
-        Emergency 상태 변경 시 호출하여 캐시 갱신.
+        Call on an Emergency state change to refresh the cache.
 
         Args:
-            namespace: 특정 네임스페이스만 무효화 (None이면 전체)
+            namespace: invalidate only this namespace (all if None)
         """
         with self._lock:
             if namespace:
@@ -366,7 +363,7 @@ _health_penalty_lock = threading.Lock()
 
 
 def get_emergency_health_penalty() -> EmergencyHealthPenalty:
-    """EmergencyHealthPenalty 싱글톤 반환."""
+    """Return the EmergencyHealthPenalty singleton."""
     global _health_penalty
     if _health_penalty is None:
         with _health_penalty_lock:
@@ -377,9 +374,9 @@ def get_emergency_health_penalty() -> EmergencyHealthPenalty:
 
 def reset_emergency_health_penalty() -> None:
     """
-    싱글톤 초기화 (테스트용).
+    Reset the singleton (for tests).
 
-    테스트 간 격리를 위해 싱글톤 인스턴스를 제거합니다.
+    Drops the singleton instance for isolation between tests.
     """
     global _health_penalty
     with _health_penalty_lock:

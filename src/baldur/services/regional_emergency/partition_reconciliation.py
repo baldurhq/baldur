@@ -1,26 +1,23 @@
 """
 Partition Reconciliation Service.
 
-네트워크 고립(Partition) 복구 시 상태 조정 서비스.
+State reconciliation service for recovery from network partitions.
 
-주요 기능:
-- check_partition_status(): 현재 리전의 네트워크 고립 상태 확인
-- reconcile_after_recovery(): 네트워크 복구 후 상태 조정
-- start_heartbeat_loop(): 백그라운드 heartbeat 모니터링 시작
-- stop_heartbeat_loop(): heartbeat 모니터링 중지
+Key features:
+- check_partition_status(): check the current region's partition state
+- reconcile_after_recovery(): reconcile state after network recovery
+- start_heartbeat_loop(): start background heartbeat monitoring
+- stop_heartbeat_loop(): stop heartbeat monitoring
 
-설계 원칙:
-- 고립된 리전은 자체 상태 유지 (Safety-First)
-- TTL 기반 자동 만료로 영구 stale 상태 방지
-- 복구 시 강제 동기화 없이 운영자 알림
+Design principles:
+- A partitioned region keeps its own state (Safety-First)
+- TTL-based auto expiry prevents permanently stale state
+- On recovery, notify the operator instead of forcing a sync
 
 Code reference:
-    error_budget/reconciliation/service.py (ReconciliationService 패턴)
-    isolation/regional_gate.py#L133-141 (TTL 기반 만료)
+    error_budget/reconciliation/service.py (ReconciliationService pattern)
+    isolation/regional_gate.py (TTL-based expiry)
     core/tiered_redis.py (TieredRedisProvider)
-
-Reference:
-    docs/baldur/middleware_system/73_NAMESPACE_AWARE_EMERGENCY.md
 """
 
 from __future__ import annotations
@@ -47,114 +44,115 @@ logger = structlog.get_logger()
 # =============================================================================
 
 HEARTBEAT_INTERVAL_SECONDS = 10
-"""Heartbeat 전송 간격 (초)."""
+"""Heartbeat send interval (seconds)."""
 
 PARTITION_DETECTION_THRESHOLD_SECONDS = 30
-"""네트워크 고립 감지 임계값 (초). 이 시간 동안 heartbeat 실패 시 고립으로 판단."""
+"""Partition detection threshold (seconds). Failing heartbeats for this long
+means the region is considered partitioned."""
 
 MAX_RECONCILIATION_ACTIONS = 100
-"""조정 액션 히스토리 최대 크기."""
+"""Maximum size of the reconciliation action history."""
 
 
 @dataclass
 class PartitionStatus(SerializableMixin):
     """
-    네트워크 고립 상태.
+    Network partition state.
 
-    현재 리전의 Global Redis 연결 상태를 나타냅니다.
+    Represents the current region's connectivity to the Global Redis.
     """
 
     is_partitioned: bool = False
-    """고립 여부."""
+    """Whether the region is partitioned."""
 
     last_heartbeat_at: str | None = None
-    """마지막 heartbeat 성공 시각 (ISO format)."""
+    """Timestamp of the last successful heartbeat (ISO format)."""
 
     partition_duration_seconds: float = 0.0
-    """고립 지속 시간 (초)."""
+    """Partition duration (seconds)."""
 
     error_message: str | None = None
-    """연결 실패 시 에러 메시지."""
+    """Error message on connection failure."""
 
     global_redis_url: str | None = None
-    """Global Redis URL (마스킹됨)."""
+    """Global Redis URL (masked)."""
 
     checked_at: str = field(default_factory=lambda: utc_now().isoformat())
-    """확인 시각."""
+    """Check timestamp."""
 
 
 @dataclass
 class ReconciliationAction(SerializableMixin):
     """
-    조정 액션.
+    Reconciliation action.
 
-    네트워크 복구 후 수행된 조정 액션.
+    An action performed after network recovery.
     """
 
     action_type: str = ""
-    """액션 유형 (NOTIFICATION, STATE_SYNC, MANUAL_REVIEW)."""
+    """Action type (NOTIFICATION, STATE_SYNC, MANUAL_REVIEW)."""
 
     message: str = ""
-    """액션 상세 메시지."""
+    """Action detail message."""
 
     namespace: str = ""
-    """대상 네임스페이스."""
+    """Target namespace."""
 
     executed_at: str = field(default_factory=lambda: utc_now().isoformat())
-    """실행 시각."""
+    """Execution timestamp."""
 
     success: bool = True
-    """실행 성공 여부."""
+    """Whether the execution succeeded."""
 
 
 @dataclass
 class ReconciliationResult(SerializableMixin):
     """
-    조정 결과.
+    Reconciliation result.
 
-    reconcile_after_recovery() 호출 결과.
+    Result of a reconcile_after_recovery() call.
     """
 
     reconciled: bool = False
-    """조정 수행 여부."""
+    """Whether reconciliation was performed."""
 
     reason: str | None = None
-    """조정 실패 또는 스킵 사유."""
+    """Reason reconciliation failed or was skipped."""
 
     actions: list[ReconciliationAction] = field(default_factory=list)
-    """수행된 액션 목록."""
+    """Actions performed."""
 
     global_state_mode: str = "UNKNOWN"
-    """Global Emergency 모드."""
+    """Global Emergency mode."""
 
     regional_state_mode: str = "UNKNOWN"
-    """Regional Emergency 모드."""
+    """Regional Emergency mode."""
 
     executed_at: str = field(default_factory=lambda: utc_now().isoformat())
-    """실행 시각."""
+    """Execution timestamp."""
 
 
 class PartitionReconciliationService:
     """
-    네트워크 고립 복구 시 상태 조정 서비스.
+    State reconciliation service for recovery from network partitions.
 
-    Global Redis와의 연결 상태를 모니터링하고,
-    네트워크 복구 후 상태 불일치를 조정합니다.
+    Monitors connectivity to the Global Redis and reconciles state
+    mismatches after the network recovers.
 
-    설계 원칙:
-    - Safety-First: 고립된 리전은 자체 보호 모드 유지
-    - 강제 동기화 없음: 복구 시 운영자 알림으로 대체
-    - TTL 기반 만료: 영구 stale 상태 방지
+    Design principles:
+    - Safety-First: a partitioned region keeps its own protection mode
+    - No forced sync: on recovery, notify the operator instead
+    - TTL-based expiry: prevents permanently stale state
 
     Usage:
         service = PartitionReconciliationService()
 
-        # 고립 상태 확인
+        # Check partition state
         status = service.check_partition_status()
         if status.is_partitioned:
             print(f"Partitioned for {status.partition_duration_seconds}s")
 
-        # 복구 후 조정
+        # Reconcile after recovery
         result = service.reconcile_after_recovery()
         for action in result.actions:
             print(f"Action: {action.action_type} - {action.message}")
@@ -168,13 +166,13 @@ class PartitionReconciliationService:
         partition_threshold: int = PARTITION_DETECTION_THRESHOLD_SECONDS,
     ):
         """
-        PartitionReconciliationService 초기화.
+        Initialize PartitionReconciliationService.
 
         Args:
-            tracker: NamespacedEmergencyTracker 인스턴스
-            tiered_redis: TieredRedisProvider 인스턴스
-            heartbeat_interval: Heartbeat 간격 (초)
-            partition_threshold: 고립 감지 임계값 (초)
+            tracker: NamespacedEmergencyTracker instance
+            tiered_redis: TieredRedisProvider instance
+            heartbeat_interval: heartbeat interval (seconds)
+            partition_threshold: partition detection threshold (seconds)
         """
         self._tracker = tracker
         self._tiered_redis = tiered_redis
@@ -182,15 +180,15 @@ class PartitionReconciliationService:
         self._partition_threshold = partition_threshold
         self._lock = threading.Lock()
 
-        # 상태
+        # State
         self._last_global_heartbeat: datetime | None = None
         self._is_partitioned = False
         self._partition_start: datetime | None = None
 
-        # 액션 히스토리
+        # Action history
         self._action_history: list[ReconciliationAction] = []
 
-        # Heartbeat 스레드
+        # Heartbeat thread
         self._heartbeat_thread: threading.Thread | None = None
         self._heartbeat_running = False
         self._handle: DaemonWorkerHandle | None = None  # impl 489 D9
@@ -200,7 +198,7 @@ class PartitionReconciliationService:
     # =========================================================================
 
     def _get_tracker(self) -> Any:
-        """NamespacedEmergencyTracker 인스턴스 획득."""
+        """Obtain the NamespacedEmergencyTracker instance."""
         if self._tracker is None:
             from baldur.services.regional_emergency.tracker import (
                 get_namespaced_emergency_tracker,
@@ -210,7 +208,7 @@ class PartitionReconciliationService:
         return self._tracker
 
     def _get_tiered_redis(self) -> Any:
-        """TieredRedisProvider 인스턴스 획득."""
+        """Obtain the TieredRedisProvider instance."""
         if self._tiered_redis is None:
             try:
                 from baldur.core.tiered_redis import TieredRedisProvider
@@ -221,7 +219,7 @@ class PartitionReconciliationService:
         return self._tiered_redis
 
     def _get_current_namespace(self) -> str:
-        """현재 리전의 네임스페이스 획득."""
+        """Obtain the current region's namespace."""
         try:
             from baldur.core.cluster_identity import get_cluster_identity
 
@@ -236,12 +234,12 @@ class PartitionReconciliationService:
 
     def check_partition_status(self) -> PartitionStatus:
         """
-        현재 리전의 네트워크 고립 상태 확인.
+        Check the current region's network partition state.
 
-        Global Redis에 ping을 시도하여 연결 상태를 확인합니다.
+        Pings the Global Redis to determine connectivity.
 
         Returns:
-            PartitionStatus 인스턴스
+            PartitionStatus instance
         """
         now = utc_now()
 
@@ -264,7 +262,7 @@ class PartitionReconciliationService:
             raise ConnectionError("Ping returned False")
 
         except Exception as e:
-            # 연결 실패
+            # Connection failure
             with self._lock:
                 if self._last_global_heartbeat:
                     duration = (now - self._last_global_heartbeat).total_seconds()
@@ -299,15 +297,15 @@ class PartitionReconciliationService:
         tiered_redis = self._get_tiered_redis()
 
         if tiered_redis is None:
-            # TieredRedisProvider 없으면 단순 Redis ping 시도
+            # Without a TieredRedisProvider, fall back to a plain Redis ping
             try:
                 from baldur.core.state_backend import get_state_backend
 
                 backend = get_state_backend()
-                # StateBackend에 ping 메서드가 있으면 사용
+                # Use the StateBackend ping method if it exists
                 if hasattr(backend, "ping"):
                     return backend.ping()
-                # 없으면 간단한 get 시도
+                # Otherwise try a simple get
                 backend.get("__ping_test__")
                 return True
             except Exception as e:
@@ -330,7 +328,7 @@ class PartitionReconciliationService:
             return False
 
     def _get_masked_redis_url(self) -> str:
-        """Redis URL 마스킹 (보안)."""
+        """Mask the Redis URL (security)."""
         import os
 
         url = os.environ.get("REDIS_GLOBAL_URL") or os.environ.get("REDIS_URL", "")
@@ -347,15 +345,15 @@ class PartitionReconciliationService:
 
     def reconcile_after_recovery(self) -> ReconciliationResult:
         """
-        네트워크 복구 후 상태 조정.
+        Reconcile state after network recovery.
 
-        Global과 Regional 상태를 비교하고 필요시 운영자에게 알립니다.
-        강제 동기화는 수행하지 않습니다 (Safety-First).
+        Compares Global and Regional state and notifies the operator when
+        needed. No forced synchronization is performed (Safety-First).
 
         Returns:
-            ReconciliationResult 인스턴스
+            ReconciliationResult instance
         """
-        # 아직 고립 상태면 스킵
+        # Skip while still partitioned
         if self._is_partitioned:
             return ReconciliationResult(
                 reconciled=False,
@@ -367,16 +365,16 @@ class PartitionReconciliationService:
         actions: list[ReconciliationAction] = []
 
         try:
-            # 상태 조회
+            # Read state
             global_state = tracker.get_state(namespace="global")
             regional_state = tracker.get_state(namespace=current_ns)
 
             global_mode = global_state.governance_mode
             regional_mode = regional_state.governance_mode
 
-            # 상태 불일치 확인 및 액션 생성
+            # Detect state mismatch and build actions
             if not global_state.is_active and regional_state.is_active:
-                # Global은 NORMAL인데 Regional은 아직 STRICT
+                # Global is NORMAL but Regional is still STRICT
                 action = ReconciliationAction(
                     action_type="MANUAL_REVIEW",
                     message=(
@@ -390,7 +388,7 @@ class PartitionReconciliationService:
                 self._log_action(action)
 
             elif global_state.is_active and not regional_state.is_active:
-                # Global은 STRICT인데 Regional은 NORMAL (복구 중 누락?)
+                # Global is STRICT but Regional is NORMAL (missed during recovery?)
                 action = ReconciliationAction(
                     action_type="NOTIFICATION",
                     message=(
@@ -404,7 +402,7 @@ class PartitionReconciliationService:
                 self._log_action(action)
 
             elif global_state.is_active and regional_state.is_active:
-                # 둘 다 활성화 - 레벨 비교
+                # Both active - compare levels
                 global_level = getattr(global_state.emergency_level, "value", 0)
                 regional_level = getattr(regional_state.emergency_level, "value", 0)
 
@@ -421,7 +419,7 @@ class PartitionReconciliationService:
                     actions.append(action)
                     self._log_action(action)
 
-            # 정상 복구 로그
+            # Clean recovery log
             if not actions:
                 logger.info(
                     "partition_reconciliation.recovery_complete_no_actions",
@@ -448,10 +446,10 @@ class PartitionReconciliationService:
             )
 
     def _log_action(self, action: ReconciliationAction) -> None:
-        """액션 히스토리에 기록."""
+        """Record an action in the history."""
         with self._lock:
             self._action_history.append(action)
-            # 히스토리 크기 제한
+            # Cap the history size
             if len(self._action_history) > MAX_RECONCILIATION_ACTIONS:
                 self._action_history = self._action_history[
                     -MAX_RECONCILIATION_ACTIONS:
@@ -469,7 +467,7 @@ class PartitionReconciliationService:
 
     def start_heartbeat_loop(self) -> None:
         """
-        백그라운드 heartbeat 모니터링 시작.
+        Start background heartbeat monitoring.
         """
         from baldur.meta.daemon_worker import DaemonWorkerHandle
         from baldur.metrics.recorders.daemon_worker import register_daemon_worker
@@ -516,7 +514,7 @@ class PartitionReconciliationService:
             raise
 
     def stop_heartbeat_loop(self) -> None:
-        """Heartbeat 모니터링 중지."""
+        """Stop heartbeat monitoring."""
         from baldur.metrics.recorders.daemon_worker import unregister_daemon_worker
 
         if self._handle is not None:
@@ -543,7 +541,7 @@ class PartitionReconciliationService:
         logger.info("partition_reconciliation.heartbeat_loop_stopped")
 
     def _heartbeat_loop(self) -> None:
-        """Heartbeat 루프 (백그라운드 스레드)."""
+        """Heartbeat loop (background thread)."""
         was_partitioned = False
 
         while self._heartbeat_running:
@@ -551,7 +549,7 @@ class PartitionReconciliationService:
             try:
                 status = self.check_partition_status()
 
-                # 고립 상태 변화 감지
+                # Detect partition state transitions
                 if status.is_partitioned and not was_partitioned:
                     logger.warning(
                         "partition_reconciliation.partition_detected",
@@ -583,13 +581,13 @@ class PartitionReconciliationService:
 
     def get_recent_actions(self, limit: int = 10) -> list[dict[str, Any]]:
         """
-        최근 조정 액션 조회.
+        Read recent reconciliation actions.
 
         Args:
-            limit: 반환할 최대 개수
+            limit: maximum number of entries to return
 
         Returns:
-            액션 목록 (최신순)
+            Action list (newest first)
         """
         with self._lock:
             actions = self._action_history[-limit:]
@@ -597,18 +595,18 @@ class PartitionReconciliationService:
 
     def is_partitioned(self) -> bool:
         """
-        현재 고립 상태 여부.
+        Whether the region is currently partitioned.
 
-        check_partition_status() 호출 없이 마지막 상태 반환.
+        Returns the last known state without calling check_partition_status().
         """
         return self._is_partitioned
 
     def get_partition_duration(self) -> float | None:
         """
-        현재 고립 지속 시간 (초).
+        Current partition duration (seconds).
 
         Returns:
-            고립 지속 시간 (고립 중이 아니면 None)
+            Partition duration (None if not partitioned)
         """
         if not self._is_partitioned or self._partition_start is None:
             return None
@@ -626,7 +624,7 @@ _service_lock = threading.Lock()
 
 
 def get_partition_reconciliation_service() -> PartitionReconciliationService:
-    """PartitionReconciliationService 싱글톤 반환."""
+    """Return the PartitionReconciliationService singleton."""
     global _reconciliation_service
     if _reconciliation_service is None:
         with _service_lock:
@@ -637,9 +635,9 @@ def get_partition_reconciliation_service() -> PartitionReconciliationService:
 
 def reset_partition_reconciliation_service() -> None:
     """
-    싱글톤 초기화 (테스트용).
+    Reset the singleton (for tests).
 
-    테스트 간 격리를 위해 싱글톤 인스턴스를 제거합니다.
+    Removes the singleton instance to isolate tests from each other.
     """
     global _reconciliation_service
     with _service_lock:

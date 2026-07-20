@@ -1,8 +1,8 @@
 """
 Event Journal Subscriber.
 
-EventBus에서 Baldur 결정 이벤트를 수신하여 저널에 기록한다.
-에러 격리 원칙: 저널링 실패가 Baldur 메인 로직을 중단시키지 않는다.
+Receives Baldur decision events from the EventBus and records them in the journal.
+Error-isolation principle: a journaling failure never halts Baldur's main logic.
 """
 
 from __future__ import annotations
@@ -40,11 +40,11 @@ JOURNALED_EVENT_TYPES: frozenset[EventType] = frozenset(
 
 class _JournalCircuitBreaker:
     """
-    저널링 전용 경량 CB. 외부 의존 없음.
+    Lightweight CB dedicated to journaling. No external dependencies.
 
-    CircuitBreakerService를 직접 사용하면 순환 의존이 발생한다:
+    Using CircuitBreakerService directly would create a dependency cycle:
     CB -> EventBus -> JournalSubscriber -> CB.
-    자체 완결형 경량 CB로 Redis 장애 시 빠른 fail-fast를 구현한다.
+    A self-contained lightweight CB gives fast fail-fast on Redis outages.
     """
 
     def __init__(self, failure_threshold: int = 5, recovery_seconds: float = 30):
@@ -68,7 +68,7 @@ class _JournalCircuitBreaker:
 
 
 class JournalSubscriber:
-    """EventBus에서 이벤트를 수신하여 저널에 기록한다."""
+    """Receives events from the EventBus and records them in the journal."""
 
     def __init__(self, repository: EventJournalRepository):
         self._repository = repository
@@ -77,7 +77,7 @@ class JournalSubscriber:
         self._bus: EventBusProtocol | None = None
 
     def register(self, bus: EventBusProtocol) -> None:
-        """대상 이벤트 타입에 대해 구독을 등록한다."""
+        """Subscribe to the target event types."""
         if self._subscribed:
             return
 
@@ -117,11 +117,11 @@ class JournalSubscriber:
 
     def _handle_event(self, event: BaldurEvent) -> None:
         """
-        이벤트를 JournalEntry로 변환하여 저장한다.
+        Convert the event into a JournalEntry and store it.
 
-        에러 격리 원칙:
-        - 저널링 실패가 Baldur 메인 로직을 중단시켜서는 안 된다.
-        - Redis 장애 지속 시 내부 CB가 열려 빠르게 fail-fast 처리.
+        Error-isolation principle:
+        - A journaling failure must never halt Baldur's main logic.
+        - On a sustained Redis outage the internal CB opens for fast fail-fast.
         """
         if self._cb.is_open():
             return
@@ -145,7 +145,7 @@ class JournalSubscriber:
             )
 
     def _build_entry(self, event: BaldurEvent) -> JournalEntry:
-        """이벤트를 JournalEntry로 변환한다. 방어적 직렬화 적용."""
+        """Convert the event into a JournalEntry, using defensive serialization."""
         safe_context = json.loads(json.dumps(event.data, default=str))
         return JournalEntry(
             sequence=0,
