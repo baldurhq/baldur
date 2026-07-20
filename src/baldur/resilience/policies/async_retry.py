@@ -129,7 +129,7 @@ class AsyncRetryPolicy:
         """Build an AsyncRetryPolicy from a RetryPolicyConfig.
 
         Mirrors the synchronous ``RetryPolicy.__init__`` mapping so the async
-        and sync retry stages behave identically off the same config:
+        and sync retry stages behave identically off the fields listed below:
 
         - ``max_retries = max(cfg.max_attempts - 1, 0)`` — sync ``max_attempts``
           counts *total* attempts; async ``max_retries`` counts *additional*
@@ -140,6 +140,13 @@ class AsyncRetryPolicy:
           a composed DLQ sink fires on async exhaustion.
         - ``retry_on_result`` / ``max_elapsed`` carry the result-predicate and
           cooperative wall-clock budget so async matches sync off the same config.
+
+        Not carried, so the parity above does not extend to them:
+        ``rate_limit_aware`` and ``rate_limit_key`` are deliberately **not**
+        mapped. Outbound 429 coordination is implemented on the synchronous
+        retry stage only, so both fields are inert on every async path that
+        reads this config. Async callers who need 429 coordination use the
+        tenacity bridge with an explicit ``rate_limit_key``.
         """
         return cls(
             max_retries=max(cfg.max_attempts - 1, 0),

@@ -10,6 +10,7 @@ shapes delays when a downstream returns 429. Distinct from both:
   quota dials (Control-API / middleware / decorator rate limiting).
 
 Environment Variables:
+    BALDUR_RATE_LIMIT_BACKOFF_COORDINATION_ENABLED=true
     BALDUR_RATE_LIMIT_BACKOFF_BASE_DELAY=1.0
     BALDUR_RATE_LIMIT_BACKOFF_MAX_DELAY=60.0
     BALDUR_RATE_LIMIT_BACKOFF_JITTER_PERCENT=30.0
@@ -49,6 +50,16 @@ class RateLimitBackoffSettings(BaseSettings):
 
     model_config = make_settings_config("BALDUR_RATE_LIMIT_BACKOFF_")
 
+    coordination_enabled: bool = Field(
+        default=True,
+        description=(
+            "Deployment kill switch for the default outbound 429 coordination "
+            "on Baldur's synchronous retry stage. Governs the *default* "
+            "coordinator resolution only: an explicitly injected coordinator, "
+            "the tenacity bridge's rate_limit_key, and the rate_limit_aware "
+            "decorator are code-level opt-ins this switch does not touch."
+        ),
+    )
     base_delay: ShortDuration = Field(
         default=STANDARD_BASE_DELAY,
         description="Base delay in seconds",
