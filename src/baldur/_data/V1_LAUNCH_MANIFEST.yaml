@@ -94,6 +94,7 @@ entries:
   - {module: "pipeline.py", class: "PipelineSettings", field: "adaptive_enabled", default: false, tier: "Core", env_var: "BALDUR_PIPELINE_ADAPTIVE_ENABLED"}
   - {module: "protect.py", class: "ProtectSettings", field: "enabled", default: true, tier: "Core", env_var: "BALDUR_PROTECT_ENABLED"}
   - {module: "rate_limit.py", class: "RateLimitSettings", field: "decorator_enabled", default: true, tier: "Core", env_var: "BALDUR_RATE_LIMIT_DECORATOR_ENABLED"}
+  - {module: "rate_limit_backoff.py", class: "RateLimitBackoffSettings", field: "coordination_enabled", default: true, tier: "Core", env_var: "BALDUR_RATE_LIMIT_BACKOFF_COORDINATION_ENABLED"}
   - {module: "rate_limit_throttle_integration.py", class: "RateLimitThrottleIntegrationSettings", field: "enabled", default: true, tier: "Core", env_var: "BALDUR_RATE_LIMIT_THROTTLE_INTEGRATION_ENABLED"}
   - {module: "recovery_circuit_breaker.py", class: "RecoveryCircuitBreakerSettings", field: "re_escalation_enabled", default: true, tier: "Core", env_var: "BALDUR_RECOVERY_CB_RE_ESCALATION_ENABLED"}
   - {module: "replay_automation.py", class: "ReplayAutomationSettings", field: "adaptive_enabled", default: false, tier: "Core", env_var: "BALDUR_REPLAY_AUTOMATION_ADAPTIVE_ENABLED"}
