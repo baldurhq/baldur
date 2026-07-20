@@ -4,9 +4,14 @@ Rate Limit Storage Adapters
 Concrete implementations of RateLimitStorageInterface for different backends.
 
 Available adapters:
-- RedisRateLimitStorage: Fastest, requires Redis
-- DatabaseRateLimitStorage: 100% compatible fallback using any database
+- RedisRateLimitStorage: Fastest, requires Redis. Shared across processes.
+- DatabaseRateLimitStorage: Any database. Opt-in only — auto-detection never
+  selects it, and it needs a repository factory the caller supplies.
 - InMemoryRateLimitStorage: Single process only, for testing
+
+Auto-detection resolves Redis when it is configured and the in-memory store
+otherwise, so a deployment without Redis coordinates per process rather than
+across the fleet.
 
 Usage:
     from baldur.adapters.rate_limit import (

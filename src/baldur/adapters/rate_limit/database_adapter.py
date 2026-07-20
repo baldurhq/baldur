@@ -1,22 +1,25 @@
 """
 Database Rate Limit Storage Adapter
 
-Universal fallback rate limit storage using any database.
-Guarantees 100% Self-DDoS prevention coverage.
+Rate limit storage backed by any database, for deployments that share cooldown
+state through a database rather than Redis.
 
-Key Insight:
-    "Every application has a database" - This adapter ensures
-    100% coverage regardless of customer infrastructure.
+Wiring:
+    This is a bring-your-own extension point, not an automatic fallback.
+    Backend auto-detection never selects it, because it needs a repository
+    factory that nothing registers by default. Reach it by asking for it
+    explicitly — ``get_rate_limit_storage("database")`` — and supply that
+    factory.
 
 Features:
     - Works with any database (PostgreSQL, MySQL, SQLite)
     - Framework-agnostic (uses repository pattern)
-    - Slightly slower than Redis (~1-5ms vs ~0.1ms)
-    - Perfect for customers without Redis infrastructure
+    - Slower than Redis (~1-5ms vs ~0.1ms)
 
 Performance Note:
-    Rate limit queries occur only on 429 responses, not every request.
-    A few milliseconds delay is negligible in this context.
+    The cost is per state read, not per 429: a coordinated retry consults the
+    cooldown before every attempt, so a call path pays this latency on each
+    one — which is why Redis is the recommended backend under load.
 """
 
 from __future__ import annotations

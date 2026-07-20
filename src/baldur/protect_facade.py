@@ -1262,6 +1262,13 @@ async def aprotect(  # verified-by: test_concurrent_duplicates_run_side_effect_e
     Any OTHER sync ``ResiliencePolicy`` passed as ``retry=`` raises
     ``NotImplementedError`` (it cannot be safely awaited).
 
+    Parity gap — outbound 429 coordination. ``protect()``'s retry stage shares
+    a cooldown across workers when a downstream returns 429; the async retry
+    stage does not, so ``rate_limit_aware`` / ``rate_limit_key`` on a
+    ``RetryPolicyConfig`` are inert here. To coordinate on the async path, pass
+    a tenacity bridge carrying a ``rate_limit_key`` as ``retry=`` — noting that
+    its wait blocks the event loop.
+
     Idempotency (``idempotency_key`` / ``idempotency_fail_open`` /
     ``idempotency_ttl`` / ``idempotency_execution_ttl``) behaves as in
     ``protect``, driven by an async-native guard/hook that
