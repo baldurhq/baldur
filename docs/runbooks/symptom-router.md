@@ -24,8 +24,11 @@ You arrived with a symptom — an alert, a page, or "it stopped working". Match 
 | On deploy you see a `baldur.gunicorn_hooks_not_installed` WARNING ~2s after startup; on SIGTERM the WAL never flushes, leader leases never release, the LB keeps routing to a dying worker | The graceful-shutdown chain is not wired into gunicorn's hooks | [gunicorn-graceful-shutdown.md](gunicorn-graceful-shutdown.md) |
 | Production boot **aborts** with a missing-critical-secret error | A CRITICAL secret (`BALDUR_SECRETS_ENCRYPTION_KEY` / `BALDUR_SECRETS_AUDIT_SIGNING_KEY`) is unset | [secure-deployment.md](secure-deployment.md) |
 | Application state was **lost or diverged** after Redis recovered from an outage | Non-tolerable data (money, billing meters, idempotency truth-of-record) was stored inside Baldur's cache, which is an AP system and does not preserve cross-worker consistency during DEGRADED windows | [data-consistency-boundaries.md](data-consistency-boundaries.md) |
+| Requests **hang / stall** (not fail) while Redis is completely down — a Sentinel quorum loss or standalone Redis outage — then recover when Redis returns; under load the worker pool fills up | The idempotency gate is **fail-closed** — it blocks per request rather than degrade cross-worker dedup unsafely, so in-flight requests wait for Redis to return. `BALDUR_REDIS_RETRY_ON_TIMEOUT` is the stall-vs-fast-fail lever | [data-consistency-boundaries.md](data-consistency-boundaries.md#request-path-liveness-under-total-redis-loss-the-other-axis) |
 | A runtime-config edit is visible on one pod but not others, or a scheduled maintenance job fires twice | Multi-worker coherence is not configured — no shared state backend / cross-pod event bus / leader election | [multi-worker-coherence.md](multi-worker-coherence.md) |
 | Slack alerts deliver, but the 📊 Dashboard / ⚙️ Admin Panel / 📖 Runbook buttons are missing | Those buttons are opt-in — their base URLs are unset, so each button is silently omitted (the alert body still delivers) | [slack-alert-action-buttons.md](slack-alert-action-buttons.md) |
+| PagerDuty incidents opened by Baldur **never close on their own**, even after the condition recovered | By design at v1.0, Baldur sends `trigger` only — never resolve/acknowledge; incidents are closed on the PagerDuty side | [notification-channel-topology.md](notification-channel-topology.md#known-limitation--trigger-only-outbound) |
+| An informational event (e.g. a daily report / non-critical alert) paged PagerDuty, or a critical alert arrived twice (Slack + PagerDuty echo) | Priority/category routing needs tuning, or the direct Slack copy of `critical` was kept alongside a PagerDuty→Slack echo | [notification-channel-topology.md](notification-channel-topology.md) |
 
 ---
 
@@ -41,6 +44,7 @@ You are wiring Baldur into a deployment or enabling a capability. Pick the goal.
 | Honor the "DLQ absorbs ALL failures" contract in a Django app (both layers) | [dlq-two-layer-activation.md](dlq-two-layer-activation.md) |
 | Stand up metrics / Grafana / OTel (traces, logs) | [observability-stack-setup.md](observability-stack-setup.md) |
 | Add one-click action buttons to Slack alerts | [slack-alert-action-buttons.md](slack-alert-action-buttons.md) |
+| Wire Slack / PagerDuty alert channels — decide which events page vs post (incl. the PagerDuty war-room echo topology) | [notification-channel-topology.md](notification-channel-topology.md) |
 | Expose OpenAPI 3.0 / Swagger UI / ReDoc / the `/features/` inventory | [api-discoverability.md](api-discoverability.md) |
 | Scale past a single process (multiple workers / pods) and stay coherent | [multi-worker-coherence.md](multi-worker-coherence.md) |
 | Edit runtime config safely via the admin console / `/config/*` REST | [runtime-config-change.md](runtime-config-change.md) |
