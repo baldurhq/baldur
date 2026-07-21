@@ -47,6 +47,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - A rate-limit coordinator or storage fault degrades to a logged no-op, not a changed outcome.
 - An exception's string `retry_after` is coerced, so a 429 no longer installs no cooldown.
 - `configure_baldur_celery(app)` raised `TypeError` on every call and registered nothing.
+- PRO-only DLQ maintenance no longer schedules without PRO — three tasks failed on cadence.
+- Stale REPLAYING entries now release back to PENDING without PRO, instead of stranding.
 - Compressed DLQ entries now age ACTIVE→STALE→ARCHIVED on a daily schedule (was never run).
 - Compressed-entry sweep reads the oldest page, not the newest — it was a no-op above ~3/day.
 - SQL DLQ adapter stamps `stale_at`/`archived_at`, so STALE→ARCHIVED can fire on SQL backends.

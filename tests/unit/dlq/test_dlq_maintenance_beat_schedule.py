@@ -29,9 +29,13 @@ def _reset_configure_guard():
 
 
 class TestDlqMaintenanceBeatScheduleContract:
-    """Contract: get_dlq_maintenance_beat_schedule returns correct task entries."""
+    """Contract: get_dlq_maintenance_beat_schedule returns correct task entries.
 
-    def test_schedule_contains_evict_overflow_task(self):
+    The lane is tier-resolved per entry, so every PRO-set assertion here runs
+    under ``mock_pro_tier``; the OSS-set is asserted separately below.
+    """
+
+    def test_schedule_contains_evict_overflow_task(self, mock_pro_tier):
         """evict-overflow-dlq-entries entry exists with correct task name."""
         from baldur.celery_tasks.dlq_tasks import get_dlq_maintenance_beat_schedule
 
@@ -41,14 +45,14 @@ class TestDlqMaintenanceBeatScheduleContract:
         entry = schedule["evict-overflow-dlq-entries"]
         assert entry["task"] == "baldur.celery_tasks.evict_overflow_dlq_entries"
 
-    def test_evict_overflow_schedule_is_60_seconds(self):
+    def test_evict_overflow_schedule_is_60_seconds(self, mock_pro_tier):
         """evict-overflow runs every 60 seconds."""
         from baldur.celery_tasks.dlq_tasks import get_dlq_maintenance_beat_schedule
 
         schedule = get_dlq_maintenance_beat_schedule()
         assert schedule["evict-overflow-dlq-entries"]["schedule"] == 60.0
 
-    def test_evict_overflow_queue_is_maintenance(self):
+    def test_evict_overflow_queue_is_maintenance(self, mock_pro_tier):
         """evict-overflow routes to maintenance queue."""
         from baldur.celery_tasks.dlq_tasks import get_dlq_maintenance_beat_schedule
 
@@ -57,7 +61,7 @@ class TestDlqMaintenanceBeatScheduleContract:
             schedule["evict-overflow-dlq-entries"]["options"]["queue"] == "maintenance"
         )
 
-    def test_schedule_contains_cleanup_resolved_task(self):
+    def test_schedule_contains_cleanup_resolved_task(self, mock_pro_tier):
         """cleanup-resolved-dlq-entries entry exists with correct task name."""
         from baldur.celery_tasks.dlq_tasks import get_dlq_maintenance_beat_schedule
 
@@ -67,22 +71,37 @@ class TestDlqMaintenanceBeatScheduleContract:
         entry = schedule["cleanup-resolved-dlq-entries"]
         assert entry["task"] == "baldur.celery_tasks.cleanup_resolved_dlq_entries"
 
-    def test_cleanup_resolved_has_days_old_kwarg(self):
+    def test_cleanup_resolved_has_days_old_kwarg(self, mock_pro_tier):
         """cleanup-resolved passes days_old=30 as kwargs."""
         from baldur.celery_tasks.dlq_tasks import get_dlq_maintenance_beat_schedule
 
         schedule = get_dlq_maintenance_beat_schedule()
         assert schedule["cleanup-resolved-dlq-entries"]["kwargs"]["days_old"] == 30
 
-    def test_schedule_has_exactly_four_entries(self):
-        """Schedule contains exactly 4 tasks."""
+    def test_pro_schedule_has_exactly_four_entries(self, mock_pro_tier):
+        """With PRO installed the lane composes all 4 tasks."""
         from baldur.celery_tasks.dlq_tasks import get_dlq_maintenance_beat_schedule
 
         schedule = get_dlq_maintenance_beat_schedule()
         assert len(schedule) == 4
 
-    def test_schedule_contains_release_stale_replaying_task(self):
-        """release-stale-replaying-entries entry exists with correct task name."""
+    def test_oss_schedule_contains_only_the_runnable_entry(self, mock_oss_tier):
+        """Without PRO only the OSS-runnable entry composes.
+
+        The other three resolve DLQ backing through a PRO-only registry slot, so
+        scheduling them on an OSS-only install would fail on cadence forever.
+        """
+        from baldur.celery_tasks.dlq_tasks import get_dlq_maintenance_beat_schedule
+
+        schedule = get_dlq_maintenance_beat_schedule()
+        assert set(schedule) == {"release-stale-replaying-entries"}
+
+    @pytest.mark.parametrize("tier_fixture", ["mock_oss_tier", "mock_pro_tier"])
+    def test_schedule_contains_release_stale_replaying_task(
+        self, request, tier_fixture
+    ):
+        """release-stale-replaying-entries composes on every tier."""
+        request.getfixturevalue(tier_fixture)
         from baldur.celery_tasks.dlq_tasks import get_dlq_maintenance_beat_schedule
 
         schedule = get_dlq_maintenance_beat_schedule()
@@ -92,7 +111,7 @@ class TestDlqMaintenanceBeatScheduleContract:
         assert entry["task"] == "baldur.celery_tasks.release_stale_replaying"
         assert entry["options"]["queue"] == "maintenance"
 
-    def test_schedule_contains_cleanup_compressed_task(self):
+    def test_schedule_contains_cleanup_compressed_task(self, mock_pro_tier):
         """cleanup-compressed-dlq-entries entry exists with correct task name."""
         from baldur.celery_tasks.dlq_tasks import get_dlq_maintenance_beat_schedule
 
@@ -103,7 +122,7 @@ class TestDlqMaintenanceBeatScheduleContract:
         assert entry["task"] == "baldur.celery_tasks.cleanup_compressed_dlq_entries"
         assert entry["options"]["queue"] == "maintenance"
 
-    def test_cleanup_compressed_runs_daily_at_0430(self):
+    def test_cleanup_compressed_runs_daily_at_0430(self, mock_pro_tier):
         """cleanup-compressed runs once a day, clear of the other lanes."""
         from baldur.celery_tasks.dlq_tasks import get_dlq_maintenance_beat_schedule
 
@@ -144,10 +163,21 @@ class TestBeatScheduleWiringContract:
 class TestBeatScheduleIncludeFlagsBehavior:
     """Behavior: include flags control schedule module loading."""
 
-    def test_dlq_maintenance_included_by_default(self):
-        """get_baldur_beat_schedule includes dlq_maintenance by default."""
+    def test_dlq_maintenance_included_by_default(self, mock_pro_tier):
+        """get_baldur_beat_schedule composes the lane by default."""
         schedule = get_baldur_beat_schedule()
         assert "evict-overflow-dlq-entries" in schedule
+
+    def test_dlq_maintenance_default_is_tier_resolved(self, mock_oss_tier):
+        """The default composition drops the PRO-set on an OSS-only install.
+
+        ``include_dlq_maintenance=True`` composes the lane, not every entry in it.
+        """
+        schedule = get_baldur_beat_schedule()
+        assert "release-stale-replaying-entries" in schedule
+        assert "evict-overflow-dlq-entries" not in schedule
+        assert "cleanup-resolved-dlq-entries" not in schedule
+        assert "cleanup-compressed-dlq-entries" not in schedule
 
     def test_dlq_maintenance_excluded_when_flag_false(self):
         """Setting include_dlq_maintenance=False excludes DLQ tasks."""

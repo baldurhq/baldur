@@ -246,14 +246,29 @@ class TestPurgeArchivedDLQEntries:
 class TestCleanupBeatSchedule:
     """Beat Schedule 설정 테스트."""
 
-    def test_schedule_contains_all_tasks(self):
-        """모든 태스크가 스케줄에 포함."""
+    def test_schedule_contains_all_tasks(self, mock_pro_tier):
+        """With PRO installed every cleanup-lane task is scheduled."""
         schedule = get_cleanup_beat_schedule()
 
         assert "cleanup-expired-config" in schedule
         assert "archive-old-dlq-entries" in schedule
         assert "expire-approval-requests" in schedule
         assert "purge-archived-dlq-entries" in schedule
+
+    def test_schedule_drops_dlq_retention_without_pro(self, mock_oss_tier):
+        """Scheduled DLQ retention is a PRO capability; the rest is tier-neutral."""
+        schedule = get_cleanup_beat_schedule()
+
+        assert "archive-old-dlq-entries" not in schedule
+        assert "purge-archived-dlq-entries" not in schedule
+        assert set(schedule) == {
+            "cleanup-expired-config",
+            "expire-approval-requests",
+            "flush-expired-jwt-tokens",
+            "cleanup-stale-cb-keys",
+            "cleanup-memory-cache-expired",
+            "refresh-audit-wal-metrics",
+        }
 
     def test_cleanup_expired_config_schedule(self):
         """만료 설정 정리 스케줄 확인."""
@@ -264,8 +279,8 @@ class TestCleanupBeatSchedule:
         assert config["options"]["queue"] == "maintenance"
         assert config["kwargs"]["older_than_hours"] == 24
 
-    def test_archive_dlq_schedule(self):
-        """DLQ 아카이브 스케줄 확인."""
+    def test_archive_dlq_schedule(self, mock_pro_tier):
+        """DLQ archive entry shape (PRO-set)."""
         schedule = get_cleanup_beat_schedule()
         config = schedule["archive-old-dlq-entries"]
 
@@ -281,8 +296,8 @@ class TestCleanupBeatSchedule:
         assert config["task"] == "baldur.expire_approval_requests"
         assert config["kwargs"]["older_than_hours"] == 72
 
-    def test_purge_dlq_schedule_critical_queue(self):
-        """영구 삭제는 critical_maintenance 큐 사용."""
+    def test_purge_dlq_schedule_critical_queue(self, mock_pro_tier):
+        """Permanent deletion uses the critical_maintenance queue (PRO-set)."""
         schedule = get_cleanup_beat_schedule()
         config = schedule["purge-archived-dlq-entries"]
 

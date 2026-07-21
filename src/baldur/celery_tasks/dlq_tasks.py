@@ -4,6 +4,8 @@ DLQ Celery Tasks
 Tasks for replaying failed operations from the Dead Letter Queue.
 """
 
+from typing import Any
+
 import structlog
 from celery import shared_task
 
@@ -602,21 +604,23 @@ def release_stale_replaying(self) -> dict:
     Entries get stuck if the replay worker crashes after acquiring but
     before completing. Runs every 15 minutes via Celery Beat.
 
+    Runs on every tier: the backing resolves through the canonical DLQ
+    resolution chain, whose repository implements the release on all three
+    OSS adapters (memory / SQL / Redis) as well as under PRO.
+
     Returns:
         Dictionary with released count
     """
-    from baldur.factory.registry import ProviderRegistry
+    from baldur.services.dlq_capture.service import resolve_dlq_backing
     from baldur.settings.dlq import get_dlq_settings
 
     task_id = self.request.id or "unknown"
     bound_logger = logger.bind(task_id=task_id)
 
     settings = get_dlq_settings()
-    repository = ProviderRegistry.dlq_repository.safe_get()
-    if repository is None:
-        raise RuntimeError("baldur_pro DLQRepository not registered")
 
     try:
+        repository = resolve_dlq_backing().repository
         released = repository.release_stale_replaying(
             older_than_minutes=settings.stale_replaying_timeout_minutes,
         )
@@ -650,29 +654,49 @@ def release_stale_replaying(self) -> dict:
 
 
 def get_dlq_maintenance_beat_schedule():
-    """Beat schedule for DLQ maintenance tasks (eviction + cleanup + stale release)."""
+    """Beat schedule for DLQ maintenance tasks (eviction + cleanup + stale release).
+
+    Tier-resolved per entry. Stale-REPLAYING release is an OSS capability and is
+    always scheduled; overflow eviction, resolved-entry cleanup and compressed-entry
+    lifecycle are PRO capabilities (OSS enforces overflow synchronously at store
+    time and demotes compression to drop), so they are scheduled only when the PRO
+    distribution is installed. Without the gate an OSS-only install would run tasks
+    that can only fail on cadence.
+    """
     from celery.schedules import crontab
 
-    return {
-        "evict-overflow-dlq-entries": {
-            "task": "baldur.celery_tasks.evict_overflow_dlq_entries",
-            "schedule": 60.0,
-            "options": {"queue": "maintenance"},
-        },
-        "cleanup-resolved-dlq-entries": {
-            "task": "baldur.celery_tasks.cleanup_resolved_dlq_entries",
-            "schedule": crontab(hour="*/6"),
-            "options": {"queue": "maintenance"},
-            "kwargs": {"days_old": 30},
-        },
+    from baldur.utils.tier import is_pro_installed
+
+    schedule: dict[str, Any] = {
         "release-stale-replaying-entries": {
             "task": "baldur.celery_tasks.release_stale_replaying",
             "schedule": crontab(minute="*/15"),
             "options": {"queue": "maintenance"},
         },
-        "cleanup-compressed-dlq-entries": {
-            "task": "baldur.celery_tasks.cleanup_compressed_dlq_entries",
-            "schedule": crontab(hour=4, minute=30),
-            "options": {"queue": "maintenance"},
-        },
     }
+
+    if not is_pro_installed():
+        logger.debug("dlq.maintenance_pro_entries_skipped")
+        return schedule
+
+    schedule.update(
+        {
+            "evict-overflow-dlq-entries": {
+                "task": "baldur.celery_tasks.evict_overflow_dlq_entries",
+                "schedule": 60.0,
+                "options": {"queue": "maintenance"},
+            },
+            "cleanup-resolved-dlq-entries": {
+                "task": "baldur.celery_tasks.cleanup_resolved_dlq_entries",
+                "schedule": crontab(hour="*/6"),
+                "options": {"queue": "maintenance"},
+                "kwargs": {"days_old": 30},
+            },
+            "cleanup-compressed-dlq-entries": {
+                "task": "baldur.celery_tasks.cleanup_compressed_dlq_entries",
+                "schedule": crontab(hour=4, minute=30),
+                "options": {"queue": "maintenance"},
+            },
+        }
+    )
+    return schedule

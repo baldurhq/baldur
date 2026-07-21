@@ -1,4 +1,4 @@
-"""G55/G56/G57 — canonical-module adoption may not re-drift (OSS halves).
+"""G55/G56/G57/G73 — canonical-module adoption may not re-drift (OSS halves).
 
 A recurring audit signature: a canonical implementation exists (exponential
 backoff, client-IP extraction, the UTC time source), later code re-implemented
@@ -27,22 +27,29 @@ Detected idioms:
    ``baldur.utils.time.utc_now`` over the ``baldur.core.time_provider``
    seam): any import of, attribute access on, or non-docstring string
    reference to the retired ``baldur.core.timezone`` module.
+4. **G73 — inline private-distribution presence probe** (canonical:
+   ``baldur.utils.tier.is_pro_installed``): a ``find_spec`` call whose first
+   positional argument is the constant ``"baldur_pro"`` / ``"baldur_dormant"``.
+   Tier-resolved composition must key off one predicate, and tier simulation in
+   tests must have one patch point; a re-inlined probe forks both.
 
 By construction the scanners do NOT flag: docstrings and comments (invisible
 to the AST scan — markdown bold like ``**counter's**`` never parses as a
 power, and prose mentions of a header or module name are not code
 constants), non-attempt exponent math (``std ** 2``), growth-with-cap on
 non-delay state (an adaptive rate multiplier), HTTP-style header names
-(``"X-Forwarded-For"``), and ``django.utils.timezone`` imports.
+(``"X-Forwarded-For"``), ``django.utils.timezone`` imports, and a private
+module path merely *named* as data (a registry slot-factory target).
 
 ENFORCED-EMPTY: there is no baseline budget. A new inline backoff triad,
-forwarded-header read, or parallel now-module reference is migrated to
-compose the canonical, never baselined.
+forwarded-header read, parallel now-module reference, or re-inlined tier probe
+is migrated to compose the canonical, never baselined.
 
 Architectural fitness function rule registry:
 ``ARCHITECTURE.md#g55-backoff-primitive-drift`` /
 ``ARCHITECTURE.md#g56-client-ip-extraction-drift`` /
-``ARCHITECTURE.md#g57-time-source-drift``
+``ARCHITECTURE.md#g57-time-source-drift`` /
+``ARCHITECTURE.md#g73-pro-probe-drift``
 """
 
 from __future__ import annotations
@@ -71,6 +78,11 @@ _ATTEMPT_FRAGMENTS = ("attempt", "retry", "retries", "resume", "consecutive")
 _DELAY_FRAGMENTS = ("delay", "backoff", "interval", "wait", "sleep", "cooldown")
 
 _FORWARDED_HEADER_LITERALS = frozenset({"HTTP_X_FORWARDED_FOR", "HTTP_X_REAL_IP"})
+
+# The one module allowed to probe for a private distribution's presence.
+_TIER_PROBE_ALLOWED_ORIGIN = "utils/tier.py"
+
+_PRIVATE_DISTRIBUTIONS = frozenset({"baldur_pro", "baldur_dormant"})
 
 
 # ---------------------------------------------------------------------------
@@ -256,6 +268,43 @@ def scan_timezone_source(
     return sorted(hits)
 
 
+def scan_pro_probe_source(
+    source: str, filename: str = "<planted>"
+) -> list[tuple[int, str]]:
+    """Return ``(lineno, kind)`` inline private-distribution presence probes.
+
+    Matches a ``find_spec`` **call** whose first positional argument is the
+    constant ``"baldur_pro"`` / ``"baldur_dormant"`` — both the bare
+    ``find_spec(...)`` and the dotted ``importlib.util.find_spec(...)`` forms.
+    Scanning the *idiom* rather than the bare module string is deliberate: that
+    string legitimately appears in registry slot-factory tables and reset maps
+    in dozens of places, so a literal scan would be all false positives and get
+    baselined into inertness.
+    """
+    try:
+        tree = ast.parse(source, filename=filename)
+    except SyntaxError:
+        return []
+    hits: set[tuple[int, str]] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.attr if isinstance(func, ast.Attribute) else None
+        if name is None and isinstance(func, ast.Name):
+            name = func.id
+        if name != "find_spec" or not node.args:
+            continue
+        first = node.args[0]
+        if (
+            isinstance(first, ast.Constant)
+            and isinstance(first.value, str)
+            and first.value in _PRIVATE_DISTRIBUTIONS
+        ):
+            hits.add((node.lineno, f"find_spec-{first.value}"))
+    return sorted(hits)
+
+
 def scan_tree(
     root: Path,
     scan: Callable[[str, str], list[tuple[int, str]]],
@@ -334,6 +383,20 @@ class TestTimeSourceAdoptionDrift:
             f"G57: {len(hits)} reference(s) to the retired baldur.core.timezone "
             "module. Use baldur.utils.time.utc_now (TimeProvider-aware) — a "
             "second now-module forks the clock source.\n" + _format(hits)
+        )
+
+
+class TestProProbeAdoptionDrift:
+    """G73 — no inline private-distribution presence probe outside the helper."""
+
+    def test_no_inline_pro_probe_outside_canonical(self):
+        hits = scan_tree(_SRC_ROOT, scan_pro_probe_source, _TIER_PROBE_ALLOWED_ORIGIN)
+        assert not hits, (
+            f"G73: {len(hits)} inline private-distribution presence probe(s) "
+            f"outside {_TIER_PROBE_ALLOWED_ORIGIN}. Call "
+            "baldur.utils.tier.is_pro_installed instead of re-inlining "
+            "find_spec — tier composition must key off one predicate, and "
+            "tests must have one patch point for tier simulation.\n" + _format(hits)
         )
 
 
@@ -554,6 +617,65 @@ class TestG57Scanner:
         assert scan_timezone_source("def f(:\n") == []
 
 
+class TestG73Scanner:
+    """`scan_pro_probe_source` flags find_spec calls on a private package."""
+
+    @pytest.mark.parametrize(
+        ("source", "expected", "note"),
+        [
+            pytest.param(
+                "import importlib.util\n"
+                "def f():\n"
+                '    return importlib.util.find_spec("baldur_pro") is not None\n',
+                1,
+                "dotted find_spec call",
+                id="dotted-call",
+            ),
+            pytest.param(
+                "from importlib.util import find_spec\n"
+                "def f():\n"
+                '    return find_spec("baldur_dormant") is None\n',
+                1,
+                "bare find_spec call on the Dormant package",
+                id="bare-call-dormant",
+            ),
+            pytest.param(
+                "import importlib.util\n"
+                "def f():\n"
+                '    return importlib.util.find_spec("celery") is not None\n',
+                0,
+                "third-party probes are out of scope",
+                id="neg-third-party",
+            ),
+            pytest.param(
+                'SLOTS = {"dlq_service": "baldur_pro.services.dlq.base"}\n',
+                0,
+                "a registry slot-factory path is not a probe",
+                id="neg-slot-table",
+            ),
+            pytest.param(
+                'def f():\n    """Probes for baldur_pro via find_spec."""\n',
+                0,
+                "docstring prose is not a call",
+                id="neg-docstring-mention",
+            ),
+            pytest.param(
+                "from baldur.utils.tier import is_pro_installed\n"
+                "def f():\n"
+                "    return is_pro_installed()\n",
+                0,
+                "the canonical helper is allowed everywhere",
+                id="neg-canonical-helper",
+            ),
+        ],
+    )
+    def test_scan_flags_expected(self, source: str, expected: int, note: str):
+        assert len(scan_pro_probe_source(source)) == expected, note
+
+    def test_unparseable_source_returns_empty(self):
+        assert scan_pro_probe_source("def f(:\n") == []
+
+
 class TestScanTree:
     """`scan_tree` honors the allowed-origin skip for every scanner."""
 
@@ -573,10 +695,13 @@ __all__ = [
     "TestG55Scanner",
     "TestG56Scanner",
     "TestG57Scanner",
+    "TestG73Scanner",
+    "TestProProbeAdoptionDrift",
     "TestScanTree",
     "TestTimeSourceAdoptionDrift",
     "scan_backoff_source",
     "scan_client_ip_source",
+    "scan_pro_probe_source",
     "scan_timezone_source",
     "scan_tree",
 ]
