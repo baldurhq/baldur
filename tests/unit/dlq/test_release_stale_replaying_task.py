@@ -149,6 +149,65 @@ class TestReleaseStaleReplayingTaskBehavior:
         assert "connection lost" in result["error"]
 
 
+class TestReleaseStaleReplayingEmptyRegistryBehavior:
+    """Behavior: the task runs with both DLQ registry slots empty.
+
+    This is the pure-OSS shape the re-point exists for. Previously the task
+    read the PRO-only ``dlq_repository`` slot and raised
+    ``RuntimeError("baldur_pro DLQRepository not registered")`` *before* its
+    try block, so an OSS install got a task FAILURE every 15 minutes. Resolution
+    now runs through the canonical backing chain, whose OSS branch always
+    resolves (in-memory fallback), and it sits inside the try.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _empty_registry_slots(self, monkeypatch):
+        """Simulate a pure-OSS registry: neither DLQ slot is registered."""
+        from baldur.factory.registry import ProviderRegistry
+        from baldur.services.dlq_capture.service import reset_dlq_capture_service
+
+        monkeypatch.setattr(ProviderRegistry.dlq_service, "safe_get", lambda: None)
+        monkeypatch.setattr(ProviderRegistry.dlq_repository, "safe_get", lambda: None)
+        reset_dlq_capture_service()
+        yield
+        reset_dlq_capture_service()
+
+    def test_returns_success_shape_with_no_exception(self, mock_settings):
+        """Both slots empty → success-shaped result, nothing raised.
+
+        The negative half of the Success Criteria: no RuntimeError on any tier.
+        """
+        with (
+            patch(
+                "baldur.settings.dlq.get_dlq_settings",
+                return_value=mock_settings,
+            ),
+            patch("baldur.celery_tasks.dlq_tasks.logger"),
+        ):
+            from baldur.celery_tasks.dlq_tasks import release_stale_replaying
+
+            result = release_stale_replaying()
+
+        assert result["success"] is True
+        assert result["released_count"] == 0
+
+    def test_does_not_log_an_error(self, mock_settings):
+        """No ERROR log — the empty-registry path is normal OSS flow, not a fault."""
+        with (
+            patch(
+                "baldur.settings.dlq.get_dlq_settings",
+                return_value=mock_settings,
+            ),
+            patch("baldur.celery_tasks.dlq_tasks.logger") as mock_logger,
+        ):
+            from baldur.celery_tasks.dlq_tasks import release_stale_replaying
+
+            release_stale_replaying()
+
+        bound_logger = mock_logger.bind.return_value
+        bound_logger.error.assert_not_called()
+
+
 class TestReleaseStaleReplayingSideEffectBehavior:
     """Behavior: logging side effects based on released count."""
 
