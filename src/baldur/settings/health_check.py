@@ -15,7 +15,12 @@ Environment Variables:
     BALDUR_HEALTH_CHECK_PROBE_ACTIVE_RECOVERIES_THRESHOLD=10
     BALDUR_HEALTH_CHECK_PROBE_MEMORY_USAGE_THRESHOLD=0.8
     BALDUR_HEALTH_CHECK_PROBE_WORKER_JOIN_TIMEOUT=2.0
+    BALDUR_HEALTH_CHECK_READINESS_PROBE_TIMEOUT_SECONDS=0.5
+    BALDUR_HEALTH_CHECK_READINESS_CACHE_TTL_SECONDS=5.0
+    BALDUR_HEALTH_CHECK_READINESS_TIMEOUT_FAIL_DIRECTION=not_ready
 """
+
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings
@@ -81,6 +86,42 @@ class HealthCheckSettings(BaseSettings):
         ge=0.5,
         le=30.0,
         description="Worker thread join timeout (seconds).",
+    )
+
+    # =========================================================================
+    # Kubernetes Readiness Probe (services/health_check.py)
+    # =========================================================================
+    readiness_probe_timeout_seconds: float = Field(
+        default=0.5,
+        ge=0.05,
+        le=30.0,
+        description=(
+            "Wall-clock budget for one readiness database probe round (seconds). "
+            "Aliases that have not answered when it expires are classified "
+            "'timed_out'. The default is half the kubelet timeoutSeconds default "
+            "so Baldur always answers before the probe itself times out."
+        ),
+    )
+    readiness_cache_ttl_seconds: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=60.0,
+        description=(
+            "TTL for the cached readiness verdict (seconds). 0.0 disables "
+            "caching — every sequential call runs a live probe round. It does "
+            "not disable in-flight dedup: callers concurrent with a running "
+            "round still share its result."
+        ),
+    )
+    readiness_timeout_fail_direction: Literal["not_ready", "ready"] = Field(
+        default="not_ready",
+        description=(
+            "Readiness verdict for an alias that exceeded the probe budget. "
+            "'not_ready' (default) depools the pod honestly and fast; 'ready' "
+            "keeps a pod with a hung dependency in rotation, which shared-"
+            "database topologies may prefer over depooling every pod at once. "
+            "Refused/failed connections always yield 'not_ready' either way."
+        ),
     )
 
 

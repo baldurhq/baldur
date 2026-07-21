@@ -46,7 +46,7 @@ class HealthCheckMetricRecorder(BaseMetricRecorder):
         )
         self._results_total = get_or_create_counter(
             f"{self.PREFIX}_health_check_results_total",
-            "Check outcomes (healthy/degraded/unhealthy/error)",
+            "Check outcomes (healthy/degraded/unhealthy/error/timeout)",
             ["check_type", "result", "is_synthetic"],
         )
         self._status = get_or_create_gauge(
@@ -71,7 +71,7 @@ class HealthCheckMetricRecorder(BaseMetricRecorder):
         """Record a health check execution.
 
         check_type: database|pool|overall|readiness
-        result: healthy|degraded|unhealthy|error
+        result: healthy|degraded|unhealthy|error|timeout
         """
         try:
             is_synthetic = self._get_synthetic_label()
