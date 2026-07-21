@@ -222,4 +222,8 @@ def _build_preset(preset: str, *, domain: str | None):
         kwargs["domain"] = domain
     if preset == "standard":
         return standard_pipeline("svc", **kwargs)
+    # ha_pipeline is fail-closed PRO-absent (its Hedging stage is PRO-tier), so
+    # it raises at construction before any coordination decision is reachable.
+    # The surface is still worth covering where it can be built.
+    pytest.importorskip("baldur_pro")
     return ha_pipeline("svc", candidates=[], **kwargs)

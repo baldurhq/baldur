@@ -116,10 +116,12 @@ _MOCK_CREATION_BUDGETS: dict[str, int] = {
     # cascade archive-repository removal: -1 — its integration suite went too.
     # compressed-lifecycle suite: -8 — MagicMock entries/repos became a real
     # in-memory repository, which is what makes those tests able to fail.
-    # rate-limit wait-result fixtures: -4 — MagicMock wait results became real
+    # rate-limit wait-result fixtures: -5 — MagicMock wait results became real
     # RateLimitResult objects; an auto-generated attribute silently defeated the
     # deferral branch, which is exactly the false-pass a spec-less mock buys.
-    "oss": 4339,
+    # The 5th was the tenacity bridge's, where the same auto-generated
+    # `.deferred` turned into a real CI failure once deferral shipped default-on.
+    "oss": 4338,
     "pro": 1800,
     "dormant": 401,
 }

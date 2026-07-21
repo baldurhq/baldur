@@ -23,6 +23,7 @@ from baldur.bridges.tenacity.instrument import _reset_instrument_for_testing
 from baldur.bridges.tenacity.policy import TenacityBridgePolicy
 from baldur.protect_facade import protect, protect_with_meta
 from baldur.resilience.policies.presets import standard_pipeline
+from baldur.services.rate_limit_coordinator.models import RateLimitResult
 from baldur.settings.bridge import reset_bridge_settings
 from baldur.settings.protect import reset_protect_settings
 
@@ -207,7 +208,10 @@ class TestBridgeSelfDDoSGuardIntegration:
 
     def test_rate_limit_coordinator_invoked_per_attempt(self):
         coord = MagicMock()
-        coord.wait_if_needed.return_value = MagicMock(waited=False, wait_time=0.0)
+        # A real result object, not a MagicMock: an auto-generated ``.deferred``
+        # is truthy, and the bridge's ``before`` callback reads it to abort the
+        # attempt — every call would defer before it ever ran.
+        coord.wait_if_needed.return_value = RateLimitResult(waited=False)
 
         counter = {"calls": 0}
 
