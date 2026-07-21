@@ -89,7 +89,9 @@ _ROOT_BUDGETS: dict[str, int] = {
     # 709: +6 — the bulkhead decorator relocated from the licensed tier into the
     # core baldur.services.bulkhead package; it carries the same six C901 noqas
     # it had before (relocation, not new complexity).
-    "baldur": 115,
+    # 719: -1 — CircuitBreakerEvaluator._simulate dropped its C901/PLR0912 noqa
+    # when its inline trip branches were replaced by the shared evaluate_trip call.
+    "baldur": 114,
     # 666: -1 — _update_config_with_meta refactored into _versioned_write +
     # _merge_changes + _post_write helpers, dropping its complexity noqa.
     "baldur_pro": 32,

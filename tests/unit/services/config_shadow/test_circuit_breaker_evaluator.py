@@ -16,6 +16,7 @@ Unit tests for Circuit Breaker Evaluator.
 """
 
 from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
 
 import pytest
 
@@ -635,3 +636,68 @@ class TestEvaluatorConfigDefaultBehavior:
         assert result.baseline_metrics["open_count"] == 1
         assert result.candidate_metrics["open_count"] == 1
         assert result.delta["open_count_delta"] == 0
+
+
+class TestEvaluatorRunningConfigBehavior:
+    """The unspecified keys come from the running config, not dataclass defaults.
+
+    Completing a partial dict from ``CircuitBreakerConfig()`` reads correctly
+    only while the operator runs stock defaults. Once any ``BALDUR_CB_*``
+    override or PRO runtime-config value is deployed, the simulated baseline is
+    a configuration nobody is running — the same fictitious-baseline failure
+    the evaluator-local literals caused, one layer down.
+
+    The running config is pinned at its seam (``from_settings``) rather than
+    through the environment, because that resolution runs through the PRO
+    RuntimeConfigManager when it is registered and through settings when it is
+    not; the evaluator must follow whichever one answered.
+    """
+
+    def test_unspecified_keys_come_from_the_running_config(self):
+        """Negative assertion: the dataclass defaults no longer decide."""
+        running = CircuitBreakerConfig(
+            failure_rate_threshold=80.0,
+            minimum_calls=25,
+            sliding_window_size=250,
+        )
+        assert (
+            running.failure_rate_threshold
+            != CircuitBreakerConfig().failure_rate_threshold
+        ), "fixture must differ from the default"
+
+        with patch.object(CircuitBreakerConfig, "from_settings", return_value=running):
+            resolved = CircuitBreakerEvaluator()._resolve_config(
+                {"failure_threshold": 3}
+            )
+
+        assert resolved.failure_rate_threshold == 80.0
+        assert resolved.minimum_calls == 25
+        assert resolved.sliding_window_size == 250
+        # The supplied key still wins over the running value.
+        assert resolved.failure_threshold == 3
+
+    def test_supplied_keys_override_the_running_config(self):
+        """The candidate config is what is being tested — it takes precedence."""
+        running = CircuitBreakerConfig(failure_rate_threshold=80.0)
+
+        with patch.object(CircuitBreakerConfig, "from_settings", return_value=running):
+            resolved = CircuitBreakerEvaluator()._resolve_config(
+                {"failure_rate_threshold": 25.0}
+            )
+
+        assert resolved.failure_rate_threshold == 25.0
+
+    def test_unreadable_running_config_degrades_to_defaults(self):
+        """A settings fault leaves an approximate simulation, not an exception."""
+        with patch.object(
+            CircuitBreakerConfig, "from_settings", side_effect=RuntimeError("boom")
+        ):
+            resolved = CircuitBreakerEvaluator()._resolve_config(
+                {"failure_threshold": 3}
+            )
+
+        assert resolved.failure_threshold == 3
+        assert (
+            resolved.failure_rate_threshold
+            == CircuitBreakerConfig().failure_rate_threshold
+        )

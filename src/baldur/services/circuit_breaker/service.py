@@ -552,18 +552,21 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
 
     def get_total_calls(self, service_name: str) -> int:
         """
-        Get total call count for a service (success + failure).
+        Get the repository counter total for a service (failure + success).
 
-        Used for minimum_calls check to prevent false positives.
+        These are the stored counters, not a call count: ``failure_count`` is
+        the consecutive-failure count since the last success or reset, and
+        ``success_count`` accrues on HALF_OPEN recovery trials. Successful
+        CLOSED calls are not counted here — the rate trigger's denominator
+        comes from :meth:`get_window_evidence` instead.
 
         Args:
             service_name: Name of the external service
 
         Returns:
-            Total number of calls tracked
+            Sum of the stored failure and success counters.
         """
         state = self.get_or_create_state(service_name)
-        # Total calls = failure_count + success_count
         return state.failure_count + state.success_count
 
     def get_all_states(self) -> list[dict[str, Any]]:
@@ -639,10 +642,12 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
         the mean. That makes it suited to a system-wide stability gate, where
         each individual service is still protected by its own circuit breaker.
 
-        Evidence comes from this worker's outcome windows, so the fraction
-        describes the traffic this process handled — the scope its consumers
-        (the capacity-reservation safety valve and the emergency recovery gate)
-        already decide in.
+        Evidence comes from **this service object's** outcome windows, so the
+        fraction covers the traffic admitted through this instance. A process
+        that also protects calls through ``protect()`` or ``@circuit_breaker``
+        gives those policies their own service instances, whose outcomes this
+        method does not see — read the aggregate from the same instance that
+        recorded the traffic.
 
         Returns:
             Failure fraction in the range 0.0-1.0.
@@ -759,11 +764,19 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
                 service_name, effective_config.sliding_window_size
             )
 
-        should_open = self._should_open_circuit(updated_state, effective_config)
+        # Read the evidence once and carry it through the decision, the snapshot
+        # and the event. A second read here would be a different window: a
+        # concurrent trip on another thread clears between the two, and the
+        # emitted event would report (0, 0) for a decision that saw real calls.
+        window_failures, window_total = self.get_window_evidence(service_name)
+
+        should_open = self._should_open_circuit(
+            updated_state,
+            effective_config,
+            window_evidence=(window_failures, window_total),
+        )
 
         if should_open and updated_state.state == "closed":
-            window_failures, window_total = self.get_window_evidence(service_name)
-
             # Collect snapshot before opening
             snapshot = self._collect_failure_snapshot(
                 service_name,
@@ -837,6 +850,7 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
         self,
         state: CircuitBreakerStateData,
         effective_config: CircuitBreakerConfig | None = None,
+        window_evidence: tuple[int, int] | None = None,
     ) -> bool:
         """
         Determine if the circuit should open, from the shared trip predicate.
@@ -850,12 +864,20 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
         Args:
             state: Current circuit breaker state
             effective_config: Optional overridden config from MeshCoordinator
+            window_evidence: Pre-read ``(failures, total)`` to decide on. The
+                caller passes what it will also record and emit, so the decision
+                and its reported evidence cannot come from two different reads
+                of a window a concurrent trip may have cleared in between.
 
         Returns:
             True if circuit should open
         """
         cfg = effective_config or self.config
-        window_failures, window_total = self.get_window_evidence(state.service_name)
+        window_failures, window_total = (
+            window_evidence
+            if window_evidence is not None
+            else self.get_window_evidence(state.service_name)
+        )
 
         trip_reason = evaluate_trip(
             consecutive_failures=state.failure_count,

@@ -13,8 +13,10 @@ per event — which the evaluator's confidence warnings already account for.
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import fields
+from dataclasses import fields, replace
 from typing import Any
+
+import structlog
 
 from baldur.interfaces.event_journal import JournalEntry
 from baldur.services.circuit_breaker.config import CircuitBreakerConfig
@@ -28,6 +30,8 @@ from baldur.services.config_shadow.models import (
     EvaluatorResult,
     SimulationResult,
 )
+
+logger = structlog.get_logger()
 
 
 class CircuitBreakerEvaluator:
@@ -89,18 +93,25 @@ class CircuitBreakerEvaluator:
         )
 
     def _resolve_config(self, config: dict[str, Any]) -> CircuitBreakerConfig:
-        """Overlay the supplied keys onto the live circuit-breaker defaults.
+        """Overlay the supplied keys onto the running circuit-breaker config.
 
         ``baseline_config`` and ``candidate_config`` are arbitrary dicts, so an
-        operator shadow-testing a single field supplies only that field. Filling
-        the rest from ``CircuitBreakerConfig`` means the simulated baseline is
-        the configuration actually running, not a set of evaluator-local
-        literals that would make the reported delta meaningless.
+        operator shadow-testing a single field supplies only that field. The
+        rest come from ``from_settings()`` — the configuration this process is
+        actually running, env overrides included — so the simulated baseline is
+        the deployment, not a set of literals that would make the reported delta
+        meaningless. Dataclass defaults are the fallback when settings cannot be
+        read, which keeps a shadow evaluation degrading to an approximation
+        rather than failing.
         """
         known = {field.name for field in fields(CircuitBreakerConfig)}
-        return CircuitBreakerConfig(
-            **{key: value for key, value in config.items() if key in known}
-        )
+        supplied = {key: value for key, value in config.items() if key in known}
+        try:
+            running = CircuitBreakerConfig.from_settings()
+        except Exception as e:
+            logger.debug("config_shadow.cb_running_config_unavailable", error=e)
+            running = CircuitBreakerConfig()
+        return replace(running, **supplied)
 
     def _simulate(
         self,
