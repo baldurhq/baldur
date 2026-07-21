@@ -2,9 +2,6 @@
 
 Tests _GaugeStore thread-safety and OTELBaldurMetrics initialization
 and recording methods added in commit cf89883a.
-
-Reference:
-    docs/baldur/middleware_system/316_GUNICORN_PRELOAD_OPTIMIZATION.md §5.8
 """
 
 from __future__ import annotations

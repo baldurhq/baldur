@@ -8,9 +8,6 @@ Tests:
 - full recovery flow (4 steps)
 - duplicate-recovery prevention
 - failure handling
-
-Reference:
-    docs/baldur/middleware_system/77_RECOVERY_COORDINATOR.md
 """
 
 import pytest

@@ -6,9 +6,6 @@ Test target:
 - adapters/queues/rq_adapter.py — RQTaskAdapter.enqueue()
 
 Both adapters wrap enqueue calls with retry_with_backoff for transient broker failures.
-
-Reference:
-    docs/baldur/middleware_system/310_FUNCTIONAL_DUPLICATION_ELIMINATION.md §3.1.3
 """
 
 from __future__ import annotations

@@ -3,7 +3,6 @@ Canary Watchdog Tests.
 
 RolloutWatchdog 서비스 및 Celery 태스크 테스트.
 
-Reference: docs/baldur/middleware_system/71_CANARY_CONFIG_ROLLOUT.md
 """
 
 import pytest

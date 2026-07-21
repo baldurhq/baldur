@@ -2,9 +2,6 @@
 @domain_tag Decorator and DomainContext Unit Tests.
 
 도메인 태깅 데코레이터 및 컨텍스트 매니저 테스트.
-
-Reference:
-    docs/baldur/middleware_system/75_CRISIS_BUDGET_MULTIPLIER.md §0.1 (6, 15번)
 """
 
 import pytest

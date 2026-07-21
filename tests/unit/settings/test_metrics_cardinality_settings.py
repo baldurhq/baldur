@@ -5,7 +5,6 @@ Tests the 3 new Pydantic fields added for Metric Cardinality Guard:
 max_distinct_endpoints, max_registered_domains, endpoint_cache_size.
 
 Reference:
-    docs/baldur/middleware_system/332_METRIC_CARDINALITY_GUARD.md §4
     src/baldur/settings/metrics.py
 """
 

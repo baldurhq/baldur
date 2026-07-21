@@ -3,7 +3,6 @@ Namespace Settings Unit Tests.
 
 NamespaceSettings 및 관련 함수들을 테스트합니다.
 
-Reference: docs/baldur/middleware_system/70_MULTI_CLUSTER_ARCHITECTURE.md
 """
 
 import os

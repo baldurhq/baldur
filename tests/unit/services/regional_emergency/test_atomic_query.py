@@ -9,9 +9,6 @@ Lua 스크립트 기반 원자적 Global+Regional 상태 조회 테스트.
 - Admin Override 동작
 - Regional STRICT 동작
 - 폴백 처리
-
-Reference:
-    docs/baldur/middleware_system/73_NAMESPACE_AWARE_EMERGENCY.md
 """
 
 from unittest.mock import MagicMock

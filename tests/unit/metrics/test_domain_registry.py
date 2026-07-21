@@ -5,8 +5,6 @@ Tests domain registration limits, resolve_domain_label enforcement,
 and settings integration for metric cardinality control.
 
 Reference:
-    docs/baldur/middleware_system/332_METRIC_CARDINALITY_GUARD.md §3.2, §7
-    docs/baldur/middleware_system/353_DOMAIN_LABEL_CARDINALITY_GUARD.md §3.1, §5.1
     src/baldur/metrics/registry.py
 """
 

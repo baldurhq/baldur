@@ -5,7 +5,6 @@ Verifies that all domain-accepting record_* functions apply
 resolve_domain_label() at entry point for cardinality enforcement.
 
 Reference:
-    docs/baldur/middleware_system/353_DOMAIN_LABEL_CARDINALITY_GUARD.md §3.3, §5.2
     src/baldur/services/metrics/recorders.py
 """
 

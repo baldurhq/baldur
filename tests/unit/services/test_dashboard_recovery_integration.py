@@ -7,9 +7,6 @@ Phase 4.13: DashboardSummaryView에 Recovery Widget 통합 테스트.
 - DashboardSummary.recovery_summary 필드
 - DashboardService._get_recovery_summary() 메서드
 - DashboardSummary.to_dict()에 recovery 포함
-
-Reference:
-    docs/baldur/middleware_system/77_RECOVERY_COORDINATOR.md#10.2.4.13
 """
 
 from unittest.mock import Mock, patch

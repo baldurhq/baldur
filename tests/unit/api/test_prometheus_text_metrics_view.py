@@ -2,9 +2,6 @@
 
 PrometheusTextMetricsView tests require Django settings (DRF dependency).
 IPC __init__ cleanup tests are pure unit tests.
-
-Reference:
-    docs/baldur/middleware_system/316_GUNICORN_PRELOAD_OPTIMIZATION.md §5.4, §5.7
 """
 
 from __future__ import annotations

@@ -1,7 +1,6 @@
 """
 GlobalConfigPropagator Unit Tests.
 
-Reference: docs/baldur/middleware_system/70_MULTI_CLUSTER_ARCHITECTURE.md
 """
 
 from unittest.mock import MagicMock

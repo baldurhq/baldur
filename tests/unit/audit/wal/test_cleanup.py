@@ -2,7 +2,6 @@
 WAL 정리 유틸리티 단위 테스트.
 
 대상: packages/baldur-python/src/baldur/audit/wal/_cleanup.py
-설계 문서: docs/baldur/middleware_system/306_AUDIT_WAL_CONSOLIDATION.md
 """
 
 from __future__ import annotations

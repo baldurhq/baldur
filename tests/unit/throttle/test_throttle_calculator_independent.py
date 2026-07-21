@@ -7,9 +7,6 @@ Test target: services/backoff_calculator/calculator.py
 - Max delay cap
 - Jitter application
 - get_delays_sequence()
-
-Reference:
-    docs/baldur/middleware_system/310_FUNCTIONAL_DUPLICATION_ELIMINATION.md §3.4.2
 """
 
 from __future__ import annotations

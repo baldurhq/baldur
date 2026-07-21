@@ -7,7 +7,6 @@ HealthCheckSettings 단위 테스트.
 
 참조 소스:
 - settings/health_check.py (HealthCheckSettings)
-- docs/baldur/middleware_system/339_SETTINGS_GAP_HEALTH_SHUTDOWN_CONTROL.md §5.1
 """
 
 from __future__ import annotations

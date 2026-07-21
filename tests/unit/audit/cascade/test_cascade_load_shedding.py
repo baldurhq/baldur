@@ -9,9 +9,6 @@ Tests:
 - 버퍼 상태별 동작
 - 메트릭 기록
 - 로컬 폴백 동작
-
-Reference:
-    docs/baldur/middleware_system/76_CASCADE_EVENT_AUDIT.md
 """
 
 from __future__ import annotations

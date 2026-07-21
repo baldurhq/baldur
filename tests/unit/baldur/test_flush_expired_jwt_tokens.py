@@ -3,9 +3,6 @@
 
 flush_expired_jwt_tokens 함수의 동작 검증 및
 Cleanup Beat Schedule 계약 검증.
-
-Reference:
-    docs/baldur/middleware_system/217_JWT_BLACKLIST_AND_SECRETS_VALIDATION.md §7.3
 """
 
 from __future__ import annotations

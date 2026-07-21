@@ -4,9 +4,6 @@ Unit tests for rate_limit package components.
 Covers:
 - RateLimitEventHistory: boundary, concurrency, idempotency, stats
 - ShadowAuditLogger: file write, audit service interaction, error handling
-
-Reference:
-    docs/baldur/middleware_system/358_LARGE_SERVICE_IMPROVEMENT.md
 """
 
 from __future__ import annotations

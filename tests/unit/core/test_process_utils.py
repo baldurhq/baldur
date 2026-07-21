@@ -9,9 +9,6 @@ Three helpers gate signal handlers and background-thread lifecycle:
   Use for signal-handler guards.
 - ``is_gunicorn_master()`` — composite: ``is_under_gunicorn() and not
   is_gunicorn_worker()``. Use for "skip in master" gating.
-
-Reference:
-    docs/baldur/middleware_system/316_GUNICORN_PRELOAD_OPTIMIZATION.md §5.2–5.3
 """
 
 from __future__ import annotations

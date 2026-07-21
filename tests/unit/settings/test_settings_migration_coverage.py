@@ -6,9 +6,6 @@ Covers:
 - MetricsSettings: sync/drift fields (Contract)
 - L2StorageSettings: 50ms default, boundary (Contract)
 - Safe getters: drift detection integration (Behavior)
-
-Reference:
-    docs/baldur/middleware_system/358_LARGE_SERVICE_IMPROVEMENT.md
 """
 
 from __future__ import annotations

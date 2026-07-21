@@ -2,9 +2,6 @@
 
 Tests _should_start_background_threads(), start_background_threads(),
 and _reset_all_background_state() added in commit cf89883a.
-
-Reference:
-    docs/baldur/middleware_system/316_GUNICORN_PRELOAD_OPTIMIZATION.md §5.2
 """
 
 from __future__ import annotations
