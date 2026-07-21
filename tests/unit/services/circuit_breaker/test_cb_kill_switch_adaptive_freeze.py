@@ -58,6 +58,7 @@ class TestKillSwitchOverride:
         from baldur.services.circuit_breaker.manual_control import (
             ManualControlMixin,
         )
+        from baldur.services.circuit_breaker.outcome_window import OutcomeWindow
 
         # Mock repository
         mock_repo = Mock()
@@ -69,6 +70,7 @@ class TestKillSwitchOverride:
         mixin.repository = mock_repo
         mixin._half_open_requests = {}
         mixin._emit_event = Mock()
+        mixin._outcome_window = OutcomeWindow()
 
         with patch(
             "baldur.services.circuit_breaker.manual_control._is_system_enabled",
@@ -114,6 +116,7 @@ class TestKillSwitchOverride:
         from baldur.services.circuit_breaker.manual_control import (
             ManualControlMixin,
         )
+        from baldur.services.circuit_breaker.outcome_window import OutcomeWindow
 
         mock_repo = Mock()
         mock_repo.atomic_force_close.return_value = (True, "open", "closed")
@@ -123,6 +126,7 @@ class TestKillSwitchOverride:
         mixin.repository = mock_repo
         mixin._half_open_requests = {}
         mixin._emit_event = Mock()
+        mixin._outcome_window = OutcomeWindow()
 
         with patch(
             "baldur.services.circuit_breaker.manual_control._is_system_enabled",

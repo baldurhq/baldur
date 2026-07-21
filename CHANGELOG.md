@@ -21,6 +21,12 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `BALDUR_CONFIG` and `BALDUR_DOTENV` no longer warn as unknown environment variables.
 - Readiness answers within a bounded time: a database that hangs no longer hangs the probe.
 - A health provider that raises logs at WARNING with the traceback at DEBUG, no longer ERROR.
+- The circuit breaker's failure rate is a real rate: successful calls now count in it too.
+- A service failing 30% of calls trips the breaker; before, only near-100% failure did.
+- `minimum_calls` no longer raises the consecutive-failure trip point above `failure_threshold`.
+- In-memory circuit-breaker counters reset like Redis/SQL: a success clears the failure count.
+- `get_aggregate_failure_rate()` reports the mean error fraction, not a near-binary 0.0/1.0.
+- Config-shadow CB simulation shares the live trip predicate and defaults, so it stops disagreeing.
 
 ### Added
 
@@ -32,6 +38,11 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - Startup report gains `storage_dirs`: which durability directories resolved, and which fell back.
 - `WALConfig.wal_dir_operator_set` / `.wal_dir_env_var` — mark a chosen dir and its override.
 - `ResilientStorageBackend.get_stats()` gains `wal_on_fallback_dir`.
+- `BALDUR_CB_FAILURE_RATE_THRESHOLD` (`50.0`) — failure % over the window that opens the circuit.
+- `BALDUR_CB_SLIDING_WINDOW_SIZE` (`100`) — recent calls the rate is measured over, per worker.
+- `BALDUR_CB_MINIMUM_CALLS` (`10`) — calls needed before the rate is trusted; gates the rate trigger only.
+- `CircuitBreakerService.get_window_evidence(name)` returns the window's `(failures, total)`.
+- `CIRCUIT_BREAKER_OPENED` carries `window_failure_count`, `window_total_calls`, `consecutive_failure_count`.
 
 ### Changed
 
@@ -45,6 +56,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `BALDUR_RATE_LIMIT_BACKOFF_COORDINATION_ENABLED=false` or `rate_limit_aware=False` opts out.
 - `@retry`/`standard_pipeline`/`ha_pipeline` without `domain` stay uncoordinated, with a WARNING.
 - `RetryPolicyConfig` gains `rate_limit_aware`/`rate_limit_key`; both are inert on async surfaces.
+- The circuit breaker trips at exactly `failure_threshold` (5) consecutive failures, not 10. **Breaking**
+- Rate evidence is per worker process, so workers under skewed load trip independently.
 
 ### Removed
 
@@ -59,6 +72,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `CascadeEventData`, `TriggerType`, `CascadeEventArchive` model + its table. **Breaking**
 - `CELERY_BEAT_SCHEDULE` — `configure_baldur_celery(app)` replaces 2 of its 5 entries. **Breaking**
 - `CHAOS_SCHEDULER_BEAT_SCHEDULE` — unread duplicate of the lane getter. **Breaking**
+- `InMemoryCircuitBreakerStateRepository(sliding_window_size=)` — window moved to the service. **Breaking**
+- `LayeredCircuitBreakerStateRepository(sliding_window_size=)` — same removal. **Breaking**
 
 ### Fixed
 

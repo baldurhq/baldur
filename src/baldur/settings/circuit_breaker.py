@@ -15,7 +15,8 @@ Environment Variables:
     ... etc
 """
 
-from pydantic import Field, field_validator
+import structlog
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 from baldur.settings.base import make_settings_config
@@ -32,6 +33,8 @@ from baldur.settings.field_types import (
     ShortDuration,
 )
 from baldur.settings.validators import warn_above
+
+logger = structlog.get_logger()
 
 
 class CircuitBreakerSettings(BaseSettings):
@@ -75,6 +78,40 @@ class CircuitBreakerSettings(BaseSettings):
             "next try_acquire_half_open_slot call (476 D8)."
         ),
     )
+
+    # ==========================================================================
+    # Failure-Rate Trigger
+    # ==========================================================================
+    failure_rate_threshold: Percentage = Field(
+        default=50.0,
+        description=(
+            "Failure percentage over the recent-call window that opens the "
+            "circuit, OR'd with failure_threshold. Set to 0 to disable the "
+            "rate trigger and leave only the consecutive-failure count trigger."
+        ),
+    )
+    sliding_window_size: LargeCount = Field(
+        default=100,
+        description=(
+            "How many recent CLOSED-state calls the failure rate is computed "
+            "over. Counted per worker process, matching the circuit breaker's "
+            "per-worker admission model."
+        ),
+    )
+    minimum_calls: LargeCount = Field(
+        default=10,
+        description=(
+            "Calls the window must hold before the failure-rate trigger is "
+            "evaluated — a rate over too few calls is noise. Gates the rate "
+            "trigger only: the consecutive-failure count trigger is "
+            "traffic-independent and always applies. Setting this above "
+            "sliding_window_size makes the rate trigger unreachable, because "
+            "the window never holds that many calls. Distinct from "
+            "rate_limit_cascade_minimum_calls, which governs 429 cascade "
+            "detection rather than the failure-rate trigger."
+        ),
+    )
+
     # ==========================================================================
     # Rate Limit Cascade Detection (from core/config.py lines 25-27)
     # ==========================================================================
@@ -177,6 +214,24 @@ class CircuitBreakerSettings(BaseSettings):
     def _warn_failure_threshold(cls, v: int) -> int:
         """Safe default fallback warning for extreme values."""
         return warn_above(50, "safe_default.high_consider_using_safety")(v)
+
+    @model_validator(mode="after")
+    def _warn_rate_trigger_unreachable(self) -> "CircuitBreakerSettings":
+        """Warn when minimum_calls puts the rate trigger out of reach.
+
+        The window never holds more than sliding_window_size calls, so a larger
+        minimum_calls means the rate condition is never evaluated. This warns
+        rather than raising: the combination is inert, not invalid — it disables
+        one trigger while the consecutive-failure trigger keeps protecting — so
+        raising would turn a suboptimal setting into a boot failure.
+        """
+        if self.minimum_calls > self.sliding_window_size:
+            logger.warning(
+                "settings.cb_rate_trigger_unreachable",
+                minimum_calls=self.minimum_calls,
+                sliding_window_size=self.sliding_window_size,
+            )
+        return self
 
 
 # =============================================================================

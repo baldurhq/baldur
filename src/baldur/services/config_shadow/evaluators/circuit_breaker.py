@@ -1,16 +1,28 @@
 """
 Circuit Breaker Evaluator.
 
-Re-runs the CB service's _should_open() logic against a virtual state to
+Replays recorded circuit-breaker events through the live trip predicate to
 simulate the effect of a config change.
+
+The predicate and the config defaults both come from the circuit breaker
+service, so a simulated trip and a real trip cannot disagree. Events recorded
+before the journal carried window evidence replay approximately — one failure
+per event — which the evaluator's confidence warnings already account for.
 """
 
 from __future__ import annotations
 
 from collections import deque
+from dataclasses import fields
 from typing import Any
 
 from baldur.interfaces.event_journal import JournalEntry
+from baldur.services.circuit_breaker.config import CircuitBreakerConfig
+from baldur.services.circuit_breaker.outcome_window import (
+    FAILURE_OUTCOME,
+    SUCCESS_OUTCOME,
+    evaluate_trip,
+)
 from baldur.services.config_shadow.models import (
     EvaluationContext,
     EvaluatorResult,
@@ -31,8 +43,8 @@ class CircuitBreakerEvaluator:
 
     def evaluate(self, context: EvaluationContext) -> EvaluatorResult:
         events = context.events
-        baseline_config = context.baseline_config
-        candidate_config = context.candidate_config
+        baseline_config = self._resolve_config(context.baseline_config)
+        candidate_config = self._resolve_config(context.candidate_config)
 
         baseline_opens = self._simulate(events, baseline_config)
         candidate_opens = self._simulate(events, candidate_config)
@@ -76,20 +88,29 @@ class CircuitBreakerEvaluator:
             warnings=conf_warnings,
         )
 
-    def _simulate(  # noqa: C901, PLR0912
+    def _resolve_config(self, config: dict[str, Any]) -> CircuitBreakerConfig:
+        """Overlay the supplied keys onto the live circuit-breaker defaults.
+
+        ``baseline_config`` and ``candidate_config`` are arbitrary dicts, so an
+        operator shadow-testing a single field supplies only that field. Filling
+        the rest from ``CircuitBreakerConfig`` means the simulated baseline is
+        the configuration actually running, not a set of evaluator-local
+        literals that would make the reported delta meaningless.
+        """
+        known = {field.name for field in fields(CircuitBreakerConfig)}
+        return CircuitBreakerConfig(
+            **{key: value for key, value in config.items() if key in known}
+        )
+
+    def _simulate(
         self,
         events: list[JournalEntry],
-        config: dict[str, Any],
+        config: CircuitBreakerConfig,
     ) -> SimulationResult:
         """Drive a virtual CB state machine over the event stream."""
-        failure_threshold = config.get("failure_threshold", 5)
-        recovery_timeout = config.get("recovery_timeout", 30)
-        minimum_calls = config.get("minimum_calls", 5)
-        failure_rate_threshold = config.get("failure_rate_threshold", 0)
-        sliding_window_size = config.get("sliding_window_size", 100)
-
         state = "closed"
-        failure_window: deque[bool] = deque(maxlen=sliding_window_size)
+        outcome_window: deque[int] = deque(maxlen=config.sliding_window_size)
+        consecutive_failures = 0
         opened_at = None
         open_count = 0
         total_open_seconds = 0.0
@@ -98,43 +119,28 @@ class CircuitBreakerEvaluator:
         for event in events:
             if state == "open" and (
                 opened_at
-                and (event.timestamp - opened_at).total_seconds() >= recovery_timeout
+                and (event.timestamp - opened_at).total_seconds()
+                >= config.recovery_timeout
             ):
                 state = "half_open"
 
             if event.event_type == "circuit_breaker_opened":
-                # failure_count in context is optional; defaults to 1 per event.
-                # When present (e.g., via enriched journal), seeds the window
-                # with the reported count. Safe because close events clear the window.
-                event_failures = event.context.get("failure_count", 1)
-                for _ in range(min(event_failures, sliding_window_size)):
-                    failure_window.append(True)
+                consecutive_failures = self._replay_open_event(
+                    event, outcome_window, consecutive_failures
+                )
 
-                if state == "closed":
-                    total_calls = len(failure_window)
-                    failure_count = sum(1 for x in failure_window if x)
-
-                    if total_calls < minimum_calls:
-                        continue
-
-                    should_open = False
-
-                    if failure_rate_threshold > 0:
-                        rate = (
-                            (failure_count / total_calls * 100)
-                            if total_calls > 0
-                            else 0
-                        )
-                        if rate >= failure_rate_threshold:
-                            should_open = True
-
-                    if failure_count >= failure_threshold:
-                        should_open = True
-
-                    if should_open:
-                        state = "open"
-                        opened_at = event.timestamp
-                        open_count += 1
+                if state == "closed" and (
+                    evaluate_trip(
+                        consecutive_failures=consecutive_failures,
+                        window_failures=sum(outcome_window),
+                        window_total=len(outcome_window),
+                        config=config,
+                    )
+                    is not None
+                ):
+                    state = "open"
+                    opened_at = event.timestamp
+                    open_count += 1
 
             elif event.event_type == "circuit_breaker_closed":
                 if state in ("open", "half_open") and opened_at:
@@ -142,7 +148,8 @@ class CircuitBreakerEvaluator:
                     total_open_seconds += duration
                     recovery_durations.append(duration)
                 state = "closed"
-                failure_window.clear()
+                outcome_window.clear()
+                consecutive_failures = 0
                 opened_at = None
 
         avg_recovery = (
@@ -156,6 +163,39 @@ class CircuitBreakerEvaluator:
             total_open_seconds=total_open_seconds,
             avg_recovery_seconds=avg_recovery,
         )
+
+    def _replay_open_event(
+        self,
+        event: JournalEntry,
+        outcome_window: deque[int],
+        consecutive_failures: int,
+    ) -> int:
+        """Restore the window the live breaker saw when it opened.
+
+        An enriched event reports the exact denominators, so the window is
+        rebuilt from them. A legacy event carries none, so it contributes a
+        single failure — approximate, and reflected in the confidence score.
+
+        Returns:
+            The consecutive-failure count after this event.
+        """
+        window_failures = event.context.get("window_failure_count")
+        window_total = event.context.get("window_total_calls")
+
+        if window_failures is None or window_total is None:
+            outcome_window.append(FAILURE_OUTCOME)
+            return consecutive_failures + 1
+
+        capacity = outcome_window.maxlen or 0
+        failures = max(min(window_failures, capacity), 0)
+        successes = max(min(window_total, capacity) - failures, 0)
+
+        outcome_window.clear()
+        outcome_window.extend([SUCCESS_OUTCOME] * successes)
+        outcome_window.extend([FAILURE_OUTCOME] * failures)
+
+        reported_consecutive = event.context.get("consecutive_failure_count")
+        return reported_consecutive if reported_consecutive is not None else failures
 
     def _check_pass_criteria(
         self,
@@ -180,8 +220,8 @@ class CircuitBreakerEvaluator:
     def _calculate_confidence(
         self,
         events: list[JournalEntry],
-        baseline_config: dict[str, Any],
-        candidate_config: dict[str, Any],
+        baseline_config: CircuitBreakerConfig,
+        candidate_config: CircuitBreakerConfig,
     ) -> tuple[float, list[str]]:
         """Compute confidence from event sufficiency plus change direction."""
         cb_events = [e for e in events if e.event_type.startswith("circuit_breaker_")]
@@ -196,8 +236,8 @@ class CircuitBreakerEvaluator:
         else:
             base_confidence = 0.95
 
-        baseline_threshold = baseline_config.get("failure_threshold", 5)
-        candidate_threshold = candidate_config.get("failure_threshold", 5)
+        baseline_threshold = baseline_config.failure_threshold
+        candidate_threshold = candidate_config.failure_threshold
 
         if candidate_threshold > baseline_threshold:
             ratio = baseline_threshold / candidate_threshold

@@ -110,38 +110,6 @@ class TestShouldAllowWithFallbackDeprecationContract:
 # =============================================================================
 
 
-class TestLayeredRepositorySlidingWindowBehavior:
-    """LayeredRepositoryBase sliding_window_size 전달 검증 — base.py L59,L76."""
-
-    def test_default_sliding_window_size_passed_to_l1(self):
-        """LayeredRepository 기본 sliding_window_size(100)가 L1에 전달된다."""
-        from baldur.adapters.memory.layered_repository.base import (
-            LayeredRepositoryBase,
-        )
-
-        layered = LayeredRepositoryBase(l2_repo=None)
-        assert layered._l1._sliding_window_size == 100
-
-    def test_custom_sliding_window_size_passed_to_l1(self):
-        """사용자 지정 sliding_window_size가 L1에 전달된다."""
-        from baldur.adapters.memory.layered_repository.base import (
-            LayeredRepositoryBase,
-        )
-
-        layered = LayeredRepositoryBase(l2_repo=None, sliding_window_size=50)
-        assert layered._l1._sliding_window_size == 50
-
-    def test_layered_default_matches_config_default(self):
-        """LayeredRepository 기본값은 CircuitBreakerConfig.sliding_window_size와 동일하다."""
-        from baldur.adapters.memory.layered_repository.base import (
-            LayeredRepositoryBase,
-        )
-
-        config = CircuitBreakerConfig()
-        layered = LayeredRepositoryBase(l2_repo=None)
-        assert layered._l1._sliding_window_size == config.sliding_window_size
-
-
 # =============================================================================
 # __init__.py export 계약 검증 (Contract)
 # =============================================================================

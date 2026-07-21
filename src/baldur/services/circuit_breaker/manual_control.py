@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from baldur.interfaces.repositories import CircuitBreakerStateRepository
 
     from .config import CircuitBreakerConfig
+    from .outcome_window import OutcomeWindow
 
 logger = structlog.get_logger()
 
@@ -86,6 +87,7 @@ class ManualControlMixin:
         # runtime, while type checkers still resolve self.X.
         config: CircuitBreakerConfig
         repository: CircuitBreakerStateRepository
+        _outcome_window: OutcomeWindow
 
         def _emit_event(
             self,
@@ -170,6 +172,7 @@ class ManualControlMixin:
                 # atomic_force_open already wrote state=OPEN; this is a counter-only
                 # cleanup so the next OPEN→HALF_OPEN transition starts fresh.
                 self.repository.reset_half_open_count(service_name)
+                self._outcome_window.clear(service_name)
                 if previous_state == new_state:
                     logger.info(
                         "circuit_breaker.circuit_already_open",
@@ -319,6 +322,7 @@ class ManualControlMixin:
                 # is harmless and keeps the contract explicit at the service
                 # tier.
                 self.repository.reset_half_open_count(service_name)
+                self._outcome_window.clear(service_name)
                 return self._handle_force_close_success(
                     service_name, previous_state, new_state, reason, trigger_replay
                 )
@@ -509,6 +513,7 @@ class ManualControlMixin:
             )
 
             if success:
+                self._outcome_window.clear(service_name)
                 logger.info(
                     "circuit_breaker.reset_circuit_reason",
                     service_name=service_name,

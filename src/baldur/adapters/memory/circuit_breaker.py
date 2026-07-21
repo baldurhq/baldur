@@ -13,7 +13,6 @@ Note: This module has been refactored for better maintainability:
 from __future__ import annotations
 
 import threading
-from collections import deque
 from datetime import datetime, timedelta
 
 import structlog
@@ -52,26 +51,16 @@ class InMemoryCircuitBreakerStateRepository(CircuitBreakerStateRepository):
 
     Thread-safe storage for circuit breaker states in memory.
 
-    When sliding_window_size is specified, record_failure() / record_success()
-    perform Ring Buffer-based Sliding Window counting.
-    failure_count and success_count reflect the count within the most recent N calls.
+    ``failure_count`` and ``success_count`` are plain cumulative counters, so a
+    reset written by ``update_state`` sticks — matching the Redis and SQL
+    repositories. Rate evidence for the failure-rate trigger lives in the
+    circuit breaker service's outcome window, not here.
     """
 
-    def __init__(self, sliding_window_size: int = 100):
+    def __init__(self) -> None:
         self._storage: dict[str, CircuitBreakerStateData] = {}
         self._next_id = 1
         self._lock = threading.RLock()  # RLock for reentrant calls
-
-        # Sliding Window: per-service ring buffer (True=success, False=failure)
-        self._sliding_window_size = sliding_window_size
-        self._call_windows: dict[str, deque[bool]] = {}
-
-        # 490 D1: per-name incremental counters parallel to _call_windows.
-        # Maintains the invariant `_success_cnt[name] + _failure_cnt[name]
-        # == len(_call_windows[name])` so record_success / record_failure can
-        # avoid the O(W) sum() pass that previously inflated lock hold time.
-        self._failure_cnt: dict[str, int] = {}
-        self._success_cnt: dict[str, int] = {}
 
         # 476: marker for the most recent try_acquire_half_open_slot result.
         # Read by LayeredCircuitBreakerStateRepository to emit the stuck-recovery
@@ -89,7 +78,6 @@ class InMemoryCircuitBreakerStateRepository(CircuitBreakerStateRepository):
 
         Extracted from get_or_create() to let lock-holding hot-path callers
         (record_success / record_failure) skip the redundant RLock reentry.
-        Naming follows _get_or_create_window() precedent in this file.
         """
         # 490 D2/D5 + #436: extracted to avoid redundant RLock reentry on the hot path.
         if service_name not in self._storage:
@@ -222,8 +210,6 @@ class InMemoryCircuitBreakerStateRepository(CircuitBreakerStateRepository):
             if entry is None:
                 return False
 
-            self._clear_window(service_name)
-
             updated = CircuitBreakerStateData(
                 id=entry.id,
                 service_name=service_name,
@@ -294,8 +280,6 @@ class InMemoryCircuitBreakerStateRepository(CircuitBreakerStateRepository):
             if entry is None:
                 return False
 
-            self._clear_window(service_name)
-
             updated = CircuitBreakerStateData(
                 id=entry.id,
                 service_name=service_name,
@@ -316,64 +300,23 @@ class InMemoryCircuitBreakerStateRepository(CircuitBreakerStateRepository):
             self._storage[service_name] = updated
             return True
 
-    def _get_or_create_window(self, service_name: str) -> deque[bool]:
-        """Get or create the per-service Sliding Window ring buffer."""
-        if service_name not in self._call_windows:
-            self._call_windows[service_name] = deque(
-                maxlen=self._sliding_window_size,
-            )
-        return self._call_windows[service_name]
-
-    def _clear_window(self, service_name: str) -> None:
-        """Reset the per-service Sliding Window and incremental counters.
-
-        Reset symmetry: zeroing _failure_cnt / _success_cnt alongside
-        the deque clear maintains the invariant
-        ``_success_cnt[n] + _failure_cnt[n] == len(_call_windows[n])`` at every
-        reset site that retains the CB entry. Terminal sites (delete / clear)
-        pop from the dicts entirely.
-        """
-        # 490 D6: keep counters in sync with the window on reset.
-        if service_name in self._call_windows:
-            self._call_windows[service_name].clear()
-            self._failure_cnt[service_name] = 0
-            self._success_cnt[service_name] = 0
-
     def record_failure(self, service_name: str) -> CircuitBreakerStateData:
         """Record a failure and return updated state.
 
-        Records a failure into the Sliding Window ring buffer, then updates
-        state using the in-window failure/success counts.
+        Increments the cumulative failure counter. A preceding
+        ``update_state(failure_count=0)`` therefore sticks, so the counter
+        reads as failures since the last success — the consecutive-failure
+        evidence the count trigger expects, identical to Redis and SQL.
         """
         with self._lock:
             entry = self._get_or_create_unlocked(service_name)
-
-            # 490 D1/D3: eviction-aware incremental update — peek the oldest
-            # slot before append() (deque(maxlen=W) silently evicts on
-            # overflow), decrement that slot's contribution, then append and
-            # increment the new value. O(1) replaces the prior O(W) sum().
-            window = self._get_or_create_window(service_name)
-            if service_name not in self._failure_cnt:
-                self._failure_cnt[service_name] = 0
-                self._success_cnt[service_name] = 0
-            if len(window) == window.maxlen:
-                evicted = window[0]
-                if evicted:
-                    self._success_cnt[service_name] -= 1
-                else:
-                    self._failure_cnt[service_name] -= 1
-            window.append(False)  # False = failure
-            self._failure_cnt[service_name] += 1
-
-            failure_count = self._failure_cnt[service_name]
-            success_count = self._success_cnt[service_name]
 
             updated = CircuitBreakerStateData(
                 id=entry.id,
                 service_name=service_name,
                 state=entry.state,
-                failure_count=failure_count,
-                success_count=success_count,
+                failure_count=entry.failure_count + 1,
+                success_count=entry.success_count,
                 last_failure_at=_now(),
                 opened_at=entry.opened_at,
                 manually_controlled=entry.manually_controlled,
@@ -391,35 +334,19 @@ class InMemoryCircuitBreakerStateRepository(CircuitBreakerStateRepository):
     def record_success(self, service_name: str) -> CircuitBreakerStateData:
         """Record a success and return updated state.
 
-        Records a success into the Sliding Window ring buffer, then updates
-        state using the in-window failure/success counts.
+        Increments the cumulative success counter, leaving the failure counter
+        untouched — resetting it is the service's decision, written through
+        ``update_state``.
         """
         with self._lock:
             entry = self._get_or_create_unlocked(service_name)
-
-            # 490 D1/D3: see record_failure() for eviction-aware update rationale.
-            window = self._get_or_create_window(service_name)
-            if service_name not in self._failure_cnt:
-                self._failure_cnt[service_name] = 0
-                self._success_cnt[service_name] = 0
-            if len(window) == window.maxlen:
-                evicted = window[0]
-                if evicted:
-                    self._success_cnt[service_name] -= 1
-                else:
-                    self._failure_cnt[service_name] -= 1
-            window.append(True)  # True = success
-            self._success_cnt[service_name] += 1
-
-            failure_count = self._failure_cnt[service_name]
-            success_count = self._success_cnt[service_name]
 
             updated = CircuitBreakerStateData(
                 id=entry.id,
                 service_name=service_name,
                 state=entry.state,
-                failure_count=failure_count,
-                success_count=success_count,
+                failure_count=entry.failure_count,
+                success_count=entry.success_count + 1,
                 last_failure_at=entry.last_failure_at,
                 opened_at=entry.opened_at,
                 manually_controlled=entry.manually_controlled,
@@ -441,47 +368,29 @@ class InMemoryCircuitBreakerStateRepository(CircuitBreakerStateRepository):
     ) -> CircuitBreakerCloseAttempt:
         """Atomic record-success + threshold-check + close transition.
 
-        Whole sequence executes under `self._lock`: eviction-aware window
-        increment, threshold check, and (if crossed from HALF_OPEN) the
-        close transition with `_clear_window` are one critical section.
-        Closes the TOCTOU race where multiple stale-view callers each pass
-        the threshold check and emit duplicate `CIRCUIT_BREAKER_CLOSED`
-        events for the same logical recovery.
+        Whole sequence executes under `self._lock`: success increment,
+        threshold check, and (if crossed from HALF_OPEN) the close transition
+        are one critical section. Closes the TOCTOU race where multiple
+        stale-view callers each pass the threshold check and emit duplicate
+        `CIRCUIT_BREAKER_CLOSED` events for the same logical recovery.
         """
         half_open_state = CircuitBreakerStateEnum.HALF_OPEN.value
         closed_state = CircuitBreakerStateEnum.CLOSED.value
         with self._lock:
             entry = self._get_or_create_unlocked(service_name)
 
-            # 490 D1/D3: eviction-aware incremental update — see record_failure().
-            window = self._get_or_create_window(service_name)
-            if service_name not in self._failure_cnt:
-                self._failure_cnt[service_name] = 0
-                self._success_cnt[service_name] = 0
-            if len(window) == window.maxlen:
-                evicted = window[0]
-                if evicted:
-                    self._success_cnt[service_name] -= 1
-                else:
-                    self._failure_cnt[service_name] -= 1
-            window.append(True)
-            self._success_cnt[service_name] += 1
-
-            failure_count = self._failure_cnt[service_name]
-            success_count = self._success_cnt[service_name]
+            failure_count = entry.failure_count
+            success_count = entry.success_count + 1
 
             should_close = (
                 entry.state == half_open_state and success_count >= success_threshold
             )
 
             if should_close:
-                # 497 D1 + G1 + G2: close transition and window clear must commit
-                # in the SAME lock acquire as the success-increment so the
-                # window-derived invariant `_success_cnt[n] + _failure_cnt[n]
-                # == len(_call_windows[n])` (490 D6) holds across CLOSED, and
-                # no subsequent record_success caller observes a stale
-                # half_open + above-threshold success_count.
-                self._clear_window(service_name)
+                # 497 D1 + G1 + G2: the close transition must commit in the SAME
+                # lock acquire as the success-increment so no subsequent
+                # record_success caller observes a stale half_open plus an
+                # above-threshold success_count.
                 updated = CircuitBreakerStateData(
                     id=entry.id,
                     service_name=service_name,
@@ -528,9 +437,9 @@ class InMemoryCircuitBreakerStateRepository(CircuitBreakerStateRepository):
     ) -> CircuitBreakerOpenAttempt:
         """Atomic record-failure + HALF_OPEN -> OPEN re-open transition.
 
-        Whole sequence executes under `self._lock`: state read, and (if the
-        state is HALF_OPEN) the re-open transition with `_clear_window` are one
-        critical section. Closes the TOCTOU race where multiple stale-view
+        Whole sequence executes under `self._lock`: state read and (if the
+        state is HALF_OPEN) the re-open transition are one critical section.
+        Closes the TOCTOU race where multiple stale-view
         callers each read HALF_OPEN and emit duplicate `CIRCUIT_BREAKER_OPENED`
         events for the same logical re-open. Symmetric mirror of
         `record_success_with_close_check`; a single HALF_OPEN failure re-opens
@@ -547,7 +456,6 @@ class InMemoryCircuitBreakerStateRepository(CircuitBreakerStateRepository):
             # HALF_OPEN failure: re-open and clear the window/counters in the
             # SAME lock acquire as the state read so no concurrent caller
             # observes a stale half_open and emits a duplicate OPEN.
-            self._clear_window(service_name)
             updated = CircuitBreakerStateData(
                 id=entry.id,
                 service_name=service_name,
@@ -579,8 +487,6 @@ class InMemoryCircuitBreakerStateRepository(CircuitBreakerStateRepository):
             entry = self._storage.get(service_name)
             if entry is None:
                 return False
-
-            self._clear_window(service_name)
 
             updated = CircuitBreakerStateData(
                 id=entry.id,
@@ -649,10 +555,6 @@ class InMemoryCircuitBreakerStateRepository(CircuitBreakerStateRepository):
             entry = self.get_or_create(service_name)
             previous_state = entry.state
 
-            # 490 D6: DTO counters reset to 0 — sync the sliding window and
-            # incremental counters to keep the window-derived invariant.
-            self._clear_window(service_name)
-
             updated = CircuitBreakerStateData(
                 id=entry.id,
                 service_name=service_name,
@@ -689,7 +591,6 @@ class InMemoryCircuitBreakerStateRepository(CircuitBreakerStateRepository):
 
             # 490 D6: DTO counters reset to 0 — sync the sliding window and
             # incremental counters to keep the window-derived invariant.
-            self._clear_window(service_name)
 
             updated = CircuitBreakerStateData(
                 id=entry.id,
@@ -735,9 +636,6 @@ class InMemoryCircuitBreakerStateRepository(CircuitBreakerStateRepository):
                     else float("inf")
                 )
                 if window_age > stuck_timeout_seconds:
-                    # 490 D6: DTO success_count reset to 0 — clear the
-                    # window so window-derived invariant matches the DTO.
-                    self._clear_window(service_name)
                     self._storage[service_name] = CircuitBreakerStateData(
                         id=entry.id,
                         service_name=service_name,
@@ -762,10 +660,6 @@ class InMemoryCircuitBreakerStateRepository(CircuitBreakerStateRepository):
                 return (False, half_open_state, half_open_state)
 
             if current_state == open_state:
-                # 490 D6: DTO success_count reset to 0 on OPEN→HALF_OPEN
-                # transition — clear the window so the next record_*'s
-                # incremental counters start from a clean slate.
-                self._clear_window(service_name)
                 self._storage[service_name] = CircuitBreakerStateData(
                     id=entry.id,
                     service_name=service_name,
@@ -866,13 +760,6 @@ class InMemoryCircuitBreakerStateRepository(CircuitBreakerStateRepository):
         with self._lock:
             if service_name in self._storage:
                 del self._storage[service_name]
-                # 490 D6 (terminal): pop from parallel dicts entirely.
-                # The pre-existing `_clear_window(name)` call only emptied
-                # the deque, leaving an empty deque jammed in
-                # `_call_windows[name]` — fixed here as a drive-by.
-                self._call_windows.pop(service_name, None)
-                self._failure_cnt.pop(service_name, None)
-                self._success_cnt.pop(service_name, None)
                 return True
             return False
 
@@ -884,10 +771,6 @@ class InMemoryCircuitBreakerStateRepository(CircuitBreakerStateRepository):
         """Clear all entries (for testing)."""
         with self._lock:
             self._storage.clear()
-            self._call_windows.clear()
-            # 490 D6 (terminal): clear parallel counter dicts.
-            self._failure_cnt.clear()
-            self._success_cnt.clear()
             self._next_id = 1
 
 

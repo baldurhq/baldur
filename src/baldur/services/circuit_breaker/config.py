@@ -45,12 +45,13 @@ class CircuitBreakerConfig:
     recovery_timeout: int = 60  # seconds
     success_threshold: int = 2
 
-    # Minimum calls before CB can open (prevents false positives with low traffic)
-    # If total calls < minimum_calls, CB will not open even if failure_threshold is met
-    minimum_calls: int = 10  # At least 10 calls before CB can trigger
+    # Calls the outcome window must hold before the rate trigger is evaluated
+    # (prevents false positives with low traffic). Gates the rate trigger only —
+    # the consecutive-failure count trigger is traffic-independent.
+    minimum_calls: int = 10
 
-    # Sliding window for rate-based threshold (used when failure_rate_threshold > 0)
-    sliding_window_size: int = 100  # Number of calls to track
+    # Outcome window for the rate-based trigger (used when failure_rate_threshold > 0)
+    sliding_window_size: int = 100  # Recent CLOSED calls the rate is computed over
     failure_rate_threshold: float = 50.0  # percentage — CB Opens when error rate exceeds 50% (OR'd with count-based)
 
     # Fallback strategy when CB is open
@@ -179,9 +180,9 @@ class CircuitBreakerConfig:
             failure_threshold=cb_settings.failure_threshold,
             recovery_timeout=cb_settings.recovery_timeout,
             success_threshold=cb_settings.success_threshold,
-            minimum_calls=getattr(cb_settings, "minimum_calls", 10),
-            sliding_window_size=getattr(cb_settings, "sliding_window_size", 100),
-            failure_rate_threshold=getattr(cb_settings, "failure_rate_threshold", 50.0),
+            minimum_calls=cb_settings.minimum_calls,
+            sliding_window_size=cb_settings.sliding_window_size,
+            failure_rate_threshold=cb_settings.failure_rate_threshold,
             fallback_strategy=getattr(cb_settings, "fallback_strategy", "cache"),
             fallback_cache_ttl_seconds=getattr(
                 cb_settings, "fallback_cache_ttl_seconds", 300

@@ -20,6 +20,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from baldur.interfaces.event_journal import JournalEntry
+from baldur.services.circuit_breaker.config import CircuitBreakerConfig
 from baldur.services.config_shadow.evaluators.circuit_breaker import (
     CircuitBreakerEvaluator,
 )
@@ -84,7 +85,9 @@ class TestCircuitBreakerEvaluatorContract:
             _make_entry("circuit_breaker_opened", datetime(2026, 1, 1, tzinfo=UTC))
             for _ in range(4)
         ]
-        conf, _ = evaluator._calculate_confidence(events, {}, {})
+        conf, _ = evaluator._calculate_confidence(
+            events, CircuitBreakerConfig(), CircuitBreakerConfig()
+        )
         assert conf == pytest.approx(0.2)
 
     def test_confidence_5_to_19_events_is_0_5(self):
@@ -94,7 +97,9 @@ class TestCircuitBreakerEvaluatorContract:
             _make_entry("circuit_breaker_opened", datetime(2026, 1, 1, tzinfo=UTC))
             for _ in range(10)
         ]
-        conf, _ = evaluator._calculate_confidence(events, {}, {})
+        conf, _ = evaluator._calculate_confidence(
+            events, CircuitBreakerConfig(), CircuitBreakerConfig()
+        )
         assert conf == pytest.approx(0.5)
 
     def test_confidence_20_to_49_events_is_0_8(self):
@@ -104,7 +109,9 @@ class TestCircuitBreakerEvaluatorContract:
             _make_entry("circuit_breaker_opened", datetime(2026, 1, 1, tzinfo=UTC))
             for _ in range(30)
         ]
-        conf, _ = evaluator._calculate_confidence(events, {}, {})
+        conf, _ = evaluator._calculate_confidence(
+            events, CircuitBreakerConfig(), CircuitBreakerConfig()
+        )
         assert conf == pytest.approx(0.8)
 
     def test_confidence_50_plus_events_is_0_95(self):
@@ -114,7 +121,9 @@ class TestCircuitBreakerEvaluatorContract:
             _make_entry("circuit_breaker_opened", datetime(2026, 1, 1, tzinfo=UTC))
             for _ in range(60)
         ]
-        conf, _ = evaluator._calculate_confidence(events, {}, {})
+        conf, _ = evaluator._calculate_confidence(
+            events, CircuitBreakerConfig(), CircuitBreakerConfig()
+        )
         assert conf == pytest.approx(0.95)
 
     def test_pass_criteria_open_count_ratio_threshold_is_2x(self):
@@ -142,7 +151,7 @@ class TestCircuitBreakerSimulationBehavior:
     def test_empty_events_returns_zero_opens(self):
         """빈 이벤트 리스트: open_count=0."""
         evaluator = CircuitBreakerEvaluator()
-        result = evaluator._simulate([], {"failure_threshold": 5})
+        result = evaluator._simulate([], CircuitBreakerConfig(failure_threshold=5))
         assert result.open_count == 0
         assert result.total_open_seconds == 0.0
         assert result.avg_recovery_seconds == 0.0
@@ -155,16 +164,22 @@ class TestCircuitBreakerSimulationBehavior:
             _make_entry("error_budget_critical", t),
             _make_entry("some_other_event", t + timedelta(seconds=10)),
         ]
-        result = evaluator._simulate(events, {"failure_threshold": 1})
+        result = evaluator._simulate(events, CircuitBreakerConfig(failure_threshold=1))
         assert result.open_count == 0
 
     def test_failure_threshold_triggers_open(self):
         """failure_threshold 도달 시 CB가 open된다."""
         evaluator = CircuitBreakerEvaluator()
         t = datetime(2026, 1, 1, tzinfo=UTC)
-        config = {"failure_threshold": 3, "minimum_calls": 1, "recovery_timeout": 60}
+        # rate trigger off so the count trigger alone decides the outcome
+        config = CircuitBreakerConfig(
+            failure_threshold=3,
+            minimum_calls=1,
+            recovery_timeout=60,
+            failure_rate_threshold=0,
+        )
 
-        # 3번의 failure 이벤트 → CB open
+        # 3번의 연속 failure 이벤트 → CB open
         events = []
         for i in range(3):
             events.append(
@@ -174,15 +189,20 @@ class TestCircuitBreakerSimulationBehavior:
         result = evaluator._simulate(events, config)
         assert result.open_count == 1
 
-    def test_minimum_calls_prevents_premature_open(self):
-        """minimum_calls 미달 시 CB가 열리지 않는다."""
+    def test_minimum_calls_prevents_premature_rate_open(self):
+        """minimum_calls 미달 시 rate 트리거가 평가되지 않는다.
+
+        minimum_calls는 rate 트리거만 게이팅한다. count 트리거는 트래픽과
+        무관하므로 여기서는 failure_threshold를 크게 두어 배제한다.
+        """
         evaluator = CircuitBreakerEvaluator()
         t = datetime(2026, 1, 1, tzinfo=UTC)
-        config = {
-            "failure_threshold": 1,
-            "minimum_calls": 10,
-            "recovery_timeout": 60,
-        }
+        config = CircuitBreakerConfig(
+            failure_threshold=100,
+            failure_rate_threshold=50.0,
+            minimum_calls=10,
+            recovery_timeout=60,
+        )
         events = [_make_entry("circuit_breaker_opened", t)]
         result = evaluator._simulate(events, config)
         assert result.open_count == 0
@@ -191,7 +211,9 @@ class TestCircuitBreakerSimulationBehavior:
         """open->close 사이클 시 recovery duration이 계산된다."""
         evaluator = CircuitBreakerEvaluator()
         t = datetime(2026, 1, 1, tzinfo=UTC)
-        config = {"failure_threshold": 1, "minimum_calls": 1, "recovery_timeout": 30}
+        config = CircuitBreakerConfig(
+            failure_threshold=1, minimum_calls=1, recovery_timeout=30
+        )
 
         events = [
             _make_entry("circuit_breaker_opened", t),
@@ -206,7 +228,9 @@ class TestCircuitBreakerSimulationBehavior:
         """여러 open-close 사이클의 평균 recovery를 계산한다."""
         evaluator = CircuitBreakerEvaluator()
         t = datetime(2026, 1, 1, tzinfo=UTC)
-        config = {"failure_threshold": 1, "minimum_calls": 1, "recovery_timeout": 10}
+        config = CircuitBreakerConfig(
+            failure_threshold=1, minimum_calls=1, recovery_timeout=10
+        )
 
         events = [
             _make_entry("circuit_breaker_opened", t),
@@ -223,13 +247,13 @@ class TestCircuitBreakerSimulationBehavior:
         """failure_rate_threshold 설정 시 비율 기반으로 CB가 열린다."""
         evaluator = CircuitBreakerEvaluator()
         t = datetime(2026, 1, 1, tzinfo=UTC)
-        config = {
-            "failure_threshold": 100,
-            "failure_rate_threshold": 50,
-            "minimum_calls": 2,
-            "recovery_timeout": 60,
-            "sliding_window_size": 10,
-        }
+        config = CircuitBreakerConfig(
+            failure_threshold=100,
+            failure_rate_threshold=50.0,
+            minimum_calls=2,
+            recovery_timeout=60,
+            sliding_window_size=10,
+        )
 
         # 2개 failure 이벤트 → 100% failure rate > 50%
         events = [
@@ -239,66 +263,82 @@ class TestCircuitBreakerSimulationBehavior:
         result = evaluator._simulate(events, config)
         assert result.open_count == 1
 
-    def test_context_failure_count_populates_window(self):
-        """context.failure_count로 failure window를 채운다."""
+    def test_enriched_event_seeds_window_from_reported_denominators(self):
+        """enriched 이벤트의 window_* 키로 replay window를 복원한다."""
         evaluator = CircuitBreakerEvaluator()
         t = datetime(2026, 1, 1, tzinfo=UTC)
-        config = {
-            "failure_threshold": 5,
-            "minimum_calls": 1,
-            "recovery_timeout": 60,
-            "sliding_window_size": 100,
-        }
+        config = CircuitBreakerConfig(
+            failure_threshold=100,
+            failure_rate_threshold=50.0,
+            minimum_calls=10,
+            recovery_timeout=60,
+            sliding_window_size=100,
+        )
 
-        # failure_count=5 → 5개 도달 → open
+        # 20건 중 12건 실패 = 60% ≥ 50% → open (count 트리거는 배제)
         events = [
             _make_entry(
                 "circuit_breaker_opened",
                 t,
-                context={"failure_count": 5},
+                context={
+                    "window_failure_count": 12,
+                    "window_total_calls": 20,
+                    "consecutive_failure_count": 3,
+                },
             ),
         ]
         result = evaluator._simulate(events, config)
         assert result.open_count == 1
 
-    def test_context_failure_count_default_is_1(self):
-        """context에 failure_count가 없으면 1로 처리."""
+    def test_enriched_event_below_rate_does_not_open(self):
+        """enriched denominator가 threshold 미만이면 열리지 않는다."""
         evaluator = CircuitBreakerEvaluator()
         t = datetime(2026, 1, 1, tzinfo=UTC)
-        config = {
-            "failure_threshold": 1,
-            "minimum_calls": 1,
-            "recovery_timeout": 60,
-        }
+        config = CircuitBreakerConfig(
+            failure_threshold=100,
+            failure_rate_threshold=50.0,
+            minimum_calls=10,
+            recovery_timeout=60,
+            sliding_window_size=100,
+        )
+
+        # 20건 중 6건 실패 = 30% < 50%
+        events = [
+            _make_entry(
+                "circuit_breaker_opened",
+                t,
+                context={
+                    "window_failure_count": 6,
+                    "window_total_calls": 20,
+                    "consecutive_failure_count": 2,
+                },
+            ),
+        ]
+        result = evaluator._simulate(events, config)
+        assert result.open_count == 0
+
+    def test_legacy_event_without_window_keys_counts_one_failure(self):
+        """enrichment 이전 이벤트는 실패 1건으로 근사 replay된다."""
+        evaluator = CircuitBreakerEvaluator()
+        t = datetime(2026, 1, 1, tzinfo=UTC)
+        config = CircuitBreakerConfig(
+            failure_threshold=1,
+            minimum_calls=1,
+            recovery_timeout=60,
+            failure_rate_threshold=0,
+        )
 
         events = [_make_entry("circuit_breaker_opened", t)]
         result = evaluator._simulate(events, config)
         assert result.open_count == 1
 
-    def test_sliding_window_size_limits_failure_window(self):
-        """sliding_window_size 초과 시 오래된 failure가 밀려난다."""
-        evaluator = CircuitBreakerEvaluator()
-        t = datetime(2026, 1, 1, tzinfo=UTC)
-        config = {
-            "failure_threshold": 4,
-            "minimum_calls": 1,
-            "recovery_timeout": 60,
-            "sliding_window_size": 3,
-        }
-
-        # 4개 failure지만 window=3이므로 최대 3개만 유지 → threshold(4)에 미달
-        events = [
-            _make_entry("circuit_breaker_opened", t + timedelta(seconds=i))
-            for i in range(4)
-        ]
-        result = evaluator._simulate(events, config)
-        assert result.open_count == 0
-
     def test_half_open_transition_after_recovery_timeout(self):
         """recovery_timeout 경과 후 open→half_open으로 전이한다."""
         evaluator = CircuitBreakerEvaluator()
         t = datetime(2026, 1, 1, tzinfo=UTC)
-        config = {"failure_threshold": 1, "minimum_calls": 1, "recovery_timeout": 30}
+        config = CircuitBreakerConfig(
+            failure_threshold=1, minimum_calls=1, recovery_timeout=30
+        )
 
         events = [
             _make_entry("circuit_breaker_opened", t),
@@ -414,8 +454,8 @@ class TestCircuitBreakerConfidenceWarningBehavior:
             _make_entry("circuit_breaker_opened", datetime(2026, 1, 1, tzinfo=UTC))
             for _ in range(25)
         ]
-        baseline_config = {"failure_threshold": 5}
-        candidate_config = {"failure_threshold": 10}
+        baseline_config = CircuitBreakerConfig(failure_threshold=5)
+        candidate_config = CircuitBreakerConfig(failure_threshold=10)
 
         conf, warnings = evaluator._calculate_confidence(
             events, baseline_config, candidate_config
@@ -432,7 +472,9 @@ class TestCircuitBreakerConfidenceWarningBehavior:
             for _ in range(25)
         ]
         _, warnings = evaluator._calculate_confidence(
-            events, {"failure_threshold": 5}, {"failure_threshold": 5}
+            events,
+            CircuitBreakerConfig(failure_threshold=5),
+            CircuitBreakerConfig(failure_threshold=5),
         )
         assert len(warnings) == 0
 
@@ -443,7 +485,9 @@ class TestCircuitBreakerConfidenceWarningBehavior:
             _make_entry("circuit_breaker_opened", datetime(2026, 1, 1, tzinfo=UTC))
             for _ in range(100)
         ]
-        conf, _ = evaluator._calculate_confidence(events, {}, {})
+        conf, _ = evaluator._calculate_confidence(
+            events, CircuitBreakerConfig(), CircuitBreakerConfig()
+        )
         assert conf == pytest.approx(0.95)
 
 

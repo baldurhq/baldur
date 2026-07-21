@@ -39,26 +39,6 @@ class _CountingRLock:
         self.release()
 
 
-def _baseline_sum_failures(
-    repo: InMemoryCircuitBreakerStateRepository, name: str
-) -> int:
-    """Reference O(W) sum-based failure count (pre-490 implementation)."""
-    window = repo._call_windows.get(name)
-    if window is None:
-        return 0
-    return sum(1 for v in window if not v)
-
-
-def _baseline_sum_successes(
-    repo: InMemoryCircuitBreakerStateRepository, name: str
-) -> int:
-    """Reference O(W) sum-based success count (pre-490 implementation)."""
-    window = repo._call_windows.get(name)
-    if window is None:
-        return 0
-    return sum(1 for v in window if v)
-
-
 class TestInMemoryCircuitBreakerStateRepository:
     """Tests for InMemoryCircuitBreakerStateRepository."""
 
@@ -215,93 +195,60 @@ class TestInMemoryCircuitBreakerStateRepository:
 # =============================================================================
 
 
-class TestRecordIncrementalCounterBehavior:
-    """490 D1/D3 — record_success / record_failure produce identical counts vs.
-    the pre-fix O(W) sum() reference, including across deque eviction.
+class TestRecordCounterBehavior:
+    """719 D3 — record_failure / record_success keep plain cumulative counters.
+
+    The ring-buffer window that used to derive these counts moved to the
+    circuit breaker service. What is left here must behave like the Redis and
+    SQL repositories: increments accumulate, and a reset written through
+    update_state sticks.
     """
 
-    @pytest.mark.parametrize("window_size", [10, 100, 500])
-    def test_record_failure_count_matches_sum_reference_below_maxlen(self, window_size):
-        # Given: a fresh repo with the parametrized window size.
-        repo = InMemoryCircuitBreakerStateRepository(sliding_window_size=window_size)
+    def test_record_failure_increments_cumulative_failure_count(self):
+        repo = InMemoryCircuitBreakerStateRepository()
 
-        # When: fewer record_failure() calls than the window can hold.
-        n = window_size // 2
-        for _ in range(n):
-            repo.record_failure("svc")
+        for expected in range(1, 6):
+            assert repo.record_failure("svc").failure_count == expected
 
-        # Then: incremental counter matches the O(W) sum() reference.
-        assert repo._failure_cnt["svc"] == _baseline_sum_failures(repo, "svc")
-        assert repo._success_cnt["svc"] == _baseline_sum_successes(repo, "svc")
-        assert repo._failure_cnt["svc"] == n
-        assert len(repo._call_windows["svc"]) == n
+    def test_record_success_increments_cumulative_success_count(self):
+        repo = InMemoryCircuitBreakerStateRepository()
 
-    @pytest.mark.parametrize("window_size", [10, 100, 500])
-    def test_record_failure_count_matches_sum_reference_at_maxlen(self, window_size):
-        repo = InMemoryCircuitBreakerStateRepository(sliding_window_size=window_size)
+        for expected in range(1, 6):
+            assert repo.record_success("svc").success_count == expected
 
-        # When: exactly window-size record_failure() calls (window now full).
-        for _ in range(window_size):
-            repo.record_failure("svc")
+    def test_record_failure_leaves_success_count_untouched(self):
+        repo = InMemoryCircuitBreakerStateRepository()
+        repo.record_success("svc")
+        repo.record_success("svc")
 
-        # Then: window is full and counter still matches sum reference.
-        assert len(repo._call_windows["svc"]) == window_size
-        assert repo._failure_cnt["svc"] == _baseline_sum_failures(repo, "svc")
-        assert repo._failure_cnt["svc"] == window_size
+        state = repo.record_failure("svc")
 
-    @pytest.mark.parametrize("window_size", [10, 100, 500])
-    def test_record_failure_count_matches_sum_reference_past_maxlen(self, window_size):
-        repo = InMemoryCircuitBreakerStateRepository(sliding_window_size=window_size)
+        assert state.failure_count == 1
+        assert state.success_count == 2
 
-        # When: 2x window-size mixed failure→success calls (forces eviction
-        # of False slots by True appends — counter MUST decrement on evict).
-        for _ in range(window_size):
-            repo.record_failure("svc")
-        for _ in range(window_size):
-            repo.record_success("svc")
+    def test_update_state_reset_sticks_across_next_failure(self):
+        """Backend reset parity: the reset is not undone by the next failure.
 
-        # Then: window saturated at maxlen, only successes remain in window.
-        assert len(repo._call_windows["svc"]) == window_size
-        assert repo._failure_cnt["svc"] == _baseline_sum_failures(repo, "svc")
-        assert repo._success_cnt["svc"] == _baseline_sum_successes(repo, "svc")
-        assert repo._failure_cnt["svc"] == 0
-        assert repo._success_cnt["svc"] == window_size
-
-    @pytest.mark.parametrize("window_size", [10, 100, 500])
-    def test_record_mixed_randomized_trace_matches_sum_reference(self, window_size):
-        import random as _random
-
-        rng = _random.Random(42)  # deterministic
-        repo = InMemoryCircuitBreakerStateRepository(sliding_window_size=window_size)
-
-        # When: 4× window-size random success/failure calls — eviction fires
-        # heavily; both counter directions must stay in lockstep with sum().
-        for _ in range(window_size * 4):
-            if rng.random() < 0.5:
-                repo.record_success("svc")
-            else:
-                repo.record_failure("svc")
-
-        # Then: invariant holds — counters == window-derived sums, sum equals len.
-        assert repo._failure_cnt["svc"] == _baseline_sum_failures(repo, "svc")
-        assert repo._success_cnt["svc"] == _baseline_sum_successes(repo, "svc")
-        assert repo._success_cnt["svc"] + repo._failure_cnt["svc"] == len(
-            repo._call_windows["svc"]
-        )
-
-    def test_record_success_returns_state_with_window_derived_counts(self):
-        # Given: a repo where one failure has already landed.
-        repo = InMemoryCircuitBreakerStateRepository(sliding_window_size=10)
+        Pre-719 the window recomputed the count from its ring, so a
+        service-issued update_state(failure_count=0) was silently resurrected.
+        """
+        repo = InMemoryCircuitBreakerStateRepository()
+        repo.record_failure("svc")
+        repo.record_failure("svc")
         repo.record_failure("svc")
 
-        # When: we record a success.
-        state = repo.record_success("svc")
+        repo.update_state(service_name="svc", state="closed", failure_count=0)
 
-        # Then: returned DTO carries the window-derived counts (1 of each).
-        assert state.failure_count == 1
-        assert state.success_count == 1
-        assert state.failure_count == repo._failure_cnt["svc"]
-        assert state.success_count == repo._success_cnt["svc"]
+        assert repo.record_failure("svc").failure_count == 1
+
+    def test_counts_are_isolated_per_service_name(self):
+        repo = InMemoryCircuitBreakerStateRepository()
+        repo.record_failure("a")
+        repo.record_failure("a")
+        repo.record_failure("b")
+
+        assert repo.get_by_service_name("a").failure_count == 2
+        assert repo.get_by_service_name("b").failure_count == 1
 
 
 class TestGetOrCreateUnlockedContract:
@@ -354,19 +301,16 @@ class TestGetOrCreateUnlockedContract:
         assert counting.acquire_calls == 1
 
 
-class TestRecordIncrementalCounterThreadSafety:
-    """490 D3 — counter consistency under multi-thread contention.
+class TestRecordCounterThreadSafety:
+    """719 D3 — concurrent record calls lose no counter updates.
 
-    Test Assessment: parametrize n_threads ∈ {10, 50, 100} × ops_per_thread = 100.
+    The counters are a read-modify-write under the repository RLock, so total
+    recorded calls must equal the number of calls made.
     """
 
-    @pytest.mark.parametrize("n_threads", [10, 50, 100])
-    @pytest.mark.parametrize("window_size", [10, 100, 500])
-    def test_concurrent_record_calls_preserve_counter_invariant(
-        self, n_threads, window_size
-    ):
-        # Given: a repo with the parametrized sliding window size.
-        repo = InMemoryCircuitBreakerStateRepository(sliding_window_size=window_size)
+    @pytest.mark.parametrize("n_threads", [10, 50])
+    def test_concurrent_record_calls_lose_no_updates(self, n_threads):
+        repo = InMemoryCircuitBreakerStateRepository()
         ops_per_thread = 100
 
         def worker(seed: int) -> None:
@@ -377,214 +321,105 @@ class TestRecordIncrementalCounterThreadSafety:
                 else:
                     repo.record_failure("svc")
 
-        # When: N concurrent workers contend for the same name.
         threads = [threading.Thread(target=worker, args=(i,)) for i in range(n_threads)]
         for t in threads:
             t.start()
         for t in threads:
             t.join()
 
-        # Then: incremental counters match the O(W) sum reference exactly,
-        # AND together they equal len(window) (window-derived invariant).
-        assert repo._failure_cnt["svc"] == _baseline_sum_failures(repo, "svc")
-        assert repo._success_cnt["svc"] == _baseline_sum_successes(repo, "svc")
-        assert repo._success_cnt["svc"] + repo._failure_cnt["svc"] == len(
-            repo._call_windows["svc"]
-        )
-        # Also: window can never exceed maxlen — sanity boundary.
-        assert len(repo._call_windows["svc"]) <= window_size
+        state = repo.get_by_service_name("svc")
+        assert state.failure_count + state.success_count == n_threads * ops_per_thread
 
 
-class TestD6ResetSymmetryBehavior:
-    """490 D6 — every reset-site path zeroes _failure_cnt/_success_cnt AND
-    clears the sliding window, preserving the invariant
-    _success_cnt[n] + _failure_cnt[n] == len(_call_windows[n]).
-    """
+class TestResetSiteCounterBehavior:
+    """719 D3 — every reset-site path zeroes the DTO counters it advertises."""
 
-    def _seed_with_calls(
-        self, repo: InMemoryCircuitBreakerStateRepository, name: str
-    ) -> None:
-        """Pre-load the window with mixed entries so the reset is observable."""
+    def _seed(self, repo: InMemoryCircuitBreakerStateRepository, name: str) -> None:
         for _ in range(3):
             repo.record_failure(name)
         for _ in range(2):
             repo.record_success(name)
 
-    def _assert_reset_invariant(
-        self, repo: InMemoryCircuitBreakerStateRepository, name: str
-    ) -> None:
-        """Counters zeroed, window emptied, dict keys retained."""
-        assert repo._failure_cnt.get(name, 0) == 0
-        assert repo._success_cnt.get(name, 0) == 0
-        # Reset sites must keep the dict key (they preserve the CB entry).
-        assert name in repo._call_windows
-        assert len(repo._call_windows[name]) == 0
-        # Window-derived invariant.
-        assert repo._success_cnt[name] + repo._failure_cnt[name] == len(
-            repo._call_windows[name]
-        )
-
-    def test_reset_counts_zeroes_counters_and_clears_window(self):
+    def test_reset_counts_zeroes_both_counters(self):
         repo = InMemoryCircuitBreakerStateRepository()
-        self._seed_with_calls(repo, "svc")
+        self._seed(repo, "svc")
 
-        repo.reset_counts("svc")
-
-        self._assert_reset_invariant(repo, "svc")
-
-    def test_reset_counts_clears_opened_at(self):
-        # 498 D9: reset_counts also clears opened_at so the rebuilt DTO does
-        # not carry a stale OPEN-era timestamp into the CLOSED-branch
-        # writeback driven by Layered.record_success_with_close_check.
-        repo = InMemoryCircuitBreakerStateRepository()
-        opened_at = datetime.now(UTC) - timedelta(minutes=15)
-        repo.get_or_create("svc")
-        repo.update_state(
-            service_name="svc",
-            state=CircuitBreakerStateEnum.OPEN.value,
-            opened_at=opened_at,
-        )
-        self._seed_with_calls(repo, "svc")
-        # Pre-condition: opened_at is non-None.
-        assert repo.get_by_service_name("svc").opened_at == opened_at
-
-        repo.reset_counts("svc")
+        assert repo.reset_counts("svc") is True
 
         state = repo.get_by_service_name("svc")
-        assert state is not None
-        assert state.opened_at is None
+        assert state.failure_count == 0
+        assert state.success_count == 0
 
-    def test_clear_manual_control_zeroes_counters_and_clears_window(self):
+    def test_reset_zeroes_both_counters_and_closes(self):
         repo = InMemoryCircuitBreakerStateRepository()
-        repo.set_manual_control(
-            service_name="svc",
-            state=CircuitBreakerStateEnum.OPEN.value,
-            controlled_by_id=1,
-            reason="test",
-        )
-        self._seed_with_calls(repo, "svc")
+        self._seed(repo, "svc")
 
-        repo.clear_manual_control("svc")
+        assert repo.reset("svc") is True
 
-        self._assert_reset_invariant(repo, "svc")
+        state = repo.get_by_service_name("svc")
+        assert state.failure_count == 0
+        assert state.success_count == 0
+        assert state.state == CircuitBreakerStateEnum.CLOSED.value
 
-    def test_reset_zeroes_counters_and_clears_window(self):
+    def test_atomic_force_close_zeroes_both_counters(self):
         repo = InMemoryCircuitBreakerStateRepository()
-        self._seed_with_calls(repo, "svc")
+        self._seed(repo, "svc")
 
-        repo.reset("svc")
+        repo.atomic_force_close("svc", reason="recovered")
 
-        self._assert_reset_invariant(repo, "svc")
+        state = repo.get_by_service_name("svc")
+        assert state.failure_count == 0
+        assert state.success_count == 0
 
-    def test_atomic_force_close_zeroes_counters_and_clears_window(self):
+    def test_atomic_reset_zeroes_both_counters(self):
         repo = InMemoryCircuitBreakerStateRepository()
-        self._seed_with_calls(repo, "svc")
+        self._seed(repo, "svc")
 
-        ok, _, _ = repo.atomic_force_close("svc", reason="test", controlled_by_id=1)
+        repo.atomic_reset("svc", reason="operator reset")
 
-        assert ok is True
-        self._assert_reset_invariant(repo, "svc")
+        state = repo.get_by_service_name("svc")
+        assert state.failure_count == 0
+        assert state.success_count == 0
 
-    def test_atomic_reset_zeroes_counters_and_clears_window(self):
+    def test_clear_manual_control_preserves_counters(self):
+        """Only the manual-control flag is cleared; counters are the service's."""
         repo = InMemoryCircuitBreakerStateRepository()
-        self._seed_with_calls(repo, "svc")
+        self._seed(repo, "svc")
+        repo.set_manual_control("svc", CircuitBreakerStateEnum.OPEN.value)
 
-        ok, _, _ = repo.atomic_reset("svc", reason="test", controlled_by_id=1)
+        assert repo.clear_manual_control("svc") is True
 
-        assert ok is True
-        self._assert_reset_invariant(repo, "svc")
+        state = repo.get_by_service_name("svc")
+        assert state.manually_controlled is False
+        assert state.failure_count == 3
+        assert state.success_count == 2
 
-    def test_try_acquire_half_open_open_to_half_open_clears_window(self):
-        # Given: a service in OPEN state with prior failure window data.
+    def test_open_to_half_open_transition_zeroes_success_count(self):
         repo = InMemoryCircuitBreakerStateRepository()
-        repo.get_or_create("svc")
-        self._seed_with_calls(repo, "svc")
-        repo.update_state(
-            service_name="svc",
-            state=CircuitBreakerStateEnum.OPEN.value,
-        )
+        self._seed(repo, "svc")
+        repo.update_state(service_name="svc", state=CircuitBreakerStateEnum.OPEN.value)
 
-        # When: OPEN→HALF_OPEN transition fires.
-        ok, prev, new = repo.try_acquire_half_open_slot(
+        acquired, previous, new = repo.try_acquire_half_open_slot(
             "svc", limit=3, stuck_timeout_seconds=60
         )
 
-        # Then: transition succeeded AND window/counters reset (DTO success_count=0).
-        assert ok is True
-        assert prev == CircuitBreakerStateEnum.OPEN.value
+        assert acquired is True
+        assert previous == CircuitBreakerStateEnum.OPEN.value
         assert new == CircuitBreakerStateEnum.HALF_OPEN.value
-        self._assert_reset_invariant(repo, "svc")
+        assert repo.get_by_service_name("svc").success_count == 0
 
-    def test_try_acquire_half_open_stuck_recovery_clears_window(self):
-        # Given: HALF_OPEN at the limit with a stuck (very old) window —
-        # success_count must be reset to 0 by the stuck-recovery path.
+    def test_delete_removes_the_entry(self):
         repo = InMemoryCircuitBreakerStateRepository()
-        repo.get_or_create("svc")
-        self._seed_with_calls(repo, "svc")
-        old_ts = datetime.now(UTC) - timedelta(seconds=3600)
-        repo.update_state(
-            service_name="svc",
-            state=CircuitBreakerStateEnum.HALF_OPEN.value,
-            half_open_request_count=3,
-        )
-        # Hand-set the half-open window start to an ancient time so the
-        # stuck_timeout check fires. update_state preserves the existing
-        # value, so we force-write through the storage dict.
-        entry = repo._storage["svc"]
-        from dataclasses import replace
+        self._seed(repo, "svc")
 
-        repo._storage["svc"] = replace(entry, half_open_window_started_at=old_ts)
+        assert repo.delete("svc") is True
+        assert repo.get_by_service_name("svc") is None
 
-        # When: a new acquire fires while limit is exceeded — stuck recovery.
-        ok, prev, new = repo.try_acquire_half_open_slot(
-            "svc", limit=3, stuck_timeout_seconds=10
-        )
-
-        # Then: recovery acquired the slot AND reset window/counters.
-        assert ok is True
-        assert repo._last_acquire_marker == "stuck_recovery"
-        self._assert_reset_invariant(repo, "svc")
-
-
-class TestD6TerminalSiteContract:
-    """490 D6 (terminal) — delete() and clear() must remove dict keys entirely
-    from _call_windows / _failure_cnt / _success_cnt — closes both the new
-    counter-leak risk AND the pre-existing _call_windows empty-deque leak.
-    """
-
-    def test_delete_removes_name_from_all_parallel_dicts(self):
-        # Given: a repo with one CB entry that has window/counter state.
+    def test_clear_removes_every_entry(self):
         repo = InMemoryCircuitBreakerStateRepository()
-        repo.record_failure("svc")
-        repo.record_success("svc")
-        assert "svc" in repo._call_windows
-        assert "svc" in repo._failure_cnt
-        assert "svc" in repo._success_cnt
+        self._seed(repo, "a")
+        self._seed(repo, "b")
 
-        # When: delete().
-        ok = repo.delete("svc")
-
-        # Then: storage AND all parallel dicts have the key removed entirely.
-        assert ok is True
-        assert "svc" not in repo._storage
-        assert "svc" not in repo._call_windows
-        assert "svc" not in repo._failure_cnt
-        assert "svc" not in repo._success_cnt
-
-    def test_clear_empties_all_parallel_dicts(self):
-        # Given: multiple CB entries with state.
-        repo = InMemoryCircuitBreakerStateRepository()
-        for n in ("a", "b", "c"):
-            repo.record_failure(n)
-            repo.record_success(n)
-
-        # When: clear().
         repo.clear()
 
-        # Then: all four dicts are empty.
-        assert repo._storage == {}
-        assert repo._call_windows == {}
-        assert repo._failure_cnt == {}
-        assert repo._success_cnt == {}
-        # And the next ID counter resets to 1 per the existing test contract.
-        assert repo._next_id == 1
+        assert repo.get_all_states() == []

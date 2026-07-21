@@ -14,7 +14,10 @@ promotion happens via dedicated proposals in later releases.
 ## Resilience core
 
 ```bash
-BALDUR_CB_FAILURE_THRESHOLD=5
+BALDUR_CB_FAILURE_THRESHOLD=5           # consecutive failures that trip the breaker
+BALDUR_CB_FAILURE_RATE_THRESHOLD=50.0   # failure % over the recent-call window that also trips it; 0 disables the rate trigger
+BALDUR_CB_SLIDING_WINDOW_SIZE=100       # recent calls the failure rate is measured over, per worker process
+BALDUR_CB_MINIMUM_CALLS=10              # calls the window needs before the rate is trusted; gates the rate trigger only
 BALDUR_CB_RECOVERY_TIMEOUT=60
 BALDUR_CB_HALF_OPEN_MAX_CALLS=3
 BALDUR_RETRY_MAX_ATTEMPTS=3

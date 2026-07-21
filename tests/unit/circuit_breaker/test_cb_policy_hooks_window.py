@@ -417,244 +417,56 @@ class TestCreateDefaultServiceBehavior:
 
 
 # =============================================================================
-# _should_open_circuit sliding_window_size cap 동작 검증 (Behavior)
-# =============================================================================
-
-
-class TestShouldOpenCircuitWindowCapBehavior:
-    """_should_open_circuit() sliding_window_size cap 로직 검증."""
-
-    @pytest.fixture
-    def cb_service(self):
-        """테스트용 CircuitBreakerService."""
-        from baldur.adapters.memory.circuit_breaker import (
-            InMemoryCircuitBreakerStateRepository,
-        )
-        from baldur.services.circuit_breaker.service import (
-            CircuitBreakerService,
-        )
-
-        repo = InMemoryCircuitBreakerStateRepository()
-        config = CircuitBreakerConfig(
-            enabled=True,
-            failure_threshold=100,  # count-based는 높게 설정하여 비활성
-            failure_rate_threshold=50.0,  # rate-based 활성화
-            sliding_window_size=10,
-            minimum_calls=5,
-        )
-        return CircuitBreakerService(config=config, repository=repo)
-
-    def test_total_calls_capped_to_window_size(self, cb_service):
-        """total_calls > window_size → cap 적용."""
-        from baldur.interfaces.repositories import CircuitBreakerStateData
-
-        # window_size=10, total_calls=200 → 200 > 10이므로 cap
-        state = CircuitBreakerStateData(
-            service_name="svc",
-            failure_count=100,
-            success_count=100,
-        )
-        # failure_rate = 100 / 10 * 100 = 1000% → cap 적용 후 rate 계산
-        # 그러나 failure_count(100) > window_size(10)이므로 rate가 100% 넘어감
-        # rate = failure_count / capped_total * 100 = 100 / 10 * 100 = 1000%
-        # → True (open)
-        result = cb_service._should_open_circuit(state)
-        assert result is True
-
-    def test_no_cap_when_total_within_window(self, cb_service):
-        """total_calls <= window_size → cap 미적용."""
-        from baldur.interfaces.repositories import CircuitBreakerStateData
-
-        # window_size=10, total_calls=8 → 8 <= 10이므로 cap 미적용
-        # failure_rate = 2/8 * 100 = 25% < 50.0% → False
-        state = CircuitBreakerStateData(
-            service_name="svc",
-            failure_count=2,
-            success_count=6,
-        )
-        result = cb_service._should_open_circuit(state)
-        assert result is False
-
-    def test_no_cap_when_window_size_zero(self):
-        """window_size=0 → cap 로직 비활성."""
-        from baldur.adapters.memory.circuit_breaker import (
-            InMemoryCircuitBreakerStateRepository,
-        )
-        from baldur.interfaces.repositories import CircuitBreakerStateData
-        from baldur.services.circuit_breaker.service import (
-            CircuitBreakerService,
-        )
-
-        config = CircuitBreakerConfig(
-            enabled=True,
-            failure_rate_threshold=50.0,
-            sliding_window_size=0,  # cap 비활성
-            minimum_calls=5,
-            failure_threshold=100,
-        )
-        repo = InMemoryCircuitBreakerStateRepository(sliding_window_size=0)
-        service = CircuitBreakerService(config=config, repository=repo)
-
-        # total_calls=200, window_size=0 → cap 조건(window_size > 0) 불충족
-        state = CircuitBreakerStateData(
-            service_name="svc",
-            failure_count=50,
-            success_count=150,
-        )
-        # failure_rate = 50/200 * 100 = 25.0% < 50.0% → False
-        result = service._should_open_circuit(state)
-        assert result is False
-
-    def test_count_based_uses_original_failure_count(self):
-        """count-based threshold는 failure_count 원본을 사용한다."""
-        from baldur.adapters.memory.circuit_breaker import (
-            InMemoryCircuitBreakerStateRepository,
-        )
-        from baldur.interfaces.repositories import CircuitBreakerStateData
-        from baldur.services.circuit_breaker.service import (
-            CircuitBreakerService,
-        )
-
-        config = CircuitBreakerConfig(
-            enabled=True,
-            failure_threshold=5,  # count-based 활성화
-            failure_rate_threshold=0.0,  # rate-based 비활성
-            sliding_window_size=10,
-            minimum_calls=3,
-        )
-        repo = InMemoryCircuitBreakerStateRepository()
-        service = CircuitBreakerService(config=config, repository=repo)
-
-        # failure_count=6 >= failure_threshold=5 → True
-        # total_calls=20 > window_size=10 → cap 적용하지만 count-based는 원본 사용
-        state = CircuitBreakerStateData(
-            service_name="svc",
-            failure_count=6,
-            success_count=14,
-        )
-        result = service._should_open_circuit(state)
-        assert result is True
-
-    def test_rate_based_with_cap_calculates_correct_rate(self, cb_service):
-        """cap 적용 후 failure_rate가 올바르게 계산된다."""
-        from baldur.interfaces.repositories import CircuitBreakerStateData
-
-        # window_size=10, failure_rate_threshold=50.0%
-        # failure_count=3, success_count=20 → total=23 > 10 → cap→10
-        # failure_rate = 3/10 * 100 = 30.0% < 50.0% → False
-        state = CircuitBreakerStateData(
-            service_name="svc",
-            failure_count=3,
-            success_count=20,
-        )
-        result = cb_service._should_open_circuit(state)
-        assert result is False
-
-    def test_rate_threshold_exceeded_with_cap(self, cb_service):
-        """cap 적용 후에도 rate >= threshold이면 True를 반환한다."""
-        from baldur.interfaces.repositories import CircuitBreakerStateData
-
-        # window_size=10, failure_rate_threshold=50.0%
-        # failure_count=6, success_count=20 → total=26 > 10 → cap→10
-        # failure_rate = 6/10 * 100 = 60.0% >= 50.0% → True
-        state = CircuitBreakerStateData(
-            service_name="svc",
-            failure_count=6,
-            success_count=20,
-        )
-        result = cb_service._should_open_circuit(state)
-        assert result is True
-
-    def test_minimum_calls_check_before_cap(self, cb_service):
-        """minimum_calls 미충족 시 False (cap 이전에 total_calls < minimum_calls 체크)."""
-        from baldur.interfaces.repositories import CircuitBreakerStateData
-
-        # minimum_calls=5, total_calls=3 < 5 → False
-        state = CircuitBreakerStateData(
-            service_name="svc",
-            failure_count=3,
-            success_count=0,
-        )
-        result = cb_service._should_open_circuit(state)
-        assert result is False
-
-    def test_cap_applied_before_minimum_calls_check(self):
-        """cap은 minimum_calls 체크 전에 적용된다."""
-        from baldur.adapters.memory.circuit_breaker import (
-            InMemoryCircuitBreakerStateRepository,
-        )
-        from baldur.interfaces.repositories import CircuitBreakerStateData
-        from baldur.services.circuit_breaker.service import (
-            CircuitBreakerService,
-        )
-
-        config = CircuitBreakerConfig(
-            enabled=True,
-            failure_rate_threshold=50.0,
-            sliding_window_size=3,  # cap = 3
-            minimum_calls=5,  # minimum = 5 > cap → 항상 minimum_calls < total 불충족
-            failure_threshold=100,
-        )
-        repo = InMemoryCircuitBreakerStateRepository()
-        service = CircuitBreakerService(config=config, repository=repo)
-
-        # total_calls=100, cap→3 < minimum_calls(5) → False
-        state = CircuitBreakerStateData(
-            service_name="svc",
-            failure_count=50,
-            success_count=50,
-        )
-        result = service._should_open_circuit(state)
-        assert result is False
-
-
-# =============================================================================
 # _should_open_circuit threshold boundaries (§8.1)
 # =============================================================================
 
 
-class TestShouldOpenCircuitThresholdBoundaries:
+class TestEvaluateTripThresholdBoundaries:
     """Exact-boundary coverage for the rate-based trip gate.
 
-    The window-cap tests above exercise only coarse over/under rates (60% and
-    30% against a 50% threshold), so a ``>=`` → ``>`` drift on the rate gate
-    still trips at 60% and goes undetected — yet at exactly the threshold it
-    would now fail to trip (a failing dependency held open one tick too long).
-    Pin the gate at its exact boundary. (The count and minimum_calls gates are
-    already pinned at their boundaries by the integration paths in
-    ``test_service`` / ``test_protection``; only the rate gate was unguarded.)
+    A ``>=`` to ``>`` drift on the rate gate still trips at 60% and goes
+    undetected, yet at exactly the threshold it would fail to trip — a failing
+    dependency held open one tick too long. Pin the gate at its exact boundary.
     """
 
     @staticmethod
-    def _service(**cfg):
-        from baldur.adapters.memory.circuit_breaker import (
-            InMemoryCircuitBreakerStateRepository,
-        )
-        from baldur.services.circuit_breaker.service import CircuitBreakerService
-
-        base = {"enabled": True, "sliding_window_size": 0}
+    def _config(**cfg):
+        base = {"enabled": True}
         base.update(cfg)
-        return CircuitBreakerService(
-            config=CircuitBreakerConfig(**base),
-            repository=InMemoryCircuitBreakerStateRepository(),
-        )
-
-    @staticmethod
-    def _state(failure, success):
-        from baldur.interfaces.repositories import CircuitBreakerStateData
-
-        return CircuitBreakerStateData(
-            service_name="svc", failure_count=failure, success_count=success
-        )
+        return CircuitBreakerConfig(**base)
 
     def test_rate_threshold_trips_exactly_at_threshold(self):
-        """failure_rate == failure_rate_threshold trips (the ``>=`` boundary, not ``>``)."""
+        """failure_rate == failure_rate_threshold trips (the ``>=`` boundary)."""
+        from baldur.services.circuit_breaker.outcome_window import (
+            TRIP_REASON_RATE,
+            evaluate_trip,
+        )
+
         # count gate held out of reach so only the rate gate decides.
-        svc = self._service(
+        config = self._config(
             failure_threshold=100, failure_rate_threshold=50.0, minimum_calls=1
         )
-        assert svc._should_open_circuit(self._state(5, 5)) is True  # at: 50% >= 50%
-        assert svc._should_open_circuit(self._state(4, 6)) is False  # below: 40%
+
+        # at the boundary: 5 failures of 10 calls == 50%
+        assert (
+            evaluate_trip(
+                consecutive_failures=0,
+                window_failures=5,
+                window_total=10,
+                config=config,
+            )
+            == TRIP_REASON_RATE
+        )
+        # below the boundary: 4 failures of 10 calls == 40%
+        assert (
+            evaluate_trip(
+                consecutive_failures=0,
+                window_failures=4,
+                window_total=10,
+                config=config,
+            )
+            is None
+        )
 
 
 # =============================================================================
