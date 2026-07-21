@@ -356,13 +356,23 @@ _SCHEDULE_MODULES = [
     ),
 ]
 
+# Module-path prefixes of the private distributions. A lane rooted at one of
+# these is expected-absent on an install without that wheel.
+_PRIVATE_LANE_PREFIXES = ("baldur_pro.", "baldur_dormant.")
+
 
 def _load_schedule_module(
     module_path: str,
     getter_func_name: str,
     debug_message: str,
 ) -> dict[str, Any]:
-    """Load a single schedule module dynamically."""
+    """Load a single schedule module dynamically.
+
+    A lane whose module lives in a private distribution is expected to be absent
+    on an install without that wheel, so its ImportError is normal flow (DEBUG).
+    An ImportError on a first-party module path is a real misconfiguration and
+    stays at WARNING.
+    """
     try:
         import importlib
 
@@ -375,6 +385,13 @@ def _load_schedule_module(
         )
         return schedule
     except ImportError as e:
+        if module_path.startswith(_PRIVATE_LANE_PREFIXES):
+            logger.debug(
+                "beat_schedule.private_lane_skipped",
+                debug_message=debug_message,
+                module_path=module_path,
+            )
+            return {}
         logger.warning(
             "beat_schedule.load_tasks",
             debug_message=debug_message,
@@ -422,7 +439,12 @@ def get_baldur_beat_schedule(
         include_saga: Include Saga Orchestrator tasks (orphan saga scan)
         include_chaos_scheduler: Include Chaos Scheduler tasks
         include_postmortem: Include Postmortem tasks (auto-seal)
-        include_dlq_maintenance: Include DLQ maintenance tasks (eviction, expiry)
+        include_dlq_maintenance: Compose the DLQ maintenance lane; the entries
+            within it are tier-resolved. ``True`` does **not** mean "all four
+            entries" — on an install without the PRO distribution only the
+            OSS-runnable entry (stale-REPLAYING release) is composed, and the
+            eviction / resolved-cleanup / compressed-cleanup entries require an
+            installed PRO wheel. ``False`` drops the lane entirely.
         include_config_apply: Include config-apply tasks (pending DELAYED/GRACEFUL)
         include_legacy: Include legacy tasks from adapters/celery/tasks.py
 
@@ -529,7 +551,10 @@ def configure_baldur_celery(
 
     Args:
         app: Celery application instance.
-        include_*: Module-level Beat task inclusion flags.
+        include_*: Module-level Beat task inclusion flags. A flag composes its
+            lane; entries within a lane may be tier-resolved — notably
+            ``include_dlq_maintenance=True`` composes only the OSS-runnable
+            entry when the PRO distribution is not installed.
         queue_prefix: Queue namespace prefix for multi-service isolation.
         queue_type: RabbitMQ queue type (classic/quorum/stream).
         enable_dlx: Whether to enable DLX bindings on critical queues.

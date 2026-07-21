@@ -2175,6 +2175,30 @@ _DEFAULT_SCHEDULED_JOBS: tuple[tuple[str, str, str, float], ...] = (
 )
 
 
+# Default jobs whose capability is PRO-only — registered only when the PRO
+# distribution is installed. The scheduled DLQ retention lifecycle is a PRO
+# capability, so on an OSS-only install this job could only fail on cadence.
+_PRO_GATED_JOBS: tuple[str, ...] = ("archive_old_dlq_entries",)
+
+
+def _tier_resolved_scheduled_jobs() -> tuple[tuple[str, str, str, float], ...]:
+    """Return the default scheduled jobs runnable on the installed tier.
+
+    Registration-time filter over ``_DEFAULT_SCHEDULED_JOBS`` — the tuple itself
+    stays the full job contract; only what actually gets registered narrows.
+    """
+    from baldur.utils.tier import is_pro_installed
+
+    if is_pro_installed():
+        return _DEFAULT_SCHEDULED_JOBS
+
+    for job_name in _PRO_GATED_JOBS:
+        logger.debug("scheduler.pro_gated_job_skipped", job=job_name)
+    return tuple(
+        job for job in _DEFAULT_SCHEDULED_JOBS if job[0] not in _PRO_GATED_JOBS
+    )
+
+
 # Maps a scheduled job name → Celery @shared_task name, for task_backend="celery".
 # When a job has no Celery counterpart, the scheduler falls back to inline with
 # a debug log.
@@ -2418,7 +2442,7 @@ def _start_default_scheduler(task_backend: str = "inline") -> None:  # noqa: C90
         return
 
     registered = 0
-    for job_name, module_path, attr, interval in _DEFAULT_SCHEDULED_JOBS:
+    for job_name, module_path, attr, interval in _tier_resolved_scheduled_jobs():
         func: Callable[[], Any] | None
         if task_backend == "celery":
             func = _build_celery_delegator(job_name)

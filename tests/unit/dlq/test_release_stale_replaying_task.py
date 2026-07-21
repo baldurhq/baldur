@@ -1,5 +1,8 @@
 """
-Unit tests for release_stale_replaying Celery task (443 D4).
+Unit tests for release_stale_replaying Celery task.
+
+The task resolves its repository through the canonical DLQ backing chain, so it
+runs on every tier — these tests patch that chain, not a tier-specific provider.
 
 Covers:
 - Task calls repository.release_stale_replaying with correct timeout
@@ -23,6 +26,20 @@ def mock_repository():
 
 
 @pytest.fixture
+def mock_backing(mock_repository):
+    """The resolved DLQ backing — the task reads ``.repository`` off it.
+
+    Specced on the OSS capture service: the PRO backing IS-A one, so the spec
+    holds for whichever tier the chain resolves to.
+    """
+    from baldur.services.dlq_capture.service import DLQCaptureService
+
+    backing = MagicMock(spec=DLQCaptureService)
+    backing.repository = mock_repository
+    return backing
+
+
+@pytest.fixture
 def mock_settings():
     settings = MagicMock()
     settings.stale_replaying_timeout_minutes = 30
@@ -32,13 +49,8 @@ def mock_settings():
 class TestReleaseStaleReplayingTaskBehavior:
     """Behavior: release_stale_replaying task delegates to repository."""
 
-    @pytest.fixture(autouse=True)
-    def _require_pro(self):
-        # Patches baldur_pro.services.dlq.base.get_dlq_repository (PRO-tier).
-        pytest.importorskip("baldur_pro")
-
     def test_calls_repository_with_settings_timeout(
-        self, mock_repository, mock_settings
+        self, mock_backing, mock_repository, mock_settings
     ):
         """Task passes stale_replaying_timeout_minutes from settings to repository."""
         mock_settings.stale_replaying_timeout_minutes = 45
@@ -49,8 +61,8 @@ class TestReleaseStaleReplayingTaskBehavior:
                 return_value=mock_settings,
             ),
             patch(
-                "baldur_pro.services.dlq.base.get_dlq_repository",
-                return_value=mock_repository,
+                "baldur.services.dlq_capture.service.resolve_dlq_backing",
+                return_value=mock_backing,
             ),
             patch("baldur.celery_tasks.dlq_tasks.logger"),
         ):
@@ -62,7 +74,9 @@ class TestReleaseStaleReplayingTaskBehavior:
             older_than_minutes=45,
         )
 
-    def test_returns_success_with_released_count(self, mock_repository, mock_settings):
+    def test_returns_success_with_released_count(
+        self, mock_backing, mock_repository, mock_settings
+    ):
         """Successful execution returns success=True and released_count."""
         mock_repository.release_stale_replaying.return_value = 5
 
@@ -72,8 +86,8 @@ class TestReleaseStaleReplayingTaskBehavior:
                 return_value=mock_settings,
             ),
             patch(
-                "baldur_pro.services.dlq.base.get_dlq_repository",
-                return_value=mock_repository,
+                "baldur.services.dlq_capture.service.resolve_dlq_backing",
+                return_value=mock_backing,
             ),
             patch("baldur.celery_tasks.dlq_tasks.logger"),
         ):
@@ -84,7 +98,9 @@ class TestReleaseStaleReplayingTaskBehavior:
         assert result["success"] is True
         assert result["released_count"] == 5
 
-    def test_returns_zero_when_no_stale_entries(self, mock_repository, mock_settings):
+    def test_returns_zero_when_no_stale_entries(
+        self, mock_backing, mock_repository, mock_settings
+    ):
         """Returns released_count=0 when no stale entries found."""
         mock_repository.release_stale_replaying.return_value = 0
 
@@ -94,8 +110,8 @@ class TestReleaseStaleReplayingTaskBehavior:
                 return_value=mock_settings,
             ),
             patch(
-                "baldur_pro.services.dlq.base.get_dlq_repository",
-                return_value=mock_repository,
+                "baldur.services.dlq_capture.service.resolve_dlq_backing",
+                return_value=mock_backing,
             ),
             patch("baldur.celery_tasks.dlq_tasks.logger"),
         ):
@@ -107,7 +123,7 @@ class TestReleaseStaleReplayingTaskBehavior:
         assert result["released_count"] == 0
 
     def test_returns_error_on_repository_exception(
-        self, mock_repository, mock_settings
+        self, mock_backing, mock_repository, mock_settings
     ):
         """Repository exception returns success=False with error message."""
         mock_repository.release_stale_replaying.side_effect = RuntimeError(
@@ -120,8 +136,8 @@ class TestReleaseStaleReplayingTaskBehavior:
                 return_value=mock_settings,
             ),
             patch(
-                "baldur_pro.services.dlq.base.get_dlq_repository",
-                return_value=mock_repository,
+                "baldur.services.dlq_capture.service.resolve_dlq_backing",
+                return_value=mock_backing,
             ),
             patch("baldur.celery_tasks.dlq_tasks.logger"),
         ):
@@ -136,12 +152,9 @@ class TestReleaseStaleReplayingTaskBehavior:
 class TestReleaseStaleReplayingSideEffectBehavior:
     """Behavior: logging side effects based on released count."""
 
-    @pytest.fixture(autouse=True)
-    def _require_pro(self):
-        # Patches baldur_pro.services.dlq.base.get_dlq_repository (PRO-tier).
-        pytest.importorskip("baldur_pro")
-
-    def test_logs_warning_when_entries_released(self, mock_repository, mock_settings):
+    def test_logs_warning_when_entries_released(
+        self, mock_backing, mock_repository, mock_settings
+    ):
         """WARNING log emitted when stale entries are released (indicates worker crash)."""
         mock_repository.release_stale_replaying.return_value = 3
 
@@ -151,8 +164,8 @@ class TestReleaseStaleReplayingSideEffectBehavior:
                 return_value=mock_settings,
             ),
             patch(
-                "baldur_pro.services.dlq.base.get_dlq_repository",
-                return_value=mock_repository,
+                "baldur.services.dlq_capture.service.resolve_dlq_backing",
+                return_value=mock_backing,
             ),
             patch("baldur.celery_tasks.dlq_tasks.logger") as mock_logger,
         ):
@@ -167,7 +180,9 @@ class TestReleaseStaleReplayingSideEffectBehavior:
         assert call_args[0][0] == "dlq.stale_replaying_released"
         assert call_args[1]["released_count"] == 3
 
-    def test_logs_debug_when_no_entries_found(self, mock_repository, mock_settings):
+    def test_logs_debug_when_no_entries_found(
+        self, mock_backing, mock_repository, mock_settings
+    ):
         """DEBUG log emitted when no stale entries found."""
         mock_repository.release_stale_replaying.return_value = 0
 
@@ -177,8 +192,8 @@ class TestReleaseStaleReplayingSideEffectBehavior:
                 return_value=mock_settings,
             ),
             patch(
-                "baldur_pro.services.dlq.base.get_dlq_repository",
-                return_value=mock_repository,
+                "baldur.services.dlq_capture.service.resolve_dlq_backing",
+                return_value=mock_backing,
             ),
             patch("baldur.celery_tasks.dlq_tasks.logger") as mock_logger,
         ):

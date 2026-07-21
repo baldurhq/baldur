@@ -425,13 +425,20 @@ def get_cleanup_beat_schedule() -> dict[str, Any]:
     """
     Return the Cleanup Lane Beat Schedule.
 
+    The DLQ retention entries (archive / purge) are tier-resolved: the scheduled
+    retention lifecycle is a PRO capability, so they are composed only when the
+    PRO distribution is installed. Every other entry is tier-neutral and always
+    composed.
+
     Returns:
         dict: Celery Beat Schedule configuration
     """
     try:
         from celery.schedules import crontab
 
-        return {
+        from baldur.utils.tier import is_pro_installed
+
+        schedule: dict[str, Any] = {
             # Daily 02:30 - clean up expired config
             "cleanup-expired-config": {
                 "task": "baldur.cleanup_expired_config",
@@ -439,26 +446,12 @@ def get_cleanup_beat_schedule() -> dict[str, Any]:
                 "options": {"queue": "maintenance"},
                 "kwargs": {"older_than_hours": 24},
             },
-            # Daily 03:00 - DLQ archive
-            "archive-old-dlq-entries": {
-                "task": "baldur.archive_old_dlq_entries",
-                "schedule": crontab(hour=3, minute=0),
-                "options": {"queue": "maintenance"},
-                "kwargs": {"older_than_days": 30},
-            },
             # Daily 06:00 - expire approval requests
             "expire-approval-requests": {
                 "task": "baldur.expire_approval_requests",
                 "schedule": crontab(hour=6, minute=0),
                 "options": {"queue": "maintenance"},
                 "kwargs": {"older_than_hours": 72},
-            },
-            # Every Sunday 04:00 - DLQ permanent deletion (high-risk)
-            "purge-archived-dlq-entries": {
-                "task": "baldur.purge_archived_dlq_entries",
-                "schedule": crontab(hour=4, minute=0, day_of_week=0),
-                "options": {"queue": "critical_maintenance"},
-                "kwargs": {"older_than_days": 90},
             },
             # Daily 02:30 - clean up expired JWT OutstandingTokens (#217)
             "flush-expired-jwt-tokens": {
@@ -485,6 +478,30 @@ def get_cleanup_beat_schedule() -> dict[str, Any]:
                 "options": {"queue": "maintenance"},
             },
         }
+
+        if not is_pro_installed():
+            logger.debug("cleanup_tasks.dlq_retention_entries_skipped")
+            return schedule
+
+        schedule.update(
+            {
+                # Daily 03:00 - DLQ archive
+                "archive-old-dlq-entries": {
+                    "task": "baldur.archive_old_dlq_entries",
+                    "schedule": crontab(hour=3, minute=0),
+                    "options": {"queue": "maintenance"},
+                    "kwargs": {"older_than_days": 30},
+                },
+                # Every Sunday 04:00 - DLQ permanent deletion (high-risk)
+                "purge-archived-dlq-entries": {
+                    "task": "baldur.purge_archived_dlq_entries",
+                    "schedule": crontab(hour=4, minute=0, day_of_week=0),
+                    "options": {"queue": "critical_maintenance"},
+                    "kwargs": {"older_than_days": 90},
+                },
+            }
+        )
+        return schedule
     except ImportError:
         logger.debug("cleanup_tasks.celery_available_beat_schedule")
         return {}

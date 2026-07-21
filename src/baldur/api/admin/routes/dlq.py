@@ -11,8 +11,6 @@ per-action gating of those same operations.
 
 from __future__ import annotations
 
-import importlib.util
-
 import structlog
 
 from baldur.api.admin.registry import AdminRegistry, AdminRoute
@@ -22,6 +20,8 @@ logger = structlog.get_logger()
 
 
 def _register_dlq_routes(registry: AdminRegistry) -> None:
+    from baldur.utils.tier import is_pro_installed
+
     try:
         from baldur.api.handlers.dlq import (
             dlq_cleanup_archive,
@@ -84,7 +84,7 @@ def _register_dlq_routes(registry: AdminRegistry) -> None:
     # package is installed — a static, import-ordering-independent presence probe
     # (does not import a PRO symbol). Pure OSS → these four routes are absent → a
     # request resolves to 404 rather than the handler-layer RuntimeError (500).
-    if importlib.util.find_spec("baldur_pro") is None:
+    if not is_pro_installed():
         return
 
     pro_routes = (

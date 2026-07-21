@@ -1946,3 +1946,24 @@ def test_provider_registry():
     yield ProviderRegistry
 
     ProviderRegistry.clear_instances()
+
+
+# =============================================================================
+# Tier Simulation Fixtures
+# =============================================================================
+
+
+@pytest.fixture
+def mock_oss_tier(monkeypatch):
+    """Simulate an install without the PRO distribution.
+
+    Patches the canonical presence probe — never ``importlib.util.find_spec``
+    itself, whose blast radius is every import in the process.
+    """
+    monkeypatch.setattr("baldur.utils.tier.is_pro_installed", lambda: False)
+
+
+@pytest.fixture
+def mock_pro_tier(monkeypatch):
+    """Simulate an install with the PRO distribution present."""
+    monkeypatch.setattr("baldur.utils.tier.is_pro_installed", lambda: True)
