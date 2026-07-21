@@ -16,30 +16,42 @@ from baldur.bootstrap import (
     _AUDIT_CHECKPOINT_ENV_VAR,
     _AUDIT_CHECKPOINT_PURPOSE,
     _AUDIT_WAL_ENV_VAR,
-    _AUDIT_WAL_PURPOSE,
     ExtensionResult,
     _build_startup_report,
     _find_resolution,
     _warn_on_audit_durability_split,
 )
-from baldur.utils.fs import resolve_writable_dir
+from baldur.utils.fs import get_writable_dir_resolutions, resolve_writable_dir
 from tests.factories.writable_dir import log_events
 
 SPLIT_EVENT = "storage.audit_dir_durability_split"
 
+# A WAL purpose exactly as a shipped surface builds it: ``wal_{file_prefix}``.
+# The request-audit buffer is one such surface; the prefix differs per
+# surface and per tier, which is why the split check keys off the recorded
+# override variable rather than off any one of these strings.
+SHIPPED_WAL_PURPOSE = "wal_request_audit"
 
-def _entry(status: str, path: str) -> dict[str, str]:
+
+def _entry(status: str, path: str, override_env: str = "") -> dict[str, str]:
     """Build one registry entry as the primitive records it."""
-    return {"status": status, "path": path, "preferred": "/var/log/audit"}
+    return {
+        "status": status,
+        "path": path,
+        "preferred": "/var/log/audit",
+        "override_env": override_env,
+    }
 
 
 def _registry(checkpoint_status: str, wal_status: str) -> dict[str, dict[str, str]]:
     """Build a registry holding both audit surfaces at chosen statuses."""
     return {
         f"{_AUDIT_CHECKPOINT_PURPOSE}-aaaaaaaa": _entry(
-            checkpoint_status, "/tmp/checkpoint"
+            checkpoint_status, "/tmp/checkpoint", _AUDIT_CHECKPOINT_ENV_VAR
         ),
-        f"{_AUDIT_WAL_PURPOSE}-bbbbbbbb": _entry(wal_status, "/var/log/audit/wal"),
+        f"{SHIPPED_WAL_PURPOSE}-bbbbbbbb": _entry(
+            wal_status, "/var/log/audit/wal", _AUDIT_WAL_ENV_VAR
+        ),
     }
 
 
@@ -86,7 +98,7 @@ class TestAuditDurabilitySplitWarningBehavior:
     def test_missing_wal_resolution_stays_silent(self):
         """Negative: one surface alone cannot disagree with anything."""
         storage_dirs = _registry("fallback", "ok")
-        del storage_dirs[f"{_AUDIT_WAL_PURPOSE}-bbbbbbbb"]
+        del storage_dirs[f"{SHIPPED_WAL_PURPOSE}-bbbbbbbb"]
 
         with capture_logs() as logs:
             _warn_on_audit_durability_split(storage_dirs)
@@ -99,6 +111,57 @@ class TestAuditDurabilitySplitWarningBehavior:
             _warn_on_audit_durability_split({})
 
         assert log_events(logs, SPLIT_EVENT) == []
+
+    def test_a_wal_that_reads_no_override_variable_is_not_compared(self):
+        """Negative: only surfaces reading the audit WAL variable pair up.
+
+        The event-bus WAL records no override variable, so naming
+        ``BALDUR_AUDIT_WAL_DIR`` at it would be a remedy that moves nothing.
+        """
+        storage_dirs = _registry("fallback", "ok")
+        del storage_dirs[f"{SHIPPED_WAL_PURPOSE}-bbbbbbbb"]
+        storage_dirs["wal_event_bus_wal-dddddddd"] = _entry(
+            "ok", "/var/log/baldur/event_bus_wal"
+        )
+
+        with capture_logs() as logs:
+            _warn_on_audit_durability_split(storage_dirs)
+
+        assert log_events(logs, SPLIT_EVENT) == []
+
+    def test_split_is_detected_for_a_wal_whose_purpose_is_not_hardcoded(
+        self, writable_dir_chain, deny_dir, tmp_path
+    ):
+        """The check survives a WAL purpose no constant in bootstrap names.
+
+        Regression: the pairing was once pinned to the literal purpose
+        ``wal_audit_wal``, which no surface resolved during boot, so the
+        warning was unreachable in both tiers. Drives the real primitive
+        with a purpose built from a caller-supplied ``file_prefix``.
+        """
+        resolve_writable_dir(
+            tmp_path / "audit",
+            purpose=_AUDIT_CHECKPOINT_PURPOSE,
+            operator_set=False,
+            env_override_name=_AUDIT_CHECKPOINT_ENV_VAR,
+        )
+        unwritable = tmp_path / "denied" / "wal"
+        deny_dir(unwritable)
+        resolve_writable_dir(
+            unwritable,
+            purpose="wal_some_caller_supplied_prefix",
+            operator_set=False,
+            env_override_name=_AUDIT_WAL_ENV_VAR,
+        )
+
+        with capture_logs() as logs:
+            _warn_on_audit_durability_split(get_writable_dir_resolutions())
+
+        records = log_events(logs, SPLIT_EVENT)
+        assert len(records) == 1
+        assert records[0]["checkpoint_status"] == "ok"
+        assert records[0]["wal_status"] == "fallback"
+        assert records[0]["wal_env"] == _AUDIT_WAL_ENV_VAR
 
 
 class TestResolutionLookupBehavior:

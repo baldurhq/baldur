@@ -376,16 +376,35 @@ class TestResolveWritableDirContract:
         entry = next(iter(get_writable_dir_resolutions().values()))
         assert entry["status"] == "unwritable"
 
-    def test_registry_entry_carries_exactly_status_path_and_preferred(
+    def test_registry_entry_carries_exactly_the_reported_fields(
         self, writable_dir_chain, tmp_path
     ):
         """Design contract: the startup report copies this shape verbatim."""
         resolve_writable_dir(
-            tmp_path / "configured", purpose="checkpoint", operator_set=False
+            tmp_path / "configured",
+            purpose="checkpoint",
+            operator_set=False,
+            env_override_name="BALDUR_AUDIT_PATH",
         )
 
         entry = next(iter(get_writable_dir_resolutions().values()))
-        assert set(entry) == {"status", "path", "preferred"}
+        assert set(entry) == {"status", "path", "preferred", "override_env"}
+        assert entry["override_env"] == "BALDUR_AUDIT_PATH"
+
+    def test_registry_records_an_empty_override_when_none_is_offered(
+        self, writable_dir_chain, tmp_path
+    ):
+        """Design contract: a surface with no override promises no variable.
+
+        Reporting keys off this field, so "offers none" has to be
+        distinguishable from a variable name rather than absent.
+        """
+        resolve_writable_dir(
+            tmp_path / "configured", purpose="event_bus_wal", operator_set=False
+        )
+
+        entry = next(iter(get_writable_dir_resolutions().values()))
+        assert entry["override_env"] == ""
 
     def test_resolved_dir_is_frozen(self, writable_dir_chain, tmp_path):
         """Design contract: an adopting surface cannot rewrite its resolution."""
@@ -448,6 +467,51 @@ class TestWritableDirLeafContract:
         assert first is second
         assert len(get_writable_dir_resolutions()) == 1
         assert len(log_events(logs, "storage.writable_dir_probe_failed")) == 1
+
+    def test_operator_set_resolve_raises_even_when_a_fallback_is_cached(
+        self, writable_dir_chain, deny_dir, tmp_path
+    ):
+        """The cache must not launder a fallback into an operator-set resolve.
+
+        Regression: the cache is keyed on ``(purpose, preferred)`` only, so a
+        default resolve that already fell back would satisfy a later
+        operator-set resolve of the same directory — silently writing an
+        explicitly configured compliance path somewhere else, the one outcome
+        the origin split exists to prevent.
+        """
+        preferred = tmp_path / "compliance-path"
+        deny_dir(preferred)
+        fallback = resolve_writable_dir(
+            preferred, purpose="checkpoint", operator_set=False
+        )
+        assert fallback.fell_back is True
+
+        with pytest.raises(ConfigurationError) as excinfo:
+            resolve_writable_dir(
+                preferred,
+                purpose="checkpoint",
+                operator_set=True,
+                env_override_name="BALDUR_AUDIT_PATH",
+            )
+
+        assert str(preferred) in str(excinfo.value)
+        assert "BALDUR_AUDIT_PATH" in str(excinfo.value)
+
+    def test_cached_non_fallback_still_satisfies_an_operator_set_resolve(
+        self, writable_dir_chain, tmp_path
+    ):
+        """Negative: a writable directory stays idempotent across both origins."""
+        preferred = tmp_path / "configured"
+
+        first = resolve_writable_dir(
+            preferred, purpose="checkpoint", operator_set=False
+        )
+        second = resolve_writable_dir(
+            preferred, purpose="checkpoint", operator_set=True
+        )
+
+        assert first is second
+        assert second.fell_back is False
 
     def test_leaf_is_the_same_whichever_surface_resolves_first(
         self, writable_dir_chain, deny_dir, tmp_path

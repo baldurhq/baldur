@@ -42,10 +42,15 @@ logger = structlog.get_logger()
 __all__ = ["init", "reset_init_state", "start_background_workers"]
 
 # Writable-dir resolution identities of the two audit durability surfaces
-# whose statuses must agree, plus the variables an operator sets for each.
+# whose statuses must agree. The checkpoint is found by purpose — a stable
+# class default on one class. The audit WAL is found by the override
+# variable each WAL recorded at resolution rather than by a purpose string:
+# a WAL purpose is built from a caller-supplied ``file_prefix``, so it
+# differs per surface and per tier, and naming a variable the resolving
+# surface does not read would hand the operator a remedy that changes
+# nothing.
 _AUDIT_CHECKPOINT_PURPOSE = "checkpoint"
 _AUDIT_CHECKPOINT_ENV_VAR = "BALDUR_AUDIT_PATH"
-_AUDIT_WAL_PURPOSE = "wal_audit_wal"
 _AUDIT_WAL_ENV_VAR = "BALDUR_AUDIT_WAL_DIR"
 
 
@@ -1900,22 +1905,22 @@ def _warn_on_audit_durability_split(
     duplicates are the correct fail direction for an audit trail.
     """
     checkpoint = _find_resolution(storage_dirs, _AUDIT_CHECKPOINT_PURPOSE)
-    wal = _find_resolution(storage_dirs, _AUDIT_WAL_PURPOSE)
-
-    if checkpoint is None or wal is None:
-        return
-    if checkpoint["status"] == wal["status"]:
+    if checkpoint is None:
         return
 
-    logger.warning(
-        "storage.audit_dir_durability_split",
-        checkpoint_status=checkpoint["status"],
-        checkpoint_path=checkpoint["path"],
-        checkpoint_env=_AUDIT_CHECKPOINT_ENV_VAR,
-        wal_status=wal["status"],
-        wal_path=wal["path"],
-        wal_env=_AUDIT_WAL_ENV_VAR,
-    )
+    for wal in _find_resolutions_by_env(storage_dirs, _AUDIT_WAL_ENV_VAR):
+        if checkpoint["status"] == wal["status"]:
+            continue
+
+        logger.warning(
+            "storage.audit_dir_durability_split",
+            checkpoint_status=checkpoint["status"],
+            checkpoint_path=checkpoint["path"],
+            checkpoint_env=_AUDIT_CHECKPOINT_ENV_VAR,
+            wal_status=wal["status"],
+            wal_path=wal["path"],
+            wal_env=_AUDIT_WAL_ENV_VAR,
+        )
 
 
 def _find_resolution(
@@ -1928,6 +1933,20 @@ def _find_resolution(
         if key.startswith(prefix):
             return entry
     return None
+
+
+def _find_resolutions_by_env(
+    storage_dirs: dict[str, dict[str, str]],
+    env_var: str,
+) -> list[dict[str, str]]:
+    """Find resolution entries whose surface reads ``env_var``.
+
+    Keys off what each surface recorded, so the variable this report names
+    as the remedy is one that surface actually reads.
+    """
+    return [
+        entry for entry in storage_dirs.values() if entry.get("override_env") == env_var
+    ]
 
 
 # =============================================================================

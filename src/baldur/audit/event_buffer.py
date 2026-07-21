@@ -383,8 +383,11 @@ class RequestAuditBuffer:
 
             config = WALConfig(
                 wal_dir=wal_dir,
-                # Operator-chosen only when the env var supplied it.
+                # Operator-chosen only when the env var supplied it. This
+                # surface does read the variable, so it is the name promised
+                # to the operator in fallback warnings.
                 wal_dir_operator_set=bool(env_wal_dir),
+                wal_dir_env_var=WAL_DIR_ENV_VAR,
                 sync_on_write=True,  # Always sync for 0% data loss
                 max_file_size_mb=50,
                 max_files=5,
