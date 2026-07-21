@@ -302,6 +302,55 @@ class TestWireCacheAndStorageWalFailFastBehavior:
 
         configure_fn.assert_called_once()
 
+    def test_production_with_a_fallback_wal_still_raises(
+        self, monkeypatch, isolated_cache_default
+    ):
+        """A usable WAL on a fallback dir must not satisfy the durability gate.
+
+        The gate promises the WAL is on its *configured* directory, so a
+        fallback fails it even though ``_wal_initialized`` is True — the old
+        predicate would have let production boot on a possibly-ephemeral WAL.
+        """
+        from baldur import bootstrap
+
+        monkeypatch.delenv("BALDUR_TEST_MODE", raising=False)
+        monkeypatch.setenv("BALDUR_ENVIRONMENT", "production")
+        monkeypatch.setenv("BALDUR_REDIS_URL", "redis://prod:6379/0")
+        monkeypatch.setenv("BALDUR_SQL_DSN", "postgresql://stub/db")
+        bootstrap.reset_init_state()
+
+        _stub_redis_settings(monkeypatch)
+        cm, _configure, backend = _patch_eager_backend(
+            wal_initialized=True, wal_on_fallback_dir=True
+        )
+
+        with cm:
+            with pytest.raises(ConfigurationError, match="did not honor"):
+                bootstrap._wire_registry_defaults()
+
+        assert backend._wal_initialized is True
+
+    def test_non_production_with_a_fallback_wal_boots(
+        self, monkeypatch, isolated_cache_default
+    ):
+        """Negative: only the production promise tightened, not the dev path."""
+        from baldur import bootstrap
+
+        monkeypatch.delenv("BALDUR_TEST_MODE", raising=False)
+        monkeypatch.setenv("BALDUR_ENVIRONMENT", "development")
+        monkeypatch.setenv("BALDUR_REDIS_URL", "redis://dev:6379/0")
+        bootstrap.reset_init_state()
+
+        _stub_redis_settings(monkeypatch)
+        cm, configure_fn, _backend = _patch_eager_backend(
+            wal_initialized=True, wal_on_fallback_dir=True
+        )
+
+        with cm:
+            bootstrap._wire_registry_defaults()
+
+        configure_fn.assert_called_once()
+
 
 # =============================================================================
 # D15 Legacy alias rejection
