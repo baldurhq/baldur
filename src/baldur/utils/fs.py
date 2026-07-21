@@ -114,8 +114,12 @@ def get_writable_dir_resolutions() -> dict[str, dict[str, str]]:
     """Return a copy of the resolution registry.
 
     Keys are ``<purpose>-<digest>``; each value carries ``status``
-    (``"ok"`` / ``"fallback"`` / ``"unwritable"``), the resolved ``path``
-    and the ``preferred`` path that was asked for.
+    (``"ok"`` / ``"fallback"`` / ``"unwritable"``), the resolved ``path``,
+    the ``preferred`` path that was asked for, and ``override_env`` — the
+    variable the resolving surface reads to choose the directory (``""``
+    when it offers none). Reporting keys off the recorded variable rather
+    than off a purpose string, so a remedy it names is one the surface
+    actually honors.
     """
     with _registry_lock:
         return {key: dict(entry) for key, entry in _resolutions.items()}
@@ -152,11 +156,14 @@ def resolve_writable_dir(
 
     Returns:
         The resolution outcome. Re-resolving the same ``(purpose,
-        preferred)`` pair returns the cached outcome unchanged.
+        preferred)`` pair returns the cached outcome unchanged, unless the
+        cached outcome is a fallback and this call is ``operator_set``.
 
     Raises:
         ConfigurationError: When ``operator_set`` is true and ``preferred``
-            is not writable, or when no fallback step is writable.
+            is not writable — including when an earlier non-operator resolve
+            of the same pair already fell back — or when no fallback step is
+            writable.
     """
     preferred_path = Path(preferred)
     key = _registry_key(purpose, preferred_path)
@@ -164,6 +171,18 @@ def resolve_writable_dir(
     with _registry_lock:
         cached = _resolved_dirs.get(key)
         if cached is not None:
+            if operator_set and cached.fell_back:
+                # The cache is keyed on (purpose, preferred) alone, so an
+                # earlier resolve that treated this directory as a hardcoded
+                # default already recorded a fallback. Returning it would let
+                # an operator-chosen compliance path be honored by writing
+                # somewhere else - the one outcome the origin split exists to
+                # prevent.
+                raise ConfigurationError(
+                    f"Configured directory for {purpose!r} is not writable: "
+                    f"{preferred_path} ({cached.reason}). "
+                    f"{_override_hint(env_override_name)}"
+                )
             return cached
 
         _check_purpose_collision(purpose, preferred_path)
@@ -178,10 +197,11 @@ def resolve_writable_dir(
                     preferred=preferred_path,
                     fell_back=False,
                 ),
+                env_override_name,
             )
 
         if operator_set:
-            _record_unwritable(key, preferred_path)
+            _record_unwritable(key, preferred_path, env_override_name)
             raise ConfigurationError(
                 f"Configured directory for {purpose!r} is not writable: "
                 f"{preferred_path} ({probe_error}). "
@@ -273,6 +293,7 @@ def _resolve_fallback(
                 fell_back=True,
                 reason=probe_error,
             ),
+            env_override_name,
         )
         if key not in _warned_keys:
             _warned_keys.add(key)
@@ -286,30 +307,41 @@ def _resolve_fallback(
             )
         return resolved
 
-    _record_unwritable(key, preferred_path)
+    _record_unwritable(key, preferred_path, env_override_name)
     raise ConfigurationError(
         f"No writable directory found for {purpose!r}. "
         f"Tried: {'; '.join(tried)}. {_override_hint(env_override_name)}"
     )
 
 
-def _record(key: str, status: str, resolved: ResolvedDir) -> ResolvedDir:
+def _record(
+    key: str,
+    status: str,
+    resolved: ResolvedDir,
+    env_override_name: str | None,
+) -> ResolvedDir:
     """Store a successful resolution in the registry."""
     _resolutions[key] = {
         "status": status,
         "path": str(resolved.path),
         "preferred": str(resolved.preferred),
+        "override_env": env_override_name or "",
     }
     _resolved_dirs[key] = resolved
     return resolved
 
 
-def _record_unwritable(key: str, preferred: Path) -> None:
+def _record_unwritable(
+    key: str,
+    preferred: Path,
+    env_override_name: str | None,
+) -> None:
     """Record a failed resolution before raising."""
     _resolutions[key] = {
         "status": STATUS_UNWRITABLE,
         "path": "",
         "preferred": str(preferred),
+        "override_env": env_override_name or "",
     }
 
 

@@ -25,7 +25,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - Daily report records the on-recovery replay sweep, so its "Auto-replay" line renders on OSS.
 - `baldur.utils.fs.resolve_writable_dir` — canonical writable-directory resolver.
 - Startup report gains `storage_dirs`: which durability directories resolved, and which fell back.
-- `WALConfig.wal_dir_operator_set` / `create_wal(wal_dir_operator_set=...)` — mark chosen dirs.
+- `WALConfig.wal_dir_operator_set` / `.wal_dir_env_var` — mark a chosen dir and its override.
 - `ResilientStorageBackend.get_stats()` gains `wal_on_fallback_dir`.
 
 ### Changed

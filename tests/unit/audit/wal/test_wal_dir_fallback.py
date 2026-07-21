@@ -40,9 +40,23 @@ class TestWALConfigContract:
         """Design contract: additive field, so existing constructions still fall back."""
         assert WALConfig().wal_dir_operator_set is False
 
-    def test_wal_dir_env_var_defaults_to_the_prefixed_name(self):
-        """Design contract: the canonical variable named in warnings and errors."""
-        assert WALConfig().wal_dir_env_var == "BALDUR_AUDIT_WAL_DIR"
+    def test_wal_dir_env_var_defaults_to_promising_nothing(self):
+        """Design contract: ``WALConfig`` reads no environment, so it names none.
+
+        Regression: this defaulted to ``BALDUR_AUDIT_WAL_DIR``, which the
+        dataclass never reads. A surface built on the default — the continuous
+        recorder, ``create_wal()`` — then told operators to set a variable that
+        would not move its WAL, and the identical fallback recurred every boot.
+        """
+        assert WALConfig().wal_dir_env_var is None
+
+    def test_setting_the_audit_wal_variable_does_not_move_a_default_config(
+        self, monkeypatch, tmp_path
+    ):
+        """The reason the default promises nothing: the variable is inert here."""
+        monkeypatch.setenv("BALDUR_AUDIT_WAL_DIR", str(tmp_path / "operator-choice"))
+
+        assert WALConfig().wal_dir == "/var/log/audit/wal"
 
     def test_env_var_names_are_the_prefixed_and_legacy_pair(self):
         """Design contract: the legacy unprefixed alias is still honored."""
@@ -73,10 +87,18 @@ class TestWALDirResolutionBehavior:
     def test_unwritable_operator_set_dir_raises_naming_the_override(
         self, writable_dir_chain, deny_dir, tmp_path
     ):
-        """An operator-chosen WAL directory fails loud rather than relocating."""
+        """An operator-chosen WAL directory fails loud rather than relocating.
+
+        The surface passes the variable it reads; ``WALConfig`` promises none
+        of its own.
+        """
         chosen = tmp_path / "compliance-wal"
         deny_dir(chosen)
-        config = WALConfig(wal_dir=str(chosen), wal_dir_operator_set=True)
+        config = WALConfig(
+            wal_dir=str(chosen),
+            wal_dir_operator_set=True,
+            wal_dir_env_var=WAL_DIR_ENV_VAR,
+        )
 
         with pytest.raises(ConfigurationError) as exc_info:
             WriteAheadLog(config=config)

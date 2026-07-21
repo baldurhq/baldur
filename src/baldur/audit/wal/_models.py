@@ -75,10 +75,12 @@ class WALConfig:
     wal_dir_operator_set: bool = False
 
     # Environment variable named in fallback warnings and configuration
-    # errors as the way to choose this WAL's directory. Surfaces with their
-    # own variable override it; ``None`` means the surface offers no
-    # environment override, so no name is promised to the operator.
-    wal_dir_env_var: str | None = WAL_DIR_ENV_VAR
+    # errors as the way to choose this WAL's directory. Defaults to ``None``
+    # because ``WALConfig`` itself reads no environment: a surface that does
+    # read one passes its own name, and every other surface promises nothing
+    # rather than pointing the operator at a variable that would not move
+    # this WAL.
+    wal_dir_env_var: str | None = None
 
     max_file_size_mb: int = 100
     sync_on_write: bool = True
