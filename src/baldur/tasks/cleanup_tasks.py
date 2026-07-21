@@ -228,14 +228,24 @@ def refresh_audit_wal_metrics() -> dict[str, Any]:
 
     Sets ``baldur_wal_total_files`` and ``baldur_wal_current_size_bytes`` so
     SREs can observe disk pressure and file-rotation health. No-op if WAL is
-    disabled (``_get_wal()`` returns None) or audit is not installed.
+    disabled (``_get_wal()`` returns None) or the audit WAL accessor is not
+    installed — the two skip shapes the caller cannot tell apart, and neither
+    is an error.
 
     Returns:
         dict: {"success": bool, "skipped": bool, "total_files": int, "current_size_bytes": int}
     """
     try:
         from baldur_pro.services.audit import _get_wal
+    except ImportError:
+        # The WAL singleton accessor ships with the private distribution, so an
+        # install without it has no audit WAL to measure. Normal flow, not a
+        # fault: the docstring's no-op contract is honored here rather than
+        # falling into the fault handler below, which re-raises.
+        logger.debug("cleanup_task.wal_metrics_skipped", reason="accessor_absent")
+        return {"success": True, "skipped": True}
 
+    try:
         wal = _get_wal()
         if wal is None:
             return {"success": True, "skipped": True}
@@ -425,10 +435,13 @@ def get_cleanup_beat_schedule() -> dict[str, Any]:
     """
     Return the Cleanup Lane Beat Schedule.
 
-    The DLQ retention entries (archive / purge) are tier-resolved: the scheduled
-    retention lifecycle is a PRO capability, so they are composed only when the
-    PRO distribution is installed. Every other entry is tier-neutral and always
-    composed.
+    Tier-resolved per entry. The always-composed entries resolve OSS backings
+    (or degrade to a no-op on one, by their own design). The PRO-set needs a
+    backing that only the PRO distribution registers — the DLQ retention
+    lifecycle (archive / purge), governance approval expiry (the runtime-config
+    manager), and the audit WAL gauges (the WAL singleton accessor) — so those
+    are composed only when the PRO distribution is installed. Scheduling them
+    without it would queue work that can only fail on cadence.
 
     Returns:
         dict: Celery Beat Schedule configuration
@@ -445,13 +458,6 @@ def get_cleanup_beat_schedule() -> dict[str, Any]:
                 "schedule": crontab(hour=2, minute=30),
                 "options": {"queue": "maintenance"},
                 "kwargs": {"older_than_hours": 24},
-            },
-            # Daily 06:00 - expire approval requests
-            "expire-approval-requests": {
-                "task": "baldur.expire_approval_requests",
-                "schedule": crontab(hour=6, minute=0),
-                "options": {"queue": "maintenance"},
-                "kwargs": {"older_than_hours": 72},
             },
             # Daily 02:30 - clean up expired JWT OutstandingTokens (#217)
             "flush-expired-jwt-tokens": {
@@ -471,16 +477,10 @@ def get_cleanup_beat_schedule() -> dict[str, Any]:
                 "schedule": crontab(minute=15),
                 "options": {"queue": "maintenance"},
             },
-            # Hourly :05 - refresh WAL disk pressure gauges (484 D11)
-            "refresh-audit-wal-metrics": {
-                "task": "baldur.refresh_audit_wal_metrics",
-                "schedule": crontab(minute=5),
-                "options": {"queue": "maintenance"},
-            },
         }
 
         if not is_pro_installed():
-            logger.debug("cleanup_tasks.dlq_retention_entries_skipped")
+            logger.debug("cleanup_tasks.pro_entries_skipped")
             return schedule
 
         schedule.update(
@@ -498,6 +498,19 @@ def get_cleanup_beat_schedule() -> dict[str, Any]:
                     "schedule": crontab(hour=4, minute=0, day_of_week=0),
                     "options": {"queue": "critical_maintenance"},
                     "kwargs": {"older_than_days": 90},
+                },
+                # Daily 06:00 - expire approval requests
+                "expire-approval-requests": {
+                    "task": "baldur.expire_approval_requests",
+                    "schedule": crontab(hour=6, minute=0),
+                    "options": {"queue": "maintenance"},
+                    "kwargs": {"older_than_hours": 72},
+                },
+                # Hourly :05 - refresh WAL disk pressure gauges (484 D11)
+                "refresh-audit-wal-metrics": {
+                    "task": "baldur.refresh_audit_wal_metrics",
+                    "schedule": crontab(minute=5),
+                    "options": {"queue": "maintenance"},
                 },
             }
         )
