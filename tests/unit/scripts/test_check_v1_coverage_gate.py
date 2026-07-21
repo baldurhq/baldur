@@ -33,7 +33,7 @@ def _file_entry(num_statements: int, covered_lines: int) -> dict:
 
 
 def _passing_files() -> dict[str, dict]:
-    """Build a synthesised `files` dict where all 5 TARGETS hit 100%.
+    """Build a synthesised `files` dict where all 4 TARGETS hit 100%.
 
     The gate reads per-target paths from `gate.TARGETS`, so we synthesise
     one entry under each directory target and one entry at each file
@@ -180,7 +180,7 @@ class TestGateContract:
 
         assert exit_code == 0
         out = capsys.readouterr().out
-        assert "OK: all 5 targets" in out
+        assert "OK: all 4 targets" in out
 
     def test_main_returns_zero_at_exact_threshold_boundary(self, write_coverage_json):
         # Boundary: 80.0% exactly should PASS (the gate uses
@@ -282,26 +282,28 @@ class TestGateContract:
 
 
 # =============================================================================
-# TestTargetsContract - hardcoded inventory of the 5 OSS launch-surface files
+# TestTargetsContract - hardcoded inventory of the 4 OSS launch-surface files
 # =============================================================================
 
 
 class TestTargetsContract:
-    def test_targets_have_five_entries(self):
-        assert len(gate.TARGETS) == 5
+    def test_targets_have_four_entries(self):
+        assert len(gate.TARGETS) == 4
 
     def test_targets_are_all_files(self):
         dirs = [t for t in gate.TARGETS if t["type"] == "dir"]
         files = [t for t in gate.TARGETS if t["type"] == "file"]
         assert len(dirs) == 0
-        assert len(files) == 5
+        assert len(files) == 4
 
     def test_targets_match_oss_launch_surface_inventory(self):
-        # Hardcoded inventory of the 5 OSS v1.0 launch-surface files (523).
+        # Hardcoded inventory of the 4 OSS v1.0 launch-surface files (523).
+        # The Pydantic-DRF serializer helper was dropped from the surface when
+        # it was removed: it was never wired to a consumer, so gating coverage
+        # on it measured a module no shipped code path could reach.
         expected_paths = {
             "src/baldur/api/django/reauthentication.py",
             "src/baldur/api/django/throttle_adapter.py",
-            "src/baldur/api/django/serializers/pydantic_integration.py",
             "src/baldur/api/handlers/canary.py",
             "src/baldur/api/handlers/compliance.py",
         }
@@ -428,7 +430,7 @@ class TestStepSummaryEnvIntegration:
         # Then the summary file picks up the markdown table
         content = summary_path.read_text(encoding="utf-8")
         assert "### v1.0 coverage gate" in content
-        # All 5 targets should appear as rows.
+        # All 4 targets should appear as rows.
         for target in gate.TARGETS:
             assert f"| `{target['name']}` |" in content
 

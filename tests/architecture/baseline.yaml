@@ -200,7 +200,6 @@ all_declaration:
   - {file: "src/baldur/api/django/serializers/config/slo_configs.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/api/django/serializers/config/storage_configs.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/api/django/serializers/control.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
-  - {file: "src/baldur/api/django/serializers/pydantic_integration.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/api/django/stress_views.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/api/django/throttle_adapter.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/api/django/tiering/middleware.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
@@ -750,7 +749,6 @@ optional_imports:
   - {file: "src/baldur/api/django/serializers/control.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
   - {file: "src/baldur/api/django/serializers/features.py", reason: "django subtree assumes DRF; same accepted state as sibling serializers", ticket: "530"}
   - {file: "src/baldur/api/django/serializers/metric_sync.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
-  - {file: "src/baldur/api/django/serializers/pydantic_integration.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
   - {file: "src/baldur/api/django/stress_views.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
   - {file: "src/baldur/api/django/throttle_adapter.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
   - {file: "src/baldur/api/django/tiering/middleware.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}

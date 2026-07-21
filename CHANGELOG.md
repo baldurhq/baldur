@@ -32,6 +32,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `RetryConfig` and `RetryPolicyConfig.from_retry_config` — use `RetryPolicyConfig`. **Breaking**
 - Daily-report `approval_expired_count` — no producer, always 0. **Breaking**
 - `MerkleSpotChecker` — only its never-scheduled callers used it. **Breaking**
+- `create_pydantic_serializer`, `PydanticSerializerMixin` + helpers — unwired. **Breaking**
 - Dead `BALDUR_AUDIT_INTEGRITY_*` knobs: merkle, verification, lock-timeout, check-interval.
 - Cascade Warm/Cold retention tiers — never delivered; only the event TTL ships. **Breaking**
 - `CascadeRetentionConfig`, `get_cascade_retention_config` — unused. **Breaking**
