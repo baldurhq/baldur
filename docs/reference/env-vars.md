@@ -115,6 +115,25 @@ undocumented bare `REDIS_URL` (and not `BALDUR_REDIS_URL`) must switch to
 `BALDUR_REDIS_URL`. This is not an automated rename
 (`scripts/migrate_baldur_env_vars.py` covers only `BALDUR_*`-prefixed keys).
 
+## Health check
+
+Readiness probes every configured database under a bounded budget. A database
+that *refuses* connections always fails readiness. This variable decides the
+other case: a database that accepts the connection but never answers, and so
+exceeds the probe budget.
+
+`not_ready` (the default) depools the pod, fast and honestly — the same outcome
+a hung probe reaches today through the orchestrator's own probe timeout, but
+decided by Baldur and visible in the response body. Choose `ready` when every
+pod shares one database: there, depooling on a database stall takes the whole
+service out of rotation at once, and staying in rotation degraded is the better
+failure mode. Either way the affected alias is reported as `timed_out` in the
+readiness body, so the stall is never silent.
+
+```bash
+BALDUR_HEALTH_CHECK_READINESS_TIMEOUT_FAIL_DIRECTION=not_ready
+```
+
 ## Event logging (runtime level adjustment)
 
 ```bash

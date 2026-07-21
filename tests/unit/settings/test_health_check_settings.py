@@ -66,8 +66,8 @@ class TestHealthCheckSettingsDefaultContract:
         assert HealthCheckSettings().probe_worker_join_timeout == 2.0
 
     def test_field_count(self):
-        """HealthCheckSettings has exactly 7 fields."""
-        assert len(HealthCheckSettings.model_fields) == 7
+        """HealthCheckSettings has exactly 10 fields."""
+        assert len(HealthCheckSettings.model_fields) == 10
 
     def test_env_prefix(self):
         """환경변수 접두사: BALDUR_HEALTH_CHECK_."""

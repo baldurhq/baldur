@@ -309,6 +309,30 @@ finish, and new requests get a `503` with a `Retry-After` header.
 Kubernetes, set `terminationGracePeriodSeconds` comfortably above the drain window (30 s by
 default) so the platform's hard kill never lands before Baldur's own deadline.
 
+**Readiness flaps, and the payload shows a database as `timed_out`.**
+*Cause:* the database is reachable but slow to answer — it did not respond inside the readiness
+probe budget (0.5 s by default, half the Kubernetes `timeoutSeconds` default so Baldur always
+answers first). A cold container, a first connection to a sleeping managed database, or a
+laptop-local database under load will all do this. `timed_out` is distinct from a refused
+connection: the dependency is there, it is just late.
+*Fix:* in development, raise the budget. If the flapping is in production, treat the slow
+database as the real problem first — the budget exists to keep the probe honest, not to hide
+latency.
+
+```bash
+BALDUR_HEALTH_CHECK_READINESS_PROBE_TIMEOUT_SECONDS=2.0   # probe budget (s); default 0.5
+BALDUR_HEALTH_CHECK_READINESS_CACHE_TTL_SECONDS=5.0       # verdict cache (s); 0 disables
+```
+
+Both are tuning knobs rather than allowlisted operator settings, so they are not in the
+[environment variables reference](reference/env-vars.md) and may change in a v1.x release.
+The related *decision* — whether a timed-out database should depool the pod at all — is
+allowlisted as `BALDUR_HEALTH_CHECK_READINESS_TIMEOUT_FAIL_DIRECTION`.
+
+If readiness lags a recovery by a few seconds, that is the verdict cache, not a stall: a
+recovered database is observed at the next cache expiry. Set the TTL to `0` to see every probe
+live.
+
 ### Audit
 
 **The audit trail isn't recording anything. `(PRO)`**

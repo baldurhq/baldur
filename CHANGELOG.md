@@ -19,9 +19,14 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - Break-glass: set `BALDUR_RESILIENT_STORAGE_WAL_DIR` to any writable path to boot anyway.
 - `schedule_retention_cleanup()` reads `BALDUR_AUDIT_WAL_DIR` first, warning on the legacy name.
 - `BALDUR_CONFIG` and `BALDUR_DOTENV` no longer warn as unknown environment variables.
+- Readiness answers within a bounded time: a database that hangs no longer hangs the probe.
+- A sustained database outage logs readiness failures at WARNING, not ERROR with a traceback.
 
 ### Added
 
+- `BALDUR_HEALTH_CHECK_READINESS_TIMEOUT_FAIL_DIRECTION` — depool on a hung DB, or stay pooled.
+- Readiness reports a database that stopped answering as `timed_out`, distinct from `not_ready`.
+- Readiness verdicts are cached briefly, so probe cadence no longer scales query load per pod.
 - Daily report records the on-recovery replay sweep, so its "Auto-replay" line renders on OSS.
 - `baldur.utils.fs.resolve_writable_dir` — canonical writable-directory resolver.
 - Startup report gains `storage_dirs`: which durability directories resolved, and which fell back.
