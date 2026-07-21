@@ -10,6 +10,7 @@ Verification techniques:
 
 from __future__ import annotations
 
+import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -123,6 +124,96 @@ class TestReadinessCheckBehavior:
         ):
             resp = readiness_check(_make_ctx())
 
+        assert "is_ready" not in resp.body
+
+
+class TestReadinessHandlerTimeoutMappingBehavior:
+    """readiness_check() over a *real* service whose database probe stalls.
+
+    The tests above pin the handler's is_ready -> status-code mapping against a
+    mocked service. This class closes the other half: that a stalled database
+    actually produces the is_ready the fail direction promises, end to end from
+    the probe round to the HTTP status an orchestrator sees. Neither half alone
+    shows that the knob reaches the wire.
+    """
+
+    _PROBE_BUDGET_SECONDS = 0.2
+    _RELEASE_BACKSTOP_SECONDS = 10.0
+
+    @pytest.fixture
+    def hung_database(self, monkeypatch):
+        """Register a database provider whose only alias never answers."""
+        from baldur.interfaces.database_health import (
+            DatabaseConnectionInfo,
+            DatabaseHealthProvider,
+        )
+        from baldur.services.health_check import reset_health_check_service
+        from baldur.settings.health_check import reset_health_check_settings
+
+        release = threading.Event()
+        backstop = self._RELEASE_BACKSTOP_SECONDS
+
+        class _HungProvider(DatabaseHealthProvider):
+            """Accepts the connection and never answers — the failure mode the
+            probe budget exists for. Released in fixture teardown."""
+
+            def check_connection(self, alias="default"):
+                release.wait(timeout=backstop)
+                return DatabaseConnectionInfo(alias=alias, is_usable=True)
+
+            def list_aliases(self):
+                return ["default"]
+
+            def close_all(self):
+                return None
+
+        monkeypatch.setenv(
+            "BALDUR_HEALTH_CHECK_READINESS_PROBE_TIMEOUT_SECONDS",
+            str(self._PROBE_BUDGET_SECONDS),
+        )
+        monkeypatch.setenv("BALDUR_HEALTH_CHECK_READINESS_CACHE_TTL_SECONDS", "0.0")
+
+        def _configure(direction):
+            monkeypatch.setenv(
+                "BALDUR_HEALTH_CHECK_READINESS_TIMEOUT_FAIL_DIRECTION", direction
+            )
+            reset_health_check_settings()
+            # The handler resolves the *singleton*, so a verdict cached by an
+            # earlier phase of this test would be served instead of a fresh one.
+            reset_health_check_service()
+            return _HungProvider()
+
+        yield _configure
+
+        release.set()
+        reset_health_check_settings()
+        reset_health_check_service()
+
+    @pytest.mark.parametrize(
+        ("direction", "expected_status_code", "expected_body_status"),
+        [("not_ready", 503, "not_ready"), ("ready", 200, "ready")],
+    )
+    def test_stalled_database_maps_to_the_configured_http_status(
+        self, hung_database, direction, expected_status_code, expected_body_status
+    ):
+        """The fail direction decides the HTTP status an orchestrator acts on.
+
+        The reported check value stays "timed_out" either way — the operator is
+        always told which alias stalled; only the depool decision moves.
+        """
+        from baldur.api.handlers.health import readiness_check
+
+        provider = hung_database(direction)
+
+        with patch(
+            "baldur.factory.registry.ProviderRegistry.database_health"
+        ) as mock_slot:
+            mock_slot.get.return_value = provider
+            resp = readiness_check(_make_ctx())
+
+        assert resp.status_code == expected_status_code
+        assert resp.body["status"] == expected_body_status
+        assert resp.body["checks"]["database_default"] == "timed_out"
         assert "is_ready" not in resp.body
 
 
