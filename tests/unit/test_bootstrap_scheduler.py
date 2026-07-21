@@ -21,14 +21,17 @@ import pytest
 
 from baldur.bootstrap import (
     _DEFAULT_SCHEDULED_JOBS,
+    _PRO_GATED_JOBS,
     _build_celery_delegator,
     _build_config_apply_callable,
     _resolve_job_callable,
     _resolve_scheduler_elector,
     _start_default_scheduler,
+    _tier_resolved_scheduled_jobs,
     _wrap_with_context,
 )
 from baldur.coordination.local_file_elector import LocalFileLeaderElector
+from baldur.coordination.scheduler import LeaderScheduler
 
 
 @pytest.fixture(autouse=True)
@@ -77,12 +80,114 @@ class TestDefaultScheduledJobsContract:
 
 
 # =============================================================================
+# Behavior — tier-resolved job registration
+# =============================================================================
+
+
+class TestTierResolvedScheduledJobsBehavior:
+    """_tier_resolved_scheduled_jobs filters the contract tuple at registration.
+
+    The PRO-gated jobs' capability is PRO-only, so on an install without the
+    PRO distribution they could only fail on cadence. The filter narrows what
+    gets registered; ``_DEFAULT_SCHEDULED_JOBS`` itself stays the full contract.
+    """
+
+    def test_pro_tier_returns_the_contract_tuple_unchanged(self, mock_pro_tier):
+        """With PRO installed nothing is filtered — the same tuple comes back."""
+        assert _tier_resolved_scheduled_jobs() == _DEFAULT_SCHEDULED_JOBS
+
+    def test_oss_tier_removes_exactly_the_pro_gated_jobs(self, mock_oss_tier):
+        """The set difference vs the contract tuple is exactly _PRO_GATED_JOBS.
+
+        Computed from the source constants rather than hardcoded, so adding a
+        job to either tuple keeps this honest instead of silently stale.
+        """
+        resolved_names = {job[0] for job in _tier_resolved_scheduled_jobs()}
+        contract_names = {job[0] for job in _DEFAULT_SCHEDULED_JOBS}
+
+        assert contract_names - resolved_names == set(_PRO_GATED_JOBS)
+
+    def test_oss_tier_preserves_the_order_of_surviving_jobs(self, mock_oss_tier):
+        """Filtering is order-preserving — registration order is not reshuffled."""
+        resolved = _tier_resolved_scheduled_jobs()
+        expected = tuple(
+            job for job in _DEFAULT_SCHEDULED_JOBS if job[0] not in _PRO_GATED_JOBS
+        )
+
+        assert resolved == expected
+
+    def test_contract_tuple_is_not_mutated_by_the_filter(self, mock_oss_tier):
+        """The filter builds a new tuple; the module-level contract is untouched."""
+        before = tuple(_DEFAULT_SCHEDULED_JOBS)
+
+        _tier_resolved_scheduled_jobs()
+
+        assert _DEFAULT_SCHEDULED_JOBS == before
+        assert "archive_old_dlq_entries" in {job[0] for job in _DEFAULT_SCHEDULED_JOBS}
+
+    def test_oss_tier_logs_each_gated_job_skip(self, mock_oss_tier):
+        """Each filtered job leaves a DEBUG breadcrumb naming it."""
+        import baldur.bootstrap as bootstrap_module
+
+        with patch.object(bootstrap_module, "logger") as mock_logger:
+            _tier_resolved_scheduled_jobs()
+
+        logged_jobs = {
+            call.kwargs["job"]
+            for call in mock_logger.debug.call_args_list
+            if call.args and call.args[0] == "scheduler.pro_gated_job_skipped"
+        }
+        assert logged_jobs == set(_PRO_GATED_JOBS)
+
+
+# =============================================================================
 # Behavior — AUTOSTART env gate and unknown backend fallback
 # =============================================================================
 
 
 class TestStartDefaultSchedulerBehavior:
     """Behavior tests for _start_default_scheduler branching logic."""
+
+    @staticmethod
+    def _registered_job_names(mock_scheduler) -> set[str]:
+        """Job names the scheduler was actually asked to register."""
+        return {
+            call.kwargs.get("name") or call.args[0]
+            for call in mock_scheduler.add_job.call_args_list
+        }
+
+    def test_gate_only_removes_the_pro_job_from_the_registered_set(self, monkeypatch):
+        """OSS registers the PRO set minus exactly the gated job.
+
+        Guards the blast radius: a gate that also dropped an unrelated job — or
+        that dropped nothing — leaves this equality failing. Both tiers are
+        driven in one test so the two registered sets are directly comparable.
+        """
+        monkeypatch.setenv("BALDUR_SCHEDULER_AUTOSTART", "1")
+
+        def registered_under(pro_installed: bool) -> set[str]:
+            from baldur.coordination.scheduler import reset_schedulers
+
+            reset_schedulers()
+            mock_sched = MagicMock(spec=LeaderScheduler)
+            with (
+                patch(
+                    "baldur.utils.tier.is_pro_installed",
+                    return_value=pro_installed,
+                ),
+                patch(
+                    "baldur.coordination.scheduler.get_leader_scheduler",
+                    return_value=mock_sched,
+                ),
+            ):
+                _start_default_scheduler(task_backend="inline")
+            return self._registered_job_names(mock_sched)
+
+        pro_names = registered_under(True)
+        oss_names = registered_under(False)
+
+        assert pro_names - oss_names == set(_PRO_GATED_JOBS)
+        assert oss_names - pro_names == set()
 
     def test_autostart_env_zero_skips_scheduler_entirely(self, monkeypatch):
         """BALDUR_SCHEDULER_AUTOSTART=0 → no scheduler import or start.

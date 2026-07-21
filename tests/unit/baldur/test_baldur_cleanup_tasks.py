@@ -270,6 +270,56 @@ class TestCleanupBeatSchedule:
             "refresh-audit-wal-metrics",
         }
 
+    _TIER_NEUTRAL_ENTRIES = {
+        "cleanup-expired-config",
+        "expire-approval-requests",
+        "flush-expired-jwt-tokens",
+        "cleanup-stale-cb-keys",
+        "cleanup-memory-cache-expired",
+        "refresh-audit-wal-metrics",
+    }
+    _PRO_RETENTION_ENTRIES = {
+        "archive-old-dlq-entries",
+        "purge-archived-dlq-entries",
+    }
+
+    @pytest.mark.parametrize(
+        ("tier_fixture", "expect_retention"),
+        [("mock_oss_tier", False), ("mock_pro_tier", True)],
+        ids=["oss", "pro"],
+    )
+    def test_composed_entry_set_is_exactly_the_tier_set(
+        self, request, tier_fixture, expect_retention
+    ):
+        """The six tier-neutral entries are invariant; only retention is gated."""
+        request.getfixturevalue(tier_fixture)
+
+        expected = set(self._TIER_NEUTRAL_ENTRIES)
+        if expect_retention:
+            expected |= self._PRO_RETENTION_ENTRIES
+
+        assert set(get_cleanup_beat_schedule()) == expected
+
+    def test_oss_branch_logs_retention_skip_once(self, mock_oss_tier):
+        """The dropped retention entries leave a DEBUG breadcrumb."""
+        from baldur.tasks import cleanup_tasks
+
+        with patch.object(cleanup_tasks, "logger") as mock_logger:
+            cleanup_tasks.get_cleanup_beat_schedule()
+
+        mock_logger.debug.assert_called_once_with(
+            "cleanup_tasks.dlq_retention_entries_skipped"
+        )
+
+    def test_pro_branch_does_not_log_a_retention_skip(self, mock_pro_tier):
+        """Nothing is dropped on PRO, so no skip breadcrumb is emitted."""
+        from baldur.tasks import cleanup_tasks
+
+        with patch.object(cleanup_tasks, "logger") as mock_logger:
+            cleanup_tasks.get_cleanup_beat_schedule()
+
+        mock_logger.debug.assert_not_called()
+
     def test_cleanup_expired_config_schedule(self):
         """만료 설정 정리 스케줄 확인."""
         schedule = get_cleanup_beat_schedule()

@@ -96,6 +96,36 @@ class TestDlqMaintenanceBeatScheduleContract:
         schedule = get_dlq_maintenance_beat_schedule()
         assert set(schedule) == {"release-stale-replaying-entries"}
 
+    @pytest.mark.parametrize(
+        ("tier_fixture", "expected_entries"),
+        [
+            ("mock_oss_tier", {"release-stale-replaying-entries"}),
+            (
+                "mock_pro_tier",
+                {
+                    "release-stale-replaying-entries",
+                    "evict-overflow-dlq-entries",
+                    "cleanup-resolved-dlq-entries",
+                    "cleanup-compressed-dlq-entries",
+                },
+            ),
+        ],
+        ids=["oss", "pro"],
+    )
+    def test_composed_entry_set_is_exactly_the_tier_set(
+        self, request, tier_fixture, expected_entries
+    ):
+        """Each tier composes exactly its entry set — nothing extra, nothing missing.
+
+        Pins both directions at once: an entry wrongly promoted to the
+        always-set would fail the OSS row, and an entry dropped from the PRO-set
+        would fail the PRO row.
+        """
+        request.getfixturevalue(tier_fixture)
+        from baldur.celery_tasks.dlq_tasks import get_dlq_maintenance_beat_schedule
+
+        assert set(get_dlq_maintenance_beat_schedule()) == expected_entries
+
     @pytest.mark.parametrize("tier_fixture", ["mock_oss_tier", "mock_pro_tier"])
     def test_schedule_contains_release_stale_replaying_task(
         self, request, tier_fixture
@@ -131,6 +161,33 @@ class TestDlqMaintenanceBeatScheduleContract:
 
         assert entry["schedule"].hour == {4}
         assert entry["schedule"].minute == {30}
+
+
+class TestDlqMaintenanceTierGateSideEffectBehavior:
+    """Behavior: the OSS branch records why the PRO-set was dropped.
+
+    Composition-time gating is silent by design (no error, no missing task) —
+    the DEBUG breadcrumb is the only trace an operator has for "why does my
+    beat schedule have one DLQ entry, not four?".
+    """
+
+    def test_oss_branch_logs_skip_once(self, mock_oss_tier):
+        """Exactly one DEBUG dlq.maintenance_pro_entries_skipped on the OSS branch."""
+        from baldur.celery_tasks import dlq_tasks
+
+        with patch.object(dlq_tasks, "logger") as mock_logger:
+            dlq_tasks.get_dlq_maintenance_beat_schedule()
+
+        mock_logger.debug.assert_called_once_with("dlq.maintenance_pro_entries_skipped")
+
+    def test_pro_branch_does_not_log_a_skip(self, mock_pro_tier):
+        """Nothing is skipped on PRO, so no skip breadcrumb is emitted."""
+        from baldur.celery_tasks import dlq_tasks
+
+        with patch.object(dlq_tasks, "logger") as mock_logger:
+            dlq_tasks.get_dlq_maintenance_beat_schedule()
+
+        mock_logger.debug.assert_not_called()
 
 
 class TestBeatScheduleWiringContract:
