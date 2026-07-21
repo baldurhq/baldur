@@ -25,10 +25,17 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from baldur.core.exceptions import ConfigurationError
+
 if TYPE_CHECKING:
     from baldur.settings.resilient_storage import ResilientStorageSettings
 
 logger = structlog.get_logger()
+
+# Environment variable an operator sets to choose this backend's WAL
+# directory. Named in fallback warnings, in the WAL configuration error and
+# in the production boot gate's break-glass instruction.
+WAL_DIR_ENV_VAR = "BALDUR_RESILIENT_STORAGE_WAL_DIR"
 
 # Prevent garbled logs from OS error messages emitted as cp949 under a
 # Windows Korean locale. Normalize to errno-based English messages.
@@ -131,6 +138,11 @@ class ResilientStorageBackend:
         # WAL for disk-based recovery queue
         self._wal: Any | None = None
         self._wal_initialized = False
+        # True when the WAL is usable but landed on a fallback directory
+        # rather than the configured one. Runtime write paths do not consult
+        # it - a fallback WAL is a working WAL - only the production boot
+        # gate, which promises the WAL is on its configured directory.
+        self._wal_on_fallback_dir = False
 
         # Memory fallback
         self._memory: dict[str, Any] = {}
@@ -371,23 +383,39 @@ class ResilientStorageBackend:
             self._recovery_lock.release()
 
     def _init_wal(self) -> None:
-        """Initialize Write-Ahead Log."""
+        """Initialize Write-Ahead Log.
+
+        Directory resolution lives inside ``WriteAheadLog``: an
+        operator-chosen ``wal_dir`` that is unwritable raises, while the
+        shipped default falls back to a writable location.
+        """
         try:
             from baldur.audit.wal import WALConfig, WriteAheadLog
 
-            # Ensure WAL directory exists
-            os.makedirs(self.config.wal_dir, exist_ok=True)
-
             wal_config = WALConfig(
                 wal_dir=self.config.wal_dir,
+                wal_dir_operator_set=("wal_dir" in self.config.model_fields_set),
+                wal_dir_env_var=WAL_DIR_ENV_VAR,
                 sync_on_write=True,  # fsync guarantee - server crash safe
                 file_prefix="resilient_storage",
             )
 
             self._wal = WriteAheadLog(config=wal_config)
+            resolved = self._wal.resolved_dir
+            self._wal_on_fallback_dir = bool(resolved and resolved.fell_back)
             self._wal_initialized = True
             logger.debug("resilient_storage.wal_initialized")
 
+        except ConfigurationError as e:
+            # Expected, handled condition - the primitive already warned
+            # with the resolved paths, so no traceback here.
+            logger.warning(
+                "resilient_storage.wal_init_failed",
+                wal_dir=self.config.wal_dir,
+                override_env=WAL_DIR_ENV_VAR,
+                _safe_error_message=_safe_error_message(e),
+            )
+            self._wal_initialized = False
         except Exception as e:
             logger.exception(
                 "resilient_storage.wal_init_failed",
@@ -395,6 +423,11 @@ class ResilientStorageBackend:
             )
             # WAL failure is serious but we continue with memory-only
             self._wal_initialized = False
+
+    @property
+    def _wal_honors_configured_dir(self) -> bool:
+        """Whether the WAL runs on the directory it was configured with."""
+        return self._wal_initialized and not self._wal_on_fallback_dir
 
     def _init_shadow_logger(self) -> None:
         """Initialize Shadow Logger for forensic logging."""
@@ -1666,6 +1699,7 @@ class ResilientStorageBackend:
             "mode": self._mode.value,
             "redis_available": self._redis_initialized,
             "wal_initialized": self._wal_initialized,
+            "wal_on_fallback_dir": self._wal_on_fallback_dir,
             "memory_keys": len(self._memory),
             # Degraded blob-store observability (D2 #539). Both are
             # GIL-atomic single reads — lock-free like ``memory_keys``.

@@ -529,6 +529,10 @@ class RedisEventBus:
 
             config = WALConfig(
                 wal_dir="/var/log/baldur/event_bus_wal",
+                # Hardcoded last-resort path, not operator input - and no
+                # environment override exists, so none is promised.
+                wal_dir_operator_set=False,
+                wal_dir_env_var=None,
                 file_prefix="event_bus_wal",
                 max_file_size_mb=50,
                 sync_on_write=True,

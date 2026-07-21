@@ -10,9 +10,28 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+### Fixed
+
+- Audit checkpoint, WAL and DLQ disk buffer now fall back to a writable directory when their
+  hardcoded default is not writable (non-root deploys), instead of dying silently or crashing.
+- A directory you set explicitly still fails loud — `ConfigurationError` names the path and
+  its env var — rather than quietly writing somewhere else.
+- `ResilientStorageBackend` no longer logs an ERROR traceback on a non-root install; it warns
+  and runs its WAL from the fallback directory.
+- Production boot still refuses to start unless the resilient-storage WAL is on its configured
+  directory. To prioritize availability during an infrastructure incident, set
+  `BALDUR_RESILIENT_STORAGE_WAL_DIR` to any writable path.
+- `schedule_retention_cleanup()` reads `BALDUR_AUDIT_WAL_DIR` first, warning when it falls back
+  to the legacy unprefixed `AUDIT_WAL_DIR`.
+
 ### Added
 
 - Daily report records the on-recovery replay sweep, so its "Auto-replay" line renders on OSS.
+- `baldur.utils.fs.resolve_writable_dir` — canonical writable-directory resolver.
+- Startup report gains `storage_dirs`: which durability directories resolved, and which fell back.
+- `WALConfig.wal_dir_operator_set` / `create_wal(wal_dir_operator_set=...)` — set it whenever
+  `wal_dir` comes from operator input.
+- `ResilientStorageBackend.get_stats()` gains `wal_on_fallback_dir`.
 
 ### Changed
 

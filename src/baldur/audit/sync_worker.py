@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from baldur.core.backoff import ExponentialBackoff
+from baldur.core.exceptions import ConfigurationError
 from baldur.interfaces.audit_adapter import AuditEntry
 
 if TYPE_CHECKING:
@@ -810,6 +811,15 @@ class AuditSyncWorker:
 
             self._checkpoint_strategy = get_default_checkpoint_strategy()
             return self._checkpoint_strategy
+        except ConfigurationError as e:
+            # Operator misconfiguration (an unwritable checkpoint directory
+            # the operator chose). Checkpointing degrades exactly as before,
+            # but the named cause is visible instead of debug-only.
+            logger.warning(
+                "audit_sync_worker.checkpoint_strategy_unavailable",
+                error=e,
+            )
+            return None
         except Exception as e:
             logger.debug(
                 "audit_sync_worker.checkpoint_strategy_unavailable",

@@ -31,6 +31,8 @@ import structlog
 
 from baldur.audit.wal._disk_manager import WALDiskManagerMixin
 from baldur.audit.wal._models import (
+    LEGACY_WAL_DIR_ENV_VAR,
+    WAL_DIR_ENV_VAR,
     WALConfig,
     WALCorruptionError,
     WALEntry,
@@ -42,6 +44,7 @@ from baldur.audit.wal._reader import WALReaderMixin
 from baldur.audit.wal._serialization import compute_checksum, verify_checksum
 from baldur.audit.wal._writer import WALWriterMixin
 from baldur.core.file_utils import safe_unlink
+from baldur.utils.fs import ResolvedDir, resolve_writable_dir
 
 logger = structlog.get_logger()
 
@@ -102,7 +105,12 @@ class WriteAheadLog(
         self._on_corruption = on_corruption
         self._audit_adapter = audit_adapter
 
+        # Re-assigned in _init_or_recover() once the directory is resolved.
+        # The mixins read this attribute, never ``config.wal_dir``, so
+        # rotation, cleanup, disk-usage and recovery all follow a fallback
+        # together.
         self._wal_dir = Path(self._config.wal_dir)
+        self._resolved_dir: ResolvedDir | None = None
         self._current_file: Path | None = None
         self._current_handle: Any | None = None
         self._sequence = 0
@@ -135,8 +143,18 @@ class WriteAheadLog(
         this worker's. Filtering by PID guarantees that a fresh
         process starts its sequence at 0 and an existing process can
         recover its own last sequence after, e.g., a re-init cycle.
+
+        Raises:
+            ConfigurationError: When an operator-chosen ``wal_dir`` is not
+                writable, or when no fallback directory is writable.
         """
-        self._wal_dir.mkdir(parents=True, exist_ok=True)
+        self._resolved_dir = resolve_writable_dir(
+            self._config.wal_dir,
+            purpose=f"wal_{self._config.file_prefix}",
+            operator_set=self._config.wal_dir_operator_set,
+            env_override_name=self._config.wal_dir_env_var,
+        )
+        self._wal_dir = self._resolved_dir.path
 
         own_pid_pattern = f"{self._config.file_prefix}_*_{os.getpid()}.wal"
         wal_files = sorted(self._wal_dir.glob(own_pid_pattern))
@@ -147,6 +165,16 @@ class WriteAheadLog(
                     self._sequence = max(self._sequence, entry.sequence)
             except Exception:
                 pass
+
+    @property
+    def wal_dir(self) -> Path:
+        """Directory WAL files are written to (post-resolution)."""
+        return self._wal_dir
+
+    @property
+    def resolved_dir(self) -> ResolvedDir | None:
+        """Directory-resolution outcome, ``None`` before initialization."""
+        return self._resolved_dir
 
     # =========================================================================
     # File Management
@@ -360,12 +388,23 @@ def create_wal(
     wal_dir: str = "/var/log/audit/wal",
     max_file_size_mb: int = 100,
     sync_on_write: bool = True,
+    wal_dir_operator_set: bool = False,
 ) -> WriteAheadLog:
-    """Helper to create a WAL."""
+    """Helper to create a WAL.
+
+    Args:
+        wal_dir: Directory WAL files are written to.
+        max_file_size_mb: Rotation threshold per WAL file.
+        sync_on_write: Whether to fsync every write.
+        wal_dir_operator_set: Set this to ``True`` whenever ``wal_dir``
+            comes from operator input. An operator-chosen directory that is
+            unwritable raises instead of silently falling back.
+    """
     config = WALConfig(
         wal_dir=wal_dir,
         max_file_size_mb=max_file_size_mb,
         sync_on_write=sync_on_write,
+        wal_dir_operator_set=wal_dir_operator_set,
     )
     return WriteAheadLog(config=config)
 
@@ -380,6 +419,8 @@ from baldur.audit.wal._jsonl import CommitMarker, JSONLReader, JSONLWriter
 from baldur.utils.time import utc_now
 
 __all__ = [
+    "LEGACY_WAL_DIR_ENV_VAR",
+    "WAL_DIR_ENV_VAR",
     "WriteAheadLog",
     "WALEntry",
     "WALConfig",
