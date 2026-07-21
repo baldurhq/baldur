@@ -273,13 +273,21 @@ def scan_pro_probe_source(
 ) -> list[tuple[int, str]]:
     """Return ``(lineno, kind)`` inline private-distribution presence probes.
 
-    Matches a ``find_spec`` **call** whose first positional argument is the
-    constant ``"baldur_pro"`` / ``"baldur_dormant"`` — both the bare
-    ``find_spec(...)`` and the dotted ``importlib.util.find_spec(...)`` forms.
-    Scanning the *idiom* rather than the bare module string is deliberate: that
-    string legitimately appears in registry slot-factory tables and reset maps
-    in dozens of places, so a literal scan would be all false positives and get
-    baselined into inertness.
+    Matches a ``find_spec`` **call** whose module argument is the constant
+    ``"baldur_pro"`` / ``"baldur_dormant"`` — the bare ``find_spec(...)``, the
+    dotted ``importlib.util.find_spec(...)`` and the keyword
+    ``find_spec(name=...)`` forms. Scanning the *idiom* rather than the bare
+    module string is deliberate: that string legitimately appears in registry
+    slot-factory tables and reset maps in dozens of places, so a literal scan
+    would be all false positives and get baselined into inertness.
+
+    Boundary (deliberate, documented rather than closed): the module argument
+    must be a literal and the callee must still be named ``find_spec``, so a
+    probe built through a variable (``find_spec(_PRIVATE)``) or an aliased
+    import (``from importlib.util import find_spec as _probe``) is not matched.
+    Closing those needs constant propagation / alias tracking, and neither is
+    the drift signature this gate exists to catch — which is a copy-paste of
+    the canonical one-liner.
     """
     try:
         tree = ast.parse(source, filename=filename)
@@ -293,9 +301,14 @@ def scan_pro_probe_source(
         name = func.attr if isinstance(func, ast.Attribute) else None
         if name is None and isinstance(func, ast.Name):
             name = func.id
-        if name != "find_spec" or not node.args:
+        if name != "find_spec":
             continue
-        first = node.args[0]
+        first = next(
+            (kw.value for kw in node.keywords if kw.arg == "name"),
+            node.args[0] if node.args else None,
+        )
+        if first is None:
+            continue
         if (
             isinstance(first, ast.Constant)
             and isinstance(first.value, str)
@@ -642,6 +655,14 @@ class TestG73Scanner:
             pytest.param(
                 "import importlib.util\n"
                 "def f():\n"
+                '    return importlib.util.find_spec(name="baldur_pro") is not None\n',
+                1,
+                "the keyword form is the same probe",
+                id="keyword-call",
+            ),
+            pytest.param(
+                "import importlib.util\n"
+                "def f():\n"
                 '    return importlib.util.find_spec("celery") is not None\n',
                 0,
                 "third-party probes are out of scope",
@@ -671,6 +692,36 @@ class TestG73Scanner:
     )
     def test_scan_flags_expected(self, source: str, expected: int, note: str):
         assert len(scan_pro_probe_source(source)) == expected, note
+
+    @pytest.mark.parametrize(
+        ("source", "note"),
+        [
+            pytest.param(
+                "import importlib.util\n"
+                '_PRIVATE = "baldur_pro"\n'
+                "def f():\n"
+                "    return importlib.util.find_spec(_PRIVATE) is not None\n",
+                "variable module argument — needs constant propagation",
+                id="boundary-variable-arg",
+            ),
+            pytest.param(
+                "from importlib.util import find_spec as _probe\n"
+                "def f():\n"
+                '    return _probe("baldur_pro") is not None\n',
+                "aliased import — needs alias tracking",
+                id="boundary-aliased-import",
+            ),
+        ],
+    )
+    def test_documented_boundary_is_not_matched(self, source: str, note: str):
+        """Pin the scanner's documented blind spots so they stay deliberate.
+
+        Neither form is the drift signature the gate exists to catch (a
+        copy-paste of the canonical one-liner). This test fails if a future
+        change closes one of them without updating the docstring and the rule
+        registry, which is what keeps the gate's advertised reach honest.
+        """
+        assert scan_pro_probe_source(source) == [], note
 
     def test_unparseable_source_returns_empty(self):
         assert scan_pro_probe_source("def f(:\n") == []

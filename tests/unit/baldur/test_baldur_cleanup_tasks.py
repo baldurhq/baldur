@@ -12,6 +12,7 @@ Tests:
 
 from __future__ import annotations
 
+import builtins
 from unittest.mock import Mock, patch
 
 import pytest
@@ -23,6 +24,7 @@ from baldur.tasks.cleanup_tasks import (
     expire_approval_requests,
     get_cleanup_beat_schedule,
     purge_archived_dlq_entries,
+    refresh_audit_wal_metrics,
 )
 
 # =============================================================================
@@ -251,8 +253,63 @@ class TestPurgeArchivedDLQEntries:
 
 
 # =============================================================================
-# Backward Compatibility 테스트
+# refresh_audit_wal_metrics — skip contract
 # =============================================================================
+
+
+class TestRefreshAuditWalMetricsSkipContractBehavior:
+    """The task's advertised no-op contract holds when the accessor is absent.
+
+    The docstring promises a no-op when "the audit WAL accessor is not
+    installed". It used to open its only ``try`` with the accessor import and
+    end that block in ``logger.exception(...)`` + ``raise``, so on an install
+    without the private distribution the promised no-op was an hourly ERROR
+    plus a task failure — the advertised contract inverted.
+    """
+
+    @staticmethod
+    def _without_accessor(monkeypatch):
+        """Make ``baldur_pro.services.audit`` unimportable for one call.
+
+        Patches the import machinery rather than deleting a module so the
+        absence is reproduced at the exact statement under test, on a repo that
+        always has the private distribution on disk.
+        """
+        real_import = builtins.__import__
+
+        def blocked(name, *args, **kwargs):
+            if name == "baldur_pro" or name.startswith("baldur_pro."):
+                raise ModuleNotFoundError(f"No module named '{name}'")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", blocked)
+
+    def test_absent_accessor_returns_a_skip_instead_of_raising(self, monkeypatch):
+        """No exception, and the skip shape the docstring names."""
+        self._without_accessor(monkeypatch)
+
+        result = refresh_audit_wal_metrics()
+
+        assert result == {"success": True, "skipped": True}
+
+    def test_absent_accessor_is_not_logged_as_a_fault(self, monkeypatch):
+        """A missing private distribution is normal flow: DEBUG, never ERROR.
+
+        Pins the level split. The fault handler is still reachable for a real
+        WAL failure — that case is covered by the existing failure tests — but
+        it may not be reached merely by running on OSS.
+        """
+        from baldur.tasks import cleanup_tasks
+
+        self._without_accessor(monkeypatch)
+
+        with patch.object(cleanup_tasks, "logger") as mock_logger:
+            cleanup_tasks.refresh_audit_wal_metrics()
+
+        mock_logger.exception.assert_not_called()
+        mock_logger.debug.assert_called_once_with(
+            "cleanup_task.wal_metrics_skipped", reason="accessor_absent"
+        )
 
 
 # =============================================================================
@@ -272,63 +329,60 @@ class TestCleanupBeatSchedule:
         assert "expire-approval-requests" in schedule
         assert "purge-archived-dlq-entries" in schedule
 
-    def test_schedule_drops_dlq_retention_without_pro(self, mock_oss_tier):
-        """Scheduled DLQ retention is a PRO capability; the rest is tier-neutral."""
+    def test_schedule_drops_pro_backed_entries_without_pro(self, mock_oss_tier):
+        """Only entries with an OSS-resolvable backing survive on OSS.
+
+        Every gated entry needs a backing that the PRO distribution alone
+        registers: DLQ retention needs the PRO DLQ service, approval expiry
+        needs the runtime-config manager, and the WAL gauges need the WAL
+        singleton accessor. Scheduling any of them on OSS queues work that can
+        only fail on cadence.
+        """
         schedule = get_cleanup_beat_schedule()
 
-        assert "archive-old-dlq-entries" not in schedule
-        assert "purge-archived-dlq-entries" not in schedule
-        assert set(schedule) == {
-            "cleanup-expired-config",
-            "expire-approval-requests",
-            "flush-expired-jwt-tokens",
-            "cleanup-stale-cb-keys",
-            "cleanup-memory-cache-expired",
-            "refresh-audit-wal-metrics",
-        }
+        assert set(schedule) == self._TIER_NEUTRAL_ENTRIES
+        assert not (set(schedule) & self._PRO_BACKED_ENTRIES)
 
     _TIER_NEUTRAL_ENTRIES = {
         "cleanup-expired-config",
-        "expire-approval-requests",
         "flush-expired-jwt-tokens",
         "cleanup-stale-cb-keys",
         "cleanup-memory-cache-expired",
-        "refresh-audit-wal-metrics",
     }
-    _PRO_RETENTION_ENTRIES = {
+    _PRO_BACKED_ENTRIES = {
         "archive-old-dlq-entries",
         "purge-archived-dlq-entries",
+        "expire-approval-requests",
+        "refresh-audit-wal-metrics",
     }
 
     @pytest.mark.parametrize(
-        ("tier_fixture", "expect_retention"),
+        ("tier_fixture", "expect_pro_entries"),
         [("mock_oss_tier", False), ("mock_pro_tier", True)],
         ids=["oss", "pro"],
     )
     def test_composed_entry_set_is_exactly_the_tier_set(
-        self, request, tier_fixture, expect_retention
+        self, request, tier_fixture, expect_pro_entries
     ):
-        """The six tier-neutral entries are invariant; only retention is gated."""
+        """The tier-neutral entries are invariant; only the PRO-set is gated."""
         request.getfixturevalue(tier_fixture)
 
         expected = set(self._TIER_NEUTRAL_ENTRIES)
-        if expect_retention:
-            expected |= self._PRO_RETENTION_ENTRIES
+        if expect_pro_entries:
+            expected |= self._PRO_BACKED_ENTRIES
 
         assert set(get_cleanup_beat_schedule()) == expected
 
-    def test_oss_branch_logs_retention_skip_once(self, mock_oss_tier):
-        """The dropped retention entries leave a DEBUG breadcrumb."""
+    def test_oss_branch_logs_pro_entry_skip_once(self, mock_oss_tier):
+        """The dropped PRO-backed entries leave a DEBUG breadcrumb."""
         from baldur.tasks import cleanup_tasks
 
         with patch.object(cleanup_tasks, "logger") as mock_logger:
             cleanup_tasks.get_cleanup_beat_schedule()
 
-        mock_logger.debug.assert_called_once_with(
-            "cleanup_tasks.dlq_retention_entries_skipped"
-        )
+        mock_logger.debug.assert_called_once_with("cleanup_tasks.pro_entries_skipped")
 
-    def test_pro_branch_does_not_log_a_retention_skip(self, mock_pro_tier):
+    def test_pro_branch_does_not_log_a_skip(self, mock_pro_tier):
         """Nothing is dropped on PRO, so no skip breadcrumb is emitted."""
         from baldur.tasks import cleanup_tasks
 
@@ -355,8 +409,8 @@ class TestCleanupBeatSchedule:
         assert config["options"]["queue"] == "maintenance"
         assert config["kwargs"]["older_than_days"] == 30
 
-    def test_expire_approval_schedule(self):
-        """승인 만료 스케줄 확인."""
+    def test_expire_approval_schedule(self, mock_pro_tier):
+        """Approval-expiry entry shape (PRO-set — needs the runtime-config manager)."""
         schedule = get_cleanup_beat_schedule()
         config = schedule["expire-approval-requests"]
 

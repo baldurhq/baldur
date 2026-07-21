@@ -50,6 +50,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `configure_baldur_celery(app)` raised `TypeError` on every call and registered nothing.
 - PRO-only DLQ maintenance no longer schedules without PRO — three tasks failed on cadence.
 - Stale REPLAYING entries now release back to PENDING without PRO, instead of stranding.
+- Cleanup-lane approval-expiry and WAL-gauge entries are PRO-gated; the WAL task failed hourly.
 - The X-Test-Mode snapshot error no longer echoes raw exception text into the response body.
 - Compressed DLQ entries now age ACTIVE→STALE→ARCHIVED on a daily schedule (was never run).
 - Compressed-entry sweep reads the oldest page, not the newest — it was a no-op above ~3/day.
