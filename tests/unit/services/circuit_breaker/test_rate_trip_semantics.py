@@ -385,6 +385,30 @@ class TestOutcomeWindowLifecycleBehavior:
         assert result.success is True
         assert service.get_window_evidence(SERVICE) == (0, 0)
 
+    def test_force_open_clears_the_window_even_if_cleanup_raises(self):
+        """The transition has committed, so the clear cannot be skipped.
+
+        ``atomic_force_open`` writes state=OPEN before the HALF_OPEN counter
+        cleanup runs. A repository fault in that cleanup must not leave the
+        pre-transition evidence behind a circuit that is already open.
+        """
+        service = _service(_config())
+        _drive(service, "fsss")
+        assert service.get_window_evidence(SERVICE) == (1, 4)
+
+        with (
+            self._manual(service),
+            patch.object(
+                service.repository,
+                "reset_half_open_count",
+                side_effect=ConnectionError("redis is gone"),
+            ),
+        ):
+            service.force_open(SERVICE, reason="maintenance")
+
+        assert service.get_state(SERVICE) == "open"
+        assert service.get_window_evidence(SERVICE) == (0, 0)
+
     def test_force_close_clears_the_window(self):
         """A manual close starts the new closed period without evidence."""
         service = _service(_config())
@@ -480,3 +504,82 @@ class TestAggregateFailureRateBehavior:
         _drive(service, "ffsssss")
 
         assert service.get_window_evidence(SERVICE) == (2, 7)
+
+
+class TestTripEvidenceConsistencyBehavior:
+    """The reported evidence is the evidence the decision was made on.
+
+    ``record_failure`` used to read the outcome window twice — once to decide,
+    once to report. A concurrent trip clears the window between those reads, so
+    a rate trip could be audited and emitted as ``window_total_calls=0`` and
+    ``failure_rate_percent=0``, and the config-shadow evaluator would replay
+    that open from an empty window and fail to reproduce it.
+    """
+
+    @staticmethod
+    def _seed_rate_trip(service: CircuitBreakerService) -> None:
+        """Fill the window so the rate term (not the count term) will fire."""
+        for _ in range(4):
+            service._outcome_window.record_success(SERVICE, 100)
+        for _ in range(6):
+            service._outcome_window.record_failure(SERVICE, 100)
+
+    def _trip_with_clear_between_decision_and_report(
+        self, service: CircuitBreakerService
+    ) -> list[tuple[str, dict]]:
+        """Trip while a concurrent clear lands inside the decision call."""
+        emitted: list[tuple[str, dict]] = []
+        service._emit_event = lambda event_type, data=None, **kw: emitted.append(
+            (event_type, data or kw)
+        )
+
+        original = service._should_open_circuit
+
+        def racing_should_open(state, effective_config=None, window_evidence=None):
+            verdict = original(state, effective_config, window_evidence)
+            # Another worker thread trips the same circuit and clears here.
+            service._outcome_window.clear(SERVICE)
+            return verdict
+
+        service._should_open_circuit = racing_should_open
+
+        with (
+            patch.object(service, "_log_circuit_open_audit"),
+            patch.object(service, "_apply_burn_rate_multiplier"),
+        ):
+            service.record_failure(SERVICE)
+
+        return emitted
+
+    def test_opened_event_reports_the_evidence_the_trip_decided_on(self):
+        """The emitted denominators survive a clear racing the decision."""
+        service = _service(_config())
+        self._seed_rate_trip(service)
+
+        emitted = self._trip_with_clear_between_decision_and_report(service)
+
+        opened = [data for name, data in emitted if "opened" in str(name).lower()]
+        assert opened, "the circuit did not open"
+        # Seeded (6, 10) plus the failure this call recorded.
+        assert opened[0]["window_failure_count"] == 7
+        assert opened[0]["window_total_calls"] == 11
+
+    def test_snapshot_rate_is_not_zero_for_a_rate_trip(self):
+        """A rate trip cannot be audited as a 0% failure rate."""
+        service = _service(_config())
+        self._seed_rate_trip(service)
+        captured: dict[str, Any] = {}
+
+        original_snapshot = service._collect_failure_snapshot
+
+        def capture(*args, **kwargs):
+            captured.update(original_snapshot(*args, **kwargs))
+            return captured
+
+        service._collect_failure_snapshot = capture
+
+        self._trip_with_clear_between_decision_and_report(service)
+
+        cb_snapshot = captured["circuit_breaker"]
+        assert cb_snapshot["window_total_calls"] == 11
+        assert cb_snapshot["failure_rate_percent"] == pytest.approx(7 / 11 * 100)

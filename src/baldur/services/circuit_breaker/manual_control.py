@@ -168,11 +168,14 @@ class ManualControlMixin:
             )
 
             if success:
+                # The state is already OPEN, so the window must be dropped even
+                # if the counter cleanup below fails — it is memory-local and
+                # cannot raise, so it goes first.
+                self._outcome_window.clear(service_name)
                 # 476 G8: clear cluster-wide HALF_OPEN counter post-transition.
                 # atomic_force_open already wrote state=OPEN; this is a counter-only
                 # cleanup so the next OPEN→HALF_OPEN transition starts fresh.
                 self.repository.reset_half_open_count(service_name)
-                self._outcome_window.clear(service_name)
                 if previous_state == new_state:
                     logger.info(
                         "circuit_breaker.circuit_already_open",
@@ -317,12 +320,15 @@ class ManualControlMixin:
             )
 
             if success:
+                # Cleared before the counter call for the same reason as
+                # force_open: the transition has committed, so the pre-transition
+                # evidence must go even if the cleanup below raises.
+                self._outcome_window.clear(service_name)
                 # 476 G8: see force_open above. atomic_force_close already
                 # resets the counter on most adapters but the discrete call
                 # is harmless and keeps the contract explicit at the service
                 # tier.
                 self.repository.reset_half_open_count(service_name)
-                self._outcome_window.clear(service_name)
                 return self._handle_force_close_success(
                     service_name, previous_state, new_state, reason, trigger_replay
                 )
