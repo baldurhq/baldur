@@ -10,6 +10,15 @@ from typing import Any
 
 from baldur.core.exceptions import AuditError
 
+# Canonical (prefixed) environment variable naming the audit WAL directory.
+# Surfaces that read it also name it in fallback warnings and configuration
+# errors, so an operator is always told which variable to set.
+WAL_DIR_ENV_VAR = "BALDUR_AUDIT_WAL_DIR"
+
+# Legacy unprefixed alias, still read as a fallback for user code that
+# predates the BALDUR_ prefix convention.
+LEGACY_WAL_DIR_ENV_VAR = "AUDIT_WAL_DIR"
+
 
 class WALState(str, Enum):
     """WAL state."""
@@ -55,6 +64,22 @@ class WALConfig:
     """WAL configuration."""
 
     wal_dir: str = "/var/log/audit/wal"
+
+    # Whether ``wal_dir`` came from operator input rather than a hardcoded
+    # default. Ownership rule: whoever sets ``wal_dir`` sets this flag.
+    # An operator-chosen directory that is unwritable raises instead of
+    # falling back, so an explicit compliance path is never honored by
+    # writing somewhere else. Deliberately not inferred from
+    # ``wal_dir != <default>``: several in-tree surfaces hardcode a
+    # non-default directory and must keep falling back.
+    wal_dir_operator_set: bool = False
+
+    # Environment variable named in fallback warnings and configuration
+    # errors as the way to choose this WAL's directory. Surfaces with their
+    # own variable override it; ``None`` means the surface offers no
+    # environment override, so no name is promised to the operator.
+    wal_dir_env_var: str | None = WAL_DIR_ENV_VAR
+
     max_file_size_mb: int = 100
     sync_on_write: bool = True
     max_files: int = 10

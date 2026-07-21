@@ -42,6 +42,7 @@ from baldur.audit.persistence.disk_buffer_shutdown import (
 )
 from baldur.audit.persistence.disk_space_monitor import DiskSpaceMonitor
 from baldur.audit.persistence.group_commit import GroupCommitWriter
+from baldur.utils.fs import resolve_writable_dir
 from baldur.utils.serialization import fast_dumps_str, fast_loads
 from baldur.utils.time import utc_now
 
@@ -101,6 +102,10 @@ class DiskPersistentBuffer:
         buffer.flush_to(lambda entries: send_to_kafka(entries))
     """
 
+    # Writable-directory resolution identity
+    DIR_PURPOSE = "disk_buffer"
+    DIR_ENV_VAR = "BALDUR_DISK_BUFFER_DATA_DIR"
+
     # Database names
     DB_ENTRIES = b"entries"
     DB_META = b"meta"
@@ -123,6 +128,11 @@ class DiskPersistentBuffer:
 
         # State
         self._state = BufferState.UNINITIALIZED
+
+        # Data directory actually used (re-assigned by _init_storage once
+        # resolved; a fallback repoints the LMDB dir and the disk monitor
+        # together).
+        self._resolved_data_path: Path = self._settings.data_path
 
         # LMDB handles
         self._env: Any = None
@@ -182,7 +192,18 @@ class DiskPersistentBuffer:
                 "lmdb not installed. Install with: pip install lmdb"
             ) from e
 
-        db_path = self._settings.data_path / self._db_name
+        # Resolve the data directory once. Both readers - the LMDB
+        # directory here and the free-space monitor below - must follow a
+        # fallback together, or the monitor would decide fail-open and
+        # priority purge against a filesystem the buffer no longer uses.
+        self._resolved_data_path = resolve_writable_dir(
+            self._settings.data_path,
+            purpose=self.DIR_PURPOSE,
+            operator_set="data_dir" in self._settings.model_fields_set,
+            env_override_name=self.DIR_ENV_VAR,
+        ).path
+
+        db_path = self._resolved_data_path / self._db_name
         db_path.mkdir(parents=True, exist_ok=True)
 
         try:
@@ -218,7 +239,7 @@ class DiskPersistentBuffer:
 
         # Initialise sub-components
         self._disk_monitor = DiskSpaceMonitor(
-            path=self._settings.data_path,
+            path=self._resolved_data_path,
             settings=self._settings,
         )
         self._group_writer = GroupCommitWriter(

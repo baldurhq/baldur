@@ -23,6 +23,7 @@ from baldur.audit.checkpoint.strategy import (
     CheckpointStorageStrategy,
     UnifiedCheckpointData,
 )
+from baldur.core.exceptions import ConfigurationError
 from baldur.utils.serialization import fast_dumps_str, fast_loads
 
 if TYPE_CHECKING:
@@ -47,6 +48,12 @@ class KafkaRedisCheckpointStorage(CheckpointStorageStrategy):
     """
 
     KEY_PREFIX = "baldur:kafka_checkpoint:"
+
+    # Distinct from FileCheckpointStorage's own purpose: both stores write
+    # ``checkpoint.{namespace}.json`` with no role discriminator in the
+    # filename, so a shared purpose would merge the Redis-failure backup
+    # into the primary store's fallback directory and contend on its locks.
+    BACKUP_PURPOSE = "checkpoint_kafka_backup"
 
     def __init__(
         self,
@@ -79,15 +86,33 @@ class KafkaRedisCheckpointStorage(CheckpointStorageStrategy):
         self._file_backup: FileCheckpointStorage | None = None
         if enable_file_backup:
             backup_path = file_backup_path or self._get_default_backup_path()
-            self._file_backup = FileCheckpointStorage(base_path=backup_path)
-            logger.info(
-                "kafka_redis_checkpoint.file_backup_enabled",
-                backup_path=backup_path,
+            operator_set = bool(file_backup_path) or bool(
+                os.environ.get(FileCheckpointStorage.PATH_ENV_VAR)
             )
+            try:
+                self._file_backup = FileCheckpointStorage(
+                    base_path=backup_path,
+                    base_path_operator_set=operator_set,
+                    purpose=self.BACKUP_PURPOSE,
+                )
+            except ConfigurationError as e:
+                # Optional integration -> fail-open. Enabling the
+                # Redis-failure backup must not fail construction where
+                # plain Redis storage would have worked.
+                logger.warning(
+                    "kafka_redis_checkpoint.file_backup_disabled",
+                    backup_path=str(backup_path),
+                    error=str(e),
+                )
+            else:
+                logger.info(
+                    "kafka_redis_checkpoint.file_backup_enabled",
+                    backup_path=str(self._file_backup.base_path),
+                )
 
     def _get_default_backup_path(self) -> Path:
         """Get default backup path."""
-        env_path = os.environ.get("BALDUR_AUDIT_PATH")
+        env_path = os.environ.get(FileCheckpointStorage.PATH_ENV_VAR)
         if env_path:
             return Path(env_path) / "kafka_checkpoint_backup"
         if os.name == "nt":

@@ -41,6 +41,13 @@ logger = structlog.get_logger()
 
 __all__ = ["init", "reset_init_state", "start_background_workers"]
 
+# Writable-dir resolution identities of the two audit durability surfaces
+# whose statuses must agree, plus the variables an operator sets for each.
+_AUDIT_CHECKPOINT_PURPOSE = "checkpoint"
+_AUDIT_CHECKPOINT_ENV_VAR = "BALDUR_AUDIT_PATH"
+_AUDIT_WAL_PURPOSE = "wal_audit_wal"
+_AUDIT_WAL_ENV_VAR = "BALDUR_AUDIT_WAL_DIR"
+
 
 # 464 D9 — declarative table of registries that init() rewires from the
 # module-load "memory" baseline to an environment-aware default. Cache is
@@ -1565,24 +1572,42 @@ def _install_resilient_storage_backend(runtime: BaldurRuntime) -> None:
 
     redis_url = get_redis_settings().url
     base_settings = get_resilient_storage_settings()
-    settings = ResilientStorageSettings(
-        **{**base_settings.model_dump(), "redis_url": redis_url}
-    )
+    # Carry over only the fields an operator actually supplied. Dumping every
+    # field would mark them all as explicitly set, and the backend infers
+    # "did the operator choose this directory?" from ``model_fields_set`` —
+    # a full dump makes every default look operator-chosen.
+    operator_supplied = {
+        name: value
+        for name, value in base_settings.model_dump().items()
+        if name in base_settings.model_fields_set
+    }
+    settings = ResilientStorageSettings(**{**operator_supplied, "redis_url": redis_url})
     backend = ResilientStorageBackend(settings=settings)
     configure_storage_backend(backend)
 
-    if runtime.is_production and not backend._wal_initialized:
+    if runtime.is_production and not backend._wal_honors_configured_dir:
         raise ConfigurationError(
-            f"WAL initialization failed at {backend.config.wal_dir} in "
-            "production. Check container volume mount or directory "
-            "permissions — the WAL-First Write Protocol cannot be "
-            "honored without a writable wal_dir."
+            f"WAL initialization did not honor {backend.config.wal_dir} in "
+            "production"
+            + (
+                f" (fell back to {backend._wal.wal_dir})"
+                if backend._wal_on_fallback_dir and backend._wal is not None
+                else ""
+            )
+            + ". Check container volume mount or directory permissions — "
+            "the WAL-First Write Protocol cannot be honored without a "
+            "writable wal_dir. To prioritize availability during an "
+            "infrastructure incident, set "
+            "BALDUR_RESILIENT_STORAGE_WAL_DIR to any writable path; an "
+            "ephemeral one is accepted, because choosing it explicitly "
+            "makes the durability trade-off yours rather than ours."
         )
 
     logger.info(
         "baldur.resilient_storage_backend_installed",
         redis_url_source="BALDUR_REDIS_URL",
         wal_initialized=backend._wal_initialized,
+        wal_on_fallback_dir=backend._wal_on_fallback_dir,
     )
 
 
@@ -1846,7 +1871,63 @@ def _build_startup_report(ext_result: ExtensionResult) -> dict[str, Any]:
     except Exception:
         report["dlq_capture_backing"] = "oss"
 
+    # Durability directory resolutions. Tells an operator which storage
+    # surfaces are on their configured directory and which fell back — the
+    # boot-time counterpart to the primitive's one-time warning. Lazily
+    # constructed surfaces resolve after the report and appear in logs only.
+    try:
+        from baldur.utils.fs import get_writable_dir_resolutions
+
+        storage_dirs = get_writable_dir_resolutions()
+        report["storage_dirs"] = storage_dirs
+        _warn_on_audit_durability_split(storage_dirs)
+    except Exception:
+        report["storage_dirs"] = {}
+
     return report
+
+
+def _warn_on_audit_durability_split(
+    storage_dirs: dict[str, dict[str, str]],
+) -> None:
+    """Warn when the audit checkpoint and audit WAL differ in durability.
+
+    The two directories resolve independently, so an operator who sets only
+    one of the audit path variables can end up with a durable WAL and a
+    fallen-back checkpoint. The lost checkpoint resets the resume point, and
+    the surviving WAL files are re-read as duplicate audit events. Detection
+    only: forcing a shared fate would undo purpose independence, and
+    duplicates are the correct fail direction for an audit trail.
+    """
+    checkpoint = _find_resolution(storage_dirs, _AUDIT_CHECKPOINT_PURPOSE)
+    wal = _find_resolution(storage_dirs, _AUDIT_WAL_PURPOSE)
+
+    if checkpoint is None or wal is None:
+        return
+    if checkpoint["status"] == wal["status"]:
+        return
+
+    logger.warning(
+        "storage.audit_dir_durability_split",
+        checkpoint_status=checkpoint["status"],
+        checkpoint_path=checkpoint["path"],
+        checkpoint_env=_AUDIT_CHECKPOINT_ENV_VAR,
+        wal_status=wal["status"],
+        wal_path=wal["path"],
+        wal_env=_AUDIT_WAL_ENV_VAR,
+    )
+
+
+def _find_resolution(
+    storage_dirs: dict[str, dict[str, str]],
+    purpose: str,
+) -> dict[str, str] | None:
+    """Find a resolution registry entry by its purpose."""
+    prefix = f"{purpose}-"
+    for key, entry in storage_dirs.items():
+        if key.startswith(prefix):
+            return entry
+    return None
 
 
 # =============================================================================

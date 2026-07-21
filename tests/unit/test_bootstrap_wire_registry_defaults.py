@@ -70,15 +70,28 @@ def _stub_redis_settings(monkeypatch, url: str = "redis://stub:6379/0"):
     return settings
 
 
-def _patch_eager_backend(*, wal_initialized: bool = True):
+def _patch_eager_backend(
+    *,
+    wal_initialized: bool = True,
+    wal_on_fallback_dir: bool = False,
+):
     """Patch ``ResilientStorageBackend`` + ``configure_storage_backend``.
 
     Returns the ``configure_storage_backend`` mock so tests can assert it
-    was called exactly once. The constructed backend exposes the
-    ``_wal_initialized`` attribute used by the D7 fail-fast check.
+    was called exactly once. The constructed backend exposes the WAL
+    attributes the production boot gate reads.
+
+    ``_wal_honors_configured_dir`` is set explicitly rather than left to
+    MagicMock: an auto-resolved attribute is always truthy, so the gate
+    would silently never fire and the fail-fast assertion would pass for
+    the wrong reason.
     """
     backend_instance = MagicMock()
     backend_instance._wal_initialized = wal_initialized
+    backend_instance._wal_on_fallback_dir = wal_on_fallback_dir
+    backend_instance._wal_honors_configured_dir = (
+        wal_initialized and not wal_on_fallback_dir
+    )
     backend_instance.config = MagicMock(wal_dir="/tmp/baldur-wal-test")
 
     backend_cls = MagicMock(return_value=backend_instance)
@@ -242,7 +255,7 @@ class TestWireCacheAndStorageWalFailFastBehavior:
         cm, _configure, _backend = _patch_eager_backend(wal_initialized=False)
 
         with cm:
-            with pytest.raises(ConfigurationError, match="WAL initialization failed"):
+            with pytest.raises(ConfigurationError, match="did not honor"):
                 bootstrap._wire_registry_defaults()
 
     def test_non_production_with_wal_init_failure_does_not_raise(

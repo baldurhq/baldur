@@ -25,6 +25,7 @@ from baldur.audit.checkpoint.strategy import (
     get_load_failures_counter,
     get_save_failures_counter,
 )
+from baldur.utils.fs import ResolvedDir, resolve_writable_dir
 from baldur.utils.time import utc_now
 
 __all__ = [
@@ -47,11 +48,14 @@ class FileCheckpointStorage(CheckpointStorageStrategy):
 
     DEFAULT_DIR = "/var/log/audit"
     DEFAULT_FILENAME = "checkpoint.json"
+    PATH_ENV_VAR = "BALDUR_AUDIT_PATH"
 
     def __init__(
         self,
         base_path: str | Path | None = None,
         sync_on_write: bool = True,
+        base_path_operator_set: bool | None = None,
+        purpose: str = "checkpoint",
     ):
         """
         Initialize file-based checkpoint storage.
@@ -59,20 +63,49 @@ class FileCheckpointStorage(CheckpointStorageStrategy):
         Args:
             base_path: Base path for checkpoint files
             sync_on_write: Whether to perform fsync on write
+            base_path_operator_set: Whether ``base_path`` came from operator
+                input. ``None`` infers it: an explicit ``base_path`` or a set
+                ``BALDUR_AUDIT_PATH`` means the operator chose the directory,
+                so an unwritable one raises instead of falling back.
+            purpose: Resolution identifier, distinguishing this store's
+                fallback directory from a sibling store's.
+
+        Raises:
+            ConfigurationError: When an operator-chosen base path is not
+                writable, or when no fallback directory is writable.
         """
-        self._base_path = self._get_base_path(base_path)
+        requested_path = self._get_base_path(base_path)
+        if base_path_operator_set is None:
+            base_path_operator_set = bool(base_path) or bool(
+                os.environ.get(self.PATH_ENV_VAR)
+            )
+
+        self._resolved_dir = resolve_writable_dir(
+            requested_path,
+            purpose=purpose,
+            operator_set=base_path_operator_set,
+            env_override_name=self.PATH_ENV_VAR,
+        )
+        self._base_path = self._resolved_dir.path
         self._sync_on_write = sync_on_write
         self._lock = threading.RLock()
 
-        # Create directory
-        self._base_path.mkdir(parents=True, exist_ok=True)
+    @property
+    def base_path(self) -> Path:
+        """Directory checkpoint files are written to (post-resolution)."""
+        return self._base_path
+
+    @property
+    def resolved_dir(self) -> ResolvedDir:
+        """Full directory-resolution outcome, including any fallback."""
+        return self._resolved_dir
 
     def _get_base_path(self, base_path: str | Path | None) -> Path:
         """Determine base path."""
         if base_path:
             return Path(base_path)
 
-        env_path = os.environ.get("BALDUR_AUDIT_PATH")
+        env_path = os.environ.get(self.PATH_ENV_VAR)
         if env_path:
             return Path(env_path)
 

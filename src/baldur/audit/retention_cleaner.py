@@ -34,6 +34,9 @@ logger = structlog.get_logger()
 # Default retention period (days)
 DEFAULT_RETENTION_DAYS = 90
 
+# Default audit WAL directory, matching WALConfig's own default.
+DEFAULT_WAL_DIR = "/var/log/audit/wal"
+
 
 class WALRetentionCleaner:
     """
@@ -335,6 +338,32 @@ class RetentionCleanupScheduler:
         return self._running
 
 
+def _resolve_wal_dir_from_env() -> str:
+    """Read the WAL directory from the environment, prefixed name first.
+
+    The unprefixed alias is still honored so existing user code keeps
+    working, but it is a naming break with every other Baldur variable and
+    the read warns naming both.
+    """
+    from baldur.audit.wal import LEGACY_WAL_DIR_ENV_VAR, WAL_DIR_ENV_VAR
+
+    prefixed = os.environ.get(WAL_DIR_ENV_VAR)
+    if prefixed:
+        return prefixed
+
+    legacy = os.environ.get(LEGACY_WAL_DIR_ENV_VAR)
+    if legacy:
+        logger.warning(
+            "retention_cleaner.legacy_env_var_used",
+            legacy_env=LEGACY_WAL_DIR_ENV_VAR,
+            canonical_env=WAL_DIR_ENV_VAR,
+            wal_dir=legacy,
+        )
+        return legacy
+
+    return DEFAULT_WAL_DIR
+
+
 def schedule_retention_cleanup(
     wal_dir: Path | str | None = None,
     interval_hours: int = 24,
@@ -344,7 +373,9 @@ def schedule_retention_cleanup(
     Convenience function for scheduling periodic retention cleanup.
 
     Args:
-        wal_dir: WAL directory (env var or default when None)
+        wal_dir: WAL directory. When None, the prefixed environment variable
+            is read first, then the legacy unprefixed alias, then the
+            default.
         interval_hours: Cleanup interval (hours)
         retention_days: Retention period (days)
 
@@ -352,7 +383,7 @@ def schedule_retention_cleanup(
         The started RetentionCleanupScheduler instance
     """
     if wal_dir is None:
-        wal_dir = os.environ.get("AUDIT_WAL_DIR", "/var/log/audit/wal")
+        wal_dir = _resolve_wal_dir_from_env()
 
     cleaner = WALRetentionCleaner(
         wal_dir=wal_dir,

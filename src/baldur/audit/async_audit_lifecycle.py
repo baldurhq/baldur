@@ -33,6 +33,8 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from baldur.core.exceptions import ConfigurationError
+
 if TYPE_CHECKING:
     pass
 
@@ -209,6 +211,15 @@ def _load_checkpoint() -> int:
 
         strategy = get_default_checkpoint_strategy()
         return strategy.get_wal_sequence("default")
+    except ConfigurationError as e:
+        # Operator misconfiguration (an unwritable checkpoint directory the
+        # operator chose). Recovery still resumes from 0 as before, but the
+        # named cause is visible instead of debug-only.
+        logger.warning(
+            "async_audit_lifecycle.checkpoint_load_failed",
+            error=e,
+        )
+        return 0
     except Exception as e:
         logger.debug(
             "async_audit_lifecycle.checkpoint_load_failed",

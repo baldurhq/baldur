@@ -375,16 +375,16 @@ class RequestAuditBuffer:
     def _get_default_wal(self):
         """Return the default WAL instance."""
         try:
-            from baldur.audit.wal import WALConfig, WriteAheadLog
+            from baldur.audit.wal import WAL_DIR_ENV_VAR, WALConfig, WriteAheadLog
 
             # Configure the WAL directory from the environment variable
-            wal_dir = os.environ.get(
-                "BALDUR_AUDIT_WAL_DIR",
-                "/var/log/audit/request_buffer_wal",
-            )
+            env_wal_dir = os.environ.get(WAL_DIR_ENV_VAR)
+            wal_dir = env_wal_dir or "/var/log/audit/request_buffer_wal"
 
             config = WALConfig(
                 wal_dir=wal_dir,
+                # Operator-chosen only when the env var supplied it.
+                wal_dir_operator_set=bool(env_wal_dir),
                 sync_on_write=True,  # Always sync for 0% data loss
                 max_file_size_mb=50,
                 max_files=5,

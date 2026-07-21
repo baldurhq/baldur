@@ -141,6 +141,16 @@ class ContinuousAuditRecorder:
         self._wal_enabled = wal_enabled
         self._wal: WriteAheadLog | None = None
 
+        if wal_config is not None and not wal_enabled:
+            # wal_config is consumed only inside the wal_enabled branch, so
+            # supplying one without enabling the WAL silently discards it -
+            # including wal_dir_operator_set, which is what makes an
+            # unwritable operator-chosen directory fail loud.
+            logger.warning(
+                "continuous_audit.wal_config_ignored",
+                wal_dir=wal_config.wal_dir,
+            )
+
         if wal_enabled:
             try:
                 from baldur.audit.wal import WALConfig as WALConfigClass
