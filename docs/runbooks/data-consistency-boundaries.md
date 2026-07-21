@@ -96,6 +96,45 @@ Worker A writes `set("user:123:profile", new_value)` in DEGRADED → only A sees
 
 ---
 
+## Request-Path Liveness Under Total Redis Loss (the other axis)
+
+The five trade-offs above are the **data** axis — what happens to *values* during a Redis blip. There is a second, independent axis: **request latency / worker liveness** when Redis is *completely* unreachable with no failover possible (a Sentinel quorum loss, or standalone Redis simply down). On this axis Baldur has **two distinct tracks**, and they behave differently:
+
+| Track | Backing | Behavior when Redis is unreachable |
+|-------|---------|------------------------------------|
+| CB state, DLQ buffer, generic cache | `ResilientStorageBackend` (`src/baldur/adapters/resilient/backend.py`) — a **sticky** mode flag + periodic recovery probe + WAL | Degrades **responsively**: after the mode flips to DEGRADED, reads/writes serve from local memory + WAL. No per-request Redis wait. |
+| Idempotency gate (`setnx`) | the **raw** cache adapter from the registry (`src/baldur/core/idempotency_gate.py` → `ProviderRegistry.get_cache()` → Redis) — **not** the resilient backend | **Blocks per request**: each `setnx` hits the dead Redis and waits out the client's `socket_timeout` (× retries), request after request, for the whole outage. |
+
+### Why the idempotency gate blocks instead of degrading — it is fail-closed by design
+
+This is deliberate, and it is the same principle as the data rule above ("money + idempotency truth → strong consistency"). Degrading idempotency to each worker's local memory during a Redis outage would silently drop the **cross-worker** dedup guarantee — two workers could each accept the "same" charge and double-act. So the idempotency path refuses to degrade: in production without an explicit escape hatch it **fail-closes** (it will not process a money-equivalent operation without the cross-worker guarantee) rather than fail-open into an unsafe per-worker dedup. Under a total Redis loss that fail-closed posture manifests as a **block** — the request waits for Redis to come back rather than proceeding unsafely.
+
+### What an operator sees
+
+- **In-flight requests on Redis-touching paths stall** for the outage duration and then mostly complete successfully once Redis returns. A small number may hard-fail (client-visible, retriable) — there is **no silent data loss**.
+- The **vast majority** of requests (everything before and after the fault) is unaffected — only the requests in-flight during the outage stall. Recovery is bounded by **Redis returning**, not by any client timeout.
+- The blast radius is bounded by **in-flight concurrency**: under closed-loop / bounded load only the active requests stall. Under **open-loop high traffic**, stalling requests can accumulate and exhaust the worker pool → whole-service unavailability. That boundary (and its graceful upgrade — a circuit breaker on Baldur's own Redis path so the gate fail-closes *fast* with a 503 instead of stalling) is tracked in the maintainer scale-boundary log as **SB-038**.
+
+### The one knob that moves this today
+
+`BALDUR_REDIS_RETRY_ON_TIMEOUT` (default `true`) is the lever, **not** `BALDUR_REDIS_SOCKET_TIMEOUT`:
+
+- With retry **on** (default), each request re-tries the socket timeout through the whole outage, so the worker is never freed until Redis returns — the stall runs the full outage. Raising `socket_timeout` barely changes this.
+- With retry **off** (`BALDUR_REDIS_RETRY_ON_TIMEOUT=false`), each Redis op fast-fails at ~`socket_timeout` with no retry, so the worker is freed sooner and the app stays responsive for non-Redis paths — **at the cost of turning a delayed-success into a fast client-visible failure** (the client must retry). This is the operator's *stall-vs-fast-fail* lever until SB-038's Redis-path circuit breaker lands.
+
+### Operator response during a total-Redis-loss incident
+
+1. **Confirm the regime.** A normal Sentinel *failover* recovers in seconds (the replica is promoted). A *total* loss — Sentinel quorum broken (≥2 of 3 sentinels also down) or standalone Redis down — has **no promotion** and stalls until Redis/quorum is restored. Check `SENTINEL ckquorum <master>` from a surviving sentinel; `NOQUORUM` confirms total loss.
+2. **Expect the stall.** In-flight requests on idempotency-gated paths will stall for the outage. No framework action frees them faster than restoring Redis — this is the fail-closed guarantee working as designed.
+3. **Restore Redis / repair Sentinel quorum.** Requests auto-recover on Redis return; no operator action inside Baldur is required.
+4. **If worker-pool exhaustion under load is the failure mode**, set `BALDUR_REDIS_RETRY_ON_TIMEOUT=false` to bound per-request cost — accept fast-fail 503s in place of delayed successes for the outage window.
+
+### Prevention
+
+Total Redis loss frequency is **topology-dominated**, not a Redis property. The single most effective prevention is the same infra hardening as the data axis: run Redis in HA (Sentinel/Cluster) **and** spread the sentinels across ≥3 independent failure domains with anti-affinity from the data nodes, so no single host/rack/AZ failure takes out both the master and a sentinel majority. A quorum needs ≥2 independent domains to fail at once — that is what makes it rare when the topology is right, and as common as a single-host outage when it is not.
+
+---
+
 ## Decision Flowchart — Where Should This Data Live?
 
 ```
