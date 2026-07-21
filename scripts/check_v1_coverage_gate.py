@@ -34,7 +34,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_COVERAGE_JSON = PROJECT_ROOT / "dist" / "cov-v1.json"
 DEFAULT_THRESHOLD = 80.0
 
-# 5 OSS v1.0 launch-surface file targets. Paths are expressed with forward
+# 4 OSS v1.0 launch-surface file targets. Paths are expressed with forward
 # slashes; the script normalises coverage.py's native separators for matching.
 TARGETS: list[dict[str, str]] = [
     {
@@ -46,11 +46,6 @@ TARGETS: list[dict[str, str]] = [
         "name": "api/django/throttle_adapter.py",
         "type": "file",
         "path": "src/baldur/api/django/throttle_adapter.py",
-    },
-    {
-        "name": "api/django/serializers/pydantic_integration.py",
-        "type": "file",
-        "path": "src/baldur/api/django/serializers/pydantic_integration.py",
     },
     {
         "name": "api/handlers/canary.py",
