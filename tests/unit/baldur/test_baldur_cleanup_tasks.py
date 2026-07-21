@@ -39,13 +39,22 @@ def reset_services():
 
 
 @pytest.fixture
-def mock_dlq_service():
-    """DLQ 서비스 모킹."""
-    pytest.importorskip("baldur_pro")
-    with patch("baldur_pro.services.dlq.get_dlq_service") as mock_get:
-        mock_service = Mock()
-        mock_get.return_value = mock_service
-        yield mock_service
+def mock_dlq_service(monkeypatch):
+    """Stub the DLQ service the cleanup lane resolves.
+
+    ``CleanupService`` reads the ``dlq_service`` ProviderRegistry slot, so the
+    slot is what a test must fill. Patching the factory that populates it in
+    production does not touch this resolution: the slot has no provider
+    registered in the unit-test process, so ``safe_get()`` returns None and the
+    service raises before ever reaching the stub. Filling the slot directly also
+    makes these tests tier-neutral — the delegation under test is OSS code, and
+    the stub stands in for the collaborator rather than requiring it.
+    """
+    from baldur.factory.registry import ProviderRegistry
+
+    mock_service = Mock()
+    monkeypatch.setattr(ProviderRegistry.dlq_service, "safe_get", lambda: mock_service)
+    return mock_service
 
 
 @pytest.fixture
@@ -216,12 +225,20 @@ class TestPurgeArchivedDLQEntries:
         assert "PERMANENT DELETION" in result["warning"]
 
     def test_run_custom_days(self, mock_dlq_service):
-        """커스텀 일수 설정."""
+        """A custom retention window reaches the service and the result.
+
+        ``older_than_days`` is echoed on the failure path too, so asserting it
+        alone cannot distinguish a purge that ran from one that raised before
+        starting — the forwarded call and the success flag are what pin it.
+        """
         mock_dlq_service.purge_archived.return_value = 50
 
         result = purge_archived_dlq_entries(older_than_days=180)
 
+        assert result["success"] is True
+        assert result["purged_count"] == 50
         assert result["older_than_days"] == 180
+        mock_dlq_service.purge_archived.assert_called_once_with(older_than_days=180)
 
     def test_run_failure(self, mock_dlq_service):
         """실행 실패."""
@@ -368,13 +385,20 @@ class TestCleanupTaskIntegration:
     def _require_pro(self):
         pytest.importorskip("baldur_pro")
 
-    @patch("baldur_pro.services.dlq.get_dlq_service")
     @patch("baldur.services.pending_config.get_pending_config_service")
     @patch("baldur_pro.services.runtime_config.get_runtime_config_manager")
-    def test_daily_cleanup_simulation(self, mock_runtime, mock_pending, mock_dlq):
-        """일일 청소 시뮬레이션."""
+    def test_daily_cleanup_simulation(
+        self, mock_runtime, mock_pending, mock_dlq_service
+    ):
+        """일일 청소 시뮬레이션.
+
+        The DLQ half stubs the ``dlq_service`` registry slot (the fixture) rather
+        than the factory behind it: the slot is what ``CleanupService`` reads, so
+        patching the factory left this test passing only when some earlier test in
+        the file had already triggered the slot's registration.
+        """
         # 모킹 설정
-        mock_dlq.return_value.archive_old_entries.return_value = 10
+        mock_dlq_service.archive_old_entries.return_value = 10
         mock_pending.return_value.cleanup_expired.return_value = 5
         mock_runtime.return_value.expire_old_requests.return_value = 2
 

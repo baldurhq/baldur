@@ -126,7 +126,10 @@ _MOCK_CREATION_BUDGETS: dict[str, int] = {
 _DECORATOR_PATCH_BUDGETS: dict[str, int] = {
     # dead schedule-lane retirement: -50 — same deleted suites.
     # compressed-lifecycle suite: -1 — one fewer patched repository getter.
-    "oss": 668,
+    # cleanup-lane daily simulation: -1 — the patched PRO DLQ-service factory was
+    # a dead seam (production resolves the registry slot instead), so it became a
+    # slot stub rather than a decorator patch. The test can now actually fail.
+    "oss": 667,
     "pro": 434,
     "dormant": 144,
 }
