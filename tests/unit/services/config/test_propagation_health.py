@@ -1,7 +1,6 @@
 """
 PropagationHealthMonitor Unit Tests.
 
-Reference: docs/baldur/middleware_system/70_MULTI_CLUSTER_ARCHITECTURE.md
 """
 
 

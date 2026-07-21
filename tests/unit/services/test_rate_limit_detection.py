@@ -4,9 +4,6 @@ Rate limit detection utility unit tests.
 Test target: services/retry_handler/rate_limit_detection.py
 - RATE_LIMIT_INDICATORS contract values
 - detect_rate_limit() behavior (detection, Retry-After extraction, edge cases)
-
-Reference:
-    docs/baldur/middleware_system/310_FUNCTIONAL_DUPLICATION_ELIMINATION.md §3.1.6.1
 """
 
 from __future__ import annotations

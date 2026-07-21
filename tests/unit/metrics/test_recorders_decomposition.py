@@ -15,7 +15,6 @@ Test Categories:
     B. Behavior: Source-referenced functional verification
 
 Reference:
-    docs/baldur/middleware_system/354_GOD_OBJECT_REFACTORING.md
     D13: baldur_ prefix standard
     D14: is_synthetic label on relevant counters
     D15: "service" label (not "service_name") for circuit breaker

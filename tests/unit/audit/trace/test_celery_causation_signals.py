@@ -8,9 +8,6 @@ Tests:
 - _cleanup_causation_context: 태스크 종료 시 컨텍스트 정리
 - 깊이 증가 확인
 - 메타데이터 설정 확인
-
-Reference:
-    docs/baldur/middleware_system/76_CASCADE_EVENT_AUDIT.md
 """
 
 from __future__ import annotations

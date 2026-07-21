@@ -1,7 +1,6 @@
 """
 Trace ID Unit Tests for Multi-Cluster Support.
 
-Reference: docs/baldur/middleware_system/70_MULTI_CLUSTER_ARCHITECTURE.md
 """
 
 import os

@@ -19,9 +19,6 @@ Note:
     (see apps.py:323) and the Gunicorn worker_exit_cleanup hook (server.py:165).
     Coverage now lives in tests/unit/audit/test_audit_shutdown_handler.py and
     tests/unit/core/test_shutdown_coordinator.py.
-
-Reference:
-    docs/baldur/middleware_system/316_GUNICORN_PRELOAD_OPTIMIZATION.md §5.3
 """
 
 from __future__ import annotations

@@ -5,7 +5,6 @@ get_baldur_beat_schedule()에 거버넌스 태스크(긴급 모드 만료 체크
 올바르게 포함되는지 검증합니다.
 
 Reference:
-    - docs/baldur/16_GOVERNANCE_IMPLEMENTATION_ROADMAP.md
     - baldur/tasks/governance.py
 """
 

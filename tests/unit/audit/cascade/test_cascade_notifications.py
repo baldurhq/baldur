@@ -9,9 +9,6 @@ Tests:
 - cascade_load_shedding_alert: Load Shedding activation/deactivation alert
 - cascade_summary: daily summary alert
 - cascade_fallback_recovery_alert: local fallback recovery alert
-
-Reference:
-    docs/baldur/middleware_system/76_CASCADE_EVENT_AUDIT.md
 """
 
 from __future__ import annotations

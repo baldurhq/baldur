@@ -12,9 +12,6 @@ EscalationAuditTrail 단위 테스트.
 - Fallback 기록
 - 조회 및 필터링
 - 통계
-
-Reference:
-    docs/baldur/middleware_system/73_NAMESPACE_AWARE_EMERGENCY.md
 """
 
 import pytest

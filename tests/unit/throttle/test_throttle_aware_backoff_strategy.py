@@ -5,9 +5,6 @@ Test target: services/backoff_calculator/strategy_adapter.py
 - BackoffStrategy interface compliance
 - Delegation to ThrottleAwareBackoffCalculator
 - reset() no-op behavior
-
-Reference:
-    docs/baldur/middleware_system/310_FUNCTIONAL_DUPLICATION_ELIMINATION.md §3.1.6.2
 """
 
 from __future__ import annotations

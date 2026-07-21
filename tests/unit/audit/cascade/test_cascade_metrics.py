@@ -10,9 +10,6 @@ Tests:
 - record_integrity_check: 무결성 검증 결과 메트릭
 - record_load_shedding_drop: Load Shedding 드랍 메트릭
 - to_prometheus_format: Prometheus 형식 출력
-
-Reference:
-    docs/baldur/middleware_system/76_CASCADE_EVENT_AUDIT.md
 """
 
 from __future__ import annotations

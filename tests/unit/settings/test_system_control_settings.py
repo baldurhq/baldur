@@ -8,7 +8,6 @@ SystemControlSettings 단위 테스트.
 
 참조 소스:
 - settings/system_control.py (SystemControlSettings)
-- docs/baldur/middleware_system/339_SETTINGS_GAP_HEALTH_SHUTDOWN_CONTROL.md §7
 """
 
 from __future__ import annotations

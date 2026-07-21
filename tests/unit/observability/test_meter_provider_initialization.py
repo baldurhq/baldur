@@ -6,9 +6,6 @@ and meter-related state in shutdown/reset added in commit cf89883a.
 450 Phase 4: state lives on the runtime-scoped ``_OtelState`` object —
 tests read/write through ``_otel_state()`` instead of the legacy
 module-level globals.
-
-Reference:
-    docs/baldur/middleware_system/316_GUNICORN_PRELOAD_OPTIMIZATION.md §5.8
 """
 
 from __future__ import annotations

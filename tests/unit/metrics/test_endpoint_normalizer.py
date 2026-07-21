@@ -4,7 +4,6 @@ EndpointNormalizer unit tests.
 Tests HTTP endpoint normalization for metric cardinality control.
 
 Reference:
-    docs/baldur/middleware_system/332_METRIC_CARDINALITY_GUARD.md §3.1, §7
     src/baldur/metrics/endpoint_normalizer.py
 """
 

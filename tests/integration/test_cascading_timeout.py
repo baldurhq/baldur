@@ -10,9 +10,6 @@ Cascading Timeout 방지 통합 테스트.
 6. Tier별 RTT 격리 (critical RTT ↔ non_essential RTT 독립)
 
 Django 의존 없음 — 순수 baldur 패키지 내부 컴포넌트 간 상호작용 검증.
-
-Related docs:
-    docs/baldur/middleware_system/243_CASCADING_TIMEOUT_DYNAMIC_FAST_FAIL.md
 """
 
 from __future__ import annotations

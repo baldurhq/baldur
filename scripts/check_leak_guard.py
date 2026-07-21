@@ -24,7 +24,8 @@ rate in public OSS text):
   Scanned in BOTH staged content and the commit message — zero legitimate use
   anywhere in the public tree:
     * the private repository name
-    * private documentation paths ``docs/{laws,impl,maintainer,self_healing}/``
+    * private documentation paths
+      ``docs/{laws,impl,maintainer,self_healing,baldur}/``
     * internal architecture-decision refs ``ADR-<n>``
 
   Scanned in the commit MESSAGE ONLY — the private source-tree paths
@@ -60,11 +61,19 @@ _PRIVATE_REPO_NAME = "self" + "healing-python"
 
 # Private documentation trees (excluded from publication) — a path into any of
 # them has zero legitimate use in public OSS content.
+#
+# ``docs/baldur/`` is the pre-split design-doc tree. It was missing from this
+# list until 2026-07-21, and 53 citations into it had shipped in src/baldur
+# comments as a result — dead pointers for every reader of this repository. The
+# omission was easy to make because the other four are the trees that exist
+# today, while this one names a layout that predates the split; it is listed
+# here precisely because such a path can no longer resolve for anyone.
 PRIVATE_DOC_PATHS: tuple[str, ...] = (
     "docs/laws/",
     "docs/impl/",
     "docs/maintainer/",
     "docs/self_healing/",
+    "docs/baldur/",
 )
 
 # Private source trees. Content-allowed (the OSS boundary tests reference these

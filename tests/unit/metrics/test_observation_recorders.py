@@ -4,9 +4,6 @@ Unit tests for observation Prometheus metric recorders (correlation_engine, auto
 Covers:
 - CorrelationEngineMetricRecorder: 8 metrics (Contract + Behavior)
 - AutoTuningMetricRecorder: 7 metrics (Contract + Behavior)
-
-Reference:
-    docs/baldur/middleware_system/358_LARGE_SERVICE_IMPROVEMENT.md
 """
 
 from __future__ import annotations
