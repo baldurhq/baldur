@@ -112,7 +112,10 @@ The most common knobs an operator sets. The full list lives in the API reference
 
 | Env Var | Default | What it controls |
 |---------|---------|------------------|
-| `BALDUR_CB_FAILURE_THRESHOLD` | `5` | How many failures in the window trip the breaker from CLOSED to OPEN |
+| `BALDUR_CB_FAILURE_THRESHOLD` | `5` | How many *consecutive* failures trip the breaker from CLOSED to OPEN — a success resets the count |
+| `BALDUR_CB_FAILURE_RATE_THRESHOLD` | `50.0` | Failure percentage over the recent-call window that also trips the breaker. `0` turns the rate trigger off |
+| `BALDUR_CB_SLIDING_WINDOW_SIZE` | `100` | How many recent calls the failure rate is measured over, per worker process |
+| `BALDUR_CB_MINIMUM_CALLS` | `10` | Calls the window needs before the rate is trusted. Gates the rate trigger only — the consecutive-failure trigger always applies |
 | `BALDUR_CB_RECOVERY_TIMEOUT` | `60` | Seconds the breaker stays OPEN before letting trial calls through |
 | `BALDUR_CB_HALF_OPEN_MAX_CALLS` | `3` | How many trial calls are allowed through while probing for recovery |
 | `BALDUR_EVENT_LOGGING_CB_LOG_LEVEL` | `WARNING` | Log level for circuit state-change events |

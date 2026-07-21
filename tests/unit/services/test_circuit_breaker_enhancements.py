@@ -21,6 +21,11 @@ from baldur.services.circuit_breaker import (
     CircuitBreakerFallbackResult,
     CircuitBreakerService,
 )
+from baldur.services.circuit_breaker.outcome_window import (
+    TRIP_REASON_COUNT,
+    TRIP_REASON_RATE,
+    evaluate_trip,
+)
 
 # =============================================================================
 # Fixtures
@@ -74,95 +79,111 @@ def mock_state():
 
 
 class TestMinimumCalls:
-    """minimum_calls 파라미터 테스트."""
+    """minimum_calls 게이트 테스트 (719 D4).
 
-    def test_circuit_not_open_when_below_minimum_calls(
-        self, mock_repository, base_config, mock_state
-    ):
-        """총 호출 수가 minimum_calls 미만이면 CB가 열리지 않아야 함."""
-        # Setup: failure_count = 5 (threshold), but total calls = 5 < 10 (minimum)
-        mock_state.failure_count = 5
-        mock_state.success_count = 0  # Total = 5 < 10
-        mock_repository.get_or_create.return_value = mock_state
-        mock_repository.record_failure.return_value = mock_state
+    minimum_calls는 rate 트리거만 게이팅한다. 연속 실패 증거는 트래픽과
+    무관하므로 count 트리거는 정확히 failure_threshold에서 트립한다.
+    판정 로직은 evaluate_trip 공유 술어에 있으므로 거기서 직접 검증한다.
+    """
 
-        service = CircuitBreakerService(config=base_config, repository=mock_repository)
-
-        # Should not open circuit
-        should_open = service._should_open_circuit(mock_state)
-
-        assert should_open is False
-
-    def test_circuit_opens_when_above_minimum_calls(
-        self, mock_repository, base_config, mock_state
-    ):
-        """총 호출 수가 minimum_calls 이상이고 threshold 초과 시 CB가 열려야 함."""
-        # Setup: failure_count = 5 (threshold), total calls = 15 >= 10 (minimum)
-        mock_state.failure_count = 5
-        mock_state.success_count = 10  # Total = 15 >= 10
-        mock_repository.get_or_create.return_value = mock_state
-
-        service = CircuitBreakerService(config=base_config, repository=mock_repository)
-
-        should_open = service._should_open_circuit(mock_state)
-
-        assert should_open is True
-
-    def test_minimum_calls_protects_low_traffic_services(
-        self, mock_repository, base_config, mock_state
-    ):
-        """저트래픽 서비스에서 일시적 실패로 CB가 열리는 것을 방지."""
-        # 새벽 시간대: 10개 요청 중 5개 실패 (50% 에러율)
-        # minimum_calls=10이면 아직 판단하지 않음
-        mock_state.failure_count = 5
-        mock_state.success_count = 4  # Total = 9 < 10
-        mock_repository.get_or_create.return_value = mock_state
-
-        service = CircuitBreakerService(config=base_config, repository=mock_repository)
-
-        should_open = service._should_open_circuit(mock_state)
-
-        assert should_open is False
-
-    def test_rate_based_threshold_with_minimum_calls(self, mock_repository, mock_state):
-        """비율 기반 threshold와 minimum_calls 조합 테스트."""
+    def test_count_trigger_is_not_gated_by_minimum_calls(self):
+        """관측 호출이 minimum_calls 미만이어도 연속 실패는 트립시킨다."""
         config = CircuitBreakerConfig(
-            enabled=True,
-            failure_threshold=5,
-            minimum_calls=20,
-            failure_rate_threshold=50.0,  # 50% 에러율
+            enabled=True, failure_threshold=5, minimum_calls=10
         )
 
-        # 20개 요청 중 10개 실패 (50%) - threshold 충족
-        mock_state.failure_count = 10
-        mock_state.success_count = 10  # Total = 20 >= 20
+        assert (
+            evaluate_trip(
+                consecutive_failures=5,
+                window_failures=5,
+                window_total=5,
+                config=config,
+            )
+            == TRIP_REASON_COUNT
+        )
 
-        service = CircuitBreakerService(config=config, repository=mock_repository)
+    def test_count_trigger_trips_at_exactly_failure_threshold(self):
+        config = CircuitBreakerConfig(
+            enabled=True, failure_threshold=5, minimum_calls=10
+        )
 
-        should_open = service._should_open_circuit(mock_state)
+        assert (
+            evaluate_trip(
+                consecutive_failures=4,
+                window_failures=4,
+                window_total=4,
+                config=config,
+            )
+            is None
+        )
+        assert (
+            evaluate_trip(
+                consecutive_failures=5,
+                window_failures=5,
+                window_total=5,
+                config=config,
+            )
+            == TRIP_REASON_COUNT
+        )
 
-        assert should_open is True
-
-    def test_rate_based_threshold_below_minimum_calls(
-        self, mock_repository, mock_state
-    ):
-        """minimum_calls 미만이면 비율 기반 threshold도 적용 안됨."""
+    def test_rate_trigger_gated_below_minimum_calls(self):
+        """저트래픽 서비스: 관측 호출이 부족하면 비율은 평가하지 않는다."""
+        # count 트리거는 사정권 밖에 두어 rate 게이트만 판정에 관여시킨다.
         config = CircuitBreakerConfig(
             enabled=True,
-            failure_threshold=5,
-            minimum_calls=20,
+            failure_threshold=100,
+            minimum_calls=10,
             failure_rate_threshold=50.0,
         )
 
-        # 10개 요청 중 8개 실패 (80%) - 하지만 minimum_calls 미달
-        mock_state.failure_count = 8
-        mock_state.success_count = 2  # Total = 10 < 20
+        # 9건 중 5건 실패(56%)지만 minimum_calls 미달
+        assert (
+            evaluate_trip(
+                consecutive_failures=1,
+                window_failures=5,
+                window_total=9,
+                config=config,
+            )
+            is None
+        )
 
-        service = CircuitBreakerService(config=config, repository=mock_repository)
+    def test_rate_trigger_applies_at_minimum_calls(self):
+        config = CircuitBreakerConfig(
+            enabled=True,
+            failure_threshold=100,
+            minimum_calls=10,
+            failure_rate_threshold=50.0,
+        )
 
-        should_open = service._should_open_circuit(mock_state)
+        # 10건 중 5건 실패(50%) — minimum_calls 충족
+        assert (
+            evaluate_trip(
+                consecutive_failures=1,
+                window_failures=5,
+                window_total=10,
+                config=config,
+            )
+            == TRIP_REASON_RATE
+        )
 
-        assert should_open is False
+    def test_rate_trigger_disabled_at_zero_threshold(self):
+        """failure_rate_threshold=0이면 비율 트리거는 평가되지 않는다."""
+        config = CircuitBreakerConfig(
+            enabled=True,
+            failure_threshold=100,
+            minimum_calls=1,
+            failure_rate_threshold=0,
+        )
+
+        assert (
+            evaluate_trip(
+                consecutive_failures=1,
+                window_failures=20,
+                window_total=20,
+                config=config,
+            )
+            is None
+        )
 
 
 # =============================================================================
@@ -356,7 +377,11 @@ class TestSnapshotCollection:
         service = CircuitBreakerService(config=base_config, repository=mock_repository)
 
         snapshot = service._collect_failure_snapshot(
-            "test_service", mock_state, error_context={"error": "Connection timeout"}
+            "test_service",
+            mock_state,
+            error_context={"error": "Connection timeout"},
+            window_failures=5,
+            window_total=15,
         )
 
         assert "service_name" in snapshot
@@ -365,7 +390,9 @@ class TestSnapshotCollection:
         assert "circuit_breaker" in snapshot
         assert snapshot["circuit_breaker"]["failure_count"] == 5
         assert snapshot["circuit_breaker"]["success_count"] == 10
-        assert snapshot["circuit_breaker"]["total_calls"] == 15
+        assert snapshot["circuit_breaker"]["consecutive_failure_count"] == 5
+        assert snapshot["circuit_breaker"]["window_failure_count"] == 5
+        assert snapshot["circuit_breaker"]["window_total_calls"] == 15
         assert "error_context" in snapshot
         assert snapshot["error_context"]["error"] == "Connection timeout"
 
@@ -378,7 +405,9 @@ class TestSnapshotCollection:
 
         service = CircuitBreakerService(config=base_config, repository=mock_repository)
 
-        snapshot = service._collect_failure_snapshot("test_service", mock_state)
+        snapshot = service._collect_failure_snapshot(
+            "test_service", mock_state, window_failures=5, window_total=15
+        )
 
         threshold_config = snapshot["circuit_breaker"]["threshold_config"]
         assert threshold_config["failure_threshold"] == base_config.failure_threshold
@@ -391,13 +420,15 @@ class TestSnapshotCollection:
     def test_collect_failure_snapshot_calculates_failure_rate(
         self, mock_repository, base_config, mock_state
     ):
-        """스냅샷에 실패율이 계산되어야 함."""
+        """스냅샷 실패율은 outcome window 증거에서 계산된다."""
         mock_state.failure_count = 3
-        mock_state.success_count = 7  # 30% failure rate
+        mock_state.success_count = 0
 
         service = CircuitBreakerService(config=base_config, repository=mock_repository)
 
-        snapshot = service._collect_failure_snapshot("test_service", mock_state)
+        snapshot = service._collect_failure_snapshot(
+            "test_service", mock_state, window_failures=3, window_total=10
+        )
 
         assert snapshot["circuit_breaker"]["failure_rate_percent"] == 30.0
 
@@ -447,20 +478,31 @@ class TestBurnRateMultiplier:
 class TestRecordFailureIntegration:
     """record_failure 통합 테스트."""
 
-    def test_record_failure_respects_minimum_calls(
-        self, mock_repository, base_config, mock_state
+    def test_record_failure_rate_trigger_respects_minimum_calls(
+        self, mock_repository, mock_state
     ):
-        """record_failure가 minimum_calls를 존중해야 함."""
-        # State: 5 failures, 0 successes = 5 total (< 10 minimum)
+        """관측 호출이 minimum_calls 미만이면 비율 트리거로 열리지 않는다.
+
+        count 트리거는 사정권 밖(failure_threshold=100)에 두어 rate 게이트만
+        판정에 관여하게 한다.
+        """
+        config = CircuitBreakerConfig(
+            enabled=True,
+            failure_threshold=100,
+            minimum_calls=10,
+            failure_rate_threshold=50.0,
+        )
         mock_state.failure_count = 5
         mock_state.success_count = 0
         mock_state.state = "closed"
         mock_repository.get_or_create.return_value = mock_state
         mock_repository.record_failure.return_value = mock_state
 
-        service = CircuitBreakerService(config=base_config, repository=mock_repository)
+        service = CircuitBreakerService(config=config, repository=mock_repository)
 
-        service.record_failure("test_service")
+        # 관측 호출 5건 < minimum_calls 10
+        for _ in range(5):
+            service.record_failure("test_service")
 
         # update_state should NOT be called (circuit should not open)
         mock_repository.update_state.assert_not_called()

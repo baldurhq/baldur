@@ -123,24 +123,26 @@ class TestRecordFailureWithOpenCheckBehavior:
         assert attempt.state.half_open_window_started_at is None
         assert attempt.state.opened_at is not None
 
-    def test_half_open_clears_window_in_same_lock_acquire(self):
-        # Given: HALF_OPEN with logged failures so the window is non-empty.
+    def test_half_open_zeroes_counters_in_same_lock_acquire(self):
+        # Given: HALF_OPEN with logged failures.
         repo = InMemoryCircuitBreakerStateRepository()
         service_name = "svc"
         _open_then_half_open(repo, service_name)
         for _ in range(3):
             repo.record_failure(service_name)
-        assert len(repo._call_windows[service_name]) > 0
+        assert repo.get_by_service_name(service_name).failure_count > 0
 
         # When: the atomic re-open fires.
-        repo.record_failure_with_open_check(service_name)
+        attempt = repo.record_failure_with_open_check(service_name)
 
-        # Then: window deque + parallel counters all cleared (490 D6 invariant).
-        window = repo._call_windows.get(service_name)
-        assert window is not None
-        assert len(window) == 0
-        assert repo._failure_cnt[service_name] == 0
-        assert repo._success_cnt[service_name] == 0
+        # Then: the re-open transition and the counter reset commit together.
+        assert attempt.did_open is True
+        assert attempt.state.failure_count == 0
+        assert attempt.state.success_count == 0
+
+        stored = repo.get_by_service_name(service_name)
+        assert stored.failure_count == 0
+        assert stored.success_count == 0
 
     def test_open_state_returns_did_open_false_no_transition(self):
         # Given: a CB already OPEN.

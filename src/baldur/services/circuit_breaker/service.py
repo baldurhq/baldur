@@ -37,6 +37,7 @@ from .config import (
     CircuitState,
 )
 from .manual_control import ManualControlMixin
+from .outcome_window import OutcomeWindow, evaluate_trip
 from .protection import ProtectionMixin
 
 if TYPE_CHECKING:
@@ -98,6 +99,11 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
         """
         self.config = config or CircuitBreakerConfig.from_settings()
         self._repository = repository
+
+        # Rate evidence for the failure-rate trigger. Held in process because a
+        # repository write per successful call would put I/O back on the
+        # CLOSED-success hot path; see outcome_window for the consistency model.
+        self._outcome_window = OutcomeWindow()
 
         # MeshCoordinator integration: list of downstream-state pre-check functions
         # checker(service_name) → True means downstream healthy, False triggers preemptive Fallback
@@ -604,12 +610,28 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
         """
         return self.repository.get_open_states(limit)
 
+    def get_window_evidence(self, service_name: str) -> tuple[int, int]:
+        """Return ``(failures, total)`` recorded in this worker's outcome window.
+
+        The evidence the failure-rate trigger decides on: outcomes observed
+        while the circuit was CLOSED, bounded by ``sliding_window_size`` and
+        cleared at every observed state transition. ``(0, 0)`` means no
+        evidence, which is not the same as a 0% failure rate.
+
+        Args:
+            service_name: Name of the external service
+
+        Returns:
+            Failure count and total call count over the window.
+        """
+        return self._outcome_window.read(service_name)
+
     def get_aggregate_failure_rate(self) -> float:
         """Return the system-wide circuit-breaker failure fraction (0.0-1.0).
 
-        Aggregates over every tracked circuit-breaker state as
-        ``sum(failure_count) / sum(failure_count + success_count)``, returning
-        ``0.0`` when no calls have been recorded across any circuit.
+        Aggregates the recorded call outcomes across every tracked service as
+        ``sum(window_failures) / sum(window_total)``, returning ``0.0`` when no
+        calls have been observed on any circuit.
 
         This is a system-wide **mean** error fraction, not a fixed-time-window
         or per-service rate: a single failing service among many healthy ones
@@ -617,14 +639,15 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
         the mean. That makes it suited to a system-wide stability gate, where
         each individual service is still protected by its own circuit breaker.
 
+        Evidence comes from this worker's outcome windows, so the fraction
+        describes the traffic this process handled — the scope its consumers
+        (the capacity-reservation safety valve and the emergency recovery gate)
+        already decide in.
+
         Returns:
             Failure fraction in the range 0.0-1.0.
         """
-        total_failures = 0
-        total_calls = 0
-        for state in self.repository.get_all_states():
-            total_failures += state.failure_count
-            total_calls += state.failure_count + state.success_count
+        total_failures, total_calls = self._outcome_window.read_all()
         if total_calls == 0:
             return 0.0
         return total_failures / total_calls
@@ -726,14 +749,28 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
         # Use repository to record failure (handles atomic update)
         updated_state = self.repository.record_failure(service_name)
 
-        # Check if threshold exceeded and circuit should open
         effective_config = self.get_effective_config(service_name)
+
+        # Only CLOSED-state observations are rate evidence. A racing transition
+        # can leave the state OPEN here; those calls describe the breaker's
+        # reaction, not the dependency's health.
+        if updated_state.state == "closed":
+            self._outcome_window.record_failure(
+                service_name, effective_config.sliding_window_size
+            )
+
         should_open = self._should_open_circuit(updated_state, effective_config)
 
         if should_open and updated_state.state == "closed":
+            window_failures, window_total = self.get_window_evidence(service_name)
+
             # Collect snapshot before opening
             snapshot = self._collect_failure_snapshot(
-                service_name, updated_state, error_context
+                service_name,
+                updated_state,
+                error_context,
+                window_failures=window_failures,
+                window_total=window_total,
             )
 
             # Open the circuit
@@ -743,12 +780,17 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
                 opened_at=utc_now(),
             )
 
+            # Outcomes observed before the trip say nothing about the rate
+            # after it — the next CLOSED period starts without evidence.
+            self._outcome_window.clear(service_name)
+
             # Log with snapshot
             logger.warning(
                 "circuit_breaker.circuit_auto_opened_failures",
                 service_name=service_name,
                 updated_state=updated_state.failure_count,
-                total_calls=self.get_total_calls(service_name),
+                window_failure_count=window_failures,
+                window_total_calls=window_total,
             )
 
             # Save audit log with snapshot
@@ -782,6 +824,12 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
                     "previous_state": "closed",
                     "timestamp": utc_now().isoformat(),
                     "trigger": "auto",
+                    # Denominators the config-shadow evaluator replays the trip
+                    # decision from. The journal subscriber stores event data
+                    # verbatim, so these persist without further wiring.
+                    "window_failure_count": window_failures,
+                    "window_total_calls": window_total,
+                    "consecutive_failure_count": updated_state.failure_count,
                 },
             )
 
@@ -791,12 +839,13 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
         effective_config: CircuitBreakerConfig | None = None,
     ) -> bool:
         """
-        Determine if circuit should be opened based on failure threshold and minimum calls.
+        Determine if the circuit should open, from the shared trip predicate.
 
-        Implements both count-based and rate-based thresholds with minimum_calls protection.
-        Rate-based threshold uses sliding_window_size to bound the calculation,
-        ensuring that cumulative-count pollution is prevented even when the
-        repository does not provide a window-based count.
+        Reads the two evidence sources and hands them to ``evaluate_trip``:
+        the consecutive-failure count from the repository state, and the
+        failure/total pair from this worker's outcome window. The config-shadow
+        evaluator calls the same predicate, so a simulated trip and a live trip
+        cannot disagree.
 
         Args:
             state: Current circuit breaker state
@@ -806,56 +855,36 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
             True if circuit should open
         """
         cfg = effective_config or self.config
-        total_calls = state.failure_count + state.success_count
+        window_failures, window_total = self.get_window_evidence(state.service_name)
 
-        # Sliding Window: cap total_calls at the window size (§9)
-        # InMemoryRepo (ring buffer) already returns a window-based count, so this is a no-op.
-        # For non-windowed repos such as RedisRepo, this prevents cumulative-count pollution.
-        window_size = cfg.sliding_window_size
-        if window_size > 0 and total_calls > window_size:
-            logger.debug(
-                "circuit_breaker.capping",
-                target_service_name=state.service_name,
-                total_calls=total_calls,
-                window_size=window_size,
-            )
-            # For rate calculation, use only the count within the window range
-            # count-based threshold uses the original failure_count (§9.4)
-            total_calls = window_size
+        trip_reason = evaluate_trip(
+            consecutive_failures=state.failure_count,
+            window_failures=window_failures,
+            window_total=window_total,
+            config=cfg,
+        )
 
-        # Check minimum_calls - prevent false positives with low traffic
-        if total_calls < cfg.minimum_calls:
-            logger.debug(
-                "circuit_breaker.opening_skipped",
-                target_service_name=state.service_name,
-                total_calls=total_calls,
-                minimum_calls=cfg.minimum_calls,
-            )
+        if trip_reason is None:
             return False
 
-        # Check rate-based threshold if configured
-        if cfg.failure_rate_threshold > 0:
-            failure_rate = (
-                (state.failure_count / total_calls * 100) if total_calls > 0 else 0
-            )
-            if failure_rate >= cfg.failure_rate_threshold:
-                logger.info(
-                    "circuit_breaker.rate_threshold_exceeded",
-                    target_service_name=state.service_name,
-                    failure_rate=failure_rate,
-                    failure_rate_threshold=cfg.failure_rate_threshold,
-                    window_size=window_size,
-                )
-                return True
-
-        # Check count-based threshold
-        return state.failure_count >= cfg.failure_threshold
+        logger.info(
+            "circuit_breaker.trip_threshold_exceeded",
+            target_service_name=state.service_name,
+            trip_reason=trip_reason,
+            consecutive_failure_count=state.failure_count,
+            window_failure_count=window_failures,
+            window_total_calls=window_total,
+        )
+        return True
 
     def _collect_failure_snapshot(
         self,
         service_name: str,
         state: CircuitBreakerStateData,
         error_context: dict[str, Any] | None = None,
+        *,
+        window_failures: int,
+        window_total: int,
     ) -> dict[str, Any]:
         """
         Collect a snapshot of system state when circuit opens.
@@ -866,6 +895,8 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
             service_name: Name of the service
             state: Current circuit breaker state
             error_context: Optional error context
+            window_failures: Failures recorded in the outcome window
+            window_total: Total calls recorded in the outcome window
 
         Returns:
             Snapshot dictionary with failure details
@@ -876,13 +907,13 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
             "circuit_breaker": {
                 "failure_count": state.failure_count,
                 "success_count": state.success_count,
-                "total_calls": state.failure_count + state.success_count,
+                "consecutive_failure_count": state.failure_count,
+                "window_failure_count": window_failures,
+                "window_total_calls": window_total,
+                # Sourced from the outcome window, the same evidence the trip
+                # decision used — repository counters hold no CLOSED successes.
                 "failure_rate_percent": (
-                    state.failure_count
-                    / (state.failure_count + state.success_count)
-                    * 100
-                    if (state.failure_count + state.success_count) > 0
-                    else 0
+                    window_failures / window_total * 100 if window_total > 0 else 0
                 ),
                 "threshold_config": {
                     "failure_threshold": self.config.failure_threshold,
@@ -1063,6 +1094,12 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
             and not hint_state.manually_controlled
             and hint_state.failure_count == 0
         ):
+            # The success still counts toward the rate denominator — that is a
+            # memory-local append, so the fast path stays free of repository I/O.
+            self._outcome_window.record_success(
+                service_name,
+                self.get_effective_config(service_name).sliding_window_size,
+            )
             return
 
         if hint_state is not None and hint_state.service_name == service_name:
@@ -1093,6 +1130,10 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
             circuit_closed = attempt.did_close
 
         elif state.state == "closed":
+            self._outcome_window.record_success(
+                service_name,
+                self.get_effective_config(service_name).sliding_window_size,
+            )
             # Reset failure count on success in closed state
             self.repository.update_state(
                 service_name=service_name,
@@ -1101,6 +1142,10 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
             )
 
         if circuit_closed:
+            # Recovery starts a fresh CLOSED period; outcomes from before the
+            # trip are not evidence about it.
+            self._outcome_window.clear(service_name)
+
             logger.info(
                 "circuit_breaker.circuit_auto_closed_successes",
                 service_name=service_name,

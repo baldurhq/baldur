@@ -178,8 +178,8 @@ class TestRecordSuccessWithCloseCheckBehavior:
         assert attempt.did_close is False
         assert attempt.state.state == CircuitBreakerStateEnum.CLOSED.value
 
-    def test_window_invariant_preserved_across_close(self):
-        # Given: HALF_OPEN with one logged failure (so window has 1 failure).
+    def test_counters_zeroed_in_same_lock_acquire_as_close(self):
+        # Given: HALF_OPEN with one logged failure.
         repo = InMemoryCircuitBreakerStateRepository()
         service_name = "svc"
         _open_then_half_open(repo, service_name)
@@ -187,18 +187,19 @@ class TestRecordSuccessWithCloseCheckBehavior:
 
         # When: two successes cross the threshold and close the circuit.
         repo.record_success_with_close_check(service_name, success_threshold=2)
-        repo.record_success_with_close_check(service_name, success_threshold=2)
-
-        # Then: window deque + parallel counters all match (490 D6 invariant).
-        # _clear_window must have fired in the same lock acquire as the close.
-        window = repo._call_windows.get(service_name)
-        assert window is not None
-        assert repo._success_cnt[service_name] + repo._failure_cnt[service_name] == len(
-            window
+        attempt = repo.record_success_with_close_check(
+            service_name, success_threshold=2
         )
-        assert repo._success_cnt[service_name] == 0
-        assert repo._failure_cnt[service_name] == 0
-        assert len(window) == 0
+
+        # Then: the close transition and the counter reset commit together, so
+        # no caller can observe CLOSED with residual counters.
+        assert attempt.did_close is True
+        assert attempt.state.failure_count == 0
+        assert attempt.state.success_count == 0
+
+        stored = repo.get_by_service_name(service_name)
+        assert stored.failure_count == 0
+        assert stored.success_count == 0
 
 
 # =============================================================================

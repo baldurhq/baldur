@@ -118,7 +118,6 @@ class LayeredRepositoryBase:
         sync_interval_seconds: float = 5.0,
         adapter_type: str = "unknown",
         drift_reconciler: DriftReconciler | None = None,
-        sliding_window_size: int = 100,
     ):
         """
         Args:
@@ -128,16 +127,13 @@ class LayeredRepositoryBase:
                 pick the timeout
             drift_reconciler: drift reconciliation instance. Falls back to the
                 default instance when None.
-            sliding_window_size: L1 sliding-window ring buffer size (default 100)
         """
         # Lazy import to avoid circular dependency
         from baldur.adapters.memory.circuit_breaker import (
             InMemoryCircuitBreakerStateRepository,
         )
 
-        self._l1 = InMemoryCircuitBreakerStateRepository(
-            sliding_window_size=sliding_window_size,
-        )
+        self._l1 = InMemoryCircuitBreakerStateRepository()
         self._l2 = l2_repo
         self._sync_interval = sync_interval_seconds
         self._adapter_type = adapter_type
