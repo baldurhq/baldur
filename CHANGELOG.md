@@ -12,25 +12,20 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ### Fixed
 
-- Audit checkpoint, WAL and DLQ disk buffer now fall back to a writable directory when their
-  hardcoded default is not writable (non-root deploys), instead of dying silently or crashing.
-- A directory you set explicitly still fails loud — `ConfigurationError` names the path and
-  its env var — rather than quietly writing somewhere else.
-- `ResilientStorageBackend` no longer logs an ERROR traceback on a non-root install; it warns
-  and runs its WAL from the fallback directory.
-- Production boot still refuses to start unless the resilient-storage WAL is on its configured
-  directory. To prioritize availability during an infrastructure incident, set
-  `BALDUR_RESILIENT_STORAGE_WAL_DIR` to any writable path.
-- `schedule_retention_cleanup()` reads `BALDUR_AUDIT_WAL_DIR` first, warning when it falls back
-  to the legacy unprefixed `AUDIT_WAL_DIR`.
+- Durability directories fall back to a writable location when the shipped default is not.
+- A directory you set explicitly fails loud: `ConfigurationError` names it and its env var.
+- `ResilientStorageBackend` warns instead of logging an ERROR traceback on a non-root install.
+- Production boot still requires the resilient-storage WAL on its configured directory.
+- Break-glass: set `BALDUR_RESILIENT_STORAGE_WAL_DIR` to any writable path to boot anyway.
+- `schedule_retention_cleanup()` reads `BALDUR_AUDIT_WAL_DIR` first, warning on the legacy name.
+- `BALDUR_CONFIG` and `BALDUR_DOTENV` no longer warn as unknown environment variables.
 
 ### Added
 
 - Daily report records the on-recovery replay sweep, so its "Auto-replay" line renders on OSS.
 - `baldur.utils.fs.resolve_writable_dir` — canonical writable-directory resolver.
 - Startup report gains `storage_dirs`: which durability directories resolved, and which fell back.
-- `WALConfig.wal_dir_operator_set` / `create_wal(wal_dir_operator_set=...)` — set it whenever
-  `wal_dir` comes from operator input.
+- `WALConfig.wal_dir_operator_set` / `create_wal(wal_dir_operator_set=...)` — mark chosen dirs.
 - `ResilientStorageBackend.get_stats()` gains `wal_on_fallback_dir`.
 
 ### Changed

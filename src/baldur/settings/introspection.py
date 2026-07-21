@@ -201,6 +201,9 @@ KNOWN_DIRECT_READ_ENV_VARS: frozenset[str] = frozenset(
         "BALDUR_PRECOMPUTED_CACHE_AUTOSTART",
         "BALDUR_SCHEDULER_AUTOSTART",
         "BALDUR_SYSTEM_METRICS_CACHE_AUTOSTART",
+        # --- CLI config discovery (read before any settings class exists) ---
+        "BALDUR_CONFIG",
+        "BALDUR_DOTENV",
         # --- diagnostic suppress flags (read by the diagnostics themselves) ---
         "BALDUR_SUPPRESS_TIER_WARNING",
         "BALDUR_SUPPRESS_UNKNOWN_ENV_WARNING",
