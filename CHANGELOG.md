@@ -20,7 +20,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `schedule_retention_cleanup()` reads `BALDUR_AUDIT_WAL_DIR` first, warning on the legacy name.
 - `BALDUR_CONFIG` and `BALDUR_DOTENV` no longer warn as unknown environment variables.
 - Readiness answers within a bounded time: a database that hangs no longer hangs the probe.
-- A sustained database outage logs readiness failures at WARNING, not ERROR with a traceback.
+- A health provider that raises logs at WARNING with the traceback at DEBUG, no longer ERROR.
 
 ### Added
 
