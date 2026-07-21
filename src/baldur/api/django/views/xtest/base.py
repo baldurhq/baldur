@@ -765,7 +765,14 @@ def collect_system_snapshot() -> dict[str, Any]:  # noqa: C901, PLR0912
             "test.mode_snapshot_collection",
             error=e,
         )
-        return {"timestamp": timezone.now().isoformat(), "error": str(e)}
+        # The snapshot is returned in an HTTP response body, so the exception
+        # text stays server-side: it can carry adapter internals and connection
+        # strings, and the caller only needs to know the snapshot is missing.
+        # The log line above keeps the detail for whoever is debugging.
+        return {
+            "timestamp": timezone.now().isoformat(),
+            "error": "snapshot_collection_failed",
+        }
 
 
 # =============================================================================
