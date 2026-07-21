@@ -365,3 +365,80 @@ class TestFallbackStrategies:
 
         config = CircuitBreakerConfig()
         assert config.fallback_cache_ttl_seconds == 300  # 5 minutes
+
+
+class TestCircuitBreakerConfigBehavior:
+    """719 D7 — the three rate-trigger fields resolve through settings.
+
+    ``from_settings`` used to read them via ``getattr(cb_settings, name,
+    <literal>)``. The literals silently won whenever the settings model lacked
+    the field, so ``BALDUR_CB_FAILURE_RATE_THRESHOLD`` had no effect at all.
+    These tests fail if a fallback is reintroduced.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_settings(self):
+        from baldur.settings.circuit_breaker import reset_circuit_breaker_settings
+        from baldur.settings.root import reset_config
+
+        reset_circuit_breaker_settings()
+        reset_config()
+        yield
+        reset_circuit_breaker_settings()
+        reset_config()
+
+    @staticmethod
+    def _from_static_settings():
+        """Resolve the config through the static-settings path.
+
+        The runtime-config path belongs to PRO and is covered separately; this
+        forces the OSS branch so the env override is what is being measured.
+        """
+        from baldur.services.circuit_breaker.config import CircuitBreakerConfig
+
+        with patch.dict("sys.modules", {"baldur_pro.services.runtime_config": None}):
+            return CircuitBreakerConfig.from_settings()
+
+    def test_failure_rate_threshold_env_override_reaches_the_config(self, monkeypatch):
+        """BALDUR_CB_FAILURE_RATE_THRESHOLD=0 disables the rate trigger."""
+        from baldur.settings.circuit_breaker import reset_circuit_breaker_settings
+        from baldur.settings.root import reset_config
+
+        monkeypatch.setenv("BALDUR_CB_FAILURE_RATE_THRESHOLD", "0")
+        reset_circuit_breaker_settings()
+        reset_config()
+
+        assert self._from_static_settings().failure_rate_threshold == 0.0
+
+    def test_sliding_window_size_env_override_reaches_the_config(self, monkeypatch):
+        """BALDUR_CB_SLIDING_WINDOW_SIZE resizes the outcome window."""
+        from baldur.settings.circuit_breaker import reset_circuit_breaker_settings
+        from baldur.settings.root import reset_config
+
+        monkeypatch.setenv("BALDUR_CB_SLIDING_WINDOW_SIZE", "250")
+        reset_circuit_breaker_settings()
+        reset_config()
+
+        assert self._from_static_settings().sliding_window_size == 250
+
+    def test_minimum_calls_env_override_reaches_the_config(self, monkeypatch):
+        """BALDUR_CB_MINIMUM_CALLS moves the rate trigger's traffic gate."""
+        from baldur.settings.circuit_breaker import reset_circuit_breaker_settings
+        from baldur.settings.root import reset_config
+
+        monkeypatch.setenv("BALDUR_CB_MINIMUM_CALLS", "3")
+        reset_circuit_breaker_settings()
+        reset_config()
+
+        assert self._from_static_settings().minimum_calls == 3
+
+    def test_unset_env_yields_the_settings_defaults(self):
+        """Without overrides the config matches the settings model's defaults."""
+        from baldur.settings.circuit_breaker import CircuitBreakerSettings
+
+        config = self._from_static_settings()
+        settings = CircuitBreakerSettings()
+
+        assert config.failure_rate_threshold == settings.failure_rate_threshold
+        assert config.sliding_window_size == settings.sliding_window_size
+        assert config.minimum_calls == settings.minimum_calls

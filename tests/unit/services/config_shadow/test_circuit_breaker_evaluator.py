@@ -514,3 +514,124 @@ class TestCircuitBreakerPassCriteriaEdgeCaseBehavior:
         baseline = SimulationResult(open_count=0)
         candidate = SimulationResult(open_count=0)
         assert evaluator._check_pass_criteria(baseline, candidate) is True
+
+
+# =============================================================================
+# Evaluator config defaults are the live defaults (719 D2)
+# =============================================================================
+
+
+class TestEvaluatorConfigDefaultBehavior:
+    """A partial shadow config is completed from the live circuit-breaker
+    defaults, not from evaluator-local literals.
+
+    ``baseline_config`` and ``candidate_config`` are arbitrary dicts, so an
+    operator shadow-testing one field supplies only that field. The evaluator
+    used to fill the rest from its own literals — ``minimum_calls=5`` and
+    ``failure_rate_threshold=0``, which disabled the rate trigger in simulation
+    only — so the reported delta was measured against a baseline that was never
+    running anywhere.
+    """
+
+    def test_partial_config_inherits_live_minimum_calls(self):
+        """Negative assertion: the local literal 5 no longer applies."""
+        evaluator = CircuitBreakerEvaluator()
+
+        resolved = evaluator._resolve_config({"failure_threshold": 5})
+
+        assert resolved.minimum_calls == CircuitBreakerConfig().minimum_calls
+        assert resolved.minimum_calls == 10
+
+    def test_partial_config_inherits_live_failure_rate_threshold(self):
+        """Negative assertion: the local literal 0 no longer applies.
+
+        A shadow baseline with the rate trigger off could not reproduce trips
+        the live breaker performs, so every delta involving the rate trigger
+        was fiction.
+        """
+        evaluator = CircuitBreakerEvaluator()
+
+        resolved = evaluator._resolve_config({"failure_threshold": 5})
+
+        assert (
+            resolved.failure_rate_threshold
+            == CircuitBreakerConfig().failure_rate_threshold
+        )
+        assert resolved.failure_rate_threshold == 50.0
+
+    def test_partial_config_inherits_live_sliding_window_size(self):
+        """The replay window is sized like the live one."""
+        evaluator = CircuitBreakerEvaluator()
+
+        resolved = evaluator._resolve_config({"failure_threshold": 5})
+
+        assert (
+            resolved.sliding_window_size == CircuitBreakerConfig().sliding_window_size
+        )
+
+    def test_supplied_keys_override_the_defaults(self):
+        """The overlay direction is supplied-over-default, not the reverse."""
+        evaluator = CircuitBreakerEvaluator()
+
+        resolved = evaluator._resolve_config(
+            {"failure_threshold": 3, "minimum_calls": 25}
+        )
+
+        assert resolved.failure_threshold == 3
+        assert resolved.minimum_calls == 25
+
+    def test_unknown_keys_are_ignored(self):
+        """A config dict carrying non-CB keys does not raise."""
+        evaluator = CircuitBreakerEvaluator()
+
+        resolved = evaluator._resolve_config(
+            {"failure_threshold": 7, "not_a_cb_field": "ignored"}
+        )
+
+        assert resolved.failure_threshold == 7
+
+    def test_empty_config_resolves_to_the_live_defaults(self):
+        """An empty dict yields the configuration actually running."""
+        evaluator = CircuitBreakerEvaluator()
+
+        resolved = evaluator._resolve_config({})
+        live = CircuitBreakerConfig()
+
+        assert resolved.failure_threshold == live.failure_threshold
+        assert resolved.minimum_calls == live.minimum_calls
+        assert resolved.failure_rate_threshold == live.failure_rate_threshold
+
+    def test_partial_baseline_config_reaches_the_simulation(self):
+        """End to end: a one-field baseline simulates against live defaults.
+
+        With the old literals the rate trigger was off in the baseline, so a
+        rate-driven trip appeared only in the candidate and reported a
+        fabricated open-count delta.
+        """
+        evaluator = CircuitBreakerEvaluator()
+        base_time = datetime(2026, 7, 22, tzinfo=UTC)
+        events = [
+            _make_entry(
+                "circuit_breaker_opened",
+                base_time,
+                context={
+                    "window_failure_count": 30,
+                    "window_total_calls": 50,
+                    "consecutive_failure_count": 2,
+                },
+            )
+        ]
+
+        result = evaluator.evaluate(
+            EvaluationContext(
+                baseline_config={"failure_threshold": 100},
+                candidate_config={"failure_threshold": 100},
+                events=events,
+            )
+        )
+
+        # 60% over 50 calls clears the inherited 50.0 threshold and the
+        # inherited minimum of 10, so both sides record the trip.
+        assert result.baseline_metrics["open_count"] == 1
+        assert result.candidate_metrics["open_count"] == 1
+        assert result.delta["open_count_delta"] == 0
