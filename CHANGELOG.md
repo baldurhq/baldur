@@ -38,6 +38,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - The compressed lifecycle sweep no longer re-reads every already-archived entry on every run.
 - The compressed lifecycle sweep holds a distributed lock, so overlapping runs cannot skip an entry.
 - Compressed `by_status` counts stay exact above `BALDUR_DLQ_COMPRESS_SUMMARY_SCAN_CAP`.
+- A negative `limit` on the compressed list no longer reads the whole index; it clamps to 1.
 
 ### Added
 

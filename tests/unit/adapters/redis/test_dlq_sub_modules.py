@@ -34,6 +34,7 @@ def _blob(data: dict) -> bytes:
 
 from baldur.adapters.redis.dlq_compression import (
     _COMPRESSED_INDEX_KEY,
+    _COMPRESSED_STATUS_PREFIX,
     _SUMMARY_MGET_CHUNK,
     RedisDLQCompression,
     _compressed_score,
@@ -2298,7 +2299,7 @@ class TestDLQCompressedStatusEnumContract:
 # J. get_compressed_entries — read routing across the four filter cells (723 D1)
 # =============================================================================
 #
-# These use the shared in-process backend from ``conftest`` rather than a
+# These use the shared in-process backend fixture from ``conftest`` rather than a
 # MagicMock: the defect is that a status-filtered listing takes its window off
 # the wrong key, and a mock returns whatever the test hands it whichever key
 # the code asked for.
@@ -2412,7 +2413,7 @@ class TestRedisCompressedListingRouting:
 
         assert rows == []
         # The listing never repairs: a console read must not pay for it.
-        assert stray.id in backend.zsets["dlq:compressed:status:archived"]
+        assert stray.id in backend.zsets[f"{_COMPRESSED_STATUS_PREFIX}archived"]
 
 
 # =============================================================================
@@ -2436,7 +2437,7 @@ class TestRedisCompressedSummaryGate:
         """Pre-migration the per-status keys may be incomplete, so they are
         not trusted — an extra member in one of them is not counted."""
         self._seed(store_compressed)
-        backend.zadd("dlq:compressed:status:active", {"unwalkable": 1.0})
+        backend.zadd(f"{_COMPRESSED_STATUS_PREFIX}active", {"unwalkable": 1.0})
 
         summary = compression.get_compressed_summary()
 
@@ -2453,7 +2454,7 @@ class TestRedisCompressedSummaryGate:
         distinguishable at all.
         """
         self._seed(store_compressed)
-        backend.zadd("dlq:compressed:status:active", {"unwalkable": 1.0})
+        backend.zadd(f"{_COMPRESSED_STATUS_PREFIX}active", {"unwalkable": 1.0})
         mark_index_ready()
 
         summary = compression.get_compressed_summary()

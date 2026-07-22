@@ -20,10 +20,10 @@ Test Categories:
     J. Contract: the stability-chain helper
 
 The backend is a fake that keeps real sorted-set ordering rather than a
-MagicMock (``conftest.FakeSortedSetBackend``). The defect these methods exist
-to fix was an ordering one — the lifecycle sweep read the newest page and so
-transitioned nothing — and a MagicMock returns whatever the test hands it,
-passing against either ordering.
+MagicMock (``tests.factories.redis.FakeSortedSetBackend``, wired by the
+directory conftest). The defect these methods exist to fix was an ordering one
+— the lifecycle sweep read the newest page and so transitioned nothing — and a
+MagicMock returns whatever the test hands it, passing against either ordering.
 """
 
 from __future__ import annotations
@@ -316,6 +316,32 @@ class TestRedisCompressedCutoffScanBehavior:
         assert len(rows) == _SUMMARY_MGET_CHUNK
         assert backend.get_blobs_calls == 1
         assert backend.blob_reads == _SUMMARY_MGET_CHUNK
+
+    def test_legacy_lane_still_drains_an_entry_that_predates_the_status_keys(
+        self, compression, backend, store_compressed
+    ):
+        """A migration that never runs must cost visibility, not transitions.
+
+        An entry compressed before the per-status family existed lives only in
+        the all-statuses index. With no marker the walk reads that index, so
+        the entry is still found and still transitions — which is what makes
+        the switch safe to ship ahead of the migration rather than with it.
+        """
+        legacy = store_compressed("legacy", days_ago=50)
+        _strip_per_status_membership(backend, legacy)
+
+        rows = compression.get_compressed_entries_before(
+            status="active", before=utc_now() - timedelta(days=5)
+        )
+
+        assert _suffixes(rows) == ["legacy"]
+        assert compression.update_compressed_status(legacy.id, "stale") is True
+        assert (
+            compression.get_compressed_entries_before(
+                status="active", before=utc_now() - timedelta(days=5)
+            )
+            == []
+        )
 
     def test_per_status_lane_offset_counts_matches_and_skips_a_stray(
         self,

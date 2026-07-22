@@ -608,16 +608,21 @@ class ResilientStorageBackend:
 
     @property
     def degrade_count(self) -> int:
-        """Monotonic count of transitions out of REDIS mode.
+        """Monotonic count of entries into degraded mode.
 
         A read that fails answers with the process-local memory view instead
         of raising, so a caller cannot tell a substituted result from a real
         one by its shape — an empty page and a non-empty page are both
         reachable from a failed fetch. Sampling this counter before and after
         a multi-page walk turns that into a decidable question: the counter is
-        bumped by ``_switch_to_degraded()``, the only edge that leaves REDIS
-        mode, so an unchanged sample across a walk that started available
-        means every page was served by Redis itself.
+        bumped by ``_switch_to_degraded()``, which is the only edge that
+        leaves REDIS mode, so an unchanged sample across a walk that started
+        available means every page was served by Redis itself.
+
+        It counts every entry into degraded mode, not only the ones from
+        REDIS — a failure landing while a recovery attempt is in flight bumps
+        it as well. That direction is safe for the sampling use: an extra bump
+        can only make a walk look unverified, never the reverse.
 
         The increment happens *before* the mode write, so a lockless reader
         that observes non-REDIS mode has necessarily already observed the
