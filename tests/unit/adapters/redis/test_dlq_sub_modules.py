@@ -19,10 +19,12 @@ Test Categories:
 from __future__ import annotations
 
 import json
+import math
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, call, patch
 
 import pytest
+from structlog.testing import capture_logs
 
 
 def _blob(data: dict) -> bytes:
@@ -31,14 +33,20 @@ def _blob(data: dict) -> bytes:
 
 
 from baldur.adapters.redis.dlq_compression import (
+    _COMPRESSED_INDEX_KEY,
+    _SUMMARY_MGET_CHUNK,
     RedisDLQCompression,
+    _compressed_score,
     _deserialize_compressed_entry,
+    _is_reserved_compressed_id,
+    _summary_scan_cap,
 )
 from baldur.adapters.redis.dlq_lifecycle import RedisDLQLifecycle
 from baldur.adapters.redis.dlq_maintenance import RedisDLQMaintenance
 from baldur.adapters.redis.dlq_query import RedisDLQQuery
 from baldur.interfaces.repositories import (
     DLQCompressedEntry,
+    DLQCompressedStatus,
     FailedOperationData,
     FailedOperationStatus,
 )
@@ -1882,3 +1890,382 @@ class TestDeserializeCompressedEntryBehavior:
         assert entry.first_seen == first
         assert entry.last_seen == last
         assert entry.compressed_at == compressed
+
+
+# =============================================================================
+# F. get_compressed_entry — by-id read + reserved-name guard (721 D2)
+# =============================================================================
+
+
+def _entry_blob(entry_id="c1", *, domain="payment", status="active", count=5) -> bytes:
+    """A complete compressed-entry blob the by-id read can deserialize."""
+    now = datetime(2026, 3, 16, 12, 0, 0, tzinfo=UTC)
+    return _blob(
+        {
+            "id": entry_id,
+            "domain": domain,
+            "failure_type": "timeout",
+            "error_code": "E001",
+            "count": str(count),
+            "first_seen": now.isoformat(),
+            "last_seen": now.isoformat(),
+            "sample_error_message": "err",
+            "sample_context": "{}",
+            "status": status,
+            "compressed_at": now.isoformat(),
+        }
+    )
+
+
+class TestRedisCompressedByIdBehavior:
+    """get_compressed_entry: index-free by-id read, guarded against reserved keys."""
+
+    def test_get_compressed_entry_present_returns_deserialized_entry(self):
+        """A present id reads its direct blob key and deserializes it."""
+        backend = MagicMock()
+        backend.get_blob.return_value = _entry_blob("c1", status="stale")
+        repo = _make_repo(backend)
+
+        entry = repo.compression.get_compressed_entry("c1")
+
+        assert entry is not None
+        assert entry.id == "c1"
+        assert entry.status == "stale"
+        backend.get_blob.assert_called_once_with("dlq:compressed:c1")
+
+    def test_get_compressed_entry_absent_returns_none(self):
+        """A missing blob maps to None (sibling get_by_id precedent)."""
+        backend = MagicMock()
+        backend.get_blob.return_value = None
+        repo = _make_repo(backend)
+
+        assert repo.compression.get_compressed_entry("c1") is None
+
+    def test_get_compressed_entry_is_read_only_and_repeatable(self):
+        """The by-id read has no write side effects and repeats identically."""
+        backend = MagicMock()
+        backend.get_blob.return_value = _entry_blob("c1")
+        repo = _make_repo(backend)
+
+        first = repo.compression.get_compressed_entry("c1")
+        second = repo.compression.get_compressed_entry("c1")
+
+        assert first.id == second.id == "c1"
+        backend.set_blob.assert_not_called()
+        backend.batch_write_ops.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "reserved_id",
+        [
+            "index",
+            "by_domain:payment",
+            "status:active",
+            "status_domain:active:payment",
+        ],
+        ids=["index", "by_domain", "status", "status_domain"],
+    )
+    def test_reserved_key_name_returns_none_without_reading_backend(self, reserved_id):
+        """A reserved structural key name short-circuits to None before get_blob.
+
+        Reading it would hit a sorted set and raise WRONGTYPE, degrading the
+        backend; the guard prevents the read entirely (§8.13 proximate cause).
+        """
+        backend = MagicMock()
+        repo = _make_repo(backend)
+
+        assert repo.compression.get_compressed_entry(reserved_id) is None
+        backend.get_blob.assert_not_called()
+
+
+# =============================================================================
+# G. update_compressed_status — index relocation + same-status short-circuit
+# =============================================================================
+
+
+class TestRedisCompressedTransition:
+    """update_compressed_status relocates per-status/composite index membership."""
+
+    @pytest.mark.parametrize(
+        ("old_status", "new_status"),
+        [("active", "stale"), ("stale", "archived")],
+        ids=["active_to_stale", "stale_to_archived"],
+    )
+    def test_real_transition_adds_new_and_removes_old_membership(
+        self, old_status, new_status
+    ):
+        """A status change is one blob-first batch: zadd new keys, zrem old keys."""
+        backend = MagicMock()
+        backend.get_blob.return_value = _blob(
+            {
+                "id": "c1",
+                "status": old_status,
+                "domain": "payment",
+                "count": "5",
+                "compressed_at": datetime(2026, 3, 16, tzinfo=UTC).isoformat(),
+            }
+        )
+        repo = _make_repo(backend)
+
+        assert repo.compression.update_compressed_status("c1", new_status) is True
+
+        ops = backend.batch_write_ops.call_args[0][0]
+        # Blob-first (723 D9), then add-before-remove. The score value itself
+        # is covered by the _compressed_score helper tests below.
+        assert ops[0][0] == "set_blob"
+        assert ops[1][0] == "zadd"
+        assert ops[1][1] == f"dlq:compressed:status:{new_status}"
+        assert "c1" in ops[1][2]
+        assert ops[2][0] == "zadd"
+        assert ops[2][1] == f"dlq:compressed:status_domain:{new_status}:payment"
+        assert ops[3] == ("zrem", f"dlq:compressed:status:{old_status}", ["c1"])
+        assert ops[4] == (
+            "zrem",
+            f"dlq:compressed:status_domain:{old_status}:payment",
+            ["c1"],
+        )
+
+    def test_transition_never_adds_and_removes_the_same_key(self):
+        """No emitted key is both zadd'd and zrem'd (the annihilation guard)."""
+        backend = MagicMock()
+        backend.get_blob.return_value = _blob(
+            {
+                "id": "c1",
+                "status": "active",
+                "domain": "payment",
+                "count": "5",
+                "compressed_at": datetime(2026, 3, 16, tzinfo=UTC).isoformat(),
+            }
+        )
+        repo = _make_repo(backend)
+
+        repo.compression.update_compressed_status("c1", "stale")
+
+        ops = backend.batch_write_ops.call_args[0][0]
+        zadd_keys = {op[1] for op in ops if op[0] == "zadd"}
+        zrem_keys = {op[1] for op in ops if op[0] == "zrem"}
+        assert zadd_keys.isdisjoint(zrem_keys)
+
+    def test_same_status_transition_short_circuits_to_a_blob_only_write(self):
+        """A same-status transition writes only the blob and emits no index ops.
+
+        An add-then-remove on one per-status key/member in a single pipeline
+        would annihilate the membership, so the short-circuit is correctness,
+        not an optimization.
+        """
+        backend = MagicMock()
+        backend.get_blob.return_value = _blob(
+            {"id": "c1", "status": "active", "domain": "payment", "count": "5"}
+        )
+        repo = _make_repo(backend)
+
+        assert repo.compression.update_compressed_status("c1", "active") is True
+
+        backend.set_blob.assert_called_once()
+        backend.batch_write_ops.assert_not_called()
+
+    def test_empty_domain_transition_skips_the_composite_ops(self):
+        """With no domain the composite (status, domain) ops are skipped."""
+        backend = MagicMock()
+        backend.get_blob.return_value = _blob(
+            {
+                "id": "c1",
+                "status": "active",
+                "domain": "",
+                "count": "5",
+                "compressed_at": datetime(2026, 3, 16, tzinfo=UTC).isoformat(),
+            }
+        )
+        repo = _make_repo(backend)
+
+        repo.compression.update_compressed_status("c1", "stale")
+
+        ops = backend.batch_write_ops.call_args[0][0]
+        op_shapes = [(op[0], op[1]) for op in ops]
+        assert op_shapes == [
+            ("set_blob", "dlq:compressed:c1"),
+            ("zadd", "dlq:compressed:status:stale"),
+            ("zrem", "dlq:compressed:status:active"),
+        ]
+
+
+# =============================================================================
+# H. get_compressed_summary — chunked walk + cap rail (721 D4/D7)
+# =============================================================================
+
+
+class TestRedisCompressedSummaryBound:
+    """The summary walk collapses round trips via chunked MGET and caps at the rail."""
+
+    def test_summary_fetches_blobs_in_ceil_n_over_chunk_batches(self):
+        """The walk issues ceil(n / _SUMMARY_MGET_CHUNK) get_blobs calls, not n."""
+        n = _SUMMARY_MGET_CHUNK * 2 + 1
+        backend = MagicMock()
+        backend.zcard.return_value = n
+        backend.zrevrange.return_value = [f"c{i}" for i in range(n)]
+        backend.get_blobs.side_effect = lambda keys: [
+            _blob({"status": "active", "count": "1"}) for _ in keys
+        ]
+        repo = _make_repo(backend)
+
+        with patch(
+            "baldur.adapters.redis.dlq_compression._summary_scan_cap",
+            return_value=100_000,
+        ):
+            summary = repo.compression.get_compressed_summary()
+
+        assert backend.get_blobs.call_count == math.ceil(n / _SUMMARY_MGET_CHUNK)
+        chunk_sizes = [len(c.args[0]) for c in backend.get_blobs.call_args_list]
+        assert chunk_sizes == [_SUMMARY_MGET_CHUNK, _SUMMARY_MGET_CHUNK, 1]
+        # Exactness is preserved across the chunked walk.
+        assert summary["total_summaries"] == n
+        assert summary["total_compressed_items"] == n
+        assert summary["by_status"]["active"] == n
+        assert "summary_truncated" not in summary
+
+    def test_summary_below_cap_is_exact_and_logs_no_warning(self):
+        """Below the cap the summary is exact and emits no truncation WARNING."""
+        backend = MagicMock()
+        backend.zcard.return_value = 2
+        backend.zrevrange.return_value = ["c1", "c2"]
+        backend.get_blobs.return_value = [
+            _blob({"status": "active", "count": "4"}),
+            _blob({"status": "stale", "count": "6"}),
+        ]
+        repo = _make_repo(backend)
+
+        with capture_logs() as logs:
+            with patch(
+                "baldur.adapters.redis.dlq_compression._summary_scan_cap",
+                return_value=10,
+            ):
+                summary = repo.compression.get_compressed_summary()
+
+        assert "summary_truncated" not in summary
+        assert summary["total_compressed_items"] == 10
+        assert not [e for e in logs if e["event"] == "dlq.compressed_summary_truncated"]
+
+    def test_summary_at_cap_is_not_truncated(self):
+        """total == cap is NOT truncated: the walk still covers the whole index."""
+        backend = MagicMock()
+        backend.zcard.return_value = 3
+        backend.zrevrange.return_value = ["c1", "c2", "c3"]
+        backend.get_blobs.side_effect = lambda keys: [
+            _blob({"status": "active", "count": "1"}) for _ in keys
+        ]
+        repo = _make_repo(backend)
+
+        with patch(
+            "baldur.adapters.redis.dlq_compression._summary_scan_cap",
+            return_value=3,
+        ):
+            summary = repo.compression.get_compressed_summary()
+
+        assert "summary_truncated" not in summary
+        # Not truncated -> the whole index is walked (stop == -1).
+        backend.zrevrange.assert_called_once_with(_COMPRESSED_INDEX_KEY, 0, -1)
+
+    def test_summary_above_cap_windows_to_newest_cap_and_warns_once(self):
+        """Above the cap the walk windows to the newest ``cap`` and warns once."""
+        backend = MagicMock()
+        backend.zcard.return_value = 4
+        backend.zrevrange.return_value = ["c1", "c2", "c3"]  # newest cap=3
+        backend.get_blobs.side_effect = lambda keys: [
+            _blob({"status": "active", "count": "1"}) for _ in keys
+        ]
+        repo = _make_repo(backend)
+
+        with capture_logs() as logs:
+            with patch(
+                "baldur.adapters.redis.dlq_compression._summary_scan_cap",
+                return_value=3,
+            ):
+                summary = repo.compression.get_compressed_summary()
+
+        assert summary["summary_truncated"] is True
+        assert summary["total_summaries"] == 4  # zcard, not the windowed count
+        # Windowed newest-first to cap-1 == 2.
+        backend.zrevrange.assert_called_once_with(_COMPRESSED_INDEX_KEY, 0, 2)
+        warnings = [e for e in logs if e["event"] == "dlq.compressed_summary_truncated"]
+        assert len(warnings) == 1
+        assert warnings[0]["log_level"] == "warning"
+        assert warnings[0]["total"] == 4
+        assert warnings[0]["cap"] == 3
+
+
+# =============================================================================
+# I. Module helpers — reserved-name guard, cap resolution, score
+# =============================================================================
+
+
+class TestCompressedModuleHelpersBehavior:
+    """_is_reserved_compressed_id / _summary_scan_cap / _compressed_score."""
+
+    @pytest.mark.parametrize(
+        ("entry_id", "expected"),
+        [
+            ("index", True),
+            ("by_domain:payment", True),
+            ("status:active", True),
+            ("status_domain:active:payment", True),
+            ("compressed:payment:timeout:E001:1700000000", False),
+            ("some-opaque-id", False),
+        ],
+        ids=[
+            "index",
+            "by_domain",
+            "status",
+            "status_domain",
+            "real_compressed_id",
+            "opaque",
+        ],
+    )
+    def test_is_reserved_compressed_id_classifies_structural_names(
+        self, entry_id, expected
+    ):
+        """Structural key names are reserved; real entry ids are not."""
+        assert _is_reserved_compressed_id(entry_id) is expected
+
+    def test_summary_scan_cap_reads_the_settings_field(self):
+        """_summary_scan_cap resolves the DLQSettings cap field."""
+        with patch("baldur.settings.dlq.get_dlq_settings") as mock_get:
+            mock_get.return_value.compress_summary_scan_cap = 1234
+            assert _summary_scan_cap() == 1234
+
+    def test_summary_scan_cap_falls_back_to_5000_when_settings_unreachable(self):
+        """When settings raise, the cap falls back to the field default 5000."""
+        with patch(
+            "baldur.settings.dlq.get_dlq_settings", side_effect=RuntimeError("boom")
+        ):
+            assert _summary_scan_cap() == 5000
+
+    def test_compressed_score_uses_the_compressed_at_timestamp(self):
+        """The per-status score is the entry's compressed_at epoch."""
+        now = datetime(2026, 3, 16, 12, 0, 0, tzinfo=UTC)
+        assert _compressed_score({"compressed_at": now.isoformat()}) == now.timestamp()
+
+    @pytest.mark.parametrize(
+        "data",
+        [{}, {"compressed_at": "not-a-date"}, {"compressed_at": None}],
+        ids=["absent", "unparseable", "none"],
+    )
+    def test_compressed_score_falls_back_to_a_positive_epoch(self, data):
+        """A missing or unparseable timestamp falls back to a positive epoch."""
+        score = _compressed_score(data)
+        assert isinstance(score, float)
+        assert score > 0
+
+
+class TestDLQCompressedStatusEnumContract:
+    """The status set the summary seeds its by_status breakdown from."""
+
+    def test_summary_status_buckets_cover_all_statuses(self):
+        """get_compressed_summary seeds a bucket for every DLQCompressedStatus."""
+        backend = MagicMock()
+        backend.zcard.return_value = 0
+        backend.zrevrange.return_value = []
+        repo = _make_repo(backend)
+
+        summary = repo.compression.get_compressed_summary()
+
+        for status in DLQCompressedStatus:
+            assert status.value in summary["by_status"]
