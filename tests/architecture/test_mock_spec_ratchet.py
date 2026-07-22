@@ -121,7 +121,11 @@ _MOCK_CREATION_BUDGETS: dict[str, int] = {
     # deferral branch, which is exactly the false-pass a spec-less mock buys.
     # The 5th was the tenacity bridge's, where the same auto-generated
     # `.deferred` turned into a real CI failure once deferral shipped default-on.
-    "oss": 4338,
+    # bounded-compressed-read tests: +18 — Redis storage-backend / redis-client
+    # mocks in the by-id, chunked-summary and get_blobs suites (I/O-boundary
+    # mocks per §6.4, following this file's existing spec-less backend-mock
+    # convention).
+    "oss": 4356,
     "pro": 1800,
     "dormant": 401,
 }
