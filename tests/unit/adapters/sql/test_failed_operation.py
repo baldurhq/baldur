@@ -333,6 +333,31 @@ class TestSQLFailedOperationCompressionBehavior:
         rows = dlq.get_compressed_entries(status="stale")
         assert len(rows) == 1
 
+    def test_get_compressed_entry_returns_stored_entry_by_id(self, dlq):
+        """get_compressed_entry is a by-id point read (721 D2)."""
+        now = utc_now()
+        entry = DLQCompressedEntry(
+            id="compressed:payment:timeout:E_X:200",
+            domain="payment",
+            failure_type="timeout",
+            error_code="E_X",
+            count=13,
+            first_seen=now - timedelta(hours=1),
+            last_seen=now,
+            sample_error_message="gateway timed out",
+        )
+        dlq.store_compressed_entry(entry)
+
+        fetched = dlq.get_compressed_entry(entry.id)
+
+        assert fetched is not None
+        assert fetched.id == entry.id
+        assert fetched.count == 13
+
+    def test_get_compressed_entry_returns_none_for_absent_id(self, dlq):
+        """A missing id returns None."""
+        assert dlq.get_compressed_entry("compressed:payment:absent:1") is None
+
 
 def _compressed(dlq, suffix, *, days_ago, status="active"):
     """Store a compressed entry aged ``days_ago`` and return it."""

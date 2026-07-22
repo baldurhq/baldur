@@ -972,3 +972,37 @@ class TestCleanupCompressedEntriesBehavior:
         assert any(a is not None for a in seen_after[1:]), (
             f"drain never advanced its cursor: {seen_after}"
         )
+
+
+class TestInMemoryCompressedByIdBehavior:
+    """InMemory adapter get_compressed_entry point read (721 D2)."""
+
+    def _compressed_entry(self, entry_id: str, *, count: int = 7) -> DLQCompressedEntry:
+        now = datetime.now(UTC)
+        return DLQCompressedEntry(
+            id=entry_id,
+            domain="payment",
+            failure_type="timeout",
+            error_code="E_X",
+            count=count,
+            first_seen=now - timedelta(days=7),
+            last_seen=now,
+            sample_error_message="x",
+        )
+
+    def test_get_compressed_entry_returns_stored_entry_by_id(self):
+        """A stored compressed entry is returned by its id."""
+        repo = InMemoryFailedOperationRepository()
+        entry = self._compressed_entry("compressed:payment:timeout:E_X:1", count=7)
+        repo.store_compressed_entry(entry)
+
+        fetched = repo.get_compressed_entry(entry.id)
+
+        assert fetched is not None
+        assert fetched.id == entry.id
+        assert fetched.count == 7
+
+    def test_get_compressed_entry_returns_none_for_absent_id(self):
+        """An id with no stored entry returns None."""
+        repo = InMemoryFailedOperationRepository()
+        assert repo.get_compressed_entry("compressed:absent:1") is None
