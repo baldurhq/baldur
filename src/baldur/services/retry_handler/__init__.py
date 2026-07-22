@@ -71,6 +71,7 @@ _SUB_MODULES = (
     "guards",
     "sinks",
     "rate_limit_detection",
+    "observability",
 )
 
 from . import guards as _guards_mod  # noqa: E402

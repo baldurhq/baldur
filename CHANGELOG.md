@@ -29,6 +29,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - It covers the service instance you call it on; `protect()`/`@circuit_breaker` each own one.
 - Config-shadow CB simulation shares the live trip predicate, so it stops disagreeing.
 - Shadow-testing one CB field completes the rest from the running config, not from stock defaults.
+- Async retry exhaustion now emits `RETRY_EXHAUSTED` and records the Prometheus retry series.
+- `BALDUR_RETRY_ENABLED=false` now stops async retries too: the function runs once, no retry.
 
 ### Added
 
