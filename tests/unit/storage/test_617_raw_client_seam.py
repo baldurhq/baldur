@@ -273,6 +273,23 @@ class TestDegradeCountSeam:
 
         assert backend.degrade_count == 1
 
+    def test_a_failure_during_recovery_also_bumps(self):
+        """The counter measures entries into degraded mode, not departures
+        from Redis: a failure landing mid-recovery bumps it again.
+
+        A walk spanning that sequence is judged unverified even though the
+        mode never returned to Redis in between — the conservative direction,
+        and the reason the counter is not documented as a REDIS-departure
+        count.
+        """
+        backend = _degrade_backend()
+        backend._switch_to_degraded()
+
+        backend._mode = ResilientStorageMode.RECOVERING
+        backend._switch_to_degraded()
+
+        assert backend.degrade_count == 2
+
     def test_each_return_to_redis_costs_a_new_bump(self):
         """A walk that spans a degrade-and-recover cycle sees the difference."""
         backend = _degrade_backend()

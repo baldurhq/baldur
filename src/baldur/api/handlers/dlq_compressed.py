@@ -64,7 +64,11 @@ def dlq_compressed_list(ctx: RequestContext) -> ResponseContext:
     domain = ctx.get_query("domain")
     entry_status = ctx.get_query("status")
     try:
-        limit = min(int(ctx.get_query("limit", 100)), 1000)
+        # Clamped at both ends. A negative limit used to reach the adapter as
+        # ``zrevrange(key, 0, limit - 1)`` with a negative stop, which Redis
+        # reads as "to the end of the set" — one viewer request would pull the
+        # whole index and a payload read per member.
+        limit = max(1, min(int(ctx.get_query("limit", 100)), 1000))
     except (TypeError, ValueError):
         limit = 100
 

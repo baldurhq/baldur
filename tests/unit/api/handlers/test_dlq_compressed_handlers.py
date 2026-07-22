@@ -270,6 +270,26 @@ class TestDlqCompressedListHandler:
 
         assert repo.calls == [{"domain": "payment", "status": "stale", "limit": 51}]
 
+    @pytest.mark.parametrize(
+        ("requested", "forwarded"),
+        [(-1, 2), (0, 2), (5000, 1001)],
+        ids=["negative", "zero", "above_ceiling"],
+    )
+    def test_the_page_size_is_clamped_at_both_ends(self, requested, forwarded):
+        """A non-positive limit must not reach the adapter as an open window.
+
+        The adapter takes its slice as ``zrevrange(key, 0, limit - 1)``, and a
+        negative stop index means "to the end of the set" in Redis — so an
+        unclamped ``limit=-1`` turns one viewer request into a full-index read
+        plus a payload fetch per member.
+        """
+        repo = _RecordingRepository(available=1)
+
+        with patch(_REPOSITORY, return_value=repo):
+            dlq_compressed_list(_list_ctx(limit=requested))
+
+        assert repo.calls == [{"domain": None, "status": None, "limit": forwarded}]
+
     def test_an_unparseable_limit_falls_back_to_the_default_page(self):
         repo = _RecordingRepository(available=1)
 
