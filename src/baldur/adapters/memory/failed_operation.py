@@ -949,7 +949,7 @@ class InMemoryFailedOperationRepository(FailedOperationRepository):
         return entries[:limit]
 
     def get_compressed_entry(self, entry_id: str) -> DLQCompressedEntry | None:
-        """Return a single compressed entry by id, or ``None`` if absent (D2)."""
+        """Return a single compressed entry by id, or ``None`` if absent."""
         return self._compressed_storage.get(entry_id)
 
     def get_compressed_entries_before(

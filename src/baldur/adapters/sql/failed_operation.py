@@ -1153,7 +1153,7 @@ class SQLFailedOperationRepository(GenericSQLRepository, FailedOperationReposito
         ]
 
     def get_compressed_entry(self, entry_id: str) -> DLQCompressedEntry | None:
-        """Return a single compressed entry by id, or ``None`` if absent (D2).
+        """Return a single compressed entry by id, or ``None`` if absent.
 
         A primary-key point read on the ``id VARCHAR`` column — proportional
         to matches, like every SQL compressed query.
