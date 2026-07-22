@@ -95,17 +95,17 @@ class TestApplyPeerCbStateBehavior:
 
         assert repo._l1.get_by_service_name("svc").opened_at == opened
 
-    def test_closed_apply_resets_l1_window(self, repo):
-        # Given: L1 OPEN with a primed failure window.
+    def test_closed_apply_resets_l1_counters(self, repo):
+        # Given: L1 OPEN with primed failure counters.
         _set_l1_state(repo, "svc", CircuitBreakerStateEnum.OPEN.value)
         for _ in range(3):
             repo._l1.record_failure("svc")
-        assert len(repo._l1._call_windows["svc"]) == 3
+        assert repo._l1.get_by_service_name("svc").failure_count == 3
 
         repo.apply_peer_cb_state("svc", "closed")
 
-        # The CLOSED apply resets the L1 sliding window via reset_counts.
-        assert len(repo._l1._call_windows["svc"]) == 0
+        # The CLOSED apply zeroes the L1 counters via reset_counts.
+        assert repo._l1.get_by_service_name("svc").failure_count == 0
         assert repo._l1.get_by_service_name("svc").state == "closed"
 
 

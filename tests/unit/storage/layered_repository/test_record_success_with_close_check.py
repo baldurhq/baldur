@@ -100,10 +100,10 @@ class TestLayeredRecordSuccessWithCloseCheckBehavior:
         assert attempt.state.state == "closed"
         l2_mock.record_success_with_close_check.assert_called_once_with("svc", 2)
 
-    def test_l1_writeback_resets_window_and_opened_at_on_close(self, repo, l2_mock):
+    def test_l1_writeback_resets_counters_and_opened_at_on_close(self, repo, l2_mock):
         """D6 step-3 close-branch invariant: prime L1 with stale failures +
-        opened_at; after the L2 close-branch returns, the L1 sliding window
-        is cleared and opened_at is None (covers D9).
+        opened_at; after the L2 close-branch returns, the L1 counters are
+        zeroed and opened_at is None (covers D9).
 
         Covers both did_close=True (winner) and did_close=False (race-loser /
         post-crash convergence) — both yield state='closed' which must reset
@@ -123,8 +123,7 @@ class TestLayeredRecordSuccessWithCloseCheckBehavior:
         )
 
         # Pre-conditions: stale counters and opened_at are visible.
-        assert repo._l1._failure_cnt["svc"] == 3
-        assert len(repo._l1._call_windows["svc"]) == 3
+        assert repo._l1.get_by_service_name("svc").failure_count == 3
         assert repo._l1.get_by_service_name("svc").opened_at is not None
 
         # L2 reports state=closed (winner branch).
@@ -134,16 +133,15 @@ class TestLayeredRecordSuccessWithCloseCheckBehavior:
 
         repo.record_success_with_close_check("svc", success_threshold=2)
 
-        # L1 reflects the L2-authoritative close decision and the window /
+        # L1 reflects the L2-authoritative close decision and the counters /
         # opened_at are cleared per D6 step 3 + D9.
         l1_state = repo._l1.get_by_service_name("svc")
         assert l1_state.state == "closed"
         assert l1_state.opened_at is None
-        assert repo._l1._failure_cnt["svc"] == 0
-        assert repo._l1._success_cnt["svc"] == 0
-        assert len(repo._l1._call_windows["svc"]) == 0
+        assert l1_state.failure_count == 0
+        assert l1_state.success_count == 0
 
-    def test_l1_writeback_resets_window_when_did_close_is_false(self, repo, l2_mock):
+    def test_l1_writeback_resets_counters_when_did_close_is_false(self, repo, l2_mock):
         """Race-loser / post-crash convergence (did_close=False, state=closed)
         also resets L1 — both branches converge on the same writeback path.
         """
@@ -167,18 +165,19 @@ class TestLayeredRecordSuccessWithCloseCheckBehavior:
         l1_state = repo._l1.get_by_service_name("svc")
         assert l1_state.state == "closed"
         assert l1_state.opened_at is None
-        assert len(repo._l1._call_windows["svc"]) == 0
+        assert l1_state.failure_count == 0
 
-    def test_half_open_increment_writeback_does_not_reset_window(self, repo, l2_mock):
-        """D6 step-3 else-branch: HALF_OPEN increment writes success_count
-        only, the window is NOT cleared (the HALF_OPEN trial is still active).
+    def test_half_open_increment_writeback_does_not_reset_counters(self, repo, l2_mock):
+        """D6 step-3 else-branch: HALF_OPEN increment writes success_count from
+        the L2 attempt, the counters are NOT reset (the HALF_OPEN trial is
+        still active).
         """
         repo._l1.get_or_create("svc")
         repo._l1.update_state(
             service_name="svc",
             state=CircuitBreakerStateEnum.HALF_OPEN.value,
         )
-        # Seed a non-empty window to confirm it's preserved.
+        # Seed a non-zero success count that the increment branch must not zero.
         for _ in range(2):
             repo._l1.record_success("svc")
 
@@ -190,8 +189,8 @@ class TestLayeredRecordSuccessWithCloseCheckBehavior:
 
         l1_state = repo._l1.get_by_service_name("svc")
         assert l1_state.state == "half_open"
-        # Window NOT cleared on increment branch.
-        assert len(repo._l1._call_windows["svc"]) == 2
+        # Increment branch writes the L2 success_count (3), NOT reset to 0.
+        assert l1_state.success_count == 3
 
 
 # =============================================================================

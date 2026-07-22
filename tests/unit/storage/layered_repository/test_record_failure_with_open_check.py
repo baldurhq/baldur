@@ -134,7 +134,7 @@ class TestLayeredOpenCheckRoutingBehavior:
         # Given: L1 HALF_OPEN; L2 reports CLOSED — a concurrent quorum of
         # HALF_OPEN successes closed the cluster while this trial failed.
         _prime_l1_half_open(repo)
-        # Prime an L1 failure window so the closed writeback's reset is visible.
+        # Prime an L1 failure count so the closed writeback's reset is visible.
         repo._l1.record_failure("svc")
         l2_mock.record_failure_with_open_check.return_value = _attempt(
             "closed", did_open=False
@@ -147,7 +147,7 @@ class TestLayeredOpenCheckRoutingBehavior:
         assert attempt.state.state == "closed"
         l1_state = repo._l1.get_by_service_name("svc")
         assert l1_state.state == "closed"
-        assert len(repo._l1._call_windows["svc"]) == 0
+        assert l1_state.failure_count == 0
 
     @pytest.mark.parametrize("stale_state", ["missing", "unknown"])
     def test_stale_l2_state_falls_back_to_l1_without_writeback(
@@ -193,7 +193,7 @@ class TestLayeredOpenCheckWritebackBehavior:
         assert l1_state.state == "open"
         assert l1_state.opened_at == opened
 
-    def test_writeback_closed_resets_window_and_sets_l1_closed(self, repo):
+    def test_writeback_closed_resets_counters_and_sets_l1_closed(self, repo):
         repo._l1.get_or_create("svc")
         repo._l1.update_state(
             service_name="svc",
@@ -202,13 +202,13 @@ class TestLayeredOpenCheckWritebackBehavior:
         )
         for _ in range(3):
             repo._l1.record_failure("svc")
-        assert len(repo._l1._call_windows["svc"]) == 3
+        assert repo._l1.get_by_service_name("svc").failure_count == 3
 
         repo._writeback_open_check_to_l1("svc", _attempt("closed", did_open=False))
 
         l1_state = repo._l1.get_by_service_name("svc")
         assert l1_state.state == "closed"
-        assert len(repo._l1._call_windows["svc"]) == 0
+        assert l1_state.failure_count == 0
 
 
 # =============================================================================
