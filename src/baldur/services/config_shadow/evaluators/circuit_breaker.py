@@ -198,15 +198,17 @@ class CircuitBreakerEvaluator:
             return consecutive_failures + 1
 
         capacity = outcome_window.maxlen or 0
-        failures = max(min(window_failures, capacity), 0)
-        successes = max(min(window_total, capacity) - failures, 0)
+        failures = max(min(int(window_failures), capacity), 0)
+        successes = max(min(int(window_total), capacity) - failures, 0)
 
         outcome_window.clear()
         outcome_window.extend([SUCCESS_OUTCOME] * successes)
         outcome_window.extend([FAILURE_OUTCOME] * failures)
 
         reported_consecutive = event.context.get("consecutive_failure_count")
-        return reported_consecutive if reported_consecutive is not None else failures
+        if reported_consecutive is None:
+            return failures
+        return int(reported_consecutive)
 
     def _check_pass_criteria(
         self,
