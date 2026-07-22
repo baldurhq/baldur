@@ -104,6 +104,15 @@ class AsyncRetryPolicy:
                 "function; an async predicate always returns a truthy coroutine "
                 "object and cannot be evaluated by the retry loop."
             )
+        # Global master toggle, snapshotted at construction (parity with the
+        # synchronous RetryPolicy). When BALDUR_RETRY_ENABLED is False, execute()
+        # runs the function once via _single_attempt with no retry. Snapshotting
+        # in __init__ — not in from_policy_config — is what covers all four
+        # construction paths (decoration, per-call composer build, the exported
+        # async_retry_policy() factory, and the bare constructor).
+        from baldur.settings.retry import get_retry_settings
+
+        self._globally_enabled = get_retry_settings().enabled
         self._max_retries = max_retries
         self._backoff = backoff or ExponentialBackoff()
         self._retryable_exceptions = retryable_exceptions
@@ -193,6 +202,13 @@ class AsyncRetryPolicy:
             _unwrapped = _unwrapped.func
         is_async = asyncio.iscoroutinefunction(_unwrapped)
 
+        # Global master toggle: when retry is disabled, run the function once via
+        # the single-attempt path (no re-execution), mirroring the synchronous
+        # RetryPolicy. Placed ahead of the observe-only guard, matching sync's
+        # order — both paths coordinate nothing and record via _single_attempt.
+        if not self._globally_enabled:
+            return await self._single_attempt(func, is_async, *args, **kwargs)
+
         # Observe-only (dry-run / shadow / evaluation): suppress the retry
         # intervention — take the single-attempt path (no re-execution),
         # mirroring the synchronous RetryPolicy dry-run guard. No ``should_dlq``
@@ -203,6 +219,19 @@ class AsyncRetryPolicy:
             max_attempts=self._max_retries + 1,
         ):
             return await self._single_attempt(func, is_async, *args, **kwargs)
+
+        # Terminal observability helpers — shared with the sync RetryPolicy so a
+        # payload/label change cannot drift between the two policies. Lazy
+        # def-body import: the resilience -> services direction is acyclic, and a
+        # def-body import forms no import-time cycle. It also keeps the
+        # bus/metrics source-module test patches intercepting. Imported here,
+        # past the single-attempt guards, so the disabled/observe-only paths
+        # (which record via _single_attempt) do not pay for it.
+        from baldur.services.retry_handler.observability import (
+            REASON_TO_OUTCOME,
+            emit_retry_exhausted_event,
+            record_retry_outcome,
+        )
 
         last_error: Exception | None = None
         last_result: Any = None
@@ -271,6 +300,7 @@ class AsyncRetryPolicy:
             else:
                 # Function returned — evaluate the result predicate (fail-open).
                 if not self._evaluate_result_rejected(result):
+                    record_retry_outcome(self._domain, attempt + 1, "success")
                     return PolicyResult(
                         value=result,
                         outcome=PolicyOutcome.SUCCESS,
@@ -340,6 +370,31 @@ class AsyncRetryPolicy:
             max_retries=self._max_retries,
             error=str(last_error),
             reason=reason,
+        )
+
+        # Terminal observability (parity with the sync RetryPolicy). The bus
+        # emit is offloaded to a thread: EventBus.publish is synchronous and
+        # blocking (it waits on each subscriber's handler), so a bare call from
+        # this coroutine would park the event loop and stall every other request
+        # on this worker. asyncio.to_thread restores exact sync semantics — the
+        # emitting call pays the handler cost, its neighbours do not. The metric
+        # recorder is a bounded in-process counter increment with no I/O, so a
+        # thread hop would cost more than the work it defers — it stays direct.
+        elapsed = time.monotonic() - start
+        await asyncio.to_thread(
+            emit_retry_exhausted_event,
+            domain=self._domain,
+            max_attempts=self._max_retries + 1,
+            last_error=last_error,
+            attempts=attempt + 1,
+            retry_history_length=len(retry_history),
+            reason=reason,
+            elapsed=elapsed,
+            budget=budget,
+            context=context,
+        )
+        record_retry_outcome(
+            self._domain, attempt + 1, REASON_TO_OUTCOME.get(reason, "exhausted")
         )
 
         return PolicyResult(
@@ -412,16 +467,23 @@ class AsyncRetryPolicy:
     ) -> PolicyResult[T]:
         """Run the function once with no retry, swallowing into a PolicyResult.
 
-        Used by the observe-only path — executes the business call exactly once
-        and never re-executes. Mirrors the synchronous
-        ``RetryPolicy._single_attempt``: the FAILURE result carries no
-        ``should_dlq``, so the downstream DLQ sink stays observe-only.
+        Used by the globally-disabled and observe-only paths — executes the
+        business call exactly once and never re-executes. Mirrors the
+        synchronous ``RetryPolicy._single_attempt``: it records the terminal
+        outcome to the Prometheus retry series but emits **no** bus event (a
+        single attempt is not an exhaustion), and the FAILURE result carries no
+        ``should_dlq`` so the downstream DLQ sink stays observe-only.
+        ``asyncio.CancelledError`` re-raises without recording — a cancellation
+        is not a terminal (sync parity, by the exception hierarchy).
         """
+        from baldur.services.retry_handler.observability import record_retry_outcome
+
         try:
             if is_async:
                 result = await func(*args, **kwargs)  # type: ignore[misc]
             else:
                 result = await asyncio.to_thread(func, *args, **kwargs)
+            record_retry_outcome(self._domain, 1, "success")
             return PolicyResult(
                 value=result,
                 outcome=PolicyOutcome.SUCCESS,
@@ -431,6 +493,7 @@ class AsyncRetryPolicy:
         except asyncio.CancelledError:
             raise
         except Exception as e:
+            record_retry_outcome(self._domain, 1, "failure")
             return PolicyResult(
                 outcome=PolicyOutcome.FAILURE,
                 error=e,

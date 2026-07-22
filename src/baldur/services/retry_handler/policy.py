@@ -45,19 +45,6 @@ _UNIDENTIFIED_DOMAIN = "default"
 _unidentified_key_warned: set[str] = set()
 _unidentified_key_warned_lock = threading.Lock()
 
-# Exhaustion-reason -> Prometheus outcome-label value. ``max_attempts`` keeps
-# the historical ``"exhausted"`` value for dashboard/alert continuity; every
-# other cause gets its own additive value so ``"exhausted"`` no longer conflates
-# non-retryable aborts and budget/deadline breaks with genuine attempt exhaustion.
-_REASON_TO_OUTCOME: dict[str, str] = {
-    "max_attempts": "exhausted",
-    "non_retryable": "non_retryable",
-    "retry_budget": "retry_budget",
-    "max_elapsed": "max_elapsed",
-    "deadline": "deadline",
-    "rate_limit_deferred": "rate_limit_deferred",
-}
-
 from baldur.core.backoff import BackoffStrategy, ExponentialBackoff
 from baldur.core.execution_mode import intervention_suppressed
 from baldur.interfaces.resilience_policy import (
@@ -495,7 +482,9 @@ class RetryPolicy(ResiliencePolicy[T]):
             budget=budget,
             context=context,
         )
-        self._record_outcome(attempt, _REASON_TO_OUTCOME.get(reason, "exhausted"))
+        from baldur.services.retry_handler.observability import REASON_TO_OUTCOME
+
+        self._record_outcome(attempt, REASON_TO_OUTCOME.get(reason, "exhausted"))
 
         return PolicyResult(
             value=last_result if result_rejected else None,
@@ -577,63 +566,38 @@ class RetryPolicy(ResiliencePolicy[T]):
     ) -> None:
         """Emit retry.exhausted event to EventBus. Fail-open.
 
-        ``reason`` disambiguates the exit cause (max_attempts / retry_budget /
-        non_retryable / max_elapsed / deadline); ``elapsed`` and ``budget`` are
-        additive fields carried for the wall-clock exits.
+        Thin delegate to the shared ``emit_retry_exhausted_event`` both retry
+        policies use. Signature is preserved for call-site compatibility;
+        ``reason`` disambiguates the exit cause and ``retry_history`` is
+        collapsed to its length here (the event carries only the count).
         """
-        try:
-            from baldur.services.event_bus import get_event_bus
-            from baldur.services.event_bus.bus.event_types import EventType
+        from baldur.services.retry_handler.observability import (
+            emit_retry_exhausted_event,
+        )
 
-            event_data: dict = {
-                "domain": self._config.domain,
-                "max_attempts": self._config.max_attempts,
-                "final_error_type": type(last_error).__name__ if last_error else None,
-                "attempts": attempts,
-                "retry_history_length": len(retry_history),
-                "reason": reason,
-            }
-            if elapsed is not None:
-                event_data["elapsed"] = elapsed
-            if budget is not None:
-                event_data["budget"] = budget
-            if context is not None:
-                if context.order_id:
-                    event_data["order_id"] = context.order_id
-                if context.user_id:
-                    event_data["user_id"] = context.user_id
-                if context.trace_id:
-                    event_data["trace_id"] = context.trace_id
-
-            bus = get_event_bus()
-            bus.emit(
-                event_type=EventType.RETRY_EXHAUSTED,
-                data=event_data,
-                source="retry_policy",
-            )
-        except ImportError:
-            pass  # fail-open: EventBus unavailable
-        except Exception as e:
-            logger.warning("retry.event_emission_failed", error=str(e))
+        emit_retry_exhausted_event(
+            domain=self._config.domain,
+            max_attempts=self._config.max_attempts,
+            last_error=last_error,
+            attempts=attempts,
+            retry_history_length=len(retry_history),
+            reason=reason,
+            elapsed=elapsed,
+            budget=budget,
+            context=context,
+        )
 
     def _record_outcome(self, attempt: int, outcome: str) -> None:
         """Record the terminal retry outcome to the Prometheus retry series. Fail-open.
 
-        Delegates to the canonical ``record_retry_attempt`` facade, which
-        resolves the ``domain`` and ``is_synthetic`` labels internally and
-        performs both the attempts-histogram observe and the outcomes-counter
-        increment in one call. The inline retry loop runs entirely inside this
-        Policy stage, so the composer-level metrics hook cannot observe
-        per-attempt retries — recording must live here. Mirrors the fail-open
-        wrapping of ``_emit_exhausted_event``: a recorder fault must never
-        change the returned value or the propagated exception.
+        Thin delegate to the shared ``record_retry_outcome`` both retry policies
+        use. The inline retry loop runs entirely inside this Policy stage, so the
+        composer-level metrics hook cannot observe per-attempt retries —
+        recording must live here.
         """
-        try:
-            from baldur.services.metrics.recorders import record_retry_attempt
+        from baldur.services.retry_handler.observability import record_retry_outcome
 
-            record_retry_attempt(self._config.domain, attempt, outcome)
-        except Exception as e:
-            logger.warning("retry.metric_recording_failed", error=str(e))
+        record_retry_outcome(self._config.domain, attempt, outcome)
 
     def _should_retry(self, exception: Exception) -> bool:
         """Pure exception classification: is this exception retryable?
