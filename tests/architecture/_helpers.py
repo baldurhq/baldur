@@ -1209,6 +1209,24 @@ def oss_src_root() -> Path:
     return PROJECT_ROOT / "src" / "baldur"
 
 
+def repo_relative(path: Path) -> str:
+    """Normalize an absolute first-party source path to its ``src/<pkg>/...`` POSIX form.
+
+    Works whether the package is in-tree or consumed as an installed sibling:
+    the file is resolved against this repository's root first, then against the
+    root of the checkout that provides ``baldur``. Falls back to the absolute
+    POSIX path when the file is under neither.
+    """
+    resolved = Path(path).resolve()
+    oss_repo_root = oss_src_root().parent.parent
+    for base in (PROJECT_ROOT, oss_repo_root):
+        try:
+            return resolved.relative_to(base).as_posix()
+        except ValueError:
+            continue
+    return resolved.as_posix()
+
+
 def consumer_src_roots() -> tuple[Path, ...]:
     """The flag-consumer scan roots: OSS (`baldur`) + both private tiers.
 
@@ -1393,6 +1411,227 @@ def flag_is_dead(classifications: set[str]) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# G72 — name-agnostic boolean config-field discovery (impl doc 722 D2, D3).
+#
+# G32's population is name-scoped (`*_enabled` / `enable_*`) AND registry-scoped
+# (`baldur.settings.*` pydantic classes), so a dead boolean flag living on a
+# config dataclass, on a `SerializableMixin` config, or on a `BaseSettings`
+# subclass outside the settings package is invisible to it. This discovery is
+# AST-based (reflection cannot enumerate plain dataclasses without importing
+# every module of every tier, and cannot run at all for an absent tier) and
+# name-agnostic: any class-body `x: bool = <bool>` declaration is a config claim.
+# The read side reuses the G32 classifier unchanged (`_iter_flag_read_classes`).
+# ---------------------------------------------------------------------------
+
+# Class-name suffixes marking an *observed-state* object — a result / report /
+# telemetry DTO rather than an operator-facing config claim. A boolean on one of
+# these is a state field, and the dominant false-positive class is exactly here:
+# such a DTO is typically serialized wholesale (`SerializableMixin.to_dict`,
+# `model_dump`, `dataclasses.asdict`), which consumes every field with no
+# field-name token any static scan can match (722 D3 item 2, R1).
+OBSERVED_STATE_SUFFIXES: tuple[str, ...] = (
+    "Decision",
+    "Entry",
+    "Event",
+    "Impact",
+    "Info",
+    "Item",
+    "Metrics",
+    "Record",
+    "Report",
+    "Request",
+    "Result",
+    "Snapshot",
+    "State",
+    "Stats",
+    "Status",
+    "Summary",
+    "Widget",
+)
+
+# Call names whose keyword/positional default carries a field's declared value.
+_FIELD_FACTORY_NAMES: frozenset[str] = frozenset({"Field", "field"})
+
+# Annotation wrappers unwrapped before the bare-`bool` test (722 D2). Measured 0
+# instances today across the three trees — this is a silent-widening guard, so
+# the first `Annotated[bool, Field(...)]` config field ever authored enters the
+# population instead of opening a hole nothing reports.
+_BOOL_ANNOTATION_WRAPPERS: frozenset[str] = frozenset({"Annotated", "Final"})
+
+
+class BoolConfigField(NamedTuple):
+    """One discovered boolean config field.
+
+    ``file`` is the ``src/<pkg>/...`` POSIX path (normalized via
+    ``repo_relative`` so it reads identically whether the package is in-tree or
+    an installed sibling); ``symbol`` is the ``baseline.yaml`` match key.
+    """
+
+    file: str
+    cls: str
+    field: str
+    default: bool
+    lineno: int
+
+    @property
+    def symbol(self) -> str:
+        """The ``Class.field`` baseline/allowlist match key."""
+        return f"{self.cls}.{self.field}"
+
+
+def _annotation_is_bool(node: ast.expr | None) -> bool:
+    """True when an annotation resolves to the bare ``bool`` name.
+
+    Unwraps ``Annotated[bool, ...]`` and ``Final[bool]`` recursively. Out of
+    shape by design: ``bool | None`` / ``Optional[bool]`` (tri-state sentinels,
+    not claims), ``ClassVar[bool]``, and string-literal annotations. Note
+    ``from __future__ import annotations`` does not affect this — PEP 563
+    stringifies at runtime only, leaving the source AST as ``Name(id='bool')``.
+    """
+    if isinstance(node, ast.Name):
+        return node.id == "bool"
+    if isinstance(node, ast.Subscript):
+        head = node.value
+        if isinstance(head, ast.Name):
+            head_name = head.id
+        elif isinstance(head, ast.Attribute):
+            head_name = head.attr
+        else:
+            return False
+        if head_name not in _BOOL_ANNOTATION_WRAPPERS:
+            return False
+        inner: ast.expr = node.slice
+        if isinstance(inner, ast.Tuple):
+            if not inner.elts:
+                return False
+            inner = inner.elts[0]
+        return _annotation_is_bool(inner)
+    return False
+
+
+def _bool_default(node: ast.expr | None) -> bool | None:
+    """Resolve a field default to a bool constant, or None when not one.
+
+    Three shapes carry a declared boolean default: the literal
+    (``x: bool = True``), a ``Field(default=<bool>)`` / ``field(default=<bool>)``
+    keyword, and a ``Field(<bool>)`` first-positional. ``default_factory`` is out
+    of shape (no constant to read).
+    """
+    if node is None:
+        return None
+    if isinstance(node, ast.Constant) and isinstance(node.value, bool):
+        return node.value
+    if isinstance(node, ast.Call):
+        func = node.func
+        if isinstance(func, ast.Name):
+            call_name = func.id
+        elif isinstance(func, ast.Attribute):
+            call_name = func.attr
+        else:
+            return None
+        if call_name not in _FIELD_FACTORY_NAMES:
+            return None
+        for keyword in node.keywords:
+            if keyword.arg == "default":
+                value = keyword.value
+                if isinstance(value, ast.Constant) and isinstance(value.value, bool):
+                    return value.value
+                return None
+        if node.args:
+            positional = node.args[0]
+            if isinstance(positional, ast.Constant) and isinstance(
+                positional.value, bool
+            ):
+                return positional.value
+    return None
+
+
+def is_observed_state_class(cls_name: str) -> bool:
+    """True when a class name marks an observed-state DTO (722 D3 item 2)."""
+    return cls_name.endswith(OBSERVED_STATE_SUFFIXES)
+
+
+def is_excluded_bool_config_field(cls_name: str, field_name: str) -> bool:
+    """True when a discovered field is out of G72's population (722 D3).
+
+    Two exclusions: the bare ``enabled`` master-toggle name (it collides with
+    every config class's own toggle, so attribute-name matching cannot isolate
+    one field's reads — G32 D4-bare precedent, routed to the periodic
+    claim-wiring audit), and observed-state DTO classes by name suffix.
+    """
+    return field_name == "enabled" or is_observed_state_class(cls_name)
+
+
+def discover_bool_config_fields(roots: Iterable[Path]) -> list[BoolConfigField]:
+    """Enumerate every boolean config field declared under ``roots`` (722 D2).
+
+    A field qualifies when a class-body ``AnnAssign`` annotates the bare ``bool``
+    name (after wrapper unwrapping) AND its default resolves to a bool constant.
+    Both defaults are in scope: a dead ``default=False`` field is an advertised
+    capability that cannot be turned on. Excluded fields (``is_excluded_bool_config_field``)
+    never enter the returned population. Sorted by ``(file, cls, field)``.
+    """
+    discovered: list[BoolConfigField] = []
+    for path in walk_src(roots):
+        tree = parse_ast(path)
+        if tree is None:
+            continue
+        file_posix = repo_relative(path)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            for stmt in node.body:
+                if not isinstance(stmt, ast.AnnAssign) or not isinstance(
+                    stmt.target, ast.Name
+                ):
+                    continue
+                if not _annotation_is_bool(stmt.annotation):
+                    continue
+                default = _bool_default(stmt.value)
+                if default is None:
+                    continue
+                if is_excluded_bool_config_field(node.name, stmt.target.id):
+                    continue
+                discovered.append(
+                    BoolConfigField(
+                        file=file_posix,
+                        cls=node.name,
+                        field=stmt.target.id,
+                        default=default,
+                        lineno=stmt.lineno,
+                    )
+                )
+    return sorted(discovered, key=lambda f: (f.file, f.cls, f.field))
+
+
+def collect_bool_field_reads(
+    fields: Iterable[BoolConfigField],
+    roots: Iterable[Path] | None = None,
+) -> dict[str, set[str]]:
+    """Map each field NAME to its read-classification set across ``roots``.
+
+    Thin wrapper over the G32 collector (`collect_long_form_flag_reads`) so both
+    gates and the audit CLI share one read model. Name-based, not type-based: a
+    same-named attribute read on any object marks the field live — the
+    false-negative direction, the same conservative trade-off G32 ships with.
+    """
+    return collect_long_form_flag_reads({field.field for field in fields}, roots)
+
+
+def zero_read_bool_fields(
+    fields: Iterable[BoolConfigField],
+    reads: dict[str, set[str]],
+) -> list[BoolConfigField]:
+    """The subset of ``fields`` with an empty read-classification set (722 D4).
+
+    Zero-read only: echo counts as a read here (unlike G32's echo-dead rule for
+    *enable* claims), because on a name-agnostic population a generic boolean
+    echoed into a report is weak deadness evidence.
+    """
+    return [field for field in fields if not reads.get(field.field)]
+
+
+# ---------------------------------------------------------------------------
 # FEATURE_CATALOG 3-axis parsing (shared by G36 + G37, impl doc 589 D1/D5).
 #
 # G36 (no-false-dormant import scan) and G37 (catalog tier drift) MUST read the
@@ -1565,23 +1804,27 @@ __all__ = [
     "EnableField",
     "KOREAN_RE",
     "MODULE_SYMBOL",
+    "OBSERVED_STATE_SUFFIXES",
     "OSS_TESTS_ROOT",
     "PACKAGE_VALUES",
     "PRODUCT_STATUS_VALUES",
     "PROJECT_ROOT",
     "REFERENCE_DIR",
     "RULE_REGISTRY_DOC",
+    "BoolConfigField",
     "CatalogEntry",
     "assurance_symbol_span",
     "baselined_count",
     "catalog_module_path_status",
     "classify_flag_in_source",
     "classify_read",
+    "collect_bool_field_reads",
     "collect_long_form_flag_reads",
     "collect_test_def_names",
     "collect_violations",
     "core_dependency_modules",
     "directive_targets",
+    "discover_bool_config_fields",
     "discover_enable_fields",
     "parse_catalog_entries",
     "resolve_module_locations",
@@ -1591,7 +1834,9 @@ __all__ = [
     "flag_is_dead",
     "format_violation",
     "has_verified_by_link",
+    "is_excluded_bool_config_field",
     "is_long_form_enable_field",
+    "is_observed_state_class",
     "iter_docstring_nodes",
     "iter_docstrings",
     "iter_inline_code_spans",
@@ -1604,4 +1849,5 @@ __all__ = [
     "symbol_of",
     "verified_by_ref",
     "walk_src",
+    "zero_read_bool_fields",
 ]
