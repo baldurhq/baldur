@@ -962,6 +962,48 @@ assurance_claim: []
 # behavioral consumer) at source, never baselined.
 flag_consumer_reachability: []
 
+# G72 (722) — a boolean config field with ZERO production read is a dead flag:
+# the operator sets it, nothing consumes it, and the claim it advertises is
+# silently absent. Population = every `x: bool = <bool>` class-body declaration
+# under src/baldur (bare `enabled` and observed-state DTO classes excluded);
+# reads are counted across every installed tier.
+# SEEDED, RATCHETED BOTH DIRECTIONS: this rule's test fails on a stale entry too
+# — a baselined field that gets wired or deleted MUST leave this list in the same
+# commit. Whole-file entries (no `symbol:`) are rejected for this rule key.
+# Per-field wire-vs-delete disposition is owned by the field's own surface, not
+# by this baseline; the baseline only tracks.
+dead_boolean_config_fields:
+  - {file: src/baldur/core/tls.py, symbol: TLSConfig.verify_ssl, reason: dead flag - zero production read (probe-verified 2026-07-20), ticket: '722'}
+  - {file: src/baldur/models/recovery.py, symbol: RecoveryGateConfig.gradual_recovery, reason: serialized-live - round-trips through the emergency config API via to_dict/from_dict, no behavioral read (verified 2026-07-22), ticket: '722'}
+  - {file: src/baldur/services/circuit_breaker/models.py, symbol: CircuitBreakerAdvancedConfig.allow_manual_override_in_lockdown, reason: dead flag - zero production read (probe-verified 2026-07-20), ticket: '722'}
+  - {file: src/baldur/services/circuit_breaker/models.py, symbol: CircuitBreakerAdvancedConfig.blast_radius_block_on_critical, reason: dead flag - zero production read (probe-verified 2026-07-20), ticket: '722'}
+  - {file: src/baldur/services/circuit_breaker/models.py, symbol: CircuitBreakerAdvancedConfig.blast_radius_integration, reason: dead flag - zero production read (probe-verified 2026-07-20), ticket: '722'}
+  - {file: src/baldur/services/circuit_breaker/models.py, symbol: CircuitBreakerAdvancedConfig.freeze_on_lockdown, reason: dead flag - zero production read (probe-verified 2026-07-20), ticket: '722'}
+  - {file: src/baldur/services/circuit_breaker/models.py, symbol: OpenStrategy.force_after_timeout, reason: dead flag - zero production read (probe-verified 2026-07-20), ticket: '722'}
+  - {file: src/baldur/settings/arq_task.py, symbol: ArqTaskSettings.redis_ssl, reason: dead flag - zero production read; the queue adapter builds its connection without it (verified 2026-07-22), ticket: '722'}
+  - {file: src/baldur/settings/bridge.py, symbol: BridgeSettings.tenacity_metrics, reason: dead flag - zero production read (probe-verified 2026-07-20), ticket: '722'}
+  - {file: src/baldur/settings/chaos.py, symbol: ChaosSettings.dry_run_default, reason: dead flag - zero production read (probe-verified 2026-07-20), ticket: '722'}
+  - {file: src/baldur/settings/chaos.py, symbol: ChaosSettings.require_approval, reason: dead flag - zero production read (probe-verified 2026-07-20), ticket: '722'}
+  - {file: src/baldur/settings/circuit_breaker_advanced.py, symbol: CircuitBreakerAdvancedSettings.allow_manual_override_in_lockdown, reason: dead flag - zero production read (probe-verified 2026-07-20), ticket: '722'}
+  - {file: src/baldur/settings/circuit_breaker_advanced.py, symbol: CircuitBreakerAdvancedSettings.blast_radius_block_on_critical, reason: dead flag - zero production read (probe-verified 2026-07-20), ticket: '722'}
+  - {file: src/baldur/settings/circuit_breaker_advanced.py, symbol: CircuitBreakerAdvancedSettings.blast_radius_integration, reason: dead flag - zero production read (probe-verified 2026-07-20), ticket: '722'}
+  - {file: src/baldur/settings/circuit_breaker_advanced.py, symbol: CircuitBreakerAdvancedSettings.freeze_on_lockdown, reason: dead flag - zero production read (probe-verified 2026-07-20), ticket: '722'}
+  - {file: src/baldur/settings/forensic.py, symbol: ForensicSettings.collect_request_body, reason: dead flag - zero production read (probe-verified 2026-07-20), ticket: '722'}
+  - {file: src/baldur/settings/forensic.py, symbol: ForensicSettings.collect_response_body, reason: dead flag - zero production read (probe-verified 2026-07-20), ticket: '722'}
+  - {file: src/baldur/settings/forensic.py, symbol: ForensicSettings.include_local_variables, reason: dead control surface - no behavioral read; value only echoed via wholesale settings serialization (verified 2026-07-22), ticket: '722'}
+  - {file: src/baldur/settings/forensic.py, symbol: ForensicSettings.mask_internal_ip, reason: dead flag - zero production read (probe-verified 2026-07-20), ticket: '722'}
+  - {file: src/baldur/settings/forensic.py, symbol: ForensicSettings.mask_sensitive_fields, reason: dead control surface - no behavioral read; masking runs unconditionally off the pattern list (verified 2026-07-22), ticket: '722'}
+  - {file: src/baldur/settings/forensic.py, symbol: ForensicSettings.mask_server_paths, reason: dead flag - zero production read (probe-verified 2026-07-20), ticket: '722'}
+  - {file: src/baldur/settings/forensic.py, symbol: ForensicSettings.sanitize_sensitive_data, reason: dead control surface - no behavioral read; value only echoed via wholesale settings serialization (verified 2026-07-22), ticket: '722'}
+  - {file: src/baldur/settings/logging_settings.py, symbol: LoggingSettings.include_request_id, reason: dead control surface - no behavioral read; value only echoed via wholesale settings serialization (verified 2026-07-22), ticket: '722'}
+  - {file: src/baldur/settings/logging_settings.py, symbol: LoggingSettings.include_timestamps, reason: dead control surface - no behavioral read; value only echoed via wholesale settings serialization (verified 2026-07-22), ticket: '722'}
+  - {file: src/baldur/settings/logging_settings.py, symbol: LoggingSettings.include_user_info, reason: dead control surface - no behavioral read; value only echoed via wholesale settings serialization (verified 2026-07-22), ticket: '722'}
+  - {file: src/baldur/settings/propagation.py, symbol: PropagationSettings.auto_start_listener, reason: dead flag - zero production read (probe-verified 2026-07-20), ticket: '722'}
+  - {file: src/baldur/settings/root.py, symbol: BaldurSettings.debug_mode, reason: dead flag - zero production read (probe-verified 2026-07-20), ticket: '722'}
+  - {file: src/baldur/settings/runbook.py, symbol: RunbookSettings.async_execution, reason: dead flag - zero production read; the runbook path reads the raw env var and bypasses the field (probe-verified 2026-07-20), ticket: '722'}
+  - {file: src/baldur/settings/runbook.py, symbol: RunbookSettings.subscribe_events, reason: dead flag - zero production read; the runbook path reads the raw env var and bypasses the field (probe-verified 2026-07-20), ticket: '722'}
+  - {file: src/baldur/settings/settings_recommendation.py, symbol: SettingsRecommendationSettings.fallback_to_rules, reason: dead flag - zero production read (probe-verified 2026-07-20), ticket: '722'}
+
 # G33 (impl doc 576) — the direct-read BALDUR_* registry constant
 # (KNOWN_DIRECT_READ_ENV_VARS) must equal the os.environ literal-read set
 # discovered across src/baldur. ENFORCED-EMPTY: a drift is fixed by pasting the
