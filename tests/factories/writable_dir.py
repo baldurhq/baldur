@@ -18,6 +18,7 @@ from __future__ import annotations
 import errno
 import os
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -91,7 +92,7 @@ def spoof_lstat(monkeypatch, target: Path, *, mode=None, uid=None) -> None:
 
 
 @pytest.fixture
-def writable_dir_chain(monkeypatch, tmp_path) -> ChainBases:
+def writable_dir_chain(monkeypatch, tmp_path) -> Iterator[ChainBases]:
     """Redirect every fallback chain base under ``tmp_path``.
 
     Also isolates the process-level resolution registry, whose cached entries
