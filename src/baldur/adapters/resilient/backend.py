@@ -1171,6 +1171,43 @@ class ResilientStorageBackend:
         else:
             return self._blob_memory.get(key)
 
+    def get_blobs(self, keys: list[str]) -> list[bytes | None]:
+        """Batched raw-bytes read — one ``MGET`` per call; callers chunk.
+
+        Mirrors :meth:`get_blob` on the paths that matter so an aggregate
+        walk can collapse N round trips into one:
+
+        - ``_ensure_redis()`` runs first, exactly as every sibling primitive
+          does. The backend is *constructed* in DEGRADED and promoted only by
+          that call, so a mode-check-first read would return all-``None`` on a
+          fresh process against a healthy Redis.
+        - An empty key list short-circuits to ``[]`` before any command:
+          ``MGET`` with zero arguments is a Redis syntax error, and the blanket
+          ``except`` would answer it by degrading the whole backend.
+        - Normal mode issues one ``raw_client.mget``; on error it degrades and
+          serves every key from the bounded blob store, matching ``get_blob``'s
+          fallback. Degraded mode serves the blob store directly.
+
+        Read-only: no WAL record, no degraded-batch vocabulary impact. Not a
+        drop-in for a loop of ``get_blob`` — ``MGET`` returns ``nil`` for a
+        wrong-typed key where ``GET`` raises ``WRONGTYPE``, and a mid-call
+        Redis error degrades the whole call to memory rather than returning the
+        bytes already fetched. Both are acceptable for an aggregate walk.
+        """
+        self._ensure_redis()
+        if not keys:
+            return []
+        full_keys = [self._get_full_key(k) for k in keys]
+
+        if self._mode == ResilientStorageMode.REDIS and self._redis:
+            try:
+                return self._redis.raw_client.mget(full_keys)
+            except Exception:
+                self._switch_to_degraded()
+                return [self._blob_memory.get(k) for k in keys]
+        else:
+            return [self._blob_memory.get(k) for k in keys]
+
     # =========================================================================
     # Grouped-op transactional write (538 D3)
     # =========================================================================

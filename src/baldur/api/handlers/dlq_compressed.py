@@ -82,8 +82,7 @@ def dlq_compressed_detail(ctx: RequestContext) -> ResponseContext:
     entry_id = ctx.get_path_param("entry_id")
     repository = _repository()
 
-    entries = repository.get_compressed_entries(limit=1000)
-    entry = next((e for e in entries if e.id == entry_id), None)
+    entry = repository.get_compressed_entry(entry_id)
     if entry is None:
         return ResponseContext.not_found("Compressed entry not found")
 
