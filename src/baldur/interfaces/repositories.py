@@ -924,6 +924,25 @@ class FailedOperationRepository(ABC):
             "Compression status update not implemented for this adapter"
         )
 
+    def backfill_compressed_status_index(
+        self,
+        *,
+        operator_initiated: bool = False,
+    ) -> dict[str, Any]:
+        """Reconcile the per-status index family with the stored entries.
+
+        Only adapters that answer a status-filtered compressed query through a
+        *separate* index have anything to reconcile. Adapters that filter
+        status inside the query itself — SQL's WHERE clause, the memory
+        adapter's in-process filter — are complete at every moment, so the
+        honest answer for them is "already complete", not "unimplemented".
+
+        ``operator_initiated`` marks an explicit operator run, which may
+        conclude the migration on the strength of a single successful pass;
+        an automatic caller has to observe stability across runs instead.
+        """
+        return {"complete": True, "walked": 0}
+
 
 class CircuitBreakerStateRepository(ABC):
     """

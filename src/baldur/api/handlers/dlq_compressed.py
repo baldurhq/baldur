@@ -7,6 +7,11 @@ Endpoints:
     GET /dlq-compressed                              Compressed DLQ entry list
     GET /dlq-compressed/{entry_id}                    Compressed entry detail
     GET /dlq-compressed/summary                       Compressed entry summary
+
+``dlq_compressed_migrate`` shares this module for the same reason: the CLI
+drives it through the handler seam so operator and HTTP surfaces cannot
+diverge. It is deliberately not registered on a route — the migration is an
+operator action, not part of the admin console's read surface.
 """
 
 from __future__ import annotations
@@ -20,6 +25,7 @@ logger = structlog.get_logger()
 __all__ = [
     "dlq_compressed_list",
     "dlq_compressed_detail",
+    "dlq_compressed_migrate",
     "dlq_compressed_summary",
 ]
 
@@ -62,16 +68,21 @@ def dlq_compressed_list(ctx: RequestContext) -> ResponseContext:
     except (TypeError, ValueError):
         limit = 100
 
-    entries = repository.get_compressed_entries(
+    # One extra row decides ``has_more`` outright. Comparing the returned
+    # count against ``limit`` cannot: a filtered page is shorter than the
+    # index slice it came from, so a full page can look partial and a paging
+    # client stops with matches left unread.
+    fetched = repository.get_compressed_entries(
         domain=domain,
         status=entry_status,
-        limit=limit,
+        limit=limit + 1,
     )
+    entries = fetched[:limit]
 
     return ResponseContext.json(
         {
             "count": len(entries),
-            "has_more": len(entries) >= limit,
+            "has_more": len(fetched) > limit,
             "results": [_serialize_compressed_entry(e) for e in entries],
         }
     )
@@ -90,7 +101,58 @@ def dlq_compressed_detail(ctx: RequestContext) -> ResponseContext:
 
 
 def dlq_compressed_summary(ctx: RequestContext) -> ResponseContext:
-    """GET /dlq-compressed/summary — compressed entry summary (viewer)."""
+    """GET /dlq-compressed/summary — compressed entry summary (viewer).
+
+    ``total_summaries`` and the sum of ``by_status`` may differ once the
+    per-status index answers ``by_status`` directly. Two transient
+    populations account for it — an entry caught mid-transition is counted
+    under both its statuses, and an entry whose payload cannot be read is
+    counted here where the payload walk skipped it. The lifecycle sweep
+    clears both, so a difference that persists across sweep runs means the
+    sweep is not reaching them and is worth investigating.
+    """
     repository = _repository()
     summary = repository.get_compressed_summary()
     return ResponseContext.json(summary)
+
+
+def dlq_compressed_migrate(ctx: RequestContext) -> ResponseContext:
+    """POST — reconcile the per-status compressed index, operator-initiated.
+
+    Walks every compressed entry and files it under the status its payload
+    carries. Add-only and idempotent, so it is safe to re-run at any time —
+    and re-running is the documented repair for the gap classes the automatic
+    scan cannot see: entries restored from a long-dormant write-ahead log, or
+    written by a worker whose clock ran far behind.
+
+    The automatic sweep concludes the migration only after observing two
+    quiet walks hours apart. An operator run concludes it on one pass: the
+    wait substitutes for the operator's own judgement that no old-code writer
+    remains, and here that judgement has already been made.
+
+    Shares the sweep's lock, so a run that collides with the sweep is
+    reported as a conflict rather than queued.
+    """
+    from baldur.dlq.helpers import compressed_lifecycle_lock
+
+    repository = _repository()
+
+    with compressed_lifecycle_lock("cli-migrate-compressed") as acquired:
+        if not acquired:
+            return ResponseContext.error(
+                "Compressed lifecycle sweep is already running; retry later",
+                status_code=409,
+                error_code="LOCK_NOT_ACQUIRED",
+            )
+        result = repository.backfill_compressed_status_index(operator_initiated=True)
+
+    if not result.get("verified", True):
+        return ResponseContext.error(
+            "Backfill could not be verified — the storage backend was "
+            "degraded during the walk; re-run once it has recovered",
+            status_code=409,
+            error_code="BACKFILL_UNVERIFIED",
+            details=result,
+        )
+
+    return ResponseContext.json({"status": "ok", **result})

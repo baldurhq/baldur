@@ -31,6 +31,7 @@ pytest.importorskip("baldur_pro")
 pytestmark = pytest.mark.requires_pro
 
 
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
@@ -817,7 +818,17 @@ class TestCleanupCompressedEntriesBehavior:
         settings.compress_archive_after_days = 90
         mock_get_settings.return_value = settings
 
-        with patch("baldur.factory.registry.ProviderRegistry") as registry:
+        # The sweep holds a distributed lock. No lock backend is configured in
+        # a unit environment, so a real acquisition reports "someone else is
+        # sweeping" and the drains under test would never run.
+        @contextmanager
+        def _lock_held(session_id):
+            yield True
+
+        with (
+            patch("baldur.factory.registry.ProviderRegistry") as registry,
+            patch("baldur.dlq.helpers.compressed_lifecycle_lock", _lock_held),
+        ):
             registry.dlq_repository.safe_get.return_value = repo
             return cleanup_compressed_dlq_entries.apply()
 

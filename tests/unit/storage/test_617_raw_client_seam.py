@@ -125,6 +125,9 @@ def _blobs_backend(
     """
     backend = object.__new__(ResilientStorageBackend)
     backend._mode = mode
+    # Degrading bumps this counter before it writes the mode, so a partially
+    # wired backend needs it as much as it needs ``_mode``.
+    backend._degrade_count = 0
     backend._redis = redis
     backend._redis_initialized = True
     backend._blob_memory = dict(memory or {})

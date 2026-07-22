@@ -2,8 +2,9 @@
 ``baldur dlq ...`` - dead-letter queue operations.
 
 Subcommands:
-    baldur dlq list     [--status] [--domain] [--page] [--page-size]
-    baldur dlq replay   [--domain] [--batch-size N]
+    baldur dlq list                [--status] [--domain] [--page] [--page-size]
+    baldur dlq replay              [--domain] [--batch-size N]
+    baldur dlq migrate-compressed
 
 All subcommands share the framework-agnostic handlers under
 :mod:`baldur.api.handlers.dlq` so CLI and admin HTTP cannot drift.
@@ -14,6 +15,7 @@ from __future__ import annotations
 import typer
 
 from baldur.api.handlers.dlq import dlq_list, dlq_replay
+from baldur.api.handlers.dlq_compressed import dlq_compressed_migrate
 from baldur.cli._bootstrap import ensure_init
 from baldur.cli._invoke import (
     build_request_context,
@@ -88,5 +90,34 @@ def dlq_replay_cmd(
 
     request = build_request_context(method="POST", path="/dlq/replay/", json_body=body)
     response = run_handler(dlq_replay, request)
+    print_response(response, json_output=json_output)
+    raise typer.Exit(code=exit_code_for(response))
+
+
+@dlq_app.command("migrate-compressed")
+def dlq_migrate_compressed_cmd(
+    ctx: typer.Context,
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit JSON instead of pretty text."
+    ),
+) -> None:
+    """Reconcile the compressed-entry status index in one pass.
+
+    The lifecycle sweep does this automatically and concludes it after two
+    quiet runs several hours apart. Run this to convert an install
+    immediately instead — on a large archive that is the difference between
+    a working archived view today and one in a couple of days. It is add-only
+    and safe to repeat, which also makes it the repair to reach for if
+    filtered listings ever come up short after a restore or a rollback.
+
+    Exits 2 if the lifecycle sweep holds the lock or the walk could not be
+    verified — both mean "re-run", not "failed".
+    """
+    ensure_init(ctx)
+
+    request = build_request_context(
+        method="POST", path="/dlq/migrate-compressed/", json_body={}
+    )
+    response = run_handler(dlq_compressed_migrate, request)
     print_response(response, json_output=json_output)
     raise typer.Exit(code=exit_code_for(response))

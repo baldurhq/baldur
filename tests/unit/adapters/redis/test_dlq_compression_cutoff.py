@@ -34,29 +34,57 @@ class FakeSortedSetBackend:
     """In-process stand-in that preserves real score ordering.
 
     Only the operations the compression module reaches for are implemented.
-    ``blob_reads`` counts entry fetches so a test can assert the ascending
-    walk stops early instead of reading the whole index.
+    ``blob_reads`` counts *entry* fetches so a test can assert the ascending
+    walk stops early instead of reading the whole index. The namespace's
+    structural blobs — the migration marker and its watermark — are excluded:
+    they are control-flow reads of fixed cost, and counting them would make
+    every walk-cost assertion depend on how often the marker is consulted.
+
+    ``degrade_count`` and ``is_redis_available`` mirror the real backend's
+    degradation seam so a test can express "the backend dropped out mid-walk"
+    without threads.
     """
+
+    _CONTROL_BLOB_KEYS = frozenset(
+        {
+            "dlq:compressed:status_index_ready",
+            "dlq:compressed:backfill_watermark",
+        }
+    )
 
     def __init__(self) -> None:
         self.blobs: dict[str, bytes] = {}
         self.zsets: dict[str, dict[str, float]] = {}
         self.blob_reads = 0
+        self.get_blobs_calls = 0
+        self.degrade_count = 0
+        self.is_redis_available = True
 
     def set_blob(self, key: str, value: bytes) -> None:
         self.blobs[key] = value
 
     def get_blob(self, key: str) -> bytes | None:
-        self.blob_reads += 1
+        if key not in self._CONTROL_BLOB_KEYS:
+            self.blob_reads += 1
         return self.blobs.get(key)
 
     def get_blobs(self, keys: list[str]) -> list[bytes | None]:
         # Batched read must charge the same per-key cost as get_blob, so a
         # cost assertion cannot be passed by accident (see D8).
+        self.get_blobs_calls += 1
         return [self.get_blob(k) for k in keys]
 
-    def zadd(self, key: str, mapping: dict[str, float]) -> None:
-        self.zsets.setdefault(key, {}).update(mapping)
+    def zadd(self, key: str, mapping: dict[str, float]) -> int:
+        """Add members, returning the count that were new — as Redis does.
+
+        The backfill's completion criterion sums exactly this value, so a
+        fake that always reported zero would let a migration conclude on a
+        walk that had just filed thousands of entries.
+        """
+        zset = self.zsets.setdefault(key, {})
+        new = sum(1 for member in mapping if member not in zset)
+        zset.update(mapping)
+        return new
 
     def zrem(self, key: str, members) -> int:
         """Remove members from a sorted set (list or single-str, as the batch
