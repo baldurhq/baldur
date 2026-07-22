@@ -14,9 +14,14 @@ Scope:
 from __future__ import annotations
 
 import builtins
+import sys
+import types
+from contextlib import contextmanager
+from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
+from structlog.testing import capture_logs
 
 import baldur.dlq.helpers as helpers
 from baldur.factory.registry import ProviderRegistry
@@ -286,3 +291,167 @@ class TestDlqBackingChainResolution:
         # A bare non-None object is enough — the predicate only checks resolution.
         monkeypatch.setattr(ProviderRegistry.dlq_service, "safe_get", lambda: object())
         assert helpers.dlq_backing_available() is True
+
+
+# =============================================================================
+# compressed_lifecycle_lock — mutual exclusion for the sweep + its migration
+# =============================================================================
+
+
+class _FakeDistributedLock:
+    """Records how the helper drives a distributed lock."""
+
+    def __init__(self, *, acquired=True, acquire_error=None, release_error=None):
+        self._acquired = acquired
+        self._acquire_error = acquire_error
+        self._release_error = release_error
+        self.constructor_kwargs: dict = {}
+        self.acquire_calls: list[dict] = []
+        self.release_calls: list[dict] = []
+
+    def acquire(self, *, namespace, session_id, blocking):
+        self.acquire_calls.append(
+            {"namespace": namespace, "session_id": session_id, "blocking": blocking}
+        )
+        if self._acquire_error is not None:
+            raise self._acquire_error
+        return self._acquired
+
+    def release(self, *, namespace, session_id):
+        self.release_calls.append({"namespace": namespace, "session_id": session_id})
+        if self._release_error is not None:
+            raise self._release_error
+
+
+@contextmanager
+def _pro_lock_installed(lock: _FakeDistributedLock):
+    """Stand a PRO coordination module up in ``sys.modules``.
+
+    Injecting the module rather than patching the real attribute keeps this
+    runnable on a PRO-absent checkout, where the import target does not exist
+    at all — which is the environment the public test suite runs in.
+    """
+    name = "baldur_pro.services.coordination.distributed_recovery_lock"
+    module = types.ModuleType(name)
+
+    def _factory(**kwargs):
+        lock.constructor_kwargs = kwargs
+        return lock
+
+    module.DistributedRecoveryLock = _factory
+    with patch.dict(sys.modules, {name: module}):
+        yield
+
+
+class TestCompressedLifecycleLockBehavior:
+    """The sweep's lock: own namespace, non-blocking, fail-open."""
+
+    def test_acquires_its_own_namespace_non_blocking_and_releases_after(self):
+        lock = _FakeDistributedLock()
+
+        with _pro_lock_installed(lock):
+            with helpers.compressed_lifecycle_lock("sweep-1") as acquired:
+                assert acquired is True
+
+        assert lock.acquire_calls == [
+            {
+                "namespace": helpers._COMPRESSED_LIFECYCLE_LOCK_NAMESPACE,
+                "session_id": "sweep-1",
+                "blocking": False,
+            }
+        ]
+        assert lock.release_calls == [
+            {
+                "namespace": helpers._COMPRESSED_LIFECYCLE_LOCK_NAMESPACE,
+                "session_id": "sweep-1",
+            }
+        ]
+
+    def test_namespace_is_not_the_overflow_eviction_task_s(self):
+        """The two tasks do unrelated work and must not exclude each other."""
+        assert (
+            helpers._COMPRESSED_LIFECYCLE_LOCK_NAMESPACE == "dlq-compressed-lifecycle"
+        )
+        assert helpers._COMPRESSED_LIFECYCLE_LOCK_NAMESPACE != "dlq-compression"
+
+    def test_lock_outlives_the_sweep_task_s_hard_time_limit(self):
+        """A live run's lock must not expire underneath it.
+
+        The sweep task is killed at 300s, so a shorter lock TTL would let a
+        second worker in while the first is still walking — the overlap the
+        lock exists to prevent.
+        """
+        from baldur.celery_tasks.dlq_tasks import cleanup_compressed_dlq_entries
+
+        ttl_seconds = helpers._COMPRESSED_LIFECYCLE_LOCK_MINUTES * 60
+
+        assert ttl_seconds > cleanup_compressed_dlq_entries.time_limit
+
+    def test_constructor_receives_that_timeout(self):
+        lock = _FakeDistributedLock()
+
+        with _pro_lock_installed(lock):
+            with helpers.compressed_lifecycle_lock("sweep-1"):
+                pass
+
+        assert lock.constructor_kwargs["lock_timeout"] == timedelta(
+            minutes=helpers._COMPRESSED_LIFECYCLE_LOCK_MINUTES
+        )
+
+    def test_lock_is_released_when_the_block_raises(self):
+        lock = _FakeDistributedLock()
+
+        with _pro_lock_installed(lock):
+            with pytest.raises(RuntimeError, match="sweep exploded"):
+                with helpers.compressed_lifecycle_lock("sweep-1"):
+                    raise RuntimeError("sweep exploded")
+
+        assert len(lock.release_calls) == 1
+
+    def test_lock_held_elsewhere_yields_false_and_releases_nothing(self):
+        """Releasing a lock this process does not hold would free someone
+        else's run mid-walk."""
+        lock = _FakeDistributedLock(acquired=False)
+
+        with _pro_lock_installed(lock):
+            with helpers.compressed_lifecycle_lock("sweep-1") as acquired:
+                assert acquired is False
+
+        assert lock.release_calls == []
+
+    def test_absent_pro_runs_the_block_unlocked(self):
+        """Fail-open: maintenance that cannot lock still runs.
+
+        Two unlocked walks can step over an entry through positional drift,
+        but it keeps its membership and its status, so the next run picks it
+        up — a delay, against refusing to run maintenance at all.
+        """
+        target = "baldur_pro.services.coordination.distributed_recovery_lock"
+
+        with patch("builtins.__import__", _patched_import_factory(target)):
+            with helpers.compressed_lifecycle_lock("sweep-1") as acquired:
+                assert acquired is True
+
+    def test_acquisition_failure_runs_the_block_unlocked_and_warns(self):
+        lock = _FakeDistributedLock(acquire_error=RuntimeError("redis down"))
+
+        with _pro_lock_installed(lock), capture_logs() as logs:
+            with helpers.compressed_lifecycle_lock("sweep-1") as acquired:
+                assert acquired is True
+
+        assert lock.release_calls == []
+        assert [e["event"] for e in logs] == [
+            "dlq.compressed_lifecycle_lock_acquisition_failed"
+        ]
+
+    def test_release_failure_does_not_propagate(self):
+        """The work is done by then; a stuck release expires on its own TTL."""
+        lock = _FakeDistributedLock(release_error=RuntimeError("redis down"))
+
+        with _pro_lock_installed(lock), capture_logs() as logs:
+            with helpers.compressed_lifecycle_lock("sweep-1") as acquired:
+                assert acquired is True
+
+        assert [e["event"] for e in logs] == [
+            "dlq.compressed_lifecycle_lock_release_failed"
+        ]

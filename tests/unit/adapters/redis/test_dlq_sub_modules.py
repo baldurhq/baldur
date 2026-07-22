@@ -1968,8 +1968,17 @@ class TestRedisCompressedByIdBehavior:
             "by_domain:payment",
             "status:active",
             "status_domain:active:payment",
+            "status_index_ready",
+            "backfill_watermark",
         ],
-        ids=["index", "by_domain", "status", "status_domain"],
+        ids=[
+            "index",
+            "by_domain",
+            "status",
+            "status_domain",
+            "marker",
+            "watermark",
+        ],
     )
     def test_reserved_key_name_returns_none_without_reading_backend(self, reserved_id):
         """A reserved structural key name short-circuits to None before get_blob.
@@ -2214,6 +2223,11 @@ class TestCompressedModuleHelpersBehavior:
             ("by_domain:payment", True),
             ("status:active", True),
             ("status_domain:active:payment", True),
+            # The migration's control blobs share the namespace, so an entry
+            # id colliding with one would make the by-id read return the
+            # marker's payload instead of a 404.
+            ("status_index_ready", True),
+            ("backfill_watermark", True),
             ("compressed:payment:timeout:E001:1700000000", False),
             ("some-opaque-id", False),
         ],
@@ -2222,6 +2236,8 @@ class TestCompressedModuleHelpersBehavior:
             "by_domain",
             "status",
             "status_domain",
+            "marker",
+            "watermark",
             "real_compressed_id",
             "opaque",
         ],
@@ -2276,3 +2292,206 @@ class TestDLQCompressedStatusEnumContract:
 
         for status in DLQCompressedStatus:
             assert status.value in summary["by_status"]
+
+
+# =============================================================================
+# J. get_compressed_entries — read routing across the four filter cells (723 D1)
+# =============================================================================
+#
+# These use the shared in-process backend from ``conftest`` rather than a
+# MagicMock: the defect is that a status-filtered listing takes its window off
+# the wrong key, and a mock returns whatever the test hands it whichever key
+# the code asked for.
+
+
+class TestRedisCompressedListingRouting:
+    """The status-filtered window comes off the per-status keys once ready."""
+
+    @staticmethod
+    def _seed(store_compressed):
+        """Archives older than a page of live entries, in two domains.
+
+        The archive is always the oldest population, which is the whole
+        problem: a newest-first slice of the all-statuses index is filled by
+        live entries long before it reaches any archived one. The second
+        domain's archives are *newer* than the first's, so a domain-scoped
+        listing that wrongly read the global per-status key would return the
+        wrong domain's entries rather than accidentally agreeing.
+        """
+        orders = [
+            store_compressed(
+                f"o{i}", days_ago=100 + i, status="archived", domain="orders"
+            )
+            for i in range(3)
+        ]
+        payment = [
+            store_compressed(f"p{i}", days_ago=300 + i, status="archived")
+            for i in range(3)
+        ]
+        for i in range(10):
+            store_compressed(f"live{i}", days_ago=1 + i)
+        return orders, payment
+
+    @pytest.mark.parametrize(
+        "domain", [None, "payment"], ids=["global", "domain_scoped"]
+    )
+    def test_archived_listing_is_unreachable_before_the_marker(
+        self, compression, store_compressed, domain
+    ):
+        """The pre-migration shape: slice the index, then filter the payloads.
+
+        Every entry in the newest page is live, so the archived filter drops
+        all of them and the caller sees an empty archive that is not empty.
+        """
+        self._seed(store_compressed)
+
+        rows = compression.get_compressed_entries(
+            domain=domain, status="archived", limit=3
+        )
+
+        assert rows == []
+
+    def test_archived_listing_reaches_the_global_archive_after_the_marker(
+        self, compression, store_compressed, mark_index_ready
+    ):
+        orders, _payment = self._seed(store_compressed)
+        mark_index_ready()
+
+        rows = compression.get_compressed_entries(status="archived", limit=3)
+
+        # Newest-first within the archive: the orders entries are the newest
+        # archived ones, so they fill the page.
+        assert {e.id for e in rows} == {e.id for e in orders}
+
+    def test_archived_listing_scoped_to_a_domain_reads_the_composite_key(
+        self, compression, store_compressed, mark_index_ready
+    ):
+        _orders, payment = self._seed(store_compressed)
+        mark_index_ready()
+
+        rows = compression.get_compressed_entries(
+            domain="payment", status="archived", limit=3
+        )
+
+        assert {e.id for e in rows} == {e.id for e in payment}
+
+    @pytest.mark.parametrize("ready", [False, True], ids=["pre_marker", "post_marker"])
+    @pytest.mark.parametrize(
+        "domain", [None, "payment"], ids=["global", "domain_scoped"]
+    )
+    def test_unfiltered_listing_never_consults_the_marker(
+        self, compression, store_compressed, mark_index_ready, domain, ready
+    ):
+        """The all-statuses family is complete at every moment by construction."""
+        self._seed(store_compressed)
+        if ready:
+            mark_index_ready()
+
+        rows = compression.get_compressed_entries(domain=domain, limit=3)
+
+        assert [e.id.split(":")[-1] for e in rows] == ["live0", "live1", "live2"]
+
+    def test_stray_whose_payload_disagrees_is_not_served_under_that_filter(
+        self,
+        compression,
+        backend,
+        store_compressed,
+        mark_index_ready,
+        rewrite_blob_status,
+    ):
+        """A crash-window stray is filtered out of the response, not served.
+
+        Its payload says the entry is live, so serving it under the archived
+        filter would report an entry as archived that no longer is.
+        """
+        stray = store_compressed("stray", days_ago=300, status="archived")
+        rewrite_blob_status(stray, "active")
+        mark_index_ready()
+
+        rows = compression.get_compressed_entries(status="archived", limit=10)
+
+        assert rows == []
+        # The listing never repairs: a console read must not pay for it.
+        assert stray.id in backend.zsets["dlq:compressed:status:archived"]
+
+
+# =============================================================================
+# K. get_compressed_summary — by_status source gate (723 D6)
+# =============================================================================
+
+
+class TestRedisCompressedSummaryGate:
+    """by_status switches from the payload walk to cardinality reads."""
+
+    @staticmethod
+    def _seed(store_compressed):
+        for i in range(3):
+            store_compressed(f"a{i}", days_ago=10 + i)
+        for i in range(2):
+            store_compressed(f"s{i}", days_ago=40 + i, status="stale")
+
+    def test_by_status_comes_from_the_payload_walk_before_the_marker(
+        self, compression, backend, store_compressed
+    ):
+        """Pre-migration the per-status keys may be incomplete, so they are
+        not trusted — an extra member in one of them is not counted."""
+        self._seed(store_compressed)
+        backend.zadd("dlq:compressed:status:active", {"unwalkable": 1.0})
+
+        summary = compression.get_compressed_summary()
+
+        assert summary["by_status"]["active"] == 3
+        assert summary["by_status"]["stale"] == 2
+
+    def test_by_status_comes_from_cardinalities_after_the_marker(
+        self, compression, backend, store_compressed, mark_index_ready
+    ):
+        """Post-migration the counts are read off the keys themselves.
+
+        The seeded member has no payload, so it is invisible to the walk and
+        visible to the cardinality — which is what makes the two sources
+        distinguishable at all.
+        """
+        self._seed(store_compressed)
+        backend.zadd("dlq:compressed:status:active", {"unwalkable": 1.0})
+        mark_index_ready()
+
+        summary = compression.get_compressed_summary()
+
+        assert summary["by_status"]["active"] == 4
+        assert summary["by_status"]["stale"] == 2
+
+    def test_by_status_stays_exact_above_the_scan_cap_after_the_marker(
+        self, compression, store_compressed, mark_index_ready
+    ):
+        """Above the cap the walk is a window; the cardinalities are not.
+
+        ``total_compressed_items`` keeps the walk — summing item counts needs
+        the payloads — so ``summary_truncated`` goes on describing it alone.
+        """
+        self._seed(store_compressed)
+        mark_index_ready()
+
+        with patch(
+            "baldur.adapters.redis.dlq_compression._summary_scan_cap", return_value=2
+        ):
+            summary = compression.get_compressed_summary()
+
+        assert summary["summary_truncated"] is True
+        assert summary["by_status"] == {"active": 3, "stale": 2, "archived": 0}
+        # The walk only covered the newest two entries, both live.
+        assert summary["total_compressed_items"] == 2
+
+    def test_by_status_is_windowed_above_the_cap_before_the_marker(
+        self, compression, store_compressed
+    ):
+        """The pre-migration counterfactual: the same request, windowed."""
+        self._seed(store_compressed)
+
+        with patch(
+            "baldur.adapters.redis.dlq_compression._summary_scan_cap", return_value=2
+        ):
+            summary = compression.get_compressed_summary()
+
+        assert summary["summary_truncated"] is True
+        assert summary["by_status"] == {"active": 2, "stale": 0, "archived": 0}

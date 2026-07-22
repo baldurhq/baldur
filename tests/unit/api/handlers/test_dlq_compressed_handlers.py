@@ -14,12 +14,17 @@ exercise the production read path rather than a stubbed return.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from baldur.api.handlers.dlq_compressed import dlq_compressed_detail
+from baldur.api.handlers.dlq_compressed import (
+    dlq_compressed_detail,
+    dlq_compressed_list,
+    dlq_compressed_migrate,
+)
 from baldur.interfaces.repositories import DLQCompressedEntry
 from baldur.interfaces.web_framework import HttpMethod, RequestContext
 
@@ -159,3 +164,191 @@ class TestDlqCompressedDetailHandler:
         assert resp.status_code == 404
         backend.get_blob.assert_not_called()
         backend._switch_to_degraded.assert_not_called()
+
+
+# =============================================================================
+# has_more truthfulness (723 D2) + the operator migration handler (723 D4)
+# =============================================================================
+
+
+class _RecordingRepository:
+    """Records what the handler forwarded and answers with a fixed population.
+
+    The handler's whole job here is the ``limit + 1`` probe, so the forwarded
+    limit is the assertion that matters — a handler that asked for ``limit``
+    and compared ``len(entries) >= limit`` produces the same body on a full
+    page and can only be told apart by what it asked for.
+    """
+
+    def __init__(self, available: int = 0, backfill_result: dict | None = None):
+        self._entries = [
+            _entry(f"compressed:payment:timeout:E001:{i:04d}") for i in range(available)
+        ]
+        self.calls: list[dict] = []
+        self.backfill_calls: list[dict] = []
+        self._backfill_result = backfill_result or {
+            "complete": True,
+            "mode": "full",
+            "walked": 7,
+            "added": 4,
+            "skipped_unreadable": 0,
+            "verified": True,
+            "marker_set": True,
+        }
+
+    def get_compressed_entries(self, domain=None, status=None, limit=100):
+        self.calls.append({"domain": domain, "status": status, "limit": limit})
+        return self._entries[:limit]
+
+    def backfill_compressed_status_index(self, *, operator_initiated=False):
+        self.backfill_calls.append({"operator_initiated": operator_initiated})
+        return self._backfill_result
+
+
+@contextmanager
+def _lock(acquired: bool):
+    yield acquired
+
+
+def _list_ctx(**query) -> RequestContext:
+    return RequestContext(
+        method=HttpMethod("GET"),
+        path="/dlq-compressed",
+        query_params={k: str(v) for k, v in query.items() if v is not None},
+    )
+
+
+def _migrate_ctx() -> RequestContext:
+    return RequestContext(
+        method=HttpMethod("POST"),
+        path="/dlq/migrate-compressed/",
+        json_body={},
+    )
+
+
+class TestDlqCompressedListHandler:
+    """has_more is decided by one extra row, not by a post-filter count."""
+
+    @pytest.mark.parametrize(
+        ("available", "expected_count", "expected_has_more"),
+        [(2, 2, False), (3, 3, False), (5, 3, True)],
+        ids=["short_page", "exact_page", "more_available"],
+    )
+    @pytest.mark.parametrize(
+        ("domain", "status"),
+        [(None, None), (None, "archived"), ("payment", None), ("payment", "archived")],
+        ids=["unfiltered", "status", "domain", "domain_status"],
+    )
+    def test_has_more_is_true_only_when_a_further_match_exists(
+        self, domain, status, available, expected_count, expected_has_more
+    ):
+        repo = _RecordingRepository(available=available)
+
+        with patch(_REPOSITORY, return_value=repo):
+            resp = dlq_compressed_list(_list_ctx(limit=3, domain=domain, status=status))
+
+        assert resp.status_code == 200
+        assert resp.body["count"] == expected_count
+        assert len(resp.body["results"]) == expected_count
+        assert resp.body["has_more"] is expected_has_more
+
+    def test_the_probe_row_is_requested_but_never_returned(self):
+        """One row past the page is fetched to decide, then dropped."""
+        repo = _RecordingRepository(available=10)
+
+        with patch(_REPOSITORY, return_value=repo):
+            resp = dlq_compressed_list(_list_ctx(limit=3, status="archived"))
+
+        assert repo.calls == [{"domain": None, "status": "archived", "limit": 4}]
+        assert len(resp.body["results"]) == 3
+
+    def test_filters_are_forwarded_to_the_repository(self):
+        repo = _RecordingRepository(available=1)
+
+        with patch(_REPOSITORY, return_value=repo):
+            dlq_compressed_list(_list_ctx(limit=50, domain="payment", status="stale"))
+
+        assert repo.calls == [{"domain": "payment", "status": "stale", "limit": 51}]
+
+    def test_an_unparseable_limit_falls_back_to_the_default_page(self):
+        repo = _RecordingRepository(available=1)
+
+        with patch(_REPOSITORY, return_value=repo):
+            dlq_compressed_list(_list_ctx(limit="not-a-number"))
+
+        assert repo.calls == [{"domain": None, "status": None, "limit": 101}]
+
+
+class TestDlqCompressedMigrateHandler:
+    """The operator migration runs under the sweep's lock and reports honestly."""
+
+    def test_successful_run_is_operator_initiated_and_returns_its_counts(self):
+        repo = _RecordingRepository()
+
+        with (
+            patch(_REPOSITORY, return_value=repo),
+            patch(
+                "baldur.dlq.helpers.compressed_lifecycle_lock", lambda s: _lock(True)
+            ),
+        ):
+            resp = dlq_compressed_migrate(_migrate_ctx())
+
+        assert resp.status_code == 200
+        assert resp.body["status"] == "ok"
+        assert resp.body["walked"] == 7
+        assert resp.body["marker_set"] is True
+        # Operator-initiated is what lets one pass conclude the migration.
+        assert repo.backfill_calls == [{"operator_initiated": True}]
+
+    def test_lock_held_by_the_sweep_is_reported_as_a_conflict(self):
+        """A conflict must not also run the walk — retrying is the answer."""
+        repo = _RecordingRepository()
+
+        with (
+            patch(_REPOSITORY, return_value=repo),
+            patch(
+                "baldur.dlq.helpers.compressed_lifecycle_lock", lambda s: _lock(False)
+            ),
+        ):
+            resp = dlq_compressed_migrate(_migrate_ctx())
+
+        assert resp.status_code == 409
+        assert resp.body["error_code"] == "LOCK_NOT_ACQUIRED"
+        assert repo.backfill_calls == []
+
+    def test_unverified_walk_is_a_conflict_carrying_its_own_report(self):
+        """An unverified walk did reconcile idempotently — it just cannot be
+        trusted to have covered anything, so the operator re-runs it."""
+        repo = _RecordingRepository(
+            backfill_result={
+                "complete": False,
+                "mode": "full",
+                "walked": 3,
+                "added": 0,
+                "skipped_unreadable": 0,
+                "verified": False,
+                "marker_set": False,
+            }
+        )
+
+        with (
+            patch(_REPOSITORY, return_value=repo),
+            patch(
+                "baldur.dlq.helpers.compressed_lifecycle_lock", lambda s: _lock(True)
+            ),
+        ):
+            resp = dlq_compressed_migrate(_migrate_ctx())
+
+        assert resp.status_code == 409
+        assert resp.body["error_code"] == "BACKFILL_UNVERIFIED"
+        assert resp.body["details"]["verified"] is False
+
+    def test_absent_pro_repository_raises_for_the_caller_to_map_to_a_500(self):
+        """Compressed entries are a PRO surface; an OSS install has no
+        repository to migrate, and that is a server-side gap, not a retry."""
+        from baldur.api.handlers.dlq_compressed import _repository
+
+        with patch("baldur.factory.registry.ProviderRegistry") as registry:
+            registry.dlq_repository.safe_get.return_value = None
+            with pytest.raises(RuntimeError, match="baldur_pro"):
+                _repository()

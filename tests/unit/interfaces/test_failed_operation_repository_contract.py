@@ -110,3 +110,49 @@ class TestFailedOperationRepositoryFacetCountsContract:
             assert "get_facet_counts" not in cls.__abstractmethods__, (
                 f"{cls.__name__} must implement get_facet_counts"
             )
+
+
+class TestCompressedBackfillDefaultContract:
+    """backfill_compressed_status_index answers "already complete" (723 D4).
+
+    The sibling compressed-entry methods raise ``NotImplementedError`` by
+    default; this one deliberately does not. An adapter that filters status
+    inside the query itself — SQL's WHERE clause, the memory adapter's
+    in-process filter — has no separate index to reconcile, so "nothing to do"
+    is the truthful answer rather than an unimplemented hole. The sweep calls
+    this on every run against whichever repository is registered.
+    """
+
+    def test_default_reports_complete_with_nothing_walked(self):
+        """The exact body 723 D4 specifies, since the sweep logs it."""
+        result = FailedOperationRepository.backfill_compressed_status_index(object())
+
+        assert result == {"complete": True, "walked": 0}
+
+    def test_it_is_concrete_so_no_adapter_is_forced_to_implement_it(self):
+        assert (
+            "backfill_compressed_status_index"
+            not in FailedOperationRepository.__abstractmethods__
+        )
+
+    def test_operator_initiated_is_keyword_only_and_defaults_to_automatic(self):
+        """Automatic callers must not be able to conclude the migration by
+        accidentally passing a positional flag."""
+        params = inspect.signature(
+            FailedOperationRepository.backfill_compressed_status_index
+        ).parameters
+
+        assert params["operator_initiated"].kind is inspect.Parameter.KEYWORD_ONLY
+        assert params["operator_initiated"].default is False
+
+    def test_memory_adapter_inherits_the_complete_answer(self):
+        from baldur.adapters.memory.failed_operation import (
+            InMemoryFailedOperationRepository,
+        )
+
+        repo = InMemoryFailedOperationRepository()
+
+        assert repo.backfill_compressed_status_index() == {
+            "complete": True,
+            "walked": 0,
+        }
