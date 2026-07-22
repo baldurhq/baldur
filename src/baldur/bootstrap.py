@@ -1558,9 +1558,10 @@ def _wire_priority_chain_registry(
 def _install_resilient_storage_backend(runtime: BaldurRuntime) -> None:
     """Eagerly construct ResilientStorageBackend and install via configure_*.
 
-    Mirrors the production WAL fail-fast: after construction,
-    ``backend._wal_initialized=False`` in production raises
-    ``ConfigurationError`` so the bad volume mount surfaces at deploy time.
+    Mirrors the production WAL fail-fast: after construction, a WAL that does
+    not honor the configured ``wal_dir`` — it failed to initialize, or fell
+    back to another directory — raises ``ConfigurationError`` in production
+    so the bad volume mount surfaces at deploy time.
     Non-production silently logs and proceeds (dev laptop tolerates the
     WAL failure).
     """

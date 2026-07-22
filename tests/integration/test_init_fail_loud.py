@@ -45,13 +45,17 @@ def _isolated_init_state():
 def patched_eager_backend(tmp_path, monkeypatch):
     """Replace ``ResilientStorageBackend`` + ``configure_storage_backend``.
 
-    The mock backend reports a writable ``wal_dir`` (``tmp_path``) and a
-    successful ``_wal_initialized=True`` so the production WAL fail-fast
-    path does NOT trip in the trigger-matrix happy paths. WAL-failure
-    scenarios override this fixture inline.
+    The mock backend reports a writable ``wal_dir`` (``tmp_path``) and a WAL
+    that honors it, so the production WAL fail-fast path does NOT trip in the
+    trigger-matrix happy paths. WAL-failure scenarios override this fixture
+    inline. The derived ``_wal_honors_configured_dir`` — the attribute the
+    boot gate actually reads — is set explicitly rather than left to
+    MagicMock's always-truthy auto-resolution.
     """
     backend = MagicMock()
     backend._wal_initialized = True
+    backend._wal_on_fallback_dir = False
+    backend._wal_honors_configured_dir = True
     backend.config = MagicMock(wal_dir=str(tmp_path))
 
     backend_cls = MagicMock(return_value=backend)
@@ -212,9 +216,15 @@ class TestInitProductionWalFailFastIntegration:
         monkeypatch.setenv("BALDUR_ENVIRONMENT", "production")
         monkeypatch.setenv("BALDUR_REDIS_URL", "redis://prod:6379/0")
 
-        # Backend reports WAL init failure.
+        # Backend reports WAL init failure. The boot gate reads the derived
+        # ``_wal_honors_configured_dir``, so it is set explicitly — an
+        # auto-resolved MagicMock attribute is always truthy and the gate
+        # would never fire.
         backend = MagicMock()
         backend._wal_initialized = False
+        backend._wal_on_fallback_dir = False
+        backend._wal = None
+        backend._wal_honors_configured_dir = False
         backend.config = MagicMock(wal_dir="/nonexistent/baldur-wal")
 
         settings_stub = MagicMock(url="redis://prod:6379/0")
@@ -231,7 +241,9 @@ class TestInitProductionWalFailFastIntegration:
             patch("baldur.adapters.resilient.backend.configure_storage_backend"),
             _scaffold_init_subdeps(),
         ):
-            with pytest.raises(ConfigurationError, match="WAL initialization failed"):
+            with pytest.raises(
+                ConfigurationError, match="WAL initialization did not honor"
+            ):
                 bootstrap.init()
 
 
