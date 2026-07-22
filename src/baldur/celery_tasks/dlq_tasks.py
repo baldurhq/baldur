@@ -491,9 +491,19 @@ def cleanup_compressed_dlq_entries(self) -> dict:
     - ACTIVE entries older than compress_stale_after_days -> STALE
     - STALE entries older than compress_archive_after_days -> ARCHIVED
     - Never hard delete.
-    """
-    from datetime import timedelta
 
+    Runs under a distributed lock. Once the drain walks a per-status index,
+    a transition removes its entry from the key being walked, so a concurrent
+    run shifts the positions the other run is paging through and entries get
+    stepped over. Overlap was harmless while the walked index never shrank;
+    it is not any more.
+
+    Step 0 of every run reconciles the per-status index family with the stored
+    entries, which is what lets the drains use it. It is fail-open: a step-0
+    failure leaves the drains to run against whichever index the repository
+    considers trustworthy.
+    """
+    from baldur.dlq.helpers import compressed_lifecycle_lock
     from baldur.factory.registry import ProviderRegistry
     from baldur.settings.dlq import get_dlq_settings
 
@@ -504,6 +514,25 @@ def cleanup_compressed_dlq_entries(self) -> dict:
     repository = ProviderRegistry.dlq_repository.safe_get()
     if repository is None:
         raise RuntimeError("baldur_pro DLQRepository not registered")
+
+    with compressed_lifecycle_lock(f"celery-{task_id}") as lock_acquired:
+        if not lock_acquired:
+            bound_logger.info(
+                "dlq.compressed_cleanup_lock_skipped",
+                reason="another_worker_sweeping",
+            )
+            return {"status": "skipped", "reason": "lock_not_acquired"}
+        return _run_compressed_cleanup(repository, settings, bound_logger)
+
+
+def _run_compressed_cleanup(repository, settings, bound_logger) -> dict:
+    """Backfill step 0, then drain both lifecycle lanes."""
+    from datetime import timedelta
+
+    try:
+        repository.backfill_compressed_status_index()
+    except Exception as e:
+        bound_logger.warning("dlq.compressed_backfill_step_failed", error=str(e))
 
     now = utc_now()
     stale_cutoff = now - timedelta(days=settings.compress_stale_after_days)

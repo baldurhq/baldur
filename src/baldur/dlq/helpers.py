@@ -14,6 +14,10 @@ compression and postmortem incident storage remain PRO-tier, so each wrapper
 delegates to the corresponding PRO function when installed and no-ops otherwise
 (``None`` for writers, ``[]`` / ``0`` for read helpers).
 
+``compressed_lifecycle_lock`` delegates to the same boundary in a different
+shape: a context manager over the PRO distributed lock that runs its block
+unlocked when PRO is absent, rather than returning a no-op value.
+
 Test isolation
 --------------
 Tests that swap PRO presence MUST reset the compression / postmortem module
@@ -25,7 +29,13 @@ the ``dlq_service`` slot empty — no import games.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
+
+import structlog
+
+logger = structlog.get_logger()
 
 _pro_dlq_compression: Any = None
 _pro_postmortem_store: Any = None
@@ -104,6 +114,74 @@ def compress_entries(*args: Any, **kwargs: Any) -> Any | None:
 
 
 # ============================================================
+# Compressed lifecycle mutual exclusion
+# ============================================================
+
+# Namespace for the compressed-entry lifecycle sweep + its operator-triggered
+# migration. Deliberately distinct from the overflow eviction task's
+# "dlq-compression": the two do unrelated work on the same data and must not
+# exclude each other.
+_COMPRESSED_LIFECYCLE_LOCK_NAMESPACE = "dlq-compressed-lifecycle"
+
+# Above the sweep task's 300s hard time limit, so a live run's lock cannot
+# expire underneath it. The lock's own TTL is what releases it if the holder
+# is killed outright.
+_COMPRESSED_LIFECYCLE_LOCK_MINUTES = 6
+
+
+@contextmanager
+def compressed_lifecycle_lock(session_id: str) -> Iterator[bool]:
+    """Hold the compressed-lifecycle lock for the block, yielding success.
+
+    Fail-open: if the coordination module is absent (a pure OSS install, or
+    Redis unconfigured) or acquisition raises, the block runs unlocked. Two
+    concurrent walks can then skip an entry through positional drift, but the
+    entry keeps its index membership and its status, so the next run picks it
+    up — a delay, never a loss, which is the better trade against refusing to
+    run maintenance at all.
+
+    Yields ``False`` only when another holder has the lock; the caller decides
+    whether that is a no-op or a reported conflict.
+    """
+    from datetime import timedelta
+
+    lock = None
+    acquired = False
+    try:
+        from baldur_pro.services.coordination.distributed_recovery_lock import (
+            DistributedRecoveryLock,
+        )
+
+        lock = DistributedRecoveryLock(
+            lock_timeout=timedelta(minutes=_COMPRESSED_LIFECYCLE_LOCK_MINUTES)
+        )
+        acquired = lock.acquire(
+            namespace=_COMPRESSED_LIFECYCLE_LOCK_NAMESPACE,
+            session_id=session_id,
+            blocking=False,
+        )
+    except ImportError:
+        lock = None
+        acquired = True
+    except Exception:
+        logger.warning("dlq.compressed_lifecycle_lock_acquisition_failed")
+        lock = None
+        acquired = True
+
+    try:
+        yield acquired
+    finally:
+        if lock is not None and acquired:
+            try:
+                lock.release(
+                    namespace=_COMPRESSED_LIFECYCLE_LOCK_NAMESPACE,
+                    session_id=session_id,
+                )
+            except Exception:
+                logger.warning("dlq.compressed_lifecycle_lock_release_failed")
+
+
+# ============================================================
 # Postmortem incident store
 # ============================================================
 
@@ -132,6 +210,7 @@ def get_healing_incidents_count(*args: Any, **kwargs: Any) -> int:
 __all__ = [
     "add_healing_incident",
     "compress_entries",
+    "compressed_lifecycle_lock",
     "dlq_backing_available",
     "get_healing_incidents",
     "get_healing_incidents_count",

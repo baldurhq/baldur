@@ -33,6 +33,11 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `BALDUR_RETRY_ENABLED=false` now stops async retries too: the function runs once, no retry.
 - A compressed DLQ entry outside the newest 1000 now opens in its detail view, no longer a 404.
 - The compressed-summary endpoint no longer costs one Redis round trip per entry ever compressed.
+- Filtering compressed DLQ entries by status now reaches past the newest page: archived entries appear.
+- `has_more` on the compressed list is exact under a status or domain filter, so paging stops at the end.
+- The compressed lifecycle sweep no longer re-reads every already-archived entry on every run.
+- The compressed lifecycle sweep holds a distributed lock, so overlapping runs cannot skip an entry.
+- Compressed `by_status` counts stay exact above `BALDUR_DLQ_COMPRESS_SUMMARY_SCAN_CAP`.
 
 ### Added
 
@@ -51,6 +56,10 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `CIRCUIT_BREAKER_OPENED` carries the window failure/total counts and the consecutive count.
 - `BALDUR_DLQ_COMPRESS_SUMMARY_SCAN_CAP` (`5000`) — cap above which the compressed summary windows.
 - Compressed summary flags `summary_truncated` when it windows to the newest `…SCAN_CAP` entries.
+- `baldur dlq migrate-compressed` converts an existing install's compressed index in one pass.
+- Without it the lifecycle sweep migrates automatically, taking effect after two daily runs.
+- Re-run it any time filtered compressed listings come up short after a restore or rollback.
+- `ResilientStorageBackend.degrade_count` — how many times the backend has dropped out of Redis mode.
 
 ### Changed
 

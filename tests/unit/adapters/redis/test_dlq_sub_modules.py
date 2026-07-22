@@ -1520,42 +1520,46 @@ class TestRedisDLQCompressionBehavior:
         )
 
     def test_get_compressed_entries_filters_by_status(self):
-        """get_compressed_entries filters results by status when provided."""
+        """get_compressed_entries filters results by status when provided.
+
+        No completion marker is seeded, so the query takes its window off the
+        all-statuses index and filters the payloads afterwards.
+        """
         backend = MagicMock()
         backend.zrevrange.return_value = ["c1", "c2"]
         now = datetime(2026, 3, 16, 12, 0, 0, tzinfo=UTC)
-        backend.get_blob.side_effect = [
-            _blob(
-                {
-                    "id": "c1",
-                    "domain": "payment",
-                    "failure_type": "timeout",
-                    "error_code": "E001",
-                    "count": "5",
-                    "first_seen": now.isoformat(),
-                    "last_seen": now.isoformat(),
-                    "sample_error_message": "err",
-                    "sample_context": "{}",
-                    "status": "active",
-                    "compressed_at": now.isoformat(),
-                }
-            ),
-            _blob(
-                {
-                    "id": "c2",
-                    "domain": "payment",
-                    "failure_type": "timeout",
-                    "error_code": "E002",
-                    "count": "3",
-                    "first_seen": now.isoformat(),
-                    "last_seen": now.isoformat(),
-                    "sample_error_message": "err",
-                    "sample_context": "{}",
-                    "status": "stale",
-                    "compressed_at": now.isoformat(),
-                }
-            ),
-        ]
+        blobs_by_key = {}
+        backend.get_blob.side_effect = lambda key: blobs_by_key.get(key)
+        blobs_by_key["dlq:compressed:c1"] = _blob(
+            {
+                "id": "c1",
+                "domain": "payment",
+                "failure_type": "timeout",
+                "error_code": "E001",
+                "count": "5",
+                "first_seen": now.isoformat(),
+                "last_seen": now.isoformat(),
+                "sample_error_message": "err",
+                "sample_context": "{}",
+                "status": "active",
+                "compressed_at": now.isoformat(),
+            }
+        )
+        blobs_by_key["dlq:compressed:c2"] = _blob(
+            {
+                "id": "c2",
+                "domain": "payment",
+                "failure_type": "timeout",
+                "error_code": "E002",
+                "count": "3",
+                "first_seen": now.isoformat(),
+                "last_seen": now.isoformat(),
+                "sample_error_message": "err",
+                "sample_context": "{}",
+                "status": "stale",
+                "compressed_at": now.isoformat(),
+            }
+        )
         repo = _make_repo(backend)
 
         results = repo.compression.get_compressed_entries(status="active")
@@ -1597,6 +1601,9 @@ class TestRedisDLQCompressionBehavior:
         """get_compressed_summary returns total, item counts, and status breakdown."""
         backend = MagicMock()
         backend.zcard.return_value = 3
+        # No completion marker seeded, so by_status is derived from the walk
+        # rather than from per-status cardinalities.
+        backend.get_blob.return_value = None
         # Below the cap (default 5000): the whole index is walked newest-first
         # and the blobs are fetched via one chunked get_blobs call.
         backend.zrevrange.return_value = ["c1", "c2", "c3"]

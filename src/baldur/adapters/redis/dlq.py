@@ -914,6 +914,15 @@ class RedisDLQRepository(
     def update_compressed_status(self, entry_id: str, new_status: str) -> bool:
         return self.compression.update_compressed_status(entry_id, new_status)
 
+    def backfill_compressed_status_index(
+        self,
+        *,
+        operator_initiated: bool = False,
+    ) -> dict[str, Any]:
+        return self.compression.backfill_compressed_status_index(
+            operator_initiated=operator_initiated,
+        )
+
     # =========================================================================
     # Redis Access Delegation
     # =========================================================================

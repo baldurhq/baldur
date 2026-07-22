@@ -130,7 +130,15 @@ WRAPPER_TABLE = [
 # Public names that are NOT verbatim PRO-only arg-forwarding wrappers.
 # ``store_to_dlq`` / ``dlq_backing_available`` resolve the OSS-or-PRO backing
 # chain rather than delegating to a cached PRO submodule.
-NON_WRAPPER_PUBLIC_NAMES = {"dlq_backing_available", "store_to_dlq"}
+# ``compressed_lifecycle_lock`` crosses the same boundary in a different shape:
+# a context manager that yields around a caller's block instead of forwarding
+# arguments and returning a value, so the table's call-and-compare form does
+# not apply to it.
+NON_WRAPPER_PUBLIC_NAMES = {
+    "compressed_lifecycle_lock",
+    "dlq_backing_available",
+    "store_to_dlq",
+}
 
 
 @pytest.fixture

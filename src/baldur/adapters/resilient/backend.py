@@ -115,6 +115,8 @@ class ResilientStorageBackend:
             settings = get_resilient_storage_settings()
         self.config = settings
         self._mode = ResilientStorageMode.DEGRADED
+        # Monotonic count of REDIS -> degraded transitions. See ``degrade_count``.
+        self._degrade_count = 0
         self._lock = threading.RLock()
 
         # Redis client
@@ -603,6 +605,26 @@ class ResilientStorageBackend:
     def is_redis_available(self) -> bool:
         """Check if Redis is available."""
         return self._redis_initialized and self._mode == ResilientStorageMode.REDIS
+
+    @property
+    def degrade_count(self) -> int:
+        """Monotonic count of transitions out of REDIS mode.
+
+        A read that fails answers with the process-local memory view instead
+        of raising, so a caller cannot tell a substituted result from a real
+        one by its shape — an empty page and a non-empty page are both
+        reachable from a failed fetch. Sampling this counter before and after
+        a multi-page walk turns that into a decidable question: the counter is
+        bumped by ``_switch_to_degraded()``, the only edge that leaves REDIS
+        mode, so an unchanged sample across a walk that started available
+        means every page was served by Redis itself.
+
+        The increment happens *before* the mode write, so a lockless reader
+        that observes non-REDIS mode has necessarily already observed the
+        bump. Any future transition path that can leave REDIS without passing
+        through ``_switch_to_degraded()`` would break that guarantee.
+        """
+        return self._degrade_count
 
     # =========================================================================
     # Core Operations
@@ -1524,9 +1546,15 @@ class ResilientStorageBackend:
     # =========================================================================
 
     def _switch_to_degraded(self) -> None:
-        """Switch to degraded mode on Redis failure."""
+        """Switch to degraded mode on Redis failure.
+
+        ``_degrade_count`` is bumped *before* the mode write so that a reader
+        which observes a non-REDIS mode has already observed the bump — the
+        ordering ``degrade_count``'s contract rests on.
+        """
         with self._lock:
             if self._mode != ResilientStorageMode.DEGRADED:
+                self._degrade_count += 1
                 self._mode = ResilientStorageMode.DEGRADED
                 logger.critical("resilient_storage.degraded_mode_fallback")
 
