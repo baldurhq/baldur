@@ -1415,8 +1415,8 @@ class TestRedisDLQCompressionBehavior:
     """RedisDLQCompression compressed entry CRUD behavior."""
 
     def test_store_compressed_entry_writes_blob_and_sorted_sets(self):
-        """store_compressed_entry writes the entry blob + index/domain ZSETs as
-        one batch_write_ops call (set_blob + zadd + zadd)."""
+        """store_compressed_entry writes the entry blob + the four index ZSETs
+        (index, by_domain, per-status, composite) as one batch_write_ops call."""
         backend = MagicMock()
         repo = _make_repo(backend)
 
@@ -1430,7 +1430,7 @@ class TestRedisDLQCompressionBehavior:
         assert result is True
         backend.batch_write_ops.assert_called_once()
         ops = backend.batch_write_ops.call_args[0][0]
-        assert len(ops) == 3
+        assert len(ops) == 5
 
         # The entry blob is a single STRING/blob (bytes) under the compressed key.
         op_name, key, blob = ops[0]
@@ -1443,9 +1443,15 @@ class TestRedisDLQCompressionBehavior:
         assert decoded["error_code"] == "E001"
         assert decoded["status"] == "active"
 
-        # Both index sorted-set writes ride the same batch.
+        # index, by_domain, per-status and composite writes ride the same batch.
         assert ops[1][0] == "zadd"
         assert ops[2][0] == "zadd"
+        assert ops[3][0] == "zadd"
+        assert ops[3][1] == "dlq:compressed:status:active"
+        assert entry.id in ops[3][2]
+        assert ops[4][0] == "zadd"
+        assert ops[4][1] == "dlq:compressed:status_domain:active:payment"
+        assert entry.id in ops[4][2]
 
     def test_store_compressed_entry_adds_to_index_sorted_set(self):
         """store_compressed_entry adds entry to global compressed index."""
@@ -1583,8 +1589,10 @@ class TestRedisDLQCompressionBehavior:
         """get_compressed_summary returns total, item counts, and status breakdown."""
         backend = MagicMock()
         backend.zcard.return_value = 3
-        backend.zrange.return_value = ["c1", "c2", "c3"]
-        backend.get_blob.side_effect = [
+        # Below the cap (default 5000): the whole index is walked newest-first
+        # and the blobs are fetched via one chunked get_blobs call.
+        backend.zrevrange.return_value = ["c1", "c2", "c3"]
+        backend.get_blobs.return_value = [
             _blob({"status": "active", "count": "10"}),
             _blob({"status": "active", "count": "5"}),
             _blob({"status": "stale", "count": "3"}),
@@ -1598,12 +1606,13 @@ class TestRedisDLQCompressionBehavior:
         assert summary["by_status"]["active"] == 2
         assert summary["by_status"]["stale"] == 1
         assert summary["by_status"]["archived"] == 0
+        assert "summary_truncated" not in summary
 
     def test_get_compressed_summary_empty_index(self):
         """get_compressed_summary returns zeros when no compressed entries exist."""
         backend = MagicMock()
         backend.zcard.return_value = 0
-        backend.zrange.return_value = []
+        backend.zrevrange.return_value = []
         repo = _make_repo(backend)
 
         summary = repo.compression.get_compressed_summary()
@@ -1612,7 +1621,12 @@ class TestRedisDLQCompressionBehavior:
         assert summary["total_compressed_items"] == 0
 
     def test_update_compressed_status_sets_stale_at_for_stale_status(self):
-        """update_compressed_status sets stale_at when transitioning to stale."""
+        """update_compressed_status sets stale_at when transitioning to stale.
+
+        A real status change (active->stale) relocates the per-status index
+        membership, so the blob rewrite rides a single batch_write_ops call
+        (blob-first) rather than a standalone set_blob.
+        """
         backend = MagicMock()
         backend.get_blob.return_value = _blob(
             {"id": "c1", "status": "active", "count": "5"}
@@ -1622,8 +1636,10 @@ class TestRedisDLQCompressionBehavior:
         result = repo.compression.update_compressed_status("c1", "stale")
 
         assert result is True
-        backend.set_blob.assert_called_once()
-        written = json.loads(backend.set_blob.call_args[0][1])
+        backend.batch_write_ops.assert_called_once()
+        ops = backend.batch_write_ops.call_args[0][0]
+        assert ops[0][0] == "set_blob"
+        written = json.loads(ops[0][2])
         assert written["status"] == "stale"
         assert "stale_at" in written
 
@@ -1638,7 +1654,9 @@ class TestRedisDLQCompressionBehavior:
         result = repo.compression.update_compressed_status("c1", "archived")
 
         assert result is True
-        written = json.loads(backend.set_blob.call_args[0][1])
+        ops = backend.batch_write_ops.call_args[0][0]
+        assert ops[0][0] == "set_blob"
+        written = json.loads(ops[0][2])
         assert written["status"] == "archived"
         assert "archived_at" in written
 

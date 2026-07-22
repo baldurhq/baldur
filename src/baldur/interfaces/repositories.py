@@ -869,6 +869,17 @@ class FailedOperationRepository(ABC):
         """
         raise NotImplementedError("Compression query not implemented for this adapter")
 
+    def get_compressed_entry(self, entry_id: str) -> DLQCompressedEntry | None:
+        """Return a single compressed entry by id, or ``None`` if absent.
+
+        A direct by-id read, mirroring ``get_by_id`` for main entries: no
+        index walk, so it is unaffected by index size and returns entries the
+        newest-first listing window would miss.
+        """
+        raise NotImplementedError(
+            "Compression by-id read not implemented for this adapter"
+        )
+
     def get_compressed_entries_before(
         self,
         *,

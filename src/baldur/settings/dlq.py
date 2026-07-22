@@ -136,6 +136,19 @@ class DLQSettings(BaseSettings):
         le=730,
         description="Days until STALE compressed entry transitions to ARCHIVED.",
     )
+    compress_summary_scan_cap: int = Field(
+        default=5000,
+        ge=100,
+        le=100_000,
+        description=(
+            "Upper bound on the compressed-summary walk. When the compressed "
+            "index holds more than this many entries, the summary covers the "
+            "newest ``compress_summary_scan_cap`` of them, sets "
+            "``summary_truncated`` on the response, and logs a WARNING. Below "
+            "the cap the summary is exact. Trades summary exactness against a "
+            "bounded interactive read cost on very large histories."
+        ),
+    )
 
     # ==========================================================================
     # Stale Replaying Recovery (443_LIFECYCLE_CLEANUP_GAPS D4)

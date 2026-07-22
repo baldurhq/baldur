@@ -1152,6 +1152,20 @@ class SQLFailedOperationRepository(GenericSQLRepository, FailedOperationReposito
             self._compressed_row_to_entry(row) for row in self._fetch_all(sql, params)
         ]
 
+    def get_compressed_entry(self, entry_id: str) -> DLQCompressedEntry | None:
+        """Return a single compressed entry by id, or ``None`` if absent (D2).
+
+        A primary-key point read on the ``id VARCHAR`` column — proportional
+        to matches, like every SQL compressed query.
+        """
+        row = self._fetch_one(
+            f"SELECT id, domain, failure_type, error_code, count, status, "
+            f"compressed_at, stale_at, archived_at, data FROM {_COMPRESSED_TABLE} "
+            f"WHERE id = %s",
+            (entry_id,),
+        )
+        return self._compressed_row_to_entry(row) if row else None
+
     def get_compressed_entries_before(
         self,
         *,

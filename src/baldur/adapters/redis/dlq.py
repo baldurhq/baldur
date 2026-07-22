@@ -888,6 +888,9 @@ class RedisDLQRepository(
     ) -> list[DLQCompressedEntry]:
         return self.compression.get_compressed_entries(domain, status, limit)
 
+    def get_compressed_entry(self, entry_id: str) -> DLQCompressedEntry | None:
+        return self.compression.get_compressed_entry(entry_id)
+
     def get_compressed_entries_before(
         self,
         *,

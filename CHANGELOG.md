@@ -31,6 +31,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - Shadow-testing one CB field completes the rest from the running config, not from stock defaults.
 - Async retry exhaustion now emits `RETRY_EXHAUSTED` and records the Prometheus retry series.
 - `BALDUR_RETRY_ENABLED=false` now stops async retries too: the function runs once, no retry.
+- A compressed DLQ entry outside the newest 1000 now opens in its detail view, no longer a 404.
+- The compressed-summary endpoint no longer costs one Redis round trip per entry ever compressed.
 
 ### Added
 
@@ -47,6 +49,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `BALDUR_CB_MINIMUM_CALLS` (`10`) — calls needed before the rate is trusted; gates rate only.
 - `CircuitBreakerService.get_window_evidence(name)` returns the window's `(failures, total)`.
 - `CIRCUIT_BREAKER_OPENED` carries the window failure/total counts and the consecutive count.
+- `BALDUR_DLQ_COMPRESS_SUMMARY_SCAN_CAP` (`5000`) — cap above which the compressed summary windows.
+- Compressed summary flags `summary_truncated` when it windows to the newest `…SCAN_CAP` entries.
 
 ### Changed
 

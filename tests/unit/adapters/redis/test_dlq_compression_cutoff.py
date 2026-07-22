@@ -50,8 +50,27 @@ class FakeSortedSetBackend:
         self.blob_reads += 1
         return self.blobs.get(key)
 
+    def get_blobs(self, keys: list[str]) -> list[bytes | None]:
+        # Batched read must charge the same per-key cost as get_blob, so a
+        # cost assertion cannot be passed by accident (see D8).
+        return [self.get_blob(k) for k in keys]
+
     def zadd(self, key: str, mapping: dict[str, float]) -> None:
         self.zsets.setdefault(key, {}).update(mapping)
+
+    def zrem(self, key: str, members) -> int:
+        """Remove members from a sorted set (list or single-str, as the batch
+        ops emit them). Returns the count actually removed, like Redis."""
+        zset = self.zsets.get(key)
+        if not zset:
+            return 0
+        if isinstance(members, str):
+            members = [members]
+        removed = 0
+        for m in members:
+            if zset.pop(m, None) is not None:
+                removed += 1
+        return removed
 
     def _sorted_items(self, key: str) -> list[tuple[str, float]]:
         members = self.zsets.get(key, {})
