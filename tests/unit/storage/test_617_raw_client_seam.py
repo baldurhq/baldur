@@ -207,3 +207,92 @@ class TestGetBlobsBehavior:
             result = backend.get_blobs(["k1", "k2", "k3"])
 
         assert result == [b"m1", b"m2", None]
+
+
+# =============================================================================
+# degrade_count — the seam a multi-page walk verifies itself against (723 D5)
+# =============================================================================
+
+
+class _ModeWriteRecorder(ResilientStorageBackend):
+    """Captures the degrade counter's value at the instant the mode is written.
+
+    The ordering is the contract: a reader that observes a non-REDIS mode must
+    already be able to observe the bump, because the two are read without a
+    shared lock. Recording at the write is the only way to assert that without
+    reaching for the source text.
+    """
+
+    @property
+    def _mode(self):
+        return self._recorded_mode
+
+    @_mode.setter
+    def _mode(self, value):
+        if not hasattr(self, "mode_writes"):
+            self.mode_writes = []
+        self.mode_writes.append((value, getattr(self, "_degrade_count", None)))
+        self._recorded_mode = value
+
+
+def _degrade_backend(cls=ResilientStorageBackend) -> ResilientStorageBackend:
+    """A backend wired with only what ``_switch_to_degraded`` touches."""
+    backend = object.__new__(cls)
+    backend._degrade_count = 0
+    backend._lock = threading.RLock()
+    backend._mode = ResilientStorageMode.REDIS
+    return backend
+
+
+class TestDegradeCountSeam:
+    """The monotonic counter that makes a substituted read detectable."""
+
+    def test_a_fresh_backend_has_never_degraded(self):
+        backend = _degrade_backend()
+
+        assert backend.degrade_count == 0
+
+    def test_leaving_redis_mode_bumps_the_counter_once(self):
+        backend = _degrade_backend()
+
+        backend._switch_to_degraded()
+
+        assert backend.degrade_count == 1
+
+    def test_failures_while_already_degraded_do_not_bump(self):
+        """The counter counts *transitions*, which is what a walk compares.
+
+        Every read after the first failure already comes from the local view,
+        so counting them would say nothing more than the first bump did.
+        """
+        backend = _degrade_backend()
+        backend._switch_to_degraded()
+
+        for _ in range(5):
+            backend._switch_to_degraded()
+
+        assert backend.degrade_count == 1
+
+    def test_each_return_to_redis_costs_a_new_bump(self):
+        """A walk that spans a degrade-and-recover cycle sees the difference."""
+        backend = _degrade_backend()
+        backend._switch_to_degraded()
+        before = backend.degrade_count
+
+        backend._mode = ResilientStorageMode.REDIS
+        backend._switch_to_degraded()
+
+        assert backend.degrade_count == before + 1
+
+    def test_counter_is_bumped_before_the_mode_is_written(self):
+        """A lockless reader that sees the mode has already seen the bump.
+
+        Reversed, a walk could observe DEGRADED with an unchanged counter and
+        conclude that every page it read came from Redis.
+        """
+        backend = _degrade_backend(_ModeWriteRecorder)
+        backend.mode_writes = []
+
+        backend._switch_to_degraded()
+
+        assert backend.mode_writes == [(ResilientStorageMode.DEGRADED, 1)]

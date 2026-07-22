@@ -36,6 +36,7 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
+from structlog.testing import capture_logs
 
 from baldur.adapters.memory.failed_operation import (
     InMemoryFailedOperationRepository,
@@ -810,7 +811,7 @@ class TestCleanupCompressedEntriesBehavior:
             ),
         )
 
-    def _run(self, repo, mock_get_settings):
+    def _run(self, repo, mock_get_settings, *, lock_acquired=True):
         from baldur.celery_tasks.dlq_tasks import cleanup_compressed_dlq_entries
 
         settings = MagicMock()
@@ -822,12 +823,12 @@ class TestCleanupCompressedEntriesBehavior:
         # a unit environment, so a real acquisition reports "someone else is
         # sweeping" and the drains under test would never run.
         @contextmanager
-        def _lock_held(session_id):
-            yield True
+        def _lock(session_id):
+            yield lock_acquired
 
         with (
             patch("baldur.factory.registry.ProviderRegistry") as registry,
-            patch("baldur.dlq.helpers.compressed_lifecycle_lock", _lock_held),
+            patch("baldur.dlq.helpers.compressed_lifecycle_lock", _lock),
         ):
             registry.dlq_repository.safe_get.return_value = repo
             return cleanup_compressed_dlq_entries.apply()
@@ -983,6 +984,75 @@ class TestCleanupCompressedEntriesBehavior:
         assert any(a is not None for a in seen_after[1:]), (
             f"drain never advanced its cursor: {seen_after}"
         )
+
+    @patch("baldur.settings.dlq.get_dlq_settings", autospec=True)
+    def test_a_run_that_loses_the_lock_transitions_nothing(self, mock_get_settings):
+        """Overlapping runs page through a shrinking key and step over entries.
+
+        Harmless while the walked index only ever grew; once a transition
+        removes its entry from the key being walked, the other run's positional
+        offset skips whatever moved.
+        """
+        repo = InMemoryFailedOperationRepository()
+        repo.store_compressed_entry(self._entry("c:1", compressed_days_ago=31))
+
+        result = self._run(repo, mock_get_settings, lock_acquired=False)
+
+        assert result.result == {"status": "skipped", "reason": "lock_not_acquired"}
+        assert repo._compressed_storage["c:1"].status == "active"
+
+    @patch("baldur.settings.dlq.get_dlq_settings", autospec=True)
+    def test_the_index_is_reconciled_before_the_drains_read_it(self, mock_get_settings):
+        """Step 0 is what makes the drains' index trustworthy, so it runs first.
+
+        Reconciling after the drains would leave every run reading an index
+        the previous run reconciled — one run behind, forever.
+        """
+        repo = InMemoryFailedOperationRepository()
+        repo.store_compressed_entry(self._entry("c:1", compressed_days_ago=31))
+        order = []
+        original_backfill = repo.backfill_compressed_status_index
+        original_query = repo.get_compressed_entries_before
+
+        def backfill(*args, **kwargs):
+            order.append("backfill")
+            return original_backfill(*args, **kwargs)
+
+        def query(*args, **kwargs):
+            order.append("query")
+            return original_query(*args, **kwargs)
+
+        repo.backfill_compressed_status_index = backfill
+        repo.get_compressed_entries_before = query
+
+        result = self._run(repo, mock_get_settings)
+
+        assert order[0] == "backfill"
+        assert order.count("backfill") == 1
+        assert result.result["stale_count"] == 1
+
+    @patch("baldur.settings.dlq.get_dlq_settings", autospec=True)
+    def test_a_failed_reconciliation_still_lets_the_drains_run(self, mock_get_settings):
+        """Fail-open: the drains fall back to whichever index the repository
+        considers trustworthy, which is exactly today's behaviour."""
+        repo = InMemoryFailedOperationRepository()
+        repo.store_compressed_entry(self._entry("c:1", compressed_days_ago=31))
+
+        def exploding_backfill(**kwargs):
+            raise RuntimeError("redis down")
+
+        repo.backfill_compressed_status_index = exploding_backfill
+
+        with capture_logs() as logs:
+            result = self._run(repo, mock_get_settings)
+
+        assert result.result["stale_count"] == 1
+        assert repo._compressed_storage["c:1"].status == "stale"
+        failures = [
+            e for e in logs if e["event"] == "dlq.compressed_backfill_step_failed"
+        ]
+        assert len(failures) == 1
+        assert failures[0]["log_level"] == "warning"
 
 
 class TestInMemoryCompressedByIdBehavior:
