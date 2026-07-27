@@ -18,6 +18,8 @@ Environment Variables:
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import Field
 from pydantic_settings import BaseSettings
 
@@ -25,6 +27,7 @@ from baldur.settings.base import make_settings_config
 
 __all__ = [
     "SignalHooksSettings",
+    "extract_attempt_count",
     "extract_domain_from_task_name",
     "extract_service_name",
     "get_signal_hooks_settings",
@@ -144,6 +147,29 @@ def extract_service_name(
 
     # Use domain as service name
     return extract_domain_from_task_name(task_name, config)
+
+
+def extract_attempt_count(sender: Any) -> int:
+    """
+    Extract how many attempts a task took to reach its terminal signal.
+
+    Celery counts *retries* (0 on the first run), so the attempt count is
+    ``retries + 1``. Both terminal signals dispatch while the request is still
+    pushed on the task, so ``sender.request`` is the live request. A dispatch
+    without a live request context (e.g. a worker-lost failure) reads the empty
+    Context default and degrades to 1.
+
+    Args:
+        sender: The task object carried by the Celery signal (may be None)
+
+    Returns:
+        Attempt count, at least 1
+    """
+    request = getattr(sender, "request", None) if sender is not None else None
+    retries = getattr(request, "retries", 0) if request is not None else 0
+    if not isinstance(retries, int) or retries < 0:
+        return 1
+    return retries + 1
 
 
 # ---------------------------------------------------------------------------

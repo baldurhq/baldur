@@ -25,7 +25,7 @@ __all__ = ["RetryMetricRecorder"]
 
 
 class RetryMetricRecorder(BaseMetricRecorder):
-    """Retry and Recovery metric definitions and recording (5 methods)."""
+    """Retry and Recovery metric definitions and recording."""
 
     def __init__(self) -> None:
         self._attempts_histogram = get_or_create_histogram(
@@ -38,6 +38,12 @@ class RetryMetricRecorder(BaseMetricRecorder):
             f"{self.PREFIX}_retry_outcomes_total",
             "Retry outcomes by domain and result",
             ["domain", "outcome", "is_synthetic"],
+        )
+        self._task_retries_total = get_or_create_counter(
+            f"{self.PREFIX}_task_retries_total",
+            "Task-queue-level retry signals (non-terminal): "
+            "one increment per task retry",
+            ["domain", "is_synthetic"],
         )
         self._success_rate = get_or_create_gauge(
             f"{self.PREFIX}_retry_success_rate",
@@ -88,6 +94,21 @@ class RetryMetricRecorder(BaseMetricRecorder):
             )
         except Exception as e:
             logger.warning("metrics.record_retry_metric_failed", error=e)
+
+    def record_retry_marker(self, domain: str) -> None:
+        """Record a task-queue retry signal (non-terminal).
+
+        Separate from the terminal-outcome counter on purpose: a task-queue
+        retry signal is not a resolution, so it must neither appear as an
+        outcome value nor dilute the attempts histogram, whose contract is one
+        observation per resolved call.
+        """
+        try:
+            self._task_retries_total.labels(
+                domain=domain, is_synthetic=self._get_synthetic_label()
+            ).inc()
+        except Exception as e:
+            logger.warning("metrics.record_retry_marker_failed", error=e)
 
     def record_retry(
         self, domain: str, success: bool, delay: float | None = None

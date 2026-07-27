@@ -219,6 +219,25 @@ def record_retry_attempt(domain: str, attempt_count: int, outcome: str) -> None:
         logger.warning("metrics.record_retry_metric_failed", error=e)
 
 
+def record_retry_marker(domain: str) -> None:
+    """
+    Record a task-queue retry signal (non-terminal).
+
+    Task-queue retries are not resolutions: they belong to their own counter,
+    never to the terminal-outcome counter or the attempts histogram.
+
+    Args:
+        domain: Business domain
+    """
+    try:
+        from baldur.metrics.prometheus import get_metrics
+
+        domain = resolve_domain_label(domain)
+        get_metrics().retry.record_retry_marker(domain)
+    except Exception as e:
+        logger.warning("metrics.record_retry_marker_failed", error=e)
+
+
 # =============================================================================
 # Recovery Recording Functions
 # =============================================================================
