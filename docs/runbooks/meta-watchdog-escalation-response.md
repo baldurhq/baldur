@@ -182,7 +182,7 @@ All under the admin server (mount prefix is deployment-specific):
 
 | Family | Workers |
 |---|---|
-| Audit pipeline (8) | `AuditSyncWorker`, `AuditFlushWorker`, `AsyncAuditWriter`, `AuditWatchdog`, `PendingSequenceWatchdog`, `WAL-RetentionCleanupScheduler`, `AsyncLoggerAdapter`, `AsyncHealingLogger` |
+| Audit pipeline (7) | `AuditSyncWorker`, `AuditFlushWorker`, `AsyncAuditWriter`, `PendingSequenceWatchdog`, `WAL-RetentionCleanupScheduler`, `AsyncLoggerAdapter`, `AsyncHealingLogger` |
 | DLQ / outbox (2) | `DLQOutboxWorker`, `DLQConsumer-*` (one per resource) |
 | Coordination / election / scheduling (2) | `Scheduler-*` (one per resource), `LeaderElector-*` (one per resource — bespoke row below) |
 | Event bus / config / IPC / pool (4) | `RedisEventBusListener`, `GlobalConfigPropagatorListener`, `CBStateSnapshotWriter`, `PoolCB-Refresh` |

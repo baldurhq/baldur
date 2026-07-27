@@ -26,7 +26,7 @@ class PendingSequenceWatchdog:
         On write failure, immediately cleans up (no TTL wait).
 
     Pattern source:
-        audit/audit_watchdog.py#L150-270 (daemon thread pattern)
+        audit/sync_worker.py (daemon thread pattern)
         api/django/rate_limit.py#L176-178 (cleanup interval pattern)
 
     Usage:

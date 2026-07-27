@@ -360,7 +360,6 @@ def pytest_unconfigure(config):
 _RESET_THREAD_OWNERS_FIRST = frozenset(
     {
         "baldur_pro.services.emergency_mode",
-        "baldur.audit.audit_watchdog",
         "baldur.audit.sync_worker",
         "baldur.adapters.memory.layered_repository",
         "baldur.api.django.pool_circuit_breaker",
@@ -1509,33 +1508,6 @@ def _restore_canonical_structlog_config():
 # =============================================================================
 # Watchdog Singleton Reset (non-autouse — explicit opt-in)
 # =============================================================================
-
-
-def _cleanup_watchdog(aw_module):
-    """Watchdog instance cleanup helper."""
-    instance = getattr(aw_module, "_watchdog_instance", None)
-    if instance is None:
-        return
-    try:
-        instance.stop()
-        thread = getattr(instance, "_thread", None)
-        if thread and thread.is_alive():
-            thread.join(timeout=0.2)
-    except Exception:
-        pass
-    aw_module._watchdog_instance = None
-
-
-@pytest.fixture
-def reset_watchdog_singleton():
-    """Reset AuditWatchdog singleton before/after test (explicit opt-in)."""
-    aw_module = sys.modules.get("baldur.audit.audit_watchdog")
-    if aw_module is None:
-        import baldur.audit.audit_watchdog as aw_module
-
-    _cleanup_watchdog(aw_module)
-    yield
-    _cleanup_watchdog(aw_module)
 
 
 # =============================================================================

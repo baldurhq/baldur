@@ -75,9 +75,10 @@ class TestGroupClassCountContract:
         canary_interlock per the canary-safeguard wiring)."""
         assert self._count_cached_properties(ServicesGroup) == 47
 
-    def test_audit_group_has_8_properties(self):
-        """AuditGroup has 8 cached_property accessors (668 removed the reconciler group)."""
-        assert self._count_cached_properties(AuditGroup) == 8
+    def test_audit_group_has_7_properties(self):
+        """AuditGroup has 7 cached_property accessors (668 removed the reconciler
+        group; the audit-watchdog removal dropped its settings accessor)."""
+        assert self._count_cached_properties(AuditGroup) == 7
 
     def test_coordination_group_has_3_properties(self):
         """CoordinationGroup: distributed_lock, leader_election, redis_key_guard."""

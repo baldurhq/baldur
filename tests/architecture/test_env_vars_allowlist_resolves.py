@@ -15,7 +15,7 @@ iff: take the LONGEST registered prefix ``P`` that ``V`` starts with, drop it, a
 the remainder (lowercased) is a field on some class with prefix ``P``. The
 longest-prefix rule is load-bearing for nested prefixes — ``BALDUR_DLQ_OUTBOX_``
 must win over ``BALDUR_DLQ_`` for ``BALDUR_DLQ_OUTBOX_ENABLED``, and
-``BALDUR_AUDIT_WATCHDOG_`` over ``BALDUR_AUDIT_``.
+``BALDUR_AUDIT_SYNC_`` over ``BALDUR_AUDIT_``.
 
 **Two surfaces, two strictnesses (568 D7).**
 
@@ -381,15 +381,15 @@ class TestEnvVarsAllowlistResolves:
 
 # A synthetic prefix index whose two overlapping prefix pairs mirror the real
 # nested-prefix shape (BALDUR_DLQ_ vs BALDUR_DLQ_OUTBOX_, BALDUR_AUDIT_ vs
-# BALDUR_AUDIT_WATCHDOG_) that makes longest-prefix resolution load-bearing.
-# BALDUR_AUDIT_ deliberately carries `enabled` while BALDUR_AUDIT_WATCHDOG_
+# BALDUR_AUDIT_SYNC_) that makes longest-prefix resolution load-bearing.
+# BALDUR_AUDIT_ deliberately carries `enabled` while BALDUR_AUDIT_SYNC_
 # does NOT — the exact shape that would false-resolve the G3 phantom
-# BALDUR_AUDIT_WATCHDOG_ENABLED if the resolver fell back to a shorter prefix.
+# BALDUR_AUDIT_SYNC_ENABLED if the resolver fell back to a shorter prefix.
 _SYNTHETIC_INDEX: dict[str, dict[str, Any]] = {
     "BALDUR_DLQ_": {"max_size": 100_000, "enabled": True},
     "BALDUR_DLQ_OUTBOX_": {"enabled": True},
     "BALDUR_AUDIT_": {"enabled": False},
-    "BALDUR_AUDIT_WATCHDOG_": {"missed_threshold": 3},
+    "BALDUR_AUDIT_SYNC_": {"batch_size": 100},
 }
 
 
@@ -403,8 +403,8 @@ class TestEnvVarResolution:
             == "BALDUR_DLQ_OUTBOX_"
         )
         assert (
-            _longest_prefix("BALDUR_AUDIT_WATCHDOG_MISSED_THRESHOLD", _SYNTHETIC_INDEX)
-            == "BALDUR_AUDIT_WATCHDOG_"
+            _longest_prefix("BALDUR_AUDIT_SYNC_BATCH_SIZE", _SYNTHETIC_INDEX)
+            == "BALDUR_AUDIT_SYNC_"
         )
 
     def test_longest_prefix_unregistered_var_returns_none(self):
@@ -420,11 +420,11 @@ class TestEnvVarResolution:
         assert _resolve("BALDUR_DLQ_OUTBOX_ENABLED", _SYNTHETIC_INDEX) is True
 
     def test_resolve_does_not_fall_back_to_shorter_prefix_field(self):
-        # The G3 phantom: BALDUR_AUDIT_WATCHDOG_ has no `enabled`, and the rule
+        # The G3 phantom: BALDUR_AUDIT_SYNC_ has no `enabled`, and the rule
         # MUST NOT fall back to BALDUR_AUDIT_.enabled (which DOES exist).
         # Longest-prefix is load-bearing for rejecting this exact var.
         assert "enabled" in _SYNTHETIC_INDEX["BALDUR_AUDIT_"]
-        assert _resolve("BALDUR_AUDIT_WATCHDOG_ENABLED", _SYNTHETIC_INDEX) is False
+        assert _resolve("BALDUR_AUDIT_SYNC_ENABLED", _SYNTHETIC_INDEX) is False
 
     def test_resolve_unknown_field_under_correct_prefix_is_false(self):
         # The G1 phantom: max_entries is not a field under BALDUR_DLQ_.
@@ -617,4 +617,4 @@ class TestPrefixIndex:
         # resolves, the phantom watchdog toggle does not.
         index = _build_prefix_index()
         assert _resolve("BALDUR_DLQ_OUTBOX_ENABLED", index) is True
-        assert _resolve("BALDUR_AUDIT_WATCHDOG_ENABLED", index) is False
+        assert _resolve("BALDUR_AUDIT_SYNC_ENABLED", index) is False

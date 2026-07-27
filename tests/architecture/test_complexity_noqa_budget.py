@@ -91,7 +91,8 @@ _ROOT_BUDGETS: dict[str, int] = {
     # it had before (relocation, not new complexity).
     # 719: -1 — CircuitBreakerEvaluator._simulate dropped its C901/PLR0912 noqa
     # when its inline trip branches were replaced by the shared evaluate_trip call.
-    "baldur": 114,
+    # audit-watchdog removal: -1 — the deleted module carried one complexity noqa.
+    "baldur": 113,
     # 666: -1 — _update_config_with_meta refactored into _versioned_write +
     # _merge_changes + _post_write helpers, dropping its complexity noqa.
     "baldur_pro": 32,

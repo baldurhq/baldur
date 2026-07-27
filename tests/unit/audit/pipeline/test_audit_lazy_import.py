@@ -261,30 +261,6 @@ class TestAuditLazyImport:
         assert WALStats is not None
         assert callable(create_wal)
 
-    def test_lazy_import_watchdog(self):
-        """Watchdog symbols should be lazily loaded."""
-        from baldur.audit import (
-            AuditWatchdog,
-            AuditWatchdogConfig,
-            AuditWatchdogStatus,
-            HeartbeatTarget,
-            WatchdogChecker,
-            WatchdogStats,
-            get_watchdog,
-            start_watchdog,
-            stop_watchdog,
-        )
-
-        assert AuditWatchdog is not None
-        assert AuditWatchdogConfig is not None
-        assert AuditWatchdogStatus is not None
-        assert WatchdogStats is not None
-        assert HeartbeatTarget is not None
-        assert WatchdogChecker is not None
-        assert callable(get_watchdog)
-        assert callable(start_watchdog)
-        assert callable(stop_watchdog)
-
     def test_lazy_import_verify_integrity(self):
         """Verify integrity symbols should be lazily loaded."""
         from baldur.audit import (
@@ -428,8 +404,8 @@ class TestAuditLazyImport:
         from baldur import audit
 
         # Access the same symbol twice — pick a surviving lazy symbol.
-        first_access = audit.AuditWatchdog
-        second_access = audit.AuditWatchdog
+        first_access = audit.WALStats
+        second_access = audit.WALStats
 
         # Both should be the same object (cached)
         assert first_access is second_access
