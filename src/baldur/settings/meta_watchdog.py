@@ -136,7 +136,12 @@ class MetaWatchdogSettings(BaseSettings):
     )
     pagerduty_severity: Literal["critical", "error", "warning", "info"] = Field(
         default="critical",
-        description="PagerDuty alert severity",
+        description=(
+            "PagerDuty alert severity — a global override applied to every "
+            "escalation event. At the default 'critical', severity is instead "
+            "mapped per event from the event's level, so component pages stay "
+            "critical while the operator self-test is sent as 'info'."
+        ),
     )
 
     # Slack

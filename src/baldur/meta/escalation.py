@@ -498,6 +498,14 @@ class EscalationManager:
         fails, ``error_message`` aggregates the per-channel cause; when no
         channel is configured, it says so.
 
+        The self-test cleans up after itself: when the PagerDuty channel was
+        attempted, its synthetic incident is closed in the same call (an
+        Events API ``resolve`` on the same dedup key), so a channel check no
+        longer leaves a real incident open for a human to remember. Because
+        that close is reported separately from delivery, ``success=True`` may
+        now coexist with a non-None ``error_message`` — the trigger was
+        delivered but the close was not, and the note says so.
+
         Returns:
             EscalationResult with per-channel sent/failed lists.
         """
@@ -539,13 +547,23 @@ class EscalationManager:
                 channels_failed.append(resolved)
                 failure_reasons.append(f"{resolved}: {reason}")
 
+        resolve_note = self._resolve_self_test_incident(
+            payload, channels_sent, channels_failed
+        )
+
         configured_any = bool(channels_sent or channels_failed)
+        # Delivery-based, as the 569 contract requires: the resolve leg is
+        # cleanup and never turns a delivered self-test into a failure.
         success = configured_any and not channels_failed
+
+        notes = [*failure_reasons]
+        if resolve_note:
+            notes.append(resolve_note)
 
         if not configured_any:
             error_message: str | None = "No escalation channel configured"
-        elif failure_reasons:
-            error_message = "; ".join(failure_reasons)
+        elif notes:
+            error_message = "; ".join(notes)
         else:
             error_message = None
 
@@ -574,6 +592,74 @@ class EscalationManager:
             )
 
         return result
+
+    @staticmethod
+    def _resolve_self_test_incident(
+        payload: NotificationPayload,
+        channels_sent: list[str],
+        channels_failed: list[str],
+    ) -> str | None:
+        """Close the synthetic PagerDuty incident the self-test just opened.
+
+        Runs when the PagerDuty channel was **attempted** — delivered or not.
+        A client-visible send failure does not mean PagerDuty rejected the
+        event (the enqueue may have succeeded and only the read timed out), so
+        keying on delivery would leave open exactly the incidents this leg
+        exists to close. Resolving a dedup key with no open incident is a
+        no-op on the Events API side, so firing on attempt has no false effect.
+
+        The resolve capability is duck-probed (the ``send_with_reason``
+        precedent): an operator-registered PagerDuty adapter without it opened
+        a real incident, so a missing capability is reported as a resolve
+        failure, never as a silent success.
+
+        Args:
+            payload: the payload the trigger used (it carries the dedup key's
+                inputs, so trigger and resolve address the same incident)
+            channels_sent: resolved channels that delivered
+            channels_failed: resolved channels that failed to deliver
+
+        Returns:
+            An operator-facing note to fold into ``error_message``, or None
+            when there is nothing to report.
+        """
+        pagerduty = NotificationChannel.PAGERDUTY.value
+        triggered_ok = pagerduty in channels_sent
+        if not triggered_ok and pagerduty not in channels_failed:
+            return None
+
+        adapter = get_notification_adapter(NotificationChannel.PAGERDUTY)
+        send_resolve = getattr(adapter, "send_resolve", None)
+        if callable(send_resolve):
+            ok, reason = send_resolve(payload)
+        else:
+            ok, reason = False, "adapter has no resolve capability"
+
+        if ok:
+            return None
+
+        # The routing key was cleared between the trigger and the resolve (the
+        # adapter re-reads the settings singleton on every call): there is no
+        # configuration left to report against.
+        if reason == "not configured":
+            return None
+
+        if not triggered_ok:
+            # Best-effort cleanup for an incident that may never have been
+            # opened — telling the operator to close it by hand would be false
+            # guidance, so this stays out of the operator-facing result.
+            logger.debug(
+                "escalation.self_test_resolve_failed",
+                reason=reason,
+                detail="trigger also failed; no incident known to exist",
+            )
+            return None
+
+        logger.warning("escalation.self_test_resolve_failed", reason=reason)
+        return (
+            f"pagerduty: resolve failed ({reason}) — "
+            "test incident left open; close manually"
+        )
 
     def get_last_escalation_time(self, component: str) -> float | None:
         """
