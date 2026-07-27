@@ -34,7 +34,8 @@ from .helpers import (
     _default_get_retry_after,
     _default_is_429,
     _emit_rate_limit_event,
-    _record_rate_limit_metrics,
+    _record_rate_limit_429,
+    _record_rate_limit_cooldown,
 )
 from .models import (
     RateLimitCoordinatorConfig,
@@ -49,7 +50,8 @@ __all__ = [
     "RateLimitResult",
     # Helpers
     "_emit_rate_limit_event",
-    "_record_rate_limit_metrics",
+    "_record_rate_limit_429",
+    "_record_rate_limit_cooldown",
     "_default_is_429",
     "_default_get_retry_after",
     # Coordinator

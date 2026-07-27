@@ -44,7 +44,7 @@ def _emit_rate_limit_event(
         event_type = getattr(EventType, event_type_name, None)
         if event_type is None:
             logger.warning(
-                "adaptive_throttle.unknown_event_type",
+                "rate_limit_coordinator.unknown_event_type",
                 event_type_name=event_type_name,
             )
             return
@@ -61,7 +61,7 @@ def _emit_rate_limit_event(
             event_type_name=event_type_name,
         )
     except ImportError:
-        logger.debug("rate_limit_coordinator.eventbus_available")
+        logger.debug("rate_limit_coordinator.eventbus_unavailable")
     except Exception as e:
         logger.warning(
             "rate_limit_coordinator.emit_event_failed",
@@ -69,37 +69,66 @@ def _emit_rate_limit_event(
         )
 
 
-def _record_rate_limit_metrics(
+# =============================================================================
+# Prometheus Recording Helpers (Fail-Open)
+# =============================================================================
+# Each helper records exactly one concern so its call site can be placed at the
+# earliest point where its values are known to be true. They are deliberately
+# NOT one helper with optional arguments: the 429 counter must fire before any
+# storage call, and a second call carrying only the cooldown values would
+# double-count it.
+
+
+def _record_rate_limit_429(key: str, status_code: int = 429) -> None:
+    """
+    Record an observed 429 into the rate-limit counter.
+
+    Counts 429s **observed by the coordinator**, not cooldowns successfully
+    installed — so a storm stays countable even while the coordination store
+    is rejecting writes.
+
+    Ignored if the metric definitions are missing or the import fails (fail-open).
+    """
+    try:
+        from baldur.services.metrics.definitions import rate_limit_429_total
+
+        rate_limit_429_total.labels(key=key, status_code=str(status_code)).inc()
+    except ImportError:
+        logger.debug("rate_limit_coordinator.metrics_module_unavailable")
+    except Exception as e:
+        logger.warning(
+            "rate_limit_coordinator.metrics_failed",
+            error=e,
+        )
+
+
+def _record_rate_limit_cooldown(
     key: str,
-    status_code: int = 429,
-    cooldown_seconds: float | None = None,
-    consecutive_429s: int | None = None,
+    cooldown_seconds: float,
+    consecutive_429s: int,
 ) -> None:
     """
-    Record rate-limit Prometheus metrics.
+    Record the cooldown a 429 computed and the consecutive-429 count.
+
+    Both values are true from the moment the cooldown is computed, so this is
+    recorded before the cooldown is stored — a store that then fails does not
+    invalidate either number.
 
     Ignored if the metric definitions are missing or the import fails (fail-open).
     """
     try:
         from baldur.services.metrics.definitions import (
-            rate_limit_429_total,
             rate_limit_consecutive_429s,
             rate_limit_cooldown_seconds,
         )
 
-        rate_limit_429_total.labels(key=key, status_code=str(status_code)).inc()
-
-        if cooldown_seconds is not None:
-            rate_limit_cooldown_seconds.labels(key=key).observe(cooldown_seconds)
-
-        if consecutive_429s is not None:
-            rate_limit_consecutive_429s.labels(key=key).set(consecutive_429s)
-
+        rate_limit_cooldown_seconds.labels(key=key).observe(cooldown_seconds)
+        rate_limit_consecutive_429s.labels(key=key).set(consecutive_429s)
     except ImportError:
-        logger.debug("rate_limit_coordinator.metrics_module_available")
+        logger.debug("rate_limit_coordinator.metrics_module_unavailable")
     except Exception as e:
-        logger.debug(
-            "adaptive_throttle.metrics_failed",
+        logger.warning(
+            "rate_limit_coordinator.metrics_failed",
             error=e,
         )
 
