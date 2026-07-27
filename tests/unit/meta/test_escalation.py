@@ -554,6 +554,25 @@ class _ResolvelessAdapter(NotificationAdapter):
         return self._channel
 
 
+class _ContractBreakingAdapter(_ResolvelessAdapter):
+    """A PagerDuty-channel adapter whose ``send_resolve`` breaks its contract.
+
+    The other half of the third-party-adapter case: the method exists, so the
+    capability probe admits it, but it does not honor ``(ok, reason)``. Both
+    breakages funnel through the same unpack site — ``raise`` propagates, and
+    a bare bool fails to unpack — so one adapter covers them by mode.
+    """
+
+    def __init__(self, channel: NotificationChannel, mode: str) -> None:
+        super().__init__(channel)
+        self._mode = mode
+
+    def send_resolve(self, payload):
+        if self._mode == "raises":
+            raise ConnectionError("pd unreachable")
+        return True  # bare bool, not the (ok, reason) tuple
+
+
 def _install_adapter(channel_name: str, adapter) -> None:
     """Swap one seam slot; the ``seam`` fixture restores it on teardown."""
     from baldur.factory import ProviderRegistry
@@ -681,6 +700,40 @@ class TestEscalationSelfTestResolveBehavior:
 
         assert result.success is True
         assert "adapter has no resolve capability" in result.error_message
+        assert "close manually" in result.error_message
+
+    @pytest.mark.parametrize(
+        ("mode", "expected_cause"),
+        [
+            ("raises", "pd unreachable"),
+            ("bare_bool", "cannot unpack"),
+        ],
+        ids=["raises", "returns_bare_bool"],
+    )
+    def test_close_capability_that_breaks_its_contract_is_a_close_failure(
+        self, seam, mode, expected_cause
+    ):
+        """A third-party adapter's broken close must not break the self-test.
+
+        The probe admits any callable, but an adapter registered through the
+        public seam is not bound by the ``(ok, reason)`` contract. Cleanup is
+        best-effort, so a raise (or a bare bool that fails to unpack) is
+        reported like any other close failure — it must not propagate out of a
+        self-test whose delivery succeeded, which would turn a green channel
+        check into a 500.
+        """
+        # Given an operator-registered PagerDuty adapter with a broken close
+        _install_adapter(
+            "pagerduty", _ContractBreakingAdapter(NotificationChannel.PAGERDUTY, mode)
+        )
+        manager = EscalationManager(settings=self._pagerduty_only())
+
+        result = manager.send_test()
+
+        # Then delivery still reads green and the cause reaches the operator
+        assert result.success is True
+        assert result.channels_sent == ["pagerduty"]
+        assert expected_cause in result.error_message
         assert "close manually" in result.error_message
 
     def test_unattempted_pagerduty_channel_is_never_closed(self, seam):
