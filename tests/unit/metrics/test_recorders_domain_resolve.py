@@ -79,7 +79,7 @@ class TestRecordersDomainResolveBehavior:
         """
         from baldur.services.metrics.recorders import record_retry_marker
 
-        mock_metrics = MagicMock()
+        mock_metrics = MagicMock(spec=["retry"])
         with patch("baldur.metrics.prometheus.get_metrics", return_value=mock_metrics):
             record_retry_marker("unknown_domain_abc")
 
@@ -91,7 +91,7 @@ class TestRecordersDomainResolveBehavior:
         """A registered domain reaches the recorder unchanged."""
         from baldur.services.metrics.recorders import record_retry_marker
 
-        mock_metrics = MagicMock()
+        mock_metrics = MagicMock(spec=["retry"])
         with patch("baldur.metrics.prometheus.get_metrics", return_value=mock_metrics):
             record_retry_marker("external_service")
 
@@ -107,7 +107,7 @@ class TestRecordersDomainResolveBehavior:
         """
         from baldur.services.metrics.recorders import record_retry_marker
 
-        mock_metrics = MagicMock()
+        mock_metrics = MagicMock(spec=["retry"])
         mock_metrics.retry.record_retry_marker.side_effect = RuntimeError(
             "metrics backend down"
         )

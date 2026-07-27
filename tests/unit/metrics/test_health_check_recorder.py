@@ -19,6 +19,25 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
+from structlog.testing import capture_logs
+
+
+class _RaisingCollector:
+    """A metric double that records the touch it then refuses to serve.
+
+    Patching a Prometheus collector with ``side_effect`` does nothing: the
+    recorder never calls the collector, it calls ``.labels(...)`` on it, so the
+    side effect never fires and the fail-open arm never runs. The double raises
+    from the attribute the recorder actually reaches, and remembers that it was
+    reached so the test can prove the fault happened at all.
+    """
+
+    def __init__(self) -> None:
+        self.touched = False
+
+    def labels(self, **_kwargs: object) -> None:
+        self.touched = True
+        raise RuntimeError("metrics registry down")
 
 
 @pytest.fixture
@@ -97,14 +116,24 @@ class TestHealthCheckRecorderBehavior:
         health_check_recorder.set_status("overall", "nonexistent_status")
 
     def test_record_check_exception_is_suppressed(self, health_check_recorder):
-        """Exception in record_check is caught and logged (fail-open)."""
-        with patch.object(
-            health_check_recorder,
-            "_duration",
-            side_effect=Exception("boom"),
-            autospec=True,
+        """Exception in record_check is caught and logged (fail-open).
+
+        The double raises from ``.labels(...)`` — the attribute the recorder
+        actually reaches — because a ``side_effect`` on the collector itself
+        never fires: the recorder never calls the collector.
+        """
+        collector = _RaisingCollector()
+        with (
+            patch.object(health_check_recorder, "_duration", collector),
+            capture_logs() as logs,
         ):
             health_check_recorder.record_check("database", "healthy", 0.1)
+
+        assert collector.touched, "the fail-open arm was never reached"
+        record = next(
+            log for log in logs if log["event"] == "metrics.record_health_check_failed"
+        )
+        assert record["log_level"] == "warning"
 
 
 # =============================================================================

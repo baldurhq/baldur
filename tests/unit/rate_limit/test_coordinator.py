@@ -828,7 +828,7 @@ class TestCoordinatorFailOpenLogEventsContract:
         """A live-bus emit failure is a genuine anomaly — WARNING, with the cause."""
         from baldur.services.rate_limit_coordinator import _emit_rate_limit_event
 
-        mock_bus = MagicMock()
+        mock_bus = MagicMock(spec=["emit"])
         mock_bus.emit.side_effect = RuntimeError("bus broken")
 
         with (
@@ -848,7 +848,7 @@ class TestCoordinatorFailOpenLogEventsContract:
         """The triaging operator needs the rejected name, not just the fact."""
         from baldur.services.rate_limit_coordinator import _emit_rate_limit_event
 
-        mock_bus = MagicMock()
+        mock_bus = MagicMock(spec=["emit"])
         with (
             patch("baldur.services.event_bus.get_event_bus", return_value=mock_bus),
             capture_logs() as logs,
