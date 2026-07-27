@@ -10,6 +10,7 @@ from views import (
     flaky,
     idempotent,
     pro_metrics_demo,
+    rate_limited,
     shutdown_sim,
     system_control_cycle,
 )
@@ -17,6 +18,7 @@ from views import (
 urlpatterns = [
     path("demo/", demo),
     path("flaky/", flaky),
+    path("rate-limited/", rate_limited),
     path("idempotent/", idempotent),
     path("system-control/", system_control_cycle),
     # Baldur health + Prometheus exposition. The collector scrapes
