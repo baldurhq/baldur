@@ -12,6 +12,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ### Fixed
 
+- The escalation channel self-test now closes the PagerDuty incident it opens.
+- If that close fails, the self-test result names the cause and says to close it manually.
 - Durability directories fall back to a writable location when the shipped default is not.
 - A directory you set explicitly fails loud: `ConfigurationError` names it and its env var.
 - `ResilientStorageBackend` warns instead of logging an ERROR traceback on a non-root install.

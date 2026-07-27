@@ -44,16 +44,28 @@ from tests.factories import MockRedisClient
 
 
 class _FakeAdapter(NotificationAdapter):
-    """Records sent payloads and returns a configurable success flag."""
+    """Records sent payloads and returns a configurable success flag.
+
+    Mirrors the PRO adapters' optional extras: ``send_resolve`` stands in for
+    the PagerDuty close verb the self-test fires after its trigger, recording
+    its payloads separately and returning a configurable ``(ok, reason)``.
+    """
 
     def __init__(self, channel: NotificationChannel) -> None:
         self._channel = channel
         self.ok = True
         self.calls: list = []
+        self.resolve_ok = True
+        self.resolve_reason: str | None = "resolve failed"
+        self.resolve_calls: list = []
 
     def send(self, payload) -> bool:
         self.calls.append(payload)
         return self.ok
+
+    def send_resolve(self, payload) -> tuple[bool, str | None]:
+        self.resolve_calls.append(payload)
+        return (True, None) if self.resolve_ok else (False, self.resolve_reason)
 
     def send_batch(self, payloads) -> int:
         return sum(1 for p in payloads if self.send(p))
