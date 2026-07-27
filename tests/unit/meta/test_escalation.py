@@ -528,6 +528,198 @@ class TestEscalationSendTest:
         assert "pagerduty:" not in result.error_message
 
 
+class _ResolvelessAdapter(NotificationAdapter):
+    """A PagerDuty-channel adapter with NO ``send_resolve``.
+
+    Stands in for an adapter an operator registered themselves through the
+    public seam: its trigger opens a real incident, so a missing close
+    capability must be reported, never treated as a silent success. Kept
+    separate from ``_FakeAdapter`` on purpose — the shared fake must keep the
+    attribute for every other case.
+    """
+
+    def __init__(self, channel: NotificationChannel) -> None:
+        self._channel = channel
+        self.calls: list = []
+
+    def send(self, payload) -> bool:
+        self.calls.append(payload)
+        return True
+
+    def send_batch(self, payloads) -> int:
+        return sum(1 for p in payloads if self.send(p))
+
+    @property
+    def channel(self) -> NotificationChannel:
+        return self._channel
+
+
+def _install_adapter(channel_name: str, adapter) -> None:
+    """Swap one seam slot; the ``seam`` fixture restores it on teardown."""
+    from baldur.factory import ProviderRegistry
+
+    ProviderRegistry.register_notification(channel_name, lambda: adapter)
+    ProviderRegistry.notification.set_instance(channel_name, adapter)
+
+
+class TestEscalationSelfTestResolveBehavior:
+    """send_test()'s PagerDuty close leg.
+
+    The self-test opens a real PagerDuty incident, so it closes it in the same
+    call. The leg fires on *attempted* rather than delivered — a client-visible
+    send failure does not mean PagerDuty rejected the event, and resolving a
+    dedup key with no open incident is an accepted no-op — and its outcome is
+    reported separately from delivery, so ``success`` stays delivery-based.
+    """
+
+    @staticmethod
+    def _pagerduty_only() -> MetaWatchdogSettings:
+        """Settings with PagerDuty as the single configured channel."""
+        return MetaWatchdogSettings(
+            slack_webhook_url=None,
+            pagerduty_routing_key="pd-routing-key",
+        )
+
+    def test_delivered_trigger_closes_the_incident_with_the_trigger_payload(self, seam):
+        """A delivered self-test closes itself, on the payload it opened with."""
+        manager = EscalationManager(settings=self._pagerduty_only())
+
+        result = manager.send_test()
+
+        # The same payload object reaches both verbs — it carries the dedup
+        # key's inputs, so trigger and close address one incident.
+        assert result.success is True
+        assert len(seam.pagerduty.resolve_calls) == 1
+        assert seam.pagerduty.resolve_calls[0] is seam.pagerduty.calls[0]
+        assert result.error_message is None
+
+    def test_failed_trigger_still_closes_the_incident(self, seam):
+        """The close fires on *attempted* — a failed send may still have landed."""
+        # Given PagerDuty reports the trigger as failed (the enqueue may
+        # nevertheless have succeeded and only the read timed out)
+        seam.pagerduty.ok = False
+        manager = EscalationManager(settings=self._pagerduty_only())
+
+        result = manager.send_test()
+
+        # Then the channel is recorded failed AND the close still went out —
+        # a delivered-keyed leg would leak exactly this incident
+        assert result.channels_failed == ["pagerduty"]
+        assert len(seam.pagerduty.resolve_calls) == 1
+
+    def test_failed_close_after_failed_trigger_adds_no_manual_close_note(self, seam):
+        """No incident is known to exist, so "close manually" would be false guidance."""
+        seam.pagerduty.ok = False
+        seam.pagerduty.resolve_ok = False
+        manager = EscalationManager(settings=self._pagerduty_only())
+
+        result = manager.send_test()
+
+        assert result.success is False
+        assert result.error_message.startswith("pagerduty:")
+        assert "close manually" not in result.error_message
+
+    def test_failed_close_after_delivered_trigger_reports_note_and_keeps_success(
+        self, seam
+    ):
+        """The close failure is reported without turning a delivered test red.
+
+        Also pins the all-succeeded path: ``error_message`` is None there, so
+        composing the note (rather than appending to it) is what keeps this
+        from raising.
+        """
+        seam.pagerduty.resolve_ok = False
+        manager = EscalationManager(settings=self._pagerduty_only())
+
+        result = manager.send_test()
+
+        assert result.success is True
+        assert result.channels_sent == ["pagerduty"]
+        assert result.channels_failed == []
+        assert "close manually" in result.error_message
+
+    @pytest.mark.parametrize(
+        "reason",
+        [
+            "unexpected status 429",
+            "HTTPSConnectionPool(host='events.pagerduty.com'): Read timed out.",
+        ],
+        ids=["rejected_status", "transport_exception"],
+    )
+    def test_failed_close_note_carries_the_adapter_reason_verbatim(self, seam, reason):
+        """The note names the cause so the operator can pick retry vs PD console."""
+        seam.pagerduty.resolve_ok = False
+        seam.pagerduty.resolve_reason = reason
+        manager = EscalationManager(settings=self._pagerduty_only())
+
+        result = manager.send_test()
+
+        assert reason in result.error_message
+
+    def test_close_reporting_not_configured_is_a_silent_noop(self, seam):
+        """A routing key cleared mid-call leaves no configuration to report on."""
+        seam.pagerduty.resolve_ok = False
+        seam.pagerduty.resolve_reason = "not configured"
+        manager = EscalationManager(settings=self._pagerduty_only())
+
+        result = manager.send_test()
+
+        assert result.success is True
+        assert result.error_message is None
+
+    def test_adapter_without_close_capability_is_reported_as_a_close_failure(
+        self, seam
+    ):
+        """A missing capability is a failure, never a silently claimed close."""
+        # Given an operator-registered PagerDuty adapter with no send_resolve
+        _install_adapter(
+            "pagerduty", _ResolvelessAdapter(NotificationChannel.PAGERDUTY)
+        )
+        manager = EscalationManager(settings=self._pagerduty_only())
+
+        result = manager.send_test()
+
+        assert result.success is True
+        assert "adapter has no resolve capability" in result.error_message
+        assert "close manually" in result.error_message
+
+    def test_unattempted_pagerduty_channel_is_never_closed(self, seam):
+        """An unconfigured PagerDuty opened nothing, so nothing is closed."""
+        manager = EscalationManager(
+            settings=MetaWatchdogSettings(
+                slack_webhook_url="https://hooks.slack.com/test",
+                pagerduty_routing_key=None,
+            )
+        )
+
+        result = manager.send_test()
+
+        assert result.channels_sent == ["slack"]
+        assert seam.pagerduty.resolve_calls == []
+
+    def test_logging_fallback_install_never_closes_an_incident(self, seam):
+        """OSS-only: both channels resolve to the log adapter, so the leg is dead.
+
+        The fallback fake *does* expose ``send_resolve``, so an empty call list
+        pins the attempted-channel guard rather than a missing attribute.
+        """
+        # Given an OSS-only seam: every configured channel resolves to "log"
+        fallback = _FakeAdapter(NotificationChannel.LOG)
+        _install_adapter("slack", fallback)
+        _install_adapter("pagerduty", fallback)
+        manager = EscalationManager(
+            settings=MetaWatchdogSettings(
+                slack_webhook_url="https://hooks.slack.com/test",
+                pagerduty_routing_key="pd-routing-key",
+            )
+        )
+
+        result = manager.send_test()
+
+        assert result.channels_sent == ["log"]
+        assert fallback.resolve_calls == []
+
+
 class TestEscalationProPresentPushRegression:
     """640 regression guard: a registered Slack push adapter still pushes.
 
