@@ -36,7 +36,7 @@ class AsyncAuditWriter:
         Request handler returns immediately after queueing.
 
     Pattern source:
-        audit/audit_watchdog.py#L150-270 (daemon thread pattern)
+        audit/sync_worker.py (daemon thread pattern)
 
     Usage:
         writer = AsyncAuditWriter(sync_writer)

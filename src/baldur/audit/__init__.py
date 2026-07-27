@@ -182,16 +182,6 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "WALState": ("baldur.audit.wal", "WALState"),
     "WALStats": ("baldur.audit.wal", "WALStats"),
     "create_wal": ("baldur.audit.wal", "create_wal"),
-    # audit_watchdog (9)
-    "AuditWatchdog": ("baldur.audit.audit_watchdog", "AuditWatchdog"),
-    "AuditWatchdogConfig": ("baldur.audit.audit_watchdog", "AuditWatchdogConfig"),
-    "AuditWatchdogStatus": ("baldur.audit.audit_watchdog", "AuditWatchdogStatus"),
-    "WatchdogStats": ("baldur.audit.audit_watchdog", "WatchdogStats"),
-    "HeartbeatTarget": ("baldur.audit.audit_watchdog", "HeartbeatTarget"),
-    "WatchdogChecker": ("baldur.audit.audit_watchdog", "WatchdogChecker"),
-    "get_watchdog": ("baldur.audit.audit_watchdog", "get_watchdog"),
-    "start_watchdog": ("baldur.audit.audit_watchdog", "start_watchdog"),
-    "stop_watchdog": ("baldur.audit.audit_watchdog", "stop_watchdog"),
     # verify_audit_integrity (4)
     "AuditIntegrityVerifier": (
         "baldur.audit.verify_audit_integrity",
@@ -297,17 +287,6 @@ if TYPE_CHECKING:
         IntegratedAuditRecorder,
         configure_integration,
         create_command_center_callback,
-    )
-    from baldur.audit.audit_watchdog import (
-        AuditWatchdog,
-        AuditWatchdogConfig,
-        AuditWatchdogStatus,
-        HeartbeatTarget,
-        WatchdogChecker,
-        WatchdogStats,
-        get_watchdog,
-        start_watchdog,
-        stop_watchdog,
     )
     from baldur.audit.checksum import (
         ChecksumResult,
@@ -500,15 +479,6 @@ __all__ = [
     "WALStats",
     "create_wal",
     # Audit Watchdog (Dead Man's Switch)
-    "AuditWatchdog",
-    "AuditWatchdogConfig",
-    "AuditWatchdogStatus",
-    "WatchdogStats",
-    "HeartbeatTarget",
-    "WatchdogChecker",
-    "get_watchdog",
-    "start_watchdog",
-    "stop_watchdog",
     # Audit Integrity Verifier (CLI Tool)
     "AuditIntegrityVerifier",
     "VerificationResult",

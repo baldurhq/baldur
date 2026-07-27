@@ -28,7 +28,6 @@ if TYPE_CHECKING:
     from baldur.settings.audit import AuditSettings
     from baldur.settings.audit_integrity import AuditIntegritySettings
     from baldur.settings.audit_sync import AuditSyncSettings
-    from baldur.settings.audit_watchdog import AuditWatchdogSettings
     from baldur.settings.auto_rollback import AutoRollbackSettings
     from baldur.settings.auto_tuning import AutoTuningSettings
     from baldur.settings.backoff import BackoffSettings
@@ -543,12 +542,6 @@ class AuditGroup:
         from baldur.settings.audit_sync import AuditSyncSettings
 
         return AuditSyncSettings()
-
-    @cached_property
-    def audit_watchdog(self) -> AuditWatchdogSettings:
-        from baldur.settings.audit_watchdog import AuditWatchdogSettings
-
-        return AuditWatchdogSettings()
 
     @cached_property
     def cascade(self) -> CascadeSettings:

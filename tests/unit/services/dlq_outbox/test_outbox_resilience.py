@@ -437,7 +437,7 @@ class TestOutboxWorkerDeathAlertBehavior:
         """Death events for other workers must not toggle dlq_outbox's flag."""
         outbox_module._worker_dead = False
         try:
-            outbox_module._on_daemon_worker_died(self._make_event("AuditWatchdog"))
+            outbox_module._on_daemon_worker_died(self._make_event("AuditSyncWorker"))
             assert is_worker_dead() is False
         finally:
             outbox_module._worker_dead = False
@@ -457,7 +457,9 @@ class TestOutboxWorkerDeathAlertBehavior:
         """Respawn events for other workers must not clear dlq_outbox's flag."""
         outbox_module._worker_dead = True
         try:
-            outbox_module._on_daemon_worker_respawned(self._make_event("AuditWatchdog"))
+            outbox_module._on_daemon_worker_respawned(
+                self._make_event("AuditSyncWorker")
+            )
             assert is_worker_dead() is True
         finally:
             outbox_module._worker_dead = False

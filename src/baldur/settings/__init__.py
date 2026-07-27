@@ -74,11 +74,6 @@ if TYPE_CHECKING:
         get_audit_sync_settings,
         reset_audit_sync_settings,
     )
-    from baldur.settings.audit_watchdog import (
-        AuditWatchdogSettings,
-        get_audit_watchdog_settings,
-        reset_audit_watchdog_settings,
-    )
     from baldur.settings.auto_rollback import (
         AutoRollbackSettings,
         get_auto_rollback_settings,
@@ -618,18 +613,6 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "reset_audit_sync_settings": (
         "baldur.settings.audit_sync",
         "reset_audit_sync_settings",
-    ),
-    "AuditWatchdogSettings": (
-        "baldur.settings.audit_watchdog",
-        "AuditWatchdogSettings",
-    ),
-    "get_audit_watchdog_settings": (
-        "baldur.settings.audit_watchdog",
-        "get_audit_watchdog_settings",
-    ),
-    "reset_audit_watchdog_settings": (
-        "baldur.settings.audit_watchdog",
-        "reset_audit_watchdog_settings",
     ),
     "AutoRollbackSettings": ("baldur.settings.auto_rollback", "AutoRollbackSettings"),
     "get_auto_rollback_settings": (
@@ -1636,10 +1619,6 @@ __all__ = [
     "AuditSyncSettings",
     "get_audit_sync_settings",
     "reset_audit_sync_settings",
-    # Audit Watchdog
-    "AuditWatchdogSettings",
-    "get_audit_watchdog_settings",
-    "reset_audit_watchdog_settings",
     # Regional Recovery Policy
     "RegionalRecoveryPolicySettings",
     "get_regional_recovery_policy_settings",

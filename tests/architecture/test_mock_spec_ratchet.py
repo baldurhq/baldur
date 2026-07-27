@@ -125,7 +125,9 @@ _MOCK_CREATION_BUDGETS: dict[str, int] = {
     # mocks in the by-id, chunked-summary and get_blobs suites (I/O-boundary
     # mocks per §6.4, following this file's existing spec-less backend-mock
     # convention).
-    "oss": 4356,
+    # audit-watchdog removal: -5 — test_audit_watchdog.py was deleted with the
+    # module it covered.
+    "oss": 4351,
     "pro": 1800,
     "dormant": 401,
 }

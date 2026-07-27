@@ -140,7 +140,7 @@ class TestDaemonWorkerKillRespawnE2E:
         outbox_module._worker_dead = False
         try:
             other_event = MagicMock()
-            other_event.data = {"worker_name": "AuditWatchdog"}
+            other_event.data = {"worker_name": "AuditSyncWorker"}
 
             outbox_module._on_daemon_worker_died(other_event)
 

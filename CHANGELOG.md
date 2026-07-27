@@ -107,6 +107,9 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `CHAOS_SCHEDULER_BEAT_SCHEDULE` — unread duplicate of the lane getter. **Breaking**
 - `InMemoryCircuitBreakerStateRepository(sliding_window_size=)` — moved to the service. **Breaking**
 - `LayeredCircuitBreakerStateRepository(sliding_window_size=)` — same removal. **Breaking**
+- `AuditWatchdog` + exports — nothing ever started it; no in-tree replacement. **Breaking**
+- It pushed an outbound dead-man's-switch ping; use an external uptime monitor instead.
+- `BALDUR_AUDIT_WATCHDOG_*` — never had any effect. **Breaking**
 
 ### Fixed
 

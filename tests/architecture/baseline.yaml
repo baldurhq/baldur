@@ -43,7 +43,6 @@ health_check_naming:
 
 startup_wiring:
   - {file: src/baldur/adapters/celery/signal_hooks.py, symbol: setup_baldur_signals, reason: 'permanent exemption: user-invoked integration API. The caller owns the Celery app object, so the library cannot invoke this - the docstring Example is the intended call site', ticket: '506'}
-  - {file: src/baldur/audit/audit_watchdog.py, symbol: start_watchdog, reason: 'genuinely uncalled: AuditWatchdog has no production consumer anywhere - get_watchdog/start_watchdog/stop_watchdog and the audit_watchdog settings class are reachable only from this module. Removal-vs-wiring is an owner decision (public export + published BALDUR_AUDIT_WATCHDOG_* env vars)', ticket: '506'}
   - {file: src/baldur/audit/sync_worker.py, symbol: start_sync_worker, reason: 'gate reach: invoked by async_audit_lifecycle._start_sync_worker(), which is not in the entry-point set. It is now the single start path - the lifecycle delegates here rather than repeating the absorb-then-start sequence', ticket: '506'}
   - {file: src/baldur/context/celery_propagation.py, symbol: setup_celery_causation_propagation, reason: 'vestigial by design: the before_task_publish handler is connected by the @before_task_publish.connect decorator at import time. This function only records enablement state, so nothing calls it and nothing needs to', ticket: '506'}
   - {file: src/baldur/observability/baggage.py, symbol: setup_baggage_propagation, reason: 'gate reach: invoked from observability/__init__.py, which is not in the entry-point set (widening the set to cover it would make nearly every module an entry point and gut the rule)', ticket: '506'}
@@ -250,7 +249,6 @@ all_declaration:
   - {file: "src/baldur/api/django/views/xtest/retry.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/api/django/views/xtest/scenarios/base.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/audit/async_audit_lifecycle.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
-  - {file: "src/baldur/audit/audit_watchdog.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/audit/cascade_chain.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/audit/cascade_config.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/audit/cascade_event.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
@@ -516,7 +514,6 @@ all_declaration:
   - {file: "src/baldur/settings/audit.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/settings/audit_integrity.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/settings/audit_sync.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
-  - {file: "src/baldur/settings/audit_watchdog.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/settings/auto_config.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/settings/auto_rollback.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/settings/backoff.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
