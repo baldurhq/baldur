@@ -197,17 +197,18 @@ def _detect_task_source(task_name: str) -> str:
 
 def setup_celery_causation_propagation() -> None:
     """
-    Enable automatic Celery causation propagation.
+    Mark Celery causation propagation as enabled.
 
-    Connects the before_task_publish signal so that the current
-    CausationContext is included in the headers of every published task.
+    The ``before_task_publish`` handler that injects the current
+    CausationContext into published task headers is connected by the
+    ``@before_task_publish.connect`` decorator at **import time** — importing
+    this module is what enables propagation. Calling this function only records
+    the state and emits the enablement log; it is not required for propagation
+    to work, and nothing in the library calls it.
 
     Usage:
         from baldur.context.celery_propagation import setup_celery_causation_propagation
         setup_celery_causation_propagation()
-
-    Note:
-        Called automatically by setup_baldur_signals() in signal_hooks.py.
     """
     global _before_task_publish_connected
 
