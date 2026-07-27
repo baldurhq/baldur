@@ -16,6 +16,7 @@ from baldur.adapters.celery.integrations.metric_recorder import (
 )
 from baldur.adapters.celery.signal_config import (
     SignalHooksSettings,
+    extract_attempt_count,
     extract_service_name,
 )
 
@@ -61,7 +62,11 @@ class SuccessHandler:
 
             # Metrics: Record success
             if self._config.metrics_enabled:
-                self._metrics.record_success(service_name, task_name)
+                self._metrics.record_success(
+                    service_name,
+                    task_name,
+                    attempt_count=extract_attempt_count(sender),
+                )
 
         except Exception as e:
             logger.exception(

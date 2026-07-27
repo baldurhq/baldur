@@ -54,6 +54,7 @@ from .recorders import (
     record_recovery_time,
     record_replay_attempt,
     record_retry_attempt,
+    record_retry_marker,
     record_sla_breach,
 )
 
@@ -90,6 +91,7 @@ __all__ = [
     "record_dlq_item_created",
     "record_sla_breach",
     "record_retry_attempt",
+    "record_retry_marker",
     "record_recovery_time",
     "record_circuit_breaker_state_change",
     "record_circuit_breaker_open_duration",

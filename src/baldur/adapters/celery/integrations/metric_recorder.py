@@ -25,14 +25,28 @@ class MetricRecorder:
     def __init__(self, config: SignalHooksSettings) -> None:
         self._config = config
 
-    def record_failure(self, domain: str, task_name: str, exception: Exception) -> None:
-        """Record failure metrics."""
+    def record_failure(
+        self,
+        domain: str,
+        task_name: str,
+        exception: Exception,
+        attempt_count: int = 1,
+    ) -> None:
+        """Record failure metrics.
+
+        Args:
+            domain: Business domain the task belongs to
+            task_name: Celery task name
+            exception: The exception that terminated the task
+            attempt_count: Attempts this task took to reach its terminal
+                failure (``request.retries + 1``); 1 when unknown
+        """
         try:
             from baldur.services.metrics.recorders import record_retry_attempt
 
             record_retry_attempt(
                 domain=domain,
-                attempt_count=1,
+                attempt_count=attempt_count,
                 outcome="failure",
             )
         except ImportError:
@@ -43,15 +57,24 @@ class MetricRecorder:
                 error=e,
             )
 
-    def record_success(self, service_name: str, task_name: str) -> None:
-        """Record success metrics."""
+    def record_success(
+        self, service_name: str, task_name: str, attempt_count: int = 1
+    ) -> None:
+        """Record success metrics.
+
+        Args:
+            service_name: Resolved service name (unused by the metric itself)
+            task_name: Celery task name the domain is derived from
+            attempt_count: Attempts this task took to succeed
+                (``request.retries + 1``); 1 when unknown
+        """
         try:
             from baldur.services.metrics.recorders import record_retry_attempt
 
             domain = extract_domain_from_task_name(task_name, self._config)
             record_retry_attempt(
                 domain=domain,
-                attempt_count=1,
+                attempt_count=attempt_count,
                 outcome="success",
             )
         except ImportError:
@@ -63,15 +86,16 @@ class MetricRecorder:
             )
 
     def record_retry(self, domain: str, task_name: str) -> None:
-        """Record retry attempt metrics."""
-        try:
-            from baldur.services.metrics.recorders import record_retry_attempt
+        """Record a task retry signal.
 
-            record_retry_attempt(
-                domain=domain,
-                attempt_count=1,
-                outcome="retry",
-            )
+        A retry signal is non-terminal, so it goes to its own counter — never
+        to the terminal-outcome counter, and never as an observation into the
+        attempts histogram (whose contract is attempts-before-resolution).
+        """
+        try:
+            from baldur.services.metrics.recorders import record_retry_marker
+
+            record_retry_marker(domain=domain)
         except ImportError:
             pass
         except Exception as e:

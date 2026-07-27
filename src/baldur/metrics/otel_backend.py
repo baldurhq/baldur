@@ -118,6 +118,13 @@ class _OTELRetryRecorder:
             f"{prefix}_retry_outcomes_total",
             description="Retry outcomes by domain and result",
         )
+        self._task_retries_total = meter.create_counter(
+            f"{prefix}_task_retries_total",
+            description=(
+                "Task-queue-level retry signals (non-terminal): "
+                "one increment per task retry"
+            ),
+        )
         self._success_store = gauge_store_fn("retry_success")
         meter.create_observable_gauge(
             f"{prefix}_retry_success_rate",
@@ -165,6 +172,17 @@ class _OTELRetryRecorder:
             )
         except Exception as e:
             logger.warning("metrics.record_retry_metric_failed", error=e)
+
+    def record_retry_marker(self, domain: str) -> None:
+        try:
+            from baldur.core.test_mode_context import TestModeContext
+
+            is_synthetic = TestModeContext.get_synthetic_label_value()
+            self._task_retries_total.add(
+                1, {"domain": domain, "is_synthetic": is_synthetic}
+            )
+        except Exception as e:
+            logger.warning("metrics.record_retry_marker_failed", error=e)
 
     def record_retry(
         self, domain: str, success: bool, delay: float | None = None

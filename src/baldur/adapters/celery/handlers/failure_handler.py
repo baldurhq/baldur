@@ -20,6 +20,7 @@ from baldur.adapters.celery.integrations.metric_recorder import (
 )
 from baldur.adapters.celery.signal_config import (
     SignalHooksSettings,
+    extract_attempt_count,
     extract_domain_from_task_name,
     extract_service_name,
 )
@@ -137,7 +138,12 @@ class FailureHandler:
 
         # 3. Metrics: Record failure
         if self._config.metrics_enabled and exception is not None:
-            self._metrics.record_failure(domain, task_name, exception)
+            self._metrics.record_failure(
+                domain,
+                task_name,
+                exception,
+                attempt_count=extract_attempt_count(sender),
+            )
 
         # 4. Forensics: Capture context
         if self._config.forensics_enabled and exception is not None:
