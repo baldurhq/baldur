@@ -77,7 +77,7 @@ class _Task:
 # =============================================================================
 
 
-class TestExtractAttemptCount:
+class TestExtractAttemptCountBehavior:
     """``retries + 1``, degrading to 1 whenever the count is not knowable.
 
     Degrading to 1 rather than 0 keeps every observation inside the histogram's
@@ -135,7 +135,7 @@ class TestExtractAttemptCount:
 # =============================================================================
 
 
-class TestSignalMetricAttempts:
+class TestSignalMetricAttemptsBehavior:
     """``MetricRecorder`` forwards the attempt count and routes retries away.
 
     Asserts the forwarded arguments rather than a return value: the recorder
@@ -259,7 +259,7 @@ class _StubGaugeStore:
         return []
 
 
-class TestRetryMarkerRecorder:
+class TestRetryMarkerRecorderBehavior:
     """``record_retry_marker`` writes its own series under both backends.
 
     The dedicated series is what keeps a task-queue retry out of the terminal
@@ -366,7 +366,7 @@ class TestRetryMarkerRecorder:
 # =============================================================================
 
 
-class TestSignalHandlersAttemptCount:
+class TestSignalHandlersAttemptCountBehavior:
     """Both terminal handlers read the live request and pass the real count."""
 
     @pytest.fixture
