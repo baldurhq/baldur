@@ -238,6 +238,27 @@ def record_retry_marker(domain: str) -> None:
         logger.warning("metrics.record_retry_marker_failed", error=e)
 
 
+def record_task_attempt(domain: str, attempt_count: int, outcome: str) -> None:
+    """
+    Record a task-queue terminal on the task layer's own series.
+
+    The task queue and the protected call it may wrap are two layers resolving
+    two different things, so each keeps its own attempts denominator.
+
+    Args:
+        domain: Business domain
+        attempt_count: Attempts the task took to resolve (1 + its own retries)
+        outcome: Result (success, failure)
+    """
+    try:
+        from baldur.metrics.prometheus import get_metrics
+
+        domain = resolve_domain_label(domain)
+        get_metrics().retry.record_task_attempt(domain, attempt_count, outcome)
+    except Exception as e:
+        logger.warning("metrics.record_task_attempt_failed", error=e)
+
+
 # =============================================================================
 # Recovery Recording Functions
 # =============================================================================

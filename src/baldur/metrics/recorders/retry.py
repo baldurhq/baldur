@@ -45,6 +45,17 @@ class RetryMetricRecorder(BaseMetricRecorder):
             "one increment per task retry",
             ["domain", "is_synthetic"],
         )
+        self._task_attempts_histogram = get_or_create_histogram(
+            f"{self.PREFIX}_task_attempts_distribution",
+            "Task attempts before resolution: 1 + the task's own retries",
+            ["domain", "is_synthetic"],
+            buckets=(1, 2, 3, 4, 5, 6, 7, 8, 9, 10),
+        )
+        self._task_outcomes_total = get_or_create_counter(
+            f"{self.PREFIX}_task_outcomes_total",
+            "Task-queue-level terminal outcomes by domain and result",
+            ["domain", "outcome", "is_synthetic"],
+        )
         self._success_rate = get_or_create_gauge(
             f"{self.PREFIX}_retry_success_rate",
             "Percentage of successful retries (0-100)",
@@ -94,6 +105,33 @@ class RetryMetricRecorder(BaseMetricRecorder):
             )
         except Exception as e:
             logger.warning("metrics.record_retry_metric_failed", error=e)
+
+    def record_task_attempt(
+        self, domain: str, attempt_count: int, outcome: str
+    ) -> None:
+        """Record a task-queue terminal on the task layer's own series.
+
+        Separate from the protected-call retry series on purpose: the task
+        queue and the protected call are two layers resolving two different
+        things, so sharing one attempts denominator dilutes both.
+        """
+        try:
+            is_synthetic = self._get_synthetic_label()
+            self._task_attempts_histogram.labels(
+                domain=domain, is_synthetic=is_synthetic
+            ).observe(attempt_count)
+            self._task_outcomes_total.labels(
+                domain=domain, outcome=outcome, is_synthetic=is_synthetic
+            ).inc()
+            logger.debug(
+                "metrics.task_attempt_recorded",
+                healing_domain=domain,
+                attempt_count=attempt_count,
+                outcome=outcome,
+                is_synthetic=is_synthetic,
+            )
+        except Exception as e:
+            logger.warning("metrics.record_task_attempt_failed", error=e)
 
     def record_retry_marker(self, domain: str) -> None:
         """Record a task-queue retry signal (non-terminal).
