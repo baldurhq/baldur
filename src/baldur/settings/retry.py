@@ -15,13 +15,13 @@ Environment Variables:
     ... etc
 
 Note:
-    Legacy backoff fields (backoff_base, min_delay, jitter_percent) moved to
-    BackoffSettings.legacy_* (baldur.settings.backoff).
-    Env vars: BALDUR_BACKOFF_LEGACY_BASE, BALDUR_BACKOFF_LEGACY_MIN_DELAY,
-    BALDUR_BACKOFF_LEGACY_JITTER_PERCENT.
+    The backoff *shape* dials (multiplier, jitter width, linear increment) live
+    in BackoffSettings (baldur.settings.backoff) under BALDUR_BACKOFF_*; this
+    class owns the retry ladder itself (attempts, strategy, base/max delay).
 """
 
-from pydantic import Field, field_validator
+import structlog
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 from baldur.settings.base import make_settings_config
@@ -35,6 +35,8 @@ from baldur.settings.field_types import (
 )
 from baldur.settings.validators import warn_above
 
+logger = structlog.get_logger()
+
 # Valid backoff strategies (from core/safe_defaults.py)
 VALID_BACKOFF_STRATEGIES = {"exponential", "linear", "constant", "decorrelated_jitter"}
 
@@ -45,11 +47,6 @@ class RetrySettings(BaseSettings):
 
     All defaults match core/config.py:RetryConfig
     All validation rules match core/safe_defaults.py:VALIDATION_RULES["retry"]
-
-    Note:
-        Legacy backoff fields (backoff_base, min_delay, jitter_percent) are
-        now in BackoffSettings (settings/backoff.py) as legacy_base,
-        legacy_min_delay, legacy_jitter_percent. See doc 359 Option B.
     """
 
     model_config = make_settings_config("BALDUR_RETRY_")
@@ -115,6 +112,25 @@ class RetrySettings(BaseSettings):
         if v is None:
             return v
         return warn_above(3600, "safe_default.high_consider_using_responsiveness")(v)
+
+    @model_validator(mode="after")
+    def _warn_base_delay_exceeds_max_delay(self) -> "RetrySettings":
+        """Warn when the first backoff wait is already above the per-sleep cap.
+
+        Every strategy enforces the cap when it computes a delay, so the pair is
+        inert rather than invalid — the ladder simply starts saturated and stays
+        there. Warning rather than raising follows that: the configuration is
+        suboptimal, not unsafe. The values are deliberately left untouched;
+        rewriting base_delay down to max_delay would mutate operator intent to
+        fix behavior that is already correct.
+        """
+        if self.base_delay > self.max_delay:
+            logger.warning(
+                "settings.retry_base_exceeds_max_delay",
+                base_delay=self.base_delay,
+                max_delay=self.max_delay,
+            )
+        return self
 
 
 # =============================================================================

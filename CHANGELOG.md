@@ -49,6 +49,10 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `baldur_rate_limit_429_total` counts every 429; the event debounce no longer flattens it.
 - It is recorded before the storage calls, so a storm stays countable during a Redis outage.
 - Celery task terminals record their real attempt count in `baldur_task_attempts_distribution`.
+- OSS retries now wait the `BALDUR_RETRY_BASE_DELAY` you set; every wait was ~4x longer before.
+- `BALDUR_BACKOFF_EXPONENTIAL_MULTIPLIER` and `_JITTER_FACTOR` now reach the retry ladder.
+- `BALDUR_RETRY_BACKOFF_STRATEGY` now picks the strategy; exponential ran whatever you set.
+- A per-domain `retry.base_delay` override now takes effect; a bad value falls back with a WARNING.
 
 ### Added
 
@@ -79,6 +83,9 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - Sample alert `TaskFailureRateHigh` — the task-queue counterpart of the protected-call rule.
 - Shipped Grafana boards gain rate-limit panels; task-layer panels join the operations board.
 - The demo stack drives a `/rate-limited/` endpoint, so the rate limit panels start populated.
+- Startup report gains `effective_retry_backoff`: the ladder the retry stage actually builds.
+- `RetrySettings` warns when `base_delay` exceeds `max_delay`, which starts the ladder saturated.
+- `ConstantBackoff(max_delay=...)` caps the constant delay; unset keeps today's uncapped behavior.
 
 ### Changed
 
@@ -97,6 +104,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `baldur_retry_outcomes_total{outcome="retry"}` → `baldur_task_retries_total`. **Breaking**
 - Celery terminals → `baldur_task_outcomes_total`/`baldur_task_attempts_distribution`. **Breaking**
 - The retry series and its two sample alerts are now protected-call SLIs, task queue excluded.
+- Retry jitter defaults to +/-20% (was 25%), matching `BALDUR_BACKOFF_EXPONENTIAL_JITTER_FACTOR`.
+- `RetryPolicyConfig` defaults are now 1 s base / 60 s cap; pipeline presets shorten to match.
 
 ### Removed
 
@@ -116,6 +125,9 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `AuditWatchdog` + exports — nothing ever started it; no in-tree replacement. **Breaking**
 - It pushed an outbound dead-man's-switch ping; use an external uptime monitor instead.
 - `BALDUR_AUDIT_WATCHDOG_*` — never had any effect. **Breaking**
+- `BALDUR_BACKOFF_LEGACY_*` — use `BALDUR_RETRY_BASE_DELAY` for the first wait. **Breaking**
+- Routes `xtest/retry/backoff-preview/` + `simulate/` — read `effective_retry_backoff`. **Breaking**
+- Both rendered a curve no retry path produced; the startup-report entry reports the real one.
 
 ### Fixed
 

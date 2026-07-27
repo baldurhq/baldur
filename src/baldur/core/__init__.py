@@ -5,7 +5,7 @@ This module contains pure Python implementations without any framework dependenc
 
 Backoff API:
     - ExponentialBackoff, LinearBackoff, etc.: Strategy pattern implementations
-      Usage: strategy = ExponentialBackoff(base=2); strategy.calculate(attempt)
+      Usage: strategy = ExponentialBackoff(base_delay=2.0); strategy.calculate(attempt)
 
 Status: Internal
 """

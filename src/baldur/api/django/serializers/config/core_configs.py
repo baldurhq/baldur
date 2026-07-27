@@ -103,11 +103,11 @@ class RetryConfigSerializer(ApplyStrategyMixin):
         required=False,
         choices=["exponential", "linear", "constant", "decorrelated_jitter"],
     )
-    backoff_base = serializers.IntegerField(required=False, min_value=1, max_value=10)
+    # Seconds — the first retry delay, same quantity and bounds as base_delay
+    # below (the two spellings are interchangeable override keys).
+    backoff_base = serializers.FloatField(required=False, min_value=0.1, max_value=60.0)
     base_delay = serializers.FloatField(required=False, min_value=0.1, max_value=60.0)
     max_delay = serializers.FloatField(required=False, min_value=1.0, max_value=3600.0)
-    min_delay = serializers.IntegerField(required=False, min_value=1, max_value=60)
-    jitter = serializers.BooleanField(required=False)
     jitter_percent = serializers.IntegerField(
         required=False, min_value=0, max_value=100
     )

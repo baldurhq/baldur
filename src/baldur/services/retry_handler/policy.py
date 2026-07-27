@@ -45,7 +45,7 @@ _UNIDENTIFIED_DOMAIN = "default"
 _unidentified_key_warned: set[str] = set()
 _unidentified_key_warned_lock = threading.Lock()
 
-from baldur.core.backoff import BackoffStrategy, ExponentialBackoff
+from baldur.core.backoff import BackoffStrategy
 from baldur.core.execution_mode import intervention_suppressed
 from baldur.interfaces.resilience_policy import (
     PolicyContext,
@@ -54,7 +54,11 @@ from baldur.interfaces.resilience_policy import (
     ResiliencePolicy,
 )
 
-from .models import MaxRetriesExceededError, RetryPolicyConfig
+from .models import (
+    STATEFUL_BACKOFF_STRATEGY,
+    MaxRetriesExceededError,
+    RetryPolicyConfig,
+)
 
 if TYPE_CHECKING:
     from baldur.services.backoff_calculator import AdaptiveRetryBudget
@@ -119,11 +123,24 @@ class RetryPolicy(ResiliencePolicy[T]):
                 "object and cannot be evaluated by the sync retry loop."
             )
         self._max_elapsed = config.max_elapsed
-        self._backoff = backoff or ExponentialBackoff(
-            base_delay=config.backoff_base,
-            max_delay=config.backoff_max,
-            jitter_factor=config.jitter_percent / 100.0,
-        )
+        # An injected strategy always wins — a caller who built one asked for it.
+        # Otherwise the config builds its own. Every path goes through a factory
+        # so the one stateful strategy can hand each execution its own instance:
+        # a single shared decorrelated instance would interleave its running
+        # ``_previous_delay`` across concurrent ladders, because protect()'s
+        # composer cache hands the same policy object to every caller of a name.
+        # The stateless strategies keep one shared instance in ``_backoff`` and
+        # the factory just hands it back; ``_backoff`` is None exactly when the
+        # ladder owns a private instance.
+        self._backoff: BackoffStrategy | None
+        self._backoff_factory: Callable[[], BackoffStrategy]
+        if backoff is None and config.backoff_strategy == STATEFUL_BACKOFF_STRATEGY:
+            self._backoff = None
+            self._backoff_factory = config.build_backoff
+        else:
+            strategy = backoff if backoff is not None else config.build_backoff()
+            self._backoff = strategy
+            self._backoff_factory = lambda: strategy
         self._rate_limit_coordinator = rate_limit_coordinator
         self._retry_budget = retry_budget
         # ``sleeper=None`` means "use the safe sync default" — historically this
@@ -282,6 +299,11 @@ class RetryPolicy(ResiliencePolicy[T]):
         start = time.monotonic()
         budget, budget_reason = self._resolve_effective_budget()
 
+        # Execution-local, never assigned back to ``self``: a stateful strategy
+        # gets a fresh instance for this ladder alone, while every other policy
+        # keeps the single instance built at construction.
+        backoff = self._backoff_factory()
+
         while attempt < self._config.max_attempts:
             attempt += 1
 
@@ -418,7 +440,7 @@ class RetryPolicy(ResiliencePolicy[T]):
                 break
 
             # Compute backoff
-            delay = self._backoff.calculate(attempt, context=context)
+            delay = backoff.calculate(attempt, context=context)
 
             # (ii) Cooperative budget check — never start a sleep+attempt that
             # would overrun the budget.

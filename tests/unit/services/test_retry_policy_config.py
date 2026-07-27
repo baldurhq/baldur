@@ -31,16 +31,16 @@ class TestRetryPolicyConfigContract:
         assert RetryPolicyConfig().max_attempts == 3
 
     def test_backoff_base_default(self):
-        """backoff_base defaults to 4."""
-        assert RetryPolicyConfig().backoff_base == 4
+        """backoff_base defaults to the standard 1.0 s first delay."""
+        assert RetryPolicyConfig().backoff_base == 1.0
 
     def test_backoff_max_default(self):
-        """backoff_max defaults to 180."""
-        assert RetryPolicyConfig().backoff_max == 180
+        """backoff_max defaults to the standard 60.0 s cap."""
+        assert RetryPolicyConfig().backoff_max == 60.0
 
     def test_jitter_percent_default(self):
-        """jitter_percent defaults to 25."""
-        assert RetryPolicyConfig().jitter_percent == 25
+        """jitter_percent defaults to the standard 20% width."""
+        assert RetryPolicyConfig().jitter_percent == 20.0
 
     def test_domain_default(self):
         """domain defaults to 'default'."""
@@ -136,8 +136,18 @@ class TestRetryPolicyConfigSourcingBehavior:
         """Minimal settings tree for the PRO-absent static path."""
         return SimpleNamespace(
             core=SimpleNamespace(
-                retry=SimpleNamespace(max_attempts=3, max_delay=180, max_elapsed=None),
-                backoff=SimpleNamespace(legacy_base=4, legacy_jitter_percent=25),
+                retry=SimpleNamespace(
+                    max_attempts=3,
+                    max_delay=180,
+                    max_elapsed=None,
+                    base_delay=1.0,
+                    backoff_strategy="exponential",
+                ),
+                backoff=SimpleNamespace(
+                    exponential_jitter_factor=0.2,
+                    exponential_multiplier=2.0,
+                    linear_increment=1.0,
+                ),
             ),
             services_group=SimpleNamespace(dlq=SimpleNamespace(enabled=True)),
             domain_configs=domain_configs,

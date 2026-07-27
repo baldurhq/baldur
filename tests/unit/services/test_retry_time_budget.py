@@ -266,8 +266,18 @@ class TestRetryBudgetConfigMappingBehavior:
         on the PRO-absent static path."""
         fake_config = SimpleNamespace(
             core=SimpleNamespace(
-                retry=SimpleNamespace(max_attempts=3, max_delay=180, max_elapsed=45.0),
-                backoff=SimpleNamespace(legacy_base=4, legacy_jitter_percent=25),
+                retry=SimpleNamespace(
+                    max_attempts=3,
+                    max_delay=180,
+                    max_elapsed=45.0,
+                    base_delay=1.0,
+                    backoff_strategy="exponential",
+                ),
+                backoff=SimpleNamespace(
+                    exponential_jitter_factor=0.2,
+                    exponential_multiplier=2.0,
+                    linear_increment=1.0,
+                ),
             ),
             services_group=SimpleNamespace(dlq=SimpleNamespace(enabled=True)),
             domain_configs={},

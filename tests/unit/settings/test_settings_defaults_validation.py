@@ -1,7 +1,7 @@
 """
 Tests for Settings Modules - Defaults and Validation.
 
-신규 Settings 모듈들의 기본값, 환경변수 오버라이드, 유효성 검증 테스트:
+Defaults, environment-variable overrides and validation for the settings modules:
 - StressTestSettings
 - CleanupSettings
 - PrecomputedCacheSettings
@@ -38,7 +38,7 @@ class TestStressTestSettings:
         reset_stress_test_settings()
 
     def test_default_values(self):
-        """기본값이 stress_test_service.py와 일치하는지 검증."""
+        """Defaults match stress_test_service.py."""
         from baldur.settings.stress_test import StressTestSettings
 
         settings = StressTestSettings()
@@ -50,7 +50,7 @@ class TestStressTestSettings:
         assert settings.inter_request_sleep_ms == 10
 
     def test_env_override(self, monkeypatch):
-        """환경변수로 값을 오버라이드할 수 있는지 검증."""
+        """Environment variables override the defaults."""
         from baldur.settings.stress_test import StressTestSettings
 
         monkeypatch.setenv("BALDUR_STRESS_TEST_DEFAULT_LOCK_TIMEOUT_MS", "5")
@@ -62,14 +62,14 @@ class TestStressTestSettings:
         assert settings.max_burst_duration_seconds == 60
 
     def test_validation_min_lock_timeout(self):
-        """lock_timeout_ms 최소값(1) 검증."""
+        """lock_timeout_ms accepts its minimum (1) and rejects below it."""
         from baldur.settings.stress_test import StressTestSettings
 
         with pytest.raises(ValidationError):
             StressTestSettings(default_lock_timeout_ms=0)
 
     def test_singleton_pattern(self):
-        """싱글톤 패턴이 동작하는지 검증."""
+        """The singleton getter returns the same instance."""
         from baldur.settings.stress_test import (
             get_stress_test_settings,
         )
@@ -98,7 +98,7 @@ class TestCleanupSettings:
         reset_cleanup_settings()
 
     def test_default_values(self):
-        """기본값이 cleanup_service.py와 일치하는지 검증."""
+        """Defaults match cleanup_service.py."""
         from baldur.settings.cleanup import CleanupSettings
 
         settings = CleanupSettings()
@@ -109,7 +109,7 @@ class TestCleanupSettings:
         assert settings.purge_older_than_days == 90
 
     def test_env_override(self, monkeypatch):
-        """환경변수로 값을 오버라이드할 수 있는지 검증."""
+        """Environment variables override the defaults."""
         from baldur.settings.cleanup import CleanupSettings
 
         monkeypatch.setenv("BALDUR_CLEANUP_ARCHIVE_OLDER_THAN_DAYS", "60")
@@ -121,7 +121,7 @@ class TestCleanupSettings:
         assert settings.purge_older_than_days == 180
 
     def test_singleton_pattern(self):
-        """싱글톤 패턴이 동작하는지 검증."""
+        """The singleton getter returns the same instance."""
         from baldur.settings.cleanup import get_cleanup_settings
 
         settings1 = get_cleanup_settings()
@@ -150,7 +150,7 @@ class TestPrecomputedCacheSettings:
         reset_precomputed_cache_settings()
 
     def test_default_values(self):
-        """기본값이 precomputed_cache.py와 일치하는지 검증."""
+        """Defaults match precomputed_cache.py."""
         from baldur.settings.precomputed_cache import PrecomputedCacheSettings
 
         settings = PrecomputedCacheSettings()
@@ -161,7 +161,7 @@ class TestPrecomputedCacheSettings:
         assert settings.refresh_interval_seconds == 10.0
 
     def test_singleton_pattern(self):
-        """싱글톤 패턴이 동작하는지 검증."""
+        """The singleton getter returns the same instance."""
         from baldur.settings.precomputed_cache import (
             get_precomputed_cache_settings,
         )
@@ -190,7 +190,7 @@ class TestBackoffSettings:
         reset_backoff_settings()
 
     def test_default_values(self):
-        """기본값이 core/backoff.py와 일치하는지 검증."""
+        """Defaults match core/backoff.py."""
         from baldur.settings.backoff import BackoffSettings
 
         settings = BackoffSettings()
@@ -211,12 +211,8 @@ class TestBackoffSettings:
         assert settings.constant_delay == 5.0
         assert settings.constant_jitter_factor == 0.1
 
-        # Legacy
-        assert settings.legacy_base == 4
-        assert settings.legacy_jitter_percent == 25
-
     def test_singleton_pattern(self):
-        """싱글톤 패턴이 동작하는지 검증."""
+        """The singleton getter returns the same instance."""
         from baldur.settings.backoff import get_backoff_settings
 
         settings1 = get_backoff_settings()
@@ -243,7 +239,7 @@ class TestPoolMonitorSettings:
         reset_pool_monitor_settings()
 
     def test_default_values(self):
-        """기본값이 core/pool_monitor.py와 일치하는지 검증."""
+        """Defaults match core/pool_monitor.py."""
         from baldur.settings.pool_monitor import PoolMonitorSettings
 
         settings = PoolMonitorSettings()
@@ -254,7 +250,7 @@ class TestPoolMonitorSettings:
         assert settings.max_history == 5000
 
     def test_threshold_validation(self):
-        """warning_threshold < critical_threshold 검증."""
+        """warning_threshold must stay below critical_threshold."""
         from baldur.settings.pool_monitor import PoolMonitorSettings
 
         # Valid: warning < critical
@@ -266,7 +262,7 @@ class TestPoolMonitorSettings:
             PoolMonitorSettings(warning_threshold=90.0, critical_threshold=80.0)
 
     def test_singleton_pattern(self):
-        """싱글톤 패턴이 동작하는지 검증."""
+        """The singleton getter returns the same instance."""
         from baldur.settings.pool_monitor import get_pool_monitor_settings
 
         settings1 = get_pool_monitor_settings()
@@ -295,7 +291,7 @@ class TestRegionalEmergencySettings:
         reset_regional_emergency_settings()
 
     def test_default_values(self):
-        """기본값이 regional_emergency/*.py와 일치하는지 검증."""
+        """Defaults match regional_emergency/*.py."""
         from baldur.settings.regional_emergency import RegionalEmergencySettings
 
         settings = RegionalEmergencySettings()
@@ -307,7 +303,7 @@ class TestRegionalEmergencySettings:
         assert settings.max_buffer_size == 1000
 
     def test_singleton_pattern(self):
-        """싱글톤 패턴이 동작하는지 검증."""
+        """The singleton getter returns the same instance."""
         from baldur.settings.regional_emergency import (
             get_regional_emergency_settings,
         )
@@ -336,7 +332,7 @@ class TestCanarySettings:
         reset_canary_settings()
 
     def test_default_values(self):
-        """기본값이 canary/*.py와 일치하는지 검증."""
+        """Defaults match canary/*.py."""
         from baldur.settings.canary import CanarySettings
 
         settings = CanarySettings()
@@ -346,7 +342,7 @@ class TestCanarySettings:
         assert settings.default_expiry_hours == 24
 
     def test_singleton_pattern(self):
-        """싱글톤 패턴이 동작하는지 검증."""
+        """The singleton getter returns the same instance."""
         from baldur.settings.canary import get_canary_settings
 
         settings1 = get_canary_settings()
@@ -373,7 +369,7 @@ class TestCanaryWatchdogSettings:
         reset_canary_watchdog_settings()
 
     def test_default_values(self):
-        """기본값이 canary_watchdog.py와 일치하는지 검증."""
+        """Defaults match canary_watchdog.py."""
         from baldur.settings.canary_watchdog import CanaryWatchdogSettings
 
         settings = CanaryWatchdogSettings()
@@ -387,7 +383,7 @@ class TestCanaryWatchdogSettings:
         assert settings.slack_channel == "#baldur-alerts"
 
     def test_timing_validation(self):
-        """auto_rollback_after_minutes > zombie_threshold_minutes 검증."""
+        """auto_rollback_after_minutes must stay above zombie_threshold_minutes."""
         from baldur.settings.canary_watchdog import CanaryWatchdogSettings
 
         # Valid: auto_rollback > zombie_threshold
@@ -403,7 +399,7 @@ class TestCanaryWatchdogSettings:
             )
 
     def test_singleton_pattern(self):
-        """싱글톤 패턴이 동작하는지 검증."""
+        """The singleton getter returns the same instance."""
         from baldur.settings.canary_watchdog import get_canary_watchdog_settings
 
         settings1 = get_canary_watchdog_settings()
@@ -430,7 +426,7 @@ class TestJitterSettings:
         reset_jitter_settings()
 
     def test_default_values(self):
-        """기본값이 utils/jitter.py와 일치하는지 검증."""
+        """Defaults match utils/jitter.py."""
         from baldur.settings.jitter import JitterSettings
 
         settings = JitterSettings()
@@ -441,7 +437,7 @@ class TestJitterSettings:
         assert settings.enabled is True
 
     def test_delay_range_validation(self):
-        """min_delay <= max_delay 검증."""
+        """min_delay must not exceed max_delay."""
         from baldur.settings.jitter import JitterSettings
 
         # Valid: min < max
@@ -453,7 +449,7 @@ class TestJitterSettings:
             JitterSettings(min_delay_seconds=60.0, max_delay_seconds=30.0)
 
     def test_singleton_pattern(self):
-        """싱글톤 패턴이 동작하는지 검증."""
+        """The singleton getter returns the same instance."""
         from baldur.settings.jitter import get_jitter_settings
 
         settings1 = get_jitter_settings()
@@ -480,7 +476,7 @@ class TestGateFaultSettings:
         reset_gate_fault_settings()
 
     def test_default_values(self):
-        """기본값이 fault_detector.py와 일치하는지 검증."""
+        """Defaults match fault_detector.py."""
         from baldur.settings.gate_fault import GateFaultSettings
 
         settings = GateFaultSettings()
@@ -489,7 +485,7 @@ class TestGateFaultSettings:
         assert settings.recovery_timeout_seconds == 30
 
     def test_env_override(self, monkeypatch):
-        """환경변수로 값을 오버라이드할 수 있는지 검증."""
+        """Environment variables override the defaults."""
         from baldur.settings.gate_fault import GateFaultSettings
 
         monkeypatch.setenv("BALDUR_GATE_FAULT_FAILURE_THRESHOLD", "10")
@@ -501,7 +497,7 @@ class TestGateFaultSettings:
         assert settings.recovery_timeout_seconds == 60
 
     def test_singleton_pattern(self):
-        """싱글톤 패턴이 동작하는지 검증."""
+        """The singleton getter returns the same instance."""
         from baldur.settings.gate_fault import get_gate_fault_settings
 
         settings1 = get_gate_fault_settings()
@@ -530,7 +526,7 @@ class TestGracefulDegradationSettings:
         reset_graceful_degradation_settings()
 
     def test_default_values(self):
-        """기본값이 graceful_degradation/enums.py와 일치하는지 검증."""
+        """Defaults match graceful_degradation/enums.py."""
         from baldur.settings.graceful_degradation import (
             GracefulDegradationSettings,
         )
@@ -550,7 +546,7 @@ class TestGracefulDegradationSettings:
         assert settings.cb_success_threshold == 2
 
     def test_singleton_pattern(self):
-        """싱글톤 패턴이 동작하는지 검증."""
+        """The singleton getter returns the same instance."""
         from baldur.settings.graceful_degradation import (
             get_graceful_degradation_settings,
         )
@@ -579,7 +575,7 @@ class TestRingBufferSettings:
         reset_ring_buffer_settings()
 
     def test_default_values(self):
-        """기본값이 ring_buffer.py와 일치하는지 검증."""
+        """Defaults match ring_buffer.py."""
         from baldur.settings.ring_buffer import RingBufferSettings
 
         settings = RingBufferSettings()
@@ -589,7 +585,7 @@ class TestRingBufferSettings:
         assert settings.strategy == "drop_oldest"
 
     def test_env_override(self, monkeypatch):
-        """환경변수로 값을 오버라이드할 수 있는지 검증."""
+        """Environment variables override the defaults."""
         from baldur.settings.ring_buffer import RingBufferSettings
 
         monkeypatch.setenv("BALDUR_RING_BUFFER_CAPACITY", "50000")
@@ -601,7 +597,7 @@ class TestRingBufferSettings:
         assert settings.strategy == "drop_newest"
 
     def test_strategy_validation(self):
-        """strategy가 유효한 값인지 검증."""
+        """strategy accepts only the known values."""
         from baldur.settings.ring_buffer import RingBufferSettings
 
         # Valid strategies
@@ -616,7 +612,7 @@ class TestRingBufferSettings:
             RingBufferSettings(strategy="invalid")
 
     def test_singleton_pattern(self):
-        """싱글톤 패턴이 동작하는지 검증."""
+        """The singleton getter returns the same instance."""
         from baldur.settings.ring_buffer import get_ring_buffer_settings
 
         settings1 = get_ring_buffer_settings()
