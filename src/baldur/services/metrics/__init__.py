@@ -56,6 +56,7 @@ from .recorders import (
     record_retry_attempt,
     record_retry_marker,
     record_sla_breach,
+    record_task_attempt,
 )
 
 # Updaters
@@ -92,6 +93,7 @@ __all__ = [
     "record_sla_breach",
     "record_retry_attempt",
     "record_retry_marker",
+    "record_task_attempt",
     "record_recovery_time",
     "record_circuit_breaker_state_change",
     "record_circuit_breaker_open_duration",
