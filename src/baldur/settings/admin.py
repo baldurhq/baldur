@@ -158,7 +158,13 @@ class AdminServerSettings(BaseSettings):
         default=30.0,
         ge=0.1,
         le=300.0,
-        description="Per-request handler timeout before returning 504.",
+        description=(
+            "Socket read timeout for a request connection, applied as "
+            "BaseHTTPRequestHandler.timeout. Bounds how long the server waits "
+            "for request bytes from a slow or idle client; it does NOT bound "
+            "handler execution, so a slow endpoint runs to completion "
+            "regardless of this value."
+        ),
     )
 
     max_body_bytes: int = Field(
