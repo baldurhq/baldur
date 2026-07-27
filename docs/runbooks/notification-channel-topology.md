@@ -1,6 +1,6 @@
 # PagerDuty / Slack Channel Topology Runbook
 
-> **Purpose**: Decide and wire **where Baldur's notifications go** — which events page PagerDuty and which land in Slack. Covers the shipped severity→channel defaults, the two independent config homes (Meta-Watchdog escalation vs the PRO unified notification hub), the recommended PagerDuty-centric war-room topology for teams that run PagerDuty (critical → PagerDuty only; PagerDuty's own Slack integration echoes into the war-room channel and provides native Acknowledge/Resolve buttons), double-notification avoidance, and the trigger-only limitation (Baldur opens PagerDuty incidents; a human closes them).
+> **Purpose**: Decide and wire **where Baldur's notifications go** — which events page PagerDuty and which land in Slack. Covers the shipped severity→channel defaults, the two independent config homes (Meta-Watchdog escalation vs the PRO unified notification hub), the recommended PagerDuty-centric war-room topology for teams that run PagerDuty (critical → PagerDuty only; PagerDuty's own Slack integration echoes into the war-room channel and provides native Acknowledge/Resolve buttons), double-notification avoidance, and the close-side limitation (Baldur closes only the incident its own channel self-test opens; component incidents are closed by a human).
 > **Audience**: Operator / SRE wiring alert channels for a Baldur-protected service — both Slack-only teams and PagerDuty teams.
 > **Cadence**: One-time per deployment + revisit when your on-call tooling (PagerDuty service, Slack workspace) changes.
 
@@ -13,7 +13,7 @@ Severity separation is **already the shipped default** — you only choose targe
 1. **Slack is the "a human should see this" channel.** The escalation tier delivers WARNING and above to Slack; the notification hub routes every priority except `info` to Slack.
 2. **PagerDuty is the "wake a human now" channel, and it is opt-in** (unset key = never pages). The escalation tier pages PagerDuty only at CRITICAL; the hub routes only `critical` priority to PagerDuty, and only when `BALDUR_CHANNEL_TARGET_PAGERDUTY_ENABLED=true`. PagerDuty delivery is a **PRO transport** — on an OSS install the PagerDuty leg degrades to a log line.
 3. **Recommended for PagerDuty shops**: route `critical` to PagerDuty **only** and let PagerDuty's Slack integration echo incidents into your war-room channel — you get Acknowledge/Resolve buttons in Slack natively, with no inbound endpoint on Baldur's side (Phase 3).
-4. **Baldur only opens PagerDuty incidents (`event_action: trigger`) — it never acknowledges or resolves them.** Close incidents in PagerDuty (UI, auto-resolve timeout, or the buttons from its Slack app). See [Known limitation](#known-limitation--trigger-only-outbound).
+4. **Baldur closes only its own self-test incident.** The channel self-test opens a synthetic incident and sends the matching `event_action: resolve` in the same call; every other incident Baldur opens (component failures, hub alerts, security, daily reports) is closed in PagerDuty (UI, auto-resolve timeout, or the buttons from its Slack app) — Baldur never acknowledges. See [Known limitation](#known-limitation--incident-close-is-self-test-only).
 
 Config quick map:
 
@@ -90,7 +90,9 @@ BALDUR_CHANNEL_TARGET_PAGERDUTY_ENABLED=true               # hub master switch �
 
 What starts paging after this (and nothing else): watchdog CRITICAL component failures, hub `critical`-priority alerts, and — only if you also add `pagerduty` to `BALDUR_DAILY_REPORT_DEFAULT_CHANNELS` — daily reports that contain actionable items.
 
-**Go/no-go**: `POST /meta-watchdog/escalation-test` → a test incident appears in PagerDuty. **The self-test opens a real incident (severity low, component `escalation_self_test`) and Baldur will not close it — resolve it in PagerDuty after verifying.**
+**Go/no-go**: `POST /meta-watchdog/escalation-test` → a test incident appears in PagerDuty. The self-test opens a real incident (severity `info`, component `escalation_self_test`) and **closes it in the same call**, so the expected signature is an incident that appears and resolves within seconds. If the close fails, the response says so per channel (`pagerduty: resolve failed (…) — test incident left open; close manually`) — that is the one case you close it by hand.
+
+**What the self-test does and does not verify.** It verifies the routing key is valid and that PagerDuty accepts the event — the configuration check. It does **not** verify your PagerDuty notification rules: it is sent at `info` severity, so on a service configured with severity-based urgency it produces a low-urgency incident and will not exercise the wake-a-human path. Use PagerDuty's own service-level test alert to verify on-call schedules, contact methods and urgency rules.
 
 ---
 
@@ -121,7 +123,7 @@ Notes:
 
 ## Phase 4 — Verify the full topology
 
-1. **Channel self-test**: `POST /meta-watchdog/escalation-test` exercises the escalation transports end-to-end and reports a per-channel result. Remember to resolve the test incident in PagerDuty.
+1. **Channel self-test**: `POST /meta-watchdog/escalation-test` exercises the escalation transports end-to-end and reports a per-channel result. Its PagerDuty incident closes itself; only close it by hand if the result reports the resolve failed.
 2. **Routing dry-run (hub)**: to validate routing without live sends, set `BALDUR_CHANNEL_TARGET_DRY_RUN=true` temporarily — deliveries log instead of send — then flip it back.
 3. **Noise check after a week**: PagerDuty should have paged only for events you would genuinely wake someone for. If something informational paged, its priority/category routing is the knob (`BALDUR_CHANNEL_ROUTING_PRIORITY_CHANNELS` / `_CATEGORY_CHANNELS`) — not disabling PagerDuty wholesale.
 
@@ -129,9 +131,11 @@ Notes:
 
 ---
 
-## Known limitation — trigger-only outbound
+## Known limitation — incident close is self-test-only
 
-Baldur's PagerDuty integration sends `event_action: "trigger"` only — it never sends acknowledge or resolve. Even when Baldur's self-healing later recovers the condition, **the incident stays open until closed on the PagerDuty side** (an operator, the Slack-app buttons, or a PagerDuty auto-resolve timeout). Repeated triggers for the same ongoing condition collapse into the existing incident via the stable `dedup_key`, so an unresolved incident does not multiply. Treat Baldur-opened incidents as manual-close when configuring PagerDuty service settings (consider its per-service auto-resolve timeout as a backstop).
+Baldur sends `event_action: "resolve"` for exactly one incident class: the channel self-test's own synthetic incident, closed in the same call that opened it. Every other incident — watchdog component failures, hub alerts, security incidents, daily reports — is `trigger`-only, and Baldur never sends acknowledge at all. Even when Baldur's self-healing later recovers the condition, **that incident stays open until closed on the PagerDuty side** (an operator, the Slack-app buttons, or a PagerDuty auto-resolve timeout). Repeated triggers for the same ongoing condition collapse into the existing incident via the stable `dedup_key`, so an unresolved incident does not multiply. Treat Baldur-opened component incidents as manual-close when configuring PagerDuty service settings (consider its per-service auto-resolve timeout as a backstop).
+
+The self-test's own cleanup is best-effort rather than absolute: `/v2/enqueue` returns `202 Queued`, so a resolve processed ahead of its trigger is discarded, and a resolve rejected with `429` is not retried. When the close does not land, the self-test says so in its per-channel result (`pagerduty: resolve failed (…) — test incident left open; close manually`) — so the manual close stays the documented backstop for those corners.
 
 ---
 
@@ -149,9 +153,9 @@ Setting only `BALDUR_CHANNEL_TARGET_SLACK_WEBHOOK_URL` and expecting watchdog pa
 
 PagerDuty is a PRO transport. On OSS, escalation CRITICAL still *attempts* the PagerDuty channel but resolves to the logging fallback — the intent is recorded in logs, no page is sent.
 
-### Mistake 4 — Forgetting the self-test opens a real incident
+### Mistake 4 — Reading the self-test as a paging-rules check
 
-`POST /meta-watchdog/escalation-test` sends a real PagerDuty event (clearly labeled, severity low). Resolve it in PagerDuty afterward — Baldur will not.
+`POST /meta-watchdog/escalation-test` sends a real PagerDuty event (clearly labeled, severity `info`) and resolves it immediately, so it proves the routing key and delivery — not that a page would reach the person on call. Verify urgency, schedules and contact methods with PagerDuty's own test alert.
 
 ### Mistake 5 — Live webhook in local development
 
