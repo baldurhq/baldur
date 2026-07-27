@@ -1,6 +1,6 @@
 {
   "__inputs_doc__": "Datasource UIDs below match docker/config/grafana-datasources.yml provisioned UIDs (mimir, tempo, loki). For manual Grafana Import, run scripts/sanitize-dashboards.sh to convert UIDs to __inputs template variables.",
-  "__tier_doc__": "OSS overview. Every Prometheus query here resolves against a series populated on the OSS @baldur.protected path (Circuit Breaker, Retry Outcomes) or the Django HTTP metrics middleware (latency). PRO-only series (DLQ, throttle, canary, emergency, notification, watchdog, bulkhead) live in baldur-operations.json so an OSS-only stack renders no mystery-empty panels. The Retry Outcomes panel populates from the inline synchronous @baldur.protected(retry=True) path: every terminal retry outcome (success / exhausted / single-attempt failure) records to baldur_retry_outcomes_total, so it is live on any protected retry traffic — not only the Celery/DLQ retry paths.",
+  "__tier_doc__": "OSS overview. Every Prometheus query here resolves against a series populated on the OSS @baldur.protected path (Circuit Breaker, Retry Outcomes) or the Django HTTP metrics middleware (latency). PRO-only series (DLQ, throttle, canary, emergency, notification, watchdog, bulkhead) live in baldur-operations.json so an OSS-only stack renders no mystery-empty panels. The Retry Outcomes panel reads the protected-call layer and only that layer: every terminal retry outcome (success / exhausted / single-attempt failure) of an inline synchronous @baldur.protected(retry=True) call records to baldur_retry_outcomes_total, so the panel is live on any protected retry traffic with no task queue involved. Celery task terminals are NOT in it — the task-queue layer keeps its own task-level series with its own denominator, panelled as the Task Layer pair in baldur-operations.json. The rate-limit panels populate from the same default synchronous retry stage: an upstream that raises HTTP 429 notifies the coordinator, which records the 429, cooldown, consecutive-streak and wait series (a 429 returned as a result value instead of raised does not reach it).",
   "__requires": [
     {"type": "grafana", "id": "grafana", "name": "Grafana", "version": "10.0.0"},
     {"type": "datasource", "id": "prometheus", "name": "Prometheus"},
@@ -12,7 +12,7 @@
   "id": null,
   "uid": "baldur-overview",
   "title": "Baldur Overview (OSS)",
-  "description": "OSS-tier observability reference: Circuit Breaker state, HTTP latency, recent error traces, Retry outcomes, Idempotency gate decisions, Health Check status, System Control kill-switch, and Graceful Shutdown. All series populate on OSS paths with no PRO tier.",
+  "description": "OSS-tier observability reference: Circuit Breaker state, HTTP latency, recent error traces, Retry outcomes, Rate-limit coordination, Idempotency gate decisions, Health Check status, System Control kill-switch, and Graceful Shutdown. All series populate on OSS paths with no PRO tier.",
   "tags": ["baldur", "oss"],
   "timezone": "utc",
   "editable": true,
@@ -112,10 +112,53 @@
       }
     },
     {
+      "id": 2,
+      "title": "Rate Limit — 429s & Deferrals",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+      "datasource": {"type": "prometheus", "uid": "mimir"},
+      "description": "Rate-limit coordination per key: 429 responses seen, calls deferred instead of made, and the current consecutive-429 streak. A rising streak means the shared cooldown is holding calls back so the upstream can recover. Populates when an upstream raises an HTTP 429 to a @baldur.protected(retry=True) call; a 429 delivered as a returned value (retry_on_result) does not reach the coordinator.",
+      "targets": [
+        {
+          "expr": "sum by (key) (rate(baldur_rate_limit_429_total[5m]))",
+          "legendFormat": "429s/s: {{ key }}"
+        },
+        {
+          "expr": "sum by (key) (rate(baldur_rate_limit_deferrals_total[5m]))",
+          "legendFormat": "deferred/s: {{ key }}"
+        },
+        {
+          "expr": "baldur_rate_limit_consecutive_429s",
+          "legendFormat": "consecutive: {{ key }}"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "Rate Limit — Cooldown & Wait (p95)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+      "datasource": {"type": "prometheus", "uid": "mimir"},
+      "description": "How long the coordinator asks callers to back off (cooldown) versus how long callers actually sleep before proceeding (wait), at the 95th percentile. A wait p95 approaching the cooldown means the fleet is spending real time asleep on 429 backoff. Populates when an upstream raises an HTTP 429 to a @baldur.protected(retry=True) call.",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(baldur_rate_limit_cooldown_seconds_bucket[5m])))",
+          "legendFormat": "cooldown p95"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(baldur_rate_limit_wait_seconds_bucket[5m])))",
+          "legendFormat": "wait p95"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "s"}
+      }
+    },
+    {
       "id": 6,
       "title": "Idempotency Gate Decisions",
       "type": "timeseries",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32},
       "datasource": {"type": "prometheus", "uid": "mimir"},
       "description": "Rate of idempotency-gate decisions: continue (first time — run the work), skip (already done — deduplicated), abort (in flight elsewhere). Rising skip/abort means the gate is catching duplicate work before it runs twice.",
       "targets": [
@@ -132,7 +175,7 @@
       "id": 7,
       "title": "Health Check Status & Results",
       "type": "timeseries",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32},
       "datasource": {"type": "prometheus", "uid": "mimir"},
       "description": "Aggregate health per check: 0 = healthy, 1 = degraded, 2 = unhealthy, 3 = error — plus the rate of check results. Anything above 0 means a dependency check is failing.",
       "targets": [
@@ -150,7 +193,7 @@
       "id": 8,
       "title": "System Control (Kill Switch)",
       "type": "stat",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 40},
       "datasource": {"type": "prometheus", "uid": "mimir"},
       "description": "The global System Control kill switch: 1 = enabled, 0 = disabled, plus the cumulative number of times it has been toggled.",
       "targets": [
@@ -185,7 +228,7 @@
       "id": 9,
       "title": "Graceful Shutdown",
       "type": "stat",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 40},
       "datasource": {"type": "prometheus", "uid": "mimir"},
       "description": "Shutdown phase (0 = running, 1 = draining, 2 = terminating, 3 = terminated) plus how many in-flight requests were drained vs. force-aborted on shutdown. Sits at 0/running normally and moves only during a SIGTERM drain; the drained/aborted counts tell you whether a restart lost in-flight work.",
       "targets": [

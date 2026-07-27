@@ -76,6 +76,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `baldur_task_retries_total` — one increment per Celery `task_retry` signal, by domain.
 - Sample alert `RateLimitStorageDegraded` — 429s arriving with no cooldown recorded for the key.
 - `baldur_task_attempts_distribution` / `baldur_task_outcomes_total` — task-layer resolutions.
+- Sample alert `TaskFailureRateHigh` — the task-queue counterpart of the protected-call rule.
+- Shipped Grafana boards gain rate-limit panels; task-layer panels join the operations board.
 
 ### Changed
 
