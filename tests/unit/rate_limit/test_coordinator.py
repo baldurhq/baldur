@@ -9,19 +9,21 @@ Covers:
 - Cooldown state
 - retry_after header precedence
 - Fail-open behavior
-- Metric recording
+- Metric recording (429 counter, cooldown values, wait/deferral decision)
 - rate_limit_aware decorator
 - on_success, _schedule_cooldown_end scheduling
 """
 
 from __future__ import annotations
 
+import itertools
 import time
 from unittest.mock import MagicMock, patch
 
 import pytest
 from freezegun import freeze_time
 
+from tests.factories.time_helpers import mock_sleep
 from tests.unit.rate_limit.conftest import (
     DEFAULT_BACKOFF_MULTIPLIER,
     DEFAULT_BASE_DELAY,
@@ -31,6 +33,43 @@ from tests.unit.rate_limit.conftest import (
     MockInMemoryRateLimitStorage,
     make_mock_event_bus,
 )
+
+# =============================================================================
+# Metric-reading helpers
+# =============================================================================
+# The rate-limit series are module-level collectors on the process-global
+# prometheus REGISTRY, so their values survive every test in the same worker.
+# Each metric assertion below therefore records under a key nothing else has
+# touched, which turns the read into an absolute value instead of a delta and
+# lets a negative assertion distinguish "never recorded" (absent sample) from
+# "recorded zero".
+
+_METRIC_KEY_SEQUENCE = itertools.count()
+
+
+def _unique_key(prefix: str) -> str:
+    """A rate-limit key nothing else in this worker has recorded under."""
+    return f"{prefix}_{next(_METRIC_KEY_SEQUENCE)}"
+
+
+def _sample(name: str, **labels: str) -> float | None:
+    """Read one prometheus sample, or None when that series was never recorded."""
+    from prometheus_client import REGISTRY
+
+    return REGISTRY.get_sample_value(name, labels)
+
+
+class _BrokenMetric:
+    """A metric double whose label lookup raises, modelling a registry fault.
+
+    A plain object rather than a Mock: the fail-open contract is "the helper
+    returns instead of propagating", so the double only has to be able to raise
+    from the one attribute the helper touches.
+    """
+
+    def labels(self, **_kwargs: str) -> None:
+        raise RuntimeError("metric registry corrupted")
+
 
 # =============================================================================
 # Event emission
@@ -194,6 +233,46 @@ class TestRateLimitCoordinatorDebouncing:
             coordinator.on_rate_limited("test_api")
 
         assert emit_count == first_count
+
+    @pytest.mark.parametrize("burst_size", [1, 3], ids=["single", "burst"])
+    def test_debounce_suppresses_the_event_but_the_metric_counts_every_429(
+        self, mock_storage, burst_size
+    ):
+        """N 429s inside one window: N counter increments, exactly one event.
+
+        The counter is deliberately NOT debounced. Debouncing it would flatten a
+        storm into a single tick, and a flattened counter is indistinguishable
+        from a storm abating — the opposite conclusion.
+        """
+        from baldur.services.rate_limit_coordinator import (
+            RateLimitCoordinator,
+            RateLimitCoordinatorConfig,
+        )
+
+        # Given a window wide enough that the whole burst lands inside it
+        key = _unique_key("debounce_metric")
+        config = RateLimitCoordinatorConfig(
+            debounce_window_seconds=DEFAULT_DEBOUNCE_WINDOW,
+            jitter_percent=0.0,
+        )
+        coordinator = RateLimitCoordinator(storage=mock_storage, config=config)
+        mock_bus, emitted_events = make_mock_event_bus()
+
+        # When the burst arrives (cooldown-end scheduling stubbed out so the
+        # emit path leaves no live Timer thread behind)
+        with (
+            patch("baldur.services.event_bus.get_event_bus", return_value=mock_bus),
+            patch.object(coordinator, "_schedule_cooldown_end_event"),
+        ):
+            for _ in range(burst_size):
+                coordinator.on_rate_limited(key)
+
+        # Then every 429 is counted ...
+        assert _sample(
+            "baldur_rate_limit_429_total", key=key, status_code="429"
+        ) == float(burst_size)
+        # ... while the window emits exactly one event regardless of burst size
+        assert len(emitted_events) == 1
 
 
 # =============================================================================
@@ -413,6 +492,293 @@ class TestRecordRateLimitMetrics:
             _record_rate_limit_cooldown(
                 key="test", cooldown_seconds=1.0, consecutive_429s=1
             )
+
+
+# =============================================================================
+# Recording order under a degraded coordination store
+# =============================================================================
+
+
+def _deterministic_coordinator(storage):
+    """Coordinator with jitter and debouncing off, for exact metric readings."""
+    from baldur.services.rate_limit_coordinator import (
+        RateLimitCoordinator,
+        RateLimitCoordinatorConfig,
+    )
+
+    config = RateLimitCoordinatorConfig(
+        jitter_percent=0.0,
+        debounce_window_seconds=0.0,
+    )
+    return RateLimitCoordinator(storage=storage, config=config)
+
+
+class TestOnRateLimitedStorageUnavailable:
+    """A failing coordination store must not erase the evidence of the storm.
+
+    Every caller wraps ``on_rate_limited`` fail-open, so a storage fault leaves
+    no trace in the business path — the metrics are the only surviving signal,
+    and they have to survive exactly the outage an operator needs them for.
+    Each recording site therefore sits at the earliest point where its values
+    are already true, which is what these exit paths pin.
+    """
+
+    @pytest.mark.parametrize(
+        "failing_call",
+        ["increment_consecutive_429s", "set_cooldown"],
+        ids=["increment", "set_cooldown"],
+    )
+    def test_storage_unavailable_still_counts_the_429(self, mock_storage, failing_call):
+        """Whichever storage call fails, the 429 counter has already advanced."""
+        from baldur.interfaces.rate_limit_storage import (
+            RateLimitStorageUnavailableError,
+        )
+
+        key = _unique_key(f"unavailable_{failing_call}")
+        coordinator = _deterministic_coordinator(mock_storage)
+
+        with patch.object(
+            mock_storage,
+            failing_call,
+            side_effect=RateLimitStorageUnavailableError("coordination store down"),
+        ):
+            with pytest.raises(RateLimitStorageUnavailableError):
+                coordinator.on_rate_limited(key)
+
+        assert _sample("baldur_rate_limit_429_total", key=key, status_code="429") == 1.0
+
+    def test_storage_unavailable_on_increment_records_no_429_cooldown_values(
+        self, mock_storage
+    ):
+        """A failing increment aborts before any cooldown value is known.
+
+        Negative half of the ordering: the cooldown is computed from the
+        increment's return value, so there is nothing truthful to record yet and
+        the two cooldown series must stay untouched.
+        """
+        from baldur.interfaces.rate_limit_storage import (
+            RateLimitStorageUnavailableError,
+        )
+
+        key = _unique_key("unavailable_before_cooldown")
+        coordinator = _deterministic_coordinator(mock_storage)
+
+        with patch.object(
+            mock_storage,
+            "increment_consecutive_429s",
+            side_effect=RateLimitStorageUnavailableError("coordination store down"),
+        ):
+            with pytest.raises(RateLimitStorageUnavailableError):
+                coordinator.on_rate_limited(key)
+
+        assert _sample("baldur_rate_limit_429_total", key=key, status_code="429") == 1.0
+        assert _sample("baldur_rate_limit_cooldown_seconds_count", key=key) is None
+        assert _sample("baldur_rate_limit_consecutive_429s", key=key) is None
+
+    def test_storage_unavailable_on_set_cooldown_keeps_the_429_cooldown_values(
+        self, mock_storage
+    ):
+        """A failing store still leaves the computed cooldown recorded.
+
+        Positive half of the ordering: the cooldown is computed and recorded
+        before it is stored, so a store that then raises invalidates neither
+        number. The storage-degradation alert reads exactly this asymmetry —
+        429s climbing while cooldown observations do not.
+        """
+        from baldur.interfaces.rate_limit_storage import (
+            RateLimitStorageUnavailableError,
+        )
+
+        key = _unique_key("unavailable_after_cooldown")
+        coordinator = _deterministic_coordinator(mock_storage)
+
+        with patch.object(
+            mock_storage,
+            "set_cooldown",
+            side_effect=RateLimitStorageUnavailableError("coordination store down"),
+        ):
+            with pytest.raises(RateLimitStorageUnavailableError):
+                coordinator.on_rate_limited(key)
+
+        assert _sample("baldur_rate_limit_429_total", key=key, status_code="429") == 1.0
+        assert _sample("baldur_rate_limit_cooldown_seconds_count", key=key) == 1.0
+        assert _sample("baldur_rate_limit_consecutive_429s", key=key) == 1.0
+
+
+# =============================================================================
+# Wait-or-defer decision metrics
+# =============================================================================
+
+
+class TestWaitIfNeededMetrics:
+    """``wait_if_needed`` records the decision it made — one series per branch.
+
+    Both series measure the *decision*, not its outcome: the wait is observed
+    before sleeping, because a caller killed mid-sleep still had the full wait
+    imposed on it. The no-cooldown fast path records nothing, which is what
+    makes the histogram count equal the number of waits.
+    """
+
+    def _cooldown(self, storage, key: str, seconds: float) -> float:
+        cooldown_until = time.time() + seconds
+        storage.set_cooldown(key, cooldown_until)
+        return cooldown_until
+
+    def test_wait_metric_observes_the_imposed_cooldown_when_served(self, mock_storage):
+        """A served wait observes the full remaining cooldown, and defers nothing."""
+        key = _unique_key("wait_served")
+        coordinator = _deterministic_coordinator(mock_storage)
+        self._cooldown(mock_storage, key, 2.0)
+
+        with mock_sleep():
+            result = coordinator.wait_if_needed(key, max_wait=10.0)
+
+        assert result.waited is True
+        assert _sample("baldur_rate_limit_wait_seconds_count", key=key) == 1.0
+        assert _sample("baldur_rate_limit_wait_seconds_sum", key=key) == pytest.approx(
+            result.wait_time
+        )
+        # Negative: a served wait is not also a deferral.
+        assert _sample("baldur_rate_limit_deferrals_total", key=key) is None
+
+    def test_wait_metric_is_observed_before_the_sleep_not_after(self, mock_storage):
+        """A caller killed mid-sleep still had the full wait imposed on it.
+
+        Observing after the sleep returns would drop exactly the waits an
+        operator most needs to see — the ones long enough for the caller to be
+        killed inside them.
+        """
+        key = _unique_key("wait_interrupted")
+        coordinator = _deterministic_coordinator(mock_storage)
+        self._cooldown(mock_storage, key, 2.0)
+
+        with patch("time.sleep", side_effect=KeyboardInterrupt):
+            with pytest.raises(KeyboardInterrupt):
+                coordinator.wait_if_needed(key, max_wait=10.0)
+
+        assert _sample("baldur_rate_limit_wait_seconds_count", key=key) == 1.0
+
+    def test_deferral_counter_increments_when_the_cooldown_outlasts_the_bound(
+        self, mock_storage
+    ):
+        """A deferral increments its counter and observes no wait.
+
+        The deferred call sleeps nothing, so counting it as a wait would inflate
+        the imposed-wait histogram with time no caller ever spent.
+        """
+        key = _unique_key("wait_deferred")
+        coordinator = _deterministic_coordinator(mock_storage)
+        self._cooldown(mock_storage, key, 300.0)
+
+        with mock_sleep() as sleep_mock:
+            result = coordinator.wait_if_needed(key, max_wait=1.0)
+
+        assert result.deferred is True
+        assert sleep_mock.call_count == 0
+        assert _sample("baldur_rate_limit_deferrals_total", key=key) == 1.0
+        # Negative: the deferral branch never observes into the wait histogram.
+        assert _sample("baldur_rate_limit_wait_seconds_count", key=key) is None
+
+    def test_no_cooldown_fast_path_records_neither_wait_metric_nor_deferral(
+        self, mock_storage
+    ):
+        """Outside cooldown neither series moves — the histogram counts waits only."""
+        key = _unique_key("wait_fast_path")
+        coordinator = _deterministic_coordinator(mock_storage)
+
+        with mock_sleep() as sleep_mock:
+            result = coordinator.wait_if_needed(key, max_wait=1.0)
+
+        assert result.waited is False
+        assert result.deferred is False
+        assert sleep_mock.call_count == 0
+        assert _sample("baldur_rate_limit_wait_seconds_count", key=key) is None
+        assert _sample("baldur_rate_limit_deferrals_total", key=key) is None
+
+
+class TestWaitDeferralHelpers:
+    """The two wait/defer recorders are fail-open, like every other metric helper.
+
+    A metrics fault must never surface in the rate-limit path: the caller is
+    already in a degraded situation, and losing observability is strictly better
+    than losing the cooldown.
+    """
+
+    def test_record_wait_metric_survives_a_missing_metrics_module(self):
+        """A missing definitions module is a no-op, not an ImportError."""
+        import sys
+
+        from baldur.services.rate_limit_coordinator import _record_rate_limit_wait
+
+        with patch.dict(sys.modules, {"baldur.services.metrics.definitions": None}):
+            _record_rate_limit_wait(key="k", wait_seconds=1.0)
+
+    def test_record_deferral_survives_a_missing_metrics_module(self):
+        """A missing definitions module is a no-op, not an ImportError."""
+        import sys
+
+        from baldur.services.rate_limit_coordinator import _record_rate_limit_deferral
+
+        with patch.dict(sys.modules, {"baldur.services.metrics.definitions": None}):
+            _record_rate_limit_deferral(key="k")
+
+    def test_record_wait_metric_survives_a_broken_metric(self):
+        """A registry fault at the label lookup is swallowed."""
+        from baldur.services.rate_limit_coordinator import _record_rate_limit_wait
+
+        with patch(
+            "baldur.services.metrics.definitions.rate_limit_wait_seconds",
+            _BrokenMetric(),
+        ):
+            _record_rate_limit_wait(key="k", wait_seconds=1.0)
+
+    def test_record_deferral_survives_a_broken_metric(self):
+        """A registry fault at the label lookup is swallowed."""
+        from baldur.services.rate_limit_coordinator import _record_rate_limit_deferral
+
+        with patch(
+            "baldur.services.metrics.definitions.rate_limit_deferrals_total",
+            _BrokenMetric(),
+        ):
+            _record_rate_limit_deferral(key="k")
+
+
+class TestRateLimitWaitMetricDefinitionsContract:
+    """Published shape of the two wait/defer series (names, labels, buckets, help)."""
+
+    def test_wait_histogram_lowest_bucket_is_the_cooldown_floor(self):
+        """0.1s is the coordinator's minimum cooldown — the first useful bucket."""
+        from baldur.services.metrics.definitions import rate_limit_wait_seconds
+
+        assert rate_limit_wait_seconds._upper_bounds[0] == 0.1
+
+    def test_wait_histogram_top_explicit_bucket_is_the_retry_after_ceiling(self):
+        """3600s, not max_delay: an honored Retry-After can push a wait far past
+        the ladder cap, and collapsing those into +Inf hides the very case the
+        series exists to show."""
+        from baldur.services.metrics.definitions import rate_limit_wait_seconds
+
+        buckets = list(rate_limit_wait_seconds._upper_bounds)
+        assert buckets[-1] == float("inf")
+        assert buckets[-2] == 3600.0
+
+    def test_wait_histogram_help_text_states_imposed_not_slept_semantics(self):
+        """The help text has to say "imposed": the value is recorded at decision
+        time, so it is not the time any caller actually slept."""
+        from baldur.services.metrics.definitions import rate_limit_wait_seconds
+
+        assert "imposed" in rate_limit_wait_seconds._documentation
+
+    @pytest.mark.parametrize(
+        "metric_name",
+        ["rate_limit_wait_seconds", "rate_limit_deferrals_total"],
+        ids=["wait", "deferrals"],
+    )
+    def test_wait_and_deferral_series_are_labelled_by_key_alone(self, metric_name):
+        """``key`` is the unit of coordination, so it is the only label."""
+        from baldur.services.metrics import definitions
+
+        assert getattr(definitions, metric_name)._labelnames == ("key",)
 
 
 # =============================================================================
