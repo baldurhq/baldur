@@ -93,9 +93,11 @@ groups:
   # =========================================================================
   - name: retry_alerts
     interval: 30s
-    # Both rules below share one population — the attempts histogram's _count,
-    # which is observed exactly once per resolved call — and one significance
-    # floor. Three things to know before editing them:
+    # The two protected-call rules below (RetryPressureHigh,
+    # ProtectedCallFailureRateHigh) share one population — the retry attempts
+    # histogram's _count, which is observed exactly once per resolved call —
+    # and one significance floor. TaskFailureRateHigh applies the same shape to
+    # the task-queue layer's own series. Three things to know before editing:
     #
     # 1. The `increase(...) > 10` leg is a MINIMUM SAMPLE SIZE requirement, not
     #    a traffic floor. Do not delete it and do not turn it back into a
@@ -108,10 +110,13 @@ groups:
     #    permanently blinds low-volume domains, which are exactly the shape a
     #    single-service deployment has.
     #
-    # 2. `by (domain)` pinpoints the failing dependency, but a Baldur-protected
-    #    call running inside a Celery task records at both layers under one
-    #    colliding domain, which dilutes the mean up to 2x. Give the inner call
-    #    its own domain to keep the two layers separate.
+    # 2. `by (domain)` pinpoints the failing dependency. The first two rules
+    #    read protected-call terminals ONLY: a Baldur-protected call running
+    #    inside a Celery task records the protected call here and the task's own
+    #    resolution on `baldur_task_attempts_distribution` /
+    #    `baldur_task_outcomes_total`, which TaskFailureRateHigh below reads. The
+    #    two layers each keep their own denominator, so no per-layer naming
+    #    workaround is needed.
     #
     # 3. Topology labels: on a global-view Prometheus (Thanos/Cortex) add your
     #    cluster/env labels to BOTH the `by (...)` groupings AND the
@@ -152,6 +157,29 @@ groups:
         annotations:
           summary: "Protected call failure rate high"
           description: "{{ $labels.domain }} terminal failure share is {{ $value | humanizePercentage }}. (threshold: 20%)"
+
+      # Task-queue counterpart of ProtectedCallFailureRateHigh, on the task
+      # layer's own series. `record_task_attempt` writes both legs in one call
+      # and is the only writer of either, so numerator and denominator can
+      # never drift apart. The task outcome vocabulary is exactly
+      # success / failure, so `outcome!="success"` is exhaustive — the
+      # per-retry signal lives in its own counter, not here.
+      - alert: TaskFailureRateHigh
+        expr: |
+          (
+            sum by (domain) (rate(baldur_task_outcomes_total{outcome!="success",is_synthetic!="true"}[5m]))
+            /
+            sum by (domain) (rate(baldur_task_attempts_distribution_count{is_synthetic!="true"}[5m]))
+          ) > 0.2
+          and on (domain)
+          sum by (domain) (increase(baldur_task_attempts_distribution_count{is_synthetic!="true"}[5m])) > 10
+        for: 5m
+        labels:
+          severity: warning
+          category: retry
+        annotations:
+          summary: "Task-queue failure rate high"
+          description: "{{ $labels.domain }} task terminal failure share is {{ $value | humanizePercentage }}. (threshold: 20%)"
 
   # =========================================================================
   # Rate Limit Coordination Alerts

@@ -1,6 +1,6 @@
 {
   "__inputs_doc__": "Datasource UIDs below match docker/config/grafana-datasources.yml provisioned UIDs (mimir, tempo, loki). For manual Grafana Import, run scripts/sanitize-dashboards.sh to convert UIDs to __inputs template variables.",
-  "__tier_doc__": "PRO superset monitoring board (full operational view — Grafana is read-only; the acting control surface is the HTML admin console, not this board). Section 'OSS Core' mirrors baldur-overview.json's panels (same series, same queries) so a PRO operator sees resilience + operations on one screen instead of switching boards; section 'PRO Operations' holds the PRO-only series. baldur-overview.json stays the OSS-only public board (no PRO series → G43 overview-excludes). This board still holds every PRO prefix → G43 operations-holds stays green. NOTE: the OSS-core panel definitions are duplicated from baldur-overview.json; keep them in sync on edit (G43 catches metric-name drift, not layout drift).",
+  "__tier_doc__": "PRO superset monitoring board (full operational view — Grafana is read-only; the acting control surface is the HTML admin console, not this board). Section 'OSS Core' = baldur-overview.json's panels (same series, same queries) PLUS adapter-conditional OSS extras that overview excludes under its own no-mystery-empty-panels rule — currently the two baldur_task_* panels, which populate only when the Celery adapter is installed. So a PRO operator sees resilience + operations on one screen instead of switching boards; section 'PRO Operations' holds the PRO-only series. The rate-limit panels populate from the default synchronous retry stage: an upstream that raises HTTP 429 notifies the coordinator, which records the 429, cooldown, consecutive-streak and wait series (a 429 returned as a result value instead of raised does not reach it). baldur-overview.json stays the OSS-only public board (no PRO series → G43 overview-excludes). This board still holds every PRO prefix → G43 operations-holds stays green. NOTE: the OSS-core panel definitions are duplicated from baldur-overview.json; keep them in sync on edit (G43 catches metric-name drift, not layout drift).",
   "__requires": [
     {
       "type": "grafana",
@@ -37,7 +37,7 @@
   "id": null,
   "uid": "baldur-operations",
   "title": "Baldur Full Board (PRO)",
-  "description": "PRO-tier full monitoring board: the full operational picture on one board — the OSS resilience core (Circuit Breaker, HTTP latency, Retry, Idempotency, Health Check, System Control, Graceful Shutdown, error traces) PLUS the PRO operations surfaces (DLQ, Adaptive Throttle, Canary, Emergency Mode, Unified Notification, Meta-Watchdog, Bulkhead). The OSS core panels populate on any stack; the PRO panels require the PRO tier. The lean OSS-only board is baldur-overview.json (shipped to OSS users, kept PRO-free).",
+  "description": "PRO-tier full monitoring board: the full operational picture on one board — the OSS resilience core (Circuit Breaker, HTTP latency, Retry, Rate-limit coordination, Task layer, Idempotency, Health Check, System Control, Graceful Shutdown, error traces) PLUS the PRO operations surfaces (DLQ, Adaptive Throttle, Canary, Emergency Mode, Unified Notification, Meta-Watchdog, Bulkhead). The OSS core panels populate on any stack; the PRO panels require the PRO tier. The lean OSS-only board is baldur-overview.json (shipped to OSS users, kept PRO-free).",
   "tags": [
     "baldur",
     "pro"
@@ -220,6 +220,120 @@
       }
     },
     {
+      "id": 13,
+      "title": "Rate Limit — 429s & Deferrals",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 25
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mimir"
+      },
+      "description": "Rate-limit coordination per key: 429 responses seen, calls deferred instead of made, and the current consecutive-429 streak. A rising streak means the shared cooldown is holding calls back so the upstream can recover. Populates when an upstream raises an HTTP 429 to a @baldur.protected(retry=True) call; a 429 delivered as a returned value (retry_on_result) does not reach the coordinator.",
+      "targets": [
+        {
+          "expr": "sum by (key) (rate(baldur_rate_limit_429_total[5m]))",
+          "legendFormat": "429s/s: {{ key }}"
+        },
+        {
+          "expr": "sum by (key) (rate(baldur_rate_limit_deferrals_total[5m]))",
+          "legendFormat": "deferred/s: {{ key }}"
+        },
+        {
+          "expr": "baldur_rate_limit_consecutive_429s",
+          "legendFormat": "consecutive: {{ key }}"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "title": "Rate Limit — Cooldown & Wait (p95)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 25
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mimir"
+      },
+      "description": "How long the coordinator asks callers to back off (cooldown) versus how long callers actually sleep before proceeding (wait), at the 95th percentile. A wait p95 approaching the cooldown means the fleet is spending real time asleep on 429 backoff. Populates when an upstream raises an HTTP 429 to a @baldur.protected(retry=True) call.",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(baldur_rate_limit_cooldown_seconds_bucket[5m])))",
+          "legendFormat": "cooldown p95"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(baldur_rate_limit_wait_seconds_bucket[5m])))",
+          "legendFormat": "wait p95"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      }
+    },
+    {
+      "id": 16,
+      "title": "Task Layer — Retries & Outcomes",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 33
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mimir"
+      },
+      "description": "Task-queue retry signals and terminal outcomes per second, recorded by the task layer on its own series so it shares no denominator with the protected-call retry panels. Populates only when the Celery adapter is installed. Grouping by domain requires baldur.metrics.register_domain to be called at startup; without it every application domain collapses into a single 'other' series.",
+      "targets": [
+        {
+          "expr": "sum by (domain) (rate(baldur_task_retries_total[5m]))",
+          "legendFormat": "retries/s: {{ domain }}"
+        },
+        {
+          "expr": "sum by (domain, outcome) (rate(baldur_task_outcomes_total[5m]))",
+          "legendFormat": "{{ domain }}: {{ outcome }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        }
+      }
+    },
+    {
+      "id": 23,
+      "title": "Task Layer — Attempts per Resolution",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 33
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mimir"
+      },
+      "description": "Mean attempts a task took to reach a terminal: 1 + the task's own retries. Counts explicit Task.retry() chains only — NOT broker redeliveries (Reject(requeue=True), visibility-timeout expiry, acks_late worker loss), which redeliver the same message with its retry header unchanged and so read as a fresh attempt count of 1. Populates only when the Celery adapter is installed. Grouping by domain requires baldur.metrics.register_domain to be called at startup; without it every application domain collapses into a single 'other' series.",
+      "targets": [
+        {
+          "expr": "sum by (domain) (rate(baldur_task_attempts_distribution_sum[5m])) / sum by (domain) (rate(baldur_task_attempts_distribution_count[5m]))",
+          "legendFormat": "{{ domain }}"
+        }
+      ]
+    },
+    {
       "id": 6,
       "title": "Idempotency Gate Decisions",
       "type": "timeseries",
@@ -227,7 +341,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 25
+        "y": 41
       },
       "datasource": {
         "type": "prometheus",
@@ -254,7 +368,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 25
+        "y": 41
       },
       "datasource": {
         "type": "prometheus",
@@ -280,7 +394,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 33
+        "y": 49
       },
       "datasource": {
         "type": "prometheus",
@@ -342,7 +456,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 33
+        "y": 49
       },
       "datasource": {
         "type": "prometheus",
@@ -439,7 +553,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 41
+        "y": 57
       },
       "panels": []
     },
@@ -451,7 +565,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 42
+        "y": 58
       },
       "datasource": {
         "type": "prometheus",
@@ -473,7 +587,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 42
+        "y": 58
       },
       "datasource": {
         "type": "prometheus",
@@ -500,7 +614,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 50
+        "y": 66
       },
       "datasource": {
         "type": "prometheus",
@@ -526,7 +640,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 50
+        "y": 66
       },
       "datasource": {
         "type": "prometheus",
@@ -641,7 +755,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 58
+        "y": 74
       },
       "datasource": {
         "type": "prometheus",
@@ -686,7 +800,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 58
+        "y": 74
       },
       "datasource": {
         "type": "prometheus",
@@ -735,7 +849,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 66
+        "y": 82
       },
       "datasource": {
         "type": "prometheus",
@@ -790,7 +904,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 66
+        "y": 82
       },
       "datasource": {
         "type": "prometheus",
@@ -824,7 +938,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 74
+        "y": 90
       },
       "datasource": {
         "type": "prometheus",
