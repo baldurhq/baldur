@@ -544,7 +544,7 @@ def _deterministic_coordinator(storage):
     return RateLimitCoordinator(storage=storage, config=config)
 
 
-class TestOnRateLimitedStorageUnavailable:
+class TestOnRateLimitedStorageUnavailableBehavior:
     """A failing coordination store must not erase the evidence of the storm.
 
     Every caller wraps ``on_rate_limited`` fail-open, so a storage fault leaves
@@ -641,7 +641,7 @@ class TestOnRateLimitedStorageUnavailable:
 # =============================================================================
 
 
-class TestWaitIfNeededMetrics:
+class TestWaitIfNeededMetricsBehavior:
     """``wait_if_needed`` records the decision it made — one series per branch.
 
     Both series measure the *decision*, not its outcome: the wait is observed
@@ -727,7 +727,7 @@ class TestWaitIfNeededMetrics:
         assert _sample("baldur_rate_limit_deferrals_total", key=key) is None
 
 
-class TestWaitDeferralHelpers:
+class TestWaitDeferralHelpersBehavior:
     """The two wait/defer recorders are fail-open, like every other metric helper.
 
     A metrics fault must never surface in the rate-limit path: the caller is
