@@ -41,6 +41,12 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - The compressed lifecycle sweep holds a distributed lock, so overlapping runs cannot skip an entry.
 - Compressed `by_status` counts stay exact above `BALDUR_DLQ_COMPRESS_SUMMARY_SCAN_CAP`.
 - A negative `limit` on the compressed list no longer reads the whole index; it clamps to 1.
+- Sample alert `RetryRateHigh` measured call throughput; `RetryPressureHigh` measures retries.
+- `ProtectedCallFailureRateHigh` replaces `RetrySuccessRateLow`, which printed a ratio as `%`.
+- Both retry sample alerts exclude synthetic traffic and need ~10 samples before they can fire.
+- `baldur_rate_limit_429_total` counts every 429; the event debounce no longer flattens it.
+- It is recorded before the storage calls, so a storm stays countable during a Redis outage.
+- Celery task terminals record their real attempt count in `baldur_retry_attempts_distribution`.
 
 ### Added
 
@@ -63,6 +69,10 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - Without it the lifecycle sweep migrates automatically, taking effect after two daily runs.
 - Re-run it any time filtered compressed listings come up short after a restore or rollback.
 - `ResilientStorageBackend.degrade_count` — times the backend left Redis mode.
+- `baldur_rate_limit_wait_seconds` — cooldown wait imposed on a caller, by coordination key.
+- `baldur_rate_limit_deferrals_total` — wait-or-defer decisions that deferred, by key.
+- `baldur_task_retries_total` — one increment per Celery `task_retry` signal, by domain.
+- Sample alert `RateLimitStorageDegraded` — 429s arriving with no cooldown recorded for the key.
 
 ### Changed
 
@@ -78,6 +88,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `RetryPolicyConfig` gains `rate_limit_aware`/`rate_limit_key`; both are inert on async surfaces.
 - The circuit breaker trips at exactly `failure_threshold` (5) consecutive failures. **Breaking**
 - Rate evidence is per worker process, so workers under skewed load trip independently.
+- `baldur_retry_outcomes_total{outcome="retry"}` → `baldur_task_retries_total`. **Breaking**
 
 ### Removed
 

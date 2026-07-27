@@ -93,31 +93,104 @@ groups:
   # =========================================================================
   - name: retry_alerts
     interval: 30s
+    # Both rules below share one population — the attempts histogram's _count,
+    # which is observed exactly once per resolved call — and one significance
+    # floor. Three things to know before editing them:
+    #
+    # 1. The `increase(...) > 10` leg is a MINIMUM SAMPLE SIZE requirement, not
+    #    a traffic floor. Do not delete it and do not turn it back into a
+    #    `rate(...) > N` volume gate: a mean is not a signal below ~10 samples,
+    #    and without the leg a single retried call in an otherwise idle domain
+    #    reads a mean of 2.0 and holds `for: 5m` for as long as the sample sits
+    #    in the range window. (`increase` may extrapolate to a fractional count;
+    #    the `> 10` comparison handles that with no special-casing.) A
+    #    rate-based floor instead makes firing depend on adopter volume and
+    #    permanently blinds low-volume domains, which are exactly the shape a
+    #    single-service deployment has.
+    #
+    # 2. `by (domain)` pinpoints the failing dependency, but a Baldur-protected
+    #    call running inside a Celery task records at both layers under one
+    #    colliding domain, which dilutes the mean up to 2x. Give the inner call
+    #    its own domain to keep the two layers separate.
+    #
+    # 3. Topology labels: on a global-view Prometheus (Thanos/Cortex) add your
+    #    cluster/env labels to BOTH the `by (...)` groupings AND the
+    #    `and on (...)` join — a `by (domain)` alone merges clusters there.
+    #    Those labels are attached at federation/remote-write time, so they are
+    #    absent from locally-scraped series and the rules ship without them.
     rules:
-      - alert: RetrySuccessRateLow
+      - alert: RetryPressureHigh
         expr: |
           (
-            sum(rate(baldur_retry_outcomes_total{outcome="success"}[5m])) by (domain)
+            sum by (domain) (rate(baldur_retry_attempts_distribution_sum{is_synthetic!="true"}[5m]))
             /
-            sum(rate(baldur_retry_outcomes_total[5m])) by (domain)
-          ) < 0.8
+            sum by (domain) (rate(baldur_retry_attempts_distribution_count{is_synthetic!="true"}[5m]))
+          ) - 1 > 0.5
+          and on (domain)
+          sum by (domain) (increase(baldur_retry_attempts_distribution_count{is_synthetic!="true"}[5m])) > 10
         for: 5m
         labels:
           severity: warning
           category: retry
         annotations:
-          summary: "Retry success rate low"
-          description: "{{ $labels.domain }} retry success rate is {{ $value | printf \"%.1f\" }}%. (threshold: 80%)"
+          summary: "Retry pressure high"
+          description: "{{ $labels.domain }} averages {{ $value | printf \"%.2f\" }} extra attempt(s) per resolved call. (threshold: 0.5)"
 
-      - alert: RetryRateHigh
-        expr: sum(rate(baldur_retry_outcomes_total[5m])) > 10
+      - alert: ProtectedCallFailureRateHigh
+        expr: |
+          (
+            sum by (domain) (rate(baldur_retry_outcomes_total{outcome!~"success|retry",is_synthetic!="true"}[5m]))
+            /
+            sum by (domain) (rate(baldur_retry_attempts_distribution_count{is_synthetic!="true"}[5m]))
+          ) > 0.2
+          and on (domain)
+          sum by (domain) (increase(baldur_retry_attempts_distribution_count{is_synthetic!="true"}[5m])) > 10
         for: 5m
         labels:
           severity: warning
           category: retry
         annotations:
-          summary: "Retry rate high"
-          description: "{{ $value | printf \"%.2f\" }} retries/sec observed."
+          summary: "Protected call failure rate high"
+          description: "{{ $labels.domain }} terminal failure share is {{ $value | humanizePercentage }}. (threshold: 20%)"
+
+  # =========================================================================
+  # Rate Limit Coordination Alerts
+  # =========================================================================
+  - name: rate_limit_alerts
+    interval: 30s
+    rules:
+      # Storage-degradation reading (coupled to the coordinator's recording
+      # order): the 429 counter is recorded before every storage call, the
+      # cooldown histogram only after the consecutive-429 increment succeeds.
+      # A sustained gap therefore means the coordination store is rejecting
+      # writes and the shared cooldown has degraded to per-worker state.
+      # Re-check this rule if the recording order ever changes.
+      #
+      # The `or ... * 0` leg is load-bearing, not defensive noise: on a
+      # cold start into an outage the cooldown series is never created, the
+      # subtraction has no element to match, and a bare `A - B` would yield an
+      # empty vector — silent in exactly the worst case. The `or` branch
+      # supplies a zero-valued right side carrying the left side's labels.
+      - alert: RateLimitStorageDegraded
+        expr: |
+          (
+            sum by (key) (rate(baldur_rate_limit_429_total[5m]))
+            -
+            (
+              sum by (key) (rate(baldur_rate_limit_cooldown_seconds_count[5m]))
+              or
+              sum by (key) (rate(baldur_rate_limit_429_total[5m])) * 0
+            )
+          ) > 0
+          and on (key)
+          sum by (key) (increase(baldur_rate_limit_429_total[5m])) > 10
+        for: 5m
+        labels:
+          severity: warning
+          category: rate_limit
+        annotations:
+          summary: "Rate-limit coordination store degraded"
+          description: "{{ $labels.key }}: {{ $value | printf \"%.2f\" }} 429/sec with no cooldown recorded — coordination store write failures."
 
   # =========================================================================
   # Latency SLA Alerts
