@@ -11,6 +11,10 @@ halves of the repair:
   both terminal handlers plumb it through ``MetricRecorder``.
 - ``task_retry`` moves onto its own ``baldur_task_retries_total`` counter,
   touching neither the terminal-outcome counter nor the histogram.
+
+Both terminals write the task layer's *own* series via ``record_task_attempt``,
+never the protected-call retry series: the two layers resolve different things,
+so sharing one attempts denominator dilutes both.
 """
 
 from __future__ import annotations
@@ -153,7 +157,7 @@ class TestSignalMetricAttemptsBehavior:
         expected_domain = extract_domain_from_task_name(_TASK_NAME, config)
 
         with patch(
-            "baldur.services.metrics.recorders.record_retry_attempt", autospec=True
+            "baldur.services.metrics.recorders.record_task_attempt", autospec=True
         ) as mock_record:
             recorder.record_success("svc", _TASK_NAME, attempt_count=4)
 
@@ -164,7 +168,7 @@ class TestSignalMetricAttemptsBehavior:
     def test_record_failure_forwards_the_attempt_count(self, recorder):
         """A task that exhausted 4 attempts records 4 against outcome=failure."""
         with patch(
-            "baldur.services.metrics.recorders.record_retry_attempt", autospec=True
+            "baldur.services.metrics.recorders.record_task_attempt", autospec=True
         ) as mock_record:
             recorder.record_failure(
                 "billing", _TASK_NAME, RuntimeError("boom"), attempt_count=4
@@ -185,7 +189,7 @@ class TestSignalMetricAttemptsBehavior:
     def test_terminal_recorders_default_to_a_single_attempt(self, recorder, record):
         """Omitting the count means "unknown", which is one attempt — never zero."""
         with patch(
-            "baldur.services.metrics.recorders.record_retry_attempt", autospec=True
+            "baldur.services.metrics.recorders.record_task_attempt", autospec=True
         ) as mock_record:
             record(recorder)
 
@@ -194,17 +198,17 @@ class TestSignalMetricAttemptsBehavior:
     def test_record_retry_increments_the_marker_only(self, recorder):
         """A retry signal is non-terminal: marker counter only.
 
-        Negative half is the point — routing it back through
-        ``record_retry_attempt`` is exactly the defect being repaired, and it
-        would both invent an ``outcome`` value and add a bogus observation of 1
-        to the attempts histogram.
+        Negative half is the point — routing it back through the terminal
+        facade is exactly the defect being repaired, and it would both invent
+        an ``outcome`` value and add a bogus observation of 1 to the attempts
+        histogram.
         """
         with (
             patch(
                 "baldur.services.metrics.recorders.record_retry_marker", autospec=True
             ) as mock_marker,
             patch(
-                "baldur.services.metrics.recorders.record_retry_attempt", autospec=True
+                "baldur.services.metrics.recorders.record_task_attempt", autospec=True
             ) as mock_attempt,
         ):
             recorder.record_retry("billing", _TASK_NAME)
@@ -289,7 +293,9 @@ class TestRetryMarkerRecorderBehavior:
 
         This is the dilution guard: an observation here would push the
         histogram's mean toward 1.0 on every retry, for a call that has not
-        resolved at all.
+        resolved at all. Asserted against BOTH terminal families — the
+        protected-call retry pair and the task layer's own pair — because the
+        marker shares a recorder with both and belongs to neither.
         """
         domain = _unique_domain("marker_isolation")
 
@@ -306,6 +312,23 @@ class TestRetryMarkerRecorderBehavior:
         assert (
             _sample(
                 "baldur_retry_outcomes_total",
+                domain=domain,
+                outcome="retry",
+                is_synthetic="false",
+            )
+            is None
+        )
+        assert (
+            _sample(
+                "baldur_task_attempts_distribution_count",
+                domain=domain,
+                is_synthetic="false",
+            )
+            is None
+        )
+        assert (
+            _sample(
+                "baldur_task_outcomes_total",
                 domain=domain,
                 outcome="retry",
                 is_synthetic="false",
@@ -359,6 +382,8 @@ class TestRetryMarkerRecorderBehavior:
         ]
         assert meter.instruments["baldur_retry_outcomes_total"].adds == []
         assert meter.instruments["baldur_retry_attempts_distribution"].adds == []
+        assert meter.instruments["baldur_task_outcomes_total"].adds == []
+        assert meter.instruments["baldur_task_attempts_distribution"].adds == []
 
 
 # =============================================================================

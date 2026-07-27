@@ -48,7 +48,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - Both retry sample alerts exclude synthetic traffic and need ~10 samples before they can fire.
 - `baldur_rate_limit_429_total` counts every 429; the event debounce no longer flattens it.
 - It is recorded before the storage calls, so a storm stays countable during a Redis outage.
-- Celery task terminals record their real attempt count in `baldur_retry_attempts_distribution`.
+- Celery task terminals record their real attempt count in `baldur_task_attempts_distribution`.
 
 ### Added
 
@@ -75,6 +75,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `baldur_rate_limit_deferrals_total` — wait-or-defer decisions that deferred, by key.
 - `baldur_task_retries_total` — one increment per Celery `task_retry` signal, by domain.
 - Sample alert `RateLimitStorageDegraded` — 429s arriving with no cooldown recorded for the key.
+- `baldur_task_attempts_distribution` / `baldur_task_outcomes_total` — task-layer resolutions.
 
 ### Changed
 
@@ -91,6 +92,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - The circuit breaker trips at exactly `failure_threshold` (5) consecutive failures. **Breaking**
 - Rate evidence is per worker process, so workers under skewed load trip independently.
 - `baldur_retry_outcomes_total{outcome="retry"}` → `baldur_task_retries_total`. **Breaking**
+- Celery terminals → `baldur_task_outcomes_total`/`baldur_task_attempts_distribution`. **Breaking**
+- The retry series and its two sample alerts are now protected-call SLIs, task queue excluded.
 
 ### Removed
 

@@ -125,6 +125,16 @@ class _OTELRetryRecorder:
                 "one increment per task retry"
             ),
         )
+        self._task_attempts_histogram = meter.create_histogram(
+            f"{prefix}_task_attempts_distribution",
+            description="Task attempts before resolution: 1 + the task's own retries",
+            # Mirror RetryMetricRecorder._task_attempts_histogram buckets (G47).
+            explicit_bucket_boundaries_advisory=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        )
+        self._task_outcomes_total = meter.create_counter(
+            f"{prefix}_task_outcomes_total",
+            description="Task-queue-level terminal outcomes by domain and result",
+        )
         self._success_store = gauge_store_fn("retry_success")
         meter.create_observable_gauge(
             f"{prefix}_retry_success_rate",
@@ -172,6 +182,23 @@ class _OTELRetryRecorder:
             )
         except Exception as e:
             logger.warning("metrics.record_retry_metric_failed", error=e)
+
+    def record_task_attempt(
+        self, domain: str, attempt_count: int, outcome: str
+    ) -> None:
+        try:
+            from baldur.core.test_mode_context import TestModeContext
+
+            is_synthetic = TestModeContext.get_synthetic_label_value()
+            self._task_attempts_histogram.record(
+                attempt_count, {"domain": domain, "is_synthetic": is_synthetic}
+            )
+            self._task_outcomes_total.add(
+                1,
+                {"domain": domain, "outcome": outcome, "is_synthetic": is_synthetic},
+            )
+        except Exception as e:
+            logger.warning("metrics.record_task_attempt_failed", error=e)
 
     def record_retry_marker(self, domain: str) -> None:
         try:

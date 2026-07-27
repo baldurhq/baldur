@@ -42,9 +42,9 @@ class MetricRecorder:
                 failure (``request.retries + 1``); 1 when unknown
         """
         try:
-            from baldur.services.metrics.recorders import record_retry_attempt
+            from baldur.services.metrics.recorders import record_task_attempt
 
-            record_retry_attempt(
+            record_task_attempt(
                 domain=domain,
                 attempt_count=attempt_count,
                 outcome="failure",
@@ -69,10 +69,10 @@ class MetricRecorder:
                 (``request.retries + 1``); 1 when unknown
         """
         try:
-            from baldur.services.metrics.recorders import record_retry_attempt
+            from baldur.services.metrics.recorders import record_task_attempt
 
             domain = extract_domain_from_task_name(task_name, self._config)
-            record_retry_attempt(
+            record_task_attempt(
                 domain=domain,
                 attempt_count=attempt_count,
                 outcome="success",
