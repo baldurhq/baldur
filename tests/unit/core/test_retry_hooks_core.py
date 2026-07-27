@@ -1,9 +1,9 @@
 """
-Core Retry Hooks 팩토리 단위 테스트.
+Core retry hooks factory unit tests.
 
-테스트 대상: core/retry_hooks.py
-- make_standard_on_retry(): Audit + Prometheus 결합 on_retry 훅 팩토리
-- make_standard_on_exhausted(): 최종 실패 감사 기록 훅 팩토리
+Target: core/retry_hooks.py
+- make_standard_on_retry(): on_retry hook factory combining audit + Prometheus
+- make_standard_on_exhausted(): final-failure audit hook factory
 """
 
 from __future__ import annotations
@@ -16,22 +16,41 @@ from baldur.core.retry_hooks import (
     make_standard_on_retry,
 )
 
+
+class _RaisingCollector:
+    """A metric double that records the touch it then refuses to serve.
+
+    Patching a Prometheus collector with ``side_effect`` does nothing: the
+    production code never calls the collector, it calls ``.labels(...)`` on it,
+    so the side effect never fires and the fail-open arm never runs. The double
+    raises from the attribute the SUT actually reaches, and remembers that it
+    was reached so the test can prove the fault happened at all.
+    """
+
+    def __init__(self) -> None:
+        self.touched = False
+
+    def labels(self, **_kwargs: object) -> None:
+        self.touched = True
+        raise RuntimeError("metrics registry down")
+
+
 # =============================================================================
-# make_standard_on_retry — 동작 검증
+# make_standard_on_retry — behavior
 # =============================================================================
 
 
 class TestMakeStandardOnRetryBehavior:
-    """make_standard_on_retry 동작 검증."""
+    """make_standard_on_retry behavior."""
 
     def test_returns_callable(self):
-        """팩토리 호출 결과는 callable이다."""
+        """The factory returns a callable."""
         hook = make_standard_on_retry("payment")
         assert callable(hook)
 
     @patch("baldur.core.retry_hooks.log_retry_audit", autospec=True)
     def test_calls_audit_logging(self, mock_audit):
-        """on_retry 호출 시 감사 로그를 기록한다."""
+        """Calling on_retry writes an audit record."""
         hook = make_standard_on_retry("payment")
         ctx = RetryContext(
             func_name="charge",
@@ -55,8 +74,8 @@ class TestMakeStandardOnRetryBehavior:
         autospec=True,
     )
     def test_records_prometheus_metric(self, mock_histogram):
-        """on_retry 호출 시 Prometheus 메트릭을 기록한다."""
-        # Audit를 skip하도록 patch
+        """Calling on_retry records a Prometheus metric."""
+        # Patch the audit call out of the way
         with patch(
             "baldur.core.retry_hooks.log_retry_audit",
             autospec=True,
@@ -101,7 +120,13 @@ class TestMakeStandardOnRetryBehavior:
             hook(ctx, ValueError("fail"))
 
     def test_metrics_failure_is_silenced(self):
-        """메트릭 기록 실패 시 예외가 전파되지 않는다 (Fail-Open)."""
+        """A metric recording failure does not propagate (fail-open).
+
+        The double witnesses its own touch because this fail-open arm is a
+        silent ``except Exception: pass`` — with nothing logged, the recorded
+        touch is the only evidence the arm was entered rather than skipped.
+        """
+        collector = _RaisingCollector()
         with (
             patch(
                 "baldur.core.retry_hooks.log_retry_audit",
@@ -109,7 +134,7 @@ class TestMakeStandardOnRetryBehavior:
             ),
             patch(
                 "baldur.services.metrics.definitions.retry_attempts_histogram",
-                side_effect=RuntimeError("metrics down"),
+                collector,
             ),
         ):
             hook = make_standard_on_retry("payment")
@@ -123,23 +148,25 @@ class TestMakeStandardOnRetryBehavior:
             # Should not raise
             hook(ctx, ValueError("fail"))
 
+        assert collector.touched, "the fail-open arm was never reached"
+
 
 # =============================================================================
-# make_standard_on_exhausted — 동작 검증
+# make_standard_on_exhausted — behavior
 # =============================================================================
 
 
 class TestMakeStandardOnExhaustedBehavior:
-    """make_standard_on_exhausted 동작 검증."""
+    """make_standard_on_exhausted behavior."""
 
     def test_returns_callable(self):
-        """팩토리 호출 결과는 callable이다."""
+        """The factory returns a callable."""
         hook = make_standard_on_exhausted("payment")
         assert callable(hook)
 
     @patch("baldur.core.retry_hooks.log_retry_audit", autospec=True)
     def test_calls_audit_with_error_info(self, mock_audit):
-        """on_exhausted 호출 시 에러 정보를 포함한 감사 로그를 기록한다."""
+        """Calling on_exhausted writes an audit record carrying the error."""
         hook = make_standard_on_exhausted("payment")
         ctx = RetryContext(
             func_name="charge",
@@ -162,7 +189,7 @@ class TestMakeStandardOnExhaustedBehavior:
 
     @patch("baldur.core.retry_hooks.log_retry_audit", autospec=True)
     def test_error_message_truncated_to_500_chars(self, mock_audit):
-        """에러 메시지가 500자로 잘린다."""
+        """The error message is truncated at 500 characters."""
         hook = make_standard_on_exhausted("payment")
         ctx = RetryContext(
             func_name="charge",

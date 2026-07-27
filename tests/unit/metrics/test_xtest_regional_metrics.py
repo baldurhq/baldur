@@ -1,36 +1,49 @@
 """
-X-Test Regional Boundary 메트릭 단위 테스트.
+X-Test regional boundary metric unit tests.
 
-Section 7.1 구현 검증:
-- xtest_cross_region_denied_total 메트릭 정의 및 기록
-- xtest_global_scope_requests_total 메트릭 정의 및 기록
-
-테스트 케이스:
-- test_xtest_cross_region_denied_metric_defined: 메트릭 정의 확인
-- test_xtest_global_scope_requests_metric_defined: 메트릭 정의 확인
-- test_record_xtest_cross_region_denied: 거부 메트릭 기록 확인
-- test_record_xtest_global_scope_request_allowed: 허용 요청 기록
-- test_record_xtest_global_scope_request_denied: 거부 요청 기록
+Covers:
+- xtest_cross_region_denied_total definition and recording
+- xtest_global_scope_requests_total definition and recording
 """
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+from structlog.testing import capture_logs
+
+
+class _RaisingCollector:
+    """A metric double that records the touch it then refuses to serve.
+
+    Patching a Prometheus collector with ``side_effect`` does nothing: the
+    recorder never calls the collector, it calls ``.labels(...)`` on it, so the
+    side effect never fires and the fail-open arm never runs. The double raises
+    from the attribute the recorder actually reaches, and remembers that it was
+    reached so the test can prove the fault happened at all.
+    """
+
+    def __init__(self) -> None:
+        self.touched = False
+
+    def labels(self, **_kwargs: object) -> None:
+        self.touched = True
+        raise RuntimeError("metrics registry down")
+
 
 class TestXTestRegionalMetricDefinitions:
-    """X-Test Regional 메트릭 정의 테스트."""
+    """X-Test regional metric definitions."""
 
     def test_xtest_cross_region_denied_metric_defined(self):
-        """xtest_cross_region_denied_total 메트릭이 정의됨."""
+        """xtest_cross_region_denied_total is defined."""
         from baldur.services.metrics.recorders import (
             _xtest_cross_region_denied_total as xtest_cross_region_denied_total,
         )
 
         assert xtest_cross_region_denied_total is not None
-        # Counter는 _name 속성을 가짐
         assert hasattr(xtest_cross_region_denied_total, "labels")
 
     def test_xtest_global_scope_requests_metric_defined(self):
-        """xtest_global_scope_requests_total 메트릭이 정의됨."""
+        """xtest_global_scope_requests_total is defined."""
         from baldur.services.metrics.recorders import (
             _xtest_global_scope_requests_total as xtest_global_scope_requests_total,
         )
@@ -39,12 +52,12 @@ class TestXTestRegionalMetricDefinitions:
         assert hasattr(xtest_global_scope_requests_total, "labels")
 
     def test_cross_region_denied_metric_labels(self):
-        """xtest_cross_region_denied_total이 올바른 레이블을 가짐."""
+        """xtest_cross_region_denied_total carries the right labels."""
         from baldur.services.metrics.recorders import (
             _xtest_cross_region_denied_total as xtest_cross_region_denied_total,
         )
 
-        # labels 메서드 호출 시 에러 없음
+        # The labels call must not raise
         labeled = xtest_cross_region_denied_total.labels(
             current_region="seoul",
             target_region="tokyo",
@@ -52,12 +65,12 @@ class TestXTestRegionalMetricDefinitions:
         assert labeled is not None
 
     def test_global_scope_requests_metric_labels(self):
-        """xtest_global_scope_requests_total이 올바른 레이블을 가짐."""
+        """xtest_global_scope_requests_total carries the right labels."""
         from baldur.services.metrics.recorders import (
             _xtest_global_scope_requests_total as xtest_global_scope_requests_total,
         )
 
-        # labels 메서드 호출 시 에러 없음
+        # The labels call must not raise
         labeled = xtest_global_scope_requests_total.labels(
             endpoint_pattern="emergency",
             region="seoul",
@@ -67,10 +80,10 @@ class TestXTestRegionalMetricDefinitions:
 
 
 class TestXTestRegionalMetricRecorders:
-    """X-Test Regional 메트릭 기록 함수 테스트."""
+    """X-Test regional metric recording functions."""
 
     def test_record_xtest_cross_region_denied_exists(self):
-        """record_xtest_cross_region_denied 함수가 존재."""
+        """record_xtest_cross_region_denied exists."""
         from baldur.services.metrics.recorders import (
             record_xtest_cross_region_denied,
         )
@@ -78,7 +91,7 @@ class TestXTestRegionalMetricRecorders:
         assert callable(record_xtest_cross_region_denied)
 
     def test_record_xtest_global_scope_request_exists(self):
-        """record_xtest_global_scope_request 함수가 존재."""
+        """record_xtest_global_scope_request exists."""
         from baldur.services.metrics.recorders import (
             record_xtest_global_scope_request,
         )
@@ -87,7 +100,7 @@ class TestXTestRegionalMetricRecorders:
 
     @patch("baldur.services.metrics.recorders._xtest_cross_region_denied_total")
     def test_record_xtest_cross_region_denied_increments(self, mock_metric):
-        """record_xtest_cross_region_denied가 메트릭을 증가시킴."""
+        """record_xtest_cross_region_denied increments the counter."""
         from baldur.services.metrics.recorders import (
             record_xtest_cross_region_denied,
         )
@@ -108,7 +121,7 @@ class TestXTestRegionalMetricRecorders:
 
     @patch("baldur.services.metrics.recorders._xtest_global_scope_requests_total")
     def test_record_xtest_global_scope_request_allowed(self, mock_metric):
-        """record_xtest_global_scope_request가 허용 요청을 기록."""
+        """record_xtest_global_scope_request records an allowed request."""
         from baldur.services.metrics.recorders import (
             record_xtest_global_scope_request,
         )
@@ -131,7 +144,7 @@ class TestXTestRegionalMetricRecorders:
 
     @patch("baldur.services.metrics.recorders._xtest_global_scope_requests_total")
     def test_record_xtest_global_scope_request_denied(self, mock_metric):
-        """record_xtest_global_scope_request가 거부 요청을 기록."""
+        """record_xtest_global_scope_request records a denied request."""
         from baldur.services.metrics.recorders import (
             record_xtest_global_scope_request,
         )
@@ -152,38 +165,67 @@ class TestXTestRegionalMetricRecorders:
         )
         mock_labeled.inc.assert_called_once()
 
-    def test_record_functions_handle_exceptions(self):
-        """기록 함수가 예외를 안전하게 처리."""
-        from baldur.services.metrics.recorders import (
-            record_xtest_cross_region_denied,
-            record_xtest_global_scope_request,
-        )
+    @pytest.mark.parametrize(
+        ("collector_name", "args", "event"),
+        [
+            (
+                "_xtest_cross_region_denied_total",
+                ("seoul", "tokyo"),
+                "metrics.record_cross_region_failed",
+            ),
+            (
+                "_xtest_global_scope_requests_total",
+                ("emergency", "seoul", "allowed"),
+                "metrics.record_global_scope_failed",
+            ),
+        ],
+        ids=["cross_region_denied", "global_scope_request"],
+    )
+    def test_record_functions_swallow_a_broken_collector_and_warn(
+        self, collector_name, args, event
+    ):
+        """A registry fault is swallowed, and the swallow is visible at WARNING.
 
-        # 예외 발생해도 함수가 중단되지 않음
-        with patch(
-            "baldur.services.metrics.recorders._xtest_cross_region_denied_total",
-            side_effect=Exception("Test error"),
-        ):
-            # 예외 발생해도 에러 없이 완료
-            record_xtest_cross_region_denied("seoul", "tokyo")
+        The double raises from ``.labels(...)`` — the attribute the recorder
+        actually reaches — because patching the collector itself with a
+        ``side_effect`` never fires: production never calls the collector, it
+        calls ``.labels()`` on it.
+        """
+        from baldur.services.metrics import recorders
 
-        with patch(
-            "baldur.services.metrics.recorders._xtest_global_scope_requests_total",
-            side_effect=Exception("Test error"),
+        record_fn = {
+            "_xtest_cross_region_denied_total": (
+                recorders.record_xtest_cross_region_denied
+            ),
+            "_xtest_global_scope_requests_total": (
+                recorders.record_xtest_global_scope_request
+            ),
+        }[collector_name]
+
+        collector = _RaisingCollector()
+        with (
+            patch(
+                f"baldur.services.metrics.recorders.{collector_name}",
+                collector,
+            ),
+            capture_logs() as logs,
         ):
-            record_xtest_global_scope_request("emergency", "seoul", "allowed")
+            record_fn(*args)
+
+        assert collector.touched, "the fail-open arm was never reached"
+        record = next(log for log in logs if log["event"] == event)
+        assert record["log_level"] == "warning"
 
 
 class TestXTestModeMixinMetricsIntegration:
-    """XTestModeMixin 메트릭 통합 테스트.
+    """XTestModeMixin metric integration.
 
-    Django 설정 없이 메트릭 연동 로직을 테스트.
-    _get_endpoint_pattern_name, _record_regional_scope_metrics 로직을
-    직접 구현하여 테스트.
+    Exercises the metric wiring without Django settings by reimplementing the
+    _get_endpoint_pattern_name / _record_regional_scope_metrics logic here.
     """
 
     def _get_endpoint_pattern_name(self, request) -> str:
-        """엔드포인트 패턴 이름 추출 (XTestModeMixin 로직 복제)."""
+        """Extract the endpoint pattern name (mirrors XTestModeMixin)."""
         path = getattr(request, "path", "")
         if "emergency" in path:
             return "emergency"
@@ -196,7 +238,7 @@ class TestXTestModeMixinMetricsIntegration:
     def _record_regional_scope_metrics(
         self, request, current_region: str, target_region: str | None, result: str
     ) -> None:
-        """Regional scope 메트릭 기록 (XTestModeMixin 로직 복제)."""
+        """Record regional scope metrics (mirrors XTestModeMixin)."""
         from baldur.services.metrics.recorders import (
             record_xtest_cross_region_denied,
             record_xtest_global_scope_request,
@@ -217,7 +259,7 @@ class TestXTestModeMixinMetricsIntegration:
             )
 
     def test_get_endpoint_pattern_name_emergency(self):
-        """emergency 엔드포인트 패턴 감지."""
+        """The emergency endpoint pattern is detected."""
         request = MagicMock()
         request.path = "/api/baldur/xtest/emergency/global/set/"
 
@@ -225,7 +267,7 @@ class TestXTestModeMixinMetricsIntegration:
         assert result == "emergency"
 
     def test_get_endpoint_pattern_name_isolation(self):
-        """isolation 엔드포인트 패턴 감지."""
+        """The isolation endpoint pattern is detected."""
         request = MagicMock()
         request.path = "/api/baldur/xtest/isolation/region/isolate/"
 
@@ -233,7 +275,7 @@ class TestXTestModeMixinMetricsIntegration:
         assert result == "isolation"
 
     def test_get_endpoint_pattern_name_governance(self):
-        """governance 엔드포인트 패턴 감지."""
+        """The governance endpoint pattern is detected."""
         request = MagicMock()
         request.path = "/api/baldur/xtest/governance/global/update/"
 
@@ -241,7 +283,7 @@ class TestXTestModeMixinMetricsIntegration:
         assert result == "governance"
 
     def test_get_endpoint_pattern_name_unknown(self):
-        """알 수 없는 엔드포인트는 unknown 반환."""
+        """An unrecognized endpoint resolves to unknown."""
         request = MagicMock()
         request.path = "/api/baldur/xtest/dlq/inject/"
 
@@ -255,7 +297,7 @@ class TestXTestModeMixinMetricsIntegration:
         mock_denied,
         mock_global,
     ):
-        """허용된 요청의 메트릭 기록."""
+        """An allowed request is recorded."""
         request = MagicMock()
         request.path = "/api/baldur/xtest/emergency/global/set/"
 
@@ -275,7 +317,7 @@ class TestXTestModeMixinMetricsIntegration:
         mock_denied,
         mock_global,
     ):
-        """리전 불일치 거부의 메트릭 기록."""
+        """A region-mismatch denial is recorded."""
         request = MagicMock()
         request.path = "/api/baldur/xtest/isolation/region/isolate/"
 
@@ -300,7 +342,7 @@ class TestXTestModeMixinMetricsIntegration:
         mock_denied,
         mock_global,
     ):
-        """헤더 없음 거부의 메트릭 기록."""
+        """A missing-header denial is recorded."""
         request = MagicMock()
         request.path = "/api/baldur/xtest/governance/global/update/"
 
@@ -311,5 +353,5 @@ class TestXTestModeMixinMetricsIntegration:
             region="seoul",
             result="denied_no_header",
         )
-        # target_region이 None이므로 cross-region 메트릭은 기록되지 않음
+        # target_region is None, so no cross-region metric is recorded
         mock_denied.assert_not_called()
