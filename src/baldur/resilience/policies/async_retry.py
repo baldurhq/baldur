@@ -91,6 +91,7 @@ class AsyncRetryPolicy:
         domain: str = "default",
         retry_on_result: Callable[[Any], bool] | None = None,
         max_elapsed: float | None = None,
+        backoff_factory: Callable[[], BackoffStrategy] | None = None,
     ):
         if max_retries < 0:
             raise ValueError(f"max_retries must be >= 0, got {max_retries}")
@@ -114,7 +115,22 @@ class AsyncRetryPolicy:
 
         self._globally_enabled = get_retry_settings().enabled
         self._max_retries = max_retries
-        self._backoff = backoff or ExponentialBackoff()
+        # Mirrors the synchronous policy: an injected strategy wins, otherwise
+        # the factory decides per execution. The factory slot exists for the one
+        # stateful strategy — sharing a single decorrelated instance would let
+        # two concurrent executions on the same policy consume each other's
+        # previous delay.
+        # ``_backoff`` holds the shared instance and is None exactly when each
+        # execution builds its own.
+        self._backoff: BackoffStrategy | None
+        self._backoff_factory: Callable[[], BackoffStrategy]
+        if backoff is None and backoff_factory is not None:
+            self._backoff = None
+            self._backoff_factory = backoff_factory
+        else:
+            strategy = backoff or ExponentialBackoff()
+            self._backoff = strategy
+            self._backoff_factory = lambda: strategy
         self._retryable_exceptions = retryable_exceptions
 
         from baldur.core.exceptions import non_retryable_exceptions as _defaults
@@ -143,8 +159,11 @@ class AsyncRetryPolicy:
         - ``max_retries = max(cfg.max_attempts - 1, 0)`` — sync ``max_attempts``
           counts *total* attempts; async ``max_retries`` counts *additional*
           attempts (``range(max_retries + 1)``). The off-by-one is load-bearing.
-        - ``backoff`` defaults to an ExponentialBackoff derived from the config
-          (base/max delay + jitter), matching the sync policy.
+        - ``backoff`` defaults to the strategy the config itself builds, so the
+          async ladder honors the same resolved base, multiplier, increment,
+          jitter width and strategy name as the sync one. The stateful
+          decorrelated strategy is passed as a factory instead of an instance,
+          so each execution gets its own.
         - ``enable_dlq`` / ``domain`` populate the exhaustion FAILURE metadata so
           a composed DLQ sink fires on async exhaustion.
         - ``retry_on_result`` / ``max_elapsed`` carry the result-predicate and
@@ -157,14 +176,15 @@ class AsyncRetryPolicy:
         reads this config. Async callers who need 429 coordination use the
         tenacity bridge with an explicit ``rate_limit_key``.
         """
+        # Local import: the retry_handler package is deliberately kept out of
+        # this module's import-time graph (see the TYPE_CHECKING block above).
+        from baldur.services.retry_handler.models import STATEFUL_BACKOFF_STRATEGY
+
+        stateful = cfg.backoff_strategy == STATEFUL_BACKOFF_STRATEGY
         return cls(
             max_retries=max(cfg.max_attempts - 1, 0),
-            backoff=backoff
-            or ExponentialBackoff(
-                base_delay=cfg.backoff_base,
-                max_delay=cfg.backoff_max,
-                jitter_factor=cfg.jitter_percent / 100.0,
-            ),
+            backoff=backoff or (None if stateful else cfg.build_backoff()),
+            backoff_factory=cfg.build_backoff if stateful else None,
             retryable_exceptions=cfg.retryable_exceptions,
             non_retryable_exceptions=cfg.non_retryable_exceptions,
             enable_dlq=cfg.enable_dlq,
@@ -248,6 +268,10 @@ class AsyncRetryPolicy:
         start = time.monotonic()
         budget, budget_reason = self._resolve_effective_budget()
 
+        # Execution-local, never assigned back to ``self`` — one concurrent
+        # execution must not advance another's backoff state.
+        backoff = self._backoff_factory()
+
         attempt = 0
         for attempt in range(self._max_retries + 1):
             # (i) Cooperative budget check — 2nd iteration onward; the first
@@ -329,7 +353,7 @@ class AsyncRetryPolicy:
             # calculate() is 1-indexed (attempt=1 -> base_delay); this loop is
             # 0-indexed, so pass attempt+1 to honor the configured base_delay on
             # the first retry (not base_delay/multiplier).
-            delay = self._backoff.calculate(attempt + 1, context=context)
+            delay = backoff.calculate(attempt + 1, context=context)
 
             # (ii) Cooperative budget check — never start a sleep+attempt that
             # would overrun the budget.

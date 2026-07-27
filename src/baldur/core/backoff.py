@@ -205,11 +205,18 @@ class ConstantBackoff(BackoffStrategy):
     Constant backoff strategy.
 
     Delay is constant regardless of attempt number.
+
+    ``max_delay`` is opt-in: ``None`` (the default) leaves the delay uncapped and
+    the jitter symmetric around it, which is what direct construction and
+    :meth:`from_settings` have always produced. Setting it routes the result
+    through the shared capped-jitter helper, so a settings-derived policy whose
+    constant delay exceeds the configured maximum still honors that cap.
     """
 
     delay: float = 5.0
     jitter: bool = False
     jitter_factor: float = 0.1
+    max_delay: float | None = None
 
     @classmethod
     def from_settings(cls, settings=None, **overrides) -> ConstantBackoff:
@@ -233,7 +240,12 @@ class ConstantBackoff(BackoffStrategy):
         )
 
     def calculate(self, attempt: int, context: PolicyContext | None = None) -> float:
-        """Return constant delay."""
+        """Return the constant delay, capped at ``max_delay`` when one is set."""
+        if self.max_delay is not None:
+            return _apply_capped_jitter(
+                self.delay, self.max_delay, self.jitter, self.jitter_factor
+            )
+
         result = self.delay
 
         if self.jitter:

@@ -96,6 +96,7 @@ The most common knobs an operator sets. The full list lives in the API reference
 |---------|---------|------------------|
 | `BALDUR_RETRY_MAX_ATTEMPTS` | `3` | The maximum number of attempts before the operation is given up and the failure is raised |
 | `BALDUR_RETRY_BASE_DELAY` | `1.0` | The starting backoff wait; later attempts wait progressively longer per the chosen strategy |
+| `BALDUR_RETRY_BACKOFF_STRATEGY` | `exponential` | Which backoff curve the waits follow: `exponential`, `linear`, `constant` or `decorrelated_jitter` |
 | `BALDUR_IDEMPOTENCY_ENABLED` | `true` | Whether Baldur's separate `@idempotent` dedup guard is active — when on, it blocks a duplicate execution of the same operation |
 
 ## See also

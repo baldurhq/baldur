@@ -26,7 +26,7 @@ class TestCircuitBreakerSettings:
         reset_circuit_breaker_settings()
 
     def test_default_values(self):
-        """기본값이 core/config.py:CircuitBreakerConfig와 일치하는지 검증."""
+        """Defaults match core/config.py:CircuitBreakerConfig."""
         from baldur.settings.circuit_breaker import CircuitBreakerSettings
 
         settings = CircuitBreakerSettings()
@@ -52,7 +52,7 @@ class TestCircuitBreakerSettings:
         assert settings.self_ddos_backoff_multiplier == 2.0
 
     def test_env_override(self, monkeypatch):
-        """환경변수로 값을 오버라이드할 수 있는지 검증."""
+        """Environment variables override the defaults."""
         from baldur.settings.circuit_breaker import CircuitBreakerSettings
 
         monkeypatch.setenv("BALDUR_CB_FAILURE_THRESHOLD", "10")
@@ -66,7 +66,7 @@ class TestCircuitBreakerSettings:
         assert settings.enabled is False
 
     def test_validation_min_failure_threshold(self):
-        """failure_threshold 최소값(1) 검증."""
+        """failure_threshold accepts its minimum (1) and rejects below it."""
         from baldur.settings.circuit_breaker import CircuitBreakerSettings
 
         with pytest.raises(ValidationError) as exc_info:
@@ -75,7 +75,7 @@ class TestCircuitBreakerSettings:
         assert "failure_threshold" in str(exc_info.value)
 
     def test_validation_max_failure_threshold(self):
-        """failure_threshold 최대값(100) 검증."""
+        """failure_threshold accepts its maximum (100) and rejects above it."""
         from baldur.settings.circuit_breaker import CircuitBreakerSettings
 
         with pytest.raises(ValidationError) as exc_info:
@@ -84,7 +84,7 @@ class TestCircuitBreakerSettings:
         assert "failure_threshold" in str(exc_info.value)
 
     def test_validation_recovery_timeout_range(self):
-        """recovery_timeout 범위 (1-3600) 검증."""
+        """recovery_timeout is bounded to 1-3600 seconds."""
         from baldur.settings.circuit_breaker import CircuitBreakerSettings
 
         # Too low
@@ -103,7 +103,7 @@ class TestCircuitBreakerSettings:
         assert settings_max.recovery_timeout == 3600
 
     def test_type_coercion(self):
-        """문자열이 정수로 자동 변환되는지 검증."""
+        """String environment values coerce to integers."""
         from baldur.settings.circuit_breaker import CircuitBreakerSettings
 
         settings = CircuitBreakerSettings(failure_threshold="5")  # type: ignore
@@ -111,7 +111,7 @@ class TestCircuitBreakerSettings:
         assert isinstance(settings.failure_threshold, int)
 
     def test_singleton_pattern(self):
-        """싱글톤 패턴이 동작하는지 검증."""
+        """The singleton getter returns the same instance."""
         from baldur.settings.circuit_breaker import (
             get_circuit_breaker_settings,
             reset_circuit_breaker_settings,
@@ -128,7 +128,7 @@ class TestCircuitBreakerSettings:
         assert settings1 is not settings3
 
     def test_json_schema_generation(self):
-        """JSON Schema가 올바르게 생성되는지 검증."""
+        """The model produces a well-formed JSON Schema."""
         from baldur.settings.circuit_breaker import CircuitBreakerSettings
 
         schema = CircuitBreakerSettings.model_json_schema()
@@ -214,7 +214,7 @@ class TestDLQSettings:
         reset_dlq_settings()
 
     def test_default_values(self):
-        """기본값이 core/config.py:DLQConfig와 일치하는지 검증."""
+        """Defaults match core/config.py:DLQConfig."""
         from baldur.settings.dlq import DLQSettings
 
         settings = DLQSettings()
@@ -228,7 +228,7 @@ class TestDLQSettings:
         assert settings.max_replay_attempts == 2
 
     def test_env_override(self, monkeypatch):
-        """환경변수로 값을 오버라이드할 수 있는지 검증."""
+        """Environment variables override the defaults."""
         from baldur.settings.dlq import DLQSettings
 
         monkeypatch.setenv("BALDUR_DLQ_MAX_REPLAY_ATTEMPTS", "5")
@@ -240,7 +240,7 @@ class TestDLQSettings:
         assert settings.retention_days == 60
 
     def test_validation_max_replay_attempts_range(self):
-        """max_replay_attempts 범위 (1-10) 검증."""
+        """max_replay_attempts is bounded to 1-10."""
         from baldur.settings.dlq import DLQSettings
 
         with pytest.raises(ValidationError):
@@ -250,7 +250,7 @@ class TestDLQSettings:
             DLQSettings(max_replay_attempts=11)
 
     def test_validation_retention_days_range(self):
-        """retention_days 범위 (1-365) 검증."""
+        """retention_days is bounded to 1-365."""
         from baldur.settings.dlq import DLQSettings
 
         with pytest.raises(ValidationError):
@@ -260,7 +260,7 @@ class TestDLQSettings:
             DLQSettings(retention_days=366)
 
     def test_singleton_pattern(self):
-        """싱글톤 패턴이 동작하는지 검증."""
+        """The singleton getter returns the same instance."""
         from baldur.settings.dlq import get_dlq_settings
 
         settings1 = get_dlq_settings()
@@ -282,7 +282,7 @@ class TestRetrySettings:
         reset_retry_settings()
 
     def test_default_values(self):
-        """기본값이 core/config.py:RetryConfig와 일치하는지 검증."""
+        """Defaults match core/config.py:RetryConfig."""
         from baldur.settings.retry import RetrySettings
 
         settings = RetrySettings()
@@ -296,7 +296,7 @@ class TestRetrySettings:
         assert settings.max_delay == 60.0
 
     def test_env_override(self, monkeypatch):
-        """환경변수로 값을 오버라이드할 수 있는지 검증."""
+        """Environment variables override the defaults."""
         from baldur.settings.retry import RetrySettings
 
         monkeypatch.setenv("BALDUR_RETRY_MAX_ATTEMPTS", "5")
@@ -308,7 +308,7 @@ class TestRetrySettings:
         assert settings.backoff_strategy == "linear"
 
     def test_validation_backoff_strategy(self):
-        """backoff_strategy 유효값 검증."""
+        """backoff_strategy accepts only the known strategy names."""
         from baldur.settings.retry import RetrySettings
 
         # Valid strategies
@@ -323,7 +323,7 @@ class TestRetrySettings:
         assert "backoff_strategy" in str(exc_info.value)
 
     def test_validation_max_attempts_range(self):
-        """max_attempts 범위 (1-20) 검증."""
+        """max_attempts is bounded to 1-20."""
         from baldur.settings.retry import RetrySettings
 
         with pytest.raises(ValidationError):
@@ -333,7 +333,7 @@ class TestRetrySettings:
             RetrySettings(max_attempts=21)
 
     def test_singleton_pattern(self):
-        """싱글톤 패턴이 동작하는지 검증."""
+        """The singleton getter returns the same instance."""
         from baldur.settings.retry import get_retry_settings
 
         settings1 = get_retry_settings()
@@ -355,7 +355,7 @@ class TestRateLimitSettings:
         reset_rate_limit_settings()
 
     def test_default_values(self):
-        """기본값이 core/config.py:RateLimitConfig와 일치하는지 검증."""
+        """Defaults match core/config.py:RateLimitConfig."""
         from baldur.settings.rate_limit import RateLimitSettings
 
         settings = RateLimitSettings()
@@ -368,7 +368,7 @@ class TestRateLimitSettings:
         assert settings.emergency_window_seconds == 60
 
     def test_env_override(self, monkeypatch):
-        """환경변수로 값을 오버라이드할 수 있는지 검증."""
+        """Environment variables override the defaults."""
         from baldur.settings.rate_limit import RateLimitSettings
 
         monkeypatch.setenv("BALDUR_RATE_LIMIT_CONTROL_API_RATE_LIMIT", "200")
@@ -380,7 +380,7 @@ class TestRateLimitSettings:
         assert settings.emergency_rate_limit == 20
 
     def test_validation_emergency_rate_limit(self):
-        """emergency_rate_limit 범위 (1-100) 검증."""
+        """emergency_rate_limit is bounded to 1-100."""
         from baldur.settings.rate_limit import RateLimitSettings
 
         with pytest.raises(ValidationError):
@@ -390,7 +390,7 @@ class TestRateLimitSettings:
             RateLimitSettings(emergency_rate_limit=101)
 
     def test_singleton_pattern(self):
-        """싱글톤 패턴이 동작하는지 검증."""
+        """The singleton getter returns the same instance."""
         from baldur.settings.rate_limit import (
             get_rate_limit_settings,
         )
@@ -414,7 +414,7 @@ class TestSecuritySettings:
         reset_security_settings()
 
     def test_default_values(self):
-        """기본값이 core/config.py:SecurityConfig와 일치하는지 검증."""
+        """Defaults match core/config.py:SecurityConfig."""
         from baldur.settings.security import SecuritySettings
 
         settings = SecuritySettings()
@@ -428,7 +428,7 @@ class TestSecuritySettings:
         assert settings.banned_ip_cache_prefix == "security:banned_ip:"
 
     def test_env_override(self, monkeypatch):
-        """환경변수로 값을 오버라이드할 수 있는지 검증."""
+        """Environment variables override the defaults."""
         from baldur.settings.security import SecuritySettings
 
         monkeypatch.setenv("BALDUR_SECURITY_TEMPORARY_BAN_HOURS", "12")
@@ -440,7 +440,7 @@ class TestSecuritySettings:
         assert settings.injection_ban_hours == 48
 
     def test_validation_injection_ban_hours(self):
-        """injection_ban_hours 범위 (1-720) 검증."""
+        """injection_ban_hours is bounded to 1-720."""
         from baldur.settings.security import SecuritySettings
 
         with pytest.raises(ValidationError):
@@ -450,7 +450,7 @@ class TestSecuritySettings:
             SecuritySettings(injection_ban_hours=721)
 
     def test_singleton_pattern(self):
-        """싱글톤 패턴이 동작하는지 검증."""
+        """The singleton getter returns the same instance."""
         from baldur.settings.security import (
             get_security_settings,
         )
@@ -461,7 +461,7 @@ class TestSecuritySettings:
         assert settings1 is settings2
 
     def test_json_schema_generation(self):
-        """JSON Schema가 올바르게 생성되는지 검증."""
+        """The model produces a well-formed JSON Schema."""
         from baldur.settings.security import SecuritySettings
 
         schema = SecuritySettings.model_json_schema()
@@ -473,14 +473,14 @@ class TestSecuritySettings:
 
 class TestSettingsConsistencyWithLegacy:
     """
-    기존 dataclass 설정과 Pydantic Settings의 일관성 검증.
+    Consistency between the legacy dataclass configs and Pydantic Settings.
 
-    core/config.py의 dataclass 기본값과
-    settings/*.py의 Pydantic 기본값이 동일한지 확인.
+    Confirms the dataclass defaults in core/config.py and the Pydantic defaults
+    in settings/*.py are the same values.
     """
 
     def test_circuit_breaker_consistency(self):
-        """CircuitBreakerConfig와 CircuitBreakerSettings 기본값 일치."""
+        """CircuitBreakerConfig and CircuitBreakerSettings share their defaults."""
         from baldur.core.config import CircuitBreakerConfig
         from baldur.settings.circuit_breaker import CircuitBreakerSettings
 
@@ -509,7 +509,7 @@ class TestSettingsConsistencyWithLegacy:
         )
 
     def test_dlq_consistency(self):
-        """DLQConfig와 DLQSettings 기본값 일치."""
+        """DLQConfig and DLQSettings share their defaults."""
         from baldur.core.config import DLQConfig
         from baldur.settings.dlq import DLQSettings
 
@@ -524,24 +524,18 @@ class TestSettingsConsistencyWithLegacy:
         assert pydantic.max_replay_attempts == legacy.max_replay_attempts
 
     def test_retry_consistency(self):
-        """RetrySettings와 BackoffSettings legacy 기본값 검증."""
-        from baldur.settings.backoff import BackoffSettings
+        """RetrySettings carries the documented retry ladder defaults."""
         from baldur.settings.retry import RetrySettings
 
         pydantic = RetrySettings()
-        backoff = BackoffSettings()
 
         assert pydantic.max_attempts == 3
         assert pydantic.backoff_strategy == "exponential"
         assert pydantic.base_delay == 1.0
         assert pydantic.max_delay == 60.0
-        # Legacy backoff fields moved to BackoffSettings (doc 359 Option B)
-        assert backoff.legacy_base == 4
-        assert backoff.legacy_min_delay == 1
-        assert backoff.legacy_jitter_percent == 25
 
     def test_rate_limit_consistency(self):
-        """RateLimitConfig와 RateLimitSettings 기본값 일치."""
+        """RateLimitConfig and RateLimitSettings share their defaults."""
         from baldur.core.config import RateLimitConfig
         from baldur.settings.rate_limit import RateLimitSettings
 
@@ -556,7 +550,7 @@ class TestSettingsConsistencyWithLegacy:
         assert pydantic.emergency_window_seconds == legacy.emergency_window_seconds
 
     def test_security_consistency(self):
-        """SecurityConfig와 SecuritySettings 기본값 일치."""
+        """SecurityConfig and SecuritySettings share their defaults."""
         from baldur.core.config import SecurityConfig
         from baldur.settings.security import SecuritySettings
 
@@ -575,12 +569,12 @@ class TestSettingsConsistencyWithLegacy:
 
 class TestValidationRulesConsistency:
     """
-    core/safe_defaults.py의 VALIDATION_RULES와
-    Pydantic Field constraints의 일관성 검증.
+    Consistency between VALIDATION_RULES in core/safe_defaults.py and the
+    Pydantic Field constraints.
     """
 
     def test_circuit_breaker_validation_rules(self):
-        """CircuitBreakerSettings 검증 규칙이 VALIDATION_RULES와 일치."""
+        """CircuitBreakerSettings constraints match VALIDATION_RULES."""
         from baldur.core.safe_defaults import VALIDATION_RULES
         from baldur.settings.circuit_breaker import CircuitBreakerSettings
 
@@ -601,7 +595,7 @@ class TestValidationRulesConsistency:
         assert props["success_threshold"]["maximum"] == rules["success_threshold"][1]
 
     def test_dlq_validation_rules(self):
-        """DLQSettings 검증 규칙이 VALIDATION_RULES와 일치."""
+        """DLQSettings constraints match VALIDATION_RULES."""
         from baldur.core.safe_defaults import VALIDATION_RULES
         from baldur.settings.dlq import DLQSettings
 
@@ -614,9 +608,8 @@ class TestValidationRulesConsistency:
         assert props["retention_days"]["maximum"] == rules["retention_days"][1]
 
     def test_retry_validation_rules(self):
-        """RetrySettings 검증 규칙이 VALIDATION_RULES와 일치."""
+        """RetrySettings constraints match VALIDATION_RULES."""
         from baldur.core.safe_defaults import VALIDATION_RULES
-        from baldur.settings.backoff import BackoffSettings
         from baldur.settings.retry import RetrySettings
 
         retry_schema = RetrySettings.model_json_schema()
@@ -627,20 +620,8 @@ class TestValidationRulesConsistency:
         assert retry_props["max_attempts"]["minimum"] == rules["max_attempts"][0]
         assert retry_props["max_attempts"]["maximum"] == rules["max_attempts"][1]
 
-        # jitter_percent moved to BackoffSettings.legacy_jitter_percent (doc 359)
-        backoff_schema = BackoffSettings.model_json_schema()
-        backoff_props = backoff_schema["properties"]
-        assert (
-            backoff_props["legacy_jitter_percent"]["minimum"]
-            == rules["jitter_percent"][0]
-        )
-        assert (
-            backoff_props["legacy_jitter_percent"]["maximum"]
-            == rules["jitter_percent"][1]
-        )
-
     def test_rate_limit_validation_rules(self):
-        """RateLimitSettings 검증 규칙이 VALIDATION_RULES와 일치."""
+        """RateLimitSettings constraints match VALIDATION_RULES."""
         from baldur.core.safe_defaults import VALIDATION_RULES
         from baldur.settings.rate_limit import RateLimitSettings
 
@@ -659,7 +640,7 @@ class TestValidationRulesConsistency:
         )
 
     def test_security_validation_rules(self):
-        """SecuritySettings 검증 규칙이 VALIDATION_RULES와 일치."""
+        """SecuritySettings constraints match VALIDATION_RULES."""
         from baldur.core.safe_defaults import VALIDATION_RULES
         from baldur.settings.security import SecuritySettings
 

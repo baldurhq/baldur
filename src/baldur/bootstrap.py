@@ -1877,6 +1877,28 @@ def _build_startup_report(ext_result: ExtensionResult) -> dict[str, Any]:
     except Exception:
         report["dlq_capture_backing"] = "oss"
 
+    # Effective retry backoff. The advertised env vars and the ladder the retry
+    # stage actually builds are two different things until something prints
+    # both; this is that print. Every field the config's backoff builder reads
+    # is included, so the ladder is reproducible from the report alone, plus
+    # which branch resolved it.
+    try:
+        from baldur.services.retry_handler.models import RetryPolicyConfig
+
+        retry_config = RetryPolicyConfig.from_settings()
+        report["effective_retry_backoff"] = {
+            "strategy": retry_config.backoff_strategy,
+            "base_delay": retry_config.backoff_base,
+            "multiplier": retry_config.backoff_multiplier,
+            "increment": retry_config.backoff_increment,
+            "jitter_percent": retry_config.jitter_percent,
+            "max_delay": retry_config.backoff_max,
+            "max_attempts": retry_config.max_attempts,
+            "source": retry_config.config_source,
+        }
+    except Exception:
+        report["effective_retry_backoff"] = {}
+
     # Durability directory resolutions. Tells an operator which storage
     # surfaces are on their configured directory and which fell back — the
     # boot-time counterpart to the primitive's one-time warning. Lazily

@@ -22,13 +22,12 @@ from baldur.settings.field_types import (
     STANDARD_BACKOFF_MULTIPLIER,
     STANDARD_BASE_DELAY,
     STANDARD_JITTER_FACTOR,
+    STANDARD_LINEAR_INCREMENT,
     STANDARD_MAX_DELAY,
     JitterFactor,
     LongDuration,
     MediumDuration,
     ShortDuration,
-    ShortInterval,
-    TinyCount,
 )
 from baldur.settings.validators import warn_above
 
@@ -73,7 +72,7 @@ class BackoffSettings(BaseSettings):
         description="Linear backoff base delay (seconds)",
     )
     linear_increment: ShortDuration = Field(
-        default=1.0,
+        default=STANDARD_LINEAR_INCREMENT,
         description="Linear backoff increment (seconds)",
     )
     linear_max_delay: MediumDuration = Field(
@@ -109,24 +108,6 @@ class BackoffSettings(BaseSettings):
     decorrelated_max_delay: LongDuration = Field(
         default=STANDARD_MAX_DELAY,
         description="Decorrelated jitter backoff maximum delay (seconds)",
-    )
-
-    # ==========================================================================
-    # Legacy Backoff (from core/backoff.py LegacyBackoffConfig)
-    # ==========================================================================
-    legacy_base: TinyCount = Field(
-        default=4,
-        description="Legacy backoff exponential base (4^n)",
-    )
-    legacy_jitter_percent: int = Field(
-        default=25,
-        ge=0,
-        le=100,
-        description="Legacy backoff jitter percent (+/-%)",
-    )
-    legacy_min_delay: ShortInterval = Field(
-        default=1,
-        description="Legacy backoff minimum delay (seconds)",
     )
 
     @field_validator("exponential_max_delay")

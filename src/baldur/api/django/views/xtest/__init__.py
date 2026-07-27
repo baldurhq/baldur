@@ -132,9 +132,7 @@ from .replay import (
 
 # Retry X-Test views
 from .retry import (
-    BackoffPreviewView,
     RetryRateLimitStatusView,
-    RetrySimulateView,
     XTestRetryConfigView,
 )
 
@@ -205,8 +203,6 @@ __all__ = [
     "TriggerReplayOnCBCloseView",
     "ReplayStatusView",
     # Retry X-Test views
-    "BackoffPreviewView",
-    "RetrySimulateView",
     "RetryRateLimitStatusView",
     "XTestRetryConfigView",
     # Rate Limit X-Test views

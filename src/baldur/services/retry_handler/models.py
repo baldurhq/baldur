@@ -9,21 +9,53 @@ RetryPolicyConfig(dataclass), RetryResult(dataclass), T TypeVar.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, TypeVar
 
+import structlog
+
+from baldur.core.backoff import (
+    BackoffStrategy,
+    ConstantBackoff,
+    DecorrelatedJitterBackoff,
+    ExponentialBackoff,
+    LinearBackoff,
+)
 from baldur.core.exceptions import (
     RetryExhaustedError,
     non_retryable_exceptions,
 )
 from baldur.settings import get_config
+from baldur.settings.field_types import (
+    STANDARD_BACKOFF_MULTIPLIER,
+    STANDARD_BASE_DELAY,
+    STANDARD_JITTER_FACTOR,
+    STANDARD_LINEAR_INCREMENT,
+    STANDARD_MAX_DELAY,
+    STANDARD_RETRY_COUNT,
+)
 
 if TYPE_CHECKING:
     from baldur.interfaces.resilience_policy import PolicyResult
 
+logger = structlog.get_logger()
+
 T = TypeVar("T")
+
+#: Default jitter width as a percentage. ``BackoffSettings`` carries the same
+#: quantity as a 0..1 factor, so every crossing between the two multiplies or
+#: divides by 100 — the config field is a percent, the strategy field a factor.
+STANDARD_JITTER_PERCENT: float = STANDARD_JITTER_FACTOR * 100
+
+#: The strategy name used when the configured one cannot be honored.
+FALLBACK_BACKOFF_STRATEGY: str = "exponential"
+
+#: The one strategy that carries running state across attempts. Policies build a
+#: fresh instance of it per execution instead of sharing one, so two concurrent
+#: ladders on a cached policy cannot interleave each other's previous delay.
+STATEFUL_BACKOFF_STRATEGY: str = "decorrelated_jitter"
 
 
 class RetryAction(str, Enum):
@@ -83,10 +115,16 @@ class MaxRetriesExceededError(RetryExhaustedError):
 class RetryPolicyConfig:
     """Configuration dedicated to the pure retry Policy. Does not include externally dependent settings."""
 
-    max_attempts: int = 3
-    backoff_base: int = 4
-    backoff_max: int = 180
-    jitter_percent: int = 25
+    max_attempts: int = STANDARD_RETRY_COUNT
+    # Seconds, not an exponent base: ``backoff_base`` is the *first* retry delay
+    # and ``backoff_multiplier`` grows it. Every default here is the shared
+    # STANDARD_* value, so direct construction and settings resolution agree.
+    backoff_base: float = STANDARD_BASE_DELAY
+    backoff_max: float = STANDARD_MAX_DELAY
+    jitter_percent: float = STANDARD_JITTER_PERCENT
+    backoff_multiplier: float = STANDARD_BACKOFF_MULTIPLIER
+    backoff_increment: float = STANDARD_LINEAR_INCREMENT
+    backoff_strategy: str = FALLBACK_BACKOFF_STRATEGY
     retryable_exceptions: tuple[type[Exception], ...] = field(
         default_factory=lambda: (Exception,)
     )
@@ -116,10 +154,22 @@ class RetryPolicyConfig:
     rate_limit_aware: bool = True
     rate_limit_key: str | None = None
 
+    # Which resolution path produced these values. Set at the exit of each
+    # ``from_settings`` branch — never re-derived from registry state, because a
+    # registered manager that raises mid-resolution falls through to the static
+    # branch and a registry probe would then label static values "runtime_config".
+    # Excluded from equality so the field cannot change any existing comparison.
+    config_source: str = field(default="direct", compare=False)
+
     @classmethod
     def from_settings(cls, domain: str = "default") -> RetryPolicyConfig:
         """
         Load only the pure retry settings from Settings.
+
+        Both resolution branches bottom out in the same operator-facing fields
+        (``BALDUR_RETRY_*`` for the ladder, ``BALDUR_BACKOFF_*`` for its shape),
+        so a domain resolves identically with and without the PRO runtime store
+        when that store holds no override.
 
         Args:
             domain: Domain name for per-domain overrides
@@ -127,57 +177,206 @@ class RetryPolicyConfig:
         Returns:
             RetryPolicyConfig instance
         """
+        config = cls._from_runtime_config(domain)
+        if config is None:
+            config = cls._from_static_settings(domain)
+
+        logger.debug(
+            "retry.backoff_config_resolved",
+            domain=domain,
+            source=config.config_source,
+            strategy=config.backoff_strategy,
+            backoff_base=config.backoff_base,
+            backoff_max=config.backoff_max,
+            backoff_multiplier=config.backoff_multiplier,
+            backoff_increment=config.backoff_increment,
+            jitter_percent=config.jitter_percent,
+            max_attempts=config.max_attempts,
+        )
+        return config
+
+    @classmethod
+    def _from_runtime_config(cls, domain: str) -> RetryPolicyConfig | None:
+        """Resolve through the PRO runtime-config store, or ``None`` when absent.
+
+        ``None`` covers both "no manager registered" and "the manager raised":
+        the caller falls through to the static branch, which is the same silent
+        fallback this method has always had.
+        """
         try:
             from baldur.factory.registry import ProviderRegistry
 
             manager = ProviderRegistry.runtime_config_manager.safe_get()
             if manager is None:
-                raise RuntimeError("baldur_pro RuntimeConfigManager not registered")
+                return None
             retry_config = manager.get_retry_config()
             dlq_config = manager.get_dlq_config()
 
-            # ``RetrySettings`` exposes the backoff base under the ``base_delay``
-            # key — not ``backoff_base``.
-            # Looking up ``backoff_base`` first preserves any explicit
-            # RuntimeConfigManager override that uses the legacy key, but falls
-            # through to the actual RetrySettings field so env vars like
-            # BALDUR_RETRY_BASE_DELAY take effect.
+            # The runtime store's retry family holds only the RetrySettings
+            # fields, so the backoff *shape* dials (multiplier, jitter width,
+            # linear increment) fall through to BackoffSettings on this branch
+            # too — that is what makes the two branches resolve alike.
+            backoff_settings = get_config().core.backoff
+
+            # ``RetrySettings`` exposes the backoff base under ``base_delay``.
+            # Looking up ``backoff_base`` first preserves an explicit
+            # RuntimeConfigManager override using that key, then falls through to
+            # the actual field so BALDUR_RETRY_BASE_DELAY takes effect.
             return cls(
-                max_attempts=retry_config.get("max_attempts", 3),
+                max_attempts=retry_config.get("max_attempts", STANDARD_RETRY_COUNT),
                 backoff_base=retry_config.get(
-                    "backoff_base", retry_config.get("base_delay", 4)
+                    "backoff_base",
+                    retry_config.get("base_delay", STANDARD_BASE_DELAY),
                 ),
-                backoff_max=int(retry_config.get("max_delay", 180)),
-                jitter_percent=retry_config.get("jitter_percent", 25),
+                backoff_max=retry_config.get("max_delay", STANDARD_MAX_DELAY),
+                jitter_percent=retry_config.get(
+                    "jitter_percent",
+                    backoff_settings.exponential_jitter_factor * 100,
+                ),
+                backoff_multiplier=backoff_settings.exponential_multiplier,
+                backoff_increment=backoff_settings.linear_increment,
+                backoff_strategy=retry_config.get(
+                    "backoff_strategy", FALLBACK_BACKOFF_STRATEGY
+                ),
                 max_elapsed=retry_config.get("max_elapsed"),
                 enable_dlq=dlq_config.get("enabled", True),
                 domain=domain,
                 rate_limit_aware=retry_config.get("rate_limit_aware", True),
                 rate_limit_key=retry_config.get("rate_limit_key"),
+                config_source="runtime_config",
             )
         except Exception:
-            pass
+            return None
 
+    @classmethod
+    def _from_static_settings(cls, domain: str) -> RetryPolicyConfig:
+        """Resolve from the settings tree plus this domain's override overlay."""
         config = get_config()
         retry_settings = config.core.retry
         backoff_settings = config.core.backoff
         dlq_settings = config.services_group.dlq
         domain_config = config.domain_configs.get(domain, {}).get("retry", {})
 
-        # Legacy backoff fields now in BackoffSettings (doc 359 Option B)
         return cls(
             max_attempts=domain_config.get("max_attempts", retry_settings.max_attempts),
-            backoff_base=domain_config.get(
-                "backoff_base", backoff_settings.legacy_base
+            backoff_base=_resolve_domain_backoff_base(
+                domain_config, retry_settings.base_delay, domain
             ),
             backoff_max=domain_config.get("max_delay", retry_settings.max_delay),
-            jitter_percent=backoff_settings.legacy_jitter_percent,
+            jitter_percent=backoff_settings.exponential_jitter_factor * 100,
+            backoff_multiplier=backoff_settings.exponential_multiplier,
+            backoff_increment=backoff_settings.linear_increment,
+            backoff_strategy=domain_config.get(
+                "backoff_strategy", retry_settings.backoff_strategy
+            ),
             max_elapsed=domain_config.get("max_elapsed", retry_settings.max_elapsed),
             enable_dlq=dlq_settings.enabled,
             domain=domain,
             rate_limit_aware=domain_config.get("rate_limit_aware", True),
             rate_limit_key=domain_config.get("rate_limit_key"),
+            config_source="static",
         )
+
+    def build_backoff(self, *, jitter: bool = True) -> BackoffStrategy:
+        """Build the backoff strategy these resolved values describe.
+
+        Reads only this dataclass's own fields — never the settings tree. Every
+        strategy parameter is resolved at ``from_settings`` time so the config
+        alone reproduces the ladder: that is what lets a caller reason about the
+        effective backoff from a startup report, and what keeps the two
+        construction sites (sync and async) from drifting apart.
+
+        Args:
+            jitter: Build the jitterless skeleton when False. Ignored by the
+                decorrelated strategy, whose randomization is its definition.
+
+        Returns:
+            BackoffStrategy: the strategy named by ``backoff_strategy``, or an
+            exponential one when that name cannot be honored (fail-open — a
+            config-shaped side input must never fail a business call).
+        """
+        builder = _BACKOFF_BUILDERS.get(self.backoff_strategy)
+        if builder is None:
+            logger.warning(
+                "retry.backoff_strategy_resolution_failed",
+                domain=self.domain,
+                strategy=self.backoff_strategy,
+                fallback=FALLBACK_BACKOFF_STRATEGY,
+            )
+            builder = _BACKOFF_BUILDERS[FALLBACK_BACKOFF_STRATEGY]
+        return builder(self, jitter)
+
+
+def _resolve_domain_backoff_base(
+    domain_config: Mapping[str, Any],
+    fallback: float,
+    domain: str,
+) -> float:
+    """Resolve this domain's first-retry delay, failing open to ``fallback``.
+
+    Two spellings are honored, ``backoff_base`` ahead of ``base_delay``, because
+    the settings-side merge route names the quantity ``base_delay`` while the
+    resolved config names it ``backoff_base`` — an operator writing either into
+    a domain overlay means the same thing.
+
+    The overlay itself is an unvalidated mapping, so whichever key matched is
+    coerced and range-checked here. Anything non-numeric or non-positive
+    degrades to the settings value with a WARNING: a config typo must not
+    replace a business outcome with a TypeError mid-retry, and a non-positive
+    base yields a delay the retry loop skips entirely, turning the ladder into
+    a hot loop against the failing upstream.
+    """
+    for key in ("backoff_base", "base_delay"):
+        if key not in domain_config:
+            continue
+        raw = domain_config[key]
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            value = None
+        if value is None or value <= 0:
+            logger.warning(
+                "retry.domain_override_coercion_failed",
+                domain=domain,
+                key=key,
+                value=repr(raw),
+                fallback=fallback,
+            )
+            return fallback
+        return value
+    return fallback
+
+
+# Strategy name -> constructor, over the same vocabulary RetrySettings
+# validates. Deliberately not routed through ``get_backoff_calculator``: that
+# factory keys decorrelated jitter as "decorrelated", which no settings value
+# can ever spell.
+_BACKOFF_BUILDERS: dict[str, Callable[[RetryPolicyConfig, bool], BackoffStrategy]] = {
+    "exponential": lambda cfg, jitter: ExponentialBackoff(
+        base_delay=cfg.backoff_base,
+        max_delay=cfg.backoff_max,
+        multiplier=cfg.backoff_multiplier,
+        jitter=jitter,
+        jitter_factor=cfg.jitter_percent / 100.0,
+    ),
+    "linear": lambda cfg, jitter: LinearBackoff(
+        base_delay=cfg.backoff_base,
+        increment=cfg.backoff_increment,
+        max_delay=cfg.backoff_max,
+        jitter=jitter and cfg.jitter_percent > 0,
+        jitter_factor=cfg.jitter_percent / 100.0,
+    ),
+    "constant": lambda cfg, jitter: ConstantBackoff(
+        delay=cfg.backoff_base,
+        jitter=jitter and cfg.jitter_percent > 0,
+        jitter_factor=cfg.jitter_percent / 100.0,
+        max_delay=cfg.backoff_max,
+    ),
+    "decorrelated_jitter": lambda cfg, jitter: DecorrelatedJitterBackoff(
+        base_delay=cfg.backoff_base,
+        max_delay=cfg.backoff_max,
+    ),
+}
 
 
 @dataclass

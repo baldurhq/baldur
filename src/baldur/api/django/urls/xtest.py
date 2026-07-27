@@ -10,7 +10,6 @@ from __future__ import annotations
 from django.urls import path
 
 from baldur.api.django.views.xtest import (
-    BackoffPreviewView,
     BlastRadiusTestView,
     CBStatusDetailView,
     CheckDuplicateView,
@@ -40,7 +39,6 @@ from baldur.api.django.views.xtest import (
     ResetDLQXTestView,
     ResetView,
     RetryRateLimitStatusView,
-    RetrySimulateView,
     RunScenarioView,
     ScenarioStatusView,
     SwitchToAutoModeView,
@@ -133,16 +131,6 @@ urlpatterns = [
         "xtest/replay/status/", ReplayStatusView.as_view(), name="xtest-replay-status"
     ),
     # Retry X-Test
-    path(
-        "xtest/retry/backoff-preview/",
-        BackoffPreviewView.as_view(),
-        name="xtest-retry-backoff-preview",
-    ),
-    path(
-        "xtest/retry/simulate/",
-        RetrySimulateView.as_view(),
-        name="xtest-retry-simulate",
-    ),
     path(
         "xtest/retry/rate-limit-status/",
         RetryRateLimitStatusView.as_view(),

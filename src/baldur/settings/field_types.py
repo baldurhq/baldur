@@ -100,6 +100,9 @@ STANDARD_BACKOFF_MULTIPLIER: float = 2.0
 STANDARD_JITTER_FACTOR: float = 0.2
 """Standard jitter factor for backoff randomization."""
 
+STANDARD_LINEAR_INCREMENT: float = 1.0
+"""Standard per-attempt increment in seconds for the linear backoff strategy."""
+
 
 # =========================================================================
 # Shared Default Constants — Timeout / Interval

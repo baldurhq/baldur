@@ -92,31 +92,20 @@ class BackoffConfig:
         """
         Load configuration from core config.
 
+        Only ``max_delay`` is settings-derived. ``base`` / ``jitter_percent`` /
+        ``min_delay`` are domain constants of the ``base ** n`` curve this class
+        reconstructs, and there is no operator-facing field carrying that
+        quantity — the retry ladder's own base is a *first delay in seconds*,
+        a different quantity that must not be substituted here.
+
         Args:
-            domain: Optional domain for per-domain overrides
+            domain: Optional domain for per-domain overrides (unused — the
+                overlay this class read never matched the real override shape)
 
         Returns:
-            BackoffConfig with merged settings
+            BackoffConfig with the settings-derived delay cap
         """
         root = get_config()
-        backoff_settings = root.core.backoff
         retry_settings = root.core.retry
 
-        # Legacy backoff fields live in BackoffSettings (doc 359 Option B)
-        config = cls(
-            base=backoff_settings.legacy_base,
-            max_delay=int(retry_settings.max_delay),
-            jitter_percent=backoff_settings.legacy_jitter_percent,
-            min_delay=backoff_settings.legacy_min_delay,
-        )
-
-        # Apply per-domain overrides if available
-        if domain:
-            # Get domain config from centralized config
-            full_config = get_config()
-            domain_configs = getattr(full_config, "domain_configs", {})
-            domain_config = domain_configs.get(domain, {})
-            if "backoff_base" in domain_config:
-                config.base = domain_config["backoff_base"]
-
-        return config
+        return cls(max_delay=int(retry_settings.max_delay))

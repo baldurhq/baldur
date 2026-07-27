@@ -57,12 +57,10 @@ SAFE_DEFAULTS: dict[str, dict[str, Any]] = {
     "retry": {
         "max_attempts": 3,
         "backoff_strategy": "exponential",
-        "backoff_base": 4,
+        "backoff_base": 1.0,
         "base_delay": 1.0,
         "max_delay": 300.0,
-        "min_delay": 1,
-        "jitter": True,
-        "jitter_percent": 25,
+        "jitter_percent": 20,
     },
     # Rate Limit - reasonable limits (inbound quota family only; the outbound
     # 429-backoff dials live in RateLimitBackoffSettings and are not
@@ -232,10 +230,9 @@ VALIDATION_RULES: dict[str, dict[str, tuple[Any, Any]]] = {
     },
     "retry": {
         "max_attempts": (1, 20),
-        "backoff_base": (1, 10),
+        "backoff_base": (0.1, 60.0),
         "base_delay": (0.1, 60.0),
         "max_delay": (1.0, 3600.0),
-        "min_delay": (1, 60),
         "jitter_percent": (0, 100),
     },
     "rate_limit": {

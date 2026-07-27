@@ -61,7 +61,7 @@ CONFIG_DESCRIPTIONS: dict[str, tuple[str, str]] = {
     # =========================================================================
     "max_attempts": ("Maximum Retry Attempts", "count"),
     "backoff_strategy": ("Backoff Strategy Type", "text"),
-    "backoff_base": ("Exponential Backoff Base", "multiplier"),
+    "backoff_base": ("Backoff First Delay", "seconds"),
     "base_delay": ("Base Delay Duration", "seconds"),
     "max_delay": ("Maximum Delay Cap", "seconds"),
     "min_delay": ("Minimum Delay Floor", "seconds"),

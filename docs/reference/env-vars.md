@@ -21,6 +21,7 @@ BALDUR_CB_MINIMUM_CALLS=10              # calls the window needs before the rate
 BALDUR_CB_RECOVERY_TIMEOUT=60
 BALDUR_CB_HALF_OPEN_MAX_CALLS=3
 BALDUR_RETRY_MAX_ATTEMPTS=3
+BALDUR_RETRY_BACKOFF_STRATEGY=exponential  # exponential | linear | constant | decorrelated_jitter
 BALDUR_RETRY_BASE_DELAY=1.0
 BALDUR_RETRY_MAX_ELAPSED=30.0  # total wall-clock retry budget (s); unset = no budget. Distinct from the per-sleep max_delay cap.
 BALDUR_IDEMPOTENCY_ENABLED=true
