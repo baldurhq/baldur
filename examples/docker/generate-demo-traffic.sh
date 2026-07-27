@@ -5,6 +5,8 @@
 # Hits the demo app's endpoints in a loop:
 #   /demo/            happy path     -> CB CLOSED + latency histogram
 #   /flaky/           intermittent   -> retries + CB trip + error traces
+#   /rate-limited/    upstream 429   -> 429 counter, cooldown, consecutive-429s,
+#                                       plus the wait a later call spends in it
 #   /idempotent/      dedup gate     -> idempotency decision counter
 #   /system-control/  kill switch    -> system-control enabled gauge + changes
 #   /api/baldur/health/?nocache=true -> health check status (recompute each hit)
@@ -39,6 +41,8 @@ while [ "${SECONDS}" -lt "${end}" ]; do
     # non-zero there, so swallow it and keep the loop going.
     curl -fsS "${BASE_URL}/demo/" >/dev/null 2>&1 || true
     curl -fsS "${BASE_URL}/flaky/" >/dev/null 2>&1 || true
+    # /rate-limited/ 5xx's on the simulated-429 path for the same reason.
+    curl -fsS "${BASE_URL}/rate-limited/" >/dev/null 2>&1 || true
     curl -fsS "${BASE_URL}/idempotent/" >/dev/null 2>&1 || true
     curl -fsS "${BASE_URL}/system-control/" >/dev/null 2>&1 || true
     # nocache=true forces the health service to recompute (and record) each hit.
@@ -53,12 +57,23 @@ if ! command -v jq >/dev/null 2>&1; then
     exit 1
 fi
 
-# Demo-drivable OSS series (Idempotency / Health / System Control). PRO panels
-# are reference-only on this OSS stack and are verified on the PRO smoke (7.6B).
+# Demo-drivable OSS series (Idempotency / Health / System Control / Rate Limit).
+# PRO panels are reference-only on this OSS stack and are verified on the PRO
+# smoke (7.6B).
+#
+# Curated, not exhaustive. Two Rate Limit series are deliberately absent:
+# baldur_rate_limit_deferrals_total needs the remaining cooldown to exceed the
+# caller's max_wait bound, which the demo's default bounds never reach (that
+# one line renders flat-zero, by design), and the task-layer series need the
+# Celery adapter, which this demo stack does not run.
 NEW_OSS_SERIES=(
     "baldur_idempotency_gate_decision_total"
     "baldur_health_check_status"
     "baldur_system_control_enabled"
+    "baldur_rate_limit_429_total"
+    "baldur_rate_limit_cooldown_seconds_count"
+    "baldur_rate_limit_consecutive_429s"
+    "baldur_rate_limit_wait_seconds_count"
 )
 
 assert_populated() {

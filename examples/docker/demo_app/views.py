@@ -8,6 +8,9 @@ These endpoints feed the Baldur Overview (OSS) dashboard end to end:
   every terminal retry outcome records to ``baldur_retry_outcomes_total`` (the
   Retry Outcomes panel), and sustained failures trip the circuit breaker to OPEN
   and emit error spans that surface in the Recent Traces panel.
+- ``/rate-limited/`` — intermittently raises an upstream 429 so the two Rate
+  Limit panels populate: the 429 counter, the computed cooldown, the
+  consecutive-429 gauge, and the wait a later call spends inside that cooldown.
 - ``/idempotent/`` — drives the IdempotencyGate over a small rotating key set so
   the Idempotency Gate Decisions panel shows continue / skip / abort.
 - ``/system-control/`` — cycles the global kill switch (disable -> enable within
@@ -46,8 +49,27 @@ _IDEMPOTENCY_GATE = IdempotencyGate(
 )
 
 
+# Fraction of /rate-limited/ calls that come back as an upstream 429. Lower
+# than the flaky rate: every 429 arms a shared cooldown, so a high rate parks
+# the whole traffic loop in backoff instead of producing a readable signal.
+_RATE_LIMITED_FAILURE_RATE = float(
+    os.environ.get("DEMO_RATE_LIMITED_FAILURE_RATE", "0.3")
+)
+
+
 class FlakyDependencyError(RuntimeError):
     """Simulated downstream fault for the /flaky/ demo endpoint."""
+
+
+class RateLimitedDependencyError(RuntimeError):
+    """Simulated upstream 429 for the /rate-limited/ demo endpoint.
+
+    Carries ``status_code`` because that is exactly what the coordinator's
+    default 429 detection reads: an exception without it is an ordinary
+    failure and never notifies the rate-limit coordinator.
+    """
+
+    status_code = 429
 
 
 @baldur.protected("demo")
@@ -62,6 +84,23 @@ def flaky(request: HttpRequest) -> JsonResponse:
     if random.random() < _FLAKY_FAILURE_RATE:
         raise FlakyDependencyError("simulated downstream failure")
     return JsonResponse({"status": "ok", "service": "flaky"})
+
+
+@baldur.protected("ratelimited", retry=True)
+def rate_limited(request: HttpRequest) -> JsonResponse:
+    """Intermittently 429-ing endpoint — drives the rate-limit panels.
+
+    Mirrors ``/flaky/``'s shape, but raises an exception carrying
+    ``status_code = 429`` so the retry stage notifies the rate-limit
+    coordinator: that records the 429 counter, the computed cooldown and the
+    consecutive-429 gauge, and the cooldown then makes the *next* call wait,
+    which is where the wait histogram is observed. The deferral counter stays
+    at zero on this demo — a deferral needs the remaining cooldown to exceed
+    the caller's max_wait bound, which the default bounds do not reach.
+    """
+    if random.random() < _RATE_LIMITED_FAILURE_RATE:
+        raise RateLimitedDependencyError("simulated upstream rate limit")
+    return JsonResponse({"status": "ok", "service": "rate-limited"})
 
 
 @baldur.protected("idempotent")

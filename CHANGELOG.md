@@ -78,6 +78,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `baldur_task_attempts_distribution` / `baldur_task_outcomes_total` — task-layer resolutions.
 - Sample alert `TaskFailureRateHigh` — the task-queue counterpart of the protected-call rule.
 - Shipped Grafana boards gain rate-limit panels; task-layer panels join the operations board.
+- The demo stack drives a `/rate-limited/` endpoint, so the rate limit panels start populated.
 
 ### Changed
 
