@@ -906,13 +906,19 @@ def start_sync_worker(
     """
     Helper function to start the Sync Worker.
 
-    Gets the singleton instance and starts it.
+    Gets the singleton instance, absorbs any orphaned WAL entries, and starts
+    the drain. This is the single start path — the audit lifecycle delegates
+    here rather than repeating the sequence.
     """
     worker = AuditSyncWorker.get_instance(
         wal=wal,
         central_adapter=central_adapter,
         config=config,
     )
+    # Absorb a crashed peer's orphan (non-own-PID) WAL entries once before the
+    # steady runtime-partitioned drain begins. Skipping this strands a dead
+    # worker's audit entries forever, so it is part of starting, not an extra.
+    worker.absorb_orphans()
     worker.start()
     return worker
 

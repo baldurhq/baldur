@@ -279,15 +279,16 @@ def _initialize_async_logger() -> None:
 
 
 def _start_sync_worker() -> None:
-    """Start the AuditSyncWorker."""
-    try:
-        from baldur.audit.sync_worker import AuditSyncWorker
+    """Start the AuditSyncWorker.
 
-        sync_worker = AuditSyncWorker.get_instance()
-        # Absorb a crashed peer's orphan (non-own-PID) WAL entries once before
-        # the steady runtime-partitioned drain begins (#470 D2).
-        sync_worker.absorb_orphans()
-        sync_worker.start()
+    Delegates to the module's public helper so the two start paths cannot
+    diverge — they did: this one absorbed orphaned WAL entries and the public
+    helper did not (#470 D2).
+    """
+    try:
+        from baldur.audit.sync_worker import start_sync_worker
+
+        start_sync_worker()
 
         logger.info("async_audit_lifecycle.auditsyncworker_started")
     except Exception as e:

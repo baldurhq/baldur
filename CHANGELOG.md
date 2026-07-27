@@ -12,6 +12,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ### Fixed
 
+- `start_sync_worker()` absorbs a crashed worker's orphaned audit WAL entries before draining.
+- Before, only the internal start path did, so the public helper stranded those entries forever.
 - The escalation channel self-test now closes the PagerDuty incident it opens.
 - If that close fails, the self-test result names the cause and says to close it manually.
 - Durability directories fall back to a writable location when the shipped default is not.

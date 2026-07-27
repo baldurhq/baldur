@@ -53,12 +53,39 @@ _ENTRY_POINT_PATHS = (
 )
 
 
+def _installed_baldur_root() -> Path | None:
+    """Directory of the installed ``baldur`` package, or None.
+
+    The private repo consumes the OSS core as a sibling editable install, so
+    ``PROJECT_ROOT/src/baldur`` does not exist there. Without this fallback the
+    OSS entry points (``bootstrap.py``, the framework adapters, the CLI) are
+    all absent from the scan while ``src/baldur_pro`` is still walked for
+    definitions — so every PRO setup function invoked from ``bootstrap.py`` was
+    reported as never-invoked, a verdict the gate had no basis for. Two such
+    false violations sat baselined as "wiring gap" while both were correctly
+    wired all along.
+    """
+    import importlib.util
+
+    spec = importlib.util.find_spec("baldur")
+    if spec is None or not spec.origin:
+        return None
+    return Path(spec.origin).resolve().parent
+
+
 def _entry_point_roots() -> list[Path]:
     roots: list[Path] = []
+    installed = _installed_baldur_root()
     for rel in _ENTRY_POINT_PATHS:
         candidate = PROJECT_ROOT / rel
         if candidate.exists():
             roots.append(candidate)
+            continue
+        # In-tree path absent: resolve it inside the installed package instead.
+        if installed is not None and rel.startswith("src/baldur/"):
+            fallback = installed / rel[len("src/baldur/") :]
+            if fallback.exists():
+                roots.append(fallback)
     return roots
 
 
@@ -113,4 +140,17 @@ class TestStartupWiringContract:
             "or in baldur.bootstrap; document dynamic dispatch in the rule "
             "registry; or add a baseline entry under `startup_wiring:` "
             "with reason+ticket.\n" + "\n".join(violations)
+        )
+
+    def test_the_oss_entry_points_are_reachable(self):
+        """Guard-of-the-guard: an unreachable entry-point set turns every
+        definition into a false violation, which is how two correctly-wired PRO
+        setup functions ended up baselined as wiring gaps."""
+        roots = _entry_point_roots()
+        assert roots, "no entry-point root resolved — every definition would be flagged"
+
+        names = {r.name for r in roots}
+        assert "bootstrap.py" in names, (
+            "baldur.bootstrap is not in the resolved entry-point set; PRO setup "
+            "functions invoked from it would be reported as never-invoked"
         )

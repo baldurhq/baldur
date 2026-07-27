@@ -42,13 +42,12 @@ health_check_naming:
   - {file: src/baldur/audit/self_audit.py, symbol: SelfAuditLogger.is_healthy, reason: 'pre-existing: SelfAuditLogger.is_healthy must be @property (cached state query, no I/O)', ticket: '506'}
 
 startup_wiring:
-  - {file: src/baldur/adapters/celery/signal_hooks.py, symbol: setup_baldur_signals, reason: 'pre-existing: setup_baldur_signals() not invoked from entry point - dynamic dispatch or wiring gap', ticket: '506'}
-  - {file: src/baldur/audit/audit_watchdog.py, symbol: start_watchdog, reason: 'pre-existing: start_watchdog() not invoked from entry point - dynamic dispatch or wiring gap', ticket: '506'}
-  - {file: src/baldur/audit/sync_worker.py, symbol: start_sync_worker, reason: 'pre-existing: start_sync_worker() not invoked from entry point - dynamic dispatch or wiring gap', ticket: '506'}
-  - {file: src/baldur/context/celery_propagation.py, symbol: setup_celery_causation_propagation, reason: 'pre-existing: setup_celery_causation_propagation() not invoked from entry point - dynamic dispatch or wiring gap', ticket: '506'}
-  - {file: src/baldur/observability/baggage.py, symbol: setup_baggage_propagation, reason: 'pre-existing: setup_baggage_propagation() not invoked from entry point - dynamic dispatch or wiring gap', ticket: '506'}
-  - {file: src/baldur/services/cell_topology/health.py, symbol: setup_cell_health_scheduler, reason: 'pre-existing: setup_cell_health_scheduler() not invoked from entry point - dynamic dispatch or wiring gap', ticket: '506'}
-  - {file: src/baldur/services/dlq_outbox/outbox.py, symbol: setup_dlq_outbox, reason: 'pre-existing: setup_dlq_outbox() not invoked from entry point - dynamic dispatch or wiring gap', ticket: '506'}
+  - {file: src/baldur/adapters/celery/signal_hooks.py, symbol: setup_baldur_signals, reason: 'permanent exemption: user-invoked integration API. The caller owns the Celery app object, so the library cannot invoke this - the docstring Example is the intended call site', ticket: '506'}
+  - {file: src/baldur/audit/audit_watchdog.py, symbol: start_watchdog, reason: 'genuinely uncalled: AuditWatchdog has no production consumer anywhere - get_watchdog/start_watchdog/stop_watchdog and the audit_watchdog settings class are reachable only from this module. Removal-vs-wiring is an owner decision (public export + published BALDUR_AUDIT_WATCHDOG_* env vars)', ticket: '506'}
+  - {file: src/baldur/audit/sync_worker.py, symbol: start_sync_worker, reason: 'gate reach: invoked by async_audit_lifecycle._start_sync_worker(), which is not in the entry-point set. It is now the single start path - the lifecycle delegates here rather than repeating the absorb-then-start sequence', ticket: '506'}
+  - {file: src/baldur/context/celery_propagation.py, symbol: setup_celery_causation_propagation, reason: 'vestigial by design: the before_task_publish handler is connected by the @before_task_publish.connect decorator at import time. This function only records enablement state, so nothing calls it and nothing needs to', ticket: '506'}
+  - {file: src/baldur/observability/baggage.py, symbol: setup_baggage_propagation, reason: 'gate reach: invoked from observability/__init__.py, which is not in the entry-point set (widening the set to cover it would make nearly every module an entry point and gut the rule)', ticket: '506'}
+  - {file: src/baldur/services/cell_topology/health.py, symbol: setup_cell_health_scheduler, reason: 'gate reach: invoked from cell_topology/service.py with fault isolation, which is not in the entry-point set', ticket: '506'}
 
 singleton_pair:
   - {file: src/baldur/adapters/memory/layered_repository/__init__.py, symbol: reset_layered_repository_executor, reason: 'pre-existing: reset_layered_repository_executor without get_layered_repository_executor', ticket: '506'}

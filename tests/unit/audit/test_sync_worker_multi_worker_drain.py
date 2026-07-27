@@ -602,6 +602,35 @@ class TestStartSyncWorkerWiringBehavior:
         # Order matters: absorb_orphans() must precede start().
         assert instance.mock_calls == [call.absorb_orphans(), call.start()]
 
+    def test_public_helper_absorbs_orphans_too(self):
+        """The public start helper must not be a second, weaker start path.
+
+        It was: it called start() without absorb_orphans(), so anyone starting
+        the worker through the public API stranded a crashed peer's WAL entries
+        forever while the lifecycle path drained them.
+        """
+        from baldur.audit.sync_worker import start_sync_worker
+
+        instance = Mock(spec=AuditSyncWorker)
+        with patch.object(AuditSyncWorker, "get_instance", return_value=instance):
+            start_sync_worker()
+
+        assert instance.mock_calls == [call.absorb_orphans(), call.start()]
+
+    def test_the_two_start_paths_issue_the_same_calls(self):
+        """The lifecycle path delegates, so the sequences cannot drift apart."""
+        from baldur.audit import async_audit_lifecycle
+        from baldur.audit.sync_worker import start_sync_worker
+
+        via_lifecycle = Mock(spec=AuditSyncWorker)
+        via_public = Mock(spec=AuditSyncWorker)
+        with patch.object(AuditSyncWorker, "get_instance", return_value=via_lifecycle):
+            async_audit_lifecycle._start_sync_worker()
+        with patch.object(AuditSyncWorker, "get_instance", return_value=via_public):
+            start_sync_worker()
+
+        assert via_lifecycle.mock_calls == via_public.mock_calls
+
 
 # =============================================================================
 # Contract: record_wal_orphans_absorbed metric (D2 SLI)
