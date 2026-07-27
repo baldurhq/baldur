@@ -611,7 +611,11 @@ class EscalationManager:
         The resolve capability is duck-probed (the ``send_with_reason``
         precedent): an operator-registered PagerDuty adapter without it opened
         a real incident, so a missing capability is reported as a resolve
-        failure, never as a silent success.
+        failure, never as a silent success. An adapter that *has* the method
+        but breaks its ``(ok, reason)`` contract — raising, or returning a
+        bare bool — is reported the same way rather than propagating: this leg
+        is cleanup, and cleanup must never turn a delivered self-test into an
+        error response.
 
         Args:
             payload: the payload the trigger used (it carries the dedup key's
@@ -631,7 +635,13 @@ class EscalationManager:
         adapter = get_notification_adapter(NotificationChannel.PAGERDUTY)
         send_resolve = getattr(adapter, "send_resolve", None)
         if callable(send_resolve):
-            ok, reason = send_resolve(payload)
+            try:
+                ok, reason = send_resolve(payload)
+            except Exception as e:
+                # An adapter registered through the public seam is third-party
+                # code and is not bound by the (ok, reason) contract. Both the
+                # raise and the failed unpack land here.
+                ok, reason = False, f"resolve call raised: {e}"
         else:
             ok, reason = False, "adapter has no resolve capability"
 
