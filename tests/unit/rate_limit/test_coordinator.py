@@ -1,17 +1,17 @@
 """
-RateLimitCoordinator 단위 테스트.
+RateLimitCoordinator unit tests.
 
-테스트 대상:
-- 429 이벤트 발행
-- 지수 백오프
-- 디바운싱 윈도우
-- Canary Request 모드
-- Cooldown 상태
-- retry_after 헤더 우선 사용
-- Fail-Open 동작
-- 메트릭 기록
-- rate_limit_aware 데코레이터
-- on_success, _schedule_cooldown_end 스케줄링
+Covers:
+- 429 event emission
+- Exponential backoff
+- Debounce window
+- Canary request mode
+- Cooldown state
+- retry_after header precedence
+- Fail-open behavior
+- Metric recording
+- rate_limit_aware decorator
+- on_success, _schedule_cooldown_end scheduling
 """
 
 from __future__ import annotations
@@ -33,15 +33,15 @@ from tests.unit.rate_limit.conftest import (
 )
 
 # =============================================================================
-# 이벤트 발행 테스트
+# Event emission
 # =============================================================================
 
 
 class TestRateLimitCoordinatorEventEmission:
-    """RateLimitCoordinator 이벤트 발행 테스트."""
+    """RateLimitCoordinator event emission tests."""
 
     def test_on_rate_limited_emits_429_event(self, mock_storage):
-        """on_rate_limited() 호출 시 RATE_LIMIT_429 이벤트 발행."""
+        """on_rate_limited() emits a RATE_LIMIT_429 event."""
         from baldur.services.rate_limit_coordinator import (
             RateLimitCoordinator,
             RateLimitCoordinatorConfig,
@@ -80,7 +80,7 @@ class TestRateLimitCoordinatorEventEmission:
     def test_on_rate_limited_calculates_exponential_backoff(
         self, mock_storage, call_index, expected_multiplier
     ):
-        """연속 429 시 지수 백오프 계산 확인."""
+        """Consecutive 429s escalate the cooldown exponentially."""
         from baldur.services.rate_limit_coordinator import (
             RateLimitCoordinator,
             RateLimitCoordinatorConfig,
@@ -106,16 +106,16 @@ class TestRateLimitCoordinatorEventEmission:
 
 
 # =============================================================================
-# 디바운싱 테스트
+# Debouncing
 # =============================================================================
 
 
 class TestRateLimitCoordinatorDebouncing:
-    """RateLimitCoordinator 디바운싱 테스트."""
+    """RateLimitCoordinator debouncing tests."""
 
     @freeze_time("2026-02-06 12:00:00")
     def test_debounce_window_prevents_duplicate_events(self, mock_storage):
-        """디바운싱 윈도우 내 중복 이벤트 방지."""
+        """Duplicate events within the window are suppressed."""
         from baldur.services.rate_limit_coordinator import (
             RateLimitCoordinator,
             RateLimitCoordinatorConfig,
@@ -131,7 +131,7 @@ class TestRateLimitCoordinatorDebouncing:
 
     @freeze_time("2026-02-06 12:00:00")
     def test_debounce_window_expires_after_timeout(self, mock_storage):
-        """디바운싱 윈도우 만료 후 이벤트 발행 허용."""
+        """Emission is allowed again once the window expires."""
         from baldur.services.rate_limit_coordinator import (
             RateLimitCoordinator,
             RateLimitCoordinatorConfig,
@@ -149,7 +149,7 @@ class TestRateLimitCoordinatorDebouncing:
 
     @freeze_time("2026-02-06 12:00:00")
     def test_debounce_tracks_keys_independently(self, mock_storage):
-        """서로 다른 key는 독립적으로 디바운싱."""
+        """Each key is debounced independently."""
         from baldur.services.rate_limit_coordinator import (
             RateLimitCoordinator,
             RateLimitCoordinatorConfig,
@@ -164,8 +164,8 @@ class TestRateLimitCoordinatorDebouncing:
         assert coordinator._should_emit_event("api_b") is True
         assert coordinator._should_emit_event("api_a") is False
 
-    def test_debounce_skips_event_and_metrics(self, mock_storage):
-        """디바운싱 윈도우 내에서 이벤트와 메트릭이 스킵됨."""
+    def test_debounce_skips_event(self, mock_storage):
+        """A second 429 inside the window emits no event."""
         from baldur.services.rate_limit_coordinator import (
             RateLimitCoordinator,
             RateLimitCoordinatorConfig,
@@ -197,15 +197,15 @@ class TestRateLimitCoordinatorDebouncing:
 
 
 # =============================================================================
-# Canary Request 테스트
+# Canary requests
 # =============================================================================
 
 
 class TestRateLimitCoordinatorCanary:
-    """RateLimitCoordinator Canary Request 테스트."""
+    """RateLimitCoordinator canary request tests."""
 
     def test_wait_if_needed_returns_canary_after_429(self, mock_storage):
-        """429 발생 후 첫 요청은 Canary 모드."""
+        """The first request after a 429 runs in canary mode."""
         from baldur.services.rate_limit_coordinator import (
             RateLimitCoordinator,
             RateLimitCoordinatorConfig,
@@ -220,7 +220,7 @@ class TestRateLimitCoordinatorCanary:
         assert result.is_canary is True
 
     def test_on_success_clears_canary_state(self, mock_storage):
-        """성공 후 Canary 상태 해제."""
+        """Canary state is cleared after a success."""
         from baldur.services.rate_limit_coordinator import (
             RateLimitCoordinator,
             RateLimitCoordinatorConfig,
@@ -241,15 +241,15 @@ class TestRateLimitCoordinatorCanary:
 
 
 # =============================================================================
-# Cooldown 상태 테스트
+# Cooldown state
 # =============================================================================
 
 
 class TestRateLimitCoordinatorCooldown:
-    """RateLimitCoordinator Cooldown 테스트."""
+    """RateLimitCoordinator cooldown tests."""
 
     def test_cooldown_state_detection(self):
-        """Cooldown 상태 감지 테스트."""
+        """An active cooldown is detected with its remaining time."""
         storage = MockInMemoryRateLimitStorage()
 
         cooldown_duration = 10.0
@@ -262,7 +262,7 @@ class TestRateLimitCoordinatorCooldown:
         assert 0 < state.remaining_cooldown <= cooldown_duration
 
     def test_cooldown_expired(self):
-        """Cooldown 만료 테스트."""
+        """An expired cooldown reports no remaining time."""
         storage = MockInMemoryRateLimitStorage()
 
         storage.set_cooldown("test_api", time.time() - 5.0)
@@ -273,15 +273,15 @@ class TestRateLimitCoordinatorCooldown:
 
 
 # =============================================================================
-# Fail-Open 동작 테스트
+# Fail-open behavior
 # =============================================================================
 
 
 class TestEmitRateLimitEventFailOpen:
-    """_emit_rate_limit_event Fail-Open 동작 테스트."""
+    """_emit_rate_limit_event fail-open tests."""
 
     def test_emit_survives_import_error(self):
-        """EventBus import 실패 시 예외 없이 통과 (Fail-Open)."""
+        """An EventBus import failure passes without raising (fail-open)."""
         from baldur.services.rate_limit_coordinator import _emit_rate_limit_event
 
         with patch(
@@ -295,7 +295,7 @@ class TestEmitRateLimitEventFailOpen:
                 _emit_rate_limit_event("RATE_LIMIT_429", {"key": "test"})
 
     def test_emit_survives_generic_exception(self):
-        """EventBus 발행 중 예외 시 Fail-Open."""
+        """An emit-time exception passes without raising (fail-open)."""
         from baldur.services.rate_limit_coordinator import _emit_rate_limit_event
 
         with patch(
@@ -305,7 +305,7 @@ class TestEmitRateLimitEventFailOpen:
             _emit_rate_limit_event("RATE_LIMIT_429", {"key": "test"})
 
     def test_emit_unknown_event_type_does_not_crash(self):
-        """존재하지 않는 EventType 지정 시 warning 후 통과."""
+        """An unknown EventType warns and returns without emitting."""
         from baldur.services.rate_limit_coordinator import _emit_rate_limit_event
 
         mock_bus = MagicMock()
@@ -316,17 +316,17 @@ class TestEmitRateLimitEventFailOpen:
 
 
 # =============================================================================
-# 메트릭 기록 테스트
+# Metric recording
 # =============================================================================
 
 
 class TestRecordRateLimitMetrics:
-    """_record_rate_limit_metrics 메트릭 기록 테스트."""
+    """_record_rate_limit_429 / _record_rate_limit_cooldown recording tests."""
 
     def test_records_429_counter(self):
-        """rate_limit_429_total 카운터 증가 확인."""
+        """rate_limit_429_total is incremented."""
         from baldur.services.rate_limit_coordinator import (
-            _record_rate_limit_metrics,
+            _record_rate_limit_429,
         )
 
         mock_counter = MagicMock()
@@ -337,86 +337,94 @@ class TestRecordRateLimitMetrics:
             "baldur.services.metrics.definitions.rate_limit_429_total",
             mock_counter,
         ):
-            _record_rate_limit_metrics(key="payment_api", status_code=429)
+            _record_rate_limit_429(key="payment_api", status_code=429)
 
         mock_counter.labels.assert_called_with(key="payment_api", status_code="429")
         mock_labels.inc.assert_called_once()
 
     def test_records_cooldown_histogram(self):
-        """rate_limit_cooldown_seconds 히스토그램 기록 확인."""
+        """rate_limit_cooldown_seconds observes the computed cooldown."""
         from baldur.services.rate_limit_coordinator import (
-            _record_rate_limit_metrics,
+            _record_rate_limit_cooldown,
         )
 
-        mock_counter = MagicMock()
-        mock_counter.labels.return_value = MagicMock()
         mock_histogram = MagicMock()
         mock_hist_labels = MagicMock()
         mock_histogram.labels.return_value = mock_hist_labels
+        mock_gauge = MagicMock()
+        mock_gauge.labels.return_value = MagicMock()
 
         cooldown_value = 15.5
         with patch(
-            "baldur.services.metrics.definitions.rate_limit_429_total",
-            mock_counter,
+            "baldur.services.metrics.definitions.rate_limit_cooldown_seconds",
+            mock_histogram,
         ):
             with patch(
-                "baldur.services.metrics.definitions.rate_limit_cooldown_seconds",
-                mock_histogram,
+                "baldur.services.metrics.definitions.rate_limit_consecutive_429s",
+                mock_gauge,
             ):
-                _record_rate_limit_metrics(key="test", cooldown_seconds=cooldown_value)
+                _record_rate_limit_cooldown(
+                    key="test", cooldown_seconds=cooldown_value, consecutive_429s=1
+                )
 
         mock_histogram.labels.assert_called_with(key="test")
         mock_hist_labels.observe.assert_called_with(cooldown_value)
 
     def test_records_consecutive_gauge(self):
-        """rate_limit_consecutive_429s 게이지 설정 확인."""
+        """rate_limit_consecutive_429s is set to the consecutive count."""
         from baldur.services.rate_limit_coordinator import (
-            _record_rate_limit_metrics,
+            _record_rate_limit_cooldown,
         )
 
-        mock_counter = MagicMock()
-        mock_counter.labels.return_value = MagicMock()
+        mock_histogram = MagicMock()
+        mock_histogram.labels.return_value = MagicMock()
         mock_gauge = MagicMock()
         mock_gauge_labels = MagicMock()
         mock_gauge.labels.return_value = mock_gauge_labels
 
         consecutive = 5
         with patch(
-            "baldur.services.metrics.definitions.rate_limit_429_total",
-            mock_counter,
+            "baldur.services.metrics.definitions.rate_limit_cooldown_seconds",
+            mock_histogram,
         ):
             with patch(
                 "baldur.services.metrics.definitions.rate_limit_consecutive_429s",
                 mock_gauge,
             ):
-                _record_rate_limit_metrics(key="test", consecutive_429s=consecutive)
+                _record_rate_limit_cooldown(
+                    key="test", cooldown_seconds=1.0, consecutive_429s=consecutive
+                )
 
         mock_gauge.labels.assert_called_with(key="test")
         mock_gauge_labels.set.assert_called_with(consecutive)
 
     def test_metrics_fail_open_on_import_error(self):
-        """메트릭 모듈 import 실패 시 예외 없이 통과."""
+        """A broken metric definition passes without raising."""
         from baldur.services.rate_limit_coordinator import (
-            _record_rate_limit_metrics,
+            _record_rate_limit_429,
+            _record_rate_limit_cooldown,
         )
 
         with patch(
             "baldur.services.metrics.definitions.rate_limit_429_total",
             side_effect=AttributeError("no such metric"),
         ):
-            _record_rate_limit_metrics(key="test")
+            _record_rate_limit_429(key="test")
+            _record_rate_limit_cooldown(
+                key="test", cooldown_seconds=1.0, consecutive_429s=1
+            )
 
 
 # =============================================================================
-# retry_after 헤더 우선 사용 테스트
+# retry_after header precedence
 # =============================================================================
 
 
 class TestRateLimitCoordinatorRetryAfter:
-    """on_rate_limited retry_after 헤더 우선 사용 테스트."""
+    """on_rate_limited retry_after header precedence tests."""
 
     def test_uses_retry_after_header_when_provided(self, mock_storage):
-        """retry_after 값이 주어지면 default_retry_after 대신 사용."""
+        """A provided retry_after wins over default_retry_after."""
         from baldur.services.rate_limit_coordinator import (
             RateLimitCoordinator,
             RateLimitCoordinatorConfig,
@@ -436,7 +444,7 @@ class TestRateLimitCoordinatorRetryAfter:
         assert delay == pytest.approx(header_ra, rel=0.1)
 
     def test_uses_default_retry_after_when_none(self, mock_storage):
-        """retry_after가 None이면 default_retry_after 사용."""
+        """A missing retry_after falls back to default_retry_after."""
         from baldur.services.rate_limit_coordinator import (
             RateLimitCoordinator,
             RateLimitCoordinatorConfig,
@@ -455,7 +463,7 @@ class TestRateLimitCoordinatorRetryAfter:
         assert delay == pytest.approx(default_ra, rel=0.1)
 
     def test_max_delay_cap(self, mock_storage):
-        """max_delay 상한 캡핑 확인."""
+        """The headerless ladder is capped at max_delay."""
         from baldur.services.rate_limit_coordinator import (
             RateLimitCoordinator,
             RateLimitCoordinatorConfig,
@@ -479,15 +487,15 @@ class TestRateLimitCoordinatorRetryAfter:
 
 
 # =============================================================================
-# on_success 동작 테스트
+# on_success behavior
 # =============================================================================
 
 
 class TestRateLimitCoordinatorOnSuccess:
-    """on_success() 동작 테스트."""
+    """on_success() behavior tests."""
 
     def test_on_success_resets_consecutive_429s(self, mock_storage):
-        """성공 응답 시 consecutive_429s 리셋."""
+        """A success resets the consecutive-429 count."""
         from baldur.services.rate_limit_coordinator import (
             RateLimitCoordinator,
             RateLimitCoordinatorConfig,
@@ -505,7 +513,7 @@ class TestRateLimitCoordinatorOnSuccess:
         assert mock_storage.get_state("test_api").consecutive_429s == 0
 
     def test_on_success_no_error_when_no_prior_429(self, mock_storage):
-        """429 없이 on_success 호출 시 에러 없음."""
+        """on_success without a prior 429 does not raise."""
         from baldur.services.rate_limit_coordinator import (
             RateLimitCoordinator,
             RateLimitCoordinatorConfig,
@@ -520,15 +528,15 @@ class TestRateLimitCoordinatorOnSuccess:
 
 
 # =============================================================================
-# _schedule_cooldown_end_event 스케줄링 테스트
+# _schedule_cooldown_end_event scheduling
 # =============================================================================
 
 
 class TestRateLimitCoordinatorScheduleCooldownEnd:
-    """_schedule_cooldown_end_event 스케줄링 테스트."""
+    """_schedule_cooldown_end_event scheduling tests."""
 
     def test_schedule_skipped_when_delay_is_zero_or_negative(self, mock_storage):
-        """cooldown_until이 과거면 타이머 스케줄링 스킵."""
+        """A past cooldown_until arms no timer."""
         from baldur.services.rate_limit_coordinator import (
             RateLimitCoordinator,
             RateLimitCoordinatorConfig,
@@ -542,7 +550,7 @@ class TestRateLimitCoordinatorScheduleCooldownEnd:
         assert "test_api" not in coordinator._cooldown_timers
 
     def test_schedule_cancels_existing_timer(self, mock_storage):
-        """동일 key에 대한 기존 타이머 취소."""
+        """Re-scheduling the same key replaces its timer."""
         from baldur.services.rate_limit_coordinator import (
             RateLimitCoordinator,
             RateLimitCoordinatorConfig,
@@ -564,15 +572,15 @@ class TestRateLimitCoordinatorScheduleCooldownEnd:
 
 
 # =============================================================================
-# rate_limit_aware 데코레이터 테스트
+# rate_limit_aware decorator
 # =============================================================================
 
 
 class TestRateLimitAwareDecorator:
-    """rate_limit_aware() 데코레이터 테스트."""
+    """rate_limit_aware() decorator tests."""
 
     def test_decorator_calls_wait_and_on_success(self, mock_storage):
-        """데코레이터가 wait_if_needed + on_success 호출."""
+        """The decorator calls wait_if_needed and on_success."""
         from baldur.services.rate_limit_coordinator import (
             RateLimitCoordinator,
             RateLimitCoordinatorConfig,
@@ -596,7 +604,7 @@ class TestRateLimitAwareDecorator:
     def test_decorator_calls_on_rate_limited_on_429(
         self, coordinator_no_jitter_no_debounce, mock_storage
     ):
-        """데코레이터가 429 응답 시 on_rate_limited 호출."""
+        """The decorator calls on_rate_limited for a 429 response."""
         coordinator = coordinator_no_jitter_no_debounce
 
         mock_response = MagicMock()
@@ -614,15 +622,15 @@ class TestRateLimitAwareDecorator:
 
 
 # =============================================================================
-# 317: _broadcast_to_cluster Kafka 분산 전파 테스트
+# _broadcast_to_cluster distributed propagation
 # =============================================================================
 
 
 class TestBroadcastToClusterBehavior:
-    """317: _broadcast_to_cluster Fail-Open 동작 검증."""
+    """_broadcast_to_cluster fail-open behavior."""
 
     def test_broadcast_calls_distributed_channel(self, mock_storage):
-        """_broadcast_to_cluster가 DistributedRateLimitChannel.broadcast_rate_limit_429 호출."""
+        """_broadcast_to_cluster calls broadcast_rate_limit_429 on the channel."""
         from baldur.services.rate_limit_coordinator import (
             RateLimitCoordinator,
             RateLimitCoordinatorConfig,
@@ -654,7 +662,7 @@ class TestBroadcastToClusterBehavior:
         )
 
     def test_broadcast_fail_open_on_import_error(self, mock_storage):
-        """분산 채널 import 실패 시 예외 없이 통과 (Fail-Open)."""
+        """A distributed-channel import failure passes without raising."""
         from baldur.services.rate_limit_coordinator import (
             RateLimitCoordinator,
             RateLimitCoordinatorConfig,
@@ -676,7 +684,7 @@ class TestBroadcastToClusterBehavior:
             )
 
     def test_broadcast_fail_open_on_runtime_error(self, mock_storage):
-        """분산 채널 런타임 에러 시 예외 없이 통과 (Fail-Open)."""
+        """A distributed-channel runtime error passes without raising."""
         from baldur.services.rate_limit_coordinator import (
             RateLimitCoordinator,
             RateLimitCoordinatorConfig,
@@ -698,7 +706,7 @@ class TestBroadcastToClusterBehavior:
             )
 
     def test_on_rate_limited_invokes_broadcast(self, mock_storage):
-        """on_rate_limited가 _broadcast_to_cluster를 호출하는지 검증."""
+        """on_rate_limited invokes _broadcast_to_cluster."""
         from baldur.services.rate_limit_coordinator import (
             RateLimitCoordinator,
             RateLimitCoordinatorConfig,

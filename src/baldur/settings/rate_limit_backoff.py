@@ -86,7 +86,9 @@ class RateLimitBackoffSettings(BaseSettings):
         default=5.0,
         description=(
             "EventBus debounce window (seconds) suppressing duplicate "
-            "rate-limit events for the same service."
+            "rate-limit events for the same service, and cooldown-end "
+            "(re)scheduling: a 429 arriving inside the window extends the "
+            "cooldown but does not reschedule the all-clear event."
         ),
     )
     # Explicit Field rather than LongDuration: the honored-header range must reach

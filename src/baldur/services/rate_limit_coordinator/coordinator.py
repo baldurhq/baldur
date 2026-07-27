@@ -59,7 +59,8 @@ from .helpers import (
     _default_get_retry_after,
     _default_is_429,
     _emit_rate_limit_event,
-    _record_rate_limit_metrics,
+    _record_rate_limit_429,
+    _record_rate_limit_cooldown,
 )
 from .models import (
     RateLimitCoordinatorConfig,
@@ -406,15 +407,32 @@ class RateLimitCoordinator:
         Returns:
             Calculated cooldown duration in seconds
         """
+        # Count the 429 before any storage call: both of the calls below can
+        # raise on a degraded backend and every caller wraps this handler
+        # fail-open, so any later placement makes a storm invisible during
+        # exactly the outage an operator needs the count for.
+        _record_rate_limit_429(key=key, status_code=status_code)
+
         consecutive = self._storage.increment_consecutive_429s(key)
 
         delay, honored, clamped = self._compute_cooldown(key, consecutive, retry_after)
+
+        # Record the computed cooldown before storing it — the computation is
+        # pure and the increment already landed, so both values are true even
+        # if set_cooldown then raises.
+        _record_rate_limit_cooldown(
+            key=key,
+            cooldown_seconds=delay,
+            consecutive_429s=consecutive,
+        )
 
         # Set global cooldown
         cooldown_until = time.time() + delay
         self._storage.set_cooldown(key, cooldown_until)
 
-        # EventBus integration (debouncing applied)
+        # EventBus integration (debouncing applied — metrics above are not
+        # debounced: a flattened counter is indistinguishable from a storm
+        # abating)
         if self._should_emit_event(key):
             _emit_rate_limit_event(
                 "RATE_LIMIT_429",
@@ -429,14 +447,6 @@ class RateLimitCoordinator:
                     "retry_after_clamped": clamped,
                 },
                 priority_name="HIGH",
-            )
-
-            # Record Prometheus metrics
-            _record_rate_limit_metrics(
-                key=key,
-                status_code=status_code,
-                cooldown_seconds=delay,
-                consecutive_429s=consecutive,
             )
 
             # Schedule cooldown-end event
