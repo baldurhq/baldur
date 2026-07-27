@@ -648,6 +648,12 @@ _NATIVE_HISTOGRAM_BUCKETS = [
         (1, 2, 3, 4, 5, 6, 7, 8, 9, 10),
         id="retry_attempts_distribution",
     ),
+    pytest.param(
+        lambda m: m.retry.record_task_attempt("g47_task_att", 3, "success"),
+        "baldur_task_attempts_distribution",
+        (1, 2, 3, 4, 5, 6, 7, 8, 9, 10),
+        id="task_attempts_distribution",
+    ),
 ]
 
 
