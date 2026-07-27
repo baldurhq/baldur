@@ -36,6 +36,8 @@ from .helpers import (
     _emit_rate_limit_event,
     _record_rate_limit_429,
     _record_rate_limit_cooldown,
+    _record_rate_limit_deferral,
+    _record_rate_limit_wait,
 )
 from .models import (
     RateLimitCoordinatorConfig,
@@ -52,6 +54,8 @@ __all__ = [
     "_emit_rate_limit_event",
     "_record_rate_limit_429",
     "_record_rate_limit_cooldown",
+    "_record_rate_limit_deferral",
+    "_record_rate_limit_wait",
     "_default_is_429",
     "_default_get_retry_after",
     # Coordinator

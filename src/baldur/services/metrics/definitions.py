@@ -363,6 +363,26 @@ rate_limit_throttle_adjustments_total = get_or_create_counter(
     ["key", "reduction_percent"],
 )
 
+# Both series measure the two branches of one wait-or-defer decision, recorded
+# where the decision is made so every consumer surface is covered. The top
+# explicit bucket is the honored-Retry-After ceiling's default, not max_delay:
+# an honored header can push a cooldown far past the ladder cap, and collapsing
+# those waits into +Inf would make the quantiles unreadable for exactly the case
+# the series exists to show.
+rate_limit_wait_seconds = get_or_create_histogram(
+    "baldur_rate_limit_wait_seconds",
+    "Cooldown wait imposed on a caller before its request was allowed",
+    ["key"],
+    buckets=(0.1, 0.5, 1, 5, 10, 30, 60, 120, 300, 900, 3600),
+)
+
+rate_limit_deferrals_total = get_or_create_counter(
+    "baldur_rate_limit_deferrals_total",
+    "Wait-or-defer decisions that deferred "
+    "(remaining cooldown exceeded the caller's bound)",
+    ["key"],
+)
+
 
 # =============================================================================
 # Error Budget - Throttle Integration Metrics

@@ -61,6 +61,8 @@ from .helpers import (
     _emit_rate_limit_event,
     _record_rate_limit_429,
     _record_rate_limit_cooldown,
+    _record_rate_limit_deferral,
+    _record_rate_limit_wait,
 )
 from .models import (
     RateLimitCoordinatorConfig,
@@ -349,6 +351,7 @@ class RateLimitCoordinator:
                     key=key,
                     state=state.consecutive_429s,
                 )
+                _record_rate_limit_deferral(key=key)
                 return RateLimitResult(
                     waited=False,
                     wait_time=0.0,
@@ -365,6 +368,8 @@ class RateLimitCoordinator:
                 key=key,
                 state=state.consecutive_429s,
             )
+
+            _record_rate_limit_wait(key=key, wait_seconds=wait_time)
 
             time.sleep(wait_time)
 

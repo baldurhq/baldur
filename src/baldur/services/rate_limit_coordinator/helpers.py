@@ -133,6 +133,48 @@ def _record_rate_limit_cooldown(
         )
 
 
+def _record_rate_limit_wait(key: str, wait_seconds: float) -> None:
+    """
+    Record the cooldown wait imposed on a caller.
+
+    Recorded at decision time, not after sleeping: the quantity is how much
+    wait the coordinator imposed, which a caller killed mid-sleep still had
+    imposed on it.
+
+    Ignored if the metric definitions are missing or the import fails (fail-open).
+    """
+    try:
+        from baldur.services.metrics.definitions import rate_limit_wait_seconds
+
+        rate_limit_wait_seconds.labels(key=key).observe(wait_seconds)
+    except ImportError:
+        logger.debug("rate_limit_coordinator.metrics_module_unavailable")
+    except Exception as e:
+        logger.warning(
+            "rate_limit_coordinator.metrics_failed",
+            error=e,
+        )
+
+
+def _record_rate_limit_deferral(key: str) -> None:
+    """
+    Record a wait-or-defer decision that deferred.
+
+    Ignored if the metric definitions are missing or the import fails (fail-open).
+    """
+    try:
+        from baldur.services.metrics.definitions import rate_limit_deferrals_total
+
+        rate_limit_deferrals_total.labels(key=key).inc()
+    except ImportError:
+        logger.debug("rate_limit_coordinator.metrics_module_unavailable")
+    except Exception as e:
+        logger.warning(
+            "rate_limit_coordinator.metrics_failed",
+            error=e,
+        )
+
+
 def _default_is_429(response: Any) -> bool:
     """Default 429 detection."""
     if hasattr(response, "status_code"):
