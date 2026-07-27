@@ -22,6 +22,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from freezegun import freeze_time
+from structlog.testing import capture_logs
 
 from tests.factories.time_helpers import mock_sleep
 from tests.unit.rate_limit.conftest import (
@@ -477,20 +478,50 @@ class TestRecordRateLimitMetrics:
         mock_gauge.labels.assert_called_with(key="test")
         mock_gauge_labels.set.assert_called_with(consecutive)
 
-    def test_metrics_fail_open_on_import_error(self):
-        """A broken metric definition passes without raising."""
-        from baldur.services.rate_limit_coordinator import (
-            _record_rate_limit_429,
-            _record_rate_limit_cooldown,
-        )
+    def test_record_429_survives_a_missing_metrics_module(self):
+        """A missing definitions module is a no-op, not an ImportError.
+
+        The counter is ``on_rate_limited``'s first statement, so a metrics
+        fault here would abort the cooldown the caller is about to receive.
+        """
+        import sys
+
+        from baldur.services.rate_limit_coordinator import _record_rate_limit_429
+
+        with patch.dict(sys.modules, {"baldur.services.metrics.definitions": None}):
+            _record_rate_limit_429(key="k")
+
+    def test_record_cooldown_survives_a_missing_metrics_module(self):
+        """A missing definitions module is a no-op, not an ImportError."""
+        import sys
+
+        from baldur.services.rate_limit_coordinator import _record_rate_limit_cooldown
+
+        with patch.dict(sys.modules, {"baldur.services.metrics.definitions": None}):
+            _record_rate_limit_cooldown(
+                key="k", cooldown_seconds=1.0, consecutive_429s=1
+            )
+
+    def test_record_429_survives_a_broken_metric(self):
+        """A registry fault at the label lookup is swallowed."""
+        from baldur.services.rate_limit_coordinator import _record_rate_limit_429
 
         with patch(
             "baldur.services.metrics.definitions.rate_limit_429_total",
-            side_effect=AttributeError("no such metric"),
+            _BrokenMetric(),
         ):
-            _record_rate_limit_429(key="test")
+            _record_rate_limit_429(key="k")
+
+    def test_record_cooldown_survives_a_broken_metric(self):
+        """A registry fault at the label lookup is swallowed."""
+        from baldur.services.rate_limit_coordinator import _record_rate_limit_cooldown
+
+        with patch(
+            "baldur.services.metrics.definitions.rate_limit_cooldown_seconds",
+            _BrokenMetric(),
+        ):
             _record_rate_limit_cooldown(
-                key="test", cooldown_seconds=1.0, consecutive_429s=1
+                key="k", cooldown_seconds=1.0, consecutive_429s=1
             )
 
 
@@ -741,6 +772,157 @@ class TestWaitDeferralHelpers:
             _BrokenMetric(),
         ):
             _record_rate_limit_deferral(key="k")
+
+
+_RECORDER_HELPERS = [
+    ("_record_rate_limit_429", {"key": "k"}, "rate_limit_429_total"),
+    (
+        "_record_rate_limit_cooldown",
+        {"key": "k", "cooldown_seconds": 1.0, "consecutive_429s": 1},
+        "rate_limit_cooldown_seconds",
+    ),
+    (
+        "_record_rate_limit_wait",
+        {"key": "k", "wait_seconds": 1.0},
+        "rate_limit_wait_seconds",
+    ),
+    ("_record_rate_limit_deferral", {"key": "k"}, "rate_limit_deferrals_total"),
+]
+
+_RECORDER_HELPER_IDS = ["429", "cooldown", "wait", "deferral"]
+
+
+class TestCoordinatorFailOpenLogEventsContract:
+    """Names and levels of the coordinator's fail-open log events.
+
+    These are an incident-triage surface — an operator finds them by grep — so
+    the literal names are pinned rather than derived. Two things they must not
+    drift back to: the ``adaptive_throttle.`` component prefix (wrong component
+    for a rate-limit helper) and an ``_available`` name on a path that only runs
+    when the thing is *un*available. The level split is a standards floor:
+    ``_failed`` is WARNING, while the two ``_unavailable`` events stay DEBUG
+    because a stripped install hits them on every single call.
+    """
+
+    def test_missing_eventbus_logs_the_unavailable_event_at_debug(self):
+        """The ImportError path names the bus as unavailable, at DEBUG."""
+        from baldur.services.rate_limit_coordinator import _emit_rate_limit_event
+
+        with (
+            patch(
+                "baldur.services.event_bus.get_event_bus",
+                side_effect=ImportError("no module"),
+            ),
+            capture_logs() as logs,
+        ):
+            _emit_rate_limit_event("RATE_LIMIT_429", {"key": "k"})
+
+        record = next(
+            log
+            for log in logs
+            if log["event"] == "rate_limit_coordinator.eventbus_unavailable"
+        )
+        assert record["log_level"] == "debug"
+
+    def test_emit_failure_logs_emit_event_failed_at_warning(self):
+        """A live-bus emit failure is a genuine anomaly — WARNING, with the cause."""
+        from baldur.services.rate_limit_coordinator import _emit_rate_limit_event
+
+        mock_bus = MagicMock()
+        mock_bus.emit.side_effect = RuntimeError("bus broken")
+
+        with (
+            patch("baldur.services.event_bus.get_event_bus", return_value=mock_bus),
+            capture_logs() as logs,
+        ):
+            _emit_rate_limit_event("RATE_LIMIT_429", {"key": "k"})
+
+        record = next(
+            log
+            for log in logs
+            if log["event"] == "rate_limit_coordinator.emit_event_failed"
+        )
+        assert record["log_level"] == "warning"
+
+    def test_unknown_event_type_logs_a_warning_naming_the_type(self):
+        """The triaging operator needs the rejected name, not just the fact."""
+        from baldur.services.rate_limit_coordinator import _emit_rate_limit_event
+
+        mock_bus = MagicMock()
+        with (
+            patch("baldur.services.event_bus.get_event_bus", return_value=mock_bus),
+            capture_logs() as logs,
+        ):
+            _emit_rate_limit_event("NONEXISTENT_EVENT_TYPE", {"key": "k"})
+
+        record = next(
+            log
+            for log in logs
+            if log["event"] == "rate_limit_coordinator.unknown_event_type"
+        )
+        assert record["log_level"] == "warning"
+        assert record["event_type_name"] == "NONEXISTENT_EVENT_TYPE"
+
+    @pytest.mark.parametrize(
+        ("helper_name", "kwargs", "metric_name"),
+        _RECORDER_HELPERS,
+        ids=_RECORDER_HELPER_IDS,
+    )
+    def test_missing_metrics_module_logs_the_unavailable_event_at_debug(
+        self, helper_name, kwargs, metric_name
+    ):
+        """Every recorder helper reports a stripped install the same way."""
+        import sys
+
+        import baldur.services.rate_limit_coordinator as coordinator_pkg
+
+        helper = getattr(coordinator_pkg, helper_name)
+
+        with (
+            patch.dict(sys.modules, {"baldur.services.metrics.definitions": None}),
+            capture_logs() as logs,
+        ):
+            helper(**kwargs)
+
+        record = next(
+            log
+            for log in logs
+            if log["event"] == "rate_limit_coordinator.metrics_module_unavailable"
+        )
+        assert record["log_level"] == "debug"
+
+    @pytest.mark.parametrize(
+        ("helper_name", "kwargs", "metric_name"),
+        _RECORDER_HELPERS,
+        ids=_RECORDER_HELPER_IDS,
+    )
+    def test_a_broken_metric_logs_metrics_failed_at_warning(
+        self, helper_name, kwargs, metric_name
+    ):
+        """A registry fault is unexpected, so it clears the ``_failed`` floor.
+
+        This is the level D5 raised from DEBUG: a swallowed registry fault that
+        only whispers at DEBUG is invisible on the install that has it.
+        """
+        import baldur.services.rate_limit_coordinator as coordinator_pkg
+
+        helper = getattr(coordinator_pkg, helper_name)
+
+        with (
+            patch(
+                f"baldur.services.metrics.definitions.{metric_name}",
+                _BrokenMetric(),
+            ),
+            capture_logs() as logs,
+        ):
+            helper(**kwargs)
+
+        record = next(
+            log
+            for log in logs
+            if log["event"] == "rate_limit_coordinator.metrics_failed"
+        )
+        assert record["log_level"] == "warning"
 
 
 class TestRateLimitWaitMetricDefinitionsContract:

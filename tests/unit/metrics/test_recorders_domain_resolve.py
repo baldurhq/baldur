@@ -13,6 +13,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
+from structlog.testing import capture_logs
+
 from baldur.metrics.registry import _FALLBACK_DOMAIN
 
 # =============================================================================
@@ -68,6 +70,58 @@ class TestRecordersDomainResolveBehavior:
             mock_metrics.retry.record_attempt.assert_called_once_with(
                 _FALLBACK_DOMAIN, 3, "failure"
             )
+
+    def test_record_retry_marker_resolves_unregistered_domain(self):
+        """The task-retry marker is domain-labelled, so it needs the same guard.
+
+        It is the newest writer on this facade and the one most exposed to
+        arbitrary labels — the domain comes from a Celery task name.
+        """
+        from baldur.services.metrics.recorders import record_retry_marker
+
+        mock_metrics = MagicMock()
+        with patch("baldur.metrics.prometheus.get_metrics", return_value=mock_metrics):
+            record_retry_marker("unknown_domain_abc")
+
+            mock_metrics.retry.record_retry_marker.assert_called_once_with(
+                _FALLBACK_DOMAIN
+            )
+
+    def test_record_retry_marker_passes_registered_domain(self):
+        """A registered domain reaches the recorder unchanged."""
+        from baldur.services.metrics.recorders import record_retry_marker
+
+        mock_metrics = MagicMock()
+        with patch("baldur.metrics.prometheus.get_metrics", return_value=mock_metrics):
+            record_retry_marker("external_service")
+
+            mock_metrics.retry.record_retry_marker.assert_called_once_with(
+                "external_service"
+            )
+
+    def test_record_retry_marker_is_fail_open_and_warns(self):
+        """A metrics fault never propagates into the Celery signal handler.
+
+        The signal handler runs inside the worker's task-retry path; raising
+        here would turn an observability fault into a task failure.
+        """
+        from baldur.services.metrics.recorders import record_retry_marker
+
+        mock_metrics = MagicMock()
+        mock_metrics.retry.record_retry_marker.side_effect = RuntimeError(
+            "metrics backend down"
+        )
+
+        with (
+            patch("baldur.metrics.prometheus.get_metrics", return_value=mock_metrics),
+            capture_logs() as logs,
+        ):
+            record_retry_marker("external_service")
+
+        record = next(
+            log for log in logs if log["event"] == "metrics.record_retry_marker_failed"
+        )
+        assert record["log_level"] == "warning"
 
     def test_record_recovery_time_resolves_unregistered_domain(self):
         """record_recovery_time resolves unregistered domain to OTHER_DOMAIN."""
