@@ -13,6 +13,7 @@ import queue
 import re
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -243,6 +244,14 @@ _registered_domains: set[str] = {
     _FALLBACK_DOMAIN,  # resolve idempotency — prevents spurious DEBUG logs
 }
 
+# Distinct unregistered domains whose DEBUG notice has already been emitted.
+# Bounded (caller-controlled keys) and independent of _MAX_REGISTERED_DOMAINS:
+# this caps log noise, not label cardinality, which resolve_domain_label
+# already collapses to the fallback.
+_MAX_UNREGISTERED_LOGGED_DOMAINS = 256
+_unregistered_seen: OrderedDict[str, None] = OrderedDict()
+_unregistered_seen_lock = threading.Lock()
+
 
 def _get_max_domains_from_settings() -> int:
     """Read max_registered_domains from MetricsSettings, fallback to module constant."""
@@ -299,12 +308,41 @@ def register_domain(domain: str, *, max_domains: int | None = None) -> bool:
     return True
 
 
+def _should_log_unregistered(sanitized: str) -> bool:
+    """Return True the first time ``sanitized`` is seen, False afterwards.
+
+    The unregistered-domain notice is worth one line per domain, not one per
+    call: ``protect()`` passes the caller's protect name straight through as
+    the metric domain and nothing in the tree calls ``register_domain()``, so
+    a real deployment's domains are unregistered on *every* recording call.
+    Structlog is wired with a non-filtering ``BoundLogger``, so a ``debug()``
+    pays its full processor chain and its global lock regardless of the
+    configured level — and this resolver now runs once per retry attempt
+    rather than once per resolution.
+
+    The seen-set is bounded because the domain string is caller-controlled:
+    an unbounded memo would be a leak. LRU shape mirrors the endpoint
+    normalizer's in this same package.
+    """
+    with _unregistered_seen_lock:
+        if sanitized in _unregistered_seen:
+            _unregistered_seen.move_to_end(sanitized)
+            return False
+        if len(_unregistered_seen) >= _MAX_UNREGISTERED_LOGGED_DOMAINS:
+            _unregistered_seen.popitem(last=False)
+        _unregistered_seen[sanitized] = None
+        return True
+
+
 def resolve_domain_label(domain: str) -> str:
     """
     Safely resolve a domain label for metric recording (enforcement).
 
     Returns the domain as-is if registered, otherwise forces OTHER_DOMAIN.
     Ensures that register_domain() limits are enforced, not advisory.
+
+    The unregistered-domain DEBUG line is emitted once per distinct domain
+    (see ``_should_log_unregistered``); the resolved value is unaffected.
 
     Args:
         domain: Domain name
@@ -315,11 +353,12 @@ def resolve_domain_label(domain: str) -> str:
     sanitized = sanitize_label_value(domain)
     if sanitized in _registered_domains:
         return sanitized
-    logger.debug(
-        "metrics.domain_label_unregistered",
-        domain=domain,
-        resolved_to=_FALLBACK_DOMAIN,
-    )
+    if _should_log_unregistered(sanitized):
+        logger.debug(
+            "metrics.domain_label_unregistered",
+            domain=domain,
+            resolved_to=_FALLBACK_DOMAIN,
+        )
     return _FALLBACK_DOMAIN
 
 
@@ -340,9 +379,16 @@ def reset_registered_domains() -> None:
 
     Uses clear() + update() instead of reassignment to preserve the set
     object identity — test fixtures may hold direct references to it.
+
+    The unregistered-domain log memo is cleared here rather than through a
+    second reset entry point: a test that re-registers a domain and expects
+    its first-resolve notice again must not depend on remembering to reset
+    two things.
     """
     _registered_domains.clear()
     _registered_domains.update(_DEFAULT_DOMAINS)
+    with _unregistered_seen_lock:
+        _unregistered_seen.clear()
 
 
 def get_registered_domains() -> list[str]:

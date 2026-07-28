@@ -19,8 +19,10 @@ from baldur.metrics.registry import (
     _MAX_REGISTERED_DOMAINS,
     DEFAULT_DOMAINS,
     _registered_domains,
+    _unregistered_seen,
     get_registered_domains,
     register_domain,
+    reset_registered_domains,
     resolve_domain_label,
     sanitize_label_value,
 )
@@ -28,11 +30,19 @@ from baldur.metrics.registry import (
 
 @pytest.fixture(autouse=True)
 def _reset_registered_domains():
-    """Reset _registered_domains to default state before/after each test."""
+    """Reset _registered_domains to default state before/after each test.
+
+    The unregistered-domain log memo is cleared at both ends too: the DEBUG
+    notice now fires once per distinct domain per process, so a domain some
+    earlier test already resolved would log nothing here and the assertion
+    would fail on test ordering rather than on behavior.
+    """
     original = _registered_domains.copy()
+    _unregistered_seen.clear()
     yield
     _registered_domains.clear()
     _registered_domains.update(original)
+    _unregistered_seen.clear()
 
 
 # =============================================================================
@@ -194,6 +204,51 @@ class TestResolveDomainLabelBehavior:
                 domain="unknown_domain",
                 resolved_to=_FALLBACK_DOMAIN,
             )
+
+    def test_repeat_unregistered_domain_logs_once(self):
+        """The notice is per distinct domain, not per call.
+
+        protect() passes the caller's name through as the metric domain and
+        nothing registers domains, so an unregistered domain is the common
+        case on every recording call — and the retry path now resolves once
+        per attempt. Without the dedup this DEBUG dominates the hot path,
+        because structlog's non-filtering BoundLogger pays the full processor
+        chain at any configured level.
+        """
+        with patch("baldur.metrics.registry.logger") as mock_logger:
+            resolve_domain_label("chatty_domain")
+            resolve_domain_label("chatty_domain")
+            resolve_domain_label("chatty_domain")
+
+        assert mock_logger.debug.call_count == 1
+
+    def test_dedup_is_per_domain_not_global(self):
+        """A first sighting of a *different* domain still logs."""
+        with patch("baldur.metrics.registry.logger") as mock_logger:
+            resolve_domain_label("first_unknown")
+            resolve_domain_label("second_unknown")
+
+        logged = [c.kwargs["domain"] for c in mock_logger.debug.call_args_list]
+        assert logged == ["first_unknown", "second_unknown"]
+
+    def test_resolution_is_unchanged_by_the_dedup(self):
+        """Suppressing the log must not change what the resolver returns."""
+        assert resolve_domain_label("quiet_domain") == _FALLBACK_DOMAIN
+        assert resolve_domain_label("quiet_domain") == _FALLBACK_DOMAIN
+
+    def test_reset_registered_domains_clears_the_log_memo(self):
+        """reset_registered_domains() is the single reset entry point.
+
+        Every existing fixture in the suite depends on that being true, so it
+        is asserted directly rather than inferred.
+        """
+        resolve_domain_label("resettable_domain")
+        reset_registered_domains()
+
+        with patch("baldur.metrics.registry.logger") as mock_logger:
+            resolve_domain_label("resettable_domain")
+
+        assert mock_logger.debug.call_count == 1
 
 
 # =============================================================================
