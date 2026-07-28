@@ -6,11 +6,12 @@ Setup:    `protect(name, fn, dlq=True, retry=RetryPolicyConfig(max_attempts=1,
           enable_dlq=True), circuit_breaker=False)` on a function that always
           raises. RetryPolicy with max_attempts=1 invokes ``fn`` once, marks
           ``should_dlq=True`` in PolicyResult.metadata, emits RETRY_EXHAUSTED
-          to EventBus, and DLQSink stores a FailedOperationData entry into
-          the InMemoryFailedOperationRepository (resolved via
-          ``baldur.core.di_fallback.resolve_with_fallback`` because no Redis
-          is wired in the benchmark env). This isolates DLQ serialization +
-          EventBus dispatch cost without network, per plan §432 rationale.
+          to EventBus, and DLQSink hands a FailedOperationData entry to the
+          DLQ outbox, whose worker drains it on its own thread. The measured
+          call therefore pays serialization + EventBus dispatch + an in-process
+          enqueue and never touches the network, which is the isolation plan
+          §432's rationale asks for — on a host with no Redis the drain simply
+          fails behind the measurement instead of entering it.
 
 Why circuit_breaker=False: the plan rationale bounds this measurement at
 "DLQ + EventBus" — including CB.record_failure double-counts what 7A.1
@@ -113,7 +114,7 @@ def _call_protect_failing() -> None:
 
 
 def _warmup() -> None:
-    """G2: hydrate DLQ ProviderRegistry layered-failure path + InMemory dict +
+    """G2: hydrate DLQ ProviderRegistry layered-failure path + outbox buffer +
     RetryPolicy module imports + DLQSink module imports + ``baldur_pro.dlq``
     convenience-singleton lazy init before measurement."""
     for _ in range(_WARMUP_ITERATIONS):
@@ -124,15 +125,22 @@ def _warmup() -> None:
 
 
 def _dlq_count() -> int:
-    """G6 helper: read the live InMemory DLQ count by calling the same
-    convenience function the production sink path uses, then querying the
-    repository it landed in. ``baldur_pro.services.dlq.get_dlq_service``
-    returns the singleton DLQService whose ``repository`` property resolves
-    via ``resolve_with_fallback`` to ``InMemoryFailedOperationRepository``
-    when no Redis is wired (the benchmark env)."""
-    from baldur_pro.services.dlq import get_dlq_service
+    """G6 helper: how many entries the DLQ sink has accepted so far.
 
-    return get_dlq_service().repository.count_all()
+    Read off the outbox's monotonic enqueue counter — the surface the sink
+    writes to — rather than off a repository. The repository only shows what a
+    drain has already persisted, so on a host with no Redis (the benchmark env)
+    it reports zero however many entries were captured: the outbox holds them
+    and the drain fails. Counting there measured backend availability, not
+    whether ``DLQSink`` fired, which is the only thing this guard is asking.
+
+    Monotonic is load-bearing: the buffer is a bounded ring, so a *size* would
+    stop tracking once a run exceeds its capacity, while ``total_enqueued``
+    keeps counting through an overflow.
+    """
+    from baldur.services.dlq_outbox import get_outbox
+
+    return get_outbox().get_stats().total_enqueued
 
 
 def test_protect_failure_path_quantiles(record_property: Any) -> None:
@@ -164,13 +172,13 @@ def test_protect_failure_path_quantiles(record_property: Any) -> None:
         # latency threshold despite being functionally broken.
         assert raised
 
-    # G6: DLQSink fired on every iteration — InMemory DLQ count grew by
-    # exactly _MEASURE_ITERATIONS. Without this, a regression that flipped
+    # G6: DLQSink fired on every iteration — the outbox accepted exactly
+    # _MEASURE_ITERATIONS more entries. Without this, a regression that flipped
     # should_dlq to False would silently measure a "no-op DLQ" path.
     post_dlq = _dlq_count()
     dlq_delta = post_dlq - pre_dlq
     assert dlq_delta == _MEASURE_ITERATIONS, (
-        f"DLQ entry delta {dlq_delta} != expected {_MEASURE_ITERATIONS} "
+        f"DLQ enqueue delta {dlq_delta} != expected {_MEASURE_ITERATIONS} "
         "— DLQSink did not fire on every failure-path iteration"
     )
 
@@ -244,9 +252,9 @@ def test_protect_failure_path_pytest_benchmark(benchmark: Any) -> None:
 
     benchmark(_measured)
 
-    # G6: at least one DLQ entry landed during pytest-benchmark calibration +
-    # measurement rounds. Cannot assert exact count because pytest-benchmark
-    # invokes the callable an opaque number of times.
+    # G6: at least one DLQ entry was accepted during pytest-benchmark
+    # calibration + measurement rounds. Cannot assert exact count because
+    # pytest-benchmark invokes the callable an opaque number of times.
     post_dlq = _dlq_count()
     assert post_dlq > pre_dlq, (
         "pytest-benchmark run produced no DLQ entries — DLQSink did not fire"
