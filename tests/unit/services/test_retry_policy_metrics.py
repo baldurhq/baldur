@@ -2,7 +2,7 @@
 
 ``RetryPolicy.execute()`` / ``_single_attempt`` record terminal retry outcomes to
 the Prometheus retry series (``baldur_retry_outcomes_total`` /
-``baldur_retry_attempts_distribution``) via the ``record_retry_attempt`` facade,
+``baldur_retry_attempts_distribution``) via the ``record_retry_resolution`` facade,
 so the OSS synchronous ``@baldur.protected(retry=True)`` path is observable
 instead of metric-silent — the exact gap 630 ``/verify`` found.
 
@@ -245,11 +245,11 @@ class TestRetryMetricFailOpen:
     """_record_outcome is fail-open: an injected raising recorder is swallowed."""
 
     def test_fail_open_success_preserves_return_value(self):
-        """A raising record_retry_attempt leaves a successful result intact."""
+        """A raising record_retry_resolution leaves a successful result intact."""
         policy = _make_policy("external_service")
 
         with patch(
-            "baldur.services.metrics.recorders.record_retry_attempt",
+            "baldur.services.metrics.recorders.record_retry_resolution",
             side_effect=RuntimeError("recorder down"),
         ):
             result = policy.execute(_flaky_until(2))
@@ -259,7 +259,7 @@ class TestRetryMetricFailOpen:
         assert result.total_attempts == 2
 
     def test_fail_open_exhaustion_preserves_propagated_error(self):
-        """A raising record_retry_attempt leaves the exhaustion error intact."""
+        """A raising record_retry_resolution leaves the exhaustion error intact."""
         policy = _make_policy("external_service", max_attempts=2)
         sentinel = ConnectionError("permanent")
 
@@ -267,7 +267,7 @@ class TestRetryMetricFailOpen:
             raise sentinel
 
         with patch(
-            "baldur.services.metrics.recorders.record_retry_attempt",
+            "baldur.services.metrics.recorders.record_retry_resolution",
             side_effect=RuntimeError("recorder down"),
         ):
             result = policy.execute(fn)
@@ -280,7 +280,7 @@ class TestRetryMetricFailOpen:
         policy = _make_policy("external_service", max_attempts=1)
 
         with patch(
-            "baldur.services.metrics.recorders.record_retry_attempt",
+            "baldur.services.metrics.recorders.record_retry_resolution",
             side_effect=RuntimeError("recorder down"),
         ):
             with capture_logs() as logs:

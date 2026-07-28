@@ -39,6 +39,12 @@ class RetryMetricRecorder(BaseMetricRecorder):
             "Retry outcomes by domain and result",
             ["domain", "outcome", "is_synthetic"],
         )
+        self._attempts_started_total = get_or_create_counter(
+            f"{self.PREFIX}_retry_attempts_started_total",
+            "Retry-loop attempts at start time: "
+            "is_retry marks attempts after the first",
+            ["domain", "is_retry", "is_synthetic"],
+        )
         self._task_retries_total = get_or_create_counter(
             f"{self.PREFIX}_task_retries_total",
             "Task-queue-level retry signals (non-terminal): "
@@ -86,8 +92,13 @@ class RetryMetricRecorder(BaseMetricRecorder):
             buckets=(300, 900, 1800, 3600, 7200, 14400, 28800),
         )
 
-    def record_attempt(self, domain: str, attempt_count: int, outcome: str) -> None:
-        """Record a retry attempt outcome."""
+    def record_resolution(self, domain: str, attempt_count: int, outcome: str) -> None:
+        """Record a resolved retry sequence — one observation per terminal.
+
+        Fires once when a sequence ends, not once per attempt:
+        ``attempt_count`` is how many attempts the sequence took. The timely
+        per-attempt companion is ``record_attempt_started``.
+        """
         try:
             is_synthetic = self._get_synthetic_label()
             self._attempts_histogram.labels(
@@ -105,6 +116,29 @@ class RetryMetricRecorder(BaseMetricRecorder):
             )
         except Exception as e:
             logger.warning("metrics.record_retry_metric_failed", error=e)
+
+    def record_attempt_started(self, domain: str, is_retry: bool) -> None:
+        """Record a retry-loop attempt at the moment it is admitted.
+
+        The timely half of the retry-pressure pair: it moves while sequences
+        are still asleep in backoff or a rate-limit cooldown, whereas the
+        attempts histogram only moves once a sequence resolves. The retry
+        share is ``{is_retry="true"} / (all children)`` — the numerator is a
+        label child of its own denominator, so it can never exceed it.
+
+        ``is_retry`` is normalized to a lowercase string here on purpose:
+        prometheus_client stringifies label values with ``str()``, which would
+        emit ``"True"`` and make every ``is_retry="true"`` matcher select
+        nothing.
+        """
+        try:
+            self._attempts_started_total.labels(
+                domain=domain,
+                is_retry="true" if is_retry else "false",
+                is_synthetic=self._get_synthetic_label(),
+            ).inc()
+        except Exception as e:
+            logger.warning("metrics.record_attempt_started_failed", error=e)
 
     def record_task_attempt(
         self, domain: str, attempt_count: int, outcome: str

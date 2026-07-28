@@ -195,12 +195,12 @@ class BaldurMetrics:
         self.dlq.set_size_ratio(domain, ratio)
 
     # --- Retry / Recovery ---
-    def record_retry_attempt(
+    def record_retry_resolution(
         self, domain: str, attempt_count: int, outcome: str
     ) -> None:
         if not self._initialized:
             return
-        self.retry.record_attempt(domain, attempt_count, outcome)
+        self.retry.record_resolution(domain, attempt_count, outcome)
 
     def record_retry(
         self, domain: str, success: bool, delay: float | None = None
@@ -457,11 +457,11 @@ def record_dlq_item_created(domain: str, failure_type: str) -> None:
     get_metrics().record_dlq_item_created(resolve_domain_label(domain), failure_type)
 
 
-def record_retry_attempt(domain: str, attempt_count: int, outcome: str) -> None:
-    """Record a retry attempt outcome."""
+def record_retry_resolution(domain: str, attempt_count: int, outcome: str) -> None:
+    """Record a resolved retry sequence (one call per terminal)."""
     from baldur.metrics.registry import resolve_domain_label
 
-    get_metrics().record_retry_attempt(
+    get_metrics().record_retry_resolution(
         resolve_domain_label(domain), attempt_count, outcome
     )
 

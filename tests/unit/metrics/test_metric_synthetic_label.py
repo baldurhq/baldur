@@ -51,11 +51,11 @@ class TestMetricSyntheticLabel:
 
         mock_metrics = MagicMock()
         with patch("baldur.metrics.prometheus.get_metrics", return_value=mock_metrics):
-            recorders.record_retry_attempt(
+            recorders.record_retry_resolution(
                 domain="internal_process", attempt_count=3, outcome="success"
             )
 
-            mock_metrics.retry.record_attempt.assert_called_once_with(
+            mock_metrics.retry.record_resolution.assert_called_once_with(
                 "internal_process", 3, "success"
             )
 
@@ -64,11 +64,11 @@ class TestMetricSyntheticLabel:
             with patch(
                 "baldur.metrics.prometheus.get_metrics", return_value=mock_metrics2
             ):
-                recorders.record_retry_attempt(
+                recorders.record_retry_resolution(
                     domain="internal_process", attempt_count=3, outcome="success"
                 )
 
-                mock_metrics2.retry.record_attempt.assert_called_once_with(
+                mock_metrics2.retry.record_resolution.assert_called_once_with(
                     "internal_process", 3, "success"
                 )
 

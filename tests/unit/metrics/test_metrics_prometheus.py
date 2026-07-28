@@ -381,14 +381,14 @@ class TestConvenienceFunctionsDomainResolveBehavior:
         )
 
     @patch("baldur.metrics.prometheus.get_metrics", autospec=True)
-    def test_record_retry_attempt_resolves_domain(self, mock_get_metrics):
-        """record_retry_attempt resolves unregistered domain to OTHER_DOMAIN."""
-        from baldur.metrics.prometheus import record_retry_attempt
+    def test_record_retry_resolution_resolves_domain(self, mock_get_metrics):
+        """record_retry_resolution resolves unregistered domain to OTHER_DOMAIN."""
+        from baldur.metrics.prometheus import record_retry_resolution
         from baldur.metrics.registry import _FALLBACK_DOMAIN
 
-        record_retry_attempt("unregistered_abc", 3, "failure")
+        record_retry_resolution("unregistered_abc", 3, "failure")
 
-        mock_get_metrics.return_value.record_retry_attempt.assert_called_once_with(
+        mock_get_metrics.return_value.record_retry_resolution.assert_called_once_with(
             _FALLBACK_DOMAIN, 3, "failure"
         )
 

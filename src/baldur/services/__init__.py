@@ -80,7 +80,7 @@ Removed symbols and their new import paths:
 
     # Metrics detail (→ metrics/ subpackage)
     record_dlq_item_created → from baldur.services.metrics.recorders import record_dlq_item_created
-    record_retry_attempt → from baldur.services.metrics.recorders import record_retry_attempt
+    record_retry_resolution → from baldur.services.metrics.recorders import record_retry_resolution
     record_recovery_time → from baldur.services.metrics.recorders import record_recovery_time
     record_circuit_breaker_state_change → from baldur.services.metrics.recorders import record_circuit_breaker_state_change
     record_circuit_breaker_open_duration → from baldur.services.metrics.recorders import record_circuit_breaker_open_duration

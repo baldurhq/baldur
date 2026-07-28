@@ -250,6 +250,7 @@ class AsyncRetryPolicy:
         from baldur.services.retry_handler.observability import (
             REASON_TO_OUTCOME,
             emit_retry_exhausted_event,
+            record_retry_attempt_started,
             record_retry_outcome,
         )
 
@@ -283,6 +284,11 @@ class AsyncRetryPolicy:
             ):
                 reason = budget_reason
                 break
+
+            # Timely retry-pressure series — the attempt is admitted from here
+            # on, so a refused iteration above records nothing. ``attempt`` is
+            # 0-indexed on this surface; the helper's contract is 1-based.
+            record_retry_attempt_started(self._domain, attempt + 1)
 
             try:
                 if is_async:
@@ -498,10 +504,17 @@ class AsyncRetryPolicy:
         single attempt is not an exhaustion), and the FAILURE result carries no
         ``should_dlq`` so the downstream DLQ sink stays observe-only.
         ``asyncio.CancelledError`` re-raises without recording — a cancellation
-        is not a terminal (sync parity, by the exception hierarchy).
+        is not a terminal (sync parity, by the exception hierarchy). The
+        attempt start is recorded for the same reason the terminal is: these
+        paths contribute the pressure ratio's denominator, so omitting them
+        would inflate the retry share wherever retries run disabled.
         """
-        from baldur.services.retry_handler.observability import record_retry_outcome
+        from baldur.services.retry_handler.observability import (
+            record_retry_attempt_started,
+            record_retry_outcome,
+        )
 
+        record_retry_attempt_started(self._domain, 1)
         try:
             if is_async:
                 result = await func(*args, **kwargs)  # type: ignore[misc]

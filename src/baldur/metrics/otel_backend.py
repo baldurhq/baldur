@@ -118,6 +118,13 @@ class _OTELRetryRecorder:
             f"{prefix}_retry_outcomes_total",
             description="Retry outcomes by domain and result",
         )
+        self._attempts_started_total = meter.create_counter(
+            f"{prefix}_retry_attempts_started_total",
+            description=(
+                "Retry-loop attempts at start time: "
+                "is_retry marks attempts after the first"
+            ),
+        )
         self._task_retries_total = meter.create_counter(
             f"{prefix}_task_retries_total",
             description=(
@@ -168,7 +175,7 @@ class _OTELRetryRecorder:
             description="Total SLA breaches detected",
         )
 
-    def record_attempt(self, domain: str, attempt_count: int, outcome: str) -> None:
+    def record_resolution(self, domain: str, attempt_count: int, outcome: str) -> None:
         try:
             from baldur.core.test_mode_context import TestModeContext
 
@@ -182,6 +189,23 @@ class _OTELRetryRecorder:
             )
         except Exception as e:
             logger.warning("metrics.record_retry_metric_failed", error=e)
+
+    def record_attempt_started(self, domain: str, is_retry: bool) -> None:
+        try:
+            from baldur.core.test_mode_context import TestModeContext
+
+            self._attempts_started_total.add(
+                1,
+                {
+                    "domain": domain,
+                    # Same lowercase string the Prometheus twin emits, so one
+                    # alert/panel matcher works on either backend.
+                    "is_retry": "true" if is_retry else "false",
+                    "is_synthetic": TestModeContext.get_synthetic_label_value(),
+                },
+            )
+        except Exception as e:
+            logger.warning("metrics.record_attempt_started_failed", error=e)
 
     def record_task_attempt(
         self, domain: str, attempt_count: int, outcome: str
@@ -748,12 +772,12 @@ class OTELBaldurMetrics:
         self.dlq.set_size_ratio(domain, ratio)
 
     # --- Retry / Recovery ---
-    def record_retry_attempt(
+    def record_retry_resolution(
         self, domain: str, attempt_count: int, outcome: str
     ) -> None:
         if not self._initialized:
             return
-        self.retry.record_attempt(domain, attempt_count, outcome)
+        self.retry.record_resolution(domain, attempt_count, outcome)
 
     def record_retry(
         self, domain: str, success: bool, delay: float | None = None

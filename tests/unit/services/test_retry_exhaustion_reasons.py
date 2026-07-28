@@ -29,7 +29,7 @@ from baldur.services.retry_handler.policy import RetryPolicy
 _GET_REMAINING_MS = "baldur.scaling.deadline_context.get_remaining_ms"
 _POLICY_MONOTONIC = "baldur.services.retry_handler.policy.time.monotonic"
 _GET_EVENT_BUS = "baldur.services.event_bus.get_event_bus"
-_RECORD_RETRY = "baldur.services.metrics.recorders.record_retry_attempt"
+_RECORD_RETRY = "baldur.services.metrics.recorders.record_retry_resolution"
 
 
 class _AdvancingClock:

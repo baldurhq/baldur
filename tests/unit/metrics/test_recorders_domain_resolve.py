@@ -59,15 +59,15 @@ class TestRecordersDomainResolveBehavior:
         # Since sla_breach doesn't delegate to a recorder, it uses the metric directly
         # We trust resolve_domain_label works (tested elsewhere) and just verify no error
 
-    def test_record_retry_attempt_resolves_unregistered_domain(self):
-        """record_retry_attempt resolves unregistered domain to OTHER_DOMAIN."""
-        from baldur.services.metrics.recorders import record_retry_attempt
+    def test_record_retry_resolution_resolves_unregistered_domain(self):
+        """record_retry_resolution resolves unregistered domain to OTHER_DOMAIN."""
+        from baldur.services.metrics.recorders import record_retry_resolution
 
         mock_metrics = MagicMock()
         with patch("baldur.metrics.prometheus.get_metrics", return_value=mock_metrics):
-            record_retry_attempt("unknown_domain_abc", 3, "failure")
+            record_retry_resolution("unknown_domain_abc", 3, "failure")
 
-            mock_metrics.retry.record_attempt.assert_called_once_with(
+            mock_metrics.retry.record_resolution.assert_called_once_with(
                 _FALLBACK_DOMAIN, 3, "failure"
             )
 

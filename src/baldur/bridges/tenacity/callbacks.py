@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from baldur.services.retry_handler.observability import record_retry_attempt_started
 from baldur.services.retry_handler.rate_limit_detection import detect_rate_limit
 
 if TYPE_CHECKING:
@@ -148,16 +149,27 @@ def make_before_callback(
     """``before(retry_state)`` — runs at the start of every attempt.
 
     Mirrors native ``RetryPolicy``'s top-of-loop logic: record the request
-    against ``AdaptiveRetryBudget`` and wait on ``RateLimitCoordinator`` if
-    a global cooldown is active. The wait is bounded by
-    ``ctx.rate_limit_max_wait``; a cooldown that exceeds it raises
-    ``_CooldownDeferredAbort`` to stop the loop instead of blocking on it.
+    against ``AdaptiveRetryBudget``, record the attempt to the timely
+    retry-pressure series, and wait on ``RateLimitCoordinator`` if a global
+    cooldown is active. The wait is bounded by ``ctx.rate_limit_max_wait``; a
+    cooldown that exceeds it raises ``_CooldownDeferredAbort`` to stop the
+    loop instead of blocking on it.
+
+    The attempt-start record is this bridge's only metric surface: a
+    tenacity-driven sequence writes no terminal series, so without it
+    bridge-managed retries would be absent from retry pressure while the
+    native policies are present in it.
     """
 
     def _before(retry_state: Any) -> None:
         attempt_number = getattr(retry_state, "attempt_number", 1)
         if ctx.retry_budget is not None:
             ctx.retry_budget.record_request(is_retry=(attempt_number > 1))
+
+        # Before the cooldown wait below, for the same reason the native loops
+        # record before theirs: an attempt about to sleep out an honored
+        # Retry-After must already be counted.
+        record_retry_attempt_started(ctx.domain, attempt_number)
 
         if ctx.rate_limit_coordinator is None or ctx.rate_limit_key is None:
             return

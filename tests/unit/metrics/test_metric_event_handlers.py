@@ -6,7 +6,7 @@ are called with resolved domain labels. Unregistered domains are resolved
 to "OTHER_DOMAIN" by resolve_domain_label().
 
 The handlers route every domain metric through the recorder public methods
-(record_state_change / record_trip / record_failure / record_attempt /
+(record_state_change / record_trip / record_failure / record_attempt / record_resolution /
 record_retry / record_recovery_duration / record_sla_breach / record_started /
 record_replay / record_store_duration), so both metrics backends populate the
 series identically (645 D1-D4). Assertions inspect those recorder calls.
@@ -100,7 +100,7 @@ class TestDLQMetricEventHandler:
             _REGISTERED_DOMAIN, "PG_TIMEOUT", attempt_count=3
         )
 
-        mock_metrics.retry.record_attempt.assert_called_once_with(
+        mock_metrics.retry.record_resolution.assert_called_once_with(
             _REGISTERED_DOMAIN, 3, "failure"
         )
 
@@ -263,7 +263,9 @@ class TestDLQEventHandlerDomainResolveBehavior:
             _UNREGISTERED_DOMAIN, "ERR", attempt_count=2
         )
 
-        assert mock_metrics.retry.record_attempt.call_args.args[0] == _FALLBACK_DOMAIN
+        assert (
+            mock_metrics.retry.record_resolution.call_args.args[0] == _FALLBACK_DOMAIN
+        )
 
     @patch("baldur.metrics.event_handlers._get_metrics", autospec=True)
     def test_on_overflow_rejected_resolves_unregistered_domain(self, mock_get_metrics):

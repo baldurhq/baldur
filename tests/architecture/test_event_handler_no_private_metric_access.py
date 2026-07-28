@@ -140,7 +140,7 @@ class TestEventHandlerNoPrivateMetricAccess:
             f"backend-private metric recorder access ({len(violations)}). "
             "Route through the recorder public method "
             "(record_state_change / record_trip / record_failure / "
-            "record_attempt / record_retry / record_recovery_duration / "
+            "record_attempt / record_resolution / record_retry / record_recovery_duration / "
             "record_sla_breach / record_started / record_replay / "
             "record_store_duration) — both metrics backends implement them. "
             "A backend-private `<recorder>._x.<call>(...)` access raises "

@@ -1,5 +1,5 @@
 """
-Retry-terminal observability — shared emission helpers for both retry policies.
+Retry observability — shared emission helpers for both retry policies.
 
 The synchronous ``RetryPolicy`` (this package) and the asynchronous
 ``AsyncRetryPolicy`` (``resilience/policies/async_retry.py``) both terminate on
@@ -10,16 +10,28 @@ Prometheus retry series. Hosting the emitters here — rather than on either pol
 and the fail-open wrapping, so a future field or label change cannot drift
 between the sync and async copies.
 
-Both helpers are plain synchronous functions. The sync policy calls them
+Two recording moments, deliberately separate:
+
+* ``record_retry_attempt_started`` fires once per attempt, at admission —
+  before the call runs and before any backoff or cooldown wait, so retry
+  pressure is readable *while* a storm is in flight.
+* ``record_retry_outcome`` fires once per sequence, at the terminal — the
+  distribution view of how many attempts resolved calls took.
+
+The tenacity bridge joins on the attempt-start half; only the two policies
+record terminals.
+
+All helpers are plain synchronous functions. The sync policy calls them
 directly. The async policy offloads the *bus* emit through
 ``asyncio.to_thread`` (``EventBus.publish`` is synchronous and blocking, so a
 bare call from a coroutine would park the event loop) and calls the *metric*
-recorder directly (a bounded in-process counter increment, cheaper than a thread
-hop). See ``AsyncRetryPolicy.execute`` for the call convention.
+recorders directly (a bounded in-process counter increment, cheaper than a
+thread hop). See ``AsyncRetryPolicy.execute`` for the call convention.
 
 Bus and metrics imports are deliberately lazy (def-body) so source-module test
 patches on ``baldur.services.event_bus.get_event_bus`` and
-``baldur.services.metrics.recorders.record_retry_attempt`` keep intercepting.
+``baldur.services.metrics.recorders.record_retry_resolution`` /
+``…record_retry_attempt_started`` keep intercepting.
 """
 
 from __future__ import annotations
@@ -108,22 +120,46 @@ def emit_retry_exhausted_event(
 def record_retry_outcome(domain: str, attempt: int, outcome: str) -> None:
     """Record the terminal retry outcome to the Prometheus retry series. Fail-open.
 
-    Delegates to the canonical ``record_retry_attempt`` facade, which resolves
-    the ``domain`` and ``is_synthetic`` labels internally and performs both the
-    attempts-histogram observe and the outcomes-counter increment in one call.
-    Mirrors the fail-open wrapping of ``emit_retry_exhausted_event``: a recorder
-    fault must never change the returned value or the propagated exception.
+    Delegates to the canonical ``record_retry_resolution`` facade, which
+    resolves the ``domain`` and ``is_synthetic`` labels internally and performs
+    both the attempts-histogram observe and the outcomes-counter increment in
+    one call. Mirrors the fail-open wrapping of ``emit_retry_exhausted_event``:
+    a recorder fault must never change the returned value or the propagated
+    exception.
     """
     try:
-        from baldur.services.metrics.recorders import record_retry_attempt
+        from baldur.services.metrics.recorders import record_retry_resolution
 
-        record_retry_attempt(domain, attempt, outcome)
+        record_retry_resolution(domain, attempt, outcome)
     except Exception as e:
         logger.warning("retry.metric_recording_failed", error=str(e))
+
+
+def record_retry_attempt_started(domain: str, attempt: int) -> None:
+    """Record an attempt start to the timely retry-pressure series. Fail-open.
+
+    Called at attempt admission by both retry policies and by the tenacity
+    bridge's ``before`` hook, so the retry share moves while sequences are
+    still asleep in backoff or in a rate-limit cooldown wait — the terminal
+    series cannot move until they resolve.
+
+    ``attempt`` is 1-based; anything past the first is a retry. The recording
+    path deliberately consults no retry budget and reads no policy state: it
+    describes what the loop did, it never influences what it does.
+    """
+    try:
+        from baldur.services.metrics.recorders import (
+            record_retry_attempt_started as _facade,
+        )
+
+        _facade(domain, is_retry=attempt > 1)
+    except Exception as e:
+        logger.warning("retry.attempt_start_recording_failed", error=str(e))
 
 
 __all__ = [
     "REASON_TO_OUTCOME",
     "emit_retry_exhausted_event",
+    "record_retry_attempt_started",
     "record_retry_outcome",
 ]

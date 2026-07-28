@@ -23,7 +23,7 @@ from baldur.services.metrics.recorders import (
     record_dlq_item_created,
     record_recovery_time,
     record_replay_attempt,
-    record_retry_attempt,
+    record_retry_resolution,
 )
 from baldur.services.metrics.updaters import (
     track_recovery_time,
@@ -100,26 +100,26 @@ class TestRecordDLQItemCreated:
 class TestRecordRetryAttempt:
     """Tests for retry attempt metric recording."""
 
-    def test_record_retry_attempt_success(self):
+    def test_record_retry_resolution_success(self):
         """
         Purpose:
             Verify successful retry attempt is recorded.
         """
-        record_retry_attempt(domain="payment", attempt_count=1, outcome="success")
+        record_retry_resolution(domain="payment", attempt_count=1, outcome="success")
 
-    def test_record_retry_attempt_failure(self):
+    def test_record_retry_resolution_failure(self):
         """
         Purpose:
             Verify failed retry attempt is recorded.
         """
-        record_retry_attempt(domain="payment", attempt_count=3, outcome="failure")
+        record_retry_resolution(domain="payment", attempt_count=3, outcome="failure")
 
-    def test_record_retry_attempt_exhausted(self):
+    def test_record_retry_resolution_exhausted(self):
         """
         Purpose:
             Verify exhausted retry is recorded.
         """
-        record_retry_attempt(domain="webhook", attempt_count=5, outcome="exhausted")
+        record_retry_resolution(domain="webhook", attempt_count=5, outcome="exhausted")
 
 
 class TestRecordRecoveryTime:

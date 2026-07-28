@@ -201,22 +201,44 @@ def record_sla_breach(domain: str) -> None:
 # =============================================================================
 
 
-def record_retry_attempt(domain: str, attempt_count: int, outcome: str) -> None:
+def record_retry_resolution(domain: str, attempt_count: int, outcome: str) -> None:
     """
-    Record a retry attempt outcome.
+    Record a resolved retry sequence — one call per terminal, not per attempt.
 
     Args:
         domain: Business domain
-        attempt_count: Number of attempts made
+        attempt_count: Number of attempts the sequence took
         outcome: Result (success, failure, exhausted)
     """
     try:
         from baldur.metrics.prometheus import get_metrics
 
         domain = resolve_domain_label(domain)
-        get_metrics().retry.record_attempt(domain, attempt_count, outcome)
+        get_metrics().retry.record_resolution(domain, attempt_count, outcome)
     except Exception as e:
         logger.warning("metrics.record_retry_metric_failed", error=e)
+
+
+def record_retry_attempt_started(domain: str, is_retry: bool) -> None:
+    """
+    Record a retry-loop attempt at admission time (the timely pressure series).
+
+    Companion to ``record_retry_resolution``: this one fires on every attempt,
+    before the call runs and before any backoff or cooldown wait, so retry
+    pressure is readable while a storm is still in flight.
+
+    Args:
+        domain: Business domain
+        is_retry: True for every attempt after the first
+    """
+    try:
+        from baldur.metrics.prometheus import get_metrics
+
+        get_metrics().retry.record_attempt_started(
+            resolve_domain_label(domain), is_retry
+        )
+    except Exception as e:
+        logger.warning("metrics.record_attempt_started_failed", error=e)
 
 
 def record_retry_marker(domain: str) -> None:
