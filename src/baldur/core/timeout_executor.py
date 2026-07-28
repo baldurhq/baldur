@@ -21,6 +21,7 @@ __all__ = [
     "LockExtendable",
     "HEARTBEAT_INTERVAL_SECONDS",
     "LOCK_EXTEND_SECONDS",
+    "DAEMON_EXECUTION_THREAD_NAME",
 ]
 
 T = TypeVar("T")
@@ -29,6 +30,9 @@ logger = logging.getLogger(__name__)
 
 HEARTBEAT_INTERVAL_SECONDS: int = 60
 LOCK_EXTEND_SECONDS: int = 300
+
+# Identifiable in a thread dump alongside baldur-timeout / baldur-watchdog-beacon.
+DAEMON_EXECUTION_THREAD_NAME = "baldur-bounded-call"
 
 
 @runtime_checkable
@@ -59,7 +63,17 @@ class TimeoutExecutor:
     - ContextVar propagation: the worker thread inherits the caller's structlog
       binding, deadline, and cell/actor context via contextvars.copy_context().run
       (matching TimeoutPolicy / ThreadPoolBulkhead / HedgingExecutor conventions)
+    - Optional daemon-thread execution mode for callers that must not leave an
+      abandoned worker behind at interpreter shutdown (see ``execute``)
     """
+
+    def __init__(self) -> None:
+        self.last_daemon_thread: threading.Thread | None = None
+        """The thread spawned by the most recent daemon-mode call.
+
+        Exposed so a caller (or a test) can observe that an abandoned call was
+        left on a daemon thread rather than on a pool worker.
+        """
 
     def execute(
         self,
@@ -71,6 +85,7 @@ class TimeoutExecutor:
         heartbeat_interval: float = HEARTBEAT_INTERVAL_SECONDS,
         extend_seconds: float = LOCK_EXTEND_SECONDS,
         pre_execute_hook: Callable[[], None] | None = None,
+        use_daemon_thread: bool = False,
     ) -> T:
         """Execute fn within timeout. Extend lock TTL via heartbeat if provided.
 
@@ -86,6 +101,13 @@ class TimeoutExecutor:
             extend_seconds: Seconds to extend lock TTL on each heartbeat. Default 300s.
             pre_execute_hook: Optional callable invoked before and after fn
                 execution in the worker thread (e.g., close_old_connections).
+            use_daemon_thread: Run fn on a plain daemon thread instead of a
+                ThreadPoolExecutor worker. ``concurrent.futures`` pool workers
+                are non-daemon and are joined at interpreter exit regardless of
+                any flag, so an abandoned hung call turns SIGTERM into a hang
+                until SIGKILL. Callers that time out on blocking I/O and must
+                stay shutdown-safe opt in here. Lock heartbeating is not
+                supported in this mode (``lock`` is ignored).
 
         Returns:
             Result of fn(stop_event).
@@ -93,6 +115,9 @@ class TimeoutExecutor:
         Raises:
             StepTimeoutError: If fn does not complete within timeout_seconds.
         """
+        if use_daemon_thread:
+            return self._execute_on_daemon_thread(fn, timeout_seconds, pre_execute_hook)
+
         stop_event = threading.Event()
         # Propagate the caller's ContextVars (structlog binding, deadline,
         # cell/actor context) into the worker thread. Matches TimeoutPolicy /
@@ -132,6 +157,52 @@ class TimeoutExecutor:
             raise StepTimeoutError(timeout_seconds=timeout_seconds)
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
+
+    def _execute_on_daemon_thread(
+        self,
+        fn: Callable[[threading.Event], T],
+        timeout_seconds: float,
+        pre_execute_hook: Callable[[], None] | None,
+    ) -> T:
+        """Run fn on a daemon thread and wait for it up to timeout_seconds.
+
+        A timed-out call is abandoned, not cancelled: the thread keeps running
+        until its blocking call returns, but being a daemon it is never joined
+        at interpreter exit, so an abandoned call cannot hold shutdown open.
+        The result slot is written before the done event is set, so a reader
+        that observes the event sees a complete slot.
+        """
+        stop_event = threading.Event()
+        ctx = contextvars.copy_context()
+        slot: dict[str, object] = {}
+        done = threading.Event()
+
+        def _run() -> None:
+            try:
+                slot["result"] = ctx.run(
+                    self._wrapped_fn, fn, stop_event, pre_execute_hook
+                )
+            except BaseException as exc:  # noqa: BLE001 - re-raised on the caller
+                slot["error"] = exc
+            finally:
+                done.set()
+
+        thread = threading.Thread(
+            target=_run,
+            name=DAEMON_EXECUTION_THREAD_NAME,
+            daemon=True,
+        )
+        self.last_daemon_thread = thread
+        thread.start()
+
+        if not done.wait(timeout_seconds):
+            stop_event.set()
+            raise StepTimeoutError(timeout_seconds=timeout_seconds)
+
+        error = slot.get("error")
+        if error is not None:
+            raise error  # type: ignore[misc]
+        return slot["result"]  # type: ignore[return-value]
 
     @staticmethod
     def _wrapped_fn(

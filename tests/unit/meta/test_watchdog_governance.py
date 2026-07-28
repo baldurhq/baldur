@@ -2,7 +2,9 @@
 MetaWatchdog governance integration unit tests (409 C11-33).
 
 Test targets:
-    - _attempt_guarded_recovery() governance check
+    - the governance gate reached through _attempt_guarded_recovery (it now runs
+      inside the bounded recovery worker, so a hung governance backend cannot
+      block the watchdog loop)
     - trace_id generation before recovery
     - Prometheus counter on governance block
 
@@ -220,7 +222,7 @@ class TestWatchdogGovernanceBehavior:
                 "baldur.audit.trace.set_trace_id",
             ),
             patch.object(
-                watchdog, "_attempt_recovery", return_value=True
+                watchdog, "_build_recovery_fn", return_value=lambda _stop: True
             ) as mock_recovery,
         ):
             watchdog._attempt_guarded_recovery("redis", unhealthy_result, 30.0)
@@ -242,7 +244,7 @@ class TestWatchdogGovernanceBehavior:
                 "baldur.audit.trace.set_trace_id",
             ),
             patch.object(
-                watchdog, "_attempt_recovery", return_value=True
+                watchdog, "_build_recovery_fn", return_value=lambda _stop: True
             ) as mock_recovery,
         ):
             watchdog._attempt_guarded_recovery("redis", unhealthy_result, 30.0)
@@ -264,7 +266,7 @@ class TestWatchdogGovernanceBehavior:
                 "baldur.audit.trace.set_trace_id",
             ),
             patch.object(
-                watchdog, "_attempt_recovery", return_value=True
+                watchdog, "_build_recovery_fn", return_value=lambda _stop: True
             ) as mock_recovery,
         ):
             watchdog._attempt_guarded_recovery("redis", unhealthy_result, 30.0)
@@ -295,7 +297,9 @@ class TestWatchdogGovernanceBehavior:
                 "baldur_pro.services.governance.checks.check_all_governance",
                 side_effect=mock_gov,
             ),
-            patch.object(watchdog, "_attempt_recovery", return_value=True),
+            patch.object(
+                watchdog, "_build_recovery_fn", return_value=lambda _stop: True
+            ),
         ):
             watchdog._attempt_guarded_recovery("redis", unhealthy_result, 30.0)
 

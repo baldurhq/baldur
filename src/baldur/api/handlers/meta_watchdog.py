@@ -128,7 +128,15 @@ def meta_watchdog_status(ctx: RequestContext) -> ResponseContext:
 
 
 def meta_watchdog_force_check(ctx: RequestContext) -> ResponseContext:
-    """POST /meta/force-check — trigger immediate health check (operator)."""
+    """POST /meta/force-check — trigger immediate health check (operator).
+
+    Returns **409** when a health check is already in progress, carrying the
+    current state snapshot. A poller that queued on the check lock instead
+    would starve the watchdog's own loop thread for as long as it kept polling
+    — and the loop missing its heartbeat is exactly the self-inflicted restart
+    the pass budget exists to prevent. The 409 body is the designed answer, not
+    an error: the diagnosis the caller asked for is already running.
+    """
     try:
         settings = _settings()
 
@@ -138,7 +146,23 @@ def meta_watchdog_force_check(ctx: RequestContext) -> ResponseContext:
             )
 
         watchdog = _watchdog()
-        state = watchdog.force_check()
+        # Duck-probed for ABSENCE only: a version-skewed install (newer OSS,
+        # older PRO watchdog) has no non-blocking entry point, and falling back
+        # to the blocking one is strictly better than a 500.
+        try_force_check = getattr(watchdog, "try_force_check", None)
+        if callable(try_force_check):
+            state = try_force_check()
+            if state is None:
+                busy = _format_state(watchdog.get_state())
+                busy["error_code"] = "check_in_progress"
+                busy["message"] = (
+                    "A health check is already in progress; the snapshot below "
+                    "is the last completed one."
+                )
+                return ResponseContext.json(busy, status_code=409)
+        else:
+            state = watchdog.force_check()
+
         result = _format_state(state)
         result["message"] = "Force check completed"
         return ResponseContext.json(result)

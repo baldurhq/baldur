@@ -55,7 +55,7 @@ All under the admin server (mount prefix is deployment-specific):
 |---|---|
 | `GET /meta-watchdog/status` | Overall + per-component health — **start here** |
 | `GET /meta-watchdog/liveness` | Is the watchdog itself alive (K8s liveness) |
-| `POST /meta-watchdog/force-check` | Trigger an immediate probe cycle (verify a fix) |
+| `POST /meta-watchdog/force-check` | Trigger an immediate probe cycle (verify a fix). A `409` reply means a cycle is already in flight — the body still carries the last completed snapshot. Wait for it rather than re-posting in a loop |
 | `POST /meta-watchdog/escalation-test` | Send a test page (verify the delivery channel) |
 | `GET circuit_breaker_status` | Per-CB state (for the `circuit_breaker` section) |
 | `GET /health/pool` | Connection-pool health (for the `redis` section) |
@@ -339,6 +339,12 @@ The watchdog ships as risk-graded slices, promoted by **data, not by date** (the
 
 `recovery_enabled` is a single bool, tracked as a tier contract (`Deferred/false`) in `baldur/_data/V1_LAUNCH_MANIFEST.yaml` and enforced by the v1.0-default-enable fitness function — so a slice promotion is **one manifest flip**, which is the data-driven gate.
 
+### Before you flip it: the pass budget caps recovery
+
+Recovery happens inside a watchdog pass, and the pass is capped by the budget described under the dead-man's-switch section (about 27 s at shipped defaults). Whichever allowance expires first wins, which makes the pass budget — not `recovery_total_timeout_seconds` — the number that actually governs. At shipped defaults it is below every recovery-side timeout (`recovery_total_timeout_seconds` 60 s, `k8s_api_timeout_seconds` 30 s, `docker_restart_timeout_seconds` 60 s, `docker_scale_timeout_seconds` 120 s), so an infrastructure restart cannot run to its own configured limit.
+
+You do not have to discover this at incident time: with `recovery_enabled=True` the watchdog logs one `watchdog.recovery_timeout_exceeds_budget` WARNING at start-up naming each field, its value and the effective budget. Buy recovery more time through the budget's inputs — a longer `probe_interval_seconds`, or a larger `BALDUR_DAEMON_WORKER_DEFAULT_STALENESS_MULTIPLIER` — since raising the recovery timeouts alone changes nothing. A longer interval also lengthens the expected inter-ping gap, so revisit your dead-man's-switch grace afterwards.
+
 ### The data source
 
 Every escalation writes a durable, queryable EventJournal record. Query the failure-mode history that feeds the promotion decision:
@@ -417,7 +423,16 @@ Set your provider's grace period (how long it waits before paging) from **your o
 
 > Take the largest gap between consecutive pings your deployment actually produced, and set grace ≥ **3× that** — and **never below 10 minutes**.
 
-There is no closed-form bound to compute instead. One watchdog pass carries every probe's timeout serially, an in-pass recovery budget with no configured upper limit, one escalation round *per unhealthy component*, and an unwrapped state-store write; and an operator polling force-check can hold the loop off besides. Every arithmetic estimate of that sum has under-counted. Over-sizing costs you a slower page; under-sizing costs false pages during exactly the incidents this switch exists to survive.
+Measurement stays the rule, but there is now an **expected gap** to check your measurement against. A pass carries a wall-clock budget derived from the watchdog's own staleness watcher, so:
+
+```
+expected gap  =  probe_interval_seconds  +  pass budget
+pass budget   =  0.9 x probe_interval_seconds x min(staleness_multiplier - 1, 2)
+```
+
+Shipped defaults (`probe_interval_seconds=30`, `BALDUR_DAEMON_WORKER_DEFAULT_STALENESS_MULTIPLIER=2.0`) give 30 + 27, about **one minute**. What used to make this incomputable is capped now: probes run concurrently inside the budget instead of one after another, page delivery happens on its own thread rather than in the pass, recovery is clamped by the same budget, and a force-check answers `409` instead of queueing behind the loop. A measured maximum far above the expected value is a finding in its own right — look into it before you size around it.
+
+**Keep the 10-minute floor.** A wedged logging sink is still unbounded on the loop thread, and the two errors are not symmetric: sizing too high costs you a slower page, sizing too low costs you false pages in the middle of the incidents this switch exists to survive.
 
 You do not need the beacon running to measure it. The watchdog already emits a per-pass heartbeat age, so its running maximum **is** the inter-ping gap:
 
@@ -458,9 +473,11 @@ They answer different questions and neither replaces the other:
 | Question answered | Is the process alive at all? | Is the loop making progress? |
 | Observed from | Outside your infrastructure | Inside the cluster (K8s `httpGet`) |
 | Needs egress | Yes | No |
-| Fed by | The watchdog loop only | Any success-path health check, **including an API force-check** |
+| Fed by | The watchdog loop only | The watchdog loop only |
 
-The last row matters during triage: an operator (or a monitoring script) polling `POST /meta-watchdog/force-check` writes the same Redis liveness timestamp the endpoint reads, so the endpoint can stay green while the loop itself is stuck. The beacon cannot be fed that way — only the loop offers to it — so it is the surface that still goes silent. Wiring force-check into the beacon would let an HTTP caller keep the external switch fed while the loop is dead, which is the exact false-liveness failure the beacon exists to prevent.
+Neither surface can be refreshed from outside, and that is the point: a liveness signal an HTTP caller can top up is a signal that reads green while the loop is dead. Polling `POST /meta-watchdog/force-check` no longer writes the liveness timestamp, so the endpoint reports the loop's own progress and nothing else.
+
+The loop writes that timestamp on **every** iteration — including one it skipped because its self-circuit-breaker is open, and one whose health check raised. The endpoint answers *is the loop alive*, which is a restart decision, not *is the watchdog healthy*: restarting a pod mid-backoff would clear the backoff and drop straight back into the failure loop it is damping. For the health question read `self_cb_open` on `GET /meta-watchdog/status`.
 
 Two more endpoint behaviors worth knowing before you rely on it: it returns `200` with `status: disabled` when the watchdog is disabled (not an error), and `500` on an internal error — `503` is specifically the stale-loop verdict. And because its timestamp lives in Redis and is shared across workers, one live worker can mask another's stuck loop.
 

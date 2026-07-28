@@ -19,6 +19,7 @@ pytestmark = pytest.mark.requires_pro
 
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -87,7 +88,11 @@ class TestEscalationDelayBehavior:
         probe = _make_probe("redis")
 
         with (
-            patch.object(watchdog, "_attempt_recovery", return_value=False),
+            patch.object(
+                watchdog,
+                "_attempt_recovery",
+                return_value=SimpleNamespace(recovered=False, governance_blocked=False),
+            ),
             patch.object(watchdog, "_escalate") as mock_escalate,
             patch.object(watchdog, "_is_in_cooldown", return_value=False),
         ):
@@ -107,7 +112,11 @@ class TestEscalationDelayBehavior:
         )
 
         with (
-            patch.object(watchdog, "_attempt_recovery", return_value=False),
+            patch.object(
+                watchdog,
+                "_attempt_recovery",
+                return_value=SimpleNamespace(recovered=False, governance_blocked=False),
+            ),
             patch.object(watchdog, "_escalate") as mock_escalate,
             patch.object(watchdog, "_is_in_cooldown", return_value=False),
         ):
@@ -123,7 +132,11 @@ class TestEscalationDelayBehavior:
         watchdog._pending_escalations["redis"] = time.time()
 
         with (
-            patch.object(watchdog, "_attempt_recovery", return_value=True),
+            patch.object(
+                watchdog,
+                "_attempt_recovery",
+                return_value=SimpleNamespace(recovered=True, governance_blocked=False),
+            ),
             patch.object(watchdog, "_is_in_cooldown", return_value=False),
         ):
             watchdog._attempt_guarded_recovery("redis", probe, 60.0)

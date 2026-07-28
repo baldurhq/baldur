@@ -439,12 +439,14 @@ class TestRecoveryCooldownBehavior:
         assert watchdog._is_in_cooldown("redis") is False
 
         with (
-            patch.object(watchdog, "_execute_recovery_with_timeout", return_value=True),
+            patch.object(
+                watchdog, "_build_recovery_fn", return_value=lambda _stop: True
+            ),
             patch.object(watchdog, "_get_recovery_audit_recorder", return_value=None),
         ):
             result = watchdog._attempt_recovery("redis", unhealthy_redis_probe, 60.0)
 
-            assert result is True
+            assert result.recovered is True
 
     def test_different_component_not_affected_by_cooldown(
         self, watchdog, unhealthy_redis_probe
@@ -455,12 +457,14 @@ class TestRecoveryCooldownBehavior:
         assert watchdog._is_in_cooldown("redis") is False
 
         with (
-            patch.object(watchdog, "_execute_recovery_with_timeout", return_value=True),
+            patch.object(
+                watchdog, "_build_recovery_fn", return_value=lambda _stop: True
+            ),
             patch.object(watchdog, "_get_recovery_audit_recorder", return_value=None),
         ):
             result = watchdog._attempt_recovery("redis", unhealthy_redis_probe, 60.0)
 
-            assert result is True
+            assert result.recovered is True
 
     def test_cooldown_timestamp_recorded_after_recovery(
         self, watchdog, unhealthy_redis_probe
@@ -469,7 +473,9 @@ class TestRecoveryCooldownBehavior:
         assert "redis" not in watchdog._last_recovery_time
 
         with (
-            patch.object(watchdog, "_execute_recovery_with_timeout", return_value=True),
+            patch.object(
+                watchdog, "_build_recovery_fn", return_value=lambda _stop: True
+            ),
             patch.object(watchdog, "_get_recovery_audit_recorder", return_value=None),
         ):
             watchdog._attempt_recovery("redis", unhealthy_redis_probe, 60.0)
@@ -483,7 +489,7 @@ class TestRecoveryCooldownBehavior:
         """복구 실패 시에도 타임스탬프가 기록된다."""
         with (
             patch.object(
-                watchdog, "_execute_recovery_with_timeout", return_value=False
+                watchdog, "_build_recovery_fn", return_value=lambda _stop: False
             ),
             patch.object(watchdog, "_get_recovery_audit_recorder", return_value=None),
         ):
@@ -497,12 +503,14 @@ class TestRecoveryCooldownBehavior:
         assert watchdog._is_in_cooldown("redis") is False
 
         with (
-            patch.object(watchdog, "_execute_recovery_with_timeout", return_value=True),
+            patch.object(
+                watchdog, "_build_recovery_fn", return_value=lambda _stop: True
+            ),
             patch.object(watchdog, "_get_recovery_audit_recorder", return_value=None),
         ):
             result = watchdog._attempt_recovery("redis", unhealthy_redis_probe, 60.0)
 
-            assert result is True
+            assert result.recovered is True
 
 
 # =============================================================================

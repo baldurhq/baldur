@@ -2425,15 +2425,31 @@
             // Render the lock banner (naming the owning rollout from the message)
             // instead of a generic error, matching the pre-load affordance.
             var lockMsg = null;
+            var busyState = null;
             try {
               var pj = JSON.parse(txt);
               if (pj && pj.error_code === "ROLLOUT_CONFLICT") { lockMsg = pj.error; }
-            } catch (_e) { lockMsg = null; }
-            result.textContent = lockMsg
-              ? ("Blocked by an active canary rollout.\n" + lockMsg + "\n"
-                 + "Roll back or cancel the rollout from the Canary Rollouts "
-                 + "panel, or wait.")
-              : ("HTTP 409\n" + txt);
+              // Meta-Watchdog force-check: a check already running is the
+              // endpoint's designed answer, not a failure. Render the returned
+              // snapshot the same way the 200 branch does instead of dropping
+              // it into the raw-blob fallthrough below.
+              if (pj && pj.error_code === "check_in_progress") { busyState = pj; }
+            } catch (_e) { lockMsg = null; busyState = null; }
+            if (busyState !== null) {
+              result.textContent = "";
+              result.appendChild(el("div", null,
+                "Watchdog is mid-diagnosis — a health check is already running. "
+                + "The last completed snapshot is below; retry once it finishes."));
+              var busyBox = el("div", "list-scroll");
+              renderStructured(busyBox, busyState, 0);
+              result.appendChild(busyBox);
+            } else {
+              result.textContent = lockMsg
+                ? ("Blocked by an active canary rollout.\n" + lockMsg + "\n"
+                   + "Roll back or cancel the rollout from the Canary Rollouts "
+                   + "panel, or wait.")
+                : ("HTTP 409\n" + txt);
+            }
           } else {
             result.textContent = "HTTP " + resp.status + "\n" + txt;
           }

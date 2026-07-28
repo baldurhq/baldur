@@ -75,7 +75,7 @@ class TestWatchdogAuditRecorderIntegration:
             watchdog, "_get_recovery_audit_recorder", return_value=mock_recorder
         ):
             with mock.patch.object(
-                watchdog, "_execute_recovery_with_timeout", return_value=True
+                watchdog, "_build_recovery_fn", return_value=lambda _stop: True
             ):
                 watchdog._attempt_recovery("redis", healthy_probe_result, 60.0)
 
@@ -92,11 +92,11 @@ class TestWatchdogAuditRecorderIntegration:
             watchdog, "_get_recovery_audit_recorder", return_value=mock_recorder
         ):
             with mock.patch.object(
-                watchdog, "_execute_recovery_with_timeout", return_value=True
+                watchdog, "_build_recovery_fn", return_value=lambda _stop: True
             ):
                 result = watchdog._attempt_recovery("redis", healthy_probe_result, 60.0)
 
-                assert result is True
+                assert result.recovered is True
                 assert mock_recorder.record_recovery_event.call_count >= 2
 
     def test_attempt_recovery_records_failed_audit_on_exception(
@@ -108,14 +108,16 @@ class TestWatchdogAuditRecorderIntegration:
         with mock.patch.object(
             watchdog, "_get_recovery_audit_recorder", return_value=mock_recorder
         ):
+
+            def _raising_recovery(_stop):
+                raise RuntimeError("Recovery failed")
+
             with mock.patch.object(
-                watchdog,
-                "_execute_recovery_with_timeout",
-                side_effect=RuntimeError("Recovery failed"),
+                watchdog, "_build_recovery_fn", return_value=_raising_recovery
             ):
                 result = watchdog._attempt_recovery("redis", healthy_probe_result, 60.0)
 
-                assert result is False
+                assert result.recovered is False
                 assert mock_recorder.record_recovery_event.called
 
     def test_attempt_recovery_works_without_audit_recorder(
@@ -126,11 +128,11 @@ class TestWatchdogAuditRecorderIntegration:
             watchdog, "_get_recovery_audit_recorder", return_value=None
         ):
             with mock.patch.object(
-                watchdog, "_execute_recovery_with_timeout", return_value=True
+                watchdog, "_build_recovery_fn", return_value=lambda _stop: True
             ):
                 result = watchdog._attempt_recovery("redis", healthy_probe_result, 60.0)
 
-                assert result is True
+                assert result.recovered is True
 
     def test_record_recovery_start_audit_handles_exception(
         self, watchdog, healthy_probe_result
@@ -220,7 +222,7 @@ class TestWatchdogAuditSessionId:
             watchdog, "_get_recovery_audit_recorder", return_value=mock_recorder
         ):
             with mock.patch.object(
-                watchdog, "_execute_recovery_with_timeout", return_value=True
+                watchdog, "_build_recovery_fn", return_value=lambda _stop: True
             ):
                 watchdog._attempt_recovery("redis", probe_result, 60.0)
 
@@ -250,7 +252,7 @@ class TestWatchdogAuditSessionId:
             watchdog, "_get_recovery_audit_recorder", return_value=mock_recorder
         ):
             with mock.patch.object(
-                watchdog, "_execute_recovery_with_timeout", return_value=True
+                watchdog, "_build_recovery_fn", return_value=lambda _stop: True
             ):
                 watchdog._attempt_recovery("redis", probe_result, 60.0)
 

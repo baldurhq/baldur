@@ -94,6 +94,12 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ### Changed
 
+- Meta-Watchdog probes now run concurrently under a per-pass wall-clock budget.
+- A probe still running at the budget reports `UNKNOWN`; the pass no longer waits for it.
+- The budget is derived from `probe_interval_seconds` and the daemon-worker staleness multiplier.
+- `POST /meta-watchdog/force-check` answers `409` when a check is already running, with the last snapshot.
+- Before, it queued on the check lock, so a poller could starve the watchdog's own loop.
+- `ProbeResult` gains `observed`: `False` marks a result no probe actually produced.
 - `dlq_id` is typed `str` across the public surface: it is an opaque token, never parse it.
 - Digest sections `dlq`, `automated_actions`, `auto_replay` are labeled OSS, not PRO.
 - Daily-report `failed_ops_without_dlq` → `dlq_captured_without_adaptive_replay`. **Breaking**

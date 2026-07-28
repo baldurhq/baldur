@@ -12,6 +12,7 @@ Capabilities:
 
 from __future__ import annotations
 
+import sys
 import threading
 from datetime import datetime
 from typing import Any
@@ -21,6 +22,9 @@ import structlog
 from baldur.utils.time import utc_now
 
 logger = structlog.get_logger()
+
+# Identifiable in a thread dump alongside baldur-watchdog-beacon / baldur-bounded-call.
+LIVENESS_WRITER_THREAD_NAME = "baldur-watchdog-liveness-writer"
 
 
 class WatchdogStateStore:
@@ -58,6 +62,10 @@ class WatchdogStateStore:
     # TTL (7 days - old data is cleaned up automatically)
     STATE_TTL_SECONDS = 7 * 24 * 60 * 60
 
+    # TTL of the liveness timestamp. Sized well above any plausible loop
+    # interval so a live loop's key never expires between two iterations.
+    LAST_LOOP_TTL_SECONDS = 300
+
     def __init__(self, redis_client: Any | None = None):
         """
         Initialize.
@@ -70,6 +78,10 @@ class WatchdogStateStore:
         self._local_cooldowns: dict[str, float] = {}
         self._local_last_loop: datetime | None = None
         self._lock = threading.RLock()
+        # Detached liveness-write state: at most one Redis write is in flight,
+        # and the caller never waits for it.
+        self._liveness_write_in_flight = False
+        self._liveness_writer: threading.Thread | None = None
 
     def _get_redis(self) -> Any | None:
         """Obtain a Redis client.
@@ -186,19 +198,60 @@ class WatchdogStateStore:
     # =========================================================================
 
     def update_last_loop_timestamp(self) -> None:
-        """Refresh the last-loop timestamp."""
-        now = utc_now()
-        now_str = now.isoformat()
+        """Refresh the last-loop timestamp without blocking the caller.
 
-        redis = self._get_redis()
-        if redis:
-            try:
-                redis.set(self.LAST_LOOP_KEY, now_str, ex=300)  # 5-minute TTL
-            except Exception:
-                pass
+        The local fallback is stamped on the calling thread; the Redis leg —
+        client acquisition included, so the caller never takes the shared
+        ``_redis_client_lock`` — is handed to a daemon thread nobody waits for.
+        The caller of this method is the watchdog loop, whose wall-clock budget
+        is the whole point of bounding the pass: a Redis whose ``set`` takes
+        seconds must cost the loop nothing.
+
+        At most one write is in flight. A call whose predecessor is still
+        writing simply skips the Redis leg — the write is never abandoned, and
+        because the writer stamps its own timestamp at send time, a slow write
+        can never land an older value over a newer one.
+        """
+        now = utc_now()
 
         with self._lock:
             self._local_last_loop = now
+            if self._liveness_write_in_flight:
+                return
+            self._liveness_write_in_flight = True
+
+        if sys.is_finalizing():
+            with self._lock:
+                self._liveness_write_in_flight = False
+            return
+
+        writer = threading.Thread(
+            target=self._write_last_loop_timestamp,
+            name=LIVENESS_WRITER_THREAD_NAME,
+            daemon=True,
+        )
+        self._liveness_writer = writer
+        writer.start()
+
+    def _write_last_loop_timestamp(self) -> None:
+        """Push the liveness timestamp to Redis (detached writer thread).
+
+        Failures are swallowed here exactly as they were on the inline path;
+        surfacing them is owned by the state-store visibility work.
+        """
+        try:
+            redis = self._get_redis()
+            if redis:
+                redis.set(
+                    self.LAST_LOOP_KEY,
+                    utc_now().isoformat(),
+                    ex=self.LAST_LOOP_TTL_SECONDS,
+                )
+        except Exception:
+            pass
+        finally:
+            with self._lock:
+                self._liveness_write_in_flight = False
 
     def get_last_loop_timestamp(self) -> datetime | None:
         """
