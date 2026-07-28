@@ -36,6 +36,18 @@ class TestBackoffDelaysBehavior:
         strat = ConstantBackoff(delay=5.0, jitter=False)
         assert strat.delays(0) == []
 
+    def test_constant_delays_honor_an_opt_in_cap(self):
+        # The schedule helper is a plain loop over calculate(), so the cap has
+        # to hold across the whole list a caller hands to an external scheduler
+        # (RQ's Retry(interval=[...])) -- not only on a single call.
+        strat = ConstantBackoff(delay=30.0, jitter=False, max_delay=10.0)
+        assert strat.delays(3) == [10.0, 10.0, 10.0]
+
+    def test_constant_delays_are_uncapped_by_default(self):
+        # No cap is the shipped default and must stay the historical behavior.
+        strat = ConstantBackoff(delay=30.0, jitter=False)
+        assert strat.delays(3) == [30.0, 30.0, 30.0]
+
     def test_stateful_strategy_advances_state_once_per_element(self):
         # Decorrelated jitter is stateful: delays(n) must advance its internal
         # state n times, exactly as calling calculate() n times would.

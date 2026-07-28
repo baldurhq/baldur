@@ -32,7 +32,9 @@ from structlog.testing import capture_logs
 from baldur.core.backoff import (
     BackoffStrategy,
     ConstantBackoff,
+    DecorrelatedJitterBackoff,
     ExponentialBackoff,
+    LinearBackoff,
 )
 from baldur.interfaces.resilience_policy import (
     AsyncResiliencePolicy,
@@ -923,6 +925,76 @@ class TestAsyncRetryFromPolicyConfigContract:
         policy = AsyncRetryPolicy.from_policy_config(cfg, backoff=custom)
 
         assert policy._backoff is custom
+
+    @pytest.mark.parametrize(
+        ("strategy", "expected_type"),
+        [
+            ("exponential", ExponentialBackoff),
+            ("linear", LinearBackoff),
+            ("constant", ConstantBackoff),
+        ],
+        ids=["exponential", "linear", "constant"],
+    )
+    def test_stateless_strategies_are_held_as_one_shared_instance(
+        self, strategy, expected_type
+    ):
+        """The configured strategy name reaches the async ladder, not only the sync one.
+
+        Both stages consume the config's own builder, so a strategy an operator
+        selects cannot apply on one stage while the other silently keeps
+        exponential.
+        """
+        from baldur.services.retry_handler.models import RetryPolicyConfig
+
+        cfg = RetryPolicyConfig(max_attempts=3, backoff_strategy=strategy, domain="d")
+        policy = AsyncRetryPolicy.from_policy_config(cfg)
+
+        assert isinstance(policy._backoff, expected_type)
+
+    def test_the_stateful_strategy_is_carried_as_a_factory_not_an_instance(self):
+        """Decorrelated jitter is built per execution, so no instance is held.
+
+        Its ``_previous_delay`` runs across attempts. A single instance on a
+        policy that ``protect()``'s composer cache hands to every caller of a
+        name would let two concurrent ladders consume each other's delay, so
+        ``_backoff`` is None exactly when each execution owns its own.
+        """
+        from baldur.services.retry_handler.models import RetryPolicyConfig
+
+        cfg = RetryPolicyConfig(
+            max_attempts=3, backoff_strategy="decorrelated_jitter", domain="d"
+        )
+        policy = AsyncRetryPolicy.from_policy_config(cfg)
+
+        assert policy._backoff is None
+        assert isinstance(policy._backoff_factory(), DecorrelatedJitterBackoff)
+
+    def test_an_injected_backoff_wins_over_the_stateful_factory(self):
+        """The injection rule does not change for the one stateful strategy."""
+        from baldur.services.retry_handler.models import RetryPolicyConfig
+
+        cfg = RetryPolicyConfig(
+            max_attempts=3, backoff_strategy="decorrelated_jitter", domain="d"
+        )
+        custom = ConstantBackoff(delay=1.5, jitter=False)
+        policy = AsyncRetryPolicy.from_policy_config(cfg, backoff=custom)
+
+        assert policy._backoff is custom
+        assert policy._backoff_factory() is custom
+
+    def test_the_derived_backoff_carries_the_resolved_multiplier(self):
+        """The multiplier is a config field now, not the strategy class default.
+
+        This mapping used to omit it entirely, so an operator who tuned
+        ``BALDUR_BACKOFF_EXPONENTIAL_MULTIPLIER`` got the library default of 2.0
+        on the async stage regardless of what they set.
+        """
+        from baldur.services.retry_handler.models import RetryPolicyConfig
+
+        cfg = RetryPolicyConfig(max_attempts=3, backoff_multiplier=3.0, domain="d")
+        policy = AsyncRetryPolicy.from_policy_config(cfg)
+
+        assert policy._backoff.multiplier == 3.0
 
     def test_rate_limit_fields_are_not_carried_onto_the_async_policy(self):
         """The two 429-coordination fields stop at the sync stage — deliberately.
