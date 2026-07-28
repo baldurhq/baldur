@@ -1045,7 +1045,14 @@ class HealthProbeManager:
         return self._probe_all_within(deadline)
 
     def _probe_all_serially(self) -> dict[str, ProbeResult]:
-        """Run every applicable probe one at a time under its own timeout."""
+        """Run every applicable probe one at a time under its own timeout.
+
+        Single-flight applies here too. A timed-out probe on this path is
+        abandoned exactly as on the bounded path — the executor stops waiting,
+        the call keeps running — so without the same lock a stranded invocation
+        would run beside the next pass's, which is the very race the lock
+        advertises against. One guarantee, not one per execution path.
+        """
         from baldur.core.timeout_executor import TimeoutExecutor
 
         timeout = self._settings.probe_timeout_seconds
@@ -1053,42 +1060,63 @@ class HealthProbeManager:
 
         executor = TimeoutExecutor()
 
-        def _probe_runner(bound_probe: HealthProbe) -> Any:
-            def _run(stop_event: Any) -> ProbeResult:
-                return bound_probe.probe()
+        def _probe_runner(bound_probe: HealthProbe, name: str) -> Any:
+            def _run(stop_event: Any) -> Any:
+                # Acquired and released ON THE WORKER, never around
+                # executor.execute(): a timed-out call here is abandoned, not
+                # cancelled, so a lock the caller released at the timeout would
+                # leave the still-running invocation unguarded — which is the
+                # race this lock exists to close.
+                lock = self._single_flight_lock(name)
+                acquired = lock.acquire(blocking=False)
+                try:
+                    # Applicability first, for the same reason as the bounded
+                    # path: an inactive component is absent, never UNKNOWN.
+                    if not _probe_is_applicable(bound_probe):
+                        return _NOT_APPLICABLE
+                    if not acquired:
+                        return self._single_flight_skipped_result(name)
+                    with self._lock:
+                        self._single_flight_skips.pop(name, None)
+                    return bound_probe.probe()
+                finally:
+                    if acquired:
+                        lock.release()
 
             return _run
 
         for probe in self._probes:
             if sys.is_finalizing():
                 break
-            if not _probe_is_applicable(probe):
-                logger.debug(
-                    "health_probe_manager.probe_skipped",
-                    probe=probe.component_name,
-                    reason="feature_disabled",
-                )
-                continue
+            name = probe.component_name
             try:
                 result = executor.execute(
-                    fn=_probe_runner(probe),
+                    fn=_probe_runner(probe, name),
                     timeout_seconds=timeout,
                 )
-                results[probe.component_name] = result
             except Exception as e:
                 logger.warning(
                     "health_probe_manager.probe_failed",
-                    probe=probe.component_name,
+                    probe=name,
                     error=str(e),
                     timeout_seconds=timeout,
                 )
-                results[probe.component_name] = ProbeResult(
-                    component=probe.component_name,
+                results[name] = ProbeResult(
+                    component=name,
                     status=HealthStatus.UNKNOWN,
                     latency_ms=0,
                     timestamp=utc_now(),
                     error=str(e),
                 )
+                continue
+            if result is _NOT_APPLICABLE:
+                logger.debug(
+                    "health_probe_manager.probe_skipped",
+                    probe=name,
+                    reason="feature_disabled",
+                )
+                continue
+            results[name] = result
 
         with self._lock:
             self._last_results = results
@@ -1176,12 +1204,14 @@ class HealthProbeManager:
         lock = self._single_flight_lock(name)
         acquired = lock.acquire(blocking=False)
         try:
-            if not acquired:
-                verdicts[name] = self._single_flight_skipped_result(name)
-                return
-            with self._lock:
-                self._single_flight_skips.pop(name, None)
             if not _probe_is_applicable(probe):
+                # Checked BEFORE the single-flight verdict, not after: absence
+                # is the stronger contract. A component whose feature is off
+                # must not surface as UNKNOWN just because an invocation from
+                # the pass that ran while it was still enabled is stranded —
+                # that drags the overall verdict to DEGRADED for a component
+                # the operator switched off. Still on the worker thread, so a
+                # slow applicability check stays bounded by the deadline.
                 logger.debug(
                     "health_probe_manager.probe_skipped",
                     probe=name,
@@ -1189,6 +1219,11 @@ class HealthProbeManager:
                 )
                 verdicts[name] = _NOT_APPLICABLE
                 return
+            if not acquired:
+                verdicts[name] = self._single_flight_skipped_result(name)
+                return
+            with self._lock:
+                self._single_flight_skips.pop(name, None)
             verdicts[name] = probe.probe()
         except Exception as e:  # noqa: BLE001 - a probe fault is never fatal
             logger.warning(

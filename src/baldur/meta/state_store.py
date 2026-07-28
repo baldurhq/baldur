@@ -231,7 +231,17 @@ class WatchdogStateStore:
             daemon=True,
         )
         self._liveness_writer = writer
-        writer.start()
+        try:
+            writer.start()
+        except RuntimeError:
+            # Thread exhaustion is exactly the pressure this timestamp exists to
+            # report, so the in-flight slot must not latch shut on it: nothing
+            # would ever clear the flag (only the thread body does), the key
+            # would expire at its TTL, and the liveness endpoint would 503 a loop
+            # that is iterating normally. Re-arm and let the next iteration try.
+            with self._lock:
+                self._liveness_write_in_flight = False
+            raise
 
     def _write_last_loop_timestamp(self) -> None:
         """Push the liveness timestamp to Redis (detached writer thread).

@@ -24,6 +24,7 @@ from __future__ import annotations
 import threading
 from datetime import datetime
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -187,3 +188,28 @@ class TestDetachedLivenessWriteBehavior:
         # in-flight flag (which would silently stop every later write)
         assert len(client.set_calls) == 2
         assert store.get_last_loop_age_seconds() < _EVENT_WAIT_SECONDS
+
+    def test_a_failed_thread_start_does_not_latch_the_slot_shut(self, parked_store):
+        """Thread exhaustion must cost one write, not every future write.
+
+        The in-flight flag is cleared only by the writer thread's own ``finally``,
+        so a ``start()`` that never runs the body would leave it True forever:
+        no Redis write again, the key expiring at its TTL, and the liveness
+        endpoint 503-ing a loop that is iterating normally — the exact
+        self-inflicted restart the bounded pass exists to remove.
+        """
+        # Given: the first iteration cannot get a thread
+        store, client = parked_store()
+        client.release.set()
+        with patch(
+            "threading.Thread.start", side_effect=RuntimeError("can't start new thread")
+        ):
+            with pytest.raises(RuntimeError):
+                store.update_last_loop_timestamp()
+
+        # When: the next iteration runs with threads available again
+        store.update_last_loop_timestamp()
+        store._liveness_writer.join(timeout=_EVENT_WAIT_SECONDS)
+
+        # Then: the Redis leg recovered instead of staying silently disabled
+        assert len(client.set_calls) == 1
