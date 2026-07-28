@@ -17,12 +17,12 @@ Why circuit_breaker=False: the plan rationale bounds this measurement at
 (success path with CB on) and 7A.3 (CB OPEN reject path) already isolate.
 Single-variable progression across 7A rows.
 
-Why max_attempts=1: default RetryPolicyConfig has max_attempts=3 +
-backoff_base=4 (seconds!) which would 12+ second per call. With max=1 the
-RetryPolicy skips the backoff sleep entirely (delay only happens between
-attempts) but still emits RETRY_EXHAUSTED + sets should_dlq=True on the
-exhausted PolicyResult — exactly the failure-path-with-DLQ semantics this
-row is supposed to measure.
+Why max_attempts=1: default RetryPolicyConfig has max_attempts=3 and a
+backoff_base of 1 s doubling per attempt, so the default ladder would spend
+3+ seconds sleeping per call. With max=1 the RetryPolicy skips the backoff
+sleep entirely (delay only happens between attempts) but still emits
+RETRY_EXHAUSTED + sets should_dlq=True on the exhausted PolicyResult —
+exactly the failure-path-with-DLQ semantics this row is supposed to measure.
 
 Two complementary measurement paths (matching 7A.1 layout):
 

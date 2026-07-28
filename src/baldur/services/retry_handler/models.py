@@ -295,7 +295,14 @@ class RetryPolicyConfig:
             exponential one when that name cannot be honored (fail-open — a
             config-shaped side input must never fail a business call).
         """
-        builder = _BACKOFF_BUILDERS.get(self.backoff_strategy)
+        try:
+            builder = _BACKOFF_BUILDERS.get(self.backoff_strategy)
+        except TypeError:
+            # An unvalidated domain overlay can carry a list or a dict where a
+            # strategy name belongs, and an unhashable key raises out of the
+            # lookup itself — the one way this dispatch could still fail a
+            # business call rather than degrade.
+            builder = None
         if builder is None:
             logger.warning(
                 "retry.backoff_strategy_resolution_failed",
@@ -324,7 +331,9 @@ def _resolve_domain_backoff_base(
     degrades to the settings value with a WARNING: a config typo must not
     replace a business outcome with a TypeError mid-retry, and a non-positive
     base yields a delay the retry loop skips entirely, turning the ladder into
-    a hot loop against the failing upstream.
+    a hot loop against the failing upstream. ``OverflowError`` is caught for the
+    same reason as the other two: JSON has no integer width limit, so an overlay
+    can carry an int no float can represent.
     """
     for key in ("backoff_base", "base_delay"):
         if key not in domain_config:
@@ -332,7 +341,7 @@ def _resolve_domain_backoff_base(
         raw = domain_config[key]
         try:
             value = float(raw)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             value = None
         if value is None or value <= 0:
             logger.warning(

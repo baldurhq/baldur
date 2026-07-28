@@ -99,6 +99,8 @@ The most common knobs an operator sets. The full list lives in the API reference
 | `BALDUR_RETRY_BACKOFF_STRATEGY` | `exponential` | Which backoff curve the waits follow: `exponential`, `linear`, `constant` or `decorrelated_jitter` |
 | `BALDUR_IDEMPOTENCY_ENABLED` | `true` | Whether Baldur's separate `@idempotent` dedup guard is active — when on, it blocks a duplicate execution of the same operation |
 
+<!-- verified-by: tests/unit/services/test_retry_effective_backoff.py — base-delay row: test_configured_base_delay_is_the_first_wait (the configured value is the first effective wait); strategy row: test_configured_strategy_shapes_the_sleep_ladder + test_linear_third_sleep_is_disjoint_from_the_exponential_one (the named curves produce distinct ladders) -->
+
 ## See also
 
 - [Getting Started](../../getting-started/index.md) — set it up
