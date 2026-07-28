@@ -1,0 +1,17 @@
+# Line endings are LF everywhere — in the repository AND in the working tree.
+#
+# Without this, the working-tree form depends on each contributor's
+# core.autocrlf (Git for Windows ships it enabled at the system level), so a
+# Windows checkout gets CRLF files while the committed blobs stay LF. Pinning
+# it here makes a checkout byte-identical on every platform, which is what a
+# contributor comparing files or running a byte-level diff expects.
+#
+# text=auto still lets Git detect binary files and leave them untouched.
+* text=auto eol=lf
+
+# Windows-only scripts stay CRLF: cmd.exe mis-parses an LF-only .bat/.cmd, and
+# older PowerShell hosts are unhappy with LF-only .ps1. None exist today; the
+# rule is here so adding one cannot break it silently.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
