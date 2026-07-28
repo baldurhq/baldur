@@ -56,6 +56,9 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ### Added
 
+- `baldur_retry_attempts_started_total{is_retry}` counts attempts at start, not on resolution.
+- `RetryPressureHigh` reads its retry share, so a storm shows while it is still in flight.
+- Before, sequences asleep in backoff or a 429 cooldown moved the alert only once they resolved.
 - `BALDUR_HEALTH_CHECK_READINESS_TIMEOUT_FAIL_DIRECTION` — depool on a hung DB, or stay pooled.
 - Readiness reports a database that stopped answering as `timed_out`, distinct from `not_ready`.
 - Readiness verdicts are cached briefly, so probe cadence no longer scales query load per pod.
@@ -107,6 +110,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - The retry series and its two sample alerts are now protected-call SLIs, task queue excluded.
 - Retry jitter defaults to +/-20% (was 25%), matching `BALDUR_BACKOFF_EXPONENTIAL_JITTER_FACTOR`.
 - `RetryPolicyConfig` defaults are now 1 s base / 60 s cap; pipeline presets shorten to match.
+- `record_retry_attempt` → `record_retry_resolution`; it always fired per resolution. **Breaking**
 
 ### Removed
 
@@ -127,6 +131,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - It pushed an outbound dead-man's-switch ping; use an external uptime monitor instead.
 - `BALDUR_AUDIT_WATCHDOG_*` — never had any effect. **Breaking**
 - `BALDUR_BACKOFF_LEGACY_*` — use `BALDUR_RETRY_BASE_DELAY` for the first wait. **Breaking**
+- `retry_attempts_total` + `baldur.core.retry_hooks`. **Breaking**
+- Use `baldur_retry_attempts_started_total`; the removed histogram never had a live writer.
 - Routes `xtest/retry/backoff-preview/` + `simulate/` — read `effective_retry_backoff`. **Breaking**
 - Both rendered a curve no retry path produced; the startup-report entry reports the real one.
 
