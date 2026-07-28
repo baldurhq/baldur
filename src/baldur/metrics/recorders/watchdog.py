@@ -26,6 +26,7 @@ __all__ = [
     "record_watchdog_recovery",
     "record_watchdog_escalation",
     "record_watchdog_governance_blocked",
+    "record_watchdog_beacon",
     "set_watchdog_self_cb_state",
     "observe_watchdog_probe_duration",
 ]
@@ -95,6 +96,11 @@ class WatchdogMetricRecorder(BaseMetricRecorder):
             "Escalations per component and delivery result",
             ["component", "result"],
         )
+        self._beacon_total = get_or_create_counter(
+            f"{self.PREFIX}_watchdog_beacon_total",
+            "Outbound liveness-beacon pings by delivery result",
+            ["result"],
+        )
         self._probe_duration = get_or_create_histogram(
             f"{self.PREFIX}_watchdog_probe_duration_seconds",
             "Per-component probe latency",
@@ -160,6 +166,18 @@ class WatchdogMetricRecorder(BaseMetricRecorder):
         except Exception as e:
             logger.warning("metrics.record_watchdog_escalation_failed", error=e)
 
+    def record_beacon(self, result: str) -> None:
+        """Record an outbound liveness-beacon ping.
+
+        result: success|failure. A ``failure`` is a lower bound on
+        non-delivery, never a proof of it — an endpoint that records the ping
+        and then answers 5xx counts here for a ping that landed.
+        """
+        try:
+            self._beacon_total.labels(result=result).inc()
+        except Exception as e:
+            logger.warning("metrics.record_watchdog_beacon_failed", error=e)
+
     def observe_probe_duration(self, component: str, duration: float) -> None:
         """Record probe latency for a component."""
         try:
@@ -210,6 +228,12 @@ def record_watchdog_escalation(component: str, result: str) -> None:
     rec = _lazy_recorder()
     if rec:
         rec.record_escalation(component, result)
+
+
+def record_watchdog_beacon(result: str) -> None:
+    rec = _lazy_recorder()
+    if rec:
+        rec.record_beacon(result)
 
 
 def observe_watchdog_probe_duration(component: str, duration: float) -> None:
