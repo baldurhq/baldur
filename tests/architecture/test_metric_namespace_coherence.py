@@ -78,8 +78,6 @@ _DEFAULT_PREFIXES = ("python_", "process_")
 # boundary (e.g. ``dlq_outbox_drops_by_reason``) — is NOT here and turns the
 # build red. This list is the documented migration debt.
 _LEGACY_BARE_FAMILIES = (
-    # core/retry_hooks.py — histogram whose metric name carries a _total suffix
-    "retry_attempts_total",
     # services/dlq_outbox/outbox.py
     "dlq_outbox_drops",
     "dlq_outbox_current_size",
@@ -245,7 +243,6 @@ def test_allowlisted_families_and_synthetic_suffixes_pass() -> None:
     # suffix match (not a loose prefix match) is what closes this hole.
     assert _is_coherent("dlq_outbox_drops_by_reason") is False
     assert _is_coherent("audit_buffer_size_p99") is False
-    assert _is_coherent("retry_attempts_total_legacy") is False
     # Framework-prefixed and prometheus defaults always pass.
     assert _is_coherent("baldur_anything_total")
     assert _is_coherent("python_gc_objects_collected_total")

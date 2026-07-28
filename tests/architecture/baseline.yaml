@@ -333,7 +333,6 @@ all_declaration:
   - {file: "src/baldur/core/request_context.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/core/resource_monitor.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/core/retry.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
-  - {file: "src/baldur/core/retry_hooks.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/core/safe_defaults.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/core/state_backend.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/core/test_mode_context.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}

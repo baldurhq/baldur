@@ -30,7 +30,6 @@ from .definitions import (  # Retry; L2 Storage; Heartbeat; Fail-Safe
     l2_timeout_total,
     override_escalation_total,
     recovery_alert_total,
-    retry_attempts_histogram,
     shadow_log_unsynced_count,
 )
 
@@ -72,8 +71,6 @@ from .updaters import (
 )
 
 __all__ = [
-    # Retry Metrics
-    "retry_attempts_histogram",
     # L2 Storage Metrics
     "l2_timeout_total",
     "l2_sync_failure_total",

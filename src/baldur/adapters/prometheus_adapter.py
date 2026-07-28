@@ -147,7 +147,8 @@ def _family_name(metric_name: str) -> str:
     the family name so the guard matches.
 
     Gauges and histograms, however, keep their full family name even when it ends
-    in ``_total`` (e.g. the live ``retry_attempts_total`` histogram). For those
+    in ``_total`` — a histogram registered as ``x_total`` collects as ``x_total``,
+    never as the counter-style stripped ``x``. For those
     this helper over-strips, so callers compare ``metric.name`` against BOTH the
     stripped family name AND the raw ``metric_name``; the latter matches a
     gauge/histogram whose own name ends in ``_total``.
