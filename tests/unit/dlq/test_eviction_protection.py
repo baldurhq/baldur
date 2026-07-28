@@ -27,7 +27,7 @@ def _create_entry(repo: InMemoryFailedOperationRepository, domain: str = "test")
     return entry.id
 
 
-def _set_status(repo: InMemoryFailedOperationRepository, entry_id: int, status: str):
+def _set_status(repo: InMemoryFailedOperationRepository, entry_id: str, status: str):
     """Directly mutate entry status for test setup (bypasses lifecycle)."""
     with repo._lock:
         entry = repo._storage.get(entry_id)
