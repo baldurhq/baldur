@@ -23,6 +23,7 @@ from baldur.bridges.tenacity.callbacks import (
     make_before_sleep_callback,
     make_retry_error_callback,
 )
+from baldur.services.rate_limit_coordinator import RateLimitCoordinator
 from baldur.services.rate_limit_coordinator.models import RateLimitResult
 
 _RECORD_ATTEMPT_STARTED = (
@@ -206,7 +207,7 @@ class TestBeforeCallbackAttemptsStartedBehavior:
         ``Retry-After`` had already been counted.
         """
         # Given
-        coordinator = MagicMock()
+        coordinator = MagicMock(spec=RateLimitCoordinator)
         starts_at_wait_entry: list[int] = []
         cb = make_before_callback(
             self._ctx(rate_limit_key="payment", rate_limit_coordinator=coordinator)
@@ -229,7 +230,7 @@ class TestBeforeCallbackAttemptsStartedBehavior:
         self, make_retry_state
     ):
         """A deferral aborts the loop, but the demand it refused is still counted."""
-        coordinator = MagicMock()
+        coordinator = MagicMock(spec=RateLimitCoordinator)
         coordinator.wait_if_needed.return_value = RateLimitResult(
             deferred=True, not_before=1.0
         )

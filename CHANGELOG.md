@@ -53,6 +53,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `BALDUR_BACKOFF_EXPONENTIAL_MULTIPLIER` and `_JITTER_FACTOR` now reach the retry ladder.
 - `BALDUR_RETRY_BACKOFF_STRATEGY` now picks the strategy; exponential ran whatever you set.
 - A per-domain `retry.base_delay` override now takes effect; a bad value falls back with a WARNING.
+- A `before` hook passed via `retrying_kwargs` now runs; the tenacity bridge dropped it silently.
+- It is chained ahead of Baldur's own hook, the same way the `before=` constructor argument is.
 
 ### Added
 
