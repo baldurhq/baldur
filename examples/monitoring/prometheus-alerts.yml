@@ -118,7 +118,7 @@ groups:
     #    two layers each keep their own denominator, so no per-layer naming
     #    workaround is needed.
     #
-    # 4. RetryPressureHigh reads STARTED attempts, not resolved calls, and that
+    # 3. RetryPressureHigh reads STARTED attempts, not resolved calls, and that
     #    is the point. The attempts histogram takes exactly one observation per
     #    sequence, at its terminal, so a storm whose sequences sit asleep in
     #    backoff or in an honored `Retry-After` cooldown (which can run to an
@@ -132,7 +132,7 @@ groups:
     #    and still answers the other question — how many attempts did resolved
     #    calls take.
     #
-    # 3. Topology labels: on a global-view Prometheus (Thanos/Cortex) add your
+    # 4. Topology labels: on a global-view Prometheus (Thanos/Cortex) add your
     #    cluster/env labels to BOTH the `by (...)` groupings AND the
     #    `and on (...)` join — a `by (domain)` alone merges clusters there.
     #    Those labels are attached at federation/remote-write time, so they are
