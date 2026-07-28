@@ -10,7 +10,7 @@ Scope:
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 import tenacity
@@ -356,6 +356,62 @@ class TestTenacityBridgePolicyRetryingKwargsBeforeBehavior:
         policy.execute(fn)
 
         assert budget.record_request.call_count == 2
+
+
+# =============================================================================
+# Behavior — the bridge's attempt-start records, driven by real tenacity
+# =============================================================================
+
+
+class TestTenacityBridgePolicyAttemptsStartedBehavior:
+    """A real tenacity run records one attempt start per attempt it makes.
+
+    The callback-level tests pin what ``_before`` does when it is called; this
+    one pins that tenacity calls it at all, on every attempt, through the
+    bridge's own wiring. Without an end-to-end drive, a hook that stopped being
+    installed would leave every callback assertion green while bridge-managed
+    retries vanished from retry pressure entirely.
+    """
+
+    _ATTEMPT_STARTED = "baldur.services.metrics.recorders.record_retry_attempt_started"
+
+    def test_bridge_three_attempt_run_records_the_parity_attempts_started_shape(self):
+        """One first attempt and two retries — the sync and async loops' shape."""
+        # Given
+        fn, counter = _make_always_failing_fn()
+        policy: TenacityBridgePolicy[str] = TenacityBridgePolicy(
+            stop=tenacity.stop_after_attempt(3),
+            wait=tenacity.wait_fixed(0),
+            domain="payment",
+        )
+
+        # When
+        with patch(self._ATTEMPT_STARTED, autospec=True) as mock_started:
+            result = policy.execute(fn)
+
+        # Then — one record per real invocation, none for the exhaustion itself
+        assert result.outcome == PolicyOutcome.FAILURE
+        assert counter["calls"] == 3
+        assert mock_started.call_args_list == [
+            call("payment", is_retry=False),
+            call("payment", is_retry=True),
+            call("payment", is_retry=True),
+        ]
+
+    def test_bridge_records_attempts_started_on_a_run_that_needs_no_retry(self):
+        """A first-attempt success contributes the denominator, and only that."""
+        fn, _ = _make_counting_fn(0)
+        policy: TenacityBridgePolicy[str] = TenacityBridgePolicy(
+            stop=tenacity.stop_after_attempt(3),
+            wait=tenacity.wait_fixed(0),
+            domain="payment",
+        )
+
+        with patch(self._ATTEMPT_STARTED, autospec=True) as mock_started:
+            result = policy.execute(fn)
+
+        assert result.outcome == PolicyOutcome.SUCCESS
+        assert mock_started.call_args_list == [call("payment", is_retry=False)]
 
 
 # =============================================================================
