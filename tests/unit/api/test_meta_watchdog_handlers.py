@@ -12,14 +12,21 @@ Verification techniques applied (§8):
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from baldur.api.handlers.meta_watchdog import meta_watchdog_send_test
+from baldur.api.handlers.meta_watchdog import (
+    meta_watchdog_force_check,
+    meta_watchdog_send_test,
+)
 from baldur.interfaces.web_framework import HttpMethod, RequestContext
 from baldur.meta.config import MetaWatchdogSettings
 from baldur.meta.escalation import EscalationManager, EscalationResult
+from baldur.meta.health_probe import HealthStatus
 
 
 def _make_ctx(method: str = "POST", path: str = "/meta-watchdog/escalation-test"):
@@ -166,3 +173,103 @@ class TestMetaWatchdogSendTestHandler:
             resp = meta_watchdog_send_test(_make_ctx())
 
         assert resp.status_code == 500
+
+
+# =============================================================================
+# POST /meta/force-check — 409 when a pass is already running
+# =============================================================================
+
+
+def _state(overall: HealthStatus = HealthStatus.HEALTHY):
+    """A minimal state object with the surface _format_state() reads."""
+    return SimpleNamespace(
+        overall_status=overall,
+        component_statuses={"redis": HealthStatus.UNHEALTHY},
+        last_check=datetime(2026, 7, 28, 12, 0, tzinfo=UTC),
+        escalation_count=3,
+        escalation_pending=True,
+        component_details={"redis": {"error": "connection refused"}},
+    )
+
+
+def _force_check_ctx():
+    return RequestContext(method=HttpMethod("POST"), path="/meta-watchdog/force-check")
+
+
+@contextmanager
+def _patched_watchdog(watchdog):
+    """Serve the handler a watchdog and an enabled settings object."""
+    with (
+        patch(
+            "baldur.api.handlers.meta_watchdog._watchdog",
+            return_value=watchdog,
+        ),
+        patch(
+            "baldur.api.handlers.meta_watchdog._settings",
+            return_value=MetaWatchdogSettings(enabled=True),
+        ),
+    ):
+        yield
+
+
+class TestForceCheckHandlerBehavior:
+    """The force-check endpoint never queues on the watchdog's check lock."""
+
+    def test_in_progress_check_answers_409_with_the_last_snapshot(self):
+        # Given: a pass is already running, so the non-blocking entry declines
+        watchdog = MagicMock()
+        watchdog.try_force_check.return_value = None
+        watchdog.get_state.return_value = _state(HealthStatus.UNHEALTHY)
+
+        # When
+        with _patched_watchdog(watchdog):
+            resp = meta_watchdog_force_check(_force_check_ctx())
+
+        # Then: a conflict carrying the last completed diagnosis, not an error
+        assert resp.status_code == 409
+        assert resp.body["error_code"] == "check_in_progress"
+        assert resp.body["overall_status"] == "unhealthy"
+        assert resp.body["components"] == {"redis": "unhealthy"}
+        assert "already in progress" in resp.body["message"]
+
+    def test_in_progress_check_never_falls_back_to_the_blocking_entry(self):
+        # Given
+        watchdog = MagicMock()
+        watchdog.try_force_check.return_value = None
+        watchdog.get_state.return_value = _state()
+
+        # When
+        with _patched_watchdog(watchdog):
+            meta_watchdog_force_check(_force_check_ctx())
+
+        # Then: a poller must not stack up behind the check lock — the blocking
+        # entry point is the starvation path the 409 exists to avoid
+        watchdog.force_check.assert_not_called()
+
+    def test_admitted_check_returns_200_with_the_fresh_state(self):
+        # Given: no other pass holds the lock
+        watchdog = MagicMock()
+        watchdog.try_force_check.return_value = _state(HealthStatus.DEGRADED)
+
+        # When
+        with _patched_watchdog(watchdog):
+            resp = meta_watchdog_force_check(_force_check_ctx())
+
+        # Then
+        assert resp.status_code == 200
+        assert resp.body["message"] == "Force check completed"
+        assert resp.body["overall_status"] == "degraded"
+        assert "error_code" not in resp.body
+
+    def test_watchdog_without_the_non_blocking_entry_falls_back_to_force_check(self):
+        # Given: a version-skewed install (newer OSS, older PRO watchdog)
+        watchdog = SimpleNamespace(force_check=MagicMock(return_value=_state()))
+
+        # When
+        with _patched_watchdog(watchdog):
+            resp = meta_watchdog_force_check(_force_check_ctx())
+
+        # Then: the blocking path is strictly better than a 500
+        assert resp.status_code == 200
+        assert resp.body["message"] == "Force check completed"
+        watchdog.force_check.assert_called_once_with()

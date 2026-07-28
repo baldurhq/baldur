@@ -438,3 +438,126 @@ class TestWatchdogRecorderBeaconBehavior:
             autospec=True,
         ):
             record_watchdog_beacon("success")  # Should not raise
+
+
+class _RaisingUnlabeledCounter:
+    """Counter double that fails on ``inc()`` — where an unlabeled metric is touched."""
+
+    def __init__(self):
+        self.touched = False
+
+    def inc(self):
+        self.touched = True
+        raise RuntimeError("registry down")
+
+
+class TestWatchdogRecorderBoundedPassContract:
+    """732: the two counters a budget-bounded pass emits are exported."""
+
+    def test_exports_bounded_pass_convenience_functions(self):
+        from baldur.metrics.recorders.watchdog import __all__
+
+        assert "record_watchdog_pass_truncated" in __all__
+        assert "record_watchdog_single_flight_skipped" in __all__
+
+
+class TestWatchdogRecorderBoundedPassBehavior:
+    """732: pass-truncation and single-flight-skip counters."""
+
+    def test_record_pass_truncated_increments_without_labels(self, watchdog_recorder):
+        """Pass-level, so unlabeled: the truncated names ride the WARNING instead.
+
+        Labelling this per component would pay per-component cardinality for an
+        exceptional event.
+        """
+        counter = _RecordingCounter()
+        watchdog_recorder._pass_truncated_total = counter
+
+        watchdog_recorder.record_pass_truncated()
+
+        assert counter.increments == 1
+        assert counter.label_calls == []
+
+    def test_record_pass_truncated_swallows_a_failing_registry(self, watchdog_recorder):
+        """A broken registry costs the counter, never the pass."""
+        counter = _RaisingUnlabeledCounter()
+        watchdog_recorder._pass_truncated_total = counter
+
+        with capture_logs() as logs:
+            watchdog_recorder.record_pass_truncated()
+
+        assert counter.touched is True
+        assert any(
+            log["event"] == "metrics.record_watchdog_pass_truncated_failed"
+            for log in logs
+        )
+
+    def test_record_single_flight_skipped_labels_the_component(self, watchdog_recorder):
+        counter = _RecordingCounter()
+        watchdog_recorder._probe_single_flight_skipped_total = counter
+
+        watchdog_recorder.record_single_flight_skipped("redis")
+
+        assert counter.label_calls == [{"component": "redis"}]
+        assert counter.increments == 1
+
+    def test_record_single_flight_skipped_applies_the_cardinality_guard(
+        self, watchdog_recorder
+    ):
+        """An unknown component collapses to the fallback label, as everywhere else."""
+        from baldur.metrics.recorders.watchdog import _FALLBACK_COMPONENT
+
+        counter = _RecordingCounter()
+        watchdog_recorder._probe_single_flight_skipped_total = counter
+
+        watchdog_recorder.record_single_flight_skipped("not_a_registered_component")
+
+        assert counter.label_calls == [{"component": _FALLBACK_COMPONENT}]
+
+    def test_record_single_flight_skipped_swallows_a_failing_registry(
+        self, watchdog_recorder
+    ):
+        counter = _RaisingCounter()
+        watchdog_recorder._probe_single_flight_skipped_total = counter
+
+        with capture_logs() as logs:
+            watchdog_recorder.record_single_flight_skipped("redis")
+
+        assert counter.touched is True
+        assert any(
+            log["event"] == "metrics.record_watchdog_single_flight_skipped_failed"
+            for log in logs
+        )
+
+    def test_convenience_functions_delegate_to_the_recorder(self):
+        from baldur.metrics.recorders.watchdog import (
+            WatchdogMetricRecorder,
+            record_watchdog_pass_truncated,
+            record_watchdog_single_flight_skipped,
+        )
+
+        mock_recorder = MagicMock(spec=WatchdogMetricRecorder)
+        with patch(
+            "baldur.metrics.recorders.watchdog._lazy_recorder",
+            return_value=mock_recorder,
+            autospec=True,
+        ):
+            record_watchdog_pass_truncated()
+            record_watchdog_single_flight_skipped("dlq")
+
+        mock_recorder.record_pass_truncated.assert_called_once_with()
+        mock_recorder.record_single_flight_skipped.assert_called_once_with("dlq")
+
+    def test_convenience_functions_noop_when_the_recorder_is_unavailable(self):
+        from baldur.metrics.recorders.watchdog import (
+            record_watchdog_pass_truncated,
+            record_watchdog_single_flight_skipped,
+        )
+
+        with patch(
+            "baldur.metrics.recorders.watchdog._lazy_recorder",
+            return_value=None,
+            autospec=True,
+        ):
+            record_watchdog_pass_truncated()  # Should not raise
+            record_watchdog_single_flight_skipped("redis")  # Should not raise

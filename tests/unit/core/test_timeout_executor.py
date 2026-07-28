@@ -215,3 +215,138 @@ class TestTimeoutExecutorContextVarPropagation:
         # fn actually ran on a different thread (real cross-thread propagation).
         assert worker_thread_ids[0] != threading.get_ident()
         assert captured == ["parent-value"]
+
+
+class TestTimeoutExecutorDaemonModeBehavior:
+    """use_daemon_thread=True: abandoned calls must not hold shutdown open.
+
+    A ``concurrent.futures`` pool worker is non-daemon and is joined at
+    interpreter exit regardless of any flag, so a caller that times out on
+    blocking I/O turns SIGTERM into a hang until SIGKILL. Daemon mode is the
+    opt-in escape hatch, and these tests pin the behaviors it must keep from the
+    pool path (result, exception, ContextVars, cooperative stop event).
+    """
+
+    def test_daemon_mode_returns_the_result_of_a_completed_call(self):
+        executor = TimeoutExecutor()
+
+        result = executor.execute(
+            fn=lambda stop_event: "done",
+            timeout_seconds=5.0,
+            use_daemon_thread=True,
+        )
+
+        assert result == "done"
+
+    def test_daemon_mode_runs_fn_on_a_daemon_thread(self):
+        # Given
+        executor = TimeoutExecutor()
+        observed: list[bool] = []
+
+        def record_daemon_flag(stop_event):
+            observed.append(threading.current_thread().daemon)
+            return "ok"
+
+        # When
+        executor.execute(
+            fn=record_daemon_flag, timeout_seconds=5.0, use_daemon_thread=True
+        )
+
+        # Then: both the running thread and the handle the caller can inspect
+        assert observed == [True]
+        assert executor.last_daemon_thread is not None
+        assert executor.last_daemon_thread.daemon is True
+
+    def test_daemon_mode_abandons_a_hung_call_at_the_timeout(self):
+        # Given: a call that will not return until the test releases it
+        release = threading.Event()
+        executor = TimeoutExecutor()
+
+        def hang(stop_event):
+            release.wait(10.0)
+            return "late"
+
+        # When
+        try:
+            with pytest.raises(StepTimeoutError):
+                executor.execute(fn=hang, timeout_seconds=0.2, use_daemon_thread=True)
+
+            # Then: abandoned — still running, and on a daemon thread, so
+            # interpreter exit will not wait for it
+            assert executor.last_daemon_thread.is_alive()
+            assert executor.last_daemon_thread.daemon is True
+        finally:
+            release.set()
+
+    def test_daemon_mode_sets_the_stop_event_on_timeout(self):
+        # Given: fn cooperates by watching its stop_event
+        cancelled = threading.Event()
+        executor = TimeoutExecutor()
+
+        def cooperative(stop_event):
+            stop_event.wait(10.0)
+            cancelled.set()
+            return "cancelled"
+
+        # When
+        with pytest.raises(StepTimeoutError):
+            executor.execute(
+                fn=cooperative, timeout_seconds=0.2, use_daemon_thread=True
+            )
+
+        # Then: cooperative cancellation still fires, as on the pool path
+        assert cancelled.wait(5.0)
+
+    def test_daemon_mode_propagates_the_exception_raised_by_fn(self):
+        executor = TimeoutExecutor()
+
+        def boom(stop_event):
+            raise ValueError("daemon-mode failure")
+
+        with pytest.raises(ValueError, match="daemon-mode failure"):
+            executor.execute(fn=boom, timeout_seconds=5.0, use_daemon_thread=True)
+
+    def test_daemon_mode_propagates_contextvars_to_the_worker(self):
+        # Given: a ContextVar set on the calling thread
+        var: contextvars.ContextVar[str] = contextvars.ContextVar(
+            "test_timeout_executor_daemon_var", default="unset"
+        )
+        var.set("parent-value")
+        captured: list[str] = []
+        thread_ids: list[int] = []
+
+        def read_var(stop_event):
+            captured.append(var.get())
+            thread_ids.append(threading.get_ident())
+            return "ok"
+
+        # When
+        executor = TimeoutExecutor()
+        executor.execute(fn=read_var, timeout_seconds=5.0, use_daemon_thread=True)
+
+        # Then: fn really ran off-thread and still saw the caller's binding
+        assert thread_ids[0] != threading.get_ident()
+        assert captured == ["parent-value"]
+
+    def test_daemon_mode_runs_the_pre_execute_hook_around_fn(self):
+        # Given
+        calls: list[str] = []
+        executor = TimeoutExecutor()
+
+        def hook():
+            calls.append("hook")
+
+        def body(stop_event):
+            calls.append("fn")
+            return "ok"
+
+        # When
+        executor.execute(
+            fn=body,
+            timeout_seconds=5.0,
+            pre_execute_hook=hook,
+            use_daemon_thread=True,
+        )
+
+        # Then: before AND after, matching the pool path's wrapper
+        assert calls == ["hook", "fn", "hook"]
