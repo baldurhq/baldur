@@ -654,11 +654,33 @@ class TestBatchWriteOps:
 
     def test_unsupported_op_name_raises_value_error(self, backend_factory):
         # DEGRADED-mode path (no Redis wired): unsupported op still raises
-        # ValueError during the WAL record-build loop.
+        # ValueError, from the upfront allowlist validation.
         backend = backend_factory()
 
         with pytest.raises(ValueError, match="Unsupported batch op"):
             backend.batch_write_ops([("hset", "dlq:bad", {"a": 1})])
+
+    def test_unsupported_op_wal_inactive_raises_before_memory_apply(
+        self, backend_factory
+    ):
+        # With WAL inactive the memory loop is the only degraded apply path.
+        # The upfront allowlist validation must reject the batch before the
+        # valid prefix reaches memory — previously the memory loop skipped
+        # unknown ops silently and applied the rest.
+        backend = backend_factory()
+        backend._wal = None
+
+        with pytest.raises(ValueError, match="Unsupported batch op"):
+            backend.batch_write_ops(
+                [
+                    ("set_blob", "dlq:entry:x", b"\x78blob-bytes"),
+                    ("hset", "dlq:bad", {"a": 1}),
+                ]
+            )
+
+        # The valid prefix was NOT applied to memory.
+        assert backend._blob_memory == {}
+        assert backend._memory == {}
 
     # 544 D6: zrem AND delete enter the batch_write_ops vocabulary so
     # ``_update`` status transitions and ``delete`` collapse to 1 RTT.
