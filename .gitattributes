@@ -9,8 +9,17 @@
 # text=auto still lets Git detect binary files and leave them untouched.
 * text=auto eol=lf
 
-# No per-type CRLF exception, deliberately: one rule for every text file is the
-# whole point. The only types that would want one are .bat / .cmd, where
-# cmd.exe can mis-seek an LF-only file around `goto` labels and multi-line
-# blocks — the repository contains none, and a future one that actually hits
-# that is a one-line `*.bat text eol=crlf` away.
+# The one exception, armed before it is needed: cmd.exe reads a batch file by
+# seeking through it, so an LF-only .bat/.cmd can mis-resolve `goto` labels and
+# multi-line `for`/`if` blocks. The repository contains none today; the rule is
+# here so that adding one later cannot walk into it. The blob stays LF either
+# way — only the checkout form differs.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# There is deliberately NO speculative rule for byte-exact text fixtures (raw
+# HTTP/MIME samples, signed golden files), whose CRLF is load-bearing. No glob
+# predicts where such a file would land, and a glob that matches nothing reads
+# as protection while providing none. When one appears, mark ITS path `-text`
+# (not `eol=crlf`: only `-text` preserves the committed bytes in both
+# directions). Binary files are already safe — `text=auto` detects them.
