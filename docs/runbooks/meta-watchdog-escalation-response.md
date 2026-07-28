@@ -388,6 +388,85 @@ If you suspect pages are **not arriving** (silence is not the same as healthy):
 2. `POST /meta-watchdog/escalation-test` — sends a synthetic page through the real channel.
 3. Check the fallback JSONL on disk — genuine delivery failures are recorded there even when no channel works. Any entries are pages you did not receive; action them.
 4. If the watchdog is alive but not paging, confirm `meta_watchdog.enabled` and `meta_watchdog.escalation_enabled` are both `True` (v1.0 defaults) and that the component is genuinely staying unhealthy for ≥ `self_cb_failure_threshold` cycles.
+5. If the pages stopped because the **process itself** died, none of the steps above can tell you — nothing in-process is left to answer. That is the gap the [outbound liveness beacon](#outbound-liveness-beacon-dead-mans-switch) covers, and it only helps if it was configured *before* the incident.
+
+## Outbound liveness beacon (dead-man's switch)
+
+Every section above assumes the watchdog is alive to page you. When the process crashes, is OOM-killed, or hangs outright, it is not — and the signals that would notice all live *inside* the infrastructure that just died: the Prometheus scrape stops (`BaldurMetricsDown`), `GET /meta-watchdog/liveness` stops answering, the Redis liveness key expires. Each of those needs your monitoring stack to have survived whatever killed Baldur.
+
+The beacon is the channel that does not need that. The watchdog loop pushes a plain `GET` **out** to an external URL once per completed probe pass, and an external dead-man's-switch service pages you when the pings stop arriving. Absence of signal is the alarm, so nothing inside the dead host has to report anything.
+
+### Setup
+
+Point it at any provider that alarms on missed check-ins (healthchecks.io, Cronitor, Uptime Kuma, a self-hosted equivalent). Baldur endorses none of them and speaks no provider protocol beyond the GET — provider choice, account setup and grace tuning are yours:
+
+```bash
+BALDUR_META_WATCHDOG_BEACON_URL=https://<provider>/ping/<check-id>
+BALDUR_META_WATCHDOG_BEACON_FAIL_URL=https://<provider>/ping/<check-id>/fail
+BALDUR_META_WATCHDOG_BEACON_TIMEOUT_SECONDS=5
+```
+
+- **Unset `BEACON_URL` is the off switch.** There is no separate enable flag, and with it unset no beacon thread is created at all.
+- **Configure the final `https://` URL.** Redirects are followed, so an `http://` URL that 301s still delivers the ping, but every leg is another request for no benefit.
+- **`BEACON_FAIL_URL` is optional and is only a routing hint.** An UNHEALTHY pass pings it instead of the main URL; with it unset, an UNHEALTHY pass still pings the main URL. **The beacon never goes silent to signal trouble** — it reports *process liveness*, nothing else. Degradation paging stays with the PagerDuty/Slack escalation channels described above.
+- **The ping never blocks the watchdog loop.** It is sent from the beacon's own thread, and `BEACON_TIMEOUT_SECONDS` is that thread's socket budget alone — raising or lowering it changes nothing about probe cadence, staleness thresholds, or shutdown time.
+
+### Sizing the grace period — measure it, do not derive it
+
+Set your provider's grace period (how long it waits before paging) from **your own deployment's measured ping gaps**:
+
+> Take the largest gap between consecutive pings your deployment actually produced, and set grace ≥ **3× that** — and **never below 10 minutes**.
+
+There is no closed-form bound to compute instead. One watchdog pass carries every probe's timeout serially, an in-pass recovery budget with no configured upper limit, one escalation round *per unhealthy component*, and an unwrapped state-store write; and an operator polling force-check can hold the loop off besides. Every arithmetic estimate of that sum has under-counted. Over-sizing costs you a slower page; under-sizing costs false pages during exactly the incidents this switch exists to survive.
+
+You do not need the beacon running to measure it. The watchdog already emits a per-pass heartbeat age, so its running maximum **is** the inter-ping gap:
+
+```promql
+max_over_time(baldur_daemon_worker_last_heartbeat_age_seconds{name="SelfHealerWatchdog"}[7d])
+```
+
+Three limits on that query, all real:
+
+1. **It needs Prometheus, so this is a sizing-time procedure** — run it before (or independently of) turning the beacon on. It is never the incident-time signal; the beacon exists precisely because that stack can be absent when you need it.
+2. **It under-reports by up to one scrape interval.** The 3× multiplier and the 10-minute floor absorb that.
+3. **Do not substitute `baldur_daemon_worker_iteration_duration_seconds`.** It measures the same pass, but its default histogram buckets top out at a 10 s finite bound, so every stalled pass this rule cares about — tens of seconds to minutes — collapses into `+Inf` and disappears.
+
+Once the beacon is live, your provider's own ping history is a valid cross-check.
+
+### What beacon silence means — and what it does not
+
+**Beacon silence means *total* death of the service's workers, not partial death.** Under Gunicorn the watchdog starts per forked worker, so one configured URL receives N independent ping streams and the switch stays fed while **any** worker still lives. This matches dead-man's-switch practice (one check per monitored instance); if you need per-worker granularity, give each worker its own check URL through your process manager's per-worker environment.
+
+The UNHEALTHY fail-signal is likewise best-effort under multiple workers — a healthier worker's next ping can overwrite it. Authoritative degradation paging is the escalation path's job, not the beacon's.
+
+For the partial case — one worker's watchdog thread dead while its siblings live — the cover is an **alert on** the same gauge used for sizing:
+
+```promql
+baldur_daemon_worker_last_heartbeat_age_seconds{name="SelfHealerWatchdog"} > <your threshold>
+```
+
+It is computed at scrape time from the last recorded heartbeat, so the age keeps rising after the thread stops rather than freezing at its final value. Without an alert rule the value is inert — a gauge nobody watches is not coverage.
+
+> The probe-side daemon-worker auto-respawn gate is **not** a cover for this case. The respawn coordinator runs inside the probe pass, on the watchdog loop thread itself, so a dead watchdog loop is the one daemon worker that can never respawn itself. Respawn covers its *siblings* (the DLQ consumer and friends), not itself.
+
+### Beacon vs. `GET /meta-watchdog/liveness`
+
+They answer different questions and neither replaces the other:
+
+| | Beacon | `GET /meta-watchdog/liveness` |
+|---|---|---|
+| Question answered | Is the process alive at all? | Is the loop making progress? |
+| Observed from | Outside your infrastructure | Inside the cluster (K8s `httpGet`) |
+| Needs egress | Yes | No |
+| Fed by | The watchdog loop only | Any success-path health check, **including an API force-check** |
+
+The last row matters during triage: an operator (or a monitoring script) polling `POST /meta-watchdog/force-check` writes the same Redis liveness timestamp the endpoint reads, so the endpoint can stay green while the loop itself is stuck. The beacon cannot be fed that way — only the loop offers to it — so it is the surface that still goes silent. Wiring force-check into the beacon would let an HTTP caller keep the external switch fed while the loop is dead, which is the exact false-liveness failure the beacon exists to prevent.
+
+Two more endpoint behaviors worth knowing before you rely on it: it returns `200` with `status: disabled` when the watchdog is disabled (not an error), and `500` on an internal error — `503` is specifically the stale-loop verdict. And because its timestamp lives in Redis and is shared across workers, one live worker can mask another's stuck loop.
+
+### Planned restarts and deploys
+
+A deploy stops the pings, and the switch cannot tell a rolling restart from a crash. Standard dead-man's-switch practice applies: **pause the check** for the deploy window, or set the grace period ≥ your deploy window. A deliberate `stop()` also discards any pending outcome rather than sending a final ping, so shutdown produces silence on purpose — that silence is the deploy, not an incident.
 
 ---
 

@@ -156,6 +156,38 @@ class MetaWatchdogSettings(BaseSettings):
         ),
     )
 
+    # Outbound liveness beacon (dead-man's switch)
+    beacon_url: str | None = Field(
+        default=None,
+        description=(
+            "Dead-man's-switch ping target. The watchdog loop GETs this URL once "
+            "per completed probe pass, so an external monitor alarms on the "
+            "ABSENCE of pings when the process dies, is OOM-killed or hangs — the "
+            "one liveness channel that survives the monitoring stack dying with "
+            "the host. None disables the beacon (set-to-enable; no separate flag)."
+        ),
+    )
+    beacon_fail_url: str | None = Field(
+        default=None,
+        description=(
+            "Optional distinct ping target for UNHEALTHY passes (the "
+            "provider-agnostic form of the '<ping-url>/fail' convention). Unset: "
+            "an UNHEALTHY pass still pings beacon_url — the beacon reports process "
+            "liveness, and silence is never used to mean 'degraded'."
+        ),
+    )
+    beacon_timeout_seconds: float = Field(
+        default=5.0,
+        description=(
+            "Socket timeout for one beacon ping (seconds). The ping runs on the "
+            "beacon's own thread, so this bounds nothing on the watchdog loop: "
+            "long enough for a TLS handshake to a distant provider, short enough "
+            "that a wedged endpoint does not hold the sender across many passes."
+        ),
+        ge=1.0,
+        le=10.0,
+    )
+
     # Dry-run mode (observe only; no recovery/escalation)
     dry_run_mode: bool = Field(
         default=False,
