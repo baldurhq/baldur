@@ -10,7 +10,7 @@ was diluted by up to 2x on exactly the shape the framework recommends.
 The terminals now write ``baldur_task_attempts_distribution`` /
 ``baldur_task_outcomes_total``. These tests assert the re-routing from the
 series' own side against a live registry rather than through a patched facade:
-patching ``record_retry_attempt`` and asserting it was not called would pass
+patching ``record_retry_resolution`` and asserting it was not called would pass
 even if the recorder stopped recording altogether, since the symbol is no
 longer imported by this module at all.
 
@@ -68,7 +68,7 @@ def _recorder_for(domain: str) -> MetricRecorder:
 class TestTaskLayerMetricsBehavior:
     """The Celery terminals' destination, and the dilution they no longer cause."""
 
-    def test_record_success_does_not_record_retry_attempt(self):
+    def test_record_success_does_not_record_retry_resolution(self):
         """A task success lands on the task pair, and only there."""
         domain = _registered_domain("task_success")
 
@@ -109,7 +109,7 @@ class TestTaskLayerMetricsBehavior:
             is None
         )
 
-    def test_record_failure_does_not_record_retry_attempt(self):
+    def test_record_failure_does_not_record_retry_resolution(self):
         """A task failure lands on the task pair, and only there."""
         domain = _registered_domain("task_failure")
 

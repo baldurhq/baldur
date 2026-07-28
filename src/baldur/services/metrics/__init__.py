@@ -53,8 +53,9 @@ from .recorders import (
     record_recovery_alert,
     record_recovery_time,
     record_replay_attempt,
-    record_retry_attempt,
+    record_retry_attempt_started,
     record_retry_marker,
+    record_retry_resolution,
     record_sla_breach,
     record_task_attempt,
 )
@@ -91,7 +92,8 @@ __all__ = [
     # Recording Functions
     "record_dlq_item_created",
     "record_sla_breach",
-    "record_retry_attempt",
+    "record_retry_resolution",
+    "record_retry_attempt_started",
     "record_retry_marker",
     "record_task_attempt",
     "record_recovery_time",

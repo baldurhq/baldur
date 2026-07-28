@@ -46,7 +46,7 @@ class MetricsBackend(Protocol):
 
     def record_dlq_item_created(self, domain: str, failure_type: str) -> None: ...
 
-    def record_retry_attempt(
+    def record_retry_resolution(
         self, domain: str, attempt_count: int, outcome: str
     ) -> None: ...
 

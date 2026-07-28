@@ -336,6 +336,14 @@ class RetryPolicy(ResiliencePolicy[T]):
                     reason = "retry_budget"
                     break
 
+            # Timely retry-pressure series: the attempt is admitted from here
+            # on. Recorded AFTER the refusal checks above (a refused iteration
+            # never ran, so it is not demand) and BEFORE the cooldown wait
+            # below (which an honored Retry-After can stretch to an hour) —
+            # that ordering is the whole point: the storm is counted at sleep
+            # start, not at resolution.
+            self._record_attempt_started(attempt)
+
             # Rate limit wait (optional), bounded by whatever budget is left.
             # A cooldown longer than the remaining budget is deferred rather
             # than slept: sleeping it would blow the budget and the attempt
@@ -555,8 +563,12 @@ class RetryPolicy(ResiliencePolicy[T]):
         """Run the function once with no retry, swallowing into a PolicyResult.
 
         Shared by the globally-disabled and observe-only paths — both execute
-        the business call exactly once and never re-execute.
+        the business call exactly once and never re-execute. They record a
+        terminal, so they must record the matching attempt start too: leaving
+        them out would shrink the pressure ratio's denominator only, inflating
+        the retry share on any deployment that runs with retries disabled.
         """
+        self._record_attempt_started(1)
         try:
             result = func(*args, **kwargs)
             self._record_outcome(1, "success")
@@ -620,6 +632,19 @@ class RetryPolicy(ResiliencePolicy[T]):
         from baldur.services.retry_handler.observability import record_retry_outcome
 
         record_retry_outcome(self._config.domain, attempt, outcome)
+
+    def _record_attempt_started(self, attempt: int) -> None:
+        """Record an attempt admission to the timely pressure series. Fail-open.
+
+        Thin delegate to the shared ``record_retry_attempt_started`` both retry
+        policies use, so the sync and async surfaces cannot drift on the
+        attempt-start half either.
+        """
+        from baldur.services.retry_handler.observability import (
+            record_retry_attempt_started,
+        )
+
+        record_retry_attempt_started(self._config.domain, attempt)
 
     def _should_retry(self, exception: Exception) -> bool:
         """Pure exception classification: is this exception retryable?

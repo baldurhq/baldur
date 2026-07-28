@@ -159,10 +159,10 @@ class TestOTELBaldurMetricsRecordingBehavior:
         metrics = self._make_uninitialized_metrics()
         metrics.record_dlq_item_created("orders", "timeout")
 
-    def test_record_retry_attempt_noop_when_uninitialized(self):
+    def test_record_retry_resolution_noop_when_uninitialized(self):
         """Uninitialized metrics silently skip retry recording."""
         metrics = self._make_uninitialized_metrics()
-        metrics.record_retry_attempt("payments", 3, "success")
+        metrics.record_retry_resolution("payments", 3, "success")
 
     def test_set_circuit_state_noop_when_uninitialized(self):
         """Uninitialized metrics silently skip circuit state."""
@@ -643,7 +643,7 @@ _NATIVE_HISTOGRAM_BUCKETS = [
         id="capacity_warmup_duration_seconds",
     ),
     pytest.param(
-        lambda m: m.retry.record_attempt("g47_att", 3, "success"),
+        lambda m: m.retry.record_resolution("g47_att", 3, "success"),
         "baldur_retry_attempts_distribution",
         (1, 2, 3, 4, 5, 6, 7, 8, 9, 10),
         id="retry_attempts_distribution",
@@ -717,7 +717,7 @@ class TestNativeHistogramBucketParity:
         value-parity (G47) still passed.
         """
         # attempt_count == 3 is included at le=3 (NOT first counted at le=4).
-        real_otel_backend.retry.record_attempt("g47_attempt3", 3, "success")
+        real_otel_backend.retry.record_resolution("g47_attempt3", 3, "success")
         c3 = _bucket_counts(
             "baldur_retry_attempts_distribution", 'domain="g47_attempt3"'
         )
@@ -725,7 +725,7 @@ class TestNativeHistogramBucketParity:
         assert c3[2.0] == 0.0
 
         # An over-range count (11) appears only in +Inf, not the top finite bucket.
-        real_otel_backend.retry.record_attempt("g47_attempt11", 11, "success")
+        real_otel_backend.retry.record_resolution("g47_attempt11", 11, "success")
         c11 = _bucket_counts(
             "baldur_retry_attempts_distribution", 'domain="g47_attempt11"'
         )

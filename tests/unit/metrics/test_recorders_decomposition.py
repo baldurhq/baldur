@@ -753,17 +753,17 @@ class TestRetryMetricRecorderContract:
 class TestRetryMetricRecorderBehavior:
     """Retry recorder method behaviors."""
 
-    def test_record_attempt_observes_histogram_and_increments_counter(
+    def test_record_resolution_observes_histogram_and_increments_counter(
         self, retry_recorder
     ):
-        """record_attempt records histogram and increments outcomes counter."""
+        """record_resolution records histogram and increments outcomes counter."""
         mock_histogram = MagicMock()
         mock_counter = MagicMock()
         retry_recorder._attempts_histogram = mock_histogram
         retry_recorder._outcomes_total = mock_counter
 
         with patch.object(retry_recorder, "_get_synthetic_label", return_value="false"):
-            retry_recorder.record_attempt("payment", 3, "success")
+            retry_recorder.record_resolution("payment", 3, "success")
 
         mock_histogram.labels.assert_called_once_with(
             domain="payment", is_synthetic="false"
@@ -877,14 +877,14 @@ class TestRetryMetricRecorderBehavior:
         mock_counter.labels.assert_called_once_with(domain="payment")
         mock_counter.labels().inc.assert_called_once()
 
-    def test_record_attempt_no_raise_on_internal_error(self, retry_recorder):
-        """record_attempt does not raise on internal errors."""
+    def test_record_resolution_no_raise_on_internal_error(self, retry_recorder):
+        """record_resolution does not raise on internal errors."""
         mock_histogram = MagicMock()
         mock_histogram.labels.side_effect = RuntimeError("metric error")
         retry_recorder._attempts_histogram = mock_histogram
 
         # Should not raise
-        retry_recorder.record_attempt("payment", 3, "success")
+        retry_recorder.record_resolution("payment", 3, "success")
 
 
 # =============================================================================

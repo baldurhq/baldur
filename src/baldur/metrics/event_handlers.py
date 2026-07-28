@@ -303,10 +303,10 @@ class DLQMetricEventHandler:
             domain = resolve_domain_label(domain)
 
             # Counter + Histogram: failure outcome and attempt count.
-            # record_attempt observes the attempts histogram AND increments
+            # record_resolution observes the attempts histogram AND increments
             # _outcomes_total{outcome=failure} in one call.
             if hasattr(metrics, "retry"):
-                metrics.retry.record_attempt(domain, attempt_count, "failure")
+                metrics.retry.record_resolution(domain, attempt_count, "failure")
 
             _log_event(
                 "get_dlq_log_level",

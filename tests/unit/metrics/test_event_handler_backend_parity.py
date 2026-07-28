@@ -1,7 +1,7 @@
 """Backend-parity tests for the metric event handlers (645).
 
 The event handlers route every domain metric through the recorder *public*
-methods (record_state_change / record_trip / record_failure / record_attempt /
+methods (record_state_change / record_trip / record_failure / record_attempt / record_resolution /
 record_retry / record_recovery_duration / record_sla_breach / record_started /
 record_replay / record_store_duration) so that Circuit Breaker / DLQ / retry /
 replay metrics populate under BOTH the prometheus_client backend (BaldurMetrics)
@@ -207,9 +207,9 @@ class TestEventHandlerBackendParity:
         outcome_spy.assert_called_once_with(_REGISTERED_DOMAIN, True)
 
     def test_on_item_failed_records_failure_attempt(self, backend):
-        """on_item_failed routes through record_attempt with the failure outcome."""
+        """on_item_failed routes through record_resolution with the failure outcome."""
         _name, metrics = backend
-        spy = _spy_on(metrics.retry, "record_attempt")
+        spy = _spy_on(metrics.retry, "record_resolution")
 
         with capture_logs() as logs:
             DLQMetricEventHandler.on_item_failed(

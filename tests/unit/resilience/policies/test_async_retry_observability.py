@@ -16,7 +16,7 @@ synchronous ``RetryPolicy``:
 
 Seams follow the sync retry tests verbatim: the bus via
 ``baldur.services.event_bus.get_event_bus``, the metric via
-``baldur.services.metrics.recorders.record_retry_attempt``, the kill switch via
+``baldur.services.metrics.recorders.record_retry_resolution``, the kill switch via
 ``baldur.settings.retry.get_retry_settings``. Metric assertions inspect the
 facade call args (no Prometheus registry scraping needed).
 """
@@ -41,7 +41,7 @@ from baldur.services.retry_handler.policy import RetryPolicy
 
 _DOMAIN = "async_obs"
 _GET_EVENT_BUS = "baldur.services.event_bus.get_event_bus"
-_RECORD_RETRY_ATTEMPT = "baldur.services.metrics.recorders.record_retry_attempt"
+_RECORD_RETRY_RESOLUTION = "baldur.services.metrics.recorders.record_retry_resolution"
 _GET_RETRY_SETTINGS = "baldur.settings.retry.get_retry_settings"
 _GET_REMAINING_MS = "baldur.scaling.deadline_context.get_remaining_ms"
 _INTERVENTION_SUPPRESSED = (
@@ -284,8 +284,8 @@ class TestAsyncRetryMetricsParityBehavior:
     async def test_terminal_records_outcome_with_total_attempts(
         self, driver, expected_outcome, expected_attempts
     ):
-        """Each terminal calls record_retry_attempt(domain, total_attempts, outcome)."""
-        with patch(_RECORD_RETRY_ATTEMPT, autospec=True) as mock_record:
+        """Each terminal calls record_retry_resolution(domain, total_attempts, outcome)."""
+        with patch(_RECORD_RETRY_RESOLUTION, autospec=True) as mock_record:
             result = await driver()
 
         mock_record.assert_called_once_with(
@@ -313,7 +313,7 @@ class TestAsyncSingleAttemptObservabilityBehavior:
             policy = AsyncRetryPolicy(max_retries=3, domain=_DOMAIN)
 
         with patch(_GET_EVENT_BUS, return_value=mock_bus):
-            with patch(_RECORD_RETRY_ATTEMPT, autospec=True) as mock_record:
+            with patch(_RECORD_RETRY_RESOLUTION, autospec=True) as mock_record:
                 result = await policy.execute(_always_fail_conn)
 
         assert result.outcome == PolicyOutcome.FAILURE
@@ -328,7 +328,7 @@ class TestAsyncSingleAttemptObservabilityBehavior:
 
         with patch(_INTERVENTION_SUPPRESSED, return_value=True):
             with patch(_GET_EVENT_BUS, return_value=mock_bus):
-                with patch(_RECORD_RETRY_ATTEMPT, autospec=True) as mock_record:
+                with patch(_RECORD_RETRY_RESOLUTION, autospec=True) as mock_record:
                     result = await policy.execute(_ok)
 
         assert result.outcome == PolicyOutcome.SUCCESS
@@ -392,7 +392,7 @@ class TestAsyncObservabilityFailOpenBehavior:
             raise sentinel
 
         with patch(_GET_EVENT_BUS, side_effect=RuntimeError("bus down")):
-            with patch(_RECORD_RETRY_ATTEMPT, autospec=True) as mock_record:
+            with patch(_RECORD_RETRY_RESOLUTION, autospec=True) as mock_record:
                 result = await policy.execute(failing)
 
         assert result.outcome == PolicyOutcome.FAILURE
@@ -410,7 +410,7 @@ class TestAsyncObservabilityFailOpenBehavior:
         async def failing():
             raise sentinel
 
-        with patch(_RECORD_RETRY_ATTEMPT, side_effect=RuntimeError("recorder down")):
+        with patch(_RECORD_RETRY_RESOLUTION, side_effect=RuntimeError("recorder down")):
             with patch(_GET_EVENT_BUS, return_value=mock_bus):
                 result = await policy.execute(failing)
 
