@@ -94,16 +94,16 @@ groups:
   - name: retry_alerts
     interval: 30s
     # The two protected-call rules below (RetryPressureHigh,
-    # ProtectedCallFailureRateHigh) share one population — the retry attempts
-    # histogram's _count, which is observed exactly once per resolved call —
-    # and one significance floor. TaskFailureRateHigh applies the same shape to
-    # the task-queue layer's own series. Three things to know before editing:
+    # ProtectedCallFailureRateHigh) both read the protected-call layer, but on
+    # different populations, and each floors its own. TaskFailureRateHigh
+    # applies the same shape to the task-queue layer's series. Four things to
+    # know before editing:
     #
     # 1. The `increase(...) > 10` leg is a MINIMUM SAMPLE SIZE requirement, not
     #    a traffic floor. Do not delete it and do not turn it back into a
-    #    `rate(...) > N` volume gate: a mean is not a signal below ~10 samples,
+    #    `rate(...) > N` volume gate: a ratio is not a signal below ~10 samples,
     #    and without the leg a single retried call in an otherwise idle domain
-    #    reads a mean of 2.0 and holds `for: 5m` for as long as the sample sits
+    #    reads full pressure and holds `for: 5m` for as long as the sample sits
     #    in the range window. (`increase` may extrapolate to a fractional count;
     #    the `> 10` comparison handles that with no special-casing.) A
     #    rate-based floor instead makes firing depend on adopter volume and
@@ -111,12 +111,26 @@ groups:
     #    single-service deployment has.
     #
     # 2. `by (domain)` pinpoints the failing dependency. The first two rules
-    #    read protected-call terminals ONLY: a Baldur-protected call running
+    #    read protected-call series ONLY: a Baldur-protected call running
     #    inside a Celery task records the protected call here and the task's own
     #    resolution on `baldur_task_attempts_distribution` /
     #    `baldur_task_outcomes_total`, which TaskFailureRateHigh below reads. The
     #    two layers each keep their own denominator, so no per-layer naming
     #    workaround is needed.
+    #
+    # 4. RetryPressureHigh reads STARTED attempts, not resolved calls, and that
+    #    is the point. The attempts histogram takes exactly one observation per
+    #    sequence, at its terminal, so a storm whose sequences sit asleep in
+    #    backoff or in an honored `Retry-After` cooldown (which can run to an
+    #    hour) does not move it at all — the alert built to catch a retry storm
+    #    was blind for the duration of the storm and only lit up once the storm
+    #    resolved. `baldur_retry_attempts_started_total` increments at attempt
+    #    admission, before any wait, so pressure is readable while the storm is
+    #    still in flight. Its sample floor therefore counts ATTEMPTS while
+    #    ProtectedCallFailureRateHigh's counts RESOLUTIONS: each floor guards
+    #    its own ratio and neither gates the other. The histogram is unchanged
+    #    and still answers the other question — how many attempts did resolved
+    #    calls take.
     #
     # 3. Topology labels: on a global-view Prometheus (Thanos/Cortex) add your
     #    cluster/env labels to BOTH the `by (...)` groupings AND the
@@ -124,22 +138,29 @@ groups:
     #    Those labels are attached at federation/remote-write time, so they are
     #    absent from locally-scraped series and the rules ship without them.
     rules:
+      # Threshold source: 0.33 is the attempt-denominator equivalent of this
+      # rule's previously approved sensitivity ("on average every second
+      # resolved call needs an extra attempt"): extra-per-resolution 0.5 ->
+      # retries-per-attempt 0.5/1.5 = 1/3. Units and timeliness changed here;
+      # sensitivity deliberately did not. For calibration context, the
+      # framework's own Self-DDoS enforcement bound (AdaptiveRetryBudget's
+      # max_retry_ratio) is 0.10 in these same units.
       - alert: RetryPressureHigh
         expr: |
           (
-            sum by (domain) (rate(baldur_retry_attempts_distribution_sum{is_synthetic!="true"}[5m]))
+            sum by (domain) (rate(baldur_retry_attempts_started_total{is_retry="true",is_synthetic!="true"}[5m]))
             /
-            sum by (domain) (rate(baldur_retry_attempts_distribution_count{is_synthetic!="true"}[5m]))
-          ) - 1 > 0.5
+            sum by (domain) (rate(baldur_retry_attempts_started_total{is_synthetic!="true"}[5m]))
+          ) > 0.33
           and on (domain)
-          sum by (domain) (increase(baldur_retry_attempts_distribution_count{is_synthetic!="true"}[5m])) > 10
+          sum by (domain) (increase(baldur_retry_attempts_started_total{is_synthetic!="true"}[5m])) > 10
         for: 5m
         labels:
           severity: warning
           category: retry
         annotations:
           summary: "Retry pressure high"
-          description: "{{ $labels.domain }} averages {{ $value | printf \"%.2f\" }} extra attempt(s) per resolved call. (threshold: 0.5)"
+          description: "{{ $labels.domain }} retry share of started attempts is {{ $value | humanizePercentage }}. (threshold: 33%)"
 
       - alert: ProtectedCallFailureRateHigh
         expr: |

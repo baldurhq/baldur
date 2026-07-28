@@ -1,6 +1,6 @@
 {
   "__inputs_doc__": "Datasource UIDs below match docker/config/grafana-datasources.yml provisioned UIDs (mimir, tempo, loki). For manual Grafana Import, run scripts/sanitize-dashboards.sh to convert UIDs to __inputs template variables.",
-  "__tier_doc__": "PRO superset monitoring board (full operational view — Grafana is read-only; the acting control surface is the HTML admin console, not this board). Section 'OSS Core' = baldur-overview.json's panels (same series, same queries) PLUS adapter-conditional OSS extras that overview excludes under its own no-mystery-empty-panels rule — currently the two baldur_task_* panels, which populate only when the Celery adapter is installed. So a PRO operator sees resilience + operations on one screen instead of switching boards; section 'PRO Operations' holds the PRO-only series. The rate-limit panels populate from the default synchronous retry stage: an upstream that raises HTTP 429 notifies the coordinator, which records the 429, cooldown, consecutive-streak and wait series (a 429 returned as a result value instead of raised does not reach it). baldur-overview.json stays the OSS-only public board (no PRO series → G43 overview-excludes). This board still holds every PRO prefix → G43 operations-holds stays green. NOTE: the OSS-core panel definitions are duplicated from baldur-overview.json; keep them in sync on edit (G43 catches metric-name drift, not layout drift).",
+  "__tier_doc__": "PRO superset monitoring board (full operational view — Grafana is read-only; the acting control surface is the HTML admin console, not this board). Section 'OSS Core' = baldur-overview.json's panels (same series, same queries) PLUS adapter-conditional OSS extras that overview excludes under its own no-mystery-empty-panels rule — currently the two baldur_task_* panels, which populate only when the Celery adapter is installed. So a PRO operator sees resilience + operations on one screen instead of switching boards; section 'PRO Operations' holds the PRO-only series. Retry Pressure and Retry Outcomes are the two halves of the retry picture and read two different series on purpose: pressure counts attempts as they START (baldur_retry_attempts_started_total), so it moves while sequences are still asleep in backoff or a 429 cooldown, while Outcomes counts sequences as they RESOLVE — a storm shows on the first for its whole duration and on the second only once it ends. The rate-limit panels populate from the default synchronous retry stage: an upstream that raises HTTP 429 notifies the coordinator, which records the 429, cooldown, consecutive-streak and wait series (a 429 returned as a result value instead of raised does not reach it). baldur-overview.json stays the OSS-only public board (no PRO series → G43 overview-excludes). This board still holds every PRO prefix → G43 operations-holds stays green. NOTE: the OSS-core panel definitions are duplicated from baldur-overview.json; keep them in sync on edit (G43 catches metric-name drift, not layout drift).",
   "__requires": [
     {
       "type": "grafana",
@@ -220,6 +220,33 @@
       }
     },
     {
+      "id": 24,
+      "title": "Retry Pressure (retries ÷ started attempts)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 25
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mimir"
+      },
+      "description": "Share of started attempts that are retries (protected-call layer). Timely: moves while sequences wait in backoff or rate-limit cooldown, before they resolve.",
+      "targets": [
+        {
+          "expr": "sum by (domain) (rate(baldur_retry_attempts_started_total{is_retry=\"true\"}[5m])) / sum by (domain) (rate(baldur_retry_attempts_started_total[5m]))",
+          "legendFormat": "{{ domain }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        }
+      }
+    },
+    {
       "id": 13,
       "title": "Rate Limit — 429s & Deferrals",
       "type": "timeseries",
@@ -227,7 +254,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 25
+        "y": 33
       },
       "datasource": {
         "type": "prometheus",
@@ -257,7 +284,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 25
+        "y": 33
       },
       "datasource": {
         "type": "prometheus",
@@ -288,7 +315,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 33
+        "y": 41
       },
       "datasource": {
         "type": "prometheus",
@@ -319,7 +346,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 33
+        "y": 41
       },
       "datasource": {
         "type": "prometheus",
@@ -341,7 +368,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 41
+        "y": 49
       },
       "datasource": {
         "type": "prometheus",
@@ -368,7 +395,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 41
+        "y": 49
       },
       "datasource": {
         "type": "prometheus",
@@ -394,7 +421,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 49
+        "y": 57
       },
       "datasource": {
         "type": "prometheus",
@@ -456,7 +483,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 49
+        "y": 57
       },
       "datasource": {
         "type": "prometheus",
@@ -553,7 +580,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 57
+        "y": 65
       },
       "panels": []
     },
@@ -565,7 +592,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 58
+        "y": 66
       },
       "datasource": {
         "type": "prometheus",
@@ -587,7 +614,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 58
+        "y": 66
       },
       "datasource": {
         "type": "prometheus",
@@ -614,7 +641,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 66
+        "y": 74
       },
       "datasource": {
         "type": "prometheus",
@@ -640,7 +667,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 66
+        "y": 74
       },
       "datasource": {
         "type": "prometheus",
@@ -755,7 +782,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 74
+        "y": 82
       },
       "datasource": {
         "type": "prometheus",
@@ -800,7 +827,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 74
+        "y": 82
       },
       "datasource": {
         "type": "prometheus",
@@ -849,7 +876,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 82
+        "y": 90
       },
       "datasource": {
         "type": "prometheus",
@@ -904,7 +931,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 82
+        "y": 90
       },
       "datasource": {
         "type": "prometheus",
@@ -938,7 +965,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 90
+        "y": 98
       },
       "datasource": {
         "type": "prometheus",
