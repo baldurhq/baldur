@@ -127,7 +127,12 @@ _MOCK_CREATION_BUDGETS: dict[str, int] = {
     # convention).
     # audit-watchdog removal: -5 — test_audit_watchdog.py was deleted with the
     # module it covered.
-    "oss": 4351,
+    # force-check 409 handler tests: +4 — the watchdog stand-ins in the
+    # meta-watchdog handler suite (§6.2 Exception 1). The only class that would
+    # spec them is the PRO watchdog, which an OSS test may not import; a
+    # SimpleNamespace cannot express the "attribute absent" skew case those
+    # tests need either.
+    "oss": 4355,
     "pro": 1800,
     "dormant": 401,
 }
