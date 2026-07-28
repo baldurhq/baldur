@@ -306,6 +306,59 @@ class TestTenacityBridgePolicyUserCallbackFallbackBehavior:
 
 
 # =============================================================================
+# Behavior — user ``before`` supplied through retrying_kwargs
+# =============================================================================
+
+
+class TestTenacityBridgePolicyRetryingKwargsBeforeBehavior:
+    """A ``before`` passed via ``retrying_kwargs`` is chained, never dropped."""
+
+    def test_user_before_in_retrying_kwargs_still_runs(self):
+        """The kwargs spelling gets the same chaining the ``before=`` param gets."""
+        fn, _ = _make_counting_fn(1)
+        seen: list[int] = []
+
+        def _user_before(retry_state):
+            seen.append(retry_state.attempt_number)
+
+        policy: TenacityBridgePolicy[str] = TenacityBridgePolicy(
+            stop=tenacity.stop_after_attempt(3),
+            wait=tenacity.wait_fixed(0),
+            retrying_kwargs={"before": _user_before},
+        )
+
+        result = policy.execute(fn)
+
+        assert result.outcome == PolicyOutcome.SUCCESS
+        assert seen == [1, 2]
+
+    def test_baldur_before_still_runs_alongside_the_user_one(self):
+        """Chaining must not displace Baldur's own hook.
+
+        Asserted through an observable Baldur side-effect of ``_before`` — the
+        budget request record — rather than through the callback object, so the
+        test fails if the chain order or the assignment ever regresses.
+        """
+        fn, _ = _make_counting_fn(1)
+        budget = MagicMock(spec=AdaptiveRetryBudget)
+        budget.should_allow_retry.return_value = True
+
+        def _user_before(_retry_state):
+            pass
+
+        policy: TenacityBridgePolicy[str] = TenacityBridgePolicy(
+            stop=tenacity.stop_after_attempt(3),
+            wait=tenacity.wait_fixed(0),
+            retry_budget=budget,
+            retrying_kwargs={"before": _user_before},
+        )
+
+        policy.execute(fn)
+
+        assert budget.record_request.call_count == 2
+
+
+# =============================================================================
 # Behavior — vanilla path (no collaborators)
 # =============================================================================
 

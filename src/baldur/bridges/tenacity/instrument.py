@@ -1,13 +1,15 @@
 """
 Level-1 tenacity instrumentation - monkey-patch ``tenacity.Retrying.__init__``
-to inject Baldur metric/audit callbacks into every Retrying instance created
+to inject a Baldur exhaustion callback into every Retrying instance created
 afterwards.
 
 Level differentiation (per impl 451 D7/D9):
-- Level 1 (this module): observation-only — emits ``RETRY_EXHAUSTED`` events
-  and records metrics. Does NOT inject ``retry_budget`` /
-  ``rate_limit_coordinator``; those are explicit Level-3 (``TenacityBridgePolicy``)
-  responsibilities.
+- Level 1 (this module): observation-only — emits ``RETRY_EXHAUSTED`` events.
+  It installs ``retry_error_callback`` and nothing else, so it records **no**
+  metrics: attempts on a Level-1-instrumented app are invisible to the retry
+  series, retry pressure included. It does not inject ``retry_budget`` /
+  ``rate_limit_coordinator`` either; those are explicit Level-3
+  (``TenacityBridgePolicy``) responsibilities.
 - Level 3: ``TenacityBridgePolicy`` constructed by the user with full guards.
   Each Level-3 Retrying instance carries the ``__baldur_bridge_explicit__``
   marker so this patch skips it (no double emission).
