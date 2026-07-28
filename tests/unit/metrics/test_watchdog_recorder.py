@@ -20,6 +20,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
+from structlog.testing import capture_logs
 
 
 @pytest.fixture
@@ -328,3 +329,112 @@ class TestWatchdogEscalationCounterBehavior:
             autospec=True,
         ):
             record_watchdog_escalation("redis", "sent")  # Should not raise
+
+
+# =============================================================================
+# H. 731 — Outbound Liveness-Beacon Counter
+# =============================================================================
+
+
+class _RaisingCounter:
+    """Counter double that fails where production actually touches it.
+
+    Production calls ``.labels(...)`` on the collector, so a ``side_effect`` on
+    the collector itself would never fire — the fault has to live on the
+    attribute the recorder reaches.
+    """
+
+    def __init__(self):
+        self.touched = False
+
+    def labels(self, **kwargs):
+        self.touched = True
+        raise RuntimeError("registry down")
+
+
+class _RecordingCounter:
+    """Counter double that captures the labels and the increments."""
+
+    def __init__(self):
+        self.label_calls = []
+        self.increments = 0
+
+    def labels(self, **kwargs):
+        self.label_calls.append(kwargs)
+        return self
+
+    def inc(self):
+        self.increments += 1
+
+
+class TestWatchdogRecorderBeaconContract:
+    """731: baldur_watchdog_beacon_total export contract."""
+
+    def test_exports_beacon_convenience_function(self):
+        """__all__ includes record_watchdog_beacon."""
+        from baldur.metrics.recorders.watchdog import __all__
+
+        assert "record_watchdog_beacon" in __all__
+
+
+class TestWatchdogRecorderBeacon:
+    """731: beacon counter labelling, fail-open, and convenience delegation."""
+
+    @pytest.mark.parametrize(
+        "result", ["success", "failure"], ids=["success", "failure"]
+    )
+    def test_record_beacon_labels_the_counter_with_the_result(
+        self, watchdog_recorder, result
+    ):
+        """The delivery result is the counter's only label, and it increments."""
+        counter = _RecordingCounter()
+        watchdog_recorder._beacon_total = counter
+
+        watchdog_recorder.record_beacon(result)
+
+        assert counter.label_calls == [{"result": result}]
+        assert counter.increments == 1
+
+    def test_record_beacon_swallows_a_failing_registry(self, watchdog_recorder):
+        """A broken registry costs the counter, never the ping.
+
+        The beacon calls this after every ping; a raise here would reach the
+        sender thread's loop instead of the metric it was trying to emit.
+        """
+        counter = _RaisingCounter()
+        watchdog_recorder._beacon_total = counter
+
+        with capture_logs() as logs:
+            watchdog_recorder.record_beacon("success")
+
+        assert counter.touched is True
+        assert any(
+            log["event"] == "metrics.record_watchdog_beacon_failed" for log in logs
+        )
+
+    def test_convenience_beacon_delegates(self):
+        """record_watchdog_beacon forwards the result to recorder.record_beacon."""
+        from baldur.metrics.recorders.watchdog import (
+            WatchdogMetricRecorder,
+            record_watchdog_beacon,
+        )
+
+        mock_recorder = MagicMock(spec=WatchdogMetricRecorder)
+        with patch(
+            "baldur.metrics.recorders.watchdog._lazy_recorder",
+            return_value=mock_recorder,
+            autospec=True,
+        ):
+            record_watchdog_beacon("failure")
+        mock_recorder.record_beacon.assert_called_once_with("failure")
+
+    def test_convenience_beacon_noop_when_none(self):
+        """record_watchdog_beacon no-ops when the recorder is unavailable."""
+        from baldur.metrics.recorders.watchdog import record_watchdog_beacon
+
+        with patch(
+            "baldur.metrics.recorders.watchdog._lazy_recorder",
+            return_value=None,
+            autospec=True,
+        ):
+            record_watchdog_beacon("success")  # Should not raise
