@@ -414,6 +414,56 @@ class TestProbeSingleFlightBehavior:
         assert not second.entered.is_set()
         assert results["shared"].reason == PROBE_SINGLE_FLIGHT_REASON
 
+    def test_the_serial_path_honours_the_same_single_flight(self, released):
+        """One guarantee, not one per execution path.
+
+        ``probe_all()`` with no deadline is public API. Its timed-out probe is
+        abandoned exactly like the bounded path's, so without the same lock a
+        stranded invocation would run beside the next pass's — the race the
+        lock advertises against.
+        """
+        # Given: "shared" is parked mid-probe from a bounded pass
+        first = _ControlledProbe("shared", block=released)
+        manager = HealthProbeManager(settings=_settings(), probes=[first])
+        manager.probe_all(deadline=time.monotonic() + 0.2)
+        assert first.entered.wait(_EVENT_WAIT_SECONDS)
+
+        # When: a caller with no pass budget probes through the serial path
+        second = _ControlledProbe("shared")
+        assert manager.remove_probe("shared") is True
+        manager.add_probe(second)
+        results = manager.probe_all()
+
+        # Then: it is skipped there too, not invoked a second time
+        assert second.call_count == 0
+        assert results["shared"].reason == PROBE_SINGLE_FLIGHT_REASON
+        assert results["shared"].observed is False
+
+    def test_an_inapplicable_component_is_absent_even_while_one_is_stranded(
+        self, released
+    ):
+        """Absence outranks the skip verdict.
+
+        A feature switched off between two passes must not surface as UNKNOWN
+        just because its previous invocation is stranded — that drags the
+        overall verdict to DEGRADED for a component the operator disabled.
+        """
+        # Given: "toggled" is parked mid-probe...
+        probe = _ControlledProbe("toggled", block=released)
+        manager = HealthProbeManager(settings=_settings(), probes=[probe])
+        manager.probe_all(deadline=time.monotonic() + 0.2)
+        assert probe.entered.wait(_EVENT_WAIT_SECONDS)
+
+        # ...and its feature is then switched off
+        probe._applicable = False
+
+        # When
+        results = manager.probe_all(deadline=time.monotonic() + 0.3)
+
+        # Then: absent from the pass, not an UNKNOWN single-flight skip
+        assert "toggled" not in results
+        assert manager.get_overall_status() != HealthStatus.DEGRADED
+
 
 class TestProbeManagerSpawnGuardBehavior:
     """_spawn_worker_thread refuses to start a second live loop."""
