@@ -285,7 +285,11 @@ class TenacityBridgePolicy(ResiliencePolicy[T]):
             retrying_kwargs.setdefault("wait", self._wait)
         if self._retry is not None:
             retrying_kwargs.setdefault("retry", self._retry)
-        retrying_kwargs["before"] = before_cb
+        # A ``before`` supplied through ``retrying_kwargs`` is chained, not
+        # dropped — same treatment the constructor's ``before=`` parameter
+        # already gets. The user's callback runs first and Baldur's follows,
+        # so the attempt-start record cannot be displaced by either spelling.
+        retrying_kwargs["before"] = chain(retrying_kwargs.get("before"), before_cb)
         retrying_kwargs["after"] = after_cb
         retrying_kwargs["before_sleep"] = before_sleep_cb
         retrying_kwargs["retry_error_callback"] = retry_error_cb
