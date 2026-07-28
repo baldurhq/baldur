@@ -211,9 +211,9 @@ class TestQueryMetricBehavior:
     def test_query_metric_total_named_histogram_matches_via_raw_name(
         self, isolated_registry
     ):
-        # The live `retry_attempts_total` is a Histogram; prometheus keeps the
-        # full `_total` family name for histograms. `_family_name` over-strips it
-        # to `retry_attempts`, so without the raw-name fallback the guard never
+        # A Histogram named `..._total`: prometheus keeps the full `_total`
+        # family name for histograms. `_family_name` over-strips it to
+        # `retry_attempts`, so without the raw-name fallback the guard never
         # matches and query_metric returns None for a populated series.
         histogram = Histogram(
             "retry_attempts_total",

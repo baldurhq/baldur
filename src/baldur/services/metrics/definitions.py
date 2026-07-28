@@ -44,18 +44,6 @@ dlq_outbox_worker_dead_coercions_total = get_or_create_counter(
 
 
 # =============================================================================
-# Retry Metrics
-# =============================================================================
-
-retry_attempts_histogram = get_or_create_histogram(
-    "retry_attempts_total",
-    "Number of retry attempts before resolution",
-    ["domain", "is_synthetic"],
-    buckets=(1, 2, 3, 4, 5, 6, 7, 8, 9, 10),
-)
-
-
-# =============================================================================
 # L2 Storage Resilience Metrics
 # =============================================================================
 
