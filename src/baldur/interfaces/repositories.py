@@ -441,10 +441,12 @@ class FailedOperationRepository(ABC):
         """Get a failed operation by its opaque id.
 
         ``id`` must be passed as a ``str`` — exactly the token
-        :meth:`create` returned. A non-``str`` value (notably raw ``bytes``
-        read straight off a backend index) is **not** normalized: it reads as
-        a miss and returns ``None`` rather than raising. Decode at the call
-        site.
+        :meth:`create` returned. Anything else is **undefined and
+        backend-dependent**: a raw ``bytes`` member read straight off a
+        backend index may read as a miss on one backend, be silently coerced
+        into a match on another, or raise. No backend normalizes it for you,
+        and none of those outcomes is part of this contract. Decode at the
+        call site.
 
         Returns ``None`` when no entry with that id exists.
         """
