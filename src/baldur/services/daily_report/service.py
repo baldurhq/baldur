@@ -42,6 +42,19 @@ _PRUNE_SWEEP_BUFFER_DAYS = 30
 _INSTALL_MARKER_KEY = "baldur:install_marker:first_seen"
 _SHADOW_PRO_GRACE_DAYS = 30
 
+# task_name -> AutomatedActionsSummary counter field, for the actions that
+# aggregate as a plain per-entry count. "auto_replay_batch" is handled
+# separately (it also folds result counts into three fields).
+_ACTION_COUNTER_FIELDS: dict[str, str] = {
+    "canary_rollout_completed": "canary_completed",
+    "canary_rollback_triggered": "canary_rolled_back",
+    "auto_tuning_applied": "auto_tuning_applied",
+    "emergency_level_changed": "emergency_level_changes",
+    "saga_completed": "saga_completed",
+    "saga_compensated": "saga_compensated",
+    "governance_policy_blocked": "governance_blocked",
+}
+
 
 def _get_daily_report_recorder():
     """Lazy accessor for DailyReportMetricRecorder (graceful if metrics unavailable)."""
@@ -489,33 +502,18 @@ class DailyReportService(EventEmitterMixin):
 
         for entry in report.entries:
             name = entry.task_name
-            r = entry.result or {}
 
             if name == "auto_replay_batch":
+                r = entry.result or {}
                 summary.auto_replay_batches += 1
                 summary.auto_replay_recovered += int(r.get("recovered_count", 0))
                 summary.auto_replay_failed += int(r.get("failed_count", 0))
                 has_any = True
-            elif name == "canary_rollout_completed":
-                summary.canary_completed += 1
-                has_any = True
-            elif name == "canary_rollback_triggered":
-                summary.canary_rolled_back += 1
-                has_any = True
-            elif name == "auto_tuning_applied":
-                summary.auto_tuning_applied += 1
-                has_any = True
-            elif name == "emergency_level_changed":
-                summary.emergency_level_changes += 1
-                has_any = True
-            elif name == "saga_completed":
-                summary.saga_completed += 1
-                has_any = True
-            elif name == "saga_compensated":
-                summary.saga_compensated += 1
-                has_any = True
-            elif name == "governance_policy_blocked":
-                summary.governance_blocked += 1
+                continue
+
+            counter_field = _ACTION_COUNTER_FIELDS.get(name)
+            if counter_field is not None:
+                setattr(summary, counter_field, getattr(summary, counter_field) + 1)
                 has_any = True
 
         if has_any:

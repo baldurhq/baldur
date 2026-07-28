@@ -21,7 +21,7 @@ import time
 from collections import OrderedDict
 from collections.abc import Callable
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import structlog
 
@@ -66,6 +66,65 @@ class ResilientStorageMode(str, Enum):
     REDIS = "redis"  # Normal mode - Redis only
     DEGRADED = "degraded"  # Fallback mode - Memory + WAL
     RECOVERING = "recovering"  # Transitioning back to Redis
+
+
+def _zrem_members(value: Any) -> list[str]:
+    """Normalize the ``zrem`` value slot (single str or iterable) to a list."""
+    return [value] if isinstance(value, str) else list(value)
+
+
+def _pipe_zrem(pipe: Any, full_key: str, value: Any) -> None:
+    members = _zrem_members(value)
+    if members:
+        pipe.zrem(full_key, *members)
+
+
+class _BatchOpHandlers(NamedTuple):
+    """Phase appliers for one ``batch_write_ops`` op.
+
+    ``pipe`` buffers the op on a normal-mode Redis pipeline; ``wal`` builds
+    the degraded-mode WAL record; ``mem`` applies the degraded in-memory
+    mutation. ``pipe`` and ``wal`` receive the prefixed full key, ``mem``
+    the prefix-less component key.
+    """
+
+    pipe: Callable[[Any, str, Any], None]
+    wal: Callable[[Any, str, Any], dict[str, Any]]
+    mem: Callable[[Any, str, Any], None]
+
+
+# 543 D3: the idempotent-op allowlist as a single registry — one row per
+# supported batch op. Membership here is what admits an op into the
+# ``batch_write_ops`` vocabulary; the replay-idempotency eligibility rule
+# an op must satisfy to gain a row is documented on ``batch_write_ops``.
+_BATCH_OP_HANDLERS: dict[str, _BatchOpHandlers] = {
+    "set_blob": _BatchOpHandlers(
+        pipe=lambda pipe, full_key, value: pipe.set(full_key, value),
+        wal=lambda backend, full_key, value: backend._wal_record_set_blob(
+            full_key, value
+        ),
+        mem=lambda backend, key, value: backend._mem_apply_set_blob(key, value),
+    ),
+    "zadd": _BatchOpHandlers(
+        pipe=lambda pipe, full_key, value: pipe.zadd(full_key, value),
+        wal=lambda backend, full_key, value: backend._wal_record_zadd(full_key, value),
+        mem=lambda backend, key, value: backend._mem_apply_zadd(key, value),
+    ),
+    "zrem": _BatchOpHandlers(
+        pipe=_pipe_zrem,
+        wal=lambda backend, full_key, value: backend._wal_record_zrem(
+            full_key, _zrem_members(value)
+        ),
+        mem=lambda backend, key, value: backend._mem_apply_zrem(
+            key, _zrem_members(value)
+        ),
+    ),
+    "delete": _BatchOpHandlers(
+        pipe=lambda pipe, full_key, value: pipe.delete(full_key),
+        wal=lambda backend, full_key, value: backend._wal_record_delete(full_key),
+        mem=lambda backend, key, value: backend._mem_apply_delete(key),
+    ),
+}
 
 
 class ResilientStorageBackend:
@@ -1423,9 +1482,10 @@ class ResilientStorageBackend:
         the same final state. A non-idempotent op (``hset`` field-merge,
         ``incr``, list-append) would double-apply on the "re-apply the
         **entire** op list" failure path and silently corrupt the entry.
-        The ``else: raise ValueError`` allowlist below is the mechanical
-        guard at the call boundary — this invariant governs which ops
-        are *eligible* to enter that allowlist.
+        The ``_BATCH_OP_HANDLERS`` registry is the mechanical guard at the
+        call boundary (an op outside it raises ``ValueError`` before any
+        state is touched) — this invariant governs which ops are
+        *eligible* to gain a registry row.
 
         Honours the lock-symmetry rule: does NOT call the public
         ``set_blob`` / ``zadd`` / ``zrem`` / ``delete`` (public→public lock
@@ -1449,19 +1509,10 @@ class ResilientStorageBackend:
                 # written and tested against.
                 with self._redis.raw_client.pipeline(transaction=False) as pipe:
                     for op_name, key, value in ops:
-                        full_key = self._get_full_key(key)
-                        if op_name == "set_blob":
-                            pipe.set(full_key, value)
-                        elif op_name == "zadd":
-                            pipe.zadd(full_key, value)
-                        elif op_name == "zrem":
-                            members = [value] if isinstance(value, str) else list(value)
-                            if members:
-                                pipe.zrem(full_key, *members)
-                        elif op_name == "delete":
-                            pipe.delete(full_key)
-                        else:
+                        handlers = _BATCH_OP_HANDLERS.get(op_name)
+                        if handlers is None:
                             raise ValueError(f"Unsupported batch op: {op_name}")
+                        handlers.pipe(pipe, self._get_full_key(key), value)
                     pipe.execute()
                 return True
             except ValueError:
@@ -1476,7 +1527,7 @@ class ResilientStorageBackend:
 
         return self._batch_write_ops_degraded(ops)
 
-    def _batch_write_ops_degraded(  # noqa: C901, PLR0912
+    def _batch_write_ops_degraded(
         self,
         ops: list[tuple[str, str, Any]],
         error: Exception | None = None,
@@ -1494,35 +1545,28 @@ class ResilientStorageBackend:
         path matches its per-op siblings.
         """
         with self._lock:
+            # Allowlist guard at the call boundary (543 D3): validate the
+            # whole op list before any WAL or memory mutation, so an
+            # unsupported op can never leave partial state behind —
+            # including when WAL is inactive, where the memory loop would
+            # otherwise apply the valid prefix silently.
+            for op_name, _key, _value in ops:
+                if op_name not in _BATCH_OP_HANDLERS:
+                    raise ValueError(f"Unsupported batch op: {op_name}")
+
             # 1. WAL-First: build all records, single batch_write_entries fsync.
             if self._wal and self._wal_initialized:
-                records: list[dict[str, Any]] = []
-                for op_name, key, value in ops:
-                    full_key = self._get_full_key(key)
-                    if op_name == "set_blob":
-                        records.append(self._wal_record_set_blob(full_key, value))
-                    elif op_name == "zadd":
-                        records.append(self._wal_record_zadd(full_key, value))
-                    elif op_name == "zrem":
-                        members = [value] if isinstance(value, str) else list(value)
-                        records.append(self._wal_record_zrem(full_key, members))
-                    elif op_name == "delete":
-                        records.append(self._wal_record_delete(full_key))
-                    else:
-                        raise ValueError(f"Unsupported batch op: {op_name}")
+                records: list[dict[str, Any]] = [
+                    _BATCH_OP_HANDLERS[op_name].wal(
+                        self, self._get_full_key(key), value
+                    )
+                    for op_name, key, value in ops
+                ]
                 self._wal.batch_write_entries(records)
 
             # 2. Memory mutations second (short keys).
             for op_name, key, value in ops:
-                if op_name == "set_blob":
-                    self._mem_apply_set_blob(key, value)
-                elif op_name == "zadd":
-                    self._mem_apply_zadd(key, value)
-                elif op_name == "zrem":
-                    members = [value] if isinstance(value, str) else list(value)
-                    self._mem_apply_zrem(key, members)
-                elif op_name == "delete":
-                    self._mem_apply_delete(key)
+                _BATCH_OP_HANDLERS[op_name].mem(self, key, value)
 
         # 3. Forensic logging (optional, outside the lock — mirrors
         #    ``_set_degraded``). Keyed on the ``set_blob`` op's key

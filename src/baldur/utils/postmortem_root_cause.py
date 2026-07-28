@@ -8,6 +8,50 @@ Usable without a Django dependency.
 
 from __future__ import annotations
 
+# Timeline event_type values are an open vocabulary (producers range from
+# framework emitters to operator-supplied API bodies, e.g. "cb_opened"),
+# so CB states are recognized by tolerant substring markers, not exact
+# names. The table is ordered first-match-wins: half-open markers MUST be
+# tested before "opened"/"open" because "half_open" contains "open".
+_HALF_OPEN_MARKERS = ("half_open", "half-open")
+_CB_STATE_PATTERNS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (_HALF_OPEN_MARKERS, "HALF_OPEN"),
+    (("opened",), "OPEN"),
+    (("closed",), "CLOSED"),
+)
+
+
+def _is_half_open_event(event_type: str) -> bool:
+    """Whether a lowercase event_type denotes a CB HALF_OPEN transition."""
+    return any(marker in event_type for marker in _HALF_OPEN_MARKERS)
+
+
+def _is_open_event(event_type: str) -> bool:
+    """Whether a lowercase event_type denotes a CB OPEN transition.
+
+    A single "open" substring also covers the "opened" spelling.
+    """
+    return "open" in event_type
+
+
+def _classify_cb_state(event_type: str) -> str | None:
+    """Classify a lowercase event_type into a CB state via the ordered table."""
+    for markers, state in _CB_STATE_PATTERNS:
+        if any(marker in event_type for marker in markers):
+            return state
+    return None
+
+
+def _find_first_open_event(timeline: list, *, skip_half_open: bool) -> dict | None:
+    """Return the first CB OPEN event in a timeline, or None."""
+    for event in timeline:
+        event_type = event.get("event_type", "").lower()
+        if skip_half_open and _is_half_open_event(event_type):
+            continue
+        if _is_open_event(event_type):
+            return event
+    return None
+
 
 def extract_trigger_info(timeline: list) -> dict | None:
     """
@@ -25,28 +69,24 @@ def extract_trigger_info(timeline: list) -> dict | None:
         return None
 
     # Find the first CB OPEN event (half_open excluded)
-    for event in timeline:
-        event_type = event.get("event_type", "").lower()
-        # Skip half_open/half-open and look for opened/open
-        if "half_open" in event_type or "half-open" in event_type:
-            continue
-        if "opened" in event_type or "open" in event_type:
-            details = event.get("details", {})
-            error_context = details.get("error_context") or {}
+    event = _find_first_open_event(timeline, skip_half_open=True)
+    if event is not None:
+        details = event.get("details", {})
+        error_context = details.get("error_context") or {}
 
-            return {
-                "event_type": event.get("event_type"),
-                "service": details.get("service_name") or details.get("service"),
-                "timestamp": event.get("timestamp"),
-                "error_context": (
-                    {
-                        "error_type": error_context.get("error_type"),
-                        "message": error_context.get("message"),
-                    }
-                    if error_context
-                    else None
-                ),
-            }
+        return {
+            "event_type": event.get("event_type"),
+            "service": details.get("service_name") or details.get("service"),
+            "timestamp": event.get("timestamp"),
+            "error_context": (
+                {
+                    "error_type": error_context.get("error_type"),
+                    "message": error_context.get("message"),
+                }
+                if error_context
+                else None
+            ),
+        }
 
     return None
 
@@ -70,37 +110,33 @@ def extract_detection_info(
         return None
 
     # Find the first CB OPEN event (OPEN = detection time, half_open excluded)
-    for event in timeline:
-        event_type = event.get("event_type", "").lower()
-        # Exclude half_open/half-open
-        if "half_open" in event_type or "half-open" in event_type:
-            continue
-        if "opened" in event_type or "open" in event_type:
-            details = event.get("details", {})
+    event = _find_first_open_event(timeline, skip_half_open=True)
+    if event is not None:
+        details = event.get("details", {})
 
-            # Try to extract failure_count and threshold
-            failure_count = details.get("failure_count")
-            threshold = details.get("threshold") or details.get("failure_threshold")
+        # Try to extract failure_count and threshold
+        failure_count = details.get("failure_count")
+        threshold = details.get("threshold") or details.get("failure_threshold")
 
-            # Fall back to threshold_config when details omits it
-            if threshold is None and threshold_config:
-                threshold = threshold_config.get("failure_threshold")
+        # Fall back to threshold_config when details omits it
+        if threshold is None and threshold_config:
+            threshold = threshold_config.get("failure_threshold")
 
-            result = {
-                "method": "circuit_breaker_threshold",
-                "detected_at": event.get("timestamp"),
-                "detector": "CircuitBreakerService",
-            }
+        result = {
+            "method": "circuit_breaker_threshold",
+            "detected_at": event.get("timestamp"),
+            "detector": "CircuitBreakerService",
+        }
 
-            # Add threshold information when present
-            if failure_count is not None or threshold is not None:
-                result["threshold_exceeded"] = {}
-                if failure_count is not None:
-                    result["threshold_exceeded"]["failure_count"] = failure_count
-                if threshold is not None:
-                    result["threshold_exceeded"]["threshold"] = threshold
+        # Add threshold information when present
+        if failure_count is not None or threshold is not None:
+            result["threshold_exceeded"] = {}
+            if failure_count is not None:
+                result["threshold_exceeded"]["failure_count"] = failure_count
+            if threshold is not None:
+                result["threshold_exceeded"]["threshold"] = threshold
 
-            return result
+        return result
 
     return None
 
@@ -127,13 +163,11 @@ def extract_resolution_info(timeline: list) -> dict | None:
     for event in timeline:
         event_type = event.get("event_type", "").lower()
 
-        # Check half_open/half-open first (takes precedence over opened)
-        if "half_open" in event_type or "half-open" in event_type:
-            state_changes.append("HALF_OPEN")
-        elif "opened" in event_type:
-            state_changes.append("OPEN")
-        elif "closed" in event_type:
-            state_changes.append("CLOSED")
+        state = _classify_cb_state(event_type)
+        if state is None:
+            continue
+        state_changes.append(state)
+        if state == "CLOSED":
             resolved_at = event.get("timestamp")
 
     if not resolved_at:
@@ -159,16 +193,17 @@ def _extract_error_context_from_timeline(
     Returns:
         (error_type, error_message, first_service) tuple
     """
-    for event in timeline:
-        event_type = event.get("event_type", "").lower()
-        if "opened" in event_type or "open" in event_type:
-            details = event.get("details", {})
-            error_context = details.get("error_context") or {}
-            return (
-                error_context.get("error_type", ""),
-                error_context.get("message", ""),
-                details.get("service_name") or details.get("service"),
-            )
+    # No half-open exclusion here: when a windowed timeline starts
+    # mid-incident, the first state-change event's context is still used.
+    event = _find_first_open_event(timeline, skip_half_open=False)
+    if event is not None:
+        details = event.get("details", {})
+        error_context = details.get("error_context") or {}
+        return (
+            error_context.get("error_type", ""),
+            error_context.get("message", ""),
+            details.get("service_name") or details.get("service"),
+        )
     return None, None, None
 
 

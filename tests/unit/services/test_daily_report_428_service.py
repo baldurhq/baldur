@@ -857,6 +857,20 @@ class TestCollectAutomatedActionsSectionBehavior:
         assert s.saga_compensated == 1
         assert s.governance_blocked == 1
 
+    def test_counter_field_mapping_targets_real_summary_fields(self):
+        """Every _ACTION_COUNTER_FIELDS value is a real summary field.
+
+        The aggregation loop applies counters via setattr(), which would
+        silently create a fresh attribute if a model field were renamed or
+        removed — so the mapping is pinned against the model here.
+        """
+        from baldur.services.daily_report.models import AutomatedActionsSummary
+        from baldur.services.daily_report.service import _ACTION_COUNTER_FIELDS
+
+        summary = AutomatedActionsSummary()
+        for field_name in _ACTION_COUNTER_FIELDS.values():
+            assert hasattr(summary, field_name), field_name
+
     def test_entries_are_not_removed_after_aggregation(self):
         """Entries remain in report.entries for detail API access (Phase 4)."""
         svc = DailyReportService()

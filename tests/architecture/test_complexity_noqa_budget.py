@@ -92,7 +92,9 @@ _ROOT_BUDGETS: dict[str, int] = {
     # 719: -1 — CircuitBreakerEvaluator._simulate dropped its C901/PLR0912 noqa
     # when its inline trip branches were replaced by the shared evaluate_trip call.
     # audit-watchdog removal: -1 — the deleted module carried one complexity noqa.
-    "baldur": 113,
+    # batch-op registry: -1 — _batch_write_ops_degraded dropped its C901/PLR0912
+    # noqa when the per-phase op chains collapsed into _BATCH_OP_HANDLERS.
+    "baldur": 112,
     # 666: -1 — _update_config_with_meta refactored into _versioned_write +
     # _merge_changes + _post_write helpers, dropping its complexity noqa.
     "baldur_pro": 32,
