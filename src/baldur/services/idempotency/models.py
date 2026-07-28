@@ -590,13 +590,14 @@ class IdempotencyKey:
     @classmethod
     def for_dlq_replay(
         cls,
-        dlq_id: int,
+        dlq_id: str,
         domain: str,
         retry_count: int,
     ) -> IdempotencyKey:
         """DLQ replay dedup — prevents concurrent replay of same entry at same attempt.
 
-        Uses DLQ entry PK (guaranteed unique per DB) + retry_count to scope
+        Uses the opaque repository-issued entry id (unique by the allocation
+        contract, whatever shape the backend chose) + retry_count to scope
         idempotency per attempt. Different attempts (retry_count) get different keys,
         allowing intentional retries while blocking concurrent duplicates.
         """

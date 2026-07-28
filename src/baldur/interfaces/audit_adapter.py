@@ -547,12 +547,16 @@ class AuditLogAdapter(ABC):
 
     def log_dlq_store(
         self,
-        dlq_id: int,
+        dlq_id: str,
         domain: str,
         failure_type: str,
         error_message: str | None = None,
     ) -> None:
-        """Convenience method for DLQ storage."""
+        """Convenience method for DLQ storage.
+
+        ``dlq_id`` is the opaque entry id issued by the repository; it carries
+        no numeric meaning and must not be parsed.
+        """
         self.log(
             AuditEntry(
                 action=AuditAction.DLQ_STORE,
@@ -568,13 +572,17 @@ class AuditLogAdapter(ABC):
 
     def log_dlq_replay(
         self,
-        dlq_id: int,
+        dlq_id: str,
         domain: str,
         success: bool,
         actor_id: str | None = None,
         error_message: str | None = None,
     ) -> None:
-        """Convenience method for DLQ replay."""
+        """Convenience method for DLQ replay.
+
+        ``dlq_id`` is the opaque entry id issued by the repository; it carries
+        no numeric meaning and must not be parsed.
+        """
         self.log(
             AuditEntry(
                 action=(

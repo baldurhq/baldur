@@ -424,12 +424,30 @@ class FailedOperationRepository(ABC):
         recommended_action: str = "",
         expires_at: datetime | None = None,
     ) -> FailedOperationData:
-        """Create a new failed operation record"""
+        """Create a new failed operation record.
+
+        The returned ``FailedOperationData.id`` is an **opaque string token**:
+        unique across uncoordinated worker processes, stable for the entry's
+        lifetime, and otherwise structureless. Each backend chooses its own
+        shape — a stringified numeric primary key, a composite token, or
+        anything else. Consumers MUST NOT parse it numerically, order by it,
+        or infer any structure from it; treat it as a bare handle to pass back
+        to :meth:`get_by_id` and the rest of this interface.
+        """
         ...
 
     @abstractmethod
     def get_by_id(self, id: str) -> FailedOperationData | None:
-        """Get a failed operation by ID"""
+        """Get a failed operation by its opaque id.
+
+        ``id`` must be passed as a ``str`` — exactly the token
+        :meth:`create` returned. A non-``str`` value (notably raw ``bytes``
+        read straight off a backend index) is **not** normalized: it reads as
+        a miss and returns ``None`` rather than raising. Decode at the call
+        site.
+
+        Returns ``None`` when no entry with that id exists.
+        """
         ...
 
     @abstractmethod

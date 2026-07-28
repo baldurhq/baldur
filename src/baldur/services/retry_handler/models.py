@@ -397,7 +397,8 @@ class RetryResult:
     attempt: int
     value: Any = None
     error: Exception | None = None
-    dlq_id: int | None = None
+    # Opaque entry id issued by the DLQ repository — never parsed numerically.
+    dlq_id: str | None = None
     next_delay: int | None = None
 
     @property

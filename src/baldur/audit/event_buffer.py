@@ -25,7 +25,7 @@ Usage:
     buffer.add(
         event_type=AuditEventType.DLQ_STORE,
         source="DLQService",
-        details={"dlq_id": 123, "domain": "payment"},
+        details={"dlq_id": "web-1:112:a1b2c3d4e5f60708:5", "domain": "payment"},
     )
 
     # Automatically collected and recorded by AuditMiddleware

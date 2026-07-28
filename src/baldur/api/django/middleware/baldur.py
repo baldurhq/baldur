@@ -621,8 +621,12 @@ class BaldurMiddleware:
         request_data: dict[str, Any],
         error_context: dict[str, Any],
         request: HttpRequest | None = None,
-    ) -> int | None:
-        """Store failed request to DLQ."""
+    ) -> str | None:
+        """Store failed request to DLQ.
+
+        Returns the opaque repository-issued entry id, or ``None`` when the DLQ
+        was unavailable or the store failed.
+        """
         try:
             domain = self._infer_domain(request_data.get("path", ""))
 

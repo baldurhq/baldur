@@ -153,7 +153,7 @@ class ReplayService(EventEmitterMixin):
         service = ReplayService()
 
         # Single replay
-        result = service.replay_single(dlq_id=123)
+        result = service.replay_single(dlq_id="web-1:112:a1b2c3d4e5f60708:5")
 
         # Batch replay
         batch_result = service.replay_batch(
