@@ -8,7 +8,7 @@ Scope:
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -16,11 +16,17 @@ from baldur.bridges.tenacity.callbacks import (
     BridgeCallbackContext,
     RetryExhaustedSnapshot,
     _BudgetExhaustedAbort,
+    _CooldownDeferredAbort,
     chain,
     make_after_callback,
     make_before_callback,
     make_before_sleep_callback,
     make_retry_error_callback,
+)
+from baldur.services.rate_limit_coordinator.models import RateLimitResult
+
+_RECORD_ATTEMPT_STARTED = (
+    "baldur.services.metrics.recorders.record_retry_attempt_started"
 )
 
 # =============================================================================
@@ -129,6 +135,113 @@ class TestMakeBeforeCallbackBehavior:
         cb = make_before_callback(ctx)
         # Should not raise — no budget to call.
         cb(make_retry_state(attempt_number=1))
+
+
+# =============================================================================
+# Behavior — make_before_callback records the timely pressure series (729 D6)
+# =============================================================================
+
+
+class TestBeforeCallbackAttemptsStartedBehavior:
+    """``before`` is this bridge's only metric surface, on every attempt.
+
+    A tenacity-driven sequence writes no terminal series at all, so without the
+    record here bridge-managed retries would be missing from retry pressure
+    while the two native policies are present in it — one alert reading two
+    populations. ``retry_state.attempt_number`` is already 1-based, which is
+    the helper's own convention, so the bridge forwards it unchanged.
+    """
+
+    @staticmethod
+    def _ctx(**overrides):
+        """Bridge context with no collaborators unless a test supplies them."""
+        kwargs = {
+            "domain": "payment",
+            "rate_limit_key": None,
+            "rate_limit_coordinator": None,
+            "retry_budget": None,
+        }
+        kwargs.update(overrides)
+        return BridgeCallbackContext(**kwargs)
+
+    @pytest.mark.parametrize(
+        ("attempt_number", "expected_is_retry"),
+        [(1, False), (2, True), (5, True)],
+        ids=["first_attempt", "first_retry", "deep_in_the_ladder"],
+    )
+    def test_bridge_records_attempts_started_with_the_one_based_attempt_number(
+        self, make_retry_state, attempt_number, expected_is_retry
+    ):
+        """tenacity's 1-based counter maps straight onto the helper's contract."""
+        cb = make_before_callback(self._ctx())
+
+        with patch(_RECORD_ATTEMPT_STARTED, autospec=True) as mock_started:
+            cb(make_retry_state(attempt_number=attempt_number))
+
+        mock_started.assert_called_once_with("payment", is_retry=expected_is_retry)
+
+    def test_bridge_records_attempts_started_with_no_retry_budget_injected(
+        self, make_retry_state
+    ):
+        """The record is not gated on the budget the line above it consults.
+
+        Nothing in the tree constructs an ``AdaptiveRetryBudget``, so a record
+        living inside that guard would never fire on any real deployment — the
+        defect this series was added to avoid repeating.
+        """
+        cb = make_before_callback(self._ctx(retry_budget=None))
+
+        with patch(_RECORD_ATTEMPT_STARTED, autospec=True) as mock_started:
+            cb(make_retry_state(attempt_number=2))
+
+        mock_started.assert_called_once_with("payment", is_retry=True)
+
+    def test_bridge_records_attempts_started_before_the_cooldown_wait_begins(
+        self, make_retry_state
+    ):
+        """Same ordering pin as the native loops: counted at sleep start.
+
+        The coordinator double reports how many starts existed when the wait
+        was entered; one means the attempt about to sleep out an honored
+        ``Retry-After`` had already been counted.
+        """
+        # Given
+        coordinator = MagicMock()
+        starts_at_wait_entry: list[int] = []
+        cb = make_before_callback(
+            self._ctx(rate_limit_key="payment", rate_limit_coordinator=coordinator)
+        )
+
+        # When
+        with patch(_RECORD_ATTEMPT_STARTED, autospec=True) as mock_started:
+
+            def _wait(_key, max_wait=None):
+                starts_at_wait_entry.append(mock_started.call_count)
+                return RateLimitResult(waited=False)
+
+            coordinator.wait_if_needed.side_effect = _wait
+            cb(make_retry_state(attempt_number=2))
+
+        # Then
+        assert starts_at_wait_entry == [1]
+
+    def test_bridge_deferred_attempt_records_attempts_started_before_aborting(
+        self, make_retry_state
+    ):
+        """A deferral aborts the loop, but the demand it refused is still counted."""
+        coordinator = MagicMock()
+        coordinator.wait_if_needed.return_value = RateLimitResult(
+            deferred=True, not_before=1.0
+        )
+        cb = make_before_callback(
+            self._ctx(rate_limit_key="payment", rate_limit_coordinator=coordinator)
+        )
+
+        with patch(_RECORD_ATTEMPT_STARTED, autospec=True) as mock_started:
+            with pytest.raises(_CooldownDeferredAbort):
+                cb(make_retry_state(attempt_number=1))
+
+        assert mock_started.call_args_list == [call("payment", is_retry=False)]
 
 
 # =============================================================================

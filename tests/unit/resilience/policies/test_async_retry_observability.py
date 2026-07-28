@@ -26,7 +26,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -42,6 +42,9 @@ from baldur.services.retry_handler.policy import RetryPolicy
 _DOMAIN = "async_obs"
 _GET_EVENT_BUS = "baldur.services.event_bus.get_event_bus"
 _RECORD_RETRY_RESOLUTION = "baldur.services.metrics.recorders.record_retry_resolution"
+_RECORD_ATTEMPT_STARTED = (
+    "baldur.services.metrics.recorders.record_retry_attempt_started"
+)
 _GET_RETRY_SETTINGS = "baldur.settings.retry.get_retry_settings"
 _GET_REMAINING_MS = "baldur.scaling.deadline_context.get_remaining_ms"
 _INTERVENTION_SUPPRESSED = (
@@ -467,3 +470,106 @@ class TestAsyncEmitOffloadBehavior:
         assert observed == []
         # The emit did complete once released (offloaded call is still awaited).
         assert emit_completed == [True]
+
+
+# =============================================================================
+# Behavior — the async loop records attempt starts, at sync parity (729 D6)
+# =============================================================================
+
+
+class TestAsyncAttemptsStartedParityBehavior:
+    """The async surface records the same attempt-start shape as the sync one.
+
+    The two loops count differently in their own frames — the async loop is
+    0-indexed, the sync loop 1-indexed — while the shared helper's contract is
+    1-based. An off-by-one on either side would not raise anywhere: it would
+    silently move one attempt per sequence between the ratio's numerator and
+    its denominator-only child, and every operator's retry-pressure panel would
+    read wrong by a fixed amount on one surface only. The parity assertion is
+    therefore against the sync loop itself, not against a restated literal.
+    """
+
+    @pytest.mark.asyncio
+    async def test_async_loop_records_three_attempts_started_one_false_two_true(self):
+        """A 3-attempt exhaustion: one first attempt, two retries."""
+        policy = AsyncRetryPolicy(
+            max_retries=2, domain=_DOMAIN, backoff=ConstantBackoff(delay=0.0)
+        )
+
+        with patch(_RECORD_ATTEMPT_STARTED, autospec=True) as mock_started:
+            result = await policy.execute(_always_fail_conn)
+
+        assert result.total_attempts == 3
+        assert mock_started.call_args_list == [
+            call(_DOMAIN, is_retry=False),
+            call(_DOMAIN, is_retry=True),
+            call(_DOMAIN, is_retry=True),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_async_and_sync_loops_record_an_identical_attempts_started_shape(
+        self,
+    ):
+        """720 parity, on the timely half: same sequence, same recorded shape."""
+        # Given — two policies driven to the same 3-attempt exhaustion
+        async_policy = AsyncRetryPolicy(
+            max_retries=2, domain=_DOMAIN, backoff=ConstantBackoff(delay=0.0)
+        )
+        sync_policy = RetryPolicy(
+            config=RetryPolicyConfig(max_attempts=3, domain=_DOMAIN),
+            backoff=ConstantBackoff(delay=0.0),
+            sleeper=lambda _: None,
+        )
+
+        # When
+        with patch(_RECORD_ATTEMPT_STARTED, autospec=True) as async_started:
+            await async_policy.execute(_always_fail_conn)
+        with patch(_RECORD_ATTEMPT_STARTED, autospec=True) as sync_started:
+            sync_policy.execute(_raise_conn_sync)
+
+        # Then
+        assert async_started.call_args_list == sync_started.call_args_list
+
+    @pytest.mark.asyncio
+    async def test_async_single_attempt_disabled_path_records_one_attempts_started(
+        self,
+    ):
+        """The disabled path records a terminal, so it owes the matching start.
+
+        Its terminal already lands in the ratio's numerator source; omitting
+        the start would leave the denominator short on any deployment running
+        with retries switched off.
+        """
+        with patch(_GET_RETRY_SETTINGS, return_value=SimpleNamespace(enabled=False)):
+            policy = AsyncRetryPolicy(max_retries=3, domain=_DOMAIN)
+
+        with (
+            patch(_RECORD_ATTEMPT_STARTED, autospec=True) as mock_started,
+            patch(_RECORD_RETRY_RESOLUTION, autospec=True) as mock_resolution,
+        ):
+            result = await policy.execute(_ok)
+
+        assert result.total_attempts == 1
+        mock_started.assert_called_once_with(_DOMAIN, is_retry=False)
+        mock_resolution.assert_called_once_with(_DOMAIN, 1, "success")
+
+    @pytest.mark.asyncio
+    async def test_wall_clock_refused_iteration_records_no_attempts_started(self):
+        """An iteration refused above the record never ran, so it is not demand.
+
+        The budget break sits before the record on both surfaces; only the one
+        attempt that actually executed is counted, and the sequence's exhaustion
+        reason confirms the refusal is what ended it.
+        """
+        policy = AsyncRetryPolicy(
+            max_retries=3,
+            domain=_DOMAIN,
+            max_elapsed=0.01,
+            backoff=ConstantBackoff(delay=10.0),
+        )
+
+        with patch(_RECORD_ATTEMPT_STARTED, autospec=True) as mock_started:
+            result = await policy.execute(_always_fail_conn)
+
+        assert result.total_attempts == 1
+        assert mock_started.call_args_list == [call(_DOMAIN, is_retry=False)]

@@ -19,7 +19,7 @@ collapse to ``OTHER_DOMAIN``).
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 from structlog.testing import capture_logs
@@ -27,11 +27,18 @@ from structlog.testing import capture_logs
 from baldur.core.backoff import ConstantBackoff
 from baldur.core.test_mode_context import TestModeContext
 from baldur.interfaces.resilience_policy import PolicyOutcome
+from baldur.services.backoff_calculator.budget import AdaptiveRetryBudget
+from baldur.services.rate_limit_coordinator import RateLimitCoordinator
+from baldur.services.rate_limit_coordinator.models import RateLimitResult
 from baldur.services.retry_handler.models import RetryPolicyConfig
 from baldur.services.retry_handler.policy import RetryPolicy
 
 _OUTCOMES = "baldur_retry_outcomes_total"
 _ATTEMPTS = "baldur_retry_attempts_distribution"
+_RECORD_ATTEMPT_STARTED = (
+    "baldur.services.metrics.recorders.record_retry_attempt_started"
+)
+_RECORD_RESOLUTION = "baldur.services.metrics.recorders.record_retry_resolution"
 
 
 def _sample(name: str, labels: dict[str, str] | None = None) -> float:
@@ -322,3 +329,199 @@ class TestInlineRetryMetricSyntheticLabel:
 
         # Then — the recording landed on the matching is_synthetic series
         assert _sample(_OUTCOMES, labels) - before == 1.0
+
+
+# =============================================================================
+# Timely pressure — the sync loop records an attempt start at admission (729 D6)
+# =============================================================================
+
+
+class TestSyncLoopAttemptsStartedBehavior:
+    """The sync retry loop records one attempt start per admitted attempt.
+
+    Assertions read the facade's call args rather than the registry: what is at
+    stake here is *when* and *how often* the loop records, and the call list
+    carries the ordering the registry's accumulated totals cannot.
+
+    The pin that matters is placement. The record sits after the loop's refusal
+    checks and before the rate-limit cooldown wait — an honored ``Retry-After``
+    can hold that wait for up to an hour, and a record on the far side of it
+    would leave the retry share flat for the whole duration of exactly the
+    storm the alert exists to catch.
+    """
+
+    def test_sync_loop_records_three_attempts_started_with_no_retry_budget_injected(
+        self,
+    ):
+        """A 3-attempt exhaustion is one first attempt and two retries.
+
+        This is the canonical ``protect(retry=True)`` shape: nothing in the
+        tree constructs an ``AdaptiveRetryBudget``, so the recording must not
+        depend on one — asserted as a precondition rather than assumed.
+        """
+        # Given
+        domain = "external_service"
+        policy = _make_policy(domain, max_attempts=3)
+        assert policy._retry_budget is None
+
+        # When
+        with patch(_RECORD_ATTEMPT_STARTED, autospec=True) as mock_started:
+            result = policy.execute(_always_fail)
+
+        # Then — one denominator-only attempt, two that are retry pressure
+        assert result.total_attempts == 3
+        assert mock_started.call_args_list == [
+            call(domain, is_retry=False),
+            call(domain, is_retry=True),
+            call(domain, is_retry=True),
+        ]
+
+    def test_attempts_started_is_recorded_before_the_cooldown_wait_begins(self):
+        """The storm is counted at sleep start, not at resolution.
+
+        The coordinator double reports how many starts had been recorded at the
+        moment the wait began. One means the attempt was already counted before
+        it went to sleep; moving the record past the wait would make it zero
+        and the series would stall for the length of the cooldown.
+        """
+        # Given
+        domain = "external_service"
+        coordinator = MagicMock(spec=RateLimitCoordinator)
+        starts_at_wait_entry: list[int] = []
+
+        # When
+        with patch(_RECORD_ATTEMPT_STARTED, autospec=True) as mock_started:
+
+            def _wait(_key, max_wait=None):
+                starts_at_wait_entry.append(mock_started.call_count)
+                return RateLimitResult(waited=False)
+
+            coordinator.wait_if_needed.side_effect = _wait
+            policy = RetryPolicy(
+                config=RetryPolicyConfig(max_attempts=2, domain=domain),
+                backoff=ConstantBackoff(delay=0.0),
+                rate_limit_coordinator=coordinator,
+                sleeper=lambda _: None,
+            )
+            result = policy.execute(lambda: "ok")
+
+        # Then
+        assert result.outcome == PolicyOutcome.SUCCESS
+        assert starts_at_wait_entry == [1]
+
+    def test_deferred_attempt_records_attempts_started_though_func_never_runs(self):
+        """A cooldown deferral is refused demand, and demand is what the ratio counts.
+
+        The attempt was admitted and then turned away by the downstream's own
+        cooldown; the call never ran, but the pressure was real. Suppressing it
+        would hide the retry storm that caused the cooldown.
+        """
+        # Given
+        domain = "external_service"
+        coordinator = MagicMock(spec=RateLimitCoordinator)
+        coordinator.wait_if_needed.return_value = RateLimitResult(
+            deferred=True, not_before=1.0
+        )
+        invocations: list[int] = []
+        policy = RetryPolicy(
+            config=RetryPolicyConfig(max_attempts=3, domain=domain),
+            backoff=ConstantBackoff(delay=0.0),
+            rate_limit_coordinator=coordinator,
+            sleeper=lambda _: None,
+        )
+
+        # When
+        with patch(_RECORD_ATTEMPT_STARTED, autospec=True) as mock_started:
+            result = policy.execute(lambda: invocations.append(1))
+
+        # Then — recorded once, and the business call demonstrably never ran
+        assert invocations == []
+        assert result.metadata["reason"] == "rate_limit_deferred"
+        assert mock_started.call_args_list == [call(domain, is_retry=False)]
+
+    def test_budget_refused_iteration_records_no_attempts_started(self):
+        """An iteration refused before the record never ran, so it is not demand.
+
+        The refusal happens above the record on purpose: the budget breaks the
+        loop, no call is made, and counting it would inflate the retry share
+        with attempts that were prevented rather than attempted.
+        """
+        # Given
+        domain = "external_service"
+        budget = MagicMock(spec=AdaptiveRetryBudget)
+        budget.should_allow_retry.return_value = False
+        budget.get_stats.return_value = {}
+        policy = RetryPolicy(
+            config=RetryPolicyConfig(max_attempts=3, domain=domain),
+            backoff=ConstantBackoff(delay=0.0),
+            retry_budget=budget,
+            sleeper=lambda _: None,
+        )
+
+        # When
+        with patch(_RECORD_ATTEMPT_STARTED, autospec=True) as mock_started:
+            result = policy.execute(_always_fail)
+
+        # Then — the refusal fired, and only the admitted first attempt recorded
+        budget.should_allow_retry.assert_called_once()
+        assert result.metadata["reason"] == "retry_budget"
+        assert mock_started.call_args_list == [call(domain, is_retry=False)]
+
+    def test_allowing_budget_records_the_same_attempts_started_shape_as_no_budget(
+        self,
+    ):
+        """The recording path consults no admission predicate of its own.
+
+        A budget that refuses nothing changes what the loop *does* in no way,
+        so it must change what the loop *records* in no way either. If the
+        record were gated on budget state instead of on admission, these two
+        runs would diverge.
+        """
+        # Given
+        domain = "external_service"
+        budget = MagicMock(spec=AdaptiveRetryBudget)
+        budget.should_allow_retry.return_value = True
+
+        # When — the same 3-attempt exhaustion, with and without a budget
+        with patch(_RECORD_ATTEMPT_STARTED, autospec=True) as without_budget:
+            _make_policy(domain, max_attempts=3).execute(_always_fail)
+
+        with patch(_RECORD_ATTEMPT_STARTED, autospec=True) as with_budget:
+            RetryPolicy(
+                config=RetryPolicyConfig(max_attempts=3, domain=domain),
+                backoff=ConstantBackoff(delay=0.0),
+                retry_budget=budget,
+                sleeper=lambda _: None,
+            ).execute(_always_fail)
+
+        # Then
+        assert with_budget.call_args_list == without_budget.call_args_list
+
+    @pytest.mark.parametrize(
+        "route",
+        ["globally_disabled", "observe_only"],
+        ids=["globally_disabled", "observe_only"],
+    )
+    def test_single_attempt_route_records_one_attempts_started_and_one_terminal(
+        self, route
+    ):
+        """The no-retry routes owe the ratio's denominator, not just its terminal.
+
+        Both routes already record a terminal. Recording the terminal without
+        the matching start would shrink the denominator alone, inflating the
+        retry share on every deployment that runs with retries turned off.
+        """
+        # Given
+        domain = "internal_process"
+
+        # When
+        with (
+            patch(_RECORD_ATTEMPT_STARTED, autospec=True) as mock_started,
+            patch(_RECORD_RESOLUTION, autospec=True) as mock_resolution,
+        ):
+            result = _run_via_single_attempt_route(route, domain, lambda: "ok")
+
+        # Then
+        assert result.total_attempts == 1
+        mock_started.assert_called_once_with(domain, is_retry=False)
+        mock_resolution.assert_called_once_with(domain, 1, "success")
