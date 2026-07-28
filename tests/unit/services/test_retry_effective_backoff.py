@@ -48,6 +48,11 @@ COERCION_FAILED_EVENT = "retry.domain_override_coercion_failed"
 #: Emitted when ``build_backoff()`` cannot honor the configured strategy name.
 STRATEGY_FAILED_EVENT = "retry.backoff_strategy_resolution_failed"
 
+#: An integer JSON can carry but no float can represent: ``float()`` raises
+#: OverflowError on it, which is neither of the two errors a coercion guard
+#: reaches for first.
+UNREPRESENTABLE_INT = int("1" + "0" * 400)
+
 #: Every field ``build_backoff()`` reads. Tier parity is asserted over exactly
 #: this tuple: a future strategy parameter sourced at build time instead of at
 #: resolution time would be invisible to a narrower one.
@@ -486,8 +491,15 @@ class TestDomainBackoffBaseBehavior:
 
     @pytest.mark.parametrize(
         "bad_value",
-        ["fast", None, 0, -1, [2.0]],
-        ids=["non_numeric_string", "none", "zero", "negative", "list"],
+        ["fast", None, 0, -1, [2.0], UNREPRESENTABLE_INT],
+        ids=[
+            "non_numeric_string",
+            "none",
+            "zero",
+            "negative",
+            "list",
+            "unrepresentable_int",
+        ],
     )
     def test_an_unusable_override_falls_open_to_the_settings_value(self, bad_value):
         """A config typo degrades to the default instead of reaching the loop.
@@ -496,7 +508,9 @@ class TestDomainBackoffBaseBehavior:
         would otherwise surface as a TypeError *inside* a business call,
         replacing its outcome. A non-positive value is rejected for a different
         reason: the retry loop skips any sleep at or below zero, so the ladder
-        would degenerate into a hot loop against the failing upstream.
+        would degenerate into a hot loop against the failing upstream. The
+        over-range integer is the case a two-error guard misses: JSON bounds
+        integer width nowhere, and ``float()`` answers that with OverflowError.
         """
         with capture_logs() as logs:
             config = self._resolve({"backoff_base": bad_value}, base_delay=1.0)
@@ -536,6 +550,22 @@ class TestDomainBackoffBaseBehavior:
             self._resolve({"backoff_base": 3.0})
 
         assert not [e for e in logs if e.get("event") == COERCION_FAILED_EVENT]
+
+    def test_an_unusable_strategy_override_still_produces_a_working_ladder(self):
+        """The whole resolve → build → sleep chain degrades, never raises.
+
+        The overlay is unvalidated, so it can carry a list where a strategy
+        name belongs. That value reaches the builder's dispatch table, where an
+        unhashable key raises out of the lookup itself — inside
+        ``RetryPolicy.__init__``, before the business call ever runs. Asserted
+        end-to-end rather than on the builder alone, because "must not fail a
+        business call" is a statement about the caller, not about a dict.
+        """
+        config = self._resolve({"backoff_strategy": ["exponential"]})
+
+        sleeps = _record_ladder(config)
+
+        assert len(sleeps) == config.max_attempts - 1
 
 
 # =============================================================================
@@ -641,14 +671,23 @@ class TestBuildBackoffBehavior:
         assert strategy.base_delay == 2.0
         assert strategy.max_delay == 45.0
 
-    def test_an_unknown_strategy_falls_open_to_exponential_with_a_warning(self):
+    @pytest.mark.parametrize(
+        "bad_strategy",
+        ["fibonacci", ["exponential"], {"name": "exponential"}],
+        ids=["unknown_name", "unhashable_list", "unhashable_dict"],
+    )
+    def test_an_unknown_strategy_falls_open_to_exponential_with_a_warning(
+        self, bad_strategy
+    ):
         """A config-shaped side input must never fail a business call.
 
         An unknown name is reachable only through the unvalidated domain
         overlay -- the settings validator rejects it everywhere else -- so the
-        builder degrades instead of raising, and says so.
+        builder degrades instead of raising, and says so. An unhashable value
+        off that same overlay has to degrade identically: it does not *miss*
+        the dispatch table, it raises out of the lookup.
         """
-        config = RetryPolicyConfig(backoff_strategy="fibonacci", domain="payment")
+        config = RetryPolicyConfig(backoff_strategy=bad_strategy, domain="payment")
 
         with capture_logs() as logs:
             strategy = config.build_backoff()
@@ -657,7 +696,7 @@ class TestBuildBackoffBehavior:
         warnings = [e for e in logs if e.get("event") == STRATEGY_FAILED_EVENT]
         assert len(warnings) == 1
         assert warnings[0]["log_level"] == "warning"
-        assert warnings[0]["strategy"] == "fibonacci"
+        assert warnings[0]["strategy"] == bad_strategy
         assert warnings[0]["fallback"] == "exponential"
         assert warnings[0]["domain"] == "payment"
 
