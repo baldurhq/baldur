@@ -9,9 +9,8 @@
 # text=auto still lets Git detect binary files and leave them untouched.
 * text=auto eol=lf
 
-# Windows-only scripts stay CRLF: cmd.exe mis-parses an LF-only .bat/.cmd, and
-# older PowerShell hosts are unhappy with LF-only .ps1. None exist today; the
-# rule is here so adding one cannot break it silently.
-*.bat text eol=crlf
-*.cmd text eol=crlf
-*.ps1 text eol=crlf
+# No per-type CRLF exception, deliberately: one rule for every text file is the
+# whole point. The only types that would want one are .bat / .cmd, where
+# cmd.exe can mis-seek an LF-only file around `goto` labels and multi-line
+# blocks — the repository contains none, and a future one that actually hits
+# that is a one-line `*.bat text eol=crlf` away.
