@@ -377,7 +377,7 @@ class TestWatchdogRecorderBeaconContract:
         assert "record_watchdog_beacon" in __all__
 
 
-class TestWatchdogRecorderBeacon:
+class TestWatchdogRecorderBeaconBehavior:
     """731: beacon counter labelling, fail-open, and convenience delegation."""
 
     @pytest.mark.parametrize(
