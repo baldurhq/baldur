@@ -27,6 +27,8 @@ __all__ = [
     "record_watchdog_escalation",
     "record_watchdog_governance_blocked",
     "record_watchdog_beacon",
+    "record_watchdog_pass_truncated",
+    "record_watchdog_single_flight_skipped",
     "set_watchdog_self_cb_state",
     "observe_watchdog_probe_duration",
 ]
@@ -100,6 +102,16 @@ class WatchdogMetricRecorder(BaseMetricRecorder):
             f"{self.PREFIX}_watchdog_beacon_total",
             "Outbound liveness-beacon pings by delivery result",
             ["result"],
+        )
+        self._pass_truncated_total = get_or_create_counter(
+            f"{self.PREFIX}_watchdog_pass_truncated_total",
+            "Health-check passes cut short by the pass budget",
+            [],
+        )
+        self._probe_single_flight_skipped_total = get_or_create_counter(
+            f"{self.PREFIX}_watchdog_probe_single_flight_skipped_total",
+            "Probes skipped because the component's previous invocation is still running",
+            ["component"],
         )
         self._probe_duration = get_or_create_histogram(
             f"{self.PREFIX}_watchdog_probe_duration_seconds",
@@ -178,6 +190,29 @@ class WatchdogMetricRecorder(BaseMetricRecorder):
         except Exception as e:
             logger.warning("metrics.record_watchdog_beacon_failed", error=e)
 
+    def record_pass_truncated(self) -> None:
+        """Record a health-check pass that hit its wall-clock budget.
+
+        Pass-level, so unlabeled: the truncated component names ride the
+        accompanying WARNING, where an operator reads them without paying
+        per-component cardinality for an exceptional event.
+        """
+        try:
+            self._pass_truncated_total.inc()
+        except Exception as e:
+            logger.warning("metrics.record_watchdog_pass_truncated_failed", error=e)
+
+    def record_single_flight_skipped(self, component: str) -> None:
+        """Record a probe skipped because its previous invocation is still running."""
+        try:
+            self._probe_single_flight_skipped_total.labels(
+                component=_resolve_component(component)
+            ).inc()
+        except Exception as e:
+            logger.warning(
+                "metrics.record_watchdog_single_flight_skipped_failed", error=e
+            )
+
     def observe_probe_duration(self, component: str, duration: float) -> None:
         """Record probe latency for a component."""
         try:
@@ -234,6 +269,18 @@ def record_watchdog_beacon(result: str) -> None:
     rec = _lazy_recorder()
     if rec:
         rec.record_beacon(result)
+
+
+def record_watchdog_pass_truncated() -> None:
+    rec = _lazy_recorder()
+    if rec:
+        rec.record_pass_truncated()
+
+
+def record_watchdog_single_flight_skipped(component: str) -> None:
+    rec = _lazy_recorder()
+    if rec:
+        rec.record_single_flight_skipped(component)
 
 
 def observe_watchdog_probe_duration(component: str, duration: float) -> None:

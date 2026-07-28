@@ -7,6 +7,7 @@ Periodically probes and collects the health status of each Baldur component
 
 from __future__ import annotations
 
+import contextvars
 import sys
 import threading
 import time
@@ -28,6 +29,25 @@ if TYPE_CHECKING:
     )
 
 logger = structlog.get_logger()
+
+# Reasons carried by the two synthetic results a bounded pass can produce. Both
+# are UNKNOWN and both carry observed=False; the reason distinguishes them for
+# an operator reading the console.
+PROBE_TRUNCATED_REASON = "pass budget exhausted"
+PROBE_SINGLE_FLIGHT_REASON = "previous probe invocation still running"
+
+# Identifiable in a thread dump alongside baldur-watchdog-beacon.
+PROBE_WORKER_THREAD_PREFIX = "baldur-probe-"
+
+# Consecutive single-flight skips of one component before the manager warns.
+# A component skipped this often has an invocation that never returned.
+_SINGLE_FLIGHT_STUCK_SKIPS = 3
+
+# Worker verdict meaning "this component's feature is not active". The collector
+# deletes the key so the component is absent from the pass entirely — the
+# contract stated on HealthProbe.is_applicable. It must be distinguishable from
+# "no verdict yet", which is what a truncated probe leaves behind.
+_NOT_APPLICABLE = object()
 
 
 class HealthStatus(str, Enum):
@@ -70,6 +90,16 @@ class ProbeResult:
 
     error: str | None = None
     """Error message (on failure)."""
+
+    observed: bool = True
+    """Whether a probe actually ran and produced this verdict.
+
+    ``False`` marks a synthetic result the manager wrote on the probe's behalf
+    because it never got to run — truncated by the pass budget, or skipped
+    because the component's previous invocation is still in flight. Consumers
+    that record telemetry MUST exclude these: a probe that observed nothing is
+    neither a failure nor a 0 ms latency sample.
+    """
 
 
 class HealthProbe(ABC):
@@ -919,6 +949,13 @@ class HealthProbeManager:
         self._worker: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._handle: DaemonWorkerHandle | None = None  # impl 489 D9
+        # Single-flight, keyed by COMPONENT NAME rather than by probe instance:
+        # remove_probe(name) + add_probe(new_instance) is a public API pair that
+        # installs a fresh object under the same name, and the external state a
+        # probe touches belongs to the component, not to the object. Instance
+        # keying would let a stranded old invocation run beside the new one.
+        self._single_flight_locks: dict[str, threading.Lock] = {}
+        self._single_flight_skips: dict[str, int] = {}
 
     def _create_default_probes(self) -> list[HealthProbe]:
         """Build the default probe list."""
@@ -982,20 +1019,37 @@ class HealthProbeManager:
                     return True
             return False
 
-    def probe_all(self) -> dict[str, ProbeResult]:
+    def probe_all(self, deadline: float | None = None) -> dict[str, ProbeResult]:
         """
-        Run all probes with per-probe timeout enforcement.
+        Run all probes, optionally under a wall-clock budget for the whole pass.
+
+        Args:
+            deadline: a ``time.monotonic()`` instant by which the pass must be
+                over. With a deadline the probes run concurrently on daemon
+                threads and any probe still running at the deadline yields
+                ``UNKNOWN`` instead of extending the pass — coverage is the
+                product function here, so every probe gets the full window
+                rather than the tail of the list starving behind a stalled
+                head. Without one (``None``), the historical serial
+                per-probe-timeout behavior is preserved for callers that have
+                no pass budget to protect.
 
         Returns:
-            Per-component probe results
+            Per-component probe results. Components whose feature is inactive
+            (``is_applicable()`` False) are absent, never ``UNKNOWN``.
         """
+        if sys.is_finalizing():
+            return {}
+        if deadline is None:
+            return self._probe_all_serially()
+        return self._probe_all_within(deadline)
+
+    def _probe_all_serially(self) -> dict[str, ProbeResult]:
+        """Run every applicable probe one at a time under its own timeout."""
         from baldur.core.timeout_executor import TimeoutExecutor
 
         timeout = self._settings.probe_timeout_seconds
         results: dict[str, ProbeResult] = {}
-
-        if sys.is_finalizing():
-            return results
 
         executor = TimeoutExecutor()
 
@@ -1040,6 +1094,198 @@ class HealthProbeManager:
             self._last_results = results
 
         return results
+
+    def _probe_all_within(self, deadline: float) -> dict[str, ProbeResult]:
+        """Fan every probe out concurrently and collect until ``deadline``.
+
+        One plain daemon thread per probe — deliberately not a
+        ``ThreadPoolExecutor``, whose workers are non-daemon and are joined at
+        interpreter exit regardless of any flag, so an abandoned hung probe
+        would hold shutdown open. Thread count per pass is unchanged from the
+        serial path (one per probe); only their overlap is.
+        """
+        timeout = self._settings.probe_timeout_seconds
+        with self._lock:
+            probes = list(self._probes)
+
+        pass_start = time.monotonic()
+        # A probe keeps its own timeout, measured from the fan-out (all workers
+        # start together), and the pass deadline caps it. Collection is
+        # sequential but execution is not, so the collection order costs
+        # nothing and no probe is starved by its position in the list.
+        collect_until = min(pass_start + timeout, deadline)
+
+        verdicts: dict[str, Any] = {}
+        completions: dict[str, threading.Event] = {}
+        for probe in probes:
+            if sys.is_finalizing():
+                break
+            name = probe.component_name
+            if name in completions:
+                continue  # duplicate component name: the first registration wins
+            done = threading.Event()
+            completions[name] = done
+            # Captured on THIS thread: the worker inherits the caller's
+            # structlog binding and trace context, matching the serial path.
+            ctx = contextvars.copy_context()
+            threading.Thread(
+                target=ctx.run,
+                args=(self._run_probe_worker, probe, name, verdicts, done),
+                name=f"{PROBE_WORKER_THREAD_PREFIX}{name}",
+                daemon=True,
+            ).start()
+
+        results: dict[str, ProbeResult] = {}
+        truncated: list[str] = []
+        for name, done in completions.items():
+            done.wait(max(0.0, collect_until - time.monotonic()))
+            verdict = verdicts.get(name)
+            if verdict is _NOT_APPLICABLE:
+                continue  # absent from the pass, exactly as the serial skip is
+            if verdict is None:
+                results[name] = self._truncated_result(name)
+                truncated.append(name)
+                continue
+            results[name] = verdict
+
+        # Rebound, never mutated in place: a stranded worker from an earlier
+        # pass writes into that pass's own dict, and get_overall_status()
+        # iterates its snapshot outside the lock.
+        with self._lock:
+            self._last_results = results
+
+        if truncated:
+            self._report_truncated_pass(truncated, deadline - pass_start)
+
+        return results
+
+    def _run_probe_worker(
+        self,
+        probe: HealthProbe,
+        name: str,
+        verdicts: dict[str, Any],
+        done: threading.Event,
+    ) -> None:
+        """Run one probe under its component's single-flight lock (worker thread).
+
+        Writes exactly one verdict into this pass's own dict before signalling
+        completion, so a collector that observes the event sees a settled slot.
+        ``is_applicable()`` is evaluated here rather than on the caller so a
+        slow applicability check is bounded by the same deadline as the probe.
+        """
+        lock = self._single_flight_lock(name)
+        acquired = lock.acquire(blocking=False)
+        try:
+            if not acquired:
+                verdicts[name] = self._single_flight_skipped_result(name)
+                return
+            with self._lock:
+                self._single_flight_skips.pop(name, None)
+            if not _probe_is_applicable(probe):
+                logger.debug(
+                    "health_probe_manager.probe_skipped",
+                    probe=name,
+                    reason="feature_disabled",
+                )
+                verdicts[name] = _NOT_APPLICABLE
+                return
+            verdicts[name] = probe.probe()
+        except Exception as e:  # noqa: BLE001 - a probe fault is never fatal
+            logger.warning(
+                "health_probe_manager.probe_failed",
+                probe=name,
+                error=str(e),
+            )
+            verdicts[name] = ProbeResult(
+                component=name,
+                status=HealthStatus.UNKNOWN,
+                latency_ms=0,
+                timestamp=utc_now(),
+                error=str(e),
+            )
+        finally:
+            if acquired:
+                lock.release()
+            done.set()
+
+    def _single_flight_lock(self, component_name: str) -> threading.Lock:
+        """Return (creating on first use) the single-flight lock for a component."""
+        with self._lock:
+            lock = self._single_flight_locks.get(component_name)
+            if lock is None:
+                lock = threading.Lock()
+                self._single_flight_locks[component_name] = lock
+            return lock
+
+    def _single_flight_skipped_result(self, component_name: str) -> ProbeResult:
+        """Build the skip verdict and surface a component stuck across passes."""
+        with self._lock:
+            skips = self._single_flight_skips.get(component_name, 0) + 1
+            self._single_flight_skips[component_name] = skips
+
+        if skips >= _SINGLE_FLIGHT_STUCK_SKIPS:
+            logger.warning(
+                "health_probe_manager.probe_single_flight_stuck",
+                probe=component_name,
+                consecutive_skips=skips,
+            )
+        self._record_single_flight_skip(component_name)
+
+        return ProbeResult(
+            component=component_name,
+            status=HealthStatus.UNKNOWN,
+            latency_ms=0.0,
+            timestamp=utc_now(),
+            reason=PROBE_SINGLE_FLIGHT_REASON,
+            observed=False,
+        )
+
+    @staticmethod
+    def _truncated_result(component_name: str) -> ProbeResult:
+        """Build the verdict for a probe still running at the pass deadline."""
+        return ProbeResult(
+            component=component_name,
+            status=HealthStatus.UNKNOWN,
+            latency_ms=0.0,
+            timestamp=utc_now(),
+            reason=PROBE_TRUNCATED_REASON,
+            observed=False,
+        )
+
+    @staticmethod
+    def _report_truncated_pass(components: list[str], budget_seconds: float) -> None:
+        """Warn + count a pass that ran out of budget. Names only the truncated.
+
+        Inapplicable components are never listed here (they were deleted from
+        the pass), and neither are single-flight skips (they have their own
+        counter) — an operator reading this line is reading the components the
+        budget actually cut off.
+        """
+        logger.warning(
+            "watchdog.pass_budget_exhausted",
+            truncated_components=components,
+            budget_seconds=round(budget_seconds, 3),
+        )
+        try:
+            from baldur.metrics.recorders.watchdog import (
+                record_watchdog_pass_truncated,
+            )
+
+            record_watchdog_pass_truncated()
+        except Exception as e:  # noqa: BLE001 - telemetry is fail-open
+            logger.debug("watchdog.pass_truncated_metric_failed", error=e)
+
+    @staticmethod
+    def _record_single_flight_skip(component_name: str) -> None:
+        """Count a single-flight skip. Fail-open, like every recorder call here."""
+        try:
+            from baldur.metrics.recorders.watchdog import (
+                record_watchdog_single_flight_skipped,
+            )
+
+            record_watchdog_single_flight_skipped(component_name)
+        except Exception as e:  # noqa: BLE001 - telemetry is fail-open
+            logger.debug("watchdog.single_flight_metric_failed", error=e)
 
     def get_overall_status(self) -> HealthStatus:
         """
@@ -1145,7 +1391,18 @@ class HealthProbeManager:
         logger.info("health_probe_manager.started")
 
     def _spawn_worker_thread(self) -> None:
-        """Construct + start a fresh probe-loop thread (impl 489 D9)."""
+        """Construct + start a fresh probe-loop thread (impl 489 D9).
+
+        Guarded on the thread object rather than on the ``_running`` flag: a
+        respawn observation made against a stale handle must not start a second
+        live loop, while a genuinely dead worker still respawns. Consulting
+        ``_running`` here would break the restart-callback contract instead.
+        """
+        existing = self._worker
+        if existing is not None and existing.is_alive():
+            logger.debug("health_probe_manager.spawn_skipped_worker_alive")
+            return
+
         self._worker = threading.Thread(
             target=self._run_loop_with_crash_capture,
             name="HealthProbeManager",
