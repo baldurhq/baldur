@@ -140,7 +140,12 @@ def _id_positions(node: ast.AST) -> Iterator[str]:
         if isinstance(node.value, str):
             yield node.value
     elif isinstance(node, ast.Subscript):
-        yield from _id_positions(node.slice)
+        # Only a *constant* key names a field. With a variable key the very same
+        # node is a container read returning the value stored *under* the id,
+        # which is not an id -- the same distinction the arg-transparent callees
+        # draw below, and it has to be drawn here too.
+        if isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, str):
+            yield node.slice.value
     elif isinstance(node, ast.IfExp):
         yield from _id_positions(node.body)
         yield from _id_positions(node.orelse)
@@ -314,9 +319,14 @@ _MIN_PARSED_FILES: dict[str, int] = {
 # ones: this tree's margins are wide enough for a whole subtree to go unscanned
 # while the count still passes. Each named subtree must contribute >=1 parsed
 # file, which no unrelated file count can satisfy.
+#
+# Every role carries at least one name, so no root is defended by its count
+# alone: the quickstarts are the whole reason the parse half walks this
+# repository's examples tree, and narrowing that root to a single quickstart
+# clears the floor exactly while hiding the other two.
 _EXPECTED_SUBTREES: dict[str, tuple[str, ...]] = {
-    "examples": (),
-    "oss_source": (),
+    "examples": ("quickstart_django", "quickstart_fastapi", "quickstart_flask"),
+    "oss_source": ("adapters", "services"),
     "tests": ("unit", "architecture"),
 }
 
@@ -419,6 +429,8 @@ _CLEAN_SOURCES: tuple[tuple[str, str], ...] = (
     ("id_derived_option", 'parser.add_argument("--entry-id-width", type=int)\n'),
     ("id_derived_stat", 'value = int(stats["dlq_id_count"])\n'),
     ("container_read_by_id", "value = int(client.get(entry_id) or 0)\n"),
+    ("container_read_by_subscript", "value = int(pending_scores[entry_id])\n"),
+    ("container_slot_declared_int", "counts[entry_id]: int = 0\n"),
     ("unrelated_receiver", "value = int(response.text.strip())\n"),
     ("sub_token_arithmetic", 'value = int(entry_id.rsplit(":", 1)[1])\n'),
     ("unrelated_name", "value = int(order_id)\n"),
@@ -491,6 +503,7 @@ class TestDetectorSpec:
             ("entry.dlq_id", ["dlq_id"]),
             ('"dlq_id"', ["dlq_id"]),
             ('mapping["dlq_id"]', ["dlq_id"]),
+            ("mapping[entry_id]", []),
             ('mapping[entry_id]["retry_count"]', ["retry_count"]),
             ("dlq_id if flag else entry_id", ["dlq_id", "entry_id"]),
             ("entry_id or fallback", ["entry_id", "fallback"]),
@@ -538,6 +551,22 @@ class TestNonVacuityGuards:
         parsed.append(tmp_path / "architecture" / "test_rule.py")
         assert non_vacuity_errors("tests", tmp_path, parsed) == []
 
+    def test_examples_root_narrowed_to_one_quickstart_is_caught(self, tmp_path):
+        """The examples floor is small enough for one quickstart to clear it.
+
+        A root narrowed to a single quickstart parses exactly as many files as
+        the floor demands, so the count alone reports nothing while the parse
+        half stops walking the other quickstarts entirely.
+        """
+        parsed = [
+            tmp_path / "quickstart_django" / name
+            for name in ("manage.py", "settings.py", "urls.py", "views.py", "wsgi.py")
+        ]
+        assert len(parsed) >= _MIN_PARSED_EXAMPLES_FILES, "the count must not be why"
+        errors = non_vacuity_errors("examples", tmp_path, parsed)
+        assert [error for error in errors if "quickstart_fastapi/" in error]
+        assert [error for error in errors if "quickstart_flask/" in error]
+
 
 class TestScanWiring:
     """The per-repository wiring: which roots are walked, and what survives it."""
@@ -573,3 +602,6 @@ class TestScanWiring:
         assert set(_scan_roots()) == set(SCAN_ROLES)
         assert set(_MIN_PARSED_FILES) == set(SCAN_ROLES)
         assert set(_EXPECTED_SUBTREES) == set(SCAN_ROLES)
+        # No role may fall back to its file count alone: a numeric floor cannot
+        # tell a correctly resolved root from a narrowed one.
+        assert all(_EXPECTED_SUBTREES[role] for role in SCAN_ROLES)
