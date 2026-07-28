@@ -42,6 +42,51 @@ class TestRetryPolicyConfigContract:
         """jitter_percent defaults to the standard 20% width."""
         assert RetryPolicyConfig().jitter_percent == 20.0
 
+    def test_backoff_multiplier_default(self):
+        """backoff_multiplier defaults to the standard 2.0 growth factor."""
+        assert RetryPolicyConfig().backoff_multiplier == 2.0
+
+    def test_backoff_increment_default(self):
+        """backoff_increment defaults to the standard 1.0 s linear step."""
+        assert RetryPolicyConfig().backoff_increment == 1.0
+
+    def test_backoff_strategy_default(self):
+        """backoff_strategy defaults to exponential, matching RetrySettings."""
+        assert RetryPolicyConfig().backoff_strategy == "exponential"
+
+    def test_config_source_default(self):
+        """A directly-constructed config reports neither resolution branch.
+
+        The label exists so an operator reading a startup report knows which
+        numbers they are looking at; "direct" is the honest answer for a config
+        that never went through ``from_settings``.
+        """
+        assert RetryPolicyConfig().config_source == "direct"
+
+    def test_the_ladder_defaults_match_the_shared_standard_constants(self):
+        """Direct construction and settings resolution agree on every default.
+
+        These five used to carry a second, legacy-valued set of literals
+        (4 s / 180 s / 25%), so the same quantity had two defaults depending on
+        which construction path a caller took -- the tier-divergence shape one
+        construction path over.
+        """
+        from baldur.settings.field_types import (
+            STANDARD_BACKOFF_MULTIPLIER,
+            STANDARD_BASE_DELAY,
+            STANDARD_JITTER_FACTOR,
+            STANDARD_LINEAR_INCREMENT,
+            STANDARD_MAX_DELAY,
+        )
+
+        config = RetryPolicyConfig()
+
+        assert config.backoff_base == STANDARD_BASE_DELAY
+        assert config.backoff_max == STANDARD_MAX_DELAY
+        assert config.jitter_percent == STANDARD_JITTER_FACTOR * 100
+        assert config.backoff_multiplier == STANDARD_BACKOFF_MULTIPLIER
+        assert config.backoff_increment == STANDARD_LINEAR_INCREMENT
+
     def test_domain_default(self):
         """domain defaults to 'default'."""
         assert RetryPolicyConfig().domain == "default"

@@ -196,7 +196,7 @@ class TestFieldTypesExportsContract:
             assert name in ft.__all__, f"{name} missing from __all__"
 
     def test_all_contains_all_constants(self):
-        """__all__ includes all 9 shared constants."""
+        """__all__ includes all 10 shared constants."""
         import baldur.settings.field_types as ft
 
         expected_constants = [
@@ -205,6 +205,7 @@ class TestFieldTypesExportsContract:
             "STANDARD_MAX_DELAY",
             "STANDARD_BACKOFF_MULTIPLIER",
             "STANDARD_JITTER_FACTOR",
+            "STANDARD_LINEAR_INCREMENT",
             "STANDARD_TIMEOUT_SECONDS",
             "STANDARD_CHECK_INTERVAL",
             "STANDARD_BATCH_SIZE",
@@ -213,11 +214,11 @@ class TestFieldTypesExportsContract:
         for name in expected_constants:
             assert name in ft.__all__, f"{name} missing from __all__"
 
-    def test_all_has_exactly_25_entries(self):
-        """__all__ has 16 types + 9 constants = 25 entries."""
+    def test_all_has_exactly_26_entries(self):
+        """__all__ has 16 types + 10 constants = 26 entries."""
         import baldur.settings.field_types as ft
 
-        assert len(ft.__all__) == 25
+        assert len(ft.__all__) == 26
 
 
 # =========================================================================

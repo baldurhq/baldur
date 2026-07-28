@@ -342,6 +342,96 @@ class TestRetrySettings:
         assert settings1 is settings2
 
 
+class TestRetrySettingsBaseAboveMaxWarningBehavior:
+    """``base_delay > max_delay`` warns instead of raising or clamping.
+
+    The pair became reachable *in effect* only once ``base_delay`` started
+    reaching the ladder: while the field was inert, the two could not disagree
+    about anything observable. Every strategy enforces the cap when it computes
+    a delay, so the combination is suboptimal rather than unsafe -- the ladder
+    simply starts saturated and stays there. Only the silence was the defect.
+    """
+
+    BASE_ABOVE_MAX_EVENT = "settings.retry_base_exceeds_max_delay"
+
+    @pytest.fixture(autouse=True)
+    def reset_singleton(self):
+        from baldur.settings.retry import reset_retry_settings
+
+        reset_retry_settings()
+        yield
+        reset_retry_settings()
+
+    def _warnings(self, logs):
+        return [e for e in logs if e.get("event") == self.BASE_ABOVE_MAX_EVENT]
+
+    def test_a_base_above_the_cap_emits_the_warning_with_both_values(self):
+        """The operator is told which two numbers disagree."""
+        from structlog.testing import capture_logs
+
+        from baldur.settings.retry import RetrySettings
+
+        with capture_logs() as logs:
+            RetrySettings(base_delay=30.0, max_delay=10.0)
+
+        warnings = self._warnings(logs)
+        assert len(warnings) == 1
+        assert warnings[0]["log_level"] == "warning"
+        assert warnings[0]["base_delay"] == 30.0
+        assert warnings[0]["max_delay"] == 10.0
+
+    def test_the_conflicting_values_come_back_unmodified(self):
+        """Warn, never clamp -- both halves asserted, not just the warning.
+
+        Rewriting ``base_delay`` down to ``max_delay`` would mutate operator
+        intent to fix behavior the strategies already handle, and would sit a
+        second clamp behind the real one. Without this assertion a future
+        editor could turn the warning into a clamp and the warning test above
+        would still pass.
+        """
+        from baldur.settings.retry import RetrySettings
+
+        settings = RetrySettings(base_delay=30.0, max_delay=10.0)
+
+        assert settings.base_delay == 30.0
+        assert settings.max_delay == 10.0
+
+    @pytest.mark.parametrize(
+        ("base_delay", "max_delay"),
+        [(1.0, 60.0), (10.0, 10.0), (9.9, 10.0)],
+        ids=["default_pair", "at_boundary", "just_below"],
+    )
+    def test_a_base_at_or_below_the_cap_stays_silent(self, base_delay, max_delay):
+        """The equal case is the boundary that matters.
+
+        A ``>`` to ``>=`` drift would warn on the perfectly ordinary "one
+        sleep, always the cap" configuration.
+        """
+        from structlog.testing import capture_logs
+
+        from baldur.settings.retry import RetrySettings
+
+        with capture_logs() as logs:
+            RetrySettings(base_delay=base_delay, max_delay=max_delay)
+
+        assert not self._warnings(logs)
+
+    def test_the_warning_fires_for_env_supplied_values(self, monkeypatch):
+        """The validator runs on env-sourced settings, not only on kwargs."""
+        from structlog.testing import capture_logs
+
+        from baldur.settings.retry import RetrySettings
+
+        monkeypatch.setenv("BALDUR_RETRY_BASE_DELAY", "30.0")
+        monkeypatch.setenv("BALDUR_RETRY_MAX_DELAY", "10.0")
+
+        with capture_logs() as logs:
+            settings = RetrySettings()
+
+        assert settings.base_delay == 30.0
+        assert self._warnings(logs)
+
+
 class TestRateLimitSettings:
     """Tests for RateLimitSettings."""
 

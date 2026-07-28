@@ -345,6 +345,52 @@ class TestBackoffHardCapBehavior:
         delay = backoff.calculate(attempt)
         assert 0.0 <= delay <= max_delay
 
+    @given(
+        delay=st.floats(min_value=0.1, max_value=100.0),
+        max_delay=st.floats(min_value=1.0, max_value=300.0),
+        jitter_factor=st.floats(min_value=0.0, max_value=1.0),
+        attempt=st.integers(min_value=1, max_value=20),
+    )
+    @hyp_settings(max_examples=300)
+    def test_capped_constant_delay_never_exceeds_max_delay(
+        self, delay, max_delay, jitter_factor, attempt
+    ):
+        """A capped constant ladder shares the hard ceiling of the growing ones.
+
+        Constant is the strategy a bounded example test protects worst: its
+        delay does not grow, so "pick an attempt where it saturates" has no
+        meaning, and only a universally-quantified draw over ``delay`` against
+        ``max_delay`` covers both sides of that boundary. It became reachable
+        from settings at the same time it gained the cap.
+        """
+        backoff = ConstantBackoff(
+            delay=delay,
+            jitter=True,
+            jitter_factor=jitter_factor,
+            max_delay=max_delay,
+        )
+        assert 0.0 <= backoff.calculate(attempt) <= max_delay
+
+    @given(
+        base=st.floats(min_value=0.1, max_value=100.0),
+        max_delay=st.floats(min_value=1.0, max_value=300.0),
+        attempt=st.integers(min_value=1, max_value=20),
+    )
+    @hyp_settings(max_examples=300)
+    def test_decorrelated_delay_stays_between_base_and_max_delay(
+        self, base, max_delay, attempt
+    ):
+        """Decorrelated jitter has no zero floor, so its lower bound is its base.
+
+        The predicate is deliberately not the ``[0, max_delay]`` one the other
+        three share: this strategy draws from ``[base_delay, 3 * previous]``
+        and never routes through the capped-jitter helper's ``max(0.0, ...)``,
+        so the blanket form would assert something weaker than what holds.
+        """
+        backoff = DecorrelatedJitterBackoff(base_delay=base, max_delay=max_delay)
+        delay = backoff.calculate(attempt)
+        assert min(base, max_delay) <= delay <= max_delay
+
     def test_saturated_jitter_is_inward_only(self):
         """At saturation the jitter draws inward: ``[max_delay - width, max_delay]``."""
         backoff = ExponentialBackoff(

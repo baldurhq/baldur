@@ -236,3 +236,61 @@ class TestStartupReportStorageDirsBehavior:
         report = _build_startup_report(ExtensionResult())
 
         assert report["storage_dirs"] == {}
+
+
+class TestStartupReportEffectiveRetryBackoffBehavior:
+    """The boot-time print of the retry ladder the executor actually builds.
+
+    The advertised env vars and the ladder the retry stage builds were two
+    different things with nothing printing both, which is how a 4x inflation
+    shipped in a release and was caught only by a wall-clock scenario
+    assertion. The entry carries every field the config's backoff builder
+    reads, so the ladder is reproducible from the report alone.
+    """
+
+    def test_the_entry_carries_every_field_the_builder_reads(self):
+        """Reproducibility is the contract: a missing field breaks it silently.
+
+        ``increment`` is the one that went missing once already -- the linear
+        parameter was sourced at build time rather than at resolution time, so
+        it existed in the ladder but not in anything that described it.
+        """
+        from baldur.services.retry_handler.models import RetryPolicyConfig
+
+        report = _build_startup_report(ExtensionResult())
+        entry = report["effective_retry_backoff"]
+
+        expected = RetryPolicyConfig.from_settings()
+        assert entry["strategy"] == expected.backoff_strategy
+        assert entry["base_delay"] == expected.backoff_base
+        assert entry["multiplier"] == expected.backoff_multiplier
+        assert entry["increment"] == expected.backoff_increment
+        assert entry["jitter_percent"] == expected.jitter_percent
+        assert entry["max_delay"] == expected.backoff_max
+        assert entry["max_attempts"] == expected.max_attempts
+
+    def test_the_source_label_names_the_branch_that_resolved(self):
+        """An operator needs to know which tier's numbers they are reading."""
+        from baldur.services.retry_handler.models import RetryPolicyConfig
+
+        report = _build_startup_report(ExtensionResult())
+
+        assert (
+            report["effective_retry_backoff"]["source"]
+            == RetryPolicyConfig.from_settings().config_source
+        )
+
+    def test_the_report_stays_buildable_when_resolution_raises(self, monkeypatch):
+        """Fail-open: an observability entry must not take boot down."""
+        monkeypatch.setattr(
+            "baldur.services.retry_handler.models.RetryPolicyConfig.from_settings",
+            classmethod(
+                lambda cls, *a, **kw: (_ for _ in ()).throw(
+                    RuntimeError("settings broken")
+                )
+            ),
+        )
+
+        report = _build_startup_report(ExtensionResult())
+
+        assert report["effective_retry_backoff"] == {}
