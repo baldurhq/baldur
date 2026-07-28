@@ -537,3 +537,39 @@ class TestNonVacuityGuards:
         parsed = [tmp_path / "unit" / f"test_{index}.py" for index in range(600)]
         parsed.append(tmp_path / "architecture" / "test_rule.py")
         assert non_vacuity_errors("tests", tmp_path, parsed) == []
+
+
+class TestScanWiring:
+    """The per-repository wiring: which roots are walked, and what survives it."""
+
+    def test_unparseable_file_is_dropped_from_the_parsed_set(self, tmp_path):
+        """The floors count *parsed* files, which is what closes the silent exit.
+
+        A file the parser rejects is skipped without a word, so it could carry a
+        violation past the rule. Counting the walk instead of the parse would let
+        a tree of unparseable files clear every floor.
+        """
+        # Given: a tree the walk sees whole, one of whose files cannot be parsed
+        readable = tmp_path / "readable.py"
+        readable.write_text("value = 1\n", encoding="utf-8")
+        broken = tmp_path / "broken.py"
+        broken.write_text("def (\n", encoding="utf-8")
+
+        # When
+        parsed = _parsed_modules(tmp_path)
+
+        # Then: the walk offered both; only the parsed one is there to be counted
+        assert sorted(walk_src((tmp_path,))) == [broken, readable]
+        assert [path for path, _ in parsed] == [readable]
+
+    def test_every_scan_role_carries_a_root_a_floor_and_a_subtree_rule(self):
+        """A role added without its wiring surfaces as a KeyError that names nothing.
+
+        The three role-keyed tables live outside the shared rule text because
+        each repository spells them differently, so nothing else compares them
+        against the roles the rule declares.
+        """
+        assert set(SCAN_ROLES) == {"examples", "oss_source", "tests"}
+        assert set(_scan_roots()) == set(SCAN_ROLES)
+        assert set(_MIN_PARSED_FILES) == set(SCAN_ROLES)
+        assert set(_EXPECTED_SUBTREES) == set(SCAN_ROLES)
