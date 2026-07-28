@@ -43,7 +43,7 @@ class ReplaySingleView(XTestModeMixin, APIView):
 
     Request:
         {
-            "dlq_id": 123,  // ID of the DLQ entry to replay (required)
+            "dlq_id": "web-1:112:a1b2c3d4e5f60708:5",  // opaque DLQ entry id (required)
             "dry_run": false,  // Validate only, no execution (optional, default false)
             "skip_governance": false  // Skip governance check (optional, default false)
         }
@@ -52,7 +52,7 @@ class ReplaySingleView(XTestModeMixin, APIView):
         {
             "status": "success",
             "success": true,
-            "dlq_id": 123,
+            "dlq_id": "web-1:112:a1b2c3d4e5f60708:5",
             "message": "Replay completed successfully",
             "governance_result": {
                 "allowed": true,
@@ -329,7 +329,7 @@ class ReplayBatchView(XTestModeMixin, APIView):
             "skipped_count": 0,
             "governance_blocked": false,
             "results": [
-                {"dlq_id": 1, "success": true, "message": "..."},
+                {"dlq_id": "web-1:112:a1b2c3d4e5f60708:5", "success": true, "message": "..."},
                 ...
             ],
             "snapshot": {...}

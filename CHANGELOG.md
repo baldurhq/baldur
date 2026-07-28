@@ -89,6 +89,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ### Changed
 
+- `dlq_id` is typed `str` across the public surface: it is an opaque token, never parse it.
 - Digest sections `dlq`, `automated_actions`, `auto_replay` are labeled OSS, not PRO.
 - Daily-report `failed_ops_without_dlq` → `dlq_captured_without_adaptive_replay`. **Breaking**
 - `wait_if_needed(key, max_wait=...)` bounds outbound 429 cooldown waits — past the bound it defers.

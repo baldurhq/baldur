@@ -54,7 +54,7 @@ class InjectDLQEntryView(XTestModeMixin, APIView):
         {
             "status": "success",
             "created_count": 1,
-            "dlq_ids": [123],
+            "dlq_ids": ["web-1:112:a1b2c3d4e5f60708:5"],
             "domain": "external_service",
             "xtest_session": "uuid-xxx",
             "snapshot": {...}
@@ -322,7 +322,7 @@ class ForceStatusView(XTestModeMixin, APIView):
 
     Request:
         {
-            "dlq_id": 123,
+            "dlq_id": "web-1:112:a1b2c3d4e5f60708:5",
             "new_status": "resolved",  // pending, reviewing, resolved, rejected
             "reason": "Test status change"  // optional
         }
@@ -330,7 +330,7 @@ class ForceStatusView(XTestModeMixin, APIView):
     Response:
         {
             "status": "success",
-            "dlq_id": 123,
+            "dlq_id": "web-1:112:a1b2c3d4e5f60708:5",
             "previous_status": "pending",
             "new_status": "resolved",
             "changed_at": "2025-01-26T14:00:00+09:00"

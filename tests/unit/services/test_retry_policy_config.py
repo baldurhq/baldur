@@ -304,11 +304,11 @@ class TestRetryResultToPolicyResultBehavior:
     def test_dlq_result_includes_dlq_id_in_metadata(self):
         """A DLQ-routed result carries dlq_id in metadata."""
         result = RetryResult(
-            success=False, action=RetryAction.DLQ, attempt=3, dlq_id=42
+            success=False, action=RetryAction.DLQ, attempt=3, dlq_id="42"
         )
         pr = result.to_policy_result()
         assert pr.outcome == PolicyOutcome.FAILURE
-        assert pr.metadata["dlq_id"] == 42
+        assert pr.metadata["dlq_id"] == "42"
         assert pr.metadata["action"] == RetryAction.DLQ.value
 
     def test_executed_policies_contains_retry(self):
