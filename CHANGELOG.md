@@ -109,6 +109,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - A DLQ domain the validator rejects is stored canonicalized when canonicalization fixes it.
 - `on_domain_rejected` now fires only when canonicalization cannot fix the input.
 - `retry_backoff_*` and `dlq_outbox_processing_delay_seconds` now carry the capped domain label.
+- `baldur_dlq_evicted_total` labels an unattributed eviction `OTHER_DOMAIN`, not the empty string.
 - Meta-Watchdog probes now run concurrently under a per-pass wall-clock budget.
 - A probe still running at the budget reports `UNKNOWN`; the pass no longer waits for it.
 - The budget is derived from `probe_interval_seconds` and the daemon-worker staleness multiplier.

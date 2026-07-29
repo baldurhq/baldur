@@ -108,7 +108,16 @@ class TestOverflowMetricsExistContract:
 
 
 class TestOverflowRecordingMethodsBehavior:
-    """BaldurMetrics overflow recording methods behavior."""
+    """BaldurMetrics overflow recording methods behavior.
+
+    Every counter assertion below is a **delta**, never an absolute value: the
+    DLQ recorder names its series off a class-level ``PREFIX``, not off the
+    ``BaldurMetrics(prefix=...)`` argument, so all instances in a process share
+    one counter object. An absolute assertion is therefore a claim about every
+    other test that ran first in the same worker — and ``domain="payment"`` is
+    exactly the label an unrelated test can now reach, since a declared domain
+    survives to its own label instead of collapsing to the fallback.
+    """
 
     @pytest.fixture(autouse=True)
     def _check_prometheus(self):
@@ -123,34 +132,59 @@ class TestOverflowRecordingMethodsBehavior:
         from baldur.metrics.prometheus import BaldurMetrics
 
         metrics = BaldurMetrics(prefix="test_rec_overflow")
+        counter = metrics.dlq._overflow_total.labels(
+            domain="payment", strategy="drop_oldest"
+        )
+        before = counter._value.get()
+
         metrics.record_dlq_overflow("payment", "drop_oldest")
 
-        val = metrics.dlq._overflow_total.labels(
-            domain="payment", strategy="drop_oldest"
-        )._value.get()
-        assert val == 1.0
+        assert counter._value.get() == before + 1.0
 
     def test_record_dlq_evicted_increments_by_count(self):
         """record_dlq_evicted increments counter by evicted count."""
         from baldur.metrics.prometheus import BaldurMetrics
 
         metrics = BaldurMetrics(prefix="test_rec_evicted")
+        counter = metrics.dlq._evicted_total.labels(
+            domain="payment", strategy="drop_oldest"
+        )
+        before = counter._value.get()
+
         metrics.record_dlq_evicted(count=50, strategy="drop_oldest", domain="payment")
 
-        val = metrics.dlq._evicted_total.labels(
-            domain="payment", strategy="drop_oldest"
-        )._value.get()
-        assert val == 50.0
+        assert counter._value.get() == before + 50.0
+
+    def test_record_dlq_evicted_without_a_domain_labels_the_collapse_bucket(self):
+        """An unattributed eviction lands on the fallback label, not ``""``.
+
+        The recorder's own default is not what decides this: both metric
+        backends forward ``domain`` positionally, so the facade's default is
+        what the only production caller — the overflow event handler, which
+        omits the argument — actually writes.
+        """
+        from baldur.metrics.prometheus import BaldurMetrics
+        from baldur.utils.domain_validation import FALLBACK_DOMAIN
+
+        metrics = BaldurMetrics(prefix="test_rec_evicted_default")
+        with patch.object(metrics.dlq, "_evicted_total") as mock_counter:
+            metrics.record_dlq_evicted(count=3, strategy="drop_oldest")
+
+        mock_counter.labels.assert_called_once_with(
+            domain=FALLBACK_DOMAIN, strategy="drop_oldest"
+        )
 
     def test_record_dlq_rejected_increments_counter(self):
         """record_dlq_rejected increments dlq._rejected_total."""
         from baldur.metrics.prometheus import BaldurMetrics
 
         metrics = BaldurMetrics(prefix="test_rec_rejected")
+        counter = metrics.dlq._rejected_total.labels(domain="payment")
+        before = counter._value.get()
+
         metrics.record_dlq_rejected("payment")
 
-        val = metrics.dlq._rejected_total.labels(domain="payment")._value.get()
-        assert val == 1.0
+        assert counter._value.get() == before + 1.0
 
     def test_record_dlq_emergency_purge_increments_counter(self):
         """record_dlq_emergency_purge increments counter."""
