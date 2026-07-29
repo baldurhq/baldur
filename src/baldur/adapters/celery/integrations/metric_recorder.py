@@ -42,8 +42,14 @@ class MetricRecorder:
                 failure (``request.retries + 1``); 1 when unknown
         """
         try:
+            from baldur.metrics.registry import register_domain
             from baldur.services.metrics.recorders import record_task_attempt
 
+            # Register where the value is consumed as a metric domain — not
+            # inside ``extract_domain_from_task_name``, which is reused as a
+            # circuit-breaker service-name fallback. Registering inside the
+            # recorder method covers every caller of it.
+            register_domain(domain)
             record_task_attempt(
                 domain=domain,
                 attempt_count=attempt_count,
@@ -69,9 +75,11 @@ class MetricRecorder:
                 (``request.retries + 1``); 1 when unknown
         """
         try:
+            from baldur.metrics.registry import register_domain
             from baldur.services.metrics.recorders import record_task_attempt
 
             domain = extract_domain_from_task_name(task_name, self._config)
+            register_domain(domain)
             record_task_attempt(
                 domain=domain,
                 attempt_count=attempt_count,
@@ -93,8 +101,10 @@ class MetricRecorder:
         attempts histogram (whose contract is attempts-before-resolution).
         """
         try:
+            from baldur.metrics.registry import register_domain
             from baldur.services.metrics.recorders import record_retry_marker
 
+            register_domain(domain)
             record_retry_marker(domain=domain)
         except ImportError:
             pass

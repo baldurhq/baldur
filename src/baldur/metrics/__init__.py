@@ -40,6 +40,7 @@ if TYPE_CHECKING:
         get_reconciler,
     )
     from baldur.metrics.registry import (
+        canonicalize_domain_label,
         get_or_create_counter,
         get_or_create_gauge,
         get_or_create_histogram,
@@ -88,6 +89,10 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "MetricReconciler": ("baldur.metrics.reconciler", "MetricReconciler"),
     "SyncResult": ("baldur.metrics.reconciler", "SyncResult"),
     "get_reconciler": ("baldur.metrics.reconciler", "get_reconciler"),
+    "canonicalize_domain_label": (
+        "baldur.metrics.registry",
+        "canonicalize_domain_label",
+    ),
     "get_or_create_counter": ("baldur.metrics.registry", "get_or_create_counter"),
     "get_or_create_gauge": ("baldur.metrics.registry", "get_or_create_gauge"),
     "get_or_create_histogram": ("baldur.metrics.registry", "get_or_create_histogram"),
@@ -128,6 +133,7 @@ def __dir__() -> list[str]:
 
 __all__ = [
     # Registry
+    "canonicalize_domain_label",
     "get_or_create_counter",
     "get_or_create_gauge",
     "get_or_create_histogram",

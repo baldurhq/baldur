@@ -415,6 +415,19 @@ def _resolve_retry_stage(
         from dataclasses import replace
 
         cfg = replace(cfg, enable_dlq=True)
+
+    # Declaration site: this is the ONLY exit that produces a domain-labeled
+    # metric, and the label comes from ``cfg.domain`` — not the ``name``
+    # parameter, which they coincide on only for the settings-derived branch.
+    # The other two exits register nothing on purpose: a caller-supplied
+    # ResiliencePolicy carries no in-band domain, and a retry-less protect call
+    # emits no domain label at all, so registering there would burn a cap slot
+    # and materialize zero-valued gauge series. An explicit config with
+    # ``domain`` unset carries the field default, which the registry's
+    # admission gate refuses as an absence of declaration.
+    from baldur.metrics.registry import register_domain
+
+    register_domain(cfg.domain)
     return cfg, None, settings_derived
 
 

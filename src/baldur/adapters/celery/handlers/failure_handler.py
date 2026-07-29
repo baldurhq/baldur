@@ -106,6 +106,14 @@ class FailureHandler:
         domain = extract_domain_from_task_name(task_name, self._config)
         service_name = extract_service_name(task_name, self._config, exception)
 
+        # Registered at the handler top rather than at the metrics step: this
+        # handler's DLQ store (step 2) consumes the domain BEFORE its metrics
+        # step, so the same-invocation guarantee has to hold from the first
+        # consumption onward.
+        from baldur.metrics.registry import register_domain
+
+        register_domain(domain)
+
         # Observe-only (dry-run / shadow / evaluation): suppress the two
         # state-mutating interventions (CB record + DLQ store). Metrics and
         # forensics (steps 3-4) are observation and still run.

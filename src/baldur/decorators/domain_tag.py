@@ -189,6 +189,17 @@ def domain_tag(domain: str) -> Callable[[F], F]:
     # literals (e.g., ``@domain_tag("invalid name!")``) at module import.
     normalized_domain = validate_and_normalize_domain(domain)
 
+    # Declaration site: the decorator literal IS the application declaring its
+    # domain vocabulary, so it claims a metric-label slot at decoration time.
+    # The runtime channels (``DomainContext`` / ``set_domain_context`` / the
+    # middleware mixin) deliberately do NOT register: they receive strings whose
+    # provenance — code literal vs client-supplied header — is indistinguishable
+    # in-process, and auto-admitting them would let an external caller squat the
+    # cardinality cap.
+    from baldur.metrics.registry import register_domain
+
+    register_domain(normalized_domain)
+
     def decorator(func: F) -> F:
         @functools.wraps(func)
         def sync_wrapper(*args, **kwargs):

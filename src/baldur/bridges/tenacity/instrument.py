@@ -46,6 +46,10 @@ __all__ = [
 _BRIDGE_PATCHED_MARKER = "__baldur_bridge_patched__"
 _BRIDGE_EXPLICIT_MARKER = "__baldur_bridge_explicit__"
 
+# The domain this bridge attributes its own observations to. Globally patched
+# Retrying instances have no per-call domain, so the bridge declares one.
+_INSTRUMENT_DOMAIN = "tenacity_instrument"
+
 _instrumented: bool = False
 _instrument_lock: threading.Lock = threading.Lock()
 _original_init: Callable[..., None] | None = None
@@ -141,6 +145,13 @@ def instrument_tenacity() -> bool:  # noqa: C901
             tenacity.Retrying.__init__ = _patched_init  # type: ignore[method-assign]
             setattr(tenacity.Retrying, _BRIDGE_PATCHED_MARKER, True)
             _instrumented = True
+            # Declaration site: the bridge itself declares the domain literal
+            # its events carry, so claim the matching metric-label slot here
+            # rather than letting Baldur's own shipped literal collapse into
+            # the unclassified bucket.
+            from baldur.metrics.registry import register_domain
+
+            register_domain(_INSTRUMENT_DOMAIN)
             logger.info("bridge.tenacity_instrumented")
             return True
         except Exception as e:
@@ -225,7 +236,7 @@ def _emit_retry_exhausted(
         from baldur.services.event_bus.bus.event_types import EventType
 
         event_data: dict[str, Any] = {
-            "domain": "tenacity_instrument",
+            "domain": _INSTRUMENT_DOMAIN,
             "attempts": attempts,
             "final_error_type": (
                 type(last_error).__name__ if last_error is not None else None
