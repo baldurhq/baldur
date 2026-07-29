@@ -91,6 +91,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - Startup report gains `effective_retry_backoff`: the ladder the retry stage actually builds.
 - `RetrySettings` warns when `base_delay` exceeds `max_delay`, which starts the ladder saturated.
 - `ConstantBackoff(max_delay=...)` caps the constant delay; unset keeps today's uncapped behavior.
+- `baldur_up` — label-less exporter liveness marker, exported by every Baldur process.
+- Sample alert `BaldurMetricsAbsent` — no `baldur_up` sample in 5m, so nothing is reporting.
 
 ### Changed
 
@@ -119,6 +121,9 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - Retry jitter defaults to +/-20% (was 25%), matching `BALDUR_BACKOFF_EXPONENTIAL_JITTER_FACTOR`.
 - `RetryPolicyConfig` defaults are now 1 s base / 60 s cap; pipeline presets shorten to match.
 - `record_retry_attempt` → `record_retry_resolution`; it always fired per resolution. **Breaking**
+- Sample alert `BaldurMetricsDown` joins on `baldur_up`, so it fires on any framework.
+- Before, it selected `up{job="django"}` and could never fire on Flask, FastAPI or the CLI.
+- Re-merge these two rules if you customized a copy of `examples/monitoring/prometheus-alerts.yml`.
 
 ### Removed
 

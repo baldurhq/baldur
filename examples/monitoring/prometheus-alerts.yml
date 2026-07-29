@@ -309,15 +309,48 @@ groups:
   - name: system_alerts
     interval: 1m
     rules:
+      # Scrape liveness keys off `baldur_up` — the label-less marker every
+      # Baldur process exports — instead of a scrape job name. Baldur ships no
+      # scrape config, so no job-name convention exists to pin a rule to, and a
+      # single-framework selector matches an empty vector everywhere else.
+      #
+      # (a) The 6h lookback bounds how long a dead target keeps paging. Past it
+      #     the join stops matching, so Alertmanager sends an affirmative
+      #     RESOLVED while the target is still dead — BaldurMetricsAbsent below
+      #     covers only the all-targets-gone case. Widen the window if that
+      #     matters more to you than noise from decommissioned targets.
+      # (b) Multi-service fleets can add a per-job specialization on top, e.g.
+      #     `up{job="payments-api"} == 0`, without touching the rules below.
+      # (c) Day 0: BaldurMetricsAbsent is an absence test over the whole TSDB,
+      #     so loading these rules before any Baldur exporter is live pages
+      #     immediately. That is intended — "supposed to report but never did"
+      #     is exactly what it detects — but load the rules after the exporter,
+      #     or drop that one rule while bringing a deployment up. Its `for: 5m`
+      #     on top of the 5m lookback keeps a rolling restart from tripping it.
+      # (d) Under dynamic service discovery (Kubernetes EndpointSlice / pod
+      #     role) a dead target is removed from discovery rather than reported
+      #     `up == 0`, so neither rule sees a single dead replica while its
+      #     siblings keep reporting. Replica-level death detection there belongs
+      #     to the orchestrator (kube-state-metrics, readiness probes).
       - alert: BaldurMetricsDown
-        expr: up{job="django"} == 0
+        expr: up == 0 and on (job, instance) present_over_time(baldur_up[6h])
         for: 2m
         labels:
           severity: critical
           category: system
         annotations:
           summary: "Baldur metrics collection failed"
-          description: "Cannot scrape metrics from Django application. Check service health."
+          description: "Target {{ $labels.instance }} (job {{ $labels.job }}) exported Baldur metrics within the last 6h and is now unscrapable. Check service health."
+
+      - alert: BaldurMetricsAbsent
+        expr: absent_over_time(baldur_up[5m])
+        for: 5m
+        labels:
+          severity: critical
+          category: system
+        annotations:
+          summary: "No Baldur exporter is reporting"
+          description: "No baldur_up sample arrived in 5m: every target is down at once, the scrape job was relabeled away, or metrics never initialized."
 
       - alert: RequestThroughputDrop
         expr: |
