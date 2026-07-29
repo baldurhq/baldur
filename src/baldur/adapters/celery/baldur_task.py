@@ -81,6 +81,13 @@ def baldur_task(
                     except Exception:
                         task_id = ""
 
+                    # Registered here, not at the resolution line: with
+                    # ``track_dlq=False`` the resolved value is consumed only
+                    # as a circuit-breaker service name, where it is not a
+                    # metric domain and would burn a cap slot for nothing.
+                    from baldur.metrics.registry import register_domain
+
+                    register_domain(resolved_domain)
                     dlq_recorder.store(
                         domain=resolved_domain,
                         task_name=task_name,

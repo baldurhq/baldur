@@ -14,6 +14,7 @@ from baldur.metrics.registry import (
     get_or_create_counter,
     get_or_create_gauge,
 )
+from baldur.utils.domain_validation import FALLBACK_DOMAIN
 
 logger = structlog.get_logger()
 
@@ -201,8 +202,15 @@ class DLQMetricRecorder(BaseMetricRecorder):
         except Exception as e:
             logger.warning("metrics.record_dlq_overflow_failed", error=e)
 
-    def record_evicted(self, count: int, strategy: str, domain: str = "") -> None:
-        """Record DLQ items evicted by overflow."""
+    def record_evicted(
+        self, count: int, strategy: str, domain: str = FALLBACK_DOMAIN
+    ) -> None:
+        """Record DLQ items evicted by overflow.
+
+        An eviction with no attributable domain lands on the standard collapse
+        label, the tree-wide convention for "unattributed domain" — an empty
+        label value is not a bucket any query can name.
+        """
         try:
             self._evicted_total.labels(domain=domain, strategy=strategy).inc(count)
         except Exception as e:

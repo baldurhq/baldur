@@ -19,7 +19,6 @@ from baldur.metrics.registry import (
     _MAX_REGISTERED_DOMAINS,
     DEFAULT_DOMAINS,
     _registered_domains,
-    _unregistered_seen,
     get_registered_domains,
     register_domain,
     reset_registered_domains,
@@ -32,17 +31,19 @@ from baldur.metrics.registry import (
 def _reset_registered_domains():
     """Reset _registered_domains to default state before/after each test.
 
-    The unregistered-domain log memo is cleared at both ends too: the DEBUG
-    notice now fires once per distinct domain per process, so a domain some
-    earlier test already resolved would log nothing here and the assertion
-    would fail on test ordering rather than on behavior.
+    Every registry-owned memo is cleared at both ends via
+    ``reset_registered_domains()``: the unregistered-domain DEBUG notice, the
+    refusal memo, the lossy-projection memo, the cap-epoch flag and the cap TTL
+    cache all fire at most once per distinct key per process, so a domain some
+    earlier test already touched would log nothing here and the assertion would
+    fail on test ordering rather than on behavior.
     """
     original = _registered_domains.copy()
-    _unregistered_seen.clear()
+    reset_registered_domains()
     yield
+    reset_registered_domains()
     _registered_domains.clear()
     _registered_domains.update(original)
-    _unregistered_seen.clear()
 
 
 # =============================================================================
@@ -125,20 +126,31 @@ class TestRegisterDomainBehavior:
         register_domain("external_service")
         assert len(_registered_domains) == count_before
 
-    def test_register_domain_sanitizes_name(self):
-        """Domain name is sanitized before storage."""
-        register_domain("my-special.service")
-        expected = sanitize_label_value("my-special.service")
-        assert expected in _registered_domains
+    def test_register_domain_stores_canonical_form(self):
+        """The canonical label form is what occupies the slot, not the raw input.
 
-    def test_limit_reached_logs_warning(self):
-        """Warning logged when domain limit is reached."""
-        # Fill to limit
-        for i in range(_MAX_REGISTERED_DOMAINS - len(DEFAULT_DOMAINS)):
+        Both ends of the registry go through the same projection, so any two
+        spellings with equal canonical forms share one slot and one label.
+        """
+        assert register_domain("  My-Special.Service ") is True
+        assert "my_special_service" in _registered_domains
+        assert resolve_domain_label("MY-special.SERVICE") == "my_special_service"
+
+    def test_limit_reached_logs_warning_once_per_cap_epoch(self):
+        """The cap refusal is reported once per time the registry FILLS.
+
+        Registration runs on the request path now, so a flood of unique
+        over-cap names must not emit one WARNING per call; the operator gets
+        one line per cap epoch instead.
+        """
+        for i in range(_MAX_REGISTERED_DOMAINS - len(_registered_domains)):
             register_domain(f"domain_{i}")
+        assert len(_registered_domains) == _MAX_REGISTERED_DOMAINS
 
         with patch("baldur.metrics.registry.logger") as mock_logger:
-            register_domain("blocked_domain")
+            assert register_domain("blocked_domain") is False
+            assert register_domain("another_blocked_domain") is False
+
             mock_logger.warning.assert_called_once_with(
                 "metrics.domain_registration_limit_reached",
                 domain="blocked_domain",
@@ -147,9 +159,9 @@ class TestRegisterDomainBehavior:
             )
 
     def test_successful_registration_logs_debug(self):
-        """Debug logged for successful new domain registration."""
+        """Debug logged for a successful registration, naming the stored form."""
         with patch("baldur.metrics.registry.logger") as mock_logger:
-            register_domain("new_test_domain")
+            register_domain("New_Test_Domain")
             mock_logger.debug.assert_called_with(
                 "metrics.domain_registered",
                 domain="new_test_domain",

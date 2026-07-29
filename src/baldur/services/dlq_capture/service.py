@@ -33,6 +33,11 @@ from baldur.core.exceptions import DomainValidationError
 from baldur.decorators.domain_tag import get_current_domain
 from baldur.metrics.event_handlers import DLQMetricEventHandler
 from baldur.metrics.prometheus import get_metrics
+from baldur.metrics.registry import (
+    NON_REGISTRABLE_DOMAIN_LABELS,
+    canonicalize_domain_label,
+    register_domain,
+)
 from baldur.models.dlq import DLQConfig, DLQEntryResult
 from baldur.services.dlq_capture.overflow import (
     enforce_overflow_eviction,
@@ -280,20 +285,48 @@ class DLQCaptureService:
         try:
             domain = validate_and_normalize_domain(domain)
         except DomainValidationError as _dom_err:
-            try:
-                DLQMetricEventHandler.on_domain_rejected(
-                    site="store_failure",
-                    reason=_dom_err.reason,
-                    original_domain=_dom_err.original_domain,
-                )
-            except Exception:
-                logger.warning(
-                    "domain.input_rejected",
-                    site="store_failure",
-                    reason=getattr(_dom_err.reason, "value", _dom_err.reason),
-                    original_preview=str(_dom_err.original_domain)[:32],
-                )
-            domain = FALLBACK_DOMAIN
+            # Canonicalization retry — the one projection between the validated
+            # vocabulary and the metric-label vocabulary, applied here so a
+            # spelling the metric registry admits (``payment-api`` ->
+            # ``payment_api``) is STORED under that same form instead of
+            # splitting into two label values across the retry and DLQ
+            # families. The skip-list keeps an empty/blank domain on the
+            # rejection path: ``""`` canonicalizes to the unclassified bucket,
+            # which must stay distinct from a real domain.
+            # Idempotent under the async outbox round-trip: the canonical form
+            # re-validates as a first-try pass.
+            _canonical = canonicalize_domain_label(domain)
+            _recovered: str | None = None
+            if _canonical not in NON_REGISTRABLE_DOMAIN_LABELS:
+                try:
+                    _recovered = validate_and_normalize_domain(_canonical)
+                except DomainValidationError:
+                    _recovered = None
+
+            if _recovered is not None:
+                domain = _recovered
+            else:
+                try:
+                    DLQMetricEventHandler.on_domain_rejected(
+                        site="store_failure",
+                        reason=_dom_err.reason,
+                        original_domain=_dom_err.original_domain,
+                    )
+                except Exception:
+                    logger.warning(
+                        "domain.input_rejected",
+                        site="store_failure",
+                        reason=getattr(_dom_err.reason, "value", _dom_err.reason),
+                        original_preview=str(_dom_err.original_domain)[:32],
+                    )
+                domain = FALLBACK_DOMAIN
+
+        # Declaration site: ``domain`` is an explicit parameter of the public
+        # DLQ entry point, so a direct caller's domain gets its own label on the
+        # FIRST call rather than only after some unrelated module carrying
+        # ``@domain_tag`` happens to be imported. Registered after the block
+        # above so the registered form matches the stored form.
+        register_domain(domain)
 
         # === Forensic field redaction + size cap ===
         # Redaction MUST run before truncation: an oversize dict containing

@@ -264,11 +264,23 @@ ensure_up_gauge()
 
 _MAX_REGISTERED_DOMAINS = 50
 
+# How long a resolved cardinality cap stays memoized. Registration now runs on
+# the request path, and a high-cardinality name (``protect(f"order_{id}")``)
+# misses the registry, the admission gate and the refusal memo on every call —
+# without this cache each such call would pay a full layered settings read
+# forever after the cap fills. Sized as the console-edit propagation delay for
+# a cardinality ceiling, which is the only thing the layered read buys here.
+# A fixed module constant rather than a settings field: a settings field for it
+# would itself need a settings read.
+_CAP_CACHE_TTL_SECONDS = 5.0
+
 # Fallback domain for unregistered domains — declared before _registered_domains
 # so it can be included in the initial set. Single source of truth lives in
 # ``utils/domain_validation`` (545 D1) so the metric label registry shares the
 # same fallback string as DLQ/decorator rejection paths.
+from baldur.core.exceptions import DomainValidationError
 from baldur.utils.domain_validation import FALLBACK_DOMAIN as _FALLBACK_DOMAIN
+from baldur.utils.domain_validation import validate_and_normalize_domain
 
 # Default domains (domain-neutral fallbacks)
 DEFAULT_DOMAINS: list[str] = [
@@ -280,8 +292,12 @@ DEFAULT_DOMAINS: list[str] = [
 ]
 
 # NOTE: Per-process registry. In multiprocess deployments (Gunicorn prefork,
-# Celery workers), each process maintains its own copy. Since all processes
-# execute the same registration code, the domain set is effectively identical.
+# Celery workers), each process maintains its own copy. Registration is
+# traffic-driven — a domain enters the set the first time a declaration site in
+# THAT process is reached — so worker sets diverge by served traffic well below
+# the cap. Label correctness is unaffected (every declaration site registers
+# before it records, within the same call), but the periodic per-domain gauge
+# inventory does diverge across workers.
 # TSDB cardinality is bounded by max_registered_domains, not multiplied by
 # worker count.
 _registered_domains: set[str] = {
@@ -301,9 +317,80 @@ _MAX_UNREGISTERED_LOGGED_DOMAINS = 256
 _unregistered_seen: OrderedDict[str, None] = OrderedDict()
 _unregistered_seen_lock = threading.Lock()
 
+# Guards the registration miss path (membership re-check, cap read, add) and
+# every piece of registry-owned memo state. The membership fast path in
+# ``register_domain`` and the lookup in ``resolve_domain_label`` stay lock-free.
+_registry_lock = threading.Lock()
+
+# Domains that must never occupy a registry slot, in canonical form. Shared
+# with the DLQ store's canonicalization retry so both channels skip-list the
+# same values:
+# ``unknown`` is what an empty/blank input sanitizes to AND the Celery
+# unmatched-task fallback (registering it would merge unrelated traffic into
+# one series), ``other_domain`` is the collapse bucket itself, and ``default``
+# is ``RetryPolicyConfig.domain``'s field default — an absence of declaration,
+# not a declaration.
+NON_REGISTRABLE_DOMAIN_LABELS: frozenset[str] = frozenset(
+    {UNKNOWN_LABEL_VALUE, "other_domain", "default"}
+)
+
+# Admission-gate refusals already reported, bounded exactly like
+# ``_unregistered_seen``. Cap refusals deliberately do NOT enter this memo — a
+# flood of unique at-cap names would thrash the LRU and re-warn forever; those
+# are reported once per cap epoch instead (``_cap_epoch_warned``).
+_MAX_REFUSED_LOGGED_DOMAINS = 256
+_refused_seen: OrderedDict[str, None] = OrderedDict()
+
+# Canonical names whose lossy-projection WARNING has already been emitted.
+_lossy_projection_seen: OrderedDict[str, None] = OrderedDict()
+
+# True once the registry has reported that it is full. Cleared by a successful
+# add (i.e. the cap was raised) and by reset_registered_domains(), so the
+# operator gets one line per time the registry fills, not one per rejected name.
+_cap_epoch_warned = False
+
+# Memoized cardinality cap + its monotonic expiry (see _CAP_CACHE_TTL_SECONDS).
+_cap_cache_value: int | None = None
+_cap_cache_expires_at: float = 0.0
+
+
+def canonicalize_domain_label(domain: object) -> str:
+    """Project any domain input onto its canonical Prometheus label form.
+
+    The tree carries two domain vocabularies — the validated form
+    (``utils.domain_validation``: lowercase, segmented identifier, <= 64 chars)
+    and the label form (``sanitize_label_value``: underscore substitution,
+    truncation) — and this is the single stated projection between them. Both
+    ends of the registry go through it, which is what makes
+    ``resolve(x)`` non-fallback iff ``canonicalize(x)`` is registered, and what
+    keeps two spellings of one logical domain on one label value.
+
+    Total on **any** input by construction: a non-``str`` yields
+    ``UNKNOWN_LABEL_VALUE`` rather than raising. That is load-bearing, not
+    defensive — ``sanitize_label_value`` short-circuits on falsy input before
+    touching ``.strip()``, so ``None`` already resolves to a label today, and
+    the DLQ store path calls this from inside an exception handler where a
+    raise would drop the record entirely.
+
+    Examples:
+        >>> canonicalize_domain_label("  Payment-API ")
+        'payment_api'
+        >>> canonicalize_domain_label(None)
+        'unknown'
+    """
+    if not isinstance(domain, str):
+        return UNKNOWN_LABEL_VALUE
+    return sanitize_label_value(domain.strip().lower())
+
 
 def _get_max_domains_from_settings() -> int:
-    """Read max_registered_domains from MetricsSettings, fallback to module constant."""
+    """Read max_registered_domains from MetricsSettings, fallback to module constant.
+
+    Fail-open is the decided direction, not an accident: fail-closed would let
+    one unrelated invalid ``BALDUR_METRICS_*`` field re-collapse every
+    application domain to the fallback label, while fail-open's worst case is a
+    bounded cap of 50 (inside the field's own ``ge=10, le=500``) plus a WARNING.
+    """
     try:
         from baldur.settings.layered_provider import get_layered_settings
         from baldur.settings.metrics import MetricsSettings
@@ -320,53 +407,190 @@ def _get_max_domains_from_settings() -> int:
         return _MAX_REGISTERED_DOMAINS
 
 
-def register_domain(domain: str, *, max_domains: int | None = None) -> bool:
+def _resolve_max_domains_cached() -> int:
+    """Return the cardinality cap, memoized for ``_CAP_CACHE_TTL_SECONDS``.
+
+    Called only from inside ``_registry_lock``, so exactly one thread ever
+    refreshes an expired entry — a cache stampede is structurally impossible
+    and needs no second mechanism.
+
+    The fail-open fallback is cached on the same terms as a configured value:
+    a persistently invalid settings field must not reinstate the per-call
+    layered read this cache exists to remove. The priced consequence is that
+    recovery from a *transient* settings failure lags by up to one TTL.
     """
-    Register a domain for metrics collection.
+    global _cap_cache_value, _cap_cache_expires_at
 
-    Args:
-        domain: Domain name
-        max_domains: Maximum number of registered domains.
-            If None, reads from MetricsSettings.max_registered_domains.
-            Falls back to _MAX_REGISTERED_DOMAINS (50) if settings unavailable.
+    now = time.monotonic()
+    if _cap_cache_value is not None and now < _cap_cache_expires_at:
+        return _cap_cache_value
+    resolved = _get_max_domains_from_settings()
+    _cap_cache_value = resolved
+    _cap_cache_expires_at = now + _CAP_CACHE_TTL_SECONDS
+    return resolved
 
-    Returns:
-        True if registration succeeded, False if limit exceeded
+
+def _admission_refusal_reason(canonical: str) -> str | None:
+    """Return why ``canonical`` may not occupy a registry slot, or None.
+
+    Pure — no settings read, no lock. Validation runs on the **canonical** form
+    rather than the raw input so the length/shape measurement is identical to
+    the one the DLQ channel applies through its own canonicalization retry;
+    a raw-vs-canonical disagreement is therefore not expressible.
     """
-    if max_domains is None:
-        max_domains = _get_max_domains_from_settings()
+    if canonical in NON_REGISTRABLE_DOMAIN_LABELS:
+        return "non_registrable"
+    try:
+        validate_and_normalize_domain(canonical)
+    except DomainValidationError as exc:
+        return str(getattr(exc.reason, "value", exc.reason))
+    return None
 
-    sanitized = sanitize_label_value(domain)
-    if sanitized in _registered_domains:
-        return True
 
-    if len(_registered_domains) >= max_domains:
-        logger.warning(
-            "metrics.domain_registration_limit_reached",
-            domain=domain,
-            max_domains=max_domains,
-            current_count=len(_registered_domains),
-        )
+def _memoize_once(memo: OrderedDict[str, None], key: str, limit: int) -> bool:
+    """Return True the first time ``key`` is offered to ``memo``.
+
+    Bounded LRU — the keys are caller-controlled domain strings, so an
+    unbounded memo would be a leak. Callers hold ``_registry_lock``.
+    """
+    if key in memo:
+        memo.move_to_end(key)
         return False
-
-    _registered_domains.add(sanitized)
-    logger.debug(
-        "metrics.domain_registered",
-        domain=sanitized,
-    )
+    if len(memo) >= limit:
+        memo.popitem(last=False)
+    memo[key] = None
     return True
 
 
-def _should_log_unregistered(sanitized: str) -> bool:
-    """Return True the first time ``sanitized`` is seen, False afterwards.
+def _warn_if_projection_lossy(domain: object, canonical: str) -> None:
+    """Announce a domain whose stored form and label form cannot agree.
+
+    Every domain-labeled *series* agrees after canonicalization, but a consumer
+    that joins a **stored** domain key against the registered set misses
+    whenever the validated form survives a character the label form rewrites.
+    Today exactly one character does that (the dot), but the predicate is
+    written as "validated form != canonical form" rather than "contains a dot"
+    so it stays correct if the validation pattern ever admits another
+    label-unsafe character.
+
+    Without this line the symptom is a silent zero on the pending gauge, the
+    console panel and the drift report — the worst failure mode. Caller holds
+    ``_registry_lock``.
+    """
+    try:
+        validated = validate_and_normalize_domain(domain)
+    except DomainValidationError:
+        # The validated channel rejects it outright, so the DLQ store path
+        # falls back to this same canonical form — the two agree.
+        return
+    if validated == canonical:
+        return
+    if _memoize_once(_lossy_projection_seen, canonical, _MAX_REFUSED_LOGGED_DOMAINS):
+        logger.warning(
+            "metrics.domain_label_projection_lossy",
+            domain=validated,
+            label=canonical,
+        )
+
+
+def register_domain(domain: object, *, max_domains: int | None = None) -> bool:
+    """
+    Register a domain so its metric label survives instead of collapsing.
+
+    Called from the surfaces where application code *declares* a domain
+    (``protect()``'s retry stage, ``@domain_tag``, the DLQ store entry point,
+    the Celery domain-consuming sites), never from runtime data reaching a
+    recorder — auto-admitting recorder input would let an external client squat
+    the cap.
+
+    Total: never raises. Sites call it bare, without a local try/except, which
+    matters because at least one of them runs inside an ``except`` block ahead
+    of a re-raise, where a propagating registry error would mask the business
+    exception.
+
+    Args:
+        domain: Domain name. Registered under its canonical label form
+            (``canonicalize_domain_label``); a non-``str`` is refused.
+        max_domains: Maximum number of registered domains.
+            If None, reads from MetricsSettings.max_registered_domains
+            (memoized for a few seconds).
+            Falls back to _MAX_REGISTERED_DOMAINS (50) if settings unavailable.
+
+    Returns:
+        True if the canonical form is registered (including "already
+        registered"), False if it was refused by the admission gate or the cap.
+    """
+    global _cap_epoch_warned
+
+    try:
+        canonical = canonicalize_domain_label(domain)
+
+        # Fast path: lock-free, no settings read. This is the steady state for
+        # every declaration site after its first call.
+        if canonical in _registered_domains:
+            return True
+
+        refusal_reason = _admission_refusal_reason(canonical)
+        if refusal_reason is not None:
+            # Lock-free memo probe so a repeating refused name pays nothing.
+            if canonical not in _refused_seen:
+                with _registry_lock:
+                    if _memoize_once(
+                        _refused_seen, canonical, _MAX_REFUSED_LOGGED_DOMAINS
+                    ):
+                        logger.warning(
+                            "metrics.domain_registration_refused",
+                            domain=canonical,
+                            reason=refusal_reason,
+                        )
+            return False
+
+        with _registry_lock:
+            # Double-checked: the fast path above ran outside the lock, so a
+            # concurrent registrant of the SAME name may have just added it.
+            # Without this re-check, that second thread measures a set the
+            # first just filled and — at the exact cap boundary — refuses a
+            # domain that is now registered, opening a cap epoch that names it.
+            if canonical in _registered_domains:
+                return True
+
+            cap = _resolve_max_domains_cached() if max_domains is None else max_domains
+            if len(_registered_domains) >= cap:
+                if not _cap_epoch_warned:
+                    _cap_epoch_warned = True
+                    logger.warning(
+                        "metrics.domain_registration_limit_reached",
+                        domain=canonical,
+                        max_domains=cap,
+                        current_count=len(_registered_domains),
+                    )
+                return False
+
+            _registered_domains.add(canonical)
+            _cap_epoch_warned = False
+            _warn_if_projection_lossy(domain, canonical)
+            logger.debug(
+                "metrics.domain_registered",
+                domain=canonical,
+            )
+            return True
+    except Exception as exc:
+        logger.warning(
+            "metrics.domain_registration_failed",
+            error=str(exc),
+        )
+        return False
+
+
+def _should_log_unregistered(canonical: str) -> bool:
+    """Return True the first time ``canonical`` is seen, False afterwards.
 
     The unregistered-domain notice is worth one line per domain, not one per
-    call: ``protect()`` passes the caller's protect name straight through as
-    the metric domain and nothing in the tree calls ``register_domain()``, so
-    a real deployment's domains are unregistered on *every* recording call.
-    Structlog is wired with a non-filtering ``BoundLogger``, so a ``debug()``
-    pays its full processor chain and its global lock regardless of the
-    configured level — and this resolver now runs once per retry attempt
+    call: a domain that no declaration site registers — a runtime-only string
+    reaching a recorder, or one refused by the cap — is unregistered on *every*
+    recording call. Structlog is wired with a non-filtering ``BoundLogger``, so
+    a ``debug()`` pays its full processor chain and its global lock regardless
+    of the configured level, and this resolver runs once per retry attempt
     rather than once per resolution.
 
     The seen-set is bounded because the domain string is caller-controlled:
@@ -374,38 +598,47 @@ def _should_log_unregistered(sanitized: str) -> bool:
     normalizer's in this same package.
     """
     with _unregistered_seen_lock:
-        if sanitized in _unregistered_seen:
-            _unregistered_seen.move_to_end(sanitized)
+        if canonical in _unregistered_seen:
+            _unregistered_seen.move_to_end(canonical)
             return False
         if len(_unregistered_seen) >= _MAX_UNREGISTERED_LOGGED_DOMAINS:
             _unregistered_seen.popitem(last=False)
-        _unregistered_seen[sanitized] = None
+        _unregistered_seen[canonical] = None
         return True
 
 
-def resolve_domain_label(domain: str) -> str:
+def resolve_domain_label(domain: object) -> str:
     """
     Safely resolve a domain label for metric recording (enforcement).
 
-    Returns the domain as-is if registered, otherwise forces OTHER_DOMAIN.
-    Ensures that register_domain() limits are enforced, not advisory.
+    Returns the canonical label form if it is registered, otherwise forces
+    OTHER_DOMAIN. This is what makes register_domain()'s cap enforced rather
+    than advisory.
 
-    The unregistered-domain DEBUG line is emitted once per distinct domain
-    (see ``_should_log_unregistered``); the resolved value is unaffected.
+    Total on any input, including non-``str`` (see
+    ``canonicalize_domain_label``). The unregistered-domain DEBUG line is
+    emitted once per distinct domain (see ``_should_log_unregistered``); the
+    resolved value is unaffected.
 
     Args:
         domain: Domain name
 
     Returns:
-        Sanitized domain if registered, "OTHER_DOMAIN" otherwise
+        Canonical domain label if registered, "OTHER_DOMAIN" otherwise
     """
-    sanitized = sanitize_label_value(domain)
-    if sanitized in _registered_domains:
-        return sanitized
-    if _should_log_unregistered(sanitized):
+    canonical = canonicalize_domain_label(domain)
+    # Idempotent echo: resolving the fallback label returns it without a
+    # membership lookup or a memo lock. The registered set holds the fallback
+    # in its UPPERCASE spelling for gauge inventory only, which no canonical
+    # form can ever equal.
+    if canonical == _FALLBACK_DOMAIN.lower():
+        return _FALLBACK_DOMAIN
+    if canonical in _registered_domains:
+        return canonical
+    if _should_log_unregistered(canonical):
         logger.debug(
             "metrics.domain_label_unregistered",
-            domain=domain,
+            domain=canonical,
             resolved_to=_FALLBACK_DOMAIN,
         )
     return _FALLBACK_DOMAIN
@@ -429,18 +662,35 @@ def reset_registered_domains() -> None:
     Uses clear() + update() instead of reassignment to preserve the set
     object identity — test fixtures may hold direct references to it.
 
-    The unregistered-domain log memo is cleared here rather than through a
-    second reset entry point: a test that re-registers a domain and expects
-    its first-resolve notice again must not depend on remembering to reset
-    two things.
+    Every memo is cleared here rather than through separate reset entry
+    points: a test that re-registers a domain and expects its first-resolve
+    notice again must not depend on remembering to reset several things.
+
+    Taking the registry lock for the set, the refusal/lossy memos, the cap
+    epoch flag and the cap cache together closes the reset-vs-registration
+    race — a concurrent registrant either completes before the reset or
+    observes a fully-reset registry.
     """
-    _registered_domains.clear()
-    _registered_domains.update(_DEFAULT_DOMAINS)
+    global _cap_epoch_warned, _cap_cache_value, _cap_cache_expires_at
+
+    with _registry_lock:
+        _registered_domains.clear()
+        _registered_domains.update(_DEFAULT_DOMAINS)
+        _refused_seen.clear()
+        _lossy_projection_seen.clear()
+        _cap_epoch_warned = False
+        _cap_cache_value = None
+        _cap_cache_expires_at = 0.0
     with _unregistered_seen_lock:
         _unregistered_seen.clear()
 
 
 def get_registered_domains() -> list[str]:
-    """Get all registered domains, including defaults."""
+    """Get all registered domains, including defaults.
+
+    The uppercase fallback label is part of the returned inventory by design:
+    the periodic per-domain gauge updaters enumerate this list, so dropping it
+    would freeze the collapse bucket's own gauge refresh.
+    """
     all_domains = _registered_domains | set(DEFAULT_DOMAINS)
     return sorted(all_domains)

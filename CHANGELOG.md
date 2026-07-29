@@ -96,6 +96,14 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ### Changed
 
+- Application domains now register themselves, so their metric labels stop collapsing to one series.
+- A protect retry stage, `@domain_tag`, a DLQ store and the Celery sites each claim their domain.
+- Registration is lazy: a domain leaves `OTHER_DOMAIN` when its declaring module or call first runs.
+- Domain label values are canonical, lower-cased: `My-Service` becomes `my_service`.
+- Auto-registered domains share `max_registered_domains` with your own `register_domain()` calls.
+- A DLQ domain the validator rejects is stored canonicalized when canonicalization fixes it.
+- `on_domain_rejected` now fires only when canonicalization cannot fix the input.
+- `retry_backoff_*` and `dlq_outbox_processing_delay_seconds` now carry the capped domain label.
 - Meta-Watchdog probes now run concurrently under a per-pass wall-clock budget.
 - A probe still running at the budget reports `UNKNOWN`; the pass no longer waits for it.
 - The budget is derived from `probe_interval_seconds` and the daemon-worker staleness multiplier.

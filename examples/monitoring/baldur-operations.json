@@ -321,7 +321,7 @@
         "type": "prometheus",
         "uid": "mimir"
       },
-      "description": "Task-queue retry signals and terminal outcomes per second, recorded by the task layer on its own series so it shares no denominator with the protected-call retry panels. Populates only when the Celery adapter is installed. Grouping by domain requires baldur.metrics.register_domain to be called at startup; without it every application domain collapses into a single 'other' series.",
+      "description": "Task-queue retry signals and terminal outcomes per second, recorded by the task layer on its own series so it shares no denominator with the protected-call retry panels. Populates only when the Celery adapter is installed. Domains register themselves the first time application code declares one (a protect call composing a retry stage, @domain_tag, a DLQ store, a Celery task); a domain past the max_registered_domains cap collapses into the shared OTHER_DOMAIN series.",
       "targets": [
         {
           "expr": "sum by (domain) (rate(baldur_task_retries_total[5m]))",
@@ -352,7 +352,7 @@
         "type": "prometheus",
         "uid": "mimir"
       },
-      "description": "Mean attempts a task took to reach a terminal: 1 + the task's own retries. Counts explicit Task.retry() chains only — NOT broker redeliveries (Reject(requeue=True), visibility-timeout expiry, acks_late worker loss), which redeliver the same message with its retry header unchanged and so read as a fresh attempt count of 1. Populates only when the Celery adapter is installed. Grouping by domain requires baldur.metrics.register_domain to be called at startup; without it every application domain collapses into a single 'other' series.",
+      "description": "Mean attempts a task took to reach a terminal: 1 + the task's own retries. Counts explicit Task.retry() chains only — NOT broker redeliveries (Reject(requeue=True), visibility-timeout expiry, acks_late worker loss), which redeliver the same message with its retry header unchanged and so read as a fresh attempt count of 1. Populates only when the Celery adapter is installed. Domains register themselves the first time application code declares one (a protect call composing a retry stage, @domain_tag, a DLQ store, a Celery task); a domain past the max_registered_domains cap collapses into the shared OTHER_DOMAIN series.",
       "targets": [
         {
           "expr": "sum by (domain) (rate(baldur_task_attempts_distribution_sum[5m])) / sum by (domain) (rate(baldur_task_attempts_distribution_count[5m]))",
