@@ -34,9 +34,14 @@ METRIC_RELIABILITY_MAP: dict[str, MetricReliability] = {
     "replay_attempts_total": MetricReliability.EXACT,
     "replay_outcomes_total": MetricReliability.EXACT,
     "security_incidents_total": MetricReliability.EXACT,
+    # Task-queue terminal counter. Declared alongside its protected-call
+    # counterpart above: the two layers keep separate series, and a task
+    # terminal is recorded exactly once, so both are EXACT.
+    "task_outcomes_total": MetricReliability.EXACT,
     # Histogram: recorded at observation time, 100% accurate
     "recovery_time_seconds": MetricReliability.EXACT,
     "retry_attempts_distribution": MetricReliability.EXACT,
+    "task_attempts_distribution": MetricReliability.EXACT,
     "retry_delay_seconds": MetricReliability.EXACT,
     "human_review_queue_time_seconds": MetricReliability.EXACT,
     "circuit_breaker_open_duration_seconds": MetricReliability.EXACT,
