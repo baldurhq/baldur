@@ -12,6 +12,11 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ### Fixed
 
+- An unreachable Redis no longer stalls the event-bus connect or the watchdog probe for seconds.
+- Both give up after `BALDUR_REDIS_PROBE_CONNECT_TIMEOUT` (0.5s), not the data-path timeout.
+- The Redis metric-source adapter builds its client through the shared connection factory.
+- Before, its check ping carried no connect timeout and hung on the OS TCP timeout.
+- It now reads the Redis URL through settings too, so credentials and Sentinel URLs apply.
 - `start_sync_worker()` absorbs a crashed worker's orphaned audit WAL entries before draining.
 - Before, only the internal start path did, so the public helper stranded those entries forever.
 - The escalation channel self-test now closes the PagerDuty incident it opens.
