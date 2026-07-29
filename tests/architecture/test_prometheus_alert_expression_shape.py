@@ -8,7 +8,10 @@ simply never firing:
   shipped as the only critical scrape-liveness rule and matched an empty vector
   on every Flask / FastAPI / plain-Python deployment — a structural inability to
   fire, not a mis-tuned threshold. Baldur ships no scrape config, so there is no
-  job-name convention any rule may assume.
+  job-name convention any rule may assume. All four matcher operators are
+  covered against all three PromQL string-literal delimiters (double quote,
+  apostrophe, backquoted raw string) — a delimiter the matcher misses is a
+  selector that ships.
 * **a value read of the ``baldur_up`` liveness marker.** The marker is a
   constant 1 whose *presence* carries the whole signal. An unlabelled
   ``prometheus_client`` Gauge initializes to ``0.0``, so any path that registers
@@ -23,6 +26,11 @@ Both regressions are behaviorally invisible: nothing in the file, in Prometheus,
 or in a metric-name check notices. G48 sits one axis over on this same file — it
 asks whether every ``baldur_``-prefixed token *resolves in the registry*, a
 name-existence question. This guard asks whether the expression can fire.
+
+Both checks above are negative, and a third way to ship a file that cannot fire
+is to carry no liveness rule at all — deleting the pair satisfies every negative
+assertion, and no gate over this file asserts a rule exists. So the presence of
+each existence predicate is pinned here too.
 
 Comment lines are out of scope by construction: the file is parsed as YAML and
 only ``expr`` values are inspected, so the deliberate ``job=`` specialization
@@ -56,9 +64,11 @@ _UP_MARKER = "baldur_up"
 _EXISTENCE_FUNCTIONS = ("present_over_time", "absent_over_time")
 
 # A label matcher on `job` inside an expr, in any of PromQL's four matcher
-# forms (`=`, `!=`, `=~`, `!~`). Vector-matching clauses that merely *name* the
-# label — `on (job, instance)` — carry no matcher operator and are not matched.
-_JOB_SELECTOR_RE = re.compile(r"\bjob\s*(?:=~|!~|!=|=)\s*[\"']")
+# forms (`=`, `!=`, `=~`, `!~`) against any of its three string-literal
+# delimiters (double quote, apostrophe, backquoted raw string). Vector-matching
+# clauses that merely *name* the label — `on (job, instance)` — carry no matcher
+# operator and are not matched.
+_JOB_SELECTOR_RE = re.compile(r"\bjob\s*(?:=~|!~|!=|=)\s*[\"'`]")
 
 # An occurrence of the marker is legitimate only when it opens the argument
 # list of an existence function.
@@ -138,6 +148,28 @@ def test_liveness_marker_is_read_by_existence_only(
     )
 
 
+def test_both_liveness_rules_ship_and_key_on_the_marker() -> None:
+    """The file still ships a scrape-liveness pair keyed on the marker (G78).
+
+    The two checks above are negative: deleting both liveness rules satisfies
+    them trivially, and no other gate over this file asserts a rule exists —
+    G48 only asks whether the tokens that *are* present resolve. Dropping the
+    rules restores the original defect (an operator importing the file gets no
+    scrape-liveness alarm at all) with every gate green, so the presence of
+    each existence predicate is pinned here rather than left to a landing grep.
+    """
+    for function in _EXISTENCE_FUNCTIONS:
+        call = re.compile(rf"{function}\(\s*{_UP_MARKER}\b")
+        matched = [name for _, name, expr in _ALERT_CASES if call.search(expr)]
+        assert matched, (
+            f"no bundled alert calls {function}({_UP_MARKER}...). The pair "
+            f"`present_over_time` (per-target death, joined on the marker) and "
+            f"`absent_over_time` (nothing reporting at all) is the whole "
+            f"framework-agnostic scrape-liveness signal — without both, a "
+            f"deployment that imports these rules has no liveness alarm."
+        )
+
+
 def test_guard_rejects_a_job_selector() -> None:
     """Guard-of-the-guard: the job-selector check must reject the shape it bans.
 
@@ -149,6 +181,12 @@ def test_guard_rejects_a_job_selector() -> None:
     assert _job_selectors('up{job!="django"} == 0')
     assert _job_selectors('up{job=~"baldur-.*"} == 0')
     assert _job_selectors('up{job !~ "django"} == 0')
+    # PromQL accepts three string-literal delimiters, not just the double
+    # quote: an apostrophe and a backquoted raw string select identically.
+    assert _job_selectors("up{job='django'} == 0")
+    assert _job_selectors("up{job=`django`} == 0"), (
+        "a backquoted raw string is a PromQL string literal like any other"
+    )
     assert not _job_selectors(
         "up == 0 and on (job, instance) present_over_time(baldur_up[6h])"
     )
