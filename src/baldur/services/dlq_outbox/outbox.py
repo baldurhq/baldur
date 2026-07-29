@@ -454,12 +454,18 @@ def _on_drop_threshold(stats: RingBufferStats) -> None:
 
 
 def _on_processing_delay(delay_seconds: float, domain: str) -> None:
-    """Worker-side enqueue→pop delay observation (D4 leading indicator)."""
+    """Worker-side enqueue→pop delay observation (D4 leading indicator).
+
+    The stored DLQ domain goes through the resolution funnel so this histogram
+    carries the same canonical, cap-enforced label as every other DLQ family.
+    """
     try:
+        from baldur.metrics.registry import resolve_domain_label
         from baldur.services.metrics.definitions import (
             dlq_outbox_processing_delay_seconds,
         )
 
+        domain = resolve_domain_label(domain)
         dlq_outbox_processing_delay_seconds.labels(domain=domain).observe(delay_seconds)
     except Exception:
         pass
