@@ -210,6 +210,55 @@ def get_or_create_histogram(
 
 
 # =============================================================================
+# Exporter Liveness Marker
+# =============================================================================
+
+UP_GAUGE_NAME = "baldur_up"
+_UP_GAUGE_DESCRIPTION = (
+    "Baldur exporter liveness marker (always 1 while the process exports metrics)"
+)
+
+
+def ensure_up_gauge() -> None:
+    """Register the exporter liveness marker and pin it at 1.
+
+    Follows the standard per-exporter ``*_up`` primitive (``mysql_up``,
+    ``redis_up``, ``pg_up``): a label-less gauge whose *presence* — never its
+    value — marks a scrape target as a Baldur exporter. The bundled
+    scrape-liveness alert rules join on it, which is what makes them
+    framework-agnostic: they need no knowledge of the scrape job's name.
+
+    Fail-open on any exception, not only on ``prometheus_client`` absence.
+    ``get_or_create_gauge`` returns whatever collector already owns the name
+    without a type check, so a foreign collector registered by unrelated code
+    collapses the call in more than one way: a ``Gauge`` carrying labels raises
+    ``ValueError`` from ``.set()`` on an unlabelled handle, and a ``Counter``
+    raises ``AttributeError`` for having no ``.set`` at all. Narrowing the catch
+    would leave one of those uncaught. A liveness marker is a pure observability
+    side-effect (fail-open), and this runs at module import, where a propagated
+    raise would break every importer of the metrics registry.
+
+    The WARNING is the only diagnostic a name collision produces, so its event
+    name is a fixed literal and carries the exception text.
+    """
+    try:
+        get_or_create_gauge(UP_GAUGE_NAME, _UP_GAUGE_DESCRIPTION, []).set(1)
+    except Exception as exc:
+        logger.warning(
+            "metrics.up_gauge_registration_failed",
+            metric=UP_GAUGE_NAME,
+            error=str(exc),
+        )
+
+
+# Registered once, at module scope: every metric-emitting path imports this
+# module by construction (all recorders pull get_or_create_* from here), so the
+# marker is exported whichever metrics backend the observability profile picks
+# — including the OTel backend, which never constructs BaldurMetrics.
+ensure_up_gauge()
+
+
+# =============================================================================
 # Domain Registry (Dynamic Domain Registration)
 # =============================================================================
 
