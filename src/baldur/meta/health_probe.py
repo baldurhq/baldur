@@ -734,8 +734,15 @@ class RedisProbe(HealthProbe):
             redis_client = None
             try:
                 from baldur.adapters.cache.redis_adapter import RedisCacheAdapter
+                from baldur.settings.redis import get_redis_settings
 
-                adapter = RedisCacheAdapter()
+                # Probe-shaped connect timeout: this client exists only to
+                # answer "is Redis reachable right now", and the watchdog asks
+                # again on its own cadence — so an unreachable host must cost
+                # the probe budget, not the full data-path timeout.
+                adapter = RedisCacheAdapter(
+                    socket_connect_timeout=get_redis_settings().probe_connect_timeout,
+                )
                 redis_client = adapter._redis
             except ImportError:
                 pass

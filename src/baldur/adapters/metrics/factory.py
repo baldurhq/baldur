@@ -6,7 +6,6 @@ Creates the appropriate metric source adapter based on configuration.
 
 from __future__ import annotations
 
-import os
 from typing import TYPE_CHECKING
 
 import structlog
@@ -42,17 +41,30 @@ get_metric_adapter, configure_metric_adapter, reset_metric_adapter = (
 
 
 def _create_redis_adapter() -> MetricSourceAdapter:
-    """Create Redis-based adapter."""
+    """Create Redis-based adapter.
+
+    The client comes from the shared connection factory rather than a direct
+    ``redis.from_url``: the factory is what applies the configured socket
+    timeouts, injects credentials from settings instead of the URL, and
+    resolves Sentinel/Cluster URLs. Built directly, the verification ping below
+    carried no connect timeout at all and blocked on the OS TCP timeout —
+    tens of seconds — whenever the host was unreachable rather than refusing.
+    """
     try:
-        import redis as redis_lib
-
         from baldur.adapters.metrics.redis_adapter import RedisMetricSourceAdapter
+        from baldur.adapters.redis.connection_factory import (
+            get_redis_connection_factory,
+        )
+        from baldur.settings.redis import get_redis_settings
 
-        redis_url = os.environ.get("BALDUR_REDIS_URL", "redis://localhost:6379/0")
+        # Same value the previous env read resolved to — RedisSettings binds
+        # BALDUR_REDIS_URL with the identical default — now read through the
+        # settings layer like every other Redis consumer.
+        redis_url = get_redis_settings().url
         settings = get_metrics_settings()
         prefix = settings.redis_prefix
 
-        client = redis_lib.from_url(redis_url, decode_responses=True)
+        client = get_redis_connection_factory().create(redis_url, decode_responses=True)
         # Test connection
         client.ping()
 

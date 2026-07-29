@@ -235,7 +235,15 @@ class RedisEventBus:
                 return False
 
             factory = get_redis_connection_factory()
-            self._redis_client = factory.create(url, decode_responses=True)
+            # Probe-shaped connect timeout: the ping below decides whether this
+            # bus runs at all, and the listener re-attempts on its own
+            # reconnect interval, so an unreachable Redis must fail fast here
+            # rather than hold the caller for the full data-path timeout.
+            self._redis_client = factory.create(
+                url,
+                decode_responses=True,
+                socket_connect_timeout=get_redis_settings().probe_connect_timeout,
+            )
             self._redis_client.ping()
             logger.info("redis_event_bus.connected_redis")
             return True

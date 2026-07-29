@@ -551,12 +551,16 @@ class TestConnectRedisBehavior:
             mock_eb_settings.return_value = MagicMock(
                 redis_url="redis://dedicated:6379/0"
             )
-            mock_redis_settings.return_value = MagicMock(url="redis://shared:6379/0")
+            mock_redis_settings.return_value = MagicMock(
+                url="redis://shared:6379/0", probe_connect_timeout=0.75
+            )
             result = bus._connect_redis()
 
         assert result is True
         mock_factory.create.assert_called_once_with(
-            "redis://dedicated:6379/0", decode_responses=True
+            "redis://dedicated:6379/0",
+            decode_responses=True,
+            socket_connect_timeout=0.75,
         )
 
     def test_falls_back_to_redis_settings_url(self):
@@ -581,12 +585,16 @@ class TestConnectRedisBehavior:
             ),
         ):
             mock_eb_settings.return_value = MagicMock(redis_url=None)
-            mock_redis_settings.return_value = MagicMock(url="redis://shared:6379/0")
+            mock_redis_settings.return_value = MagicMock(
+                url="redis://shared:6379/0", probe_connect_timeout=0.75
+            )
             result = bus._connect_redis()
 
         assert result is True
         mock_factory.create.assert_called_once_with(
-            "redis://shared:6379/0", decode_responses=True
+            "redis://shared:6379/0",
+            decode_responses=True,
+            socket_connect_timeout=0.75,
         )
 
     def test_returns_false_when_no_url_configured(self):
