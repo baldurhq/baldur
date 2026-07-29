@@ -179,6 +179,23 @@ BALDUR_META_WATCHDOG_SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
 BALDUR_META_WATCHDOG_PAGERDUTY_ROUTING_KEY=<pd-key>
 ```
 
+Escalation only reaches you while the process is alive to send it. The outbound
+liveness beacon covers the other case: set `BEACON_URL` and the watchdog loop
+GETs it once per completed probe pass, so an external dead-man's-switch service
+pages on the *absence* of pings when the process crashes, is OOM-killed or
+hangs. Unset is the off switch (there is no separate enable flag). `FAIL_URL` is
+optional and only routes UNHEALTHY passes elsewhere — silence is never used to
+signal degradation, and with it unset an UNHEALTHY pass still pings `BEACON_URL`.
+`TIMEOUT_SECONDS` (1–10) is the socket budget of the beacon's own sender thread
+and bounds nothing on the watchdog loop. Setup, provider choice and grace-period
+sizing: `docs/runbooks/meta-watchdog-escalation-response.md`.
+
+```bash
+BALDUR_META_WATCHDOG_BEACON_URL=https://<dms-provider>/ping/<check-id>
+BALDUR_META_WATCHDOG_BEACON_FAIL_URL=https://<dms-provider>/ping/<check-id>/fail
+BALDUR_META_WATCHDOG_BEACON_TIMEOUT_SECONDS=5
+```
+
 ## Metrics source (canary live evaluation)
 
 Connects Baldur to a Prometheus (or PromQL-compatible) metrics backend so the
