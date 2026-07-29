@@ -19,6 +19,8 @@ from typing import TYPE_CHECKING, cast
 
 import structlog
 
+from baldur.utils.domain_validation import FALLBACK_DOMAIN
+
 logger = structlog.get_logger()
 
 # Check prometheus_client availability
@@ -169,7 +171,13 @@ class BaldurMetrics:
             return
         self.dlq.record_overflow(domain, strategy)
 
-    def record_dlq_evicted(self, count: int, strategy: str, domain: str = "") -> None:
+    def record_dlq_evicted(
+        self, count: int, strategy: str, domain: str = FALLBACK_DOMAIN
+    ) -> None:
+        # The default is repeated here rather than deferred to the recorder:
+        # this facade forwards ``domain`` positionally, so its own default is
+        # what an unattributed eviction actually lands on — and the only
+        # production caller (the overflow event handler) omits the argument.
         if not self._initialized:
             return
         self.dlq.record_evicted(count, strategy, domain)

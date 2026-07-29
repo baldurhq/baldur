@@ -38,6 +38,7 @@ from datetime import datetime
 import structlog
 
 from baldur.metrics.safe_gauge import clamp_percentage
+from baldur.utils.domain_validation import FALLBACK_DOMAIN
 from baldur.utils.time import utc_now
 
 logger = structlog.get_logger()
@@ -746,7 +747,12 @@ class OTELBaldurMetrics:
             return
         self.dlq.record_overflow(domain, strategy)
 
-    def record_dlq_evicted(self, count: int, strategy: str, domain: str = "") -> None:
+    def record_dlq_evicted(
+        self, count: int, strategy: str, domain: str = FALLBACK_DOMAIN
+    ) -> None:
+        # Mirrors the Prometheus backend: the argument is forwarded
+        # positionally, so this default — not the recorder's — is what an
+        # unattributed eviction lands on.
         if not self._initialized:
             return
         self.dlq.record_evicted(count, strategy, domain)

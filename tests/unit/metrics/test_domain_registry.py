@@ -700,6 +700,24 @@ class TestRegisterDomainAdmissionBehavior:
         refused = [c.kwargs["domain"] for c in mock_logger.warning.call_args_list]
         assert refused == ["3rd_party", "4th_party"]
 
+    def test_a_flood_of_distinct_refused_names_saturates_instead_of_recycling(self):
+        """The refusal memo is bounded AND the WARNING count is bounded.
+
+        Registration now runs on the request path, so a per-tenant name that
+        the admission gate rejects — a digit-leading id, say — arrives with a
+        fresh spelling every call. An LRU would evict and re-admit forever,
+        emitting one WARNING per call: the exact flood the cap-epoch flag
+        exists to prevent on the other refusal path.
+        """
+        limit = registry_module._MAX_REFUSED_LOGGED_DOMAINS
+
+        with patch("baldur.metrics.registry.logger") as mock_logger:
+            for index in range(limit + 200):
+                assert register_domain(f"{index}_tenant") is False
+
+        assert mock_logger.warning.call_count == limit
+        assert len(registry_module._refused_seen) == limit
+
 
 # =============================================================================
 # Behavior Tests — register_domain() totality
@@ -1128,6 +1146,43 @@ class TestProjectionLossyWarningBehavior:
             assert register_domain("payment.tier2") is True
 
         assert mock_logger.warning.call_count == 0
+
+    def test_lossy_spelling_of_an_already_registered_name_still_announces(self):
+        """The divergence belongs to the spelling, not to who registered first.
+
+        ``data.sync`` canonicalizes onto ``data_sync``, one of the six domains
+        the registry ships pre-registered — so it never reaches the admission
+        branch. It is stored with its dot all the same, so the registry-joined
+        gauge reads zero for it, and an admission-only announcement would be
+        silent on the framework's own shipped vocabulary.
+        """
+        assert "data_sync" in _registered_domains
+
+        with patch("baldur.metrics.registry.logger") as mock_logger:
+            assert register_domain("data.sync") is True
+
+        mock_logger.warning.assert_called_once_with(
+            "metrics.domain_label_projection_lossy",
+            domain="data.sync",
+            label="data_sync",
+        )
+
+    def test_agreeing_form_on_the_fast_path_is_evaluated_once(self):
+        """A repeat of an agreeing name must not re-run the validator.
+
+        The memo records every canonical form it has *evaluated*, not only the
+        ones it warned about — otherwise the membership fast path would pay a
+        validation on every steady-state call.
+        """
+        register_domain("payment")
+
+        with patch(
+            "baldur.metrics.registry.validate_and_normalize_domain", autospec=True
+        ) as mock_validate:
+            for _ in range(5):
+                assert register_domain("payment") is True
+
+        mock_validate.assert_not_called()
 
     @pytest.mark.parametrize("raw", ["payment", "Payment-API", "  my-service  "])
     def test_agreeing_forms_are_not_announced(self, raw):

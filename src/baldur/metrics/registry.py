@@ -341,8 +341,11 @@ NON_REGISTRABLE_DOMAIN_LABELS: frozenset[str] = frozenset(
 _MAX_REFUSED_LOGGED_DOMAINS = 256
 _refused_seen: OrderedDict[str, None] = OrderedDict()
 
-# Canonical names whose lossy-projection WARNING has already been emitted.
+# Canonical names whose projection has already been EVALUATED for lossiness
+# (warned or not — see _note_projection_lossiness). Its own lock, because the
+# check runs on the lock-free membership hit as well as under _registry_lock.
 _lossy_projection_seen: OrderedDict[str, None] = OrderedDict()
+_lossy_projection_lock = threading.Lock()
 
 # True once the registry has reported that it is full. Cleared by a successful
 # add (i.e. the cap was raised) and by reset_registered_domains(), so the
@@ -448,21 +451,28 @@ def _admission_refusal_reason(canonical: str) -> str | None:
 
 
 def _memoize_once(memo: OrderedDict[str, None], key: str, limit: int) -> bool:
-    """Return True the first time ``key`` is offered to ``memo``.
+    """Return True the first time ``key`` is offered to ``memo``, else False.
 
-    Bounded LRU — the keys are caller-controlled domain strings, so an
-    unbounded memo would be a leak. Callers hold ``_registry_lock``.
+    **Saturating**, not LRU: once ``limit`` distinct keys have been recorded,
+    every further key returns False. The keys are caller-controlled domain
+    strings, so an unbounded memo would be a leak — but an LRU is the wrong
+    bound for a WARNING gate on a request path: a rotation of more than
+    ``limit`` distinct names evicts and re-admits forever, which is one
+    WARNING per call, exactly the flood the cap-epoch flag exists to avoid on
+    the other refusal path. Saturating caps the total at ``limit`` lines per
+    ``reset_registered_domains()`` cycle.
+
+    Callers hold ``_registry_lock``.
     """
     if key in memo:
-        memo.move_to_end(key)
         return False
     if len(memo) >= limit:
-        memo.popitem(last=False)
+        return False
     memo[key] = None
     return True
 
 
-def _warn_if_projection_lossy(domain: object, canonical: str) -> None:
+def _note_projection_lossiness(domain: object, canonical: str) -> None:
     """Announce a domain whose stored form and label form cannot agree.
 
     Every domain-labeled *series* agrees after canonicalization, but a consumer
@@ -473,19 +483,35 @@ def _warn_if_projection_lossy(domain: object, canonical: str) -> None:
     so it stays correct if the validation pattern ever admits another
     label-unsafe character.
 
+    Runs on the membership hit as well as on a fresh admission, because the
+    divergence is a property of the *spelling*, not of who won the race to
+    register it: ``data.sync`` resolves against a shipped default that is
+    already in the set, so an admission-only check would stay silent on the
+    one vocabulary the framework itself ships. The memo therefore records
+    every canonical form it has **evaluated**, not only the ones it warned
+    about — otherwise an agreeing name would re-run the validator on every
+    steady-state call, which is the per-call cost the fast path exists to
+    remove. Known residue: a second, differently-spelled raw input for an
+    already-evaluated canonical form is not re-checked.
+
     Without this line the symptom is a silent zero on the pending gauge, the
-    console panel and the drift report — the worst failure mode. Caller holds
-    ``_registry_lock``.
+    console panel and the drift report — the worst failure mode. Takes its own
+    lock, so it is callable from inside or outside ``_registry_lock``.
     """
+    if canonical in _lossy_projection_seen:
+        return
     try:
         validated = validate_and_normalize_domain(domain)
     except DomainValidationError:
         # The validated channel rejects it outright, so the DLQ store path
         # falls back to this same canonical form — the two agree.
-        return
-    if validated == canonical:
-        return
-    if _memoize_once(_lossy_projection_seen, canonical, _MAX_REFUSED_LOGGED_DOMAINS):
+        validated = canonical
+    with _lossy_projection_lock:
+        if not _memoize_once(
+            _lossy_projection_seen, canonical, _MAX_REFUSED_LOGGED_DOMAINS
+        ):
+            return
+    if validated != canonical:
         logger.warning(
             "metrics.domain_label_projection_lossy",
             domain=validated,
@@ -526,8 +552,13 @@ def register_domain(domain: object, *, max_domains: int | None = None) -> bool:
         canonical = canonicalize_domain_label(domain)
 
         # Fast path: lock-free, no settings read. This is the steady state for
-        # every declaration site after its first call.
+        # every declaration site after its first call. The lossiness note runs
+        # here too — after its own memo hit it is a single dict lookup, and a
+        # spelling whose canonical form is already registered (``data.sync``
+        # against the shipped ``data_sync`` default) diverges exactly as much
+        # as one that had to be admitted.
         if canonical in _registered_domains:
+            _note_projection_lossiness(domain, canonical)
             return True
 
         refusal_reason = _admission_refusal_reason(canonical)
@@ -568,12 +599,15 @@ def register_domain(domain: object, *, max_domains: int | None = None) -> bool:
 
             _registered_domains.add(canonical)
             _cap_epoch_warned = False
-            _warn_if_projection_lossy(domain, canonical)
             logger.debug(
                 "metrics.domain_registered",
                 domain=canonical,
             )
-            return True
+
+        # Outside the registry lock on purpose: the lossiness note takes its
+        # own lock, and nesting two locks for a diagnostic buys nothing.
+        _note_projection_lossiness(domain, canonical)
+        return True
     except Exception as exc:
         logger.warning(
             "metrics.domain_registration_failed",
@@ -666,10 +700,11 @@ def reset_registered_domains() -> None:
     points: a test that re-registers a domain and expects its first-resolve
     notice again must not depend on remembering to reset several things.
 
-    Taking the registry lock for the set, the refusal/lossy memos, the cap
-    epoch flag and the cap cache together closes the reset-vs-registration
-    race — a concurrent registrant either completes before the reset or
-    observes a fully-reset registry.
+    Taking the registry lock for the set, the refusal memo, the cap epoch flag
+    and the cap cache together closes the reset-vs-registration race — a
+    concurrent registrant either completes before the reset or observes a
+    fully-reset registry. The two diagnostic memos hold their own locks and are
+    cleared sequentially, never nested, so no inverse lock order exists.
     """
     global _cap_epoch_warned, _cap_cache_value, _cap_cache_expires_at
 
@@ -677,10 +712,11 @@ def reset_registered_domains() -> None:
         _registered_domains.clear()
         _registered_domains.update(_DEFAULT_DOMAINS)
         _refused_seen.clear()
-        _lossy_projection_seen.clear()
         _cap_epoch_warned = False
         _cap_cache_value = None
         _cap_cache_expires_at = 0.0
+    with _lossy_projection_lock:
+        _lossy_projection_seen.clear()
     with _unregistered_seen_lock:
         _unregistered_seen.clear()
 

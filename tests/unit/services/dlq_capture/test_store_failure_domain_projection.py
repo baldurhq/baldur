@@ -124,6 +124,16 @@ class TestStoreFailureCanonicalizationRetryBehavior:
         assert resolve_domain_label(raw) == FALLBACK_DOMAIN
         assert "x" * 100 not in get_registered_domains()
 
+    def test_non_string_domain_still_files_the_record(self, service, repo):
+        """Totality at the channel boundary, not just at the registry.
+
+        The projection is called from inside this method's ``except`` block, so
+        a version of it that started with ``.strip()`` would raise there and
+        drop a record that is filed under the fallback label today. The
+        regression this pins is a DLQ entry that stops existing.
+        """
+        assert _store(service, repo, None) == FALLBACK_DOMAIN
+
     def test_empty_domain_keeps_todays_rejection_path(self, service, repo):
         """The skip-list is what stops ``""`` merging into a real domain."""
         with patch(
