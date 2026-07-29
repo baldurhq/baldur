@@ -938,14 +938,25 @@ class CacheProviderInterface(ABC):
     @abstractmethod
     def flush_all(self) -> bool:
         """
-        Clear all keys (USE WITH CAUTION - mainly for testing).
+        Clear every key in this provider's namespace (USE WITH CAUTION -
+        mainly for testing).
 
         Returns:
             True if successful
 
         Warning:
-            This will delete ALL data in the cache. Only use
-            in testing environments or with explicit confirmation.
+            The blast radius is the provider's whole key namespace, which on
+            a shared backend is wider than "cached values". Other Baldur
+            components store state under the same key prefix - circuit
+            breaker state, DLQ entries, idempotency records - and are
+            deleted along with it, so calling this on a live system can
+            discard accepted-but-unprocessed work.
+
+            Backends differ in reach: the in-memory provider clears only its
+            own store, the Redis provider clears everything under the
+            configured prefix, and Memcached flushes the entire server
+            including keys this application never wrote. Only use in testing
+            environments or with explicit confirmation.
         """
         pass
 

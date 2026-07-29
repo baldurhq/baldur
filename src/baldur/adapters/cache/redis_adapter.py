@@ -877,7 +877,13 @@ class RedisCacheAdapter(CacheProviderInterface):
             return False
 
     def flush_all(self) -> bool:
-        """Clear all keys with our prefix (not entire Redis DB)."""
+        """Clear every key under the configured prefix (not the entire Redis DB).
+
+        The prefix is Baldur's namespace rather than a cache-only
+        sub-namespace, so this also deletes circuit breaker state, DLQ
+        entries and idempotency records stored under it. Read the interface
+        warning before calling this against a live deployment.
+        """
         try:
             # Use SCAN to find keys with our prefix
             cursor = 0
