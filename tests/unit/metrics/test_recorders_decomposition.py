@@ -342,6 +342,38 @@ class TestDLQMetricRecorderContract:
         """_size_ratio gauge exists."""
         assert hasattr(dlq_recorder, "_size_ratio")
 
+    def test_record_evicted_defaults_to_the_standard_collapse_label(self, dlq_recorder):
+        """An unattributed eviction lands on the collapse label, not ``""``.
+
+        An empty label value is not a bucket any query can name, so the
+        eviction counter's unattributed domain follows the tree-wide
+        "unattributed domain = fallback label" convention.
+        """
+        import inspect
+
+        from baldur.utils.domain_validation import FALLBACK_DOMAIN
+
+        default = (
+            inspect.signature(dlq_recorder.record_evicted).parameters["domain"].default
+        )
+
+        assert default == FALLBACK_DOMAIN
+        assert default != ""
+
+    def test_record_evicted_without_a_domain_labels_the_collapse_bucket(
+        self, dlq_recorder
+    ):
+        """The default reaches the counter, not just the signature."""
+        from baldur.utils.domain_validation import FALLBACK_DOMAIN
+
+        with patch.object(dlq_recorder, "_evicted_total") as mock_counter:
+            dlq_recorder.record_evicted(count=3, strategy="oldest_first")
+
+        mock_counter.labels.assert_called_once_with(
+            domain=FALLBACK_DOMAIN, strategy="oldest_first"
+        )
+        mock_counter.labels.return_value.inc.assert_called_once_with(3)
+
     def test_all_nine_metric_attributes_exist(self, dlq_recorder):
         """DLQ recorder has exactly 9 metric attributes."""
         expected_attrs = {

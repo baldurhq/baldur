@@ -11,10 +11,12 @@ Scope:
 
 from __future__ import annotations
 
+import pytest
 import tenacity
 
 from baldur.bridges.tenacity.instrument import (
     _BRIDGE_PATCHED_MARKER,
+    _INSTRUMENT_DOMAIN,
     _reset_instrument_for_testing,
     instrument_tenacity,
     is_instrumented,
@@ -228,3 +230,62 @@ class TestInstrumentResetContract:
         # Second call must also be a no-op.
         _reset_instrument_for_testing()
         assert is_instrumented() is False
+
+
+# =============================================================================
+# Behavior — metric-label registration at Level-1 enable
+# =============================================================================
+
+
+class TestTenacityInstrumentRegistrationBehavior:
+    """The bridge declares its own event domain, so it claims the label slot.
+
+    Globally patched ``Retrying`` instances have no per-call domain, so the
+    bridge declares one literal — and before this site existed that literal was
+    one of Baldur's own shipped strings that Baldur's own registry rejected.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_registry(self):
+        """The registry, its memos and its cap cache are process-global."""
+        from baldur.metrics.registry import (
+            _registered_domains,
+            reset_registered_domains,
+        )
+
+        original = _registered_domains.copy()
+        reset_registered_domains()
+        yield
+        reset_registered_domains()
+        _registered_domains.clear()
+        _registered_domains.update(original)
+
+    def test_level_one_enable_registers_the_bridge_domain(self):
+        """Enabling the bridge is the declaration — one shot, at enable time."""
+        from baldur.metrics.registry import (
+            get_registered_domains,
+            resolve_domain_label,
+        )
+
+        # Given
+        assert _INSTRUMENT_DOMAIN not in get_registered_domains()
+
+        # When
+        assert instrument_tenacity() is True
+
+        # Then
+        assert _INSTRUMENT_DOMAIN in get_registered_domains()
+        assert resolve_domain_label(_INSTRUMENT_DOMAIN) == _INSTRUMENT_DOMAIN
+
+    def test_registered_literal_is_the_one_the_events_carry(self):
+        """A slot for a different string would leave the events collapsing."""
+        assert _INSTRUMENT_DOMAIN == "tenacity_instrument"
+
+    def test_second_enable_does_not_claim_a_second_slot(self):
+        """The one-shot patch guard means one registration per process."""
+        from baldur.metrics.registry import get_registered_domains
+
+        instrument_tenacity()
+        instrument_tenacity()
+
+        assert get_registered_domains().count(_INSTRUMENT_DOMAIN) == 1
