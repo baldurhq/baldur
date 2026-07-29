@@ -456,8 +456,16 @@ class ThrottleAwareBackoffCalculator:
         multiplier: float,
         reason: str,
     ) -> None:
-        """Record Prometheus metrics."""
+        """Record Prometheus metrics.
+
+        The domain goes through the resolution funnel like every other
+        domain-labeled family: these four series carry the retry policy's
+        domain — i.e. the protect name — so writing it raw would put one
+        logical domain on two label values (canonical everywhere else, raw
+        here) and would exempt four histograms from the cardinality cap.
+        """
         try:
+            from baldur.metrics.registry import resolve_domain_label
             from baldur.services.metrics.definitions import (
                 retry_backoff_adjusted_seconds,
                 retry_backoff_multiplier,
@@ -465,6 +473,7 @@ class ThrottleAwareBackoffCalculator:
                 retry_throttle_full_stop_skips_total,
             )
 
+            domain = resolve_domain_label(domain)
             retry_backoff_multiplier.labels(domain=domain, reason=reason).observe(
                 multiplier
             )

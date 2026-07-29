@@ -930,6 +930,21 @@ oss_test_pro_classification: []
 # instead.
 domain_set_direct_call: []
 
+# G79 - every `.labels(domain=...)` write must route its value through
+# `resolve_domain_label` so the cardinality cap is enforced rather than
+# advisory (impl doc 738 D11). Entries below are channels whose domains no
+# declaration site registers yet: routing them today would collapse every one
+# of their series to the fallback label, which is a regression, not a fix.
+domain_label_resolution_funnel:
+  - {file: src/baldur/adapters/audit/redis_buffer.py, symbol: RedisAuditBuffer._check_buffer_threshold, count: 2, reason: 'audit-buffer channel has no registration site - funnelling it today would collapse every audit_buffer_* series to the fallback label', ticket: '738'}
+  - {file: src/baldur/adapters/audit/redis_buffer.py, symbol: RedisAuditBuffer.apply_safety_ltrim, reason: 'audit-buffer channel has no registration site - funnelling it today would collapse every audit_buffer_* series to the fallback label', ticket: '738'}
+  - {file: src/baldur/metrics/audit_buffer_metrics.py, symbol: record_batch_write, count: 2, reason: 'audit-buffer channel has no registration site - funnelling it today would collapse every audit_buffer_* series to the fallback label', ticket: '738'}
+  - {file: src/baldur/metrics/audit_buffer_metrics.py, symbol: record_flush, reason: 'audit-buffer channel has no registration site - funnelling it today would collapse every audit_buffer_* series to the fallback label', ticket: '738'}
+  - {file: src/baldur/metrics/audit_buffer_metrics.py, symbol: record_orphan_recovery, reason: 'audit-buffer channel has no registration site - funnelling it today would collapse every audit_buffer_* series to the fallback label', ticket: '738'}
+  - {file: src/baldur/metrics/audit_buffer_metrics.py, symbol: record_safety_ltrim, count: 2, reason: 'audit-buffer channel has no registration site - funnelling it today would collapse every audit_buffer_* series to the fallback label', ticket: '738'}
+  - {file: src/baldur/metrics/audit_buffer_metrics.py, symbol: update_buffer_metrics, count: 2, reason: 'audit-buffer channel has no registration site - funnelling it today would collapse every audit_buffer_* series to the fallback label', ticket: '738'}
+  - {file: src/baldur_pro/services/error_budget/propagation.py, symbol: DomainPropagationMultiplier._record_cycle_detected_metric, reason: 'error-budget crisis-propagation channel has no registration site - same class as the audit-buffer channel, found by the 738 gate sweep', ticket: '738'}
+
 # G30 - every operator-tunable BALDUR_* var on a gated surface
 # (docs/reference/env-vars.md + docs/concepts/**/*.md) MUST resolve to a real
 # (env_prefix, field) via longest-prefix match, and every concept-guide

@@ -226,16 +226,30 @@ class TestOutboxObservabilityBehavior:
     """``dlq_outbox_processing_delay_seconds`` Histogram observation."""
 
     def test_processing_delay_observed_with_domain_label(self):
-        """Worker calls ``_on_processing_delay(delay, domain)`` per entry."""
+        """Worker calls ``_on_processing_delay(delay, domain)`` per entry.
+
+        The stored domain goes through the resolution funnel, so it reaches the
+        histogram as its registered canonical label.
+        """
         # Given
+        from baldur.metrics.registry import (
+            register_domain,
+            reset_registered_domains,
+        )
+
         mock_histogram = MagicMock()
 
         # When
-        with patch(
-            "baldur.services.metrics.definitions.dlq_outbox_processing_delay_seconds",
-            mock_histogram,
-        ):
-            _on_processing_delay(0.05, "payment")
+        reset_registered_domains()
+        register_domain("payment")
+        try:
+            with patch(
+                "baldur.services.metrics.definitions.dlq_outbox_processing_delay_seconds",
+                mock_histogram,
+            ):
+                _on_processing_delay(0.05, "payment")
+        finally:
+            reset_registered_domains()
 
         # Then
         mock_histogram.labels.assert_called_with(domain="payment")
