@@ -36,6 +36,24 @@ class TestMetricReliabilityMap:
         )
         assert METRIC_RELIABILITY_MAP["retry_delay_seconds"] == MetricReliability.EXACT
 
+    def test_task_layer_matches_its_protected_call_counterpart(self):
+        """Task-layer series declare the same reliability as the retry-layer pair.
+
+        The task queue and the protected call it may wrap keep separate series,
+        but they are the same metric shapes recorded the same way. Asserting the
+        pair rather than the literal keeps this true if the level ever changes,
+        and catches a terminal that moves between the layers onto a series whose
+        reliability was never declared.
+        """
+        assert (
+            METRIC_RELIABILITY_MAP["task_outcomes_total"]
+            == METRIC_RELIABILITY_MAP["retry_outcomes_total"]
+        )
+        assert (
+            METRIC_RELIABILITY_MAP["task_attempts_distribution"]
+            == METRIC_RELIABILITY_MAP["retry_attempts_distribution"]
+        )
+
     def test_gauges_are_eventual(self):
         """Gauge metrics should be marked as EVENTUAL."""
         assert METRIC_RELIABILITY_MAP["dlq_pending_count"] == MetricReliability.EVENTUAL
