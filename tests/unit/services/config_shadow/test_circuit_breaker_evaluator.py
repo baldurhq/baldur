@@ -15,6 +15,7 @@ Unit tests for Circuit Breaker Evaluator.
 테스트 대상: baldur.services.config_shadow.evaluators.circuit_breaker
 """
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
@@ -522,6 +523,30 @@ class TestCircuitBreakerPassCriteriaEdgeCaseBehavior:
 # =============================================================================
 
 
+# A running configuration deliberately unlike BOTH the dataclass literals and
+# the evaluator's former local literals, so an assertion can tell which of the
+# three a resolved field actually came from. Left unpinned, the running config
+# equals the dataclass literals in a clean environment, and these tests pass
+# without distinguishing the two sources — while any process that resolves a
+# different running configuration (a registered runtime configuration manager
+# holding an edited value, for instance) fails them for a reason that is not
+# about the evaluator at all.
+_RUNNING_CONFIG = replace(
+    CircuitBreakerConfig(),
+    failure_threshold=9,
+    minimum_calls=23,
+    sliding_window_size=250,
+    failure_rate_threshold=42.0,
+)
+
+
+def _running_config():
+    """Pin what the process reports as its running circuit-breaker config."""
+    return patch.object(
+        CircuitBreakerConfig, "from_settings", return_value=_RUNNING_CONFIG
+    )
+
+
 class TestEvaluatorConfigDefaultBehavior:
     """A partial shadow config is completed from the live circuit-breaker
     defaults, not from evaluator-local literals.
@@ -538,10 +563,11 @@ class TestEvaluatorConfigDefaultBehavior:
         """Negative assertion: the local literal 5 no longer applies."""
         evaluator = CircuitBreakerEvaluator()
 
-        resolved = evaluator._resolve_config({"failure_threshold": 5})
+        with _running_config():
+            resolved = evaluator._resolve_config({"failure_threshold": 5})
 
-        assert resolved.minimum_calls == CircuitBreakerConfig().minimum_calls
-        assert resolved.minimum_calls == 10
+        assert resolved.minimum_calls == _RUNNING_CONFIG.minimum_calls
+        assert resolved.minimum_calls != 5
 
     def test_partial_config_inherits_live_failure_rate_threshold(self):
         """Negative assertion: the local literal 0 no longer applies.
@@ -552,23 +578,20 @@ class TestEvaluatorConfigDefaultBehavior:
         """
         evaluator = CircuitBreakerEvaluator()
 
-        resolved = evaluator._resolve_config({"failure_threshold": 5})
+        with _running_config():
+            resolved = evaluator._resolve_config({"failure_threshold": 5})
 
-        assert (
-            resolved.failure_rate_threshold
-            == CircuitBreakerConfig().failure_rate_threshold
-        )
-        assert resolved.failure_rate_threshold == 50.0
+        assert resolved.failure_rate_threshold == _RUNNING_CONFIG.failure_rate_threshold
+        assert resolved.failure_rate_threshold != 0
 
     def test_partial_config_inherits_live_sliding_window_size(self):
         """The replay window is sized like the live one."""
         evaluator = CircuitBreakerEvaluator()
 
-        resolved = evaluator._resolve_config({"failure_threshold": 5})
+        with _running_config():
+            resolved = evaluator._resolve_config({"failure_threshold": 5})
 
-        assert (
-            resolved.sliding_window_size == CircuitBreakerConfig().sliding_window_size
-        )
+        assert resolved.sliding_window_size == _RUNNING_CONFIG.sliding_window_size
 
     def test_supplied_keys_override_the_defaults(self):
         """The overlay direction is supplied-over-default, not the reverse."""
@@ -595,12 +618,15 @@ class TestEvaluatorConfigDefaultBehavior:
         """An empty dict yields the configuration actually running."""
         evaluator = CircuitBreakerEvaluator()
 
-        resolved = evaluator._resolve_config({})
-        live = CircuitBreakerConfig()
+        with _running_config():
+            resolved = evaluator._resolve_config({})
 
-        assert resolved.failure_threshold == live.failure_threshold
-        assert resolved.minimum_calls == live.minimum_calls
-        assert resolved.failure_rate_threshold == live.failure_rate_threshold
+        assert resolved.failure_threshold == _RUNNING_CONFIG.failure_threshold
+        assert resolved.minimum_calls == _RUNNING_CONFIG.minimum_calls
+        assert resolved.failure_rate_threshold == _RUNNING_CONFIG.failure_rate_threshold
+        # Every asserted field differs from the dataclass literal, so a resolver
+        # that fell back to stock defaults would fail here rather than coincide.
+        assert resolved != CircuitBreakerConfig()
 
     def test_partial_baseline_config_reaches_the_simulation(self):
         """End to end: a one-field baseline simulates against live defaults.
