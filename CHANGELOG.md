@@ -10,6 +10,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-07-30
+
 ### Fixed
 
 - A failed precomputed-cache refresh no longer stops the worker for the life of the process.
