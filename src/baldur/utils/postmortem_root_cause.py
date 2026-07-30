@@ -8,6 +8,8 @@ Usable without a Django dependency.
 
 from __future__ import annotations
 
+from typing import Any
+
 # Timeline event_type values are an open vocabulary (producers range from
 # framework emitters to operator-supplied API bodies, e.g. "cb_opened"),
 # so CB states are recognized by tolerant substring markers, not exact
@@ -42,7 +44,9 @@ def _classify_cb_state(event_type: str) -> str | None:
     return None
 
 
-def _find_first_open_event(timeline: list, *, skip_half_open: bool) -> dict | None:
+def _find_first_open_event(
+    timeline: list[dict[str, Any]], *, skip_half_open: bool
+) -> dict[str, Any] | None:
     """Return the first CB OPEN event in a timeline, or None."""
     for event in timeline:
         event_type = event.get("event_type", "").lower()
@@ -122,7 +126,11 @@ def extract_detection_info(
         if threshold is None and threshold_config:
             threshold = threshold_config.get("failure_threshold")
 
-        result = {
+        # Annotated because the block below nests a dict under
+        # "threshold_exceeded" and then writes into it. Inference over the
+        # literal alone widens the value type to the join of str and the
+        # timestamp lookup, which does not support item assignment.
+        result: dict[str, Any] = {
             "method": "circuit_breaker_threshold",
             "detected_at": event.get("timestamp"),
             "detector": "CircuitBreakerService",
