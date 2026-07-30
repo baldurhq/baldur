@@ -176,7 +176,42 @@ class PrecomputedCacheWorker:
         self._timer.daemon = True
         self._timer.start()
 
-    def _do_refresh(self) -> None:  # noqa: C901, PLR0912, PLR0915
+    def _do_refresh(self) -> None:
+        """Timer callback: run one refresh pass, and outlive its failure.
+
+        The pass arms the next tick itself on every path it completes, so this
+        wrapper re-arms only when the pass raised before reaching one. Without
+        it, a single escaping exception ends the chain for the life of the
+        process: nothing reschedules, the cache stops refreshing, and the only
+        trace is a thread traceback on stderr.
+
+        That is reachable on the default configuration rather than an edge
+        case. The admission check that opens the pass reads circuit-breaker
+        state, which on a Redis-backed repository goes through the resilient
+        backend; while Redis is down that path writes to the audit WAL, and a
+        WAL that refuses the write raises straight through the callback. The
+        failure therefore lands during the outage the worker is supposed to
+        ride out.
+
+        Invariant this relies on: arming the next tick is the last thing
+        ``_refresh_pass`` does on every path it returns from. Adding a
+        statement after a ``_schedule_refresh`` call would let a raise there
+        arm the chain twice.
+        """
+        try:
+            self._refresh_pass()
+        except Exception:
+            # WARNING, not ERROR: one lost pass degrades cache freshness and
+            # the chain survives. No metric — a pass-level counter is a metric
+            # taxonomy decision that belongs with the other precomputed-cache
+            # observability work, not with this guard.
+            logger.warning("precomputed_cache.refresh_pass_failed", exc_info=True)
+            try:
+                self._schedule_refresh()
+            except Exception:
+                logger.exception("precomputed_cache.reschedule_failed")
+
+    def _refresh_pass(self) -> None:  # noqa: C901, PLR0912, PLR0915
         """Execute pre-computation for all registered keys with drift detection."""
         start_time = time.perf_counter()
         any_success = False

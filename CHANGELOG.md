@@ -10,6 +10,12 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+### Fixed
+
+- A failed precomputed-cache refresh no longer stops the worker for the life of the process.
+- The pass reads circuit-breaker state, which can raise while Redis is down — exactly when it ran.
+- Recovery needed a restart; the endpoints kept serving whatever the last good pass had computed.
+
 ## [1.3.0] - 2026-07-30
 
 ### Added
