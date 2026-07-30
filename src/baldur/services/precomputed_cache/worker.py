@@ -172,6 +172,13 @@ class PrecomputedCacheWorker:
                 jitter = 0.0
             delay = base + jitter
         self._current_effective_interval = delay
+        # Cancel before replacing: a timer that is still pending keeps ticking
+        # once its slot is overwritten, and `stop()` can only reach the slot —
+        # so the orphan would outlive every attempt to end it. Cancelling one
+        # that has already fired is a no-op, which is the case on the chain's
+        # own re-arm.
+        if self._timer is not None:
+            self._timer.cancel()
         self._timer = threading.Timer(delay, self._do_refresh)
         self._timer.daemon = True
         self._timer.start()
