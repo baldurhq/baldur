@@ -10,6 +10,12 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+### Fixed
+
+- The system-metrics cache no longer samples psutil twice per interval.
+- Starting it armed two refresh chains, and `stop()` could only ever reach one of them.
+- A failed metrics tick no longer stops the sampling for the life of the process.
+
 ## [1.3.1] - 2026-07-30
 
 ### Fixed
