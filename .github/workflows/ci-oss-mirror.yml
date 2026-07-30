@@ -45,6 +45,16 @@ jobs:
       # diagonal structurally cannot: Django 4.2 LTS on the Python most distros
       # ship (3.12), and the newest Python on an LTS Django (3.13/5.2).
       # Celery pinned to 5.4 (4.x EOL); optional-deps-test carries the rest.
+      #
+      # KEEP IN STEP: docs/compatibility.md publishes this same cell list as its
+      # "Test matrix shape" grid, and that page's premise is that "Tested in CI"
+      # is proof rather than a claim. Nothing enforces the link, so editing the
+      # cells below without editing that grid turns the published page into a
+      # false statement — and it fails in the dangerous direction: removing a
+      # cell leaves the page claiming coverage that no longer runs, which stays
+      # green in every gate. Change both in the same commit. Adding or dropping
+      # a Python version also touches the Runtime table and the pyproject
+      # classifiers.
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
         django-version: ["4.2", "5.2", "6.0"]
