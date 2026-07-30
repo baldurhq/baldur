@@ -23,6 +23,7 @@ Supporting fixtures:
 
 import atexit
 import copy
+import importlib
 import inspect
 import os
 import sys
@@ -1200,7 +1201,6 @@ def _make_pro_singleton_factory(module_path: str, getter_name: str):
     ("baldur_pro.services.X.get_Y", ...)`` — captured references would
     short-circuit such patches.
     """
-    import importlib
 
     def factory():
         module = importlib.import_module(module_path)
@@ -1844,29 +1844,48 @@ def sample_config():
 # Chaos Engineering Fixtures
 # =============================================================================
 
+# Candidate dotted paths to the chaos support module, most-nested first. The
+# chaos package sits one level deeper in the tier-partitioned tree than in the
+# published one, so the path is resolved at fixture-setup time instead of being
+# hard-coded: a literal that is correct in one layout raises ModuleNotFoundError
+# in the other, and because it fires inside a fixture it surfaces as four
+# errored chaos tests rather than as a missing module.
+_CHAOS_MODULE_CANDIDATES = ("tests.oss.chaos.conftest", "tests.chaos.conftest")
+
+
+def _chaos_support():
+    """Import the chaos support module from whichever test-tree layout is present."""
+    for dotted in _CHAOS_MODULE_CANDIDATES:
+        try:
+            return importlib.import_module(dotted)
+        except ModuleNotFoundError as exc:
+            # Only a missing candidate package is a reason to try the next one.
+            # A ModuleNotFoundError raised from *inside* the chaos module names
+            # some other module, and swallowing it would report a real broken
+            # dependency as "layout not found".
+            if exc.name is None or not dotted.startswith(exc.name):
+                raise
+    raise ModuleNotFoundError(
+        f"chaos support module not found; tried {', '.join(_CHAOS_MODULE_CANDIDATES)}"
+    )
+
 
 @pytest.fixture
 def failure_injector():
     """Provides a configurable failure injector for chaos tests."""
-    from tests.chaos.conftest import FailureInjector
-
-    return FailureInjector(failure_rate=0.3)
+    return _chaos_support().FailureInjector(failure_rate=0.3)
 
 
 @pytest.fixture
 def burst_failure_injector():
     """Provides a burst failure pattern injector."""
-    from tests.chaos.conftest import BurstFailureInjector
-
-    return BurstFailureInjector(burst_size=10, burst_interval=50)
+    return _chaos_support().BurstFailureInjector(burst_size=10, burst_interval=50)
 
 
 @pytest.fixture
 def latency_injector():
     """Provides a latency injector for slow degradation tests."""
-    from tests.chaos.conftest import LatencyInjector
-
-    return LatencyInjector(
+    return _chaos_support().LatencyInjector(
         min_latency_ms=100,
         max_latency_ms=30000,
         degradation_rate=100,
@@ -1876,9 +1895,7 @@ def latency_injector():
 @pytest.fixture
 def resource_simulator():
     """Provides a resource exhaustion simulator."""
-    from tests.chaos.conftest import ResourceExhaustionSimulator
-
-    return ResourceExhaustionSimulator(max_connections=100)
+    return _chaos_support().ResourceExhaustionSimulator(max_connections=100)
 
 
 # =============================================================================
