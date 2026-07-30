@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from baldur.services.circuit_breaker.service import CircuitBreakerService
 from baldur.services.precomputed_cache.worker import PrecomputedCacheWorker
 
 
@@ -579,3 +580,74 @@ class TestOnCacheInvalidatedBehavior:
         ) as mock_l1:
             mock_l1.invalidate.side_effect = RuntimeError("boom")
             worker._on_cache_invalidated(event)
+
+
+class TestRefreshChainSurvivesAPassFailureBehavior:
+    """A pass that raises must not end the timer chain.
+
+    The chain is self-rescheduling: each pass arms the next tick. Nothing else
+    re-arms it, so an exception escaping the timer callback stops the worker
+    for the life of the process -- the cache silently freezes at whatever it
+    last computed. The admission check that opens a pass reaches
+    circuit-breaker state, which on a Redis-backed repository can raise while
+    Redis is down, so the failure arrives during the outage the worker exists
+    to ride out.
+    """
+
+    def test_admission_check_raising_still_arms_the_next_tick(self, worker):
+        """should_allow() raising reschedules instead of killing the chain."""
+        mock_cb = MagicMock(spec=CircuitBreakerService)
+        mock_cb.should_allow.side_effect = RuntimeError("WAL is closed")
+        worker._cb_service = mock_cb
+        worker._running = True
+        worker._compute_functions = {"k1": lambda: {"val": 1}}
+
+        with patch.object(worker, "_schedule_refresh") as mock_schedule:
+            worker._do_refresh()
+
+        mock_cb.should_allow.assert_called_once_with("precomputed_cache_compute")
+        mock_schedule.assert_called_once()
+
+    def test_pass_failure_does_not_propagate_out_of_the_callback(self, worker):
+        """The timer callback swallows the pass exception.
+
+        threading.Timer has no error channel: an escaping exception becomes an
+        unhandled thread exception and the thread dies mid-chain.
+        """
+        mock_cb = MagicMock(spec=CircuitBreakerService)
+        mock_cb.should_allow.side_effect = RuntimeError("boom")
+        worker._cb_service = mock_cb
+        worker._running = True
+
+        with patch.object(worker, "_schedule_refresh"):
+            worker._do_refresh()  # must not raise
+
+    def test_a_reschedule_that_also_fails_is_not_a_second_exception(self, worker):
+        """A failing re-arm is logged, not raised.
+
+        Timer.start() refuses when the process cannot create a thread, and that
+        refusal lands inside the handler for the first failure.
+        """
+        mock_cb = MagicMock(spec=CircuitBreakerService)
+        mock_cb.should_allow.side_effect = RuntimeError("boom")
+        worker._cb_service = mock_cb
+        worker._running = True
+
+        with patch.object(worker, "_schedule_refresh") as mock_schedule:
+            mock_schedule.side_effect = RuntimeError("can't start new thread")
+            worker._do_refresh()  # must not raise
+
+        mock_schedule.assert_called_once()
+
+    def test_a_completed_pass_arms_the_chain_exactly_once(self, worker):
+        """Negative assertion: the guard must not double-arm a healthy pass."""
+        mock_cb = MagicMock(spec=CircuitBreakerService)
+        mock_cb.should_allow.return_value = True
+        worker._cb_service = mock_cb
+        worker._running = True
+        worker._compute_functions = {"k1": lambda: {"val": 1}}
+
+        with patch.object(worker, "_schedule_refresh") as mock_schedule:
+            worker._do_refresh()
+
+        mock_schedule.assert_called_once()
