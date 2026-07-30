@@ -56,7 +56,7 @@ stateDiagram-v2
     REPLAYING --> PENDING: replay fails, attempts remain
     REPLAYING --> REQUIRES_REVIEW: replay attempts exhausted
     REQUIRES_REVIEW --> REPLAYING: operator force-redrives after a fix
-    PENDING --> EXPIRED: retention window passes
+    PENDING --> EXPIRED: expiry window passes
     RESOLVED --> ARCHIVED: aged out / cleaned up
 ```
 
@@ -108,13 +108,14 @@ When the queue reaches its size limit, the **overflow strategy** decides what gi
   one-time warning and falls back to `drop_oldest`.
 
 By default the queue lives in your configured storage backend, and capture flows through a
-non-blocking in-memory outbox that keeps it off the request hot path. With PRO active, two things
-change for deployments that cannot tolerate losing even queued-but-not-yet-written work across a
-process crash: the outbox gains a disk-durable mode, and the outbox itself is monitored. It exposes
-leading-indicator signals (how deep the buffer is and how long entries wait before being written),
-raises an alert if its drop rate crosses a threshold, and its background drain worker's liveness is
-watched separately. You see the buffer filling up *before* it starts shedding, rather than
-discovering after the fact that captured failures were dropped.
+non-blocking in-memory outbox that keeps it off the request hot path. The outbox watches its own
+pressure in every tier: it records how long entries wait before being written (the leading sign of
+a buffer under stress) and raises a warning, with a matching metric and event, when its drop rate
+crosses a threshold, so you learn the outbox is shedding instead of discovering it after the fact.
+With PRO active, two things change for deployments that cannot tolerate losing even
+queued-but-not-yet-written work across a process crash: the outbox gains a disk-durable mode, and
+the liveness of its background drain worker is watched separately, so a stalled drain is detected
+rather than silently backing up.
 
 ### Trace continuity: from the original failure to its replay
 
@@ -126,13 +127,15 @@ failure → DLQ capture → replay" reads as one connected story instead of two 
 **How the link is made.** At capture time Baldur records the failing request's trace on the entry
 (its `origin_trace_id`, plus the full W3C trace/span ids when an OpenTelemetry span is active). When
 that entry is later replayed — by any path: a targeted retry, a batch, an automatic on-recovery
-sweep, or a force-redrive — Baldur:
+sweep, or a force-redrive — Baldur re-attaches that origin:
 
-- adds an `origin_trace_id` field to the replay's log line,
-- records the origin trace in the replay's audit entry, and
-- when OpenTelemetry is active and the entry carries its origin span ids, wraps the replay in a
-  `dlq.replay` span carrying a **span link** back to the original failure's span, plus a searchable
-  `baldur.dlq.origin_trace_id` attribute.
+- when OpenTelemetry is active and the entry carries its origin span ids, every replay path wraps
+  the replay in a `dlq.replay` span carrying a **span link** back to the original failure's span,
+  plus a searchable `baldur.dlq.origin_trace_id` attribute,
+- the log lines reporting the replay carry an `origin_trace_id` field, and
+- the replay paths that write an audit record (a batch replay, the automatic sweep, a
+  force-redrive) record the origin trace there too; a targeted single-entry retry keeps its trail
+  in the log line and the span instead of a per-entry audit record.
 
 The link is **additive**: the replay keeps its own trace (the operator request or circuit-breaker
 recovery that triggered it) as its primary trace, and the origin is attached alongside. The two
@@ -145,9 +148,9 @@ replay recovering?"* — so both are kept rather than one overwriting the other.
   span link to jump to the original failure's trace. You can also search spans by the
   `baldur.dlq.origin_trace_id` attribute.
 - *Without OpenTelemetry (plain structured logs):* the origin id is stored on the entry itself and
-  stamped on every replay log line, so an `origin_trace_id=<id>` query across your logs returns all
-  replay activity for that failure; the entry's detail view (console or REST) is the capture-side
-  record. Note that a bare `trace_id=<origin>` search will **not** match the replay lines — because
+  stamped on the replay's log lines, so an `origin_trace_id=<id>` query across your logs returns
+  the replay activity for that failure; the entry's detail view (console or REST) is the
+  capture-side record. Note that a bare `trace_id=<origin>` search will **not** match the replay lines — because
   the replay keeps its own trigger trace, the origin rides the separate `origin_trace_id` field.
   Search that field, not `trace_id`.
 
@@ -213,8 +216,9 @@ prerequisite, so you can tell at a glance whether the loop is live:
     register_replay_handler(PaymentReplayHandler())
     ```
 
-    Without a registered handler, every replay for that domain fails per-entry and the entry is
-    parked for review. The arming surface reports `handler_missing`.
+    Without a registered handler, every replay for that domain fails per-entry and the entry ends
+    up parked for review once its replay budget is spent. The arming surface reports
+    `handler_missing`.
 
 2. **Map recovered services to their failure types.** When a circuit breaker closes, Baldur needs to
    know *which* captured entries the recovered dependency is responsible for. Configure that mapping
@@ -243,13 +247,47 @@ prerequisite, so you can tell at a glance whether the loop is live:
 `baldur_dlq_auto_replay_armed` gauge. A queue that grows without draining means the dispatch is
 succeeding but no worker is consuming it.
 
+## What belongs in automatic replay — and what doesn't
+
+Replay re-runs the original operation, so it is a recovery tool for work that is **safe to run
+again** and a hazard for work that isn't. The same caution governs [retries](../oss/retry.md). Two
+properties of the captured work decide whether it belongs in the automatic on-recovery path.
+
+**Is it safe to repeat?** A replayed operation executes a second time, so replaying one that can't
+safely repeat may double its effect: a second charge, a duplicate shipment, a repeated email. Map a
+failure type into automatic replay only when re-running it is a no-op once the work has already
+completed. The handler's `can_replay(failed_op)` check refuses unsafe entries on the operator-driven
+paths — the single-entry retry and force-redrive actions, and the console/REST batch replay
+(**PRO**) — but neither the automatic on-recovery sweep nor batch replay from code consults it, so
+on those paths the guard is `replay()` itself: detect work that has already completed and report
+success without re-running it. Making an operation safe to repeat is a separate guarantee Baldur provides
+(see [Idempotency](../oss/idempotency.md)), and money-equivalent operations should anchor their dedup
+on a database uniqueness constraint rather than a cache. The
+[what-belongs-in-Baldur-vs-your-database boundaries](https://github.com/baldurhq/baldur/blob/main/docs/runbooks/data-consistency-boundaries.md)
+runbook covers where that line sits.
+
+**Is anyone still waiting on it?** Automatic replay fires minutes or hours after the failure, long
+after the original caller has gone. That fits backend work whose goal is simply to finish: settling a
+payment the gateway already accepted, writing an order your database rejected, delivering a webhook,
+reconciling state. It does not fit a synchronous, user-facing action such as a checkout
+authorization. A customer who abandoned a failed payment should not be charged when the dependency
+recovers an hour later. Protect that path with the circuit breaker, which fails fast so the user gets
+an immediate retry instead of a hang, and with idempotency, so the user's own retry can't
+double-act. Replay is not the tool for that path.
+
+This is why the failure types you map to on-recovery replay are the transient, your-side ones: a
+database timeout, a dropped connection, a dependency returning 503, where the work is sound and only
+the infrastructure faltered. A business rejection such as a declined card is not one of them. It will
+fail again on replay, so it does not belong in the mapping.
+
 ## Tier behavior
 
 DLQ + Replay runs in every tier. Capture and recovery are the OSS core; PRO layers the
 operate-at-scale surface on top.
 
 - **In OSS**: the full failure-preservation loop — capture with forensic context, the non-blocking
-  outbox, the local on-disk fallback when the store is unreachable, size limits with the
+  outbox with its own pressure signals (write-wait latency and the drop-rate warning), the local
+  on-disk fallback when the store is unreachable, size limits with the
   `drop_oldest` / `reject` overflow strategies, the Web Console DLQ panel and the read REST
   endpoints (list, detail, facet counts, cleanup stats), the single-entry actions (retry, resolve,
   force-redrive), batch replay by failure type from code, and automatic replay on circuit-breaker
@@ -258,12 +296,15 @@ operate-at-scale surface on top.
   gains adaptive (success-rate-driven) batch sizing and a throttled replay queue, the
   `compress_oldest` overflow strategy and its compressed summaries become available, evictions move
   off the capture path to a background water-level worker, the outbox gains its disk-durable mode
-  plus drop-rate alerting and leading-indicator metrics, scheduled archive/purge retention ages old
+  and separate drain-worker liveness monitoring, scheduled archive/purge retention ages old
   entries out, and test entries can be created for replay drills.
 
 ## See also
 
 - [Circuit Breaker](../oss/circuit-breaker.md) — the recovery signal that triggers automatic replay
+- [Idempotency](../oss/idempotency.md) — the dedup guard that makes an operation safe to replay
+- [Which operations are safe to auto-replay (vs. need an ACID store)](https://github.com/baldurhq/baldur/blob/main/docs/runbooks/data-consistency-boundaries.md) — the data-consistency boundaries runbook
+- [Capturing failures that happen before your view runs (Django)](https://github.com/baldurhq/baldur/blob/main/docs/runbooks/dlq-two-layer-activation.md) — `dlq=True` captures what the wrapped function raises; failures that occur earlier in the request (database connection setup, middleware-stage errors) reach the queue only once the Django middleware layer is configured as well
 - [Web Console](web-console.md) — the admin console where the DLQ panel lives
 - [Environment Variables](../../reference/env-vars.md) — the complete operator-tunable list
 - [Dead-letter queue API (PRO)](../../reference/pro/dlq.md) — batch replay and management operations

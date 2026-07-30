@@ -35,8 +35,7 @@ def charge_customer(order_id):
 
 The call now travels through a circuit breaker and retry. Add `fallback=` for a
 safe default, `idempotency_key="order_id"` to dedup a re-delivered task, or
-`dlq=True` to set a final failure aside for replay (dead-letter storage is
-**PRO**). See [Composing with @baldur.protected](../concepts/foundations/composition.md).
+`dlq=True` to set a final failure aside for replay. See [Composing with @baldur.protected](../concepts/foundations/composition.md).
 
 ## 3. Observe every task automatically
 
@@ -64,8 +63,9 @@ setup_baldur_signals(
 (every payment task trips one breaker); an unmapped task uses its own task name.
 The circuit-breaker, dead-letter, metrics, and forensic-capture hooks each toggle
 independently (`cb_enabled` / `dlq_enabled` / `metrics_enabled` /
-`forensics_enabled`), all on by default. Durable failure capture through the
-dead-letter queue is a **PRO** feature.
+`forensics_enabled`), all on by default. Durable failure capture and replay ship
+in the OSS core; PRO adds the operate-at-scale surface on top (batch replay from
+the console, adaptive pacing, a durable outbox, archive/purge).
 
 ## 4. Run Baldur's scheduled maintenance on your beat
 

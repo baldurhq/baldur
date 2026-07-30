@@ -25,8 +25,9 @@ variables, no Docker. Add Redis when you go multi-process.
 Baldur is framework-agnostic (Django, FastAPI, Flask), ships a built-in web
 console to operate and recover from the browser, and exports Prometheus and
 OpenTelemetry. The free Apache-2.0 core covers the resilience patterns
-themselves; the PRO package adds a durable dead-letter queue with replay, an
-audit trail, unified notification, emergency mode, and more.
+themselves, the dead-letter queue with replay included; the PRO package adds an
+audit trail, unified notification, emergency mode, dead-letter operations at
+scale, and more.
 
 Start with the [Getting Started guide](getting-started/index.md), compare tiers
 in [OSS vs PRO](concepts/oss-vs-pro.md), or read [what self-healing means](concepts/foundations/self-healing.md).
