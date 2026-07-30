@@ -10,6 +10,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+## [1.3.2] - 2026-07-31
+
 ### Fixed
 
 - The system-metrics cache no longer samples psutil twice per interval.
