@@ -16,7 +16,9 @@ commit. Two facts matter for each dependency:
 | Python | 3.11 | 3.11 · 3.12 · 3.13 |
 
 Python is tested on the three current releases. There is no upper bound in the
-package metadata, but versions above 3.13 are not yet exercised in CI.
+package metadata. Python 3.14 runs in CI as a non-blocking preview job — it
+collects a signal ahead of time and is not a supported version; it will be
+listed above once it is green and stays green.
 
 ## Web frameworks
 
@@ -48,25 +50,31 @@ optional and only needed to share state across multiple workers.
 |-----------|---------|--------------|
 | Redis server | — | 7.x |
 | `redis-py` client | 4.0 | resolved from the extra |
+| PostgreSQL server | — | 16.x |
+| `psycopg2-binary` client | 2.9 | resolved from the extra |
 
 The distinction matters: **Redis server 7.x** is the data store Baldur's
 integration suite runs against, while **`redis-py` 4.0** is the floor for the
 client library installed by `baldur-framework[redis]` (and by the `celery`,
-`arq`, and `rq` extras).
+`arq`, and `rq` extras). The same split applies to PostgreSQL: **server 16.x**
+is what the integration suite provisions, and **`psycopg2-binary` 2.9** is the
+client floor installed by `baldur-framework[postgres]`.
 
 ## Test matrix shape
 
-The Python × Django combinations are tested **diagonally**, not as a full grid:
+The Python × Django combinations are tested as a **full grid** — every pair the
+two projects both support is exercised on every commit:
 
-| Python | Django |
-|--------|--------|
-| 3.11 | 4.2 |
-| 3.12 | 5.2 |
-| 3.13 | 6.0 |
+| Python | Django 4.2 LTS | Django 5.2 LTS | Django 6.0 |
+|--------|:--------------:|:--------------:|:----------:|
+| 3.11 | ✅ | ✅ | — |
+| 3.12 | ✅ | ✅ | ✅ |
+| 3.13 | — | ✅ | ✅ |
 
-Each Python version is paired with one Django version. Off-diagonal
-combinations (for example Python 3.11 with Django 6.0) satisfy the declared
-minimums and are expected to work, but are not run in CI.
+The two blank cells are upstream limits rather than gaps in coverage: Django 6.0
+requires Python 3.12 or newer, and Django 4.2 supports Python 3.12 at most.
+Every remaining combination is a real CI job, so a failure identifies which
+axis — the Python version or the Django version — carries the incompatibility.
 
 ## Version support policy
 
@@ -77,8 +85,5 @@ for the full policy.
 
 ## Not in this matrix
 
-- **PostgreSQL** — the `baldur-framework[postgres]` extra exists for the SQL
-  adapter, but the v1.0 integration suite does not provision a PostgreSQL
-  service, so no version is listed here as tested.
 - **Message-queue, orchestration, and cloud-provider adapters** — these are not
   part of the v1.0 productized surface and are not covered by this matrix.

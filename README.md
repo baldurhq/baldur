@@ -149,7 +149,7 @@ hand-rolling a circuit breaker. See
 | Celery | 5.3 | 5.4 |
 | Redis server | — | 7.x |
 
-See [Compatibility](docs/compatibility.md) for the full matrix, the diagonal
+See [Compatibility](docs/compatibility.md) for the full matrix, the
 Python × Django test grid, and the version support policy.
 
 ## License
