@@ -101,11 +101,11 @@ class SystemMetricsCache:
                 sample_interval=self._sample_interval,
             )
 
-            # Cold-start avoidance: run the first measurement synchronously (~100ms)
+            # Cold-start avoidance: run the first measurement synchronously
+            # (~100ms). It arms the next tick on its way out, so scheduling
+            # again here would start a second chain rather than the periodic
+            # refresh it looks like it is starting.
             self._do_refresh()
-
-            # Schedule subsequent periodic refreshes
-            self._schedule_refresh()
 
     def stop(self) -> None:
         """Stop background refresh."""
@@ -180,9 +180,17 @@ class SystemMetricsCache:
     # =========================================================================
 
     def _schedule_refresh(self) -> None:
-        """Schedule the next refresh."""
+        """Arm the next refresh, replacing any tick already pending.
+
+        Cancelling first is what keeps the chain single. Overwriting a live
+        timer without cancelling it leaves the previous one armed with nothing
+        referencing it, so it ticks on forever and ``stop()`` -- which can only
+        reach ``self._timer`` -- has no way to end it.
+        """
         if not self._running:
             return
+        if self._timer is not None:
+            self._timer.cancel()
         self._timer = threading.Timer(self._refresh_interval, self._do_refresh)
         self._timer.daemon = True
         self._timer.start()
@@ -218,9 +226,12 @@ class SystemMetricsCache:
                 "system_metrics_cache.refresh_failed",
                 error=e,
             )
-
-        # Schedule the next refresh
-        self._schedule_refresh()
+        finally:
+            # Re-arm from `finally`, not after the try: nothing else schedules
+            # this chain, so an exception leaving here would stop the sampling
+            # for the life of the process and `get_metrics()` would serve an
+            # ever-staler reading with no error to explain it.
+            self._schedule_refresh()
 
     def get_stats(self) -> dict[str, Any]:
         """Statistics for debugging/monitoring."""
