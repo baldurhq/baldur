@@ -10,56 +10,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
-### Fixed
-
-- An unreachable Redis no longer stalls the event-bus connect or the watchdog probe for seconds.
-- Both give up after `BALDUR_REDIS_PROBE_CONNECT_TIMEOUT` (0.5s), not the data-path timeout.
-- The Redis metric-source adapter builds its client through the shared connection factory.
-- Before, its check ping carried no connect timeout and hung on the OS TCP timeout.
-- It now reads the Redis URL through settings too, so credentials and Sentinel URLs apply.
-- `start_sync_worker()` absorbs a crashed worker's orphaned audit WAL entries before draining.
-- Before, only the internal start path did, so the public helper stranded those entries forever.
-- The escalation channel self-test now closes the PagerDuty incident it opens.
-- If that close fails, the self-test result names the cause and says to close it manually.
-- Durability directories fall back to a writable location when the shipped default is not.
-- A directory you set explicitly fails loud: `ConfigurationError` names it and its env var.
-- `ResilientStorageBackend` warns instead of logging an ERROR traceback on a non-root install.
-- Production boot still requires the resilient-storage WAL on its configured directory.
-- Break-glass: set `BALDUR_RESILIENT_STORAGE_WAL_DIR` to any writable path to boot anyway.
-- `schedule_retention_cleanup()` reads `BALDUR_AUDIT_WAL_DIR` first, warning on the legacy name.
-- `BALDUR_CONFIG` and `BALDUR_DOTENV` no longer warn as unknown environment variables.
-- Readiness answers within a bounded time: a database that hangs no longer hangs the probe.
-- A health provider that raises logs at WARNING with the traceback at DEBUG, no longer ERROR.
-- The circuit breaker's failure rate is a real rate: successful calls now count in it too.
-- A service failing 30% of calls trips the breaker; before, only near-100% failure did.
-- `minimum_calls` no longer raises the consecutive-failure trip point above `failure_threshold`.
-- In-memory circuit-breaker counters reset like Redis/SQL: a success clears the failure count.
-- `get_aggregate_failure_rate()` reports the mean error fraction, not a near-binary 0.0/1.0.
-- It covers the service instance you call it on; `protect()`/`@circuit_breaker` each own one.
-- Config-shadow CB simulation shares the live trip predicate, so it stops disagreeing.
-- Shadow-testing one CB field completes the rest from the running config, not from stock defaults.
-- Async retry exhaustion now emits `RETRY_EXHAUSTED` and records the Prometheus retry series.
-- `BALDUR_RETRY_ENABLED=false` now stops async retries too: the function runs once, no retry.
-- A compressed DLQ entry outside the newest 1000 now opens in its detail view, no longer a 404.
-- The compressed-summary endpoint no longer costs one Redis round trip per entry ever compressed.
-- Filtering compressed DLQ entries by status now reaches past the newest page.
-- `has_more` on the compressed list is now exact under a status or domain filter.
-- The compressed lifecycle sweep no longer re-reads every already-archived entry on every run.
-- The compressed lifecycle sweep holds a distributed lock, so overlapping runs cannot skip an entry.
-- Compressed `by_status` counts stay exact above `BALDUR_DLQ_COMPRESS_SUMMARY_SCAN_CAP`.
-- A negative `limit` on the compressed list no longer reads the whole index; it clamps to 1.
-- Sample alert `RetryRateHigh` measured call throughput; `RetryPressureHigh` measures retries.
-- `ProtectedCallFailureRateHigh` replaces `RetrySuccessRateLow`, which printed a ratio as `%`.
-- Both retry sample alerts exclude synthetic traffic and need ~10 samples before they can fire.
-- `baldur_rate_limit_429_total` counts every 429; the event debounce no longer flattens it.
-- It is recorded before the storage calls, so a storm stays countable during a Redis outage.
-- Celery task terminals record their real attempt count in `baldur_task_attempts_distribution`.
-- OSS retries now wait the `BALDUR_RETRY_BASE_DELAY` you set; every wait was ~4x longer before.
-- `BALDUR_BACKOFF_EXPONENTIAL_MULTIPLIER` and `_JITTER_FACTOR` now reach the retry ladder.
-- `BALDUR_RETRY_BACKOFF_STRATEGY` now picks the strategy; exponential ran whatever you set.
-- A per-domain `retry.base_delay` override now takes effect; a bad value falls back with a WARNING.
-- A `before` hook passed via `retrying_kwargs` now runs; the tenacity bridge dropped it silently.
-- It is chained ahead of Baldur's own hook, the same way the `before=` constructor argument is.
+## [1.3.0] - 2026-07-30
 
 ### Added
 
@@ -165,6 +116,54 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ### Fixed
 
+- An unreachable Redis no longer stalls the event-bus connect or the watchdog probe for seconds.
+- Both give up after `BALDUR_REDIS_PROBE_CONNECT_TIMEOUT` (0.5s), not the data-path timeout.
+- The Redis metric-source adapter builds its client through the shared connection factory.
+- Before, its check ping carried no connect timeout and hung on the OS TCP timeout.
+- It now reads the Redis URL through settings too, so credentials and Sentinel URLs apply.
+- `start_sync_worker()` absorbs a crashed worker's orphaned audit WAL entries before draining.
+- Before, only the internal start path did, so the public helper stranded those entries forever.
+- The escalation channel self-test now closes the PagerDuty incident it opens.
+- If that close fails, the self-test result names the cause and says to close it manually.
+- Durability directories fall back to a writable location when the shipped default is not.
+- A directory you set explicitly fails loud: `ConfigurationError` names it and its env var.
+- `ResilientStorageBackend` warns instead of logging an ERROR traceback on a non-root install.
+- Production boot still requires the resilient-storage WAL on its configured directory.
+- Break-glass: set `BALDUR_RESILIENT_STORAGE_WAL_DIR` to any writable path to boot anyway.
+- `schedule_retention_cleanup()` reads `BALDUR_AUDIT_WAL_DIR` first, warning on the legacy name.
+- `BALDUR_CONFIG` and `BALDUR_DOTENV` no longer warn as unknown environment variables.
+- Readiness answers within a bounded time: a database that hangs no longer hangs the probe.
+- A health provider that raises logs at WARNING with the traceback at DEBUG, no longer ERROR.
+- The circuit breaker's failure rate is a real rate: successful calls now count in it too.
+- A service failing 30% of calls trips the breaker; before, only near-100% failure did.
+- `minimum_calls` no longer raises the consecutive-failure trip point above `failure_threshold`.
+- In-memory circuit-breaker counters reset like Redis/SQL: a success clears the failure count.
+- `get_aggregate_failure_rate()` reports the mean error fraction, not a near-binary 0.0/1.0.
+- It covers the service instance you call it on; `protect()`/`@circuit_breaker` each own one.
+- Config-shadow CB simulation shares the live trip predicate, so it stops disagreeing.
+- Shadow-testing one CB field completes the rest from the running config, not from stock defaults.
+- Async retry exhaustion now emits `RETRY_EXHAUSTED` and records the Prometheus retry series.
+- `BALDUR_RETRY_ENABLED=false` now stops async retries too: the function runs once, no retry.
+- A compressed DLQ entry outside the newest 1000 now opens in its detail view, no longer a 404.
+- The compressed-summary endpoint no longer costs one Redis round trip per entry ever compressed.
+- Filtering compressed DLQ entries by status now reaches past the newest page.
+- `has_more` on the compressed list is now exact under a status or domain filter.
+- The compressed sweep no longer walks the archived tail; each lane reads its own status index.
+- The compressed lifecycle sweep holds a distributed lock, so overlapping runs cannot skip an entry.
+- Compressed `by_status` counts stay exact above `BALDUR_DLQ_COMPRESS_SUMMARY_SCAN_CAP`.
+- A negative `limit` on the compressed list no longer reads the whole index; it clamps to 1.
+- Sample alert `RetryRateHigh` measured call throughput; `RetryPressureHigh` measures retries.
+- `ProtectedCallFailureRateHigh` replaces `RetrySuccessRateLow`, which printed a ratio as `%`.
+- Both retry sample alerts exclude synthetic traffic and need ~10 samples before they can fire.
+- `baldur_rate_limit_429_total` counts every 429; the event debounce no longer flattens it.
+- It is recorded before the storage calls, so a storm stays countable during a Redis outage.
+- Celery task terminals record their real attempt count in `baldur_task_attempts_distribution`.
+- OSS retries now wait the `BALDUR_RETRY_BASE_DELAY` you set; every wait was ~4x longer before.
+- `BALDUR_BACKOFF_EXPONENTIAL_MULTIPLIER` and `_JITTER_FACTOR` now reach the retry ladder.
+- `BALDUR_RETRY_BACKOFF_STRATEGY` now picks the strategy; exponential ran whatever you set.
+- A per-domain `retry.base_delay` override now takes effect; a bad value falls back with a WARNING.
+- A `before` hook passed via `retrying_kwargs` now runs; the tenacity bridge dropped it silently.
+- It is chained ahead of Baldur's own hook, the same way the `before=` constructor argument is.
 - Jittered `ExponentialBackoff`/`LinearBackoff` delays no longer exceed `max_delay`.
 - A provider `Retry-After` is no longer undercut by jitter into an early retry.
 - A rate-limit coordinator or storage fault degrades to a logged no-op, not a changed outcome.
@@ -178,7 +177,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - Compressed-entry sweep reads the oldest page, not the newest — it was a no-op above ~3/day.
 - SQL DLQ adapter stamps `stale_at`/`archived_at`, so STALE→ARCHIVED can fire on SQL backends.
 - SQL adapters read timestamps back as UTC-aware; MySQL returned naive ones and broke compares.
-- Compressed-entry sweep no longer re-reads entries it already transitioned on Redis.
+- The compressed sweep no longer re-reads entries it transitioned earlier in the same run.
 - Daily-report Auto-Processing counts (archived/expired/purged) now reflect real cleanup work.
 - Replay-driven DLQ resolutions now count in the digest and decrement the pending gauge.
 - Redis DLQ archive/purge counts no longer include writes that changed nothing.
