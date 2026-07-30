@@ -23,10 +23,11 @@ Meta-Watchdog turns that silent gap into an explicit, observable signal:
 - **It pages once, not once per server.** When the same subsystem is unhealthy across a fleet of workers, you get a single alert for the incident — not one page per process at 3 a.m.
 - **It tells the truth about what it did.** The page says plainly that a human is needed and that no automatic recovery was attempted — so on-call knows this is theirs to act on, not something the system is quietly handling.
 - **Every page is on the record.** Each escalation is written to a durable event journal and counted as a metric, so "what failed, and when did we hear about it?" is answerable after the fact instead of reconstructed from memory.
+- **It can still reach you when the whole process dies.** A watchdog that lives inside your application shares its fate: if the process crashes, is OOM-killed or hangs, the watchdog dies with it and the page it would have sent is never sent. The optional outbound liveness beacon inverts that signal, so an external service alarms on the *silence*.
 
 ## How it works in Baldur
 
-Meta-Watchdog runs as a background loop. On a fixed interval (30 seconds by default) it probes each of Baldur's healing subsystems (the circuit breakers, the dead-letter queue, the recovery pipeline, the Redis connection, the audit system, the chaos scheduler, the notification channels, the precomputed cache, the error-budget gate, canary rollouts, emergency mode, and the adaptive throttle) and grades each one, skipping any subsystem you have disabled so the status view only ever shows what is actually running:
+Meta-Watchdog runs as a background loop. On a fixed interval (30 seconds by default) it probes each of Baldur's healing subsystems (the circuit breakers, the dead-letter queue, the recovery pipeline, its own background workers, the Redis connection, the audit system, the chaos scheduler, the notification channels, the precomputed cache, the error-budget gate, canary rollouts, emergency mode, and the adaptive throttle) and grades each one, skipping any subsystem you have disabled so the status view only ever shows what is actually running:
 
 | Status | Meaning |
 |--------|---------|
@@ -37,13 +38,16 @@ Meta-Watchdog runs as a background loop. On a fixed interval (30 seconds by defa
 
 The overall health is the *worst* status across all subsystems, so a single broken component is never averaged away by the healthy ones.
 
+Each sweep runs under a time budget. The probes run in parallel, and the whole pass must finish inside a wall-clock window derived from the probe interval itself (it is not a separate knob to tune), so one wedged probe can never stall the sweep. A probe that does not finish in time is reported as **Unknown**, with a reason that says so ("pass budget exhausted", or a note that its previous run is still in flight), and a truncated pass logs a warning naming exactly which probes were cut off: the watchdog degrades to "I could not judge this component in time", never to silence.
+
 **The key trick is detecting "stuck".** Beyond asking "is it up?", Meta-Watchdog watches whether each subsystem is actually *making progress*. If a component's key metric stops changing entirely — its variance falls to essentially zero — while its error rate stays high, it is treated as **stuck** even though the process is alive and answering. A queue pinned at exactly 1,000 pending entries that never drains, or a circuit breaker locked open, fits this pattern. So does frozen *business* state: a canary rollout wedged at one stage, an emergency level stuck mid-recovery instead of winding down, or an adaptive throttle whose limit never moves while requests are still being rejected. A component that has simply been unhealthy for too long is flagged the same way. This is what lets the watchdog catch the frozen-but-running failures that ordinary up/down health checks miss.
 
 When a subsystem stays unhealthy across several consecutive probes, Meta-Watchdog escalates — it pages a human through your configured channel (Slack or PagerDuty) with a critical-severity alert titled **`Baldur <component> Failure`**. The alert names the failing component, includes the underlying error, and states that manual intervention is required.
 
-Two rules keep the paging sane:
+Three rules keep the paging sane:
 
-- **One page per incident.** An ongoing failure escalates **once per episode**, not on every probe. The alert clears internally only when the component returns to healthy — so a subsystem that's been broken for an hour doesn't generate an hour of duplicate pages. This holds across every running instance too: a cluster-wide guard ensures one worker pages for a shared failure rather than all of them at once.
+- **One page per incident.** An ongoing failure escalates **once per episode**, not on every probe. The alert clears internally once a probe pass no longer finds the component unhealthy — so a subsystem that's been broken for an hour doesn't generate an hour of duplicate pages. This holds across every running instance too: a cluster-wide guard ensures one worker pages for a shared failure rather than all of them at once.
+- **Paging never slows detection down.** The page itself is handed to a dedicated sender and delivered off the detection loop, so a slow or unresponsive notification channel cannot stall the next probe pass. Delivery is at-least-once: if the watchdog shuts down before a page goes out, the undelivered page is still written to the local record, and the accepted worst case is a duplicate page, never a silently lost one.
 - **It always records, even if paging fails.** Every escalation is appended to a durable event journal and emitted as a metric. If the external channel itself can't be reached, the alert is written to a local fallback record so the event is never lost.
 
 ```mermaid
@@ -60,7 +64,13 @@ stateDiagram-v2
 
 **In v1.0, Meta-Watchdog detects and escalates — it does not self-recover.** This is a deliberate choice, not a missing feature. Handing a system the authority to restart its own internals is only safe once the failure modes are well understood, so v1.0 ships the part that is unambiguously safe (*find the problem and tell a human*) and a real person decides what to do. Baldur does not restart its own internals autonomously; it detects the problem and escalates to a human.
 
-**Verifying your alerts before you need them.** Because the worst time to discover a misconfigured webhook is during a real incident, an operator can fire an on-demand self-test — `baldur escalation test` on the command line, or the equivalent admin endpoint — which sends a clearly-labelled test notification through every configured channel and reports, per channel, whether it was delivered. It confirms your paging path is live without waiting for something to actually break.
+**When the watchdog itself dies.** Everything above depends on one thing: the process being alive to send the page. A crash, an OOM kill or a hard hang takes the watchdog down with the application, and an in-process supervisor cannot report its own death. For that case, point `BALDUR_META_WATCHDOG_BEACON_URL` at a dead-man's-switch service (a URL that expects to be pinged regularly) and the watchdog sends an outbound liveness ping to it once per completed probe pass, roughly every probe interval. The external service then pages you on the *absence* of pings — the one signal that still works when the process, the host, or the whole monitoring stack dies together.
+
+The beacon reports process liveness, nothing else. The outcome of a pass only chooses *which* URL is pinged, never *whether* to ping: an unhealthy pass still pings (or hits the optional `BALDUR_META_WATCHDOG_BEACON_FAIL_URL` instead, for providers that accept an explicit fail signal), so silence always means "the watchdog is not running", never "things are degraded". Do not use the beacon as your degradation alert; that job stays with the escalation path above. The ping runs on its own background thread with its own socket timeout (`BALDUR_META_WATCHDOG_BEACON_TIMEOUT_SECONDS`), so a slow or dead beacon endpoint never delays probing or paging. Leaving the URL unset is the off switch (there is no separate enable flag), and a set URL pings for real from any process that runs the watchdog with it, local development included: give each environment its own check, or leave it unset outside production, so a dev machine cannot keep the switch fed while production is down.
+
+**Verifying your alerts before you need them.** Because the worst time to discover a misconfigured webhook is during a real incident, an operator can fire an on-demand self-test — `baldur escalation test` on the command line, or the equivalent admin endpoint — which sends a clearly-labelled test notification through every configured channel and reports, per channel, whether it was delivered. It confirms the channel itself is live — the credential still works and the message arrives — without waiting for something to actually break. On PagerDuty the test also closes the incident it just opened, in the same call, so verifying a channel does not leave a real incident behind for someone to clean up; if that close does not land, the result says so and tells you to close it by hand.
+
+What the self-test deliberately does not check is your PagerDuty notification rules. It is sent as an informational event, so on a service that derives urgency from severity it produces a low-urgency incident and will not exercise the wake-a-human path — use PagerDuty's own test alert to verify on-call schedules, contact methods and urgency.
 
 | What you observe | When it happens |
 |------------------|-----------------|
@@ -68,7 +78,9 @@ stateDiagram-v2
 | The alert states manual intervention is required and no recovery was attempted | v1.0 detect-and-escalate mode — it does not auto-recover |
 | A single alert for one incident, not one per worker | cluster-wide and per-process de-duplication |
 | A durable journal entry and a metric increment for each escalation | every time it pages |
-| A test alert through every configured channel, with per-channel delivery results | you run the escalation self-test |
+| A test alert through every configured channel, with per-channel delivery results — and on PagerDuty an incident that appears and resolves within seconds | you run the escalation self-test |
+| A subsystem shown as Unknown with the reason `pass budget exhausted` | its probe could not finish inside the pass's time window, so the sweep moved on instead of stalling |
+| Your dead-man's-switch provider alarms because pings stopped | the watchdog process crashed, was OOM-killed, or hung (beacon configured) |
 
 ## Configuration
 
@@ -81,6 +93,7 @@ Meta-Watchdog is **on by default** under PRO. The most common knobs:
 | `BALDUR_META_WATCHDOG_PROBE_INTERVAL_SECONDS` | `30` | How often it probes every subsystem |
 | `BALDUR_META_WATCHDOG_SLACK_WEBHOOK_URL` | _(none)_ | Slack incoming-webhook URL pages are delivered to — while unset, pages are logged but nothing is posted |
 | `BALDUR_META_WATCHDOG_PAGERDUTY_ROUTING_KEY` | _(none)_ | PagerDuty Events API routing key for critical pages |
+| `BALDUR_META_WATCHDOG_BEACON_URL` | _(none)_ | Dead-man's-switch ping target, hit once per completed probe pass — while unset, the beacon is off |
 
 One caution on the webhook URL: a set URL posts for real from any process that loads it, local development included, so leave it unset anywhere that should not page a shared channel.
 

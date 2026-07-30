@@ -38,9 +38,9 @@ in-memory backend — no Redis, no Docker, no environment variables.
   your users.
 - **Falls back to a safe answer.** When the call cannot succeed, your fallback
   runs instead of an exception propagating.
-- **Sets work aside instead of dropping it** *(PRO)*. Failed work lands in a
-  durable dead-letter queue and can be replayed — from code or from the web
-  console — once the dependency recovers.
+- **Sets work aside instead of dropping it.** Failed work lands in a durable
+  dead-letter queue and can be replayed — from code or from the web console —
+  once the dependency recovers.
 
 The concept behind all four, and why hand-rolling them in every project goes
 wrong, is covered in
@@ -69,11 +69,11 @@ with it — see
 
 The core is free and Apache-2.0 licensed (`pip install baldur-framework`), and
 covers the resilience patterns themselves: circuit breaker, retry, fallback,
-idempotency, health checks, metrics, and the web console. **Baldur PRO** is a
-separate package you add on top for critical workloads: a durable dead-letter
-queue with replay, audit trail, emergency mode, governance gates, unified
-notifications, and more. PRO adds capability — it never replaces or
-relicenses anything in the core.
+idempotency, health checks, metrics, the durable dead-letter queue with replay,
+and the web console. **Baldur PRO** is a separate package you add on top for
+critical workloads: audit trail, emergency mode, governance gates, unified
+notifications, dead-letter operations at scale, and more. PRO adds capability —
+it never replaces or relicenses anything in the core.
 
 See [the tier model](concepts/foundations/tier-model.md) for how to decide
 which tier you need, the

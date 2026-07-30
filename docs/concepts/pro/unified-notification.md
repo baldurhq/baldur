@@ -19,7 +19,7 @@ Unified Notification turns that into one deliberate, observable pipeline:
 
 - **One control point, not five.** Every alert source (circuit breakers, SLA monitors, security incidents, governance gates) sends through the same hub. Routing rules, rate limits, and the audit record live in one place instead of being reinvented (and drifting) in each subsystem.
 - **No alert fatigue.** Two independent guards keep the channel survivable: a **rate limit** caps how many notifications go out per minute and per hour, and a **cooldown** suppresses repeats of the *same* alert for a configurable window. A storm of identical "circuit breaker still open" messages collapses to one (and that holds across every running instance, not just within a single process) so the channel stays worth reading.
-- **The right severity reaches the right channel.** Routing is policy-based: a low-priority operations note can go to Slack only, while a critical security incident fans out to every configured channel: Slack, PagerDuty, or a generic outbound webhook. You decide the policy once; every source inherits it.
+- **The right severity reaches the right channel.** Routing is policy-based: a low-priority operations note can go to Slack only, while a critical security incident fans out to every channel your critical policy lists: Slack plus PagerDuty by default, with the generic outbound webhook joining once you add it to the policy. You decide the policy once; every source inherits it.
 - **Critical signals surface during an incident.** When the system is already in trouble, a low-priority notification is exactly the wrong thing to silently batch. During an active emergency, and when one source starts firing repeatedly, the hub **escalates** the priority so the important signal rises above the noise instead of being lost in it.
 - **Every notification is on the record.** Each sent notification is written to the audit trail, and operational alerts also feed the daily report — so "what did we alert on, and when?" is answerable after the fact, not reconstructed from memory.
 
@@ -44,13 +44,15 @@ flowchart TD
 
 A notification carries a **priority** that decides how far it fans out, and a **category** that decides where it goes:
 
-| Priority | Reaches |
-|----------|---------|
-| **CRITICAL** | All channels |
+| Priority | Reaches (default policy) |
+|----------|--------------------------|
+| **CRITICAL** | Slack + PagerDuty |
 | **HIGH** | Slack |
-| **MEDIUM** | Slack only |
-| **LOW** | Slack only |
+| **MEDIUM** | Slack |
+| **LOW** | Slack |
 | **INFO** | Logged only, unless a channel is configured for it |
+
+This mapping is itself policy, not hardwiring: each priority maps to a channel list you can change, PagerDuty delivers only once its integration is enabled, and the generic outbound webhook joins whichever priorities (or categories) you add it to.
 
 Categories (`security`, `operations`, `sla`, `circuit_breaker`, `governance`, `approval`, `report`, `error`, and `chaos`) let you route by *kind* as well as severity. Routing is **category-first**: a category with its own channel policy (say, security alerts always going to a dedicated incident channel) takes precedence, and the priority-based channels are merged in on top. The concrete destinations — which Slack channel, which outbound webhook endpoints — are resolved from your settings, so the same priority can land in different places for different categories.
 
@@ -76,7 +78,7 @@ After a successful send, the hub records the cooldown, writes the notification t
 | A notification is held back, and the result names the reason | it's `disabled`, `rate_limited`, suppressed by `cooldown`, or routes to `log_only` |
 | A flood of identical alerts collapses to a single delivered message | a cooldown window suppresses the repeats |
 | A low-priority alert arrives at a higher priority than it was sent | Emergency Mode is active, or one source has crossed a burst threshold |
-| A critical alert fans out across Slack, PagerDuty, and any configured webhook at once | the notification's priority is CRITICAL |
+| A critical alert fans out to every channel in the critical-priority policy (Slack + PagerDuty by default) | the notification's priority is CRITICAL |
 | A delivery-failure event appears (one per failed channel), with the source masked | delivery fails outright — no channel accepts the message |
 | The notification shows up in the audit trail and the daily report | the send succeeds (operational categories feed the daily report) |
 

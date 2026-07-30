@@ -21,11 +21,11 @@ before a slow dependency drags everything down, returns a fallback so a user nev
 and if none of that ever surfaces, you have no idea whether the system is coasting or quietly
 catching fires all day.
 
-The Daily Report makes the invisible visible. One digest a day answers the question every operator
-actually has (*is everything OK?*) without anyone opening a dashboard. On a calm day it collapses
-to a single "all quiet" line, so a report that suddenly runs long is itself the signal that
-yesterday was busy. For a small team with nobody watching screens, it's the cheapest possible proof
-that your safety net is doing its job.
+The Daily Report makes the invisible visible. A digest answers the question every operator
+actually has (*is everything OK?*) without anyone opening a dashboard. On a quiet day it collapses
+to a single "all quiet" line (and a day with nothing recorded at all sends no digest), so a report
+that suddenly runs long is itself the signal that yesterday was busy. For a small team with nobody
+watching screens, it's the cheapest possible proof that your safety net is doing its job.
 
 ## How it works in Baldur
 
@@ -34,10 +34,13 @@ keeps a rolling history (about three months by default) that you can query by da
 
 The report is **adaptive**, to stay readable:
 
-- A core summary line is **always** present — it confirms the report ran at all.
+- Every digest opens with a core summary line, so a delivered report always tells you it ran.
 - Detail sections (auto-processing of archived/expired/recovered items, circuit-breaker activity,
-  errors, and the like) appear **only when they have something to report**. A day with no incidents
-  collapses to a single line: *"All quiet — 0 processed, 0 alerts."*
+  errors, and the like) appear **only when they have something to report**. A day with activity on
+  record but nothing that needs attention collapses to a single line: *"All quiet — 0 processed,
+  0 alerts."*
+- A day with **nothing recorded at all** (no activity and no pending backlog) is skipped outright:
+  no digest is sent and nothing is stored for that date.
 - The report's severity is derived from its contents: a clean day is *info*, task failures make it
   *warning*, a critical alert makes it *critical*.
 
@@ -46,9 +49,10 @@ How you *get* the report depends on your tier — you either pull it on demand o
 | What you observe | When it happens |
 |------------------|-----------------|
 | `baldur report` (or the report API / admin console) returns the day's digest and a multi-day trend | Any time — the report is generated and stored in every tier |
-| An *"All quiet — 0 processed, 0 alerts"* one-liner | The day had no healing activity and no incidents |
+| An *"All quiet — 0 processed, 0 alerts"* one-liner | Something was recorded that day, but nothing needed attention |
+| No digest (and no stored report) for a date | Nothing was recorded that day — generation skips it entirely |
 | Expanded detail sections | Those events actually occurred that day |
-| The digest pushed to your Slack automatically each morning | **PRO** — see *Tier behavior* below |
+| The digest pushed to your Slack automatically each day | **PRO** — see *Tier behavior* below |
 | A "what you're missing" insights block inside the report | **OSS only** — see *Tier behavior* below |
 
 The report ships **disabled by default**; you turn it on once you want the daily digest.
@@ -89,9 +93,8 @@ features you have active.
   to a channel is a PRO capability. The "what you're missing" block disappears, because you are no
   longer missing it. The **"Automated Actions" section** — which on OSS carries the auto-replayed
   dead-letter batches — fills out with the rest of what Baldur did while you were away: canary
-  rollouts and rollbacks, emergency-level changes, governance blocks, alongside richer sections fed
-  by the PRO features. The same daily digest shifts from *"here's what you're missing"* to *"here's
-  what was handled for you."*
+  rollouts and rollbacks, emergency-level changes, governance blocks. The same daily digest shifts
+  from *"here's what you're missing"* to *"here's what was handled for you."*
 
 ### Sections by tier
 
