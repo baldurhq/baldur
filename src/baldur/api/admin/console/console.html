@@ -21,8 +21,9 @@
   <style>
     :root {
       /* Instrument principle (v6): achromatic chrome, state-only color. The
-         former dawn-gold brand micro-marks (wordmark tick, :focus-visible
-         ring, PRO badge) are achromatic now (--mark) — hue means state
+         former dawn-gold brand micro-marks are retired — the wordmark is
+         plain text, and the surviving locator marks (:focus-visible ring,
+         panel flash) use the achromatic --mark — so hue means state
          severity and nothing else. Severity hues use the terminal-ANSI
          family shared with the baldur.sh landing, so site and console read
          as one system. */
@@ -45,10 +46,9 @@
       position: sticky; top: 0; z-index: 10;
     }
     header h1 { font-size: 16px; margin: 0; font-weight: 600; }
-    /* Wordmark: "Baldur" + 8px square tick + secondary "Admin Console". */
+    /* Wordmark: "Baldur" + secondary "Admin Console" — plain text, no mark. */
     .wordmark { display: flex; align-items: center; gap: 8px; }
     .wordmark b { font-weight: 700; color: var(--bone); }
-    .wordmark .tick { width: 8px; height: 8px; background: var(--mark); border-radius: 1px; }
     .wordmark .wm-sub { font-weight: 400; font-size: 13px; color: var(--ash); }
     header .spacer { flex: 1; }
     .key-entry { display: flex; align-items: center; gap: 6px; }
@@ -361,7 +361,7 @@
 </head>
 <body>
   <header>
-    <h1 class="wordmark"><b>Baldur</b><span class="tick"></span><span class="wm-sub">Admin Console</span></h1>
+    <h1 class="wordmark"><b>Baldur</b><span class="wm-sub">Admin Console</span></h1>
     <span class="spacer"></span>
     <label class="autorefresh">
       <input type="checkbox" id="autorefresh-toggle" /> Auto-refresh
