@@ -10,6 +10,11 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+### Changed
+
+- Admin console restyled: neutral-grey dark, square state tags, quieter action buttons.
+- Severity hues now match the baldur.sh terminal palette; state glyphs (● ◐ ○) unchanged.
+
 ## [1.3.2] - 2026-07-31
 
 ### Fixed

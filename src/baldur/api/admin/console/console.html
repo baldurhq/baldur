@@ -20,15 +20,18 @@
   <title>Baldur Admin Console</title>
   <style>
     :root {
-      /* Instrument principle (v5): achromatic chrome, state-only color, dawn
-         brand micro-marks. Hue is reserved for state severity + the three dawn
-         marks (wordmark tick, :focus-visible ring, PRO badge). */
-      --ink: #0b0d10; --ink2: #14171c; --ink3: #1b1f26; --line: #252a33;
-      --bone: #e7eaee; --ash: #97a0ab; --ash2: #76808e;
-      --dawn: #e8a33d;
-      --ember: #f4584f; --moss: #5fd085; --amber: #f3cb4d;
-      --ember-tint: rgba(244,88,79,.12); --moss-tint: rgba(95,208,133,.10);
-      --amber-tint: rgba(243,203,77,.10);
+      /* Instrument principle (v6): achromatic chrome, state-only color. The
+         former dawn-gold brand micro-marks (wordmark tick, :focus-visible
+         ring, PRO badge) are achromatic now (--mark) — hue means state
+         severity and nothing else. Severity hues use the terminal-ANSI
+         family shared with the baldur.sh landing, so site and console read
+         as one system. */
+      --ink: #101113; --ink2: #17181a; --ink3: #1c1d20; --line: #2a2b2e;
+      --bone: #ececec; --ash: #9a9a9a; --ash2: #737373;
+      --mark: #e6e6e6;
+      --ember: #f14c4c; --moss: #89d185; --amber: #cca700;
+      --ember-tint: rgba(241,76,76,.10); --moss-tint: rgba(137,209,133,.08);
+      --amber-tint: rgba(204,167,0,.10);
       --mono: ui-monospace, "Cascadia Code", "SF Mono", Consolas, monospace;
     }
     * { box-sizing: border-box; }
@@ -42,35 +45,37 @@
       position: sticky; top: 0; z-index: 10;
     }
     header h1 { font-size: 16px; margin: 0; font-weight: 600; }
-    /* Wordmark: "Baldur" + 8px dawn square tick + secondary "Admin Console". */
+    /* Wordmark: "Baldur" + 8px square tick + secondary "Admin Console". */
     .wordmark { display: flex; align-items: center; gap: 8px; }
     .wordmark b { font-weight: 700; color: var(--bone); }
-    .wordmark .tick { width: 8px; height: 8px; background: var(--dawn); border-radius: 1px; }
+    .wordmark .tick { width: 8px; height: 8px; background: var(--mark); border-radius: 1px; }
     .wordmark .wm-sub { font-weight: 400; font-size: 13px; color: var(--ash); }
     header .spacer { flex: 1; }
     .key-entry { display: flex; align-items: center; gap: 6px; }
     .key-entry input {
       background: var(--ink); border: 1px solid var(--line); color: var(--bone);
-      border-radius: 6px; padding: 6px 10px; width: 220px; font: inherit;
+      border-radius: 4px; padding: 6px 10px; width: 220px; font: inherit;
     }
-    /* Buttons are the outline family: transparent + hairline border, hue only on
-       recover (moss) / destructive (ember). The modal Confirm is the one fill —
-       the dialog's primary affordance must dominate Cancel without spending hue. */
+    /* Buttons are the outline family: transparent + neutral hairline border for
+       every button — consequence hue lives on the LABEL only (recover = moss,
+       destructive = ember), with a faint tint fill on hover. The modal Confirm
+       is the one fill — the dialog's primary affordance must dominate Cancel
+       without spending hue. */
     button {
       background: transparent; color: var(--bone); border: 1px solid var(--line);
-      border-radius: 6px; padding: 6px 12px; font: inherit; cursor: pointer;
+      border-radius: 4px; padding: 6px 12px; font: inherit; cursor: pointer;
     }
     button:hover { background: var(--ink3); }
-    button.danger { color: var(--ember); border-color: rgba(244,88,79,.4); }
+    button.danger { color: var(--ember); }
     button.danger:hover { background: var(--ember-tint); }
     button.primary {
       background: var(--bone); color: var(--ink); border-color: var(--bone);
       font-weight: 600;
     }
     button.primary:hover { background: var(--bone); filter: brightness(0.9); }
-    /* One global focus locator (dawn mark #2): visible on every focusable
-       element, not just the spine chips. */
-    :focus-visible { outline: 2px solid var(--dawn); outline-offset: 2px; }
+    /* One global focus locator: visible on every focusable element, not just
+       the spine chips. */
+    :focus-visible { outline: 2px solid var(--mark); outline-offset: 2px; }
     #banner {
       display: none; padding: 8px 20px; background: var(--amber-tint); color: var(--amber);
       border-bottom: 1px solid var(--line); font-size: 13px;
@@ -97,7 +102,7 @@
     @media (max-width: 719px) { #grid { grid-template-columns: minmax(0, 1fr); } }
     .panel {
       background: var(--ink2); border: 1px solid var(--line);
-      border-radius: 10px; overflow: hidden; display: flex; flex-direction: column;
+      border-radius: 6px; overflow: hidden; display: flex; flex-direction: column;
     }
     .panel-head {
       display: flex; align-items: center; gap: 8px; padding: 10px 14px;
@@ -105,21 +110,22 @@
     }
     .panel-head h2 { font-size: 14px; margin: 0; font-weight: 600; flex: 1; }
     /* Neutral chip: achromatic by default (color-budget rule a). A severity
-       class adds state color + a CSS-drawn glyph; warn/danger additionally get
-       the lit-chip tint. Booleans / non-status tokens stay quiet ash. */
+       class adds state color on the text + a CSS-drawn glyph; every chip keeps
+       the same neutral hairline border and transparent ground (no tint fills,
+       no pill radius). Booleans / non-status tokens stay quiet ash. */
     .tag {
-      font-size: 11px; padding: 1px 7px; border-radius: 10px;
+      font-size: 11px; padding: 1px 7px; border-radius: 3px;
       background: transparent; color: var(--ash); border: 1px solid var(--line);
       text-transform: uppercase;
       /* Status badges must never break mid-word (e.g. a table cell with
          overflow-wrap:anywhere would otherwise split "PENDING"). */
       white-space: nowrap;
     }
-    /* PRO tier badge: dawn outline (brand mark #3), OSS badge removed. */
-    .tag.pro    { color: var(--dawn); border-color: rgba(232,163,61,.45); }
+    /* PRO tier badge: quiet ash outline, OSS badge removed. */
+    .tag.pro    { color: var(--ash); }
     .tag.ok     { color: var(--moss); }
-    .tag.warn   { color: var(--amber); background: var(--amber-tint); border-color: rgba(243,203,77,.3); }
-    .tag.danger { color: var(--ember); background: var(--ember-tint); border-color: rgba(244,88,79,.3); }
+    .tag.warn   { color: var(--amber); }
+    .tag.danger { color: var(--ember); }
     /* State = color + shape: 9px glyph — filled dot (ok), half (warn), hollow
        ring (danger) — so severity survives colorblindness. */
     .tag.ok::before, .tag.warn::before, .tag.danger::before {
@@ -183,7 +189,7 @@
     .dlq-filter { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; }
     .dlq-filter select, .dlq-filter input {
       background: var(--ink); border: 1px solid var(--line); color: var(--bone);
-      border-radius: 6px; padding: 4px 8px; font: inherit; font-size: 12px;
+      border-radius: 4px; padding: 4px 8px; font: inherit; font-size: 12px;
     }
     .dlq-filter input { width: 130px; }
     /* Per-panel freshness + header auto-refresh toggle. */
@@ -204,7 +210,7 @@
     }
     #modal {
       background: var(--ink2); border: 1px solid var(--line);
-      border-radius: 12px; padding: 20px; width: 420px; max-width: 92vw;
+      border-radius: 8px; padding: 20px; width: 420px; max-width: 92vw;
     }
     #modal h3 { margin: 0 0 10px; font-size: 15px; }
     #modal p { color: var(--ash); font-size: 13px; }
@@ -214,7 +220,7 @@
     }
     #modal input, #modal textarea, #modal select {
       width: 100%; background: var(--ink); border: 1px solid var(--line);
-      color: var(--bone); border-radius: 6px; padding: 8px; font: inherit;
+      color: var(--bone); border-radius: 4px; padding: 8px; font: inherit;
       margin: 6px 0;
     }
     #modal textarea { min-height: 70px; font-family: monospace; font-size: 12px; }
@@ -237,13 +243,12 @@
     body { font-feature-settings: "tnum" 1; }
 
     /* Status spine: one aggregate health bar under the header. */
+    /* The spine ground stays flat in every state — the LED, the state word,
+       and the chip glyphs carry severity; no tinted band. */
     .spine {
       display: flex; align-items: center; gap: 18px; padding: 16px 20px;
       border-bottom: 1px solid var(--line); background: var(--ink2);
     }
-    .spine.state-ok     { background: linear-gradient(180deg, var(--moss-tint), transparent); }
-    .spine.state-warn   { background: linear-gradient(180deg, var(--amber-tint), transparent); }
-    .spine.state-danger { background: linear-gradient(180deg, var(--ember-tint), transparent); }
     .spine-led {
       width: 16px; height: 16px; border-radius: 50%; flex: 0 0 auto;
       box-shadow: 0 0 0 4px rgba(255,255,255,.04);
@@ -252,8 +257,8 @@
     .state-warn   .spine-led { background: var(--amber); }
     .state-danger .spine-led { background: var(--ember); animation: spine-pulse 1.3s ease-in-out infinite; }
     @keyframes spine-pulse {
-      0%, 100% { box-shadow: 0 0 0 0 rgba(244,88,79,.55); }
-      50%      { box-shadow: 0 0 0 10px rgba(244,88,79,0); }
+      0%, 100% { box-shadow: 0 0 0 0 rgba(241,76,76,.55); }
+      50%      { box-shadow: 0 0 0 10px rgba(241,76,76,0); }
     }
     @media (prefers-reduced-motion: reduce) { .state-danger .spine-led { animation: none; } }
     .spine-main  { display: flex; flex-direction: column; gap: 3px; }
@@ -264,35 +269,33 @@
     .spine-sub   { font-size: 12px; color: var(--ash); }
     .spine-chips { display: flex; gap: 8px; flex-wrap: wrap; margin-left: auto; }
     .spine-chip  {
-      cursor: pointer; font: 12px/1 var(--mono); padding: 6px 11px; border-radius: 8px;
+      cursor: pointer; font: 12px/1 var(--mono); padding: 6px 11px; border-radius: 4px;
       border: 1px solid var(--line); background: var(--ink); color: var(--bone);
       display: flex; gap: 7px; align-items: center;
     }
     .spine-chip .dot   { width: 7px; height: 7px; border-radius: 50%; }
-    .spine-chip.danger { border-color: rgba(244,88,79,.4); }
     .spine-chip.danger .dot { background: transparent; border: 2px solid var(--ember); }
     .spine-chip.warn .dot   { background: linear-gradient(90deg, var(--amber) 0 50%, transparent 50%); }
     .spine-chip:hover  { border-color: var(--ash); }
 
-    /* Panel health weighting: trouble is marked with an inset stripe + a header
-       tint; calm panels stay fully legible (no opacity dimming — that is
-       legibility loss, not attention routing). */
-    #grid .panel[data-health="warn"]     { box-shadow: inset 4px 0 0 var(--amber); }
-    #grid .panel[data-health="warn"] .panel-head   { background: linear-gradient(90deg, var(--amber-tint), transparent); }
-    #grid .panel[data-health="danger"]   { box-shadow: inset 4px 0 0 var(--ember); border-color: rgba(244,88,79,.4); }
-    #grid .panel[data-health="danger"] .panel-head { background: linear-gradient(90deg, var(--ember-tint), transparent); }
-    .panel.flash { outline: 2px solid var(--dawn); outline-offset: 2px; }
+    /* Panel health weighting: trouble is marked with a thin inset stripe;
+       calm panels stay fully legible (no opacity dimming — that is
+       legibility loss, not attention routing — and no header tint). */
+    #grid .panel[data-health="warn"]     { box-shadow: inset 2px 0 0 var(--amber); }
+    #grid .panel[data-health="danger"]   { box-shadow: inset 2px 0 0 var(--ember); }
+    .panel.flash { outline: 2px solid var(--mark); outline-offset: 2px; }
 
     /* Dashboard hero: full-width at-a-glance readout. */
     #grid .panel.hero { grid-column: 1 / -1; opacity: 1; }
     .hero-top  { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
     .hero-pill {
       font: 600 12px/1 var(--mono); letter-spacing: .09em; padding: 7px 13px;
-      border-radius: 20px; text-transform: uppercase;
+      border-radius: 3px; border: 1px solid var(--line);
+      text-transform: uppercase;
     }
-    .hero-pill.ok     { background: var(--moss-tint);  color: var(--moss); }
-    .hero-pill.warn   { background: var(--amber-tint); color: var(--amber); }
-    .hero-pill.danger { background: var(--ember-tint); color: var(--ember); }
+    .hero-pill.ok     { color: var(--moss); }
+    .hero-pill.warn   { color: var(--amber); }
+    .hero-pill.danger { color: var(--ember); }
     .hero-pill.ok::before, .hero-pill.warn::before, .hero-pill.danger::before {
       content: ""; display: inline-block; width: 9px; height: 9px;
       border-radius: 50%; margin-right: 7px; vertical-align: -1px;
@@ -302,7 +305,7 @@
     .hero-pill.danger::before { border: 2px solid currentColor; }
     .hero-ts   { font: 11px/1 var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--ash); }
     .hero-tiles{ display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; }
-    .tile { background: var(--ink); border: 1px solid var(--line); border-radius: 9px; padding: 13px 15px; }
+    .tile { background: var(--ink); border: 1px solid var(--line); border-radius: 4px; padding: 13px 15px; }
     .tile .lbl { font: 600 10px/1 var(--mono); letter-spacing: .13em; text-transform: uppercase; color: var(--ash2); }
     .tile .num { font: 600 30px/1.1 var(--mono); margin-top: 9px; color: var(--bone); }
     .tile.warn .num   { color: var(--amber); }
@@ -325,7 +328,7 @@
 
     /* DLQ stats: mini tiles per status. */
     .mini-tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
-    .mini-tile { background: var(--ink); border: 1px solid var(--line); border-radius: 7px; padding: 8px 10px; }
+    .mini-tile { background: var(--ink); border: 1px solid var(--line); border-radius: 4px; padding: 8px 10px; }
     .mini-tile .lbl  { font: 600 9px/1 var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--ash2); }
     .mini-tile .mnum { font: 600 20px/1.1 var(--mono); margin-top: 6px; color: var(--bone); }
     .mini-tile.warn .mnum   { color: var(--amber); }
@@ -337,11 +340,12 @@
     .dlq-armed-more { font: 11px/1.4 var(--mono); color: var(--ash); }
 
     /* Action buttons colored by consequence (moss = recover, ember = destructive
-       reserved, neutral = routine) — outline family, tint fill on hover.
-       Permission gating (typed-confirm) is separate. */
-    .panel-actions button.btn-recover { color: var(--moss); border-color: rgba(95,208,133,.4); }
+       reserved, neutral = routine) — hue on the label only, neutral hairline
+       border, tint fill on hover. Permission gating (typed-confirm) is
+       separate. */
+    .panel-actions button.btn-recover { color: var(--moss); }
     .panel-actions button.btn-recover:hover { background: var(--moss-tint); }
-    .panel-actions button.btn-danger  { color: var(--ember); border-color: rgba(244,88,79,.4); }
+    .panel-actions button.btn-danger  { color: var(--ember); }
     .panel-actions button.btn-danger:hover { background: var(--ember-tint); }
 
     /* Tables (DLQ + Canary share .dlq-table): keep code-like ids on one line and

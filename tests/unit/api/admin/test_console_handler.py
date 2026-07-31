@@ -728,8 +728,11 @@ class TestConsoleAssetStructure:
     # CSS is not executed under pytest, so the redesign's verifiable surface is
     # content assertions on the packaged asset (precedent: this whole class).
 
-    # The old-palette inventory retired by 681 D1 (removal-type full sweep). Any
-    # survivor leaves a stale-temperature fragment after the token swap.
+    # The old-palette inventory retired by 681 D1 (removal-type full sweep),
+    # extended with the v5 palette retired by the v6 resurfacing (neutral-grey
+    # ground, achromatic brand marks, terminal-ANSI severity hues shared with
+    # the baldur.sh landing). Any survivor leaves a stale-temperature fragment
+    # after the token swap.
     _RETIRED_PALETTE = [
         "0f1419",
         "1a212b",
@@ -756,6 +759,22 @@ class TestConsoleAssetStructure:
         "95,207,128",
         "243,193,78",
         "243,97,78",
+        # v5 tokens retired by the v6 resurfacing:
+        "0b0d10",
+        "14171c",
+        "1b1f26",
+        "252a33",
+        "e7eaee",
+        "97a0ab",
+        "76808e",
+        "e8a33d",
+        "f4584f",
+        "5fd085",
+        "f3cb4d",
+        "244,88,79",
+        "95,208,133",
+        "243,203,77",
+        "232,163,61",
     ]
 
     def test_oss_tier_badge_removed(self):
@@ -781,13 +800,15 @@ class TestConsoleAssetStructure:
         assert re.search(r"\.tag\." + severity + r"::before", raw) is not None
 
     def test_retired_palette_absent_and_new_palette_present(self):
-        """681 D1: the old palette is fully retired and the v5 token anchors
-        (``--ink`` #0b0d10, ``--dawn`` #e8a33d) are present."""
+        """681 D1 (v6 anchors): the old palettes are fully retired and the v6
+        token anchors are present — ``--ink`` #101113 (neutral-grey ground)
+        and ``--ember`` #f14c4c (terminal-ANSI severity, shared with the
+        baldur.sh landing)."""
         raw = _console_html().lower()
         for stale in self._RETIRED_PALETTE:
             assert stale.lower() not in raw, f"retired palette value survived: {stale}"
-        assert "0b0d10" in raw
-        assert "e8a33d" in raw
+        assert "101113" in raw
+        assert "f14c4c" in raw
 
     def test_opacity_dimming_of_calm_panels_removed(self):
         """681 D7: healthy/none panels are no longer opacity-dimmed (that is
