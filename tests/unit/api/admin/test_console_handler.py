@@ -984,6 +984,18 @@ class TestConsoleTriageStructure:
         assert "openedAtText" in raw
         assert "updated " in raw
 
+    def test_mounted_drilldown_states_its_own_age(self):
+        """The 15 s body refresher deliberately never rebuilds a mounted
+        drill-down, so the row's ``updated Xs ago`` token describes the STATUS
+        fetch only — it reads "just now" over drill-down content from twenty
+        minutes ago. The drill-down carries its own mount-time stamp, on the
+        same always-on ticker, so the two ages are never confused."""
+        raw = _console_source()
+        assert "function stampDrilldown(row)" in raw
+        assert "drill-down loaded " in raw
+        # Both mount points stamp: first expansion, and the explicit rebuild.
+        assert raw.count("stampDrilldown(row);") == 2
+
     def test_freshness_ticker_supports_per_element_formatters(self):
         """One always-on 5 s display ticker drives every age token. Elements may
         carry their own formatter; with none the original ``updated Xs ago``
@@ -1137,6 +1149,19 @@ class TestConsoleHealingLedger:
         raw = _console_source()
         assert "ledgerInFlight" in raw
         assert "ledgerGeneration" in raw
+
+    def test_a_superseded_chain_is_discarded_before_it_can_paint(self):
+        """Regression: the generation counter was advanced only where a chain
+        STARTS, which is reachable only when none is running — so the two
+        ``generation !== ledgerGeneration`` guards could never be true and a
+        superseded chain painted its own result first. Pasting an admin key
+        into a console whose boot fetch was still 401ing wrote "series
+        unavailable" over the ledger before the rerun replaced it. A forced
+        refresh must bump the generation at the point it supersedes."""
+        raw = _console_source()
+        assert "ledgerRerun = true; ledgerGeneration++;" in raw
+        # Both guards stay, and both now have a reachable false branch.
+        assert raw.count("if (generation !== ledgerGeneration) { return; }") == 2
 
 
 class TestConsolePanelSeverityResolvers:
