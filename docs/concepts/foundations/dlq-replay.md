@@ -170,6 +170,34 @@ replay recovering?"* — so both are kept rather than one overwriting the other.
 Entries captured **before** this linkage existed, and captures that had no active trace, simply
 replay without an origin link — the absence is the normal state, not an error.
 
+## Why capture is opt-in per call
+
+`@baldur.protected` does not send a call's final failures to the dead letter queue unless the call
+site asks for it with `dlq=True` (the `@dlq_protect` preset pins it on, together with retry and the
+circuit breaker). The queue itself is ready with no wiring — storage resolves to your configured
+backend or the in-memory fallback — so the flag is not about infrastructure. It is about what gets
+stored.
+
+To be replayable, an entry has to carry the work itself: capture records a snapshot of the failing
+call's arguments — the request data a replay re-runs. That snapshot is your domain data: order ids,
+amounts, user ids. Sensitive-looking fields are masked by rule-based patterns, but no generic rule
+set can know which of *your* values are sensitive, so domain values survive masking by design.
+Persisting that data is therefore a decision Baldur leaves to you, made explicitly per call site,
+rather than something an upgrade switches on silently.
+
+There is deliberately no "capture without the payload" middle ground. Replay re-runs the captured
+request data, so an entry that lost its payload (for example, cut off by the write-side size cap)
+is refused replay rather than re-run half-blind — a payload-less capture would demote the queue
+from a work queue to a log. For call sites that should record the failure but must not snapshot
+arguments (say, a password-verification path), keep `dlq=True` and pass `context_from=False`: the
+failure is still captured, without the auto-extracted argument payload — accepting that such
+entries need an operator (or a custom replay handler with its own data source) rather than
+hands-off replay.
+
+`BALDUR_DLQ_ENABLED` (below) is a different switch: it governs whether the capture service accepts
+entries at all. It defaults to on so that every `dlq=True` call site just works — it does not put
+any call into the queue by itself.
+
 ## Configuration
 
 The knobs an operator sets most often. The full list lives in the API reference.

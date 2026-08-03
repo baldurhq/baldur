@@ -21,6 +21,12 @@ rate-limit, backpressure, and circuit-breaker pre-flight at the ASGI edge. The
 --8<-- "examples/quickstart_fastapi/app.py"
 ```
 
+`dlq=True` opts the route into the [dead-letter queue](../concepts/foundations/dlq-replay.md):
+a final failure is captured with a snapshot of the call's arguments so it can be
+replayed once the dependency recovers. Capture stores your request data, which
+is [why it is opt-in per call](../concepts/foundations/dlq-replay.md#why-capture-is-opt-in-per-call)
+rather than on by default.
+
 !!! note "Baldur does not authenticate your routes"
 
     The middleware adds resilience (rate-limit, backpressure, circuit

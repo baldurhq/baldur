@@ -28,12 +28,18 @@ to add — the same out-of-the-box behavior as the Flask and FastAPI quickstarts
 
 ## 3. Protect a view
 
-`@baldur.protected("demo")` wraps the view in Baldur's composed resilience
-pipeline (circuit breaker on by default):
+`@baldur.protected("demo", dlq=True)` wraps the view in Baldur's composed
+resilience pipeline (circuit breaker on by default):
 
 ```python
 --8<-- "examples/quickstart_django/views.py"
 ```
+
+`dlq=True` opts the view into the [dead-letter queue](../concepts/foundations/dlq-replay.md):
+a final failure is captured with a snapshot of the call's arguments so it can be
+replayed once the dependency recovers. Capture stores your request data, which
+is [why it is opt-in per call](../concepts/foundations/dlq-replay.md#why-capture-is-opt-in-per-call)
+rather than on by default.
 
 Route it:
 
