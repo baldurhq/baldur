@@ -263,6 +263,7 @@
     .kv-null { color: var(--ash2); }
     /* DLQ drill-down (D2/D3/D5). */
     .panel-drilldown { padding: 10px 14px 12px; border-top: 1px solid var(--line); }
+    .drill-age { padding: 0 14px 10px; }
     .drill-title { font-size: 12px; color: var(--ash); margin-bottom: 6px; }
     table.dlq-table { width: 100%; border-collapse: collapse; font-size: 12px; }
     table.dlq-table th {
@@ -3221,6 +3222,19 @@
     return row;
   }
 
+  // A mounted drill-down is deliberately NOT rebuilt by the 15 s body refresher
+  // (a refresh must never yank content out from under an operator mid-triage),
+  // so the row's own "updated Xs ago" token describes the STATUS fetch only. It
+  // can read "just now" over drill-down content from twenty minutes ago. The
+  // drill-down therefore states its own age, on the same always-on ticker.
+  function drillAgeText(t) { return "drill-down loaded " + relAgo(t); }
+  function stampDrilldown(row) {
+    if (!row.drillAgeEl) { return; }
+    row.drillAgeEl._t = Date.now();
+    row.drillAgeEl._fmt = drillAgeText;
+    row.drillAgeEl.textContent = drillAgeText(row.drillAgeEl._t);
+  }
+
   function toggleRow(row) {
     row.open = !row.open;
     row.bodyWrap.style.display = row.open ? "" : "none";
@@ -3232,6 +3246,7 @@
     if (row.open && row.drillFn && !row.drillMounted) {
       row.drillMounted = true;
       row.drillFn(row.drillEl);
+      stampDrilldown(row);
     }
   }
 
@@ -3248,6 +3263,7 @@
     if (row.drillMounted && row.drillFn) {
       row.drillEl.textContent = "";
       row.drillFn(row.drillEl);
+      stampDrilldown(row);
     }
   }
 
@@ -3299,6 +3315,9 @@
     if (row.drillFn) {
       row.drillEl = el("div", "panel-drilldown");
       row.bodyWrap.appendChild(row.drillEl);
+      // Sibling, not a child: refreshRow clears drillEl's children on rebuild.
+      row.drillAgeEl = el("div", "drill-age updated");
+      row.bodyWrap.appendChild(row.drillAgeEl);
     }
     buildActions(p, row, null);
     return row;
@@ -3490,7 +3509,15 @@
       // One chain at a time. A chain is up to 3 sequential pages at the fetch
       // timeout, i.e. the refresh period itself, so overlap is reachable — not
       // theoretical — on a slow DLQ backend.
-      if (force) { ledgerRerun = true; }
+      //
+      // A FORCED refresh supersedes the live chain, so the generation is bumped
+      // HERE. Bumping only where a chain starts would advance the counter solely
+      // while none is running, which makes the guards below unreachable and lets
+      // a superseded chain paint its own result first: paste an admin key into a
+      // console whose boot fetch is still 401ing and the stale chain writes
+      // "series unavailable" over the ledger before the rerun replaces it. A
+      // plain 15 s tick is dropped instead of superseding, so it must NOT bump.
+      if (force) { ledgerRerun = true; ledgerGeneration++; }
       return;
     }
     ledgerInFlight = true;
