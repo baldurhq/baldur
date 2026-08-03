@@ -131,7 +131,12 @@
       color: var(--mark);
     }
     .triage h1 .triage-detail { color: var(--ash); font-weight: 400; }
-    .triage-age { margin-left: auto; font: 12px/1 var(--mono); color: var(--ash2); }
+    /* nowrap: the verdict beside it wraps freely, and a two-line "as of just
+       now" in the corner reads as a broken layout rather than a timestamp. */
+    .triage-age {
+      margin-left: auto; font: 12px/1 var(--mono); color: var(--ash2);
+      white-space: nowrap;
+    }
     .triage-chips { display: flex; gap: 8px; flex-wrap: wrap; padding: 0 0 4px 21px; }
     .triage-chip {
       cursor: pointer; font: 12px/1 var(--mono); padding: 6px 11px; border-radius: 4px;
@@ -912,6 +917,27 @@
     return true;
   }
 
+  // The second honesty predicate, and the only one that needs two payloads.
+  //
+  // The ledger and the Dashboard row tell the same story from two different
+  // backings: /dlq/list reads the DLQ repository itself, while
+  // /dashboard/summary reads a statistics adapter that exists only on the
+  // Django and SQL paths. On every other install — plain Python / Flask /
+  // FastAPI over a memory or Redis DLQ, the shipped OSS shape — the adapter is
+  // a Null object that answers 200 with every count zero and a "healthy"
+  // status, byte-identical to a genuinely empty queue. Nothing in the payload
+  // distinguishes the two; the contradiction against the window the ledger has
+  // already fetched is the only signal there is.
+  //
+  // Stated as the disagreement it is, never diagnosed as a missing adapter: a
+  // cache-served summary legitimately lags a burst of fresh entries, and the
+  // console must not accuse a working install of being unconfigured.
+  function summaryDisagreesWithWindow(summary) {
+    var overview = (summary && summary.overview) || {};
+    if (!isReported(overview.total) || overview.total !== 0) { return false; }
+    return !!(ledgerState && ledgerState.entries && ledgerState.entries.length);
+  }
+
   // --- Structured render (D1) ----------------------------------------------
   // Replaces the raw JSON.stringify dump with scannable key->value rows. Status
   // coloring is conservative and value-driven: only a recognized status token
@@ -1289,7 +1315,7 @@
   // "none" mean exactly one thing — no answer — which the triage line's
   // "N of M reporting" denominator depends on.
   function panelSeverity(p, data) {
-    if (p.id === "dashboard") { return severityOf(data && data.health_status) || "ok"; }
+    if (p.id === "dashboard") { return dashboardSeverity(data); }
     if (p.id === "circuit_breaker") { return cbSeverity(data); }
     if (p.id === "dlq") { return dlqSeverity(data); }
     if (p.id === "canary") { return canarySeverity(data); }
@@ -1300,6 +1326,16 @@
     if (p.id === "bulkhead") { return bulkheadSeverity(data); }
     if (p.id === "governance") { return governanceSeverity(data); }
     return scanSeverity(data);
+  }
+  // The Dashboard row's own severity. `health_status` comes from the same
+  // summary the counts do, so on a Null statistics adapter it is a permanent
+  // "healthy" — a green dot, and a seat in the System tier's healthy count,
+  // earned by a source that is not describing this store at all. A summary
+  // contradicted by the ledger's window is not reporting health; it is
+  // reporting nothing, which is what "none" means everywhere else here.
+  function dashboardSeverity(d) {
+    if (summaryDisagreesWithWindow(d)) { return "none"; }
+    return severityOf(d && d.health_status) || "ok";
   }
   // Per-service severity for an expanded circuit-breaker row.
   //
@@ -1423,8 +1459,9 @@
       wrap.appendChild(el("span", "tag", "auto-replay: probe failed"));
     } else {
       wrap.appendChild(el("span", "tag warn",
-        "auto-replay disarmed: " + (ar.missing_link || "unknown")));
-      var more = (ar.missing_links || []).slice(1);
+        "auto-replay disarmed: "
+        + (ar.missing_link ? replayLinkText(ar.missing_link) : "unknown")));
+      var more = (ar.missing_links || []).slice(1).map(replayLinkText);
       if (more.length) {
         wrap.appendChild(el("span", "dlq-armed-more",
           " · also missing: " + more.join(", ")));
@@ -1646,10 +1683,17 @@
       if (resolved < answered) {
         caveats.push((answered - resolved) + " reporting no state");
       }
-      detail = "· " + (caveats.length ? caveats.join(" · ") : "every check is reporting");
+      detail = caveats.length ? caveats.join(" · ") : "every check is reporting";
     }
     triage.querySelector(".triage-lead").textContent = lead;
-    triage.querySelector(".triage-detail").textContent = detail;
+    // The separator belongs to the join, not to any one branch: the lead ends
+    // in a sentence (often the offender's own, which ends in a clause), and
+    // appending the count straight onto it made the two read as one run-on
+    // line — "…parked calls to DLQ 2 other checks need attention". The space
+    // AFTER the dot is non-breaking so the verdict wraps before the separator
+    // and carries it down, instead of leaving a dot stranded at a line end.
+    triage.querySelector(".triage-detail").textContent =
+      detail ? " · " + detail : "";
     renderTriageAge();
     renderTriageChips(offenders);
   }
@@ -2630,6 +2674,16 @@
   // translatable in one place instead of scattered through six renderers.
   var DESCRIBERS = {
     dashboard: function (d) {
+      // The three zeros are "reported" by the letter of isReported, so the
+      // reported-fields-only rule cannot save this row on its own: a Null
+      // statistics adapter reports them, every time, on the shipped OSS
+      // install. Printing them under a ledger that is drawing entries states a
+      // number the operator can see is wrong, one row below the strip that
+      // already defends itself by taking max(reported, window-derived).
+      if (summaryDisagreesWithWindow(d)) {
+        return "totals disagree with the DLQ window — the statistics source "
+          + "reports an empty store (unconfigured, or lagging behind its cache)";
+      }
       var ov = (d && d.overview) || {};
       var ra = (d && d.recent_activity) || {};
       var parts = [];
@@ -2681,7 +2735,8 @@
       var ar = d.auto_replay;
       if (ar && ar.armed === false) {
         parts.push("auto-replay disarmed"
-          + (isReported(ar.missing_link) ? " (" + ar.missing_link + ")" : ""));
+          + (isReported(ar.missing_link)
+            ? " — " + replayLinkText(ar.missing_link) : ""));
       }
       return parts.join(" · ");
     },
@@ -2849,13 +2904,31 @@
     last_failure_at: "last failure",
     opened_at: "opened",
     manually_controlled: "operator override",
-    control_reason: "forced by"
+    control_reason: "forced by",
+    controlled_by_id: "controlled by"
   };
   // Excluded by name. `service_name` IS the row's name, already in the head —
   // repeating it is not a fact about the service. `metadata` is caller-supplied
   // context of unbounded shape, and flattening it re-creates the key->value
   // dump this table exists to replace.
   var FACT_EXCLUDED = { service_name: 1, metadata: 1 };
+
+  // The auto-replay arming chain reports which link is missing as a machine
+  // token from a closed set (the server's own link order, plus the probe's
+  // failure marker). The same translation-layer rule as FACT_LABELS: a token
+  // with no entry renders as itself rather than disappearing, so a new link
+  // added server-side is visible-but-untranslated instead of silently absent.
+  var REPLAY_LINK_LABELS = {
+    disabled: "replay is switched off",
+    celery_missing: "Celery is not installed",
+    worker_missing: "no worker is consuming the replay queue",
+    map_unconfigured: "no domain-to-task map is configured",
+    handler_missing: "no replay handler is registered",
+    probe_failed: "the worker probe failed"
+  };
+  function replayLinkText(token) {
+    return REPLAY_LINK_LABELS[token] || token;
+  }
 
   // --- Action modal (D10) --------------------------------------------------
   var pendingAction = null;
@@ -3349,6 +3422,12 @@
     Object.keys(svc).forEach(function (k) {
       if (FACT_EXCLUDED[k]) { return; }
       if (!isReported(svc[k])) { return; }
+      // `controlled_by_id` is an identity slot, and 0 is its no-identity value:
+      // the control path passes None on every non-Django boot ("the audit trail
+      // is the single source of truth for who"), which serialises to 0 here.
+      // A fact reading `controlled by 0` names nobody — the same absence
+      // isReported drops for null, wearing a different placeholder.
+      if (k === "controlled_by_id" && !svc[k]) { return; }
       var fact = el("div", "fact");
       fact.appendChild(el("span", "k", FACT_LABELS[k] || k));
       fact.appendChild(el("span", "v", factValue(k, svc[k])));
@@ -3799,6 +3878,21 @@
     setText("ledger-window", " — all domains · " + describeSpan(series));
     renderLedgerCaption(series);
     renderLedgerFooter(series);
+    reresolveDashboardRow();
+  }
+
+  // The mirror of the dashboard->ledger hook in loadPanel. The window is what
+  // makes a structurally-zero summary detectable at all, and the two fetches
+  // race: on a cold load the Dashboard row usually answers first, resolves
+  // against a summary it cannot yet contradict, and would keep that verdict —
+  // the zeros — until the operator refreshed the row by hand.
+  function reresolveDashboardRow() {
+    var row = ROW_BY_KEY["p:dashboard"];
+    if (!row || !row.answered) { return; }
+    // setRowHealth re-describes, re-places and re-renders the verdict, so the
+    // sentence and the tier move together — the row cannot end up green with
+    // the disagreement sentence, or vice versa.
+    setRowHealth(row, panelSeverity(row.panel, row.status));
   }
 
   function describeSpan(series) {
@@ -3856,6 +3950,14 @@
       + "entries drop out entirely");
     if (series && series.summaryOpen === null) {
       parts.push("no statistics adapter is reporting, so the open count is "
+        + "window-derived only");
+    } else if (series && summaryDisagreesWithWindow(series.summary)) {
+      // Reported, and reported wrong: a summary claiming an empty store while
+      // this window holds entries contributes nothing to the counters above,
+      // which the max() already handles silently. Saying so is the difference
+      // between a number that is quietly window-only and one the reader can
+      // trust for the reason stated.
+      parts.push("the summary reports an empty store, so the counts are "
         + "window-derived only");
     }
     setText("ledger-caption", parts.join(" · "));

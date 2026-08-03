@@ -1216,3 +1216,120 @@ class TestConsolePanelSeverityResolvers:
         assert '"all clear"' in raw
         assert "reporting" in raw
         assert "markUnanswered" in raw
+
+
+class TestConsoleSummaryDisagreement:
+    """A statistics source that reports an empty store while the ledger draws
+    entries is not describing this install.
+
+    The ledger reads the DLQ repository through ``/dlq/list``; the Dashboard row
+    reads a statistics adapter through ``/dashboard/summary``, and that adapter
+    exists only on the Django and SQL paths. Everywhere else it is a Null object
+    answering 200 with every count zero and a "healthy" status — shape-identical
+    to an empty queue. The counters above the row already take
+    ``max(reported, window-derived)``; the row itself trusted the zeros."""
+
+    def test_one_shared_disagreement_predicate(self):
+        """One predicate, three readers (row prose, row severity, ledger
+        caption). Hand-written copies are how the three drift into disagreeing
+        about the same payload."""
+        raw = _console_source()
+        assert "function summaryDisagreesWithWindow(" in raw
+        assert raw.count("summaryDisagreesWithWindow(") >= 4
+
+    def test_the_disagreement_needs_both_payloads(self):
+        """The summary alone cannot carry the signal — an empty queue produces
+        the identical payload. The contradiction is against the window the
+        ledger already fetched, so a genuinely empty store keeps reporting its
+        zeros and is never accused of being unconfigured."""
+        raw = _console_source()
+        assert "overview.total !== 0" in raw
+        assert "ledgerState && ledgerState.entries && ledgerState.entries.length" in raw
+
+    def test_the_dashboard_row_has_its_own_resolver(self):
+        """``health_status`` comes from the same summary the counts do, so the
+        Null adapter's permanent "healthy" bought a green dot and a seat in the
+        System tier's healthy count."""
+        raw = _console_source()
+        assert 'if (p.id === "dashboard") { return dashboardSeverity(data); }' in raw
+        assert "function dashboardSeverity(" in raw
+        assert 'if (summaryDisagreesWithWindow(d)) { return "none"; }' in raw
+
+    def test_the_row_states_the_disagreement_instead_of_the_zeros(self):
+        """Worded as the disagreement it is, not as a diagnosis: a cache-served
+        summary legitimately lags fresh entries, and the console must not accuse
+        a working install of being unconfigured."""
+        raw = _console_source()
+        assert "totals disagree with the DLQ window" in raw
+        assert "unconfigured, or lagging behind its cache" in raw
+
+    def test_the_row_is_re_resolved_when_the_window_lands(self):
+        """The two fetches race, and on a cold load the Dashboard row usually
+        answers first — against a summary it cannot yet contradict. Without the
+        mirror of the dashboard->ledger hook it would keep the zeros until the
+        operator refreshed the row by hand."""
+        raw = _console_source()
+        assert "function reresolveDashboardRow(" in raw
+        assert "reresolveDashboardRow();" in raw
+
+    def test_the_caption_says_which_half_carried_the_counters(self):
+        """`max()` silently absorbs the useless half. Saying so is the
+        difference between a number that happens to be window-only and one the
+        reader can trust for a stated reason."""
+        raw = _console_source()
+        assert "the summary reports an empty store, so the counts are" in raw
+
+
+class TestConsoleOperatorProse:
+    """Machine tokens and placeholder identities are not operator prose."""
+
+    def test_replay_link_tokens_are_translated(self):
+        """``missing_link`` is a machine token from the server's own closed link
+        set. The row printed it raw — "auto-replay disarmed (map_unconfigured)".
+        A translation layer, not a whitelist: an unmapped token renders as
+        itself, so a new server-side link is visible-but-untranslated rather
+        than silently dropped."""
+        raw = _console_source()
+        assert "var REPLAY_LINK_LABELS = {" in raw
+        assert "function replayLinkText(" in raw
+        assert "REPLAY_LINK_LABELS[token] || token" in raw
+        for token in (
+            "disabled",
+            "celery_missing",
+            "worker_missing",
+            "map_unconfigured",
+            "handler_missing",
+            "probe_failed",
+        ):
+            assert f"{token}:" in raw, f"{token} has no operator sentence"
+
+    def test_both_replay_readers_use_the_one_table(self):
+        """The row sentence and the expanded badge describe the same field."""
+        raw = _console_source()
+        # declaration + row sentence + badge headline; the badge's remaining
+        # links pass the function itself to map().
+        assert raw.count("replayLinkText(") >= 3
+        assert ".map(replayLinkText)" in raw
+
+    def test_a_placeholder_identity_is_not_a_fact(self):
+        """``controlled_by_id`` is an identity slot and 0 is its no-identity
+        value: the control path passes None on every non-Django boot, because
+        the audit trail owns "who". "controlled by 0" names nobody — the same
+        absence ``isReported`` drops for null, wearing a placeholder."""
+        raw = _console_source()
+        assert 'controlled_by_id: "controlled by"' in raw
+        assert 'if (k === "controlled_by_id" && !svc[k]) { return; }' in raw
+
+    def test_the_verdict_separator_belongs_to_the_join(self):
+        """The lead ends in the offender's own sentence, which ends in a clause.
+        Appending the count straight onto it read as one run-on line.
+
+        The space after the dot is NON-BREAKING (written here as an escape,
+        because the two spaces are indistinguishable on sight): the verdict
+        wraps at the space before the separator and carries the dot down with
+        the text, instead of stranding it at the end of the first line."""
+        raw = _console_source()
+        separator = " ·" + " "
+        assert f'detail ? "{separator}" + detail : ""' in raw
+        # …and no branch carries its own copy of the separator any more.
+        assert 'detail = "· "' not in raw
