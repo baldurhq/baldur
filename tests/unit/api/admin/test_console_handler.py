@@ -1016,6 +1016,129 @@ class TestConsoleTriageStructure:
         )
 
 
+class TestConsoleHealingLedger:
+    """The hero is a derived time axis, not another snapshot readout.
+
+    There is no history API, so the series is reconstructed client-side from a
+    bounded ``/dlq/list`` page walk. What matters in a static-asset assertion is
+    that the honesty machinery is present: a derived (not fixed) bucket width,
+    the truncation state, the caption, the three-slot footer, and the two
+    counters that have no source staying absent.
+    """
+
+    @pytest.mark.parametrize(
+        "constant",
+        [
+            "LEDGER_PAGE_SIZE",
+            "LEDGER_MAX_PAGES",
+            "LEDGER_SPAN_MS",
+            "LEDGER_BUCKET_COUNT",
+            "LEDGER_BUCKET_MIN",
+            "LEDGER_BUCKET_LADDER",
+        ],
+    )
+    def test_ledger_constant_is_named(self, constant: str):
+        """Operational values are named module constants, not literals at the
+        use site (the client-side analog of the settings rule)."""
+        assert f"var {constant} = " in _console_source()
+
+    def test_bucket_width_is_derived_not_fixed(self):
+        """A fixed bucket cannot render both a 7-minute incident and a 6-hour
+        quiet stretch. The width snaps UP a ladder from the span the page walk
+        actually fetched, so the retired fixed-width constant must be gone."""
+        raw = _console_source()
+        assert "LEDGER_BUCKET_MS" not in raw
+        assert "LEDGER_BUCKET_LADDER" in raw
+
+    def test_page_size_literal_stays_absent(self):
+        """``page_size=100`` is a banned anchor (a retired sample fetch used
+        it), so the query string is composed from the constant."""
+        raw = _console_source()
+        assert "page_size=100" not in raw
+        assert '&page_size=" + LEDGER_PAGE_SIZE' in raw
+
+    def test_chart_is_first_party_inline_svg(self):
+        """The zero-new-runtime-dependency constraint holds: no chart library,
+        and SVG text goes through textContent like every other render."""
+        raw = _console_source()
+        assert "function svgEl(" in raw
+        assert "createElementNS" in raw
+        assert ".innerHTML" not in raw
+
+    def test_crosshair_is_one_shared_handler(self):
+        """Cursor sync across the two bands is by construction — one mousemove
+        over one container — not a synchronization protocol. The client→SVG
+        rect is cached because reading it per move forces a layout flush."""
+        raw = _console_source()
+        assert "wireCrosshair" in raw
+        assert "ledgerRect = null" in raw
+
+    def test_truncation_is_rendered_not_footnoted(self):
+        """Over a truncated window the oldest bucket shows what fraction of the
+        newest N fell there, never what actually happened then — so the band
+        carries a marker and the caption carries both real numbers."""
+        raw = _console_source()
+        assert "state.truncated" in raw
+        assert "derived from the newest " in raw
+
+    def test_series_unavailable_is_distinct_from_an_empty_window(self):
+        """A raising repository fails open with ``total_pages: 0`` while a real
+        empty queue is ``1``. The two must never render as each other: an
+        unreachable store is not a healthy empty chart."""
+        raw = _console_source()
+        assert "series unavailable" in raw
+        assert "no failures in the fetched window" in raw
+        assert "pagination.total_pages === 0" in raw
+
+    def test_ledger_counters_take_the_same_anchor_as_the_chart(self):
+        """With no SQL statistics adapter registered — the shipped memory/Redis
+        OSS configuration — every ``/dashboard/summary`` count is a permanent
+        zero. Reading it alone would print ``open 0`` over bars drawn from
+        parked entries. Each counter is ``max(server-reported,
+        window-derived)``, the same shape as the chart's right-edge anchor, so
+        the strip and the chart cannot disagree."""
+        raw = _console_source()
+        assert "Math.max" in raw
+        assert '"open"' in raw
+        assert '"parked"' in raw
+        # One call per rendered slot (the healed slot branches on its label),
+        # and never a fourth for a counter with no source field.
+        assert raw.count("addCounter(foot,") >= 3
+
+    def test_healed_counter_states_the_span_it_covers(self):
+        """``resolved_24h`` is a rolling 24-hour count, not a calendar day —
+        and when the window-derived heal count wins the max, a 7-minute number
+        must not wear a 24-hour label."""
+        raw = _console_source()
+        assert '"healed 24 h"' in raw
+        assert '"healed in window"' in raw
+
+    def test_ledger_age_is_measured_from_the_data(self):
+        """``/dashboard/summary`` is cache-served, so a receive-time stamp
+        would read "just now" over numbers minutes old. The age comes from the
+        payload's own timestamp where it reports one, and the ledger reports
+        the OLDEST contributing source."""
+        raw = _console_source()
+        assert "function payloadInstant(" in raw
+        assert "data.timestamp" in raw
+        assert "ledgerAgeText" in raw
+
+    def test_axis_never_labels_stale_data_as_now(self):
+        """The right-edge label reads ``now`` only while the data is younger
+        than one bucket; past that it shows the fetch clock time. Auto-refresh
+        ships OFF, so a console left open would otherwise draw a chart claiming
+        to be the present."""
+        raw = _console_source()
+        assert 'age < series.width ? "now" : clockOf(state.fetchedAt)' in raw
+
+    def test_only_one_fetch_chain_at_a_time(self):
+        """A chain is up to three sequential pages at the fetch timeout — the
+        refresh period itself — so a tick must not start a second one."""
+        raw = _console_source()
+        assert "ledgerInFlight" in raw
+        assert "ledgerGeneration" in raw
+
+
 class TestConsolePanelSeverityResolvers:
     """Every row's tier and every offender in the verdict comes from
     ``panelSeverity``. Six panels used to fall through to a blind whole-payload

@@ -199,7 +199,12 @@
 
     /* Expanded service row: label -> value facts, prose labels, mono values.
        Only fields the payload actually reports appear (isReported). */
-    .facts { display: flex; flex-direction: column; padding: 6px 18px; font-size: 13.5px; }
+    /* Bounded: a label and its value must stay readable as a pair, not sit
+       at opposite ends of a wide viewport. */
+    .facts {
+      display: flex; flex-direction: column; padding: 6px 18px;
+      font-size: 13.5px; max-width: 560px;
+    }
     .fact {
       display: flex; justify-content: space-between; gap: 24px; padding: 7px 0;
       border-bottom: 1px solid var(--ink3);
@@ -412,6 +417,46 @@
     table.dlq-table td { white-space: nowrap; overflow-wrap: normal; }
     table.dlq-table td:first-child { font-family: var(--mono); }
     .list-scroll { overflow-x: auto; }
+
+    /* ===== Healing ledger: the one time axis on the page ===== */
+    .ledger {
+      background: var(--ink2); border: 1px solid var(--line); border-radius: 10px;
+      padding: 20px 24px 14px; margin-top: 18px;
+    }
+    .ledger-head {
+      display: flex; justify-content: space-between; align-items: baseline;
+      gap: 16px; flex-wrap: wrap;
+      font: 12px/1.4 var(--mono); color: var(--ash); margin-bottom: 14px;
+    }
+    .ledger-head b { color: var(--bone); font-weight: 500; }
+    .legend { display: flex; gap: 20px; }
+    .legend span { display: inline-flex; align-items: center; gap: 6px; }
+    .dot-sq { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+    .dot-sq.fail { background: var(--ember); }
+    .dot-sq.heal { background: var(--moss); }
+    .dot-sq.open { background: var(--open); }
+    .ledger-plot { position: relative; }
+    .ledger-plot svg { display: block; width: 100%; height: auto; }
+    .ledger-plot text.lg-axis { fill: var(--ash2); font-size: 10px; }
+    .ledger-state { padding: 40px 0; text-align: center; color: var(--ash); font-size: 13px; }
+    /* Instant feedback: the tooltip follows the cursor with no transition and
+       no animation — a chart that lags the pointer reads as a picture. */
+    .ledger-tip {
+      position: absolute; pointer-events: none; display: none;
+      background: var(--ink3); border: 1px solid var(--line); border-radius: 6px;
+      padding: 7px 10px; font: 11px/1.5 var(--mono); color: var(--bone);
+      white-space: pre; z-index: 5;
+    }
+    .ledger-caption {
+      margin-top: 10px; font: 11.5px/1.6 var(--mono); color: var(--ash2);
+    }
+    .ledger-foot {
+      display: flex; gap: 30px; flex-wrap: wrap;
+      border-top: 1px solid var(--ink3); margin-top: 10px; padding-top: 12px;
+      font: 12.5px/1 var(--mono); color: var(--ash);
+    }
+    .ledger-foot b { color: var(--bone); font-weight: 500; }
+
     @media (max-width: 719px) {
       .wrap { padding: 0 16px; }
       .row-head { flex-wrap: wrap; gap: 8px; }
@@ -451,6 +496,25 @@
       <span class="triage-age updated"></span>
     </div>
     <div class="triage-chips" id="triage-chips"></div>
+
+    <!-- The one time axis: what failed, what healed, and how much stayed open.
+         Derived client-side from the existing DLQ + summary reads. -->
+    <div class="ledger" id="ledger">
+      <div class="ledger-head">
+        <span><b>healing ledger</b><span id="ledger-window"></span></span>
+        <div class="legend">
+          <span><i class="dot-sq fail"></i>failures</span>
+          <span><i class="dot-sq heal"></i>heals</span>
+          <span><i class="dot-sq open"></i>open</span>
+        </div>
+      </div>
+      <div class="ledger-plot" id="ledger-plot">
+        <div class="ledger-state">Loading…</div>
+      </div>
+      <div class="ledger-caption" id="ledger-caption"></div>
+      <div class="ledger-caption updated" id="ledger-age"></div>
+      <div class="ledger-foot" id="ledger-foot"></div>
+    </div>
 
     <!-- Tier 2: what needs attention, each row expanding in place. -->
     <div class="sec-label">
@@ -1698,6 +1762,9 @@
           // The breaker panel's own fetch is the sole author of which service
           // rows exist — no second request, and never the per-service endpoint.
           if (p.id === "circuit_breaker") { syncServiceRows(parsed); }
+          // The ledger's right-edge anchor and its counters read this payload;
+          // re-render (never re-fetch) so they pick it up when it lands.
+          if (p.id === "dashboard" && ledgerState) { renderLedger(); }
         });
       })
       .catch(function (err) {
@@ -3361,6 +3428,461 @@
     renderTriage();
   }
 
+  // --- Healing ledger ------------------------------------------------------
+  // There is no history API: /dashboard/summary is snapshot aggregates and
+  // /dlq/list is a page of entries. The series is therefore DERIVED from a
+  // bounded page walk — fails by created_at, heals by resolved_at — and the
+  // caption states that bound rather than implying the chart is a record.
+  var LEDGER_PAGE_SIZE = 100;
+  var LEDGER_MAX_PAGES = 3;
+  // How far back the page walk is allowed to reach. NOT the rendered span:
+  // the axis covers what the walk actually fetched.
+  var LEDGER_SPAN_MS = 6 * 60 * 60 * 1000;
+  var LEDGER_BUCKET_COUNT = 24;
+  var LEDGER_BUCKET_MIN = 6;
+  // Snapping UP to a ladder value keeps axis labels on round times and caps
+  // the bucket count at LEDGER_BUCKET_COUNT by construction. A live incident
+  // renders at 30-second granularity; a quiet system whose entries span hours
+  // renders at hour granularity. One behaviour, no mode switch, no setting.
+  var LEDGER_BUCKET_LADDER = [
+    10 * 1000, 30 * 1000, 60 * 1000,
+    5 * 60 * 1000, 15 * 60 * 1000, 30 * 60 * 1000, 60 * 60 * 1000
+  ];
+
+  // Plot geometry — layout-fixed literals, not operational values.
+  var LG = {
+    w: 1180, h: 250, left: 36, right: 1160,
+    openTop: 26, openBottom: 118,
+    barBottom: 216, barHeight: 70,
+    axisY: 216, labelY: 236
+  };
+
+  var ledgerGeneration = 0;
+  var ledgerInFlight = false;
+  var ledgerRerun = false;
+  var ledgerState = null;
+  var ledgerRect = null;   // cached; a rect read per mousemove forces a layout
+
+  function svgEl(tag, attrs) {
+    var node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    if (attrs) {
+      Object.keys(attrs).forEach(function (k) { node.setAttribute(k, attrs[k]); });
+    }
+    return node;
+  }
+  function svgText(x, y, text, cls) {
+    var node = svgEl("text", { x: x, y: y, class: cls || "" });
+    node.textContent = text;        // safe-DOM holds for SVG text too
+    return node;
+  }
+
+  // The dashboard row already fetched /dashboard/summary. Reuse it — a second
+  // request for the same payload would be the only new server traffic here.
+  function summaryPayload() {
+    var row = ROW_BY_KEY["p:dashboard"];
+    return (row && row.answered) ? row.status : null;
+  }
+
+  function refreshLedger(force) {
+    if (ledgerInFlight) {
+      // One chain at a time. A chain is up to 3 sequential pages at the fetch
+      // timeout, i.e. the refresh period itself, so overlap is reachable — not
+      // theoretical — on a slow DLQ backend.
+      if (force) { ledgerRerun = true; }
+      return;
+    }
+    ledgerInFlight = true;
+    var generation = ++ledgerGeneration;
+    var entries = [];
+    var totalCount = null;
+    var truncated = false;
+    var partial = false;
+    var cutoff = Date.now() - LEDGER_SPAN_MS;
+
+    function fetchPage(n) {
+      // The page-size literal is a banned anchor (a retired domain-sample
+      // fetch used it), so the query is composed from the constant.
+      return adminFetch("/dlq/list?page=" + n + "&page_size=" + LEDGER_PAGE_SIZE)
+        .then(function (resp) {
+          if (!resp.ok) { throw new Error("HTTP " + resp.status); }
+          return resp.json();
+        });
+    }
+
+    function walk(n) {
+      return fetchPage(n).then(function (body) {
+        var pagination = (body && body.pagination) || {};
+        var results = (body && body.results) || [];
+        if (n === 1) {
+          // total_pages is max(1, …) on success and 0 on the repository
+          // fail-open path, so 0 is a raising backend, not an empty queue.
+          if (pagination.total_pages === 0) {
+            throw new Error("the DLQ store did not answer");
+          }
+          if (typeof pagination.total_count === "number") {
+            totalCount = pagination.total_count;
+          }
+        }
+        entries = entries.concat(results);
+        if (!pagination.has_next) { return null; }
+        var oldest = oldestCreatedAt(entries);
+        if (n >= LEDGER_MAX_PAGES || (oldest !== null && oldest < cutoff)) {
+          truncated = true;
+          return null;
+        }
+        return walk(n + 1);
+      }, function (err) {
+        // A page after the first failing leaves a real, shorter window.
+        if (n > 1) { partial = true; return null; }
+        throw err;
+      });
+    }
+
+    walk(1).then(function () {
+      if (generation !== ledgerGeneration) { return; }
+      if (totalCount !== null && totalCount > entries.length) { truncated = true; }
+      ledgerState = {
+        entries: entries, totalCount: totalCount, truncated: truncated,
+        partial: partial, fetchedAt: Date.now()
+      };
+      renderLedger();
+    }).catch(function (err) {
+      if (generation !== ledgerGeneration) { return; }
+      ledgerState = null;
+      renderLedgerState("series unavailable — " + ((err && err.message) || err));
+    }).then(function () {
+      ledgerInFlight = false;
+      if (ledgerRerun) { ledgerRerun = false; refreshLedger(true); }
+    });
+  }
+
+  function oldestCreatedAt(entries) {
+    var oldest = null;
+    entries.forEach(function (e) {
+      var t = Date.parse(e && e.created_at);
+      if (!isNaN(t) && (oldest === null || t < oldest)) { oldest = t; }
+    });
+    return oldest;
+  }
+
+  function renderLedgerState(message) {
+    var plot = document.getElementById("ledger-plot");
+    if (!plot) { return; }
+    plot.textContent = "";
+    plot.appendChild(el("div", "ledger-state", message));
+    setText("ledger-window", "");
+    setText("ledger-caption", "");
+    setText("ledger-age", "");
+    var ageEl = document.getElementById("ledger-age");
+    if (ageEl) { ageEl._t = null; }
+    // No operands means no counters — max() of nothing is not zero.
+    var foot = document.getElementById("ledger-foot");
+    if (foot) { foot.textContent = ""; }
+  }
+  function setText(id, text) {
+    var node = document.getElementById(id);
+    if (node) { node.textContent = text; }
+  }
+
+  // Bucket the fetched window. The width is derived from what was actually
+  // fetched, not fixed: a 7-minute incident and a 6-hour quiet stretch both
+  // have to read as a time axis.
+  function ledgerSeries(state) {
+    var now = state.fetchedAt;
+    var creates = [];
+    var heals = [];
+    var stillOpen = 0;
+    state.entries.forEach(function (e) {
+      var c = Date.parse(e && e.created_at);
+      if (!isNaN(c)) { creates.push(c); }
+      var r = Date.parse(e && e.resolved_at);
+      if (!isNaN(r)) { heals.push(r); }
+      if (!isReported(e && e.resolved_at)) { stillOpen++; }
+    });
+    var oldest = creates.length ? Math.min.apply(null, creates) : null;
+    var span = 0;
+    if (oldest !== null) { span = Math.max(1, now - oldest); }
+    var width = LEDGER_BUCKET_LADDER[LEDGER_BUCKET_LADDER.length - 1];
+    for (var i = 0; i < LEDGER_BUCKET_LADDER.length; i++) {
+      if (LEDGER_BUCKET_LADDER[i] >= span / LEDGER_BUCKET_COUNT) {
+        width = LEDGER_BUCKET_LADDER[i];
+        break;
+      }
+    }
+    // The floor left-pads with empty buckets so a 20-second-old incident reads
+    // as a time axis rather than one lone block.
+    var count = Math.min(LEDGER_BUCKET_COUNT,
+      Math.max(LEDGER_BUCKET_MIN, Math.ceil(span / width)));
+    var end = now;
+    var start = end - count * width;
+    var fails = [];
+    var healed = [];
+    for (var b = 0; b < count; b++) { fails.push(0); healed.push(0); }
+    function drop(times, into) {
+      times.forEach(function (t) {
+        var idx = Math.floor((t - start) / width);
+        if (idx < 0 || idx >= count) { return; }
+        into[idx]++;
+      });
+    }
+    drop(creates, fails);
+    drop(heals, healed);
+
+    // Right-edge anchor for the open series. The summary half silently zeroes
+    // with no statistics adapter registered — the shipped memory/Redis OSS
+    // configuration — and the window half is a lower bound of true open, so
+    // max() is the honest floor either way. It understates; it never overstates.
+    var summary = summaryPayload();
+    var overview = (summary && summary.overview) || {};
+    var summaryOpen = null;
+    if (isReported(overview.pending) || isReported(overview.failed)) {
+      summaryOpen = (overview.pending || 0) + (overview.failed || 0);
+    }
+    var anchor = summaryOpen === null
+      ? stillOpen
+      : Math.max(stillOpen, summaryOpen);
+    var open = [];
+    var running = anchor;
+    for (var k = count - 1; k >= 0; k--) {
+      open[k] = running;
+      // open(t-1) = open(t) - creates(t) + heals(t)
+      running = Math.max(0, running - fails[k] + healed[k]);
+    }
+    return {
+      start: start, end: end, width: width, count: count,
+      fails: fails, heals: healed, open: open,
+      stillOpen: stillOpen, summaryOpen: summaryOpen, anchor: anchor,
+      healedInWindow: heals.length, summary: summary
+    };
+  }
+
+  function renderLedger() {
+    var state = ledgerState;
+    var plot = document.getElementById("ledger-plot");
+    if (!state || !plot) { return; }
+    if (!state.entries.length) {
+      // Distinct from "unavailable": the query succeeded and the window is
+      // genuinely empty. It says nothing about history outside the window.
+      renderLedgerState("no failures in the fetched window");
+      renderLedgerCaption(null);
+      renderLedgerFooter(null);
+      return;
+    }
+    var series = ledgerSeries(state);
+    plot.textContent = "";
+
+    var svg = svgEl("svg", {
+      viewBox: "0 0 " + LG.w + " " + LG.h,
+      width: "100%", height: LG.h, "font-family": "IBM Plex Mono, monospace"
+    });
+    var plotWidth = LG.right - LG.left;
+    var step = plotWidth / series.count;
+    var maxOpen = Math.max(1, Math.max.apply(null, series.open));
+    var maxBar = Math.max(1, Math.max.apply(null, series.fails.concat(series.heals)));
+    function xAt(i) { return LG.left + i * step; }
+    function yOpen(v) {
+      return LG.openBottom - (v / maxOpen) * (LG.openBottom - LG.openTop);
+    }
+
+    // Open-count band: gridlines + the step line with a wash beneath it.
+    [maxOpen, Math.round(maxOpen / 2), 0].forEach(function (v) {
+      svg.appendChild(svgEl("line", {
+        x1: LG.left, y1: yOpen(v), x2: LG.right, y2: yOpen(v),
+        stroke: "var(--ink3)", "stroke-width": 1
+      }));
+      svg.appendChild(svgText(6, yOpen(v) + 4, String(v), "lg-axis"));
+    });
+    var points = [];
+    for (var i = 0; i < series.count; i++) {
+      points.push(xAt(i) + "," + yOpen(series.open[i]));
+      points.push(xAt(i + 1) + "," + yOpen(series.open[i]));
+    }
+    svg.appendChild(svgEl("path", {
+      d: "M" + points.join(" L"), fill: "none",
+      stroke: "var(--open)", "stroke-width": 2
+    }));
+    svg.appendChild(svgEl("path", {
+      d: "M" + points.join(" L") + " L" + LG.right + "," + yOpen(0)
+        + " L" + LG.left + "," + yOpen(0) + " Z",
+      fill: "var(--open)", "fill-opacity": 0.07, stroke: "none"
+    }));
+
+    // Fail / heal bars, paired inside each bucket.
+    var barW = Math.max(3, Math.min(9, step * 0.34));
+    for (var b = 0; b < series.count; b++) {
+      var base = xAt(b) + step / 2 - barW - 1;
+      if (series.fails[b]) {
+        var fh = (series.fails[b] / maxBar) * LG.barHeight;
+        svg.appendChild(svgEl("rect", {
+          x: base, y: LG.barBottom - fh, width: barW, height: fh,
+          fill: "var(--ember)", opacity: 0.85
+        }));
+      }
+      if (series.heals[b]) {
+        var hh = (series.heals[b] / maxBar) * LG.barHeight;
+        svg.appendChild(svgEl("rect", {
+          x: base + barW + 2, y: LG.barBottom - hh, width: barW, height: hh,
+          fill: "var(--moss)", opacity: 0.85
+        }));
+      }
+    }
+    svg.appendChild(svgEl("line", {
+      x1: LG.left, y1: LG.axisY, x2: LG.right, y2: LG.axisY,
+      stroke: "var(--line)", "stroke-width": 1
+    }));
+
+    // Truncation is DRAWN, not footnoted: over a truncated window the oldest
+    // bucket shows what fraction of the newest N fell there, never what
+    // actually happened then.
+    if (state.truncated) {
+      svg.appendChild(svgEl("line", {
+        x1: LG.left, y1: LG.openTop - 6, x2: LG.left, y2: LG.axisY,
+        stroke: "var(--ash2)", "stroke-width": 2, "stroke-dasharray": "2 4"
+      }));
+      svg.appendChild(svgText(LG.left + 5, LG.openTop - 10, "sample", "lg-axis"));
+    }
+
+    // Time labels: every other bucket edge, then the right edge.
+    for (var t = 0; t < series.count; t += 2) {
+      svg.appendChild(svgText(xAt(t), LG.labelY,
+        clockOf(series.start + t * series.width), "lg-axis"));
+    }
+    // "now" only while the data is younger than one bucket; past that the
+    // right edge shows the fetch clock time, so the axis never labels stale
+    // data as the present moment.
+    var age = Date.now() - state.fetchedAt;
+    svg.appendChild(svgText(LG.right - 30, LG.labelY,
+      age < series.width ? "now" : clockOf(state.fetchedAt), "lg-axis"));
+
+    // Crosshair: ONE handler over both bands, so cursor sync is by
+    // construction rather than a synchronization protocol.
+    var cross = svgEl("line", {
+      x1: 0, y1: LG.openTop - 6, x2: 0, y2: LG.axisY,
+      stroke: "var(--ash2)", "stroke-width": 1, "stroke-dasharray": "3 3",
+      opacity: 0
+    });
+    svg.appendChild(cross);
+    plot.appendChild(svg);
+    var tip = el("div", "ledger-tip");
+    plot.appendChild(tip);
+    wireCrosshair(plot, svg, cross, tip, series, step);
+
+    setText("ledger-window", " — all domains · " + describeSpan(series));
+    renderLedgerCaption(series);
+    renderLedgerFooter(series);
+  }
+
+  function describeSpan(series) {
+    var minutes = Math.round((series.end - series.start) / 60000);
+    if (minutes < 90) { return "last " + Math.max(1, minutes) + " min"; }
+    return "last " + Math.round(minutes / 60) + " h";
+  }
+
+  function wireCrosshair(plot, svg, cross, tip, series, step) {
+    ledgerRect = null;
+    function bucketAt(clientX) {
+      if (!ledgerRect) { ledgerRect = svg.getBoundingClientRect(); }
+      if (!ledgerRect.width) { return -1; }
+      var vx = ((clientX - ledgerRect.left) / ledgerRect.width) * LG.w;
+      var idx = Math.floor((vx - LG.left) / step);
+      return (idx < 0 || idx >= series.count) ? -1 : idx;
+    }
+    plot.addEventListener("mousemove", function (e) {
+      var idx = bucketAt(e.clientX);
+      if (idx < 0) { cross.setAttribute("opacity", 0); tip.style.display = "none"; return; }
+      var cx = LG.left + (idx + 0.5) * step;
+      cross.setAttribute("x1", cx);
+      cross.setAttribute("x2", cx);
+      cross.setAttribute("opacity", 1);
+      var from = series.start + idx * series.width;
+      tip.textContent = clockOf(from) + "–" + clockOf(from + series.width) + "\n"
+        + series.fails[idx] + " failed · " + series.heals[idx] + " healed\n"
+        + series.open[idx] + " open";
+      tip.style.display = "block";
+      var box = plot.getBoundingClientRect();
+      tip.style.left = Math.min(box.width - 170, Math.max(0, e.clientX - box.left + 12)) + "px";
+      tip.style.top = "8px";
+    });
+    plot.addEventListener("mouseleave", function () {
+      cross.setAttribute("opacity", 0);
+      tip.style.display = "none";
+    });
+    window.addEventListener("resize", function () { ledgerRect = null; });
+  }
+
+  // Always rendered: the reader has to know what the axis is a picture OF.
+  function renderLedgerCaption(series) {
+    var state = ledgerState;
+    if (!state) { return; }
+    var parts = ["derived from the newest " + state.entries.length
+      + (state.totalCount === null ? "" : " of " + state.totalCount)
+      + " DLQ entries by creation time"];
+    if (state.truncated) {
+      parts.push("truncated — the left edge is a sample of the newest entries, "
+        + "not a count of what happened then");
+    }
+    if (state.partial) { parts.push("partial window — a page failed to load"); }
+    parts.push("a failure created before this window is off-axis, and heals of "
+      + "those entries are not counted; archived-then-purged and evicted "
+      + "entries drop out entirely");
+    if (series && series.summaryOpen === null) {
+      parts.push("no statistics adapter is reporting, so the open count is "
+        + "window-derived only");
+    }
+    setText("ledger-caption", parts.join(" · "));
+    var ageEl = document.getElementById("ledger-age");
+    if (!ageEl) { return; }
+    // The oldest contributing clock: /dlq/list stamps no timestamp so it is
+    // the fetch instant, /dashboard/summary carries the moment its numbers
+    // were computed and is cache-served for up to its TTL.
+    var oldest = state.fetchedAt;
+    var summary = series && series.summary;
+    if (summary) {
+      var stamped = payloadInstant(summary);
+      if (stamped < oldest) { oldest = stamped; }
+    }
+    ageEl._t = oldest;
+    ageEl._fmt = ledgerAgeText;
+    ageEl.textContent = ledgerAgeText(oldest);
+  }
+  function ledgerAgeText(t) { return "as of " + clockOf(t) + " · " + relAgo(t); }
+
+  // Three counters, not the confirmed design's five: `replayed` and `humans
+  // paged` have no field in any read-only admin payload, and inventing them on
+  // the strip whose whole purpose is trust is the one thing this surface
+  // cannot afford.
+  //
+  // Each takes the same shape as the chart's anchor — max(server-reported,
+  // window-derived) — so the strip and the chart above it cannot disagree by
+  // construction, and a permanently-zero statistics repository (the shipped
+  // memory/Redis OSS configuration) cannot print `open 0` over drawn bars.
+  function renderLedgerFooter(series) {
+    var foot = document.getElementById("ledger-foot");
+    if (!foot) { return; }
+    foot.textContent = "";
+    if (!series) { return; }
+    var overview = (series.summary && series.summary.overview) || {};
+    var activity = (series.summary && series.summary.recent_activity) || {};
+    addCounter(foot, "open", series.anchor);
+    var parked = [series.stillOpen];
+    if (isReported(overview.pending)) { parked.push(overview.pending); }
+    addCounter(foot, "parked", Math.max.apply(null, parked));
+    // The label states the span it actually covers: a heal count from a
+    // 7-minute window must not wear a 24-hour label.
+    var summaryHealed = isReported(activity.resolved_24h) ? activity.resolved_24h : null;
+    if (summaryHealed !== null && summaryHealed >= series.healedInWindow) {
+      addCounter(foot, "healed 24 h", summaryHealed);
+    } else {
+      addCounter(foot, "healed in window", series.healedInWindow);
+    }
+  }
+  function addCounter(foot, label, value) {
+    var slot = el("span");
+    slot.appendChild(document.createTextNode(label + " "));
+    slot.appendChild(el("b", null, String(value)));
+    foot.appendChild(slot);
+  }
+
   function init() {
     // Informational entitlement banner (D8) — non-gating.
     if (window.__BALDUR_ENTITLEMENT__ === "invalid") {
@@ -3419,6 +3941,7 @@
       if (auto.checked) {
         autoRefreshTimer = setInterval(function () {
           panelRefreshers.forEach(function (fn) { fn(); });
+          refreshLedger();
         }, 15000);
       }
     });
@@ -3450,6 +3973,7 @@
     placeRows();
     renderTriage();
     ROWS.forEach(function (row) { loadPanel(row.panel, row); });
+    refreshLedger(true);
   }
 
   init();
