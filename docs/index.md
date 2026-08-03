@@ -1,6 +1,6 @@
 ---
 title: Self-healing reliability for Python
-description: Self-healing reliability for Python — circuit breaker, retry, fallback, and dead-letter queue behind one decorator. Framework-agnostic, zero-config by default.
+description: Self-healing reliability for Python — circuit breaker, retry, fallback, and dead-letter queue behind one decorator. Framework-agnostic, zero infrastructure to start.
 hide:
   - navigation
   - toc

@@ -54,7 +54,10 @@ class ProtectSettings(BaseSettings):
     default_dlq: bool = Field(
         default=False,
         description="Route final failures to DLQ by default when caller does not pass dlq=. "
-        "Off by default — DLQ requires repository wiring.",
+        "Off by default — DLQ capture persists a snapshot of the call's arguments "
+        "so the failure can be replayed, and Baldur does not start storing that "
+        "data without an explicit opt-in (dlq=True at the call site, or this "
+        "flag set deliberately).",
     )
     default_timeout_seconds: float | None = Field(
         default=None,

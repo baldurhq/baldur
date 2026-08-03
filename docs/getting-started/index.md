@@ -6,8 +6,11 @@ variables. Baldur's in-memory fallback makes `pip install` → `@protected` →
 working code the whole first-run path.
 
 The first code sample is always the marquee facade,
-`@baldur.protected("name")`, which composes circuit breaker, retry, and
-fallback behind a single decorator.
+`@baldur.protected("name")`, which composes circuit breaker, retry, fallback,
+and the dead-letter queue behind a single decorator. DLQ capture stores a
+snapshot of the failing call's arguments so it can be replayed, so it is
+[opt-in per call](../concepts/foundations/dlq-replay.md#why-capture-is-opt-in-per-call)
+with `dlq=True` — the quickstarts show the flag in place.
 
 ## Pick your framework
 
