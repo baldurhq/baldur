@@ -316,6 +316,23 @@ def _console_html() -> str:
     )
 
 
+_FONT_BLOB_RE = re.compile(r'(var FONT_[A-Z0-9_]+_B64 = ")[A-Za-z0-9+/=]+(";)')
+
+
+def _console_source() -> str:
+    """console.html with the embedded font base64 replaced by a placeholder.
+
+    The blobs are ~99 KB of opaque binary data in which any short character
+    sequence occurs by chance — ``p95`` already does. Scanning them for
+    *authored* strings would make a content assertion a lottery, so the
+    authored-content anchors below run against the source with the bytes
+    elided. (The retired-palette scan deliberately still covers the whole
+    file: a 6-hex-digit collision there is improbable enough to be worth
+    catching, and the documented fix is to re-encode the asset.)
+    """
+    return _FONT_BLOB_RE.sub(r"\1<font-bytes>\2", _console_html())
+
+
 class TestConsoleAssetStructure:
     """Static-asset content assertions for the 540 frontend enhancements.
 
@@ -881,3 +898,173 @@ class TestConsoleAssetStructure:
         worker toggle) are ``<button>``s carrying ``aria-expanded`` synced to
         the open state — screen-reader parity for the silent ▸/▾ glyph."""
         assert "aria-expanded" in _console_html()
+
+
+# =============================================================================
+# Triage-ledger redesign — 3-tier structure, row prose, per-panel severity
+# =============================================================================
+
+
+class TestConsoleTriageStructure:
+    """The console renders three tiers of rows, not a grid of API-shaped cards.
+
+    The logic is browser JS, so the verifiable surface stays content assertions
+    on the packaged asset (precedent: ``TestConsoleAssetStructure``).
+    """
+
+    def test_panel_grid_is_gone(self):
+        """The 12-cell ``#grid`` mirrored the admin route map one cell per
+        domain. It is replaced by the triage line + attention stream + System
+        table, so the container itself must not survive."""
+        raw = _console_source()
+        assert 'id="grid"' not in raw
+        assert 'id="triage"' in raw
+        assert 'id="attention"' in raw
+        assert 'id="system-rows"' in raw
+
+    def test_circuit_breaker_panel_expands_per_service(self):
+        """The operator's unit of trouble is a service, not a route domain, so
+        the breaker panel contributes one row per ``/control/status`` service
+        on top of its own row. Rows are keyed by NAME (``"cb:" + name``) so a
+        reordered ``services[]`` cannot rename one service's contents onto
+        another, and a vanished service is removed rather than left stale."""
+        raw = _console_source()
+        assert '"cb:"' in raw
+        assert "syncServiceRows" in raw
+        assert "buildServiceRow" in raw
+
+    def test_health_map_is_pruned_with_its_row(self):
+        """``HEALTH`` was write-only until a full rebuild. With per-service keys
+        a service that vanishes on a body-only refresh would leave a key no
+        refresh removes, inflating every count derived from the map."""
+        raw = _console_source()
+        assert "delete HEALTH[key]" in raw
+
+    def test_per_service_endpoint_is_never_fetched(self):
+        """``GET /control/status/{name}`` calls ``get_or_create_state``, so
+        expanding a row for a name the server has never observed would CREATE
+        the breaker record and then describe the record it just made. Row
+        bodies read the element the list call already returned."""
+        assert '"/control/status/"' not in _console_source()
+
+    def test_row_prose_table_is_present(self):
+        """Every row carries a one-sentence diagnosis from a per-panel table,
+        replacing the key→value dump that left the operator doing the
+        diagnosis."""
+        raw = _console_source()
+        assert "var DESCRIBERS = {" in raw
+        assert "DESCRIBERS.service(" in raw
+
+    def test_facts_table_labels_are_a_translation_layer(self):
+        """The expanded service row renders prose labels, not raw field names.
+        The map is not a whitelist — an unmapped field still renders under its
+        raw name, so a server-side addition is visible-but-unlabelled rather
+        than silently invisible. ``metadata`` is excluded BY NAME (unbounded
+        caller-supplied shape); ``service_name`` is the row's own name."""
+        raw = _console_source()
+        assert "var FACT_LABELS = {" in raw
+        assert "FACT_LABELS[k] || k" in raw
+        assert "var FACT_EXCLUDED = { service_name: 1, metadata: 1 };" in raw
+
+    def test_one_shared_isreported_predicate(self):
+        """The honesty rule has two call sites — which facts render, and which
+        describer clauses survive. Two hand-written copies is how they drift
+        apart, and the drift is invisible because each site looks locally
+        correct. One predicate, declared once, called by both."""
+        raw = _console_source()
+        assert raw.count("function isReported(") == 1
+        assert raw.count("isReported(") >= 3
+
+    def test_trailing_token_uses_the_iso_safe_helper(self):
+        """``opened_at`` is an ISO string; ``relAgo`` takes epoch ms and would
+        render nonsense from one. The row token parses it first, and the panel
+        rows keep the existing ``updated Xs ago`` freshness string."""
+        raw = _console_source()
+        assert "relAgoIso" in raw
+        assert "openedAtText" in raw
+        assert "updated " in raw
+
+    def test_freshness_ticker_supports_per_element_formatters(self):
+        """One always-on 5 s display ticker drives every age token. Elements may
+        carry their own formatter; with none the original ``updated Xs ago``
+        shape is kept, so no existing call site changed."""
+        raw = _console_source()
+        assert "spans[i]._fmt" in raw
+        assert '"updated " + relAgo(spans[i]._t)' in raw
+
+    @pytest.mark.parametrize(
+        ("banned", "why"),
+        [
+            ('id="grid"', "the API-mirror panel grid"),
+            ("== null ? 0", "a zero substituted for an unreported value"),
+            ('"/control/status/"', "a read with a write side effect"),
+            ("p95", "a per-domain latency no admin route reports"),
+            ("uptime", "a process uptime no admin route reports"),
+            ("leader ", "a leader identity no admin route reports"),
+            ("humans paged", "an escalation count with no source field"),
+            ("replayed today", "a replay count with no source field"),
+        ],
+    )
+    def test_no_value_without_a_source(self, banned: str, why: str):
+        """The redesign's one rule: a slot with no reported field renders
+        nothing — never a zero, a dash, or a plausible default. These are
+        pattern-level, not instance-level, so they catch a reintroduction
+        anywhere in the file, which is the only enforcement a static asset
+        can carry."""
+        assert banned.lower() not in _console_source().lower(), (
+            f"{banned!r} reintroduced — {why}"
+        )
+
+
+class TestConsolePanelSeverityResolvers:
+    """Every row's tier and every offender in the verdict comes from
+    ``panelSeverity``. Six panels used to fall through to a blind whole-payload
+    token scan, which was wrong in both directions."""
+
+    @pytest.mark.parametrize(
+        "panel_id",
+        ["system", "emergency", "throttle", "bulkhead", "governance"],
+    )
+    def test_panel_has_a_bespoke_resolver(self, panel_id: str):
+        """``scanSeverity`` walks the payload for a recognized token. The kill
+        switch reports ``"disabled"`` (in no token list), an active emergency
+        reports a boolean, throttle and bulkhead report numbers only — so all
+        four were invisible — while one historical REJECTED governance record
+        made that row ``danger`` forever. Each now reads the field that means
+        state."""
+        raw = _console_source()
+        assert f'if (p.id === "{panel_id}") {{ return ' in raw
+
+    @pytest.mark.parametrize(
+        "resolver",
+        [
+            "systemSeverity",
+            "emergencySeverity",
+            "throttleSeverity",
+            "bulkheadSeverity",
+            "governanceSeverity",
+        ],
+    )
+    def test_resolver_is_declared(self, resolver: str):
+        raw = _console_source()
+        assert f"function {resolver}(" in raw
+
+    def test_forced_closed_breaker_is_never_green(self):
+        """A breaker an operator pinned closed is passing traffic DESPITE
+        failures, and the condition is sticky — nothing else will ever raise
+        it. Reading ``state`` alone put it in the System tier behind a green
+        dot and counted it ``ok`` toward the verdict."""
+        raw = _console_source()
+        assert "function serviceSeverity(" in raw
+        assert "svc.manually_controlled === true" in raw
+        assert 'severityOf(svc.state) || "none"' in raw
+
+    def test_unresolved_row_is_not_counted_as_healthy(self):
+        """A row that never answered is not evidence of health. The previous
+        aggregation counted an unresolved panel into "all systems nominal · N
+        panels healthy", so a 500ing status route read as SAFE."""
+        raw = _console_source()
+        assert "all systems nominal" not in raw
+        assert '"all clear"' in raw
+        assert "reporting" in raw
+        assert "markUnanswered" in raw
