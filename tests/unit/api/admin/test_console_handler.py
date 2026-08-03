@@ -842,6 +842,40 @@ class TestConsoleAssetStructure:
             if re.search(r'data-health="(ok|none)"', line):
                 assert "opacity" not in line
 
+    # --- Typography: buffer-sourced FontFace registration ------------------
+
+    def test_both_font_families_are_registered_from_buffers(self):
+        """The console self-hosts the landing's two faces. The served CSP has
+        no ``font-src``, so it falls back to ``default-src 'self'`` — which
+        admits neither ``data:`` nor ``blob:``. Only a FontFace constructed
+        from an ArrayBuffer skips the fetch (and therefore the check), so the
+        registration must never regress into a url()-sourced ``@font-face``."""
+        raw = _console_html()
+        assert '{ family: "Schibsted Grotesk", weight: "400 900"' in raw
+        assert '{ family: "IBM Plex Mono", weight: "400"' in raw
+        assert '{ family: "IBM Plex Mono", weight: "500"' in raw
+        assert "new FontFace(f.family, base64ToArrayBuffer(f.data)" in raw
+        # A url()-routed font (data: / blob:) would be CSP-blocked.
+        assert "@font-face" not in raw
+        assert "createObjectURL" not in raw
+
+    def test_font_registration_declares_swap_display(self):
+        """Both registrations carry ``display: "swap"``, matching the landing's
+        ``font-display: swap`` on the same files — text is never invisible
+        waiting for a face the page can already degrade past."""
+        assert _console_html().count('display: "swap"') >= 1
+
+    def test_font_registration_degrades_benignly(self):
+        """An exotic browser / decode failure must leave the system stack, not
+        a broken console: the whole block sits in a try/catch and the per-face
+        ``loaded`` rejection is swallowed before the global error boundary."""
+        raw = _console_html()
+        block = re.search(
+            r"var EMBEDDED_FONTS = \[.*?\n  \} catch \(_e\) \{", raw, re.DOTALL
+        )
+        assert block is not None
+        assert "face.loaded.catch" in block.group(0)
+
     def test_null_collapse_toggle_has_aria_expanded(self):
         """681 D4: the null-collapse toggle (and the retrofitted meta-watchdog
         worker toggle) are ``<button>``s carrying ``aria-expanded`` synced to
