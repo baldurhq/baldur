@@ -111,9 +111,11 @@
 
     /* ===== Tier 1: the triage line — one sentence, then the offenders ===== */
     .triage { padding: 22px 0 6px; display: flex; align-items: baseline; gap: 12px; }
+    /* Aligned to the FIRST line, not the block centre: a long verdict wraps,
+       and a dot floating between two lines reads as belonging to neither. */
     .triage .dot {
       width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0;
-      align-self: center; background: var(--ash2);
+      align-self: flex-start; margin-top: 10px; background: var(--ash2);
     }
     .triage.state-ok     .dot { background: var(--moss); }
     .triage.state-warn   .dot {
