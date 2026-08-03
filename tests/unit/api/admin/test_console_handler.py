@@ -729,8 +729,9 @@ class TestConsoleAssetStructure:
     # content assertions on the packaged asset (precedent: this whole class).
 
     # The old-palette inventory retired by 681 D1 (removal-type full sweep),
-    # extended with the v5 palette retired by the v6 resurfacing (neutral-grey
-    # ground, achromatic brand marks, terminal-ANSI severity hues shared with
+    # extended with the v5 palette retired by the v6 resurfacing, and again
+    # with the v6 ANSI severity set + neutral-grey chrome retired by the
+    # two-hue redesign (fail/heal on a fully monochrome ground, shared with
     # the baldur.sh landing). Any survivor leaves a stale-temperature fragment
     # after the token swap.
     _RETIRED_PALETTE = [
@@ -775,6 +776,26 @@ class TestConsoleAssetStructure:
         "95,208,133",
         "243,203,77",
         "232,163,61",
+        # v6 ANSI severity set retired by the two-hue redesign (hex + the
+        # rgb-triple forms the tint/keyframe rules carry):
+        "f14c4c",
+        "89d185",
+        "cca700",
+        "241,76,76",
+        "137,209,133",
+        "204,167,0",
+        # the intermediate (never-shipped) trio superseded before this landed:
+        "f2495c",
+        "66c2a5",
+        # v6 neutral-grey chrome retired by the monochrome ground:
+        "101113",
+        "17181a",
+        "1c1d20",
+        "2a2b2e",
+        "ececec",
+        "9a9a9a",
+        "737373",
+        "e6e6e6",
     ]
 
     def test_oss_tier_badge_removed(self):
@@ -800,15 +821,17 @@ class TestConsoleAssetStructure:
         assert re.search(r"\.tag\." + severity + r"::before", raw) is not None
 
     def test_retired_palette_absent_and_new_palette_present(self):
-        """681 D1 (v6 anchors): the old palettes are fully retired and the v6
-        token anchors are present — ``--ink`` #101113 (neutral-grey ground)
-        and ``--ember`` #f14c4c (terminal-ANSI severity, shared with the
-        baldur.sh landing)."""
+        """The old palettes are fully retired and the current token anchors are
+        present — ``--ink`` #0a0b0d (monochrome ground), ``--ember`` #e05561 /
+        ``--moss`` #6fb5a0 (the two data hues shared with the baldur.sh
+        landing) and ``--open`` #778092 (the ledger's neutral open series)."""
         raw = _console_html().lower()
         for stale in self._RETIRED_PALETTE:
             assert stale.lower() not in raw, f"retired palette value survived: {stale}"
-        assert "101113" in raw
-        assert "f14c4c" in raw
+        assert "0a0b0d" in raw
+        assert "e05561" in raw
+        assert "6fb5a0" in raw
+        assert "778092" in raw
 
     def test_opacity_dimming_of_calm_panels_removed(self):
         """681 D7: healthy/none panels are no longer opacity-dimmed (that is
