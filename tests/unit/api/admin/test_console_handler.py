@@ -1372,6 +1372,22 @@ class TestConsoleOperatorProse:
         assert raw.count("replayLinkText(") >= 3
         assert ".map(replayLinkText)" in raw
 
+    def test_an_off_switch_someone_chose_is_not_a_warning(self):
+        """The published guide's own remedy: "if you don't use automatic replay,
+        turn it off rather than leaving it half-configured … the arming surface
+        reports `disabled`".
+
+        But `disabled` is a link like any other, so it disarms the loop, and the
+        row raised the same warn as a broken chain — the documented way OUT of
+        the warning produced the warning. Every other missing link still means
+        the feature is on and cannot fire, which is the state the guide says not
+        to sit in."""
+        raw = _console_source()
+        assert 'ar.missing_link !== "disabled"' in raw
+        assert '"auto-replay off by configuration"' in raw
+        # …and the neutral tag is neutral: no warn class on that branch.
+        assert 'el("span", "tag", "auto-replay off by configuration")' in raw
+
     def test_a_placeholder_identity_is_not_a_fact(self):
         """``controlled_by_id`` is an identity slot and 0 is its no-identity
         value: the control path passes None on every non-Django boot, because
