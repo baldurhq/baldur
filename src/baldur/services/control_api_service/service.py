@@ -65,7 +65,11 @@ class NullCircuitBreakerService:
     def force_open(self, service_name, reason="", **kwargs):
         return _NullCBResult(service_name)
 
-    def reset_to_default(self, service_name, **kwargs):
+    # Named for the method the real service actually has. The previous name
+    # (`reset_to_default`) existed ONLY here, so this Null object was the sole
+    # implementer of the method its caller called — which is how the reset path
+    # went to its AttributeError fallback on every real install.
+    def reset(self, service_name, reason="", **kwargs):
         return _NullCBResult(service_name)
 
     def record_failure(self, service_name, **kwargs):
@@ -310,30 +314,37 @@ class ControlAPIService:
         """
         Execute reset action - revert to default configuration.
 
-        Clears all manual overrides and returns to policy defaults.
-        """
-        try:
-            self.circuit_breaker.reset_to_default(request.service_name)
+        Clears all manual overrides and returns to policy defaults, which is
+        what ``reset()`` does: ``atomic_reset`` closes the circuit, zeroes the
+        counters and clears ``manually_controlled``.
 
+        This called ``reset_to_default()`` until 2026-08-03 — a name that only
+        ever existed on ``NullCircuitBreakerService``. Every real service raised
+        ``AttributeError`` and the ``except`` branch below it "fell back" to
+        ``force_close``, so the operator's recovery action pinned a permanent
+        manual override instead of clearing one, and that breaker could never
+        open again. The fallback is gone with it: a reset that cannot reset must
+        report failure, never quietly do the opposite.
+        """
+        result = self.circuit_breaker.reset(
+            service_name=request.service_name,
+            reason=request.reason,
+        )
+
+        if getattr(result, "success", True):
             return ControlResponse(
                 status="success",
                 action_applied="reset",
                 system_state="allow",  # Default state is allow
                 evidence=self._gather_evidence(request.service_name),
             )
-        except AttributeError:
-            # Fallback if reset_to_default doesn't exist
-            self.circuit_breaker.force_close(
-                service_name=request.service_name,
-                reason=f"RESET: {request.reason}",
-            )
-
-            return ControlResponse(
-                status="success",
-                action_applied="reset",
-                system_state="allow",
-                evidence=self._gather_evidence(request.service_name),
-            )
+        return ControlResponse(
+            status="error",
+            action_applied="reset",
+            error_code="CIRCUIT_BREAKER_ERROR",
+            error_message=getattr(result, "error", None)
+            or "Failed to reset circuit breaker",
+        )
 
     def _execute_inject_failure(self, request: ControlRequest) -> ControlResponse:
         """

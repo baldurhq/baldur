@@ -51,6 +51,7 @@ def mock_cb_service():
     success_result.error = None
     cb.force_close.return_value = success_result
     cb.force_open.return_value = success_result
+    cb.reset.return_value = success_result
 
     # get_or_create_state 결과
     state = MagicMock()
@@ -650,15 +651,84 @@ class TestExecuteReset:
         assert resp.action_applied == "reset"
         assert resp.system_state == "allow"
 
-    def test_reset_fallback_when_no_method(self, service, mock_cb_service):
-        """Reset fallback when reset_to_default doesn't exist
-        reset_to_default가 없을 때 force_close로 폴백하는지 확인.
+    def test_reset_calls_reset_and_never_force_close(self, service, mock_cb_service):
+        """Reset must reset.
+
+        This called ``reset_to_default()``, a name carried only by
+        ``NullCircuitBreakerService``, so every real service raised
+        AttributeError and the handler "fell back" to ``force_close`` — pinning
+        a manual override instead of clearing one. The retired test asserted
+        that fallback, which is why a mock kept it green: the mock answered to
+        a method the real service never had.
         """
-        mock_cb_service.reset_to_default.side_effect = AttributeError()
         req = _make_request(action=ControlAPIActions.RESET)
         resp = service._execute_reset(req)
+
         assert resp.status == "success"
-        mock_cb_service.force_close.assert_called()
+        mock_cb_service.reset.assert_called_once()
+        mock_cb_service.force_close.assert_not_called()
+
+    def test_reset_failure_is_reported_not_swallowed(self, service, mock_cb_service):
+        """A reset that could not reset says so — the retired fallback returned
+        ``success`` after doing the opposite of what was asked."""
+        from baldur.services.circuit_breaker.config import CircuitBreakerResult
+
+        mock_cb_service.reset.return_value = CircuitBreakerResult(
+            success=False, service_name="payment", error="state not found"
+        )
+
+        resp = service._execute_reset(_make_request(action=ControlAPIActions.RESET))
+
+        assert resp.status == "error"
+        assert resp.error_code == "CIRCUIT_BREAKER_ERROR"
+        assert "state not found" in resp.error_message
+
+
+class TestResetAgainstTheRealService:
+    """The seam the mock above cannot cover.
+
+    Every test in this module drives a MagicMock circuit breaker, which answers
+    to any method name — including one that exists nowhere in production. The
+    regression is only visible against the real service and a real repository,
+    so this class builds both.
+    """
+
+    @pytest.fixture
+    def real_service(self):
+        from baldur.adapters.memory import InMemoryCircuitBreakerStateRepository
+        from baldur.services.circuit_breaker import CircuitBreakerService
+
+        cb = CircuitBreakerService(repository=InMemoryCircuitBreakerStateRepository())
+        with (
+            patch(
+                "baldur.services.circuit_breaker.get_circuit_breaker_service",
+                return_value=cb,
+            ),
+            patch("baldur.services.replay_service.ReplayService"),
+        ):
+            yield ControlAPIService(), cb
+
+    def test_reset_clears_the_manual_override_it_used_to_create(self, real_service):
+        """An operator blocks a service, the incident passes, they press Reset.
+
+        Before: Reset pinned ``manually_controlled=True`` with reason
+        ``RESET: …``, so the breaker was exempt from automatic protection and
+        could never open again — the console showed the row as a standing
+        operator override forever, correctly describing a payload that lied.
+        """
+        service, cb = real_service
+        cb.force_open(service_name="payments-api", reason="upstream 5xx storm")
+        assert cb.repository.get_by_service_name("payments-api").manually_controlled
+
+        resp = service._execute_reset(
+            _make_request(action=ControlAPIActions.RESET, service_name="payments-api")
+        )
+
+        assert resp.status == "success"
+        state = cb.repository.get_by_service_name("payments-api")
+        assert state.manually_controlled is False
+        assert state.state == "closed"
+        assert state.failure_count == 0
 
 
 class TestExecuteInjectFailure:

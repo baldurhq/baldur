@@ -15,6 +15,10 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - Admin console redesigned: 3-tier triage layout with a healing-ledger hero (crosshair, no deps).
 - Console + landing state palette refreshed (two-hue red/jade); Schibsted Grotesk embedded.
 
+### Fixed
+
+- Reset pinned a manual circuit-breaker override instead of clearing it, so it never reopened.
+
 ## [1.3.2] - 2026-07-31
 
 ### Fixed
