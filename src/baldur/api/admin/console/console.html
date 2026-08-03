@@ -513,7 +513,10 @@
         <div class="legend">
           <span><i class="dot-sq fail"></i>failures</span>
           <span><i class="dot-sq heal"></i>heals</span>
-          <span><i class="dot-sq open"></i>open</span>
+          <!-- NOT "open": the same screen shows breakers whose state IS open,
+               and the line means something else entirely — failures that have
+               not been healed yet. One word, two meanings, one viewport. -->
+          <span><i class="dot-sq open"></i>still unhealed</span>
         </div>
       </div>
       <div class="ledger-plot" id="ledger-plot">
@@ -1572,37 +1575,67 @@
 
   function attentionTier(sev) { return sev === "danger" || sev === "warn"; }
 
+  // ONE ranking for the three surfaces that rank the same rows: the verdict's
+  // headline, its offender chips, and the order of the attention stream.
+  //
+  // The stream used to render in ROWS order — panel registration order, with
+  // the per-service rows spliced in above their panel — while the verdict
+  // sorted by severity. So a `danger` System Control sat below two `warn` rows
+  // and the headline named a row the reader's eye landed on third. Worse, ROWS
+  // order is not even stable across loads: which services exist is decided by
+  // a fetch that races the panels.
+  //
+  // The index tiebreak is explicit rather than leaning on a stable sort: it is
+  // what makes equal-severity order deterministic, so the stream does not
+  // reshuffle under a refresh that changed nothing.
+  function bySeverity(rows) {
+    return rows.map(function (r, i) { return { row: r, i: i }; })
+      .sort(function (a, b) {
+        var d = SEV_RANK[HEALTH[b.row.key]] - SEV_RANK[HEALTH[a.row.key]];
+        return d || (a.i - b.i);
+      })
+      .map(function (x) { return x.row; });
+  }
+
   function placeRows() {
     var attention = document.getElementById("attention");
     var system = document.getElementById("system-rows");
     if (!attention || !system) { return; }
-    var plan = ROWS.map(function (r) {
-      return { row: r, attn: attentionTier(HEALTH[r.key]) };
+    var attnRows = bySeverity(ROWS.filter(function (r) {
+      return attentionTier(HEALTH[r.key]);
+    }));
+    // The System tier stays a roll call in registration order: it is scanned
+    // for presence, not ranked for urgency.
+    var sysRows = ROWS.filter(function (r) {
+      return !attentionTier(HEALTH[r.key]);
     });
-    var signature = plan.map(function (x) {
-      return x.row.key + (x.attn ? "!" : ".");
-    }).join("|");
+    function keyOf(r) { return r.key; }
+    // The signature now carries the ORDER, not just the split: a promotion that
+    // reorders the stream without changing its membership has to re-append.
+    var signature = attnRows.map(keyOf).join("|") + "#" + sysRows.map(keyOf).join("|");
     if (signature !== LAST_PLACEMENT) {
       LAST_PLACEMENT = signature;
-      plan.forEach(function (x) {
-        (x.attn ? attention : system).appendChild(x.row.node);
-      });
+      attnRows.forEach(function (r) { attention.appendChild(r.node); });
+      sysRows.forEach(function (r) { system.appendChild(r.node); });
     }
-    renderSectionCounts(plan);
+    renderSectionCounts(attnRows, sysRows);
   }
 
   // Section headings count RENDERED ROWS in that section, never HEALTH keys —
   // a panel contributes one key but N rows once the breaker panel expands, and
   // a count that disagrees with what is visible under it is its own small lie.
-  function renderSectionCounts(plan) {
-    var attn = plan.filter(function (x) { return x.attn; }).length;
-    var healthy = plan.filter(function (x) { return HEALTH[x.row.key] === "ok"; }).length;
-    var quiet = plan.length - attn - healthy;
+  function renderSectionCounts(attnRows, sysRows) {
+    var attn = attnRows.length;
+    var total = attn + sysRows.length;
+    var healthy = sysRows.filter(function (r) {
+      return HEALTH[r.key] === "ok";
+    }).length;
+    var quiet = total - attn - healthy;
     var attnLabel = document.getElementById("attention-count");
     var sysLabel = document.getElementById("system-count");
     var empty = document.getElementById("attention-empty");
     if (attnLabel) {
-      attnLabel.textContent = attn + " of " + plan.length + " checks";
+      attnLabel.textContent = attn + " of " + total + " checks";
     }
     if (sysLabel) {
       sysLabel.textContent = healthy + " healthy"
@@ -1639,11 +1672,12 @@
     var resolved = ROWS.filter(function (r) {
       return HEALTH[r.key] && HEALTH[r.key] !== "none";
     }).length;
-    var offenders = ROWS.filter(function (r) {
+    // Same ranking the stream is laid out with, so the row this sentence names
+    // is the first row under it and the first chip beside it — three surfaces,
+    // one order, no reader wondering why the headline points at row three.
+    var offenders = bySeverity(ROWS.filter(function (r) {
       return attentionTier(HEALTH[r.key]);
-    }).sort(function (a, b) {
-      return SEV_RANK[HEALTH[b.key]] - SEV_RANK[HEALTH[a.key]];
-    });
+    }));
     var state = offenders.length
       ? HEALTH[offenders[0].key]
       : (answered ? "ok" : "none");
@@ -2681,8 +2715,13 @@
       // number the operator can see is wrong, one row below the strip that
       // already defends itself by taking max(reported, window-derived).
       if (summaryDisagreesWithWindow(d)) {
-        return "totals disagree with the DLQ window — the statistics source "
-          + "reports an empty store (unconfigured, or lagging behind its cache)";
+        // Observation first, cause second, and the cause names the thing an
+        // operator can actually go and check. The longer form this replaced
+        // ("the statistics source reports an empty store (unconfigured, or
+        // lagging behind its cache)") described the payload rather than the
+        // fix, which is a sentence the reader has to translate before acting.
+        return "totals disagree with the DLQ window"
+          + " — no statistics adapter is reporting, or its cache is stale";
       }
       var ov = (d && d.overview) || {};
       var ra = (d && d.recent_activity) || {};
@@ -3920,7 +3959,7 @@
       var from = series.start + idx * series.width;
       tip.textContent = clockOf(from) + "–" + clockOf(from + series.width) + "\n"
         + series.fails[idx] + " failed · " + series.heals[idx] + " healed\n"
-        + series.open[idx] + " open";
+        + series.open[idx] + " still unhealed";
       tip.style.display = "block";
       var box = plot.getBoundingClientRect();
       tip.style.left = Math.min(box.width - 170, Math.max(0, e.clientX - box.left + 12)) + "px";
@@ -3949,7 +3988,7 @@
       + "those entries are not counted; archived-then-purged and evicted "
       + "entries drop out entirely");
     if (series && series.summaryOpen === null) {
-      parts.push("no statistics adapter is reporting, so the open count is "
+      parts.push("no statistics adapter is reporting, so the unhealed count is "
         + "window-derived only");
     } else if (series && summaryDisagreesWithWindow(series.summary)) {
       // Reported, and reported wrong: a summary claiming an empty store while
@@ -3994,10 +4033,15 @@
     if (!series) { return; }
     var overview = (series.summary && series.summary.overview) || {};
     var activity = (series.summary && series.summary.recent_activity) || {};
-    addCounter(foot, "open", series.anchor);
+    // Two counters one word apart until they were named: the first is every
+    // entry not resolved (the line's right-edge anchor), the second the subset
+    // sitting in the queue waiting to be replayed. "open · parked" made them
+    // look like the same number twice — which, on an install where they are
+    // equal, is exactly how it read.
+    addCounter(foot, "still unhealed", series.anchor);
     var parked = [series.stillOpen];
     if (isReported(overview.pending)) { parked.push(overview.pending); }
-    addCounter(foot, "parked", Math.max.apply(null, parked));
+    addCounter(foot, "awaiting replay", Math.max.apply(null, parked));
     // The label states the span it actually covers: a heal count from a
     // 7-minute window must not wear a 24-hour label.
     var summaryHealed = isReported(activity.resolved_24h) ? activity.resolved_24h : null;

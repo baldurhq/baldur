@@ -1111,11 +1111,28 @@ class TestConsoleHealingLedger:
         the strip and the chart cannot disagree."""
         raw = _console_source()
         assert "Math.max" in raw
-        assert '"open"' in raw
-        assert '"parked"' in raw
+        assert '"still unhealed"' in raw
+        assert '"awaiting replay"' in raw
         # One call per rendered slot (the healed slot branches on its label),
         # and never a fourth for a counter with no source field.
         assert raw.count("addCounter(foot,") >= 3
+
+    def test_the_level_series_is_not_called_open(self):
+        """``open`` is taken: the same viewport shows breakers whose *state* is
+        open, and a DLQ row that says "parked awaiting replay". The line is
+        neither — it is the count of failures not yet healed, and the two
+        counters beneath it ("open · parked") read as the same number printed
+        twice on any install where they are equal."""
+        raw = _console_source()
+        # Scoped to the three render sites, not to the token: the CSS class and
+        # the internal series name stay `open`, and the comment explaining the
+        # collision has to be able to quote the word it retired.
+        assert 'addCounter(foot, "open"' not in raw
+        assert 'addCounter(foot, "parked"' not in raw
+        assert "</i>open</span>" not in raw
+        assert '+ " open"' not in raw
+        # The legend, the footer slot and the crosshair tooltip say one thing.
+        assert raw.count("still unhealed") >= 3
 
     def test_healed_counter_states_the_span_it_covers(self):
         """``resolved_24h`` is a rolling 24-hour count, not a calendar day —
@@ -1207,6 +1224,31 @@ class TestConsolePanelSeverityResolvers:
         assert "svc.manually_controlled === true" in raw
         assert 'severityOf(svc.state) || "none"' in raw
 
+    def test_one_ranking_drives_the_stream_the_headline_and_the_chips(self):
+        """The stream used to render in ROWS order — panel registration order
+        with the per-service rows spliced in above their panel — while the
+        verdict sorted by severity. Disabling the kill switch put a ``danger``
+        System Control row below two ``warn`` rows, and the headline named a
+        row the eye reached third. ROWS order is not even stable across loads:
+        which service rows exist is decided by a fetch that races the panels."""
+        raw = _console_source()
+        assert "function bySeverity(" in raw
+        # The verdict and the placement read the one ranking…
+        assert "bySeverity(ROWS.filter(" in raw
+        assert raw.count("bySeverity(") >= 3
+        # …and equal severities keep a deterministic order rather than relying
+        # on the engine's sort being stable.
+        assert "d || (a.i - b.i)" in raw
+
+    def test_placement_signature_carries_the_order(self):
+        """The placement is skipped when the signature is unchanged. With order
+        now meaningful, a promotion that reorders the stream without changing
+        its membership must still re-append."""
+        raw = _console_source()
+        assert (
+            'attnRows.map(keyOf).join("|") + "#" + sysRows.map(keyOf).join("|")' in raw
+        )
+
     def test_unresolved_row_is_not_counted_as_healthy(self):
         """A row that never answered is not evidence of health. The previous
         aggregation counted an unresolved panel into "all systems nominal · N
@@ -1261,7 +1303,9 @@ class TestConsoleSummaryDisagreement:
         a working install of being unconfigured."""
         raw = _console_source()
         assert "totals disagree with the DLQ window" in raw
-        assert "unconfigured, or lagging behind its cache" in raw
+        # Both causes stay on offer — naming only the missing adapter would
+        # accuse a working install whose summary is merely cache-lagged.
+        assert "no statistics adapter is reporting, or its cache is stale" in raw
 
     def test_the_row_is_re_resolved_when_the_window_lands(self):
         """The two fetches race, and on a cold load the Dashboard row usually
