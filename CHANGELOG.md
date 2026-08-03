@@ -12,8 +12,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ### Changed
 
-- Admin console restyled: neutral-grey dark, square state tags, quieter action buttons.
-- Severity hues now match the baldur.sh terminal palette; state glyphs (● ◐ ○) unchanged.
+- Admin console redesigned: 3-tier triage layout with a healing-ledger hero (crosshair, no deps).
+- Console + landing state palette refreshed (two-hue red/jade); Schibsted Grotesk embedded.
 
 ## [1.3.2] - 2026-07-31
 
