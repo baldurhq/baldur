@@ -1,17 +1,24 @@
 <!DOCTYPE html>
 <!--
-  Baldur Admin Web Console (impl doc 536).
+  Baldur Admin Web Console.
 
   Self-contained: inline <style> and <script> only — no third-party scripts,
-  no external assets (429 zero-new-runtime-dependency constraint). Served by
-  the stdlib admin server at GET /. The handler (console/handler.py) substitutes
-  three per-request placeholders before serving:
-    - the v1.0 PRO panel-visibility map (D8/D9), into window.__BALDUR_PANELS__
-    - the non-gating entitlement status string (D8)
-    - the per-request CSP nonce on every <script> tag (D12)
+  no external assets (the zero-new-runtime-dependency constraint), which is
+  also why the two embedded typefaces are registered from bytes rather than
+  fetched. Served by the stdlib admin server at GET /. The handler
+  (console/handler.py) substitutes three per-request placeholders before
+  serving:
+    - the v1.0 PRO panel-visibility map, into window.__BALDUR_PANELS__
+    - the non-gating entitlement status string
+    - the per-request CSP nonce on every <script> tag
+
+  Structure, top to bottom: a one-line triage verdict, then the rows that need
+  attention (each expanding in place), then a compact System table for the
+  rest. Every row is one check — one per PANELS entry, plus one per application
+  service the circuit-breaker status returns.
 
   All API JSON is rendered with textContent (never innerHTML) — DOM-XSS safe.
-  A global error boundary keeps one panel's failure from blanking the console.
+  A global error boundary keeps one row's failure from blanking the console.
 -->
 <html lang="en">
 <head>
@@ -50,17 +57,29 @@
       font: 14px/1.5 var(--display);
       -webkit-font-smoothing: antialiased;
     }
-    header {
-      display: flex; align-items: center; gap: 16px; padding: 12px 20px;
-      background: var(--ink2); border-bottom: 1px solid var(--line);
+    .wrap { max-width: 1240px; margin: 0 auto; padding: 0 32px; }
+    .topbar {
+      border-bottom: 1px solid var(--line); background: var(--ink);
       position: sticky; top: 0; z-index: 10;
     }
-    header h1 { font-size: 16px; margin: 0; font-weight: 600; }
-    /* Wordmark: "Baldur" + secondary "Admin Console" — plain text, no mark. */
-    .wordmark { display: flex; align-items: center; gap: 8px; }
-    .wordmark b { font-weight: 700; color: var(--bone); }
-    .wordmark .wm-sub { font-weight: 400; font-size: 13px; color: var(--ash); }
-    header .spacer { flex: 1; }
+    .topbar-inner {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 16px; padding: 12px 0;
+    }
+    /* Wordmark: "BALDUR" + a secondary context word — plain text, no mark. */
+    .brand { display: flex; align-items: baseline; gap: 10px; }
+    .brand .mark {
+      font-weight: 700; font-size: 15px; letter-spacing: .06em; color: var(--mark);
+    }
+    .brand .ctx { font-size: 13px; color: var(--ash2); }
+    .topbar-right {
+      display: flex; align-items: center; gap: 16px; font-size: 13px;
+      color: var(--ash);
+    }
+    /* Wall clock only. The confirmed design pairs it with a "live" marker; the
+       auto-refresh toggle ships OFF, so "live" would be false on a default
+       console. The per-surface age tokens state the real thing instead. */
+    .clock { font: 12.5px/1 var(--mono); color: var(--ash2); }
     .key-entry { display: flex; align-items: center; gap: 6px; }
     .key-entry input {
       background: var(--ink); border: 1px solid var(--line); color: var(--bone);
@@ -83,42 +102,111 @@
       font-weight: 600;
     }
     button.primary:hover { background: var(--bone); filter: brightness(0.9); }
-    /* One global focus locator: visible on every focusable element, not just
-       the spine chips. */
+    /* One global focus locator: visible on every focusable element. */
     :focus-visible { outline: 2px solid var(--mark); outline-offset: 2px; }
     #banner {
       display: none; padding: 8px 20px; background: var(--amber-tint); color: var(--amber);
       border-bottom: 1px solid var(--line); font-size: 13px;
     }
-    #grid {
-      display: grid; gap: 16px; padding: 20px;
-      /* Fixed column count per width band (not auto-fill): the count is constant
-         within each band, so panel wrapping is deterministic and the wide
-         (span-2) panels tile with no empty cell. Bands are the natural 320px-min
-         column thresholds: 4 cols need 4*320 + 3*16 gap + 2*20 pad = 1368px. */
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+
+    /* ===== Tier 1: the triage line — one sentence, then the offenders ===== */
+    .triage { padding: 22px 0 6px; display: flex; align-items: baseline; gap: 12px; }
+    .triage .dot {
+      width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0;
+      align-self: center; background: var(--ash2);
     }
-    @media (min-width: 1040px) { #grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
-    @media (min-width: 1368px) {
-      #grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-      /* DLQ + Canary always occupy two columns at full width, so their position
-         never shifts when a backlog / rollout appears. The PANELS order places
-         them at a row end (dashboard / cb·system·DLQ / emrg·bulkhead·canary) so
-         the second column tiles cleanly. span-2 lives only in the 4-col band;
-         at 3/2/1 cols they fall back to one column (tables scroll horizontally). */
-      #grid .panel[data-panel-id="dlq"],
-      #grid .panel[data-panel-id="canary"] { grid-column: span 2; }
+    .triage.state-ok     .dot { background: var(--moss); }
+    .triage.state-warn   .dot {
+      background: linear-gradient(90deg, var(--amber) 0 50%, transparent 50%);
     }
-    @media (max-width: 719px) { #grid { grid-template-columns: minmax(0, 1fr); } }
-    .panel {
-      background: var(--ink2); border: 1px solid var(--line);
-      border-radius: 6px; overflow: hidden; display: flex; flex-direction: column;
+    .triage.state-danger .dot {
+      background: transparent; box-shadow: inset 0 0 0 2px var(--ember);
+      animation: triage-pulse 1.6s ease-in-out infinite;
     }
-    .panel-head {
-      display: flex; align-items: center; gap: 8px; padding: 10px 14px;
-      border-bottom: 1px solid var(--line);
+    @media (prefers-reduced-motion: reduce) { .triage.state-danger .dot { animation: none; } }
+    .triage h1 {
+      margin: 0; font-size: 19px; font-weight: 600; letter-spacing: -.01em;
+      color: var(--mark);
     }
-    .panel-head h2 { font-size: 14px; margin: 0; font-weight: 600; flex: 1; }
+    .triage h1 .triage-detail { color: var(--ash); font-weight: 400; }
+    .triage-age { margin-left: auto; font: 12px/1 var(--mono); color: var(--ash2); }
+    .triage-chips { display: flex; gap: 8px; flex-wrap: wrap; padding: 0 0 4px 21px; }
+    .triage-chip {
+      cursor: pointer; font: 12px/1 var(--mono); padding: 6px 11px; border-radius: 4px;
+      border: 1px solid var(--line); background: var(--ink2); color: var(--bone);
+      display: flex; gap: 7px; align-items: center;
+    }
+    .triage-chip .cdot { width: 7px; height: 7px; border-radius: 50%; }
+    .triage-chip.danger .cdot { background: transparent; border: 2px solid var(--ember); }
+    .triage-chip.warn .cdot {
+      background: linear-gradient(90deg, var(--amber) 0 50%, transparent 50%);
+    }
+    .triage-chip:hover { border-color: var(--ash); }
+
+    /* ===== Section labels shared by the attention stream and System ===== */
+    .sec-label { display: flex; align-items: baseline; gap: 10px; margin: 26px 0 12px; }
+    .sec-label h2 {
+      margin: 0; font-size: 14px; font-weight: 600; color: var(--bone);
+      letter-spacing: .01em;
+    }
+    .sec-label .count { font: 12px/1 var(--mono); color: var(--ash2); }
+
+    /* ===== Tier 2/3: rows. ONE node per check; the tier it lives in is the
+       only difference, so a tier migration re-appends the same element and the
+       accordion keeps its open state and its mounted drill-down. ===== */
+    .stream { display: flex; flex-direction: column; gap: 10px; }
+    .stream-empty { font-size: 14px; color: var(--ash); padding: 2px 0 4px; }
+    .sys-table { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+    .row { border: 1px solid var(--line); border-radius: 10px; background: var(--ink2); }
+    .sys-table .row {
+      border: none; border-radius: 0; border-bottom: 1px solid var(--ink3);
+      background: var(--ink2);
+    }
+    .sys-table .row:last-child { border-bottom: none; }
+    .row.open { border-color: var(--ash2); background: var(--ink3); }
+    .row-head {
+      display: flex; align-items: center; gap: 14px; padding: 14px 18px;
+      cursor: pointer;
+    }
+    .sys-table .row-head { padding: 11px 18px; }
+    /* State = colour + shape, the same vocabulary the .tag glyphs use, so
+       severity survives colourblindness on a 8px dot. */
+    .row-head .st {
+      width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+      background: var(--ash2);
+    }
+    .row[data-sev="ok"]     .st { background: var(--moss); }
+    .row[data-sev="warn"]   .st {
+      background: linear-gradient(90deg, var(--amber) 0 50%, transparent 50%);
+    }
+    .row[data-sev="danger"] .st {
+      background: transparent; box-shadow: inset 0 0 0 2px var(--ember);
+    }
+    .row[data-sev="none"]   .st {
+      background: transparent; box-shadow: inset 0 0 0 1px var(--ash2);
+    }
+    .row-head .name { font-weight: 600; font-size: 15px; color: var(--mark); }
+    .sys-table .row-head .name { font-weight: 500; min-width: 150px; font-size: 14px; }
+    .row-head .desc { color: var(--ash); font-size: 14px; }
+    .row-head .when {
+      margin-left: auto; font: 12px/1 var(--mono); color: var(--ash2);
+      white-space: nowrap;
+    }
+    .row-head .chev { color: var(--ash2); font-size: 11px; }
+    .row-head .row-refresh { padding: 2px 7px; font-size: 12px; color: var(--ash); }
+    .row-body { border-top: 1px solid var(--ink3); }
+    .row.flash { outline: 2px solid var(--mark); outline-offset: 2px; }
+
+    /* Expanded service row: label -> value facts, prose labels, mono values.
+       Only fields the payload actually reports appear (isReported). */
+    .facts { display: flex; flex-direction: column; padding: 6px 18px; font-size: 13.5px; }
+    .fact {
+      display: flex; justify-content: space-between; gap: 24px; padding: 7px 0;
+      border-bottom: 1px solid var(--ink3);
+    }
+    .fact:last-child { border-bottom: none; }
+    .fact .k { color: var(--ash); }
+    .fact .v { font: 12.5px/1.5 var(--mono); color: var(--bone); text-align: right; }
     /* Neutral chip: achromatic by default (color-budget rule a). A severity
        class adds state color on the text + a CSS-drawn glyph; every chip keeps
        the same neutral hairline border and transparent ground (no tint fills,
@@ -250,54 +338,14 @@
     }
     #modal .modal-result { font-size: 12px; margin-top: 10px; white-space: pre-wrap; }
 
-    /* ===== Triage redesign: status spine + per-panel health weighting ===== */
+    /* Tabular figures everywhere: counts must not jitter as they tick. */
     body { font-feature-settings: "tnum" 1; }
+    @keyframes triage-pulse {
+      0%, 100% { box-shadow: inset 0 0 0 2px var(--ember), 0 0 0 0 rgba(224,85,97,.55); }
+      50%      { box-shadow: inset 0 0 0 2px var(--ember), 0 0 0 8px rgba(224,85,97,0); }
+    }
 
-    /* Status spine: one aggregate health bar under the header. */
-    /* The spine ground stays flat in every state — the LED, the state word,
-       and the chip glyphs carry severity; no tinted band. */
-    .spine {
-      display: flex; align-items: center; gap: 18px; padding: 16px 20px;
-      border-bottom: 1px solid var(--line); background: var(--ink2);
-    }
-    .spine-led {
-      width: 16px; height: 16px; border-radius: 50%; flex: 0 0 auto;
-      box-shadow: 0 0 0 4px rgba(255,255,255,.04);
-    }
-    .state-ok     .spine-led { background: var(--moss); }
-    .state-warn   .spine-led { background: var(--amber); }
-    .state-danger .spine-led { background: var(--ember); animation: spine-pulse 1.3s ease-in-out infinite; }
-    @keyframes spine-pulse {
-      0%, 100% { box-shadow: 0 0 0 0 rgba(224,85,97,.55); }
-      50%      { box-shadow: 0 0 0 10px rgba(224,85,97,0); }
-    }
-    @media (prefers-reduced-motion: reduce) { .state-danger .spine-led { animation: none; } }
-    .spine-main  { display: flex; flex-direction: column; gap: 3px; }
-    .spine-state { font: 600 19px/1 var(--mono); letter-spacing: .07em; }
-    .state-ok     .spine-state { color: var(--moss); }
-    .state-warn   .spine-state { color: var(--amber); }
-    .state-danger .spine-state { color: var(--ember); }
-    .spine-sub   { font-size: 12px; color: var(--ash); }
-    .spine-chips { display: flex; gap: 8px; flex-wrap: wrap; margin-left: auto; }
-    .spine-chip  {
-      cursor: pointer; font: 12px/1 var(--mono); padding: 6px 11px; border-radius: 4px;
-      border: 1px solid var(--line); background: var(--ink); color: var(--bone);
-      display: flex; gap: 7px; align-items: center;
-    }
-    .spine-chip .dot   { width: 7px; height: 7px; border-radius: 50%; }
-    .spine-chip.danger .dot { background: transparent; border: 2px solid var(--ember); }
-    .spine-chip.warn .dot   { background: linear-gradient(90deg, var(--amber) 0 50%, transparent 50%); }
-    .spine-chip:hover  { border-color: var(--ash); }
-
-    /* Panel health weighting: trouble is marked with a thin inset stripe;
-       calm panels stay fully legible (no opacity dimming — that is
-       legibility loss, not attention routing — and no header tint). */
-    #grid .panel[data-health="warn"]     { box-shadow: inset 2px 0 0 var(--amber); }
-    #grid .panel[data-health="danger"]   { box-shadow: inset 2px 0 0 var(--ember); }
-    .panel.flash { outline: 2px solid var(--mark); outline-offset: 2px; }
-
-    /* Dashboard hero: full-width at-a-glance readout. */
-    #grid .panel.hero { grid-column: 1 / -1; opacity: 1; }
+    /* Dashboard readout (rendered inside its row body). */
     .hero-top  { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
     .hero-pill {
       font: 600 12px/1 var(--mono); letter-spacing: .09em; padding: 7px 13px;
@@ -364,29 +412,58 @@
     table.dlq-table td { white-space: nowrap; overflow-wrap: normal; }
     table.dlq-table td:first-child { font-family: var(--mono); }
     .list-scroll { overflow-x: auto; }
-    /* The DLQ + Canary span-2 width rule lives with the #grid band definitions
-       above (it applies only in the 4-col band). It is unconditional there — the
-       panels hold a fixed two-column slot whether or not they currently have a
-       backlog / rollout, so their position is stable as content comes and goes. */
+    @media (max-width: 719px) {
+      .wrap { padding: 0 16px; }
+      .row-head { flex-wrap: wrap; gap: 8px; }
+      .row-head .when { margin-left: 0; }
+    }
   </style>
 </head>
 <body>
-  <header>
-    <h1 class="wordmark"><b>Baldur</b><span class="wm-sub">Admin Console</span></h1>
-    <span class="spacer"></span>
-    <label class="autorefresh">
-      <input type="checkbox" id="autorefresh-toggle" /> Auto-refresh
-    </label>
-    <div class="key-entry">
-      <label for="admin-key" class="spinner">Admin key</label>
-      <input id="admin-key" type="password" autocomplete="off"
-             placeholder="paste key (non-localhost)" />
-      <button id="save-key">Save</button>
+  <div class="topbar">
+    <div class="wrap topbar-inner">
+      <div class="brand">
+        <span class="mark">BALDUR</span>
+        <span class="ctx">admin console</span>
+      </div>
+      <div class="topbar-right">
+        <span class="clock" id="clock"></span>
+        <label class="autorefresh">
+          <input type="checkbox" id="autorefresh-toggle" /> Auto-refresh
+        </label>
+        <div class="key-entry">
+          <label for="admin-key" class="spinner">Admin key</label>
+          <input id="admin-key" type="password" autocomplete="off"
+                 placeholder="paste key (non-localhost)" />
+          <button id="save-key">Save</button>
+        </div>
+      </div>
     </div>
-  </header>
+  </div>
 
   <div id="banner"></div>
-  <div id="grid"></div>
+
+  <div class="wrap">
+    <!-- Tier 1: the verdict. One sentence, then jump-to-row offender chips. -->
+    <div class="triage" id="triage">
+      <span class="dot"></span>
+      <h1><span class="triage-lead"></span> <span class="triage-detail"></span></h1>
+      <span class="triage-age updated"></span>
+    </div>
+    <div class="triage-chips" id="triage-chips"></div>
+
+    <!-- Tier 2: what needs attention, each row expanding in place. -->
+    <div class="sec-label">
+      <h2>Needs attention</h2><span class="count" id="attention-count"></span>
+    </div>
+    <div class="stream-empty" id="attention-empty"></div>
+    <div class="stream" id="attention"></div>
+
+    <!-- Tier 3: everything else, one compact line each. -->
+    <div class="sec-label"><h2>System</h2><span class="count" id="system-count"></span></div>
+    <div class="sys-table" id="system-rows"></div>
+    <div style="height: 40px"></div>
+  </div>
 
   <div id="overlay">
     <div id="modal" role="dialog" aria-modal="true">
@@ -727,6 +804,46 @@
     var t = Date.parse(iso);
     return isNaN(t) ? String(iso) : relAgo(t);
   }
+  function pad2(n) { return (n < 10 ? "0" : "") + n; }
+  // Local wall clock. Event times on rows and the top-bar clock share one time
+  // zone so two numbers on the same screen are never in different frames; the
+  // top bar names the offset so "03:12:05" is never ambiguous.
+  function clockOf(tMs) {
+    var d = new Date(tMs);
+    return pad2(d.getHours()) + ":" + pad2(d.getMinutes()) + ":" + pad2(d.getSeconds());
+  }
+  function clockOfIso(iso) {
+    var t = Date.parse(iso);
+    return isNaN(t) ? String(iso) : clockOf(t);
+  }
+  function tzSuffix() {
+    var off = -new Date().getTimezoneOffset();
+    if (off === 0) { return "UTC"; }
+    var sign = off < 0 ? "-" : "+";
+    off = Math.abs(off);
+    var mins = off % 60;
+    return "UTC" + sign + pad2(Math.floor(off / 60)) + (mins ? ":" + pad2(mins) : "");
+  }
+
+  // --- The honesty predicate ------------------------------------------------
+  // A value is REPORTED only when the payload carried something. 0 and false
+  // are reported facts (failure_count: 0 means "no failures"); null, undefined,
+  // "", {} and [] are the absence of an answer, and an absence must never be
+  // rendered as data. /control/status in particular emits a FIXED 10-key dict
+  // and encodes "no value" as null, so a key-presence test would print
+  // `opened_at: null` on every healthy service.
+  //
+  // Both call sites go through this one function: the facts table (which fields
+  // render) and the describers (which clauses survive). Two hand-written copies
+  // is how they drift apart, and the drift is invisible because each site looks
+  // locally correct.
+  function isReported(v) {
+    if (v === null || v === undefined || v === "") { return false; }
+    if (typeof v === "object") {
+      return Array.isArray(v) ? v.length > 0 : Object.keys(v).length > 0;
+    }
+    return true;
+  }
 
   // --- Structured render (D1) ----------------------------------------------
   // Replaces the raw JSON.stringify dump with scannable key->value rows. Status
@@ -971,21 +1088,27 @@
     }
     var escRow = el("div", "kv-row");
     escRow.appendChild(el("span", "kv-key", "escalations"));
+    // "–", not 0: an unreported count is not a count of zero.
     escRow.appendChild(el("span", "kv-val",
-      String(data.escalation_count == null ? 0 : data.escalation_count)));
+      isReported(data.escalation_count) ? String(data.escalation_count) : "–"));
     box.appendChild(escRow);
 
     bodyEl.appendChild(box);
   }
 
-  // --- Triage redesign: status spine + per-panel health weighting ----------
-  // Aggregates every visible panel's status into one spine
-  // (SAFE/DEGRADED/CRITICAL), floats troubled panels up while healthy ones
-  // recede, and renders the dashboard/CB/DLQ status bodies as scannable
-  // readouts. Severity reuses the existing severityOf() token map; loadPanel
-  // updates the spine as each panel's status resolves.
+  // --- Severity: what each row's status payload actually says --------------
+  // Every row's tier placement and every offender named in the triage verdict
+  // comes from here, so a resolver that answers from the wrong field is not a
+  // wrong dot on one of eleven equal cards any more — it decides what the
+  // operator reads first.
   var HEALTH = {};
   var SEV_RANK = { danger: 3, warn: 2, ok: 1, none: 0 };
+  // The row set, in display order: PANELS order, with the breaker panel's
+  // per-service rows as a contiguous block immediately above it. Keys are
+  // "p:<panel id>" and "cb:<service name>".
+  var ROWS = [];
+  var ROW_BY_KEY = {};
+  var LAST_PLACEMENT = "";
 
   function scanSeverity(value) {
     var worst = "none";
@@ -1002,37 +1125,132 @@
     })(value, 0);
     return worst;
   }
+  // The breaker PANEL row is the controls surface — it is always rendered, and
+  // it sits below the per-service rows the same fetch produced. Its severity is
+  // deliberately NOT the worst-of over those services: each service already has
+  // its own row carrying its own severity, so re-aggregating here would put one
+  // incident in the attention stream twice and name it twice in the verdict.
+  // With no services on record there are no rows to carry the answer, and an
+  // empty list is not a claim that everything is healthy — hence "none".
   function cbSeverity(data) {
     var services = (data && data.services) || [];
-    if (!services.length) { return "none"; }
-    var worst = "ok";
-    services.forEach(function (s) {
-      var sv = severityOf(s && s.state);
-      if (sv && SEV_RANK[sv] > SEV_RANK[worst]) { worst = sv; }
-    });
-    return worst;
+    return services.length ? "ok" : "none";
   }
   function dlqSeverity(data) {
     var bs = (data && data.by_status) || {};
     if ((bs.permanently_failed || 0) + (bs.rejected || 0) > 0) { return "danger"; }
     // A disarmed on-recovery auto-replay loop is the same silent-degradation class
-    // the backlog counts warn on — surface it on the status spine.
+    // the backlog counts warn on — surface it on the row's severity.
     var ar = (data && data.auto_replay) || null;
     if (ar && ar.armed === false) { return "warn"; }
     if ((bs.pending || 0) + (bs.requires_review || 0) + (bs.reviewing || 0)
         + (bs.replaying || 0) > 0) { return "warn"; }
     return "ok";
   }
-  // Per-panel severity: bespoke where the status shape carries no severity token
-  // (dashboard health_status, CB service states, DLQ by_status counts), generic
-  // token scan otherwise.
+  // System Control: the kill switch. `status` is "enabled" | "disabled", and
+  // "disabled" is in NO severity token list, so the generic scan reports *no
+  // signal* for the one state that means nothing Baldur claims to do is
+  // happening. disabled_reason is free text and must never drive severity.
+  function systemSeverity(data) {
+    var d = data || {};
+    if (d.status === "disabled" || d.enabled === false) { return "danger"; }
+    if (d.dry_run === true) { return "warn"; }
+    return "ok";
+  }
+  // Emergency: is_active is the product's own declaration. No level value is a
+  // recognized token, so the generic scan misses an active LEVEL_2 entirely —
+  // while an operator reason containing "failed" would make a calm system read
+  // danger. level selects the sentence, never the severity.
+  function emergencySeverity(data) {
+    return (data && data.is_active === true) ? "danger" : "ok";
+  }
+  // Throttle: booleans and numbers only — the generic scan finds no string at
+  // all, so a full stop or an engaged kill switch was permanently invisible.
+  function throttleSeverity(data) {
+    var d = data || {};
+    var gov = d.governance || {};
+    var emg = d.emergency || {};
+    var rec = d.recovery || {};
+    if (gov.kill_switch_active === true || emg.full_stop_active === true) {
+      return "danger";
+    }
+    if (emg.active === true || rec.dampening_active === true) { return "warn"; }
+    return "ok";
+  }
+  // Bulkhead: numbers only, so saturation and rejections were invisible too.
+  // rejected_count is a LIFETIME counter, not a current condition — an absolute
+  // threshold would either alarm forever or never, so it only counts when it
+  // GREW since the previous fetch. The previous sample resets with the page.
+  var BULKHEAD_REJECTED_SEEN = {};
+  function bulkheadSeverity(data) {
+    var d = data || {};
+    var bulkheads = d.bulkheads || {};
+    var summary = d.summary || {};
+    var worst = "ok";
+    var hot = summary.high_utilization;
+    if (Array.isArray(hot) && hot.length) { worst = "warn"; }
+    Object.keys(bulkheads).forEach(function (name) {
+      var b = bulkheads[name] || {};
+      if (b.available_permits === 0) { worst = "warn"; }
+      if (typeof b.rejected_count === "number") {
+        var prev = BULKHEAD_REJECTED_SEEN[name];
+        // No previous sample yields ok, never a false alarm.
+        if (prev != null && b.rejected_count > prev) { worst = "warn"; }
+        BULKHEAD_REJECTED_SEEN[name] = b.rejected_count;
+      }
+    });
+    return worst;
+  }
+  // Governance: the list carries every stored record, including terminal ones,
+  // and no status filter is sent — so one historical REJECTED request made the
+  // generic scan report danger forever. Only a PENDING record is a current
+  // condition: someone is waiting on a human.
+  function pendingApprovals(data) {
+    var requests = data && data.requests;
+    if (!Array.isArray(requests)) { return []; }
+    return requests.filter(function (r) { return r && r.status === "PENDING"; });
+  }
+  function governanceSeverity(data) {
+    return pendingApprovals(data).length ? "warn" : "ok";
+  }
+  // Per-panel severity: bespoke wherever the status shape's meaning is carried
+  // by a field rather than by a recognized token. scanSeverity survives as the
+  // fallback for a panel with no resolver (today: meta_watchdog, whose
+  // overall_status + per-component values ARE real tokens).
+  //
+  // A resolver returning a real severity on every good fetch is what lets
+  // "none" mean exactly one thing — no answer — which the triage line's
+  // "N of M reporting" denominator depends on.
   function panelSeverity(p, data) {
     if (p.id === "dashboard") { return severityOf(data && data.health_status) || "ok"; }
     if (p.id === "circuit_breaker") { return cbSeverity(data); }
     if (p.id === "dlq") { return dlqSeverity(data); }
     if (p.id === "canary") { return canarySeverity(data); }
     if (p.id === "runtime_config") { return runtimeConfigSeverity(data); }
+    if (p.id === "system") { return systemSeverity(data); }
+    if (p.id === "emergency") { return emergencySeverity(data); }
+    if (p.id === "throttle") { return throttleSeverity(data); }
+    if (p.id === "bulkhead") { return bulkheadSeverity(data); }
+    if (p.id === "governance") { return governanceSeverity(data); }
     return scanSeverity(data);
+  }
+  // Per-service severity for an expanded circuit-breaker row.
+  //
+  // Two corrections over reading `state` alone. severityOf returns null for an
+  // unknown/non-string token, and a null must resolve to "none" rather than
+  // leaving the row at the loop's "ok" initialiser. And a breaker an operator
+  // pinned — manually_controlled — is a standing condition whatever the state
+  // word says: traffic is being forced through DESPITE failures, and it does
+  // not self-clear, so nothing else will ever raise it. A pinned breaker is
+  // never green; force_open already resolves danger through state "open", so
+  // the lift bites exactly the forced-CLOSED case.
+  function serviceSeverity(svc) {
+    svc = svc || {};
+    var sev = severityOf(svc.state) || "none";
+    if (svc.manually_controlled === true) {
+      return SEV_RANK[sev] > SEV_RANK.warn ? sev : "warn";
+    }
+    return sev;
   }
   // Runtime Config panel health: a queued (pending) change is the only signal
   // worth surfacing — config editing is otherwise a calm, deliberate surface,
@@ -1041,12 +1259,6 @@
   function runtimeConfigSeverity(data) {
     var pending = (data && data.pending_changes) || [];
     return (Array.isArray(pending) && pending.length) ? "warn" : "ok";
-  }
-  function panelTitle(id) {
-    for (var i = 0; i < PANELS.length; i++) {
-      if (PANELS[i].id === id) { return PANELS[i].title; }
-    }
-    return id;
   }
   function statePill(stateStr) {
     var s = severityOf(stateStr);
@@ -1085,10 +1297,14 @@
       "success rate", null));
     bodyEl.appendChild(tiles);
     var foot = el("div", "hero-foot");
+    // Same "–" discipline as the tiles above: an unreported 24 h count is not
+    // a reported zero, and on screen the two are indistinguishable.
     foot.appendChild(document.createTextNode("last 24h "));
-    foot.appendChild(el("b", null, "+" + (ra.new_failures_24h == null ? 0 : ra.new_failures_24h)));
+    foot.appendChild(el("b", null, isReported(ra.new_failures_24h)
+      ? "+" + ra.new_failures_24h : "–"));
     foot.appendChild(document.createTextNode(" new · "));
-    foot.appendChild(el("b", null, String(ra.resolved_24h == null ? 0 : ra.resolved_24h)));
+    foot.appendChild(el("b", null, isReported(ra.resolved_24h)
+      ? String(ra.resolved_24h) : "–"));
     foot.appendChild(document.createTextNode(" resolved"));
     bodyEl.appendChild(foot);
   }
@@ -1169,11 +1385,9 @@
     if (parts.length) { bodyEl.appendChild(el("div", "dlq-rec", parts.join(" · "))); }
   }
 
-  // Canary summary — lifecycle bucket counts (active / created / terminal) instead
-  // of a raw-JSON dump that duplicates the drilldown, and widen the panel when it
-  // has rollouts so the active / history drilldown tables don't clip (same intent
-  // as the DLQ backlog span-2). Body fetches include_completed=true so terminal
-  // rollouts are counted and the history-only case still widens.
+  // Canary summary — lifecycle bucket counts (active / created / terminal)
+  // instead of a raw-JSON dump that duplicates the drilldown. Body fetches
+  // include_completed=true so terminal rollouts are counted too.
   function canaryBucket(state) {
     var s = String(state == null ? "" : state).toLowerCase();
     if (s === "created") { return "created"; }
@@ -1192,12 +1406,10 @@
     tiles.appendChild(miniTile("Created", n.created, null));
     tiles.appendChild(miniTile("Terminal", n.terminal, null));
     bodyEl.appendChild(tiles);
-    var panel = bodyEl.closest(".panel");
-    if (panel) { panel.dataset.populated = rollouts.length ? "1" : "0"; }
   }
   // Canary panel health: failed -> danger, paused -> warn, normal active -> ok;
   // terminal states (completed/rolled_back/cancelled) don't elevate so a clean
-  // history doesn't keep the spine degraded.
+  // history doesn't keep the row in the attention tier.
   function canarySeverity(data) {
     var rollouts = (data && data.rollouts) || [];
     var worst = "none";
@@ -1241,77 +1453,182 @@
     bodyEl.appendChild(tiles);
   }
 
-  // Tag a panel with its health and refresh the spine. Severity is shown IN
-  // PLACE — colored left border + brightness (CSS [data-health]) plus the status
-  // spine / clickable offender chips — and panels are NOT reordered. Fixed grid
-  // positions preserve the operator's spatial memory; this matches the mainstream
-  // convention (Grafana / Datadog / Sidekiq keep the layout stable and route
-  // severity into a dedicated summary region — here, the spine + jump-to chips).
-  // The dashboard still leads: it is first in source order and full-width (.hero).
-  function setPanelHealth(p, bodyEl, sev) {
-    HEALTH[p.id] = sev;
-    var panel = bodyEl.closest(".panel");
-    if (panel) {
-      panel.dataset.health = sev;
-    }
-    renderSpine();
+  // --- Tier placement + the triage verdict ---------------------------------
+  // One row per check. A row's severity decides which tier it lives in, and a
+  // migration RE-APPENDS the same node — the accordion's open state and its
+  // mounted drill-down survive, which a rebuild would destroy mid-triage.
+  function setRowHealth(row, sev) {
+    HEALTH[row.key] = sev;
+    row.sev = sev;
+    row.node.dataset.sev = sev;
+    describeRow(row);
+    placeRows();
+    renderTriage();
   }
-  function renderSpine() {
-    var spine = document.getElementById("spine");
-    if (!spine) { return; }
-    var ids = Object.keys(HEALTH);
-    var worst = "none";
-    ids.forEach(function (id) {
-      if (SEV_RANK[HEALTH[id]] > SEV_RANK[worst]) { worst = HEALTH[id]; }
+
+  function attentionTier(sev) { return sev === "danger" || sev === "warn"; }
+
+  function placeRows() {
+    var attention = document.getElementById("attention");
+    var system = document.getElementById("system-rows");
+    if (!attention || !system) { return; }
+    var plan = ROWS.map(function (r) {
+      return { row: r, attn: attentionTier(HEALTH[r.key]) };
     });
-    var state = worst === "none" ? "ok" : worst;
-    spine.className = "spine state-" + state;
-    var offenders = ids.filter(function (id) {
-      return HEALTH[id] === "danger" || HEALTH[id] === "warn";
-    }).sort(function (a, b) { return SEV_RANK[HEALTH[b]] - SEV_RANK[HEALTH[a]]; });
-    var nDanger = offenders.filter(function (id) { return HEALTH[id] === "danger"; }).length;
-    var nWarn = offenders.length - nDanger;
-    spine.querySelector(".spine-state").textContent =
-      state === "danger" ? "CRITICAL" : state === "warn" ? "DEGRADED" : "SAFE";
-    var sub = spine.querySelector(".spine-sub");
-    if (state === "ok") {
-      sub.textContent = "all systems nominal · " + ids.length + " panels healthy";
-    } else {
-      var parts = [];
-      if (nDanger) { parts.push(nDanger + " critical"); }
-      if (nWarn) { parts.push(nWarn + " degraded"); }
-      sub.textContent = parts.join(" · ") + " — needs attention";
-    }
-    var chips = spine.querySelector(".spine-chips");
-    chips.textContent = "";
-    offenders.forEach(function (id) {
-      var chip = el("button", "spine-chip " + HEALTH[id]);
-      chip.setAttribute("type", "button");
-      chip.appendChild(el("span", "dot"));
-      chip.appendChild(el("span", null, panelTitle(id)));
-      chip.addEventListener("click", function () {
-        var target = document.querySelector('.panel[data-panel-id="' + id + '"]');
-        if (target) {
-          target.scrollIntoView({ behavior: "smooth", block: "center" });
-          target.classList.add("flash");
-          setTimeout(function () { target.classList.remove("flash"); }, 1200);
-        }
+    var signature = plan.map(function (x) {
+      return x.row.key + (x.attn ? "!" : ".");
+    }).join("|");
+    if (signature !== LAST_PLACEMENT) {
+      LAST_PLACEMENT = signature;
+      plan.forEach(function (x) {
+        (x.attn ? attention : system).appendChild(x.row.node);
       });
+    }
+    renderSectionCounts(plan);
+  }
+
+  // Section headings count RENDERED ROWS in that section, never HEALTH keys —
+  // a panel contributes one key but N rows once the breaker panel expands, and
+  // a count that disagrees with what is visible under it is its own small lie.
+  function renderSectionCounts(plan) {
+    var attn = plan.filter(function (x) { return x.attn; }).length;
+    var healthy = plan.filter(function (x) { return HEALTH[x.row.key] === "ok"; }).length;
+    var quiet = plan.length - attn - healthy;
+    var attnLabel = document.getElementById("attention-count");
+    var sysLabel = document.getElementById("system-count");
+    var empty = document.getElementById("attention-empty");
+    if (attnLabel) {
+      attnLabel.textContent = attn + " of " + plan.length + " checks";
+    }
+    if (sysLabel) {
+      sysLabel.textContent = healthy + " healthy"
+        + (quiet ? " · " + quiet + " no signal" : "");
+    }
+    if (empty) {
+      empty.textContent = attn ? "" : "Nothing needs attention.";
+      empty.style.display = attn ? "none" : "";
+    }
+  }
+
+  function rowLabel(row) {
+    return row.kind === "service" ? row.service : row.panel.title;
+  }
+
+  // The verdict.
+  //
+  // Two rules it exists to keep. A row that never answered is NOT healthy: the
+  // previous aggregation folded an unresolved panel into its nominal-state
+  // sentence and its healthy count, so a 500ing status route read as SAFE. And
+  // the all-clear line is never rendered before anything has answered — that is the
+  // loading state, not a verdict. The denominator is the fetch outcome (did the
+  // status come back), which is why every panel now has a resolver that returns
+  // a real severity on a good fetch.
+  function renderTriage() {
+    var triage = document.getElementById("triage");
+    if (!triage) { return; }
+    var total = ROWS.length;
+    // Two different questions. "answered" = the status request came back at
+    // all. "resolved" = it came back AND carried a state. A row that answered
+    // with no state is not evidence of health, so it can never make the
+    // all-clear line true.
+    var answered = ROWS.filter(function (r) { return r.answered; }).length;
+    var resolved = ROWS.filter(function (r) {
+      return HEALTH[r.key] && HEALTH[r.key] !== "none";
+    }).length;
+    var offenders = ROWS.filter(function (r) {
+      return attentionTier(HEALTH[r.key]);
+    }).sort(function (a, b) {
+      return SEV_RANK[HEALTH[b.key]] - SEV_RANK[HEALTH[a.key]];
+    });
+    var state = offenders.length
+      ? HEALTH[offenders[0].key]
+      : (answered ? "ok" : "none");
+    triage.className = "triage state-" + state;
+
+    var lead;
+    var detail;
+    if (!resolved) {
+      // Not a verdict — either nothing has answered yet, or everything that
+      // answered carried no state. Either way this is the loading/unknown
+      // line, never the all-clear one.
+      lead = answered ? "no verdict yet" : "collecting status";
+      detail = answered + " of " + total + " checks reporting";
+    } else if (offenders.length) {
+      var worstRow = offenders[0];
+      var sentence = worstRow.descEl.textContent;
+      lead = sentence
+        ? rowLabel(worstRow) + ": " + sentence
+        : rowLabel(worstRow) + " needs attention";
+      var parts = [];
+      if (offenders.length > 1) {
+        parts.push((offenders.length - 1) + " other check"
+          + (offenders.length > 2 ? "s" : "") + " need attention");
+      }
+      if (answered < total) {
+        parts.push(answered + " of " + total + " reporting");
+      } else if (offenders.length === 1) {
+        parts.push("everything else is healthy");
+      }
+      detail = parts.join(" · ");
+    } else {
+      lead = "all clear";
+      var caveats = [];
+      if (answered < total) {
+        caveats.push(answered + " of " + total + " reporting");
+      }
+      if (resolved < answered) {
+        caveats.push((answered - resolved) + " reporting no state");
+      }
+      detail = "· " + (caveats.length ? caveats.join(" · ") : "every check is reporting");
+    }
+    triage.querySelector(".triage-lead").textContent = lead;
+    triage.querySelector(".triage-detail").textContent = detail;
+    renderTriageAge();
+    renderTriageChips(offenders);
+  }
+
+  // The age of the verdict, not of the fetch: where a payload stamps its own
+  // timestamp the console uses THAT, because /dashboard/summary is cache-served
+  // and a receive-time stamp would read "just now" over numbers minutes old.
+  // The token reports the OLDEST contributing payload, so it is never newer
+  // than any part of the sentence above it.
+  function renderTriageAge() {
+    var ageEl = document.querySelector(".triage-age");
+    if (!ageEl) { return; }
+    var oldest = null;
+    ROWS.forEach(function (r) {
+      if (r.dataAt != null && (oldest === null || r.dataAt < oldest)) {
+        oldest = r.dataAt;
+      }
+    });
+    if (oldest === null) {
+      ageEl._t = null;
+      ageEl.textContent = "";
+      return;
+    }
+    ageEl._t = oldest;
+    ageEl._fmt = triageAgeText;
+    ageEl.textContent = triageAgeText(oldest);
+  }
+  function triageAgeText(t) { return "as of " + relAgo(t); }
+
+  function renderTriageChips(offenders) {
+    var chips = document.getElementById("triage-chips");
+    if (!chips) { return; }
+    chips.textContent = "";
+    offenders.forEach(function (row) {
+      var chip = el("button", "triage-chip " + HEALTH[row.key]);
+      chip.setAttribute("type", "button");
+      chip.appendChild(el("span", "cdot"));
+      chip.appendChild(el("span", null, rowLabel(row)));
+      chip.addEventListener("click", function () { jumpToRow(row); });
       chips.appendChild(chip);
     });
   }
-  function buildSpine() {
-    if (document.getElementById("spine")) { return; }
-    var spine = el("div", "spine state-ok");
-    spine.id = "spine";
-    spine.appendChild(el("div", "spine-led"));
-    var main = el("div", "spine-main");
-    main.appendChild(el("div", "spine-state", "SAFE"));
-    main.appendChild(el("div", "spine-sub", "…"));
-    spine.appendChild(main);
-    spine.appendChild(el("div", "spine-chips"));
-    var grid = document.getElementById("grid");
-    grid.parentNode.insertBefore(spine, grid);
+  function jumpToRow(row) {
+    row.node.scrollIntoView({ behavior: "smooth", block: "center" });
+    row.node.classList.add("flash");
+    setTimeout(function () { row.node.classList.remove("flash"); }, 1200);
   }
 
   // Action button color encodes consequence, not permission (a.risk still drives
@@ -1332,7 +1649,19 @@
     return null;
   }
 
-  function loadPanel(p, bodyEl, updatedEl) {
+  // Where a payload stamps the moment its numbers were computed, that is the
+  // age of the DATA; the fetch instant is only the age of the request.
+  function payloadInstant(data) {
+    if (data && typeof data === "object" && typeof data.timestamp === "string") {
+      var t = Date.parse(data.timestamp);
+      if (!isNaN(t)) { return t; }
+    }
+    return Date.now();
+  }
+
+  function loadPanel(p, row) {
+    var bodyEl = row.bodyEl;
+    var updatedEl = row.whenEl;
     bodyEl.textContent = "";
     bodyEl.appendChild(el("div", "spinner", "Loading…"));
     adminFetch(p.status)
@@ -1342,11 +1671,11 @@
           try { parsed = JSON.parse(txt); } catch (_e) { parsed = txt; }
           if (!resp.ok) {
             bodyEl.textContent = "";
-            bodyEl.appendChild(el("div", "notice",
-              "HTTP " + resp.status + (resp.status === 401
-                ? " — set the admin key" : resp.status === 403
-                ? " — insufficient permission" : "")));
-            setPanelHealth(p, bodyEl, "none");
+            var httpNotice = "HTTP " + resp.status + (resp.status === 401
+              ? " — set the admin key" : resp.status === 403
+              ? " — insufficient permission" : "");
+            bodyEl.appendChild(el("div", "notice", httpNotice));
+            markUnanswered(row, httpNotice);
             return;
           }
           // A panel may declare a bespoke body renderer (bodyRender: "<key>")
@@ -1361,18 +1690,35 @@
             updatedEl._t = Date.now();
             updatedEl.textContent = "updated just now";
           }
-          setPanelHealth(p, bodyEl, panelSeverity(p, parsed));
+          row.status = parsed;
+          row.notice = null;
+          row.answered = true;
+          row.dataAt = payloadInstant(parsed);
+          setRowHealth(row, panelSeverity(p, parsed));
+          // The breaker panel's own fetch is the sole author of which service
+          // rows exist — no second request, and never the per-service endpoint.
+          if (p.id === "circuit_breaker") { syncServiceRows(parsed); }
         });
       })
       .catch(function (err) {
-        // Per-panel isolation: only this panel degrades.
+        // Per-row isolation: only this row degrades.
         bodyEl.textContent = "";
         var msg = (err && err.name === "AbortError")
           ? "server slow/unresponsive — verify via curl"
           : "fetch failed: " + ((err && err.message) || err);
         bodyEl.appendChild(el("div", "notice", msg));
-        setPanelHealth(p, bodyEl, "none");
+        markUnanswered(row, msg);
       });
+  }
+
+  // No answer. Severity "none" means exactly this — not "answered with nothing
+  // recognizable" — so the verdict can count reporting rows honestly.
+  function markUnanswered(row, notice) {
+    row.status = null;
+    row.notice = notice;
+    row.answered = false;
+    row.dataAt = null;
+    setRowHealth(row, "none");
   }
 
   // --- Shared drill-down fetch wrapper (550 D3) ----------------------------
@@ -2202,6 +2548,245 @@
     runtime_config: renderRuntimeConfig
   };
 
+  // --- Row prose: one sentence per row, from what the payload REPORTS -------
+  // A key->value dump makes the operator do the diagnosis. These describers do
+  // it instead — but they may only state what their own status payload
+  // actually carries. A clause whose value is unreported DROPS; it never
+  // becomes "unknown", "0" or an asserted condition, and a describer with
+  // nothing to say returns "" so the row renders its name and state alone.
+  // Every one is a pure function of the payload (no DOM, no row state).
+  //
+  // Sentences are static English with interpolated data tokens, so the copy is
+  // translatable in one place instead of scattered through six renderers.
+  var DESCRIBERS = {
+    dashboard: function (d) {
+      var ov = (d && d.overview) || {};
+      var ra = (d && d.recent_activity) || {};
+      var parts = [];
+      if (isReported(ov.pending)) { parts.push(ov.pending + " awaiting heal"); }
+      if (isReported(ov.failed)) { parts.push(ov.failed + " unrecovered"); }
+      if (isReported(ra.resolved_24h)) { parts.push(ra.resolved_24h + " healed in 24 h"); }
+      return parts.join(" · ");
+    },
+    // The controls row. It does NOT restate per-service trouble: every service
+    // in the list has its own row above, carrying its own state and severity,
+    // so a summary here would say the same thing a second time in a tier the
+    // operator is not scanning for trouble.
+    circuit_breaker: function (d) {
+      var services = d && d.services;
+      if (!Array.isArray(services)) { return ""; }
+      if (!services.length) {
+        // Never "all services healthy" — the store simply has no record yet.
+        return "no breaker state on record — the controls below take a service name";
+      }
+      return services.length + (services.length === 1 ? " service" : " services")
+        + " tracked — each has its own row above";
+    },
+    system: function (d) {
+      d = d || {};
+      if (d.status === "disabled" || d.enabled === false) {
+        var stopped = "automation is stopped — the kill switch is engaged, "
+          + "so nothing is being healed";
+        if (isReported(d.disabled_reason)) { stopped += ": " + d.disabled_reason; }
+        return stopped;
+      }
+      if (d.dry_run === true) {
+        return "dry-run — failures are observed and logged, no action is taken";
+      }
+      if (d.status === "enabled" || d.enabled === true) { return "automation enabled"; }
+      return "";
+    },
+    dlq: function (d) {
+      d = d || {};
+      var bs = d.by_status || {};
+      var parked = (bs.pending || 0) + (bs.requires_review || 0)
+        + (bs.reviewing || 0) + (bs.replaying || 0);
+      var lost = (bs.permanently_failed || 0) + (bs.rejected || 0);
+      var parts = [];
+      if (isReported(d.total)) {
+        parts.push(d.total + (d.total === 1 ? " entry" : " entries"));
+      }
+      if (parked) { parts.push(parked + " parked awaiting replay"); }
+      if (lost) { parts.push(lost + " past recovery"); }
+      var ar = d.auto_replay;
+      if (ar && ar.armed === false) {
+        parts.push("auto-replay disarmed"
+          + (isReported(ar.missing_link) ? " (" + ar.missing_link + ")" : ""));
+      }
+      return parts.join(" · ");
+    },
+    bulkhead: function (d) {
+      var sm = (d && d.summary) || {};
+      var parts = [];
+      if (isReported(sm.total_bulkheads)) {
+        parts.push(sm.total_bulkheads
+          + (sm.total_bulkheads === 1 ? " bulkhead" : " bulkheads"));
+      }
+      if (isReported(sm.total_active)) {
+        parts.push(sm.total_active + (sm.total_active === 1 ? " call" : " calls")
+          + " in flight");
+      }
+      if (isReported(sm.high_utilization)) {
+        parts.push("above 80% utilisation: " + sm.high_utilization.join(", "));
+      }
+      if (isReported(sm.total_rejected)) {
+        parts.push(sm.total_rejected + " rejected since start");
+      }
+      return parts.join(" · ");
+    },
+    emergency: function (d) {
+      d = d || {};
+      if (d.is_active === false) { return "no emergency declared"; }
+      if (d.is_active !== true) { return ""; }
+      var s = "emergency active";
+      if (isReported(d.level)) { s += " at " + d.level; }
+      if (isReported(d.activation_reason)) { s += " — " + d.activation_reason; }
+      if (d.is_recovering === true) { s += " · gradual recovery under way"; }
+      return s;
+    },
+    canary: function (d) {
+      var rollouts = d && d.rollouts;
+      if (!Array.isArray(rollouts)) { return ""; }
+      if (!rollouts.length) { return "no rollouts on record"; }
+      var n = { active: 0, created: 0, terminal: 0 };
+      rollouts.forEach(function (r) { n[canaryBucket(r && r.state)]++; });
+      var parts = [];
+      if (n.active) {
+        parts.push(n.active + " rollout" + (n.active === 1 ? "" : "s") + " in progress");
+      }
+      if (n.created) { parts.push(n.created + " staged, not started"); }
+      if (!n.active && !n.created) { parts.push("no active rollouts"); }
+      if (n.terminal) { parts.push(n.terminal + " finished"); }
+      return parts.join(" · ");
+    },
+    throttle: function (d) {
+      d = d || {};
+      var gov = d.governance || {};
+      var emg = d.emergency || {};
+      var rec = d.recovery || {};
+      if (gov.kill_switch_active === true) {
+        return "kill switch engaged — the adaptive limit is not being applied";
+      }
+      if (emg.full_stop_active === true) {
+        return "full stop — every throttled request is being rejected";
+      }
+      var parts = [];
+      if (isReported(d.current_limit)) {
+        parts.push("limit " + d.current_limit + " requests per window");
+      }
+      if (emg.active === true) { parts.push("emergency tier multipliers applied"); }
+      if (rec.dampening_active === true) { parts.push("recovery dampening active"); }
+      if (isReported(d.rejected_requests)) {
+        parts.push(d.rejected_requests + " rejected since start");
+      }
+      return parts.join(" · ");
+    },
+    governance: function (d) {
+      var requests = d && d.requests;
+      if (!Array.isArray(requests)) { return ""; }
+      var pending = pendingApprovals(d);
+      if (pending.length) {
+        return pending.length + (pending.length === 1 ? " request" : " requests")
+          + " waiting on a human decision";
+      }
+      return requests.length
+        ? "nothing waiting on a decision · " + requests.length + " on record"
+        : "no approval requests on record";
+    },
+    meta_watchdog: function (d) {
+      d = d || {};
+      var comps = d.components || {};
+      var names = Object.keys(comps);
+      var bad = names.filter(function (n) {
+        var s = severityOf(comps[n]);
+        return s === "danger" || s === "warn";
+      });
+      var parts = [];
+      if (isReported(d.overall_status)) { parts.push("watchdog reports " + d.overall_status); }
+      if (names.length) {
+        parts.push(bad.length
+          ? bad.length + " of " + names.length + " components unhealthy: " + bad.join(", ")
+          : names.length + " components healthy");
+      }
+      if (isReported(d.last_check)) { parts.push("last check " + relAgoIso(d.last_check)); }
+      return parts.join(" · ");
+    },
+    runtime_config: function (d) {
+      d = d || {};
+      var parts = [];
+      if (d.config && typeof d.config === "object") {
+        var n = Object.keys(d.config).length;
+        parts.push(n + (n === 1 ? " domain" : " domains") + " editable");
+      }
+      if (Array.isArray(d.pending_changes)) {
+        parts.push(d.pending_changes.length
+          ? d.pending_changes.length
+            + (d.pending_changes.length === 1 ? " change pending" : " changes pending")
+          : "no pending changes");
+      }
+      if (d.audit_enabled === false) {
+        parts.push("audit trail OFF — change reasons are not retained");
+      }
+      return parts.join(" · ");
+    },
+    // One expanded circuit-breaker row. A forced-CLOSED breaker must never read
+    // "operating normally": an operator pinned traffic through DESPITE the
+    // failures, which is what the console's own Allow copy says it does.
+    service: function (svc) {
+      svc = svc || {};
+      var state = typeof svc.state === "string" ? svc.state.toLowerCase() : null;
+      var forced = svc.manually_controlled === true;
+      // controlled_by_id is permanently null on the console's own action path,
+      // so the reason is the only "who" there is — and it drops when unreported
+      // rather than promising an operator identity the payload never carries.
+      var why = isReported(svc.control_reason) ? " — " + svc.control_reason : "";
+      if (forced && state === "closed") {
+        return "forced closed by an operator — traffic is passing despite failures" + why;
+      }
+      if (forced && state === "open") {
+        return "blocked by an operator — every call is being rejected" + why;
+      }
+      if (forced) { return "under an operator override" + why; }
+      if (state === "open") {
+        var open = "circuit open — calls are being parked instead of sent";
+        if (isReported(svc.failure_count)) {
+          open += ", after " + svc.failure_count + " failures";
+        }
+        return open;
+      }
+      if (state === "half_open") {
+        return "probing — the next call decides whether the circuit closes";
+      }
+      if (state === "closed") {
+        var closed = "circuit closed";
+        if (isReported(svc.failure_count) && svc.failure_count > 0) {
+          closed += " · " + svc.failure_count + " failures recorded";
+        }
+        return closed;
+      }
+      return "state not reported — this circuit's condition is unknown";
+    }
+  };
+
+  // Prose labels for the expanded service row's facts. A translation layer,
+  // never a whitelist: a field with no entry still renders under its raw name,
+  // so a server-side addition is visible-but-unlabelled rather than silently
+  // invisible. Ugly is recoverable; missing is not.
+  var FACT_LABELS = {
+    state: "state",
+    failure_count: "failures",
+    success_count: "successes",
+    last_failure_at: "last failure",
+    opened_at: "opened",
+    manually_controlled: "operator override",
+    control_reason: "forced by"
+  };
+  // Excluded by name. `service_name` IS the row's name, already in the head —
+  // repeating it is not a fact about the service. `metadata` is caller-supplied
+  // context of unbounded shape, and flattening it re-creates the key->value
+  // dump this table exists to replace.
+  var FACT_EXCLUDED = { service_name: 1, metadata: 1 };
+
   // --- Action modal (D10) --------------------------------------------------
   var pendingAction = null;
   function openActionModal(action) {
@@ -2524,75 +3109,256 @@
   }
 
   // --- Build the page ------------------------------------------------------
-  // Body-only refreshers (one per built panel) for the header auto-refresh
+  // Body-only refreshers (one per built panel row) for the header auto-refresh
   // toggle; reset on every refreshAll() rebuild.
   var panelRefreshers = [];
   var autoRefreshTimer = null;
-  function buildPanel(p) {
-    var panel = el("div", "panel");
-    panel.dataset.panelId = p.id;  // spine chip targeting + DLQ width selector
-    if (p.id === "dashboard") { panel.classList.add("hero"); }
-    var head = el("div", "panel-head");
-    head.appendChild(el("h2", null, p.title));
-    if (p.pro) { head.appendChild(el("span", "tag pro", "PRO")); }
-    var updated = el("span", "updated", "");
-    head.appendChild(updated);
-    var refresh = el("button", null, "↻");
+
+  // Row skeleton shared by both kinds. The head is the compact line the System
+  // tier shows; the body is hidden until the operator expands the row.
+  function buildRowShell(key, kind, name, isPro) {
+    var row = { key: key, kind: kind, sev: "none", answered: false, dataAt: null };
+    var node = el("div", "row");
+    node.dataset.sev = "none";
+    var head = el("div", "row-head");
+    head.setAttribute("aria-expanded", "false");
+    head.appendChild(el("span", "st"));
+    head.appendChild(el("span", "name", name));
+    if (isPro) { head.appendChild(el("span", "tag pro", "PRO")); }
+    row.descEl = el("span", "desc", "");
+    head.appendChild(row.descEl);
+    // The trailing token rides the always-on freshness ticker: a panel row
+    // shows its own fetch age, a service row its opened_at event time.
+    row.whenEl = el("span", "when updated", "");
+    head.appendChild(row.whenEl);
+    var refresh = el("button", "row-refresh", "↻");
     refresh.title = "Refresh";
+    refresh.setAttribute("type", "button");
+    refresh.addEventListener("click", function (e) {
+      e.stopPropagation();          // the head itself toggles the accordion
+      refreshRow(row);
+    });
     head.appendChild(refresh);
-    panel.appendChild(head);
+    row.chevEl = el("span", "chev", "▸");
+    head.appendChild(row.chevEl);
+    head.addEventListener("click", function () { toggleRow(row); });
+    node.appendChild(head);
 
-    var body = el("div", "panel-body");
-    panel.appendChild(body);
+    row.bodyWrap = el("div", "row-body");
+    row.bodyWrap.style.display = "none";
+    node.appendChild(row.bodyWrap);
+    row.node = node;
+    row.headEl = head;
+    return row;
+  }
 
-    // Refresh the whole panel surface: status body + (if present) the drill-down.
-    // Wired to ↻ and to each action's post-success onDone so bulk actions
-    // (Replay/Archive/Purge) also update the numbers behind the modal.
-    var drill = null;
-    var drillFn = p.drilldown ? DRILLDOWNS[p.drilldown] : null;
-    function refreshPanel() {
-      loadPanel(p, body, updated);
-      if (drill && drillFn) {
-        drill.textContent = "";
-        drillFn(drill);
-      }
+  function toggleRow(row) {
+    row.open = !row.open;
+    row.bodyWrap.style.display = row.open ? "" : "none";
+    row.chevEl.textContent = row.open ? "▾" : "▸";
+    row.node.classList.toggle("open", row.open);
+    row.headEl.setAttribute("aria-expanded", row.open ? "true" : "false");
+    // Drill-downs mount on FIRST expansion, not at boot: severity needs only
+    // the status fetch, so a page load costs one request per row instead of two.
+    if (row.open && row.drillFn && !row.drillMounted) {
+      row.drillMounted = true;
+      row.drillFn(row.drillEl);
     }
-    refresh.addEventListener("click", refreshPanel);
-    // Body-only refresher for the header auto-refresh toggle — never rebuilds an
-    // open drill-down, so it won't disrupt active triage.
-    panelRefreshers.push(function () { loadPanel(p, body, updated); });
+  }
 
-    if (p.actions && p.actions.length) {
-      var actions = el("div", "panel-actions");
-      p.actions.forEach(function (a) {
-        // Per-action PRO gate (D5): a `pro: true` action is hidden unless the
-        // panel's backing slot reports PRO present. Reuses the same
-        // __BALDUR_PANELS__ map that panelVisible consults for whole-panel
-        // gating, so a partly-OSS panel (dlq) shows its OSS actions and hides
-        // its PRO-only ones (Replay/Archive/Purge).
-        if (a.pro && (window.__BALDUR_PANELS__ || {})[p.id] !== true) { return; }
-        var btn = el("button", btnClass(a), a.label);
-        // Copy the action so the post-success panel refresh is attached without
-        // mutating the shared PANELS config.
-        btn.addEventListener("click", function () {
-          openActionModal(Object.assign({}, a, { onDone: refreshPanel }));
-        });
-        actions.appendChild(btn);
+  // Refresh the whole row surface: status body + (if mounted) the drill-down.
+  // Wired to ↻ and to each action's post-success onDone. A service row has no
+  // fetch of its own — the breaker panel's list call is its only source.
+  function refreshRow(row) {
+    if (row.kind === "service") {
+      var cb = ROW_BY_KEY["p:circuit_breaker"];
+      if (cb) { refreshRow(cb); }
+      return;
+    }
+    loadPanel(row.panel, row);
+    if (row.drillMounted && row.drillFn) {
+      row.drillEl.textContent = "";
+      row.drillFn(row.drillEl);
+    }
+  }
+
+  // The action loop, shared by panel rows and expanded service rows. On a
+  // service row the target is pre-bound, so "Reset breaker" on the payments row
+  // targets payments instead of asking the operator to retype a name the row
+  // already states.
+  function buildActions(p, row, boundParam) {
+    if (!p.actions || !p.actions.length) { return; }
+    var actions = el("div", "panel-actions");
+    var rendered = 0;
+    p.actions.forEach(function (a) {
+      // Per-action PRO gate (D5): a `pro: true` action is hidden unless the
+      // panel's backing slot reports PRO present. Reuses the same
+      // __BALDUR_PANELS__ map that panelVisible consults for whole-panel
+      // gating, so a partly-OSS panel (dlq) shows its OSS actions and hides
+      // its PRO-only ones (Replay/Archive/Purge).
+      if (a.pro && (window.__BALDUR_PANELS__ || {})[p.id] !== true) { return; }
+      var btn = el("button", btnClass(a), a.label);
+      // Copy the action so the post-success refresh (and any pre-bound target)
+      // is attached without mutating the shared PANELS config.
+      btn.addEventListener("click", function () {
+        openActionModal(bindAction(a, boundParam, function () { refreshRow(row); }));
       });
-      panel.appendChild(actions);
+      actions.appendChild(btn);
+      rendered++;
+    });
+    if (rendered) { row.bodyWrap.appendChild(actions); }
+  }
+  function bindAction(a, boundParam, onDone) {
+    var bound = Object.assign({}, a, { onDone: onDone });
+    if (boundParam && a.param) {
+      bound.path = a.path.replace("{" + a.param + "}",
+        encodeURIComponent(boundParam));
+      bound.param = null;   // the modal no longer asks for a target
     }
+    return bound;
+  }
 
+  function buildPanelRow(p) {
+    var row = buildRowShell("p:" + p.id, "panel", p.title, p.pro);
+    row.panel = p;
+    row.bodyEl = el("div", "panel-body");
+    row.bodyWrap.appendChild(row.bodyEl);
     // Bespoke drill-down hook (550 D3): the generic shape stays the single
     // source of truth (PANELS); a panel's `drilldown: "<key>"` selects its
     // one-off table/detail renderer from the DRILLDOWNS dispatch table.
-    if (drillFn) {
-      drill = el("div", "panel-drilldown");
-      panel.appendChild(drill);
-      drillFn(drill);
+    row.drillFn = p.drilldown ? DRILLDOWNS[p.drilldown] : null;
+    if (row.drillFn) {
+      row.drillEl = el("div", "panel-drilldown");
+      row.bodyWrap.appendChild(row.drillEl);
     }
+    buildActions(p, row, null);
+    return row;
+  }
 
-    loadPanel(p, body, updated);
-    return panel;
+  // An expanded circuit-breaker row: one per application service the LIST call
+  // returned. GET /control/status/{name} is deliberately NOT used — it calls
+  // get_or_create_state, so expanding a row for a name the server has never
+  // observed would CREATE the breaker record and then describe the record it
+  // just made. A read must not manufacture its own answer.
+  function buildServiceRow(cbPanel, serviceName) {
+    var row = buildRowShell("cb:" + serviceName, "service", serviceName, false);
+    row.service = serviceName;
+    row.panel = cbPanel;
+    row.factsEl = el("div", "facts");
+    row.bodyWrap.appendChild(row.factsEl);
+    buildActions(cbPanel, row, serviceName);
+    return row;
+  }
+
+  function renderServiceRow(row) {
+    var svc = row.status || {};
+    describeRow(row);
+    // Facts: value-based, never key-based. /control/status emits a fixed 10-key
+    // dict with null in the empty slots, so "one row per key present" would
+    // print `opened_at: null` on every healthy service — the key->value dump
+    // this table exists to replace, with null shown to the operator.
+    row.factsEl.textContent = "";
+    Object.keys(svc).forEach(function (k) {
+      if (FACT_EXCLUDED[k]) { return; }
+      if (!isReported(svc[k])) { return; }
+      var fact = el("div", "fact");
+      fact.appendChild(el("span", "k", FACT_LABELS[k] || k));
+      fact.appendChild(el("span", "v", factValue(k, svc[k])));
+      row.factsEl.appendChild(fact);
+    });
+    // Trailing token: a real event time when the payload reports one, else the
+    // panel's fetch age. opened_at is an ISO string, so it needs relAgoIso —
+    // relAgo takes epoch ms and would render nonsense from a string.
+    if (isReported(svc.opened_at)) {
+      var opened = Date.parse(svc.opened_at);
+      if (!isNaN(opened)) {
+        row.whenEl._t = opened;
+        row.whenEl._fmt = openedAtText;
+        row.whenEl.textContent = openedAtText(opened);
+        return;
+      }
+    }
+    var cb = ROW_BY_KEY["p:circuit_breaker"];
+    row.whenEl._fmt = null;
+    row.whenEl._t = (cb && cb.whenEl._t) || null;
+    row.whenEl.textContent = row.whenEl._t ? "updated " + relAgo(row.whenEl._t) : "";
+  }
+  function openedAtText(t) { return "opened " + clockOf(t) + " · " + relAgo(t); }
+  function factValue(key, value) {
+    if (typeof value === "boolean") { return value ? "yes" : "no"; }
+    if (key === "opened_at" || key === "last_failure_at") {
+      return clockOfIso(value) + " · " + relAgoIso(value);
+    }
+    return String(value);
+  }
+
+  function describeRow(row) {
+    var text = "";
+    if (row.kind === "service") {
+      text = DESCRIBERS.service(row.status);
+    } else if (row.answered) {
+      var describe = DESCRIBERS[row.panel.id];
+      text = describe ? describe(row.status) : "";
+    } else if (row.notice) {
+      text = "status not obtained — " + row.notice;
+    }
+    row.descEl.textContent = text;
+  }
+
+  // The breaker panel's services[] is the sole author of which service rows
+  // exist. Keyed on the name, never on position: a reordered list must not
+  // rename one service's contents onto another.
+  function syncServiceRows(data) {
+    var cbRow = ROW_BY_KEY["p:circuit_breaker"];
+    if (!cbRow) { return; }
+    var services = (data && data.services) || [];
+    if (!Array.isArray(services)) { services = []; }
+    var live = {};
+    var ordered = [];
+    services.forEach(function (svc) {
+      svc = svc || {};
+      var name = svc.service_name == null ? "" : String(svc.service_name);
+      if (!name || live["cb:" + name]) { return; }
+      var key = "cb:" + name;
+      live[key] = true;
+      var row = ROW_BY_KEY[key];
+      if (!row) {
+        row = buildServiceRow(cbRow.panel, name);
+        ROW_BY_KEY[key] = row;
+      }
+      row.status = svc;
+      row.answered = true;
+      row.dataAt = cbRow.dataAt;
+      ordered.push(row);
+    });
+    // A service that disappeared loses its row AND its HEALTH key in the same
+    // step. The map is otherwise write-only until a full rebuild, so a stale
+    // key would inflate every count derived from it.
+    Object.keys(ROW_BY_KEY).forEach(function (key) {
+      if (key.indexOf("cb:") !== 0 || live[key]) { return; }
+      var gone = ROW_BY_KEY[key];
+      if (gone.node.parentNode) { gone.node.parentNode.removeChild(gone.node); }
+      delete ROW_BY_KEY[key];
+      delete HEALTH[key];
+    });
+    // Service rows sit as a contiguous block immediately above their panel row,
+    // in services[] order. The panel row itself is ALWAYS kept: its three
+    // actions take a free-typed service name, so on a fresh install (or a
+    // degraded backend serving an empty memory view) it is the only /control
+    // surface the console has left.
+    var others = ROWS.filter(function (r) { return r.kind !== "service"; });
+    var at = others.indexOf(cbRow);
+    if (at < 0) { at = others.length; }
+    ROWS = others.slice(0, at).concat(ordered, others.slice(at));
+    ordered.forEach(function (row) {
+      HEALTH[row.key] = serviceSeverity(row.status);
+      row.sev = HEALTH[row.key];
+      row.node.dataset.sev = row.sev;
+      renderServiceRow(row);
+    });
+    LAST_PLACEMENT = "";   // the row SET changed, not just a severity
+    placeRows();
+    renderTriage();
   }
 
   function init() {
@@ -2616,17 +3382,33 @@
     document.getElementById("modal-confirm").addEventListener("click",
       runPendingAction);
 
-    // Keep "updated Xs ago" labels ticking without refetching (display only).
+    // One always-on display ticker for every age token on the page. Each
+    // element may carry its own formatter (_fmt); with none it keeps the
+    // original "updated Xs ago" shape, so every existing call site is
+    // unchanged. One timer, one loop, several output shapes — and it never
+    // fetches, so it cannot interleave with anything.
     setInterval(function () {
       var spans = document.getElementsByClassName("updated");
       for (var i = 0; i < spans.length; i++) {
         if (spans[i]._t) {
-          spans[i].textContent = "updated " + relAgo(spans[i]._t);
+          spans[i].textContent = spans[i]._fmt
+            ? spans[i]._fmt(spans[i]._t)
+            : "updated " + relAgo(spans[i]._t);
         }
       }
     }, 5000);
 
-    // Header auto-refresh toggle: body-only refresh of every panel on an
+    // Wall clock (display only). The confirmed design pairs it with a "live"
+    // marker; auto-refresh ships OFF, so "live" would be a false claim on a
+    // default console — the age tokens state the real thing instead.
+    var clock = document.getElementById("clock");
+    function tickClock() {
+      clock.textContent = clockOf(Date.now()) + " " + tzSuffix();
+    }
+    tickClock();
+    setInterval(tickClock, 1000);
+
+    // Header auto-refresh toggle: body-only refresh of every panel row on an
     // interval (off by default; admin traffic is <1 RPS).
     var auto = document.getElementById("autorefresh-toggle");
     auto.addEventListener("change", function () {
@@ -2641,19 +3423,33 @@
       }
     });
 
-    buildSpine();
     refreshAll();
   }
 
   function refreshAll() {
-    var grid = document.getElementById("grid");
-    grid.textContent = "";
-    panelRefreshers = [];  // repopulated by buildPanel below
-    HEALTH = {};           // repopulated as each panel's status resolves
-    renderSpine();         // reset the spine to SAFE until panels report
+    var attention = document.getElementById("attention");
+    var system = document.getElementById("system-rows");
+    attention.textContent = "";
+    system.textContent = "";
+    panelRefreshers = [];        // repopulated below
+    HEALTH = {};                 // repopulated as each row's status resolves
+    ROWS = [];
+    ROW_BY_KEY = {};
+    LAST_PLACEMENT = "";
+    BULKHEAD_REJECTED_SEEN = {}; // no previous sample -> no false rejection alarm
     PANELS.filter(panelVisible).forEach(function (p) {
-      grid.appendChild(buildPanel(p));
+      var row = buildPanelRow(p);
+      ROWS.push(row);
+      ROW_BY_KEY[row.key] = row;
+      // Body-only refresher for the header auto-refresh toggle — never rebuilds
+      // an open drill-down, so it won't disrupt active triage.
+      panelRefreshers.push(function () { loadPanel(p, row); });
     });
+    // Every row boots into System and the verdict shows its loading state:
+    // nothing has answered yet, so there is no verdict to render.
+    placeRows();
+    renderTriage();
+    ROWS.forEach(function (row) { loadPanel(row.panel, row); });
   }
 
   init();
