@@ -20,19 +20,21 @@
   <title>Baldur Admin Console</title>
   <style>
     :root {
-      /* Instrument principle (v6): achromatic chrome, state-only color. The
-         former dawn-gold brand micro-marks are retired — the wordmark is
-         plain text, and the surviving locator marks (:focus-visible ring,
-         panel flash) use the achromatic --mark — so hue means state
-         severity and nothing else. Severity hues use the terminal-ANSI
-         family shared with the baldur.sh landing, so site and console read
-         as one system. */
-      --ink: #101113; --ink2: #17181a; --ink3: #1c1d20; --line: #2a2b2e;
-      --bone: #ececec; --ash: #9a9a9a; --ash2: #737373;
-      --mark: #e6e6e6;
-      --ember: #f14c4c; --moss: #89d185; --amber: #cca700;
-      --ember-tint: rgba(241,76,76,.10); --moss-tint: rgba(137,209,133,.08);
-      --amber-tint: rgba(204,167,0,.10);
+      /* Instrument principle: achromatic chrome, state-only color. The former
+         dawn-gold brand micro-marks are retired — the wordmark is plain text,
+         and the surviving locator marks (:focus-visible ring, row flash) use
+         the achromatic --mark — so hue means state severity and nothing else.
+         The state set is the two-hue data family shared with the baldur.sh
+         landing (--ember fail / --moss heal / --open neutral series), so site
+         and console read as one system. --amber is the console's own
+         attention-tier mark for a degraded-but-absorbing domain; it never
+         appears on the landing and is never a chart series. */
+      --ink: #0a0b0d; --ink2: #0f1013; --ink3: #121317; --line: #1e2026;
+      --bone: #d8dce3; --ash: #7e8695; --ash2: #4c525e;
+      --mark: #f0f2f5;
+      --ember: #e05561; --moss: #6fb5a0; --amber: #fbad37; --open: #778092;
+      --ember-tint: rgba(224,85,97,.10); --moss-tint: rgba(111,181,160,.08);
+      --amber-tint: rgba(251,173,55,.10);
       --mono: ui-monospace, "Cascadia Code", "SF Mono", Consolas, monospace;
     }
     * { box-sizing: border-box; }
@@ -257,8 +259,8 @@
     .state-warn   .spine-led { background: var(--amber); }
     .state-danger .spine-led { background: var(--ember); animation: spine-pulse 1.3s ease-in-out infinite; }
     @keyframes spine-pulse {
-      0%, 100% { box-shadow: 0 0 0 0 rgba(241,76,76,.55); }
-      50%      { box-shadow: 0 0 0 10px rgba(241,76,76,0); }
+      0%, 100% { box-shadow: 0 0 0 0 rgba(224,85,97,.55); }
+      50%      { box-shadow: 0 0 0 10px rgba(224,85,97,0); }
     }
     @media (prefers-reduced-motion: reduce) { .state-danger .spine-led { animation: none; } }
     .spine-main  { display: flex; flex-direction: column; gap: 3px; }
@@ -730,7 +732,7 @@
   // same mechanism as the updatedEl._t freshness stamp.
   function appendNullCollapse(container, depth, path, nullKeys, nullsOpen) {
     var open = !!(nullsOpen && nullsOpen[path]);
-    var toggle = el("button", "null-clamp");   // a <button> -> gets the dawn focus ring
+    var toggle = el("button", "null-clamp");   // a <button> -> gets the achromatic focus ring
     toggle.setAttribute("type", "button");
     if (depth > 0) { toggle.style.paddingLeft = (depth * 14) + "px"; }
     var expanded = el("div");
