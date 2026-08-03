@@ -3777,15 +3777,23 @@
 
     // Right-edge anchor for the open series. The summary half silently zeroes
     // with no statistics adapter registered — the shipped memory/Redis OSS
-    // configuration — and the window half is a lower bound of true open, so
-    // max() is the honest floor either way. It understates; it never overstates.
+    // configuration — and a TRUNCATED window is a lower bound of true open, so
+    // max() is the honest floor across those two.
+    //
+    // Not, however, when the window is WHOLE. Then `entries` is every entry the
+    // store holds, `stillOpen` is the count rather than a floor, and it is read
+    // fresh while /dashboard/summary is cache-served for its TTL. Taking the max
+    // there is how a completed recovery keeps reading as a live incident: drain
+    // the queue and for one TTL the strip and the right edge stay pinned to the
+    // pre-drain number, directly above the heal bars that emptied it.
     var summary = summaryPayload();
     var overview = (summary && summary.overview) || {};
     var summaryOpen = null;
     if (isReported(overview.pending) || isReported(overview.failed)) {
       summaryOpen = (overview.pending || 0) + (overview.failed || 0);
     }
-    var anchor = summaryOpen === null
+    var whole = windowIsWhole(state);
+    var anchor = (summaryOpen === null || whole)
       ? stillOpen
       : Math.max(stillOpen, summaryOpen);
     var open = [];
@@ -3799,8 +3807,16 @@
       start: start, end: end, width: width, count: count,
       fails: fails, heals: healed, open: open,
       stillOpen: stillOpen, summaryOpen: summaryOpen, anchor: anchor,
-      healedInWindow: heals.length, summary: summary
+      healedInWindow: heals.length, summary: summary, whole: whole
     };
+  }
+
+  // The window is WHOLE when nothing was left out of it: no page cap, no
+  // 6-hour cutoff, and a server-reported total that matches what was fetched.
+  // Everywhere else the window is a sample and its counts are lower bounds.
+  function windowIsWhole(state) {
+    return !!state && !state.truncated && !state.partial
+      && state.totalCount !== null && state.totalCount === state.entries.length;
   }
 
   function renderLedger() {
@@ -4040,7 +4056,10 @@
     // equal, is exactly how it read.
     addCounter(foot, "still unhealed", series.anchor);
     var parked = [series.stillOpen];
-    if (isReported(overview.pending)) { parked.push(overview.pending); }
+    // Same rule as the anchor: the cache-served summary is a floor only while
+    // the window is a sample. Over a whole window it is merely the older of two
+    // readings of the same number.
+    if (!series.whole && isReported(overview.pending)) { parked.push(overview.pending); }
     addCounter(foot, "awaiting replay", Math.max.apply(null, parked));
     // The label states the span it actually covers: a heal count from a
     // 7-minute window must not wear a 24-hour label.

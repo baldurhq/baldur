@@ -1134,6 +1134,23 @@ class TestConsoleHealingLedger:
         # The legend, the footer slot and the crosshair tooltip say one thing.
         assert raw.count("still unhealed") >= 3
 
+    def test_a_whole_window_outranks_a_cache_served_summary(self):
+        """max(reported, window-derived) is a floor only while the window is a
+        SAMPLE. When nothing was truncated away the window is the whole store,
+        read fresh, while /dashboard/summary is cache-served for its TTL — so
+        the max pinned the strip and the right edge to the pre-recovery number
+        for one TTL after an operator drained the queue, directly above the heal
+        bars that emptied it."""
+        raw = _console_source()
+        assert "function windowIsWhole(" in raw
+        assert "state.totalCount === state.entries.length" in raw
+        # The anchor and the parked counter take the same rule.
+        assert "(summaryOpen === null || whole)" in raw
+        assert "if (!series.whole && isReported(overview.pending))" in raw
+        # …and the retired claim goes with it: over a whole window the max()
+        # overstates, so the comment must not promise it never does.
+        assert "It understates; it never overstates" not in raw
+
     def test_healed_counter_states_the_span_it_covers(self):
         """``resolved_24h`` is a rolling 24-hour count, not a calendar day —
         and when the window-derived heal count wins the max, a 7-minute number
