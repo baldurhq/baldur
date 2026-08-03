@@ -1237,8 +1237,18 @@
     if ((bs.permanently_failed || 0) + (bs.rejected || 0) > 0) { return "danger"; }
     // A disarmed on-recovery auto-replay loop is the same silent-degradation class
     // the backlog counts warn on — surface it on the row's severity.
+    //
+    // Except when the operator switched it off. `disabled` is a link like any
+    // other in the arming chain, so it disarms the loop and used to raise the
+    // same warn as a broken one — which made the documented way OUT of the
+    // warning ("if you don't use automatic replay, turn it off rather than
+    // leaving it half-configured") produce the warning it promises to remove.
+    // An off switch someone chose is a configuration statement, not a defect;
+    // every other missing link means the feature is on and cannot fire.
     var ar = (data && data.auto_replay) || null;
-    if (ar && ar.armed === false) { return "warn"; }
+    if (ar && ar.armed === false && ar.missing_link !== "disabled") {
+      return "warn";
+    }
     if ((bs.pending || 0) + (bs.requires_review || 0) + (bs.reviewing || 0)
         + (bs.replaying || 0) > 0) { return "warn"; }
     return "ok";
@@ -1460,6 +1470,10 @@
       wrap.appendChild(el("span", "tag ok", "auto-replay armed"));
     } else if (ar.armed === null) {
       wrap.appendChild(el("span", "tag", "auto-replay: probe failed"));
+    } else if (ar.missing_link === "disabled") {
+      // Neutral tag, no remaining-links list: nothing is missing, the feature
+      // is off because someone turned it off.
+      wrap.appendChild(el("span", "tag", "auto-replay off by configuration"));
     } else {
       wrap.appendChild(el("span", "tag warn",
         "auto-replay disarmed: "
@@ -2773,9 +2787,13 @@
       if (lost) { parts.push(lost + " past recovery"); }
       var ar = d.auto_replay;
       if (ar && ar.armed === false) {
-        parts.push("auto-replay disarmed"
-          + (isReported(ar.missing_link)
-            ? " — " + replayLinkText(ar.missing_link) : ""));
+        // "disarmed — replay is switched off" reads as a fault report about a
+        // switch the operator chose. It is one clause, in their own terms.
+        parts.push(ar.missing_link === "disabled"
+          ? "auto-replay off by configuration"
+          : "auto-replay disarmed"
+            + (isReported(ar.missing_link)
+              ? " — " + replayLinkText(ar.missing_link) : ""));
       }
       return parts.join(" · ");
     },
