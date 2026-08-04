@@ -148,23 +148,3 @@ class TestEnvAuditorEventNameContract:
         mock_logger.debug.assert_called()
         event_names = [c[0][0] for c in mock_logger.debug.call_args_list]
         assert "baldur.integrity_module_unavailable" in event_names
-
-
-class TestMetricHydratorEventNameContract:
-    """MetricHydrator event names: semantic inversion fixes."""
-
-    def test_metric_hydrator_source_has_correct_event_names(self) -> None:
-        """MetricHydrator source uses correct event names (not old _available / _non suffixes)."""
-        import inspect
-
-        from baldur.adapters.django.startup import metric_hydrator
-
-        source = inspect.getsource(metric_hydrator)
-        # Fixed event names present
-        assert '"baldur.reconciler_module_unavailable"' in source
-        assert '"baldur.gauge_hydration_failed"' in source
-        # (system_metrics_cache events relocated to baldur.bootstrap — 608 D6)
-        # Old incorrect names absent
-        assert '"baldur.reconciler_module_available"' not in source
-        assert '"baldur.gauge_hydration_failed_non"' not in source
-        assert '"baldur.module_available"' not in source

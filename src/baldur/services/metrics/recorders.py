@@ -594,11 +594,25 @@ def emit_heartbeat(component: str = "error_budget") -> None:
         component: The component emitting the heartbeat
 
     Prometheus Alert Rule:
+        Always match on the component label. Several components emit this
+        series with different tolerances, so a matcher-free rule pages
+        "service dead" on a healthy process whose component is simply slower.
+
         - alert: BaldurServiceDead
-          expr: time() - baldur_heartbeat_timestamp_seconds > 120
+          expr: |
+            time()
+            - baldur_heartbeat_timestamp_seconds{component="error_budget"} > 120
           for: 0m
           labels:
             severity: critical
+
+        Prerequisite: that rule needs the error-budget heartbeat task
+        scheduled in your beat config — no shipped configuration schedules it —
+        and without the runtime-config manager the task emits the
+        ``error_budget_degraded`` component instead. For the periodic gauge
+        collector, which runs automatically in every serving process, the
+        shipped ``BaldurMetricCollectionStale`` rule is the equivalent signal
+        (component ``metric_collection``, 300s tolerance).
     """
     try:
         current_time = time.time()

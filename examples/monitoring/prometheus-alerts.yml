@@ -10,37 +10,69 @@ groups:
   # =========================================================================
   - name: dlq_alerts
     interval: 30s
+    # -----------------------------------------------------------------------
+    # Why these rules read `max(max_over_time(baldur_dlq_items_by_status{
+    # status="pending"}[2m]))` and not `sum(baldur_dlq_pending_count)`:
+    #
+    # (a) Source. `baldur_dlq_items_by_status{status="pending"}` is the
+    #     repository's O(1) pending count (a ZCARD / GROUP BY / index length).
+    #     `baldur_dlq_pending_count` is a per-domain breakdown produced by an
+    #     O(pending) scan that silently under-reports (undecodable entries are
+    #     skipped), carries a domain axis whose label set differs per process,
+    #     and is absent for domains a given worker has never served. It stays
+    #     exported as a DIAGNOSTIC surface — use it to attribute a backlog, not
+    #     to page on one.
+    # (b) `max`, not `sum`. The pending total is repository-global but exported
+    #     per process, so summing reporters multiplies the backlog by the
+    #     number of scraped workers. `max` is also the safe-direction
+    #     aggregator: a stale-high reporter extends an alert, never un-pages.
+    #     On the memory backend the DLQ is genuinely per process, so `max`
+    #     reports the largest single worker's backlog, not the fleet total.
+    # (c) `max_over_time([2m])`. Exposition is per process: behind one scrape
+    #     target, consecutive samples come from different workers, each up to
+    #     one collection interval + jitter stale, and a just-restarted worker
+    #     publishes no sample at all until its first tick. Taking the highest
+    #     value in a short window turns both into a bounded lag in the safe
+    #     direction (an alert resolves late, never early).
+    #
+    # Interval coupling — all three values below are tied to
+    # BALDUR_METRICS_COLLECTION_INTERVAL_SECONDS (default 60s). Raising the
+    # collection interval REQUIRES raising them in step:
+    #   * this file's `[2m]` windows          -> keep >= 2x the interval
+    #   * BaldurMetricCollectionStale `> 300` -> keep >= 5x the interval
+    #   * its `[5m]` lookback                 -> keep >= the 300s threshold
+    # -----------------------------------------------------------------------
     rules:
       - alert: DLQHighPendingCount
-        expr: sum(baldur_dlq_pending_count) > 50
+        expr: max(max_over_time(baldur_dlq_items_by_status{status="pending"}[2m])) > 50
         for: 5m
         labels:
           severity: warning
           category: dlq
         annotations:
           summary: "DLQ pending count elevated"
-          description: "DLQ has {{ $value }} pending items. (threshold: 50)"
+          description: "DLQ has {{ $value }} pending items. (threshold: 50) Per-domain attribution: baldur_dlq_pending_count, or the DLQ admin API."
           runbook_url: "https://docs.example.com/runbooks/dlq-high-pending"
           dashboard_url: "/d/baldur-operations/baldur-operations"
 
       - alert: DLQCriticalPendingCount
-        expr: sum(baldur_dlq_pending_count) > 100
+        expr: max(max_over_time(baldur_dlq_items_by_status{status="pending"}[2m])) > 100
         for: 3m
         labels:
           severity: critical
           category: dlq
         annotations:
           summary: "DLQ pending count critical"
-          description: "DLQ has {{ $value }} pending items. Immediate investigation required."
+          description: "DLQ has {{ $value }} pending items. Immediate investigation required. Per-domain attribution: baldur_dlq_pending_count, or the DLQ admin API."
           runbook_url: "https://docs.example.com/runbooks/dlq-critical"
           dashboard_url: "/d/baldur-operations/baldur-operations"
 
       - alert: DLQSpikeDetected
         expr: |
           (
-            sum(baldur_dlq_pending_count)
+            max(max_over_time(baldur_dlq_items_by_status{status="pending"}[2m]))
             /
-            sum(baldur_dlq_pending_count offset 5m)
+            max(max_over_time(baldur_dlq_items_by_status{status="pending"}[2m] offset 5m))
           ) > 2
         for: 2m
         labels:
@@ -49,6 +81,50 @@ groups:
         annotations:
           summary: "DLQ spike detected"
           description: "DLQ pending items increased {{ $value | printf \"%.1f\" }}x in 5 minutes."
+
+      # Dead man's switch for the per-process gauge collector. Every serving
+      # process emits this heartbeat when it successfully refreshes the DLQ
+      # status family — the family the three rules above page on — so a stalled
+      # collector cannot leave those rules evaluating a frozen number in
+      # silence. It deliberately does NOT track the per-domain breakdown: the
+      # Redis adapter fails that scan open at outage scale while the paged
+      # number stays perfectly fresh, and paging on it would stack a false
+      # "collection stale" critical onto every large-backlog incident.
+      #
+      # max_over_time takes the freshest heartbeat behind the target, so the
+      # rule means what it says — EVERY collecting process here has stopped —
+      # instead of flapping on whichever worker answered the scrape. That also
+      # means it cannot detect one dead worker among healthy siblings; for
+      # per-worker thread death use baldur_daemon_worker_alive /
+      # baldur_daemon_worker_last_heartbeat_age_seconds{name="domain_gauge_updater"}.
+      - alert: BaldurMetricCollectionStale
+        expr: time() - max_over_time(baldur_heartbeat_timestamp_seconds{component="metric_collection"}[5m]) > 300
+        for: 0m
+        labels:
+          severity: warning
+          category: metrics
+        annotations:
+          summary: "Baldur metric collection has stopped"
+          description: "No successful DLQ gauge collection on {{ $labels.instance }} for over 5 minutes. The DLQ backlog alerts are evaluating a frozen value."
+          runbook_url: "https://docs.example.com/runbooks/metric-collection-stale"
+
+      # Uncomment on deployments that run with metric collection ENABLED (the
+      # default). Fires for any scraped target that is up but exports no
+      # collection heartbeat at all — the one failure this file cannot
+      # otherwise see, because a target whose collector never started has no
+      # series for the rule above to evaluate, and baldur_up == 1 keeps the
+      # BaldurMetricsDown / BaldurMetricsAbsent rules green. Left commented
+      # because it fires on every target of a deployment that sets
+      # BALDUR_METRICS_ENABLED=false on purpose.
+      # - alert: BaldurMetricCollectionAbsent
+      #   expr: baldur_up == 1 unless on(instance, job) baldur_heartbeat_timestamp_seconds{component="metric_collection"}
+      #   for: 10m
+      #   labels:
+      #     severity: warning
+      #     category: metrics
+      #   annotations:
+      #     summary: "Baldur target exports no metric-collection heartbeat"
+      #     description: "{{ $labels.instance }} is up but its gauge collector never started, so the DLQ backlog alerts have no series to evaluate there."
 
   # =========================================================================
   # Circuit Breaker Alerts

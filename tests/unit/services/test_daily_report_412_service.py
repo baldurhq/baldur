@@ -451,7 +451,9 @@ class TestCollectSnapshotsBehavior:
         report = DailyAutonomousReport()
         date = datetime(2026, 4, 4, tzinfo=UTC)
 
-        mock_repo = MagicMock()
+        from baldur.interfaces.repositories import FailedOperationRepository
+
+        mock_repo = MagicMock(spec=FailedOperationRepository)
         mock_repo.get_statistics.return_value = {
             "pending_count": 15,
             "pending_by_domain": {"payment": 8, "inventory": 4},

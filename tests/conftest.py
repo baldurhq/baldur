@@ -109,6 +109,13 @@ os.environ.setdefault("BALDUR_CB_STATE_SEED_AUTOSTART", "0")
 # the autostart hatches above.
 os.environ.setdefault("BALDUR_BULKHEAD_METRICS_AUTOSTART", "0")
 
+# 742 D1: MetricsSettings.enabled defaults True and init() now starts a
+# per-process gauge collector (a daemon thread refreshing the DLQ/CB gauge
+# families from the repository on a timer), so any init() in a test would
+# otherwise spawn it. Tests that exercise the collector construct a
+# DomainGaugeUpdater directly. Mirrors the autostart hatches above.
+os.environ.setdefault("BALDUR_DOMAIN_GAUGE_UPDATER_AUTOSTART", "0")
+
 
 # =============================================================================
 # Canonical Test Structlog Config (578 D2)

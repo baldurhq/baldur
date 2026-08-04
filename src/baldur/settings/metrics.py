@@ -38,6 +38,17 @@ class MetricsSettings(BaseSettings):
         default=True,
         description="Enable metrics collection",
     )
+    collection_interval_seconds: float = Field(
+        default=60.0,
+        ge=5.0,
+        le=3600.0,
+        description=(
+            "Interval between per-process repository-backed gauge collections "
+            "(DLQ pending/status, circuit-breaker state). Raising it above "
+            "60s also requires raising the BaldurMetricCollectionStale "
+            "threshold in the bundled alert rules."
+        ),
+    )
     prefix: str = Field(
         default="baldur",
         description="Prefix for all metrics names",

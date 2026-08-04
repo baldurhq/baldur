@@ -134,10 +134,9 @@ _REJECTED_LEGACY_ALIASES: frozenset[str] = frozenset(
 _init_not_called_cache_warned: bool = False
 _init_not_called_storage_warned: bool = False
 
-# Once-per-process guard for the CB-state startup seed (D1). Mirrors
-# MetricHydrator._hydration_done so a double invocation (Django init() per
-# worker + post_worker_init) schedules the seed timer at most once per
-# serving process.
+# Once-per-process guard for the CB-state startup seed (D1), so a double
+# invocation (Django init() per worker + post_worker_init) schedules the seed
+# timer at most once per serving process.
 _cb_state_seed_done: bool = False
 _cb_state_seed_lock: threading.Lock = threading.Lock()
 
@@ -837,6 +836,14 @@ def _register_shutdown_handlers() -> None:  # noqa: C901, PLR0912, PLR0915
 
             factories.append(integrate_rate_controller_with_shutdown_coordinator)
             factories.append(integrate_hpa_exporter_with_shutdown_coordinator)
+        except ImportError:
+            pass
+        try:
+            from baldur.services.metrics.shutdown import (
+                integrate_domain_gauge_updater_with_shutdown_coordinator,
+            )
+
+            factories.append(integrate_domain_gauge_updater_with_shutdown_coordinator)
         except ImportError:
             pass
         try:
@@ -3146,6 +3153,93 @@ def _start_bulkhead_metrics_updater_if_enabled() -> None:
         logger.warning("baldur.bulkhead_metrics_updater_start_failed", error=exc)
 
 
+def _start_domain_gauge_updater_if_enabled() -> None:
+    """Start the per-process repository-backed gauge collector when enabled.
+
+    The Prometheus registry is process-local and the exposition endpoint
+    renders the answering worker's own registry, so a collection job that runs
+    in one process (a leader-gated scheduler entry, a Celery beat task) leaves
+    every other serving process's scrape surface frozen. Membership in
+    ``_BACKGROUND_WORKER_STARTERS`` is what makes the refresh per-process:
+    ``init()`` starts it on the single-process shapes and the
+    framework-agnostic ``post_worker_init`` hook re-starts it inside each
+    forked gunicorn worker.
+
+    Routes through ``start_domain_gauge_updater(interval=..., jitter_seconds=...)``
+    so ``BALDUR_METRICS_COLLECTION_INTERVAL_SECONDS`` is honored — this starter
+    is the sole production first-caller of ``get_domain_gauge_updater``, which
+    captures both at first call. Jitter reuses the existing
+    ``MetricsSettings.jitter_enabled`` / ``jitter_max_delay_seconds`` (CB-seed
+    precedent) so a multi-server restart does not stampede a shared repository;
+    it delays only the first tick.
+
+    Escape hatch: ``BALDUR_DOMAIN_GAUGE_UPDATER_AUTOSTART=0`` skips the start —
+    used by the unit-test process (``metrics.enabled`` defaults True, so any
+    ``init()`` in a test would otherwise spawn the daemon thread). Mirrors the
+    sibling AUTOSTART hatches (meta_watchdog / precomputed_cache /
+    system_metrics_cache / bulkhead_metrics / cb_state_seed).
+
+    Also gated on the Prometheus client being importable: without it the
+    collector module raises at import (its gauges are created at module scope),
+    which the fail-soft catch below would swallow into a thread that silently
+    never exists. Checking the flag makes the non-start a stated DEBUG outcome.
+
+    Fork-safety: skipped in the gunicorn master (thread dies after ``fork()``
+    and ``init()`` is not re-run per worker). ``start()`` is idempotent
+    (``_running`` guard), so the runserver double-call is benign.
+    """
+    autostart = (
+        os.environ.get("BALDUR_DOMAIN_GAUGE_UPDATER_AUTOSTART", "1").strip().lower()
+    )
+    if autostart in {"0", "false", "no"}:
+        logger.debug("domain_gauge_updater.autostart_disabled_env")
+        return
+
+    try:
+        from baldur.core.process_utils import is_gunicorn_master
+
+        if is_gunicorn_master():
+            logger.debug("domain_gauge_updater.start_skipped_gunicorn_master")
+            return
+
+        from baldur.metrics.registry import PROMETHEUS_AVAILABLE
+
+        if not PROMETHEUS_AVAILABLE:
+            logger.debug(
+                "domain_gauge_updater.start_skipped",
+                reason="prometheus_client_unavailable",
+            )
+            return
+
+        from baldur.settings.metrics import get_metrics_settings
+
+        settings = get_metrics_settings()
+        if not settings.enabled:
+            logger.debug(
+                "domain_gauge_updater.start_skipped",
+                reason="metrics_disabled",
+            )
+            return
+
+        jitter = 0.0
+        if settings.jitter_enabled:
+            import random
+
+            jitter = random.uniform(0, settings.jitter_max_delay_seconds)
+
+        from baldur.services.metrics.periodic_updater import start_domain_gauge_updater
+
+        start_domain_gauge_updater(
+            interval=settings.collection_interval_seconds,
+            jitter_seconds=jitter,
+        )
+        logger.info("baldur.domain_gauge_updater_started", jitter=jitter)
+    except ImportError as exc:
+        logger.debug("baldur.domain_gauge_updater_module_not_available", error=exc)
+    except Exception as exc:
+        logger.warning("baldur.domain_gauge_updater_start_failed", error=exc)
+
+
 def _seed_circuit_breaker_state() -> None:
     """Seed the ``baldur_circuit_breaker_state`` gauge from the repo.
 
@@ -3183,9 +3277,9 @@ def _seed_circuit_breaker_state_if_enabled() -> None:
     ``init()`` step would not reach forked workers — ``init()`` runs once in the
     master and a Timer scheduled there does not survive ``fork()``.
 
-    The seed runs on a daemon ``threading.Timer`` with jitter (mirrors the
-    Django MetricHydrator) so it never blocks startup nor stampedes shared Redis
-    on multi-server restarts. Jitter is sourced from the existing
+    The seed runs on a daemon ``threading.Timer`` with jitter so it never
+    blocks startup nor stampedes shared Redis on multi-server restarts (same
+    posture as the domain-gauge collector). Jitter is sourced from the existing
     ``MetricsSettings.jitter_enabled`` / ``jitter_max_delay_seconds`` — no
     dedicated env var.
 
@@ -3278,6 +3372,13 @@ def _reset_cb_state_seed() -> None:
 # excluded: they have distinct per-process semantics (PID-isolated WAL,
 # leader-election-gated scheduler, single-socket admin server) that the uniform
 # daemon-thread restart does not fit.
+# ``domain_gauge_updater`` refreshes the repository-backed gauge families (DLQ
+# pending/status, CB state) on a timer in EVERY serving process. It belongs here
+# rather than in the leader-gated scheduler precisely because its effect is
+# process-local: the Prometheus registry is per process, so a leader-only job
+# would refresh exactly one process's scrape surface and leave the rest frozen.
+# Default-ON (``metrics.enabled``), so it carries a
+# ``BALDUR_DOMAIN_GAUGE_UPDATER_AUTOSTART`` test hatch.
 # ``_seed_circuit_breaker_state_if_enabled`` is a one-shot (not a daemon loop):
 # it schedules a single jittered Timer that seeds the per-process
 # ``baldur_circuit_breaker_state`` gauge from the repo's actual state, so each
@@ -3296,6 +3397,7 @@ _BACKGROUND_WORKER_STARTERS: tuple[Callable[[], None], ...] = (
     _start_rate_controller_if_enabled,
     _start_hpa_exporter_if_enabled,
     _start_bulkhead_metrics_updater_if_enabled,
+    _start_domain_gauge_updater_if_enabled,
     _seed_circuit_breaker_state_if_enabled,
 )
 

@@ -15,6 +15,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `BALDUR_CB_MANUAL_OVERRIDE_TTL_MINUTES` (`90`, range 1-1440) — default manual-override lifetime.
 - A force-close (Allow / Override) now expires too, restoring automatic protection on its own.
 - Control responses report `effective_until` read back from storage, so it matches the real expiry.
+- `BALDUR_METRICS_COLLECTION_INTERVAL_SECONDS` (`60`, range 5-3600) — gauge collection cadence.
+- `BaldurMetricCollectionStale` alert rule; `BaldurMetricCollectionAbsent` ships commented out.
 
 ### Changed
 
@@ -24,6 +26,11 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - **Breaking**: `atomic_force_open` / `atomic_force_close` take `ttl_minutes: int | None`.
 - **Breaking**: the Django admin's `manually_controlled` is read-only — use `reset_selected`.
 - The override-expiry sweep clears the manual flag only; it no longer writes circuit state.
+- The DLQ backlog alerts and dashboard panel read the O(1) pending total, not the per-domain sum.
+- **Breaking**: those alerts lost their `domain` label — re-key per-domain routing and silences.
+- **Breaking**: `BALDUR_SYNC_ON_STARTUP` / `BALDUR_SYNC_JITTER_MAX` dropped with the gauge hydrator.
+- **Breaking**: `retry_success_rate` in `GET /api/baldur/metrics/` may be null (was always `100.0`).
+- A `monitored_services` breaker that never tripped gets no series until its state is recorded.
 
 ### Fixed
 
@@ -31,6 +38,12 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - A manual block admitted trial traffic once `recovery_timeout` elapsed; it now admits nothing.
 - The block lifetime typed in the console was discarded — every block lasted the global default.
 - Manual overrides never expired without Celery; the inline scheduler now runs the sweep.
+- DLQ and circuit-breaker gauges froze at startup; every serving process now refreshes them.
+- A failed DLQ statistics read no longer zeroes every pending gauge mid-incident; values hold.
+- DLQ status gauges read `0` on the memory and SQL backends regardless of what was stored.
+- The retry success-rate gauge and payload field reported a fabricated 100%; both are now absent.
+- `total_dlq_pending` and the daily report's DLQ line read `0` when the breakdown was unavailable.
+- **Migration**: a copied `BaldurServiceDead` rule needs `{component="error_budget"}` to stay true.
 
 ## [1.3.2] - 2026-07-31
 
