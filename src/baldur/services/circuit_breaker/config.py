@@ -21,6 +21,8 @@ from baldur.interfaces.repositories import (
 from baldur.settings import get_config
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from baldur.interfaces.repositories import CircuitBreakerStateData
 
 __all__ = [
@@ -321,6 +323,14 @@ class CircuitBreakerResult:
     new_state: str = ""
     message: str = ""
     error: str | None = None
+    expires_at: datetime | None = None
+    """When the manual override this operation created lifts.
+
+    Read back from storage after the write, so a caller reporting an expiry to
+    an operator reports the one that is actually stored rather than recomputing
+    it. ``None`` means either no manual override was created or the read-back
+    was unavailable — in both cases the caller must not promise an expiry.
+    """
 
     @classmethod
     def succeeded(
@@ -329,6 +339,7 @@ class CircuitBreakerResult:
         previous_state: str,
         new_state: str,
         message: str = "",
+        expires_at: datetime | None = None,
     ) -> CircuitBreakerResult:
         """Factory for successful operation."""
         return cls(
@@ -337,6 +348,7 @@ class CircuitBreakerResult:
             previous_state=previous_state,
             new_state=new_state,
             message=message,
+            expires_at=expires_at,
         )
 
     @classmethod

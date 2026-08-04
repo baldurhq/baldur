@@ -2274,6 +2274,16 @@ _DEFAULT_SCHEDULED_JOBS: tuple[tuple[str, str, str, float], ...] = (
         "_synthetic_cb_recovery_check",
         60.0,
     ),
+    # 741 D2 — clear lapsed manual overrides without requiring Celery. The
+    # Celery beat entry covers celery deployments only, which left the manual
+    # pin on every Flask/FastAPI/plain-Python install with nothing to clear it.
+    # Same cost class and cadence as cb_recovery (one get_all_states pass).
+    (
+        "cb_override_expiry",
+        "baldur.services",
+        "_synthetic_cb_override_expiry",
+        60.0,
+    ),
     (
         "archive_old_dlq_entries",
         "baldur.tasks.cleanup_tasks",
@@ -2329,6 +2339,7 @@ _CELERY_TASK_NAMES: dict[str, str] = {
     "daily_report": "baldur.tasks.daily_report.generate_daily_autonomous_report",
     "sla_drift": "baldur.celery_tasks.check_sla_drift",
     "cb_recovery": "baldur.celery_tasks.check_circuit_breaker_recovery",
+    "cb_override_expiry": "baldur.celery_tasks.expire_manual_overrides",
     "config_apply": "baldur.apply_pending_config_changes",
 }
 
@@ -2346,6 +2357,8 @@ def _resolve_job_callable(module_path: str, attr: str) -> Callable[[], Any] | No
     # Synthetic callables — composed from existing services, no module import.
     if attr == "_synthetic_cb_recovery_check":
         return _build_cb_recovery_callable()
+    if attr == "_synthetic_cb_override_expiry":
+        return _build_cb_override_expiry_callable()
     if attr == "_synthetic_sla_drift_check":
         return _build_sla_drift_callable()
     if attr == "_synthetic_config_apply":
@@ -2377,6 +2390,24 @@ def _build_cb_recovery_callable() -> Callable[[], Any]:
         return service.check_recovery_transitions()
 
     _tick.__name__ = "cb_recovery_tick"
+    return _tick
+
+
+def _build_cb_override_expiry_callable() -> Callable[[], Any]:
+    """Return a zero-arg callable that clears lapsed manual CB overrides.
+
+    Bypasses the Celery-bound ``expire_manual_overrides(self)`` so a Celery-less
+    install still lifts a manual block at the lifetime the operator was
+    promised. Identical shape to the cb_recovery synthetic.
+    """
+
+    def _tick() -> list[str]:
+        from baldur.services import get_circuit_breaker_service
+
+        service = get_circuit_breaker_service()
+        return service.check_and_expire_manual_overrides()
+
+    _tick.__name__ = "cb_override_expiry_tick"
     return _tick
 
 

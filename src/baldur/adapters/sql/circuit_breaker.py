@@ -14,7 +14,7 @@ implicit row-level locking provided by its single-writer model.
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
 import structlog
@@ -29,6 +29,7 @@ from baldur.interfaces.repositories import (
     CircuitBreakerStateData,
     CircuitBreakerStateEnum,
     CircuitBreakerStateRepository,
+    resolve_manual_override_expiry,
 )
 from baldur.settings.sql import SQLDialect
 from baldur.utils.time import utc_now
@@ -802,13 +803,11 @@ class SQLCircuitBreakerStateRepository(
         service_name: str,
         reason: str = "",
         controlled_by_id: int | None = None,
-        ttl_minutes: int = 90,
+        ttl_minutes: int | None = None,
     ) -> tuple[bool, str, str]:
         entry = self.get_or_create(service_name)
         previous = entry.state
-        expires_at = (
-            utc_now() + timedelta(minutes=ttl_minutes) if ttl_minutes > 0 else None
-        )
+        expires_at = resolve_manual_override_expiry(ttl_minutes)
         self.set_manual_control(
             service_name=service_name,
             state=CircuitBreakerStateEnum.OPEN.value,
@@ -823,21 +822,24 @@ class SQLCircuitBreakerStateRepository(
         service_name: str,
         reason: str = "",
         controlled_by_id: int | None = None,
+        ttl_minutes: int | None = None,
     ) -> tuple[bool, str, str]:
         entry = self.get_or_create(service_name)
         previous = entry.state
         now = utc_now()
+        expires_at = resolve_manual_override_expiry(ttl_minutes)
         self._execute(
             f"UPDATE {_TABLE} SET state = %s, failure_count = 0, success_count = 0, "
             f"half_open_request_count = 0, half_open_window_started_at = NULL, "
             f"opened_at = NULL, "
             f"manually_controlled = 1, controlled_by_id = %s, control_reason = %s, "
-            f"manual_override_expires_at = NULL, updated_at = %s "
+            f"manual_override_expires_at = %s, updated_at = %s "
             f"WHERE service_name = %s",
             (
                 CircuitBreakerStateEnum.CLOSED.value,
                 controlled_by_id,
                 reason,
+                self._dt_to_db(expires_at),
                 self._dt_to_db(now),
                 service_name,
             ),

@@ -30,6 +30,7 @@ from baldur.services.control_api_service import (
     ControlRequest,
     get_control_api_service,
 )
+from baldur.settings.circuit_breaker import MAX_MANUAL_OVERRIDE_TTL_MINUTES
 from baldur.utils.time import utc_now
 
 logger = structlog.get_logger()
@@ -89,8 +90,10 @@ def _validate_control_request(  # noqa: C901, PLR0912
     if ttl_minutes is not None:
         if not isinstance(ttl_minutes, int) or isinstance(ttl_minutes, bool):
             errors["ttl_minutes"] = "ttl_minutes must be an integer"
-        elif ttl_minutes < 1 or ttl_minutes > 1440:
-            errors["ttl_minutes"] = "ttl_minutes must be between 1 and 1440"
+        elif ttl_minutes < 1 or ttl_minutes > MAX_MANUAL_OVERRIDE_TTL_MINUTES:
+            errors["ttl_minutes"] = (
+                f"ttl_minutes must be between 1 and {MAX_MANUAL_OVERRIDE_TTL_MINUTES}"
+            )
 
     if errors:
         return {}, str(errors)
@@ -260,7 +263,6 @@ def _quick_action(
     ctx: RequestContext,
     action: str,
     default_reason: str,
-    default_ttl_minutes: int | None = None,
 ) -> ResponseContext:
     service_name = ctx.get_path_param("service_name", "")
     if not service_name:
@@ -274,7 +276,7 @@ def _quick_action(
         action=action,
         reason=body.get("reason", default_reason),
         environment=body.get("environment", "ops"),
-        ttl_minutes=body.get("ttl_minutes", default_ttl_minutes),
+        ttl_minutes=body.get("ttl_minutes"),
         actor=resolve_actor(ctx),
     )
     service = get_control_api_service()
@@ -288,10 +290,14 @@ def quick_allow(ctx: RequestContext) -> ResponseContext:
 
 
 def quick_block(ctx: RequestContext) -> ResponseContext:
-    """POST /control/block/{service_name}/ — quick block (admin)."""
-    return _quick_action(
-        ctx, ControlAPIActions.BLOCK, "Quick block via API", default_ttl_minutes=90
-    )
+    """POST /control/block/{service_name}/ — quick block (admin).
+
+    No TTL default here: a blank one passes through as ``None`` so the service
+    layer resolves the configured default, which is what
+    ``BALDUR_CB_MANUAL_OVERRIDE_TTL_MINUTES`` (or the PRO console field) sets.
+    A literal here would shadow that setting on the console's own Block path.
+    """
+    return _quick_action(ctx, ControlAPIActions.BLOCK, "Quick block via API")
 
 
 def quick_reset(ctx: RequestContext) -> ResponseContext:

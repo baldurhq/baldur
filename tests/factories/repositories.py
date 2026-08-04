@@ -1,33 +1,41 @@
 """
 In-Memory Repositories for Testing.
 
-테스트용 인메모리 Repository 구현입니다.
-실제 DB/Redis 연결 없이 테스트가 가능하도록 합니다.
+In-memory repository implementations for tests, so a test can exercise
+repository-backed code without a real DB/Redis connection.
 
-MockRepository를 개별 테스트 파일에서 반복 정의하던 것을 통합합니다.
+Consolidates the MockRepository classes that used to be redefined in each
+individual test file.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from tests.factories.constants import DefaultValues
 from tests.factories.data_factory import MockCircuitBreakerStateData
 
 
+def _resolve_expiry(ttl_minutes: int | None) -> datetime | None:
+    """Mirror the repository contract: None or <= 0 stores no expiry."""
+    if ttl_minutes is None or ttl_minutes <= 0:
+        return None
+    return datetime.now(UTC) + timedelta(minutes=ttl_minutes)
+
+
 class InMemoryCircuitBreakerRepository:
     """
-    Circuit Breaker State용 인메모리 Repository.
+    In-memory repository for Circuit Breaker state.
 
-    CircuitBreakerStateRepository 인터페이스를 구현합니다.
-    테스트에서 실제 DB/Redis 없이 CB 상태 관리 테스트 가능.
+    Implements the CircuitBreakerStateRepository interface, so CB state
+    management can be tested without a real DB/Redis.
 
     Usage:
         repo = InMemoryCircuitBreakerRepository()
 
-        # 상태 조회/생성
+        # Read/create state
         state = repo.get_or_create("payment-api")
         assert state.state == "closed"
 
@@ -39,28 +47,29 @@ class InMemoryCircuitBreakerRepository:
             ttl_minutes=30
         )
 
-        # 상태 확인
+        # Verify state
         state = repo.get_or_create("payment-api")
         assert state.state == "open"
     """
 
     def __init__(self):
         self._states: dict[str, MockCircuitBreakerStateData] = {}
-        self._atomic_success: bool = True  # atomic 연산 성공 여부 제어
+        # Controls whether atomic operations report success
+        self._atomic_success: bool = True
 
     def set_atomic_success(self, success: bool) -> None:
-        """atomic 연산 성공 여부 설정 (테스트용)."""
+        """Set whether atomic operations report success (test control)."""
         self._atomic_success = success
 
     def get_or_create(self, service_name: str) -> MockCircuitBreakerStateData:
         """
-        서비스의 CB 상태를 조회하거나 새로 생성.
+        Read a service's CB state, creating it when absent.
 
         Args:
-            service_name: 서비스 이름
+            service_name: Service name
 
         Returns:
-            MockCircuitBreakerStateData 인스턴스
+            MockCircuitBreakerStateData instance
         """
         if service_name not in self._states:
             self._states[service_name] = MockCircuitBreakerStateData(
@@ -70,34 +79,35 @@ class InMemoryCircuitBreakerRepository:
 
     def get(self, service_name: str) -> MockCircuitBreakerStateData | None:
         """
-        서비스의 CB 상태 조회 (없으면 None).
+        Read a service's CB state (None when absent).
 
         Args:
-            service_name: 서비스 이름
+            service_name: Service name
 
         Returns:
-            MockCircuitBreakerStateData 또는 None
+            MockCircuitBreakerStateData or None
         """
         return self._states.get(service_name)
 
     def atomic_force_open(
         self,
         service_name: str,
-        reason: str,
-        controlled_by_id: int,
-        ttl_minutes: int,
+        reason: str = "",
+        controlled_by_id: int | None = None,
+        ttl_minutes: int | None = None,
     ) -> tuple[bool, str | None, str | None]:
         """
-        Circuit Breaker를 atomic하게 open.
+        Atomically force the circuit breaker open.
 
         Args:
-            service_name: 서비스 이름
-            reason: open 사유
-            controlled_by_id: 제어자 ID
-            ttl_minutes: TTL (분)
+            service_name: Service name
+            reason: Reason for opening
+            controlled_by_id: Controlling user ID
+            ttl_minutes: Manual-override lifetime in minutes; None or <= 0
+                stores no expiry
 
         Returns:
-            (success, previous_state, new_state) 튜플
+            (success, previous_state, new_state) tuple
         """
         if not self._atomic_success:
             return (False, None, None)
@@ -111,25 +121,29 @@ class InMemoryCircuitBreakerRepository:
         state.manually_controlled = True
         state.controlled_by_id = controlled_by_id
         state.control_reason = reason
+        state.manual_override_expires_at = _resolve_expiry(ttl_minutes)
 
         return (True, previous_state, DefaultValues.CB_STATE_OPEN)
 
     def atomic_force_close(
         self,
         service_name: str,
-        reason: str,
-        controlled_by_id: int,
+        reason: str = "",
+        controlled_by_id: int | None = None,
+        ttl_minutes: int | None = None,
     ) -> tuple[bool, str | None, str | None]:
         """
-        Circuit Breaker를 atomic하게 close.
+        Atomically force the circuit breaker closed.
 
         Args:
-            service_name: 서비스 이름
-            reason: close 사유
-            controlled_by_id: 제어자 ID
+            service_name: Service name
+            reason: Reason for closing
+            controlled_by_id: Controlling user ID
+            ttl_minutes: Manual-override lifetime in minutes; None or <= 0
+                stores no expiry
 
         Returns:
-            (success, previous_state, new_state) 튜플
+            (success, previous_state, new_state) tuple
         """
         if not self._atomic_success:
             return (False, None, None)
@@ -140,18 +154,19 @@ class InMemoryCircuitBreakerRepository:
         state.manually_controlled = False
         state.controlled_by_id = controlled_by_id
         state.control_reason = reason
+        state.manual_override_expires_at = _resolve_expiry(ttl_minutes)
 
         return (True, previous_state, DefaultValues.CB_STATE_CLOSED)
 
     def atomic_reset(self, service_name: str) -> bool:
         """
-        Circuit Breaker를 atomic하게 리셋.
+        Atomically reset the circuit breaker.
 
         Args:
-            service_name: 서비스 이름
+            service_name: Service name
 
         Returns:
-            성공 여부
+            Whether the reset succeeded
         """
         state = self.get_or_create(service_name)
         state.state = DefaultValues.CB_STATE_CLOSED
@@ -171,14 +186,14 @@ class InMemoryCircuitBreakerRepository:
         increment: int = 1,
     ) -> int:
         """
-        실패 횟수 업데이트.
+        Update the failure count.
 
         Args:
-            service_name: 서비스 이름
-            increment: 증가량
+            service_name: Service name
+            increment: Amount to add
 
         Returns:
-            새 실패 횟수
+            New failure count
         """
         state = self.get_or_create(service_name)
         state.failure_count += increment
@@ -191,14 +206,14 @@ class InMemoryCircuitBreakerRepository:
         increment: int = 1,
     ) -> int:
         """
-        성공 횟수 업데이트.
+        Update the success count.
 
         Args:
-            service_name: 서비스 이름
-            increment: 증가량
+            service_name: Service name
+            increment: Amount to add
 
         Returns:
-            새 성공 횟수
+            New success count
         """
         state = self.get_or_create(service_name)
         state.success_count += increment
@@ -206,11 +221,11 @@ class InMemoryCircuitBreakerRepository:
         return state.success_count
 
     def list_all(self) -> list[MockCircuitBreakerStateData]:
-        """모든 CB 상태 조회."""
+        """List every CB state."""
         return list(self._states.values())
 
     def clear(self) -> None:
-        """모든 상태 초기화."""
+        """Clear every state."""
         self._states.clear()
 
     def reset_half_open_count(self, service_name: str) -> None:
@@ -252,9 +267,9 @@ class InMemoryCircuitBreakerRepository:
 
 class InMemoryRateLimitTracker:
     """
-    Rate Limit Tracker용 인메모리 구현.
+    In-memory implementation of the Rate Limit Tracker.
 
-    test_protection.py의 MockRateLimitTracker를 대체합니다.
+    Replaces MockRateLimitTracker from test_protection.py.
 
     Usage:
         tracker = InMemoryRateLimitTracker()
@@ -271,39 +286,39 @@ class InMemoryRateLimitTracker:
         self._backoff: dict[str, int] = {}
 
     def record_rate_limit(self, service_name: str) -> None:
-        """Rate limit 응답 기록."""
+        """Record a rate-limited response."""
         self._rate_limits.setdefault(service_name, 0)
         self._rate_limits[service_name] += 1
 
     def record_request(self, service_name: str) -> None:
-        """요청 기록."""
+        """Record a request."""
         self._requests.setdefault(service_name, 0)
         self._requests[service_name] += 1
 
     def get_rate_limit_count(self, service_name: str, window_seconds: int) -> int:
-        """지정 윈도우 내 rate limit 횟수 조회."""
+        """Read the rate-limit count within the given window."""
         return self._rate_limits.get(service_name, 0)
 
     def get_request_count(self, service_name: str, window_seconds: int) -> int:
-        """지정 윈도우 내 요청 횟수 조회."""
+        """Read the request count within the given window."""
         return self._requests.get(service_name, 0)
 
     def get_backoff_level(self, service_name: str) -> int:
-        """현재 backoff 레벨 조회."""
+        """Read the current backoff level."""
         return self._backoff.get(service_name, 0)
 
     def increment_backoff(self, service_name: str) -> int:
-        """backoff 레벨 증가."""
+        """Increase the backoff level."""
         self._backoff.setdefault(service_name, 0)
         self._backoff[service_name] += 1
         return self._backoff[service_name]
 
     def reset_backoff(self, service_name: str) -> None:
-        """backoff 레벨 리셋."""
+        """Reset the backoff level."""
         self._backoff[service_name] = 0
 
     def clear(self) -> None:
-        """모든 데이터 초기화."""
+        """Clear every tracked value."""
         self._rate_limits.clear()
         self._requests.clear()
         self._backoff.clear()
@@ -311,7 +326,7 @@ class InMemoryRateLimitTracker:
 
 @dataclass
 class MockDLQEntry:
-    """DLQ 엔트리 Mock 데이터."""
+    """Mock data for a DLQ entry."""
 
     id: int
     domain: str
@@ -333,24 +348,24 @@ class MockDLQEntry:
 
 class InMemoryDLQRepository:
     """
-    DLQ (Dead Letter Queue)용 인메모리 Repository.
+    In-memory repository for the DLQ (Dead Letter Queue).
 
-    FailedOperationRepository 인터페이스를 구현합니다.
+    Implements the FailedOperationRepository interface.
 
     Usage:
         repo = InMemoryDLQRepository()
 
-        # 엔트리 추가
+        # Add an entry
         entry = repo.create(
             domain="payment",
             failure_type="PG_TIMEOUT",
             error_message="Connection timed out"
         )
 
-        # 조회
+        # Read it back
         entry = repo.get_by_id(1)
 
-        # 재시도 횟수 증가
+        # Increment the retry count
         repo.increment_retry_count(1)
     """
 
@@ -367,17 +382,17 @@ class InMemoryDLQRepository:
         **kwargs,
     ) -> MockDLQEntry:
         """
-        새 DLQ 엔트리 생성.
+        Create a new DLQ entry.
 
         Args:
-            domain: 비즈니스 도메인
-            failure_type: 실패 유형
-            status: 상태
-            error_message: 에러 메시지
-            **kwargs: 추가 필드
+            domain: Business domain
+            failure_type: Failure type
+            status: Entry status
+            error_message: Error message
+            **kwargs: Additional fields
 
         Returns:
-            생성된 MockDLQEntry
+            The created MockDLQEntry
         """
         entry = MockDLQEntry(
             id=self._next_id,
@@ -392,11 +407,11 @@ class InMemoryDLQRepository:
         return entry
 
     def get_by_id(self, pk: int) -> MockDLQEntry | None:
-        """ID로 엔트리 조회."""
+        """Read an entry by ID."""
         return self._entries.get(pk)
 
     def increment_retry_count(self, pk: int) -> bool:
-        """재시도 횟수 증가."""
+        """Increment the retry count."""
         entry = self._entries.get(pk)
         if entry is None:
             return False
@@ -404,7 +419,7 @@ class InMemoryDLQRepository:
         return True
 
     def update_status(self, pk: int, status: str) -> bool:
-        """상태 업데이트."""
+        """Update the entry status."""
         entry = self._entries.get(pk)
         if entry is None:
             return False
@@ -419,14 +434,14 @@ class InMemoryDLQRepository:
         limit: int = 100,
     ) -> list[MockDLQEntry]:
         """
-        Pending 상태 엔트리 목록 조회.
+        List entries in the pending state.
 
         Args:
-            domain: 필터할 도메인 (None이면 전체)
-            limit: 최대 개수
+            domain: Domain to filter by (None means all)
+            limit: Maximum number of entries
 
         Returns:
-            MockDLQEntry 리스트
+            List of MockDLQEntry
         """
         entries = [
             e
@@ -437,17 +452,17 @@ class InMemoryDLQRepository:
         return entries[:limit]
 
     def list_all(self) -> list[MockDLQEntry]:
-        """모든 엔트리 조회."""
+        """List every entry."""
         return list(self._entries.values())
 
     def delete(self, pk: int) -> bool:
-        """엔트리 삭제."""
+        """Delete an entry."""
         if pk in self._entries:
             del self._entries[pk]
             return True
         return False
 
     def clear(self) -> None:
-        """모든 엔트리 초기화."""
+        """Clear every entry."""
         self._entries.clear()
         self._next_id = 1

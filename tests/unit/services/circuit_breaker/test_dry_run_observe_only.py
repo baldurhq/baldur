@@ -142,7 +142,7 @@ class TestCBPolicyDryRun:
             config=CircuitBreakerConfig(enabled=True, recovery_timeout=0),
             repository=repo,
         )
-        service.force_open("payment-api", reason="setup")
+        _seed_automatic_open(repo, service, "payment-api")
         assert repo.get_by_service_name("payment-api").state == "open"
 
         policy = CircuitBreakerPolicy(service_name="payment-api", cb_service=service)
@@ -170,10 +170,22 @@ class TestCBPolicyDryRun:
             config=CircuitBreakerConfig(enabled=True, recovery_timeout=0),
             repository=repo,
         )
-        service.force_open("payment-api", reason="setup")
+        _seed_automatic_open(repo, service, "payment-api")
         policy = CircuitBreakerPolicy(service_name="payment-api", cb_service=service)
         policy.execute(lambda: "ok")
         assert repo.get_by_service_name("payment-api").state != "open"
+
+
+def _seed_automatic_open(repo, service, service_name: str) -> None:
+    """Put the breaker in an OPEN state that carries no manual override.
+
+    force_open alone would not do: it pins a manual override, and a live
+    manual override rejects every request regardless of recovery_timeout — so
+    the state would hold at OPEN whether or not dry-run were active, making
+    the assertions below pass for the wrong reason.
+    """
+    service.force_open(service_name, reason="setup")
+    repo.clear_manual_control(service_name, preserve_reason=True)
 
 
 class TestProtectionDryRun:

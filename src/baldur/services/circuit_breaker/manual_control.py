@@ -6,7 +6,7 @@ Provides manual force open/close and TTL management functionality.
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 import structlog
@@ -17,17 +17,95 @@ from baldur.audit.helpers import (
 )
 from baldur.core.decision_logger import DecisionLogger, ReasonCode
 from baldur.core.execution_mode import get_execution_mode
+from baldur.settings.circuit_breaker import MAX_MANUAL_OVERRIDE_TTL_MINUTES
 from baldur.utils.time import utc_now
 
 from .config import CircuitBreakerResult, CircuitState
 
 if TYPE_CHECKING:
-    from baldur.interfaces.repositories import CircuitBreakerStateRepository
+    from baldur.interfaces.repositories import (
+        CircuitBreakerStateData,
+        CircuitBreakerStateRepository,
+    )
 
     from .config import CircuitBreakerConfig
     from .outcome_window import OutcomeWindow
 
 logger = structlog.get_logger()
+
+
+# =============================================================================
+# Manual-pin predicates (pure reads over a state row)
+# =============================================================================
+
+
+def is_manual_pin_active(state: CircuitBreakerStateData) -> bool:
+    """Whether the manual override on this row is still in force.
+
+    Enforcement expiry is evaluated per read rather than waiting for the
+    background sweep, so an override stops being honoured at its promised
+    instant even in a worker the sweep never reaches (only one process per host
+    runs scheduled jobs, and in-memory pins are process-local by design).
+
+    A pin with no stored expiry reads as permanently active — that is the
+    correct reading of "manually controlled, no lifetime", and the reason the
+    service layer never creates one.
+    """
+    return bool(state.manually_controlled) and (
+        state.manual_override_expires_at is None
+        or state.manual_override_expires_at > utc_now()
+    )
+
+
+def is_pin_lift_due(state: CircuitBreakerStateData) -> bool:
+    """The operator's own pinned OPEN whose TTL has passed, lift not yet taken.
+
+    No primitive clears ``manually_controlled`` on an automatic transition, so
+    the flag alone cannot distinguish "the block the operator set, now due to
+    lift" from "a later automatic OPEN carrying a stale flag". The
+    ``opened_at <= manual_override_expires_at`` discriminator does: a forced
+    open always stamps ``opened_at`` before the expiry it writes, while every
+    OPEN written after the expiry instant (auto-revert, count/rate trip) stamps
+    a later ``opened_at`` and is therefore governed by the normal recovery gate.
+    """
+    return (
+        bool(state.manually_controlled)
+        and state.state == CircuitState.OPEN
+        and state.manual_override_expires_at is not None
+        and state.manual_override_expires_at <= utc_now()
+        and (
+            state.opened_at is None
+            or state.opened_at <= state.manual_override_expires_at
+        )
+    )
+
+
+def _reject_out_of_range_ttl(
+    service_name: str, ttl_minutes: object
+) -> CircuitBreakerResult | None:
+    """Return a failed result when an explicit TTL is unusable, else None.
+
+    ``None`` means "use the configured default" and is always accepted. Every
+    other value must be a plain integer inside ``1..MAX_MANUAL_OVERRIDE_TTL_MINUTES``:
+    a non-positive TTL would store a pin with no expiry, i.e. one that the
+    sweep skips and that no operator action short of a Reset can lift.
+    """
+    if ttl_minutes is None:
+        return None
+    if not isinstance(ttl_minutes, int) or isinstance(ttl_minutes, bool):
+        return CircuitBreakerResult.failed(
+            service_name=service_name,
+            error="ttl_minutes must be an integer",
+        )
+    if ttl_minutes < 1 or ttl_minutes > MAX_MANUAL_OVERRIDE_TTL_MINUTES:
+        return CircuitBreakerResult.failed(
+            service_name=service_name,
+            error=(
+                f"ttl_minutes must be between 1 and "
+                f"{MAX_MANUAL_OVERRIDE_TTL_MINUTES} (got: {ttl_minutes})"
+            ),
+        )
+    return None
 
 
 def _is_system_enabled() -> bool:
@@ -106,6 +184,7 @@ class ManualControlMixin:
         service_name: str,
         reason: str = "",
         override_kill_switch: bool = False,
+        ttl_minutes: int | None = None,
     ) -> CircuitBreakerResult:
         """
         Force the circuit breaker to OPEN state (block all requests).
@@ -124,10 +203,18 @@ class ManualControlMixin:
             service_name: Name of the external service
             reason: Reason for opening (for audit)
             override_kill_switch: If True, bypass Kill Switch check
+            ttl_minutes: How long the block holds before lifting on its own.
+                ``None`` uses the configured default. Every block created here
+                expires — a non-positive value is rejected rather than stored,
+                because it would mint a pin nothing can lift automatically.
 
         Returns:
             CircuitBreakerResult with operation outcome
         """
+        ttl_error = _reject_out_of_range_ttl(service_name, ttl_minutes)
+        if ttl_error:
+            return ttl_error
+
         # Get actor from context (set by middleware/signal handlers)
         from baldur.context.actor_context import ActorContext
 
@@ -164,10 +251,15 @@ class ManualControlMixin:
                 service_name=service_name,
                 reason=reason,
                 controlled_by_id=None,
-                ttl_minutes=self.config.manual_override_ttl_minutes,
+                ttl_minutes=(
+                    ttl_minutes
+                    if ttl_minutes is not None
+                    else self.config.manual_override_ttl_minutes
+                ),
             )
 
             if success:
+                expires_at = self._read_back_override_expiry(service_name)
                 # The state is already OPEN, so the window must be dropped even
                 # if the counter cleanup below fails — it is memory-local and
                 # cannot raise, so it goes first.
@@ -186,6 +278,7 @@ class ManualControlMixin:
                         previous_state=previous_state,
                         new_state=new_state,
                         message="Circuit breaker already open",
+                        expires_at=expires_at,
                     )
                 logger.warning(
                     "circuit_breaker.force_opened_circuit_reason",
@@ -238,6 +331,7 @@ class ManualControlMixin:
                     previous_state=previous_state,
                     new_state=new_state,
                     message=f"Circuit breaker opened for {service_name}",
+                    expires_at=expires_at,
                 )
             return CircuitBreakerResult.failed(
                 service_name=service_name,
@@ -259,6 +353,7 @@ class ManualControlMixin:
         reason: str = "",
         trigger_replay: bool = False,
         override_kill_switch: bool = False,
+        ttl_minutes: int | None = None,
     ) -> CircuitBreakerResult:
         """
         Force the circuit breaker to CLOSED state (allow all requests).
@@ -278,10 +373,18 @@ class ManualControlMixin:
             reason: Reason for closing (for audit)
             trigger_replay: Whether to trigger conditional replay for queued items
             override_kill_switch: If True, bypass Kill Switch check
+            ttl_minutes: How long the forced-closed pin holds before automatic
+                protection resumes. ``None`` uses the configured default — a
+                force-close suspends the breaker's protection, so it expires
+                like a block does rather than pinning the circuit open-ended.
 
         Returns:
             CircuitBreakerResult with operation outcome
         """
+        ttl_error = _reject_out_of_range_ttl(service_name, ttl_minutes)
+        if ttl_error:
+            return ttl_error
+
         # Get actor from context (set by middleware/signal handlers)
         from baldur.context.actor_context import ActorContext
 
@@ -317,9 +420,15 @@ class ManualControlMixin:
                 service_name=service_name,
                 reason=reason,
                 controlled_by_id=None,
+                ttl_minutes=(
+                    ttl_minutes
+                    if ttl_minutes is not None
+                    else self.config.manual_override_ttl_minutes
+                ),
             )
 
             if success:
+                expires_at = self._read_back_override_expiry(service_name)
                 # Cleared before the counter call for the same reason as
                 # force_open: the transition has committed, so the pre-transition
                 # evidence must go even if the cleanup below raises.
@@ -330,7 +439,12 @@ class ManualControlMixin:
                 # tier.
                 self.repository.reset_half_open_count(service_name)
                 return self._handle_force_close_success(
-                    service_name, previous_state, new_state, reason, trigger_replay
+                    service_name,
+                    previous_state,
+                    new_state,
+                    reason,
+                    trigger_replay,
+                    expires_at,
                 )
             return CircuitBreakerResult.failed(
                 service_name=service_name,
@@ -385,6 +499,26 @@ class ManualControlMixin:
 
         return None
 
+    def _read_back_override_expiry(self, service_name: str) -> datetime | None:
+        """Read the expiry the atomic write just stored, or None if unreadable.
+
+        Kept in its own try/except rather than sharing the caller's: the write
+        has already committed by this point, so letting a degraded read raise
+        would report a manual override that IS in force as a failed operation,
+        and the operator would re-issue it. A missing value simply means no
+        expiry is reported — never a fabricated one.
+        """
+        try:
+            state = self.repository.get_by_service_name(service_name)
+        except Exception as e:
+            logger.warning(
+                "circuit_breaker.override_expiry_readback_failed",
+                service_name=service_name,
+                error=str(e),
+            )
+            return None
+        return state.manual_override_expires_at if state else None
+
     def _handle_force_close_success(
         self,
         service_name: str,
@@ -392,6 +526,7 @@ class ManualControlMixin:
         new_state: str,
         reason: str,
         trigger_replay: bool,
+        expires_at: datetime | None = None,
     ) -> CircuitBreakerResult:
         """Handle a successful force close."""
         if previous_state == new_state:
@@ -404,6 +539,7 @@ class ManualControlMixin:
                 previous_state=previous_state,
                 new_state=new_state,
                 message="Circuit breaker already closed",
+                expires_at=expires_at,
             )
 
         logger.info(
@@ -439,6 +575,7 @@ class ManualControlMixin:
             previous_state=previous_state,
             new_state=new_state,
             message=f"Circuit breaker closed for {service_name}",
+            expires_at=expires_at,
         )
 
     def _log_state_change_audit(
@@ -591,14 +728,23 @@ class ManualControlMixin:
 
     def check_and_expire_manual_overrides(self) -> list[str]:
         """
-        Check all circuit breakers for expired manual overrides.
+        Clear the manual-control flag on circuit breakers whose override lapsed.
 
-        Manual overrides have a TTL to prevent "forgotten" blocks.
-        When expired, circuits transition from OPEN to HALF_OPEN
-        for gradual recovery testing.
+        Manual overrides have a TTL to prevent "forgotten" blocks. This pass
+        clears the lapsed flag and writes nothing else — in particular it never
+        writes ``state``. Whether a lapsed block's circuit gets a trial request
+        is decided on the admission path, whose atomic primitive is
+        single-winner, sets the half-open watermark and emits the state-change
+        audit and event; this loop is an unsynchronized read-modify-write and
+        could do none of those correctly.
+
+        Enforcement does not wait for this pass: ``is_manual_pin_active`` has
+        already stopped honouring the override at its expiry instant on every
+        worker. What this clears is the stored flag (and with it the "manual"
+        display label).
 
         Returns:
-            List of service names that had their overrides expired
+            List of service names whose override flag was cleared
         """
         expired_services = []
 
@@ -608,33 +754,44 @@ class ManualControlMixin:
             current_time = utc_now()
 
             for state in all_states:
-                if (
+                if not (
                     state.manually_controlled
                     and state.manual_override_expires_at
                     and state.manual_override_expires_at <= current_time
                 ):
-                    previous_state = state.state
-                    previous_reason = state.control_reason or ""
-                    f"{previous_reason} [EXPIRED]".strip()
+                    continue
 
-                    # Expire the override - transition to HALF_OPEN for testing
-                    self.repository.update_state(
-                        service_name=state.service_name,
-                        state=CircuitState.HALF_OPEN,
-                    )
-                    # Note: If you need to update control_reason,
-                    # implement it in your repository adapter
+                # Revalidate against storage: the snapshot may be stale by a
+                # concurrent sweep, an operator re-Block, or a traffic-driven
+                # recovery. Whatever the other writer decided, it stands.
+                fresh = self.repository.get_by_service_name(state.service_name)
+                if fresh is None or not fresh.manually_controlled:
+                    continue
+                # Re-pinned since the snapshot (operator re-Block, or an Allow
+                # carrying a fresh TTL) — that action stands.
+                if is_manual_pin_active(fresh):
+                    continue
 
-                    self.repository.clear_manual_control(
-                        state.service_name, preserve_reason=True
-                    )
+                # The operator's own block whose lift has not been taken yet:
+                # clearing the flag here would erase the only evidence that
+                # this OPEN was an operator block, and the recovery gate would
+                # then keep the circuit shut for the rest of recovery_timeout.
+                # Admission consumes the lift on the next request; a later pass
+                # clears the flag once the row has moved out of OPEN.
+                if is_pin_lift_due(fresh):
+                    continue
 
-                    expired_services.append(state.service_name)
-                    logger.warning(
-                        "circuit_breaker.manual_override_expired",
-                        target_service_name=state.service_name,
-                        previous_state=previous_state,
-                    )
+                previous_state = fresh.state
+                self.repository.clear_manual_control(
+                    fresh.service_name, preserve_reason=True
+                )
+
+                expired_services.append(fresh.service_name)
+                logger.warning(
+                    "circuit_breaker.manual_override_expired",
+                    target_service_name=fresh.service_name,
+                    previous_state=previous_state,
+                )
         except Exception as e:
             logger.exception(
                 "circuit_breaker.check_expired_overrides_failed",
@@ -678,14 +835,15 @@ class ManualControlMixin:
                     error="Circuit is not under manual control",
                 )
 
-            # Extend TTL
+            # Extend TTL. The base is never in the past: a stored expiry that
+            # already lapsed (sweep down, or a worker the sweep cannot reach)
+            # would otherwise put the "extension" behind us — reported as
+            # success while the override stays lapsed.
             current_time = utc_now()
-            if state.manual_override_expires_at:
-                new_expires_at = state.manual_override_expires_at + timedelta(
-                    minutes=additional_minutes
-                )
-            else:
-                new_expires_at = current_time + timedelta(minutes=additional_minutes)
+            base = state.manual_override_expires_at or current_time
+            new_expires_at = max(base, current_time) + timedelta(
+                minutes=additional_minutes
+            )
 
             new_reason = (
                 f"{state.control_reason} | Extended: {reason}"

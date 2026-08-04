@@ -726,6 +726,12 @@ class BaseCircuitBreakerStateAdmin(admin.ModelAdmin if DJANGO_AVAILABLE else obj
         "opened_at",
         "created_at",
         "updated_at",
+        # Displayed but not editable: ticking this box on the change form
+        # pinned a breaker with no lifetime, and a pin with no lifetime never
+        # lifts on its own. Every pin lifecycle transition goes through the
+        # actions below instead, which route through the service and always
+        # carry a TTL.
+        "manually_controlled",
     ]
 
     actions = [

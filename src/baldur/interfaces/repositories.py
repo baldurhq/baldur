@@ -964,6 +964,21 @@ class FailedOperationRepository(ABC):
         return {"complete": True, "walked": 0}
 
 
+def resolve_manual_override_expiry(ttl_minutes: int | None) -> datetime | None:
+    """Translate a manual-override TTL into the timestamp adapters store.
+
+    The single definition of the storage-side TTL semantics shared by every
+    ``atomic_force_open`` / ``atomic_force_close`` implementation: a positive
+    value becomes ``now + ttl``, while ``None`` or a non-positive value stores
+    no expiry at all. Adapters used to disagree on the non-positive case (one
+    stored a past timestamp, i.e. an override that expired the instant it was
+    written), which made the same request mean opposite things per backend.
+    """
+    if ttl_minutes is None or ttl_minutes <= 0:
+        return None
+    return utc_now() + timedelta(minutes=ttl_minutes)
+
+
 class CircuitBreakerStateRepository(ABC):
     """
     Abstract repository for CircuitBreakerState data access.
@@ -1206,7 +1221,7 @@ class CircuitBreakerStateRepository(ABC):
         service_name: str,
         reason: str = "",
         controlled_by_id: int | None = None,
-        ttl_minutes: int = 90,
+        ttl_minutes: int | None = None,
     ) -> tuple[bool, str, str]:
         """
         Atomically force open a circuit breaker.
@@ -1218,7 +1233,11 @@ class CircuitBreakerStateRepository(ABC):
             service_name: Name of the service
             reason: Reason for opening
             controlled_by_id: User ID who initiated the change
-            ttl_minutes: TTL for manual override
+            ttl_minutes: Lifetime of the manual override, in minutes. ``None``
+                or a value ``<= 0`` stores no expiry, which is a pin that never
+                lifts on its own. Repositories are dumb storage here: the policy
+                default and the range check live at the service layer, which
+                never asks for a non-expiring pin.
 
         Returns:
             Tuple of (success, previous_state, new_state)
@@ -1242,16 +1261,24 @@ class CircuitBreakerStateRepository(ABC):
         service_name: str,
         reason: str = "",
         controlled_by_id: int | None = None,
+        ttl_minutes: int | None = None,
     ) -> tuple[bool, str, str]:
         """
         Atomically force close a circuit breaker.
 
         This method MUST use row-level locking to prevent concurrent modifications.
 
+        Implementations MUST write ``manual_override_expires_at`` explicitly
+        (to the computed expiry or to NULL) rather than leaving whatever a
+        previous manual override stored — a stale expiry left behind by an
+        earlier force-open would otherwise apply to this pin.
+
         Args:
             service_name: Name of the service
             reason: Reason for closing
             controlled_by_id: User ID who initiated the change
+            ttl_minutes: Lifetime of the manual override, in minutes. ``None``
+                or a value ``<= 0`` stores no expiry (see ``atomic_force_open``).
 
         Returns:
             Tuple of (success, previous_state, new_state)

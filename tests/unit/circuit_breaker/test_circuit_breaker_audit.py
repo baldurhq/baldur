@@ -231,6 +231,9 @@ class TestCircuitBreakerAutoRecoveryAudit:
         state = Mock()
         state.state = CircuitState.OPEN
         state.opened_at = datetime.now(UTC) - timedelta(seconds=120)  # 120초 전
+        # Automatic OPEN, not an operator block — a manual pin takes a
+        # different admission branch entirely.
+        state.manually_controlled = False
         mock_repository.get_or_create.return_value = state
         # 476: repository owns the OPEN→HALF_OPEN atomic transition.
         mock_repository.try_acquire_half_open_slot.return_value = (
@@ -269,6 +272,7 @@ class TestCircuitBreakerAutoRecoveryAudit:
         state = Mock()
         state.state = CircuitState.OPEN
         state.opened_at = datetime.now(UTC) - timedelta(seconds=30)  # 30초 전
+        state.manually_controlled = False
         mock_repository.get_or_create.return_value = state
 
         # Execute

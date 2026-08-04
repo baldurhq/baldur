@@ -15,6 +15,7 @@ from baldur.core.constants import (
     ControlAPIActions,
     ControlAPIEnvironments,
 )
+from baldur.settings.circuit_breaker import MAX_MANUAL_OVERRIDE_TTL_MINUTES
 from baldur.utils.time import utc_now
 
 from .models import ControlRequest, ControlResponse
@@ -225,6 +226,7 @@ class ControlAPIService:
             service_name=request.service_name,
             reason=request.reason,
             trigger_replay=request.metadata.get("trigger_replay", False),
+            ttl_minutes=request.ttl_minutes,
         )
 
         if result.success:
@@ -232,6 +234,9 @@ class ControlAPIService:
                 status="success",
                 action_applied="allow",
                 system_state="allow",
+                effective_until=(
+                    result.expires_at.isoformat() if result.expires_at else None
+                ),
                 evidence=self._gather_evidence(request.service_name),
             )
         return ControlResponse(
@@ -250,24 +255,20 @@ class ControlAPIService:
         result = self.circuit_breaker.force_open(
             service_name=request.service_name,
             reason=request.reason,
+            ttl_minutes=request.ttl_minutes,
         )
-
-        # Calculate effective_until
-        effective_until = None
-        if request.ttl_minutes:
-            effective_until = (
-                utc_now() + timedelta(minutes=request.ttl_minutes)
-            ).isoformat()
-        elif request.environment == ControlAPIEnvironments.OPS:
-            # Default 90 minutes in ops
-            effective_until = (utc_now() + timedelta(minutes=90)).isoformat()
 
         if result.success:
             return ControlResponse(
                 status="success",
                 action_applied="block",
                 system_state="block",
-                effective_until=effective_until,
+                # Read back from storage, not recomputed: the reported lift
+                # time is the one actually stored, so the response cannot
+                # promise an expiry the breaker does not have.
+                effective_until=(
+                    result.expires_at.isoformat() if result.expires_at else None
+                ),
                 evidence=self._gather_evidence(request.service_name),
             )
         return ControlResponse(
@@ -287,20 +288,17 @@ class ControlAPIService:
         result = self.circuit_breaker.force_close(
             service_name=request.service_name,
             reason=f"OVERRIDE: {request.reason}",
+            ttl_minutes=request.ttl_minutes,
         )
-
-        effective_until = None
-        if request.ttl_minutes:
-            effective_until = (
-                utc_now() + timedelta(minutes=request.ttl_minutes)
-            ).isoformat()
 
         if result.success:
             return ControlResponse(
                 status="success",
                 action_applied="override",
                 system_state="allow",
-                effective_until=effective_until,
+                effective_until=(
+                    result.expires_at.isoformat() if result.expires_at else None
+                ),
                 evidence=self._gather_evidence(request.service_name),
             )
         return ControlResponse(
@@ -497,6 +495,38 @@ class ControlAPIService:
                 error_code="ACTION_FORBIDDEN_IN_ENVIRONMENT",
                 error_message="inject_success is forbidden in ops environment",
             )
+
+        # TTL range, for every action that pins a manual override.
+        #
+        # Guarded before it compares: this method runs outside execute()'s
+        # try/except, and the quick-action routes put the raw JSON value into
+        # ControlRequest without a type check — so a non-int reaching a
+        # comparison here would surface as a 500 instead of a rejection.
+        if (
+            request.action
+            in (
+                ControlAPIActions.ALLOW,
+                ControlAPIActions.BLOCK,
+                ControlAPIActions.OVERRIDE,
+            )
+            and request.ttl_minutes is not None
+        ):
+            ttl = request.ttl_minutes
+            if (
+                not isinstance(ttl, int)
+                or isinstance(ttl, bool)
+                or ttl < 1
+                or ttl > MAX_MANUAL_OVERRIDE_TTL_MINUTES
+            ):
+                return ControlResponse(
+                    status="rejected",
+                    action_applied=request.action,
+                    error_code="TTL_OUT_OF_RANGE",
+                    error_message=(
+                        f"ttl_minutes must be an integer between 1 and "
+                        f"{MAX_MANUAL_OVERRIDE_TTL_MINUTES} (got: {ttl!r})"
+                    ),
+                )
 
         # override in ops requires TTL (max 60)
         if (
