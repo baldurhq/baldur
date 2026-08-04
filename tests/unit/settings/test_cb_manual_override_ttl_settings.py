@@ -57,6 +57,7 @@ class TestManualOverrideTTLSettingsContract:
         assert MAX_MANUAL_OVERRIDE_TTL_MINUTES == 1440
 
     def test_manual_override_ttl_minutes_reads_its_env_var(self):
+        """``BALDUR_CB_MANUAL_OVERRIDE_TTL_MINUTES`` feeds the field."""
         reset_circuit_breaker_settings()
         with mock.patch.dict(
             os.environ,
@@ -110,3 +111,42 @@ class TestManualOverrideTTLConfigResolution:
 
         reset_circuit_breaker_settings()
         assert config.manual_override_ttl_minutes == 17
+
+
+# =============================================================================
+# Contract — the dict-merge write path enforces the same bound
+# =============================================================================
+
+
+class TestManualOverrideTTLRuntimeConfigGuardContract:
+    """The runtime-config write path refuses what the Field bound refuses.
+
+    PRO runtime-config edits merge plain dicts through
+    ``is_valid_value`` — the Pydantic ``ge/le`` never runs there. Without a
+    ``VALIDATION_RULES`` row, a console edit could store ``0``, and the
+    blank-TTL default would then mint a pin with no expiry — one that the
+    sweep skips and only a Reset lifts (741 verify, refutation pass).
+    """
+
+    def test_validation_rules_row_matches_the_settings_bound(self):
+        """One bound, one source — the rule row must track the constant."""
+        from baldur.core.safe_defaults import VALIDATION_RULES
+
+        assert VALIDATION_RULES["circuit_breaker"]["manual_override_ttl_minutes"] == (
+            1,
+            MAX_MANUAL_OVERRIDE_TTL_MINUTES,
+        )
+
+    @pytest.mark.parametrize(
+        ("value", "accepted"),
+        [(0, False), (-5, False), (1, True), (90, True), (1440, True), (100000, False)],
+        ids=["zero", "negative", "at_min", "default", "at_max", "way_above"],
+    )
+    def test_is_valid_value_enforces_the_bound(self, value, accepted):
+        """The gate the PRO ``_apply_kwargs`` merge actually consults."""
+        from baldur.core.safe_defaults import is_valid_value
+
+        assert (
+            is_valid_value("circuit_breaker", "manual_override_ttl_minutes", value)
+            is accepted
+        )

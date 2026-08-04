@@ -1162,3 +1162,37 @@ class TestExtendLapsedOverride:
 
         stored = repo.get_by_service_name("payment-api").manual_override_expires_at
         assert stored == stored_expiry + timedelta(minutes=30)
+
+    @pytest.mark.parametrize(
+        "additional_minutes",
+        [0, -30, MAX_MANUAL_OVERRIDE_TTL_MINUTES + 1, "abc", True],
+        ids=["zero", "negative", "above_max", "non_int", "bool"],
+    )
+    def test_extend_rejects_an_out_of_range_extension(self, additional_minutes):
+        """An unusable extension is refused before anything is written.
+
+        A non-positive value used to compute ``max(base, now) - 30min`` — a
+        past-dated expiry written to storage and reported as a success
+        (741 verify, refutation pass). Regression guard: the stored expiry is
+        byte-identical after the rejected call.
+        """
+        repo = InMemoryCircuitBreakerStateRepository()
+        service = _build_service(repo)
+        stored_expiry = utc_now() - timedelta(minutes=10)
+        _seed_state(
+            repo,
+            state=CircuitBreakerStateEnum.OPEN.value,
+            manually_controlled=True,
+            manual_override_expires_at=stored_expiry,
+            opened_at=utc_now() - timedelta(minutes=20),
+        )
+
+        result = service.extend_manual_override(
+            "payment-api", additional_minutes=additional_minutes
+        )
+
+        assert result.success is False
+        assert (
+            repo.get_by_service_name("payment-api").manual_override_expires_at
+            == stored_expiry
+        )
