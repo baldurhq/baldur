@@ -17,7 +17,9 @@ Covers:
 - the get_control_api_service() singleton
 """
 
+from contextlib import contextmanager
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -1113,6 +1115,122 @@ class TestGetMetrics:
         result = service.get_metrics()
         assert result["healthy_services"] == 1
         assert result["degraded_services"] == 1
+
+
+# =============================================================================
+# get_metrics honest-absence Tests
+# =============================================================================
+
+
+class TestGetMetricsHonestAbsence:
+    """get_metrics() with the real updaters, which now report "not measured".
+
+    Both updaters return ``None`` on this path — the retry one on every call
+    until a producer exists, the pending one whenever the per-domain breakdown
+    is unavailable — so the response must render honest values rather than
+    raising or fabricating. Each assertion below states the value, never only
+    that no exception was raised: the loop over registered domains is what
+    would raise, and a test that merely survives would also pass if the loop
+    never ran.
+    """
+
+    @staticmethod
+    def _repo(stats):
+        """A statistics repository double returning one snapshot shape."""
+        from baldur.interfaces.repositories import FailedOperationRepository
+
+        repo = MagicMock(spec=FailedOperationRepository)
+        repo.get_statistics.return_value = stats
+        return repo
+
+    @contextmanager
+    def _wired(self, stats):
+        """Drive the real updaters against a snapshot of the given shape."""
+        from baldur.metrics.recorders.dlq import DLQMetricRecorder
+        from baldur.metrics.recorders.retry import RetryMetricRecorder
+
+        facade = SimpleNamespace(
+            dlq=MagicMock(spec=DLQMetricRecorder),
+            retry=MagicMock(spec=RetryMetricRecorder),
+        )
+        with (
+            patch("baldur.factory.ProviderRegistry") as mock_registry,
+            patch(
+                "baldur.metrics.registry.get_registered_domains",
+                return_value=["payment", "point"],
+            ),
+            patch(
+                "baldur.services.metrics.updaters.get_registered_domains",
+                return_value=["payment", "point"],
+            ),
+            patch("baldur.metrics.prometheus.get_metrics", return_value=facade),
+        ):
+            mock_registry.failed_op_repo.safe_get.return_value = self._repo(stats)
+            mock_registry.circuit_breaker_repo.safe_get.return_value = None
+            yield facade
+
+    def test_get_metrics_renders_every_service_when_the_rate_source_is_absent(
+        self, service
+    ):
+        """No adapter produces success rates, so the updater returns None.
+
+        Coercing that to an empty mapping is what keeps the per-service loop
+        from raising on ``.get()``; the loop must still run for all domains.
+        """
+        with self._wired({"pending_count": 4, "pending_by_domain": {"payment": 4}}):
+            result = service.get_metrics()
+
+        assert [s["service_name"] for s in result["services"]] == ["payment", "point"]
+
+    def test_get_metrics_retry_success_rate_is_null_not_a_fabricated_hundred(
+        self, service
+    ):
+        """The payload models "not measured" as null on every service."""
+        with self._wired({"pending_count": 4, "pending_by_domain": {"payment": 4}}):
+            result = service.get_metrics()
+
+        assert [s["retry_success_rate"] for s in result["services"]] == [None, None]
+
+    def test_control_api_pending_total_reads_the_o1_count_when_breakdown_absent(
+        self, service
+    ):
+        """The headline total is the repository's own count, not a breakdown sum.
+
+        The Redis adapter drops ``pending_by_domain`` when its O(pending) scan
+        fails — summing what is left renders 0 against a real backlog, two
+        lines from the alert that is paging on the same quantity.
+        """
+        with self._wired({"pending_count": 120, "total_count": 500}):
+            result = service.get_metrics()
+
+        assert result["total_dlq_pending"] == 120
+
+    def test_get_metrics_pending_total_uses_the_by_status_shape_too(self, service):
+        """Memory and SQL emit no flat count — the projection covers them."""
+        with self._wired({"by_status": {"pending": 7}, "pending_by_domain": {}}):
+            result = service.get_metrics()
+
+        assert result["total_dlq_pending"] == 7
+
+    def test_get_metrics_reads_the_dlq_repository_once_per_poll(self, service):
+        """One snapshot per response, so its numbers describe one instant."""
+        repo = self._repo({"pending_count": 1, "total_count": 2})
+        with (
+            patch("baldur.factory.ProviderRegistry") as mock_registry,
+            patch(
+                "baldur.metrics.registry.get_registered_domains",
+                return_value=["payment"],
+            ),
+            patch(
+                "baldur.services.metrics.updaters.get_registered_domains",
+                return_value=["payment"],
+            ),
+        ):
+            mock_registry.failed_op_repo.safe_get.return_value = repo
+            mock_registry.circuit_breaker_repo.safe_get.return_value = None
+            service.get_metrics()
+
+        assert repo.get_statistics.call_count == 1
 
 
 # =============================================================================

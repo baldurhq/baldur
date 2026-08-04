@@ -635,3 +635,77 @@ class TestGenerateAndSendReportSkipConditionBehavior:
 
         assert result.skipped is True
         assert result.skip_reason == "no_data"
+
+
+# =============================================================================
+# dlq_pending_count source — Behavior Tests
+# =============================================================================
+
+
+class TestDailyReportPendingTotal:
+    """The report's DLQ line reads the O(1) pending total, whatever the shape.
+
+    The call site's return value is deliberately unused: the gauge updater
+    returns ``None`` when the per-domain breakdown is unavailable, which is
+    exactly the incident during which the report is worth reading. Summing the
+    breakdown printed 0 there.
+    """
+
+    @staticmethod
+    def _collect(stats, report=None):
+        """Run ``_collect_snapshots`` against one statistics snapshot shape."""
+        from baldur.interfaces.repositories import FailedOperationRepository
+
+        svc = DailyReportService()
+        report = DailyAutonomousReport() if report is None else report
+        mock_repo = MagicMock(spec=FailedOperationRepository)
+        mock_repo.get_statistics.return_value = stats
+
+        with (
+            patch(
+                "baldur_pro.services.chaos.reports.get_report_generator",
+                side_effect=Exception,
+            ),
+            patch(
+                "baldur.factory.ProviderRegistry.get_cache",
+                side_effect=Exception,
+            ),
+            patch(
+                "baldur.scaling.rate_controller.get_rate_controller",
+                side_effect=Exception,
+            ),
+            patch(
+                "baldur.factory.ProviderRegistry.get_failed_operation_repo",
+                return_value=mock_repo,
+            ),
+            patch("baldur.services.metrics.updaters.update_dlq_pending_gauges"),
+        ):
+            svc._collect_snapshots(report, datetime(2026, 4, 4, tzinfo=UTC))
+
+        return report
+
+    def test_daily_report_pending_total_reads_the_o1_count_when_breakdown_absent(self):
+        """The Redis fail-open drops the breakdown; the baseline count survives."""
+        report = self._collect({"pending_count": 120})
+
+        assert report.dlq_pending_count == 120
+
+    def test_daily_report_pending_total_reads_the_by_status_shape(self):
+        """Memory and SQL emit no flat count — the projection covers them."""
+        report = self._collect({"by_status": {"pending": 7}, "pending_by_domain": {}})
+
+        assert report.dlq_pending_count == 7
+
+    def test_daily_report_pending_total_unmeasured_leaves_the_field_untouched(self):
+        """Neither key shape present: report nothing rather than a fabricated 0.
+
+        The field is pre-set to a value the collection cannot produce, so a
+        regression that writes an unconditional 0 is visible — asserting the
+        dataclass default alone would pass either way.
+        """
+        report = DailyAutonomousReport()
+        report.dlq_pending_count = 99
+
+        self._collect({"total": 30}, report=report)
+
+        assert report.dlq_pending_count == 99
