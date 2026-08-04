@@ -41,6 +41,22 @@ METRIC_COLLECTION_HEARTBEAT_COMPONENT = "metric_collection"
 # Statistics-dict projection helpers
 # =============================================================================
 
+# Gauge label -> ``by_status`` source key, for adapters that emit the status
+# map instead of the flat ``*_count`` keys (memory, SQL). Written out as an
+# explicit projection rather than a name-identity map with one alias, because
+# REVIEWING and REQUIRES_REVIEW are BOTH live statuses and both appear in
+# ``by_status``: an identity map would land two source keys on the `reviewing`
+# gauge label, making its value depend on iteration order. The alias direction
+# below mirrors the Redis adapter's own flat keys, where `reviewing_count`
+# carries the requires-review count. Every other status is deliberately
+# ungauged — same set the flat path publishes.
+_STATUS_GAUGE_SOURCE_KEYS = {
+    "pending": "pending",
+    "reviewing": "requires_review",
+    "resolved": "resolved",
+    "rejected": "rejected",
+}
+
 
 def _resolve_pending_total(stats: dict) -> int | None:
     """Resolve the repository's pending total from a ``get_statistics()`` dict.
@@ -101,11 +117,18 @@ def update_dlq_pending_gauges(
     repository: FailedOperationRepository | None = None,
     *,
     stats: dict | None = None,
-) -> dict[str, int]:
+) -> dict[str, int] | None:
     """
     Update DLQ pending gauges from database.
 
     Should be called periodically by a scheduled task.
+
+    The per-domain breakdown is a diagnostic surface, not a paging one: it is
+    an O(pending) scan that the Redis adapter omits on collection error. When
+    it cannot be trusted this function writes **nothing** and returns ``None``,
+    so the previously exported values are held. Holding a stale high count
+    keeps paging a human; writing zeros would resolve the DLQ alerts during the
+    very incident that produced the backlog.
 
     Args:
         repository: Optional repository instance (uses factory if not provided)
@@ -114,7 +137,8 @@ def update_dlq_pending_gauges(
             read once instead of once per updater.
 
     Returns:
-        Dictionary of domain -> pending count
+        Dictionary of domain -> pending count, or ``None`` when the breakdown
+        was unavailable or self-inconsistent (no gauge was written).
     """
     try:
         if stats is None:
@@ -124,7 +148,30 @@ def update_dlq_pending_gauges(
                 repository = ProviderRegistry.get_failed_operation_repo()
 
             stats = repository.get_statistics()
-        pending_by_domain = stats.get("pending_by_domain", {})
+
+        if "pending_by_domain" not in stats:
+            # Producer failed the breakdown open (the key is dropped, the
+            # baseline counts survive) — the WARNING is emitted there.
+            logger.debug(
+                "metrics.dlq_pending_breakdown_unavailable",
+                reason="key_absent",
+            )
+            return None
+
+        pending_by_domain = stats["pending_by_domain"]
+        baseline = _resolve_pending_total(stats) or 0
+        if baseline > 0 and not sum(pending_by_domain.values()):
+            # Present-but-empty against a live baseline: a mid-call backend
+            # degradation flips the breakdown collector onto its empty
+            # in-memory fallback and it returns {} without raising. Both
+            # numbers come from this one snapshot, so this is a pure local
+            # consistency check.
+            logger.debug(
+                "metrics.dlq_pending_breakdown_unavailable",
+                reason="inconsistent_with_baseline",
+                pending_count=baseline,
+            )
+            return None
 
         from baldur.metrics.prometheus import get_metrics
 
@@ -144,16 +191,23 @@ def update_dlq_pending_gauges(
             "metrics.update_dlq_pending_failed",
             error=e,
         )
-        return {}
+        return None
 
 
 def update_dlq_status_gauges(
     repository: FailedOperationRepository | None = None,
     *,
     stats: dict | None = None,
-) -> dict[str, int]:
+) -> dict[str, int] | None:
     """
     Update DLQ status distribution gauges.
+
+    Reads the flat ``*_count`` keys when the adapter emits them (Redis) and
+    otherwise projects ``by_status`` (memory / SQL) through
+    :data:`_STATUS_GAUGE_SOURCE_KEYS`. The counts here are O(1) on every
+    adapter — an index length, a ``GROUP BY`` count or a ``ZCARD`` — which is
+    why the ``pending`` row of this family, not the per-domain breakdown, is
+    what the bundled DLQ backlog alerts page on.
 
     Args:
         repository: Optional repository instance (uses factory if not provided)
@@ -161,7 +215,8 @@ def update_dlq_status_gauges(
             :func:`update_dlq_pending_gauges`)
 
     Returns:
-        Dictionary of status -> count
+        Dictionary of status -> count, or ``None`` when the snapshot carries
+        neither key shape (no gauge was written).
     """
     try:
         if stats is None:
@@ -171,12 +226,26 @@ def update_dlq_status_gauges(
                 repository = ProviderRegistry.get_failed_operation_repo()
 
             stats = repository.get_statistics()
-        by_status = {
-            "pending": stats.get("pending_count", 0),
-            "reviewing": stats.get("reviewing_count", 0),
-            "resolved": stats.get("resolved_count", 0),
-            "rejected": stats.get("rejected_count", 0),
-        }
+
+        source_by_status = stats.get("by_status")
+        if "pending_count" in stats:
+            by_status = {
+                "pending": stats.get("pending_count", 0),
+                "reviewing": stats.get("reviewing_count", 0),
+                "resolved": stats.get("resolved_count", 0),
+                "rejected": stats.get("rejected_count", 0),
+            }
+        elif isinstance(source_by_status, dict):
+            by_status = {
+                gauge_label: source_by_status.get(source_key, 0)
+                for gauge_label, source_key in _STATUS_GAUGE_SOURCE_KEYS.items()
+            }
+        else:
+            logger.debug(
+                "metrics.dlq_status_source_unavailable",
+                reason="no_flat_keys_and_no_by_status",
+            )
+            return None
 
         from baldur.metrics.prometheus import get_metrics
 
@@ -195,7 +264,7 @@ def update_dlq_status_gauges(
             "metrics.update_dlq_status_failed",
             error=e,
         )
-        return {}
+        return None
 
 
 def update_circuit_breaker_gauges(
@@ -247,9 +316,15 @@ def update_retry_success_rates(
     repository: FailedOperationRepository | None = None,
     *,
     stats: dict | None = None,
-) -> dict[str, float]:
+) -> dict[str, float] | None:
     """
     Calculate and update retry success rate gauges.
+
+    No repository adapter computes ``success_rates_by_domain`` today, so this
+    function normally writes nothing and returns ``None``: the gauge stays
+    honestly absent rather than exporting a fabricated 100% for every domain.
+    A domain missing from an otherwise-present map is likewise skipped, never
+    defaulted.
 
     Args:
         repository: Optional repository instance (uses factory if not provided)
@@ -257,7 +332,8 @@ def update_retry_success_rates(
             :func:`update_dlq_pending_gauges`)
 
     Returns:
-        Dictionary of domain -> success_rate_percentage
+        Dictionary of domain -> success_rate_percentage, or ``None`` when the
+        snapshot carries no success-rate source (no gauge was written).
     """
     try:
         if stats is None:
@@ -267,15 +343,23 @@ def update_retry_success_rates(
                 repository = ProviderRegistry.get_failed_operation_repo()
 
             stats = repository.get_statistics()
-        rates = {}
 
-        success_rates = stats.get("success_rates_by_domain", {})
+        success_rates = stats.get("success_rates_by_domain")
+        if not isinstance(success_rates, dict):
+            logger.debug(
+                "metrics.retry_success_rate_source_unavailable",
+                reason="key_absent",
+            )
+            return None
 
         from baldur.metrics.prometheus import get_metrics
 
         metrics = get_metrics()
+        rates = {}
         for domain in get_registered_domains():
-            rate = success_rates.get(domain, 100.0)
+            if domain not in success_rates:
+                continue
+            rate = success_rates[domain]
             metrics.retry.set_success_rate(domain, rate)
             rates[domain] = rate
 
@@ -290,7 +374,7 @@ def update_retry_success_rates(
             "metrics.update_retry_success_failed",
             error=e,
         )
-        return {}
+        return None
 
 
 # =============================================================================
@@ -331,20 +415,56 @@ def collect_all_metrics() -> dict:
     """
     Collect all baldur metrics.
 
-    This should be called by a periodic Celery task.
+    Driven per interval by the per-process ``DomainGaugeUpdater``, and
+    available to operators who prefer to run collection as a Celery task.
+
+    One ``get_statistics()`` snapshot feeds the three DLQ-family updaters, so
+    a tick pays the repository read — the O(pending) breakdown scan on Redis —
+    once rather than three times, and the pending updater's cross-key
+    consistency check compares two numbers from the same read.
+
+    Emits the ``metric_collection`` heartbeat only when the DLQ **status**
+    family was actually written. That family carries the pending total the
+    bundled backlog alerts page on, so the dead-man's switch advances exactly
+    when the paged gauge is fresh: a Redis incident that costs only the
+    per-domain breakdown leaves the paged number current and must not also
+    raise a staleness page, while a stalled status write must not leave the
+    switch green over a frozen paged series.
 
     Returns:
         Dictionary with all current metric values
     """
-    pending = update_dlq_pending_gauges()
-    status = update_dlq_status_gauges()
+    stats: dict | None = None
+    try:
+        from baldur.factory import ProviderRegistry
+
+        stats = ProviderRegistry.get_failed_operation_repo().get_statistics()
+    except Exception as e:
+        logger.exception(
+            "metrics.collect_all_snapshot_failed",
+            error=e,
+        )
+
+    pending = None
+    status = None
+    success_rates = None
+    if stats is not None:
+        pending = update_dlq_pending_gauges(stats=stats)
+        status = update_dlq_status_gauges(stats=stats)
+        success_rates = update_retry_success_rates(stats=stats)
+
+    # Separate repository, separate failure domain — read unconditionally.
     cb_states = update_circuit_breaker_gauges()
-    success_rates = update_retry_success_rates()
+
+    if status is not None:
+        from baldur.services.metrics.recorders import emit_heartbeat
+
+        emit_heartbeat(component=METRIC_COLLECTION_HEARTBEAT_COMPONENT)
 
     return {
-        "dlq_pending_by_domain": pending,
-        "dlq_by_status": status,
+        "dlq_pending_by_domain": pending or {},
+        "dlq_by_status": status or {},
         "circuit_breaker_states": cb_states,
-        "retry_success_rates": success_rates,
+        "retry_success_rates": success_rates or {},
         "collected_at": utc_now().isoformat(),
     }
