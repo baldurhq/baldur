@@ -814,13 +814,20 @@ class ManualControlMixin:
 
         Args:
             service_name: Name of the external service
-            additional_minutes: Minutes to extend the override
+            additional_minutes: Minutes to extend the override. Must be a
+                plain integer in ``1..MAX_MANUAL_OVERRIDE_TTL_MINUTES`` — a
+                non-positive extension would write a past-dated expiry and
+                report success while the override stays lapsed.
             controlled_by_id: User ID who initiated the extension
             reason: Reason for extension
 
         Returns:
             CircuitBreakerResult with operation outcome
         """
+        ttl_error = _reject_out_of_range_ttl(service_name, additional_minutes)
+        if ttl_error:
+            return ttl_error
+
         try:
             state = self.repository.get_by_service_name(service_name)
             if state is None:

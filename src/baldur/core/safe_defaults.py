@@ -35,6 +35,7 @@ SAFE_DEFAULTS: dict[str, dict[str, Any]] = {
         "recovery_timeout": 60,  # 1 minute
         "success_threshold": 2,
         "half_open_max_calls": 3,
+        "manual_override_ttl_minutes": 90,  # matches the settings Field default
         "rate_limit_cascade_threshold": 10,
         "rate_limit_cascade_window_seconds": 60,
         "rate_limit_cascade_rate": 10.0,
@@ -215,6 +216,12 @@ VALIDATION_RULES: dict[str, dict[str, tuple[Any, Any]]] = {
         "recovery_timeout": (1, 3600),
         "success_threshold": (1, 100),
         "half_open_max_calls": (1, 100),
+        # Mirrors settings.circuit_breaker.MAX_MANUAL_OVERRIDE_TTL_MINUTES —
+        # this dict-merge path (PRO runtime-config writes) bypasses the
+        # Pydantic Field bound, so without this row a console edit could store
+        # a value the env-var path rejects. 0 or below would make the blank-TTL
+        # default mint a pin with no expiry, which nothing lifts automatically.
+        "manual_override_ttl_minutes": (1, 1440),
         "rate_limit_cascade_rate": (0.0, 100.0),
         "rate_limit_cascade_minimum_calls": (1, 100),
         "self_ddos_rps_limit": (1, 10000),
