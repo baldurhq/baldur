@@ -96,6 +96,12 @@ class TestOverrideExpiryInlineScheduler:
     """The inline default scheduler owns the sweep on Celery-less installs."""
 
     def test_override_expiry_inline_job_is_registered(self, inline_scheduler):
+        """
+        Purpose:
+            The default job table registers the sweep on the inline scheduler.
+        Expected:
+            - ``cb_override_expiry`` is present after ``_start_default_scheduler``
+        """
         assert JOB_NAME in inline_scheduler.jobs
 
     def test_override_expiry_inline_job_needs_no_celery_task(self, inline_scheduler):
@@ -111,6 +117,13 @@ class TestOverrideExpiryInlineScheduler:
     def test_override_expiry_inline_job_clears_a_lapsed_block(
         self, inline_scheduler, cb_repository
     ):
+        """
+        Purpose:
+            The registered job reaches the real service sweep end to end —
+            table -> resolver -> service -> repository — with no Celery present.
+        Expected:
+            - one pass clears ``manually_controlled`` and the stored expiry
+        """
         # Given: a manual Block whose lifetime has run out.
         _lapsed_block(cb_repository)
 

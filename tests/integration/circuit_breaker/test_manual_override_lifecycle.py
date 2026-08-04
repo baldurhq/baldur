@@ -76,6 +76,17 @@ class TestManualBlockLifecycle:
     def test_block_holds_for_its_lifetime_then_returns_to_automatic_recovery(
         self, service
     ):
+        """
+        Purpose:
+            One manual Block, end to end: stored lifetime, zero admissions
+            while it holds, the promised lift, and the hand-back to ordinary
+            recovery — the sequence no single unit test can show.
+        Expected:
+            - stored expiry equals the typed TTL and the reported expiry
+            - zero admissions until the lift instant, one trial after it
+            - a failed trial re-opens under the normal recovery gate
+            - the sweep clears the flag without touching state
+        """
         repository = service.repository
         blocked_at = utc_now()
 
@@ -159,6 +170,15 @@ class TestManualAllowLifecycle:
     """A force-allow suspends protection, so it has to expire too."""
 
     def test_allow_expires_and_automatic_protection_resumes(self, service):
+        """
+        Purpose:
+            A force-allow (force_close) is a suspension of protection, so its
+            expiry must hand the breaker back to automatic supervision.
+        Expected:
+            - failures are ignored while the allow holds
+            - past the lifetime, ``record_failure`` counts again with no sweep
+            - the sweep clears the flag and the circuit stays CLOSED
+        """
         repository = service.repository
         allowed_at = utc_now()
 
