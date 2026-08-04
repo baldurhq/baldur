@@ -40,6 +40,12 @@ class TestRedisManualOverrideExpiryRoundTrip:
     def test_force_open_stores_the_requested_lifetime(
         self, redis_circuit_breaker_repository
     ):
+        """
+        Purpose:
+            A force-open's TTL survives the Redis hash round-trip.
+        Expected:
+            - the read-back row is pinned with a future expiry
+        """
         repo = redis_circuit_breaker_repository
         before = utc_now()
 
@@ -86,6 +92,13 @@ class TestRedisManualOverrideExpiryRoundTrip:
     def test_force_close_without_a_ttl_clears_the_expiry_column(
         self, redis_circuit_breaker_repository
     ):
+        """
+        Purpose:
+            An explicit ``ttl_minutes=None`` force-close writes the column
+            to empty rather than leaving the previous block's value.
+        Expected:
+            - the read-back expiry is ``None`` after the force-close
+        """
         repo = redis_circuit_breaker_repository
         repo.atomic_force_open(SERVICE, reason="block", ttl_minutes=1440)
 

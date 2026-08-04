@@ -55,10 +55,12 @@ class TestResolveManualOverrideExpiryContract:
 
     @pytest.mark.parametrize("ttl", NO_EXPIRY_TTLS)
     def test_non_positive_or_absent_ttl_stores_no_expiry(self, ttl):
+        """``None`` and non-positive TTLs all resolve to "no expiry stored"."""
         assert resolve_manual_override_expiry(ttl) is None
 
     @pytest.mark.parametrize("ttl", [1, 5, 90, 1440])
     def test_positive_ttl_becomes_now_plus_the_lifetime(self, ttl):
+        """A positive TTL resolves to ``now + ttl`` within the call window."""
         before = utc_now()
 
         resolved = resolve_manual_override_expiry(ttl)
@@ -130,6 +132,7 @@ class TestAtomicForceTTLSemantics:
     def test_memory_stores_no_expiry_for_a_non_positive_ttl(
         self, memory_repo, ttl, operation
     ):
+        """Memory: a non-positive TTL stores no expiry on either force op."""
         getattr(memory_repo, operation)(SERVICE, reason="test", ttl_minutes=ttl)
 
         row = memory_repo.get_by_service_name(SERVICE)
@@ -140,6 +143,7 @@ class TestAtomicForceTTLSemantics:
     def test_layered_stores_no_expiry_for_a_non_positive_ttl(
         self, layered_repo, ttl, operation
     ):
+        """Layered: a non-positive TTL stores no expiry on either force op."""
         getattr(layered_repo, operation)(SERVICE, reason="test", ttl_minutes=ttl)
 
         row = layered_repo.get_by_service_name(SERVICE)
@@ -150,6 +154,7 @@ class TestAtomicForceTTLSemantics:
     def test_sql_stores_no_expiry_for_a_non_positive_ttl(
         self, sql_repo, ttl, operation
     ):
+        """SQL: a non-positive TTL stores no expiry on either force op."""
         getattr(sql_repo, operation)(SERVICE, reason="test", ttl_minutes=ttl)
 
         row = sql_repo.get_by_service_name(SERVICE)
@@ -167,6 +172,7 @@ class TestAtomicForceTTLSemantics:
 
     @pytest.mark.parametrize("operation", ["atomic_force_open", "atomic_force_close"])
     def test_memory_stores_the_requested_lifetime(self, memory_repo, operation):
+        """Memory: a positive TTL is stored as ``now + ttl``."""
         before = utc_now()
 
         getattr(memory_repo, operation)(SERVICE, reason="test", ttl_minutes=30)
@@ -180,6 +186,7 @@ class TestAtomicForceTTLSemantics:
 
     @pytest.mark.parametrize("operation", ["atomic_force_open", "atomic_force_close"])
     def test_sql_stores_the_requested_lifetime(self, sql_repo, operation):
+        """SQL: a positive TTL is stored as ``now + ttl``."""
         before = utc_now()
 
         getattr(sql_repo, operation)(SERVICE, reason="test", ttl_minutes=30)
@@ -193,6 +200,7 @@ class TestAtomicForceTTLSemantics:
 
     @pytest.mark.parametrize("operation", ["atomic_force_open", "atomic_force_close"])
     def test_redis_stores_the_requested_lifetime(self, operation):
+        """Redis: a positive TTL lands in the written hash as ``now + ttl``."""
         repo, backend = _redis_repo()
         before = utc_now()
 
@@ -212,6 +220,7 @@ class TestForceCloseClearsAPreviousBlocksExpiry:
     """A force-close pin never inherits the expiry an earlier block wrote."""
 
     def test_memory_force_close_overwrites_the_stored_expiry(self, memory_repo):
+        """Memory: a TTL-less force-close erases the block's stored expiry."""
         memory_repo.atomic_force_open(SERVICE, reason="block", ttl_minutes=90)
 
         memory_repo.atomic_force_close(SERVICE, reason="allow", ttl_minutes=None)
@@ -220,6 +229,7 @@ class TestForceCloseClearsAPreviousBlocksExpiry:
         assert row.manual_override_expires_at is None
 
     def test_sql_force_close_overwrites_the_stored_expiry(self, sql_repo):
+        """SQL: a TTL-less force-close erases the block's stored expiry."""
         sql_repo.atomic_force_open(SERVICE, reason="block", ttl_minutes=90)
 
         sql_repo.atomic_force_close(SERVICE, reason="allow", ttl_minutes=None)
