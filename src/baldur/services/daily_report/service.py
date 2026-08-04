@@ -374,11 +374,23 @@ class DailyReportService(EventEmitterMixin):
         # D8 supplement: dlq_pending_count (gauge -> snapshot, not event-driven)
         # Note: update_dlq_pending_gauges() also sets Prometheus gauge as side-effect.
         # Gauge.set() is idempotent — no metric spike at report time.
+        # The reported count comes from the repository's O(1) pending total,
+        # not from summing the per-domain breakdown: the breakdown is omitted
+        # on collection error (the adapter's documented fail-open), and summing
+        # it would print 0 against a real backlog. The updater's return value is
+        # deliberately unused — it is None when the breakdown is unavailable.
         try:
-            from baldur.services.metrics.updaters import update_dlq_pending_gauges
+            from baldur.factory import ProviderRegistry
+            from baldur.services.metrics.updaters import (
+                _resolve_pending_total,
+                update_dlq_pending_gauges,
+            )
 
-            pending = update_dlq_pending_gauges()
-            report.dlq_pending_count = sum(pending.values())
+            stats = ProviderRegistry.get_failed_operation_repo().get_statistics()
+            update_dlq_pending_gauges(stats=stats)
+            pending_total = _resolve_pending_total(stats)
+            if pending_total is not None:
+                report.dlq_pending_count = pending_total
         except Exception:
             pass
 

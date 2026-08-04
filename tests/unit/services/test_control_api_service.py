@@ -1054,7 +1054,10 @@ class TestGetMetrics:
         assert "healthy_services" in result
         assert "degraded_services" in result
         assert "total_dlq_pending" in result
-        assert result["total_dlq_pending"] == 4  # 3 + 1
+        # The headline total is the repository's O(1) pending count, NOT the
+        # sum of the per-domain breakdown (which the adapter omits on
+        # collection error and which under-counts silently).
+        assert result["total_dlq_pending"] == 5
         assert "services" in result
         assert len(result["services"]) == 2
         assert "timestamp" in result

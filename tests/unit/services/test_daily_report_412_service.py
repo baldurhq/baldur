@@ -440,10 +440,23 @@ class TestCollectSnapshotsBehavior:
         assert report.load_shedding_summary.level == "medium"
 
     def test_dlq_pending_snapshot_populates_gauge(self):
-        """D8: dlq_pending_count populated from update_dlq_pending_gauges()."""
+        """dlq_pending_count comes from the repository's O(1) pending total.
+
+        Deliberately NOT the sum of ``pending_by_domain``: the breakdown is
+        omitted on collection error, so summing it prints 0 against a real
+        backlog. The snapshot below carries a breakdown summing to 12 while
+        the O(1) count says 15 — the report must report 15.
+        """
         svc = DailyReportService()
         report = DailyAutonomousReport()
         date = datetime(2026, 4, 4, tzinfo=UTC)
+
+        mock_repo = MagicMock()
+        mock_repo.get_statistics.return_value = {
+            "pending_count": 15,
+            "pending_by_domain": {"payment": 8, "inventory": 4},
+            "pending_by_domain_and_failure_type": {},
+        }
 
         with (
             patch(
@@ -459,8 +472,11 @@ class TestCollectSnapshotsBehavior:
                 side_effect=Exception,
             ),
             patch(
+                "baldur.factory.ProviderRegistry.get_failed_operation_repo",
+                return_value=mock_repo,
+            ),
+            patch(
                 "baldur.services.metrics.updaters.update_dlq_pending_gauges",
-                return_value={"payment": 10, "inventory": 5},
             ),
         ):
             svc._collect_snapshots(report, date)
