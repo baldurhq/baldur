@@ -98,14 +98,27 @@ class TestManualOverrideTTLConfigResolution:
     """The setting is what force_open / force_close resolve ``None`` to."""
 
     def test_resolved_config_reads_the_settings_value(self):
-        """Without this hop the env var would be dead on every path."""
+        """Without this hop the env var would be dead on the PRO-absent path.
+
+        ``from_settings`` prefers the runtime-config manager when one is
+        registered and only falls through to the settings hop when it is not,
+        so the manager slot is neutralised here. Otherwise this asserts the
+        stored blob's defaults rather than the environment, and the variable
+        this suite covers is the documented PRO-absent surface.
+        """
+        from baldur.factory.registry import ProviderRegistry
         from baldur.services.circuit_breaker.config import CircuitBreakerConfig
 
         reset_circuit_breaker_settings()
-        with mock.patch.dict(
-            os.environ,
-            {"BALDUR_CB_MANUAL_OVERRIDE_TTL_MINUTES": "17"},
-            clear=True,
+        with (
+            mock.patch.object(
+                ProviderRegistry.runtime_config_manager, "safe_get", return_value=None
+            ),
+            mock.patch.dict(
+                os.environ,
+                {"BALDUR_CB_MANUAL_OVERRIDE_TTL_MINUTES": "17"},
+                clear=True,
+            ),
         ):
             config = CircuitBreakerConfig.from_settings()
 
