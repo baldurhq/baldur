@@ -260,11 +260,13 @@ class _MinimalABCRepoForOpenDefault(CircuitBreakerStateRepository):
         return True
 
     def atomic_force_open(
-        self, service_name, reason="", controlled_by_id=None, ttl_minutes=90
+        self, service_name, reason="", controlled_by_id=None, ttl_minutes=None
     ):
         return (True, "", "open")
 
-    def atomic_force_close(self, service_name, reason="", controlled_by_id=None):
+    def atomic_force_close(
+        self, service_name, reason="", controlled_by_id=None, ttl_minutes=None
+    ):
         return (True, "", "closed")
 
     def atomic_reset(self, service_name, reason="", controlled_by_id=None):

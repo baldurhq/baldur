@@ -74,17 +74,18 @@ def check_circuit_breaker_recovery(self) -> dict:
 )
 def expire_manual_overrides(self) -> dict:
     """
-    Periodic task to expire manual circuit breaker overrides.
+    Periodic task to clear lapsed manual circuit breaker overrides.
 
-    Manual overrides have a TTL to prevent "forgotten" blocks.
-    When expired:
-    - OPEN circuits transition to HALF_OPEN for gradual recovery
-    - The manually_controlled flag is cleared
+    Manual overrides have a TTL to prevent "forgotten" blocks. This task
+    clears the manually_controlled flag on rows whose lifetime has passed; it
+    writes no state. Traffic resumption is not gated on it — the admission path
+    stops honouring an override at its expiry instant on every worker, and the
+    trial request that follows is performed by the repository's atomic
+    primitive, which emits the transition audit and event this loop cannot.
 
     This ensures operators cannot accidentally leave services blocked
-    indefinitely. Default TTL is 90 minutes.
-
-    This task should be scheduled to run every 5 minutes.
+    indefinitely. The default lifetime is the configured
+    BALDUR_CB_MANUAL_OVERRIDE_TTL_MINUTES (90 minutes out of the box).
 
     Returns:
         Dictionary with expiration results

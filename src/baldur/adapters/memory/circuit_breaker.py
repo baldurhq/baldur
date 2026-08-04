@@ -13,7 +13,7 @@ Note: This module has been refactored for better maintainability:
 from __future__ import annotations
 
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import structlog
 
@@ -40,6 +40,7 @@ from baldur.interfaces.repositories import (
     CircuitBreakerStateData,
     CircuitBreakerStateEnum,
     CircuitBreakerStateRepository,
+    resolve_manual_override_expiry,
 )
 
 logger = structlog.get_logger()
@@ -513,16 +514,14 @@ class InMemoryCircuitBreakerStateRepository(CircuitBreakerStateRepository):
         service_name: str,
         reason: str = "",
         controlled_by_id: int | None = None,
-        ttl_minutes: int = 90,
+        ttl_minutes: int | None = None,
     ) -> tuple[bool, str, str]:
         """Atomically force open a circuit breaker."""
         with self._lock:
             entry = self.get_or_create(service_name)
             previous_state = entry.state
 
-            expires_at = (
-                _now() + timedelta(minutes=ttl_minutes) if ttl_minutes > 0 else None
-            )
+            expires_at = resolve_manual_override_expiry(ttl_minutes)
 
             updated = CircuitBreakerStateData(
                 id=entry.id,
@@ -549,6 +548,7 @@ class InMemoryCircuitBreakerStateRepository(CircuitBreakerStateRepository):
         service_name: str,
         reason: str = "",
         controlled_by_id: int | None = None,
+        ttl_minutes: int | None = None,
     ) -> tuple[bool, str, str]:
         """Atomically force close a circuit breaker."""
         with self._lock:
@@ -566,7 +566,7 @@ class InMemoryCircuitBreakerStateRepository(CircuitBreakerStateRepository):
                 manually_controlled=True,
                 controlled_by_id=controlled_by_id,
                 control_reason=reason,
-                manual_override_expires_at=None,
+                manual_override_expires_at=resolve_manual_override_expiry(ttl_minutes),
                 half_open_request_count=0,
                 half_open_window_started_at=None,
                 created_at=entry.created_at,

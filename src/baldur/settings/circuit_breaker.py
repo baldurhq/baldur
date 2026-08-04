@@ -36,6 +36,15 @@ from baldur.settings.validators import warn_above
 
 logger = structlog.get_logger()
 
+# Upper bound for a manual override's lifetime, in minutes (24 hours).
+#
+# Single source for every TTL bound in the manual-control chain: the settings
+# field below, the control-API validator and the REST handler validator all
+# import this constant rather than restating a literal. 24h is the shift-
+# handover boundary — a manual block that outlives one handover with nobody
+# re-affirming it is exactly the population the TTL is a dead-man's switch for.
+MAX_MANUAL_OVERRIDE_TTL_MINUTES = 1440
+
 
 class CircuitBreakerSettings(BaseSettings):
     """
@@ -76,6 +85,23 @@ class CircuitBreakerSettings(BaseSettings):
             "Seconds after which a HALF_OPEN window with count==limit is "
             "considered stuck (worker died mid-trial) and auto-reset on the "
             "next try_acquire_half_open_slot call (476 D8)."
+        ),
+    )
+
+    # ==========================================================================
+    # Manual Override Lifetime
+    # ==========================================================================
+    manual_override_ttl_minutes: int = Field(
+        default=90,
+        ge=1,
+        le=MAX_MANUAL_OVERRIDE_TTL_MINUTES,
+        description=(
+            "Default lifetime, in minutes, of a manual circuit-breaker override "
+            "(Block / Allow / Override) when the operator does not type one. "
+            "Every manual pin expires: this is the dead-man's switch that stops "
+            "a forgotten block from suppressing traffic indefinitely. Applies at "
+            "the next worker start — a running service keeps the value it was "
+            "constructed with."
         ),
     )
 

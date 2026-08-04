@@ -36,7 +36,11 @@ from .config import (
     CircuitBreakerResult,
     CircuitState,
 )
-from .manual_control import ManualControlMixin
+from .manual_control import (
+    ManualControlMixin,
+    is_manual_pin_active,
+    is_pin_lift_due,
+)
 from .outcome_window import OutcomeWindow, evaluate_trip
 from .protection import ProtectionMixin
 
@@ -310,14 +314,34 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
 
         # OPEN with recovery_timeout NOT yet elapsed: short-circuit reject.
         if state.state == CircuitState.OPEN:
-            elapsed = (
-                (utc_now() - state.opened_at).total_seconds()
-                if state.opened_at is not None
-                else 0.0
-            )
-            if state.opened_at is None or elapsed < effective_config.recovery_timeout:
+            # A manual block admits nothing while it holds. Without this the
+            # pinned circuit would fall through to the trial path once
+            # recovery_timeout elapsed and keep leaking half_open_max_calls
+            # requests per window for as long as the block stayed in place.
+            if state.manually_controlled and is_manual_pin_active(state):
                 self._record_blocked_metric(service_name, "open")
                 return CircuitBreakerDecision(allowed=False, state=state)
+
+            # The recovery gate is skipped for exactly one row shape: the
+            # operator's own block whose promised lift instant has arrived.
+            # opened_at is the moment they blocked, so re-applying the gate
+            # there would hold a 5-minute block for the whole of a long
+            # recovery_timeout. A row that merely carries a stale flag (an
+            # automatic OPEN written after the expiry) takes the normal gate —
+            # otherwise every later OPEN would skip its recovery wait and admit
+            # one request per request against a dependency that is still down.
+            if not is_pin_lift_due(state):
+                elapsed = (
+                    (utc_now() - state.opened_at).total_seconds()
+                    if state.opened_at is not None
+                    else 0.0
+                )
+                if (
+                    state.opened_at is None
+                    or elapsed < effective_config.recovery_timeout
+                ):
+                    self._record_blocked_metric(service_name, "open")
+                    return CircuitBreakerDecision(allowed=False, state=state)
 
         # OPEN with elapsed timeout, OR already HALF_OPEN — atomic acquire.
         # The repository's Lua / RLock primitive owns the state-machine
@@ -691,8 +715,11 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
         else:
             state = self.get_or_create_state(service_name)
 
-        # Skip if manually controlled
-        if state.manually_controlled:
+        # Skip while a manual override is in force. Read through the predicate,
+        # not the raw flag: once the override's lifetime has passed, automatic
+        # supervision resumes immediately rather than waiting for the sweep to
+        # clear the flag (which may never reach this worker).
+        if is_manual_pin_active(state):
             logger.debug(
                 "circuit_breaker.skipping_failure_recording_manually",
                 service_name=service_name,
@@ -1113,7 +1140,7 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
             hint_state is not None
             and hint_state.service_name == service_name
             and hint_state.state == CircuitState.CLOSED
-            and not hint_state.manually_controlled
+            and not is_manual_pin_active(hint_state)
             and hint_state.failure_count == 0
         ):
             # The success still counts toward the rate denominator — that is a
@@ -1129,8 +1156,8 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
         else:
             state = self.get_or_create_state(service_name)
 
-        # Skip if manually controlled
-        if state.manually_controlled:
+        # Skip while a manual override is in force (see record_failure).
+        if is_manual_pin_active(state):
             logger.debug(
                 "circuit_breaker.skipping_success_recording_manually",
                 service_name=service_name,

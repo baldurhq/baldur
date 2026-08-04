@@ -674,7 +674,7 @@ class RepositoryOperationsMixin:
         service_name: str,
         reason: str = "",
         controlled_by_id: int | None = None,
-        ttl_minutes: int = 90,
+        ttl_minutes: int | None = None,
     ) -> tuple:
         """Force open in L1, then synchronize to L2."""
         result = self._l1.atomic_force_open(
@@ -693,9 +693,12 @@ class RepositoryOperationsMixin:
         service_name: str,
         reason: str = "",
         controlled_by_id: int | None = None,
+        ttl_minutes: int | None = None,
     ) -> tuple:
         """Force close in L1, then synchronize to L2."""
-        result = self._l1.atomic_force_close(service_name, reason, controlled_by_id)
+        result = self._l1.atomic_force_close(
+            service_name, reason, controlled_by_id, ttl_minutes
+        )
 
         if result[0]:
             updated = self._l1.get_by_service_name(service_name)

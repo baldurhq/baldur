@@ -192,6 +192,9 @@ class TestBaseCircuitBreakerAdminConfiguration:
             "opened_at",
             "created_at",
             "updated_at",
+            # Editable on the change form until 741: ticking it pinned a
+            # breaker with no lifetime, which nothing lifts automatically.
+            "manually_controlled",
         ]
         assert admin_class.readonly_fields == expected_readonly
 

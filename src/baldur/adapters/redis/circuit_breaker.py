@@ -17,6 +17,7 @@ from baldur.interfaces.repositories import (
     CircuitBreakerStateData,
     CircuitBreakerStateEnum,
     CircuitBreakerStateRepository,
+    resolve_manual_override_expiry,
 )
 from baldur.utils.serialization import fast_loads
 from baldur.utils.time import utc_now
@@ -1092,7 +1093,7 @@ class RedisCircuitBreakerStateRepository(
         service_name: str,
         reason: str = "",
         controlled_by_id: int | None = None,
-        ttl_minutes: int = 90,
+        ttl_minutes: int | None = None,
     ) -> tuple[bool, str, str]:
         """
         Atomically force open a circuit breaker.
@@ -1104,7 +1105,8 @@ class RedisCircuitBreakerStateRepository(
             service_name: Service identifier
             reason: Reason for opening
             controlled_by_id: User ID who initiated
-            ttl_minutes: TTL for manual override
+            ttl_minutes: Lifetime of the manual override in minutes; ``None``
+                or ``<= 0`` stores no expiry
 
         Returns:
             Tuple of (success, previous_state, new_state)
@@ -1115,7 +1117,7 @@ class RedisCircuitBreakerStateRepository(
         new_state = CircuitBreakerStateEnum.OPEN.value
 
         now = utc_now()
-        expires_at = now + timedelta(minutes=ttl_minutes)
+        expires_at = resolve_manual_override_expiry(ttl_minutes)
 
         updates = {
             "state": new_state,
@@ -1123,7 +1125,7 @@ class RedisCircuitBreakerStateRepository(
             "control_reason": reason,
             "opened_at": now.isoformat(),
             "updated_at": now.isoformat(),
-            "manual_override_expires_at": expires_at.isoformat(),
+            "manual_override_expires_at": expires_at.isoformat() if expires_at else "",
         }
 
         if controlled_by_id is not None:
@@ -1138,6 +1140,7 @@ class RedisCircuitBreakerStateRepository(
         service_name: str,
         reason: str = "",
         controlled_by_id: int | None = None,
+        ttl_minutes: int | None = None,
     ) -> tuple[bool, str, str]:
         """
         Atomically force close a circuit breaker.
@@ -1146,6 +1149,8 @@ class RedisCircuitBreakerStateRepository(
             service_name: Service identifier
             reason: Reason for closing
             controlled_by_id: User ID who initiated
+            ttl_minutes: Lifetime of the manual override in minutes; ``None``
+                or ``<= 0`` stores no expiry
 
         Returns:
             Tuple of (success, previous_state, new_state)
@@ -1155,6 +1160,7 @@ class RedisCircuitBreakerStateRepository(
         new_state = CircuitBreakerStateEnum.CLOSED.value
 
         now = utc_now()
+        expires_at = resolve_manual_override_expiry(ttl_minutes)
 
         updates = {
             "state": new_state,
@@ -1166,6 +1172,9 @@ class RedisCircuitBreakerStateRepository(
             "control_reason": reason,
             "opened_at": "",
             "updated_at": now.isoformat(),
+            # Written unconditionally: leaving the field untouched would let a
+            # previous force-open's expiry govern this pin.
+            "manual_override_expires_at": expires_at.isoformat() if expires_at else "",
         }
 
         if controlled_by_id is not None:

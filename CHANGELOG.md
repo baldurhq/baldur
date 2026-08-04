@@ -10,14 +10,29 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+### Added
+
+- `BALDUR_CB_MANUAL_OVERRIDE_TTL_MINUTES` (`90`, range 1-1440) — default manual-override lifetime.
+- A force-close (Allow / Override) now expires too, restoring automatic protection on its own.
+- Control responses report `effective_until` read back from storage, so it matches the real expiry.
+
 ### Changed
 
 - Admin console redesigned: 3-tier triage layout with a healing-ledger hero (crosshair, no deps).
 - Console + landing state palette refreshed (two-hue red/jade); Schibsted Grotesk embedded.
+- **Breaking**: `ttl_minutes` of `0` or below is rejected (`TTL_OUT_OF_RANGE`) instead of stored.
+- **Breaking**: `CircuitBreakerStateRepository.atomic_force_open` / `.atomic_force_close` take
+  `ttl_minutes: int | None`; custom repository implementations must accept it.
+- **Breaking**: the Django admin's `manually_controlled` checkbox is read-only — use the
+  `force_open_selected` / `force_close_selected` / `reset_selected` actions instead.
+- The override-expiry sweep clears the manual flag only; it no longer writes circuit state.
 
 ### Fixed
 
 - Reset pinned a manual circuit-breaker override instead of clearing it, so it never reopened.
+- A manual block admitted trial traffic once `recovery_timeout` elapsed; it now admits nothing.
+- The block lifetime typed in the console was discarded — every block lasted the global default.
+- Manual overrides never expired without Celery; the inline scheduler now runs the sweep.
 
 ## [1.3.2] - 2026-07-31
 

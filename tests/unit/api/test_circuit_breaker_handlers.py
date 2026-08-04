@@ -456,8 +456,13 @@ class TestQuickActionsBehavior:
         assert req.action == ControlAPIActions.ALLOW
         assert req.service_name == "payment"
 
-    def test_quick_block_applies_default_ttl(self):
-        """Block action gets default ttl_minutes=90 if not overridden."""
+    def test_quick_block_passes_ttl_through_when_omitted(self):
+        """An omitted ttl_minutes reaches the service as None.
+
+        The handler must not substitute a literal: the configured default is
+        resolved at the service layer, so a default here would shadow
+        BALDUR_CB_MANUAL_OVERRIDE_TTL_MINUTES on the console's Block path.
+        """
         service = MagicMock()
         service.execute.return_value = _mock_response()
         with patch(
@@ -469,7 +474,7 @@ class TestQuickActionsBehavior:
             )
         req = service.execute.call_args[0][0]
         assert req.action == ControlAPIActions.BLOCK
-        assert req.ttl_minutes == 90
+        assert req.ttl_minutes is None
 
     def test_quick_block_respects_user_override_ttl(self):
         """Body ttl_minutes overrides the default."""

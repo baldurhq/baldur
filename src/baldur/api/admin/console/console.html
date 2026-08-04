@@ -669,14 +669,17 @@
             { key: "ttl_minutes", label: "Auto-clear after (minutes, optional)",
               type: "number", placeholder: "90",
               help: "Block lifts automatically after N minutes. "
-                + "Blank = server default (90)." }
+                + "Blank = server default (90 unless configured). "
+                + "Range 1-1440 (24h)." }
           ] },
         { label: "Allow (force closed)", path: "/control/allow/{service_name}",
           method: "POST", risk: "admin", param: "service_name",
           bodyFields: [
             { key: "reason", label: "Reason (optional)", type: "text",
               placeholder: "why traffic is being forced through despite failures",
-              help: "Recorded in the audit trail. Blank = a default note." }
+              help: "Recorded in the audit trail. Blank = a default note. "
+                + "Reverts to automatic protection after the server "
+                + "default TTL." }
           ] }
       ] },
     { id: "system", title: "System Control", pro: false, status: "/system/status",
