@@ -271,7 +271,8 @@ class ServiceMetricsSerializer(serializers.Serializer):
         help_text="Failure rate in last 5 minutes (0.0 - 1.0)",
     )
     retry_success_rate = serializers.FloatField(
-        help_text="Retry success rate (0.0 - 100.0)",
+        help_text="Retry success rate (0.0 - 100.0). Null when not measured.",
+        allow_null=True,
     )
     dlq_count = serializers.IntegerField(
         help_text="Current DLQ pending count for this service",

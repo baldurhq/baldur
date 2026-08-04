@@ -697,6 +697,7 @@ class ControlAPIService:
         from baldur.factory import ProviderRegistry
         from baldur.metrics.registry import get_registered_domains
         from baldur.services.metrics.updaters import (
+            _resolve_pending_total,
             update_dlq_pending_gauges,
             update_retry_success_rates,
         )
@@ -706,12 +707,30 @@ class ControlAPIService:
         current_time - timedelta(minutes=5)
         current_time - timedelta(hours=24)
 
-        # Collect DLQ pending counts
-        dlq_pending = update_dlq_pending_gauges()
-        total_dlq_pending = sum(dlq_pending.values())
+        # One DLQ repository snapshot per poll: both gauge updaters, the
+        # headline pending total and the failure-rate block below read it, so
+        # the response describes a single instant instead of three.
+        dlq_stats: dict[str, Any] = {}
+        try:
+            failed_op_repo = ProviderRegistry.failed_op_repo.safe_get()
+            if failed_op_repo:
+                dlq_stats = failed_op_repo.get_statistics() or {}
+        except Exception:
+            pass
 
-        # Collect retry success rates
-        retry_rates = update_retry_success_rates()
+        # Per-domain pending breakdown — diagnostic-grade. `or {}` because the
+        # updater returns None (holding the previously exported gauge values)
+        # when the breakdown is unavailable, rather than zero-filling.
+        dlq_pending = update_dlq_pending_gauges(stats=dlq_stats) or {}
+        # The headline total reads the O(1) status-pending quantity — the same
+        # one the bundled DLQ alerts page on — never the sum of the breakdown:
+        # summing renders 0 on exactly the collection failure the adapter omits
+        # the breakdown for, disagreeing with the alert that is firing.
+        total_dlq_pending = _resolve_pending_total(dlq_stats) or 0
+
+        # Retry success rates — empty while no adapter produces them, so the
+        # per-service field below renders null instead of a fabricated 100%.
+        retry_rates = update_retry_success_rates(stats=dlq_stats) or {}
 
         # Get circuit breaker states from repository
         cb_states: dict[str, Any] = {}
@@ -737,22 +756,18 @@ class ControlAPIService:
             1 for s in cb_states.values() if s in ("open", "half_open")
         )
 
-        # Calculate 5-minute failure rate from repository
+        # Calculate 5-minute failure rate from the snapshot taken above
         last_5m_failure_rate = 0.0
         last_5m_request_count = 0
         avg_time_to_recovery = None
 
         try:
-            failed_op_repo = ProviderRegistry.failed_op_repo.safe_get()
-            if failed_op_repo:
-                stats = failed_op_repo.get_statistics()
-                # Use statistics if available
-                if stats:
-                    last_5m_failure_rate = stats.get("pending_count", 0) / max(
-                        stats.get("total_count", 1), 1
-                    )
-                    last_5m_request_count = stats.get("total_count", 0)
-                    avg_time_to_recovery = stats.get("avg_resolution_time_seconds")
+            if dlq_stats:
+                last_5m_failure_rate = dlq_stats.get("pending_count", 0) / max(
+                    dlq_stats.get("total_count", 1), 1
+                )
+                last_5m_request_count = dlq_stats.get("total_count", 0)
+                avg_time_to_recovery = dlq_stats.get("avg_resolution_time_seconds")
         except Exception:
             pass
 
@@ -770,7 +785,9 @@ class ControlAPIService:
             service_metric = {
                 "service_name": domain,
                 "failure_rate_5m": 0.0,
-                "retry_success_rate": retry_rates.get(domain, 100.0),
+                # None while no producer computes per-domain success rates —
+                # the field models "not measured", never a fabricated 100%.
+                "retry_success_rate": retry_rates.get(domain),
                 "dlq_count": dlq_pending.get(domain, 0),
                 "circuit_state": cb_states.get(domain, "closed"),
                 "avg_recovery_time_seconds": None,

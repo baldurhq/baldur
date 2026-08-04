@@ -31,6 +31,46 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
+# Component label of the collection dead-man's switch. The bundled
+# BaldurMetricCollectionStale rule selects this exact value, so it is a shipped
+# contract rather than a tunable.
+METRIC_COLLECTION_HEARTBEAT_COMPONENT = "metric_collection"
+
+
+# =============================================================================
+# Statistics-dict projection helpers
+# =============================================================================
+
+
+def _resolve_pending_total(stats: dict) -> int | None:
+    """Resolve the repository's pending total from a ``get_statistics()`` dict.
+
+    Adapters disagree on the key shape: the Redis adapter emits a flat
+    ``pending_count`` (an O(1) ``ZCARD``), while the memory and SQL adapters
+    emit ``by_status`` (an index length / ``GROUP BY`` count). Both are cheap
+    and exact, unlike ``pending_by_domain`` — an O(pending) scan that is
+    omitted on collection error and under-counts silently when an entry fails
+    to decode, so summing it reports 0 against a real backlog.
+
+    Returns:
+        The pending total, or ``None`` when the snapshot carries neither shape
+        (so callers can tell "no backlog" from "not measured").
+    """
+    if "pending_count" in stats:
+        try:
+            return int(stats["pending_count"])
+        except (TypeError, ValueError):
+            return None
+
+    by_status = stats.get("by_status")
+    if isinstance(by_status, dict):
+        try:
+            return int(by_status.get("pending", 0))
+        except (TypeError, ValueError):
+            return None
+
+    return None
+
 
 # =============================================================================
 # Shadow Log Metrics Update
@@ -59,6 +99,8 @@ def update_shadow_log_metrics() -> None:
 
 def update_dlq_pending_gauges(
     repository: FailedOperationRepository | None = None,
+    *,
+    stats: dict | None = None,
 ) -> dict[str, int]:
     """
     Update DLQ pending gauges from database.
@@ -67,17 +109,21 @@ def update_dlq_pending_gauges(
 
     Args:
         repository: Optional repository instance (uses factory if not provided)
+        stats: Optional pre-fetched ``get_statistics()`` snapshot. Callers that
+            drive several updaters from one tick pass it so the repository is
+            read once instead of once per updater.
 
     Returns:
         Dictionary of domain -> pending count
     """
     try:
-        if repository is None:
-            from baldur.factory import ProviderRegistry
+        if stats is None:
+            if repository is None:
+                from baldur.factory import ProviderRegistry
 
-            repository = ProviderRegistry.get_failed_operation_repo()
+                repository = ProviderRegistry.get_failed_operation_repo()
 
-        stats = repository.get_statistics()
+            stats = repository.get_statistics()
         pending_by_domain = stats.get("pending_by_domain", {})
 
         from baldur.metrics.prometheus import get_metrics
@@ -103,23 +149,28 @@ def update_dlq_pending_gauges(
 
 def update_dlq_status_gauges(
     repository: FailedOperationRepository | None = None,
+    *,
+    stats: dict | None = None,
 ) -> dict[str, int]:
     """
     Update DLQ status distribution gauges.
 
     Args:
         repository: Optional repository instance (uses factory if not provided)
+        stats: Optional pre-fetched ``get_statistics()`` snapshot (see
+            :func:`update_dlq_pending_gauges`)
 
     Returns:
         Dictionary of status -> count
     """
     try:
-        if repository is None:
-            from baldur.factory import ProviderRegistry
+        if stats is None:
+            if repository is None:
+                from baldur.factory import ProviderRegistry
 
-            repository = ProviderRegistry.get_failed_operation_repo()
+                repository = ProviderRegistry.get_failed_operation_repo()
 
-        stats = repository.get_statistics()
+            stats = repository.get_statistics()
         by_status = {
             "pending": stats.get("pending_count", 0),
             "reviewing": stats.get("reviewing_count", 0),
@@ -194,23 +245,28 @@ def update_circuit_breaker_gauges(
 
 def update_retry_success_rates(
     repository: FailedOperationRepository | None = None,
+    *,
+    stats: dict | None = None,
 ) -> dict[str, float]:
     """
     Calculate and update retry success rate gauges.
 
     Args:
         repository: Optional repository instance (uses factory if not provided)
+        stats: Optional pre-fetched ``get_statistics()`` snapshot (see
+            :func:`update_dlq_pending_gauges`)
 
     Returns:
         Dictionary of domain -> success_rate_percentage
     """
     try:
-        if repository is None:
-            from baldur.factory import ProviderRegistry
+        if stats is None:
+            if repository is None:
+                from baldur.factory import ProviderRegistry
 
-            repository = ProviderRegistry.get_failed_operation_repo()
+                repository = ProviderRegistry.get_failed_operation_repo()
 
-        stats = repository.get_statistics()
+            stats = repository.get_statistics()
         rates = {}
 
         success_rates = stats.get("success_rates_by_domain", {})
