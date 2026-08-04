@@ -1,19 +1,20 @@
 """
 Tests for services/control_api_service.py - Control API Service.
-서비스 차단/허용, 장애 주입, 위험 평가 등 Control API 핵심 비즈니스 로직 단위 테스트.
+Unit tests for the Control API's core business logic: blocking/allowing a
+service, failure injection, and risk assessment.
 
-커버리지 대상:
+Covers:
 - ReasonClassification enum
-- classify_reason() 함수
-- assess_risk_level() 함수
-- ControlRequest / ControlResponse 데이터클래스
-- ControlAPIService.execute() 라우팅
-- _validate_request() (inject 금지, override TTL 검증)
+- classify_reason()
+- assess_risk_level()
+- the ControlRequest / ControlResponse dataclasses
+- ControlAPIService.execute() routing
+- _validate_request() (inject forbidden in ops, override TTL rules)
 - _execute_allow/block/override/reset/inject_failure/inject_success()
 - _gather_evidence(), _record_audit()
 - get_status(), get_service_status()
 - is_failure_injection_active(), get_failure_injection_config()
-- 싱글톤 get_control_api_service()
+- the get_control_api_service() singleton
 """
 
 from datetime import datetime, timedelta
@@ -21,11 +22,16 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from baldur.adapters.memory.circuit_breaker import (
+    InMemoryCircuitBreakerStateRepository,
+)
 from baldur.core.constants import (
     ControlAPIActions,
     ControlAPIEnvironments,
     RiskLevels,
 )
+from baldur.services.circuit_breaker.config import CircuitBreakerConfig
+from baldur.services.circuit_breaker.service import CircuitBreakerService
 from baldur.services.control_api_service import (
     ControlAPIService,
     ControlRequest,
@@ -34,6 +40,15 @@ from baldur.services.control_api_service import (
     assess_risk_level,
     classify_reason,
     get_control_api_service,
+)
+from baldur.services.replay_service import ReplayService
+from baldur.settings.circuit_breaker import MAX_MANUAL_OVERRIDE_TTL_MINUTES
+from baldur.utils.time import utc_now
+
+_TTL_PINNING_ACTIONS = (
+    ControlAPIActions.ALLOW,
+    ControlAPIActions.BLOCK,
+    ControlAPIActions.OVERRIDE,
 )
 
 # =============================================================================
@@ -45,15 +60,19 @@ from baldur.services.control_api_service import (
 def mock_cb_service():
     """CircuitBreakerService mock."""
     cb = MagicMock()
-    # force_close / force_open 결과
+    # force_close / force_open results
     success_result = MagicMock()
     success_result.success = True
     success_result.error = None
+    # The expiry the manual override actually stored. Left as a bare MagicMock
+    # it would make every "effective_until is not None" assertion pass on the
+    # mock's own truthiness, whatever the response path did with the value.
+    success_result.expires_at = utc_now() + timedelta(minutes=90)
     cb.force_close.return_value = success_result
     cb.force_open.return_value = success_result
     cb.reset.return_value = success_result
 
-    # get_or_create_state 결과
+    # get_or_create_state result
     state = MagicMock()
     state.state = "closed"
     state.failure_count = 0
@@ -68,7 +87,7 @@ def mock_cb_service():
 
 @pytest.fixture
 def service(mock_cb_service):
-    """ControlAPIService 인스턴스 (의존성 모킹)."""
+    """A ControlAPIService with its dependencies mocked."""
     with (
         patch(
             "baldur.services.circuit_breaker.get_circuit_breaker_service",
@@ -84,7 +103,7 @@ def service(mock_cb_service):
 
 
 def _make_request(**overrides) -> ControlRequest:
-    """ControlRequest 팩토리."""
+    """ControlRequest factory."""
     defaults = {
         "service_name": "payment",
         "action": ControlAPIActions.ALLOW,
@@ -101,11 +120,11 @@ def _make_request(**overrides) -> ControlRequest:
 
 
 class TestReasonClassification:
-    """ReasonClassification Enum 테스트."""
+    """The ReasonClassification enum."""
 
     def test_enum_values(self):
         """Enum values
-        모든 ReasonClassification 멤버가 올바른 문자열 값을 갖는지 확인.
+        Every ReasonClassification member carries its declared string value.
         """
         assert (
             ReasonClassification.EXTERNAL_DEPENDENCY_FAILURE
@@ -116,7 +135,7 @@ class TestReasonClassification:
 
     def test_enum_is_string(self):
         """Enum is str subclass
-        Enum 값이 str 타입인지 확인.
+        The enum values are plain strings.
         """
         assert isinstance(ReasonClassification.MAINTENANCE_WINDOW.value, str)
 
@@ -127,7 +146,7 @@ class TestReasonClassification:
 
 
 class TestClassifyReason:
-    """classify_reason() 함수 테스트."""
+    """classify_reason()."""
 
     @pytest.mark.parametrize(
         ("reason", "expected"),
@@ -167,13 +186,13 @@ class TestClassifyReason:
     )
     def test_pattern_matching(self, reason, expected):
         """Pattern matching for reason classification
-        다양한 사유 문자열에 대해 올바른 분류가 반환되는지 확인.
+        Each reason string maps to its expected classification.
         """
         assert classify_reason(reason) == expected
 
     def test_case_insensitive(self):
         """Case insensitive classification
-        대소문자 구분 없이 분류가 동작하는지 확인.
+        Classification ignores case.
         """
         assert (
             classify_reason("SCHEDULED MAINTENANCE")
@@ -182,7 +201,7 @@ class TestClassifyReason:
 
     def test_no_matching_pattern(self):
         """No matching pattern returns manual_intervention
-        매칭되는 패턴이 없을 때 'manual-intervention'을 반환하는지 확인.
+        An unmatched reason falls back to 'manual-intervention'.
         """
         assert (
             classify_reason("Some random reason")
@@ -191,7 +210,7 @@ class TestClassifyReason:
 
     def test_empty_reason(self):
         """Empty reason string
-        빈 문자열에 대해 'manual-intervention'을 반환하는지 확인.
+        An empty reason falls back to 'manual-intervention'.
         """
         assert classify_reason("") == ReasonClassification.MANUAL_INTERVENTION.value
 
@@ -202,11 +221,11 @@ class TestClassifyReason:
 
 
 class TestAssessRiskLevel:
-    """assess_risk_level() 함수 테스트."""
+    """assess_risk_level()."""
 
     def test_allow_in_test(self):
         """Allow in test environment
-        테스트 환경의 allow 액션은 INFO 수준인지 확인.
+        allow in the test environment is INFO.
         """
         assert (
             assess_risk_level(ControlAPIActions.ALLOW, ControlAPIEnvironments.TEST)
@@ -215,7 +234,7 @@ class TestAssessRiskLevel:
 
     def test_block_in_ops(self):
         """Block in ops environment
-        운영 환경의 block 액션은 HIGH 수준인지 확인.
+        block in ops is HIGH.
         """
         assert (
             assess_risk_level(ControlAPIActions.BLOCK, ControlAPIEnvironments.OPS)
@@ -224,7 +243,7 @@ class TestAssessRiskLevel:
 
     def test_override_in_ops(self):
         """Override in ops environment
-        운영 환경의 override 액션은 CRITICAL 수준인지 확인.
+        override in ops is CRITICAL.
         """
         assert (
             assess_risk_level(ControlAPIActions.OVERRIDE, ControlAPIEnvironments.OPS)
@@ -233,7 +252,7 @@ class TestAssessRiskLevel:
 
     def test_inject_failure_in_ops(self):
         """Inject failure in ops environment
-        운영 환경의 inject_failure 액션은 FORBIDDEN 수준인지 확인.
+        inject_failure in ops is FORBIDDEN.
         """
         assert (
             assess_risk_level(
@@ -244,7 +263,7 @@ class TestAssessRiskLevel:
 
     def test_inject_success_in_chaos(self):
         """Inject success in chaos
-        카오스 환경의 inject_success 액션은 INFO 수준인지 확인.
+        inject_success in chaos is INFO.
         """
         assert (
             assess_risk_level(
@@ -255,7 +274,7 @@ class TestAssessRiskLevel:
 
     def test_unknown_combination_defaults_warning(self):
         """Unknown combination defaults to WARNING
-        정의되지 않은 조합은 WARNING을 반환하는지 확인.
+        An undefined combination falls back to WARNING.
         """
         assert assess_risk_level("unknown_action", "unknown_env") == RiskLevels.WARNING
 
@@ -266,11 +285,11 @@ class TestAssessRiskLevel:
 
 
 class TestControlRequest:
-    """ControlRequest 데이터클래스 테스트."""
+    """The ControlRequest dataclass."""
 
     def test_default_values(self):
         """Default values
-        기본값이 올바르게 설정되는지 확인.
+        The declared defaults are applied.
         """
         req = ControlRequest(
             service_name="payment",
@@ -282,11 +301,11 @@ class TestControlRequest:
         assert req.metadata == {}
         assert req.actor == "system"
         assert req.actor_role == "automation"
-        assert req.request_id  # UUID가 자동 생성
+        assert req.request_id  # auto-generated UUID
 
     def test_custom_values(self):
         """Custom values
-        커스텀 값이 올바르게 설정되는지 확인.
+        Explicit values override the defaults.
         """
         req = ControlRequest(
             service_name="payment",
@@ -303,24 +322,24 @@ class TestControlRequest:
 
 
 class TestControlResponse:
-    """ControlResponse 데이터클래스 테스트."""
+    """The ControlResponse dataclass."""
 
     def test_to_dict_minimal(self):
         """Minimal to_dict
-        필수 필드만 있을 때 to_dict()가 올바르게 동작하는지 확인.
+        to_dict() with only the required fields populated.
         """
         resp = ControlResponse(status="success", action_applied="allow")
         d = resp.to_dict()
         assert d["status"] == "success"
         assert d["action_applied"] == "allow"
         assert "correlation_id" in d
-        # 빈 optional 필드가 제외되는지 확인
+        # Empty optional fields are dropped
         assert "system_state" not in d
         assert "error_code" not in d
 
     def test_to_dict_full(self):
         """Full to_dict
-        모든 필드가 채워졌을 때 to_dict()가 올바르게 동작하는지 확인.
+        to_dict() with every field populated.
         """
         resp = ControlResponse(
             status="error",
@@ -347,11 +366,11 @@ class TestControlResponse:
 
 
 class TestExecuteRouting:
-    """ControlAPIService.execute() 액션 라우팅 테스트."""
+    """ControlAPIService.execute() action routing."""
 
     def test_execute_allow(self, service):
         """Execute allow action
-        allow 액션이 올바르게 실행되는지 확인.
+        The allow action runs.
         """
         req = _make_request(action=ControlAPIActions.ALLOW)
         resp = service.execute(req)
@@ -361,7 +380,7 @@ class TestExecuteRouting:
 
     def test_execute_block(self, service):
         """Execute block action
-        block 액션이 올바르게 실행되는지 확인.
+        The block action runs.
         """
         req = _make_request(action=ControlAPIActions.BLOCK)
         resp = service.execute(req)
@@ -370,7 +389,7 @@ class TestExecuteRouting:
 
     def test_execute_override(self, service):
         """Execute override action
-        override 액션이 올바르게 실행되는지 확인.
+        The override action runs.
         """
         req = _make_request(action=ControlAPIActions.OVERRIDE, ttl_minutes=30)
         resp = service.execute(req)
@@ -379,7 +398,7 @@ class TestExecuteRouting:
 
     def test_execute_reset(self, service):
         """Execute reset action
-        reset 액션이 올바르게 실행되는지 확인.
+        The reset action runs.
         """
         req = _make_request(action=ControlAPIActions.RESET)
         resp = service.execute(req)
@@ -388,7 +407,7 @@ class TestExecuteRouting:
 
     def test_execute_inject_failure(self, service):
         """Execute inject_failure action
-        inject_failure 액션이 올바르게 실행되는지 확인.
+        The inject_failure action runs.
         """
         req = _make_request(action=ControlAPIActions.INJECT_FAILURE)
         resp = service.execute(req)
@@ -397,7 +416,7 @@ class TestExecuteRouting:
 
     def test_execute_inject_success(self, service):
         """Execute inject_success action
-        inject_success 액션이 올바르게 실행되는지 확인.
+        The inject_success action runs.
         """
         req = _make_request(action=ControlAPIActions.INJECT_SUCCESS)
         resp = service.execute(req)
@@ -406,7 +425,7 @@ class TestExecuteRouting:
 
     def test_execute_unknown_action(self, service):
         """Execute unknown action
-        알 수 없는 액션에 대해 error 응답을 반환하는지 확인.
+        An unknown action returns an error response.
         """
         req = _make_request(action="unknown_action")
         resp = service.execute(req)
@@ -415,7 +434,7 @@ class TestExecuteRouting:
 
     def test_execute_exception_handling(self, service, mock_cb_service):
         """Execute with exception
-        실행 중 예외 발생 시 error 응답을 반환하는지 확인.
+        An exception during execution returns an error response.
         """
         mock_cb_service.force_close.side_effect = RuntimeError("Unexpected error")
         req = _make_request(action=ControlAPIActions.ALLOW)
@@ -425,7 +444,7 @@ class TestExecuteRouting:
 
     def test_execute_adds_metadata(self, service):
         """Execute adds classification and risk
-        실행 후 reason_classification과 risk_level이 추가되는지 확인.
+        reason_classification and risk_level are attached after execution.
         """
         req = _make_request(
             action=ControlAPIActions.ALLOW,
@@ -445,11 +464,11 @@ class TestExecuteRouting:
 
 
 class TestValidateRequest:
-    """_validate_request() 검증 테스트."""
+    """_validate_request()."""
 
     def test_inject_failure_forbidden_in_ops(self, service):
         """Inject failure forbidden in ops
-        운영 환경에서 inject_failure가 거부되는지 확인.
+        inject_failure is rejected in ops.
         """
         req = _make_request(
             action=ControlAPIActions.INJECT_FAILURE,
@@ -462,7 +481,7 @@ class TestValidateRequest:
 
     def test_inject_success_forbidden_in_ops(self, service):
         """Inject success forbidden in ops
-        운영 환경에서 inject_success가 거부되는지 확인.
+        inject_success is rejected in ops.
         """
         req = _make_request(
             action=ControlAPIActions.INJECT_SUCCESS,
@@ -474,7 +493,7 @@ class TestValidateRequest:
 
     def test_override_requires_ttl_in_ops(self, service):
         """Override requires TTL in ops
-        운영 환경에서 override 시 TTL이 필수인지 확인.
+        An override in ops requires a TTL.
         """
         req = _make_request(
             action=ControlAPIActions.OVERRIDE,
@@ -487,7 +506,7 @@ class TestValidateRequest:
 
     def test_override_ttl_limit_in_ops(self, service):
         """Override TTL exceeds limit in ops
-        운영 환경에서 override TTL이 60분을 초과하면 거부되는지 확인.
+        An override TTL above 60 minutes is rejected in ops.
         """
         req = _make_request(
             action=ControlAPIActions.OVERRIDE,
@@ -500,7 +519,7 @@ class TestValidateRequest:
 
     def test_override_valid_ttl_in_ops(self, service):
         """Override valid TTL in ops
-        운영 환경에서 유효한 TTL(60분 이하)이면 None(유효)을 반환하는지 확인.
+        A TTL of 60 minutes or less in ops passes validation.
         """
         req = _make_request(
             action=ControlAPIActions.OVERRIDE,
@@ -512,7 +531,7 @@ class TestValidateRequest:
 
     def test_allow_in_ops_valid(self, service):
         """Allow in ops is valid
-        운영 환경에서 allow 액션은 검증을 통과하는지 확인.
+        allow passes validation in ops.
         """
         req = _make_request(
             action=ControlAPIActions.ALLOW,
@@ -523,7 +542,7 @@ class TestValidateRequest:
 
     def test_inject_failure_in_chaos_valid(self, service):
         """Inject failure in chaos is valid
-        카오스 환경에서 inject_failure는 검증을 통과하는지 확인.
+        inject_failure passes validation in chaos.
         """
         req = _make_request(
             action=ControlAPIActions.INJECT_FAILURE,
@@ -539,11 +558,11 @@ class TestValidateRequest:
 
 
 class TestExecuteAllow:
-    """_execute_allow() 테스트."""
+    """_execute_allow()."""
 
     def test_allow_calls_force_close(self, service, mock_cb_service):
         """Allow calls force_close
-        allow 액션이 circuit_breaker.force_close()를 호출하는지 확인.
+        The allow action calls circuit_breaker.force_close().
         """
         req = _make_request(action=ControlAPIActions.ALLOW)
         service._execute_allow(req)
@@ -551,7 +570,7 @@ class TestExecuteAllow:
 
     def test_allow_failure(self, service, mock_cb_service):
         """Allow failure response
-        force_close 실패 시 error 응답을 반환하는지 확인.
+        A failed force_close returns an error response.
         """
         fail_result = MagicMock()
         fail_result.success = False
@@ -565,39 +584,61 @@ class TestExecuteAllow:
 
 
 class TestExecuteBlock:
-    """_execute_block() 테스트."""
+    """_execute_block()."""
 
     def test_block_calls_force_open(self, service, mock_cb_service):
         """Block calls force_open
-        block 액션이 circuit_breaker.force_open()을 호출하는지 확인.
+        The block action calls circuit_breaker.force_open().
         """
         req = _make_request(action=ControlAPIActions.BLOCK)
         service._execute_block(req)
         mock_cb_service.force_open.assert_called_once()
 
-    def test_block_with_ttl(self, service):
-        """Block with TTL
-        TTL이 있을 때 effective_until이 설정되는지 확인.
-        """
+    def test_block_forwards_the_requested_ttl_to_the_circuit_breaker(
+        self, service, mock_cb_service
+    ):
+        """The typed lifetime reaches force_open instead of being recomputed."""
         req = _make_request(action=ControlAPIActions.BLOCK, ttl_minutes=30)
-        resp = service._execute_block(req)
-        assert resp.effective_until is not None
 
-    def test_block_ops_default_ttl(self, service):
-        """Block in ops gets default 90min TTL
-        운영 환경에서 TTL 미지정 시 기본 90분이 적용되는지 확인.
+        service._execute_block(req)
+
+        assert mock_cb_service.force_open.call_args.kwargs["ttl_minutes"] == 30
+
+    def test_block_reports_the_expiry_the_circuit_breaker_stored(
+        self, service, mock_cb_service
+    ):
+        """effective_until mirrors the stored expiry, typed TTL or not.
+
+        The response used to recompute it — including a 90-minute literal on
+        the ops branch — so it could promise a lift time the breaker did not
+        have.
         """
         req = _make_request(
             action=ControlAPIActions.BLOCK,
             environment=ControlAPIEnvironments.OPS,
             ttl_minutes=None,
         )
+
         resp = service._execute_block(req)
-        assert resp.effective_until is not None
+
+        stored = mock_cb_service.force_open.return_value.expires_at
+        assert resp.effective_until == stored.isoformat()
+
+    def test_block_omits_effective_until_when_no_expiry_was_read_back(
+        self, service, mock_cb_service
+    ):
+        """A degraded read-back must not be papered over with a computed value."""
+        mock_cb_service.force_open.return_value.expires_at = None
+        req = _make_request(action=ControlAPIActions.BLOCK, ttl_minutes=30)
+
+        resp = service._execute_block(req)
+
+        assert resp.status == "success"
+        assert resp.effective_until is None
 
     def test_block_failure(self, service, mock_cb_service):
         """Block failure response
-        force_open 실패 시 error 응답을 반환하는지 확인.
+        A failed force_open returns an error response.
         """
         fail_result = MagicMock()
         fail_result.success = False
@@ -610,22 +651,24 @@ class TestExecuteBlock:
 
 
 class TestExecuteOverride:
-    """_execute_override() 테스트."""
+    """_execute_override()."""
 
-    def test_override_success(self, service):
+    def test_override_success(self, service, mock_cb_service):
         """Override success
-        override 성공 시 올바른 응답을 반환하는지 확인.
+        A successful override returns the expected response.
         """
         req = _make_request(action=ControlAPIActions.OVERRIDE, ttl_minutes=15)
         resp = service._execute_override(req)
         assert resp.status == "success"
         assert resp.action_applied == "override"
         assert resp.system_state == "allow"
-        assert resp.effective_until is not None
+        stored = mock_cb_service.force_close.return_value.expires_at
+        assert resp.effective_until == stored.isoformat()
+        assert mock_cb_service.force_close.call_args.kwargs["ttl_minutes"] == 15
 
     def test_override_failure(self, service, mock_cb_service):
         """Override failure
-        override 실패 시 error 응답을 반환하는지 확인.
+        A failed override returns an error response.
         """
         fail_result = MagicMock()
         fail_result.success = False
@@ -639,11 +682,11 @@ class TestExecuteOverride:
 
 
 class TestExecuteReset:
-    """_execute_reset() 테스트."""
+    """_execute_reset()."""
 
     def test_reset_success(self, service, mock_cb_service):
         """Reset success
-        reset 성공 시 올바른 응답을 반환하는지 확인.
+        A successful reset returns the expected response.
         """
         req = _make_request(action=ControlAPIActions.RESET)
         resp = service._execute_reset(req)
@@ -732,11 +775,11 @@ class TestResetAgainstTheRealService:
 
 
 class TestExecuteInjectFailure:
-    """_execute_inject_failure() 테스트."""
+    """_execute_inject_failure()."""
 
     def test_config_mode(self, service):
         """Configuration mode injection
-        설정 모드 장애 주입이 올바르게 동작하는지 확인.
+        Configuration-mode failure injection is applied.
         """
         req = _make_request(
             action=ControlAPIActions.INJECT_FAILURE,
@@ -746,12 +789,12 @@ class TestExecuteInjectFailure:
         assert resp.status == "success"
         assert resp.evidence["failure_rate"] == 0.5
         assert resp.evidence["failure_type"] == "timeout"
-        # 내부 상태에도 저장되었는지 확인
+        # Also recorded in the service's own state
         assert service.is_failure_injection_active("payment")
 
     def test_trigger_cb_mode(self, service, mock_cb_service):
         """Trigger CB failures mode
-        trigger_cb_failures 모드에서 record_failure가 호출되는지 확인.
+        trigger_cb_failures mode calls record_failure.
         """
         state = MagicMock()
         state.state = "open"
@@ -770,7 +813,7 @@ class TestExecuteInjectFailure:
 
     def test_config_mode_with_ttl(self, service):
         """Configuration mode with TTL
-        TTL 설정 시 expires_at가 설정되는지 확인.
+        A TTL sets the injection's expiry.
         """
         req = _make_request(
             action=ControlAPIActions.INJECT_FAILURE,
@@ -781,11 +824,11 @@ class TestExecuteInjectFailure:
 
 
 class TestExecuteInjectSuccess:
-    """_execute_inject_success() 테스트."""
+    """_execute_inject_success()."""
 
     def test_inject_success(self, service, mock_cb_service):
         """Inject success records successes
-        inject_success가 record_success를 호출하는지 확인.
+        inject_success calls record_success.
         """
         req = _make_request(
             action=ControlAPIActions.INJECT_SUCCESS,
@@ -797,7 +840,7 @@ class TestExecuteInjectSuccess:
 
     def test_default_success_count(self, service, mock_cb_service):
         """Default success count is 1
-        metadata에 success_count가 없으면 기본값 1이 사용되는지 확인.
+        A missing success_count in metadata defaults to 1.
         """
         req = _make_request(action=ControlAPIActions.INJECT_SUCCESS)
         service._execute_inject_success(req)
@@ -810,11 +853,11 @@ class TestExecuteInjectSuccess:
 
 
 class TestGatherEvidence:
-    """_gather_evidence() 테스트."""
+    """_gather_evidence()."""
 
     def test_gather_evidence_success(self, service, mock_cb_service):
         """Gather evidence success
-        서킷 브레이커 상태에서 evidence를 올바르게 수집하는지 확인.
+        Evidence is collected from the circuit breaker state.
         """
         evidence = service._gather_evidence("payment")
         assert "failure_count" in evidence
@@ -822,7 +865,7 @@ class TestGatherEvidence:
 
     def test_gather_evidence_exception(self, service, mock_cb_service):
         """Gather evidence with exception
-        예외 발생 시 빈 딕셔너리를 반환하는지 확인.
+        An exception yields an empty dict.
         """
         mock_cb_service.get_or_create_state.side_effect = Exception("Error")
         evidence = service._gather_evidence("payment")
@@ -830,15 +873,15 @@ class TestGatherEvidence:
 
 
 class TestRecordAudit:
-    """_record_audit() 테스트."""
+    """_record_audit()."""
 
     def test_record_audit_no_exception(self, service):
         """Record audit does not raise
-        audit 기록 중 예외가 발생해도 전파되지 않는지 확인.
+        An exception while recording the audit entry does not propagate.
         """
         req = _make_request()
         resp = ControlResponse(status="success", action_applied="allow")
-        # 예외 없이 완료되어야 함
+        # Must complete without raising
         service._record_audit(req, resp)
 
 
@@ -848,11 +891,11 @@ class TestRecordAudit:
 
 
 class TestGetStatus:
-    """get_status() 테스트."""
+    """get_status()."""
 
     def test_get_status(self, service):
         """Get status returns expected structure
-        get_status()가 올바른 구조의 딕셔너리를 반환하는지 확인.
+        get_status() returns a dict with the expected shape.
         """
         result = service.get_status(environment="test")
         assert "services" in result
@@ -861,11 +904,11 @@ class TestGetStatus:
 
 
 class TestGetServiceStatus:
-    """get_service_status() 테스트."""
+    """get_service_status()."""
 
     def test_get_service_status(self, service):
         """Get service status
-        get_service_status()가 서비스 상태를 올바르게 반환하는지 확인.
+        get_service_status() reports the service's state.
         """
         result = service.get_service_status("payment")
         assert result["service_name"] == "payment"
@@ -879,31 +922,31 @@ class TestGetServiceStatus:
 
 
 class TestFailureInjectionState:
-    """is_failure_injection_active / get_failure_injection_config 테스트."""
+    """is_failure_injection_active / get_failure_injection_config."""
 
     def test_no_injection_active(self, service):
         """No injection active
-        주입이 없을 때 False를 반환하는지 확인.
+        No injection registered returns False.
         """
         assert service.is_failure_injection_active("payment") is False
 
     def test_injection_active(self, service):
         """Injection active
-        주입이 활성화된 후 True를 반환하는지 확인.
+        An active injection returns True.
         """
         service._failure_injections["payment"] = {"enabled": True}
         assert service.is_failure_injection_active("payment") is True
 
     def test_injection_disabled(self, service):
         """Injection disabled
-        enabled=False일 때 False를 반환하는지 확인.
+        enabled=False returns False.
         """
         service._failure_injections["payment"] = {"enabled": False}
         assert service.is_failure_injection_active("payment") is False
 
     def test_injection_expired(self, service):
         """Injection expired
-        만료 시간이 지난 주입은 False를 반환하고 제거되는지 확인.
+        An expired injection returns False and is discarded.
         """
         past = datetime.now() - timedelta(hours=1)
         service._failure_injections["payment"] = {
@@ -919,13 +962,13 @@ class TestFailureInjectionState:
 
     def test_get_config_returns_none_for_inactive(self, service):
         """Get config returns None for inactive
-        비활성 주입에 대해 None을 반환하는지 확인.
+        An inactive injection has no config.
         """
         assert service.get_failure_injection_config("payment") is None
 
     def test_get_config_returns_config_for_active(self, service):
         """Get config returns config for active
-        활성 주입에 대해 설정을 반환하는지 확인.
+        An active injection returns its config.
         """
         config = {"enabled": True, "failure_rate": 0.5}
         service._failure_injections["payment"] = config
@@ -938,11 +981,11 @@ class TestFailureInjectionState:
 
 
 class TestSingleton:
-    """get_control_api_service() 싱글톤 테스트."""
+    """The get_control_api_service() singleton."""
 
     def test_creates_singleton(self):
         """Creates singleton if not exists
-        인스턴스가 없을 때 새로 생성하는지 확인.
+        The first call constructs the instance.
         """
         from baldur.services.control_api_service import reset_control_api_service
 
@@ -956,7 +999,7 @@ class TestSingleton:
 
     def test_returns_existing_singleton(self):
         """Returns existing singleton
-        이미 존재하는 싱글톤을 반환하는지 확인.
+        A later call returns the existing instance.
         """
         from baldur.services.control_api_service import reset_control_api_service
 
@@ -975,7 +1018,7 @@ class TestSingleton:
 
 
 class TestGetMetrics:
-    """get_metrics() 메서드 테스트."""
+    """get_metrics()."""
 
     @patch("baldur.factory.ProviderRegistry")
     @patch("baldur.services.metrics.updaters.update_retry_success_rates")
@@ -985,7 +1028,7 @@ class TestGetMetrics:
         self, mock_domains, mock_dlq, mock_retry, mock_registry, service
     ):
         """Get metrics returns expected structure
-        get_metrics()가 올바른 구조를 반환하는지 확인.
+        get_metrics() returns the expected shape.
         """
         mock_domains.return_value = ["payment", "point"]
         mock_dlq.return_value = {"payment": 3, "point": 1}
@@ -1025,7 +1068,7 @@ class TestGetMetrics:
         self, mock_domains, mock_dlq, mock_retry, mock_registry, service
     ):
         """Get metrics handles CB repo exception
-        CB 리포지토리 예외 시에도 정상적으로 반환하는지 확인.
+        A repository exception still yields a well-formed result.
         """
         mock_domains.return_value = ["payment"]
         mock_dlq.return_value = {"payment": 0}
@@ -1045,7 +1088,7 @@ class TestGetMetrics:
         self, mock_domains, mock_dlq, mock_retry, mock_registry, service
     ):
         """Get metrics with CB states
-        CB 상태가 있을 때 healthy/degraded 카운트가 올바른지 확인.
+        The healthy/degraded counts reflect the circuit breaker states.
         """
         mock_domains.return_value = ["payment", "point"]
         mock_dlq.return_value = {"payment": 0, "point": 0}
@@ -1075,11 +1118,11 @@ class TestGetMetrics:
 
 
 class TestExecuteValidationPath:
-    """execute()에서 validation 실패 경로 테스트."""
+    """The validation-failure path through execute()."""
 
     def test_execute_validation_rejection(self, service):
         """Execute returns validation rejection
-        _validate_request에서 거부되면 execute()가 바로 거부 응답을 반환하는지 확인.
+        A rejection from _validate_request short-circuits execute().
         """
         req = _make_request(
             action=ControlAPIActions.INJECT_FAILURE,
@@ -1160,3 +1203,182 @@ class TestControlAPIServiceInitFallbackBehavior:
         # record methods are no-ops (no exceptions)
         null_cb.record_failure("svc")
         null_cb.record_success("svc")
+
+
+# =============================================================================
+# 741 D4 — TTL range and type validation at the control-API surface
+# =============================================================================
+
+
+class TestControlRequestTTLValidation:
+    """Every action that pins a manual override validates its lifetime.
+
+    The quick-action routes put the raw JSON value straight into
+    ``ControlRequest`` with no type check, and ``_validate_request`` runs
+    outside ``execute()``'s try/except — so a value that reaches a bare
+    comparison here surfaces as a 500 rather than a rejection.
+    """
+
+    @pytest.mark.parametrize("action", _TTL_PINNING_ACTIONS)
+    @pytest.mark.parametrize("ttl", [1, 60, MAX_MANUAL_OVERRIDE_TTL_MINUTES])
+    def test_ttl_inside_the_bound_passes_validation(self, service, action, ttl):
+        req = _make_request(
+            action=action,
+            environment=ControlAPIEnvironments.TEST,
+            ttl_minutes=ttl,
+        )
+
+        assert service._validate_request(req) is None
+
+    @pytest.mark.parametrize("action", _TTL_PINNING_ACTIONS)
+    @pytest.mark.parametrize("ttl", [0, -1, MAX_MANUAL_OVERRIDE_TTL_MINUTES + 1])
+    def test_ttl_out_of_range_is_rejected(self, service, action, ttl):
+        req = _make_request(
+            action=action,
+            environment=ControlAPIEnvironments.TEST,
+            ttl_minutes=ttl,
+        )
+
+        result = service._validate_request(req)
+
+        assert result is not None
+        assert result.status == "rejected"
+        assert result.error_code == "TTL_OUT_OF_RANGE"
+
+    @pytest.mark.parametrize("action", _TTL_PINNING_ACTIONS)
+    @pytest.mark.parametrize("ttl", ["abc", True, 1.5, [5]])
+    def test_ttl_out_of_range_covers_non_integer_values(self, service, action, ttl):
+        """A non-int is rejected, not compared — comparing it raises."""
+        req = _make_request(
+            action=action,
+            environment=ControlAPIEnvironments.TEST,
+            ttl_minutes=ttl,
+        )
+
+        result = service._validate_request(req)
+
+        assert result is not None
+        assert result.error_code == "TTL_OUT_OF_RANGE"
+
+    @pytest.mark.parametrize("ttl", ["abc", 0, MAX_MANUAL_OVERRIDE_TTL_MINUTES + 1])
+    def test_ttl_out_of_range_never_reaches_the_circuit_breaker(
+        self, service, mock_cb_service, ttl
+    ):
+        """Rejected before any state write, and without raising out of execute()."""
+        req = _make_request(action=ControlAPIActions.BLOCK, ttl_minutes=ttl)
+
+        resp = service.execute(req)
+
+        assert resp.status == "rejected"
+        assert resp.error_code == "TTL_OUT_OF_RANGE"
+        mock_cb_service.force_open.assert_not_called()
+
+    def test_ttl_absent_still_passes_for_actions_that_do_not_require_one(self, service):
+        """``None`` means "use the configured default" — always acceptable."""
+        req = _make_request(
+            action=ControlAPIActions.BLOCK,
+            environment=ControlAPIEnvironments.TEST,
+            ttl_minutes=None,
+        )
+
+        assert service._validate_request(req) is None
+
+    def test_ops_override_keeps_its_own_narrower_ttl_limit(self, service):
+        """The 60-minute ops rule survives the wider generic bound."""
+        req = _make_request(
+            action=ControlAPIActions.OVERRIDE,
+            environment=ControlAPIEnvironments.OPS,
+            ttl_minutes=90,
+        )
+
+        result = service._validate_request(req)
+
+        assert result.error_code == "TTL_EXCEEDS_OPS_LIMIT"
+
+
+# =============================================================================
+# 741 D5 — effective_until is read back from storage
+# =============================================================================
+
+
+@pytest.fixture
+def cb_repository() -> InMemoryCircuitBreakerStateRepository:
+    return InMemoryCircuitBreakerStateRepository()
+
+
+@pytest.fixture
+def live_service(cb_repository):
+    """ControlAPIService over a real circuit breaker and repository.
+
+    The response's expiry claim is only meaningful against what the
+    repository actually stored, so this path is driven end to end rather
+    than against a mocked result object.
+    """
+    cb = CircuitBreakerService(
+        config=CircuitBreakerConfig(enabled=True, manual_override_ttl_minutes=45),
+        repository=cb_repository,
+    )
+    with (
+        patch(
+            "baldur.services.circuit_breaker.get_circuit_breaker_service",
+            return_value=cb,
+        ),
+        patch(
+            "baldur.services.replay_service.ReplayService",
+            return_value=MagicMock(spec=ReplayService),
+        ),
+        patch(
+            "baldur.services.circuit_breaker.manual_control._is_system_enabled",
+            return_value=True,
+        ),
+    ):
+        yield ControlAPIService()
+
+
+class TestControlResponseEffectiveUntil:
+    """The reported lift time is the stored one, for every pinning action."""
+
+    @pytest.mark.parametrize(
+        "action",
+        [ControlAPIActions.BLOCK, ControlAPIActions.ALLOW, ControlAPIActions.OVERRIDE],
+    )
+    def test_effective_until_equals_the_stored_expiry(
+        self, live_service, cb_repository, action
+    ):
+        req = _make_request(action=action, ttl_minutes=30)
+
+        resp = live_service.execute(req)
+
+        stored = cb_repository.get_by_service_name("payment")
+        assert resp.status == "success"
+        assert resp.effective_until == stored.manual_override_expires_at.isoformat()
+
+    def test_blank_ttl_stores_and_reports_the_configured_default(
+        self, live_service, cb_repository
+    ):
+        """No typed TTL — the settings default is what lands in storage."""
+        before = utc_now()
+        req = _make_request(action=ControlAPIActions.BLOCK, ttl_minutes=None)
+
+        resp = live_service.execute(req)
+
+        stored = cb_repository.get_by_service_name("payment")
+        expiry = stored.manual_override_expires_at
+        assert resp.effective_until == expiry.isoformat()
+        assert (
+            before + timedelta(minutes=45)
+            <= expiry
+            <= utc_now() + timedelta(minutes=45)
+        )
+
+    def test_allow_now_carries_an_expiry_it_never_had(
+        self, live_service, cb_repository
+    ):
+        """A "temporary" force-allow used to suspend protection permanently."""
+        req = _make_request(action=ControlAPIActions.ALLOW, ttl_minutes=None)
+
+        resp = live_service.execute(req)
+
+        stored = cb_repository.get_by_service_name("payment")
+        assert stored.manual_override_expires_at is not None
+        assert resp.effective_until == stored.manual_override_expires_at.isoformat()

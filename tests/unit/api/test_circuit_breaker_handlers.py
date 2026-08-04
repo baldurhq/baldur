@@ -15,6 +15,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from baldur.api.handlers.circuit_breaker import (
     _validate_control_request,
     control_action,
@@ -27,6 +29,7 @@ from baldur.api.handlers.circuit_breaker import (
 )
 from baldur.core.constants import ControlAPIActions, ControlAPIEnvironments
 from baldur.interfaces.web_framework import HttpMethod, RequestContext
+from baldur.settings.circuit_breaker import MAX_MANUAL_OVERRIDE_TTL_MINUTES
 
 
 def _make_ctx(
@@ -506,3 +509,127 @@ class TestQuickActionsBehavior:
             )
         req = service.execute.call_args[0][0]
         assert req.action == ControlAPIActions.RESET
+
+
+# =============================================================================
+# 741 D3/F1 — one TTL bound, one source
+# =============================================================================
+
+
+class TestTTLBoundSingleSource:
+    """Both control surfaces accept the same maximum lifetime.
+
+    The REST validator used to carry its own literal while the service layer
+    grew a second bound, which would have made one typed value acceptable on
+    ``POST /control/block/{service}`` and rejected on ``POST /control``.
+    """
+
+    def test_ttl_bound_accepts_the_settings_maximum(self):
+        cleaned, err = _validate_control_request(
+            _valid_body(
+                action=ControlAPIActions.ALLOW,
+                ttl_minutes=MAX_MANUAL_OVERRIDE_TTL_MINUTES,
+            )
+        )
+
+        assert err is None
+        assert cleaned["ttl_minutes"] == MAX_MANUAL_OVERRIDE_TTL_MINUTES
+
+    def test_ttl_bound_rejects_one_minute_above_the_settings_maximum(self):
+        _, err = _validate_control_request(
+            _valid_body(
+                action=ControlAPIActions.ALLOW,
+                ttl_minutes=MAX_MANUAL_OVERRIDE_TTL_MINUTES + 1,
+            )
+        )
+
+        assert err is not None
+        assert str(MAX_MANUAL_OVERRIDE_TTL_MINUTES) in err
+
+    def test_ttl_bound_is_identical_on_both_control_surfaces(self):
+        """The generic route and the quick-action route agree on the maximum.
+
+        Driven through a real ControlAPIService because the quick-action route
+        skips the REST validator entirely — the two limits can only be compared
+        by exercising both paths.
+        """
+        max_ttl = MAX_MANUAL_OVERRIDE_TTL_MINUTES
+
+        _, rest_err = _validate_control_request(
+            _valid_body(action=ControlAPIActions.BLOCK, ttl_minutes=max_ttl)
+        )
+        _, rest_over = _validate_control_request(
+            _valid_body(action=ControlAPIActions.BLOCK, ttl_minutes=max_ttl + 1)
+        )
+        quick_ok = _quick_block_body({"ttl_minutes": max_ttl})
+        quick_over = _quick_block_body({"ttl_minutes": max_ttl + 1})
+
+        assert rest_err is None
+        assert quick_ok.get("error_code") != "TTL_OUT_OF_RANGE"
+        assert rest_over is not None
+        assert quick_over["error_code"] == "TTL_OUT_OF_RANGE"
+
+
+def _quick_block_body(json_body: dict) -> dict:
+    """Run POST /control/block/{service} against a real ControlAPIService.
+
+    The quick-action route builds a ControlRequest from the raw JSON with no
+    type check, and _validate_request runs outside execute()'s try/except — so
+    only the real service shows whether an unusable TTL rejects or raises.
+    """
+    from baldur.services.circuit_breaker.service import CircuitBreakerService
+    from baldur.services.control_api_service import ControlAPIService
+    from baldur.services.replay_service import ReplayService
+
+    cb = MagicMock(spec=CircuitBreakerService)
+    cb.force_open.return_value = SimpleNamespace(
+        success=True, error=None, expires_at=None
+    )
+    cb.get_or_create_state.return_value = SimpleNamespace(
+        state="closed",
+        failure_count=0,
+        success_count=0,
+        last_failure_at=None,
+        manually_controlled=False,
+        control_reason=None,
+    )
+    with (
+        patch(
+            "baldur.services.circuit_breaker.get_circuit_breaker_service",
+            return_value=cb,
+        ),
+        patch(
+            "baldur.services.replay_service.ReplayService",
+            return_value=MagicMock(spec=ReplayService),
+        ),
+    ):
+        control_api = ControlAPIService()
+
+    with patch(
+        "baldur.api.handlers.circuit_breaker.get_control_api_service",
+        return_value=control_api,
+    ):
+        resp = quick_block(
+            _make_ctx(
+                method="POST",
+                path_params={"service_name": "payment"},
+                json_body=json_body,
+            )
+        )
+    return resp.body
+
+
+class TestQuickBlockTTLRejection:
+    """An unusable TTL on the console's own Block path rejects, never 500s."""
+
+    @pytest.mark.parametrize("ttl", ["abc", True, 1.5, 0, -1])
+    def test_quick_block_rejects_an_unusable_ttl_without_raising(self, ttl):
+        body = _quick_block_body({"ttl_minutes": ttl})
+
+        assert body["status"] == "rejected"
+        assert body["error_code"] == "TTL_OUT_OF_RANGE"
+
+    def test_quick_block_accepts_a_usable_ttl(self):
+        body = _quick_block_body({"ttl_minutes": 5})
+
+        assert body["status"] == "success"

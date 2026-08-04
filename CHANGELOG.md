@@ -21,10 +21,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - Admin console redesigned: 3-tier triage layout with a healing-ledger hero (crosshair, no deps).
 - Console + landing state palette refreshed (two-hue red/jade); Schibsted Grotesk embedded.
 - **Breaking**: `ttl_minutes` of `0` or below is rejected (`TTL_OUT_OF_RANGE`) instead of stored.
-- **Breaking**: `CircuitBreakerStateRepository.atomic_force_open` / `.atomic_force_close` take
-  `ttl_minutes: int | None`; custom repository implementations must accept it.
-- **Breaking**: the Django admin's `manually_controlled` checkbox is read-only — use the
-  `force_open_selected` / `force_close_selected` / `reset_selected` actions instead.
+- **Breaking**: `atomic_force_open` / `atomic_force_close` take `ttl_minutes: int | None`.
+- **Breaking**: the Django admin's `manually_controlled` is read-only — use `reset_selected`.
 - The override-expiry sweep clears the manual flag only; it no longer writes circuit state.
 
 ### Fixed

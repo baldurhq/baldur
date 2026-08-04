@@ -2,8 +2,9 @@
 
 Scope:
 - _start_default_scheduler AUTOSTART=0 early-return.
-- Default job list registers six jobs (archive_old_dlq_entries, cb_recovery,
-  cleanup_expired_config, daily_report, sla_drift, config_apply).
+- Default job list registers seven jobs (archive_old_dlq_entries, cb_recovery,
+  cb_override_expiry, cleanup_expired_config, daily_report, sla_drift,
+  config_apply).
 - Unknown task_backend falls back to "inline" with WARNING log.
 - arq backend explicitly logs "not_implemented" and falls back to inline.
 - _build_celery_delegator returns None when Celery is missing.
@@ -20,6 +21,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from baldur.bootstrap import (
+    _CELERY_TASK_NAMES,
     _DEFAULT_SCHEDULED_JOBS,
     _PRO_GATED_JOBS,
     _build_celery_delegator,
@@ -54,7 +56,7 @@ class TestDefaultScheduledJobsContract:
     with exactly these names and intervals."""
 
     def test_default_jobs_contract(self):
-        """Exactly six jobs, keyed by name, with known intervals."""
+        """Exactly seven jobs, keyed by name, with known intervals."""
         by_name = {
             name: interval for name, _mod, _attr, interval in _DEFAULT_SCHEDULED_JOBS
         }
@@ -63,6 +65,7 @@ class TestDefaultScheduledJobsContract:
             "daily_report",
             "sla_drift",
             "cb_recovery",
+            "cb_override_expiry",
             "archive_old_dlq_entries",
             "cleanup_expired_config",
             "config_apply",
@@ -75,8 +78,25 @@ class TestDefaultScheduledJobsContract:
         assert by_name["cleanup_expired_config"] == 60 * 60.0
         # Per-minute
         assert by_name["cb_recovery"] == 60.0
+        # 741 D2 — same cost class and cadence as cb_recovery, so the console's
+        # "lifts after N minutes" promise stays accurate to within a minute.
+        assert by_name["cb_override_expiry"] == 60.0
         # 665 D2 — config apply every 30s
         assert by_name["config_apply"] == 30.0
+
+    def test_override_expiry_job_is_not_pro_gated(self):
+        """It ships on every install — Celery-less deployments are the point."""
+        assert "cb_override_expiry" not in _PRO_GATED_JOBS
+        assert "cb_override_expiry" in {
+            job[0] for job in _tier_resolved_scheduled_jobs()
+        }
+
+    def test_override_expiry_job_delegates_to_the_celery_task_when_present(self):
+        """With celery as the backend the existing beat task owns the sweep."""
+        assert (
+            _CELERY_TASK_NAMES["cb_override_expiry"]
+            == "baldur.celery_tasks.expire_manual_overrides"
+        )
 
 
 # =============================================================================
@@ -275,6 +295,35 @@ class TestResolveJobCallableBehavior:
 
         assert callable(fn)
         assert fn.__name__ == "cb_recovery_tick"
+
+    def test_synthetic_cb_override_expiry_returns_callable(self):
+        """cb_override_expiry resolves without importing the Celery task."""
+        fn = _resolve_job_callable("baldur.services", "_synthetic_cb_override_expiry")
+
+        assert callable(fn)
+        assert fn.__name__ == "cb_override_expiry_tick"
+
+    def test_synthetic_cb_override_expiry_runs_the_service_sweep(self):
+        """The synthetic callable is the sweep, not a lookalike.
+
+        Resolving to a callable proves nothing about which method it drives —
+        the whole point of the job is that a Celery-less install still clears
+        lapsed manual overrides.
+        """
+        from baldur.services.circuit_breaker.service import CircuitBreakerService
+
+        fn = _resolve_job_callable("baldur.services", "_synthetic_cb_override_expiry")
+        cb_service = MagicMock(spec=CircuitBreakerService)
+        cb_service.check_and_expire_manual_overrides.return_value = ["payment-api"]
+
+        with patch(
+            "baldur.services.get_circuit_breaker_service",
+            return_value=cb_service,
+        ):
+            result = fn()
+
+        cb_service.check_and_expire_manual_overrides.assert_called_once_with()
+        assert result == ["payment-api"]
 
     def test_synthetic_sla_drift_returns_callable(self):
         """sla_drift attr shortcut returns a zero-arg callable."""
