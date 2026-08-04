@@ -132,7 +132,10 @@ _MOCK_CREATION_BUDGETS: dict[str, int] = {
     # spec them is the PRO watchdog, which an OSS test may not import; a
     # SimpleNamespace cannot express the "attribute absent" skew case those
     # tests need either.
-    "oss": 4355,
+    # metric-hydrator retirement: -3 — the hydrator test classes were deleted
+    # with the class they covered; the one mock added in their place (the
+    # daily-report statistics repository) is spec'd.
+    "oss": 4352,
     "pro": 1800,
     "dormant": 401,
 }

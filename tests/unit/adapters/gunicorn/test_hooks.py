@@ -65,7 +65,7 @@ def _mock_background_worker_starts():
     ``post_worker_init`` calls ``baldur.bootstrap.start_background_workers()``
     (the OSS-5 init()-started daemon workers) for all adapters, then
     ``BaldurConfig.start_background_threads()`` for the Django-only extras. Both
-    spawn daemon threads (MetricHydrator timer, precomputed-cache /
+    spawn daemon threads (domain-gauge collector, precomputed-cache /
     system-metrics refresh loops, SelfhealerWatchdog, correlation-engine loop)
     that linger until module teardown joins them (5s × N → 10s+ teardown). Hook
     tests only need to verify wiring, not real thread lifecycle, so both are

@@ -314,12 +314,7 @@ class TestStartAllBackgroundThreads317Behavior:
         """_start_all_background_threads calls correlation method."""
         config = BaldurConfig.__new__(BaldurConfig)
 
-        with (
-            patch(
-                "baldur.adapters.django.apps.MetricHydrator.hydrate",
-            ),
-            patch.object(config, "_start_correlation_engine_loop") as mock_corr,
-        ):
+        with patch.object(config, "_start_correlation_engine_loop") as mock_corr:
             config._start_all_background_threads()
 
         mock_corr.assert_called_once()

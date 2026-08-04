@@ -598,10 +598,10 @@
         "type": "prometheus",
         "uid": "mimir"
       },
-      "description": "How many failed operations are currently waiting in the Dead Letter Queue. A rising count means failures are piling up faster than they're being replayed or cleared.",
+      "description": "How many failed operations are currently waiting in the Dead Letter Queue. A rising count means failures are piling up faster than they're being replayed or cleared. Reads the repository's O(1) pending total (the same series the DLQ alerts use) rather than summing the per-domain breakdown, which would multiply the backlog by the number of scraped processes.",
       "targets": [
         {
-          "expr": "sum(baldur_dlq_pending_count)",
+          "expr": "max(max_over_time(baldur_dlq_items_by_status{status=\"pending\"}[2m]))",
           "legendFormat": "Pending"
         }
       ]

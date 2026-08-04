@@ -19,10 +19,6 @@ Scheduling:
     the ones you want to your own beat config:
 
         CELERY_BEAT_SCHEDULE.update({
-            "collect-baldur-metrics": {
-                "task": "baldur.adapters.celery.tasks.collect_baldur_metrics",
-                "schedule": 60.0,  # Every minute
-            },
             "check-sla-breaches": {
                 "task": "baldur.adapters.celery.tasks.check_and_report_sla_breaches",
                 "schedule": 300.0,  # Every 5 minutes
@@ -32,6 +28,14 @@ Scheduling:
                 "schedule": 60.0,  # Every minute
             },
         })
+
+    Prometheus gauge freshness needs no beat entry: baldur.init() starts a
+    per-process collector that refreshes the DLQ / circuit-breaker gauge
+    families on every serving process. This package's collect_baldur_metrics
+    is therefore deliberately omitted above — it returns a statistics dict and
+    sets no gauge. Operators who additionally want gauge collection inside a
+    scraped Celery worker should schedule the gauge-updating task
+    ``baldur.celery_tasks.collect_baldur_metrics`` instead.
 
     cleanup_resolved_dlq_entries is deliberately omitted above: the DLQ
     maintenance lane already schedules its twin. See dlq_replay.

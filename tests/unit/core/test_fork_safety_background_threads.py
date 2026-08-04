@@ -10,7 +10,6 @@ import threading
 from unittest.mock import MagicMock, patch
 
 from baldur.adapters.django.apps import BaldurConfig
-from baldur.adapters.django.startup.metric_hydrator import MetricHydrator
 
 
 class TestShouldStartBackgroundThreadsContract:
@@ -68,23 +67,22 @@ class TestResetAllBackgroundStateBehavior:
         a Django-side guard — they are started via
         ``baldur.bootstrap.start_background_workers()`` and carry their own
         service-level ``_running``/``_active`` idempotency. The only remaining
-        Django-side guard is the gauge-hydration flag (the correlation loop's flag
-        is reset under its own lock).
+        Django-side guard is the correlation-loop flag, reset under its own lock.
         """
         # Given — set the guard to True
-        MetricHydrator._hydration_done = True
+        BaldurConfig._correlation_loop_started = True
 
         # When
         BaldurConfig._reset_all_background_state()
 
         # Then
-        assert MetricHydrator._hydration_done is False
+        assert BaldurConfig._correlation_loop_started is False
 
     def test_idempotent_double_reset_no_error(self):
         """Resetting twice in a row does not raise."""
         BaldurConfig._reset_all_background_state()
         BaldurConfig._reset_all_background_state()
-        assert MetricHydrator._hydration_done is False
+        assert BaldurConfig._correlation_loop_started is False
 
 
 class TestStartBackgroundThreadsBehavior:
@@ -97,13 +95,13 @@ class TestStartBackgroundThreadsBehavior:
         mock_apps.get_app_config.return_value = mock_config
 
         # Given — guards are set
-        MetricHydrator._hydration_done = True
+        BaldurConfig._correlation_loop_started = True
 
         # When
         BaldurConfig.start_background_threads()
 
         # Then — guards are reset
-        assert MetricHydrator._hydration_done is False
+        assert BaldurConfig._correlation_loop_started is False
         mock_apps.get_app_config.assert_called_once_with("baldur")
         mock_config._start_all_background_threads.assert_called_once()
 

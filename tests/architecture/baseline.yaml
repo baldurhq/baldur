@@ -702,7 +702,6 @@ optional_imports:
   - {file: "src/baldur/adapters/django/session_adapter.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
   - {file: "src/baldur/adapters/django/signal_hooks.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
   - {file: "src/baldur/adapters/django/startup/env_auditor.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
-  - {file: "src/baldur/adapters/django/startup/metric_hydrator.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
   - {file: "src/baldur/adapters/django/startup/rbac_initializer.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
   - {file: "src/baldur/adapters/django/statistics.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
   - {file: "src/baldur/adapters/flask/middleware.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}

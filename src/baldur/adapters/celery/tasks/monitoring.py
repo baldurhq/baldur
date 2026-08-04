@@ -8,10 +8,6 @@ that configure_baldur_celery() injects. To run them periodically, add them
 to your own beat config:
 
     CELERY_BEAT_SCHEDULE.update({
-        "collect-baldur-metrics": {
-            "task": "baldur.adapters.celery.tasks.collect_baldur_metrics",
-            "schedule": 60.0,  # Every minute
-        },
         "check-sla-breaches": {
             "task": "baldur.adapters.celery.tasks.check_and_report_sla_breaches",
             "schedule": 300.0,  # Every 5 minutes
@@ -21,6 +17,15 @@ to your own beat config:
             "schedule": 60.0,  # Should match heartbeat_interval_seconds config
         },
     })
+
+Prometheus gauge freshness needs no beat entry: baldur.init() starts a
+per-process collector that refreshes the DLQ / circuit-breaker gauge families
+on every serving process (interval:
+BALDUR_METRICS_COLLECTION_INTERVAL_SECONDS). collect_baldur_metrics below is
+deliberately absent from the sample above — it returns a statistics dict for
+inspection and sets NO Prometheus gauge. Operators who additionally want gauge
+collection inside a Celery worker they scrape should schedule
+``baldur.celery_tasks.collect_baldur_metrics`` (a different task).
 """
 
 from datetime import UTC, datetime, timedelta
@@ -41,15 +46,18 @@ logger = structlog.get_logger(__name__)
 )
 def collect_baldur_metrics(self) -> dict:
     """
-    Periodic task to collect and update baldur metrics.
+    Read a DLQ / circuit-breaker statistics snapshot and return it.
 
-    Collects:
+    Reads via the statistics repository and returns:
     - DLQ pending counts by domain
-    - DLQ items by status
-    - Circuit breaker states
-    - Retry success rates
+    - DLQ counts by status
+    - Open / half-open circuit-breaker counts
 
-    Uses ProviderRegistry for statistics repository access.
+    This task sets NO Prometheus gauge — it is an inspection/return-value task.
+    Gauge freshness is handled automatically by the per-process collector that
+    ``baldur.init()`` starts; the gauge-updating Celery task, for operators who
+    want collection to run inside a scraped Celery worker, is
+    ``baldur.celery_tasks.collect_baldur_metrics``.
 
     Returns:
         Dictionary with collected metric values
@@ -189,8 +197,22 @@ def emit_baldur_heartbeat(self, component: str = "error_budget") -> dict:
         Dictionary with heartbeat status
 
     Prometheus Alert Rules:
-        - BaldurServiceDead: time() - baldur_heartbeat_timestamp_seconds > 120
-        - BaldurHeartbeatMissing: absent(baldur_heartbeat_timestamp_seconds) == 1
+        Match on the component label — the periodic gauge collector emits the
+        same series with a 300s tolerance, so a matcher-free rule pages
+        "service dead" on a healthy process.
+
+        - BaldurServiceDead:
+            time()
+            - baldur_heartbeat_timestamp_seconds{component="error_budget"} > 120
+        - BaldurHeartbeatMissing:
+            absent(baldur_heartbeat_timestamp_seconds{component="error_budget"}) == 1
+
+        Both need this task scheduled in your beat config (no shipped
+        configuration schedules it), and note the except-path below relabels
+        the component to ``<component>_degraded`` when the runtime-config
+        manager is unavailable. The collector's own freshness signal is the
+        shipped ``BaldurMetricCollectionStale`` rule
+        (component ``metric_collection``).
     """
     import time
 

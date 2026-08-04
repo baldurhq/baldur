@@ -30,13 +30,11 @@ Note:
     This app config still provides:
     - RBAC group auto-creation
     - Environment variable audit
-    - Startup hydration for Prometheus gauges
     - Pre-computed cache worker
 
 Startup responsibilities are delegated to the ``startup`` sub-package:
     - RBACInitializer: RBAC group creation via post_migrate signal
     - EnvironmentAuditor: Environment variable snapshot + hash chain sync
-    - MetricHydrator: Prometheus gauge hydration
 """
 
 from __future__ import annotations
@@ -51,7 +49,6 @@ from django.apps import AppConfig
 from baldur.adapters.django.startup import (
     BALDUR_GROUPS,
     EnvironmentAuditor,
-    MetricHydrator,
     RBACInitializer,
     create_baldur_groups,
 )
@@ -702,7 +699,6 @@ class BaldurConfig(AppConfig):
         baggage, etc.); see :func:`baldur.bootstrap._wrap_with_context` for the
         canonical example used by the leader scheduler.
         """
-        MetricHydrator.hydrate()
         self._start_correlation_engine_loop()
         # Every init()-started background worker — the OSS-5 daemon workers
         # (meta_watchdog, precomputed_cache, system_metrics_cache,
@@ -714,7 +710,11 @@ class BaldurConfig(AppConfig):
         # init() and by the framework-agnostic gunicorn post_worker_init hook,
         # so Django / FastAPI / Flask / CLI all get the same wiring. They are
         # intentionally NOT started here; this method now carries only the
-        # Django-adapter-intrinsic extras (gauge hydration + correlation loop).
+        # Django-adapter-intrinsic extra (the correlation loop). Prometheus
+        # gauge hydration used to run here too — it is gone: the per-process
+        # domain-gauge collector in start_background_workers() refreshes the
+        # same families from the repository on every framework, and did so with
+        # real values where the hydrator wrote the null metric adapter's zeros.
 
     @classmethod
     def start_background_threads(cls):
@@ -753,20 +753,10 @@ class BaldurConfig(AppConfig):
     def _reset_all_background_state(cls):
         """Reset the Django-only duplicate-start guards for a fresh Worker.
 
-        Only the Django-only extras (gauge hydration, correlation loop) keep
-        per-worker guards here. The OSS-5 init()-started workers carry their own
+        Only the Django-only extra (the correlation loop) keeps a per-worker
+        guard here. The OSS-5 init()-started workers carry their own
         service-level ``_running``/``_active`` idempotency guard and are started
         via ``start_background_workers()``, so they need no Django-side reset.
         """
-        MetricHydrator.reset_state()
         with cls._correlation_loop_lock:
             cls._correlation_loop_started = False
-
-    # =========================================================================
-    # Test Helpers
-    # =========================================================================
-
-    @classmethod
-    def reset_hydration_state(cls):
-        """Hydration state reset (for testing)."""
-        MetricHydrator.reset_state()
