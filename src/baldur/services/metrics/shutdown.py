@@ -39,14 +39,33 @@ class DomainGaugeUpdaterShutdownHandler(ShutdownHandler):
     expires and force-shutdown runs — the same bound every sibling handler has.
     """
 
-    def __init__(self, updater: DomainGaugeUpdater) -> None:
+    def __init__(self, updater: DomainGaugeUpdater | None = None) -> None:
+        """
+        Args:
+            updater: the collector to stop. Left ``None`` in production, where
+                the handler is built during ``init()`` — BEFORE the
+                background-worker starters run. Resolving the singleton here
+                would *create* it with the accessor's fallback cadence, and
+                the accessor captures interval and jitter at the FIRST call,
+                so the starter's settings-derived values would then be
+                silently discarded. Tests pass an explicit instance.
+        """
         self._updater = updater
 
+    def _collector(self) -> DomainGaugeUpdater:
+        """Resolve the collector as late as possible (see ``__init__``)."""
+        if self._updater is not None:
+            return self._updater
+
+        from baldur.services.metrics.periodic_updater import get_domain_gauge_updater
+
+        return get_domain_gauge_updater()
+
     def on_shutdown_start(self) -> None:
-        self._updater.stop()
+        self._collector().stop()
 
     def is_drain_complete(self) -> bool:
-        thread = self._updater._thread
+        thread = self._collector()._thread
         if thread is None or not thread.is_alive():
             return True
         thread.join(timeout=_DRAIN_POLL_TIMEOUT_SECONDS)
@@ -56,17 +75,22 @@ class DomainGaugeUpdaterShutdownHandler(ShutdownHandler):
         pass
 
     def on_force_shutdown(self, pending_requests: list[TrackedRequest]) -> None:
-        self._updater.stop()
+        self._collector().stop()
 
 
 def integrate_domain_gauge_updater_with_shutdown_coordinator() -> (
     DomainGaugeUpdaterShutdownHandler | None
 ):
-    """Create DomainGaugeUpdaterShutdownHandler for external registration."""
-    try:
-        from baldur.services.metrics.periodic_updater import get_domain_gauge_updater
+    """Create DomainGaugeUpdaterShutdownHandler for external registration.
 
-        return DomainGaugeUpdaterShutdownHandler(get_domain_gauge_updater())
+    Deliberately does not touch the collector singleton: shutdown handlers are
+    registered earlier in ``init()`` than the background-worker starters, so
+    constructing it here would fix its cadence at the accessor's fallback and
+    make ``BALDUR_METRICS_COLLECTION_INTERVAL_SECONDS`` (and the startup
+    jitter) inert. The handler resolves it at shutdown instead.
+    """
+    try:
+        return DomainGaugeUpdaterShutdownHandler()
     except Exception as e:
         logger.debug(
             "metrics.domain_gauge_updater_shutdown_handler_creation_skipped", error=e
