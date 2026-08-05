@@ -204,7 +204,12 @@ def editable_config_get(ctx: RequestContext) -> ResponseContext:
 
 
 def config_reset(ctx: RequestContext) -> ResponseContext:
-    """POST /config/reset/ — reset all to defaults (admin)."""
+    """POST /config/reset/ — reset all to defaults (admin).
+
+    Carries the same per-domain ``default_strategy`` block the read endpoints
+    return, so the reset — an incident-path button — states whether the values
+    it just wrote reach running processes, rather than reporting a bare success.
+    """
     manager = _get_manager()
     config = manager.reset_to_defaults()
 
@@ -215,6 +220,10 @@ def config_reset(ctx: RequestContext) -> ResponseContext:
             "status": "success",
             "message": "All configuration reset to defaults",
             "config": config,
+            "default_strategy": {
+                config_type: manager.get_default_strategy(config_type)
+                for config_type in config
+            },
             "timestamp": utc_now().isoformat(),
         }
     )
