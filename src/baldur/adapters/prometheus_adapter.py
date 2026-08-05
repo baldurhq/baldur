@@ -19,11 +19,20 @@ Usage:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 import structlog
 
+if TYPE_CHECKING:
+    from prometheus_client.samples import Sample
+
 logger = structlog.get_logger()
+
+# Quantile the console's latency tokens report. Named rather than inlined so the
+# reducer and its callers cannot drift apart.
+P95_QUANTILE = 0.95
 
 # Check if prometheus_client is available
 try:
@@ -99,6 +108,49 @@ class PrometheusAdapter:
             )
             return None
 
+    def collect_families(
+        self,
+        names: Sequence[str],
+    ) -> dict[str, list[Sample]]:
+        """Collect several metric families in a **single** registry walk.
+
+        A registry walk costs O(total registered label sets), so a caller
+        needing several families must not walk once per family. This walks once
+        and returns the samples of every requested family.
+
+        Matching is **exact-name**, never a prefix: ``metric.name`` is compared
+        against both the ``_total``-stripped counter family name and the raw
+        requested name (the same dual compare the single-metric queries use).
+        A prefix match would, for example, feed the counter
+        ``baldur_dlq_replay_dispatch_total`` into a caller asking for the
+        histogram ``baldur_dlq_replay_duration_seconds``.
+
+        Args:
+            names: Metric names to collect.
+
+        Returns:
+            ``{requested_name: samples}``. A family that is not registered is
+            **absent from the mapping** — distinguishable from a registered
+            family that has no samples (present, empty list).
+        """
+        collected: dict[str, list[Sample]] = {}
+        try:
+            from prometheus_client import REGISTRY
+
+            for metric in REGISTRY.collect():
+                for name in names:
+                    if metric.name == _family_name(name) or metric.name == name:
+                        collected[name] = list(metric.samples)
+        except Exception as e:
+            logger.debug(
+                "prometheus_adapter.collect_families_failed",
+                metric_names=list(names),
+                error=str(e),
+            )
+            return {}
+
+        return collected
+
     def query_metric(
         self,
         metric_name: str,
@@ -166,6 +218,103 @@ def _labels_match(
     return all(sample_labels.get(k) == v for k, v in required_labels.items())
 
 
+def sum_counter(
+    samples: Sequence[Sample],
+    labels: dict[str, str] | None = None,
+) -> int:
+    """Sum a **counter** family's samples, optionally filtered by labels.
+
+    Pure over an already-collected sample list — performs no registry access.
+
+    Only ``_total`` samples are summed, so a counter's ``_created`` companion
+    never inflates the result. That same filter makes this function unusable on
+    a histogram family: histogram samples are named ``_bucket`` / ``_count`` /
+    ``_sum``, none of which end in ``_total``, so the sum would be a silent
+    ``0``. Histogram families go through :func:`p95_from_buckets` only.
+
+    Args:
+        samples: Samples of one counter family.
+        labels: Optional label filter — a sample matches when it carries every
+            given key with the given value.
+
+    Returns:
+        The summed value, truncated to an integer.
+    """
+    total = 0.0
+    for sample in samples:
+        if not sample.name.endswith("_total"):
+            continue
+        if labels and not _labels_match(sample.labels, labels):
+            continue
+        total += sample.value
+    return int(total)
+
+
+def p95_from_buckets(samples: Sequence[Sample]) -> float | None:
+    """Interpolate the p95 of a **histogram** family from its bucket samples.
+
+    Pure over an already-collected sample list — performs no registry access.
+
+    Bucket counts are merged across every label set of the family, which is
+    sound because a family's bucket edges are identical for all label sets
+    (``prometheus_client`` takes the edges once, at family creation). The
+    quantile is then interpolated inside the containing bucket, the same way
+    PromQL's ``histogram_quantile`` does.
+
+    Args:
+        samples: Samples of one histogram family.
+
+    Returns:
+        The interpolated p95 in the family's own unit, or ``None`` when the
+        merged observation count is zero — a caller must render nothing rather
+        than a fabricated ``0``.
+    """
+    merged: dict[str, float] = {}
+    for sample in samples:
+        if not sample.name.endswith("_bucket"):
+            continue
+        bound = sample.labels.get("le")
+        if bound is None:
+            continue
+        merged[bound] = merged.get(bound, 0.0) + sample.value
+
+    if not merged:
+        return None
+
+    bounds = sorted(merged, key=_bucket_bound)
+    cumulative = [merged[bound] for bound in bounds]
+    observations = cumulative[-1]
+    if observations <= 0:
+        return None
+
+    rank = P95_QUANTILE * observations
+    index = 0
+    while index < len(cumulative) - 1 and cumulative[index] < rank:
+        index += 1
+
+    upper = _bucket_bound(bounds[index])
+    if upper == float("inf"):
+        # The quantile lands in the overflow bucket: report the highest finite
+        # bound rather than infinity (the Prometheus convention).
+        finite = [_bucket_bound(b) for b in bounds if _bucket_bound(b) != float("inf")]
+        return finite[-1] if finite else None
+
+    lower = _bucket_bound(bounds[index - 1]) if index > 0 else 0.0
+    below = cumulative[index - 1] if index > 0 else 0.0
+    in_bucket = cumulative[index] - below
+    if in_bucket <= 0:
+        return upper
+    return lower + (upper - lower) * ((rank - below) / in_bucket)
+
+
+def _bucket_bound(le: str) -> float:
+    """Parse a histogram bucket's ``le`` label into a comparable float."""
+    try:
+        return float(le)
+    except (TypeError, ValueError):
+        return float("inf")
+
+
 # =============================================================================
 # Singleton Pattern
 # =============================================================================
@@ -190,8 +339,11 @@ get_prometheus_adapter, configure_prometheus_adapter, reset_prometheus_adapter =
 
 
 __all__ = [
+    "P95_QUANTILE",
     "PrometheusAdapter",
-    "get_prometheus_adapter",
     "configure_prometheus_adapter",
+    "get_prometheus_adapter",
+    "p95_from_buckets",
     "reset_prometheus_adapter",
+    "sum_counter",
 ]
