@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from baldur.interfaces.messaging_common import OFF_HOST_DELIVERY_CHANNELS
 from baldur.interfaces.notification import (
     NotificationChannel,
     get_notification_adapter,
@@ -103,6 +104,24 @@ class EscalationResult:
 
     error_message: str | None = None
     """Error message."""
+
+    @property
+    def delivered_externally(self) -> bool:
+        """Whether a channel that leaves this host accepted the escalation.
+
+        ``success`` alone cannot answer this: the notification seam substitutes
+        the logging adapter whenever the configured transport cannot be
+        resolved, and that adapter always reports success — so an escalation
+        that only reached this process's log is indistinguishable from a paged
+        human by ``success``. Dry-run mode is the same shape: it reports
+        success on the synthetic ``dry_run`` channel without touching an
+        adapter.
+
+        Read this instead of ``success`` before claiming a person was reached.
+        """
+        return any(
+            channel in OFF_HOST_DELIVERY_CHANNELS for channel in self.channels_sent
+        )
 
 
 # EscalationLevel -> NotificationPriority value. The recorded delivery channel
