@@ -5,14 +5,19 @@
 # what the number actually is.
 #
 # Regenerate with scripts/derive_operator_surface.py. The unit list is derived
-# from code and must never be edited by hand; the verdict, evidence and ticket
-# columns are the audited part and are preserved across regeneration.
+# from code and must never be edited by hand; the audited columns named under
+# "Verdicts" below are preserved across regeneration, and every other column is
+# re-derived each run.
 #
 # This is a verdict inventory, NOT a violation allowlist. A row that no longer
 # matches a live unit FAILS its gate as an orphan rather than being silently
 # accepted, because the audit's closing counts are taken over these rows — a
 # stale row here inflates a count instead of forgiving a violation that stopped
 # happening. Do not carry the allowlist file's silent-accept behaviour across.
+#
+# Audited columns here: verdict, ticket. `evidence` is the scanner's own
+# file:lines and is re-derived every run — a note written into it is lost on the
+# next regeneration; put it in `ticket` or the audit report instead.
 #
 # Verdicts:
 #   real-producer   the producer provably always supplies the key, or the
