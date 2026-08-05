@@ -12,11 +12,10 @@ Penalty weights:
 - Regional STRICT: -20 points
 - Global STRICT: -30 points
 
-Integrates with PropagationHealthMonitor so that the Emergency state is
-automatically reflected in the Health Score.
+Exposes the Emergency state as a Health Score penalty so a score consumer
+reflects it without knowing about emergency levels.
 
 Code reference:
-    services/config/propagation_health.py (penalty pattern)
     services/regional_emergency/tracker.py (NamespacedEmergencyTracker)
 """
 
@@ -93,7 +92,6 @@ class EmergencyHealthPenalty:
     Health Score penalty calculator based on Emergency state.
 
     Applies a penalty to the Health Score while an Emergency is active.
-    Used in combination with PropagationHealthMonitor.
 
     Penalty weights:
     - LEVEL_1: -5 points (warning level)

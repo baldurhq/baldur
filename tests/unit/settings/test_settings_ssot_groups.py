@@ -84,13 +84,14 @@ class TestGroupClassCountContract:
         """CoordinationGroup: distributed_lock, leader_election, redis_key_guard."""
         assert self._count_cached_properties(CoordinationGroup) == 3
 
-    def test_multi_region_group_has_6_properties(self):
-        """MultiRegionGroup: cell_topology, namespace, regional_emergency, propagation, regional_recovery_policy, tiered_redis.
+    def test_multi_region_group_has_5_properties(self):
+        """MultiRegionGroup: cell_topology, namespace, regional_emergency, regional_recovery_policy, tiered_redis.
 
         The former ``config`` property moved to the private distribution
-        with the multiregion package relocation (599 D5).
+        with the multiregion package relocation (599 D5); ``propagation`` went
+        with the dead cross-cluster config-propagation package.
         """
-        assert self._count_cached_properties(MultiRegionGroup) == 6
+        assert self._count_cached_properties(MultiRegionGroup) == 5
 
     def test_metrics_group_has_7_properties(self):
         """MetricsGroup: detection, drift_detection, drift_threshold, metrics, prometheus, safe_gauge, system_metrics_cache."""

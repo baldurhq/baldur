@@ -112,7 +112,6 @@ if TYPE_CHECKING:
     from baldur.settings.precomputed_cache import PrecomputedCacheSettings
     from baldur.settings.predictive_forecaster import PredictiveForecasterSettings
     from baldur.settings.prometheus import PrometheusSettings
-    from baldur.settings.propagation import PropagationSettings
     from baldur.settings.rate_limit import RateLimitSettings
     from baldur.settings.rate_limit_backoff import RateLimitBackoffSettings
     from baldur.settings.rate_limit_throttle_integration import (
@@ -616,12 +615,6 @@ class MultiRegionGroup:
         from baldur.settings.regional_emergency import RegionalEmergencySettings
 
         return RegionalEmergencySettings()
-
-    @cached_property
-    def propagation(self) -> PropagationSettings:
-        from baldur.settings.propagation import PropagationSettings
-
-        return PropagationSettings()
 
     @cached_property
     def regional_recovery_policy(self) -> RegionalRecoveryPolicySettings:
