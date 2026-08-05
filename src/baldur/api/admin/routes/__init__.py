@@ -30,6 +30,7 @@ from baldur.api.admin.routes.dlq import _register_dlq_routes
 from baldur.api.admin.routes.emergency import _register_emergency_routes
 from baldur.api.admin.routes.error_budget import _register_error_budget_routes
 from baldur.api.admin.routes.governance import _register_governance_routes
+from baldur.api.admin.routes.healing import _register_healing_routes
 from baldur.api.admin.routes.health import _register_health_routes
 from baldur.api.admin.routes.l2_storage import _register_l2_storage_routes
 from baldur.api.admin.routes.operations import _register_operations_routes
@@ -78,6 +79,8 @@ def register_all_routes(registry: AdminRegistry) -> None:
     _register_analysis_routes(registry)
     _register_config_data_routes(registry)
     _register_security_review_routes(registry)
+    # Console data sources
+    _register_healing_routes(registry)
     # Web console (GET /) — registered last so its root path never shadows a
     # more specific domain route.
     _register_console_routes(registry)
