@@ -466,7 +466,6 @@ class BaldurConfig(AppConfig):
             graph.register_service("event_bus")
             graph.register_service("correlation_engine", depends_on=["event_bus"])
             graph.register_service("saga")
-            graph.register_service("config")
             # capacity_reservation init relocated to baldur.bootstrap's
             # framework-agnostic _start_capacity_reservation_if_enabled (it now
             # owns both initialize() and start()), so it is no longer wired here.
@@ -478,7 +477,6 @@ class BaldurConfig(AppConfig):
                     "event_journal",
                     "correlation_engine",
                     "saga",
-                    "config",
                 ],
                 direction="leaves_first",
             )
@@ -487,7 +485,6 @@ class BaldurConfig(AppConfig):
                 "event_journal": self._init_event_journal,
                 "correlation_engine": self._init_correlation_engine,
                 "saga": self._init_saga_autodiscover,
-                "config": self._init_config_propagator,
             }
 
             for service_name in init_order:
@@ -564,21 +561,6 @@ class BaldurConfig(AppConfig):
             logger.debug("baldur.saga_autodiscover_skipped_no_celery")
         except Exception as e:
             logger.warning("baldur.saga_autodiscover_failed", error=e)
-
-    @staticmethod
-    def _init_config_propagator():
-        """317: Initialize GlobalConfigPropagator."""
-        try:
-            from baldur.services.config.propagator import (
-                get_global_config_propagator,
-            )
-
-            get_global_config_propagator()
-            logger.info("baldur.config_propagator_initialized")
-        except ImportError:
-            logger.debug("baldur.config_propagator_module_not_available")
-        except Exception as e:
-            logger.warning("baldur.init_config_propagator_failed", error=e)
 
     # =========================================================================
     # 320: Celery Signal Registration Detection

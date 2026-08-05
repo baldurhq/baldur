@@ -135,7 +135,9 @@ _MOCK_CREATION_BUDGETS: dict[str, int] = {
     # metric-hydrator retirement: -3 — the hydrator test classes were deleted
     # with the class they covered; the one mock added in their place (the
     # daily-report statistics repository) is spec'd.
-    "oss": 4352,
+    # cross-cluster config-propagation removal: -1 — the propagator suite was
+    # deleted with the dead package it covered.
+    "oss": 4351,
     "pro": 1800,
     "dormant": 401,
 }

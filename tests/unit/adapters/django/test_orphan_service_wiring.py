@@ -238,14 +238,6 @@ class TestInitOrphanServiceFailOpenBehavior:
         ):
             BaldurConfig._init_saga_autodiscover()
 
-    def test_init_config_propagator_import_error(self):
-        """ConfigPropagator import failure passes without raising."""
-        with patch(
-            "baldur.services.config.propagator.get_global_config_propagator",
-            side_effect=ImportError("no module"),
-        ):
-            BaldurConfig._init_config_propagator()
-
     # _init_runbook tests moved to tests/pro/unit/test_register_relocated_features.py
     # (599 D12 - the runbook init seam relocated to register_pro_services).
 
@@ -258,11 +250,12 @@ class TestInitOrphanServiceFailOpenBehavior:
 class TestInitializeOrphanServicesBehavior:
     """317: _initialize_orphan_services integrated flow."""
 
-    def test_calls_all_four_initializers(self):
-        """All four initializer methods are called.
+    def test_calls_all_initializers(self):
+        """Every initializer method is called.
 
         runbook moved to PRO (599 D12); capacity_reservation init relocated to
-        baldur.bootstrap's framework-agnostic starter.
+        baldur.bootstrap's framework-agnostic starter; the cross-cluster config
+        propagator was removed as dead wiring.
         """
         config = BaldurConfig.__new__(BaldurConfig)
         call_order = []
@@ -279,16 +272,14 @@ class TestInitializeOrphanServicesBehavior:
                 config, "_init_correlation_engine", make_tracker("correlation_engine")
             ),
             patch.object(config, "_init_saga_autodiscover", make_tracker("saga")),
-            patch.object(config, "_init_config_propagator", make_tracker("config")),
         ):
             config._initialize_orphan_services()
 
-        assert len(call_order) == 4
+        assert len(call_order) == 3
         assert set(call_order) == {
             "event_journal",
             "correlation_engine",
             "saga",
-            "config",
         }
 
     def test_exception_in_graph_does_not_crash(self):

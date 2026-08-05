@@ -12,7 +12,6 @@ Referenced sources:
 - core/state_backend.py — SystemControlSettings-driven factory
 - adapters/health_checker.py — HealthCheckSettings defaults
 - meta/health_probe.py — HealthCheckSettings thresholds
-- services/config/propagation_health.py — PropagationSettings injection
 - audit/integrity/health_score.py — AuditIntegritySettings cache parameters
 
 The multiregion health_monitor slice (339 §5.2) moved to
@@ -200,41 +199,6 @@ class TestHealthCheckerSettingsConnectionBehavior:
 
         checker = PortableHealthChecker(ttl=None)
         assert checker._ttl == HealthCheckSettings().checker_cache_ttl_seconds
-
-
-# =============================================================================
-# PropagationHealthMonitor — PropagationSettings connection (339 §5.4)
-# =============================================================================
-
-
-class TestPropagationHealthMonitorSettingsBehavior:
-    """Verify PropagationHealthMonitor uses PropagationSettings."""
-
-    def test_uses_propagation_settings_sla_thresholds(self):
-        """SLA thresholds are provided by PropagationSettings."""
-        from baldur.services.config.propagation_health import (
-            PropagationHealthMonitor,
-        )
-        from baldur.settings.propagation import PropagationSettings
-
-        settings = PropagationSettings()
-        monitor = PropagationHealthMonitor(settings=settings)
-        assert monitor._propagation_settings is settings
-
-    def test_custom_settings_override_defaults(self):
-        """Custom settings values are reflected."""
-        from baldur.services.config.propagation_health import (
-            PropagationHealthMonitor,
-        )
-        from baldur.settings.propagation import PropagationSettings
-
-        custom_settings = PropagationSettings(
-            tier1_max_latency_ms=500,
-            tier1_penalty_points=10,
-        )
-        monitor = PropagationHealthMonitor(settings=custom_settings)
-        assert monitor._propagation_settings.tier1_max_latency_ms == 500
-        assert monitor._propagation_settings.tier1_penalty_points == 10
 
 
 # =============================================================================

@@ -38,7 +38,7 @@ Monitored components, in recovery-priority order (lower = more foundational; bud
 | `circuit_breaker` | 1 | Core resilience | Off (Slice B target) |
 | `recovery_pipeline` | 2 | Baldur internal | **None** (no impl — see §) |
 | `audit_system` | 2 | Compliance-critical | **Escalation-only by design** |
-| `daemon_workers` | 2 | Baldur internal — catch-all liveness for all 31 background worker threads; always active | **Probe-side respawn gate** (separate flag, off by default — see §) |
+| `daemon_workers` | 2 | Baldur internal — catch-all liveness for all 30 background worker threads; always active | **Probe-side respawn gate** (separate flag, off by default — see §) |
 | `chaos_scheduler` | 3 | Application-level (chaos experiments are off by default at v1.0) | Off (Slice B target) |
 | `notification_channels` | 3 | Application-level (meta-critical) | Off (degraded fallback only) |
 | `precomputed_cache` | 3 | Application-level | Off (Slice B target) |
@@ -163,7 +163,7 @@ All under the admin server (mount prefix is deployment-specific):
 
 ## daemon_workers — Baldur internal (priority 2)
 
-**Symptom**: `Baldur daemon_workers Failure`. One or more of Baldur's 31 background daemon worker threads is DEAD or STALE. This is the **widest** watchdog component — a single bad worker flips the whole component UNHEALTHY (worst-status aggregation) — so the page names the *component*; the `Error:`/reason line names the *worker(s)*: `N unhealthy daemon worker(s): <names>`.
+**Symptom**: `Baldur daemon_workers Failure`. One or more of Baldur's 30 background daemon worker threads is DEAD or STALE. This is the **widest** watchdog component — a single bad worker flips the whole component UNHEALTHY (worst-status aggregation) — so the page names the *component*; the `Error:`/reason line names the *worker(s)*: `N unhealthy daemon worker(s): <names>`.
 
 **Diagnose**:
 - `GET /meta-watchdog/status` → `component_details.daemon_workers.details.workers` is the per-worker drill-down map: each entry is `HEALTHY` / `STALE` / `DEAD` / `STOPPING` with `heartbeat_age_seconds` (the Web Console renders the same map). Find the worker(s) named in the page reason.
@@ -178,14 +178,14 @@ All under the admin server (mount prefix is deployment-specific):
 2. **DEAD worker**: check whether the auto-respawn gate (below) already restarted it — `restart_count` in the drill-down entry and `baldur_daemon_worker_restarts_total` rise on each respawn. If respawn is off, ineligible, or exhausted (`respawn_max_attempts`), restart the owning process — every worker is an in-process daemon thread and re-registers on process start.
 3. **STALE worker**: check the worker's blocking dependency first — a STALE worker usually points at a stuck I/O dependency, so correlate with `redis` / `dlq` / `audit_system` pages and fix the foundational component first. If the worker alone is wedged, restart the owning process (respawn cannot help — the thread is still alive).
 
-**Worker inventory** (31 production registrations at authoring time; `-*` names are dynamic per-resource/per-experiment):
+**Worker inventory** (30 production registrations at authoring time; `-*` names are dynamic per-resource/per-experiment):
 
 | Family | Workers |
 |---|---|
 | Audit pipeline (7) | `AuditSyncWorker`, `AuditFlushWorker`, `AsyncAuditWriter`, `PendingSequenceWatchdog`, `WAL-RetentionCleanupScheduler`, `AsyncLoggerAdapter`, `AsyncHealingLogger` |
 | DLQ / outbox (2) | `DLQOutboxWorker`, `DLQConsumer-*` (one per resource) |
 | Coordination / election / scheduling (2) | `Scheduler-*` (one per resource), `LeaderElector-*` (one per resource — bespoke row below) |
-| Event bus / config / IPC / pool (4) | `RedisEventBusListener`, `GlobalConfigPropagatorListener`, `CBStateSnapshotWriter`, `PoolCB-Refresh` |
+| Event bus / config / IPC / pool (3) | `RedisEventBusListener`, `CBStateSnapshotWriter`, `PoolCB-Refresh` |
 | Scaling / capacity (4) | `RateController`, `HPAMetricsExporter`, `capacity-reservation-scheduler`, `bulkhead_metrics_updater` |
 | Meta probes / guards / feedback (4) | `HealthProbeManager`, `AutoRollbackGuard`, `RuntimeFeedback`, `SelfHealerWatchdog` (PRO) |
 | Regional / cell (2) | `PartitionHeartbeat`, `cell-topology-anti-entropy` |
@@ -201,11 +201,11 @@ Bespoke rows (the 2 respawn-ineligible workers) and the catch-all:
 
 > **Episodic workers**: `EmergencyGradualRecovery` and `synthetic-load-*` register per operation and self-unregister — their *absence* from the drill-down map is normal.
 
-**Auto-respawn gate (probe-side — NOT the watchdog's `recovery_enabled`)**: dead-worker respawn is a separate path inside the probe itself. It fires only on **DEAD** (never STALE), and only when **all** of these hold: `BALDUR_DAEMON_WORKER_RESPAWN_ENABLED=true` (default **false**) AND the worker registered a restart callback (29 of 31 are eligible; the 2 bespoke rows above are not). Attempts are capped (`BALDUR_DAEMON_WORKER_RESPAWN_MAX_ATTEMPTS`, default 3) with exponential backoff, and the attempt counter resets after sustained health (`BALDUR_DAEMON_WORKER_RESPAWN_COUNT_RESET_SECONDS`, default 3600).
+**Auto-respawn gate (probe-side — NOT the watchdog's `recovery_enabled`)**: dead-worker respawn is a separate path inside the probe itself. It fires only on **DEAD** (never STALE), and only when **all** of these hold: `BALDUR_DAEMON_WORKER_RESPAWN_ENABLED=true` (default **false**) AND the worker registered a restart callback (28 of 30 are eligible; the 2 bespoke rows above are not). Attempts are capped (`BALDUR_DAEMON_WORKER_RESPAWN_MAX_ATTEMPTS`, default 3) with exponential backoff, and the attempt counter resets after sustained health (`BALDUR_DAEMON_WORKER_RESPAWN_COUNT_RESET_SECONDS`, default 3600).
 
 > **Verify before proceeding**: `POST /meta-watchdog/force-check`; `daemon_workers` healthy — every entry in the drill-down map is `HEALTHY` or `STOPPING`.
 
-**Graduation Note** — `daemon_workers` does **not** graduate via `recovery_enabled`: the watchdog has no `_recover_*` impl for it (an unhealthy `daemon_workers` always escalates). The auto path is the **probe-side respawn gate** above — flag `BALDUR_DAEMON_WORKER_RESPAWN_ENABLED` + per-worker restart-callback eligibility (29 of 31), DEAD-only. **Risk**: low — respawn is attempt-capped with backoff, never touches the 2 ineligible workers, and never acts on STALE wedges (those stay manual). Graduate it by flipping the probe-side flag once the restart counter dashboards show DEAD events are transient crashes, not crash loops.
+**Graduation Note** — `daemon_workers` does **not** graduate via `recovery_enabled`: the watchdog has no `_recover_*` impl for it (an unhealthy `daemon_workers` always escalates). The auto path is the **probe-side respawn gate** above — flag `BALDUR_DAEMON_WORKER_RESPAWN_ENABLED` + per-worker restart-callback eligibility (28 of 30), DEAD-only. **Risk**: low — respawn is attempt-capped with backoff, never touches the 2 ineligible workers, and never acts on STALE wedges (those stay manual). Graduate it by flipping the probe-side flag once the restart counter dashboards show DEAD events are transient crashes, not crash loops.
 
 ---
 
@@ -376,7 +376,7 @@ A component graduates from Slice A → auto-recovery only when **all** of these 
 | `chaos_scheduler` | pause experiments / clean up zombies | `_recover_chaos_scheduler_impl` (item-capped zombie cleanup) | B | Low | — |
 | `dlq` | restart DLQ worker | `_recover_dlq_impl` (`restart_worker`) | C | Medium | — |
 | `redis` | restore Redis / reconnect | `_recover_redis_impl` (pool reset → restart) | C | High | — |
-| `daemon_workers` | per-worker triage / restart owning process | **probe-side respawn** — `BALDUR_DAEMON_WORKER_RESPAWN_ENABLED` + per-worker eligibility (29 of 31), DEAD-only; independent of `recovery_enabled` | — (separate flag) | Low | — |
+| `daemon_workers` | per-worker triage / restart owning process | **probe-side respawn** — `BALDUR_DAEMON_WORKER_RESPAWN_ENABLED` + per-worker eligibility (28 of 30), DEAD-only; independent of `recovery_enabled` | — (separate flag) | Low | — |
 | `recovery_pipeline` | manual inspect/restart | **none (placeholder)** | — | — | impl placeholder + resume-efficacy stack (maintainer backlog) |
 | `audit_system` | restore audit backend | — | never | — | by design |
 | `error_budget_gate` | `/gate/reset` | — | never | — | by design |
