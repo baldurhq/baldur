@@ -20,6 +20,7 @@ from datetime import datetime
 
 import pytest
 
+from baldur.interfaces.messaging_common import OFF_HOST_DELIVERY_CHANNELS
 from baldur.interfaces.notification import NotificationAdapter, NotificationChannel
 from baldur.meta.config import MetaWatchdogSettings
 from baldur.meta.escalation import (
@@ -183,6 +184,83 @@ class TestEscalationResult:
 
         assert result.success is False
         assert "pagerduty" in result.channels_failed
+
+
+class TestDeliveredExternallyContract:
+    """``delivered_externally`` answers "did this leave the host?" — ``success`` cannot.
+
+    The notification seam substitutes the logging adapter whenever the
+    configured transport cannot be resolved, and that adapter always reports
+    success, so a ``success=True`` result may have reached nothing but this
+    process's own log. The property reads the resolved channels against the
+    off-host whitelist instead.
+    """
+
+    def test_off_host_channel_set_is_exactly_the_four_transports(self):
+        # The whitelist is the spec: a channel added to MessageChannel later is
+        # non-delivering until someone adds it HERE, so the counter it backs
+        # understates rather than overstates.
+        assert OFF_HOST_DELIVERY_CHANNELS == frozenset(
+            {"slack", "teams", "pagerduty", "webhook"}
+        )
+
+    @pytest.mark.parametrize(
+        ("channels_sent", "expected"),
+        [
+            ([], False),
+            (["slack"], True),
+            (["teams"], True),
+            (["pagerduty"], True),
+            (["webhook"], True),
+            # The logging fallback's own channel — the substitution this
+            # property exists to expose.
+            (["log"], False),
+            (["stdout"], False),
+            (["file"], False),
+            # dry_run_mode short-circuits before any adapter is touched.
+            (["dry_run"], False),
+            # Mixed: one real channel is enough to have reached a person.
+            (["log", "slack"], True),
+            (["stdout", "log"], False),
+            # Whitelist negative: an unrecognised channel is NOT assumed to
+            # deliver. A blacklist would have answered True here.
+            (["carrier_pigeon"], False),
+        ],
+    )
+    def test_delivered_externally_reflects_the_channels_that_leave_the_host(
+        self, channels_sent, expected
+    ):
+        result = EscalationResult(
+            success=True,
+            channels_sent=list(channels_sent),
+            channels_failed=[],
+        )
+
+        assert result.delivered_externally is expected
+
+    def test_delivered_externally_is_false_for_a_successful_log_only_delivery(self):
+        # The whole point, stated as one case: `success` and
+        # `delivered_externally` disagree exactly where the seam substituted.
+        result = EscalationResult(
+            success=True,
+            channels_sent=["log"],
+            channels_failed=[],
+        )
+
+        assert result.success is True
+        assert result.delivered_externally is False
+
+    def test_delivered_externally_ignores_a_whitelisted_channel_that_failed(self):
+        # A channel that was ATTEMPTED and failed reached nobody, even though
+        # it is on the whitelist — the property reads channels_sent only.
+        result = EscalationResult(
+            success=False,
+            channels_sent=[],
+            channels_failed=["slack", "pagerduty"],
+            error_message="all channels failed",
+        )
+
+        assert result.delivered_externally is False
 
 
 class TestEscalationManager:
