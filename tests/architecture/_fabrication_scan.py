@@ -124,16 +124,19 @@ def _own_nodes(fn: ast.AST) -> Iterator[ast.AST]:
 
     A nested function gets its own eligibility decision rather than inheriting
     its parent's, so it is skipped here and visited as a candidate in its own
-    right.
+    right. The skip is decided when the node is popped, not when it is pushed:
+    a nested ``def`` is usually a direct statement of the enclosing body, and
+    filtering only on the way in lets exactly that shape through, which both
+    lends the parent an eligibility it did not earn and re-attributes the
+    child's sites to the parent's qualname as a second row.
     """
     stack: list[ast.AST] = list(getattr(fn, "body", []))
     while stack:
         node = stack.pop()
+        if isinstance(node, _FUNCTION_TYPES):
+            continue
         yield node
-        for child in ast.iter_child_nodes(node):
-            if isinstance(child, _FUNCTION_TYPES):
-                continue
-            stack.append(child)
+        stack.extend(ast.iter_child_nodes(node))
 
 
 def _str_key_of(node: ast.AST | None) -> str | None:
