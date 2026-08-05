@@ -46,6 +46,14 @@ Extraction boundaries worth knowing before trusting a count:
   local aliases. A read rooted in an expression rather than a name — the
   ``(workers[w] || {}).status`` shape — is not captured, and stays owned by the
   periodic audit.
+- Operator input keys are read from the ``PANELS`` declaration only. The asset
+  declares a handful of others outside it — actions a drilldown builds at click
+  time (``openActionModal({path: …, bodyField: {key: "notes"}})``) and the
+  canary lifecycle table, which names a ``suffix`` rather than a ``path``.
+  Attributing those needs a unit key and a tier rule for a second declaration
+  site, which is a design decision rather than a wider regex, so they are
+  tracked as an open item and NOT silently counted. Read the tier close as
+  "every unit this extractor derives", not "every key on the screen".
 
 This is a non-test helper (no ``test_`` prefix, so pytest does not collect it).
 """
@@ -314,6 +322,10 @@ def body_field_units(raw: str) -> list[SurfaceUnit]:
     Within a panel slice each action begins at its ``path:`` literal, so the
     span from one action path to the next holds exactly that action's body
     fields.
+
+    Scoped to the ``PANELS`` declaration — see the module docstring's extraction
+    boundaries for the keys declared elsewhere in the asset and why they are an
+    open item rather than a wider regex.
     """
     block = _panels_block(raw)
     starts = list(_PANEL_ID_RE.finditer(block))

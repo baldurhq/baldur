@@ -19,9 +19,18 @@ authoring move instead, on three axes that have to coincide:
 infix, so ``failure_rate_5m`` counts. Names ending ``_threshold``, ``_limit``,
 ``_multiplier``, ``_min`` or ``_max`` are excluded: those are configuration,
 their numeric defaults are legitimate, and measurement showed they otherwise
-dominate the population. Counters are out of scope by construction — a counter
-is never named ``*_rate``, and ``0`` is the *correct* default for "how many
-happened", whereas for "what is the level" unmeasured is neither 0 nor 100.
+dominate the population. ``0`` is the *correct* default for "how many happened",
+whereas for "what is the level" unmeasured is neither 0 nor 100, so counters are
+mostly out of scope by name alone.
+
+*Mostly*, not by construction — the earlier wording overstated it. The token
+matches as an infix, so a counter whose name merely contains a measurement word
+does match: ``pending_rate_limit_resets`` is a count of pending resets and is
+flagged, because ``_rate_`` sits inside ``rate_limit``. The exclusion list is
+suffix-anchored and does not catch it. Those land in the baseline as
+``out-of-surface`` rows with evidence, which is the intended handling of a
+false positive here — narrowing the token rule instead would move the
+population and needs its own decision.
 
 **Shape.** Four, symmetric across dict assembly and constructor assembly:
 ``"<key>": <num>``, ``<x>.get("<key>", <num>)``, ``<kwarg>=<num>``, and
@@ -69,17 +78,18 @@ class FabricationHit:
     """One flagged field, with every site inside its function that produced it.
 
     ``symbol`` is the enclosing function's qualname, so a row keyed on
-    (file, symbol, field) survives edits above it; the lines are evidence, never
+    (file, symbol, field) survives edits above it; the sites are evidence, never
     identity. A field assembled at several sites in the same function is one
-    row carrying several lines — the count is asserted, so a *new* site inside
-    an already-flagged function still regresses the gate.
+    row carrying several sites — the count is asserted, so a *new* site inside
+    an already-flagged function still regresses the gate, including one added to
+    a line that already holds another.
     """
 
     file: str
     symbol: str
     field: str
     shape: str
-    lines: tuple[int, ...]
+    sites: tuple[tuple[int, int], ...]
 
     @property
     def key(self) -> str:
@@ -87,7 +97,12 @@ class FabricationHit:
 
     @property
     def occurrences(self) -> int:
-        return len(self.lines)
+        return len(self.sites)
+
+    @property
+    def lines(self) -> tuple[int, ...]:
+        """The distinct lines the sites fall on — the human-readable evidence."""
+        return tuple(sorted({line for line, _ in self.sites}))
 
     @property
     def evidence(self) -> str:
@@ -194,14 +209,29 @@ def _qualname(tree: ast.Module) -> dict[int, str]:
     return index
 
 
-def _sites_in_function(fn: ast.AST) -> Iterator[tuple[str, str, int]]:
-    """``(field, shape, line)`` for every flagged assembly site inside ``fn``."""
+def _position(node: ast.AST) -> tuple[int, int]:
+    """A site's identity: line AND column.
+
+    Line alone is not identity. Two shapes can describe one site — a kwarg whose
+    value is a ``.get`` fallback matches both the kwarg rule and the ``.get``
+    rule — and those must merge, which they do because both resolve to the same
+    node and therefore the same position. Two *distinct* sites can also share a
+    line (``{"a": {"r": 0.0}, "b": {"r": 0.0}}``), and those must not merge: the
+    occurrence count is what makes a second fabricated site inside an
+    already-flagged function regress, and keying on the line alone silently
+    counted that pair as one.
+    """
+    return node.lineno, node.col_offset
+
+
+def _sites_in_function(fn: ast.AST) -> Iterator[tuple[str, str, tuple[int, int]]]:
+    """``(field, shape, position)`` for every flagged assembly site inside ``fn``."""
     for node in _own_nodes(fn):
         if isinstance(node, ast.Dict):
             for key_node, value_node in zip(node.keys, node.values, strict=False):
                 key = _str_key_of(key_node)
                 if key and is_measurement_name(key) and _is_number(value_node):
-                    yield key, "dict-literal", key_node.lineno
+                    yield key, "dict-literal", _position(key_node)
         elif isinstance(node, ast.Call):
             func = node.func
             if (
@@ -212,12 +242,12 @@ def _sites_in_function(fn: ast.AST) -> Iterator[tuple[str, str, int]]:
             ):
                 key = _str_key_of(node.args[0])
                 if key and is_measurement_name(key):
-                    yield key, "get-fallback", node.lineno
+                    yield key, "get-fallback", _position(node)
         elif isinstance(node, ast.keyword) and node.arg:
             if not is_measurement_name(node.arg):
                 continue
             if _is_number(node.value):
-                yield node.arg, "kwarg", node.value.lineno
+                yield node.arg, "kwarg", _position(node.value)
             elif (
                 isinstance(node.value, ast.Call)
                 and isinstance(node.value.func, ast.Attribute)
@@ -225,7 +255,7 @@ def _sites_in_function(fn: ast.AST) -> Iterator[tuple[str, str, int]]:
                 and len(node.value.args) == 2
                 and _is_number(node.value.args[1])
             ):
-                yield node.arg, "kwarg-get-fallback", node.value.lineno
+                yield node.arg, "kwarg-get-fallback", _position(node.value)
 
 
 def scan_source(source: str, *, file: str = "<source>") -> list[FabricationHit]:
@@ -233,8 +263,9 @@ def scan_source(source: str, *, file: str = "<source>") -> list[FabricationHit]:
 
     Two shapes can describe one site — ``resolution_rate_percent=x.get(…, 0.0)``
     is both a kwarg fallback and a ``.get`` fallback — so a field's sites are
-    merged and its line set deduplicated. A field assembled at genuinely
-    distinct sites keeps both lines and an occurrence count of two.
+    merged and deduplicated by *position*, which both shapes share. A field
+    assembled at genuinely distinct sites keeps an occurrence per site, even
+    when two of them sit on one line.
     """
     try:
         tree = ast.parse(source, filename=file)
@@ -242,15 +273,15 @@ def scan_source(source: str, *, file: str = "<source>") -> list[FabricationHit]:
         return []
     names = _qualname(tree)
     shapes: dict[tuple[str, str], str] = {}
-    lines: dict[tuple[str, str], set[int]] = {}
+    sites: dict[tuple[str, str], set[tuple[int, int]]] = {}
     for node in ast.walk(tree):
         if not isinstance(node, _FUNCTION_TYPES) or not is_payload_assembly(node):
             continue
         symbol = names.get(id(node), node.name)
-        for field, shape, line in _sites_in_function(node):
+        for field, shape, position in _sites_in_function(node):
             slot = (symbol, field)
             shapes.setdefault(slot, shape)
-            lines.setdefault(slot, set()).add(line)
+            sites.setdefault(slot, set()).add(position)
     return sorted(
         (
             FabricationHit(
@@ -258,9 +289,9 @@ def scan_source(source: str, *, file: str = "<source>") -> list[FabricationHit]:
                 symbol=symbol,
                 field=field,
                 shape=shapes[(symbol, field)],
-                lines=tuple(sorted(lines[(symbol, field)])),
+                sites=tuple(sorted(sites[(symbol, field)])),
             )
-            for symbol, field in lines
+            for symbol, field in sites
         ),
         key=lambda h: (h.file, h.symbol, h.field),
     )

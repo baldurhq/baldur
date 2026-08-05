@@ -248,6 +248,21 @@ class TestScanMerging:
         assert hits[0].occurrences == 1
         assert hits[0].shape in {"kwarg-get-fallback", "get-fallback"}
 
+    def test_scan_source_counts_two_sites_of_one_field_on_one_line_separately(
+        self,
+    ) -> None:
+        # Given the same field fabricated twice on a single line
+        source = 'def build():\n    return {"a": {"hit_ratio": 0.0}, "b": {"hit_ratio": 0.0}}\n'
+
+        # When scanning
+        hits = scan_source(source, file="mod.py")
+
+        # Then both sites count: a site keyed on its line alone would merge them
+        # and let a second fabricated value ride in under the existing row
+        assert len(hits) == 1
+        assert hits[0].occurrences == 2
+        assert hits[0].lines == (2,)
+
     def test_scan_source_keeps_two_fields_on_one_line_as_two_rows(self) -> None:
         source = 'def build():\n    return {"failure_rate": 0.0, "hit_ratio": 0.0}\n'
 

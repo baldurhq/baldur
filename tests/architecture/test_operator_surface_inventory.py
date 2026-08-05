@@ -46,6 +46,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from baldur.utils.tier import is_pro_installed
 from tests.architecture._operator_surface import (
     BODY_FIELD,
     PANEL,
@@ -93,6 +94,26 @@ def _rows() -> list[dict]:
     return list(_baseline().get("rows") or [])
 
 
+# The two comparisons the gate turns into a verdict live here rather than inline
+# in the assertions, so the fixture classes below can drive them with synthetic
+# input. A fixture that re-derived the answer instead of calling these would be
+# asserting set arithmetic, not asserting that this gate detects anything.
+
+
+def inventory_drift(live: set[str], recorded: set[str]) -> tuple[list[str], list[str]]:
+    """``(units with no verdict row, verdict rows matching no unit)``."""
+    return sorted(live - recorded), sorted(recorded - live)
+
+
+def t1_offenders(rows: list[dict]) -> list[tuple[str, str]]:
+    """T1 rows still carrying an unresolved or defective verdict."""
+    return sorted(
+        (str(row.get("unit")), str(row.get("verdict")))
+        for row in rows
+        if row.get("tier") == T1 and str(row.get("verdict")) in T1_FORBIDDEN_VERDICTS
+    )
+
+
 # =============================================================================
 # The gate
 # =============================================================================
@@ -105,8 +126,7 @@ class TestOperatorSurfaceInventory:
         live = {unit.id for unit in level1_units()}
         recorded = {str(row.get("unit")) for row in _rows()}
 
-        unverdicted = sorted(live - recorded)
-        orphaned = sorted(recorded - live)
+        unverdicted, orphaned = inventory_drift(live, recorded)
         drift = [*unverdicted, *orphaned]
         assert not drift, (
             "the operator-surface verdict baseline drifted from the derived "
@@ -172,12 +192,7 @@ class TestOperatorSurfaceInventory:
         than reviewed by hand because the whole point of the exercise was that
         hand review is what missed these in the first place.
         """
-        offenders = sorted(
-            (str(row.get("unit")), str(row.get("verdict")))
-            for row in _rows()
-            if row.get("tier") == T1
-            and str(row.get("verdict")) in T1_FORBIDDEN_VERDICTS
-        )
+        offenders = t1_offenders(_rows())
         assert not offenders, (
             f"{len(offenders)} T1 unit(s) still carry an unresolved or "
             f"defective verdict: {offenders}. A T1 fabricated value is "
@@ -193,14 +208,57 @@ class TestOperatorSurfaceInventory:
         "domain absent from the inventory" is never evidence that the surface is
         absent. The committed count is the floor; a deliberate route removal
         regenerates it.
+
+        The floor is **per tier**, because the registry itself is: the DLQ
+        registrar returns before its management set when the PRO distribution is
+        absent, so the same tree yields a smaller route list in a pure-OSS
+        install. One number would be wrong in one of the two repositories — the
+        PRO-present figure fails here as a phantom floor, and the PRO-absent
+        figure would forgive four genuinely dropped routes there.
         """
-        floor = int(_baseline().get("meta", {}).get("admin_route_count", 0))
+        key = "admin_route_count" if is_pro_installed() else "admin_route_count_oss"
+        meta = _baseline().get("meta", {})
+        assert key in meta, (
+            f"the baseline carries no '{key}' floor, so this ratchet would pass "
+            "against nothing. Regenerate with derive_operator_surface.py, which "
+            "derives both tiers' counts in one run."
+        )
+
+        floor = int(meta[key])
         live = len(admin_routes())
         assert live >= floor, (
             f"the admin registry produced {live} route(s), below the committed "
-            f"floor of {floor}. A registrar most likely swallowed an import "
-            "error and dropped its whole domain silently — check the route "
-            "modules before touching this number."
+            f"{key} floor of {floor}. A registrar most likely swallowed an "
+            "import error and dropped its whole domain silently — check the "
+            "route modules before touching this number."
+        )
+
+    def test_both_tier_floors_are_recorded_and_ordered(self):
+        """One floor cannot serve both repositories, so both must be present.
+
+        A pure-OSS install wires strictly fewer admin routes than a PRO one, so
+        collapsing the two back into a single number silently re-breaks the gate
+        in whichever repository did not produce it.
+        """
+        meta = _baseline().get("meta", {})
+        pro_floor = meta.get("admin_route_count")
+        oss_floor = meta.get("admin_route_count_oss")
+
+        non_integer = [
+            (key, value)
+            for key, value in (
+                ("admin_route_count", pro_floor),
+                ("admin_route_count_oss", oss_floor),
+            )
+            if not isinstance(value, int)
+        ]
+        assert not non_integer, (
+            f"the baseline must carry an integer floor for each tier: "
+            f"{non_integer} — regenerate it"
+        )
+        assert 0 < oss_floor <= pro_floor, (
+            f"the OSS floor ({oss_floor}) must be positive and no larger than "
+            f"the PRO floor ({pro_floor}); PRO adds routes, it never removes any"
         )
 
     def test_extraction_is_not_vacuous(self):
@@ -245,8 +303,17 @@ def _fixture_unit_ids() -> set[str]:
     return {unit.id for unit in level1_units(raw=_FIXTURE_ASSET, routes=[])}
 
 
+def _fixture_row(unit: str, verdict: str, *, tier: str = T1) -> dict:
+    return {"unit": unit, "tier": tier, "verdict": verdict, "evidence": "traced"}
+
+
 class TestInventoryEqualityIsNotVacuous:
-    """Both failure directions reproduce on a controlled asset."""
+    """Both failure directions reproduce on a controlled asset.
+
+    Each test drives ``inventory_drift`` — the same call the gate makes — rather
+    than recomputing the difference alongside it, so a comparison that stopped
+    reporting one direction would fail here.
+    """
 
     def test_fixture_asset_yields_the_expected_units(self):
         assert _fixture_unit_ids() == {
@@ -256,15 +323,54 @@ class TestInventoryEqualityIsNotVacuous:
             "renderer-key:alpha::error_rate",
         }
 
+    def test_a_complete_baseline_reports_no_drift_in_either_direction(self):
+        assert inventory_drift(_fixture_unit_ids(), _fixture_unit_ids()) == ([], [])
+
     def test_a_new_unit_with_no_verdict_row_is_detected(self):
         """The regression direction — the shape a new panel or key arrives in."""
         recorded = _fixture_unit_ids() - {"renderer-key:alpha::error_rate"}
-        assert _fixture_unit_ids() - recorded == {"renderer-key:alpha::error_rate"}
+
+        assert inventory_drift(_fixture_unit_ids(), recorded) == (
+            ["renderer-key:alpha::error_rate"],
+            [],
+        )
 
     def test_a_row_matching_nothing_is_detected_as_an_orphan(self):
         """The direction a one-way subset check would let through forever."""
         recorded = _fixture_unit_ids() | {"panel:deleted_last_release"}
-        assert recorded - _fixture_unit_ids() == {"panel:deleted_last_release"}
+
+        assert inventory_drift(_fixture_unit_ids(), recorded) == (
+            [],
+            ["panel:deleted_last_release"],
+        )
+
+
+class TestT1ClosingRuleIsNotVacuous:
+    """The launch-gate rule fires on each verdict it forbids, and only at T1."""
+
+    @pytest.mark.parametrize("verdict", sorted(T1_FORBIDDEN_VERDICTS))
+    def test_a_forbidden_verdict_at_t1_is_reported(self, verdict):
+        rows = [
+            _fixture_row("panel:alpha", "real-producer"),
+            _fixture_row("renderer-key:alpha::error_rate", verdict),
+        ]
+
+        assert t1_offenders(rows) == [("renderer-key:alpha::error_rate", verdict)]
+
+    @pytest.mark.parametrize("verdict", sorted(T1_FORBIDDEN_VERDICTS))
+    def test_the_same_verdict_outside_t1_is_permitted(self, verdict):
+        rows = [_fixture_row("panel:beta", verdict, tier="T2")]
+
+        assert t1_offenders(rows) == []
+
+    def test_a_fully_dispositioned_t1_reports_nothing(self):
+        rows = [
+            _fixture_row("panel:alpha", "real-producer"),
+            _fixture_row("body-field:/alpha/go::reason", "consumer-reached"),
+            _fixture_row("route-domain:alpha", "cross-ref"),
+        ]
+
+        assert t1_offenders(rows) == []
 
 
 class TestDerivedTiering:
