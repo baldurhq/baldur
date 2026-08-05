@@ -286,6 +286,13 @@ def track_replay(
 
     Tracks replay start/completion automatically and records the duration.
 
+    Scope — replay functions **you** call directly, returning a bool. Do NOT
+    apply it to a registered ``ReplayHandler.replay``: the framework already
+    records the attempt, outcome and duration at its own execution point, so
+    the decorator would double-count every replay. It would also mis-score the
+    outcome, since a non-bool return (a ``ReplayResult``, whatever its
+    ``success`` field says) is treated as success here.
+
     Args:
         domain: Domain name (extracted from kwargs when empty)
         replay_type: Replay type (auto, manual, batch)
