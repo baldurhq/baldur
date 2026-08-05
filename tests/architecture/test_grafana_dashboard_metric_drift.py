@@ -1,7 +1,7 @@
 """G43 — shipped Grafana dashboard queries MUST name live registry metrics.
 
-The two sample dashboards under ``examples/monitoring/`` (the OSS overview and
-the PRO operations board) ship with the ``baldur-framework[prometheus]`` extra. Every
+The sample dashboards under ``examples/monitoring/`` (the OSS overview and the
+PRO operations board) ship with the ``baldur-framework[prometheus]`` extra. Every
 Prometheus panel query in them references framework metric series by name. Those
 names were once authored by guessing — before the recorder layer existed — and
 silently rotted (``baldur_retry_total`` / ``baldur_requests_total`` never
@@ -9,8 +9,13 @@ existed), rendering empty panels with nothing in CI to catch it.
 
 This guard closes that hole. It snapshots the LIVE Prometheus registry after
 importing the metric modules, extracts the metric-name tokens from every panel
-``target.expr`` in both dashboards, and asserts each token is a registered
-series name. A typo or a renamed metric turns the build red on the next commit.
+``target.expr`` in every shipped dashboard, and asserts each token is a
+registered series name. A typo or a renamed metric turns the build red on the
+next commit.
+
+The board set is derived from the shipped directory (``_dashboards.py``, shared
+with G75) rather than named here, so a newly added board is scanned on the
+commit that adds it.
 
 Scope boundary — name existence, NOT population. A registered-but-dead name
 (e.g. the bare ``circuit_breaker_state`` duplicate) would pass: population is a
@@ -38,6 +43,10 @@ from pathlib import Path
 
 import pytest
 
+from tests.architecture._dashboards import (
+    missing_floor_boards,
+    shipped_dashboards,
+)
 from tests.architecture._promql import unregistered_tokens
 from tests.architecture.conftest import PROJECT_ROOT
 
@@ -46,9 +55,13 @@ from tests.architecture.conftest import PROJECT_ROOT
 pytest.importorskip("prometheus_client")
 
 _MONITORING_DIR = PROJECT_ROOT / "examples" / "monitoring"
+_DASHBOARDS = shipped_dashboards(_MONITORING_DIR)
+
+# Named separately because the tiering assertions below are role-specific (the
+# OSS board must exclude PRO series, the PRO board must hold them) — unlike the
+# scan set, which is derived.
 _OVERVIEW_JSON = _MONITORING_DIR / "baldur-overview.json"
 _OPERATIONS_JSON = _MONITORING_DIR / "baldur-operations.json"
-_DASHBOARDS = (_OVERVIEW_JSON, _OPERATIONS_JSON)
 
 # PRO-only metric families in the v1.0 launch set. They live only on the
 # operations board so an OSS-only stack renders no mystery-empty panels (the
@@ -91,7 +104,7 @@ def _iter_panel_exprs(dashboard_path: Path):
 
 
 def _all_panel_cases() -> list[tuple[str, str, str]]:
-    """Collect ``(file_name, panel_title, expr)`` across both dashboards."""
+    """Collect ``(file_name, panel_title, expr)`` across every shipped board."""
     cases: list[tuple[str, str, str]] = []
     for path in _DASHBOARDS:
         for title, expr in _iter_panel_exprs(path):
@@ -125,10 +138,19 @@ def registered_metric_names() -> frozenset[str]:
     return frozenset(REGISTRY._names_to_collectors.keys())
 
 
-def test_dashboard_files_exist() -> None:
-    """Both shipped dashboards are present (guards against a stale rename)."""
-    for path in _DASHBOARDS:
-        assert path.is_file(), f"missing dashboard sample: {path}"
+def test_dashboard_discovery_covers_floor() -> None:
+    """Discovery found the boards that ship today (guards a stale rename).
+
+    The scan set is a glob, so an empty or shrunken result would make every
+    per-panel assertion below vacuously green. Asserting the floor makes that
+    failure loud instead.
+    """
+    missing = missing_floor_boards(_DASHBOARDS)
+    assert not missing, (
+        f"shipped dashboard(s) {missing} were not discovered under "
+        f"{_MONITORING_DIR}; a rename or relocation would otherwise silently "
+        f"shrink the scan set to nothing."
+    )
 
 
 def test_panel_cases_collected() -> None:
