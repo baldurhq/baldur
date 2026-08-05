@@ -258,6 +258,15 @@ def reset_protect_caches() -> None:
         _cb_policy_cache.clear()
         _composer_cache.clear()
 
+    # Clearing the policy cache no longer refreshes the breaker's configuration
+    # — a rebuilt policy reads the same process-shared config object — so the
+    # holder is invalidated explicitly here to keep the reset complete.
+    from baldur.services.circuit_breaker.config import (
+        invalidate_circuit_breaker_config,
+    )
+
+    invalidate_circuit_breaker_config()
+
     # #564 — invalidate the memoized cache-backed idempotency gate + replace
     # its in-process fallback cache so prior-test dedup state cannot leak into
     # the next test through the policy guard/hook.

@@ -64,6 +64,13 @@ from .service import CircuitBreakerService
 _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     # config (additional types)
     "CircuitBreakerFallbackResult": (".config", "CircuitBreakerFallbackResult"),
+    # config (process-shared holder)
+    "current_circuit_breaker_config": (".config", "current_circuit_breaker_config"),
+    "invalidate_circuit_breaker_config": (
+        ".config",
+        "invalidate_circuit_breaker_config",
+    ),
+    "reset_circuit_breaker_config": (".config", "reset_circuit_breaker_config"),
     # rate_limit_tracker
     "MemoryRateLimitTracker": (".rate_limit_tracker", "MemoryRateLimitTracker"),
     "RateLimitTracker": (".rate_limit_tracker", "RateLimitTracker"),
@@ -231,7 +238,12 @@ if TYPE_CHECKING:
     from .blast_radius_integration import (
         should_allow_cb_auto_open as should_allow_cb_auto_open_blast,
     )
-    from .config import CircuitBreakerFallbackResult
+    from .config import (
+        CircuitBreakerFallbackResult,
+        current_circuit_breaker_config,
+        invalidate_circuit_breaker_config,
+        reset_circuit_breaker_config,
+    )
     from .convenience import (
         force_close_circuit,
         get_protection_status,
@@ -321,6 +333,9 @@ __all__ = [
     "force_open_circuit",
     # Config (additional)
     "CircuitBreakerFallbackResult",
+    "current_circuit_breaker_config",
+    "invalidate_circuit_breaker_config",
+    "reset_circuit_breaker_config",
     # Rate limit tracking
     "MemoryRateLimitTracker",
     "RateLimitTracker",

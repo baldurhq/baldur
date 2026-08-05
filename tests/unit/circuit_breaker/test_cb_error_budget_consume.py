@@ -52,7 +52,7 @@ class TestApplyBurnRateMultiplierBehavior:
         mock_get_consumer.return_value = mock_consumer
 
         # When
-        service._apply_burn_rate_multiplier("payment_api")
+        service._apply_burn_rate_multiplier("payment_api", service.config)
 
         # Then
         mock_consumer.consume_atomic.assert_called_once_with(
@@ -86,7 +86,7 @@ class TestApplyBurnRateMultiplierBehavior:
         mock_get_consumer.return_value = mock_consumer
 
         # When
-        service._apply_burn_rate_multiplier("order_api")
+        service._apply_burn_rate_multiplier("order_api", service.config)
 
         # Then
         mock_logger.info.assert_any_call(
@@ -106,7 +106,7 @@ class TestApplyBurnRateMultiplierBehavior:
         service = self._make_service()
 
         # When / Then - no exception raised
-        service._apply_burn_rate_multiplier("missing_api")
+        service._apply_burn_rate_multiplier("missing_api", service.config)
 
 
 class TestCBOpenBaseConsumptionMinutesContract:

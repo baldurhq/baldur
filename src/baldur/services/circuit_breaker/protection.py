@@ -73,6 +73,10 @@ class ProtectionMixin:
         if not self.is_enabled:
             return None
 
+        # Resolve the shared config once — every threshold this decision uses
+        # must come from the same snapshot as the window it is measured over.
+        cfg = self.config
+
         tracker = get_rate_limit_tracker()
         tracker.record_rate_limit(service_name)
         # A 429 implies a request was made — record it so the hybrid cascade
@@ -80,15 +84,15 @@ class ProtectionMixin:
         tracker.record_request(service_name)
 
         # Hybrid cascade condition: absolute floor AND minimum sample AND rate threshold
-        window = self.config.rate_limit_cascade_window_seconds
+        window = cfg.rate_limit_cascade_window_seconds
         rate_limit_count = tracker.get_rate_limit_count(service_name, window)
         total_requests = tracker.get_request_count(service_name, window)
 
         cascade_detected = (
-            rate_limit_count >= self.config.rate_limit_cascade_threshold
-            and total_requests >= self.config.rate_limit_cascade_minimum_calls
+            rate_limit_count >= cfg.rate_limit_cascade_threshold
+            and total_requests >= cfg.rate_limit_cascade_minimum_calls
             and (rate_limit_count / total_requests)
-            >= (self.config.rate_limit_cascade_rate / 100)
+            >= (cfg.rate_limit_cascade_rate / 100)
         )
 
         if cascade_detected:
@@ -142,16 +146,17 @@ class ProtectionMixin:
         Returns:
             True if cascade is detected, False otherwise
         """
+        cfg = self.config
         tracker = get_rate_limit_tracker()
-        window = self.config.rate_limit_cascade_window_seconds
+        window = cfg.rate_limit_cascade_window_seconds
         rate_limit_count = tracker.get_rate_limit_count(service_name, window)
         total_requests = tracker.get_request_count(service_name, window)
 
         return (
-            rate_limit_count >= self.config.rate_limit_cascade_threshold
-            and total_requests >= self.config.rate_limit_cascade_minimum_calls
+            rate_limit_count >= cfg.rate_limit_cascade_threshold
+            and total_requests >= cfg.rate_limit_cascade_minimum_calls
             and (rate_limit_count / total_requests)
-            >= (self.config.rate_limit_cascade_rate / 100)
+            >= (cfg.rate_limit_cascade_rate / 100)
         )
 
     # =========================================================================
@@ -180,26 +185,28 @@ class ProtectionMixin:
             backoff = self.calculate_adaptive_backoff(service_name)
             return False, backoff
 
+        cfg = self.config
+
         # Check self-DDoS protection
-        if not self.config.self_ddos_protection_enabled:
+        if not cfg.self_ddos_protection_enabled:
             return True, 0.0
 
         tracker = get_rate_limit_tracker()
         tracker.record_request(service_name)
 
         request_count = tracker.get_request_count(
-            service_name, self.config.self_ddos_window_seconds
+            service_name, cfg.self_ddos_window_seconds
         )
-        rps = request_count / self.config.self_ddos_window_seconds
+        rps = request_count / cfg.self_ddos_window_seconds
 
-        if rps > self.config.self_ddos_rps_limit:
+        if rps > cfg.self_ddos_rps_limit:
             backoff = self.calculate_adaptive_backoff(service_name)
             logger.warning(
                 "circuit_breaker.self_ddos_protection_triggered",
                 service_name=service_name,
                 current_rps=round(rps, 1),
-                rps_limit=self.config.self_ddos_rps_limit,
-                window_seconds=self.config.self_ddos_window_seconds,
+                rps_limit=cfg.self_ddos_rps_limit,
+                window_seconds=cfg.self_ddos_window_seconds,
                 backoff=backoff,
             )
             return True, backoff  # Allow but suggest delay
@@ -220,6 +227,7 @@ class ProtectionMixin:
         """
         from baldur.core.backoff import ExponentialBackoff
 
+        cfg = self.config
         tracker = get_rate_limit_tracker()
         backoff_level = tracker.get_backoff_level(service_name)
 
@@ -228,11 +236,11 @@ class ProtectionMixin:
         # uses attempt-1 as the exponent, so pass backoff_level + 1 to keep the
         # historical base x multiplier^level growth.
         strategy = ExponentialBackoff(
-            base_delay=self.config.self_ddos_backoff_base_seconds,
-            max_delay=self.config.self_ddos_backoff_max_seconds,
-            multiplier=self.config.self_ddos_backoff_multiplier,
+            base_delay=cfg.self_ddos_backoff_base_seconds,
+            max_delay=cfg.self_ddos_backoff_max_seconds,
+            multiplier=cfg.self_ddos_backoff_multiplier,
             jitter=True,
-            jitter_factor=self.config.self_ddos_backoff_jitter_factor,
+            jitter_factor=cfg.self_ddos_backoff_jitter_factor,
         )
         return max(_MIN_BACKOFF_SECONDS, strategy.calculate(backoff_level + 1))
 
@@ -262,15 +270,16 @@ class ProtectionMixin:
         Returns:
             True if self-DDoS is detected, False otherwise
         """
-        if not self.config.self_ddos_protection_enabled:
+        cfg = self.config
+        if not cfg.self_ddos_protection_enabled:
             return False
 
         tracker = get_rate_limit_tracker()
         request_count = tracker.get_request_count(
-            service_name, self.config.self_ddos_window_seconds
+            service_name, cfg.self_ddos_window_seconds
         )
-        rps = request_count / self.config.self_ddos_window_seconds
-        return rps > self.config.self_ddos_rps_limit
+        rps = request_count / cfg.self_ddos_window_seconds
+        return rps > cfg.self_ddos_rps_limit
 
     def get_protection_status(self, service_name: str) -> dict[str, Any]:
         """
@@ -279,13 +288,14 @@ class ProtectionMixin:
         Returns:
             Dictionary with protection status details
         """
+        cfg = self.config
         tracker = get_rate_limit_tracker()
 
-        cascade_window = self.config.rate_limit_cascade_window_seconds
+        cascade_window = cfg.rate_limit_cascade_window_seconds
         rate_limit_count = tracker.get_rate_limit_count(service_name, cascade_window)
         total_requests = tracker.get_request_count(service_name, cascade_window)
 
-        ddos_window = self.config.self_ddos_window_seconds
+        ddos_window = cfg.self_ddos_window_seconds
         request_count = tracker.get_request_count(service_name, ddos_window)
 
         return {
@@ -301,17 +311,17 @@ class ProtectionMixin:
                     if total_requests > 0
                     else 0.0
                 ),
-                "threshold": self.config.rate_limit_cascade_threshold,
-                "rate_threshold_percent": self.config.rate_limit_cascade_rate,
-                "minimum_calls": self.config.rate_limit_cascade_minimum_calls,
+                "threshold": cfg.rate_limit_cascade_threshold,
+                "rate_threshold_percent": cfg.rate_limit_cascade_rate,
+                "minimum_calls": cfg.rate_limit_cascade_minimum_calls,
                 "window_seconds": cascade_window,
             },
             "self_ddos_protection": {
-                "enabled": self.config.self_ddos_protection_enabled,
+                "enabled": cfg.self_ddos_protection_enabled,
                 "detected": self.is_self_ddos_detected(service_name),
                 "request_count_in_window": request_count,
                 "current_rps": request_count / ddos_window,
-                "rps_limit": self.config.self_ddos_rps_limit,
+                "rps_limit": cfg.self_ddos_rps_limit,
                 "window_seconds": ddos_window,
             },
             "backoff": {

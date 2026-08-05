@@ -3,12 +3,22 @@ Circuit Breaker Configuration and Types
 
 Contains configuration dataclass, state constants, and result types
 for circuit breaker operations.
+
+The configuration a default-constructed :class:`CircuitBreakerService` reads is
+process-shared: :func:`current_circuit_breaker_config` owns the single instance
+and :func:`invalidate_circuit_breaker_config` swaps in a rebuilt one. Services
+therefore never own (and never rebuild) a config of their own, which keeps the
+config-source lookup off every request path and lets one invalidation reach
+every default-config instance at once.
 """
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+
+import structlog
 
 # =============================================================================
 # Circuit Breaker State Enum
@@ -25,12 +35,17 @@ if TYPE_CHECKING:
 
     from baldur.interfaces.repositories import CircuitBreakerStateData
 
+logger = structlog.get_logger()
+
 __all__ = [
     "CircuitState",
     "CircuitBreakerConfig",
     "CircuitBreakerDecision",
     "CircuitBreakerFallbackResult",
     "CircuitBreakerResult",
+    "current_circuit_breaker_config",
+    "invalidate_circuit_breaker_config",
+    "reset_circuit_breaker_config",
 ]
 
 # =============================================================================
@@ -72,6 +87,10 @@ class CircuitBreakerConfig:
     half_open_max_calls: int = (
         3  # Max trial calls admitted while probing recovery in half-open state
     )
+    # Seconds after which a HALF_OPEN window at its call limit is treated as
+    # stuck (the worker holding the trial slot died) and auto-reset on the next
+    # slot acquisition. Matches the settings default.
+    half_open_stuck_timeout_seconds: int = 60
     max_pending_duration_hours: int = 4  # SLA for pending DLQ items
     max_retry_lifetime_hours: int = 24  # Max time to attempt retries
 
@@ -97,7 +116,13 @@ class CircuitBreakerConfig:
 
     @classmethod
     def from_settings(cls) -> CircuitBreakerConfig:
-        """Load configuration from RuntimeConfigManager (preferred) or core config."""
+        """Load configuration from RuntimeConfigManager (preferred) or core config.
+
+        This is the single admission point for every circuit-breaker consumer:
+        both source branches funnel through :func:`_admit_config_values`, so a
+        value that would disable protection cannot reach the protection logic
+        no matter which source it came from.
+        """
         # Try RuntimeConfigManager first (runtime-configurable)
         try:
             from baldur.factory.registry import ProviderRegistry
@@ -107,7 +132,7 @@ class CircuitBreakerConfig:
                 raise RuntimeError("baldur_pro RuntimeConfigManager not registered")
             runtime_config = manager.get_circuit_breaker_config()
 
-            return cls(
+            return cls._admitted(
                 enabled=runtime_config.get("enabled", True),
                 failure_threshold=runtime_config.get("failure_threshold", 5),
                 recovery_timeout=runtime_config.get("recovery_timeout", 60),
@@ -131,6 +156,9 @@ class CircuitBreakerConfig:
                     "manual_override_ttl_minutes", 90
                 ),
                 half_open_max_calls=runtime_config.get("half_open_max_calls", 3),
+                half_open_stuck_timeout_seconds=runtime_config.get(
+                    "half_open_stuck_timeout_seconds", 60
+                ),
                 max_pending_duration_hours=runtime_config.get(
                     "max_pending_duration_hours", 4
                 ),
@@ -177,7 +205,7 @@ class CircuitBreakerConfig:
 
         # Fallback to static core config
         cb_settings = get_config().core.circuit_breaker
-        return cls(
+        return cls._admitted(
             enabled=cb_settings.enabled,
             failure_threshold=cb_settings.failure_threshold,
             recovery_timeout=cb_settings.recovery_timeout,
@@ -199,6 +227,9 @@ class CircuitBreakerConfig:
                 cb_settings, "manual_override_ttl_minutes", 90
             ),
             half_open_max_calls=getattr(cb_settings, "half_open_max_calls", 3),
+            half_open_stuck_timeout_seconds=getattr(
+                cb_settings, "half_open_stuck_timeout_seconds", 60
+            ),
             max_pending_duration_hours=getattr(
                 cb_settings, "max_pending_duration_hours", 4
             ),
@@ -218,6 +249,204 @@ class CircuitBreakerConfig:
             self_ddos_backoff_jitter_factor=cb_settings.self_ddos_backoff_jitter_factor,
             rate_limit_distributed=cb_settings.rate_limit_distributed,
         )
+
+    @classmethod
+    def _admitted(cls, **values: Any) -> CircuitBreakerConfig:
+        """Build the config from ``values`` after the admission clamp."""
+        return cls(**_admit_config_values(values))
+
+
+# =============================================================================
+# Config Admission — derived bounds
+# =============================================================================
+#
+# A value stored through the runtime-config write path runs no Pydantic
+# validator, so a window/count field can hold a 0 (or an unreachably large
+# number) that silently disables a protection trigger on every worker that
+# builds a config from it. The clamp below is the last gate before such a value
+# reaches the protection logic.
+#
+# The bounds are DERIVED from CircuitBreakerSettings' own field declarations,
+# never authored here: the range an operator can already set through
+# BALDUR_CB_* is exactly the range admitted, so the clamp cannot narrow a
+# legal configuration. A field that declares no bound is passed through
+# unchanged, and a stored out-of-range value is still stored and still shown in
+# the console — it simply cannot reach the breaker.
+
+# Clamps already reported, so a repeated rebuild of the same out-of-range value
+# costs one WARNING per (field, stored, applied) triple per process rather than
+# one per config build.
+_clamp_warned: set[tuple[str, Any, Any]] = set()
+_clamp_warned_lock = threading.Lock()
+
+
+def _declared_bounds() -> dict[str, tuple[Any, Any, Any]]:
+    """Map each bounded settings field to ``(lower, upper, python_type)``.
+
+    Only inclusive bounds (``ge`` / ``le``) are resolved. An exclusive bound
+    (``gt`` / ``lt``) names no admissible value of its own, so a field that
+    declares one is left unclamped rather than clamped to a value the settings
+    layer would itself reject. No circuit-breaker field declares one today.
+    """
+    from annotated_types import Ge, Le
+
+    from baldur.settings.circuit_breaker import CircuitBreakerSettings
+
+    bounds: dict[str, tuple[Any, Any, Any]] = {}
+    for name, field in CircuitBreakerSettings.model_fields.items():
+        lower = upper = None
+        for constraint in field.metadata:
+            if isinstance(constraint, Ge):
+                lower = constraint.ge
+            elif isinstance(constraint, Le):
+                upper = constraint.le
+        if lower is None and upper is None:
+            continue
+        bounds[name] = (lower, upper, field.annotation)
+    return bounds
+
+
+def _admit_config_values(values: dict[str, Any]) -> dict[str, Any]:
+    """Clamp every bounded numeric value into its declared range.
+
+    Returns a new dict; the input is not mutated. Also emits the report-only
+    cross-field warning for ``minimum_calls > sliding_window_size``, which
+    makes the failure-rate trigger unreachable — the settings layer warns about
+    that combination but the runtime-config write path never runs its
+    validators.
+    """
+    admitted = dict(values)
+
+    for name, (lower, upper, python_type) in _declared_bounds().items():
+        if name not in admitted:
+            continue
+        stored = admitted[name]
+        # bool is an int subclass; a flag has no range to clamp into.
+        if isinstance(stored, bool) or not isinstance(stored, (int, float)):
+            continue
+
+        applied = stored
+        if lower is not None and applied < lower:
+            applied = lower
+        if upper is not None and applied > upper:
+            applied = upper
+        if applied == stored:
+            continue
+
+        if python_type is int:
+            applied = int(applied)
+        elif python_type is float:
+            applied = float(applied)
+
+        admitted[name] = applied
+        _warn_clamped(name, stored, applied)
+
+    minimum_calls = admitted.get("minimum_calls")
+    window_size = admitted.get("sliding_window_size")
+    if (
+        isinstance(minimum_calls, int)
+        and isinstance(window_size, int)
+        and minimum_calls > window_size
+    ):
+        logger.warning(
+            "circuit_breaker.config_rate_trigger_unreachable",
+            minimum_calls=minimum_calls,
+            sliding_window_size=window_size,
+            remedy=(
+                "the outcome window never holds more calls than "
+                "sliding_window_size, so the failure-rate trigger is never "
+                "evaluated: lower minimum_calls or raise sliding_window_size"
+            ),
+        )
+
+    return admitted
+
+
+def _warn_clamped(field_name: str, stored: Any, applied: Any) -> None:
+    """Report one admission clamp, at most once per distinct triple."""
+    key = (field_name, stored, applied)
+    with _clamp_warned_lock:
+        if key in _clamp_warned:
+            return
+        _clamp_warned.add(key)
+
+    logger.warning(
+        "circuit_breaker.config_value_clamped",
+        field=field_name,
+        stored_value=stored,
+        applied_value=applied,
+        remedy=(
+            "the stored value is outside the range this field declares; the "
+            "breaker runs the clamped value until the stored one is corrected"
+        ),
+    )
+
+
+# =============================================================================
+# Process-Shared Config Holder
+# =============================================================================
+
+_current_config: CircuitBreakerConfig | None = None
+_current_config_lock = threading.Lock()
+
+
+def current_circuit_breaker_config() -> CircuitBreakerConfig:
+    """Return the process-shared circuit-breaker configuration.
+
+    Every default-constructed service reads this, so a single invalidation
+    reaches all of them. ``baldur.init()`` seeds the holder, which is what keeps
+    the build (and the config-source lock it takes) off the first request; the
+    lazy build below is the fallback for a process that never calls ``init()``.
+    """
+    global _current_config
+
+    config = _current_config
+    if config is not None:
+        return config
+
+    with _current_config_lock:
+        if _current_config is None:
+            _current_config = CircuitBreakerConfig.from_settings()
+        return _current_config
+
+
+def invalidate_circuit_breaker_config() -> CircuitBreakerConfig | None:
+    """Rebuild the shared configuration and swap it in, on the calling thread.
+
+    Eager by design: a lazy rebuild would move the config-source read onto
+    whichever request thread happens to read first, where it can block behind an
+    administrative write. Returns the configuration now in force — the previous
+    one when the rebuild failed, so a transient source failure never leaves the
+    process without a configuration.
+    """
+    global _current_config
+
+    try:
+        rebuilt = CircuitBreakerConfig.from_settings()
+    except Exception as e:
+        logger.warning(
+            "circuit_breaker.config_rebuild_failed",
+            error=str(e),
+        )
+        return _current_config
+
+    with _current_config_lock:
+        _current_config = rebuilt
+    return rebuilt
+
+
+def reset_circuit_breaker_config() -> None:
+    """Drop the shared configuration — test isolation only.
+
+    The next read rebuilds it lazily. Production code invalidates (which
+    rebuilds eagerly) rather than resetting.
+    """
+    global _current_config
+
+    with _current_config_lock:
+        _current_config = None
+    with _clamp_warned_lock:
+        _clamp_warned.clear()
 
 
 # =============================================================================

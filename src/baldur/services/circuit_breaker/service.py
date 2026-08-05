@@ -35,6 +35,7 @@ from .config import (
     CircuitBreakerFallbackResult,
     CircuitBreakerResult,
     CircuitState,
+    current_circuit_breaker_config,
 )
 from .manual_control import (
     ManualControlMixin,
@@ -98,10 +99,17 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
         Initialize the circuit breaker service.
 
         Args:
-            config: Optional configuration, loads from settings if None
+            config: Optional configuration. When given it is pinned for this
+                instance's lifetime and never follows a runtime edit; when
+                omitted the instance reads the process-shared configuration, so
+                one invalidation reaches every default-config instance at once.
             repository: Optional repository for DI, uses Django adapter if None
         """
-        self.config = config or CircuitBreakerConfig.from_settings()
+        # Deliberately NOT ``config or CircuitBreakerConfig.from_settings()``:
+        # building here would pin a fresh snapshot into every policy-cached
+        # service and put the config-source lock on the first request of the
+        # process. The shared holder owns the build instead.
+        self._pinned_config = config
         self._repository = repository
 
         # Rate evidence for the failure-rate trigger. Held in process because a
@@ -115,6 +123,27 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
 
         # MeshCoordinator integration: per-service threshold-override map
         self._threshold_overrides: dict[str, Any] = {}
+
+    @property
+    def config(self) -> CircuitBreakerConfig:  # type: ignore[override]
+        """Configuration in force for this instance.
+
+        A pinned config (constructor argument or a later assignment) wins;
+        otherwise the process-shared configuration is returned, so a runtime
+        invalidation is observed on the next read with no per-instance rebuild.
+
+        The returned object is shared across the process — read it, never
+        mutate a field on it.
+        """
+        pinned = self._pinned_config
+        if pinned is not None:
+            return pinned
+        return current_circuit_breaker_config()
+
+    @config.setter
+    def config(self, value: CircuitBreakerConfig) -> None:
+        """Pin a configuration to this instance, opting it out of invalidation."""
+        self._pinned_config = value
 
     @property
     def repository(self) -> CircuitBreakerStateRepository:  # type: ignore[override]
@@ -187,6 +216,11 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
 
         Lookup happens in the L1 local cache, so there is no external I/O.
         Without an override, returns the base config; otherwise replaces only the overridden fields.
+
+        Override values are NOT re-admitted through the config-build clamp: the
+        mesh coordinator produces them in-process, so they are not values an
+        operator can store. The clamp's contract covers the operator-writable
+        sources only.
         """
         if service_name not in self._threshold_overrides:
             return self.config
@@ -249,7 +283,9 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
         """
         if not self.is_enabled:
             return True
-        return self._evaluate_admission(service_name).allowed
+        return self._evaluate_admission(
+            service_name, self.get_effective_config(service_name)
+        ).allowed
 
     def should_allow_with_state(self, service_name: str) -> CircuitBreakerDecision:
         """Companion API to ``should_allow`` that returns the admission decision
@@ -273,16 +309,21 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
                 allowed=True,
                 state=self.get_or_create_state(service_name),
             )
-        return self._evaluate_admission(service_name)
+        return self._evaluate_admission(
+            service_name, self.get_effective_config(service_name)
+        )
 
-    def _evaluate_admission(self, service_name: str) -> CircuitBreakerDecision:  # noqa: C901
+    def _evaluate_admission(  # noqa: C901
+        self, service_name: str, effective_config: CircuitBreakerConfig
+    ) -> CircuitBreakerDecision:
         """Shared admission-decision body for ``should_allow`` /
         ``should_allow_with_state``.
 
-        Caller MUST have already verified ``self.is_enabled`` — this method
-        does not re-check it. Returns a ``CircuitBreakerDecision`` whose
-        ``state`` reflects any post-atomic-acquire transition that happened
-        during the call.
+        Caller MUST have already verified ``self.is_enabled`` and MUST pass the
+        config it resolved — this method does not resolve one, so a single
+        admission decision cannot be taken against two different configurations.
+        Returns a ``CircuitBreakerDecision`` whose ``state`` reflects any
+        post-atomic-acquire transition that happened during the call.
         """
         # Downstream-state pre-check (MeshCoordinator integration)
         # Performs only O(1) in-memory lookups, no external I/O
@@ -309,8 +350,6 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
 
         if state.state == CircuitState.CLOSED:
             return CircuitBreakerDecision(allowed=True, state=state)
-
-        effective_config = self.get_effective_config(service_name)
 
         # OPEN with recovery_timeout NOT yet elapsed: short-circuit reject.
         if state.state == CircuitState.OPEN:
@@ -347,13 +386,10 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
         # The repository's Lua / RLock primitive owns the state-machine
         # decision (OPEN→HALF_OPEN combo / HALF_OPEN increment / rejected /
         # stuck-recovery auto-reset). Single-winner semantics close G3/G4.
-        from baldur.settings.circuit_breaker import get_circuit_breaker_settings
-
-        settings = get_circuit_breaker_settings()
         allowed, prev_state, new_state = self.repository.try_acquire_half_open_slot(
             service_name=service_name,
             limit=effective_config.half_open_max_calls,
-            stuck_timeout_seconds=settings.half_open_stuck_timeout_seconds,
+            stuck_timeout_seconds=effective_config.half_open_stuck_timeout_seconds,
         )
 
         # Emit transition event/audit iff this thread caused the OPEN→HALF_OPEN
@@ -811,6 +847,7 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
                 error_context,
                 window_failures=window_failures,
                 window_total=window_total,
+                effective_config=effective_config,
             )
 
             # Open the circuit
@@ -837,7 +874,7 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
             self._log_circuit_open_audit(service_name, snapshot)
 
             # Apply burn rate multiplier to Error Budget
-            self._apply_burn_rate_multiplier(service_name)
+            self._apply_burn_rate_multiplier(service_name, effective_config)
 
             # Push event - record the CB state-change metric
             try:
@@ -876,7 +913,7 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
     def _should_open_circuit(
         self,
         state: CircuitBreakerStateData,
-        effective_config: CircuitBreakerConfig | None = None,
+        effective_config: CircuitBreakerConfig,
         window_evidence: tuple[int, int] | None = None,
     ) -> bool:
         """
@@ -890,7 +927,10 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
 
         Args:
             state: Current circuit breaker state
-            effective_config: Optional overridden config from MeshCoordinator
+            effective_config: Config the caller resolved for this service, with
+                any MeshCoordinator override already applied. Required — the
+                helper never resolves its own, so the decision and the caller's
+                other config-derived side effects cannot disagree.
             window_evidence: Pre-read ``(failures, total)`` to decide on. The
                 caller passes what it will also record and emit, so the decision
                 and its reported evidence cannot come from two different reads
@@ -899,7 +939,7 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
         Returns:
             True if circuit should open
         """
-        cfg = effective_config or self.config
+        cfg = effective_config
         window_failures, window_total = (
             window_evidence
             if window_evidence is not None
@@ -934,6 +974,7 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
         *,
         window_failures: int,
         window_total: int,
+        effective_config: CircuitBreakerConfig,
     ) -> dict[str, Any]:
         """
         Collect a snapshot of system state when circuit opens.
@@ -946,6 +987,10 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
             error_context: Optional error context
             window_failures: Failures recorded in the outcome window
             window_total: Total calls recorded in the outcome window
+            effective_config: The config the trip decision was taken against —
+                required so the recorded thresholds are the ones that actually
+                fired, not whatever the shared config holds by the time the
+                snapshot is built.
 
         Returns:
             Snapshot dictionary with failure details
@@ -965,9 +1010,9 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
                     window_failures / window_total * 100 if window_total > 0 else 0
                 ),
                 "threshold_config": {
-                    "failure_threshold": self.config.failure_threshold,
-                    "minimum_calls": self.config.minimum_calls,
-                    "failure_rate_threshold": self.config.failure_rate_threshold,
+                    "failure_threshold": effective_config.failure_threshold,
+                    "minimum_calls": effective_config.minimum_calls,
+                    "failure_rate_threshold": effective_config.failure_rate_threshold,
                 },
             },
             "trigger_reason": "auto_threshold_exceeded",
@@ -1064,7 +1109,9 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
                 error=e,
             )
 
-    def _apply_burn_rate_multiplier(self, service_name: str) -> None:
+    def _apply_burn_rate_multiplier(
+        self, service_name: str, effective_config: CircuitBreakerConfig
+    ) -> None:
         """
         Apply burn rate multiplier to Error Budget when CB opens.
 
@@ -1073,6 +1120,8 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
 
         Args:
             service_name: Name of the service
+            effective_config: The config the trip was decided against —
+                required so the consumed budget matches that decision.
         """
         try:
             from baldur_pro.services.error_budget.atomic_consumer import (
@@ -1082,8 +1131,8 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
             consumer = get_atomic_budget_consumer()
             result = consumer.consume_atomic(
                 namespace=service_name,
-                raw_minutes=self.config.cb_open_base_consumption_minutes,
-                multiplier=self.config.cb_open_burn_rate_multiplier,
+                raw_minutes=effective_config.cb_open_base_consumption_minutes,
+                multiplier=effective_config.cb_open_burn_rate_multiplier,
                 budget_key=f"baldur:{service_name}:error_budget",
             )
 
@@ -1131,6 +1180,11 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
         if not self.is_enabled:
             return
 
+        # Resolve the config once for the whole operation. A second read could
+        # land on a different object after a runtime invalidation, and the
+        # close-threshold this method decides on is also the one it audits.
+        effective_config = self.get_effective_config(service_name)
+
         # 490 D4 fast path: steady-state CLOSED + zero failures means
         # update_state(failure_count=0) would be a no-op. Skip all repository
         # I/O. Stale hints (state has drifted to OPEN/HALF_OPEN since the
@@ -1147,7 +1201,7 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
             # memory-local append, so the fast path stays free of repository I/O.
             self._outcome_window.record_success(
                 service_name,
-                self.get_effective_config(service_name).sliding_window_size,
+                effective_config.sliding_window_size,
             )
             return
 
@@ -1174,14 +1228,14 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
             # where N stale-view callers would each pass an unlocked
             # `state.state == half_open` check.
             attempt = self.repository.record_success_with_close_check(
-                service_name, self.config.success_threshold
+                service_name, effective_config.success_threshold
             )
             circuit_closed = attempt.did_close
 
         elif state.state == "closed":
             self._outcome_window.record_success(
                 service_name,
-                self.get_effective_config(service_name).sliding_window_size,
+                effective_config.sliding_window_size,
             )
             # Reset failure count on success in closed state
             self.repository.update_state(
@@ -1198,7 +1252,7 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
             logger.info(
                 "circuit_breaker.circuit_auto_closed_successes",
                 service_name=service_name,
-                success_threshold=self.config.success_threshold,
+                success_threshold=effective_config.success_threshold,
             )
 
             # Audit - auto-recovery complete (HALF_OPEN → CLOSED)
@@ -1206,7 +1260,10 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
                 cb_name=service_name,
                 old_state="half_open",
                 new_state="closed",
-                reason=f"auto_recovery: success_threshold ({self.config.success_threshold}) reached",
+                reason=(
+                    f"auto_recovery: success_threshold "
+                    f"({effective_config.success_threshold}) reached"
+                ),
             )
             # Push event - record the CB state-change metric
             try:

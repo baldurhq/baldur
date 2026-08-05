@@ -382,6 +382,7 @@ class TestSnapshotCollection:
             error_context={"error": "Connection timeout"},
             window_failures=5,
             window_total=15,
+            effective_config=base_config,
         )
 
         assert "service_name" in snapshot
@@ -406,7 +407,11 @@ class TestSnapshotCollection:
         service = CircuitBreakerService(config=base_config, repository=mock_repository)
 
         snapshot = service._collect_failure_snapshot(
-            "test_service", mock_state, window_failures=5, window_total=15
+            "test_service",
+            mock_state,
+            window_failures=5,
+            window_total=15,
+            effective_config=base_config,
         )
 
         threshold_config = snapshot["circuit_breaker"]["threshold_config"]
@@ -427,7 +432,11 @@ class TestSnapshotCollection:
         service = CircuitBreakerService(config=base_config, repository=mock_repository)
 
         snapshot = service._collect_failure_snapshot(
-            "test_service", mock_state, window_failures=3, window_total=10
+            "test_service",
+            mock_state,
+            window_failures=3,
+            window_total=10,
+            effective_config=base_config,
         )
 
         assert snapshot["circuit_breaker"]["failure_rate_percent"] == 30.0
@@ -452,7 +461,7 @@ class TestBurnRateMultiplier:
 
         # The method should run without errors (it has try/except inside)
         # It will fail silently if emergency_manager or event_bus are not available
-        service._apply_burn_rate_multiplier("test_service")
+        service._apply_burn_rate_multiplier("test_service", service.config)
 
     def test_burn_rate_multiplier_uses_config_value(self, mock_repository, mock_state):
         """설정된 multiplier 값이 올바르게 저장되어야 함."""
@@ -467,7 +476,7 @@ class TestBurnRateMultiplier:
         assert service.config.cb_open_burn_rate_multiplier == 15.0
 
         # The method should run without errors
-        service._apply_burn_rate_multiplier("test_service")
+        service._apply_burn_rate_multiplier("test_service", service.config)
 
 
 # =============================================================================
@@ -570,7 +579,7 @@ class TestRecordFailureIntegration:
             with patch.object(service, "_apply_burn_rate_multiplier") as mock_burn:
                 service.record_failure("test_service")
 
-        mock_burn.assert_called_once_with("test_service")
+        mock_burn.assert_called_once_with("test_service", base_config)
 
 
 # =============================================================================
