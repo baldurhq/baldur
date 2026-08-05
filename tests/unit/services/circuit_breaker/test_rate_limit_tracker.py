@@ -992,3 +992,135 @@ class TestRateLimitTrackerContract:
         )
 
         assert MemoryRateLimitTracker()._resolve_retention() == expected
+
+
+class TestRateLimitRetentionGuardBehavior:
+    """744 D17 - a read window wider than the retention is reported.
+
+    The retention window is resolved once from environment settings, while the
+    cascade window a caller reads over is console-editable. Raising the cascade
+    window past the retention makes every count for that window silently short,
+    so the 429-cascade condition under-fires with nothing to show for it. The
+    guard is report-only: correcting the count needs a retention resize, which
+    is a sizing decision rather than a config swap.
+
+    Boundary analysis: window == retention is exact (the counters trim to the
+    retention), so only window > retention is reported.
+    """
+
+    @staticmethod
+    def _tracker(retention: float):
+        from baldur.services.circuit_breaker.rate_limit_tracker import (
+            MemoryRateLimitTracker,
+            reset_rate_limit_tracker,
+        )
+
+        # Clears the per-service "already reported" memo shared by the module.
+        reset_rate_limit_tracker()
+        return MemoryRateLimitTracker(retention_seconds=retention)
+
+    @staticmethod
+    def _retention_warnings(mock_logger):
+        return [
+            call
+            for call in mock_logger.warning.call_args_list
+            if call.args[0] == "circuit_breaker.rate_limit_window_exceeds_retention"
+        ]
+
+    def test_window_below_retention_is_silent(self):
+        from baldur.services.circuit_breaker import rate_limit_tracker as module
+
+        tracker = self._tracker(120.0)
+
+        with patch.object(module, "logger") as mock_logger:
+            tracker.get_rate_limit_count("payments", 60)
+
+        assert self._retention_warnings(mock_logger) == []
+
+    def test_window_equal_to_retention_is_silent(self):
+        """The exact boundary: the counters trim to the retention, so a read
+        over exactly that window is still exact."""
+        from baldur.services.circuit_breaker import rate_limit_tracker as module
+
+        tracker = self._tracker(120.0)
+
+        with patch.object(module, "logger") as mock_logger:
+            tracker.get_rate_limit_count("payments", 120)
+
+        assert self._retention_warnings(mock_logger) == []
+
+    def test_window_above_retention_is_reported_with_both_values(self):
+        from baldur.services.circuit_breaker import rate_limit_tracker as module
+
+        tracker = self._tracker(120.0)
+
+        with patch.object(module, "logger") as mock_logger:
+            tracker.get_rate_limit_count("payments", 121)
+
+        warnings = self._retention_warnings(mock_logger)
+        assert len(warnings) == 1
+        assert warnings[0].kwargs["service_name"] == "payments"
+        assert warnings[0].kwargs["window_seconds"] == 121
+        assert warnings[0].kwargs["retention_seconds"] == 120.0
+
+    def test_request_count_read_is_guarded_too(self):
+        """Both non-destructive reads share the precondition, so both check."""
+        from baldur.services.circuit_breaker import rate_limit_tracker as module
+
+        tracker = self._tracker(120.0)
+
+        with patch.object(module, "logger") as mock_logger:
+            tracker.get_request_count("payments", 300)
+
+        assert len(self._retention_warnings(mock_logger)) == 1
+
+    def test_repeated_reads_report_once_per_service(self):
+        """The read happens per 429; an unbounded log stream would be its own
+        incident."""
+        from baldur.services.circuit_breaker import rate_limit_tracker as module
+
+        tracker = self._tracker(120.0)
+
+        with patch.object(module, "logger") as mock_logger:
+            for _ in range(5):
+                tracker.get_rate_limit_count("payments", 300)
+
+        assert len(self._retention_warnings(mock_logger)) == 1
+
+    def test_each_service_is_reported_separately(self):
+        """One misconfigured service must not suppress the diagnostic for the
+        next one."""
+        from baldur.services.circuit_breaker import rate_limit_tracker as module
+
+        tracker = self._tracker(120.0)
+
+        with patch.object(module, "logger") as mock_logger:
+            tracker.get_rate_limit_count("payments", 300)
+            tracker.get_rate_limit_count("search", 300)
+
+        reported = {
+            call.kwargs["service_name"]
+            for call in self._retention_warnings(mock_logger)
+        }
+        assert reported == {"payments", "search"}
+
+    def test_the_guard_does_not_change_the_count_it_reports_on(self):
+        """Report-only: the short count is still returned, unaltered."""
+        tracker = self._tracker(120.0)
+        tracker.record_rate_limit("payments")
+
+        assert tracker.get_rate_limit_count("payments", 300) == 1
+
+    def test_tracker_reset_clears_the_reported_memo(self):
+        """Test isolation: a service reported in one test must be reportable in
+        the next."""
+        from baldur.services.circuit_breaker import rate_limit_tracker as module
+
+        tracker = self._tracker(120.0)
+        tracker.get_rate_limit_count("payments", 300)
+
+        second = self._tracker(120.0)
+        with patch.object(module, "logger") as mock_logger:
+            second.get_rate_limit_count("payments", 300)
+
+        assert len(self._retention_warnings(mock_logger)) == 1
