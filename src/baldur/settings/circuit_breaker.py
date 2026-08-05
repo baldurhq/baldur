@@ -278,3 +278,12 @@ def reset_circuit_breaker_settings() -> None:
         del get_config().core.__dict__["circuit_breaker"]
     except KeyError:
         pass
+
+    # Cascade into the process-shared circuit-breaker configuration. Services
+    # no longer rebuild their own config, so without this a settings reset would
+    # leave every breaker running the values built before the reset.
+    from baldur.services.circuit_breaker.config import (
+        invalidate_circuit_breaker_config,
+    )
+
+    invalidate_circuit_breaker_config()

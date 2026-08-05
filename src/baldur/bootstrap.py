@@ -190,6 +190,7 @@ def init(
         _install_idempotency_gate()
         _emit_tier_setting_warnings()
         ext_result = _run_pro_extensions()
+        _seed_circuit_breaker_config()
         _warn_unknown_env_vars()
         _apply_audit_default_provider()
         _start_audit_pipeline_if_enabled()
@@ -299,10 +300,31 @@ def reset_init_state() -> None:
         except Exception as e:
             logger.warning("baldur.wired_registry_reset_failed", error=str(e))
 
+        # Step 3.6 — drop the seeded circuit-breaker configuration so the next
+        # init() seeds from scratch.
+        _drop_seeded_circuit_breaker_config()
+
         # Step 4 — drop the runtime (eager-read env vars are re-read on rebuild).
         from baldur.runtime import reset_runtime
 
         reset_runtime()
+
+
+def _drop_seeded_circuit_breaker_config() -> None:
+    """Clear the process-shared circuit-breaker configuration on init reset.
+
+    Without this the seed step's "unconditional rebuild" property is untestable:
+    a re-run of ``init()`` would inherit the previous run's configuration
+    through the still-populated holder.
+    """
+    try:
+        from baldur.services.circuit_breaker.config import (
+            reset_circuit_breaker_config,
+        )
+
+        reset_circuit_breaker_config()
+    except Exception as e:
+        logger.warning("baldur.circuit_breaker_config_reset_failed", error=str(e))
 
 
 # =============================================================================
@@ -1118,6 +1140,44 @@ def _emit_tier_setting_warnings() -> None:  # noqa: C901
             env_var=env_var,
             version_target="post-v1.0",
         )
+
+
+# =============================================================================
+# Step 3.6 — Seed the process-shared circuit-breaker configuration
+# =============================================================================
+
+
+def _seed_circuit_breaker_config() -> None:
+    """Build the process-shared circuit-breaker configuration once, at startup.
+
+    Runs immediately after the PRO extensions register, so the seeded value
+    reflects the runtime-config manager when one is installed. Two properties
+    depend on this step and on its position:
+
+    - No request or admission path ever builds the configuration, so none of
+      them takes the runtime-config manager's lock — a lock an administrative
+      write holds across a backend round trip.
+    - The rebuild is unconditional, not build-if-empty. A ``protect()`` call
+      that ran at import time (before the manager registered) has already
+      pinned the holder to environment values; without an unconditional
+      rebuild that process would never see a stored value again.
+
+    Deliberately not a background-worker starter: those are skipped in the
+    gunicorn master, and a plain dataclass survives ``fork()``, so seeding here
+    is also what gives a hookless gunicorn deployment a seeded holder.
+
+    Best-effort — a failing config source must not abort startup; the holder
+    then keeps whatever it had and rebuilds lazily on first read.
+    """
+    try:
+        from baldur.services.circuit_breaker.config import (
+            invalidate_circuit_breaker_config,
+        )
+
+        invalidate_circuit_breaker_config()
+        logger.debug("baldur.circuit_breaker_config_seeded")
+    except Exception as e:
+        logger.warning("baldur.circuit_breaker_config_seed_failed", error=str(e))
 
 
 # =============================================================================

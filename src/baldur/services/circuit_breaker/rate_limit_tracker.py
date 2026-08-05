@@ -45,6 +45,12 @@ _REDIS_PROBE_INTERVAL = 30.0
 _MIN_L2_RETENTION_SECONDS = 120
 _L2_TTL_PADDING_SECONDS = 60
 
+# Services already reported for a read window wider than the resolved retention,
+# so the diagnostic costs one WARNING per service per process rather than one
+# per 429.
+_retention_exceeded_warned: set[str] = set()
+_retention_exceeded_warned_lock = threading.Lock()
+
 
 class MemoryRateLimitTracker:
     """Thread-safe in-memory rate limit event tracker (L1).
@@ -127,15 +133,52 @@ class MemoryRateLimitTracker:
 
         Non-destructive: the write-side trim bounds memory, so the read only
         counts. Valid because every caller's ``window_seconds`` is <= the
-        retention window, so no in-window entry has been trimmed.
+        retention window, so no in-window entry has been trimmed. That
+        precondition is checked (report-only) rather than assumed — see
+        :meth:`_warn_if_window_exceeds_retention`.
         """
         rate_limit_counter, _ = self._counters()
+        self._warn_if_window_exceeds_retention(service_name, window_seconds)
         return rate_limit_counter.count(service_name, window_seconds)
 
     def get_request_count(self, service_name: str, window_seconds: int) -> int:
         """Get the number of requests in the time window (non-destructive count)."""
         _, request_counter = self._counters()
+        self._warn_if_window_exceeds_retention(service_name, window_seconds)
         return request_counter.count(service_name, window_seconds)
+
+    def _warn_if_window_exceeds_retention(
+        self, service_name: str, window_seconds: float
+    ) -> None:
+        """Report a read window wider than the retention the counters trim to.
+
+        The retention window is resolved once from environment settings, while
+        the cascade window a caller reads over is console-editable — so raising
+        the cascade window past the retention makes every count for that window
+        silently short, and the cascade condition it feeds under-fires. This is
+        report-only: correcting the count needs a retention resize, which is a
+        sizing decision rather than a config swap.
+        """
+        retention = self._retention_seconds
+        if retention is None or window_seconds <= retention:
+            return
+
+        with _retention_exceeded_warned_lock:
+            if service_name in _retention_exceeded_warned:
+                return
+            _retention_exceeded_warned.add(service_name)
+
+        logger.warning(
+            "circuit_breaker.rate_limit_window_exceeds_retention",
+            service_name=service_name,
+            window_seconds=window_seconds,
+            retention_seconds=retention,
+            remedy=(
+                "entries older than the retention window have been trimmed, so "
+                "this count is short: restart the process after raising the "
+                "cascade window so the retention is re-resolved"
+            ),
+        )
 
     def get_backoff_level(self, service_name: str) -> int:
         """Get current backoff level for a service."""
@@ -339,3 +382,5 @@ def reset_rate_limit_tracker() -> None:
     global _rate_limit_tracker
     with _rate_limit_tracker_lock:
         _rate_limit_tracker = None
+    with _retention_exceeded_warned_lock:
+        _retention_exceeded_warned.clear()

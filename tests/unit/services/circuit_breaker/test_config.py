@@ -393,10 +393,19 @@ class TestCircuitBreakerConfigBehavior:
 
         The runtime-config path belongs to PRO and is covered separately; this
         forces the OSS branch so the env override is what is being measured.
+
+        Isolates at the seam ``from_settings`` actually consults — the registry
+        slot — rather than at the import. Blocking the import only forces the
+        OSS branch while the provider has never been constructed; once anything
+        has resolved it, the registry serves the cached instance and the
+        manager branch wins.
         """
+        from baldur.factory.registry import ProviderRegistry
         from baldur.services.circuit_breaker.config import CircuitBreakerConfig
 
-        with patch.dict("sys.modules", {"baldur_pro.services.runtime_config": None}):
+        with patch.object(
+            ProviderRegistry.runtime_config_manager, "safe_get", return_value=None
+        ):
             return CircuitBreakerConfig.from_settings()
 
     def test_failure_rate_threshold_env_override_reaches_the_config(self, monkeypatch):
