@@ -109,10 +109,34 @@ Do not judge success by "the panel looks different". Read the response fields:
 
 - **`status: applied`** (IMMEDIATE) / **`status: scheduled`** (DELAYED, carries
   `pending_id` + `scheduled_at`) / **`status: waiting`** (GRACEFUL).
+- **`runtime_apply`** (inside `default_strategy`) — whether a change reaches processes
+  that are **already running**, as `{mode, converges_within_seconds, detail}`. The
+  `mode` is one of `live` (delivered to this process's consumers), `stored_only`
+  (stored, but delivery is not running here, so running processes keep the old value),
+  or `unverified` (runtime pickup by the consuming services is not verified for this
+  domain). It is derived from the process's own invalidation wiring rather than written
+  per domain, so it cannot claim an effect that did not happen — the console renders it
+  as a badge beside the apply strategy. **On this release every domain reports
+  `unverified`**, because no domain is wired for runtime pickup yet. So it does not yet
+  tell the domains in the reach-class map apart: keep using that map, and read
+  `unverified` as "stored — a running worker may keep the old value until it restarts".
+  Note this is a *different question* from `status`/`applied_strategy`, which say when
+  the value is **written to storage** and how long it stays cancellable.
 - **`applied_safe_defaults`** — a non-empty list here means one of your values was
   **out of range and clamped** to a safe default (e.g. `failure_threshold: 999 → 20`).
   This is a *successful, surfaced* clamp, **not** a rejected change. If your value did
   not "stick", check this list before concluding the apply failed.
+- **`applied_safe_defaults` does not cover every clamp.** `circuit_breaker` values are
+  clamped a second time, later and elsewhere: each worker admits the stored value into
+  the range that field's own setting declares as it builds its breaker configuration, so
+  a stored value that would disable protection (a `0` in a window or count field, a
+  count so large the failure-rate trigger can never be evaluated) never reaches the
+  breaker. That clamp happens **after** the apply response is written and per process,
+  so it appears in neither `applied_safe_defaults` nor the console — the console keeps
+  showing the value you stored. Its only signal is a log line,
+  `circuit_breaker.config_value_clamped`, naming the field, the stored value and the
+  applied one. After a `circuit_breaker` edit near a field's limits, grep your worker
+  logs for that event before trusting the console readback.
 - **HTTP 409 (version conflict)** — your view was stale (someone changed the section
   since you read it). Re-read `GET /config/<section>`, re-apply. Only the IMMEDIATE
   `PUT` is version-guarded this way.
@@ -122,8 +146,11 @@ Do not judge success by "the panel looks different". Read the response fields:
   it back / cancel it, or wait. See `## v1.0 limitations`.
 
 **Before moving to the next step:** the response `status` is `applied`/`scheduled`/
-`waiting` (not `error`), and you have read `applied_safe_defaults` — any clamp is
-intentional, not a silent failure.
+`waiting` (not `error`), and you have read `applied_safe_defaults` — a clamp listed
+there is intentional, not a silent failure. For `circuit_breaker`, an empty
+`applied_safe_defaults` is **not** on its own proof that the value you stored is the
+value the breaker runs: check the worker logs for `circuit_breaker.config_value_clamped`
+as well.
 
 ---
 
