@@ -105,10 +105,10 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
                 one invalidation reaches every default-config instance at once.
             repository: Optional repository for DI, uses Django adapter if None
         """
-        # Deliberately NOT ``config or CircuitBreakerConfig.from_settings()``:
-        # building here would pin a fresh snapshot into every policy-cached
-        # service and put the config-source lock on the first request of the
-        # process. The shared holder owns the build instead.
+        # Deliberately does NOT fall back to building a config from settings
+        # here: that would pin a fresh snapshot into every policy-cached service
+        # and put the config-source lock on the first request of the process.
+        # The shared holder owns the build instead.
         self._pinned_config = config
         self._repository = repository
 

@@ -1,12 +1,16 @@
 """
 Configuration Apply Strategy.
 
-Defines how configuration changes are applied to the running system.
+Defines WHEN a configuration change is written to storage, and how long the
+operator has to cancel it before that happens. It says nothing about whether an
+already-running process picks the new value up — that is a separate, per-domain
+fact, reported by the ``runtime_apply`` block that accompanies this one in every
+configuration response.
 
-Strategies:
-- IMMEDIATE: Apply changes right away
-- DELAYED: Apply changes after N seconds (cancellable)
-- GRACEFUL: Wait for in-progress operations to complete, then apply
+Strategies (all describe the write to storage):
+- IMMEDIATE: Write on request, no cancellation window
+- DELAYED: Write after N seconds; cancellable until then
+- GRACEFUL: Wait for in-progress operations to complete, then write
 
 Settings are overridable via ApplyStrategySettings environment variables:
 - BALDUR_APPLY_STRATEGY_CIRCUIT_BREAKER_DELAY
@@ -120,11 +124,14 @@ def _get_default_apply_strategies() -> dict[str, DefaultApplyConfig]:
             strategy=ApplyStrategy.IMMEDIATE,
             delay_seconds=settings.forensic_delay,
         ),
-        # Traffic control - immediate but with warning
+        # Traffic control - written immediately, with a caution note. The note
+        # makes no claim about when running processes pick the value up: each
+        # worker reads through its own config cache, so an immediacy claim here
+        # would be true of at most the worker that served the write.
         "rate_limit": DefaultApplyConfig(
             strategy=ApplyStrategy.IMMEDIATE,
             delay_seconds=settings.rate_limit_delay,
-            warning_message="Rate limit changes take effect immediately for new requests",
+            warning_message="Rate limits shape live traffic. Change with caution.",
         ),
         # Processing - delayed to protect in-flight operations
         "retry": DefaultApplyConfig(

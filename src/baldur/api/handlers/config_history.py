@@ -33,6 +33,35 @@ def _service():
     return get_config_history_service()
 
 
+def _default_strategy(config_type: str) -> dict:
+    """Apply-semantics block for ``config_type``, resolved independently.
+
+    The rollback response asserts that a configuration change happened, so it
+    owes the same apply-semantics statement the read endpoints carry. The
+    manager is resolved here rather than borrowed from ``_apply_config_values``
+    (a different function), and a registered-but-failing provider degrades to
+    the framework-derived ``runtime_apply`` block alone — never to a bare
+    success with no statement at all.
+    """
+    from baldur.core.config_invalidation import describe_config_runtime_apply
+
+    manager = None
+    try:
+        from baldur.factory.registry import ProviderRegistry
+
+        manager = ProviderRegistry.runtime_config_manager.safe_get()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("config_rollback.manager_unavailable", error=str(exc))
+
+    if manager is not None:
+        try:
+            return manager.get_default_strategy(config_type)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("config_rollback.default_strategy_failed", error=str(exc))
+
+    return {"runtime_apply": describe_config_runtime_apply(config_type).to_dict()}
+
+
 def _validate_config_type(service, config_type: str) -> ResponseContext | None:
     if not service.is_valid_config_type(config_type):
         return ResponseContext.bad_request(f"Invalid config_type: {config_type}")
@@ -163,6 +192,7 @@ def config_rollback(ctx: RequestContext) -> ResponseContext:
             "new_version": rolled_back.version,
             "applied_by": actor,
             "applied_values": target.values,
+            "default_strategy": _default_strategy(config_type),
         }
     )
 

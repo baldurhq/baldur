@@ -2540,6 +2540,25 @@
       return input.value;  // select / text
     }
 
+    // Render the server's runtime-apply declaration: a badge for the mode plus
+    // its one-sentence detail. The mode vocabulary and the sentence both come
+    // from the server (derived from its invalidation wiring), so this renderer
+    // states nothing of its own and cannot drift from the backend.
+    function appendRuntimeApply(box, strategy) {
+      var ra = strategy && strategy.runtime_apply;
+      if (!ra || !ra.mode) { return; }
+      var severity = ra.mode === "live" ? "ok"
+        : (ra.mode === "stored_only" ? "danger" : "warn");
+      var label = ra.mode.replace("_", " ");
+      if (ra.mode === "live" && ra.converges_within_seconds != null) {
+        label += " ≤" + ra.converges_within_seconds + "s";
+      }
+      var line = el("p", "field-help");
+      line.appendChild(el("span", "tag " + severity, label));
+      line.appendChild(document.createTextNode(" " + (ra.detail || "")));
+      box.appendChild(line);
+    }
+
     function showForm(domain, entry) {
       formBox.textContent = "";
       var lockOwner = rolloutLocks[domain];
@@ -2581,6 +2600,11 @@
       formBox.appendChild(stratSel);
       formBox.appendChild(el("p", "field-help",
         "default strategy for this section: " + defStrategy));
+      // The strategy above says when the value is WRITTEN. Whether a running
+      // worker picks it up is a separate, per-domain fact the server derives
+      // from its own wiring — render it beside the strategy so a write-time
+      // promise is never read as a take-effect promise.
+      appendRuntimeApply(formBox, entry.default_strategy);
       var secsInput = el("input"); secsInput.type = "number";
       secsInput.setAttribute("placeholder", "seconds (delayed/graceful)");
       secsInput.style.display = (defStrategy === "immediate") ? "none" : "";

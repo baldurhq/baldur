@@ -20,6 +20,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `GET /healing/summary` (viewer, read-only) — this process's replay/page counts and p95 latencies.
 - The console ledger reports `replayed` and `humans paged`, and System rows carry a p95 token.
 - `EscalationResult.delivered_externally` — whether a channel that leaves the host accepted a page.
+- Config responses carry `runtime_apply`: whether a stored change reaches running processes.
 
 ### Changed
 
@@ -38,10 +39,12 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `baldur_replay_duration_seconds` covers those replays too; it was replay-service-only before.
 - **Migration**: `baldur_replay_outcomes_total{outcome="failure"}` alerts fire on failed retries.
 - `baldur_dlq_replay_duration_seconds` no longer times gate refusals, so its p95 rises to the truth.
+- **Breaking**: `baldur.services.config` and `BALDUR_PROPAGATION_*` removed — use `RedisEventBus`.
 
 ### Fixed
 
 - Reset pinned a manual circuit-breaker override instead of clearing it, so it never reopened.
+- A stored out-of-range circuit-breaker value could disable protection; it is now clamped.
 - A manual block admitted trial traffic once `recovery_timeout` elapsed; it now admits nothing.
 - The block lifetime typed in the console was discarded — every block lasted the global default.
 - Manual overrides never expired without Celery; the inline scheduler now runs the sweep.
