@@ -169,6 +169,14 @@ docs = [
 all = [
     "baldur-framework[django,fastapi,flask,celery,arq,prometheus,opentelemetry,fast-json,caching,disk-buffer,crypto,rq,postgres,chaos,export,databases,tenacity,redis,openapi]",
 ]
+# Browser-driven admin-console lane (tests/e2e/). Deliberately NOT in [dev]:
+# it needs a ~130 MB Chromium download on top of the wheel, which no other
+# suite requires, and the lane auto-skips without it. Setup is two commands:
+#   pip install -e ".[test-e2e]" && playwright install --with-deps chromium
+test-e2e = [
+    "playwright>=1.60",
+]
+
 dev = [
     "baldur-framework[all]",
     "pytest>=7.0",

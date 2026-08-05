@@ -319,10 +319,55 @@ jobs:
           path: dist/smoke_install_report.json
           if-no-files-found: ignore
 
+  console-e2e:
+    # The admin console's client logic, driven in a real browser. Every other
+    # console assertion in the suite is a whole-file substring scan, which
+    # catches a renamed string but not logic whose failure is ordering-dependent
+    # — a fetch chain that repaints in the wrong order spells correctly.
+    #
+    # One cell, not a matrix: the subject is browser-side JavaScript, which does
+    # not vary by Python or Django version. Chromium is a ~130 MB download, so
+    # it is cached on the Playwright version the lockless extra resolves to.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      - run: pip install -e ".[dev,prometheus,test-e2e]"
+      - name: Resolve the installed Playwright version
+        id: pw
+        run: echo "version=$(python -c 'import playwright; print(playwright.__version__)')" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
+        id: chromium-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-chromium-${{ steps.pw.outputs.version }}
+      - name: Install Chromium
+        run: playwright install --with-deps chromium
+      # TEST_BROWSER_AVAILABLE=true asserts the lane actually RAN here. Without
+      # it a broken browser install would auto-skip and the job would go green
+      # having verified nothing — the exact failure mode this lane exists to
+      # remove.
+      - name: Run the console e2e lane
+        run: pytest tests/e2e/ --tb=short -p no:randomly
+        env:
+          DJANGO_SETTINGS_MODULE: tests.testapp.settings
+          TEST_BROWSER_AVAILABLE: "true"
+      - name: Upload traces on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: console-e2e-artifacts
+          path: test-results/
+          if-no-files-found: ignore
+
   ci-gate:
     # unit-test-preview is omitted on purpose — it carries the unsupported
     # Python 3.14 cells and must never gate a merge.
-    needs: [unit-test, lint, coverage-gate, integration-test, wiring-check, optional-deps-test, smoke-install]
+    needs: [unit-test, lint, coverage-gate, integration-test, wiring-check, optional-deps-test, smoke-install, console-e2e]
     if: always()
     runs-on: ubuntu-latest
     steps:
