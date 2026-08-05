@@ -89,13 +89,13 @@ rows:
   occurrences: 1
   verdict: FABRICATED
   evidence: src/baldur/services/config_shadow/evaluators/error_budget.py:80
-  ticket: 748 OOS
+  ticket: 748 OOS row suppressed 2026-08-05 (shadow evaluation opt-in)
 - unit: src/baldur/services/config_shadow/evaluators/error_budget.py::ErrorBudgetEvaluator._simulate::burn_rate_1h
   shape: get-fallback
   occurrences: 1
   verdict: FABRICATED
   evidence: src/baldur/services/config_shadow/evaluators/error_budget.py:81
-  ticket: 748 OOS
+  ticket: 748 OOS row suppressed 2026-08-05 (shadow evaluation opt-in)
 - unit: src/baldur/services/config_shadow/evaluators/error_budget.py::ErrorBudgetEvaluator._simulate::burn_rate_fast_critical
   shape: get-fallback
   occurrences: 1
