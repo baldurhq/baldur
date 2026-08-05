@@ -20,7 +20,12 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
-__all__ = ["ReplayExecutionMixin"]
+# Existing ``replay_type`` label vocabulary ("single"/"conditional"/"batch") —
+# the operator surface replays one entry per call, so no new label value enters
+# the published attempts family.
+REPLAY_TYPE_SINGLE = "single"
+
+__all__ = ["REPLAY_TYPE_SINGLE", "ReplayExecutionMixin"]
 
 
 class ReplayExecutionMixin:
@@ -29,6 +34,11 @@ class ReplayExecutionMixin:
     def _execute_replay(self, entry: FailedOperationData) -> bool:
         """
         Execute replay for a single DLQ entry using registered handler.
+
+        This is the convergence point of the whole operator replay surface
+        (single-entry retry, force-redrive, batch and throttle-aware replay), so
+        it is where those replays enter the replay attempt/outcome metrics — the
+        replay service records its own stack separately.
 
         Args:
             entry: The failed operation entry to replay
@@ -39,7 +49,15 @@ class ReplayExecutionMixin:
         import time
 
         start = time.monotonic()
+        # Whether the registered handler was actually invoked. A gate refusal
+        # costs microseconds; observing it in the replay-duration histogram
+        # would mix non-events with second-scale replays and drag the reported
+        # quantile toward zero. A refusal that is nonetheless slow — one gate is
+        # customer code and may do I/O — stays visible in the timing carried on
+        # its own blocked WARNING.
+        handler_ran = False
         try:
+            from baldur.metrics.event_handlers import ReplayEventHandler
             from baldur.observability import span_with_link
             from baldur.services.replay_service import get_replay_handler
             from baldur.services.replay_service.handlers import _truncate_gate
@@ -52,6 +70,7 @@ class ReplayExecutionMixin:
                     "dlq.replay_blocked",
                     dlq_entry_id=entry.id,
                     reason=gate_reason,
+                    duration_ms=(time.monotonic() - start) * 1000,
                 )
                 return False
 
@@ -64,6 +83,7 @@ class ReplayExecutionMixin:
                     "dlq.replay_blocked",
                     dlq_entry_id=entry.id,
                     reason=reason,
+                    duration_ms=(time.monotonic() - start) * 1000,
                 )
                 return False
 
@@ -73,28 +93,45 @@ class ReplayExecutionMixin:
             # origin full ids are absent, so unlinked entries create no span.
             origin = extract_origin_trace(entry.metadata)
 
-            # Execute replay
-            with span_with_link(
-                "dlq.replay",
-                origin["origin_trace_id_full"],
-                origin["origin_span_id"],
-                attributes={
-                    "baldur.dlq.id": str(entry.id),
-                    "baldur.dlq.origin_trace_id": origin["origin_trace_id"] or "",
-                },
-            ):
-                result = handler.replay(entry)
-            return result.success
-        finally:
-            duration = time.monotonic() - start
-            try:
-                from baldur.metrics.prometheus import get_metrics
+            # Both events are emitted, never one alone: outcomes without their
+            # attempt would push an operator's success-rate panel above 1.
+            # Gate-blocked exits above emit neither, so attempts never count an
+            # entry whose handler was not reached.
+            ReplayEventHandler.on_replay_started(entry.domain, REPLAY_TYPE_SINGLE)
+            replay_start = time.monotonic()
+            succeeded = False
 
-                metrics = get_metrics()
-                if metrics and hasattr(metrics, "dlq"):
-                    metrics.dlq.record_replay_duration(entry.domain, duration)
-            except Exception:
-                pass
+            # Execute replay. One completion site, reached by the handler's
+            # return AND by its crash, so the two counters cannot come apart.
+            try:
+                with span_with_link(
+                    "dlq.replay",
+                    origin["origin_trace_id_full"],
+                    origin["origin_span_id"],
+                    attributes={
+                        "baldur.dlq.id": str(entry.id),
+                        "baldur.dlq.origin_trace_id": origin["origin_trace_id"] or "",
+                    },
+                ):
+                    handler_ran = True
+                    result = handler.replay(entry)
+                succeeded = result.success
+            finally:
+                ReplayEventHandler.on_replay_completed(
+                    entry.domain, succeeded, time.monotonic() - replay_start
+                )
+            return succeeded
+        finally:
+            if handler_ran:
+                duration = time.monotonic() - start
+                try:
+                    from baldur.metrics.prometheus import get_metrics
+
+                    metrics = get_metrics()
+                    if metrics and hasattr(metrics, "dlq"):
+                        metrics.dlq.record_replay_duration(entry.domain, duration)
+                except Exception:
+                    pass
 
     def _emit_replay_exhausted(self, entry: FailedOperationData) -> None:
         """Emit the replay-exhausted metric when a replay reached the cap.
