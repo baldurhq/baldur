@@ -42,3 +42,21 @@ class MessageChannel(str, Enum):
     STDOUT = "stdout"
     FILE = "file"
     LOG = "log"
+
+
+OFF_HOST_DELIVERY_CHANNELS = frozenset(
+    {
+        MessageChannel.SLACK.value,
+        MessageChannel.TEAMS.value,
+        MessageChannel.PAGERDUTY.value,
+        MessageChannel.WEBHOOK.value,
+    }
+)
+"""Channels that carry a message off the host, i.e. can reach a person who is
+not reading this process's logs.
+
+A whitelist, deliberately: a channel added to :class:`MessageChannel` later is
+treated as non-delivering until someone adds it here, so a caller asking "did
+this actually reach anyone?" understates rather than overstates. The remaining
+channels (``stdout`` / ``file`` / ``log``) write where the process already
+writes, and reach a person only if someone is watching that output."""
