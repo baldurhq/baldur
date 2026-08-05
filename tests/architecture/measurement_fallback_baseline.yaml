@@ -1,0 +1,135 @@
+# Measurement-fallback verdict inventory — read by the fabrication-detector gate.
+#
+# One row per measurement-named field filled by a numeric literal inside a
+# payload-assembly function. A row is not permission to fabricate: it records
+# what the number actually is.
+#
+# Regenerate with scripts/derive_operator_surface.py. The unit list is derived
+# from code and must never be edited by hand; the verdict, evidence and ticket
+# columns are the audited part and are preserved across regeneration.
+#
+# This is a verdict inventory, NOT a violation allowlist. A row that no longer
+# matches a live unit FAILS its gate as an orphan rather than being silently
+# accepted, because the audit's closing counts are taken over these rows — a
+# stale row here inflates a count instead of forgiving a violation that stopped
+# happening. Do not carry the allowlist file's silent-accept behaviour across.
+#
+# Verdicts:
+#   real-producer   the producer provably always supplies the key, or the
+#                   branch condition itself establishes the value
+#   config-default  a configured parameter's default, not a measurement
+#   out-of-surface  not an operator-visible value slot (log field, internal
+#                   decision record, stub adapter)
+#   honest-absent   the literal was replaced by an explicit absence
+#   FABRICATED      a live lie; the ticket tracks it
+#   cross-ref       another in-flight work item owns the disposition
+
+rows:
+- unit: src/baldur/api/django/pool_circuit_breaker.py::PoolCircuitBreakerMiddleware.__call__::usage_percent
+  shape: kwarg-get-fallback
+  occurrences: 1
+  verdict: out-of-surface
+  evidence: src/baldur/api/django/pool_circuit_breaker.py:885
+  ticket: ''
+- unit: src/baldur/api/handlers/auto_tuning.py::_create_default_service.<locals>.DummyMetricsAdapter.fetch_current_metrics::error_rate
+  shape: dict-literal
+  occurrences: 1
+  verdict: out-of-surface
+  evidence: src/baldur/api/handlers/auto_tuning.py:75
+  ticket: ''
+- unit: src/baldur/api/handlers/auto_tuning.py::_create_default_service.<locals>.DummyMetricsAdapter.fetch_current_metrics::retry_exhausted_rate
+  shape: dict-literal
+  occurrences: 1
+  verdict: out-of-surface
+  evidence: src/baldur/api/handlers/auto_tuning.py:76
+  ticket: ''
+- unit: src/baldur/api/handlers/error_budget_status.py::budget_exhaust::target_remaining_percent
+  shape: get-fallback
+  occurrences: 1
+  verdict: config-default
+  evidence: src/baldur/api/handlers/error_budget_status.py:210
+  ticket: ''
+- unit: src/baldur/audit/cascade_load_shedding.py::CascadeLoadShedding.should_accept::buffer_ratio
+  shape: dict-literal
+  occurrences: 1
+  verdict: out-of-surface
+  evidence: src/baldur/audit/cascade_load_shedding.py:179
+  ticket: ''
+- unit: src/baldur/meta/stuck_detector.py::StuckDetector.check::error_rate
+  shape: kwarg
+  occurrences: 1
+  verdict: out-of-surface
+  evidence: src/baldur/meta/stuck_detector.py:250
+  ticket: ''
+- unit: src/baldur/services/chaos_context.py::create_chaos_context::injection_rate
+  shape: kwarg-get-fallback
+  occurrences: 1
+  verdict: config-default
+  evidence: src/baldur/services/chaos_context.py:425
+  ticket: ''
+- unit: src/baldur/services/circuit_breaker/load_shedding/manager.py::LoadSheddingManager.should_allow_request::allowed_traffic_percent
+  shape: kwarg
+  occurrences: 2
+  verdict: real-producer
+  evidence: src/baldur/services/circuit_breaker/load_shedding/manager.py:274,286
+  ticket: ''
+- unit: src/baldur/services/circuit_breaker/panic_threshold.py::PanicThresholdMonitor.check_panic_threshold::open_rate
+  shape: kwarg
+  occurrences: 1
+  verdict: out-of-surface
+  evidence: src/baldur/services/circuit_breaker/panic_threshold.py:163
+  ticket: ''
+- unit: src/baldur/services/config_shadow/evaluators/error_budget.py::ErrorBudgetEvaluator._simulate::budget_remaining_percent
+  shape: get-fallback
+  occurrences: 1
+  verdict: FABRICATED
+  evidence: src/baldur/services/config_shadow/evaluators/error_budget.py:80
+  ticket: 748 OOS
+- unit: src/baldur/services/config_shadow/evaluators/error_budget.py::ErrorBudgetEvaluator._simulate::burn_rate_1h
+  shape: get-fallback
+  occurrences: 1
+  verdict: FABRICATED
+  evidence: src/baldur/services/config_shadow/evaluators/error_budget.py:81
+  ticket: 748 OOS
+- unit: src/baldur/services/config_shadow/evaluators/error_budget.py::ErrorBudgetEvaluator._simulate::burn_rate_fast_critical
+  shape: get-fallback
+  occurrences: 1
+  verdict: config-default
+  evidence: src/baldur/services/config_shadow/evaluators/error_budget.py:73
+  ticket: ''
+- unit: src/baldur/services/config_shadow/evaluators/error_budget.py::ErrorBudgetEvaluator._simulate::critical_threshold_percent
+  shape: get-fallback
+  occurrences: 1
+  verdict: config-default
+  evidence: src/baldur/services/config_shadow/evaluators/error_budget.py:72
+  ticket: ''
+- unit: src/baldur/services/control_api_service/service.py::ControlAPIService._execute_inject_failure::failure_rate
+  shape: get-fallback
+  occurrences: 1
+  verdict: config-default
+  evidence: src/baldur/services/control_api_service/service.py:392
+  ticket: ''
+- unit: src/baldur/services/control_api_service/service.py::ControlAPIService.get_metrics::failure_rate_5m
+  shape: dict-literal
+  occurrences: 1
+  verdict: cross-ref
+  evidence: src/baldur/services/control_api_service/service.py:787
+  ticket: 742 OOS / 746
+- unit: src/baldur/services/dashboard_service/service.py::DashboardService._dict_to_summary::resolution_rate_percent
+  shape: kwarg-get-fallback
+  occurrences: 1
+  verdict: real-producer
+  evidence: src/baldur/services/dashboard_service/service.py:263
+  ticket: ''
+- unit: src/baldur/services/xtest_cleanup_service.py::XTestCleanupService.get_cleanup_stats::pending_rate_limit_resets
+  shape: dict-literal
+  occurrences: 1
+  verdict: out-of-surface
+  evidence: src/baldur/services/xtest_cleanup_service.py:429
+  ticket: ''
+- unit: src/baldur/tasks/drift_detection.py::SLADriftDetector._analyze_domain_sla::sla_breach_rate
+  shape: dict-literal
+  occurrences: 2
+  verdict: FABRICATED
+  evidence: src/baldur/tasks/drift_detection.py:209,233
+  ticket: 748 OOS
