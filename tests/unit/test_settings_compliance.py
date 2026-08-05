@@ -12,7 +12,6 @@ _KNOWN_EXCEPTIONS: set[str] = {
     "canary/cross_cluster.py",
     "circuit_breaker/adaptive_threshold.py",
     "circuit_breaker/models.py",
-    "config/propagator.py",
     "correlation_engine/wildcard_observer.py",
     "event_bus/redis_bus.py",
     "metrics/registry.py",

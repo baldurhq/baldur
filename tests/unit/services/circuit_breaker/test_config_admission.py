@@ -257,6 +257,34 @@ class TestCircuitBreakerConfigAdmissionBehavior:
         assert config.self_ddos_rps_limit / config.self_ddos_window_seconds > 0
 
     @pytest.mark.parametrize("source", _SOURCES)
+    @pytest.mark.parametrize("stored", [False, True], ids=["false", "true"])
+    def test_a_bool_stored_in_a_bounded_numeric_field_is_admitted_as_a_number(
+        self, source, stored
+    ):
+        """``bool`` is an ``int`` subclass, so a stored ``false`` compares equal
+        to 0 and would pass any range check that treats it as a flag — reaching
+        ``OutcomeWindow`` as ``deque(maxlen=0)``, the exact evidence-discarding
+        state this clamp exists to prevent. The write path accepts it: the field
+        has no ``VALIDATION_RULES`` row, so ``is_valid_value`` returns True and
+        the merge stores it verbatim."""
+        config = _build_config(source, {"sliding_window_size": stored})
+
+        assert config.sliding_window_size == 1
+        assert not isinstance(config.sliding_window_size, bool)
+
+    def test_a_bool_stored_in_a_window_field_still_records_outcomes(self):
+        """The end-to-end half of the row above: the admitted value is the one
+        the outcome ring is sized with."""
+        from baldur.services.circuit_breaker.outcome_window import OutcomeWindow
+
+        config = _build_config("runtime_manager", {"sliding_window_size": False})
+        window = OutcomeWindow()
+
+        window.record_failure("payments", config.sliding_window_size)
+
+        assert window.read("payments") == (1, 1)
+
+    @pytest.mark.parametrize("source", _SOURCES)
     def test_field_declaring_no_bound_is_passed_through_unchanged(self, source):
         """Guards the derivation itself: the clamp applies declared bounds and
         invents none, so an unbounded field keeps whatever was stored."""

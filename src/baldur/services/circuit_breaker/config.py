@@ -321,16 +321,22 @@ def _admit_config_values(values: dict[str, Any]) -> dict[str, Any]:
         if name not in admitted:
             continue
         stored = admitted[name]
-        # bool is an int subclass; a flag has no range to clamp into.
-        if isinstance(stored, bool) or not isinstance(stored, (int, float)):
+        if not isinstance(stored, (int, float)):
             continue
 
-        applied = stored
+        # bool is an int subclass, and no bounded numeric field declares one --
+        # a bool only ever arrives here as a malformed write. It must be
+        # admitted as the number it is rather than skipped: `False` compares
+        # equal to 0, so skipping it would let exactly the value this clamp
+        # exists to stop (a 0 in a window/count field) past the range check.
+        numeric: int | float = int(stored) if isinstance(stored, bool) else stored
+
+        applied = numeric
         if lower is not None and applied < lower:
             applied = lower
         if upper is not None and applied > upper:
             applied = upper
-        if applied == stored:
+        if applied == numeric and not isinstance(stored, bool):
             continue
 
         if python_type is int:
