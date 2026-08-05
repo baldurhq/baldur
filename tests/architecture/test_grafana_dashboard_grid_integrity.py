@@ -1,6 +1,6 @@
 """G75 — shipped Grafana boards MUST have a self-consistent panel grid.
 
-The sample dashboards under ``examples/monitoring/`` are hand-authored JSON, and
+Every sample dashboard under ``examples/monitoring/`` is hand-authored JSON, and
 inserting a panel means rewriting the ``gridPos`` of every panel below it. That
 reflow is recurring and mechanical — two consecutive documents rewrote 14 and
 ~15 coordinates respectively — and every way it can go wrong is silent: two
@@ -11,7 +11,9 @@ clipped. Nothing catches any of it until a human opens the board.
 G43 sits one axis over: it validates the metric *names* inside ``target.expr``
 and says so in its own docstring ("name existence, NOT population"). It never
 reads ``gridPos``. This guard covers the geometry, so the same scoped commit
-gate that catches a rotted series name now also catches a botched reflow.
+gate that catches a rotted series name now also catches a botched reflow. Both
+guards take their board set from the same derived discovery (``_dashboards.py``)
+so neither can silently miss a board the other sees.
 
 What is asserted, per shipped board:
 
@@ -33,15 +35,31 @@ from pathlib import Path
 
 import pytest
 
+from tests.architecture._dashboards import (
+    missing_floor_boards,
+    shipped_dashboards,
+)
 from tests.architecture.conftest import PROJECT_ROOT
 
 _MONITORING_DIR = PROJECT_ROOT / "examples" / "monitoring"
-_DASHBOARDS = (
-    _MONITORING_DIR / "baldur-overview.json",
-    _MONITORING_DIR / "baldur-operations.json",
-)
+_DASHBOARDS = shipped_dashboards(_MONITORING_DIR)
 
 _GRID_COLUMNS = 24
+
+
+def test_dashboard_discovery_covers_floor() -> None:
+    """Discovery found the boards that ship today (guards a stale rename).
+
+    Every geometry assertion below is parametrized over the discovered set, so
+    an empty or shrunken glob would produce no cases at all rather than a
+    failure. Asserting the floor makes that loud.
+    """
+    missing = missing_floor_boards(_DASHBOARDS)
+    assert not missing, (
+        f"shipped dashboard(s) {missing} were not discovered under "
+        f"{_MONITORING_DIR}; a rename or relocation would otherwise silently "
+        f"empty the geometry checks."
+    )
 
 
 def _panels(dashboard_path: Path) -> list[dict]:
