@@ -711,3 +711,78 @@ class TestSloConfigDeleteBehavior:
                 _make_ctx(method="DELETE", query={"name": "missing"})
             )
         assert resp.status_code == 404
+
+
+# =============================================================================
+# config_reset apply semantics (744 D11/G24)
+# =============================================================================
+
+
+class TestConfigResetApplySemanticsBehavior:
+    """Reset-to-defaults is an incident-path button: an operator reaches it
+    while recovering from a bad change. Reporting a bare success there reads as
+    "the defaults are now in effect", which is a claim about running processes
+    that the reset does not make. The response carries the same per-domain
+    ``default_strategy`` block the read endpoints return."""
+
+    @pytest.fixture(autouse=True)
+    def _require_pro(self):
+        pytest.importorskip("baldur_pro")
+
+    class _StubManager:
+        """Only the two methods ``config_reset`` calls, so a rename on the real
+        manager surfaces here instead of being auto-answered."""
+
+        def __init__(self, domains):
+            self._domains = domains
+            self.strategy_calls: list[str] = []
+
+        def reset_to_defaults(self):
+            return {domain: {} for domain in self._domains}
+
+        def get_default_strategy(self, config_type):
+            self.strategy_calls.append(config_type)
+            return {
+                "strategy": "immediate",
+                "runtime_apply": {"mode": "unverified", "detail": config_type},
+            }
+
+    @staticmethod
+    def _reset_with(manager):
+        with patch(
+            "baldur_pro.services.runtime_config.get_runtime_config_manager",
+            return_value=manager,
+        ):
+            return config_reset(
+                _make_ctx(method="POST", user=SimpleNamespace(username="admin"))
+            )
+
+    def test_response_carries_a_strategy_block_per_reset_domain(self):
+        manager = self._StubManager(["circuit_breaker", "retry"])
+
+        resp = self._reset_with(manager)
+
+        assert set(resp.body["default_strategy"]) == {"circuit_breaker", "retry"}
+
+    def test_each_domain_block_carries_the_runtime_apply_statement(self):
+        """Negative assertion: no domain in the reset response reports a bare
+        success with no apply-semantics statement beside it."""
+        manager = self._StubManager(["circuit_breaker", "retry"])
+
+        resp = self._reset_with(manager)
+
+        assert all(
+            "runtime_apply" in block for block in resp.body["default_strategy"].values()
+        )
+
+    def test_strategy_is_resolved_for_every_domain_the_reset_touched(self):
+        """The block is per domain, not one answer reused: a domain whose
+        wiring differs must be able to report differently."""
+        manager = self._StubManager(["circuit_breaker", "retry"])
+
+        resp = self._reset_with(manager)
+
+        assert manager.strategy_calls == ["circuit_breaker", "retry"]
+        assert (
+            resp.body["default_strategy"]["retry"]["runtime_apply"]["detail"] == "retry"
+        )
