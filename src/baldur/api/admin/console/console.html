@@ -3526,6 +3526,10 @@
     } else if (row.answered) {
       var describe = DESCRIBERS[row.panel.id];
       text = describe ? describe(row.status) : "";
+      // The per-row datum comes from a second payload, so it is joined here
+      // rather than inside the describer, which may only read its own status.
+      var token = healingRowToken(row.panel.id);
+      if (token) { text = text ? text + " · " + token : token; }
     } else if (row.notice) {
       text = "status not obtained — " + row.notice;
     }
@@ -3623,6 +3627,14 @@
   var ledgerState = null;
   var ledgerRect = null;   // cached; a rect read per mousemove forces a layout
 
+  // /healing/summary and the ledger walk are two independent fetches with no
+  // shared completion signal, so neither may assume it painted last. The
+  // healing payload is kept here, and the last series the ledger computed is
+  // kept alongside it, so whichever answers second can re-render the other's
+  // work instead of silently dropping its own.
+  var healingSummary = null;
+  var lastLedgerSeries = null;
+
   function svgEl(tag, attrs) {
     var node = document.createElementNS("http://www.w3.org/2000/svg", tag);
     if (attrs) {
@@ -3717,10 +3729,43 @@
     }).catch(function (err) {
       if (generation !== ledgerGeneration) { return; }
       ledgerState = null;
+      lastLedgerSeries = null;
       renderLedgerState("series unavailable — " + ((err && err.message) || err));
     }).then(function () {
       ledgerInFlight = false;
       if (ledgerRerun) { ledgerRerun = false; refreshLedger(true); }
+    });
+  }
+
+  // Its OWN chain, terminating in its own .catch. Joined into the ledger's, a
+  // rejection here would reach that chain's handler and paint "series
+  // unavailable" over a plot whose own fetch succeeded — a secondary payload
+  // must not be able to blank a primary one.
+  function refreshHealing() {
+    adminFetch("/healing/summary").then(function (resp) {
+      if (!resp.ok) { throw new Error("HTTP " + resp.status); }
+      return resp.json();
+    }).then(function (body) {
+      healingSummary = body || null;
+      renderHealingArrival();
+    }).catch(function () {
+      // No source: no counters, no scope caption, no row tokens. The ledger
+      // keeps everything it rendered.
+      healingSummary = null;
+      renderHealingArrival();
+    });
+  }
+
+  // The arrival re-render. Auto-refresh ships off, so a healing payload landing
+  // after the ledger chain has finished would otherwise paint nothing at all
+  // until the operator reloaded the page by hand — and land before it roughly
+  // half the time, which is how the failure stays invisible.
+  function renderHealingArrival() {
+    renderLedgerCaption(lastLedgerSeries);
+    renderLedgerFooter(lastLedgerSeries);
+    ["p:dashboard", "p:dlq"].forEach(function (key) {
+      var row = ROW_BY_KEY[key];
+      if (row && row.answered) { describeRow(row); }
     });
   }
 
@@ -3739,13 +3784,15 @@
     plot.textContent = "";
     plot.appendChild(el("div", "ledger-state", message));
     setText("ledger-window", "");
-    setText("ledger-caption", "");
     setText("ledger-age", "");
     var ageEl = document.getElementById("ledger-age");
     if (ageEl) { ageEl._t = null; }
-    // No operands means no counters — max() of nothing is not zero.
-    var foot = document.getElementById("ledger-foot");
-    if (foot) { foot.textContent = ""; }
+    // No operands means no window counters — max() of nothing is not zero. But
+    // clearing the elements outright here would also erase what /healing/summary
+    // reported, which this fetch says nothing about, so both renderers are asked
+    // to redraw with no series instead of being bypassed.
+    renderLedgerCaption(null);
+    renderLedgerFooter(null);
   }
   function setText(id, text) {
     var node = document.getElementById(id);
@@ -3847,12 +3894,14 @@
     if (!state.entries.length) {
       // Distinct from "unavailable": the query succeeded and the window is
       // genuinely empty. It says nothing about history outside the window.
+      lastLedgerSeries = null;
       renderLedgerState("no failures in the fetched window");
       renderLedgerCaption(null);
       renderLedgerFooter(null);
       return;
     }
     var series = ledgerSeries(state);
+    lastLedgerSeries = series;
     plot.textContent = "";
 
     var svg = svgEl("svg", {
@@ -4012,7 +4061,15 @@
   // Always rendered: the reader has to know what the axis is a picture OF.
   function renderLedgerCaption(series) {
     var state = ledgerState;
-    if (!state) { return; }
+    var healing = healingCaptionPart();
+    if (!state) {
+      // The window is gone but the healing counters may still be on the strip,
+      // and this sentence is the only thing that says whose numbers they are.
+      // The window-derived clauses stay behind the guard: a failed window must
+      // keep saying nothing about the axis it no longer has.
+      setText("ledger-caption", healing);
+      return;
+    }
     var parts = ["derived from the newest " + state.entries.length
       + (state.totalCount === null ? "" : " of " + state.totalCount)
       + " DLQ entries by creation time"];
@@ -4036,6 +4093,7 @@
       parts.push("the summary reports an empty store, so the counts are "
         + "window-derived only");
     }
+    if (healing) { parts.push(healing); }
     setText("ledger-caption", parts.join(" · "));
     var ageEl = document.getElementById("ledger-age");
     if (!ageEl) { return; }
@@ -4054,43 +4112,106 @@
   }
   function ledgerAgeText(t) { return "as of " + clockOf(t) + " · " + relAgo(t); }
 
-  // Three counters, not the confirmed design's five: `replayed` and `humans
-  // paged` have no field in any read-only admin payload, and inventing them on
-  // the strip whose whole purpose is trust is the one thing this surface
-  // cannot afford.
+  // The three window counters each take the same shape as the chart's anchor —
+  // max(server-reported, window-derived) — so the strip and the chart above it
+  // cannot disagree by construction, and a permanently-zero statistics
+  // repository (the shipped memory/Redis OSS configuration) cannot print
+  // `open 0` over drawn bars.
   //
-  // Each takes the same shape as the chart's anchor — max(server-reported,
-  // window-derived) — so the strip and the chart above it cannot disagree by
-  // construction, and a permanently-zero statistics repository (the shipped
-  // memory/Redis OSS configuration) cannot print `open 0` over drawn bars.
+  // The healing counters follow them and obey a different rule, because they
+  // come from a different kind of source — see addHealingCounters.
   function renderLedgerFooter(series) {
     var foot = document.getElementById("ledger-foot");
     if (!foot) { return; }
     foot.textContent = "";
-    if (!series) { return; }
-    var overview = (series.summary && series.summary.overview) || {};
-    var activity = (series.summary && series.summary.recent_activity) || {};
-    // Two counters one word apart until they were named: the first is every
-    // entry not resolved (the line's right-edge anchor), the second the subset
-    // sitting in the queue waiting to be replayed. "open · parked" made them
-    // look like the same number twice — which, on an install where they are
-    // equal, is exactly how it read.
-    addCounter(foot, "still unhealed", series.anchor);
-    var parked = [series.stillOpen];
-    // Same rule as the anchor: the cache-served summary is a floor only while
-    // the window is a sample. Over a whole window it is merely the older of two
-    // readings of the same number.
-    if (!series.whole && isReported(overview.pending)) { parked.push(overview.pending); }
-    addCounter(foot, "awaiting replay", Math.max.apply(null, parked));
-    // The label states the span it actually covers: a heal count from a
-    // 7-minute window must not wear a 24-hour label.
-    var summaryHealed = isReported(activity.resolved_24h) ? activity.resolved_24h : null;
-    if (summaryHealed !== null && summaryHealed >= series.healedInWindow) {
-      addCounter(foot, "healed 24 h", summaryHealed);
-    } else {
-      addCounter(foot, "healed in window", series.healedInWindow);
+    if (series) {
+      var overview = (series.summary && series.summary.overview) || {};
+      var activity = (series.summary && series.summary.recent_activity) || {};
+      // Two counters one word apart until they were named: the first is every
+      // entry not resolved (the line's right-edge anchor), the second the subset
+      // sitting in the queue waiting to be replayed. "open · parked" made them
+      // look like the same number twice — which, on an install where they are
+      // equal, is exactly how it read.
+      addCounter(foot, "still unhealed", series.anchor);
+      var parked = [series.stillOpen];
+      // Same rule as the anchor: the cache-served summary is a floor only while
+      // the window is a sample. Over a whole window it is merely the older of two
+      // readings of the same number.
+      if (!series.whole && isReported(overview.pending)) { parked.push(overview.pending); }
+      addCounter(foot, "awaiting replay", Math.max.apply(null, parked));
+      // The label states the span it actually covers: a heal count from a
+      // 7-minute window must not wear a 24-hour label.
+      var summaryHealed = isReported(activity.resolved_24h) ? activity.resolved_24h : null;
+      if (summaryHealed !== null && summaryHealed >= series.healedInWindow) {
+        addCounter(foot, "healed 24 h", summaryHealed);
+      } else {
+        addCounter(foot, "healed in window", series.healedInWindow);
+      }
+    }
+    // Deliberately OUTSIDE the window guard: an operator who has healed
+    // everything has no window to draw, and that is the exact moment
+    // "replayed 47" is most worth showing.
+    addHealingCounters(foot);
+  }
+
+  // These two read a process-local, since-boot counter rather than shared
+  // state, so a zero means one of three things — this process replayed
+  // nothing, another process did the replaying, or this process restarted —
+  // and nothing on this screen can tell them apart. The counters are monotone,
+  // so any value above zero is true whichever of the three holds; the zero is
+  // the only unverifiable claim, so it is never drawn. An install that has
+  // genuinely healed nothing therefore shows four counters instead of five,
+  // and the caption's scope sentence — rendered whenever the source answered
+  // at all — is what separates "live source, nothing to report" from "no
+  // source".
+  function addHealingCounters(foot) {
+    var counters = (healingSummary && healingSummary.counters) || {};
+    if (counters.replayed > 0) {
+      addCounter(foot, "replayed", counters.replayed);
+    }
+    if (counters.humans_paged > 0) {
+      addCounter(foot, "humans paged", counters.humans_paged);
     }
   }
+
+  // Never "today" — the counters start at process boot, not at midnight.
+  function healingCaptionPart() {
+    if (!healingSummary) { return ""; }
+    var t = Date.parse(healingSummary.since);
+    if (isNaN(t)) { return ""; }
+    return "replay/paged counters: this process, since " + clockOf(t);
+  }
+
+  // Joined in describeRow, never inside a describer: DESCRIBERS entries are
+  // pure functions of their OWN row's status payload, and /healing/summary is
+  // not that payload.
+  function healingRowToken(panelId) {
+    var latency = (healingSummary && healingSummary.latency) || {};
+    if (panelId === "dashboard") {
+      // "app" is load-bearing. This measures the protected application's HTTP
+      // endpoints, not this row's own subject, so a bare "p95 1.8 s" beside
+      // "3 awaiting heal" would read as healing latency and be false. The
+      // token ships with the prefix or not at all.
+      return isReported(latency.http_p95_seconds)
+        ? "app p95 " + secondsToken(latency.http_p95_seconds) : "";
+    }
+    if (panelId === "dlq") {
+      if (isReported(latency.dlq_replay_p95_seconds)) {
+        return "replay p95 " + secondsToken(latency.dlq_replay_p95_seconds);
+      }
+      // A different operation, so a different label: the store timing never
+      // inherits the replay one's name.
+      if (isReported(latency.dlq_store_p95_seconds)) {
+        return "store p95 " + secondsToken(latency.dlq_store_p95_seconds);
+      }
+    }
+    return "";
+  }
+  function secondsToken(seconds) {
+    if (seconds < 1) { return Math.round(seconds * 1000) + " ms"; }
+    return (Math.round(seconds * 10) / 10) + " s";
+  }
+
   function addCounter(foot, label, value) {
     var slot = el("span");
     slot.appendChild(document.createTextNode(label + " "));
@@ -4157,6 +4278,7 @@
         autoRefreshTimer = setInterval(function () {
           panelRefreshers.forEach(function (fn) { fn(); });
           refreshLedger();
+          refreshHealing();
         }, 15000);
       }
     });
@@ -4189,6 +4311,7 @@
     renderTriage();
     ROWS.forEach(function (row) { loadPanel(row.panel, row); });
     refreshLedger(true);
+    refreshHealing();
   }
 
   init();
