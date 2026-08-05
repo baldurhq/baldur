@@ -1534,3 +1534,57 @@ class TestConsoleHealingSummary:
         raw = _console_source()
         assert '"replay p95 "' in raw
         assert '"store p95 "' in raw
+
+
+class TestConsoleRuntimeApplyStatement:
+    """The apply-semantics statement the server derives from its own wiring.
+
+    The strategy line beside it says WHEN the value is written to storage. That
+    is the sentence an operator historically read as "it is in effect now", so
+    the two must render together and the second must never be the console's own
+    opinion — every word of it comes from the server.
+    """
+
+    def test_the_statement_renders_beside_the_strategy_it_qualifies(self):
+        """Rendered anywhere else, the strategy line keeps its old reading: a
+        write-time promise with nothing next to it saying the running workers
+        may not have the value."""
+        raw = _console_source()
+        assert "function appendRuntimeApply(box, strategy)" in raw
+        form = raw[raw.index("function showForm(domain, entry)") :]
+        form = (
+            form[: form.index("\n    function ") + 1]
+            if "\n    function " in form
+            else form
+        )
+        assert '"default strategy for this section: "' in form
+        assert "appendRuntimeApply(formBox, entry.default_strategy);" in form
+        assert form.index('"default strategy for this section: "') < form.index(
+            "appendRuntimeApply(formBox, entry.default_strategy);"
+        )
+
+    def test_the_console_states_nothing_of_its_own(self):
+        """The mode vocabulary and the sentence are the server's, derived from
+        its invalidation wiring. A sentence written here would keep claiming
+        whatever it was written to claim after the wiring changed."""
+        raw = _console_source()
+        assert "ra.mode.replace" in raw
+        assert "ra.detail" in raw
+        # No console-authored sentence for any of the three modes.
+        assert "Running processes keep the old value" not in raw
+        assert "not verified for this domain" not in raw
+
+    def test_an_absent_statement_paints_nothing(self):
+        """A backend that sends no ``runtime_apply`` (an older build, or a
+        response that carries no strategy at all) must leave the form as it was
+        rather than render an empty badge that reads as a mode."""
+        raw = _console_source()
+        assert "var ra = strategy && strategy.runtime_apply;" in raw
+        assert "if (!ra || !ra.mode) { return; }" in raw
+
+    def test_only_a_live_mode_shows_a_convergence_bound(self):
+        """The bound is the delivery mechanism's own promise. On a mode that has
+        no delivery running there is no bound to state, and a number beside
+        ``stored only`` would read as one."""
+        raw = _console_source()
+        assert 'ra.mode === "live" && ra.converges_within_seconds != null' in raw
