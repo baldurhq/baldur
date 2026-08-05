@@ -1,0 +1,553 @@
+# Operator-surface verdict inventory — read by the surface-inventory gate.
+#
+# One row per affordance-level unit: a console panel, a bespoke renderer's
+# payload read, an operator input key, or a mutating control domain.
+#
+# Regenerate with scripts/derive_operator_surface.py. The unit list is derived
+# from code and must never be edited by hand; the verdict, evidence and ticket
+# columns are the audited part and are preserved across regeneration.
+#
+# This is a verdict inventory, NOT a violation allowlist. A row that no longer
+# matches a live unit FAILS its gate as an orphan rather than being silently
+# accepted, because the audit's closing counts are taken over these rows — a
+# stale row here inflates a count instead of forgiving a violation that stopped
+# happening. Do not carry the allowlist file's silent-accept behaviour across.
+#
+# Tier is derived from panel visibility (T1 = OSS-visible console surface and
+# everything hanging off it, T2 = PRO console surface, T3 = no panel at all).
+#
+# Value verdicts (panel, renderer-key):
+#   real-producer   a producer computes the value on every rendered path
+#   honest-absent   the slot renders absence rather than a stand-in number
+#   FABRICATED      rendered from nothing; the ticket tracks the fix
+#   cross-ref       another in-flight work item owns the disposition
+#   pending-tier    this tier has not been audited yet (never valid at T1)
+#
+# Control verdicts (route-domain, body-field):
+#   consumer-reached  the write reaches something that behaves differently
+#   DEAD-CONTROL      accepted, stored, audited, and acted on by nothing —
+#                     including echo-only reads, which are not "reached"
+#   cross-ref, pending-tier as above
+
+meta:
+  admin_route_count: 261
+rows:
+- unit: body-field:/control/allow/{service_name}::reason
+  tier: T1
+  verdict: consumer-reached
+  evidence: api/handlers/circuit_breaker.py:277 -> force_close(reason=...)
+  ticket: ''
+  source: console.html PANELS circuit_breaker action
+- unit: body-field:/control/block/{service_name}::reason
+  tier: T1
+  verdict: consumer-reached
+  evidence: api/handlers/circuit_breaker.py:77,123 -> force_open(reason=...) :151
+  ticket: ''
+  source: console.html PANELS circuit_breaker action
+- unit: body-field:/control/block/{service_name}::ttl_minutes
+  tier: T1
+  verdict: consumer-reached
+  evidence: api/handlers/circuit_breaker.py:89-95,125 -> force_open(ttl_minutes=...) :153
+  ticket: ''
+  source: console.html PANELS circuit_breaker action
+- unit: body-field:/dlq/cleanup/archive::older_than_days
+  tier: T1
+  verdict: consumer-reached
+  evidence: api/handlers/dlq.py:235 -> service.archive_old_entries:238
+  ticket: ''
+  source: console.html PANELS dlq action
+- unit: body-field:/dlq/cleanup/purge::confirm
+  tier: T1
+  verdict: consumer-reached
+  evidence: api/handlers/dlq.py:259 (rejects without it)
+  ticket: ''
+  source: console.html PANELS dlq action
+- unit: body-field:/dlq/cleanup/purge::ids
+  tier: T1
+  verdict: consumer-reached
+  evidence: api/handlers/dlq.py:268 -> service.purge_archived:286
+  ticket: ''
+  source: console.html PANELS dlq action
+- unit: body-field:/dlq/cleanup/purge::older_than_days
+  tier: T1
+  verdict: consumer-reached
+  evidence: api/handlers/dlq.py:274-286
+  ticket: ''
+  source: console.html PANELS dlq action
+- unit: body-field:/dlq/replay::reason
+  tier: T1
+  verdict: consumer-reached
+  evidence: api/handlers/dlq.py:126
+  ticket: ''
+  source: console.html PANELS dlq action
+- unit: body-field:/emergency/gradual-recovery::target_level
+  tier: T2
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: console.html PANELS emergency action
+- unit: body-field:/emergency/release::force
+  tier: T2
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: console.html PANELS emergency action
+- unit: body-field:/emergency/release::reason
+  tier: T2
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: console.html PANELS emergency action
+- unit: body-field:/emergency/stop-recovery::reason
+  tier: T2
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: console.html PANELS emergency action
+- unit: body-field:/emergency/trigger::duration_minutes
+  tier: T2
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: console.html PANELS emergency action
+- unit: body-field:/emergency/trigger::level
+  tier: T2
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: console.html PANELS emergency action
+- unit: body-field:/emergency/trigger::override_kill_switch
+  tier: T2
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: console.html PANELS emergency action
+- unit: body-field:/emergency/trigger::reason
+  tier: T2
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: console.html PANELS emergency action
+- unit: body-field:/system/disable::reason
+  tier: T1
+  verdict: consumer-reached
+  evidence: api/handlers/system_control.py:70
+  ticket: ''
+  source: console.html PANELS system action
+- unit: panel:bulkhead
+  tier: T1
+  verdict: real-producer
+  evidence: GET /bulkheads -> api/handlers/bulkhead.bulkhead_status
+  ticket: ''
+  source: console.html PANELS
+- unit: panel:canary
+  tier: T2
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: console.html PANELS
+- unit: panel:circuit_breaker
+  tier: T1
+  verdict: real-producer
+  evidence: GET /control/status -> api/handlers/circuit_breaker.control_status -> ControlAPIService.get_status
+    (services/control_api_service/service.py:602)
+  ticket: ''
+  source: console.html PANELS
+- unit: panel:dashboard
+  tier: T1
+  verdict: real-producer
+  evidence: GET /dashboard/summary -> api/handlers/dashboard.dashboard_summary -> DashboardSummary.to_dict
+    (services/dashboard_service/models.py:49)
+  ticket: ''
+  source: console.html PANELS
+- unit: panel:dlq
+  tier: T1
+  verdict: real-producer
+  evidence: GET /dlq/cleanup/stats -> api/handlers/dlq.dlq_cleanup_stats:212 (payload assembled key by
+    key from CleanupStats)
+  ticket: ''
+  source: console.html PANELS
+- unit: panel:emergency
+  tier: T2
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: console.html PANELS
+- unit: panel:governance
+  tier: T2
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: console.html PANELS
+- unit: panel:meta_watchdog
+  tier: T2
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: console.html PANELS
+- unit: panel:runtime_config
+  tier: T2
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: console.html PANELS
+- unit: panel:system
+  tier: T1
+  verdict: real-producer
+  evidence: GET /system/status -> api/handlers/system_control.system_status
+  ticket: ''
+  source: console.html PANELS
+- unit: panel:throttle
+  tier: T2
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: console.html PANELS
+- unit: renderer-key:canary_summary::rollouts
+  tier: T2
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: console.html canary_summary renderer
+- unit: renderer-key:canary_summary::state
+  tier: T2
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: console.html canary_summary renderer
+- unit: renderer-key:circuit_breaker::failure_count
+  tier: T1
+  verdict: real-producer
+  evidence: services/circuit_breaker/service.py:644
+  ticket: ''
+  source: console.html circuit_breaker renderer
+- unit: renderer-key:circuit_breaker::service_name
+  tier: T1
+  verdict: real-producer
+  evidence: services/circuit_breaker/service.py:642
+  ticket: ''
+  source: console.html circuit_breaker renderer
+- unit: renderer-key:circuit_breaker::services
+  tier: T1
+  verdict: real-producer
+  evidence: services/control_api_service/service.py:615 <- services/circuit_breaker/service.py:640
+  ticket: ''
+  source: console.html circuit_breaker renderer
+- unit: renderer-key:circuit_breaker::state
+  tier: T1
+  verdict: real-producer
+  evidence: services/circuit_breaker/service.py:643
+  ticket: ''
+  source: console.html circuit_breaker renderer
+- unit: renderer-key:dashboard::failed
+  tier: T1
+  verdict: real-producer
+  evidence: services/dashboard_service/models.py:58
+  ticket: ''
+  source: console.html dashboard renderer
+- unit: renderer-key:dashboard::health_status
+  tier: T1
+  verdict: real-producer
+  evidence: services/dashboard_service/models.py:53
+  ticket: ''
+  source: console.html dashboard renderer
+- unit: renderer-key:dashboard::new_failures_24h
+  tier: T1
+  verdict: real-producer
+  evidence: services/dashboard_service/models.py:63
+  ticket: ''
+  source: console.html dashboard renderer
+- unit: renderer-key:dashboard::overview
+  tier: T1
+  verdict: real-producer
+  evidence: services/dashboard_service/models.py:54
+  ticket: ''
+  source: console.html dashboard renderer
+- unit: renderer-key:dashboard::pending
+  tier: T1
+  verdict: real-producer
+  evidence: services/dashboard_service/models.py:56
+  ticket: ''
+  source: console.html dashboard renderer
+- unit: renderer-key:dashboard::recent_activity
+  tier: T1
+  verdict: real-producer
+  evidence: services/dashboard_service/models.py:62
+  ticket: ''
+  source: console.html dashboard renderer
+- unit: renderer-key:dashboard::resolution_rate_percent
+  tier: T1
+  verdict: real-producer
+  evidence: services/dashboard_service/models.py:60 <- DashboardService.calculate_resolution_rate:412.
+    Computed on every path; the zero-denominator branch returns 0.0 rather than an absence, which is a
+    separate honesty finding (recorded in OOS), not a missing producer
+  ticket: ''
+  source: console.html dashboard renderer
+- unit: renderer-key:dashboard::resolved
+  tier: T1
+  verdict: real-producer
+  evidence: services/dashboard_service/models.py:57
+  ticket: ''
+  source: console.html dashboard renderer
+- unit: renderer-key:dashboard::resolved_24h
+  tier: T1
+  verdict: real-producer
+  evidence: services/dashboard_service/models.py:64
+  ticket: ''
+  source: console.html dashboard renderer
+- unit: renderer-key:dlq_stats::auto_replay
+  tier: T1
+  verdict: real-producer
+  evidence: api/handlers/dlq.py:227
+  ticket: ''
+  source: console.html dlq_stats renderer
+- unit: renderer-key:dlq_stats::by_status
+  tier: T1
+  verdict: real-producer
+  evidence: api/handlers/dlq.py:220
+  ticket: ''
+  source: console.html dlq_stats renderer
+- unit: renderer-key:dlq_stats::can_archive
+  tier: T1
+  verdict: real-producer
+  evidence: api/handlers/dlq.py:224
+  ticket: ''
+  source: console.html dlq_stats renderer
+- unit: renderer-key:dlq_stats::can_purge
+  tier: T1
+  verdict: real-producer
+  evidence: api/handlers/dlq.py:225
+  ticket: ''
+  source: console.html dlq_stats renderer
+- unit: renderer-key:dlq_stats::recommendations
+  tier: T1
+  verdict: real-producer
+  evidence: api/handlers/dlq.py:223
+  ticket: ''
+  source: console.html dlq_stats renderer
+- unit: renderer-key:dlq_stats::total
+  tier: T1
+  verdict: real-producer
+  evidence: api/handlers/dlq.py:219
+  ticket: ''
+  source: console.html dlq_stats renderer
+- unit: renderer-key:meta_watchdog::component_details
+  tier: T2
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: console.html meta_watchdog renderer
+- unit: renderer-key:meta_watchdog::components
+  tier: T2
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: console.html meta_watchdog renderer
+- unit: renderer-key:meta_watchdog::details
+  tier: T2
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: console.html meta_watchdog renderer
+- unit: renderer-key:meta_watchdog::error
+  tier: T2
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: console.html meta_watchdog renderer
+- unit: renderer-key:meta_watchdog::escalation_count
+  tier: T2
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: console.html meta_watchdog renderer
+- unit: renderer-key:meta_watchdog::heartbeat_age_seconds
+  tier: T2
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: console.html meta_watchdog renderer
+- unit: renderer-key:meta_watchdog::last_check
+  tier: T2
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: console.html meta_watchdog renderer
+- unit: renderer-key:meta_watchdog::overall_status
+  tier: T2
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: console.html meta_watchdog renderer
+- unit: renderer-key:meta_watchdog::reason
+  tier: T2
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: console.html meta_watchdog renderer
+- unit: renderer-key:meta_watchdog::status
+  tier: T2
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: console.html meta_watchdog renderer
+- unit: renderer-key:runtime_config::audit_enabled
+  tier: T2
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: console.html runtime_config renderer
+- unit: renderer-key:runtime_config::config
+  tier: T2
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: console.html runtime_config renderer
+- unit: renderer-key:runtime_config::pending_changes
+  tier: T2
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: console.html runtime_config renderer
+- unit: route-domain:auto-tuning
+  tier: T3
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: PUT /auto-tuning/bounds -> baldur.api.handlers.auto_tuning.auto_tuning_bounds_update
+- unit: route-domain:blast-radius
+  tier: T3
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: PUT /blast-radius/dna-policy -> baldur.api.handlers.blast_radius.blast_radius_dna_policy_create
+- unit: route-domain:canary
+  tier: T2
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: POST /canary/panic-rollback -> baldur.api.handlers.canary.canary_panic_rollback
+- unit: route-domain:chaos
+  tier: T3
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: PATCH /chaos/config/blast-radius -> baldur.api.handlers.chaos_config.chaos_blast_radius_policy_update
+- unit: route-domain:compliance
+  tier: T3
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: PATCH /compliance/reports/{report_id}/checks/{check_id}/review -> baldur.api.handlers.compliance.compliance_evidence_review
+- unit: route-domain:config
+  tier: T2
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: PUT /config/circuit-breaker -> baldur.api.handlers.config.config_update
+- unit: route-domain:config-history
+  tier: T3
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: POST /config-history/{config_type}/rollback -> baldur.api.handlers.config_history.config_rollback
+- unit: route-domain:control
+  tier: T1
+  verdict: consumer-reached
+  evidence: 'api/handlers/circuit_breaker.py -> ControlAPIService force_open / force_close / reset mutate
+    persisted breaker state. Residual: a manual Block does not reach protect()''s layered view on every
+    worker — owned by 749, not by this audit'
+  ticket: '749'
+  source: POST /control -> baldur.api.handlers.circuit_breaker.control_action
+- unit: route-domain:dlq
+  tier: T1
+  verdict: consumer-reached
+  evidence: api/handlers/dlq.py archive/purge/replay mutate DLQ entries through the DLQ service; the batch
+    actions are PRO-gated per action but the panel is OSS-visible
+  ticket: ''
+  source: POST /dlq/cleanup/archive -> baldur.api.handlers.dlq.dlq_cleanup_archive
+- unit: route-domain:drift-threshold
+  tier: T3
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: PUT /drift-threshold/config -> baldur.api.handlers.drift_threshold.drift_threshold_config_update
+- unit: route-domain:emergency
+  tier: T2
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: PUT /emergency/config -> baldur.api.handlers.emergency.emergency_config_update
+- unit: route-domain:finops
+  tier: T3
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: POST /finops/alerts/{alert_index} -> baldur.api.handlers.finops.finops_alert_acknowledge
+- unit: route-domain:governance
+  tier: T2
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: PUT /governance/config -> baldur.api.handlers.governance.governance_config_update
+- unit: route-domain:grafana
+  tier: T3
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: POST /grafana/webhook -> baldur.api.handlers.grafana_webhook.grafana_alert_webhook
+- unit: route-domain:l2-storage
+  tier: T3
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: PUT /l2-storage/config -> baldur.api.handlers.l2_storage.l2_storage_config_update
+- unit: route-domain:learning
+  tier: T3
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: POST /learning/metric -> baldur.api.handlers.learning.learning_metric_record
+- unit: route-domain:meta-watchdog
+  tier: T2
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: POST /meta-watchdog/escalation-test -> baldur.api.handlers.meta_watchdog.meta_watchdog_send_test
+- unit: route-domain:metric-sync
+  tier: T3
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: POST /metric-sync -> baldur.api.handlers.metric_sync.metric_sync
+- unit: route-domain:postmortem
+  tier: T3
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: POST /postmortem/generate -> baldur.api.handlers.postmortem.postmortem_generate
+- unit: route-domain:reconciliation
+  tier: T3
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: PUT /reconciliation/config -> baldur.api.handlers.error_budget_reconciliation.reconciliation_config_update
+- unit: route-domain:resilience
+  tier: T3
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: POST /resilience/cb/force-open/{name} -> baldur.api.handlers.audit_resilience.circuit_breaker_force_open
+- unit: route-domain:system
+  tier: T1
+  verdict: consumer-reached
+  evidence: api/handlers/system_control.py -> SystemControl enable/disable flips the persisted kill switch
+    every automation path reads
+  ticket: ''
+  source: POST /system/disable -> baldur.api.handlers.system_control.system_disable
+- unit: route-domain:tiering
+  tier: T3
+  verdict: pending-tier
+  evidence: ''
+  ticket: ''
+  source: PUT /tiering/config -> baldur.api.handlers.tiering.tier_definitions_update
