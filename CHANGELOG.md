@@ -17,6 +17,9 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - Control responses report `effective_until` read back from storage, so it matches the real expiry.
 - `BALDUR_METRICS_COLLECTION_INTERVAL_SECONDS` (`60`, range 5-3600) — gauge collection cadence.
 - `BaldurMetricCollectionStale` alert rule; `BaldurMetricCollectionAbsent` ships commented out.
+- `GET /healing/summary` (viewer, read-only) — this process's replay/page counts and p95 latencies.
+- The console ledger reports `replayed` and `humans paged`, and System rows carry a p95 token.
+- `EscalationResult.delivered_externally` — whether a channel that leaves the host accepted a page.
 
 ### Changed
 
@@ -31,6 +34,10 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - **Breaking**: `BALDUR_SYNC_ON_STARTUP` / `BALDUR_SYNC_JITTER_MAX` dropped with the gauge hydrator.
 - **Breaking**: `retry_success_rate` in `GET /api/baldur/metrics/` may be null (was always `100.0`).
 - A `monitored_services` breaker that never tripped gets no series until its state is recorded.
+- `baldur_replay_attempts_total` now covers console retries, force-redrives and PRO batch replays.
+- `baldur_replay_duration_seconds` covers those replays too; it was replay-service-only before.
+- **Migration**: `baldur_replay_outcomes_total{outcome="failure"}` alerts fire on failed retries.
+- `baldur_dlq_replay_duration_seconds` no longer times gate refusals, so its p95 rises to the truth.
 
 ### Fixed
 

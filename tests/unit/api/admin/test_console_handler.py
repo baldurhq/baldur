@@ -1010,11 +1010,9 @@ class TestConsoleTriageStructure:
             ('id="grid"', "the API-mirror panel grid"),
             ("== null ? 0", "a zero substituted for an unreported value"),
             ('"/control/status/"', "a read with a write side effect"),
-            ("p95", "a per-domain latency no admin route reports"),
             ("uptime", "a process uptime no admin route reports"),
             ("leader ", "a leader identity no admin route reports"),
-            ("humans paged", "an escalation count with no source field"),
-            ("replayed today", "a replay count with no source field"),
+            ("replayed today", "a replay count wearing a window it does not have"),
         ],
     )
     def test_no_value_without_a_source(self, banned: str, why: str):
@@ -1027,6 +1025,34 @@ class TestConsoleTriageStructure:
             f"{banned!r} reintroduced — {why}"
         )
 
+    @pytest.mark.parametrize(
+        ("token", "source"),
+        [
+            ("humans paged", "/healing/summary"),
+            ("app p95 ", "/healing/summary"),
+            ("replay p95 ", "/healing/summary"),
+            ("store p95 ", "/healing/summary"),
+        ],
+    )
+    def test_new_value_names_its_source(self, token: str, source: str):
+        """The other half of the same rule. ``p95`` and ``humans paged`` were
+        banned only for as long as nothing reported them; now that a read-only
+        admin route does, the ban flips to a positive assertion — the string
+        renders AND the route that backs it is fetched in the same file. The
+        un-ban and the first occurrence therefore have to land together."""
+        raw = _console_source()
+        assert token in raw, f"{token!r} is missing — its source now exists"
+        assert source in raw, f"{token!r} renders without fetching {source!r}"
+
+    def test_latency_token_names_its_subject(self):
+        """The dashboard row's latency measures the protected application's HTTP
+        endpoints, not the row's own subject. A bare ``p95`` beside ``3 awaiting
+        heal`` reads as healing latency, so the token ships with its prefix or
+        not at all."""
+        raw = _console_source()
+        assert '"app p95 "' in raw
+        assert '" p95 "' not in raw, "a subject-less p95 token reached a row"
+
 
 class TestConsoleHealingLedger:
     """The hero is a derived time axis, not another snapshot readout.
@@ -1034,8 +1060,7 @@ class TestConsoleHealingLedger:
     There is no history API, so the series is reconstructed client-side from a
     bounded ``/dlq/list`` page walk. What matters in a static-asset assertion is
     that the honesty machinery is present: a derived (not fixed) bucket width,
-    the truncation state, the caption, the three-slot footer, and the two
-    counters that have no source staying absent.
+    the truncation state, the caption, and the window-derived footer slots.
     """
 
     @pytest.mark.parametrize(
@@ -1410,3 +1435,102 @@ class TestConsoleOperatorProse:
         assert f'detail ? "{separator}" + detail : ""' in raw
         # …and no branch carries its own copy of the separator any more.
         assert 'detail = "· "' not in raw
+
+
+class TestConsoleHealingSummary:
+    """The two counters the confirmed design asked for, and the per-row datum.
+
+    All three come from ``/healing/summary``, which reads a process-local,
+    since-boot registry rather than shared state. That difference is the whole
+    design: the number is a lower bound on real activity, so it renders only
+    when it cannot be false, always beside a sentence stating its scope, and
+    never at the mercy of a second fetch that has nothing to do with it.
+    """
+
+    def test_healing_fetch_is_its_own_promise_chain(self):
+        """``adminFetch`` returns a raw rejectable promise. Joined into the
+        ledger's chain, a ``/healing/summary`` rejection would reach that
+        chain's ``.catch`` and paint "series unavailable" over a plot whose own
+        fetch succeeded — a secondary payload blanking a primary one."""
+        raw = _console_source()
+        assert "function refreshHealing()" in raw
+        chain = raw[raw.index("function refreshHealing()") :][:1200]
+        assert 'adminFetch("/healing/summary")' in chain
+        assert ".catch(function ()" in chain
+
+    def test_counters_survive_an_empty_or_failed_window(self):
+        """``renderLedgerFooter`` returns early on no series and
+        ``renderLedgerState`` used to clear the strip outright, so an operator
+        who had healed everything — the exact moment ``replayed 47`` is worth
+        showing — would have seen no footer at all. The new slots are appended
+        outside the window guard, and the failure path delegates instead of
+        blanking."""
+        raw = _console_source()
+        footer = raw[raw.index("function renderLedgerFooter(series)") :][:2600]
+        # The window counters sit inside the guard; the healing ones after it.
+        assert "if (series) {" in footer
+        assert footer.index('addCounter(foot, "still unhealed"') < footer.index(
+            "addHealingCounters(foot);"
+        )
+        assert raw.count("renderLedgerFooter(null)") >= 2
+        # Only the footer renderer may clear the footer element.
+        assert raw.count('foot.textContent = ""') == 1
+
+    def test_a_process_local_zero_is_never_rendered(self):
+        """These counters read one process's since-boot registry, so ``0``
+        means one of three things — this process replayed nothing, another
+        process did, or this one restarted — and nothing on screen tells them
+        apart. They are monotone, so every value above zero is true whichever
+        holds; the zero is the only unverifiable claim on the strip whose whole
+        purpose is trust."""
+        raw = _console_source()
+        assert "counters.replayed > 0" in raw
+        assert "counters.humans_paged > 0" in raw
+
+    def test_the_scope_sentence_outlives_the_window(self):
+        """Zero-suppression is only readable next to a statement of scope:
+        caption present with no counter means "live source, nothing to report",
+        no caption means "no source". So the healing part is emitted before the
+        caption's own ``!state`` guard, and the failure path re-renders the
+        caption rather than blanking the element."""
+        raw = _console_source()
+        caption = raw[raw.index("function renderLedgerCaption(series)") :][:900]
+        assert caption.index("healingCaptionPart()") < caption.index("if (!state)")
+        assert "this process, since " in raw
+        assert raw.count("renderLedgerCaption(null)") >= 2
+        assert 'setText("ledger-caption", "")' not in raw
+
+    def test_the_arrival_handler_repaints_what_already_rendered(self):
+        """Neither fetch waits for the other and auto-refresh ships off, so a
+        healing payload resolving after the ledger chain would paint nothing at
+        all until the operator reloaded by hand — and resolve before it roughly
+        half the time, which is how the failure stays invisible. The same bug
+        class ``reresolveDashboardRow`` already exists to fix."""
+        raw = _console_source()
+        arrival = raw[raw.index("function renderHealingArrival()") :][:700]
+        assert "renderLedgerCaption(lastLedgerSeries)" in arrival
+        assert "renderLedgerFooter(lastLedgerSeries)" in arrival
+        assert "describeRow(row)" in arrival
+        # Boot AND the auto-refresh tick — omitting the tick would freeze the
+        # counters at their boot values on the one setting that refreshes
+        # everything else.
+        assert raw.count("refreshHealing()") >= 3
+
+    def test_the_row_token_leaves_the_describers_pure(self):
+        """``DESCRIBERS`` entries are declared pure functions of their OWN row's
+        status payload. The per-row datum comes from a different fetch, so it is
+        joined in ``describeRow`` with the existing separator instead."""
+        raw = _console_source()
+        assert "function healingRowToken(panelId)" in raw
+        describers = raw[raw.index("var DESCRIBERS = {") :]
+        describers = describers[: describers.index("\n  };")]
+        assert "healing" not in describers.lower()
+        assert "var token = healingRowToken(row.panel.id);" in raw
+
+    def test_the_store_timing_never_wears_the_replay_label(self):
+        """When the replay histogram has no observations the dlq row falls back
+        to the store timing — a different operation, so a different label. A
+        shared label would report store latency as replay latency."""
+        raw = _console_source()
+        assert '"replay p95 "' in raw
+        assert '"store p95 "' in raw
