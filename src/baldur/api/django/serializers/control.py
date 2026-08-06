@@ -268,7 +268,12 @@ class ServiceMetricsSerializer(serializers.Serializer):
         help_text="Service identifier (e.g., 'payment', 'inventory')",
     )
     failure_rate_5m = serializers.FloatField(
-        help_text="Failure rate in last 5 minutes (0.0 - 1.0)",
+        help_text=(
+            "Failed share of calls admitted and counted under this worker's "
+            "circuit breakers in the last 5 minutes (0.0 - 1.0). "
+            "Null when nothing was measured."
+        ),
+        allow_null=True,
     )
     retry_success_rate = serializers.FloatField(
         help_text="Retry success rate (0.0 - 100.0). Null when not measured.",
@@ -278,7 +283,11 @@ class ServiceMetricsSerializer(serializers.Serializer):
         help_text="Current DLQ pending count for this service",
     )
     circuit_state = serializers.CharField(
-        help_text="Current circuit breaker state (closed, open, half_open)",
+        help_text=(
+            "This worker's circuit breaker state (closed, open, half_open). "
+            "Null when this worker holds no evidence for the service."
+        ),
+        allow_null=True,
     )
     avg_recovery_time_seconds = serializers.FloatField(
         help_text="Average time to recovery in seconds",
@@ -302,10 +311,18 @@ class MetricsResponseSerializer(serializers.Serializer):
 
     # Trend metrics
     last_5m_failure_rate = serializers.FloatField(
-        help_text="Overall failure rate in last 5 minutes (0.0 - 1.0)",
+        help_text=(
+            "Failed share of all calls admitted and counted under this "
+            "worker's circuit breakers in the last 5 minutes (0.0 - 1.0). "
+            "Null when nothing was measured."
+        ),
+        allow_null=True,
     )
     last_5m_request_count = serializers.IntegerField(
-        help_text="Total requests processed in last 5 minutes",
+        help_text=(
+            "Calls admitted and counted under this worker's circuit breakers "
+            "in the last 5 minutes"
+        ),
     )
 
     # Recovery metrics

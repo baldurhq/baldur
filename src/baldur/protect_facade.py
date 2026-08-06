@@ -245,10 +245,10 @@ def reset_protect_caches() -> None:
     """Reset all process-local protect() caches.
 
     Clears the per-name ``CircuitBreakerPolicy`` cache, the default-kwargs
-    ``PolicyComposer`` cache, forwards to ``reset_protect_recorder()``
-    (recorder singleton + sticky failure flag), and drains
-    ``TimeoutPolicy``'s shared executor so the next test starts with a
-    clean thread pool. Wired into ``reset_protect_settings()`` so test
+    ``PolicyComposer`` cache, the call-outcome rate window, forwards to
+    ``reset_protect_recorder()`` (recorder singleton + sticky failure flag),
+    and drains ``TimeoutPolicy``'s shared executor so the next test starts
+    with a clean thread pool. Wired into ``reset_protect_settings()`` so test
     fixtures that reset settings automatically invalidate every piece of
     process-local state whose captured config snapshot would otherwise
     drift (CB service config, composer-bound TimeoutPolicy, recorder,
@@ -338,6 +338,16 @@ def reset_protect_caches() -> None:
         ProviderRegistry.governance.get().reset_governance_pipeline_cache()
     except Exception:
         pass
+
+    # The call-outcome rate window is protect-fed process-local state, but —
+    # unlike the per-breaker OutcomeWindow, which the policy-cache clear above
+    # discards implicitly — it is a module singleton, so it needs an explicit
+    # drop or its evidence leaks across settings-reset boundaries.
+    from baldur.services.circuit_breaker.time_outcome_window import (
+        reset_call_outcome_window,
+    )
+
+    reset_call_outcome_window()
 
 
 # =============================================================================
