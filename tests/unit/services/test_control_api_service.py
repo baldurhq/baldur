@@ -1579,3 +1579,481 @@ class TestControlResponseEffectiveUntil:
         stored = cb_repository.get_by_service_name("payment")
         assert stored.manual_override_expires_at is not None
         assert resp.effective_until == stored.manual_override_expires_at.isoformat()
+
+
+# =============================================================================
+# get_metrics failure-rate producer Tests (746)
+# =============================================================================
+
+
+class TestControlApiCircuitBreakerRepoResolution:
+    """``_resolve_circuit_breaker_repo()`` — which breaker store the read reaches.
+
+    Every ``CircuitBreakerPolicy`` builds its breaker against the separately
+    registered ``"layered"`` repository, while the registry's module-load default
+    is the Redis one. Asking for the default resolves nothing wherever L2 is
+    absent, so the state column would be empty on exactly the deployments it
+    matters on — and the honest-null contract would land honest and empty.
+    """
+
+    def test_named_layered_instance_is_what_the_read_asks_for(self):
+        """The name is requested, and its instance is returned unchanged."""
+        from baldur.interfaces.repositories import CircuitBreakerStateRepository
+
+        repo = MagicMock(spec=CircuitBreakerStateRepository)
+        with patch("baldur.factory.ProviderRegistry") as mock_registry:
+            mock_registry.get_circuit_breaker_repo.return_value = repo
+
+            resolved = ControlAPIService._resolve_circuit_breaker_repo()
+
+        assert resolved is repo
+        mock_registry.get_circuit_breaker_repo.assert_called_once_with(name="layered")
+
+    def test_unregistered_name_falls_back_to_the_registry_default(self):
+        """``layered`` is registered only inside the redis-client-import guard.
+
+        On a redis-client-absent install the name is unregistered, so the read
+        falls back the same way the policy falls back for its own lookup.
+        """
+        from baldur.interfaces.repositories import CircuitBreakerStateRepository
+
+        fallback = MagicMock(spec=CircuitBreakerStateRepository)
+        with patch("baldur.factory.ProviderRegistry") as mock_registry:
+            mock_registry.get_circuit_breaker_repo.side_effect = ValueError(
+                "unregistered"
+            )
+            mock_registry.circuit_breaker_repo.safe_get.return_value = fallback
+
+            resolved = ControlAPIService._resolve_circuit_breaker_repo()
+
+        assert resolved is fallback
+
+    def test_both_lookups_failing_yields_no_repository(self):
+        """Absence is modelled as unknown, never as a raise and never as closed."""
+        with patch("baldur.factory.ProviderRegistry") as mock_registry:
+            mock_registry.get_circuit_breaker_repo.side_effect = ValueError("no name")
+            mock_registry.circuit_breaker_repo.safe_get.side_effect = RuntimeError(
+                "backend down"
+            )
+
+            assert ControlAPIService._resolve_circuit_breaker_repo() is None
+
+
+class TestCanonicalLookupViewsBehavior:
+    """``_canonical_lookup_views()`` — one join vocabulary for the row lookups.
+
+    Four key sources meet on one ``service_name`` column and three speak
+    different dialects: registered domains and the outcome window are canonical,
+    breaker states carry the raw protected name, the DLQ breakdown carries its
+    store's validated form. Joining a canonical row against a raw map misses
+    every name holding a dot, a hyphen, a space or an uppercase letter — which
+    is the fabricated class this change removes, re-introduced by the rows it
+    adds.
+    """
+
+    def test_raw_breaker_names_are_rekeyed_to_the_canonical_form(self):
+        """A dotted breaker name must be findable from its canonical row key."""
+        states, _pending = ControlAPIService._canonical_lookup_views(
+            {"orders.charge": "open", "Payment-API": "half_open"}, {}
+        )
+
+        assert states == {"orders_charge": "open", "payment_api": "half_open"}
+
+    def test_raw_dlq_names_are_rekeyed_to_the_canonical_form(self):
+        """A service with real DLQ entries must not read 0 on its own row."""
+        _states, pending = ControlAPIService._canonical_lookup_views(
+            {}, {"orders.charge": 3}
+        )
+
+        assert pending == {"orders_charge": 3}
+
+    @pytest.mark.parametrize(
+        ("raw_states", "expected"),
+        [
+            ({"orders.charge": "closed", "orders-charge": "open"}, "open"),
+            ({"orders.charge": "open", "orders-charge": "closed"}, "open"),
+            ({"orders.charge": "closed", "orders-charge": "half_open"}, "half_open"),
+            ({"orders.charge": "half_open", "orders-charge": "open"}, "open"),
+        ],
+        ids=[
+            "closed_then_open",
+            "open_then_closed",
+            "closed_then_half_open",
+            "half_open_then_open",
+        ],
+    )
+    def test_merged_names_resolve_to_the_most_degraded_state(
+        self, raw_states, expected
+    ):
+        """A merge must never hide an open breaker behind a closed one.
+
+        Both iteration orders are covered: a most-degraded rule implemented as
+        "last writer wins" passes one case and fails the other.
+        """
+        states, _pending = ControlAPIService._canonical_lookup_views(raw_states, {})
+
+        assert states == {"orders_charge": expected}
+
+    def test_merged_names_sum_their_pending_counts(self):
+        """A merged row must not under-report an existing backlog."""
+        _states, pending = ControlAPIService._canonical_lookup_views(
+            {}, {"orders.charge": 3, "orders-charge": 4}
+        )
+
+        assert pending == {"orders_charge": 7}
+
+    def test_unknown_state_string_does_not_outrank_a_known_one(self):
+        """An unrecognised state ranks lowest, so it cannot mask a real open."""
+        states, _pending = ControlAPIService._canonical_lookup_views(
+            {"orders.charge": "open", "orders-charge": "mystery"}, {}
+        )
+
+        assert states == {"orders_charge": "open"}
+
+    def test_empty_sources_produce_empty_views(self):
+        """No evidence in means no evidence out — never a fabricated default."""
+        assert ControlAPIService._canonical_lookup_views({}, {}) == ({}, {})
+
+
+class TestGetMetricsHonestRateBehavior:
+    """The payload's five-minute fields, against a real producer snapshot.
+
+    Before this producer existed, ``failure_rate_5m`` was the literal 0.0 on
+    every row and the aggregate was the DLQ backlog's pending/total share. Each
+    case below states the rendered value, so a regression to either fabrication
+    fails rather than merely looking different.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _empty_outcome_window(self):
+        """Each case owns the process-wide window it seeds."""
+        from baldur.services.circuit_breaker.time_outcome_window import (
+            reset_call_outcome_window,
+        )
+
+        reset_call_outcome_window()
+        yield
+        reset_call_outcome_window()
+
+    @staticmethod
+    def _record(key, *, failures=0, successes=0):
+        """Seed the process window the payload reads."""
+        from baldur.services.circuit_breaker.time_outcome_window import (
+            get_call_outcome_window,
+        )
+
+        window = get_call_outcome_window()
+        for _ in range(failures):
+            window.record(key, failure=True)
+        for _ in range(successes):
+            window.record(key, failure=False)
+
+    @contextmanager
+    def _wired(self, *, registered=(), cb_states=(), dlq_pending=None, dlq_stats=None):
+        """Drive get_metrics() with the given registry, breaker and DLQ views."""
+        from baldur.interfaces.repositories import (
+            CircuitBreakerStateRepository,
+            FailedOperationRepository,
+        )
+
+        cb_repo = MagicMock(spec=CircuitBreakerStateRepository)
+        cb_repo.get_all_states.return_value = [
+            SimpleNamespace(service_name=name, state=state) for name, state in cb_states
+        ]
+        failed_repo = MagicMock(spec=FailedOperationRepository)
+        failed_repo.get_statistics.return_value = dlq_stats or {}
+
+        with (
+            patch("baldur.factory.ProviderRegistry") as mock_registry,
+            patch(
+                "baldur.metrics.registry.get_registered_domains",
+                return_value=list(registered),
+            ),
+            patch(
+                "baldur.services.metrics.updaters.update_dlq_pending_gauges",
+                return_value=dict(dlq_pending or {}),
+            ),
+            patch(
+                "baldur.services.metrics.updaters.update_retry_success_rates",
+                return_value={},
+            ),
+        ):
+            mock_registry.get_circuit_breaker_repo.return_value = cb_repo
+            mock_registry.failed_op_repo.safe_get.return_value = failed_repo
+            yield
+
+    @staticmethod
+    def _row(result, service_name):
+        """The one row naming this service, or None."""
+        for row in result["services"]:
+            if row["service_name"] == service_name:
+                return row
+        return None
+
+    def test_failure_rate_is_reported_for_a_service_that_registered_no_domain(
+        self, service
+    ):
+        """The failing service gets a row even though nothing registered it.
+
+        The default circuit-breaker-only ``protect()`` deliberately registers no
+        domain, so a registered-domains-only row source left the failing service
+        with no row at all — the very case the payload exists to answer.
+        """
+        self._record("checkout", failures=3, successes=1)
+
+        with self._wired(registered=["payment"]):
+            result = service.get_metrics()
+
+        row = self._row(result, "checkout")
+        assert row is not None
+        assert row["failure_rate_5m"] == 0.75
+
+    def test_failure_rate_is_null_for_a_domain_with_no_observed_admissions(
+        self, service
+    ):
+        """Null, never 0.0 — a fabricated zero reads as healthy in an incident."""
+        with self._wired(registered=["payment"]):
+            result = service.get_metrics()
+
+        assert self._row(result, "payment")["failure_rate_5m"] is None
+
+    def test_all_failing_service_reports_a_failure_rate_of_one(self, service):
+        """The extreme the old literal hid completely."""
+        self._record("checkout", failures=4)
+
+        with self._wired(registered=[]):
+            result = service.get_metrics()
+
+        assert self._row(result, "checkout")["failure_rate_5m"] == 1.0
+
+    def test_boot_fresh_worker_reports_an_unmeasured_failure_rate_aggregate(
+        self, service
+    ):
+        """The honest-absence floor: null rate, zero observed admissions."""
+        with self._wired(registered=["payment"]):
+            result = service.get_metrics()
+
+        assert result["last_5m_failure_rate"] is None
+        assert result["last_5m_request_count"] == 0
+
+    def test_aggregate_failure_rate_is_the_cross_key_ratio(self, service):
+        """The aggregate rides the same producer as the rows."""
+        self._record("payment", failures=1, successes=3)
+        self._record("checkout", failures=2, successes=2)
+
+        with self._wired(registered=[]):
+            result = service.get_metrics()
+
+        assert result["last_5m_failure_rate"] == 3 / 8
+        assert result["last_5m_request_count"] == 8
+
+    def test_aggregate_failure_rate_ignores_the_dlq_backlog_entirely(self, service):
+        """Negative: the removed aggregate was the DLQ pending/total share.
+
+        This snapshot would have rendered 5/100 over 100 "requests"; with a real
+        producer holding one clean admission it is 0.0 over 1.
+        """
+        self._record("payment", successes=1)
+
+        with self._wired(
+            registered=[],
+            dlq_stats={"pending_count": 5, "total_count": 100},
+        ):
+            result = service.get_metrics()
+
+        assert result["last_5m_failure_rate"] == 0.0
+        assert result["last_5m_request_count"] == 1
+
+    def test_dlq_resolution_time_keeps_its_own_honest_source(self, service):
+        """Only the fabricated pair was removed from the DLQ stats blob."""
+        with self._wired(
+            registered=[],
+            dlq_stats={"avg_resolution_time_seconds": 42.5},
+        ):
+            result = service.get_metrics()
+
+        assert result["avg_time_to_recovery"] == 42.5
+
+    def test_row_reports_a_breaker_the_repository_knows_under_a_raw_name(self, service):
+        """Join vocabulary: a dotted breaker name must reach its canonical row.
+
+        Given/When/Then: without the canonical lookup views this row renders no
+        breaker state for a breaker the repository knows, and 0 in DLQ for a
+        service with real entries — both fabrications, on a row this change adds.
+        """
+        # Given: the breaker and the backlog are both keyed by the raw name
+        self._record("orders_charge", failures=1)
+
+        # When: the payload is built
+        with self._wired(
+            registered=[],
+            cb_states=[("orders.charge", "open")],
+            dlq_pending={"orders.charge": 3},
+        ):
+            result = service.get_metrics()
+
+        # Then: the canonical row carries both
+        row = self._row(result, "orders_charge")
+        assert row["circuit_state"] == "open"
+        assert row["dlq_count"] == 3
+
+    def test_circuit_state_is_null_when_the_repository_holds_no_evidence(self, service):
+        """Absence of repository evidence is unknown, not closed.
+
+        Negative assertion for the removed "closed" default: the payload would
+        otherwise assert that a breaker it cannot see is fine.
+        """
+        self._record("checkout", failures=1)
+
+        with self._wired(registered=[], cb_states=[]):
+            result = service.get_metrics()
+
+        assert self._row(result, "checkout")["circuit_state"] is None
+
+    def test_window_only_row_reports_null_for_the_unproduced_fields(self, service):
+        """A row the window alone contributed still models what is not measured."""
+        self._record("checkout", successes=2)
+
+        with self._wired(registered=[]):
+            result = service.get_metrics()
+
+        row = self._row(result, "checkout")
+        assert row["retry_success_rate"] is None
+        assert row["avg_recovery_time_seconds"] is None
+        assert row["dlq_count"] == 0
+
+    def test_rows_are_the_registered_domains_union_the_window_keys(self, service):
+        """Both sources contribute, and neither replaces the other."""
+        self._record("checkout", failures=1)
+        self._record("payment", successes=1)
+
+        with self._wired(registered=["payment", "point"]):
+            result = service.get_metrics()
+
+        assert [row["service_name"] for row in result["services"]] == [
+            "checkout",
+            "payment",
+            "point",
+        ]
+
+    def test_row_count_never_exceeds_the_reported_service_total(self, service):
+        """The window's keys join the total's union, so the payload cannot
+        contradict itself about how many services it describes."""
+        self._record("checkout", failures=1)
+
+        with self._wired(
+            registered=["payment"],
+            cb_states=[("orders.charge", "open")],
+            dlq_pending={"legacy": 1},
+        ):
+            result = service.get_metrics()
+
+        assert len(result["services"]) <= result["total_services"]
+
+    def test_registry_is_read_exactly_once_per_response(self, service):
+        """A domain registered between two reads would make rows exceed the total.
+
+        Given/When/Then: the registry double reports a growing set, so a second
+        read would return a domain the count never saw.
+        """
+        # Given: a registry view that grows on every call
+        calls = {"count": 0}
+        views = [["payment"], ["payment", "checkout"]]
+
+        def _growing_registry():
+            view = views[min(calls["count"], len(views) - 1)]
+            calls["count"] += 1
+            return list(view)
+
+        from baldur.interfaces.repositories import (
+            CircuitBreakerStateRepository,
+            FailedOperationRepository,
+        )
+
+        cb_repo = MagicMock(spec=CircuitBreakerStateRepository)
+        cb_repo.get_all_states.return_value = []
+        failed_repo = MagicMock(spec=FailedOperationRepository)
+        failed_repo.get_statistics.return_value = {}
+
+        # When: the payload is built
+        with (
+            patch("baldur.factory.ProviderRegistry") as mock_registry,
+            patch(
+                "baldur.metrics.registry.get_registered_domains",
+                side_effect=_growing_registry,
+            ),
+            patch(
+                "baldur.services.metrics.updaters.update_dlq_pending_gauges",
+                return_value={},
+            ),
+            patch(
+                "baldur.services.metrics.updaters.update_retry_success_rates",
+                return_value={},
+            ),
+        ):
+            mock_registry.get_circuit_breaker_repo.return_value = cb_repo
+            mock_registry.failed_op_repo.safe_get.return_value = failed_repo
+            result = service.get_metrics()
+
+        # Then: one read, and the row list matches the count it was taken with
+        assert calls["count"] == 1
+        assert [row["service_name"] for row in result["services"]] == ["payment"]
+        assert len(result["services"]) <= result["total_services"]
+
+    def test_aggregate_and_rows_come_from_one_producer_read(self, service):
+        """One read, one instant, one story.
+
+        A second read of the producer would let a call landing between the two
+        make the aggregate contradict the rows rendered beside it in the same
+        JSON. The double below reports different evidence on a second snapshot
+        and a wildly different cross-key total, so either extra read is visible.
+        """
+
+        class _GrowingWindow:
+            def __init__(self) -> None:
+                self.snapshot_calls = 0
+                self.read_all_calls = 0
+
+            def snapshot(self):
+                self.snapshot_calls += 1
+                if self.snapshot_calls == 1:
+                    return {"payment": (1, 2)}
+                return {"payment": (1, 2), "checkout": (1, 1)}
+
+            def read_all(self):
+                self.read_all_calls += 1
+                return (99, 99)
+
+        window = _GrowingWindow()
+        with (
+            self._wired(registered=[]),
+            patch(
+                "baldur.services.circuit_breaker.time_outcome_window"
+                ".get_call_outcome_window",
+                return_value=window,
+            ),
+        ):
+            result = service.get_metrics()
+
+        assert window.snapshot_calls == 1
+        assert window.read_all_calls == 0
+        assert result["last_5m_request_count"] == 2
+        assert result["last_5m_failure_rate"] == 0.5
+        assert [row["service_name"] for row in result["services"]] == ["payment"]
+
+    def test_no_row_renders_a_fabricated_zero_failure_rate(self, service):
+        """Negative sweep: every unmeasured row is null, none is 0.0.
+
+        The literal it replaced was 0.0 on every row, so a partial regression
+        would show up as a mix — asserted across the whole list rather than on
+        one row.
+        """
+        self._record("checkout", failures=1)
+
+        with self._wired(registered=["payment", "point"]):
+            result = service.get_metrics()
+
+        rates = {
+            row["service_name"]: row["failure_rate_5m"] for row in result["services"]
+        }
+        assert rates == {"checkout": 1.0, "payment": None, "point": None}
