@@ -413,9 +413,14 @@ def _get_max_domains_from_settings() -> int:
 def _resolve_max_domains_cached() -> int:
     """Return the cardinality cap, memoized for ``_CAP_CACHE_TTL_SECONDS``.
 
-    Called only from inside ``_registry_lock``, so exactly one thread ever
-    refreshes an expired entry — a cache stampede is structurally impossible
-    and needs no second mechanism.
+    Deliberately unsynchronized. The registry's own callers hold
+    ``_registry_lock``, but the call-outcome window's cap resolve does not — it
+    runs outside its own lock so a settings read can never reach a protected
+    call. Concurrent refreshes of an expired entry therefore cost a duplicate
+    settings read and nothing more: both writers store an equally valid cap, and
+    the assignments are individually atomic. A lock here would buy only the
+    duplicate read, at the price of putting the metrics-read path behind the
+    registry's own contention.
 
     The fail-open fallback is cached on the same terms as a configured value:
     a persistently invalid settings field must not reinstate the per-call
