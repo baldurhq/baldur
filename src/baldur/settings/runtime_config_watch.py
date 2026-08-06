@@ -52,3 +52,10 @@ def reset_runtime_config_watch_settings() -> None:
         del get_config().services_group.__dict__["runtime_config_watch"]
     except KeyError:
         pass
+
+
+__all__ = [
+    "RuntimeConfigWatchSettings",
+    "get_runtime_config_watch_settings",
+    "reset_runtime_config_watch_settings",
+]
