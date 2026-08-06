@@ -32,6 +32,7 @@ import pytest
 from baldur.factory.registry import ProviderRegistry
 
 _EXPECTED_ORDER = [
+    "runtime_config",
     "chaos_scheduler",
     "bulkhead",
     "hedging",
@@ -41,6 +42,7 @@ _EXPECTED_ORDER = [
 ]
 
 _PRO_SHUTDOWN_MODULES = [
+    "baldur_pro.services.runtime_config.shutdown",
     "baldur_pro.services.chaos.scheduler.shutdown",
     "baldur_pro.services.bulkhead.shutdown",
     "baldur_pro.services.hedging.shutdown",
@@ -81,7 +83,7 @@ def fresh_shutdown_registry():
 
 
 def test_pro_shutdown_modules_register_in_bootstrap_order(fresh_shutdown_registry):
-    """Importing the six PRO shutdown modules in bootstrap order yields the
+    """Importing the PRO shutdown modules in bootstrap order yields the
     insertion order that ``baldur.bootstrap`` relies on for handler dispatch.
     """
     for module_path in _PRO_SHUTDOWN_MODULES:

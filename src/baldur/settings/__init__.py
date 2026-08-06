@@ -445,6 +445,11 @@ if TYPE_CHECKING:
         get_runbook_settings,
         reset_runbook_settings,
     )
+    from baldur.settings.runtime_config_watch import (
+        RuntimeConfigWatchSettings,
+        get_runtime_config_watch_settings,
+        reset_runtime_config_watch_settings,
+    )
     from baldur.settings.runtime_feedback import (
         RuntimeFeedbackSettings,
         get_runtime_feedback_settings,
@@ -1281,6 +1286,18 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "RunbookSettings": ("baldur.settings.runbook", "RunbookSettings"),
     "get_runbook_settings": ("baldur.settings.runbook", "get_runbook_settings"),
     "reset_runbook_settings": ("baldur.settings.runbook", "reset_runbook_settings"),
+    "RuntimeConfigWatchSettings": (
+        "baldur.settings.runtime_config_watch",
+        "RuntimeConfigWatchSettings",
+    ),
+    "get_runtime_config_watch_settings": (
+        "baldur.settings.runtime_config_watch",
+        "get_runtime_config_watch_settings",
+    ),
+    "reset_runtime_config_watch_settings": (
+        "baldur.settings.runtime_config_watch",
+        "reset_runtime_config_watch_settings",
+    ),
     "RuntimeFeedbackSettings": (
         "baldur.settings.runtime_feedback",
         "RuntimeFeedbackSettings",
@@ -1433,6 +1450,10 @@ __all__ = [
     "RunbookSettings",
     "get_runbook_settings",
     "reset_runbook_settings",
+    # Runtime config delivery poll
+    "RuntimeConfigWatchSettings",
+    "get_runtime_config_watch_settings",
+    "reset_runtime_config_watch_settings",
     # Security
     "SecuritySettings",
     "get_security_settings",
