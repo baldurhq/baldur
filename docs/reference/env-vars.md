@@ -147,6 +147,21 @@ BALDUR_EVENT_LOGGING_REPLAY_LOG_LEVEL=INFO
 BALDUR_EVENT_LOGGING_SLA_LOG_LEVEL=WARNING
 ```
 
+## Runtime config delivery (PRO)
+
+How often each process re-reads the stored configuration of every domain wired
+for runtime pickup. This value *is* the convergence bound the config API
+reports back to you: a change stored just after one read reaches that process's
+consumers by the next one. Raising it widens the window in which a fleet can
+serve two different configurations for one service; `0` turns the poll off, and
+the domain then reports itself as stored-only instead of claiming a bound it
+cannot keep. Like every other variable here, a change takes effect at the next
+process start.
+
+```bash
+BALDUR_RUNTIME_CONFIG_WATCH_INTERVAL_SECONDS=30
+```
+
 ## Circuit Breaker Slack push (OSS)
 
 Set a Slack incoming-webhook URL and Baldur posts a message when a circuit

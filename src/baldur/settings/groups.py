@@ -137,6 +137,7 @@ if TYPE_CHECKING:
     from baldur.settings.retry import RetrySettings
     from baldur.settings.ring_buffer import RingBufferSettings
     from baldur.settings.runbook import RunbookSettings
+    from baldur.settings.runtime_config_watch import RuntimeConfigWatchSettings
     from baldur.settings.runtime_feedback import RuntimeFeedbackSettings
     from baldur.settings.safe_gauge import SafeGaugeSettings
     from baldur.settings.safety_bounds import SafetyBoundsSettings
@@ -485,6 +486,12 @@ class ServicesGroup:
         from baldur.settings.runbook import RunbookSettings
 
         return RunbookSettings()
+
+    @cached_property
+    def runtime_config_watch(self) -> RuntimeConfigWatchSettings:
+        from baldur.settings.runtime_config_watch import RuntimeConfigWatchSettings
+
+        return RuntimeConfigWatchSettings()
 
     @cached_property
     def saga(self) -> SagaSettings:

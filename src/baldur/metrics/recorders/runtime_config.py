@@ -2,12 +2,13 @@
 Runtime Config metric recorder — tracks configuration updates,
 no-change events, safe default applications, and failures.
 
-Metrics (5):
+Metrics (6):
 - baldur_runtime_config_updates_total: Config update counter
 - baldur_runtime_config_update_no_change_total: No-change update counter
 - baldur_runtime_config_safe_default_applied_total: Safe default application counter
 - baldur_runtime_config_update_failed_total: Update failure counter
 - baldur_runtime_config_pending_changes: Pending changes gauge
+- baldur_runtime_config_installed_fingerprint: Installed-config fingerprint gauge
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ __all__ = ["RuntimeConfigMetricRecorder"]
 
 
 class RuntimeConfigMetricRecorder(BaseMetricRecorder):
-    """Runtime Config metric definitions and recording (5 metrics)."""
+    """Runtime Config metric definitions and recording (6 metrics)."""
 
     def __init__(self) -> None:
         self._updates_total = get_or_create_counter(
@@ -52,6 +53,11 @@ class RuntimeConfigMetricRecorder(BaseMetricRecorder):
         self._pending_changes = get_or_create_gauge(
             f"{self.PREFIX}_runtime_config_pending_changes",
             "Number of pending config changes",
+            ["config_type"],
+        )
+        self._installed_fingerprint = get_or_create_gauge(
+            f"{self.PREFIX}_runtime_config_installed_fingerprint",
+            "Fingerprint of the configuration this process currently serves",
             ["config_type"],
         )
 
@@ -89,6 +95,26 @@ class RuntimeConfigMetricRecorder(BaseMetricRecorder):
             ).inc()
         except Exception:
             logger.debug("runtime_config.metric_record_failed", metric="update_failed")
+
+    def set_installed_fingerprint(self, config_type: str, fingerprint: int) -> None:
+        """Publish the fingerprint of the configuration this process serves.
+
+        Answers the question the per-process runtime-apply API cannot: *how many
+        of my workers are running the change I just stored?* Two processes
+        serving byte-identical values publish the same number whatever order or
+        how many installs got them there, so ``count(count by (value) (...))``
+        over the fleet is the convergence signal and any spread is real
+        divergence.
+
+        Deliberately absent where no delivery runs — a process that cannot pick
+        a change up must not publish a convergence datum.
+        """
+        try:
+            self._installed_fingerprint.labels(config_type=config_type).set(fingerprint)
+        except Exception:
+            logger.debug(
+                "runtime_config.metric_record_failed", metric="installed_fingerprint"
+            )
 
     def set_pending_changes(self, config_type: str, count: int) -> None:
         """Set the number of pending config changes."""

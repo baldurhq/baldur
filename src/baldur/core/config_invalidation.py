@@ -185,8 +185,9 @@ _MODE_DETAIL: dict[RuntimeApplyMode, str] = {
         "Stored on write and delivered to this process's consumers."
     ),
     RuntimeApplyMode.STORED_ONLY: (
-        "Stored on write; applies to new processes. Running processes keep the "
-        "old value because delivery is not running here."
+        "Stored on write; applies to new processes. No bounded delivery is "
+        "running here, so a running process is not guaranteed to pick it up "
+        "before it restarts."
     ),
     RuntimeApplyMode.UNVERIFIED: (
         "Stored on write; runtime pickup by the consuming services is not "

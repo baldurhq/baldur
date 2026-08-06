@@ -890,6 +890,9 @@ def _register_shutdown_handlers() -> None:  # noqa: C901, PLR0912, PLR0915
         import importlib
 
         _PRO_SHUTDOWN_MODULES = [
+            # First: the config delivery poll can invalidate any of the services
+            # below, so it stops before they do.
+            "baldur_pro.services.runtime_config.shutdown",
             "baldur_pro.services.chaos.scheduler.shutdown",
             "baldur_pro.services.bulkhead.shutdown",
             "baldur_pro.services.hedging.shutdown",
@@ -3406,6 +3409,106 @@ def _reset_cb_state_seed() -> None:
         _cb_state_seed_done = False
 
 
+def _dispatch_config_invalidation(event: Any) -> None:
+    """Refresh the consumers of whichever config domain an event names.
+
+    The process's single ``CONFIG_UPDATED`` subscriber. Dispatching on the
+    event's ``config_type`` through the invalidation registry — rather than one
+    handler per domain — is what keeps the runtime-apply declaration derivable:
+    a domain becomes deliverable by registering a target, not by someone
+    remembering to write and subscribe a matching handler.
+
+    The name matters. The bus de-duplicates subscriptions by ``__name__``, and
+    every existing ``CONFIG_UPDATED`` subscriber is called ``_on_config_updated``
+    — a fourth handler carrying that name would be silently dropped and this
+    whole path would never fire.
+
+    Best-effort throughout: the event bus is at-most-once and drops silently
+    during a reconnect, so this is a latency shortcut and never the correctness
+    path. A domain that misses an event converges on the delivery poll instead.
+    """
+    from baldur.core.config_invalidation import (
+        get_config_invalidation_targets,
+        invoke_config_invalidation_targets,
+    )
+
+    data = getattr(event, "data", None) or {}
+    config_type = data.get("config_type")
+    if not config_type or not get_config_invalidation_targets(config_type):
+        return
+
+    # Reload the stored section before rebuilding: the consuming services read
+    # the manager's cached values, so invalidating them alone would rebuild from
+    # the same stale cache on every process that did not serve the write.
+    # Probed rather than assumed — an older manager has no such method, and this
+    # path degrades to "rebuild from the cache we have" instead of raising.
+    try:
+        from baldur.factory.registry import ProviderRegistry
+
+        manager = ProviderRegistry.runtime_config_manager.safe_get()
+        reload_section = getattr(manager, "reload_section", None)
+        if reload_section is not None:
+            reload_section(config_type)
+    except ImportError as exc:
+        logger.debug("config_invalidation.manager_not_available", error=exc)
+    except Exception as exc:
+        logger.warning(
+            "config_invalidation.reload_failed",
+            config_type=config_type,
+            error=exc,
+        )
+
+    invoke_config_invalidation_targets(config_type)
+
+
+def _setup_config_invalidation_delivery() -> None:
+    """Register the circuit-breaker invalidation target and the dispatcher.
+
+    Registration is the declaration: with a target registered, the runtime-apply
+    statement stops reporting the domain as unverified, and it does so because
+    the wiring exists in this process rather than because a literal was edited.
+    Unconditional apart from the gunicorn-master skip — there is no enable flag,
+    since a process that registers nothing simply has no domain to deliver.
+
+    ``await_result=False`` is not a tuning choice. The manager publishes
+    ``CONFIG_UPDATED`` while holding its own lock, and an awaited handler that
+    re-enters that lock cannot proceed until the publisher releases it — every
+    value-changing write would pay the handler timeout.
+
+    On an OSS-only install the registered target rebuilds from environment
+    settings and the event never fires, since only the PRO manager emits it for
+    config domains: dormant and harmless.
+    """
+    try:
+        from baldur.core.process_utils import is_gunicorn_master
+
+        if is_gunicorn_master():
+            logger.debug("config_invalidation.start_skipped_gunicorn_master")
+            return
+
+        from baldur.core.config_invalidation import (
+            register_config_invalidation_target,
+        )
+        from baldur.services.circuit_breaker.config import (
+            invalidate_circuit_breaker_config,
+        )
+        from baldur.services.event_bus.bus import EventType, get_event_bus
+
+        register_config_invalidation_target(
+            "circuit_breaker", invalidate_circuit_breaker_config
+        )
+        get_event_bus().subscribe(
+            EventType.CONFIG_UPDATED,
+            _dispatch_config_invalidation,
+            await_result=False,
+        )
+        logger.info("baldur.config_invalidation_delivery_installed")
+    except ImportError as exc:
+        logger.debug("baldur.config_invalidation_module_not_available", error=exc)
+    except Exception as exc:
+        logger.warning("baldur.config_invalidation_setup_failed", error=exc)
+
+
 # =============================================================================
 # Background daemon-worker registry — single source of truth (D4)
 # =============================================================================
@@ -3447,6 +3550,12 @@ def _reset_cb_state_seed() -> None:
 # once-per-process done-flag, and a ``BALDUR_CB_STATE_SEED_AUTOSTART`` test
 # hatch (``metrics.enabled`` defaults True, unlike the default-OFF scaling
 # loops).
+# ``_setup_config_invalidation_delivery`` registers the circuit-breaker
+# invalidation target and installs the single CONFIG_UPDATED dispatcher. It is a
+# subscription, not a thread, so fork-inheritance is benign and the handler-name
+# dedup makes the ``post_worker_init`` re-run idempotent. Unconditional apart
+# from the master skip — the registration is what makes the runtime-apply
+# declaration honest, and the handler is a no-op for unregistered domains.
 
 _BACKGROUND_WORKER_STARTERS: tuple[Callable[[], None], ...] = (
     _start_capacity_reservation_if_enabled,
@@ -3459,6 +3568,7 @@ _BACKGROUND_WORKER_STARTERS: tuple[Callable[[], None], ...] = (
     _start_bulkhead_metrics_updater_if_enabled,
     _start_domain_gauge_updater_if_enabled,
     _seed_circuit_breaker_state_if_enabled,
+    _setup_config_invalidation_delivery,
 )
 
 

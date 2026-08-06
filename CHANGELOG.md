@@ -21,6 +21,9 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - The console ledger reports `replayed` and `humans paged`, and System rows carry a p95 token.
 - `EscalationResult.delivered_externally` — whether a channel that leaves the host accepted a page.
 - Config responses carry `runtime_apply`: whether a stored change reaches running processes.
+- `BALDUR_RUNTIME_CONFIG_WATCH_INTERVAL_SECONDS` (`30`, range 0-3600) — config delivery cadence.
+- Stored circuit-breaker config now reaches already-running processes; `0` disables the delivery.
+- `baldur_runtime_config_installed_fingerprint{config_type}` — equal across converged workers.
 
 ### Changed
 
@@ -54,6 +57,10 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - The retry success-rate gauge and payload field reported a fabricated 100%; both are now absent.
 - `total_dlq_pending` and the daily report's DLQ line read `0` when the breakdown was unavailable.
 - **Migration**: a copied `BaldurServiceDead` rule needs `{component="error_budget"}` to stay true.
+- A failed config-store read replaced a process's live configuration with factory defaults.
+- Two near-simultaneous config edits could leave the older one in force until the next write.
+- A first read of the shared breaker configuration could deadlock against a concurrent edit.
+- The `stored_only` detail said running processes keep the old value; it now states only the bound.
 
 ## [1.3.2] - 2026-07-31
 

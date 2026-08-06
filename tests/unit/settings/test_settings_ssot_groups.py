@@ -70,10 +70,11 @@ class TestGroupClassCountContract:
         """CoreGroup: admission_control, backoff, circuit_breaker, circuit_breaker_advanced, health_check, pool_monitor, retry, system_control, thread_management."""
         assert self._count_cached_properties(CoreGroup) == 9
 
-    def test_services_group_has_47_properties(self):
-        """ServicesGroup has 47 cached_property accessors (incl. dlq_outbox per #486,
-        canary_interlock per the canary-safeguard wiring)."""
-        assert self._count_cached_properties(ServicesGroup) == 47
+    def test_services_group_has_48_properties(self):
+        """ServicesGroup has 48 cached_property accessors (incl. dlq_outbox per #486,
+        canary_interlock per the canary-safeguard wiring, runtime_config_watch per
+        the config delivery poll)."""
+        assert self._count_cached_properties(ServicesGroup) == 48
 
     def test_audit_group_has_7_properties(self):
         """AuditGroup has 7 cached_property accessors (668 removed the reconciler
