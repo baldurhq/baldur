@@ -7,7 +7,7 @@ Test targets:
 
 Test Categories:
     A. Contract: __all__ exports, facade registration
-    B. Behavior: Method calls, value clamping
+    B. Behavior: Method calls, value clamping, the convergence gauge
 
 Reference:
     394
@@ -87,3 +87,42 @@ class TestRuntimeConfigRecorderBehavior:
         assert BaseMetricRecorder._clamp_non_negative(-3, "pending_changes") == 0
         # Verify the method still completes without error
         runtime_config_recorder.set_pending_changes("retry", -3)
+
+
+class TestInstalledFingerprintRecorderBehavior:
+    """The fleet-convergence gauge.
+
+    Two processes serving byte-identical values publish the same number whatever
+    order or how many installs got them there, so any spread across the fleet is
+    real divergence — which is why the value is a content hash and not the
+    per-process install counter.
+    """
+
+    def test_set_installed_fingerprint_does_not_raise(self, runtime_config_recorder):
+        runtime_config_recorder.set_installed_fingerprint("circuit_breaker", 1234567)
+
+    def test_a_failing_collector_never_reaches_the_caller(
+        self, runtime_config_recorder
+    ):
+        """A metric must never break the tick that publishes it."""
+        from unittest.mock import patch
+
+        with patch.object(
+            runtime_config_recorder,
+            "_installed_fingerprint",
+            **{"labels.side_effect": RuntimeError("registry unavailable")},
+        ):
+            runtime_config_recorder.set_installed_fingerprint("circuit_breaker", 42)
+
+    def test_the_gauge_carries_only_the_config_type_label(
+        self, runtime_config_recorder
+    ):
+        """Label cardinality is bounded by the domain count, not by values."""
+        from unittest.mock import MagicMock, patch
+
+        gauge = MagicMock(spec=runtime_config_recorder._installed_fingerprint)
+        with patch.object(runtime_config_recorder, "_installed_fingerprint", gauge):
+            runtime_config_recorder.set_installed_fingerprint("retry", 99)
+
+        gauge.labels.assert_called_once_with(config_type="retry")
+        gauge.labels.return_value.set.assert_called_once_with(99)

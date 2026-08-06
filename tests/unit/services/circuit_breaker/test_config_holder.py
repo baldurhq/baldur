@@ -16,6 +16,9 @@ Verification techniques (§8):
   - Exception/edge — a failing rebuild leaves the previous configuration in
     force rather than clearing it
   - Side effects — in-flight rate evidence and mesh overrides survive a swap
+  - Concurrency — an out-of-order rebuild never becomes the configuration in
+    force, and the holder lock is a leaf so a first-ever read cannot deadlock
+    against a configuration write
 
 The runtime-config manager slot is stubbed out for the whole module: these
 tests measure the holder, so the config source has to be the deterministic
@@ -35,6 +38,10 @@ from baldur.services.circuit_breaker.config import (
     reset_circuit_breaker_config,
 )
 from baldur.services.circuit_breaker.service import CircuitBreakerService
+
+#: Bound on the two-thread lock-order regression: a real inversion hangs
+#: forever, so the failure has to be a timeout rather than a stuck run.
+_DEADLOCK_TIMEOUT_SECONDS = 10.0
 
 
 @pytest.fixture(autouse=True)
@@ -350,3 +357,308 @@ class TestCircuitBreakerConfigPinningBehavior:
         shared = current_circuit_breaker_config()
 
         assert service.get_effective_config("payments") is shared
+
+
+# =============================================================================
+# Ordered swap + leaf lock (Behavior)
+# =============================================================================
+
+
+class TestSourceGenerationResolutionBehavior:
+    """Reading the config source's install counter never breaks a rebuild.
+
+    ``None`` means nothing can order this build, and every branch that produces
+    it is a property of the process rather than a transient state: no source
+    registered, or a source that predates the counter.
+    """
+
+    def _read_generation(self):
+        from baldur.services.circuit_breaker.config import _source_install_generation
+
+        return _source_install_generation()
+
+    def test_no_registered_source_yields_none(self):
+        assert self._read_generation() is None
+
+    def test_a_source_without_the_accessor_yields_none(self):
+        """The normal state between this release and the next one of the package
+        that provides the source — the two release independently."""
+        from unittest.mock import MagicMock
+
+        from baldur.factory.registry import ProviderRegistry
+
+        legacy_source = MagicMock(spec=[])
+        with patch.object(
+            ProviderRegistry.runtime_config_manager,
+            "safe_get",
+            return_value=legacy_source,
+        ):
+            assert self._read_generation() is None
+
+    def test_a_raising_source_yields_none_rather_than_propagating(self):
+        from unittest.mock import MagicMock
+
+        from baldur.factory.registry import ProviderRegistry
+        from baldur.interfaces.runtime_config import RuntimeConfigManager
+
+        source = MagicMock(spec=RuntimeConfigManager)
+        source.get_section_generation.side_effect = RuntimeError("source down")
+        with patch.object(
+            ProviderRegistry.runtime_config_manager, "safe_get", return_value=source
+        ):
+            assert self._read_generation() is None
+
+    def test_a_registered_source_yields_its_counter_for_this_section(self):
+        from unittest.mock import MagicMock
+
+        from baldur.factory.registry import ProviderRegistry
+        from baldur.interfaces.runtime_config import RuntimeConfigManager
+
+        source = MagicMock(spec=RuntimeConfigManager)
+        source.get_section_generation.return_value = 4
+        with patch.object(
+            ProviderRegistry.runtime_config_manager, "safe_get", return_value=source
+        ):
+            assert self._read_generation() == 4
+
+        source.get_section_generation.assert_called_with("circuit_breaker")
+
+
+def _with_generation(value):
+    """Pin what the config source's install counter reports for this build."""
+    return patch(
+        "baldur.services.circuit_breaker.config._source_install_generation",
+        return_value=value,
+    )
+
+
+class TestConfigHolderOrderingBehavior:
+    """The swap is ordered, not last-writer-wins.
+
+    The replacement is built outside the holder lock, so two invalidations that
+    read different values can finish in the opposite order — and an
+    unconditional assignment would leave the older configuration in force with
+    nothing to correct it: the counter has already moved past it, so no later
+    poll delivers anything.
+    """
+
+    def test_a_build_from_an_older_counter_does_not_win(self, monkeypatch):
+        # Given: a configuration built from counter 2 is in force
+        with _with_generation(2):
+            _reload_settings(monkeypatch, "BALDUR_CB_FAILURE_THRESHOLD", "9")
+            newer = invalidate_circuit_breaker_config()
+        assert newer.failure_threshold == 9
+
+        # When: a rebuild that started from counter 1 completes afterwards
+        with _with_generation(1):
+            _reload_settings(monkeypatch, "BALDUR_CB_FAILURE_THRESHOLD", "3")
+            returned = invalidate_circuit_breaker_config()
+
+        # Then: the newer configuration is still in force, and the caller is
+        # told what is in force rather than what it built
+        assert current_circuit_breaker_config() is newer
+        assert current_circuit_breaker_config().failure_threshold == 9
+        assert returned is newer
+
+    def test_a_build_from_the_same_counter_installs(self, monkeypatch):
+        """Only a strictly older build is discarded: two rebuilds at one counter
+        are the ordinary shape of a settings-only change."""
+        with _with_generation(2):
+            invalidate_circuit_breaker_config()
+            _reload_settings(monkeypatch, "BALDUR_CB_FAILURE_THRESHOLD", "3")
+            rebuilt = invalidate_circuit_breaker_config()
+
+        assert current_circuit_breaker_config() is rebuilt
+        assert rebuilt.failure_threshold == 3
+
+    def test_a_build_from_a_newer_counter_installs(self, monkeypatch):
+        with _with_generation(1):
+            invalidate_circuit_breaker_config()
+        with _with_generation(2):
+            _reload_settings(monkeypatch, "BALDUR_CB_FAILURE_THRESHOLD", "3")
+            rebuilt = invalidate_circuit_breaker_config()
+
+        assert current_circuit_breaker_config() is rebuilt
+
+    def test_a_build_carrying_no_counter_installs_unconditionally(self, monkeypatch):
+        """An environment-sourced build has no ordering to preserve, so it must
+        not be refused by a rule written for stored values."""
+        with _with_generation(5):
+            invalidate_circuit_breaker_config()
+
+        with _with_generation(None):
+            _reload_settings(monkeypatch, "BALDUR_CB_FAILURE_THRESHOLD", "3")
+            rebuilt = invalidate_circuit_breaker_config()
+
+        assert current_circuit_breaker_config() is rebuilt
+
+    def test_a_counterless_install_clears_the_record_so_the_next_build_is_admitted(
+        self, monkeypatch
+    ):
+        """The cold-boot ordering. A first reader that builds before the source
+        is registered installs an environment-sourced configuration; the very
+        next invalidation is the first one that *can* read stored values, and a
+        naive ``>=`` against a stale record would reject it.
+        """
+        with _with_generation(None):
+            invalidate_circuit_breaker_config()
+
+        with _with_generation(1):
+            _reload_settings(monkeypatch, "BALDUR_CB_FAILURE_THRESHOLD", "3")
+            rebuilt = invalidate_circuit_breaker_config()
+
+        assert current_circuit_breaker_config() is rebuilt
+
+    def test_an_absent_record_admits_any_counter(self):
+        """The state at the first invalidation of a process's life, and after
+        every reset."""
+        reset_circuit_breaker_config()
+
+        with _with_generation(7):
+            rebuilt = invalidate_circuit_breaker_config()
+
+        assert current_circuit_breaker_config() is rebuilt
+
+    def test_reset_clears_the_recorded_counter_too(self, monkeypatch):
+        with _with_generation(9):
+            invalidate_circuit_breaker_config()
+
+        reset_circuit_breaker_config()
+        with _with_generation(1):
+            _reload_settings(monkeypatch, "BALDUR_CB_FAILURE_THRESHOLD", "3")
+            rebuilt = invalidate_circuit_breaker_config()
+
+        assert current_circuit_breaker_config() is rebuilt
+
+    def test_the_counter_is_read_before_the_build(self):
+        """What keeps the recorded number from ever overstating the freshness of
+        what it labels — and therefore what makes the only rejectable build one
+        that a same-or-newer build has already superseded."""
+        order = []
+
+        def _read_generation():
+            order.append("read_generation")
+            return 1
+
+        def _build():
+            order.append("build")
+            return CircuitBreakerConfig()
+
+        with (
+            patch(
+                "baldur.services.circuit_breaker.config._source_install_generation",
+                side_effect=_read_generation,
+            ),
+            patch.object(CircuitBreakerConfig, "from_settings", side_effect=_build),
+        ):
+            invalidate_circuit_breaker_config()
+
+        assert order == ["read_generation", "build"]
+
+    def test_a_failed_build_leaves_the_previous_configuration_and_its_record(
+        self, monkeypatch
+    ):
+        with _with_generation(3):
+            in_force = invalidate_circuit_breaker_config()
+
+        with (
+            _with_generation(4),
+            patch.object(
+                CircuitBreakerConfig,
+                "from_settings",
+                side_effect=RuntimeError("settings unavailable"),
+            ),
+        ):
+            returned = invalidate_circuit_breaker_config()
+
+        assert returned is in_force
+        assert current_circuit_breaker_config() is in_force
+
+
+class TestConfigHolderLeafLockBehavior:
+    """The holder lock acquires nothing, so it cannot invert against any other.
+
+    The lazy read path used to build inside the holder lock, and the build takes
+    the config source's own lock underneath it — while the eager invalidation
+    path takes the holder lock underneath *that* one. That is an ABBA deadlock
+    between a configuration write and a first-ever read of this holder, latent
+    only while nothing else can invalidate concurrently.
+    """
+
+    def test_the_lazy_path_does_not_build_while_holding_the_holder_lock(self):
+        """Negative assertion: the old shape must not come back."""
+        import baldur.services.circuit_breaker.config as config_module
+
+        observed = []
+
+        def _observing_build():
+            observed.append(config_module._current_config_lock.locked())
+            return CircuitBreakerConfig()
+
+        reset_circuit_breaker_config()
+        with patch.object(
+            CircuitBreakerConfig, "from_settings", side_effect=_observing_build
+        ):
+            current_circuit_breaker_config()
+
+        assert observed == [False]
+
+    def test_a_first_read_and_a_concurrent_rebuild_both_complete(self):
+        """The regression itself: two real threads crossing the two lock orders.
+
+        The holder is cleared on every iteration — a seeded holder makes the
+        lazy path unreachable and the test vacuous.
+        """
+        import threading
+
+        reset_circuit_breaker_config()
+        done = []
+        barrier = threading.Barrier(2, timeout=_DEADLOCK_TIMEOUT_SECONDS)
+
+        def _first_reader():
+            barrier.wait()
+            for _ in range(50):
+                reset_circuit_breaker_config()
+                current_circuit_breaker_config()
+            done.append("reader")
+
+        def _invalidator():
+            barrier.wait()
+            for _ in range(50):
+                invalidate_circuit_breaker_config()
+            done.append("invalidator")
+
+        threads = [
+            threading.Thread(target=_first_reader, name="cb-holder-reader"),
+            threading.Thread(target=_invalidator, name="cb-holder-invalidator"),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=_DEADLOCK_TIMEOUT_SECONDS)
+
+        assert [t.name for t in threads if t.is_alive()] == []
+        assert sorted(done) == ["invalidator", "reader"]
+
+    def test_the_lazy_path_returns_what_is_actually_in_force(self):
+        """A concurrent herd may each build; one wins, and every caller is told
+        the winner rather than its own object."""
+        reset_circuit_breaker_config()
+
+        first = current_circuit_breaker_config()
+        second = current_circuit_breaker_config()
+
+        assert first is second
+
+    def test_the_lazy_path_still_yields_a_configuration_when_the_swap_returns_none(
+        self,
+    ):
+        """``invalidate`` returns ``None`` only when the build itself failed and
+        the holder is still empty; the accessor then lets that failure reach the
+        caller rather than returning a fabricated configuration."""
+        reset_circuit_breaker_config()
+        with patch(
+            "baldur.services.circuit_breaker.config.invalidate_circuit_breaker_config",
+            return_value=None,
+        ):
+            assert isinstance(current_circuit_breaker_config(), CircuitBreakerConfig)
