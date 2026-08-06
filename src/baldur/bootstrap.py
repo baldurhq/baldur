@@ -3423,9 +3423,10 @@ def _dispatch_config_invalidation(event: Any) -> None:
     — a fourth handler carrying that name would be silently dropped and this
     whole path would never fire.
 
-    Best-effort throughout: the event bus is at-most-once and drops silently
-    during a reconnect, so this is a latency shortcut and never the correctness
-    path. A domain that misses an event converges on the delivery poll instead.
+    Best-effort throughout: the event bus delivers no more than once and drops
+    silently during a reconnect, so this is a latency shortcut and never the
+    correctness path. A domain that misses an event converges on the delivery
+    poll instead.
     """
     from baldur.core.config_invalidation import (
         get_config_invalidation_targets,
