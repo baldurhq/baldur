@@ -392,8 +392,48 @@ def _warn_clamped(field_name: str, stored: Any, applied: Any) -> None:
 # Process-Shared Config Holder
 # =============================================================================
 
+#: The configuration domain this holder mirrors, as the runtime config manager
+#: names its stored section.
+_CONFIG_SECTION = "circuit_breaker"
+
 _current_config: CircuitBreakerConfig | None = None
+#: The config source's install counter at the moment the held configuration was
+#: built. ``None`` means the build carried no ordering — see
+#: :func:`_source_install_generation`.
+_current_config_generation: int | None = None
 _current_config_lock = threading.Lock()
+
+
+def _source_install_generation() -> int | None:
+    """Read the config source's install counter for this section.
+
+    The counter orders two concurrent rebuilds of the same section: it is
+    bumped by whichever writer changed what the source would serve, so a build
+    that started from an older counter is a build a newer one has superseded.
+
+    ``None`` means nothing can order this build, and there are two such cases —
+    both properties of the process rather than transient states. No config
+    source is registered at all, so the rebuild reads environment settings; or
+    the registered source predates this counter, which is the normal state
+    between this release and the next one of the package that provides the
+    source.
+    """
+    try:
+        from baldur.factory.registry import ProviderRegistry
+
+        manager = ProviderRegistry.runtime_config_manager.safe_get()
+        if manager is None:
+            return None
+        read_generation = getattr(manager, "get_section_generation", None)
+        if read_generation is None:
+            return None
+        return read_generation(_CONFIG_SECTION)
+    except Exception as e:
+        logger.debug(
+            "circuit_breaker.config_generation_unavailable",
+            error=str(e),
+        )
+        return None
 
 
 def current_circuit_breaker_config() -> CircuitBreakerConfig:
@@ -403,17 +443,32 @@ def current_circuit_breaker_config() -> CircuitBreakerConfig:
     reaches all of them. ``baldur.init()`` seeds the holder, which is what keeps
     the build (and the config-source lock it takes) off the first request; the
     lazy build below is the fallback for a process that never calls ``init()``.
-    """
-    global _current_config
 
+    The lazy path delegates rather than building here, so no lock is held while
+    the build runs. Building inside the holder lock would take the config
+    source's own lock underneath it, while the eager invalidation path takes the
+    holder lock underneath *that* one — an ABBA deadlock between a
+    configuration write and a first-ever read of this holder. A concurrent herd
+    of first readers may each build; the builds are idempotent, one wins, and
+    that is strictly cheaper than the inversion.
+
+    A process that never calls ``init()`` has no config source registered, so
+    the build reads environment settings — silently, since the source branch
+    falls through on any failure. That is what "the fallback" means here: the
+    values are the environment's, not the stored ones.
+    """
     config = _current_config
     if config is not None:
         return config
 
-    with _current_config_lock:
-        if _current_config is None:
-            _current_config = CircuitBreakerConfig.from_settings()
-        return _current_config
+    installed = invalidate_circuit_breaker_config()
+    if installed is not None:
+        return installed
+
+    # The build failed and the holder is still empty, so there is no previous
+    # configuration to fall back to. Building again lets the same failure reach
+    # the caller instead of returning a fabricated configuration.
+    return CircuitBreakerConfig.from_settings()
 
 
 def invalidate_circuit_breaker_config() -> CircuitBreakerConfig | None:
@@ -421,11 +476,29 @@ def invalidate_circuit_breaker_config() -> CircuitBreakerConfig | None:
 
     Eager by design: a lazy rebuild would move the config-source read onto
     whichever request thread happens to read first, where it can block behind an
-    administrative write. Returns the configuration now in force — the previous
-    one when the rebuild failed, so a transient source failure never leaves the
-    process without a configuration.
+    administrative write. Returns the configuration now in force — which is not
+    always the one this call built, see below — and the previous one when the
+    rebuild failed, so a transient source failure never leaves the process
+    without a configuration.
+
+    **The swap is ordered, not last-writer-wins.** The build runs outside the
+    holder lock, so two concurrent invalidations can finish in the opposite
+    order to the changes they read, and an unconditional assignment would leave
+    the older configuration in force with nothing to correct it. The source's
+    install counter is therefore read *before* the build — which guarantees the
+    recorded number never overstates the freshness of the configuration it
+    labels — and a build whose counter is behind the one already in force is
+    discarded.
+
+    Only two present counters are ever compared. A build that carries none
+    installs unconditionally and clears the record, because an
+    environment-sourced build has no ordering to preserve; and an absent record
+    admits every build, which is the state at the first invalidation of a
+    process's life and after every reset.
     """
-    global _current_config
+    global _current_config, _current_config_generation
+
+    generation = _source_install_generation()
 
     try:
         rebuilt = CircuitBreakerConfig.from_settings()
@@ -437,8 +510,22 @@ def invalidate_circuit_breaker_config() -> CircuitBreakerConfig | None:
         return _current_config
 
     with _current_config_lock:
-        _current_config = rebuilt
-    return rebuilt
+        recorded = _current_config_generation
+        superseded = (
+            generation is not None and recorded is not None and generation < recorded
+        )
+        if not superseded:
+            _current_config = rebuilt
+            _current_config_generation = generation
+        in_force = _current_config
+
+    if superseded:
+        logger.debug(
+            "circuit_breaker.config_swap_skipped",
+            built_from_generation=generation,
+            in_force_generation=recorded,
+        )
+    return in_force
 
 
 def reset_circuit_breaker_config() -> None:
@@ -447,10 +534,11 @@ def reset_circuit_breaker_config() -> None:
     The next read rebuilds it lazily. Production code invalidates (which
     rebuilds eagerly) rather than resetting.
     """
-    global _current_config
+    global _current_config, _current_config_generation
 
     with _current_config_lock:
         _current_config = None
+        _current_config_generation = None
     with _clamp_warned_lock:
         _clamp_warned.clear()
 
