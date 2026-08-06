@@ -1022,6 +1022,22 @@ class TestSingleton:
 class TestGetMetrics:
     """get_metrics()."""
 
+    @pytest.fixture(autouse=True)
+    def _empty_outcome_window(self):
+        """Start and end each case with no recorded call outcomes.
+
+        The producer behind ``failure_rate_5m`` is a module singleton fed by
+        every protected call in the process, so a neighbouring test's traffic
+        would otherwise add rows here and move the aggregate.
+        """
+        from baldur.services.circuit_breaker.time_outcome_window import (
+            reset_call_outcome_window,
+        )
+
+        reset_call_outcome_window()
+        yield
+        reset_call_outcome_window()
+
     @patch("baldur.factory.ProviderRegistry")
     @patch("baldur.services.metrics.updaters.update_retry_success_rates")
     @patch("baldur.services.metrics.updaters.update_dlq_pending_gauges")
@@ -1036,10 +1052,10 @@ class TestGetMetrics:
         mock_dlq.return_value = {"payment": 3, "point": 1}
         mock_retry.return_value = {"payment": 95.0, "point": 100.0}
 
-        # CB repository mock
+        # CB repository mock — resolved by name, the instance breakers write to
         mock_cb_repo = MagicMock()
         mock_cb_repo.get_all_states.return_value = []
-        mock_registry.circuit_breaker_repo.safe_get.return_value = mock_cb_repo
+        mock_registry.get_circuit_breaker_repo.return_value = mock_cb_repo
 
         # Failed op repository mock
         mock_failed_repo = MagicMock()
@@ -1064,6 +1080,13 @@ class TestGetMetrics:
         assert len(result["services"]) == 2
         assert "timestamp" in result
         assert "collection_duration_ms" in result
+        # The five-minute aggregate is NOT the DLQ backlog ratio. This snapshot
+        # would have rendered 5/100 = 0.05 over 100 "requests" before a producer
+        # existed; with no observed admission it is honestly unmeasured.
+        assert result["last_5m_failure_rate"] is None
+        assert result["last_5m_request_count"] == 0
+        # The DLQ resolution time keeps its own honest source.
+        assert result["avg_time_to_recovery"] == 30.0
 
     @patch("baldur.factory.ProviderRegistry")
     @patch("baldur.services.metrics.updaters.update_retry_success_rates")
@@ -1078,12 +1101,16 @@ class TestGetMetrics:
         mock_domains.return_value = ["payment"]
         mock_dlq.return_value = {"payment": 0}
         mock_retry.return_value = {"payment": 100.0}
+        mock_registry.get_circuit_breaker_repo.side_effect = Exception("unregistered")
         mock_registry.circuit_breaker_repo.safe_get.side_effect = Exception("DB down")
         mock_registry.failed_op_repo.safe_get.side_effect = Exception("DB down")
 
         result = service.get_metrics()
         assert result["healthy_services"] == 0
         assert result["degraded_services"] == 0
+        # Both lookups failed, so the process holds no evidence about this
+        # breaker — reported as unknown, never as "closed".
+        assert result["services"][0]["circuit_state"] is None
 
     @patch("baldur.factory.ProviderRegistry")
     @patch("baldur.services.metrics.updaters.update_retry_success_rates")
@@ -1109,12 +1136,50 @@ class TestGetMetrics:
 
         mock_cb_repo = MagicMock()
         mock_cb_repo.get_all_states.return_value = [cb1, cb2]
-        mock_registry.circuit_breaker_repo.safe_get.return_value = mock_cb_repo
+        mock_registry.get_circuit_breaker_repo.return_value = mock_cb_repo
         mock_registry.failed_op_repo.safe_get.return_value = None
 
         result = service.get_metrics()
         assert result["healthy_services"] == 1
         assert result["degraded_services"] == 1
+
+    def test_get_metrics_reads_the_repository_the_breakers_write_to(self, service):
+        """The circuit-breaker read is name-scoped to the layered instance.
+
+        The registry's module-load default is the Redis repository, while every
+        policy builds its breaker against the separately-registered layered one.
+        Reading the default resolves nothing wherever L2 is absent, so the state
+        column would be empty on exactly the deployments it matters on.
+        """
+        from baldur.interfaces.repositories import CircuitBreakerStateRepository
+
+        mock_cb_repo = MagicMock(spec=CircuitBreakerStateRepository)
+        mock_cb_repo.get_all_states.return_value = []
+
+        with (
+            patch("baldur.factory.ProviderRegistry") as mock_registry,
+            patch(
+                "baldur.services.metrics.updaters.update_retry_success_rates",
+                return_value={},
+            ),
+            patch(
+                "baldur.services.metrics.updaters.update_dlq_pending_gauges",
+                return_value={},
+            ),
+            patch(
+                "baldur.metrics.registry.get_registered_domains",
+                return_value=["payment"],
+            ),
+        ):
+            mock_registry.get_circuit_breaker_repo.return_value = mock_cb_repo
+            mock_registry.failed_op_repo.safe_get.return_value = None
+
+            service.get_metrics()
+
+            mock_registry.get_circuit_breaker_repo.assert_called_once_with(
+                name="layered"
+            )
+            mock_registry.circuit_breaker_repo.safe_get.assert_not_called()
 
 
 # =============================================================================
@@ -1133,6 +1198,17 @@ class TestGetMetricsHonestAbsence:
     would raise, and a test that merely survives would also pass if the loop
     never ran.
     """
+
+    @pytest.fixture(autouse=True)
+    def _empty_outcome_window(self):
+        """No recorded call outcomes, so every row's rate is a real absence."""
+        from baldur.services.circuit_breaker.time_outcome_window import (
+            reset_call_outcome_window,
+        )
+
+        reset_call_outcome_window()
+        yield
+        reset_call_outcome_window()
 
     @staticmethod
     def _repo(stats):
@@ -1166,7 +1242,7 @@ class TestGetMetricsHonestAbsence:
             patch("baldur.metrics.prometheus.get_metrics", return_value=facade),
         ):
             mock_registry.failed_op_repo.safe_get.return_value = self._repo(stats)
-            mock_registry.circuit_breaker_repo.safe_get.return_value = None
+            mock_registry.get_circuit_breaker_repo.return_value = None
             yield facade
 
     def test_get_metrics_renders_every_service_when_the_rate_source_is_absent(
@@ -1227,7 +1303,7 @@ class TestGetMetricsHonestAbsence:
             ),
         ):
             mock_registry.failed_op_repo.safe_get.return_value = repo
-            mock_registry.circuit_breaker_repo.safe_get.return_value = None
+            mock_registry.get_circuit_breaker_repo.return_value = None
             service.get_metrics()
 
         assert repo.get_statistics.call_count == 1

@@ -43,9 +43,16 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - **Migration**: `baldur_replay_outcomes_total{outcome="failure"}` alerts fire on failed retries.
 - `baldur_dlq_replay_duration_seconds` no longer times gate refusals, so its p95 rises to the truth.
 - **Breaking**: `baldur.services.config` and `BALDUR_PROPAGATION_*` removed — use `RedisEventBus`.
+- **Breaking**: `failure_rate_5m` in `GET /api/baldur/metrics/` may be null (was always `0.0`).
+- **Breaking**: `last_5m_failure_rate` may be null; `circuit_state` may be null (was `closed`).
+- A service with an observed call but no registered domain now gets a row in that payload.
 
 ### Fixed
 
+- Per-service `failure_rate_5m` was a literal; a real 5-minute windowed rate now backs it.
+- `last_5m_failure_rate` was the DLQ backlog share and `last_5m_request_count` its all-time total.
+- `circuit_state` read a repository no breaker writes to, so it said `closed` about open breakers.
+- A breaker name with a dot, a hyphen or a capital missed the DLQ and state joins on its row.
 - Reset pinned a manual circuit-breaker override instead of clearing it, so it never reopened.
 - A stored out-of-range circuit-breaker value could disable protection; it is now clamped.
 - A manual block admitted trial traffic once `recovery_timeout` elapsed; it now admits nothing.

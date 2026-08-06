@@ -112,14 +112,8 @@ rows:
   shape: get-fallback
   occurrences: 1
   verdict: config-default
-  evidence: src/baldur/services/control_api_service/service.py:392
+  evidence: src/baldur/services/control_api_service/service.py:397
   ticket: ''
-- unit: src/baldur/services/control_api_service/service.py::ControlAPIService.get_metrics::failure_rate_5m
-  shape: dict-literal
-  occurrences: 1
-  verdict: cross-ref
-  evidence: src/baldur/services/control_api_service/service.py:787
-  ticket: 742 OOS / 746
 - unit: src/baldur/services/dashboard_service/service.py::DashboardService._dict_to_summary::resolution_rate_percent
   shape: kwarg-get-fallback
   occurrences: 1

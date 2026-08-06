@@ -23,6 +23,11 @@ from .risk import assess_risk_level, classify_reason
 
 logger = structlog.get_logger()
 
+# Degradation order used when two raw circuit-breaker names project onto one
+# canonical row key. The merged row reports the worst of them, so a merge can
+# never hide an open breaker behind a closed one.
+_CB_STATE_SEVERITY: dict[str, int] = {"closed": 0, "half_open": 1, "open": 2}
+
 
 # =============================================================================
 # Null Object — CircuitBreakerService (D1, doc 426)
@@ -674,6 +679,78 @@ class ControlAPIService:
             return None
         return self._failure_injections.get(service_name)
 
+    @staticmethod
+    def _resolve_circuit_breaker_repo() -> Any:
+        """Return the repository instance the circuit breakers actually write to.
+
+        Every ``CircuitBreakerPolicy`` builds its service against the
+        separately-registered ``"layered"`` repository, while the registry's
+        module-load default is the Redis one. Asking for the default here would
+        resolve nothing on any deployment whose L2 is absent or degraded, so the
+        payload's ``circuit_state`` would be empty for every service precisely
+        when breakers are open. Requesting the name reaches the same per-name
+        singleton the policies obtained, and its ``get_all_states()`` reads the
+        in-process L1 tier, so a deployment with no reachable Redis still yields
+        real states.
+
+        ``"layered"`` is only registered inside the redis-client-import guard,
+        so on a redis-client-absent install the name is unregistered — hence the
+        same fall-back shape the policy uses for its own lookup. When both fail
+        the caller sees ``None`` and renders the state as unknown, never as
+        "closed".
+        """
+        from baldur.factory import ProviderRegistry
+
+        try:
+            return ProviderRegistry.get_circuit_breaker_repo(name="layered")
+        except Exception:
+            logger.debug("control_api.layered_cb_repo_unavailable")
+        try:
+            return ProviderRegistry.circuit_breaker_repo.safe_get()
+        except Exception:
+            return None
+
+    @staticmethod
+    def _canonical_lookup_views(
+        cb_states: dict[str, Any], dlq_pending: dict[str, int]
+    ) -> tuple[dict[str, Any], dict[str, int]]:
+        """Re-key the per-row lookup sources into one join vocabulary.
+
+        Four key sources meet on one ``service_name`` column and three of them
+        speak different dialects: registered domains and the outcome window are
+        canonical, circuit breaker states carry the raw name the application
+        protected, and the DLQ breakdown carries that store's own validated
+        form. Joining a canonical row against a raw map misses every name
+        holding a dot, a hyphen, a space or an uppercase letter — rendering "no
+        breaker state" for a breaker the repository knows, and "0 in DLQ" for a
+        service with real entries.
+
+        Only the LOOKUP side is re-keyed. The emitted breakdown and the counting
+        fields keep the raw keys they ship today: canonicalizing those would move
+        three numeric fields for reasons unrelated to the join.
+
+        Two raw names that merge onto one key resolve to the **most degraded**
+        state and to the **sum** of the pending counts, so a merged row can never
+        under-report an open breaker or an existing backlog.
+        """
+        from baldur.metrics.registry import canonicalize_domain_label
+
+        states_by_key: dict[str, Any] = {}
+        for raw_name, state in cb_states.items():
+            key = canonicalize_domain_label(raw_name)
+            previous = states_by_key.get(key)
+            if previous is None or _CB_STATE_SEVERITY.get(
+                state, 0
+            ) > _CB_STATE_SEVERITY.get(previous, 0):
+                states_by_key[key] = state
+
+        pending_by_key: dict[str, int] = {}
+        for raw_name, pending in dlq_pending.items():
+            key = canonicalize_domain_label(raw_name)
+            pending_by_key[key] = pending_by_key.get(key, 0) + pending
+
+        return states_by_key, pending_by_key
+
     def get_metrics(self) -> dict:
         """
         Collect comprehensive baldur metrics for trend analysis.
@@ -687,6 +764,35 @@ class ControlAPIService:
         - Prometheus/Grafana: Metrics scraping
         - External Monitoring: Alerting integration
 
+        **What the failure-rate and circuit-state fields mean:**
+
+        All three per-service fields describe **this worker process**: the
+        serving worker's own call-outcome window and its own breaker view.
+        Responses therefore vary across workers on a multi-worker deployment;
+        fleet-level aggregation is the Prometheus surface's job.
+
+        The denominator is calls this worker's circuit breakers **admitted and
+        counted** over the last five minutes — not calls that executed. An
+        inner stage that exhausts its own budget (a timeout whose task never
+        started, for instance) is a failed call from the caller's perspective,
+        and the window counts it exactly as the breaker does. Conversely, an
+        admitted call whose exception the breaker was configured to ignore is in
+        neither the numerator nor the denominator. Under the default
+        composition the breaker is outermost, so one admission is one protected
+        call; under a retry-over-breaker composition the breaker sits inside the
+        retry loop and one admission is one attempt.
+
+        Absence is reported as ``null``, never as zero: unprotected traffic, a
+        disabled breaker, an observe-only mode and retry-only compositions are
+        all invisible to this producer, and a service with no observed
+        admissions renders ``failure_rate_5m: null``. Test-mode traffic is not
+        segregated, matching the breaker's own trip evidence. Two service names
+        differing only in characters a metric label cannot carry share one row,
+        whose rate matches neither; the producer warns when that first happens.
+        Beyond the process's domain cap a newly-seen service is **absent from
+        the list** rather than folded into another row, and appears once a read
+        frees a slot.
+
         Returns:
             Dictionary with comprehensive metrics data
         """
@@ -694,8 +800,10 @@ class ControlAPIService:
 
         start_time = time.time()
 
-        from baldur.factory import ProviderRegistry
         from baldur.metrics.registry import get_registered_domains
+        from baldur.services.circuit_breaker.time_outcome_window import (
+            get_call_outcome_window,
+        )
         from baldur.services.metrics.updaters import (
             _resolve_pending_total,
             update_dlq_pending_gauges,
@@ -704,14 +812,23 @@ class ControlAPIService:
         from baldur.utils.time import utc_now as get_now
 
         current_time = get_now()
-        current_time - timedelta(minutes=5)
-        current_time - timedelta(hours=24)
 
-        # One DLQ repository snapshot per poll: both gauge updaters, the
-        # headline pending total and the failure-rate block below read it, so
-        # the response describes a single instant instead of three.
+        # Every shared source that feeds more than one field is read exactly
+        # once and reused from a local. Re-reading either of these produces a
+        # response that contradicts itself under concurrent traffic: a domain
+        # registered between two registry reads makes the row list longer than
+        # the count beside it, and an outcome recorded between two window reads
+        # makes the aggregate disagree with the rows it summarises.
+        registered_domains = get_registered_domains()
+        outcome_window = get_call_outcome_window().snapshot()
+
+        # One DLQ repository snapshot per poll: both gauge updaters and the
+        # headline pending total read it, so the response describes a single
+        # instant instead of three.
         dlq_stats: dict[str, Any] = {}
         try:
+            from baldur.factory import ProviderRegistry
+
             failed_op_repo = ProviderRegistry.failed_op_repo.safe_get()
             if failed_op_repo:
                 dlq_stats = failed_op_repo.get_statistics() or {}
@@ -732,10 +849,10 @@ class ControlAPIService:
         # per-service field below renders null instead of a fabricated 100%.
         retry_rates = update_retry_success_rates(stats=dlq_stats) or {}
 
-        # Get circuit breaker states from repository
+        # Circuit breaker states, read from the instance the breakers write to.
         cb_states: dict[str, Any] = {}
         try:
-            cb_repo = ProviderRegistry.circuit_breaker_repo.safe_get()
+            cb_repo = self._resolve_circuit_breaker_repo()
             if cb_repo:
                 all_states = cb_repo.get_all_states()
                 for cb in all_states:
@@ -743,33 +860,38 @@ class ControlAPIService:
         except Exception:
             pass
 
-        # Calculate aggregate service counts
+        cb_states_by_key, dlq_by_key = self._canonical_lookup_views(
+            cb_states, dlq_pending
+        )
+
+        # Aggregate service counts — deliberately still over the raw maps: a
+        # canonicalized recount would move three numeric fields for reasons
+        # unrelated to the failure rate. The window's keys join the union so the
+        # response can never carry more rows than this counts.
         total_services = len(
-            set(
-                list(dlq_pending.keys())
-                + list(cb_states.keys())
-                + get_registered_domains()
-            )
+            set(dlq_pending)
+            | set(cb_states)
+            | set(registered_domains)
+            | set(outcome_window)
         )
         healthy_services = sum(1 for s in cb_states.values() if s == "closed")
         degraded_services = sum(
             1 for s in cb_states.values() if s in ("open", "half_open")
         )
 
-        # Calculate 5-minute failure rate from the snapshot taken above
-        last_5m_failure_rate = 0.0
-        last_5m_request_count = 0
-        avg_time_to_recovery = None
+        # Five-minute aggregate, summed from the SAME window snapshot the rows
+        # are built from — not a second read of the producer. A call landing
+        # between two reads would make the aggregate contradict the rows beside
+        # it in one response. Null when nothing was observed; the request count
+        # stays 0, which is the honest count for "no observed admissions".
+        window_failures = sum(failures for failures, _ in outcome_window.values())
+        window_total = sum(total for _, total in outcome_window.values())
+        last_5m_failure_rate = window_failures / window_total if window_total else None
+        last_5m_request_count = window_total
 
-        try:
-            if dlq_stats:
-                last_5m_failure_rate = dlq_stats.get("pending_count", 0) / max(
-                    dlq_stats.get("total_count", 1), 1
-                )
-                last_5m_request_count = dlq_stats.get("total_count", 0)
-                avg_time_to_recovery = dlq_stats.get("avg_resolution_time_seconds")
-        except Exception:
-            pass
+        # DLQ resolution time — a separate, honestly-sourced measurement that
+        # happens to ride the same stats blob.
+        avg_time_to_recovery = dlq_stats.get("avg_resolution_time_seconds")
 
         # auto_allowed/auto_blocked: not yet implemented — counts require audit log query
         # (deferred until governance event volume justifies the query cost).
@@ -779,17 +901,33 @@ class ControlAPIService:
         auto_allowed = 0
         auto_blocked = 0
 
-        # Build per-service metrics
+        # Build per-service metrics. Rows come from the registered domains
+        # UNION the window's keys: the default circuit-breaker-only protect()
+        # deliberately never registers a domain, so a service failing every call
+        # would otherwise have no row at all — the very case this payload exists
+        # to answer. Both sources are canonical and both are members of the
+        # total_services union above, so len(services) <= total_services holds
+        # by construction.
         services_metrics = []
-        for domain in get_registered_domains():
+        for domain in sorted(set(registered_domains) | set(outcome_window)):
+            observed = outcome_window.get(domain)
             service_metric = {
                 "service_name": domain,
-                "failure_rate_5m": 0.0,
+                # Null, never 0.0, when this worker observed no admission for
+                # the service: a fabricated zero reads as "healthy" to an
+                # operator during an incident.
+                "failure_rate_5m": (
+                    observed[0] / observed[1] if observed and observed[1] else None
+                ),
                 # None while no producer computes per-domain success rates —
                 # the field models "not measured", never a fabricated 100%.
                 "retry_success_rate": retry_rates.get(domain),
-                "dlq_count": dlq_pending.get(domain, 0),
-                "circuit_state": cb_states.get(domain, "closed"),
+                "dlq_count": dlq_by_key.get(domain, 0),
+                # Null when the repository view holds no evidence for this
+                # service. Absence is "unknown", not "closed" — defaulting to
+                # closed asserts that a breaker is fine about breakers this
+                # process cannot see.
+                "circuit_state": cb_states_by_key.get(domain),
                 "avg_recovery_time_seconds": None,
             }
             services_metrics.append(service_metric)

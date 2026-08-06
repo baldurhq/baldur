@@ -34,6 +34,7 @@ from baldur.interfaces.resilience_policy import (
 from .config import CircuitBreakerConfig, CircuitState
 from .exceptions import CircuitBreakerOpenError
 from .service import CircuitBreakerService
+from .time_outcome_window import record_call_outcome, resolve_outcome_key
 
 logger = structlog.get_logger()
 
@@ -87,6 +88,13 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
         self._failure_exceptions = failure_exceptions
         self._ignore_exceptions = ignore_exceptions
         self._hooks = hooks if hooks is not None else []
+        # Resolved once: the service name is fixed for this policy's lifetime
+        # and the policy itself is cached per name, so the key projection, its
+        # lazy import and its collision check are paid once per protected name
+        # instead of once per call. ``None`` (projection failed) means the
+        # recording path is skipped entirely — the rate renders "not measured"
+        # rather than a wrong number.
+        self._outcome_key = resolve_outcome_key(service_name)
 
     @staticmethod
     def _create_default_service(
@@ -235,6 +243,7 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
             self._service_name,
             hint_state=hint_state,
         )
+        record_call_outcome(self._outcome_key, failure=False)
         success_result = PolicyResult(
             value=value,
             outcome=PolicyOutcome.SUCCESS,
@@ -260,6 +269,10 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
                 error_context={"error": str(error), "type": type(error).__name__},
                 hint_state=hint_state,
             )
+            # Behind the same gate as the breaker's own count: an admission
+            # whose exception the breaker was configured to ignore is in
+            # neither the numerator nor the denominator of the rate.
+            record_call_outcome(self._outcome_key, failure=True)
         # Hook: execution failure (Audit + EventBus)
         self._invoke_hooks("on_failure", self._service_name, error, 1)
 
