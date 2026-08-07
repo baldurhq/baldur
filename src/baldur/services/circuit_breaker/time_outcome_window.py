@@ -24,7 +24,9 @@ Design constraints that are load-bearing rather than stylistic:
   wall clock stepped backwards by NTP makes the current bucket index smaller
   than the stored ones, so buckets holding old outcomes satisfy the in-window
   predicate and get reported as "the last five minutes" — fabricated freshness,
-  the defect class this module exists to remove.
+  the defect class this module exists to remove. A bucket stores its index and
+  nothing else, so no read-side check can recover from that; the only defence
+  is a clock that cannot step back. Treat the default as load-bearing.
 - **Buckets are pre-allocated mutable integer arrays.** A tuple triple would
   allocate and rebind on every recorded outcome, putting one object allocation
   on every protected call.
@@ -349,9 +351,22 @@ class TimeBucketedOutcomeWindow:
         """Return ``(failures, total, last_active_epoch)`` over in-window buckets.
 
         A bucket is in window when its epoch is within ``_BUCKET_COUNT`` steps
-        behind ``now_epoch``. A bucket stamped *ahead* of now — reachable only
-        through an injected clock moving backwards — is excluded, which
-        under-reports rather than reporting stale outcomes as fresh.
+        behind ``now_epoch``, so the covered span is >= 300 s and < 310 s. The
+        exact edge inside that band is bucket-phase-relative, not
+        elapsed-relative: an outcome is counted iff the read's bucket index is
+        at most 30 ahead of the record's. Every phase counts everything up to
+        300 s and drops everything from 310 s; only the 10 s between them
+        depends on where in its bucket the outcome landed.
+
+        A bucket stamped *ahead* of now is excluded. That is NOT a general
+        defence against a clock moving backwards, and must not be read as one:
+        a clock that runs forward past the window and only then steps back can
+        leave an aged-out bucket inside the in-window band again, republishing
+        old failures as the last five minutes. Nothing here can detect that,
+        because a bucket stores only its index. The defence is the monotonic
+        default clock, which never moves backwards at all — which is why that
+        default is a contract of this module rather than a convenience (see the
+        module docstring).
 
         Caller MUST hold the lock.
         """
