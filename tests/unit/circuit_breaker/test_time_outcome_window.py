@@ -678,6 +678,82 @@ class TestOutcomeWindowCardinalityBehavior:
 
 
 # =============================================================================
+# Behavior — the shipped default cap provider
+# =============================================================================
+
+
+class TestDefaultCapProviderBehavior:
+    """What bounds the window when nobody injects a cap — i.e. in production.
+
+    Every case above injects ``cap_provider``, which is exactly why this class
+    exists: freezing the shipped default to the module constant would leave all
+    of them green while silently disconnecting the window from the operator's
+    ``max_registered_domains`` knob. The claim being pinned is that the two
+    cardinality surfaces read one number, so they cannot disagree about the cap.
+    """
+
+    @staticmethod
+    def _forget_the_shared_cap_memo() -> None:
+        """Drop the registry's memoized cap so a patched value is seen at once.
+
+        The resolver is memoized for its own TTL and shared process-wide, so a
+        stale entry would both hide the patch here and outlive the case.
+        """
+        from baldur.metrics.registry import reset_registered_domains
+
+        reset_registered_domains()
+
+    def test_default_provider_returns_the_operator_configured_cap(self):
+        """The window's cap is the metric registry's cap, not a private one."""
+        self._forget_the_shared_cap_memo()
+        try:
+            with patch(
+                "baldur.settings.layered_provider.get_layered_settings",
+                autospec=True,
+            ) as mock_get:
+                mock_get.return_value.max_registered_domains = 123
+
+                assert time_outcome_window._default_cap_provider() == 123
+        finally:
+            self._forget_the_shared_cap_memo()
+
+    def test_default_provider_falls_back_when_the_resolver_is_unreachable(self):
+        """A broken shared resolver leaves a finite cap, never an uncapped window."""
+        with patch(
+            "baldur.metrics.registry._resolve_max_domains_cached",
+            side_effect=RuntimeError("registry unavailable"),
+        ):
+            assert time_outcome_window._default_cap_provider() == _MAX_OUTCOME_KEYS
+
+    def test_window_built_without_a_provider_enforces_the_operator_cap(self):
+        """End to end on the shipped wiring: the knob governs admission.
+
+        Observable rather than attribute-level — the third name is refused
+        because the operator set the cap to two, with nothing injected.
+        """
+        self._forget_the_shared_cap_memo()
+        try:
+            with patch(
+                "baldur.settings.layered_provider.get_layered_settings",
+                autospec=True,
+            ) as mock_get:
+                mock_get.return_value.max_registered_domains = 2
+                clock = _FakeClock()
+                window = TimeBucketedOutcomeWindow(clock=clock)
+                window.snapshot()
+
+                for index in range(3):
+                    window.record(f"svc_{index}", failure=True)
+                    clock.advance(_BUCKET_SECONDS)
+
+                observed = window.snapshot()
+
+            assert set(observed) == {"svc_0", "svc_1"}
+        finally:
+            self._forget_the_shared_cap_memo()
+
+
+# =============================================================================
 # Behavior — read-time eviction (D14)
 # =============================================================================
 
