@@ -101,20 +101,15 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
         config: CircuitBreakerConfig | None = None,
     ) -> CircuitBreakerService:
         """
-        Create the default CircuitBreakerService — uses LayeredRepository.
+        Create the default CircuitBreakerService.
 
-        If the "layered" key is registered in ProviderRegistry, use LayeredRepository.
-        Otherwise, fall back to the ProviderRegistry default (redis).
-        This removes Redis I/O from the hot path and guarantees L1 Memory decisions (#227 §7.4).
+        The layered-first resolution now lives on
+        ``CircuitBreakerService.repository`` itself, so the traffic path and
+        every operator-facing consumer resolve through one place instead of
+        two — which is what kept an operator's manual pin out of the view
+        admission reads.
         """
-        repository = None
-        try:
-            from baldur.factory import ProviderRegistry
-
-            repository = ProviderRegistry.get_circuit_breaker_repo(name="layered")
-        except (ValueError, ImportError, Exception):
-            logger.debug("circuit_breaker_policy.layered_repo_available_falling")
-        return CircuitBreakerService(config=config, repository=repository)
+        return CircuitBreakerService(config=config)
 
     @property
     def name(self) -> str:
@@ -167,8 +162,8 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
           run func.
         - ``("run", None, hint_state)`` — admitted: run func, then call
           :meth:`_on_success` / :meth:`_on_failure` with ``hint_state`` (the
-          state object ``should_allow_with_state`` already loaded, so record_*
-          skips a redundant lookup).
+          state object ``should_allow_with_state`` already loaded, which
+          unlocks ``record_success``'s read-free steady-state fast path).
 
         Shared verbatim by the sync ``execute`` and the async wrapper — the only
         difference between the two variants is ``func()`` vs ``await func()``.
@@ -224,9 +219,10 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
             self._invoke_hooks("on_reject", self._service_name, "circuit_open")
             return "reject", reject_result, None
 
-        # 490 D4: return decision.state as hint_state so record_success /
-        # record_failure skip the redundant ``get_or_create_state`` lookup. The
-        # CLOSED steady-state path then does zero repository acquires.
+        # Return decision.state as hint_state so ``record_success`` can take its
+        # read-free steady-state fast path: the CLOSED steady-state path then
+        # does zero repository acquires. The hint is a fast-path gate only —
+        # neither record path treats it as a substitute for a fresh read.
         return "run", None, decision.state
 
     def _direct_result(self, value: T) -> PolicyResult[T]:

@@ -7,9 +7,10 @@ Provides CircuitBreakerStateRepository interface implementation with L1 priority
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -47,6 +48,15 @@ class RepositoryOperationsMixin:
         def _sync_to_l2_async(
             self, service_name: str, state: CircuitBreakerStateData
         ) -> None: ...
+        def _sync_to_l2_with_timeout(
+            self, service_name: str, state: CircuitBreakerStateData
+        ) -> bool: ...
+        def _sync_pin_to_l2(
+            self,
+            service_name: str,
+            write: Callable[[], Any],
+            intended_state: str = "",
+        ) -> bool: ...
         def _handle_l2_success(self, elapsed_ms: float) -> None: ...
         def _handle_l2_timeout(
             self, operation: str, service_name: str | None
@@ -73,14 +83,11 @@ class RepositoryOperationsMixin:
                 l2_result = future.result(timeout=timeout)
 
                 if l2_result:
-                    self._l1.get_or_create(service_name)
-                    self._l1.update_state(
-                        service_name=service_name,
-                        state=l2_result.state,
-                        failure_count=l2_result.failure_count,
-                        success_count=l2_result.success_count,
-                        opened_at=l2_result.opened_at,
-                    )
+                    # Wholesale hydration of an absent L1 row: nothing local
+                    # can be erased, so this lane carries the manual-control
+                    # fields too — a Block placed elsewhere is enforced here
+                    # from the first request onward.
+                    self._l1.hydrate_snapshot(l2_result)
                     elapsed_ms = (time.perf_counter() - start_time) * 1000
                     self._handle_l2_success(elapsed_ms)
                     return self._l1.get_by_service_name(service_name)
@@ -669,6 +676,58 @@ class RepositoryOperationsMixin:
 
         return result
 
+    def _write_manual_control_through(
+        self,
+        service_name: str,
+        row: CircuitBreakerStateData,
+        pin_write: Callable[[CircuitBreakerStateRepository], Any],
+    ) -> None:
+        """Write an operator's manual-control result through to L2, synchronously.
+
+        Two writes, in this order:
+
+        1. the generic four-field state mirror, and
+        2. the pin fields, via L2's own manual-control primitive.
+
+        The generic mirror carries state only — a pin written through it alone
+        would never reach the durable row. The order matters: a reader racing
+        between the two writes sees the new state without the pin (an ordinary
+        OPEN — the safe direction), where the reverse order would expose a pin
+        attached to the state it replaced.
+
+        Synchronous rather than fire-and-forget because the operator's response
+        is read back once this returns; the expiry it reports and the expiry
+        stored durably must be the same instant. Both writes are bounded by the
+        adapter timeout on the shared executor, never issued inline.
+        """
+        l2 = self._l2
+        if l2 is None:
+            return
+
+        self._sync_to_l2_with_timeout(service_name, row)
+        self._sync_pin_to_l2(service_name, lambda: pin_write(l2), row.state)
+
+    def _pin_fields_write(
+        self, row: CircuitBreakerStateData
+    ) -> Callable[[CircuitBreakerStateRepository], Any]:
+        """Build the L2 pin write that reproduces ``row``'s manual-control fields.
+
+        ``expires_at`` is passed explicitly from the row the L1 operation just
+        produced — never recomputed from a TTL, which would resolve to a
+        different instant than the one the operator's response reports.
+        """
+
+        def _write(l2: CircuitBreakerStateRepository) -> Any:
+            return l2.set_manual_control(
+                row.service_name,
+                state=row.state,
+                controlled_by_id=row.controlled_by_id,
+                reason=row.control_reason,
+                expires_at=row.manual_override_expires_at,
+            )
+
+        return _write
+
     def atomic_force_open(
         self,
         service_name: str,
@@ -676,7 +735,7 @@ class RepositoryOperationsMixin:
         controlled_by_id: int | None = None,
         ttl_minutes: int | None = None,
     ) -> tuple:
-        """Force open in L1, then synchronize to L2."""
+        """Force open in L1, then write state and pin fields through to L2."""
         result = self._l1.atomic_force_open(
             service_name, reason, controlled_by_id, ttl_minutes
         )
@@ -684,7 +743,9 @@ class RepositoryOperationsMixin:
         if result[0]:
             updated = self._l1.get_by_service_name(service_name)
             if updated:
-                self._sync_to_l2_async(service_name, updated)
+                self._write_manual_control_through(
+                    service_name, updated, self._pin_fields_write(updated)
+                )
 
         return result
 
@@ -695,7 +756,7 @@ class RepositoryOperationsMixin:
         controlled_by_id: int | None = None,
         ttl_minutes: int | None = None,
     ) -> tuple:
-        """Force close in L1, then synchronize to L2."""
+        """Force close in L1, then write state and pin fields through to L2."""
         result = self._l1.atomic_force_close(
             service_name, reason, controlled_by_id, ttl_minutes
         )
@@ -703,7 +764,9 @@ class RepositoryOperationsMixin:
         if result[0]:
             updated = self._l1.get_by_service_name(service_name)
             if updated:
-                self._sync_to_l2_async(service_name, updated)
+                self._write_manual_control_through(
+                    service_name, updated, self._pin_fields_write(updated)
+                )
 
         return result
 
@@ -713,13 +776,17 @@ class RepositoryOperationsMixin:
         reason: str = "",
         controlled_by_id: int | None = None,
     ) -> tuple:
-        """Reset in L1, then synchronize to L2."""
+        """Reset in L1, then write state and the pin clear through to L2."""
         result = self._l1.atomic_reset(service_name, reason, controlled_by_id)
 
         if result[0]:
             updated = self._l1.get_by_service_name(service_name)
             if updated:
-                self._sync_to_l2_async(service_name, updated)
+                self._write_manual_control_through(
+                    service_name,
+                    updated,
+                    lambda l2: l2.atomic_reset(service_name, reason, controlled_by_id),
+                )
 
         return result
 
@@ -731,7 +798,7 @@ class RepositoryOperationsMixin:
         reason: str = "",
         expires_at: datetime | None = None,
     ) -> bool:
-        """Set manual control in L1, then synchronize to L2."""
+        """Set manual control in L1, then write state and pin fields through to L2."""
         result = self._l1.set_manual_control(
             service_name, state, controlled_by_id, reason, expires_at
         )
@@ -739,20 +806,26 @@ class RepositoryOperationsMixin:
         if result:
             updated = self._l1.get_by_service_name(service_name)
             if updated:
-                self._sync_to_l2_async(service_name, updated)
+                self._write_manual_control_through(
+                    service_name, updated, self._pin_fields_write(updated)
+                )
 
         return result
 
     def clear_manual_control(
         self, service_name: str, preserve_reason: bool = False
     ) -> bool:
-        """Clear manual control in L1, then synchronize to L2."""
+        """Clear manual control in L1, then write the clear through to L2."""
         result = self._l1.clear_manual_control(service_name, preserve_reason)
 
         if result:
             updated = self._l1.get_by_service_name(service_name)
             if updated:
-                self._sync_to_l2_async(service_name, updated)
+                self._write_manual_control_through(
+                    service_name,
+                    updated,
+                    lambda l2: l2.clear_manual_control(service_name, preserve_reason),
+                )
 
         return result
 

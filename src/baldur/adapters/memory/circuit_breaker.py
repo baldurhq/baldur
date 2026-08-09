@@ -113,6 +113,62 @@ class InMemoryCircuitBreakerStateRepository(CircuitBreakerStateRepository):
         with self._lock:
             return self._get_or_create_unlocked(service_name)
 
+    def hydrate_snapshot(self, snapshot: CircuitBreakerStateData) -> None:
+        """Create-or-replace a row from a durable snapshot, pin fields included.
+
+        The single primitive for wholesale restores from the durable layer:
+        the layered repository's construction-time load and its miss-hydration
+        lane. It carries the manual-control fields that a per-field state copy
+        drops, so an operator's Block/Allow survives into a process that
+        did not take it.
+
+        Copied from the snapshot: state, failure_count, success_count,
+        opened_at, last_failure_at, manually_controlled, controlled_by_id,
+        control_reason, manual_override_expires_at, metadata.
+
+        Preserved (layer-local, never carried by a snapshot): id, created_at,
+        and the half-open window fields, which belong to the atomic
+        slot-acquire primitives rather than to bulk transfer.
+
+        Deliberately NOT the two-step ``set_manual_control`` +
+        ``update_state``: that primitive restamps ``opened_at`` on an OPEN row,
+        which would corrupt the discriminator that decides whether a pin's
+        lift is due, and the two writes are not atomic against a concurrent
+        admission read. One locked replace avoids both.
+        """
+        with self._lock:
+            entry = self._storage.get(snapshot.service_name)
+            if entry is None:
+                entry_id = self._next_id
+                self._next_id += 1
+                created_at = _now()
+                half_open_count = 0
+                half_open_window_started_at: datetime | None = None
+            else:
+                entry_id = entry.id  # type: ignore[assignment]
+                created_at = entry.created_at  # type: ignore[assignment]
+                half_open_count = entry.half_open_request_count
+                half_open_window_started_at = entry.half_open_window_started_at
+
+            self._storage[snapshot.service_name] = CircuitBreakerStateData(
+                id=entry_id,
+                service_name=snapshot.service_name,
+                state=snapshot.state,
+                failure_count=snapshot.failure_count,
+                success_count=snapshot.success_count,
+                last_failure_at=snapshot.last_failure_at,
+                opened_at=snapshot.opened_at,
+                manually_controlled=snapshot.manually_controlled,
+                controlled_by_id=snapshot.controlled_by_id,
+                control_reason=snapshot.control_reason,
+                manual_override_expires_at=snapshot.manual_override_expires_at,
+                half_open_request_count=half_open_count,
+                half_open_window_started_at=half_open_window_started_at,
+                metadata=dict(snapshot.metadata),
+                created_at=created_at,
+                updated_at=_now(),
+            )
+
     def update_state(
         self,
         service_name: str,

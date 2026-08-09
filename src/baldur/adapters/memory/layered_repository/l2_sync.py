@@ -7,6 +7,7 @@ Provides methods for syncing data to/from L2 storage.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import TYPE_CHECKING, Any
 
@@ -53,6 +54,61 @@ class L2SyncMixin:
             intended_state: str = "",
         ) -> None: ...
         def _load_from_l2_with_timeout(self) -> None: ...
+
+    def _submit_l2_write(self, write: Callable[[], Any]) -> None:
+        """Run one L2 write on the shared executor, bounded by the adapter timeout.
+
+        Every synchronous L2 write routes through here instead of calling the
+        adapter inline. An inline call is bounded only by the Redis socket
+        timeout with retry-on-timeout — seconds, on whichever thread issued the
+        operation, which for the manual-control ops is the operator's own
+        request thread.
+
+        Raises ``TimeoutError`` (concurrent.futures) or whatever the write
+        raised; each caller reports it with its own literal event name.
+        """
+        future = self._get_executor().submit(write)
+        future.result(timeout=self._get_timeout_seconds())
+
+    def _sync_pin_to_l2(
+        self,
+        service_name: str,
+        write: Callable[[], Any],
+        intended_state: str = "",
+    ) -> bool:
+        """Write an operator's manual-control decision through to L2, bounded.
+
+        The generic state mirror carries only the four state fields, so a pin
+        placed here would otherwise never reach the durable row and would be
+        lost to every process that hydrates from it. Deliberately synchronous:
+        the operator's response is read back after this returns, so the stored
+        expiry and the reported one must be the same instant.
+
+        Fail-open on the durability side-effect: a failed L2 write is logged
+        and counted through the quarantine handlers, and the operation still
+        succeeds — enforcement is the L1 row, which is already written.
+        """
+        if not self._l2:
+            return False
+
+        start_time = time.perf_counter()
+        try:
+            self._submit_l2_write(write)
+            self._handle_l2_success((time.perf_counter() - start_time) * 1000)
+            return True
+        except FuturesTimeoutError:
+            self._handle_l2_timeout("manual_control_sync", service_name)
+            logger.warning(
+                "layered_repo.manual_control_sync_timeout_ms",
+                service_name=service_name,
+                timeout_ms=self._get_timeout_seconds() * 1000,
+            )
+            return False
+        except Exception as e:
+            self._handle_l2_error(
+                "manual_control_sync", service_name, e, intended_state
+            )
+            return False
 
     def _sync_to_l2_with_timeout(
         self,
@@ -145,6 +201,48 @@ class L2SyncMixin:
                 error=e,
             )
 
+    def _repair_row_to_l2(self, service_name: str) -> bool | None:
+        """Mirror one L1 row to L2 for repair — unless the row is pinned.
+
+        Every whole-row L1→L2 repair lane routes through here. Two properties
+        it guarantees that a direct mirror call does not:
+
+        - **Freshness.** The row is re-read here, never taken from a snapshot
+          the caller took at the start of its pass. A snapshot predating an
+          operator's Block would otherwise be written back over it, leaving a
+          CLOSED row that still reports itself manually controlled — a shape
+          whose admission short-circuit admits everything.
+        - **Pin neutrality.** A pinned row is skipped outright. The mirror
+          opens with L2 ``get_or_create``, which on a missing key writes the
+          default payload — including "not manually controlled" — so repairing
+          a pinned service after the durable row was lost would erase the
+          operator's decision from the shared store.
+
+        Skipping is safe rather than merely conservative: the manual-control
+        ops already write the pinned row through to L2 synchronously, so what
+        a skipped repair leaves behind is correct, not stale. Reconciliation
+        here is pin-*neutral* — it never creates, erases, or contradicts a pin;
+        it does not deliver one either.
+
+        Returns True when the mirror ran and succeeded, False when it ran and
+        failed, and ``None`` when nothing was attempted (row gone or pinned) —
+        a skip is not a failure and must not be reported as one.
+        """
+        row = self._l1.get_by_service_name(service_name)
+        if row is None:
+            logger.debug(
+                "layered_repo.repair_skipped_row_absent",
+                service_name=service_name,
+            )
+            return None
+        if row.manually_controlled:
+            logger.debug(
+                "layered_repo.repair_skipped_manually_controlled",
+                service_name=service_name,
+            )
+            return None
+        return self._sync_to_l2_with_timeout(service_name, row)
+
     def force_sync_from_l2(self) -> bool:
         """Force synchronization from L2 (administrative purpose)."""
         if not self._l2:
@@ -165,12 +263,17 @@ class L2SyncMixin:
         if not self._l2:
             return {"success": False, "reason": "L2 not configured"}
 
-        all_states = self._l1.get_all_states()
         success_count = 0
         failure_count = 0
+        skipped_count = 0
 
-        for state in all_states:
-            if self._sync_to_l2_with_timeout(state.service_name, state):
+        # Enumerate names, not rows: the repair helper re-reads each row, so a
+        # pin taken during the pass is honoured rather than overwritten.
+        for state in self._l1.get_all_states():
+            outcome = self._repair_row_to_l2(state.service_name)
+            if outcome is None:
+                skipped_count += 1
+            elif outcome:
                 success_count += 1
             else:
                 failure_count += 1
@@ -180,7 +283,8 @@ class L2SyncMixin:
 
         return {
             "success": failure_count == 0,
-            "total": len(all_states),
+            "total": success_count + failure_count + skipped_count,
             "synced": success_count,
             "failed": failure_count,
+            "skipped": skipped_count,
         }

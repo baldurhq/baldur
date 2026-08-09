@@ -48,6 +48,7 @@ class DriftOperationsMixin:
         def _sync_to_l2_with_timeout(
             self, service_name: str, state: CircuitBreakerStateData
         ) -> bool: ...
+        def _repair_row_to_l2(self, service_name: str) -> bool | None: ...
         def _log_drift_reconciliation_audit(
             self,
             total_checked: int,
@@ -116,7 +117,7 @@ class DriftOperationsMixin:
                     continue
 
                 if l2_state is None:
-                    self._sync_to_l2_with_timeout(l1_state.service_name, l1_state)
+                    self._repair_row_to_l2(l1_state.service_name)
                     l1_wins_count += 1
                     reconciled_count += 1
                     continue
@@ -138,9 +139,15 @@ class DriftOperationsMixin:
                     DriftReconciliationResult.L1_WINS,
                     DriftReconciliationResult.TIMESTAMP_L1,
                 ):
-                    self._sync_to_l2_with_timeout(l1_state.service_name, l1_state)
+                    self._repair_row_to_l2(l1_state.service_name)
                     l1_wins_count += 1
                 else:
+                    # L2-wins keeps the pin-preserving four-field copy on
+                    # purpose: this pass compares a start-of-pass L1 snapshot
+                    # against a per-service L2 read and writes without
+                    # re-reading, so a wholesale replace here could erase a pin
+                    # placed between the two. Consequence, accepted and named:
+                    # reconciliation never delivers pins across processes.
                     self._l1.update_state(
                         service_name=l2_state.service_name,
                         state=l2_state.state,
@@ -249,7 +256,7 @@ class DriftOperationsMixin:
             return {"success": False, "reason": str(e)}
 
         if l2_state is None:
-            self._sync_to_l2_with_timeout(service_name, l1_state)
+            self._repair_row_to_l2(service_name)
             return {
                 "success": True,
                 "action": "l1_to_l2",
@@ -277,7 +284,7 @@ class DriftOperationsMixin:
             DriftReconciliationResult.L1_WINS,
             DriftReconciliationResult.TIMESTAMP_L1,
         ):
-            self._sync_to_l2_with_timeout(service_name, l1_state)
+            self._repair_row_to_l2(service_name)
             return {
                 "success": True,
                 "action": "l1_to_l2",

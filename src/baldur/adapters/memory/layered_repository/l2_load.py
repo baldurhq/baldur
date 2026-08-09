@@ -72,14 +72,13 @@ class L2LoadMixin:
             all_states = future.result(timeout=timeout)
 
             for state in all_states:
-                self._l1.get_or_create(state.service_name)
-                self._l1.update_state(
-                    service_name=state.service_name,
-                    state=state.state,
-                    failure_count=state.failure_count,
-                    success_count=state.success_count,
-                    opened_at=state.opened_at,
-                )
+                # Wholesale restore: this lane owns the L1 row outright (it
+                # runs at construction, and on the admin force-resync), so it
+                # carries the manual-control fields a per-field state copy
+                # drops. Without them a process started after an operator's
+                # Block hydrates the OPEN state but not the pin, and its first
+                # trial success closes the circuit the operator pinned.
+                self._l1.hydrate_snapshot(state)
 
             self._last_sync_time = _now()
             # Reset the quarantine quad under self._lock (D6) so the

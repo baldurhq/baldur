@@ -195,8 +195,14 @@ class TestRepositoryProperty:
 
         assert service.repository is mock_repo
 
-    def test_repository_lazy_creates_default(self):
-        """Test repository creates default when not injected."""
+    def test_repository_lazy_resolves_the_layered_view(self):
+        """The uninjected default resolves the layered repository, by name.
+
+        The name is the assertion: this property is the single resolution
+        point shared by the traffic path and every operator-facing consumer,
+        and a name-blind mock returns the same object for any name — so
+        asserting only that a repository came back would prove nothing.
+        """
         from baldur.services.circuit_breaker.config import CircuitBreakerConfig
         from baldur.services.circuit_breaker.service import CircuitBreakerService
 
@@ -210,7 +216,10 @@ class TestRepositoryProperty:
             service = CircuitBreakerService(config=config)
             repo = service.repository
 
-            assert repo is not None
+            assert repo is mock_repo
+            mock_registry.get_circuit_breaker_repo.assert_called_once_with(
+                name="layered"
+            )
 
 
 class TestCircuitBreakerServiceIntegration:
@@ -385,16 +394,23 @@ HINT_CASES = [
 
 
 class TestRecordSuccessHintStateBehavior:
-    """490 D4 — record_success(hint_state=...) parametrize across all 7 hints.
+    """record_success(hint_state=...) parametrized across all 7 hints.
 
-    Fast path (fresh-CLOSED-fc=0) MUST NOT touch the repository at all.
-    Slow paths reuse the hint when service_name matches; mismatched name
-    falls through to a fresh get_or_create_state().
+    The hint is a read-free fast-path gate and nothing more. Only the
+    steady-state fresh-CLOSED-fc=0 case skips the repository entirely; every
+    other case re-reads, because a hint taken at admission time can predate
+    an operator's manual pin and every slow-path branch either runs the pin
+    check or writes state.
     """
 
     @pytest.mark.parametrize("hint", HINT_CASES)
     def test_record_success_with_hint(self, hint):
         service, repo = _build_service_with_mock_repo()
+        # The hint no longer substitutes for the read, so the stored row must
+        # agree with the hint for the branch the hint names to be the branch
+        # actually exercised.
+        if hint is not None and hint.service_name == "svc":
+            repo.get_or_create.return_value = hint
 
         # When: record_success() is invoked with the parametrized hint.
         service.record_success("svc", hint_state=hint)
@@ -416,26 +432,26 @@ class TestRecordSuccessHintStateBehavior:
                 assert repo.update_state.call_count == 0
                 assert repo.record_success.call_count == 0
             elif hint.manually_controlled:
-                # Manual-control short-circuit: hint reused, no writes.
-                assert repo.get_or_create.call_count == 0
+                # Manual-control short-circuit — decided on the fresh read.
+                assert repo.get_or_create.call_count == 1
                 assert repo.update_state.call_count == 0
                 assert repo.record_success.call_count == 0
             elif hint.state == CircuitBreakerStateEnum.HALF_OPEN.value:
-                # HALF_OPEN success: hint reused, atomic record-success +
-                # close-check called. 497 D1/D2 replaced the prior
-                # record_success + threshold-check + update_state(close)
-                # sequence with a single repository method.
-                assert repo.get_or_create.call_count == 0
+                # HALF_OPEN success: atomic record-success + close-check.
+                # 497 D1/D2 replaced the prior record_success +
+                # threshold-check + update_state(close) sequence with a
+                # single repository method.
+                assert repo.get_or_create.call_count == 1
                 assert repo.record_success_with_close_check.call_count == 1
                 assert repo.record_success.call_count == 0
             elif hint.state == CircuitBreakerStateEnum.CLOSED.value:
-                # Stale CLOSED with fc>0: hint reused (no get_or_create),
-                # update_state(closed, fc=0) is called.
-                assert repo.get_or_create.call_count == 0
+                # Stale CLOSED with fc>0: fresh read, then
+                # update_state(closed, fc=0).
+                assert repo.get_or_create.call_count == 1
                 assert repo.update_state.call_count == 1
             elif hint.state == CircuitBreakerStateEnum.OPEN.value:
-                # OPEN: no branch fires; just hint-reuse skip of get_or_create.
-                assert repo.get_or_create.call_count == 0
+                # OPEN: no branch fires, but the read still happens.
+                assert repo.get_or_create.call_count == 1
                 assert repo.update_state.call_count == 0
                 assert repo.record_success.call_count == 0
             else:
@@ -446,24 +462,25 @@ class TestRecordSuccessHintStateBehavior:
 
 
 class TestRecordFailureHintStateBehavior:
-    """490 D4 — record_failure(hint_state=...) parametrize across all 7 hints.
+    """record_failure(hint_state=...) parametrized across all 7 hints.
 
-    Failures must always be recorded, so the fast path is narrower: the hint
-    only skips the redundant get_or_create_state lookup. The eventual write
-    (record_failure or update_state-revert) still runs.
+    record_failure has no fast path — it always writes — so it always reads
+    fresh state and the hint is never consulted at all.
     """
 
     @pytest.mark.parametrize("hint", HINT_CASES)
     def test_record_failure_with_hint(self, hint):
         service, repo = _build_service_with_mock_repo()
+        if hint is not None and hint.service_name == "svc":
+            repo.get_or_create.return_value = hint
 
         # When: record_failure() is invoked with the parametrized hint.
         service.record_failure("svc", hint_state=hint)
 
-        # Then: matched hint always skips get_or_create; failures are still
-        # recorded (or, for HALF_OPEN, an update_state(OPEN) revert fires).
+        # Then: the repository read always happens; failures are still
+        # recorded (or, for HALF_OPEN, an atomic OPEN revert fires).
         if hint is not None and hint.service_name == "svc":
-            assert repo.get_or_create.call_count == 0
+            assert repo.get_or_create.call_count == 1
             if hint.manually_controlled:
                 assert repo.record_failure.call_count == 0
                 assert repo.update_state.call_count == 0
