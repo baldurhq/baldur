@@ -13,6 +13,8 @@ Test targets:
 
 from __future__ import annotations
 
+import importlib.util
+from contextlib import ExitStack
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
@@ -653,7 +655,16 @@ class TestDailyReportPendingTotal:
 
     @staticmethod
     def _collect(stats, report=None):
-        """Run ``_collect_snapshots`` against one statistics snapshot shape."""
+        """Run ``_collect_snapshots`` against one statistics snapshot shape.
+
+        The subject is OSS-only, so this runs in both tiers rather than
+        skipping without one. The chaos-report source it silences belongs to
+        the private tier, and patching a target inside an absent package raises
+        instead of skipping — so that one patch is conditional while every
+        other collaborator is neutralised unconditionally. Without the private
+        tier the source is already unreachable, which is the state the patch
+        manufactures when it is present.
+        """
         from baldur.interfaces.repositories import FailedOperationRepository
 
         svc = DailyReportService()
@@ -661,25 +672,29 @@ class TestDailyReportPendingTotal:
         mock_repo = MagicMock(spec=FailedOperationRepository)
         mock_repo.get_statistics.return_value = stats
 
-        with (
-            patch(
-                "baldur_pro.services.chaos.reports.get_report_generator",
-                side_effect=Exception,
-            ),
-            patch(
-                "baldur.factory.ProviderRegistry.get_cache",
-                side_effect=Exception,
-            ),
-            patch(
-                "baldur.scaling.rate_controller.get_rate_controller",
-                side_effect=Exception,
-            ),
-            patch(
-                "baldur.factory.ProviderRegistry.get_failed_operation_repo",
-                return_value=mock_repo,
-            ),
-            patch("baldur.services.metrics.updaters.update_dlq_pending_gauges"),
-        ):
+        with ExitStack() as stack:
+            if importlib.util.find_spec("baldur_pro") is not None:
+                stack.enter_context(
+                    patch(
+                        "baldur_pro.services.chaos.reports.get_report_generator",
+                        side_effect=Exception,
+                    )
+                )
+            for ctx in (
+                patch(
+                    "baldur.factory.ProviderRegistry.get_cache", side_effect=Exception
+                ),
+                patch(
+                    "baldur.scaling.rate_controller.get_rate_controller",
+                    side_effect=Exception,
+                ),
+                patch(
+                    "baldur.factory.ProviderRegistry.get_failed_operation_repo",
+                    return_value=mock_repo,
+                ),
+                patch("baldur.services.metrics.updaters.update_dlq_pending_gauges"),
+            ):
+                stack.enter_context(ctx)
             svc._collect_snapshots(report, datetime(2026, 4, 4, tzinfo=UTC))
 
         return report
