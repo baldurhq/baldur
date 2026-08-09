@@ -68,6 +68,14 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - Two near-simultaneous config edits could leave the older one in force until the next write.
 - A first read of the shared breaker configuration could deadlock against a concurrent edit.
 - The `stored_only` detail said running processes keep the old value; it now states only the bound.
+- With `BALDUR_EVENT_BUS_BACKEND=redis`, no default event handler was registered in any process.
+- CB notifications, snapshots and post-mortems never fired on those installs; now they do.
+- Under `gunicorn --preload` no worker received cross-process events; each worker now subscribes.
+- Workers also reused the master's sender id, so a sibling's events looked self-sent and dropped.
+- A forked child's shutdown could unsubscribe the parent from every channel, deafening it for good.
+- Event-handler dispatch stalled silently in any forked child; the inherited pool is now rebuilt.
+- gunicorn workers wired via `baldur.server` never started the background workers at all.
+- Preloaded workers inherited one RNG state, so backoff jitter was identical in every worker.
 
 ## [1.3.2] - 2026-07-31
 

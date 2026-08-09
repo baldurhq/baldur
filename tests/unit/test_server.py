@@ -131,6 +131,19 @@ class TestServerContract:
 class TestPostWorkerInitStartBehavior:
     """post_worker_init_start() 동작 검증."""
 
+    @pytest.fixture(autouse=True)
+    def _stub_background_workers(self):
+        """Keep the registry starters out of these nodes.
+
+        The hook now revives the framework-agnostic background workers as well
+        as the Django extras, and this class asserts only the Django half plus
+        the log contract. Real starters here would register process-global
+        subscriptions in an in-process test. Mirrors the modern-hook tests,
+        which stub the same entry point.
+        """
+        with patch("baldur.bootstrap.start_background_workers"):
+            yield
+
     def test_sets_gunicorn_worker_env_var(self):
         """GUNICORN_WORKER 환경변수를 '1'로 설정."""
         worker = _make_worker()

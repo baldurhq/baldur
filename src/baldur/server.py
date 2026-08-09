@@ -61,12 +61,34 @@ def post_fork_reset(worker):
 def post_worker_init_start(worker):
     """Start background threads in forked worker.
 
+    The framework-agnostic starters run first, then the Django-only extras. Both
+    documented gunicorn hook surfaces must revive the same set: the starters
+    spawn daemon threads that do not survive ``fork()``, and ``init()`` either is
+    not re-run in the worker (preload) or runs there with the master check still
+    suppressing every start (non-preload, where the worker env var is set after
+    ``init()``). Without this call every registered background worker stays dead
+    in workers wired to this surface.
+
     Args:
         worker: Gunicorn worker instance
     """
     import os
 
     os.environ["GUNICORN_WORKER"] = "1"
+
+    try:
+        from baldur.bootstrap import start_background_workers
+
+        start_background_workers()
+        logger.info(
+            "worker.background_workers_started",
+            extra={"worker_id": worker.pid},
+        )
+    except Exception as exc:
+        logger.warning(
+            "worker.background_workers_startup_failed",
+            extra={"worker_id": worker.pid, "error": str(exc)},
+        )
 
     try:
         from baldur.adapters.django.apps import BaldurConfig
