@@ -160,6 +160,70 @@ class TestPostWorkerInitStartBehavior:
                     post_worker_init_start(worker)
                 assert os.environ.get("GUNICORN_WORKER") == "1"
 
+    def test_calls_start_background_workers_for_all_adapters(self):
+        """747 D9: the framework-agnostic starters run on this hook surface too.
+
+        Both documented gunicorn hook surfaces must revive the same set — the
+        starters spawn daemon threads that do not survive ``fork()``, and
+        ``init()`` either is not re-run in the worker (preload) or runs there with
+        the master check still suppressing every start. Without this call every
+        registered background worker — the event-bus listener included — stayed
+        dead in workers wired to this surface.
+        """
+        worker = _make_worker()
+        with (
+            patch("baldur.bootstrap.start_background_workers") as m_start,
+            patch("baldur.adapters.django.apps.BaldurConfig", autospec=True),
+        ):
+            post_worker_init_start(worker)
+
+        m_start.assert_called_once_with()
+
+    def test_background_workers_start_before_the_django_extras(self):
+        """Order matters: the Django extras assume the framework-agnostic workers
+        are already up in this process."""
+        worker = _make_worker()
+        call_order = []
+
+        with (
+            patch(
+                "baldur.bootstrap.start_background_workers",
+                side_effect=lambda: call_order.append("agnostic"),
+            ),
+            patch(
+                "baldur.adapters.django.apps.BaldurConfig",
+                autospec=True,
+            ) as mock_config,
+        ):
+            mock_config.start_background_threads.side_effect = lambda: (
+                call_order.append("django")
+            )
+            post_worker_init_start(worker)
+
+        assert call_order == ["agnostic", "django"]
+
+    def test_failing_background_workers_does_not_block_the_django_extras(self):
+        """Fail-soft: a starter blowing up must not cost the worker its Django
+        gauge hydration and correlation loop."""
+        worker = _make_worker()
+
+        with (
+            patch(
+                "baldur.bootstrap.start_background_workers",
+                side_effect=RuntimeError("starter boom"),
+            ),
+            patch("baldur.server.logger", autospec=True) as mock_logger,
+            patch(
+                "baldur.adapters.django.apps.BaldurConfig",
+                autospec=True,
+            ) as mock_config,
+        ):
+            post_worker_init_start(worker)  # must not raise
+
+        mock_config.start_background_threads.assert_called_once()
+        mock_logger.warning.assert_called()
+        assert "background_workers_startup_failed" in str(mock_logger.warning.call_args)
+
     def test_calls_start_background_threads(self):
         """BaldurConfig.start_background_threads()를 호출."""
         worker = _make_worker()
