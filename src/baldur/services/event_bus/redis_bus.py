@@ -350,8 +350,18 @@ class RedisEventBus:
                     # raising: the caller is a background-worker starter, so a
                     # raise here would leave _running=True with no thread and
                     # nothing that ever retries the subscribe.
+                    #
+                    # The client is dropped with the pubsub — unlike the fork
+                    # repair, which keeps a client that redis-py rebuilds for
+                    # itself. Here the subscribe against *this* client just
+                    # failed, so handing the loop a client it would only retry
+                    # against would make it raise out on the next tick. Dropping
+                    # it routes the loop through _connect_redis(), which reports
+                    # an outage by returning False and so backs off for
+                    # _RECONNECT_INTERVAL instead.
                     logger.warning("redis_event_bus.pubsub_setup_failed", error=e)
                     self._pubsub = None
+                    self._redis_client = None
             self._spawn_listener_thread()
             assert self._listener_thread is not None  # spawn always sets non-None
             self._handle = DaemonWorkerHandle(
@@ -514,13 +524,19 @@ class RedisEventBus:
                 self._handle.heartbeat()
 
     def _try_reconnect(self) -> bool:
-        """Attempt Redis reconnection (pattern: RedisCacheAdapter.reconnect)."""
-        if self._redis_client is not None:
-            return True
-        if not self._connect_redis():
+        """Restore the subscription this loop needs (pattern: RedisCacheAdapter.reconnect).
+
+        Returning True means *the loop has a pubsub to poll*, not merely that a
+        client object exists. A live client with no pubsub is a real state — the
+        fork repair abandons the inherited subscription while deliberately
+        keeping the pid-guarded client — and reporting success there without
+        subscribing would spin this loop with nothing to read.
+        """
+        if self._redis_client is None and not self._connect_redis():
             return False
         with self._lock:
-            self._setup_pubsub()
+            if self._pubsub is None:
+                self._setup_pubsub()
         return True
 
     def _handle_redis_message(self, data: str) -> None:

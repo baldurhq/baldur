@@ -153,9 +153,17 @@ class BaldurEventBus:
             cls._executor_lock = threading.Lock()
             cls._executor = None
             cls._executor_pid = os.getpid()
-        if cls._executor is None:
+        # Every read below goes through the local, and the local is what is
+        # returned. The fork branch above writes lock-free, so a second
+        # first-toucher that read the stale pid can null ``_executor`` at any
+        # point — including between this caller's own assignment and its return.
+        # Re-reading the classvar there would hand the caller None and turn the
+        # next ``submit()`` into an AttributeError, silently losing the dispatch.
+        executor = cls._executor
+        if executor is None:
             with cls._executor_lock:
-                if cls._executor is None:
+                executor = cls._executor
+                if executor is None:
                     try:
                         from baldur.settings.event_bus import (
                             get_event_bus_settings,
@@ -164,19 +172,20 @@ class BaldurEventBus:
                         max_workers = get_event_bus_settings().dispatch_workers
                     except Exception:
                         max_workers = _FALLBACK_DISPATCH_WORKERS
-                    cls._executor = ThreadPoolExecutor(
+                    executor = ThreadPoolExecutor(
                         max_workers=max_workers,
                         thread_name_prefix=_EXECUTOR_NAME,
                     )
+                    cls._executor = executor
                     try:
                         from baldur.metrics.recorders.executor import (
                             register_executor,
                         )
 
-                        register_executor(_EXECUTOR_NAME, cls._executor)
+                        register_executor(_EXECUTOR_NAME, executor)
                     except Exception:
                         pass
-        return cls._executor
+        return executor
 
     @classmethod
     def shutdown_dispatch_executor(cls) -> None:

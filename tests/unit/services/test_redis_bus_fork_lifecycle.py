@@ -39,6 +39,20 @@ from baldur.settings.event_bus import EventBusSettings
 # clock, so the value only bounds a hang.
 _JOIN_TIMEOUT_SECONDS = 5.0
 
+# The reconnect-branch nodes are the exception: they assert that the branch is
+# *paced*, which only a clock can express. The instance override shrinks the
+# 30 s production interval; the settle window is many multiples of it, so the
+# spin these nodes guard against (tens of thousands of passes per second)
+# overshoots the bound by orders of magnitude rather than by a scheduling
+# hiccup.
+_BACKOFF_SECONDS = 0.02
+_SETTLE_SECONDS = 0.3
+
+
+def _settle() -> None:
+    """Let the listener loop run its reconnect branch a few times."""
+    threading.Event().wait(_SETTLE_SECONDS)
+
 
 # =============================================================================
 # Fork-simulation seam
@@ -463,27 +477,69 @@ class TestStartListenerRespawnGuardBehavior:
         self, stop_buses
     ):
         """747 D12: the caller is a background-worker starter, so a raise here
-        would leave ``_running=True`` with no thread and nothing that retries."""
-        # Given a subscribe that fails at start.
+        would leave ``_running=True`` with no thread and nothing that retries.
+
+        The client is dropped alongside the pubsub: the subscribe against *this*
+        client just failed, so the loop has to go back through ``_connect_redis``
+        — which reports an outage by returning False, and so backs off — rather
+        than retrying a subscribe that would raise straight out of the loop.
+        """
+        # Given a subscribe that fails at start, and a Redis still unreachable.
         bus = _make_bus(redis_client=_make_client_spy())
         stop_buses.append(bus)
+        bus._RECONNECT_INTERVAL = _BACKOFF_SECONDS
 
         # When start_listener runs.
         with (
+            patch.object(RedisEventBus, "_connect_redis", return_value=False),
             patch.object(bus, "_setup_pubsub", side_effect=RuntimeError("no route")),
             capture_logs() as logs,
         ):
             bus.start_listener()  # must not raise
 
-        # Then the loop is alive on its own reconnect path.
-        assert bus._pubsub is None
-        assert bus._listener_thread is not None
-        assert bus._listener_thread.is_alive()
+            # Then the loop is alive on its own reconnect path.
+            assert bus._pubsub is None
+            assert bus._redis_client is None
+            assert bus._listener_thread is not None
+            assert bus._listener_thread.is_alive()
+            _settle()
+
         warnings = [
             e for e in logs if e["event"] == "redis_event_bus.pubsub_setup_failed"
         ]
         assert len(warnings) == 1
         assert warnings[0]["log_level"] == "warning"
+
+    def test_setup_failure_hands_the_loop_to_the_backing_off_reconnect_branch(
+        self, stop_buses
+    ):
+        """The degradation only pays off if the loop survives to retry.
+
+        With the client dropped alongside the pubsub, the branch runs the full
+        ``_connect_redis`` → subscribe sequence, and an outage is reported by a
+        False return that the loop answers with ``_RECONNECT_INTERVAL`` — so the
+        thread neither dies on a re-raised subscribe nor spins.
+        """
+        # Given a listener degraded onto the reconnect branch, Redis still down.
+        bus = _make_bus(redis_client=_make_client_spy())
+        stop_buses.append(bus)
+        bus._RECONNECT_INTERVAL = _BACKOFF_SECONDS
+
+        with (
+            patch.object(RedisEventBus, "_connect_redis", return_value=False),
+            patch.object(bus, "_setup_pubsub", side_effect=RuntimeError("no route")),
+            capture_logs() as logs,
+        ):
+            bus.start_listener()
+            _settle()
+
+        # Then the loop is still there to retry, and it was paced by the backoff
+        # rather than spun. Aliveness is asserted first: a dead thread also logs
+        # nothing, and would pass the pacing bound for the wrong reason.
+        assert bus._listener_thread.is_alive()
+        attempts = len([e for e in logs if e["event"] == "redis_event_bus.reconnected"])
+        max_attempts = int(_SETTLE_SECONDS / _BACKOFF_SECONDS) + 2
+        assert attempts <= max_attempts, f"{attempts} reconnect attempts — spinning"
 
 
 # =============================================================================
@@ -516,6 +572,35 @@ class TestSpawnListenerAtomicityBehavior:
             assert bus._origin_pid == os.getpid()
             assert bus._listener_thread is not None
             assert bus._listener_thread.is_alive()
+
+    def test_respawn_on_inherited_state_resubscribes_through_the_real_loop(
+        self, stop_buses
+    ):
+        """The other half of the same claim, with the real loop body.
+
+        Repair leaves the child holding a live client and no pubsub — a state the
+        loop never saw before this document, and the only one that can reach its
+        reconnect branch with a client already in hand. The branch has to
+        subscribe there; reporting success without subscribing would spin it.
+        """
+        # Given the watchdog respawning a listener on fork-inherited state.
+        bus = _make_bus(redis_client=_make_client_spy())
+        stop_buses.append(bus)
+        bus._RECONNECT_INTERVAL = _BACKOFF_SECONDS
+        inherited_pubsub = _simulate_fork_inheritance(bus)
+
+        # When the restart callback fires and the loop runs for real.
+        with capture_logs() as logs:
+            bus._spawn_listener_thread()
+            _settle()
+
+        # Then the child polls a subscription of its own, built once.
+        assert bus._pubsub is not None
+        assert bus._pubsub is not inherited_pubsub
+        assert len(bus._subscribed_redis_channels) == 6
+        assert inherited_pubsub.method_calls == []
+        attempts = len([e for e in logs if e["event"] == "redis_event_bus.reconnected"])
+        assert attempts == 1, f"{attempts} reconnect attempts — spinning"
 
     def test_respawn_racing_start_listener_leaves_exactly_one_live_thread(
         self, stop_buses
