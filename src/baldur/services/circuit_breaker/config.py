@@ -427,7 +427,12 @@ def _source_install_generation() -> int | None:
         read_generation = getattr(manager, "get_section_generation", None)
         if read_generation is None:
             return None
-        return read_generation(_CONFIG_SECTION)
+        # The probe answers "is the method there", not "does it answer with a
+        # counter". A source that returns something uncomparable would reach
+        # the ordering comparison and raise inside the swap; an unusable answer
+        # is the same no-ordering case this function already reports as None.
+        generation = read_generation(_CONFIG_SECTION)
+        return generation if isinstance(generation, int) else None
     except Exception as e:
         logger.debug(
             "circuit_breaker.config_generation_unavailable",

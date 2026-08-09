@@ -44,6 +44,11 @@ class RuntimeConfigManager(Protocol):
 
     def get_editable_config(self) -> dict[str, dict[str, dict[str, Any]]]: ...
 
+    # The apply-semantics block the config REST handlers attach to every read
+    # and to the rollback response. Five OSS call sites reach it, so it belongs
+    # here by this file's inclusion rule; it was called before it was declared.
+    def get_default_strategy(self, config_type: str) -> dict[str, Any]: ...
+
     # Runtime delivery. Both are called from OSS code — the config-invalidation
     # dispatcher and the circuit-breaker config holder's swap guard — so they
     # belong here by this file's inclusion rule. Those call sites still probe
