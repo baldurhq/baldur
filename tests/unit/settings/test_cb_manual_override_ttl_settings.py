@@ -98,18 +98,26 @@ class TestManualOverrideTTLConfigResolution:
     """The setting is what force_open / force_close resolve ``None`` to."""
 
     def test_resolved_config_reads_the_settings_value(self):
-        """Without this hop the env var would be dead on the PRO-absent path.
+        """Without this hop the env var would be dead on the tier-absent path.
 
         ``from_settings`` prefers the runtime-config manager when one is
         registered and only falls through to the settings hop when it is not,
         so the manager slot is neutralised here. Otherwise this asserts the
         stored blob's defaults rather than the environment, and the variable
-        this suite covers is the documented PRO-absent surface.
+        this suite covers is the documented tier-absent surface.
+
+        The reset belongs *inside* the patched environment. It cascades into an
+        eager rebuild, which refills the settings cache it has just cleared,
+        from whichever environment is in force at that moment. Reset outside
+        and that refill happens a statement before the fake environment is
+        installed, so the assertion reads the shipped default and the hop this
+        test exists for never runs. Which environment refills it also depends
+        on whether a runtime-config manager is registered, so the same
+        placement passes with the private tier installed and fails without it.
         """
         from baldur.factory.registry import ProviderRegistry
         from baldur.services.circuit_breaker.config import CircuitBreakerConfig
 
-        reset_circuit_breaker_settings()
         with (
             mock.patch.object(
                 ProviderRegistry.runtime_config_manager, "safe_get", return_value=None
@@ -120,6 +128,7 @@ class TestManualOverrideTTLConfigResolution:
                 clear=True,
             ),
         ):
+            reset_circuit_breaker_settings()
             config = CircuitBreakerConfig.from_settings()
 
         reset_circuit_breaker_settings()
