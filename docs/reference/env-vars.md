@@ -20,6 +20,7 @@ BALDUR_CB_SLIDING_WINDOW_SIZE=100       # recent calls the failure rate is measu
 BALDUR_CB_MINIMUM_CALLS=10              # calls the window needs before the rate is trusted; gates the rate trigger only
 BALDUR_CB_RECOVERY_TIMEOUT=60
 BALDUR_CB_HALF_OPEN_MAX_CALLS=3
+BALDUR_CB_MANUAL_OVERRIDE_TTL_MINUTES=90  # minutes a manual override (Block / Allow / Override) lasts when the operator sets no lifetime of its own; 1-1440
 BALDUR_RETRY_MAX_ATTEMPTS=3
 BALDUR_RETRY_BACKOFF_STRATEGY=exponential  # exponential | linear | constant | decorrelated_jitter
 BALDUR_RETRY_BASE_DELAY=1.0
