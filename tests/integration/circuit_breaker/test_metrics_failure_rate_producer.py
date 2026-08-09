@@ -20,10 +20,15 @@ the registry's module-load default instead resolves nothing on any deployment
 whose Redis L2 is absent, so the honest ``null`` this change introduces would
 have been the answer for every service on exactly those deployments.
 
-Mock-based — no infra. The layered repository's ``get_all_states()`` reads its
-in-process L1 tier, and that L2-absent condition is precisely what these tests
-assert against. The registry seam is patched only in the degradation case, where
-the point is what the payload renders when the named provider is missing.
+No infra is *required*: the layered repository's ``get_all_states()`` serves
+these assertions from its in-process L1 tier when no L2 is reachable. It must
+not assume none is, though — this file runs in the lane that provisions Redis,
+where the same repository loads its rows from L2 at construction and writes
+them back. Dropping the process caches therefore does not return the suite to a
+clean slate there; ``_drop_breaker_state`` is what does, and it is why these
+tests read the same way with and without an L2. The registry seam is patched
+only in the degradation case, where the point is what the payload renders when
+the named provider is missing.
 """
 
 from __future__ import annotations
@@ -52,16 +57,43 @@ def _raise_boom():
     raise _Boom("downstream down")
 
 
+def _drop_breaker_state() -> None:
+    """Delete this suite's breaker rows from wherever the repository keeps them.
+
+    ``reset_protect_caches()`` clears process-local state only. The layered
+    repository also loads its rows from an L2 tier at construction and writes
+    through to it, so on a host where one is reachable a breaker this suite
+    opened outlives the process reset and is read straight back into the next
+    test — which then starts with an open breaker and has its first protected
+    call refused. ``delete_state`` removes the row from both tiers, so the
+    isolation no longer depends on there being no L2.
+
+    The dotted name is dropped in both spellings: the breaker is keyed by the
+    name as given, while the metrics row carries its canonical form.
+    """
+    repo = ControlAPIService._resolve_circuit_breaker_repo()
+    if repo is None:
+        return
+    for name in (SERVICE, DOTTED_SERVICE, DOTTED_SERVICE.replace(".", "_")):
+        try:
+            repo.delete_state(name)
+        except Exception:  # noqa: BLE001 — cleanup must not mask the real failure
+            pass
+
+
 @pytest.fixture(autouse=True)
 def _clean_protect_state():
-    """Start and end with no policy cache and no recorded outcomes.
+    """Start and end with no policy cache, no recorded outcomes, no stored state.
 
     The window is a process singleton fed by every protected call, so without
-    this a neighbouring test's traffic lands in this payload.
+    this a neighbouring test's traffic lands in this payload. The stored breaker
+    state needs its own drop for the reason ``_drop_breaker_state`` records.
     """
+    _drop_breaker_state()
     reset_protect_caches()
     yield
     reset_protect_caches()
+    _drop_breaker_state()
 
 
 @pytest.fixture(autouse=True)
