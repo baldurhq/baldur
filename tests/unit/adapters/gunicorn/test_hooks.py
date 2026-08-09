@@ -239,6 +239,39 @@ class TestPostWorkerInit:
         m_start.assert_called_once()
         assert os.environ["GUNICORN_WORKER"] == "1"
 
+    def test_reseeds_the_rng_before_starting_background_workers(self):
+        """747 D14: under ``--preload`` every worker inherits one identical
+        ``random`` module state, so baldur's backoff jitter is bit-identical
+        across workers and they retry in lockstep against a recovering
+        dependency. The reseed must precede the starters, which spawn threads
+        that draw jitter.
+        """
+        from baldur.adapters.gunicorn.hooks import post_worker_init
+
+        call_order = []
+
+        with (
+            patch("random.seed", side_effect=lambda: call_order.append("seed")),
+            patch(
+                "baldur.bootstrap.start_background_workers",
+                side_effect=lambda: call_order.append("starters"),
+            ),
+        ):
+            # The hook ignores its worker argument; a bare sentinel keeps the
+            # node free of a spec-less stand-in.
+            post_worker_init(worker=object())
+
+        assert call_order == ["seed", "starters"]
+
+    def test_no_post_fork_hook_is_exported_by_the_package(self):
+        """The reseed rides the existing ``post_worker_init`` surface. Exporting a
+        fourth hook name would make every user's gunicorn config stale.
+        """
+        from baldur.adapters import gunicorn as pkg
+
+        assert not hasattr(pkg, "post_fork")
+        assert "post_fork" not in pkg.__all__
+
 
 class TestWorkerInt:
     """``worker_int`` contract."""

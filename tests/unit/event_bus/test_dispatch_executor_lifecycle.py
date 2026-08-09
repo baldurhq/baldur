@@ -12,6 +12,7 @@ UNIT_TEST_GUIDELINES.md compliance:
 
 from __future__ import annotations
 
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
@@ -233,3 +234,151 @@ class TestBaldurEventBusExecutorSettingsRoundtripBehavior:
         assert BaldurEventBus._executor is not None
         reset_protect_caches()
         assert BaldurEventBus._executor is None
+
+
+# =============================================================================
+# Fork safety — the inherited pool is abandoned, never shut down (747 D13)
+# =============================================================================
+
+
+class TestDispatchExecutorForkBehavior:
+    """747 D13: a ``ThreadPoolExecutor`` does not survive ``fork()``.
+
+    The child inherits the worker ``Thread`` objects — all dead — together with
+    the idle-worker semaphore permits they were counted against, so
+    ``_adjust_thread_count`` consumes a permit, spawns nothing, and every
+    submitted dispatch queues forever. The pid check runs at the point of use so
+    it covers every fork shape (celery prefork, uWSGI, hookless gunicorn,
+    ``multiprocessing``), and ``async_pool`` is the default dispatch mode on the
+    memory backend too.
+
+    No real ``fork()`` here: the pid stamp is mutated to the shape a child
+    inherits, which is exactly what the guard reads.
+    """
+
+    # Bounds a hang only — no assertion depends on wall clock.
+    _JOIN_TIMEOUT_SECONDS = 5.0
+
+    def test_first_call_stamps_the_constructing_process(self):
+        from baldur.services.event_bus.bus.event_bus import BaldurEventBus
+
+        BaldurEventBus._get_executor()
+
+        assert BaldurEventBus._executor_pid == os.getpid()
+
+    def test_matched_pid_returns_the_same_pool_and_keeps_the_lock(self):
+        """The guard must be a fork guard, not a rebuild on every call."""
+        from baldur.services.event_bus.bus.event_bus import BaldurEventBus
+
+        first = BaldurEventBus._get_executor()
+        lock_before = BaldurEventBus._executor_lock
+
+        second = BaldurEventBus._get_executor()
+
+        assert second is first
+        assert BaldurEventBus._executor_lock is lock_before
+
+    def test_pid_mismatch_builds_a_new_pool_and_a_new_lock(self):
+        """Both the pool and the lock are replaced — the lock is held across a
+        pool construction plus a settings load, wide enough for a fork to inherit
+        it owned by a thread that no longer exists."""
+        # Given a pool this process built, then a simulated fork.
+        from baldur.services.event_bus.bus.event_bus import BaldurEventBus
+
+        inherited_pool = BaldurEventBus._get_executor()
+        inherited_lock = BaldurEventBus._executor_lock
+        BaldurEventBus._executor_pid = os.getpid() + 1
+
+        # When the first dispatch in the child asks for the executor.
+        new_pool = BaldurEventBus._get_executor()
+
+        # Then nothing inherited is reused.
+        assert new_pool is not inherited_pool
+        assert BaldurEventBus._executor_lock is not inherited_lock
+        assert BaldurEventBus._executor_pid == os.getpid()
+
+    def test_pid_mismatch_never_shuts_down_the_inherited_pool(self):
+        """``shutdown()`` would acquire the inherited shutdown lock and enqueue a
+        wake-up sentinel against dead threads. Dropping the reference is enough —
+        the copied thread objects and work queue are plain memory."""
+        # Given a pool whose shutdown is spied on.
+        from baldur.services.event_bus.bus.event_bus import BaldurEventBus
+
+        inherited_pool = BaldurEventBus._get_executor()
+        BaldurEventBus._executor_pid = os.getpid() + 1
+
+        # When the child rebuilds.
+        with patch.object(inherited_pool, "shutdown", autospec=True) as m_shutdown:
+            BaldurEventBus._get_executor()
+
+        # Then the parent's pool was abandoned untouched.
+        m_shutdown.assert_not_called()
+
+    def test_pid_mismatch_completes_while_the_inherited_lock_is_held(self):
+        """The lock is replaced *before* any acquisition. An inherited lock can be
+        owned by a thread that did not survive the fork; acquiring it would hang
+        the first dispatch forever.
+        """
+        # Given an inherited lock held by a live thread that never releases it.
+        from baldur.services.event_bus.bus.event_bus import BaldurEventBus
+
+        BaldurEventBus._get_executor()
+        inherited_lock = BaldurEventBus._executor_lock
+        BaldurEventBus._executor_pid = os.getpid() + 1
+
+        acquired = threading.Event()
+        release = threading.Event()
+
+        def _hold_forever() -> None:
+            with inherited_lock:
+                acquired.set()
+                release.wait(self._JOIN_TIMEOUT_SECONDS)
+
+        holder = threading.Thread(target=_hold_forever, daemon=True)
+        holder.start()
+        assert acquired.wait(timeout=self._JOIN_TIMEOUT_SECONDS)
+
+        try:
+            # When the child asks for the executor.
+            done = threading.Event()
+            result: list[ThreadPoolExecutor] = []
+
+            def _first_dispatch() -> None:
+                result.append(BaldurEventBus._get_executor())
+                done.set()
+
+            caller = threading.Thread(target=_first_dispatch, daemon=True)
+            caller.start()
+
+            # Then it did not block on the orphaned lock.
+            assert done.wait(timeout=self._JOIN_TIMEOUT_SECONDS)
+            assert result[0] is BaldurEventBus._executor
+            assert BaldurEventBus._executor_lock is not inherited_lock
+        finally:
+            release.set()
+            holder.join(timeout=self._JOIN_TIMEOUT_SECONDS)
+
+    def test_rebuilt_pool_actually_dispatches(self):
+        """The point of abandoning the pool: submitted handlers run again."""
+        from baldur.services.event_bus.bus.event_bus import BaldurEventBus
+
+        BaldurEventBus._get_executor()
+        BaldurEventBus._executor_pid = os.getpid() + 1
+
+        executor = BaldurEventBus._get_executor()
+        future = executor.submit(lambda: "dispatched")
+
+        assert future.result(timeout=self._JOIN_TIMEOUT_SECONDS) == "dispatched"
+
+    def test_rebuilt_pool_replaces_the_registered_executor_slot(self):
+        """The scrape-time gauges must observe the live pool, not the inherited
+        one — the registry is keyed by name, so registration replaces the slot."""
+        from baldur.metrics.recorders.executor import get_registered_executors
+        from baldur.services.event_bus.bus.event_bus import BaldurEventBus
+
+        BaldurEventBus._get_executor()
+        BaldurEventBus._executor_pid = os.getpid() + 1
+
+        new_pool = BaldurEventBus._get_executor()
+
+        assert get_registered_executors()["baldur-eventbus-dispatch"] is new_pool
