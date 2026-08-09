@@ -370,6 +370,37 @@ class TestDispatchExecutorForkBehavior:
 
         assert future.result(timeout=self._JOIN_TIMEOUT_SECONDS) == "dispatched"
 
+    def test_never_returns_none_when_a_concurrent_first_toucher_resets(self):
+        """The fork branch writes lock-free, so a second first-toucher's reset can
+        land anywhere — including inside this caller's own critical section.
+
+        A caller that re-read the classvar on the way out would return ``None``
+        there, and the async-pool dispatch site guards only ``RuntimeError``, so
+        the ``submit()`` would raise ``AttributeError`` and the handler would be
+        swallowed as a generic dispatch failure. The interleaving is reached
+        deterministically here: the other thread's reset is emulated at the last
+        point inside the lock where this caller still runs code.
+        """
+        # Given a second first-toucher whose lock-free reset lands mid-build.
+        import baldur.metrics.recorders.executor as executor_module
+        from baldur.services.event_bus.bus.event_bus import BaldurEventBus
+
+        real_register = executor_module.register_executor
+
+        def register_then_reset(name: str, executor: ThreadPoolExecutor) -> None:
+            real_register(name, executor)
+            BaldurEventBus._executor = None
+
+        # When this caller builds the pool.
+        with patch.object(executor_module, "register_executor", register_then_reset):
+            pool = BaldurEventBus._get_executor()
+
+        # Then it got the pool it built, not the hole the other thread punched.
+        assert pool is not None
+        future = pool.submit(lambda: "dispatched")
+        assert future.result(timeout=self._JOIN_TIMEOUT_SECONDS) == "dispatched"
+        pool.shutdown(wait=True)
+
     def test_rebuilt_pool_replaces_the_registered_executor_slot(self):
         """The scrape-time gauges must observe the live pool, not the inherited
         one — the registry is keyed by name, so registration replaces the slot."""

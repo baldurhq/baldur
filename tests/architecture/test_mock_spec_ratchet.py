@@ -137,7 +137,9 @@ _MOCK_CREATION_BUDGETS: dict[str, int] = {
     # daily-report statistics repository) is spec'd.
     # cross-cluster config-propagation removal: -1 — the propagator suite was
     # deleted with the dead package it covered.
-    "oss": 4351,
+    # _try_reconnect subscribe-guard nodes: -1 — the two redis client stand-ins
+    # in that class are now spec'd against redis.Redis.
+    "oss": 4350,
     "pro": 1800,
     "dormant": 401,
 }

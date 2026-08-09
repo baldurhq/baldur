@@ -19,6 +19,7 @@ import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
+import redis
 
 from baldur.services.event_bus.bus.event_types import EventPriority, EventType
 from baldur.services.event_bus.bus.models import BaldurEvent
@@ -652,11 +653,33 @@ class TestConnectRedisBehavior:
 class TestTryReconnectBehavior:
     """_try_reconnect() behavior verification."""
 
-    def test_already_connected_returns_true(self):
-        """When _redis_client is not None, returns True immediately."""
-        mock_redis = MagicMock()
+    def test_already_connected_skips_the_connect_but_still_subscribes(self):
+        """A live client is not on its own a reason to report success.
+
+        True means the loop has a pubsub to poll. A client with no pubsub is a
+        real state — the fork repair abandons the inherited subscription while
+        keeping the pid-guarded client — and answering True there without
+        subscribing would spin the listen loop with nothing to read.
+        """
+        mock_redis = MagicMock(spec=redis.Redis)
         bus = _make_bus_with_redis(mock_redis)
+        assert bus._pubsub is None
+
+        with patch.object(bus, "_connect_redis") as mock_connect:
+            assert bus._try_reconnect() is True
+
+        mock_connect.assert_not_called()
+        assert bus._pubsub is not None
+
+    def test_already_subscribed_is_not_rebuilt(self):
+        """An established pubsub is left alone — the subscribe guard is idempotent."""
+        mock_redis = MagicMock(spec=redis.Redis)
+        bus = _make_bus_with_redis(mock_redis)
+        bus._setup_pubsub()
+        established = bus._pubsub
+
         assert bus._try_reconnect() is True
+        assert bus._pubsub is established
 
     def test_reconnect_success_sets_up_pubsub(self):
         """Successful reconnect calls _setup_pubsub()."""
