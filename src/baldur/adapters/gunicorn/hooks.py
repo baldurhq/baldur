@@ -22,12 +22,15 @@ Hook responsibilities
     worker's SIGTERM lifecycle without breaking gunicorn's drain. The
     handler is fast: ``initiate_shutdown`` fires synchronous
     ``on_shutdown_start`` callbacks then spawns a daemon drain thread
-    that runs in parallel with gunicorn's HTTP-drain. Then re-starts the
-    ``init()``-started background daemon workers in the forked worker for
-    **all** adapters via ``baldur.bootstrap.start_background_workers()``
-    (they die after fork if started in master, and ``init()`` is not
-    re-run per worker), and additionally re-starts the Django-only extra
-    threads (gauge hydration, correlation loop) when Django is present.
+    that runs in parallel with gunicorn's HTTP-drain. Reseeds the global
+    RNG, which under ``--preload`` is inherited identical by every worker
+    and would make backoff jitter bit-identical across them. Then
+    re-starts the ``init()``-started background daemon workers in the
+    forked worker for **all** adapters via
+    ``baldur.bootstrap.start_background_workers()`` (they die after fork
+    if started in master, and ``init()`` is not re-run per worker), and
+    additionally re-starts the Django-only extra threads (gauge
+    hydration, correlation loop) when Django is present.
 
 ``worker_int``
     Invoked by gunicorn when SIGINT or SIGQUIT is forwarded to the
@@ -54,6 +57,7 @@ end-to-end behavior contract.
 from __future__ import annotations
 
 import os
+import random
 import signal
 from typing import Any
 
@@ -109,6 +113,13 @@ def post_worker_init(worker: Any) -> None:
     get_shutdown_coordinator(request_tracker=RequestTracker())
 
     _install_chained_sigterm_handler()
+
+    # Reseed the global RNG, which every worker otherwise inherits identical
+    # from the master under --preload. baldur's backoff jitter draws from that
+    # module, so identical state means bit-identical per-worker retry delays and
+    # workers that retry in lockstep against a recovering dependency. Must
+    # precede the starters below, which spawn threads that draw jitter.
+    random.seed()
 
     # Framework-agnostic per-worker re-start of the init()-started background
     # daemon workers. Runs for ALL adapters: GUNICORN_WORKER=1 is set above, so

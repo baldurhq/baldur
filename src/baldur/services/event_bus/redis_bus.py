@@ -27,6 +27,7 @@ Channels:
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from collections.abc import Callable
@@ -216,6 +217,14 @@ class RedisEventBus:
         self._lock = threading.RLock()
         self._subscribed_redis_channels: set[str] = set()
         self._handle: DaemonWorkerHandle | None = None  # impl 489 D9
+        # Mirrors the local bus's own idempotence flag so
+        # register_default_handlers() can guard on either backend's instance.
+        self._handlers_registered = False
+        # Fork identity. _origin_pid marks the process that owns the pubsub
+        # subscription; _lock_pid marks the process that created _lock. Both are
+        # read by _repair_if_forked to tell inherited state from own state.
+        self._origin_pid = os.getpid()
+        self._lock_pid = os.getpid()
 
         # Connect to Redis
         self._connect_redis()
@@ -264,17 +273,85 @@ class RedisEventBus:
     # Listener Management
     # -------------------------------------------------------------------------
 
+    def _repair_if_forked(self) -> None:
+        """Abandon fork-inherited subscription state so this process owns its own.
+
+        No-op in the process that constructed the bus — one attribute load plus
+        ``os.getpid()``. On a mismatch the inherited state is *abandoned*, never
+        closed: ``unsubscribe()``/``close()`` write protocol bytes on a socket
+        the parent still owns, and the Redis server would unsubscribe the parent.
+
+        The inherited Redis *client* is deliberately kept. redis-py's connection
+        pool records its pid and rebuilds the child's connections on the first
+        checkout after a mismatch, so outbound publishing has no gap and no
+        reconnect window is manufactured here. Only the ``PubSub`` object cannot
+        be repaired that way — it pins one connection for the life of the
+        subscription, and two processes reading one socket steal each other's
+        messages.
+
+        Never touches ``_running``, ``_local_bus``, ``_handlers_registered`` or
+        ``_handle``: the handler table survives ``fork()`` as copied memory, and
+        the running flag stays owned by the start/stop paths.
+        """
+        if os.getpid() == self._origin_pid:
+            return
+
+        # Step 1 — renew an inherited lock BEFORE any acquisition. Only the
+        # forking thread survives fork(), so an owner recorded in the inherited
+        # RLock is a thread that does not exist here and will never release it.
+        # Gated on a pid stamp rather than on elapsed time: a temporal predicate
+        # cannot tell an orphaned lock from a legitimately held one.
+        if self._lock_pid != os.getpid():
+            self._lock = threading.RLock()
+            self._lock_pid = os.getpid()
+
+        with self._lock:
+            inherited_pid = self._origin_pid
+            if os.getpid() == inherited_pid:
+                return  # another thread finished the repair first
+            self._pubsub = None
+            self._instance_id = uuid4().hex
+            self._subscribed_redis_channels.clear()
+            self._origin_pid = os.getpid()
+            instance_id = self._instance_id
+
+        logger.info(
+            "redis_event_bus.fork_state_repaired",
+            inherited_pid=inherited_pid,
+            instance_id=instance_id,
+        )
+
     def start_listener(self) -> None:
-        """Start listener thread (runs regardless of Redis availability)."""
+        """Start listener thread (runs regardless of Redis availability).
+
+        Fork-aware: inherited state is repaired first, and the idempotence guard
+        consults thread aliveness rather than ``_running`` alone, because a fork
+        child inherits ``_running=True`` together with a thread object that
+        Python already marked stopped.
+        """
         from baldur.meta.daemon_worker import DaemonWorkerHandle
         from baldur.metrics.recorders.daemon_worker import register_daemon_worker
 
+        self._repair_if_forked()
+
         with self._lock:
-            if self._running:
+            if (
+                self._running
+                and self._listener_thread is not None
+                and self._listener_thread.is_alive()
+            ):
                 return
             self._running = True
             if self._redis_client:
-                self._setup_pubsub()
+                try:
+                    self._setup_pubsub()
+                except Exception as e:
+                    # Degrade to the listen loop's own reconnect path instead of
+                    # raising: the caller is a background-worker starter, so a
+                    # raise here would leave _running=True with no thread and
+                    # nothing that ever retries the subscribe.
+                    logger.warning("redis_event_bus.pubsub_setup_failed", error=e)
+                    self._pubsub = None
             self._spawn_listener_thread()
             assert self._listener_thread is not None  # spawn always sets non-None
             self._handle = DaemonWorkerHandle(
@@ -289,15 +366,39 @@ class RedisEventBus:
             )
 
     def _spawn_listener_thread(self) -> None:
-        """Construct + start a fresh listener thread (impl 489 D9)."""
-        self._listener_thread = threading.Thread(
-            target=self._listen_loop_with_crash_capture,
-            daemon=True,
-            name="RedisEventBusListener",
-        )
-        self._listener_thread.start()
-        if self._handle is not None:
-            self._handle.thread = self._listener_thread
+        """Construct + start a fresh listener thread (impl 489 D9).
+
+        The single atomic spawn point. The meta-watchdog invokes this directly as
+        a ``restart_callback``, deliberately bypassing the ``_running`` flag per
+        the ``DaemonWorkerHandle`` contract, so both the fork repair and the
+        spawn idempotence have to live here rather than in ``start_listener()``:
+        a respawn on inherited state would otherwise read the parent's pubsub,
+        and a respawn racing ``start_listener()`` would leave two live threads
+        on one connection.
+
+        Guarded on thread aliveness — never on ``_running``, which is what the
+        restart contract bans. Same shape as the sibling probe-loop respawn
+        helper in ``meta/health_probe.py``.
+        """
+        self._repair_if_forked()
+
+        with self._lock:
+            existing = self._listener_thread
+            if existing is not None and existing.is_alive():
+                logger.debug("redis_event_bus.spawn_skipped_listener_alive")
+                return
+
+            thread = threading.Thread(
+                target=self._listen_loop_with_crash_capture,
+                daemon=True,
+                name="RedisEventBusListener",
+            )
+            # start() before publishing the reference so no reader — locked or
+            # lock-free — can observe an assigned-but-unstarted thread as dead.
+            thread.start()
+            self._listener_thread = thread
+            if self._handle is not None:
+                self._handle.thread = thread
 
     def _listen_loop_with_crash_capture(self) -> None:
         try:
@@ -310,8 +411,36 @@ class RedisEventBus:
             raise
 
     def stop_listener(self) -> None:
-        """Stop Redis Pub/Sub listener."""
+        """Stop Redis Pub/Sub listener.
+
+        On fork-inherited state — a child that never revived the listener, yet
+        inherited the coordinator's signal handlers and the registered shutdown
+        handler — the pubsub belongs to the parent, so the refs are abandoned
+        without touching the socket.
+        """
         from baldur.metrics.recorders.daemon_worker import unregister_daemon_worker
+
+        if os.getpid() != self._origin_pid:
+            # unsubscribe() here would write on the parent's connection and the
+            # Redis server would unsubscribe the PARENT from every channel. An
+            # unsubscribe confirmation is not an error, so the parent's listener
+            # would never enter its reconnect path — permanent silent deafness.
+            #
+            # Lock-free on purpose: no baldur thread survives fork() in a
+            # never-revived child, so there is no contention, while the
+            # inherited lock may be held by a thread that no longer exists and
+            # would hang the signal frame this can run on. Both writes are
+            # single-reference stores. Nulling the client is right here (unlike
+            # in the repair path) because this tears the process down rather
+            # than preparing it for further use.
+            self._running = False
+            self._pubsub = None
+            self._redis_client = None
+            logger.debug(
+                "redis_event_bus.stop_skipped_inherited_state",
+                inherited_pid=self._origin_pid,
+            )
+            return
 
         with self._lock:
             if self._handle is not None:
@@ -638,6 +767,9 @@ class RedisEventBus:
         """Reset state (for testing)."""
         self.stop_listener()
         self._local_bus.reset()
+        # Symmetric with BaldurEventBus.reset() — without this a reset bus would
+        # silently skip default-handler re-registration.
+        self._handlers_registered = False
 
 
 # =============================================================================

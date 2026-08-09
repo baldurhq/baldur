@@ -3510,6 +3510,59 @@ def _setup_config_invalidation_delivery() -> None:
         logger.warning("baldur.config_invalidation_setup_failed", error=exc)
 
 
+def _start_event_bus_listener_if_enabled() -> None:
+    """Revive the Redis event-bus listener thread in this process.
+
+    Only reachable work on the ``redis`` backend: the listener is a daemon
+    thread, so under ``gunicorn --preload`` it is created once in the master by
+    ``init()`` and does not survive ``fork()``. Without this starter every
+    cross-process subscriber — circuit-breaker state propagation,
+    ``CONFIG_UPDATED`` invalidation, emergency events — runs local-only in every
+    worker with nothing logged.
+
+    ``start_listener()`` is fork-aware: it abandons the inherited subscription,
+    draws a fresh self-origin identity (an inherited one makes the bus classify
+    every same-host sibling's message as its own) and subscribes its own
+    connection, so this starter is a plain call with no pre-conditioning.
+
+    Fork-safety: skipped in the gunicorn master (the thread it would start dies
+    at ``fork()``); ``post_worker_init`` re-runs the start per worker once
+    ``GUNICORN_WORKER=1`` flips the master check. The backend defaults to
+    ``memory``, so no AUTOSTART hatch is needed — unit-test processes return at
+    the backend gate without touching the singleton.
+    """
+    try:
+        from baldur.core.process_utils import is_gunicorn_master
+
+        if is_gunicorn_master():
+            logger.debug("redis_event_bus.start_skipped_gunicorn_master")
+            return
+
+        from baldur.settings.event_bus import get_event_bus_settings
+
+        if get_event_bus_settings().backend != "redis":
+            logger.debug("redis_event_bus.start_skipped", reason="backend_not_redis")
+            return
+
+        from baldur.services.event_bus.bus import get_event_bus
+        from baldur.services.event_bus.redis_bus import RedisEventBus
+
+        bus = get_event_bus()
+        if not isinstance(bus, RedisEventBus):
+            # Backend says redis but the singleton was configured otherwise
+            # (configure_event_bus / test override). The bus protocol carries no
+            # listener surface, so there is nothing to revive.
+            logger.debug("redis_event_bus.start_skipped", reason="bus_not_redis_backed")
+            return
+
+        bus.start_listener()
+        logger.info("baldur.event_bus_listener_started")
+    except ImportError as exc:
+        logger.debug("baldur.event_bus_module_not_available", error=exc)
+    except Exception as exc:
+        logger.warning("baldur.event_bus_listener_start_failed", error=exc)
+
+
 # =============================================================================
 # Background daemon-worker registry — single source of truth (D4)
 # =============================================================================
@@ -3557,6 +3610,13 @@ def _setup_config_invalidation_delivery() -> None:
 # dedup makes the ``post_worker_init`` re-run idempotent. Unconditional apart
 # from the master skip — the registration is what makes the runtime-apply
 # declaration honest, and the handler is a no-op for unregistered domains.
+# ``_start_event_bus_listener_if_enabled`` revives the Redis event-bus listener
+# thread per worker. It is the transport the previous member (and the CB / config
+# / emergency subscribers) actually rides on: created once in the ``--preload``
+# master and dead in every fork child until this starter runs. Gated on the
+# ``redis`` backend, which defaults to ``memory``, so no AUTOSTART hatch is
+# needed. Order-independent from the watchdog starter because every listener
+# spawn path is individually fork-safe.
 
 _BACKGROUND_WORKER_STARTERS: tuple[Callable[[], None], ...] = (
     _start_capacity_reservation_if_enabled,
@@ -3570,6 +3630,7 @@ _BACKGROUND_WORKER_STARTERS: tuple[Callable[[], None], ...] = (
     _start_domain_gauge_updater_if_enabled,
     _seed_circuit_breaker_state_if_enabled,
     _setup_config_invalidation_delivery,
+    _start_event_bus_listener_if_enabled,
 )
 
 

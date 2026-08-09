@@ -89,6 +89,31 @@ The config-apply task is idempotent (diff-aware + status-guarded), so leaving th
 
 ---
 
+## Process model (`--preload`, prefork)
+
+The Redis event bus keeps a subscriber thread per process. A thread does not survive `fork()`, so **how** your server creates its worker processes decides whether a worker receives cross-process events or only publishes them.
+
+| Process shape | Publishes events | Receives events |
+|---------------|------------------|-----------------|
+| gunicorn, either hook surface wired (with or without `--preload`) | yes | yes |
+| gunicorn with **no** baldur hook wired | yes | no |
+| Celery prefork worker, uWSGI worker | yes | no |
+
+**Wire one of the two gunicorn hook surfaces.** This is required with `--preload` and recommended without it — it is also what makes graceful shutdown drain on SIGTERM:
+
+```python
+# gunicorn.conf.py
+from baldur.adapters.gunicorn.hooks import post_worker_init, worker_int, worker_exit
+```
+
+With a hook wired, each worker rebuilds its own subscription (fresh connection, fresh sender identity) after `fork()` and logs `redis_event_bus.listener_started`. Under `--preload` a worker that repaired inherited state also logs `redis_event_bus.fork_state_repaired`.
+
+**Without a hook** the process still publishes to Redis normally — other pods and workers see its events — but it receives nothing, so cross-process circuit-breaker state, `CONFIG_UPDATED` and emergency events do not reach it. A gunicorn install that has not imported the hooks module above logs `baldur.gunicorn_hooks_not_installed` shortly after startup, naming the missing wiring (it also fires on the older `baldur.server` wiring, which revives the subscriber but does not chain the SIGTERM drain — see the gunicorn graceful-shutdown runbook). Celery prefork and uWSGI workers have no equivalent hook today and carry the same receive-only caveat silently; runtime-config delivery still converges on those shapes through its periodic watcher (`BALDUR_RUNTIME_CONFIG_WATCH_INTERVAL_SECONDS`), just not at event latency.
+
+**Verify**: with `BALDUR_EVENT_BUS_BACKEND=redis`, count `redis_event_bus.listener_started` at startup — you should see one per worker process, not one per host.
+
+---
+
 ## Residual: concurrent same-section writes
 
 Cross-pod **read/apply** coherence is what this runbook covers (the applier sees cross-pod pending changes; console reads reflect changes applied elsewhere). It does **not** add cross-process optimistic concurrency for two operators editing the **same** config section in the same read→write window — that last-writer-wins residual is rollback-recoverable via ConfigHistory and is a known limitation tracked for a future release.

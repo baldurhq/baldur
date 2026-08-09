@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextvars
+import os
 import threading
 import traceback
 from collections import deque
@@ -70,6 +71,9 @@ class BaldurEventBus:
     # subclass-safety contract.
     _executor: ThreadPoolExecutor | None = None
     _executor_lock = threading.Lock()
+    # Process that built _executor. An inherited pool is non-None and looks
+    # healthy, so the fork check has to be a pid comparison — see _get_executor.
+    _executor_pid: int | None = None
 
     def __init__(self) -> None:
         self._subscriptions: dict[EventType, list[EventSubscription]] = {}
@@ -125,7 +129,30 @@ class BaldurEventBus:
         the lifetime of the executor; change requires
         ``shutdown_dispatch_executor()`` (drained by
         ``reset_event_bus_settings()`` and ``reset_protect_caches()``).
+
+        Fork-safe. A ``ThreadPoolExecutor`` does not survive ``fork()``: the
+        child inherits the worker ``Thread`` objects (all dead) together with
+        the idle-worker semaphore permits they were counted against, so
+        ``_adjust_thread_count`` consumes a permit, spawns nothing, and every
+        submitted dispatch queues forever. The inherited state is therefore
+        *abandoned* on a pid mismatch — never ``shutdown()``, which would
+        acquire the inherited shutdown lock and enqueue a wake-up sentinel
+        against dead threads. Dropping the reference is enough; the copied
+        thread objects and work queue are plain memory.
+
+        The check runs at the point of use rather than from a post-fork hook so
+        it covers every fork shape (celery prefork, uWSGI, hookless gunicorn,
+        ``multiprocessing``) — ``async_pool`` is the default dispatch mode on
+        the memory backend too.
         """
+        if cls._executor_pid != os.getpid():
+            # Lock-free, and the lock is replaced before any acquisition: it is
+            # held across a pool construction plus a settings load, wide enough
+            # for a fork to inherit it owned by a thread that no longer exists,
+            # and acquiring that would hang the first dispatch.
+            cls._executor_lock = threading.Lock()
+            cls._executor = None
+            cls._executor_pid = os.getpid()
         if cls._executor is None:
             with cls._executor_lock:
                 if cls._executor is None:
