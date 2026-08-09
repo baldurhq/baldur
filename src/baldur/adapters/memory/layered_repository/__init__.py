@@ -60,7 +60,51 @@ class LayeredCircuitBreakerStateRepository(
         )
     """
 
-    pass
+    # Which state fields cross which way between the layers. Declared here, on
+    # the assembled class, because the lanes live in several mixins and the
+    # contract is a property of the pair rather than of any one lane.
+    #
+    # L1 -> L2, the generic state mirror driven by traffic. Narrow on purpose:
+    # a mirror that also carried the manual-control fields would let one
+    # process's unpinned snapshot clear an operator's pin in the shared store.
+    # Pins reach L2 only through the manual-control primitives.
+    _L2_STATE_MIRROR_FIELDS = (
+        "state",
+        "failure_count",
+        "success_count",
+        "opened_at",
+    )
+
+    # L2 -> L1, the wholesale hydration set (``hydrate_snapshot``), used where
+    # the local row is absent or a full restore is intended. Carries the
+    # manual-control fields, so a Block survives into a process that did not
+    # take it.
+    _L1_HYDRATION_FIELDS = (
+        "state",
+        "failure_count",
+        "success_count",
+        "opened_at",
+        "last_failure_at",
+        "manually_controlled",
+        "controlled_by_id",
+        "control_reason",
+        "manual_override_expires_at",
+        "metadata",
+    )
+
+    # Never bulk-transferred, and why:
+    # - half_open_request_count / half_open_window_started_at are owned by the
+    #   L2-authoritative atomic slot primitives; a bulk copy would race them.
+    # - id / created_at / updated_at are layer-local identity and clock.
+    # ``service_name`` is the row key rather than payload, so it belongs to
+    # none of the three sets.
+    _TRANSFER_EXCLUDED_FIELDS = (
+        "id",
+        "created_at",
+        "updated_at",
+        "half_open_request_count",
+        "half_open_window_started_at",
+    )
 
 
 def reset_layered_repository_executor() -> None:

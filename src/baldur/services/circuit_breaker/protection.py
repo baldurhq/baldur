@@ -10,13 +10,16 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from baldur.core.decision_logger import ReasonCode, log_intervention_evaluated
 from baldur.core.execution_mode import intervention_suppressed
 
+from .manual_control import is_manual_pin_active
 from .rate_limit_tracker import get_rate_limit_tracker
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from baldur.interfaces.repositories import CircuitBreakerStateData
     from baldur.services.circuit_breaker import CircuitBreakerResult
 
     from .config import CircuitBreakerConfig
@@ -48,6 +51,7 @@ class ProtectionMixin:
         is_enabled: bool
         should_allow: Callable[..., bool]
         get_state: Callable[..., str]
+        get_or_create_state: Callable[..., CircuitBreakerStateData]
         force_open: Callable[..., CircuitBreakerResult]
 
     # =========================================================================
@@ -105,6 +109,34 @@ class ProtectionMixin:
                 rate_percent=round(rate_percent, 2),
                 window_seconds=window,
             )
+
+            # An operator's live Block/Allow outranks the automatic verdict.
+            # Without this the cascade would replace an Allow with a Block, or
+            # restamp a live Block with a TTL nobody typed. Every sibling
+            # automatic path already yields to the pin — the record paths skip
+            # on it, recovery transitions filter it out, and the expiry sweep
+            # leaves a due lift to admission — so this was an asymmetry, not a
+            # design. Like the observe-only gate below, it sits at this call
+            # site and not inside force_open, so the manual force path stays
+            # live. Accepted consequence: while an Allow is pinned, traffic
+            # keeps flowing to a 429-ing dependency for the pin's lifetime —
+            # bounded by its TTL and by the operator's explicit instruction.
+            state = self.get_or_create_state(service_name)
+            if is_manual_pin_active(state):
+                log_intervention_evaluated(
+                    service_name=service_name,
+                    allowed=False,
+                    reason=ReasonCode.POLICY_CONSTRAINT_ACTIVE,
+                )
+                logger.warning(
+                    "circuit_breaker.rate_limit_force_open_blocked",
+                    service_name=service_name,
+                    rate_limit_count=rate_limit_count,
+                    total_requests=total_requests,
+                    rate_percent=round(rate_percent, 2),
+                    window_seconds=window,
+                )
+                return None
 
             # Observe-only (dry-run / shadow / evaluation): suppress the
             # automatic 429 force-open. The gate sits at this call site, NOT

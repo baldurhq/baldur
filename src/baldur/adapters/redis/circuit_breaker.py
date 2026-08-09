@@ -260,6 +260,18 @@ class RedisCircuitBreakerStateRepository(
         """Generate storage key for service."""
         return f"{self._key_prefix}{service_name}"
 
+    def _scan_prefix(self) -> str:
+        """Full key prefix for keyspace enumeration — the seam writes use.
+
+        Every write resolves its physical key through the backend's key seam,
+        which applies the *dynamic* namespace prefix when namespacing is
+        enabled. A pattern built from the static configured prefix would then
+        match zero keys — silently, and indistinguishably from a genuinely
+        empty keyspace. Enumeration therefore builds its pattern (and strips
+        its prefix) through the same seam the atomic half-open acquire uses.
+        """
+        return self._backend._get_full_key(self.KEY_PREFIX)
+
     # =========================================================================
     # Interface Implementation
     # =========================================================================
@@ -490,8 +502,14 @@ class RedisCircuitBreakerStateRepository(
         Returns:
             List of all CircuitBreakerStateData
         """
-        # In degraded mode, we can only return what's in memory
-        if self._backend.is_degraded:
+        # Probe before trusting the degraded verdict. The backend is
+        # constructed DEGRADED and connects lazily per operation; unlike the
+        # per-key paths, whose backend calls run that lazy init themselves,
+        # this scan has no backend operation to trigger it. Without the probe
+        # a never-yet-connected backend reports an empty keyspace to its first
+        # consumer — which for the layered repository is the construction-time
+        # initial load, i.e. the lane that hydrates operator state.
+        if self._backend.is_degraded and not self._backend.ensure_redis():
             return self._get_all_from_memory()
 
         # In Redis mode, scan for keys
@@ -499,7 +517,8 @@ class RedisCircuitBreakerStateRepository(
             assert (
                 self._backend._redis is not None
             )  # is_degraded == False ⇒ Redis ready
-            pattern = f"{self._backend.config.key_prefix}{self.KEY_PREFIX}*"
+            prefix = self._scan_prefix()
+            pattern = f"{prefix}*"
             keys = self._backend.raw_redis_client.keys(pattern)
 
             results = []
@@ -508,7 +527,6 @@ class RedisCircuitBreakerStateRepository(
                     key = key.decode()
 
                 # Extract service name
-                prefix = f"{self._backend.config.key_prefix}{self.KEY_PREFIX}"
                 service_name = key[len(prefix) :]
 
                 data = self.get_state(service_name)
@@ -541,7 +559,8 @@ class RedisCircuitBreakerStateRepository(
             assert (
                 self._backend._redis is not None
             )  # is_degraded == False ⇒ Redis ready
-            pattern = f"{self._backend.config.key_prefix}{self.KEY_PREFIX}*"
+            prefix = self._scan_prefix()
+            pattern = f"{prefix}*"
             cursor: int = 0
             results: list[CircuitBreakerStateData] = []
             iterations = 0
@@ -558,7 +577,6 @@ class RedisCircuitBreakerStateRepository(
                     if isinstance(key, bytes):
                         key = key.decode()
 
-                    prefix = f"{self._backend.config.key_prefix}{self.KEY_PREFIX}"
                     service_name = key[len(prefix) :]
 
                     data = self.get_state(service_name)
@@ -623,12 +641,12 @@ class RedisCircuitBreakerStateRepository(
             assert (
                 self._backend._redis is not None
             )  # is_degraded == False ⇒ Redis ready
-            pattern = f"{self._backend.config.key_prefix}{self.KEY_PREFIX}*"
+            prefix = self._scan_prefix()
+            pattern = f"{prefix}*"
             cursor: int = 0
             iterations = 0
             max_iterations = 1000
             deadline = _time.monotonic() + 2.0
-            prefix = f"{self._backend.config.key_prefix}{self.KEY_PREFIX}"
 
             while True:
                 cursor, keys = self._backend.raw_redis_client.scan(

@@ -201,18 +201,26 @@ class TestCircuitBreakerServiceDIFallbackBehavior:
         service._sync_callbacks = []
         return service
 
-    def test_repository_uses_provider_registry_when_available(self):
-        """Normal path: repository comes from ProviderRegistry."""
+    def test_repository_asks_the_registry_for_the_layered_view_first(self):
+        """Normal path: repository comes from ProviderRegistry, named "layered".
+
+        The name assertion is the point. The mock is name-blind — it returns
+        the same object whichever view is requested — so a bare
+        ``repo is mock_repo`` would hold no matter which view the property
+        resolved, including the one that leaves an operator's manual pin
+        invisible to the traffic path.
+        """
         service = self._make_service()
         mock_repo = MagicMock()
 
         with patch(
             "baldur.factory.ProviderRegistry.get_circuit_breaker_repo",
             return_value=mock_repo,
-        ):
+        ) as mock_get:
             repo = service.repository
 
         assert repo is mock_repo
+        assert mock_get.call_args_list[0].kwargs == {"name": "layered"}
 
     def test_repository_falls_back_to_inmemory_when_allow_policy(self):
         """ALLOW policy: falls back to InMemory silently."""
@@ -226,7 +234,7 @@ class TestCircuitBreakerServiceDIFallbackBehavior:
             patch(
                 "baldur.factory.ProviderRegistry.get_circuit_breaker_repo",
                 side_effect=ValueError("No repo"),
-            ),
+            ) as mock_get,
             patch(
                 "baldur.settings.get_config",
                 return_value=mock_config,
@@ -235,6 +243,9 @@ class TestCircuitBreakerServiceDIFallbackBehavior:
             repo = service.repository
 
         assert isinstance(repo, InMemoryCircuitBreakerStateRepository)
+        # The layered attempt happened and raised; the fallback chain is what
+        # produced this repository, not a skipped first attempt.
+        assert mock_get.call_args_list[0].kwargs == {"name": "layered"}
 
     def test_repository_raises_runtime_error_when_fail_fast_policy(self):
         """FAIL_FAST policy: raises RuntimeError."""
@@ -246,7 +257,7 @@ class TestCircuitBreakerServiceDIFallbackBehavior:
             patch(
                 "baldur.factory.ProviderRegistry.get_circuit_breaker_repo",
                 side_effect=ValueError("No repo"),
-            ),
+            ) as mock_get,
             patch(
                 "baldur.settings.get_config",
                 return_value=mock_config,
@@ -254,6 +265,8 @@ class TestCircuitBreakerServiceDIFallbackBehavior:
             pytest.raises(RuntimeError, match="ProviderRegistry unavailable"),
         ):
             _ = service.repository
+
+        assert mock_get.call_args_list[0].kwargs == {"name": "layered"}
 
     def test_repository_caches_after_first_access(self):
         """Repository is cached after first successful access."""
@@ -263,11 +276,13 @@ class TestCircuitBreakerServiceDIFallbackBehavior:
         with patch(
             "baldur.factory.ProviderRegistry.get_circuit_breaker_repo",
             return_value=mock_repo,
-        ):
+        ) as mock_get:
             repo1 = service.repository
             repo2 = service.repository
 
         assert repo1 is repo2
+        assert mock_get.call_count == 1
+        assert mock_get.call_args_list[0].kwargs == {"name": "layered"}
 
 
 class TestDLQServiceBaseDIFallbackBehavior:

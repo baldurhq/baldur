@@ -43,6 +43,10 @@ def _make_repo(
     backend = MagicMock()
     backend.is_degraded = is_degraded
     backend.config.key_prefix = key_prefix
+    # Reads and writes must resolve their physical key through the same seam
+    # the real backend uses; a fake that only carries the configured prefix
+    # cannot tell a correct scan pattern from one that matches nothing.
+    backend._get_full_key = lambda key: f"{key_prefix}{key}"
 
     redis_client = MagicMock()
     backend.raw_redis_client = redis_client

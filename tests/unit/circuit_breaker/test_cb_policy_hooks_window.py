@@ -379,12 +379,20 @@ class TestCreateDefaultServiceBehavior:
             service = CircuitBreakerPolicy._create_default_service()
             assert isinstance(service, CircuitBreakerService)
 
-    def test_create_default_service_tries_layered_first(self):
-        """_create_default_service()는 'layered' repo를 먼저 시도한다."""
+    def test_create_default_service_resolves_the_layered_view(self):
+        """The default policy service resolves the layered repository.
+
+        The resolution itself now lives on ``CircuitBreakerService.repository``
+        so the traffic path and the operator-facing consumers share one view;
+        the policy must not carry a second, competing one. Asserting on the
+        requested *name* is what makes this non-vacuous — a name-blind mock
+        would satisfy any resolution order.
+        """
         mock_repo = MagicMock()
         with patch("baldur.factory.ProviderRegistry") as mock_registry:
             mock_registry.get_circuit_breaker_repo.return_value = mock_repo
-            CircuitBreakerPolicy._create_default_service()
+            service = CircuitBreakerPolicy._create_default_service()
+            assert service.repository is mock_repo
             mock_registry.get_circuit_breaker_repo.assert_called_once_with(
                 name="layered"
             )

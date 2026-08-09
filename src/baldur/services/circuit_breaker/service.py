@@ -147,7 +147,27 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
 
     @property
     def repository(self) -> CircuitBreakerStateRepository:  # type: ignore[override]
-        """Get the repository using ProviderRegistry with fallback policy."""
+        """Resolve the default repository — the layered view first.
+
+        This property is the single resolution point for every default
+        consumer: the control REST surface and admin actions, both expiry and
+        recovery sweeps, the inbound middleware, and the traffic policies. They
+        must all see one view, or an operator's Block lands in a repository the
+        admission path never reads — which is exactly what a split default
+        produced: the control surface wrote to the registry's default view
+        while ``protect()`` decided from the layered one.
+
+        Resolution order:
+
+        1. the "layered" view (L1 memory over the shared store), which keeps
+           admission off the network per the hot-path guarantee, then
+        2. the registry default, then the in-memory fallback, unchanged from
+           before — reached only where "layered" is unregistered or fails to
+           construct.
+
+        The registry caches instances per name, so a process holds exactly one
+        layered view and the two components cannot split.
+        """
         if self._repository is None:
             from baldur.adapters.memory import (
                 InMemoryCircuitBreakerStateRepository,
@@ -155,11 +175,17 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
             from baldur.core.di_fallback import resolve_with_fallback
             from baldur.factory import ProviderRegistry
 
-            self._repository = resolve_with_fallback(
-                registry_method=lambda: ProviderRegistry.get_circuit_breaker_repo(),
-                fallback_class=InMemoryCircuitBreakerStateRepository,
-                service_name=self.__class__.__name__,
-            )
+            try:
+                self._repository = ProviderRegistry.get_circuit_breaker_repo(
+                    name="layered"
+                )
+            except Exception:
+                logger.debug("circuit_breaker.layered_repo_unavailable_falling_back")
+                self._repository = resolve_with_fallback(
+                    registry_method=lambda: ProviderRegistry.get_circuit_breaker_repo(),
+                    fallback_class=InMemoryCircuitBreakerStateRepository,
+                    service_name=self.__class__.__name__,
+                )
         return self._repository
 
     @property
@@ -736,20 +762,21 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
         Args:
             service_name: Name of the external service
             error_context: Optional context about the failure (for snapshot)
-            hint_state: Optional pre-fetched state — when the caller
-                already loaded the state via ``should_allow_with_state``,
-                passing it here skips a redundant repository lookup. The hint
-                is used only when its ``service_name`` matches; otherwise we
-                fall through to a fresh fetch. Failures always increment
-                counters, so the hint cannot fully skip the repository write.
+            hint_state: Accepted for call-site symmetry with
+                ``record_success`` and deliberately NOT used as a substitute
+                for the state read below. A hint taken at admission time can
+                predate an operator's manual pin, and every branch here either
+                runs the pin check or writes state — so the decision is always
+                made on freshly-read state.
         """
         if not self.is_enabled:
             return
 
-        if hint_state is not None and hint_state.service_name == service_name:
-            state = hint_state
-        else:
-            state = self.get_or_create_state(service_name)
+        # Always read fresh: the hint may predate a manual pin taken while the
+        # protected call was in flight, and acting on it would write over the
+        # operator's row (state clobbered, pin fields preserved) and then admit
+        # every later request for the rest of the pin's lifetime.
+        state = self.get_or_create_state(service_name)
 
         # Skip while a manual override is in force. Read through the predicate,
         # not the raw flag: once the override's lifetime has passed, automatic
@@ -1167,15 +1194,15 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
             service_name: Name of the external service
             hint_state: Optional pre-fetched state — when the caller
                 already loaded the state via ``should_allow_with_state``,
-                passing it here unlocks two optimizations:
-                  1. Fast path: when the hint indicates steady-state CLOSED
-                     (manually_controlled=False, failure_count=0), the call
-                     returns immediately without touching the repository — the
-                     eventual ``update_state(failure_count=0)`` is a no-op.
-                  2. Slow path: skips the redundant ``get_or_create_state``
-                     repository read when the hint's ``service_name`` matches.
-                Stale-hint cases are observably equivalent to the no-hint path:
-                a missed reset is corrected by the next call's slow path.
+                passing it here unlocks the read-free fast path: a hint
+                indicating steady-state CLOSED (manually_controlled=False,
+                failure_count=0) returns immediately without touching the
+                repository, because the eventual
+                ``update_state(failure_count=0)`` would be a no-op. That is
+                the hint's ONLY role — it never substitutes for the fresh
+                read the slow path performs, since a hint taken at admission
+                time can predate an operator's manual pin and the slow path
+                writes state. Stale hints fall through to the slow path.
         """
         if not self.is_enabled:
             return
@@ -1205,10 +1232,10 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
             )
             return
 
-        if hint_state is not None and hint_state.service_name == service_name:
-            state = hint_state
-        else:
-            state = self.get_or_create_state(service_name)
+        # Past the fast path every branch below either runs the pin check or
+        # writes state, so the decision is always made on freshly-read state —
+        # never on a hint that may predate an operator's manual pin.
+        state = self.get_or_create_state(service_name)
 
         # Skip while a manual override is in force (see record_failure).
         if is_manual_pin_active(state):

@@ -33,6 +33,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - **Breaking**: `atomic_force_open` / `atomic_force_close` take `ttl_minutes: int | None`.
 - **Breaking**: the Django admin's `manually_controlled` is read-only — use `reset_selected`.
 - The override-expiry sweep clears the manual flag only; it no longer writes circuit state.
+- A manual block or allow is enforced per process — an already-running peer worker won't see it.
 - The DLQ backlog alerts and dashboard panel read the O(1) pending total, not the per-domain sum.
 - **Breaking**: those alerts lost their `domain` label — re-key per-domain routing and silences.
 - **Breaking**: `BALDUR_SYNC_ON_STARTUP` / `BALDUR_SYNC_JITTER_MAX` dropped with the gauge hydrator.
@@ -55,7 +56,12 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - A breaker name with a dot, a hyphen or a capital missed the DLQ and state joins on its row.
 - Reset pinned a manual circuit-breaker override instead of clearing it, so it never reopened.
 - A stored out-of-range circuit-breaker value could disable protection; it is now clamped.
-- A manual block admitted trial traffic once `recovery_timeout` elapsed; it now admits nothing.
+- A manual block admitted every request: control and traffic read different breaker stores.
+- Recording an outcome from a request admitted before a block could reopen the blocked breaker.
+- A block placed elsewhere was lost on process start; it now loads with the rest of the state.
+- A drift repair could overwrite a live block in the shared store with an unblocked row.
+- An automatic 429-cascade force-open overrode an operator's block or allow; it now yields to it.
+- With `BALDUR_NAMESPACE_NAMESPACE_ENABLED=true`, every breaker keyspace scan matched nothing.
 - The block lifetime typed in the console was discarded — every block lasted the global default.
 - Manual overrides never expired without Celery; the inline scheduler now runs the sweep.
 - DLQ and circuit-breaker gauges froze at startup; every serving process now refreshes them.
