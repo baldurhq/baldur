@@ -44,6 +44,7 @@ from baldur.audit.wal._reader import WALReaderMixin
 from baldur.audit.wal._serialization import compute_checksum, verify_checksum
 from baldur.audit.wal._writer import WALWriterMixin
 from baldur.core.file_utils import safe_unlink
+from baldur.core.process_utils import fork_repaired
 from baldur.utils.fs import ResolvedDir, resolve_writable_dir
 
 logger = structlog.get_logger()
@@ -117,6 +118,12 @@ class WriteAheadLog(
         self._state = WALState.ACTIVE
         self._lock = threading.RLock()
 
+        # Fork ownership. An instance constructed in a child is born owned, so
+        # the repair below no-ops; an instance inherited through fork() is
+        # re-owned lazily at the first public entry point.
+        self._origin_pid = os.getpid()
+        self._repair_gate = threading.Lock()
+
         # Statistics
         self._total_entries = 0
         self._corrupted_entries = 0
@@ -165,6 +172,96 @@ class WriteAheadLog(
                     self._sequence = max(self._sequence, entry.sequence)
             except Exception:
                 pass
+
+    def _repair_if_forked(self) -> None:
+        """Re-own fork-inherited WAL state so this process writes its own file.
+
+        No-op in the process that constructed the instance — one attribute
+        load plus ``os.getpid()``. The gate is only reached on a mismatch, and
+        the constructing process never mismatches, so the gate itself is never
+        held at a ``fork()`` instant in the served topology.
+
+        What the repair does, and why each step is the shape it is:
+
+        - **Renew the lock before any acquisition.** A writer thread holds the
+          WAL lock on a recurring cadence, so a fork while it is held is a real
+          window, and the owner recorded in the inherited ``RLock`` is a thread
+          that does not exist here and will never release it. The pid stamp is
+          the discriminator: a temporal predicate cannot tell an orphaned
+          holder from a live one.
+        - **Release the inherited handle at the raw layer, then drop it.**
+          Unlike a socket-backed object, a buffered file object cannot simply
+          be abandoned: dropping the last reference runs a finalizer that
+          *flushes*, writing the parent's buffered bytes into the parent's file
+          through the inherited file description — the parent then writes them
+          again itself. Closing the raw layer releases only this process's
+          descriptor and discards the buffer unwritten; the wrapper afterwards
+          reports itself closed, so its finalizer skips the flush. The
+          wrapper's own ``close()`` is deliberately NOT called: it takes the
+          buffered layer's internal lock before honoring that state, which a
+          child forked mid-write would wait on forever.
+        - **Carry ``_sequence`` forward.** Cursors over this sequence space
+          live on other objects that this repair cannot reach; restarting at 0
+          would put the child's own new entries below an inherited cursor,
+          where they are silently never replayed. Carrying it keeps every
+          inherited cursor below the child's first new entry.
+        - **Clear an inherited operating-mode latch.** A parent that once ran
+          out of disk hands the child a WAL whose every write returns ``-1``,
+          for the child's whole life, with nothing on the audit path clearing
+          it — while a freshly started process on the same disk would retry and
+          re-latch only if the disk is still full. ``CLOSED`` is the owner's
+          explicit intent and is kept: a child that writes then gets a loud
+          error rather than a silent drop.
+        - **Reset the per-process counters.** They are this-process statistics
+          published through ``get_stats()`` and the audit health probe, so an
+          inherited value makes a worker that wrote three entries report the
+          parent's thousands. Durability state (the sequence) is not statistics
+          and is not reset.
+
+        The repair event is logged after the gate is released: a log call is
+        not lock-free, and holding the gate across one turns the repair itself
+        into the thing that can hang.
+        """
+        if os.getpid() == self._origin_pid:
+            return
+
+        with self._repair_gate:
+            inherited_pid = self._origin_pid
+            if os.getpid() == inherited_pid:
+                return  # another thread finished the repair first
+
+            self._lock = threading.RLock()
+
+            handle = self._current_handle
+            self._current_handle = None
+            if handle is not None:
+                try:
+                    getattr(handle, "raw", handle).close()
+                except Exception:
+                    pass
+
+            self._current_file = None
+            self._group_buffer = []
+            self._last_flush_time = time.time()
+
+            if self._state in (WALState.DISK_FULL_FAILOPEN, WALState.ROTATING):
+                self._state = WALState.ACTIVE
+
+            self._total_entries = 0
+            self._corrupted_entries = 0
+            self._recovered_entries = 0
+            self._group_commit_flushes = 0
+            self._last_write_time = None
+
+            self._origin_pid = os.getpid()
+            carried_sequence = self._sequence
+
+        logger.info(
+            "wal.fork_state_repaired",
+            inherited_pid=inherited_pid,
+            file_prefix=self._config.file_prefix,
+            carried_sequence=carried_sequence,
+        )
 
     @property
     def wal_dir(self) -> Path:
@@ -247,8 +344,25 @@ class WriteAheadLog(
                 )
 
     def _cleanup_old_files(self) -> None:
-        """Clean up old WAL files."""
-        wal_files = sorted(self._wal_dir.glob(f"{self._config.file_prefix}_*.wal"))
+        """Enforce the retention cap over this process's own rotated files.
+
+        The cap is scoped to the files this process is allowed to reclaim.
+        Counting every PID's files against it while reclaiming its own is what
+        makes a multi-worker deployment lossy: with one file per worker the
+        directory passes the cap with nobody misbehaving, and each rotating
+        worker then deletes its **own** oldest file — including the one it just
+        rotated, whose entries the drain has not necessarily delivered
+        (rotation is size-triggered, the drain is not).
+
+        ``max_files`` is therefore a per-process retention budget, and the
+        directory ceiling is ``workers x max_files x max_file_size``. That is
+        not a new ceiling: once a process may not unlink a living peer's file,
+        a directory-wide cap is unenforceable anyway. The backstop against a
+        genuinely full disk is the priority purge, which is allowed to reclaim
+        dead-PID files.
+        """
+        own_pid_pattern = f"{self._config.file_prefix}_*_{os.getpid()}.wal"
+        wal_files = sorted(self._wal_dir.glob(own_pid_pattern))
 
         while len(wal_files) > self._config.max_files:
             oldest = wal_files.pop(0)
@@ -258,6 +372,7 @@ class WriteAheadLog(
     # Stats & Lifecycle
     # =========================================================================
 
+    @fork_repaired
     def get_stats(self) -> WALStats:
         """Read WAL statistics."""
         with self._lock:
@@ -284,11 +399,13 @@ class WriteAheadLog(
                 recovered_entries=self._recovered_entries,
             )
 
+    @fork_repaired
     def count_unprocessed(self, last_processed_seq: int = 0) -> int:
         """Return the number of unprocessed entries."""
         with self._lock:
             return max(0, self._sequence - last_processed_seq)
 
+    @fork_repaired
     def get_sync_lag(self, last_synced_seq: int = 0) -> int:
         """Compute the sync lag against the central store."""
         with self._lock:
@@ -297,6 +414,7 @@ class WriteAheadLog(
                 update_wal_sync_lag(lag)
             return lag
 
+    @fork_repaired
     def flush(self) -> None:
         """
         Flush the buffer.
@@ -318,6 +436,7 @@ class WriteAheadLog(
                 if self._config.sync_on_write:
                     os.fsync(self._current_handle.fileno())
 
+    @fork_repaired
     def close(self) -> None:
         """Close the WAL."""
         with self._lock:

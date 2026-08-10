@@ -3527,6 +3527,41 @@ def _setup_config_invalidation_delivery() -> None:
         logger.warning("baldur.config_invalidation_setup_failed", error=exc)
 
 
+def _start_audit_pipeline_starter() -> None:
+    """Revive the async audit pipeline in this process.
+
+    Under ``gunicorn --preload`` the pipeline is built once in the master by
+    ``init()`` — the batch consumer thread, the WAL sync worker and the
+    CRITICAL flush pool — and none of it survives ``fork()``. Without this
+    starter every non-CRITICAL audit event a worker emits is enqueued to a
+    consumer that does not exist: dropped at exit, or earlier once the bounded
+    queue fills.
+
+    A plain delegation to the ``init()``-time starter, so the settings gate
+    and the ImportError shield stay single-sourced. Everything it reaches is
+    fork-aware: the lifecycle guard is PID-scoped and each component re-owns
+    its inherited state at its first entry point, so there is nothing to
+    pre-condition here.
+
+    Fork-safety: skipped in the gunicorn master, whose pipeline is already
+    running; ``post_worker_init`` re-runs it per worker once
+    ``GUNICORN_WORKER=1`` flips the master check, and completes before the
+    worker accepts a request, so no request thread can race the repair. Audit
+    is disabled by default, so no AUTOSTART hatch is needed — unit-test
+    processes return at the settings gate.
+    """
+    try:
+        from baldur.core.process_utils import is_gunicorn_master
+
+        if is_gunicorn_master():
+            logger.debug("audit.start_skipped_gunicorn_master")
+            return
+
+        _start_audit_pipeline_if_enabled()
+    except Exception as exc:
+        logger.warning("baldur.audit_pipeline_start_failed", error=exc)
+
+
 def _start_event_bus_listener_if_enabled() -> None:
     """Revive the Redis event-bus listener thread in this process.
 
@@ -3602,10 +3637,15 @@ def _start_event_bus_listener_if_enabled() -> None:
 # invalidation, auto-tuning) are ``baldur_pro``-internal and live in
 # ``ProviderRegistry.startup_integrations`` instead (615 D1), iterated
 # by ``start_background_workers()`` after this OSS tuple.
-# ``audit`` / ``dlq_outbox`` / ``default_scheduler`` / ``admin_server`` are
-# excluded: they have distinct per-process semantics (PID-isolated WAL,
-# leader-election-gated scheduler, single-socket admin server) that the uniform
-# daemon-thread restart does not fit.
+# ``dlq_outbox`` / ``default_scheduler`` / ``admin_server`` are excluded: they
+# have distinct per-process semantics (leader-election-gated scheduler,
+# single-socket admin server) that the uniform daemon-thread restart does not
+# fit. ``audit`` used to be excluded on the same grounds — a PID-isolated WAL —
+# but the pipeline's components now re-own their fork-inherited state at their
+# entry points, and the WAL repair preserves exactly that isolation: the child
+# abandons the inherited handle and lazily opens its own PID-stamped file. The
+# exclusion rationale therefore no longer holds, and leaving it out is what
+# made every non-CRITICAL audit event emitted in a preload worker unreachable.
 # ``domain_gauge_updater`` refreshes the repository-backed gauge families (DLQ
 # pending/status, CB state) on a timer in EVERY serving process. It belongs here
 # rather than in the leader-gated scheduler precisely because its effect is
@@ -3648,6 +3688,7 @@ _BACKGROUND_WORKER_STARTERS: tuple[Callable[[], None], ...] = (
     _seed_circuit_breaker_state_if_enabled,
     _setup_config_invalidation_delivery,
     _start_event_bus_listener_if_enabled,
+    _start_audit_pipeline_starter,
 )
 
 

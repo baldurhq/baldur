@@ -14,6 +14,7 @@ from typing import IO, TYPE_CHECKING, Any
 import structlog
 
 from baldur.audit.wal._serialization import serialize_entry, sync_and_maybe_rotate
+from baldur.core.process_utils import fork_repaired
 
 if TYPE_CHECKING:
     from baldur.audit.wal._models import WALConfig, WALState
@@ -41,6 +42,7 @@ class WALWriterMixin:
         def _rotate_file(self) -> None: ...
         def _handle_disk_full(self) -> None: ...
 
+    @fork_repaired
     def write(self, data: dict[str, Any]) -> int:
         """
         Write to the WAL.
@@ -170,12 +172,14 @@ class WALWriterMixin:
         self._group_buffer.clear()
         self._last_flush_time = time.time()
 
+    @fork_repaired
     def flush_group_commit(self) -> None:
         """Force-flush the Group Commit buffer."""
         with self._lock:
             if self._config.group_commit_enabled:
                 self._flush_buffer()
 
+    @fork_repaired
     def batch_write_entries(self, entries: list[dict[str, Any]]) -> list[int]:
         """
         Write several entries in a single pass (one fsync).

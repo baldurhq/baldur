@@ -6,11 +6,13 @@ Handles disk-full conditions, priority-based purging, and recovery checks.
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 import structlog
 
 from baldur.core.file_utils import safe_unlink
+from baldur.core.process_utils import fork_repaired
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -76,6 +78,36 @@ class WALDiskManagerMixin:
                 error=e,
             )
 
+    def _reclaimable_in_order(self, wal_files: list[Path]) -> list[Path]:
+        """Order candidate files by who may reclaim them, dropping live peers.
+
+        A file whose embedded PID names another living process is never
+        reclaimable — its owner is still appending to it, and freeing space by
+        unlinking it would send the owner's subsequent writes to an unlinked
+        inode.
+
+        Own-PID files come first: they are this process's own rotated history,
+        the only files it can be sure nobody else is waiting to drain. Dead-PID
+        (and PID-less) files come last, because those are precisely the
+        un-absorbed orphan backlog — deleting them ahead of this process's own
+        history would discard a crashed peer's undelivered entries first.
+        """
+        from baldur.audit.wal._reader import is_live_peer_wal_file, wal_file_owner_pid
+
+        own_pid = os.getpid()
+        own: list[Path] = []
+        foreign: list[Path] = []
+
+        for wal_file in wal_files:
+            if is_live_peer_wal_file(wal_file):
+                continue
+            if wal_file_owner_pid(wal_file) == own_pid:
+                own.append(wal_file)
+            else:
+                foreign.append(wal_file)
+
+        return own + foreign
+
     def _purge_by_priority(self) -> bool:  # noqa: C901
         """
         Free disk space by deleting files in priority order.
@@ -92,9 +124,11 @@ class WALDiskManagerMixin:
 
         for priority in purge_priorities:
             priority_pattern = f"{self._config.file_prefix}_{priority.lower()}_*.wal"
-            priority_files = sorted(
-                self._wal_dir.glob(priority_pattern),
-                key=lambda f: f.stat().st_mtime,
+            priority_files = self._reclaimable_in_order(
+                sorted(
+                    self._wal_dir.glob(priority_pattern),
+                    key=lambda f: f.stat().st_mtime,
+                )
             )
 
             for wal_file in priority_files:
@@ -124,9 +158,11 @@ class WALDiskManagerMixin:
 
         # With no priority files left, delete general files oldest-first
         if freed_bytes < target_free:
-            general_files = sorted(
-                self._wal_dir.glob(f"{self._config.file_prefix}_*.wal"),
-                key=lambda f: f.stat().st_mtime,
+            general_files = self._reclaimable_in_order(
+                sorted(
+                    self._wal_dir.glob(f"{self._config.file_prefix}_*.wal"),
+                    key=lambda f: f.stat().st_mtime,
+                )
             )
             critical_min_bytes = self._config.critical_retention_min_mb * 1024 * 1024
             total_size = sum(f.stat().st_size for f in general_files)
@@ -173,6 +209,7 @@ class WALDiskManagerMixin:
         )
         return False
 
+    @fork_repaired
     def check_disk_recovery(self) -> bool:
         """
         Return to normal mode once free disk space is available again.

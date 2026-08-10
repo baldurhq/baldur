@@ -49,6 +49,14 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - **Breaking**: `last_5m_failure_rate` may be null; `circuit_state` may be null (was `closed`).
 - A service with an observed call but no registered domain now gets a row in that payload.
 - **Breaking**: `baldur.server` removed — use `baldur.adapters.gunicorn`'s three worker hooks.
+- **Breaking**: WAL `max_files` is now a per-process cap, so a directory holds workers × that many.
+- Orphan WAL absorption is scheduled as the drain loop's first action, not done on the boot path.
+
+### Removed
+
+- **Breaking**: `AsyncHealingLogger.configure_wal()` and `WALPolicy` are gone; no replacement.
+- **Breaking**: `AsyncHealingLogger.get_stats()` dropped `wal_writes`; indexing it now raises.
+- Both described a WAL-first write path that had no caller and never executed.
 
 ### Fixed
 
@@ -83,6 +91,16 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - A forked child's shutdown could unsubscribe the parent from every channel, deafening it for good.
 - Event-handler dispatch stalled silently in any forked child; the inherited pool is now rebuilt.
 - A worker recycle ran no audit shutdown: the WAL was left unclosed and no checkpoint saved.
+- Under `gunicorn --preload`, audit events emitted in a worker reached a consumer killed by fork.
+- Non-CRITICAL audit events logged in such a worker were dropped; the pipeline is now revived.
+- `AsyncHealingLogger.flush()` waited 5 s and flushed nothing when its consumer thread was dead.
+- A worker with no live audit threads reported the pipeline as running; both reads now check it.
+- A swallowed audit-startup failure was recorded as success, so no later call ever retried it.
+- Orphan-WAL absorption read a *live* peer's file and re-delivered entries it had already sent.
+- WAL retention, the disk purge and startup cleanup could unlink a living peer's open file.
+- A forked worker inherited a disk-full latch and silently dropped every WAL write for its life.
+- A no-op audit destination counted as delivery and consumed the one-shot orphan absorb.
+- The orphan absorb ran on the boot path; a slow one could exceed gunicorn's worker-boot timeout.
 
 ## [1.3.2] - 2026-07-31
 

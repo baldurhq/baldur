@@ -7,7 +7,6 @@ Asynchronous event buffering for Zero-Latency Logging
 Key features:
 - Priority Queue-based event processing (CRITICAL first)
 - ThreadPoolExecutor-based CRITICAL event processing (prevents thread explosion)
-- WAL-First logging (prevents data loss)
 - Batch flush retries (exponential backoff)
 - Queue size limit and backpressure strategy
 - Error-threshold-based automatic alerting
@@ -15,6 +14,7 @@ Key features:
 
 from __future__ import annotations
 
+import os
 import queue
 import threading
 import time
@@ -22,29 +22,42 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum, IntEnum
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import structlog
 
 from baldur.core.backoff import ExponentialBackoff
+from baldur.core.process_utils import fork_repaired
 from baldur.core.rate_limiting import CooldownGate, SlidingWindowCounter
 from baldur.settings.batch import get_batch_settings
-
-if TYPE_CHECKING:
-    from baldur.audit.wal import WriteAheadLog
 
 __all__ = [
     "AsyncHealingLogger",
     "EventSeverity",
     "LogFlushPriority",
     "PrioritizedEvent",
-    "WALPolicy",
     "QueueOverflowPolicy",
     "BatchRetryPolicy",
     "FlushErrorAlertConfig",
 ]
 
 logger = structlog.get_logger()
+
+
+def _initial_stats() -> dict[str, int]:
+    """Zeroed statistics counters — the single definition of the stat keys."""
+    return {
+        "events_logged": 0,
+        "events_flushed": 0,
+        "immediate_flushes": 0,
+        "batch_flushes": 0,
+        "flush_errors": 0,
+        "queue_overflows": 0,
+        "pending_retries": 0,
+        "dlq_moved": 0,
+        "total_retries": 0,
+        "alerts_sent": 0,
+    }
 
 
 # =============================================================================
@@ -88,14 +101,6 @@ class PrioritizedEvent:
     event: dict[str, Any] = field(compare=False)
 
 
-class WALPolicy(str, Enum):
-    """WAL write policy."""
-
-    ALL = "all"  # write all events to WAL
-    CRITICAL_ONLY = "critical"  # write only CRITICAL to WAL (recommended)
-    NONE = "none"  # no WAL (legacy behavior)
-
-
 class QueueOverflowPolicy(str, Enum):
     """Queue overflow policy."""
 
@@ -137,7 +142,6 @@ class AsyncHealingLogger:
     Key characteristics:
     - Priority Queue: process CRITICAL events first
     - ThreadPoolExecutor: thread pool for CRITICAL events (prevents thread explosion)
-    - WAL-First: write to WAL before the memory queue (prevents data loss)
     - Batch retry: applies exponential backoff
     - Queue size limit: protects memory via a backpressure strategy
     - Error alert: automatic alert when the threshold is exceeded
@@ -167,9 +171,11 @@ class AsyncHealingLogger:
     _settings_cache: Any | None = None
     _handle: Any | None = None  # DaemonWorkerHandle (impl 489 D9)
 
-    # WAL-related
-    _wal: WriteAheadLog | None = None
-    _wal_policy: WALPolicy = WALPolicy.CRITICAL_ONLY
+    # Fork ownership. ``None`` until a start actually proceeds, so a process
+    # that never started the pipeline — every unit-test process included — can
+    # never trip the repair.
+    _origin_pid: int | None = None
+    _repair_gate = threading.Lock()
 
     # CRITICAL event thread pool
     _critical_executor: ThreadPoolExecutor | None = None
@@ -202,19 +208,7 @@ class AsyncHealingLogger:
     IMMEDIATE_SEVERITIES = {EventSeverity.CRITICAL}
 
     # Statistics
-    _stats = {
-        "events_logged": 0,
-        "events_flushed": 0,
-        "immediate_flushes": 0,
-        "batch_flushes": 0,
-        "flush_errors": 0,
-        "wal_writes": 0,
-        "queue_overflows": 0,
-        "pending_retries": 0,
-        "dlq_moved": 0,
-        "total_retries": 0,
-        "alerts_sent": 0,
-    }
+    _stats = _initial_stats()
 
     @classmethod
     def _get_settings(cls):
@@ -234,10 +228,101 @@ class AsyncHealingLogger:
         return cls._get_settings().flush_interval
 
     # -------------------------------------------------------------------------
+    # Fork ownership
+    # -------------------------------------------------------------------------
+
+    @classmethod
+    def _repair_if_forked(cls) -> None:
+        """Re-own fork-inherited pipeline state so this process runs its own.
+
+        A ``fork()`` copies this class's state wholesale into the child and
+        leaves none of it usable: the consumer thread does not exist there,
+        the class locks may record an owner that never releases them, and the
+        queue holds copies of events the parent is still delivering itself.
+
+        Runs at the head of every public entry point that reaches the repaired
+        state — not only at ``start()``. The child's *first* class-lock
+        acquisition on the revival path is ``configure()``, and an inherited
+        lock held at the fork instant would deadlock the worker's main thread
+        before ``start()`` is ever reached.
+
+        No-op unless some ancestor actually started the pipeline (``None``
+        stamp) or this process already owns it — one attribute load plus
+        ``os.getpid()``, which is why it is affordable on ``log()``.
+
+        Design notes on the individual steps:
+
+        - The gate is entered only after an unlocked mismatch pre-check, so
+          the process that owns the state never holds it and it is never
+          inherited locked; inside, the mismatch is re-checked so a second
+          thread returns instead of repairing twice.
+        - Queues are **replaced**, never set to ``None``: a ``None`` queue
+          makes the consumer loop busy-spin and makes enqueue silently drop.
+          The inherited contents are abandoned rather than flushed — the
+          parent's live pipeline owns those events and delivers them exactly
+          once, whereas flushing the copies would write one duplicate per
+          worker into the audit trail with nothing downstream to dedup them.
+        - ``Event`` objects are replaced rather than ``clear()``-ed: an
+          Event's own internal lock can be inherited held.
+        - The error window and alert cooldown are replaced wholesale. They
+          each own a lock (an inherited held one deadlocks the child's first
+          flush-error path) and the cooldown additionally carries a live
+          *reservation*, which would suppress the child's first page for the
+          remainder of the parent's cooldown — a missed alert, not a slow one.
+        - ``_running`` is deliberately untouched: it stays owned by
+          start/stop, and the aliveness-composed guards read the thread rather
+          than the flag. ``_handle`` is kept for identity (a respawn rebinds
+          its thread field and converges) with only its inherited observations
+          reset.
+        """
+        origin = cls._origin_pid
+        if origin is None or origin == os.getpid():
+            return
+
+        with cls._repair_gate:
+            inherited_pid = cls._origin_pid
+            if inherited_pid is None or inherited_pid == os.getpid():
+                return  # another thread finished the repair first
+
+            # Renew both class locks BEFORE anything acquires them.
+            cls._lock = threading.RLock()
+            cls._queue_count_lock = threading.Lock()
+
+            cls._priority_queue = queue.PriorityQueue()
+            cls._queue = queue.Queue(maxsize=cls._max_queue_size)
+            cls._queue_count = 0
+            cls._pending_retries = []
+
+            cls._flush_requested = threading.Event()
+            cls._flush_done = threading.Event()
+
+            cls._stats = _initial_stats()
+            cls._error_window = SlidingWindowCounter()
+            cls._alert_gate = CooldownGate()
+
+            # The inherited consumer thread and executor threads do not exist
+            # here. The executor is dropped without shutdown() — its worker
+            # threads are the parent's — and CRITICAL events fall back to a
+            # thread per event until start() rebuilds the pool.
+            cls._worker_thread = None
+            cls._critical_executor = None
+
+            if cls._handle is not None:
+                cls._handle.reset_after_fork()
+
+            cls._origin_pid = os.getpid()
+
+        logger.info(
+            "async_healing_logger.fork_state_repaired",
+            inherited_pid=inherited_pid,
+        )
+
+    # -------------------------------------------------------------------------
     # Configuration
     # -------------------------------------------------------------------------
 
     @classmethod
+    @fork_repaired
     def configure(cls, flush_callback: Callable[[list[dict]], None]) -> None:
         """
         Set the batch send callback
@@ -249,27 +334,7 @@ class AsyncHealingLogger:
             cls._flush_callback = flush_callback
 
     @classmethod
-    def configure_wal(
-        cls,
-        wal: WriteAheadLog,
-        policy: WALPolicy = WALPolicy.CRITICAL_ONLY,
-    ) -> None:
-        """
-        Set the WAL instance and policy.
-
-        Args:
-            wal: WriteAheadLog instance
-            policy: WAL write policy
-        """
-        with cls._lock:
-            cls._wal = wal
-            cls._wal_policy = policy
-        logger.info(
-            "async_healing_logger.wal_configured",
-            policy=policy.value,
-        )
-
-    @classmethod
+    @fork_repaired
     def configure_queue(
         cls,
         max_size: int = 5000,
@@ -292,6 +357,7 @@ class AsyncHealingLogger:
         )
 
     @classmethod
+    @fork_repaired
     def configure_retry(cls, policy: BatchRetryPolicy) -> None:
         """
         Set the retry policy.
@@ -307,6 +373,7 @@ class AsyncHealingLogger:
         )
 
     @classmethod
+    @fork_repaired
     def configure_alert(cls, config: FlushErrorAlertConfig) -> None:
         """
         Set the error alert.
@@ -326,10 +393,36 @@ class AsyncHealingLogger:
     # -------------------------------------------------------------------------
 
     @classmethod
+    @fork_repaired
     def start(cls) -> None:
-        """Start the background worker"""
+        """Start the background worker.
+
+        Idempotence is composed from thread aliveness rather than ``_running``
+        alone: a fork child inherits ``_running=True`` together with a thread
+        object Python has already marked stopped, so a flag-only guard would
+        report a running pipeline that has no consumer.
+
+        On the already-running path the CRITICAL executor is still ensured, so
+        a revival that came in through the respawn callback rather than
+        through here does not pin CRITICAL events on the per-event-thread
+        fallback for the rest of the process's life.
+
+        Start failure is reported honestly: if the thread cannot be spawned
+        (a container thread cap, say) ``_running`` is put back before the
+        exception propagates, so later guards do not read a pipeline that
+        never existed.
+        """
         with cls._lock:
-            if cls._running:
+            if (
+                cls._running
+                and cls._worker_thread is not None
+                and cls._worker_thread.is_alive()
+            ):
+                if cls._critical_executor is None:
+                    cls._critical_executor = ThreadPoolExecutor(
+                        max_workers=cls.CRITICAL_EXECUTOR_MAX_WORKERS,
+                        thread_name_prefix="CriticalAuditFlush",
+                    )
                 return
             cls._running = True
 
@@ -355,13 +448,18 @@ class AsyncHealingLogger:
             )
 
             cls._pending_retries = []
+            cls._origin_pid = os.getpid()
 
             from baldur.meta.daemon_worker import DaemonWorkerHandle
             from baldur.metrics.recorders.daemon_worker import (
                 register_daemon_worker,
             )
 
-            cls._spawn_worker_thread()
+            try:
+                cls._spawn_worker_thread()
+            except BaseException:
+                cls._running = False
+                raise
             assert cls._worker_thread is not None  # populated by _spawn_worker_thread
             cls._handle = DaemonWorkerHandle(
                 thread=cls._worker_thread,
@@ -372,16 +470,34 @@ class AsyncHealingLogger:
             logger.debug("async_healing_logger.background_worker_started")
 
     @classmethod
+    @fork_repaired
     def _spawn_worker_thread(cls) -> None:
-        """Construct + start a fresh worker thread (impl 489 D9)."""
-        cls._worker_thread = threading.Thread(
-            target=cls._worker_with_crash_capture,
-            daemon=True,
-            name="AsyncHealingLogger",
-        )
-        cls._worker_thread.start()
-        if cls._handle is not None:
-            cls._handle.thread = cls._worker_thread
+        """Construct + start a fresh worker thread (impl 489 D9).
+
+        The single atomic spawn point, shared by ``start()`` and by the
+        meta-watchdog's respawn callback. The callback contract forbids
+        consulting ``_running``, so both the fork repair and the spawn
+        idempotence live here rather than in ``start()``: a respawn over
+        inherited state would otherwise consume the parent's queue copies,
+        and a respawn racing ``start()`` would leave two consumers on one
+        queue.
+
+        Guarded on thread aliveness — never on ``_running``.
+        """
+        with cls._lock:
+            existing = cls._worker_thread
+            if existing is not None and existing.is_alive():
+                logger.debug("async_healing_logger.spawn_skipped_worker_alive")
+                return
+
+            cls._worker_thread = threading.Thread(
+                target=cls._worker_with_crash_capture,
+                daemon=True,
+                name="AsyncHealingLogger",
+            )
+            cls._worker_thread.start()
+            if cls._handle is not None:
+                cls._handle.thread = cls._worker_thread
 
     @classmethod
     def _worker_with_crash_capture(cls) -> None:
@@ -395,6 +511,7 @@ class AsyncHealingLogger:
             raise
 
     @classmethod
+    @fork_repaired
     def stop(cls, timeout: float | None = None) -> None:
         """Stop the background worker"""
         from baldur.metrics.recorders.daemon_worker import unregister_daemon_worker
@@ -430,32 +547,19 @@ class AsyncHealingLogger:
         logger.debug("async_healing_logger.background_worker_stopped")
 
     # -------------------------------------------------------------------------
-    # WAL Support
-    # -------------------------------------------------------------------------
-
-    @classmethod
-    def _should_write_to_wal(cls, severity: EventSeverity) -> bool:
-        """Decide whether to write to WAL."""
-        if cls._wal_policy == WALPolicy.ALL:
-            return True
-        if cls._wal_policy == WALPolicy.CRITICAL_ONLY:
-            return severity in cls.IMMEDIATE_SEVERITIES
-        return False
-
-    # -------------------------------------------------------------------------
     # Logging
     # -------------------------------------------------------------------------
 
     @classmethod
+    @fork_repaired
     def log(
         cls, event: dict[str, Any], severity: EventSeverity = EventSeverity.INFO
     ) -> None:
         """
         Log an event (non-blocking, ~0.01ms)
 
-        Processing order:
-        1. WAL-First: write to WAL first (per configuration)
-        2. Add to the Priority Queue (CRITICAL first)
+        CRITICAL events are handed to the dedicated executor for immediate
+        delivery; everything else joins the Priority Queue for batching.
 
         Args:
             event: healing event dictionary
@@ -466,21 +570,6 @@ class AsyncHealingLogger:
             "severity": severity.name,
             "timestamp": time.time(),
         }
-
-        # WAL-First: write to WAL before the memory queue
-        wal_seq = -1
-        if cls._wal and cls._should_write_to_wal(severity):
-            try:
-                wal_seq = cls._wal.write(enriched_event)
-                with cls._lock:
-                    cls._stats["wal_writes"] += 1
-            except Exception as e:
-                logger.warning(
-                    "async_healing_logger.wal_write_failed",
-                    error=e,
-                )
-
-        enriched_event["_wal_seq"] = wal_seq
 
         with cls._lock:
             cls._stats["events_logged"] += 1
@@ -550,13 +639,26 @@ class AsyncHealingLogger:
             logger.warning("async_healing_logger.queue_full_event_dropped")
 
     @classmethod
+    @fork_repaired
     def flush(cls) -> None:
         """Manual flush (send all pending events immediately).
 
-        If the worker thread is running, request a flush to the worker and wait for completion.
-        Performs a full flush including events already dequeued into the worker's local batch.
+        If a consumer thread is actually alive, the flush is delegated to it
+        and this call waits for completion — that is the only way to include
+        events already dequeued into the worker's local batch.
+
+        Aliveness is part of the predicate, not just ``_running``: a state
+        with a dead consumer (a fork child before revival, or a hookless
+        deployment whose consumer never survived) would otherwise signal a
+        thread that does not exist and wait out the full timeout having
+        flushed nothing. With the check, such a caller falls through to the
+        direct drain below and delivers synchronously.
         """
-        if cls._running and cls._worker_thread is not None:
+        if (
+            cls._running
+            and cls._worker_thread is not None
+            and cls._worker_thread.is_alive()
+        ):
             # Request a flush to the worker → the worker flushes its local batch + queue remainder
             cls._flush_done.clear()
             cls._flush_requested.set()
@@ -592,6 +694,7 @@ class AsyncHealingLogger:
             cls._flush_batch(events)
 
     @classmethod
+    @fork_repaired
     def get_stats(cls) -> dict[str, int]:
         """Look up logger statistics"""
         with cls._lock:
@@ -602,22 +705,11 @@ class AsyncHealingLogger:
             return stats
 
     @classmethod
+    @fork_repaired
     def reset_stats(cls) -> None:
         """Reset statistics"""
         with cls._lock:
-            cls._stats = {
-                "events_logged": 0,
-                "events_flushed": 0,
-                "immediate_flushes": 0,
-                "batch_flushes": 0,
-                "flush_errors": 0,
-                "wal_writes": 0,
-                "queue_overflows": 0,
-                "pending_retries": 0,
-                "dlq_moved": 0,
-                "total_retries": 0,
-                "alerts_sent": 0,
-            }
+            cls._stats = _initial_stats()
 
     # -------------------------------------------------------------------------
     # Worker
@@ -778,7 +870,7 @@ class AsyncHealingLogger:
                 if cls._retry_policy.dlq_on_final_failure:
                     cls._move_to_dlq(events, str(e))
                 else:
-                    # If there is a WAL sequence, the SyncWorker reprocesses it
+                    # Nothing else holds a copy: the batch ends here.
                     logger.warning("async_healing_logger.events_lost_no_dlq")
 
     @classmethod
@@ -969,6 +1061,7 @@ class AsyncHealingLogger:
     # -------------------------------------------------------------------------
 
     @classmethod
+    @fork_repaired
     def reset(cls) -> None:
         """Reset state (for tests)"""
         cls.stop()
@@ -978,24 +1071,11 @@ class AsyncHealingLogger:
             cls._running = False
             cls._worker_thread = None
             cls._flush_callback = None
-            cls._wal = None
-            cls._wal_policy = WALPolicy.CRITICAL_ONLY
             cls._critical_executor = None
             cls._pending_retries = []
             cls._error_window = SlidingWindowCounter()
             cls._alert_gate = CooldownGate()
             cls._flush_requested.clear()
             cls._flush_done.clear()
-            cls._stats = {
-                "events_logged": 0,
-                "events_flushed": 0,
-                "immediate_flushes": 0,
-                "batch_flushes": 0,
-                "flush_errors": 0,
-                "wal_writes": 0,
-                "queue_overflows": 0,
-                "pending_retries": 0,
-                "dlq_moved": 0,
-                "total_retries": 0,
-                "alerts_sent": 0,
-            }
+            cls._origin_pid = None
+            cls._stats = _initial_stats()
