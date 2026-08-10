@@ -10,8 +10,10 @@ Covers the contract documented in the module docstring:
   Django-only extra threads when the Django adapter is importable, and
   silently no-ops the Django branch when it is not.
 - ``worker_int`` calls ``coordinator.initiate_shutdown()``.
-- ``worker_exit`` waits for drain (with the documented 30 s timeout)
-  and stops Django background threads when available.
+- ``worker_exit`` runs only in the worker it was handed, waits for drain
+  (settings-driven, 30 s by default), resets the Django background-thread
+  guards when available, flushes the audit system unconditionally, and
+  marks its own completion.
 - The package re-exports the three hooks under stable names so users
   can ``from baldur.adapters.gunicorn import post_worker_init,
   worker_int, worker_exit``.
@@ -25,6 +27,18 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from structlog.testing import capture_logs
+
+
+def _exiting_worker() -> MagicMock:
+    """A gunicorn ``Worker`` stand-in for the process running the test.
+
+    ``worker_exit`` runs its pipeline only when the worker it is handed is
+    this process — gunicorn invokes the same hook in the master for a worker
+    that had already exited when it was signalled.
+    """
+    worker = MagicMock()
+    worker.pid = os.getpid()
+    return worker
 
 
 @pytest.fixture(autouse=True)
@@ -239,33 +253,10 @@ class TestPostWorkerInit:
         m_start.assert_called_once()
         assert os.environ["GUNICORN_WORKER"] == "1"
 
-    def test_reseeds_the_rng_before_starting_background_workers(self):
-        """747 D14: under ``--preload`` every worker inherits one identical
-        ``random`` module state, so baldur's backoff jitter is bit-identical
-        across workers and they retry in lockstep against a recovering
-        dependency. The reseed must precede the starters, which spawn threads
-        that draw jitter.
-        """
-        from baldur.adapters.gunicorn.hooks import post_worker_init
-
-        call_order = []
-
-        with (
-            patch("random.seed", side_effect=lambda: call_order.append("seed")),
-            patch(
-                "baldur.bootstrap.start_background_workers",
-                side_effect=lambda: call_order.append("starters"),
-            ),
-        ):
-            # The hook ignores its worker argument; a bare sentinel keeps the
-            # node free of a spec-less stand-in.
-            post_worker_init(worker=object())
-
-        assert call_order == ["seed", "starters"]
-
     def test_no_post_fork_hook_is_exported_by_the_package(self):
-        """The reseed rides the existing ``post_worker_init`` surface. Exporting a
-        fourth hook name would make every user's gunicorn config stale.
+        """The post-fork resets ride the existing ``post_worker_init`` surface.
+        Exporting a fourth hook name would make every user's gunicorn config
+        stale, and omitting it would be silent.
         """
         from baldur.adapters import gunicorn as pkg
 
@@ -290,13 +281,16 @@ class TestWorkerInt:
 class TestWorkerExit:
     """``worker_exit`` contract."""
 
-    def test_waits_for_shutdown_with_30s_timeout(self):
+    def test_waits_for_shutdown_with_the_configured_drain_timeout(self):
+        """The wait reads ``default_drain_timeout_seconds`` — 30.0 at
+        defaults, which is what an operator tuning that field expects to
+        change."""
         from baldur.adapters.gunicorn.hooks import worker_exit
         from baldur.core.shutdown_coordinator import get_shutdown_coordinator
 
         coordinator = get_shutdown_coordinator()
         with patch.object(coordinator, "wait_for_shutdown") as m_wait:
-            worker_exit(worker=MagicMock(), server=MagicMock())
+            worker_exit(MagicMock(), _exiting_worker())
 
         m_wait.assert_called_once_with(timeout=30.0)
 
@@ -306,7 +300,7 @@ class TestWorkerExit:
         with patch(
             "baldur.adapters.django.apps.BaldurConfig.stop_background_threads"
         ) as m_stop:
-            worker_exit(worker=MagicMock(), server=MagicMock())
+            worker_exit(MagicMock(), _exiting_worker())
 
         m_stop.assert_called_once()
 
@@ -322,7 +316,7 @@ class TestWorkerExit:
             patch.object(coordinator, "wait_for_shutdown", return_value=True),
             capture_logs() as cap_logs,
         ):
-            worker_exit(worker=MagicMock(), server=MagicMock())
+            worker_exit(MagicMock(), _exiting_worker())
 
         matching = [e for e in cap_logs if e.get("event") == "shutdown.worker_drained"]
         assert len(matching) == 1
@@ -344,7 +338,7 @@ class TestWorkerExit:
             patch.object(coordinator, "wait_for_shutdown", return_value=False),
             capture_logs() as cap_logs,
         ):
-            worker_exit(worker=MagicMock(), server=MagicMock())
+            worker_exit(MagicMock(), _exiting_worker())
 
         matching = [
             e for e in cap_logs if e.get("event") == "shutdown.worker_drain_incomplete"
@@ -353,10 +347,12 @@ class TestWorkerExit:
         assert matching[0]["log_level"] == "warning"
         assert matching[0]["phase"] == "draining"
 
-    def test_no_shutdown_log_when_drain_not_initiated(self):
+    def test_no_drain_log_when_drain_not_initiated(self):
         """A normal worker exit with no shutdown initiated (phase RUNNING)
-        must not emit a ``shutdown.*`` terminal log — otherwise routine
-        worker recycles / reloads would warn spuriously."""
+        must not report on a drain that never started — otherwise routine
+        worker recycles / reloads would warn spuriously. The completion
+        marker is the one line this path does emit: on a recycle it is the
+        only evidence the exit pipeline ran at all."""
         from baldur.adapters.gunicorn.hooks import worker_exit
         from baldur.core.shutdown_coordinator import get_shutdown_coordinator
 
@@ -365,11 +361,11 @@ class TestWorkerExit:
             patch.object(coordinator, "wait_for_shutdown", return_value=False),
             capture_logs() as cap_logs,
         ):
-            worker_exit(worker=MagicMock(), server=MagicMock())
+            worker_exit(MagicMock(), _exiting_worker())
 
         shutdown_events = [
             e["event"]
             for e in cap_logs
             if str(e.get("event", "")).startswith("shutdown.")
         ]
-        assert shutdown_events == []
+        assert shutdown_events == ["shutdown.worker_exit_completed"]

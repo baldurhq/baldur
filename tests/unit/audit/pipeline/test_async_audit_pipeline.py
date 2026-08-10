@@ -352,8 +352,8 @@ class TestAsyncAuditLifecycle:
 
     # 416 Part 5: register_shutdown_handlers() and its signal helpers were
     # deleted from async_audit_lifecycle.py. They were superseded by
-    # AuditShutdownHandler + GracefulShutdownCoordinator (registered via
-    # apps.py) and the Gunicorn worker_exit_cleanup hook (server.py).
+    # AuditShutdownHandler + GracefulShutdownCoordinator (registered by the
+    # Django app config) and the gunicorn worker-exit hook.
 
 
 class TestAuditMiddlewareAsyncMode:

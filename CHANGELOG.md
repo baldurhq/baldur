@@ -24,6 +24,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `BALDUR_RUNTIME_CONFIG_WATCH_INTERVAL_SECONDS` (`30`, range 0-3600) — config delivery cadence.
 - Stored circuit-breaker config now reaches already-running processes; `0` disables the delivery.
 - `baldur_runtime_config_installed_fingerprint{config_type}` — equal across converged workers.
+- `baldur.gunicorn_hooks_installed` (INFO) — confirms the hooks are wired, not just warns when not.
 
 ### Changed
 
@@ -47,6 +48,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - **Breaking**: `failure_rate_5m` in `GET /api/baldur/metrics/` may be null (was always `0.0`).
 - **Breaking**: `last_5m_failure_rate` may be null; `circuit_state` may be null (was `closed`).
 - A service with an observed call but no registered domain now gets a row in that payload.
+- **Breaking**: `baldur.server` removed — use `baldur.adapters.gunicorn`'s three worker hooks.
 
 ### Fixed
 
@@ -80,8 +82,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - Workers also reused the master's sender id, so a sibling's events looked self-sent and dropped.
 - A forked child's shutdown could unsubscribe the parent from every channel, deafening it for good.
 - Event-handler dispatch stalled silently in any forked child; the inherited pool is now rebuilt.
-- gunicorn workers wired via `baldur.server` never started the background workers at all.
-- Preloaded workers inherited one RNG state, so backoff jitter was identical in every worker.
+- A worker recycle ran no audit shutdown: the WAL was left unclosed and no checkpoint saved.
 
 ## [1.3.2] - 2026-07-31
 

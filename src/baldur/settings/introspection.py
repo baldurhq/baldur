@@ -213,7 +213,6 @@ KNOWN_DIRECT_READ_ENV_VARS: frozenset[str] = frozenset(
         "BALDUR_TEST_LOG_LEVEL",
         "BALDUR_TRACE_URL_TEMPLATE",
         "BALDUR_EMERGENCY_ESCALATION_LOG",
-        "BALDUR_EMERGENCY_DUMP_DIR",
         # --- namespace identity (also field-resolvable; read directly too) ---
         "BALDUR_NAMESPACE_ENV",
         "BALDUR_NAMESPACE_REGION",

@@ -139,7 +139,10 @@ _MOCK_CREATION_BUDGETS: dict[str, int] = {
     # deleted with the dead package it covered.
     # _try_reconnect subscribe-guard nodes: -1 — the two redis client stand-ins
     # in that class are now spec'd against redis.Redis.
-    "oss": 4350,
+    # legacy gunicorn hook-surface consolidation: -8 — the module-scoped suite
+    # for the deleted second hook surface went with it, along with one hook test
+    # covering a reseed the server itself performs before either hook runs.
+    "oss": 4342,
     "pro": 1800,
     "dormant": 401,
 }

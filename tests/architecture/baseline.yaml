@@ -395,7 +395,6 @@ all_declaration:
   - {file: "src/baldur/scaling/rate_controller.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/scaling/traffic_gate.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/scripts/demo_zero_data_loss.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
-  - {file: "src/baldur/server.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/services/adaptive_replay.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/services/backoff_calculator/budget.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
   - {file: "src/baldur/services/backoff_calculator/calculator.py", reason: "pre-existing: missing __all__ declaration", ticket: "506"}
@@ -881,7 +880,8 @@ pro_import_boundary_count: 161
 
 # G17c — OSS->Dormant import-boundary global-count snapshot (528 D10-v2).
 # Target = 0. Current sites (in-function lazy imports of baldur_dormant
-# adapters): server.py:_reset_kafka, services/event_bus/redis_bus.py:
+# adapters): adapters/gunicorn/hooks.py:_reset_kafka_after_fork,
+# services/event_bus/redis_bus.py:
 # _publish_to_kafka_fallback, services/rate_limit/distributed_channel.py:
 # _ensure_kafka_bus, scripts/demo_zero_data_loss.py. These will retire as
 # OSS callers migrate fully to ProviderRegistry.kafka_eventbus /

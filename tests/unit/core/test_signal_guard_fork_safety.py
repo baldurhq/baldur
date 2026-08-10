@@ -16,7 +16,7 @@ Modules tested:
 Note:
     audit/async_audit_lifecycle.py signal helpers were deleted in 416 Part 5;
     they were superseded by AuditShutdownHandler + GracefulShutdownCoordinator
-    (see apps.py:323) and the Gunicorn worker_exit_cleanup hook (server.py:165).
+    (registered by the Django app config) and the gunicorn worker-exit hook.
     Coverage now lives in tests/unit/audit/test_audit_shutdown_handler.py and
     tests/unit/core/test_shutdown_coordinator.py.
 """
