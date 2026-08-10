@@ -44,13 +44,16 @@ FOREIGN_PID = os.getpid() + 1
 def lifecycle_state():
     """Runtime-scoped lifecycle flags, reset either side of the test."""
     state = _lifecycle_state()
-    state.startup_completed = False
-    state.origin_pid = None
-    state.audit_shutdown_done = False
+
+    def _clear() -> None:
+        state.startup_completed = False
+        state.origin_pid = None
+        state.audit_shutdown_done = False
+        state.shutdown_registered = False
+
+    _clear()
     yield state
-    state.startup_completed = False
-    state.origin_pid = None
-    state.audit_shutdown_done = False
+    _clear()
 
 
 @pytest.fixture

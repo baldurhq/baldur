@@ -39,8 +39,6 @@ from baldur.utils.async_logger import AsyncHealingLogger, EventSeverity
 
 pytestmark = pytest.mark.skipif(not hasattr(os, "fork"), reason="fork() is POSIX-only")
 
-CHILD_WAIT_SECONDS = 20.0
-
 
 @pytest.fixture
 def sink(tmp_path) -> Path:
