@@ -9,6 +9,8 @@ Covers the contract documented in the module docstring:
   **all** adapters (even when Django is absent), then re-starts the
   Django-only extra threads when the Django adapter is importable, and
   silently no-ops the Django branch when it is not.
+- ``post_worker_init`` drops inherited external-connection state, but only
+  when the application was preloaded.
 - ``worker_int`` calls ``coordinator.initiate_shutdown()``.
 - ``worker_exit`` runs only in the worker it was handed, waits for drain
   (settings-driven, 30 s by default), resets the Django background-thread
@@ -17,12 +19,19 @@ Covers the contract documented in the module docstring:
 - The package re-exports the three hooks under stable names so users
   can ``from baldur.adapters.gunicorn import post_worker_init,
   worker_int, worker_exit``.
+
+Every ``worker_exit`` call below is **positional**. gunicorn invokes the
+hook as ``cfg.worker_exit(self, worker)`` and its own config validator
+checks arity only, never parameter names — so a keyword-calling suite
+binds correctly whichever way round the parameters are declared and can
+never observe an argument-order defect.
 """
 
 from __future__ import annotations
 
 import os
 import sys
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -39,6 +48,40 @@ def _exiting_worker() -> MagicMock:
     worker = MagicMock()
     worker.pid = os.getpid()
     return worker
+
+
+def _arbiter() -> SimpleNamespace:
+    """Stand-in for ``worker_exit``'s first argument.
+
+    The hook never reads it; what the tests pin is that it is passed
+    first, which is the order gunicorn's arbiter uses.
+    """
+    return SimpleNamespace()
+
+
+def _foreign_worker() -> SimpleNamespace:
+    """A ``Worker`` describing some *other* process.
+
+    This is what the master is handed when the arbiter reaches the hook for
+    a worker that had already exited when it was signalled. ``-1`` is never
+    a live pid, so the guard's comparison cannot pass by coincidence.
+    """
+    return SimpleNamespace(pid=-1)
+
+
+def _worker_with_preload(preload_app: bool | None) -> SimpleNamespace:
+    """An exiting-process worker whose ``cfg`` reports the preload setting.
+
+    ``None`` produces a ``cfg`` with no ``preload_app`` attribute at all —
+    the unexpected-gunicorn-shape branch, which must degrade to running the
+    resets rather than silently skipping them.
+    """
+    cfg = (
+        SimpleNamespace()
+        if preload_app is None
+        else SimpleNamespace(preload_app=preload_app)
+    )
+    return SimpleNamespace(pid=os.getpid(), cfg=cfg)
 
 
 @pytest.fixture(autouse=True)
@@ -278,8 +321,88 @@ class TestWorkerInt:
         m_initiate.assert_called_once_with()
 
 
-class TestWorkerExit:
-    """``worker_exit`` contract."""
+class TestWorkerExitProcessGuard:
+    """``worker_exit`` acts only in the worker it was handed.
+
+    gunicorn's arbiter invokes the same hook **in the master** for a worker
+    that had already exited when it was signalled (``kill_worker`` →
+    ``ESRCH``), a routine race during scale-down and timeout replacement.
+    Running the pipeline there would tear down the master's audit system and
+    set a process-global once-flag that every later-forked worker inherits.
+    """
+
+    def test_no_pipeline_step_runs_when_the_worker_is_another_process(self):
+        # Given: the worker being reported is not this process
+        from baldur.adapters.gunicorn.hooks import worker_exit
+        from baldur.core.shutdown_coordinator import get_shutdown_coordinator
+
+        coordinator = get_shutdown_coordinator()
+
+        # When
+        with (
+            patch.object(coordinator, "wait_for_shutdown") as m_wait,
+            patch(
+                "baldur.adapters.django.apps.BaldurConfig.stop_background_threads"
+            ) as m_stop,
+            patch(
+                "baldur.audit.async_audit_lifecycle.graceful_shutdown_audit_system"
+            ) as m_flush,
+            capture_logs() as cap_logs,
+        ):
+            worker_exit(_arbiter(), _foreign_worker())
+
+        # Then: every step of the pipeline is skipped, including the marker
+        m_wait.assert_not_called()
+        m_stop.assert_not_called()
+        m_flush.assert_not_called()
+        assert [
+            e["event"]
+            for e in cap_logs
+            if e.get("event") == "shutdown.worker_exit_completed"
+        ] == []
+
+    @pytest.mark.parametrize(
+        ("gunicorn_worker_env", "expected_level", "expected_reason"),
+        [
+            (None, "debug", "not_the_exiting_worker"),
+            ("1", "warning", "pid_mismatch_inside_worker"),
+        ],
+        ids=["master_side_race", "worker_that_lost_its_own_pid"],
+    )
+    def test_skip_log_level_separates_the_routine_race_from_a_broken_contract(
+        self, monkeypatch, gunicorn_worker_env, expected_level, expected_reason
+    ):
+        """A flat DEBUG would make this guard fail-silent.
+
+        ``post_worker_init`` sets ``GUNICORN_WORKER`` in the worker's own
+        environ and never in the master. So an unset value means the expected
+        master-side race, while a set one means a process that ran
+        ``post_worker_init`` no longer recognizes its own pid — under which
+        every worker skips its whole exit pipeline with nothing turning red.
+        The WARNING arm is unreachable under a contract-honouring gunicorn;
+        this test is the only place it executes.
+        """
+        from baldur.adapters.gunicorn.hooks import worker_exit
+
+        if gunicorn_worker_env is None:
+            monkeypatch.delenv("GUNICORN_WORKER", raising=False)
+        else:
+            monkeypatch.setenv("GUNICORN_WORKER", gunicorn_worker_env)
+
+        with capture_logs() as cap_logs:
+            worker_exit(_arbiter(), _foreign_worker())
+
+        matching = [
+            e for e in cap_logs if e.get("event") == "shutdown.worker_exit_skipped"
+        ]
+        assert len(matching) == 1
+        assert matching[0]["log_level"] == expected_level
+        assert matching[0]["reason"] == expected_reason
+        assert matching[0]["process_id"] == os.getpid()
+
+
+class TestWorkerExitDrainTimeout:
+    """The drain wait is settings-driven, and survives a settings failure."""
 
     def test_waits_for_shutdown_with_the_configured_drain_timeout(self):
         """The wait reads ``default_drain_timeout_seconds`` — 30.0 at
@@ -290,9 +413,71 @@ class TestWorkerExit:
 
         coordinator = get_shutdown_coordinator()
         with patch.object(coordinator, "wait_for_shutdown") as m_wait:
-            worker_exit(MagicMock(), _exiting_worker())
+            worker_exit(_arbiter(), _exiting_worker())
 
         m_wait.assert_called_once_with(timeout=30.0)
+
+    def test_a_tuned_drain_timeout_reaches_the_wait(self, monkeypatch):
+        """The whole point of reading settings here is that the operator's
+        value arrives — a hook that read the field and then waited 30.0
+        anyway would pass a "reads settings" grep and change nothing."""
+        from baldur.adapters.gunicorn.hooks import worker_exit
+        from baldur.core.shutdown_coordinator import get_shutdown_coordinator
+        from baldur.settings.recovery_shutdown import reset_recovery_shutdown_settings
+
+        monkeypatch.setenv(
+            "BALDUR_RECOVERY_SHUTDOWN_DEFAULT_DRAIN_TIMEOUT_SECONDS", "7.5"
+        )
+        reset_recovery_shutdown_settings()
+        try:
+            coordinator = get_shutdown_coordinator()
+            with patch.object(coordinator, "wait_for_shutdown") as m_wait:
+                worker_exit(_arbiter(), _exiting_worker())
+        finally:
+            monkeypatch.delenv(
+                "BALDUR_RECOVERY_SHUTDOWN_DEFAULT_DRAIN_TIMEOUT_SECONDS", raising=False
+            )
+            reset_recovery_shutdown_settings()
+
+        m_wait.assert_called_once_with(timeout=7.5)
+
+    def test_falls_back_to_the_module_default_when_the_settings_read_raises(self):
+        """A degenerate config must not skip the exit pipeline: the read is
+        wrapped, the fallback mirrors the Field default, and the failure is
+        reported rather than swallowed."""
+        from baldur.adapters.gunicorn.hooks import (
+            _DEFAULT_DRAIN_WAIT_SECONDS,
+            worker_exit,
+        )
+        from baldur.core.shutdown_coordinator import get_shutdown_coordinator
+
+        coordinator = get_shutdown_coordinator()
+        with (
+            patch(
+                "baldur.settings.recovery_shutdown.get_recovery_shutdown_settings",
+                side_effect=RuntimeError("degenerate config"),
+            ),
+            patch.object(coordinator, "wait_for_shutdown") as m_wait,
+            patch(
+                "baldur.audit.async_audit_lifecycle.graceful_shutdown_audit_system"
+            ) as m_flush,
+            capture_logs() as cap_logs,
+        ):
+            worker_exit(_arbiter(), _exiting_worker())
+
+        m_wait.assert_called_once_with(timeout=_DEFAULT_DRAIN_WAIT_SECONDS)
+        m_flush.assert_called_once()
+        failures = [
+            e
+            for e in cap_logs
+            if e.get("event") == "shutdown.drain_timeout_read_failed"
+        ]
+        assert len(failures) == 1
+        assert failures[0]["log_level"] == "warning"
+
+
+class TestWorkerExitPipeline:
+    """``worker_exit``'s step sequence, isolation and terminal marker."""
 
     def test_calls_django_stop_background_threads_when_available(self):
         from baldur.adapters.gunicorn.hooks import worker_exit
@@ -300,7 +485,7 @@ class TestWorkerExit:
         with patch(
             "baldur.adapters.django.apps.BaldurConfig.stop_background_threads"
         ) as m_stop:
-            worker_exit(MagicMock(), _exiting_worker())
+            worker_exit(_arbiter(), _exiting_worker())
 
         m_stop.assert_called_once()
 
@@ -316,7 +501,7 @@ class TestWorkerExit:
             patch.object(coordinator, "wait_for_shutdown", return_value=True),
             capture_logs() as cap_logs,
         ):
-            worker_exit(MagicMock(), _exiting_worker())
+            worker_exit(_arbiter(), _exiting_worker())
 
         matching = [e for e in cap_logs if e.get("event") == "shutdown.worker_drained"]
         assert len(matching) == 1
@@ -338,7 +523,7 @@ class TestWorkerExit:
             patch.object(coordinator, "wait_for_shutdown", return_value=False),
             capture_logs() as cap_logs,
         ):
-            worker_exit(MagicMock(), _exiting_worker())
+            worker_exit(_arbiter(), _exiting_worker())
 
         matching = [
             e for e in cap_logs if e.get("event") == "shutdown.worker_drain_incomplete"
@@ -361,7 +546,7 @@ class TestWorkerExit:
             patch.object(coordinator, "wait_for_shutdown", return_value=False),
             capture_logs() as cap_logs,
         ):
-            worker_exit(MagicMock(), _exiting_worker())
+            worker_exit(_arbiter(), _exiting_worker())
 
         shutdown_events = [
             e["event"]
@@ -369,3 +554,283 @@ class TestWorkerExit:
             if str(e.get("event", "")).startswith("shutdown.")
         ]
         assert shutdown_events == ["shutdown.worker_exit_completed"]
+
+    def test_audit_flush_still_runs_when_the_django_reset_raises(self):
+        """The audit flush is the one guarantee only this hook can offer on a
+        recycle exit, so a Django-side failure must not be allowed to skip
+        it — which is why the steps are isolated rather than sequential."""
+        from baldur.adapters.gunicorn.hooks import worker_exit
+
+        with (
+            patch(
+                "baldur.adapters.django.apps.BaldurConfig.stop_background_threads",
+                side_effect=RuntimeError("django teardown blew up"),
+            ),
+            patch(
+                "baldur.audit.async_audit_lifecycle.graceful_shutdown_audit_system"
+            ) as m_flush,
+            capture_logs() as cap_logs,
+        ):
+            worker_exit(_arbiter(), _exiting_worker())
+
+        m_flush.assert_called_once_with()
+        events = [e["event"] for e in cap_logs]
+        assert "shutdown.django_thread_guards_reset_failed" in events
+        assert "shutdown.worker_exit_completed" in events
+
+    @pytest.mark.parametrize(
+        "failing_steps",
+        [
+            ("audit",),
+            ("django", "audit"),
+        ],
+        ids=["audit_flush_raises", "both_steps_raise"],
+    )
+    def test_completion_marker_is_emitted_even_when_steps_raise(self, failing_steps):
+        """``shutdown.worker_exit_completed`` marks that the pipeline reached
+        its end, not that every step succeeded. Suppressing it on a step
+        failure would make it indistinguishable from the case it exists to
+        detect: gunicorn killing the worker inside the hook."""
+        from baldur.adapters.gunicorn.hooks import worker_exit
+
+        django_effect = (
+            RuntimeError("django teardown blew up")
+            if "django" in failing_steps
+            else None
+        )
+        with (
+            patch(
+                "baldur.adapters.django.apps.BaldurConfig.stop_background_threads",
+                side_effect=django_effect,
+            ),
+            patch(
+                "baldur.audit.async_audit_lifecycle.graceful_shutdown_audit_system",
+                side_effect=RuntimeError("flush blew up"),
+            ),
+            capture_logs() as cap_logs,
+        ):
+            worker_exit(_arbiter(), _exiting_worker())
+
+        events = [e["event"] for e in cap_logs]
+        assert "shutdown.audit_flush_failed" in events
+        assert "shutdown.worker_exit_completed" in events
+
+    @pytest.mark.parametrize(
+        ("drained", "phase_value", "expected_event"),
+        [
+            (True, "terminated", "shutdown.worker_drained"),
+            (False, "draining", "shutdown.worker_drain_incomplete"),
+        ],
+        ids=["drained", "drain_incomplete"],
+    )
+    def test_terminal_drain_logs_identify_the_worker(
+        self, drained, phase_value, expected_event
+    ):
+        """Without ``worker_id`` these lines are byte-identical across every
+        worker of the pool — structlog's processor chain adds no pid — so an
+        operator cannot tell which worker drained and which did not."""
+        from baldur.adapters.gunicorn.hooks import worker_exit
+        from baldur.core.shutdown_coordinator import (
+            ShutdownPhase,
+            get_shutdown_coordinator,
+        )
+
+        coordinator = get_shutdown_coordinator()
+        coordinator._phase = ShutdownPhase(phase_value)
+        with (
+            patch.object(coordinator, "wait_for_shutdown", return_value=drained),
+            capture_logs() as cap_logs,
+        ):
+            worker_exit(_arbiter(), _exiting_worker())
+
+        matching = [e for e in cap_logs if e.get("event") == expected_event]
+        assert len(matching) == 1
+        assert matching[0]["worker_id"] == os.getpid()
+
+    def test_completion_marker_identifies_the_worker(self):
+        from baldur.adapters.gunicorn.hooks import worker_exit
+        from baldur.core.shutdown_coordinator import get_shutdown_coordinator
+
+        coordinator = get_shutdown_coordinator()
+        with (
+            patch.object(coordinator, "wait_for_shutdown", return_value=False),
+            capture_logs() as cap_logs,
+        ):
+            worker_exit(_arbiter(), _exiting_worker())
+
+        matching = [
+            e for e in cap_logs if e.get("event") == "shutdown.worker_exit_completed"
+        ]
+        assert len(matching) == 1
+        assert matching[0]["log_level"] == "info"
+        assert matching[0]["worker_id"] == os.getpid()
+
+
+class TestPostWorkerInitForkResets:
+    """The inherited-resource reset carried onto this surface.
+
+    Exactly one member survived the consolidation — the event-producer
+    reset, which is a no-op on a stock install. It rides ``post_worker_init``
+    rather than a fourth hook name whose omission would be silent, and it is
+    gated on preload because that is the only branch where "drop what the
+    master left me" describes anything real: without ``--preload`` gunicorn
+    runs ``load_wsgi()`` in the child, so ``baldur.init()`` built this
+    process's own state moments earlier.
+    """
+
+    @pytest.mark.parametrize(
+        ("preload_app", "expect_reset"),
+        [
+            (True, True),
+            (False, False),
+            (None, True),
+        ],
+        ids=["preloaded", "not_preloaded", "preload_attribute_absent"],
+    )
+    def test_reset_runs_only_when_the_app_was_preloaded(
+        self, preload_app, expect_reset
+    ):
+        from baldur.adapters.gunicorn.hooks import post_worker_init
+
+        with patch("baldur.adapters.gunicorn.hooks._reset_kafka_after_fork") as m_reset:
+            post_worker_init(_worker_with_preload(preload_app))
+
+        assert m_reset.called is expect_reset
+
+    def test_reset_failure_does_not_skip_the_coordinator_wiring(self):
+        """The reset is isolated: it runs before the coordinator init and the
+        background-worker restart, so an unhandled failure there would take
+        the whole hook — and with it SIGTERM's route to the drain — down."""
+        from baldur.adapters.gunicorn.hooks import post_worker_init
+        from baldur.core.shutdown_coordinator import get_shutdown_coordinator
+
+        with (
+            patch(
+                "baldur.adapters.gunicorn.hooks._reset_kafka_after_fork",
+                side_effect=RuntimeError("producer reset blew up"),
+            ),
+            patch("baldur.bootstrap.start_background_workers") as m_start,
+            capture_logs() as cap_logs,
+        ):
+            post_worker_init(_worker_with_preload(True))
+
+        m_start.assert_called_once()
+        assert get_shutdown_coordinator()._tracker is not None
+        assert "worker.postfork_reset_failed" in [e["event"] for e in cap_logs]
+
+    def test_does_not_invalidate_the_cache_registry_slot(self):
+        """The legacy surface invalidated the resolved cache singleton after
+        fork. It was dropped, not moved: ``init()`` hands the resolved adapter
+        by reference to the idempotency gate and the resilient storage
+        backend, so popping the registry slot cannot reach either — while the
+        next lazy resolver on a serving path builds a second adapter and a
+        second connection pool per preloaded worker.
+        """
+        from baldur.adapters.gunicorn.hooks import post_worker_init
+        from baldur.factory import ProviderRegistry
+
+        with patch.object(
+            ProviderRegistry.cache, "invalidate_instance", autospec=True
+        ) as m_invalidate:
+            post_worker_init(_worker_with_preload(True))
+
+        m_invalidate.assert_not_called()
+
+    def test_does_not_reseed_the_random_module(self):
+        """gunicorn's own ``Worker.init_process()`` calls ``util.seed()`` in
+        every worker, after ``fork()`` and before this hook runs, and baldur's
+        backoff jitter draws from exactly those module globals. A second
+        reseed here asserted a defect that cannot occur under gunicorn.
+        """
+        import random
+
+        from baldur.adapters.gunicorn.hooks import post_worker_init
+
+        with patch.object(random, "seed", autospec=True) as m_seed:
+            post_worker_init(_worker_with_preload(True))
+
+        m_seed.assert_not_called()
+
+
+class TestResetKafkaAfterForkBehavior:
+    """``_reset_kafka_after_fork`` branch coverage.
+
+    Re-authored from the deleted second surface's suite: the producer reset
+    is the one member the consolidation carried, so its three branches must
+    keep being exercised against the surface that now owns it.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _require_dormant(self):
+        pytest.importorskip("baldur_dormant")
+
+    def test_configured_producer_is_dropped_without_a_close(self):
+        """``cleanup=False`` drops the reference without issuing
+        ``close()``/``flush()``: the producer's background threads did not
+        survive ``fork()``, so a call into them would deadlock."""
+        from baldur.adapters.gunicorn.hooks import _reset_kafka_after_fork
+
+        with (
+            patch(
+                "baldur_dormant.adapters.kafka.config.get_kafka_settings",
+                autospec=True,
+                return_value=SimpleNamespace(bootstrap_servers="kafka:9092"),
+            ),
+            patch(
+                "baldur_dormant.adapters.kafka.producer.reset_kafka_producer",
+                autospec=True,
+            ) as m_reset,
+            capture_logs() as cap_logs,
+        ):
+            _reset_kafka_after_fork(_worker_with_preload(True))
+
+        m_reset.assert_called_once_with(cleanup=False)
+        matching = [
+            e for e in cap_logs if e.get("event") == "worker.postfork_kafka_reset"
+        ]
+        assert len(matching) == 1
+        assert matching[0]["worker_id"] == os.getpid()
+
+    def test_unconfigured_producer_is_left_alone(self):
+        from baldur.adapters.gunicorn.hooks import _reset_kafka_after_fork
+
+        with (
+            patch(
+                "baldur_dormant.adapters.kafka.config.get_kafka_settings",
+                autospec=True,
+                return_value=SimpleNamespace(bootstrap_servers=""),
+            ),
+            patch(
+                "baldur_dormant.adapters.kafka.producer.reset_kafka_producer",
+                autospec=True,
+            ) as m_reset,
+            capture_logs() as cap_logs,
+        ):
+            _reset_kafka_after_fork(_worker_with_preload(True))
+
+        m_reset.assert_not_called()
+        assert "worker.postfork_kafka_skipped" in [e["event"] for e in cap_logs]
+
+
+class TestResetKafkaWithoutTheProducerPackage:
+    """The stock-install branch: the producer adapter ships separately."""
+
+    def test_missing_producer_package_is_a_logged_no_op(self, monkeypatch):
+        """Blocking the import at ``sys.modules`` reproduces an open-source
+        install, where this branch is the only one that ever runs."""
+        from baldur.adapters.gunicorn.hooks import _reset_kafka_after_fork
+
+        # A None entry makes ``import`` raise ImportError for that exact name.
+        monkeypatch.setitem(sys.modules, "baldur_dormant.adapters.kafka.config", None)
+        monkeypatch.setitem(sys.modules, "baldur_dormant.adapters.kafka.producer", None)
+
+        with capture_logs() as cap_logs:
+            _reset_kafka_after_fork(_worker_with_preload(True))
+
+        matching = [
+            e
+            for e in cap_logs
+            if e.get("event") == "worker.postfork_kafka_skipped_no_dormant"
+        ]
+        assert len(matching) == 1
+        assert matching[0]["log_level"] == "debug"

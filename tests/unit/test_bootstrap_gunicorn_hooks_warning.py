@@ -3,7 +3,8 @@
 Coverage:
 - Under gunicorn (SERVER_SOFTWARE) AND hooks-module absent → ONE
   ``baldur.gunicorn_hooks_not_installed`` WARNING is emitted
-- Under gunicorn AND hooks-module already imported → silent
+- Under gunicorn AND hooks-module already imported → ONE
+  ``baldur.gunicorn_hooks_installed`` INFO and no WARNING
 - NOT under gunicorn → silent (returns early)
 
 Timer mechanics: ``threading.Timer(delay, _check)`` is replaced by a
@@ -91,29 +92,6 @@ class TestGunicornHooksMissingWarningBehavior:
             f"{mock_logger.warning.call_args_list}"
         )
 
-    def test_silent_when_under_gunicorn_but_hooks_present(
-        self, fake_timer, monkeypatch
-    ):
-        """Hooks module already in sys.modules → no WARNING."""
-        stub = MagicMock()
-        monkeypatch.setitem(sys.modules, "baldur.adapters.gunicorn.hooks", stub)
-
-        with (
-            patch(
-                "baldur.core.process_utils.is_under_gunicorn",
-                return_value=True,
-            ),
-            patch.object(bootstrap_module, "logger") as mock_logger,
-        ):
-            bootstrap_module._schedule_gunicorn_hooks_check()
-
-        warn_calls = [
-            call
-            for call in mock_logger.warning.call_args_list
-            if call.args and call.args[0] == "baldur.gunicorn_hooks_not_installed"
-        ]
-        assert warn_calls == []
-
     def test_silent_when_not_under_gunicorn(self, fake_timer, monkeypatch):
         """Not under gunicorn → no WARNING regardless of sys.modules state."""
         # Even if the hooks module is absent, non-gunicorn deployments must
@@ -167,3 +145,69 @@ class TestGunicornHooksMissingWarningBehavior:
         assert len(captured) == 1
         assert captured[0].daemon is True
         assert captured[0].started is True
+
+
+class TestGunicornHooksCheckPositiveArm:
+    """Correct wiring must produce a signal, not merely the absence of one.
+
+    With only the WARNING arm, the entire operator-visible result of wiring
+    the hooks was that a line stopped appearing — indistinguishable from a
+    check that never ran, a gunicorn that was never detected, or a Timer that
+    died. The symmetric INFO arm is what makes the wiring assertable.
+    """
+
+    def test_info_emitted_and_no_warning_when_hooks_are_wired(
+        self, fake_timer, monkeypatch
+    ):
+        stub = MagicMock()
+        monkeypatch.setitem(sys.modules, "baldur.adapters.gunicorn.hooks", stub)
+
+        with (
+            patch(
+                "baldur.core.process_utils.is_under_gunicorn",
+                return_value=True,
+            ),
+            patch.object(bootstrap_module, "logger") as mock_logger,
+        ):
+            bootstrap_module._schedule_gunicorn_hooks_check()
+
+        info_calls = [
+            call
+            for call in mock_logger.info.call_args_list
+            if call.args and call.args[0] == "baldur.gunicorn_hooks_installed"
+        ]
+        warn_calls = [
+            call
+            for call in mock_logger.warning.call_args_list
+            if call.args and call.args[0] == "baldur.gunicorn_hooks_not_installed"
+        ]
+        assert len(info_calls) == 1, (
+            f"expected exactly one hooks-installed INFO, got "
+            f"{mock_logger.info.call_args_list}"
+        )
+        assert warn_calls == []
+
+    def test_no_installed_info_when_the_hooks_module_is_absent(
+        self, fake_timer, monkeypatch
+    ):
+        """Both arms share one predicate, so the positive line must be as
+        absent on the unwired path as the WARNING is on the wired one."""
+        monkeypatch.delitem(
+            sys.modules, "baldur.adapters.gunicorn.hooks", raising=False
+        )
+
+        with (
+            patch(
+                "baldur.core.process_utils.is_under_gunicorn",
+                return_value=True,
+            ),
+            patch.object(bootstrap_module, "logger") as mock_logger,
+        ):
+            bootstrap_module._schedule_gunicorn_hooks_check()
+
+        info_calls = [
+            call
+            for call in mock_logger.info.call_args_list
+            if call.args and call.args[0] == "baldur.gunicorn_hooks_installed"
+        ]
+        assert info_calls == []
