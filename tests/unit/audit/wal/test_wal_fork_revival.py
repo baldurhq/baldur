@@ -445,6 +445,50 @@ class TestWalReclamationOrderBehavior:
         assert wal._state == WALState.ACTIVE
         assert not own.exists()
 
+    def test_the_currently_open_file_is_never_a_purge_candidate(
+        self, wal, wal_dir, only_the_live_peer_is_alive
+    ):
+        """Regression (`/verify` Stage 6.7): the open file is the one file
+        guaranteed to have an active writer — this process. Unlinking it is the
+        live-peer mistake committed against ourselves: the handle stays open,
+        every later record goes to an unlinked inode, and no drain reads them.
+        Ordering by owner put it *ahead* of a dead peer's orphan file, where
+        the previous oldest-first ordering had put it last.
+        """
+        wal.write({"event": "open-and-undrained"})
+        current = wal._current_file
+        dead = wal_dir / _filename(DEAD_PEER_PID, "000")
+        _write_raw_wal_file(dead, [{"seq": 1, "ts": 1.0, "data": {}}])
+
+        ordered = wal._reclaimable_in_order([current, dead])
+
+        assert current not in ordered
+        assert ordered == [dead]
+
+    def test_retention_floor_counts_files_this_process_may_not_reclaim(
+        self, wal, wal_dir, only_the_live_peer_is_alive
+    ):
+        """Regression (`/verify` Stage 6.7): ``critical_retention_min_mb`` asks
+        how much WAL data is left **on disk**, so it counts every file in the
+        directory. Measuring it over the reclaimable subset alone lets a live
+        peer's untouchable file shrink the denominator until this process
+        refuses to free its own rotated history — and then latches Fail-Open,
+        in exactly the multi-worker topology per-process WAL files create.
+        """
+        wal._config.max_file_size_mb = 1
+        wal._config.critical_retention_min_mb = 3
+        own = wal_dir / _filename(os.getpid(), "001")
+        own.write_bytes(b"\0" * (2 * 1024 * 1024))
+        live_peer = wal_dir / _filename(LIVE_PEER_PID, "002")
+        live_peer.write_bytes(b"\0" * (4 * 1024 * 1024))
+
+        wal._handle_disk_full()
+
+        # 6 MB on disk, floor 3 MB: freeing the own 2 MB file is allowed.
+        assert not own.exists()
+        assert live_peer.exists()
+        assert wal._state == WALState.ACTIVE
+
     def test_purge_latches_fail_open_rather_than_unlink_a_live_peer(
         self, wal, wal_dir, only_the_live_peer_is_alive
     ):

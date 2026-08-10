@@ -29,6 +29,7 @@ class WALDiskManagerMixin:
         # Host contract — attributes provided by WriteAheadLog.
         _config: WALConfig
         _wal_dir: Path
+        _current_file: Path | None
 
     def _handle_disk_full(self) -> None:
         """Handle a disk-full condition.
@@ -86,11 +87,19 @@ class WALDiskManagerMixin:
         unlinking it would send the owner's subsequent writes to an unlinked
         inode.
 
-        Own-PID files come first: they are this process's own rotated history,
-        the only files it can be sure nobody else is waiting to drain. Dead-PID
-        (and PID-less) files come last, because those are precisely the
-        un-absorbed orphan backlog — deleting them ahead of this process's own
-        history would discard a crashed peer's undelivered entries first.
+        This process's **currently open** file is excluded outright. It is the
+        one file guaranteed to have an active writer, so unlinking it is the
+        live-peer mistake committed against ourselves: the handle stays open,
+        every subsequent record goes to an unlinked inode, and no drain ever
+        reads them. The pre-existing oldest-first ordering hid this by putting
+        the newest file last; ordering by owner does not, so the exclusion is
+        explicit.
+
+        Own-PID files then come first: they are this process's own rotated
+        history, the only files it can be sure nobody else is waiting to drain.
+        Dead-PID (and PID-less) files come last, because those are precisely
+        the un-absorbed orphan backlog — deleting them ahead of this process's
+        own history would discard a crashed peer's undelivered entries first.
         """
         from baldur.audit.wal._reader import is_live_peer_wal_file, wal_file_owner_pid
 
@@ -99,6 +108,8 @@ class WALDiskManagerMixin:
         foreign: list[Path] = []
 
         for wal_file in wal_files:
+            if self._current_file is not None and wal_file == self._current_file:
+                continue
             if is_live_peer_wal_file(wal_file):
                 continue
             if wal_file_owner_pid(wal_file) == own_pid:
@@ -158,14 +169,19 @@ class WALDiskManagerMixin:
 
         # With no priority files left, delete general files oldest-first
         if freed_bytes < target_free:
-            general_files = self._reclaimable_in_order(
-                sorted(
-                    self._wal_dir.glob(f"{self._config.file_prefix}_*.wal"),
-                    key=lambda f: f.stat().st_mtime,
-                )
+            all_general = sorted(
+                self._wal_dir.glob(f"{self._config.file_prefix}_*.wal"),
+                key=lambda f: f.stat().st_mtime,
             )
+            general_files = self._reclaimable_in_order(all_general)
             critical_min_bytes = self._config.critical_retention_min_mb * 1024 * 1024
-            total_size = sum(f.stat().st_size for f in general_files)
+            # The retention floor is "how much WAL data is left on disk", so it
+            # counts every file in the directory — not only the ones this
+            # process may reclaim. Measuring it over the reclaimable subset
+            # would let a live peer's untouchable file shrink the denominator
+            # and stop this process from freeing its own rotated history, in
+            # exactly the multi-worker topology per-process WAL files create.
+            total_size = sum(f.stat().st_size for f in all_general)
 
             for wal_file in general_files:
                 if freed_bytes >= target_free:

@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import os
 import threading
-import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -243,7 +242,7 @@ class TestAbsorbOneShotBehavior:
             ((4, 4), True),
         ],
         ids=[
-            "no_destination",
+            "could_not_run",
             "no_orphans_found",
             "attempted_but_delivered_none",
             "partial_delivery",
@@ -313,6 +312,54 @@ class TestAbsorbOneShotBehavior:
         absorbed, attempted = instance._absorb_orphans_pass()
 
         assert (absorbed, attempted) == (2, 3)
+
+    def test_a_pass_with_no_wal_at_all_does_not_consume_the_one_shot(self, worker):
+        """Regression (`/verify` Stage 6.7): "no WAL" is *absent*, not "no
+        orphans". The WAL check runs before the destination is resolved, so a
+        pass that returned a tuple here would consume the one-shot having
+        looked at nothing — and a WAL that is disabled, still failing its init,
+        or PRO-only on an install that later gains PRO can appear afterwards.
+        """
+        instance = AuditSyncWorker(
+            wal=None, central_adapter=MagicMock(spec=AuditLogAdapter)
+        )
+
+        assert instance._absorb_orphans_pass() is None
+
+        instance._absorb_orphans_once()
+        assert instance._orphans_absorbed is False
+
+    def test_a_failed_orphan_read_does_not_consume_the_one_shot(self, worker):
+        """Regression (`/verify` Stage 6.7): a raising ``recover_orphans()``
+        yields the same empty result as a genuinely empty orphan set, and
+        reading the failure as "there were none" strands a dead peer's whole
+        backlog for the life of this process. One malformed record in a
+        crashed peer's torn file is enough to raise here.
+        """
+        wal = MagicMock(spec=WriteAheadLog)
+        wal.recover_orphans.side_effect = TypeError("torn record: seq is a str")
+        instance = AuditSyncWorker(
+            wal=wal, central_adapter=MagicMock(spec=AuditLogAdapter)
+        )
+
+        assert instance._absorb_orphans_pass() is None
+
+        instance._absorb_orphans_once()
+        assert instance._orphans_absorbed is False
+
+    def test_a_later_cycle_absorbs_once_the_orphan_read_recovers(self, worker):
+        """The other half: the retry the failed read preserved actually lands."""
+        wal = MagicMock(spec=WriteAheadLog)
+        wal.recover_orphans.side_effect = [OSError("read failed"), [_orphan_entry(1)]]
+        instance = AuditSyncWorker(
+            wal=wal, central_adapter=MagicMock(spec=AuditLogAdapter)
+        )
+
+        instance._absorb_orphans_once()
+        assert instance._orphans_absorbed is False
+        instance._absorb_orphans_once()
+
+        assert instance._orphans_absorbed is True
 
     def test_pass_resolves_the_destination_before_reading_any_orphan_file(self, worker):
         """With nothing real to deliver to, the pass costs one registry lookup
@@ -479,7 +526,7 @@ class TestSpawnHelperConvergenceBehavior:
             racer_thread.join(timeout=5.0)
 
         assert len({id(t) for t in spawned}) == 1
-        assert threading.active_count() >= 1
+        assert worker._thread.is_alive()
 
     def test_spawn_rebinds_the_handles_thread_so_a_respawn_converges(self, worker):
         """The registry keeps pointing at the same handle, so the new thread
@@ -509,10 +556,9 @@ class TestSpawnHelperConvergenceBehavior:
         assert worker._origin_pid == os.getpid()
         assert worker._thread is not None
         assert worker._thread.is_alive()
-        # Deadline-free: the loop is running, so the stop Event it waits on
-        # must be this process's replacement, not the inherited one.
-        deadline = time.monotonic() + 5.0
+        # The loop is running, so the stop Event it waits on must be this
+        # process's replacement rather than the inherited one — otherwise
+        # setting the replacement would leave the thread parked forever.
         worker._stop_event.set()
-        while worker._thread.is_alive() and time.monotonic() < deadline:
-            time.sleep(0.01)
+        worker._thread.join(timeout=5.0)
         assert worker._thread.is_alive() is False

@@ -757,6 +757,11 @@ class AuditSyncWorker:
         exactly like having no destination: nothing consumed, retried next
         cycle. A pass that found no orphans at all, or delivered some and
         failed others, does consume it.
+
+        A pass that could not run at all reports ``None`` and consumes
+        nothing — no WAL, no real destination, or a recovery read that raised.
+        Reading an empty result out of a failure as "there were no orphans" is
+        the same mistake as reading a no-op adapter's silence as delivery.
         """
         result = self._absorb_orphans_pass()
         if result is None:
@@ -769,11 +774,19 @@ class AuditSyncWorker:
         self._orphans_absorbed = True
 
     def _absorb_orphans_pass(self) -> tuple[int, int] | None:
-        """One absorb pass. ``(absorbed, attempted)``, or ``None`` if no destination.
+        """One absorb pass. ``(absorbed, attempted)``, or ``None`` if it could not run.
 
-        The destination is resolved **first**: with nothing real to deliver
-        to, the pass costs one registry lookup instead of a full read of every
-        orphan file.
+        ``None`` means the pass never got as far as an orphan set it can
+        believe: there is no WAL to read, no real destination to deliver to,
+        or the recovery read raised. Only a tuple is evidence *about orphans*,
+        and only a tuple may consume the caller's one-shot — an empty result
+        produced by a failure is a different fact from an empty orphan set,
+        and conflating them strands a dead peer's backlog for the whole life
+        of this process.
+
+        The destination is resolved before any file is read: with nothing real
+        to deliver to, the pass costs one registry lookup instead of a full
+        read of every orphan file.
 
         A pass aborts as soon as the first entry exhausts its retry budget
         with nothing yet delivered. An unreachable store is a property of the
@@ -784,7 +797,10 @@ class AuditSyncWorker:
         """
         wal = self._get_wal()
         if wal is None or not hasattr(wal, "recover_orphans"):
-            return (0, 0)
+            # Absent, not empty: a WAL that is disabled, still failing its
+            # init, or PRO-only on an OSS install may appear later, and
+            # ``_sync_batch`` re-resolves it every cycle regardless.
+            return None
 
         destination = self._resolve_central_destination()
         if destination is None:
@@ -797,7 +813,7 @@ class AuditSyncWorker:
                 "audit_sync_worker.orphan_recover_failed",
                 error=e,
             )
-            return (0, 0)
+            return None
 
         if not entries:
             return (0, 0)
