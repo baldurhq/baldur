@@ -21,7 +21,7 @@ Meta-Watchdog turns that silent gap into an explicit, observable signal:
 
 - **It catches "frozen", not just "crashed".** A dead process is easy to spot. The dangerous case is a component that's still up but no longer doing anything: its numbers haven't moved in minutes while errors pile up behind it. Meta-Watchdog treats that *zero-progress* state as a failure in its own right, so a wedged subsystem can't hide behind a live process.
 - **It pages once, not once per server.** When the same subsystem is unhealthy across a fleet of workers, you get a single alert for the incident — not one page per process at 3 a.m.
-- **It tells the truth about what it did.** The page says plainly that a human is needed and that no automatic recovery was attempted — so on-call knows this is theirs to act on, not something the system is quietly handling.
+- **It tells the truth about what it did.** The page states which of the two cases you are in: automatic recovery is switched off so nothing was attempted, or it ran and failed. On-call learns from the alert itself whether this is theirs to act on or something the system already tried and could not fix.
 - **Every page is on the record.** Each escalation is written to a durable event journal and counted as a metric, so "what failed, and when did we hear about it?" is answerable after the fact instead of reconstructed from memory.
 - **It can still reach you when the whole process dies.** A watchdog that lives inside your application shares its fate: if the process crashes, is OOM-killed or hangs, the watchdog dies with it and the page it would have sent is never sent. The optional outbound liveness beacon inverts that signal, so an external service alarms on the *silence*.
 
@@ -46,9 +46,9 @@ When a subsystem stays unhealthy across several consecutive probes, Meta-Watchdo
 
 Three rules keep the paging sane:
 
-- **One page per incident.** An ongoing failure escalates **once per episode**, not on every probe. The alert clears internally once a probe pass no longer finds the component unhealthy — so a subsystem that's been broken for an hour doesn't generate an hour of duplicate pages. This holds across every running instance too: a cluster-wide guard ensures one worker pages for a shared failure rather than all of them at once.
+- **One page per incident.** An ongoing failure escalates **once per episode**, not on every probe. The alert clears internally once a probe pass no longer finds the component unhealthy — so a subsystem that's been broken for an hour doesn't generate an hour of duplicate pages. This holds across every running instance too: a cluster-wide guard ensures one worker pages for a shared failure rather than all of them at once. That guard is a lock in the shared Redis store; where there is no shared store to hold it, each worker falls back to de-duplicating only its own pages.
 - **Paging never slows detection down.** The page itself is handed to a dedicated sender and delivered off the detection loop, so a slow or unresponsive notification channel cannot stall the next probe pass. Delivery is at-least-once: if the watchdog shuts down before a page goes out, the undelivered page is still written to the local record, and the accepted worst case is a duplicate page, never a silently lost one.
-- **It always records, even if paging fails.** Every escalation is appended to a durable event journal and emitted as a metric. If the external channel itself can't be reached, the alert is written to a local fallback record so the event is never lost.
+- **It always records, even if paging fails.** Every escalation is appended to a durable event journal and emitted as a metric. If the external channel itself can't be reached, the alert is written to a local fallback record so the event is never lost. The metric distinguishes a page that actually left this host from one that only reached the local log, which is the state you land in when a channel is misconfigured or has fallen back, so the console's "humans paged" count means people were reached rather than merely that Baldur tried.
 
 ```mermaid
 stateDiagram-v2
@@ -62,7 +62,12 @@ stateDiagram-v2
     Unhealthy --> Healthy: recovers on its own
 ```
 
-**In v1.0, Meta-Watchdog detects and escalates — it does not self-recover.** This is a deliberate choice, not a missing feature. Handing a system the authority to restart its own internals is only safe once the failure modes are well understood, so v1.0 ships the part that is unambiguously safe (*find the problem and tell a human*) and a real person decides what to do. Baldur does not restart its own internals autonomously; it detects the problem and escalates to a human.
+**Out of the box, Meta-Watchdog detects and escalates. It repairs nothing.** This is a deliberate choice, not a missing feature. Handing a system the authority to restart its own internals is only safe once its failure modes are well understood, so the shipped default is the part that is unambiguously safe: find the problem, tell a human, let a real person decide what to do.
+
+An automatic-recovery mode does exist, and it ships switched off. Switch it on and a component that has failed several passes in a row gets one bounded repair attempt before anyone is paged. The attempt runs under a time budget, at most once per component in any five-minute window, and it is skipped entirely while a level-3 emergency is in force. Succeed, and nobody is paged. Fail, and the page goes out about three minutes later, saying that recovery was tried. While a component sits in that five-minute window the watchdog neither retries it nor pages for it, so turning recovery on trades a little detection latency for the chance of a fix.
+
+!!! warning "Automatic recovery force-closes a breaker you opened by hand"
+    Its circuit-breaker repair treats any breaker that has been open for five minutes as stuck and force-closes it, without asking whether an operator put it there. If you rely on forcing a breaker open to hold a dependency out of rotation during maintenance, leave automatic recovery off. See [which PRO features can lift a manual force, and what you get back instead](../oss/circuit-breaker.md).
 
 **When the watchdog itself dies.** Everything above depends on one thing: the process being alive to send the page. A crash, an OOM kill or a hard hang takes the watchdog down with the application, and an in-process supervisor cannot report its own death. For that case, point `BALDUR_META_WATCHDOG_BEACON_URL` at a dead-man's-switch service (a URL that expects to be pinged regularly) and the watchdog sends an outbound liveness ping to it once per completed probe pass, roughly every probe interval. The external service then pages you on the *absence* of pings — the one signal that still works when the process, the host, or the whole monitoring stack dies together.
 
@@ -75,9 +80,9 @@ What the self-test deliberately does not check is your PagerDuty notification ru
 | What you observe | When it happens |
 |------------------|-----------------|
 | A critical page titled `Baldur <component> Failure` | a healing subsystem stays unhealthy or frozen across several probes |
-| The alert states manual intervention is required and no recovery was attempted | v1.0 detect-and-escalate mode — it does not auto-recover |
+| The alert says manual intervention is required and that recovery is disabled, so none was attempted | the shipped default; with automatic recovery switched on, the same page instead says the attempt failed |
 | A single alert for one incident, not one per worker | cluster-wide and per-process de-duplication |
-| A durable journal entry and a metric increment for each escalation | every time it pages |
+| A durable journal entry and a metric increment for each escalation, counted separately depending on whether the page left this host | every time it pages |
 | A test alert through every configured channel, with per-channel delivery results — and on PagerDuty an incident that appears and resolves within seconds | you run the escalation self-test |
 | A subsystem shown as Unknown with the reason `pass budget exhausted` | its probe could not finish inside the pass's time window, so the sweep moved on instead of stalling |
 | Your dead-man's-switch provider alarms because pings stopped | the watchdog process crashed, was OOM-killed, or hung (beacon configured) |
@@ -102,6 +107,7 @@ The full set of tuning options lives in the [environment variable reference](../
 ## See also
 
 - [Unified Notification](unified-notification.md) — the channel layer Meta-Watchdog's pages are delivered through
+- [Circuit Breaker](../oss/circuit-breaker.md) — what a manual force guarantees, and how automatic recovery can lift one
 - [Audit Trail](audit.md) — where escalation events are durably recorded
 - [Getting Started](../../getting-started/index.md) — set Baldur up
 - [API Reference](../../reference/index.md) — full options and signatures

@@ -91,7 +91,7 @@ export BALDUR_SQL_DSN=postgresql://user:pass@host:5432/db
 
 Reach for this when you want that history **durable and queryable in the database
 you already operate** rather than in Redis. It is an advanced backend and is not
-part of the v1.0 tested compatibility matrix; the default multi-worker path is
+part of the tested compatibility matrix; the default multi-worker path is
 Redis, not SQL. Baldur is a resilience layer, not your system of record — it does
 not move your application's data here.
 

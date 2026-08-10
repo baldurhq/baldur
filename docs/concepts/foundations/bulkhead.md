@@ -163,7 +163,7 @@ the table above; a compartment you register yourself takes the capacity you give
 concurrent if you don't say). Each call site then just names its compartment and, optionally,
 sets a wait timeout.
 
-The tuning settings behind the built-in defaults are advanced / internal for v1.0: they are not
+The tuning settings behind the built-in defaults are advanced / internal: they are not
 part of the public operator-tunable environment-variable allowlist yet.
 
 The compartments, the `/bulkheads` status surface, and the console panel are available on every

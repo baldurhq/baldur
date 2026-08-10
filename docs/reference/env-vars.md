@@ -3,7 +3,7 @@
 Operators may set these env vars in production. Everything else with a
 `BALDUR_*` prefix is advanced / internal and subject to change in v1.x.
 
-The full settings inventory is internal to v1.0; operator-tunable
+The full settings inventory is internal; operator-tunable
 promotion happens via dedicated proposals in later releases.
 
 !!! info "`(PRO)` marker"
@@ -21,6 +21,7 @@ BALDUR_CB_MINIMUM_CALLS=10              # calls the window needs before the rate
 BALDUR_CB_RECOVERY_TIMEOUT=60
 BALDUR_CB_HALF_OPEN_MAX_CALLS=3
 BALDUR_CB_MANUAL_OVERRIDE_TTL_MINUTES=90  # minutes a manual override (Block / Allow / Override) lasts when the operator sets no lifetime of its own; 1-1440
+BALDUR_CB_CLUSTER_STATE_PROPAGATION_ENABLED=false  # set true on every worker: a booting worker reads shared breaker state on a local miss, and with PRO + the Redis event bus a peer's OPEN/CLOSED is applied here (a peer's CLOSED overrides a manual block held on this worker)
 BALDUR_RETRY_MAX_ATTEMPTS=3
 BALDUR_RETRY_BACKOFF_STRATEGY=exponential  # exponential | linear | constant | decorrelated_jitter
 BALDUR_RETRY_BASE_DELAY=1.0
@@ -180,9 +181,10 @@ BALDUR_META_WATCHDOG_SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
 
 ## Meta-Watchdog (self-monitoring, PRO)
 
-Autonomous self-monitoring of Baldur's own healing subsystems. On detection
-of a stuck/dead subsystem it pages a human through Slack or PagerDuty; it does not
-self-recover (autonomous recovery is deferred). Default-on under PRO — set
+Autonomous self-monitoring of Baldur's own healing subsystems. On detection of a
+stuck/dead subsystem it pages a human through Slack or PagerDuty and stops
+there — what ships enabled is detect-and-escalate, which takes no recovery
+action of its own. Default-on under PRO — set
 `BALDUR_META_WATCHDOG_ENABLED=false` to silence. Escalation pages deliver to
 the same `BALDUR_META_WATCHDOG_SLACK_WEBHOOK_URL` documented in the
 circuit-breaker push section above.
@@ -193,7 +195,18 @@ BALDUR_META_WATCHDOG_ESCALATION_ENABLED=true
 BALDUR_META_WATCHDOG_PROBE_INTERVAL_SECONDS=30
 BALDUR_META_WATCHDOG_SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
 BALDUR_META_WATCHDOG_PAGERDUTY_ROUTING_KEY=<pd-key>
+BALDUR_META_WATCHDOG_RECOVERY_ENABLED=false  # opt-in autonomous repair: one bounded attempt per failing component before anyone is paged — read the two cautions below before setting it true
 ```
+
+Recovery is implemented and ships switched off. Weigh two things before you turn
+it on. The single flag covers both the in-process repairs and the ones that
+restart shared infrastructure — the Redis and DLQ-worker workloads — so there is
+no way to take the low-blast-radius half alone. And its circuit-breaker repair
+force-closes the breakers it finds open without asking whether an operator put
+them there (see [Circuit Breaker](../concepts/oss/circuit-breaker.md)), so a
+manual block does not survive it. The per-component graduation criteria — which
+repair exists for each component, its risk, and the evidence to look for first —
+are in `docs/runbooks/meta-watchdog-escalation-response.md`.
 
 Escalation only reaches you while the process is alive to send it. The outbound
 liveness beacon covers the other case: set `BEACON_URL` and the watchdog loop

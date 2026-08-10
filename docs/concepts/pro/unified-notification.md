@@ -86,7 +86,7 @@ After a successful send, the hub records the cooldown, writes the notification t
 
 Unified Notification ships with the PRO tier; the hub is available once PRO is active (set through the standard PRO entitlement, `BALDUR_LICENSE_KEY`) and is a no-op otherwise.
 
-Its operational knobs — the per-minute and per-hour rate limits, the per-category cooldown windows, the channel-routing policy, and the escalation thresholds — ship with production-safe defaults and are **advanced / internal for v1.0**: they are not part of the public operator-tunable environment-variable allowlist yet. The concrete channel destinations (Slack channels, PagerDuty routing) are likewise resolved from settings rather than a public env var at this stage. Operator-tunable promotion of these knobs happens through dedicated proposals in a later release; see the [environment variable reference](../../reference/env-vars.md) for the current public allowlist.
+Its operational knobs — the per-minute and per-hour rate limits, the per-category cooldown windows, the channel-routing policy, and the escalation thresholds — ship with production-safe defaults and are **advanced / internal**: they are not part of the public operator-tunable environment-variable allowlist yet. The concrete channel destinations (Slack channels, PagerDuty routing) are likewise resolved from settings rather than a public env var at this stage. Operator-tunable promotion of these knobs happens through dedicated proposals in a later release; see the [environment variable reference](../../reference/env-vars.md) for the current public allowlist.
 
 ## See also
 
