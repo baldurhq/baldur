@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import threading
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -70,7 +70,15 @@ class TestInitBehavior:
     """Behavior tests using the actual sub-step functions as targets."""
 
     def test_init_invokes_each_step_once(self):
-        """All seven sub-steps fire exactly once on a fresh init()."""
+        """Each sub-step fires exactly once on a fresh init().
+
+        The audit pipeline is the one exception, and deliberately so: it is
+        both an init() step and a per-worker background starter, because the
+        threads it builds do not survive a ``fork()``. Outside gunicorn both
+        calls land in the same process and the second one early-returns on the
+        lifecycle guard, so the extra call is idempotent rather than a second
+        pipeline.
+        """
         from baldur import bootstrap
 
         with (
@@ -89,8 +97,11 @@ class TestInitBehavior:
         m_shutdown.assert_called_once_with()
         m_pro.assert_called_once_with()
         m_audit_default.assert_called_once_with()
-        m_pipeline.assert_called_once_with()
         m_env.assert_called_once_with()
+
+        # Once as init()'s own step, once through the background-worker
+        # starter that revives it per forked worker.
+        assert m_pipeline.call_args_list == [call(), call()]
 
     def test_init_passes_quarantine_callback_through(self):
         """Quarantine callback is forwarded to ``_validate_startup_config``."""

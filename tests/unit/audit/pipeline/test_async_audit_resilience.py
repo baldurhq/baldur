@@ -1,17 +1,14 @@
-# packages/baldur-python/tests/unit/audit/test_async_audit_resilience.py
 """
-AsyncHealingLogger 및 관련 컴포넌트 내구성 테스트.
+Durability tests for AsyncHealingLogger and its neighbouring components.
 
-문서: 167_ASYNC_AUDIT_PIPELINE.md 섹션 8 보완 제안 구현 검증
-
-테스트 항목:
-- WAL-First 로깅
-- 배치 플러시 재시도
-- 큐 배압 전략
-- 에러 알림 임계치
-- Priority Queue
-- DurableEventLogger
-- 체크포인트 관리
+Covers:
+- Batch flush retry policy
+- Queue backpressure strategy
+- Error alert thresholds
+- Priority Queue ordering
+- CRITICAL thread pool lifecycle
+- Checkpoint configuration
+- Fast serialization
 """
 
 from __future__ import annotations
@@ -24,17 +21,17 @@ import queue
 
 
 class TestPriorityQueue:
-    """Priority Queue 테스트 (8.4.1)."""
+    """Priority Queue ordering."""
 
     def test_critical_events_have_highest_priority(self):
-        """CRITICAL 이벤트가 가장 높은 우선순위를 가진다."""
+        """A CRITICAL event outranks every other severity."""
         from baldur.utils.async_logger import (
             SEVERITY_PRIORITY_MAP,
             EventSeverity,
             LogFlushPriority,
         )
 
-        # CRITICAL이 가장 낮은 숫자 (높은 우선순위)
+        # CRITICAL carries the lowest number, i.e. the highest priority.
         assert (
             SEVERITY_PRIORITY_MAP[EventSeverity.CRITICAL] == LogFlushPriority.CRITICAL
         )
@@ -52,7 +49,7 @@ class TestPriorityQueue:
         )
 
     def test_prioritized_event_ordering(self):
-        """PrioritizedEvent가 올바르게 정렬된다."""
+        """PrioritizedEvent sorts by priority."""
         from baldur.utils.async_logger import LogFlushPriority, PrioritizedEvent
 
         events = [
@@ -76,12 +73,12 @@ class TestPriorityQueue:
         assert sorted_events[2].event["type"] == "debug"
 
     def test_priority_queue_processes_critical_first(self):
-        """Priority Queue가 CRITICAL 이벤트를 먼저 처리한다."""
+        """A PriorityQueue hands back the CRITICAL event first."""
         from baldur.utils.async_logger import LogFlushPriority, PrioritizedEvent
 
         pq = queue.PriorityQueue()
 
-        # 순서대로 추가 (DEBUG, CRITICAL, INFO)
+        # Inserted in arrival order (DEBUG, CRITICAL, INFO).
         pq.put(
             PrioritizedEvent(
                 priority=LogFlushPriority.DEBUG, timestamp=1.0, event={"type": "debug"}
@@ -100,7 +97,7 @@ class TestPriorityQueue:
             )
         )
 
-        # 우선순위 순으로 꺼내기
+        # Retrieved in priority order.
         first = pq.get()
         second = pq.get()
         third = pq.get()
@@ -110,73 +107,11 @@ class TestPriorityQueue:
         assert third.event["type"] == "debug"
 
 
-class TestWALFirstLogging:
-    """WAL-First 로깅 테스트 (8.1.1)."""
-
-    def test_wal_policy_enum_values(self):
-        """WALPolicy enum 값 검증."""
-        from baldur.utils.async_logger import WALPolicy
-
-        assert WALPolicy.ALL.value == "all"
-        assert WALPolicy.CRITICAL_ONLY.value == "critical"
-        assert WALPolicy.NONE.value == "none"
-
-    def test_should_write_to_wal_with_all_policy(self):
-        """WALPolicy.ALL일 때 모든 이벤트 WAL 기록."""
-        from baldur.utils.async_logger import (
-            AsyncHealingLogger,
-            EventSeverity,
-            WALPolicy,
-        )
-
-        AsyncHealingLogger.reset()
-        AsyncHealingLogger._wal_policy = WALPolicy.ALL
-
-        assert AsyncHealingLogger._should_write_to_wal(EventSeverity.INFO) is True
-        assert AsyncHealingLogger._should_write_to_wal(EventSeverity.CRITICAL) is True
-        assert AsyncHealingLogger._should_write_to_wal(EventSeverity.DEBUG) is True
-
-        AsyncHealingLogger.reset()
-
-    def test_should_write_to_wal_with_critical_only_policy(self):
-        """WALPolicy.CRITICAL_ONLY일 때 CRITICAL만 WAL 기록."""
-        from baldur.utils.async_logger import (
-            AsyncHealingLogger,
-            EventSeverity,
-            WALPolicy,
-        )
-
-        AsyncHealingLogger.reset()
-        AsyncHealingLogger._wal_policy = WALPolicy.CRITICAL_ONLY
-
-        assert AsyncHealingLogger._should_write_to_wal(EventSeverity.INFO) is False
-        assert AsyncHealingLogger._should_write_to_wal(EventSeverity.CRITICAL) is True
-        assert AsyncHealingLogger._should_write_to_wal(EventSeverity.DEBUG) is False
-
-        AsyncHealingLogger.reset()
-
-    def test_should_write_to_wal_with_none_policy(self):
-        """WALPolicy.NONE일 때 WAL 기록 안함."""
-        from baldur.utils.async_logger import (
-            AsyncHealingLogger,
-            EventSeverity,
-            WALPolicy,
-        )
-
-        AsyncHealingLogger.reset()
-        AsyncHealingLogger._wal_policy = WALPolicy.NONE
-
-        assert AsyncHealingLogger._should_write_to_wal(EventSeverity.INFO) is False
-        assert AsyncHealingLogger._should_write_to_wal(EventSeverity.CRITICAL) is False
-
-        AsyncHealingLogger.reset()
-
-
 class TestFlushRetry:
-    """배치 플러시 재시도 테스트 (8.1.3, 8.4.3)."""
+    """Batch flush retry policy."""
 
     def test_batch_retry_policy_defaults(self):
-        """BatchRetryPolicy 기본값 검증."""
+        """BatchRetryPolicy default values."""
         from baldur.utils.async_logger import BatchRetryPolicy
 
         policy = BatchRetryPolicy()
@@ -188,7 +123,7 @@ class TestFlushRetry:
         assert policy.dlq_on_final_failure is True
 
     def test_exponential_backoff_calculation(self):
-        """지수 백오프 계산 검증."""
+        """Exponential backoff grows by the configured multiplier."""
         from baldur.utils.async_logger import BatchRetryPolicy
 
         policy = BatchRetryPolicy(
@@ -212,7 +147,7 @@ class TestFlushRetry:
         assert delays == [1.0, 2.0, 4.0, 8.0]
 
     def test_max_delay_cap(self):
-        """최대 지연 시간 제한 검증."""
+        """The computed delay is capped at max_delay_seconds."""
         from baldur.utils.async_logger import BatchRetryPolicy
 
         policy = BatchRetryPolicy(
@@ -230,10 +165,10 @@ class TestFlushRetry:
 
 
 class TestQueueBackpressure:
-    """큐 배압 테스트 (8.2.2)."""
+    """Queue backpressure configuration."""
 
     def test_queue_overflow_policy_values(self):
-        """QueueOverflowPolicy enum 값 검증."""
+        """QueueOverflowPolicy enum values."""
         from baldur.utils.async_logger import QueueOverflowPolicy
 
         assert QueueOverflowPolicy.DROP_NEWEST.value == "drop_newest"
@@ -241,7 +176,7 @@ class TestQueueBackpressure:
         assert QueueOverflowPolicy.BLOCK.value == "block"
 
     def test_configure_queue_sets_values(self):
-        """configure_queue가 설정을 올바르게 적용한다."""
+        """configure_queue applies both settings."""
         from baldur.utils.async_logger import (
             AsyncHealingLogger,
             QueueOverflowPolicy,
@@ -260,10 +195,10 @@ class TestQueueBackpressure:
 
 
 class TestFlushErrorAlert:
-    """플러시 에러 알림 테스트 (8.3.2)."""
+    """Flush-error alerting configuration."""
 
     def test_flush_error_alert_config_defaults(self):
-        """FlushErrorAlertConfig 기본값 검증."""
+        """FlushErrorAlertConfig default values."""
         from baldur.utils.async_logger import FlushErrorAlertConfig
 
         config = FlushErrorAlertConfig()
@@ -274,7 +209,7 @@ class TestFlushErrorAlert:
         assert config.severity == "CRITICAL"
 
     def test_configure_alert_sets_values(self):
-        """configure_alert가 설정을 올바르게 적용한다."""
+        """configure_alert applies the supplied configuration."""
         from baldur.utils.async_logger import (
             AsyncHealingLogger,
             FlushErrorAlertConfig,
@@ -295,16 +230,16 @@ class TestFlushErrorAlert:
 
 
 class TestCriticalThreadPool:
-    """CRITICAL 스레드 풀 테스트 (8.2.1)."""
+    """CRITICAL flush thread pool lifecycle."""
 
     def test_critical_executor_max_workers_default(self):
-        """CRITICAL 스레드 풀 기본 워커 수 검증."""
+        """Default worker count for the CRITICAL pool."""
         from baldur.utils.async_logger import AsyncHealingLogger
 
         assert AsyncHealingLogger.CRITICAL_EXECUTOR_MAX_WORKERS == 5
 
     def test_executor_created_on_start(self):
-        """start() 호출 시 스레드 풀이 생성된다."""
+        """start() creates the thread pool."""
         from baldur.utils.async_logger import AsyncHealingLogger
 
         AsyncHealingLogger.reset()
@@ -317,7 +252,7 @@ class TestCriticalThreadPool:
         AsyncHealingLogger.reset()
 
     def test_executor_shutdown_on_stop(self):
-        """stop() 호출 시 스레드 풀이 종료된다."""
+        """stop() shuts the thread pool down."""
         from baldur.utils.async_logger import AsyncHealingLogger
 
         AsyncHealingLogger.reset()
@@ -331,10 +266,10 @@ class TestCriticalThreadPool:
 
 
 class TestAsyncLoggerStats:
-    """AsyncHealingLogger 통계 테스트."""
+    """AsyncHealingLogger statistics."""
 
     def test_initial_stats(self):
-        """초기 통계 값 검증."""
+        """A freshly reset logger reports zeroed counters."""
         from baldur.utils.async_logger import AsyncHealingLogger
 
         AsyncHealingLogger.reset()
@@ -344,17 +279,32 @@ class TestAsyncLoggerStats:
         assert stats["events_flushed"] == 0
         assert stats["flush_errors"] == 0
         assert stats["queue_overflows"] == 0
-        assert stats["wal_writes"] == 0
 
         AsyncHealingLogger.reset()
 
-    def test_reset_stats(self):
-        """통계 초기화 검증."""
+    def test_stats_carry_no_wal_write_counter(self):
+        """The logger never writes to a WAL, so it publishes no such counter.
+
+        Regression guard for the removed WAL-first path: the counter had a
+        producer and no consumer, and the surrounding write path never
+        executed, so publishing it advertised durability the logger did not
+        have.
+        """
         from baldur.utils.async_logger import AsyncHealingLogger
 
         AsyncHealingLogger.reset()
 
-        # 통계 조작
+        assert "wal_writes" not in AsyncHealingLogger.get_stats()
+
+        AsyncHealingLogger.reset()
+
+    def test_reset_stats(self):
+        """reset_stats() zeroes an advanced counter."""
+        from baldur.utils.async_logger import AsyncHealingLogger
+
+        AsyncHealingLogger.reset()
+
+        # Advance a counter by hand.
         with AsyncHealingLogger._lock:
             AsyncHealingLogger._stats["events_logged"] = 100
 
@@ -372,10 +322,10 @@ class TestAsyncLoggerStats:
 
 
 class TestSyncWorkerCheckpoint:
-    """SyncWorker 체크포인트 테스트 (8.1.2)."""
+    """SyncWorker checkpoint configuration."""
 
     def test_config_has_checkpoint_settings(self):
-        """SyncWorkerConfig에 체크포인트 설정이 있다."""
+        """SyncWorkerConfig carries the checkpoint cadence settings."""
         from baldur.audit.sync_worker import SyncWorkerConfig
 
         config = SyncWorkerConfig()
@@ -392,10 +342,10 @@ class TestSyncWorkerCheckpoint:
 
 
 class TestFastSerialization:
-    """고속 직렬화 테스트 (8.3.1)."""
+    """Fast JSON serialization helpers."""
 
     def test_fast_dumps_returns_bytes(self):
-        """fast_dumps가 bytes를 반환한다."""
+        """fast_dumps returns bytes."""
         from baldur.utils.serialization import fast_dumps
 
         data = {"key": "value", "number": 123}
@@ -404,7 +354,7 @@ class TestFastSerialization:
         assert isinstance(result, bytes)
 
     def test_fast_loads_from_bytes(self):
-        """fast_loads가 bytes를 파싱한다."""
+        """fast_loads parses bytes."""
         from baldur.utils.serialization import fast_dumps, fast_loads
 
         data = {"key": "value", "number": 123}
@@ -414,7 +364,7 @@ class TestFastSerialization:
         assert decoded == data
 
     def test_fast_loads_from_string(self):
-        """fast_loads가 문자열을 파싱한다."""
+        """fast_loads parses a string."""
         from baldur.utils.serialization import fast_loads
 
         json_str = '{"key":"value","number":123}'
@@ -424,13 +374,13 @@ class TestFastSerialization:
         assert decoded["number"] == 123
 
     def test_fast_json_available_flag(self):
-        """FAST_JSON_AVAILABLE 플래그 존재."""
+        """The FAST_JSON_AVAILABLE flag is exposed as a bool."""
         from baldur.utils.serialization import FAST_JSON_AVAILABLE
 
         assert isinstance(FAST_JSON_AVAILABLE, bool)
 
     def test_fast_dumps_str_returns_string(self):
-        """fast_dumps_str가 문자열을 반환한다."""
+        """fast_dumps_str returns a string."""
         from baldur.utils.serialization import fast_dumps_str
 
         data = {"key": "value"}
@@ -440,7 +390,7 @@ class TestFastSerialization:
         assert "key" in result
 
     def test_unicode_handling(self):
-        """유니코드 처리."""
+        """Non-ASCII payloads survive a serialization round trip."""
         from baldur.utils.serialization import fast_dumps, fast_loads
 
         data = {"message": "한글 테스트", "emoji": "🎉"}
