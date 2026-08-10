@@ -85,7 +85,7 @@ class EventBusProtocol(Protocol):
 # =============================================================================
 # Doc 528 D10-v2 "OSS interfaces extracted": the concrete classes live in
 # ``baldur_dormant.adapters.kafka.{producer,consumer,event_bus}``. OSS callers
-# in ``server.py`` / ``services/event_bus/redis_bus.py`` /
+# in the gunicorn hooks / ``services/event_bus/redis_bus.py`` /
 # ``services/rate_limit/distributed_channel.py`` reference these Protocols
 # instead of the concrete classes so type-checking stays clean on the public
 # install surface. Methods cover only the OSS-caller usage axis — not the

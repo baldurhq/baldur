@@ -7,10 +7,10 @@ Replaces:
 - services/coordination/recovery_shutdown.py:RecoveryAwareShutdownConfig
 
 Environment Variables:
-    BALDUR_RECOVERY_SHUTDOWN_DRAIN_TIMEOUT=30.0
-    BALDUR_RECOVERY_SHUTDOWN_RECOVERY_EXTENSION=300.0
-    BALDUR_RECOVERY_SHUTDOWN_MAX_WAIT=600.0
-    ... etc
+    BALDUR_RECOVERY_SHUTDOWN_DEFAULT_DRAIN_TIMEOUT_SECONDS=30.0
+    BALDUR_RECOVERY_SHUTDOWN_RECOVERY_EXTENSION_SECONDS=300.0
+    BALDUR_RECOVERY_SHUTDOWN_MAX_SHUTDOWN_WAIT_SECONDS=600.0
+    ... etc (one per field below, prefix + upper-cased field name)
 """
 
 from typing import Self

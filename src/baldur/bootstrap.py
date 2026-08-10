@@ -996,7 +996,13 @@ def _register_shutdown_handlers() -> None:  # noqa: C901, PLR0912, PLR0915
 
 
 def _schedule_gunicorn_hooks_check() -> None:
-    """Schedule a one-shot WARNING when running under gunicorn without hooks.
+    """Schedule a one-shot report on whether the gunicorn hooks are wired.
+
+    Emits ``baldur.gunicorn_hooks_installed`` (INFO) when they are and
+    ``baldur.gunicorn_hooks_not_installed`` (WARNING) when they are not.
+    Both arms share one predicate, so they cannot drift apart, and an
+    operator who has just wired the hooks gets a line that says so instead
+    of having to infer it from a WARNING that stopped appearing.
 
     Detection signals:
 
@@ -1028,6 +1034,17 @@ def _schedule_gunicorn_hooks_check() -> None:
                 if not is_under_gunicorn():
                     return
                 if "baldur.adapters.gunicorn.hooks" in sys.modules:
+                    # Symmetric arm. Without it the whole operator-visible
+                    # result of wiring the hooks is that a WARNING stopped
+                    # appearing — an absence, indistinguishable from a check
+                    # that never ran or a gunicorn that was never detected.
+                    logger.info(
+                        "baldur.gunicorn_hooks_installed",
+                        hint=(
+                            "baldur's gunicorn worker-lifecycle hooks are "
+                            "wired; SIGTERM reaches the shutdown coordinator."
+                        ),
+                    )
                     return
                 logger.warning(
                     "baldur.gunicorn_hooks_not_installed",

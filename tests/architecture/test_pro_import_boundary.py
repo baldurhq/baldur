@@ -33,8 +33,8 @@ G17c — global-count ratchet for the OSS->Dormant direction
     OSS callers should resolve concrete adapters via ``ProviderRegistry``
     rather than importing ``baldur_dormant`` directly. Initial snapshot
     captures the Stage 2b residual sites that still in-function-import
-    ``baldur_dormant`` adapters (server.py kafka reset, redis_bus.py
-    fallback, distributed_channel.py kafka eventbus, etc.).
+    ``baldur_dormant`` adapters (the gunicorn hooks' kafka reset,
+    redis_bus.py fallback, distributed_channel.py kafka eventbus, etc.).
 
 Scope: OSS->PRO and OSS->Dormant directions only. ``baldur_pro/`` /
 ``baldur_dormant/`` importing OSS is DIP-correct and not a violation
@@ -269,7 +269,8 @@ class TestDormantImportCount:
     through ``ProviderRegistry.<slot>`` rather than importing
     ``baldur_dormant`` directly. Stage 2b lands the registry slots + NoOp
     defaults; this ratchet ensures the residual in-function imports
-    (server.py kafka reset, redis_bus.py fallback, etc.) shrink over time.
+    (the gunicorn hooks' kafka reset, redis_bus.py fallback, etc.) shrink
+    over time.
     Target = 0.
     """
 
