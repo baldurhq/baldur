@@ -32,6 +32,7 @@ against).
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -225,6 +226,83 @@ class TestStartBackgroundWorkersBehavior:
         # Then the healthy starter after the failure still ran.
         boom.assert_called_once_with()
         spy_ok.assert_called_once_with()
+
+
+class TestAuditStarterBehavior:
+    """The audit-pipeline starter is a plain delegation to the ``init()``-time
+    starter, so the settings gate and the ImportError shield stay
+    single-sourced. What it adds is the master skip — and the fact that it
+    exists at all, which is what makes a preload worker's non-CRITICAL audit
+    events reach a consumer."""
+
+    def test_worker_delegates_to_the_init_time_starter(self, non_gunicorn_env):
+        with patch.object(bootstrap, "_start_audit_pipeline_if_enabled") as delegate:
+            bootstrap._start_audit_pipeline_starter()
+
+        delegate.assert_called_once_with()
+
+    def test_master_returns_before_touching_the_pipeline(self, gunicorn_master_env):
+        """Negative: the master's pipeline is already running — starting a
+        second one there would put two consumers on the master's queue.
+        """
+        with patch.object(bootstrap, "_start_audit_pipeline_if_enabled") as delegate:
+            bootstrap._start_audit_pipeline_starter()
+
+        delegate.assert_not_called()
+
+    def test_worker_after_post_worker_init_delegates(
+        self, gunicorn_master_env, monkeypatch
+    ):
+        """``post_worker_init`` sets ``GUNICORN_WORKER=1``, which flips the
+        master check — the same call that was a no-op a moment ago now revives
+        the pipeline in this worker.
+        """
+        monkeypatch.setenv("GUNICORN_WORKER", "1")
+
+        with patch.object(bootstrap, "_start_audit_pipeline_if_enabled") as delegate:
+            bootstrap._start_audit_pipeline_starter()
+
+        delegate.assert_called_once_with()
+
+    def test_audit_disabled_reaches_the_shared_settings_gate(self, non_gunicorn_env):
+        """The gate is not duplicated here: the delegate is entered and returns
+        on ``AuditSettings.enabled`` — which is also why no AUTOSTART hatch is
+        needed for unit-test processes.
+        """
+        with (
+            patch(
+                "baldur.settings.audit.get_audit_settings",
+                return_value=SimpleNamespace(enabled=False),
+            ),
+            patch(
+                "baldur.audit.async_audit_lifecycle.startup_async_audit_system"
+            ) as startup,
+        ):
+            bootstrap._start_audit_pipeline_starter()
+
+        startup.assert_not_called()
+
+    def test_a_raising_delegate_is_swallowed(self, non_gunicorn_env):
+        """Fail-soft: ``start_background_workers()`` has no try/except of its
+        own, so a starter that propagates would abort every starter after it.
+        """
+        with patch.object(
+            bootstrap,
+            "_start_audit_pipeline_if_enabled",
+            side_effect=RuntimeError("audit boom"),
+        ):
+            bootstrap._start_audit_pipeline_starter()  # must not raise
+
+    def test_an_import_error_is_swallowed(self, non_gunicorn_env):
+        """Build-time exclusion of the ``audit/`` package must not take the
+        rest of the background workers down with it.
+        """
+        with patch.object(
+            bootstrap,
+            "_start_audit_pipeline_if_enabled",
+            side_effect=ImportError("no audit package in this build"),
+        ):
+            bootstrap._start_audit_pipeline_starter()  # must not raise
 
 
 class TestForkRestartMatrixBehavior:
