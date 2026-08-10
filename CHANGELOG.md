@@ -10,6 +10,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-08-11
+
 ### Added
 
 - `BALDUR_CB_MANUAL_OVERRIDE_TTL_MINUTES` (`90`, range 1-1440) — default manual-override lifetime.
