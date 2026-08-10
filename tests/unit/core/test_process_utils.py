@@ -9,16 +9,24 @@ Three helpers gate signal handlers and background-thread lifecycle:
   Use for signal-handler guards.
 - ``is_gunicorn_master()`` — composite: ``is_under_gunicorn() and not
   is_gunicorn_worker()``. Use for "skip in master" gating.
+
+A fourth helper answers a different question — whether some *other* process is
+still alive (``pid_alive``) — and decides whether a PID-stamped WAL file may be
+absorbed or reclaimed.
 """
 
 from __future__ import annotations
 
+import os
 from unittest.mock import patch
+
+import pytest
 
 from baldur.core.process_utils import (
     is_gunicorn_master,
     is_gunicorn_worker,
     is_under_gunicorn,
+    pid_alive,
 )
 
 
@@ -146,3 +154,61 @@ class TestIsGunicornMasterContract:
             "os.environ", {"SERVER_SOFTWARE": "gunicorn/21.2.0"}, clear=True
         ):
             assert is_gunicorn_master() is True
+
+
+class TestPidAliveContract:
+    """``pid_alive`` decides whether a WAL file's owner may still be writing.
+
+    Two rules of its own sit on top of the delegate: non-positive PIDs are
+    rejected before probing at all, and an undecidable probe reports *live* so
+    callers defer instead of reclaiming.
+    """
+
+    @pytest.mark.parametrize(
+        "pid", [0, -1, -12345], ids=["zero", "minus_one", "large_negative"]
+    )
+    def test_non_positive_pid_is_rejected(self, pid):
+        """``0`` is a process group on POSIX and Idle on Windows; ``-1`` means
+        every process. Neither can be a filename-derived owner.
+        """
+        assert pid_alive(pid) is False
+
+    @pytest.mark.parametrize("pid", [0, -1], ids=["zero", "minus_one"])
+    def test_non_positive_pid_never_reaches_the_probe(self, pid):
+        """The rejection is *before* the delegate — on Windows ``pid_exists(0)``
+        answers True, so a probe-first ordering would report the Idle process
+        as a live WAL owner.
+        """
+        with patch("psutil.pid_exists") as probe:
+            pid_alive(pid)
+
+        probe.assert_not_called()
+
+    def test_own_pid_is_reported_alive(self):
+        """The one PID whose liveness is knowable without mocking anything."""
+        assert pid_alive(os.getpid()) is True
+
+    def test_result_is_the_probes_answer_for_the_asked_pid(self):
+        """Delegation: the queried PID is forwarded unchanged, and a negative
+        answer from the delegate is a negative answer here — this is what makes
+        a never-allocated PID's file reclaimable.
+        """
+        with patch("psutil.pid_exists", return_value=False) as probe:
+            result = pid_alive(4242)
+
+        assert result is False
+        probe.assert_called_once_with(4242)
+
+    def test_truthy_probe_answer_is_normalised_to_a_bool(self):
+        """Callers branch on identity (``is True``), so the delegate's return
+        value is coerced rather than passed through.
+        """
+        with patch("psutil.pid_exists", return_value=1):
+            assert pid_alive(4242) is True
+
+    def test_probe_failure_reports_live(self):
+        """Fail direction: undecidable means defer. Reporting dead would let a
+        reclaimer unlink a file whose owner is still appending to it.
+        """
+        with patch("psutil.pid_exists", side_effect=OSError("probe blew up")):
+            assert pid_alive(4242) is True
