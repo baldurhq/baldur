@@ -1,4 +1,4 @@
-# Baldur v1.0 Public API Surface
+# Baldur Public API Surface
 
 Authoritative reference for the public API. Every name listed below is
 covered by SemVer compatibility guarantees in v1.x. Everything not listed is
@@ -274,11 +274,11 @@ user-raised contracts and the owning sub-packages are `Status: Internal`.
 ## PRO Internal Sub-Package Surface
 
 Any `baldur_pro.services.*` sub-package **not** listed as `Status: Public` in
-the PRO Addendum above is `Status: Internal` for v1.0. An Internal sub-package
+the PRO Addendum above is `Status: Internal`. An Internal sub-package
 may be **user-reachable today** (nested-path imports resolve), but its
 nested-path symbols are **NOT SemVer-covered** in v1.x: renames, package moves,
 and facade collapses inside them do not constitute breaking changes for v1.x
-subscribers. A post-v1.0 freeze pass graduates launch-ready surfaces to
+subscribers. A later freeze pass graduates launch-ready surfaces to
 `Status: Public`.
 
 Subscriber code MUST consume governance via `ProviderRegistry.governance`
@@ -315,7 +315,7 @@ pipeline, not the surface freeze.
 The operator-tunable `BALDUR_*` allowlist is maintained as a single canonical
 list in [Environment Variables](env-vars.md). Everything else with a `BALDUR_*`
 prefix is advanced / internal and subject to change in v1.x; the full settings
-inventory is internal to v1.0, with operator-tunable promotion handled via
+inventory is internal, with operator-tunable promotion handled via
 dedicated proposals in later releases.
 
 ### Abbreviation Registry

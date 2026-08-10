@@ -175,8 +175,8 @@ react.
 
 The limit's shape — the floor, the ceiling, the starting value, the SLA thresholds, the sampling
 interval, and the recovery ramp — is set on the throttle when it is created, in code, alongside the
-service it protects. The framework-level tuning behind the defaults is advanced / internal for
-v1.0: it is not part of the public operator-tunable environment-variable allowlist yet.
+service it protects. The framework-level tuning behind the defaults is advanced / internal: it is
+not part of the public operator-tunable environment-variable allowlist yet.
 
 ## See also
 

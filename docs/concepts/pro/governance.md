@@ -96,7 +96,7 @@ Governance is operated at **runtime through the admin REST API / Web Console**, 
 
 The gate's **safety semantics are fixed** and not operator-tunable: checks always run in the order above, the gate always stops at the first failure, every block is always audited, and an un-evaluable check always fails open. The **Break Glass** bypass is itself a runtime emergency control — engaging it is an audited action that requires a post-incident review.
 
-These controls are **advanced / internal for v1.0**: governance has no entries in the public operator-tunable environment-variable allowlist yet. Governance ships with the PRO tier; the admin endpoints are available once PRO is active, and report the feature as unavailable otherwise.
+These controls are **advanced / internal**: governance has no entries in the public operator-tunable environment-variable allowlist yet. Governance ships with the PRO tier; the admin endpoints are available once PRO is active, and report the feature as unavailable otherwise.
 
 ## See also
 

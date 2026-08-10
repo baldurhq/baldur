@@ -111,7 +111,7 @@ is *fail-closed*: if the governance check itself cannot run, the operation is bl
 than waved through. For start and promote the gate refuses while the global kill switch is
 engaged, while Emergency Mode is at or above its configured severity (level 2 of 3 by default),
 or — when the error-budget gate is turned on (`BALDUR_ERROR_BUDGET_GATE_ENABLED=true`, off by
-default in v1.0) — while the error budget is exhausted (judged more strictly for higher-tier
+default) — while the error budget is exhausted (judged more strictly for higher-tier
 services). Pushing a config change deeper into a fleet that is already in trouble is exactly the
 wrong move. Resume and rollback are deliberately gated more
 lightly: both re-check only Emergency Mode, skipping the kill-switch and error-budget checks —
@@ -136,7 +136,7 @@ above the baseline, p95 latency within +50 ms, and p99 within +20%, measured ove
 window with at least 100 requests — too little traffic means "not enough evidence", not "pass",
 so a quiet canary blocks promotion instead of waving the change through.
 
-The criteria can also watch the **error budget**, but that check ships OFF by default in v1.0
+The criteria can also watch the **error budget**, but that check ships OFF by default
 (`BALDUR_ERROR_BUDGET_ENABLED`): out of the box it honestly skips — and logs that it did —
 rather than reading empty data as a healthy pass. Turned on, it blocks promotion while the
 canary is burning error budget faster than 1.2× its sustainable rate or has less than 10% of the
@@ -260,7 +260,7 @@ Everything that shapes an individual rollout — stages, clusters, observation t
 auto-promote, pass criteria — is part of the rollout you create, in the API call, not an
 environment variable. The framework-level tuning behind the defaults (watchdog thresholds, the
 emergency brake's polling interval and failure posture, the config-type→service-tier mapping,
-governance severity levels, retention) is advanced / internal for v1.0: it is not part of the
+governance severity levels, retention) is advanced / internal: it is not part of the
 public operator-tunable environment-variable allowlist yet.
 
 ## See also

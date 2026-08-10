@@ -1,6 +1,6 @@
 # Compatibility
 
-What Baldur v1.0 runs on, and what continuous integration verifies on every
+What Baldur runs on, and what continuous integration verifies on every
 commit. Two facts matter for each dependency:
 
 - **Minimum** — the lowest version Baldur declares it works against (the floor
@@ -86,4 +86,4 @@ for the full policy.
 ## Not in this matrix
 
 - **Message-queue, orchestration, and cloud-provider adapters** — these are not
-  part of the v1.0 productized surface and are not covered by this matrix.
+  part of the productized surface and are not covered by this matrix.

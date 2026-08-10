@@ -56,14 +56,14 @@ If you cannot put the cap at the edge, the practical in-app approximation is to 
 
 ## Configuration
 
-There are no rate-limit-specific operator environment variables in the v1.0 public allowlist. The two that shape rate-limiting behavior are the shared-state and entitlement knobs:
+There are no rate-limit-specific operator environment variables in the public allowlist. The two that shape rate-limiting behavior are the shared-state and entitlement knobs:
 
 | Env Var | Default | What it controls |
 |---------|---------|------------------|
 | `BALDUR_REDIS_URL` | `redis://localhost:6379/0` | whether the admin-API count and the outbound cooldown are shared across workers; without it both fall back to per-instance |
 | `BALDUR_LICENSE_KEY` |  | PRO entitlement (unset in OSS mode); Adaptive Throttle activates when Baldur initializes with a valid license |
 
-The individual limits and windows (the per-endpoint cap, the admin-API rate, the throttle's floor and ceiling) are set in code or through advanced settings that are not part of the public operator-tunable environment-variable allowlist for v1.0.
+The individual limits and windows (the per-endpoint cap, the admin-API rate, the throttle's floor and ceiling) are set in code or through advanced settings that are not part of the public operator-tunable environment-variable allowlist.
 
 ## Tier behavior
 

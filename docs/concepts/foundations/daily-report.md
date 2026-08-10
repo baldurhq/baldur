@@ -60,7 +60,7 @@ The report ships **disabled by default**; you turn it on once you want the daily
 ## Configuration
 
 The Daily Report's knobs — whether it's on, when it runs, how long history is kept, and how often
-the insights block appears — are treated as advanced settings in v1.0 rather than part of the stable
+the insights block appears — are treated as advanced settings rather than part of the stable
 operator environment-variable allowlist, so they may change before they're promoted. See the
 [API Reference](../../reference/index.md) for the current settings; the report is **off by default**.
 
@@ -117,7 +117,7 @@ don't have. The sections the Slack digest can carry today:
 | `emergency` | Emergency-level changes | PRO |
 | `governance` | Governance policy blocks | PRO |
 
-Features that arrive after v1.0 add their own sections to the digest as they ship.
+New features add their own sections to the digest as they ship.
 
 ## See also
 

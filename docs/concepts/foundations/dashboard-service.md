@@ -69,7 +69,7 @@ Two design choices keep it cheap and safe to poll:
 
 ## Configuration
 
-The Dashboard Service has no operator environment variables in the stable v1.0 allowlist. The cache
+The Dashboard Service has no operator environment variables in the stable allowlist. The cache
 windows it uses — how long a snapshot stays cached before the next read refreshes it — are treated as
 advanced settings that may change before they are promoted to the stable operator contract; see the
 [API Reference](../../reference/index.md) for the current values.
