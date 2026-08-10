@@ -222,11 +222,6 @@ def worker_exit(server: Any, worker: Any) -> None:
         _log_worker_exit_skipped(worker_id)
         return
 
-    from baldur.core.shutdown_coordinator import (
-        ShutdownPhase,
-        get_shutdown_coordinator,
-    )
-
     try:
         from baldur.settings.recovery_shutdown import get_recovery_shutdown_settings
 
@@ -239,28 +234,45 @@ def worker_exit(server: Any, worker: Any) -> None:
         )
         drain_wait = _DEFAULT_DRAIN_WAIT_SECONDS
 
-    coordinator = get_shutdown_coordinator()
-    drained = coordinator.wait_for_shutdown(timeout=drain_wait)
-
-    # Reliable shutdown-complete signal. worker_exit runs in the worker's
-    # main process — not the OS signal-handler frame (where
-    # shutdown.graceful_initiated may be dropped) and not the daemon drain
-    # thread (which can be killed before shutdown.in_flight_drained lands),
-    # so this is the one terminal log that survives a real worker exit.
-    # It reports the drain predicate, which the coordinator satisfies before
-    # it runs handler teardown — the flush below may still be ahead of us.
-    if drained:
-        logger.info("shutdown.worker_drained", worker_id=worker_id)
-    elif coordinator.phase != ShutdownPhase.RUNNING:
-        # Shutdown was initiated but drain did not reach TERMINATED within
-        # the wait timeout (drain-timeout / forced termination).
-        logger.warning(
-            "shutdown.worker_drain_incomplete",
-            worker_id=worker_id,
-            phase=coordinator.phase.value,
+    # Isolated like the two steps below it. Resolving the coordinator can
+    # itself fail on a degenerate config — a lazily constructed one reads the
+    # same settings the wait timeout came from — and a failure here must not
+    # cost the worker its audit flush.
+    try:
+        from baldur.core.shutdown_coordinator import (
+            ShutdownPhase,
+            get_shutdown_coordinator,
         )
-    # phase == RUNNING ⇒ no shutdown was initiated (normal worker recycle /
-    # reload exit) — nothing to report about a drain that never started.
+
+        coordinator = get_shutdown_coordinator()
+        drained = coordinator.wait_for_shutdown(timeout=drain_wait)
+
+        # Reliable shutdown-complete signal. worker_exit runs in the worker's
+        # main process — not the OS signal-handler frame (where
+        # shutdown.graceful_initiated may be dropped) and not the daemon drain
+        # thread (which can be killed before shutdown.in_flight_drained lands),
+        # so this is the one terminal log that survives a real worker exit.
+        # It reports the drain predicate, which the coordinator satisfies
+        # before it runs handler teardown — the flush below may still be
+        # ahead of us.
+        if drained:
+            logger.info("shutdown.worker_drained", worker_id=worker_id)
+        elif coordinator.phase != ShutdownPhase.RUNNING:
+            # Shutdown was initiated but drain did not reach TERMINATED within
+            # the wait timeout (drain-timeout / forced termination).
+            logger.warning(
+                "shutdown.worker_drain_incomplete",
+                worker_id=worker_id,
+                phase=coordinator.phase.value,
+            )
+        # phase == RUNNING ⇒ no shutdown was initiated (normal worker recycle
+        # / reload exit) — nothing to report about a drain that never started.
+    except Exception as exc:
+        logger.warning(
+            "shutdown.drain_wait_failed",
+            worker_id=worker_id,
+            error=exc,
+        )
 
     # Each remaining step is isolated: a Django-side failure must not skip
     # the audit flush, which is the one guarantee only this hook can offer

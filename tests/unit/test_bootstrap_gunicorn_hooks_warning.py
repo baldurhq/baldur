@@ -147,7 +147,7 @@ class TestGunicornHooksMissingWarningBehavior:
         assert captured[0].started is True
 
 
-class TestGunicornHooksCheckPositiveArm:
+class TestGunicornHooksCheckPositiveArmBehavior:
     """Correct wiring must produce a signal, not merely the absence of one.
 
     With only the WARNING arm, the entire operator-visible result of wiring

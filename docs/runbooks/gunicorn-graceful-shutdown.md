@@ -48,7 +48,7 @@ timeout = 30
 graceful_timeout = 35
 ```
 
-Both patterns import `baldur.adapters.gunicorn.hooks` at gunicorn's config-parse time, which is the signal baldur looks for when deciding whether to emit the `baldur.gunicorn_hooks_not_installed` WARNING.
+**Both patterns wire the hooks correctly. Only Pattern B is visible to baldur's wiring check.** Pattern B imports `baldur.adapters.gunicorn.hooks` under its own name at gunicorn's config-parse time, which is the signal the check looks for. Pattern A does not: gunicorn loads any `-c` file under the module name `__config__`, and the hooks module imports nothing from baldur at module level, so the dotted name never enters `sys.modules`. gunicorn still picks the three callables out of that module and the drain works exactly the same — but the check reports `baldur.gunicorn_hooks_not_installed` and the confirming INFO line never appears. If you want the check to agree with your deployment, use Pattern B.
 
 ### Migrating off `baldur.server`
 
@@ -209,6 +209,8 @@ baldur.gunicorn_hooks_not_installed [warning]  running under gunicorn with no ho
 
 Look for the INFO line after a wiring change: it is the positive confirmation. An *absent* WARNING is not the same evidence — a check that never ran, or a gunicorn that was never detected, also produces no WARNING.
 
+**On Pattern A, neither line means what it says.** The check reads `sys.modules`, and Pattern A never puts the hooks module there (see the note under the two patterns), so a correctly wired Pattern A deployment gets the WARNING and never the INFO. Confirm Pattern A wiring by its behavior instead — `shutdown.worker_drained` (or, on a recycle, `shutdown.worker_exit_completed`) in the worker's log at exit.
+
 ### `baldur.gunicorn_hooks_not_installed`
 
 If you see this WARNING in your logs ~2 seconds after `baldur.init()`:
@@ -222,7 +224,7 @@ hint=Running under gunicorn but baldur.adapters.gunicorn.hooks was not imported.
 
 **What it means**: the SERVER_SOFTWARE env var indicates you are running under gunicorn, but `sys.modules['baldur.adapters.gunicorn.hooks']` is missing. baldur's signal-handler registration self-skipped (correctly, to avoid clobbering gunicorn's own SIGTERM handler), but no replacement was wired in. **Result**: SIGTERM bypasses baldur entirely. No registered handler fires.
 
-**Fix**: pick one of the two wiring patterns above and redeploy.
+**Fix**: pick one of the two wiring patterns above and redeploy. If you are already on **Pattern A**, this WARNING is a known false positive — the hooks are wired and the drain works; switch to Pattern B if you want the check to say so.
 
 **Tunable**: `BALDUR_RECOVERY_SHUTDOWN_HOOKS_CHECK_DELAY_SECONDS` (default 2.0, range 0.5–30.0). If `post_worker_init` runs late on your platform and the WARNING is a false positive, raise the delay.
 
