@@ -7,10 +7,10 @@
   ``cleanup_processed(mode="runtime")`` (G3 — no peer file deletion),
   ``_sync_batch`` → ``recover_unprocessed(mode="runtime")`` (G2/G4 — no peer
   over-replay, coherent per-worker cursor), and ``get_lag`` likewise.
-- **D2** — ``WALReaderMixin.recover_orphans()`` (non-own-PID, read-only) +
-  ``AuditSyncWorker.absorb_orphans()`` (idempotent one-shot startup absorption
-  of a crashed peer's orphan entries; no cursor advance, no cross-PID cleanup),
-  wired into ``_start_sync_worker()`` before ``start()``, surfaced via the new
+- **D2** — ``WALReaderMixin.recover_orphans()`` (dead-PID, read-only) +
+  ``AuditSyncWorker.absorb_orphans()`` (idempotent one-shot absorption of a
+  crashed peer's orphan entries; no cursor advance, no cross-PID cleanup),
+  scheduled as the drain loop's first action, surfaced via the
   ``record_wal_orphans_absorbed()`` SLI counter.
 
 The WAL-level ``mode`` glob semantics are covered by
@@ -44,7 +44,7 @@ import pytest
 from baldur.audit.sync_worker import AuditSyncWorker
 from baldur.audit.wal import WriteAheadLog
 from baldur.audit.wal._models import WALConfig
-from baldur.interfaces.audit_adapter import AuditEntry
+from baldur.interfaces.audit_adapter import AuditEntry, AuditLogAdapter
 from baldur.metrics import drift_metrics
 
 WAL_PREFIX = "test_wal"
@@ -84,6 +84,22 @@ def _peer_pid_filename(suffix: str = "001") -> str:
     """
     peer = os.getpid() + 99999
     return f"{WAL_PREFIX}_{suffix}_{peer}.wal"
+
+
+@pytest.fixture(autouse=True)
+def dead_peer_pids():
+    """Make every fabricated peer PID deterministically dead.
+
+    Orphan-ness is liveness-scoped: a file whose embedded PID still names a
+    running process is neither absorbed nor reclaimed. ``_peer_pid_filename``
+    stamps ``os.getpid() + 99999``, which is only *presumed* unused — on a
+    developer machine or a CI agent it can name a real process, and the whole
+    orphan suite would then pass or fail depending on the host. Patching the
+    probe at the reader's import site makes those files dead by construction;
+    a test that needs a *live* peer patches it back.
+    """
+    with patch("baldur.audit.wal._reader.pid_alive", return_value=False):
+        yield
 
 
 @pytest.fixture
@@ -588,26 +604,31 @@ class TestSyncWorkerRuntimeDrain:
 
 
 class TestStartSyncWorkerWiringBehavior:
-    """``_start_sync_worker()`` runs the one-shot orphan absorption before
-    the steady drain loop starts.
+    """Starting the worker is exactly ``start()``.
+
+    The one-shot orphan absorption still precedes the first steady drain, but
+    it belongs to the drain loop rather than to whoever starts it: performed
+    on the caller's thread it can block for one retry budget per backlog
+    entry, which under gunicorn means the worker-boot timeout kills the worker
+    before it ever serves a request.
     """
 
-    def test_absorb_orphans_called_before_start(self):
+    def test_lifecycle_path_only_starts_the_worker(self):
         from baldur.audit import async_audit_lifecycle
 
         instance = Mock()
         with patch.object(AuditSyncWorker, "get_instance", return_value=instance):
             async_audit_lifecycle._start_sync_worker()
 
-        # Order matters: absorb_orphans() must precede start().
-        assert instance.mock_calls == [call.absorb_orphans(), call.start()]
+        assert instance.mock_calls == [call.start()]
 
-    def test_public_helper_absorbs_orphans_too(self):
-        """The public start helper must not be a second, weaker start path.
+    def test_public_helper_only_starts_the_worker(self):
+        """The public start helper is not a second, weaker start path.
 
-        It was: it called start() without absorb_orphans(), so anyone starting
-        the worker through the public API stranded a crashed peer's WAL entries
-        forever while the lifecycle path drained them.
+        It once was: it called ``start()`` where the lifecycle path also
+        absorbed orphans, so the two paths stranded different sets of a
+        crashed peer's entries. They now reach the same loop, which is where
+        the absorb lives.
         """
         from baldur.audit.sync_worker import start_sync_worker
 
@@ -615,7 +636,61 @@ class TestStartSyncWorkerWiringBehavior:
         with patch.object(AuditSyncWorker, "get_instance", return_value=instance):
             start_sync_worker()
 
-        assert instance.mock_calls == [call.absorb_orphans(), call.start()]
+        assert instance.mock_calls == [call.start()]
+
+    def test_drain_loop_absorbs_orphans_before_the_first_batch(self):
+        """The absorb runs once, on the loop's thread, ahead of any drain."""
+        worker = AuditSyncWorker(
+            wal=MagicMock(spec=WriteAheadLog),
+            central_adapter=MagicMock(spec=AuditLogAdapter),
+        )
+        order: list[str] = []
+
+        def absorb_once():
+            order.append("absorb")
+            worker._orphans_absorbed = True
+
+        def sync_batch():
+            order.append("sync")
+            worker._stop_event.set()
+            return (0, 0)
+
+        with (
+            patch.object(worker, "_absorb_orphans_once", side_effect=absorb_once),
+            patch.object(worker, "_sync_batch", side_effect=sync_batch),
+        ):
+            worker._run_loop()
+
+        assert order == ["absorb", "sync"]
+
+    def test_drain_loop_absorbs_only_once_across_cycles(self):
+        """A consumed one-shot is not re-run on later cycles."""
+        worker = AuditSyncWorker(
+            wal=MagicMock(spec=WriteAheadLog),
+            central_adapter=MagicMock(spec=AuditLogAdapter),
+        )
+        cycles = {"n": 0}
+
+        def absorb_once():
+            worker._orphans_absorbed = True
+
+        def sync_batch():
+            cycles["n"] += 1
+            if cycles["n"] >= 3:
+                worker._stop_event.set()
+            return (0, 0)
+
+        with (
+            patch.object(
+                worker, "_absorb_orphans_once", side_effect=absorb_once
+            ) as absorb,
+            patch.object(worker, "_sync_batch", side_effect=sync_batch),
+        ):
+            worker._config.sync_interval_seconds = 0.0
+            worker._run_loop()
+
+        assert absorb.call_count == 1
+        assert cycles["n"] == 3
 
     def test_the_two_start_paths_issue_the_same_calls(self):
         """The lifecycle path delegates, so the sequences cannot drift apart."""
