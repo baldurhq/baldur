@@ -58,7 +58,7 @@ def _flush_runs_for_real(monkeypatch):
     _reset_audit_shutdown_state()
 
 
-class TestGracefulShutdownConcurrency:
+class TestGracefulShutdownConcurrencyBehavior:
     """One caller runs the body; the other waits it out or gives up."""
 
     @pytest.fixture(autouse=True)

@@ -321,7 +321,7 @@ class TestWorkerInt:
         m_initiate.assert_called_once_with()
 
 
-class TestWorkerExitProcessGuard:
+class TestWorkerExitProcessGuardBehavior:
     """``worker_exit`` acts only in the worker it was handed.
 
     gunicorn's arbiter invokes the same hook **in the master** for a worker
@@ -401,7 +401,7 @@ class TestWorkerExitProcessGuard:
         assert matching[0]["process_id"] == os.getpid()
 
 
-class TestWorkerExitDrainTimeout:
+class TestWorkerExitDrainTimeoutBehavior:
     """The drain wait is settings-driven, and survives a settings failure."""
 
     def test_waits_for_shutdown_with_the_configured_drain_timeout(self):
@@ -475,8 +475,64 @@ class TestWorkerExitDrainTimeout:
         assert len(failures) == 1
         assert failures[0]["log_level"] == "warning"
 
+    def test_a_degenerate_config_does_not_cost_the_worker_its_audit_flush(self):
+        """The fallback is worthless if the *next* line re-reads the same
+        settings and raises.
 
-class TestWorkerExitPipeline:
+        A coordinator nobody built yet is constructed lazily right here, and
+        its constructor reads ``recovery_shutdown`` too. So on a config that
+        fails validation the wait timeout falls back correctly and then the
+        resolution one line later raises — taking the Django reset, the audit
+        flush and the completion marker with it, which is exactly the outcome
+        the fallback exists to prevent. The coordinator singleton is
+        deliberately not pre-created here: pre-creating it is what hid this.
+        """
+        from baldur.adapters.gunicorn.hooks import worker_exit
+
+        with (
+            patch(
+                "baldur.settings.recovery_shutdown.get_recovery_shutdown_settings",
+                side_effect=RuntimeError("degenerate config"),
+            ),
+            patch(
+                "baldur.audit.async_audit_lifecycle.graceful_shutdown_audit_system"
+            ) as m_flush,
+            capture_logs() as cap_logs,
+        ):
+            worker_exit(_arbiter(), _exiting_worker())
+
+        m_flush.assert_called_once()
+        events = [e["event"] for e in cap_logs]
+        assert "shutdown.drain_wait_failed" in events
+        assert "shutdown.worker_exit_completed" in events
+
+    def test_a_failing_coordinator_resolution_is_isolated_like_every_other_step(
+        self,
+    ):
+        from baldur.adapters.gunicorn.hooks import worker_exit
+
+        with (
+            patch(
+                "baldur.core.shutdown_coordinator.get_shutdown_coordinator",
+                side_effect=RuntimeError("coordinator unavailable"),
+            ),
+            patch(
+                "baldur.audit.async_audit_lifecycle.graceful_shutdown_audit_system"
+            ) as m_flush,
+            capture_logs() as cap_logs,
+        ):
+            worker_exit(_arbiter(), _exiting_worker())
+
+        m_flush.assert_called_once()
+        failures = [
+            e for e in cap_logs if e.get("event") == "shutdown.drain_wait_failed"
+        ]
+        assert len(failures) == 1
+        assert failures[0]["log_level"] == "warning"
+        assert failures[0]["worker_id"] == os.getpid()
+
+
+class TestWorkerExitPipelineBehavior:
     """``worker_exit``'s step sequence, isolation and terminal marker."""
 
     def test_calls_django_stop_background_threads_when_available(self):
@@ -666,7 +722,7 @@ class TestWorkerExitPipeline:
         assert matching[0]["worker_id"] == os.getpid()
 
 
-class TestPostWorkerInitForkResets:
+class TestPostWorkerInitForkResetsBehavior:
     """The inherited-resource reset carried onto this surface.
 
     Exactly one member survived the consolidation — the event-producer
@@ -812,7 +868,7 @@ class TestResetKafkaAfterForkBehavior:
         assert "worker.postfork_kafka_skipped" in [e["event"] for e in cap_logs]
 
 
-class TestResetKafkaWithoutTheProducerPackage:
+class TestResetKafkaWithoutTheProducerPackageBehavior:
     """The stock-install branch: the producer adapter ships separately."""
 
     def test_missing_producer_package_is_a_logged_no_op(self, monkeypatch):
