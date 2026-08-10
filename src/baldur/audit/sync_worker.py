@@ -24,6 +24,7 @@ Usage:
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from collections.abc import Callable
@@ -34,6 +35,7 @@ import structlog
 
 from baldur.core.backoff import ExponentialBackoff
 from baldur.core.exceptions import ConfigurationError
+from baldur.core.process_utils import fork_repaired
 from baldur.interfaces.audit_adapter import AuditEntry
 
 if TYPE_CHECKING:
@@ -231,6 +233,16 @@ class AuditSyncWorker:
         self._batches_since_checkpoint: int = 0
         self._last_checkpoint_time: float = time.time()
 
+        # One-shot orphan absorb, performed by the drain loop rather than by
+        # the caller that starts it. Set only by a pass that achieved
+        # something, so an outage-booted worker keeps retrying.
+        self._orphans_absorbed: bool = False
+
+        # Fork ownership: an instance constructed here is born owned, so the
+        # repair no-ops until this object is inherited through fork().
+        self._origin_pid: int = os.getpid()
+        self._repair_gate = threading.Lock()
+
         logger.info(
             "audit_sync_worker.initialized",
             sync_interval_seconds=self._config.sync_interval_seconds,
@@ -262,6 +274,64 @@ class AuditSyncWorker:
             if cls._instance:
                 cls._instance.stop()
             cls._instance = None
+
+    def _repair_if_forked(self) -> None:
+        """Re-own fork-inherited worker state so this process drains its own.
+
+        Instance-preserving: the registry handle and the respawn callback keep
+        referencing this object, so every existing reference stays valid. What
+        is renewed is the state a ``fork()`` makes unusable — a lock whose
+        recorded owner is a thread that no longer exists, the stop ``Event``
+        (replaced, never ``clear()``-ed, since its own internal lock can be
+        inherited held), and the reference to a thread that is not running
+        here.
+
+        ``_last_processed_seq`` is kept **exactly** as inherited. The child's
+        WAL carries the inherited sequence forward, so its first new entry is
+        strictly above this cursor and gets drained; resetting the cursor is
+        the class of mutation that silently swallows entries.
+
+        Everything that merely *reports* on the parent's run is dropped:
+        statistics, the stall counters, the edge-triggered warning latches,
+        the checkpoint batch counter, and the one-shot absorb flag — the child
+        has its own peers to absorb.
+
+        ``_running`` is left alone (owned by start/stop; the guards compose
+        thread aliveness instead), and the handle is kept for identity with
+        only its inherited observations reset.
+        """
+        if os.getpid() == self._origin_pid:
+            return
+
+        with self._repair_gate:
+            inherited_pid = self._origin_pid
+            if os.getpid() == inherited_pid:
+                return  # another thread finished the repair first
+
+            # Renew the lock BEFORE anything acquires it.
+            self._lock = threading.RLock()
+            self._stop_event = threading.Event()
+            self._thread = None
+
+            if self._handle is not None:
+                self._handle.reset_after_fork()
+
+            self._stats = SyncStats()
+            self._stall_cycles = 0
+            self._cursor_stall_alerted = False
+            self._no_adapter_warned = False
+            self._batches_since_checkpoint = 0
+            self._last_checkpoint_time = time.time()
+            self._orphans_absorbed = False
+
+            self._origin_pid = os.getpid()
+            carried_cursor = self._last_processed_seq
+
+        logger.info(
+            "sync_worker.fork_state_repaired",
+            inherited_pid=inherited_pid,
+            carried_cursor=carried_cursor,
+        )
 
     def _get_wal(self) -> Any:
         """Get the WAL instance."""
@@ -297,9 +367,40 @@ class AuditSyncWorker:
             )
             return None
 
+    def _resolve_central_destination(self) -> Any:
+        """The adapter to deliver to, or ``None`` when there is no real one.
+
+        ``_get_adapter()`` cannot answer this: the provider registry falls
+        back to the no-op audit adapter, so a booted process always gets an
+        object back. Treating that object as a destination makes "delivered"
+        satisfiable by a method whose body is ``pass`` — a crashed peer's
+        whole backlog would be reported absorbed having reached nowhere.
+
+        Detection is by type rather than by the registry's configured default
+        name, which is wrong whenever the adapter was resolved by an explicit
+        name. An injected adapter (tests, custom wiring) passes unchanged.
+        """
+        adapter = self._get_adapter()
+        if adapter is None:
+            return None
+
+        try:
+            from baldur.adapters.audit.null_adapter import NullAuditLogAdapter
+        except ImportError:
+            return adapter
+
+        if isinstance(adapter, NullAuditLogAdapter):
+            return None
+        return adapter
+
+    @fork_repaired
     def start(self) -> bool:
         """
         Start the worker.
+
+        Idempotence composes thread aliveness rather than reading ``_running``
+        alone: a fork child inherits the flag set together with a thread
+        object that no longer runs anywhere.
 
         Returns:
             True: started successfully
@@ -309,7 +410,7 @@ class AuditSyncWorker:
         from baldur.metrics.recorders.daemon_worker import register_daemon_worker
 
         with self._lock:
-            if self._running:
+            if self._running and self._thread is not None and self._thread.is_alive():
                 return False
 
             self._stop_event.clear()
@@ -325,16 +426,33 @@ class AuditSyncWorker:
             logger.info("sync_worker.started")
             return True
 
+    @fork_repaired
     def _spawn_thread(self) -> None:
-        """Construct + start a fresh sync loop thread (impl 489 D9 respawn helper)."""
-        self._thread = threading.Thread(
-            target=self._run_loop_with_crash_capture,
-            name="AuditSyncWorker",
-            daemon=True,
-        )
-        self._thread.start()
-        if self._handle is not None:
-            self._handle.thread = self._thread
+        """Construct + start a fresh sync loop thread (impl 489 D9 respawn helper).
+
+        The single atomic spawn point, shared by ``start()`` and by the
+        meta-watchdog's respawn callback. The callback contract forbids
+        consulting ``_running``, so the fork repair and the spawn idempotence
+        both live here: a respawn over inherited state would drain against a
+        stale cursor, and a respawn racing ``start()`` would leave two loops
+        sharing one cursor.
+
+        Guarded on thread aliveness — never on ``_running``.
+        """
+        with self._lock:
+            existing = self._thread
+            if existing is not None and existing.is_alive():
+                logger.debug("sync_worker.spawn_skipped_thread_alive")
+                return
+
+            self._thread = threading.Thread(
+                target=self._run_loop_with_crash_capture,
+                name="AuditSyncWorker",
+                daemon=True,
+            )
+            self._thread.start()
+            if self._handle is not None:
+                self._handle.thread = self._thread
 
     def _run_loop_with_crash_capture(self) -> None:
         try:
@@ -346,6 +464,7 @@ class AuditSyncWorker:
                 self._handle.record_crash(e)
             raise
 
+    @fork_repaired
     def stop(self, timeout: float = 1.0) -> None:
         """
         Stop the worker.
@@ -379,12 +498,27 @@ class AuditSyncWorker:
         logger.info("sync_worker.stopped")
 
     def _run_loop(self) -> None:
-        """Main synchronization loop."""
+        """Main synchronization loop.
+
+        The one-shot orphan absorb runs here — as the loop's first action, on
+        the loop's own thread — rather than on whatever thread starts the
+        worker. It still precedes the first steady drain, so the ordering that
+        made it a start-time step is preserved, but a slow absorb now delays
+        the next drain instead of blocking process readiness: with the central
+        destination unreachable a synchronous absorb of K backlog entries
+        costs K retry budgets, and gunicorn's worker-boot timeout kills a
+        worker that spends that long inside its post-fork hook — a respawn
+        crash-loop for as long as the destination is down. The watcher for a
+        slow absorb is now the WAL lag gauge.
+        """
         last_metrics_time = time.time()
 
         while not self._stop_event.is_set():
             iter_start = time.monotonic()
             try:
+                if not self._orphans_absorbed:
+                    self._absorb_orphans_once()
+
                 # Perform synchronization
                 synced, failed = self._sync_batch()
 
@@ -611,32 +745,50 @@ class AuditSyncWorker:
                 self._stats.last_error = str(e)
             raise
 
-    def absorb_orphans(self) -> int:
+    def _absorb_orphans_once(self) -> None:
+        """Run the one-shot absorb, consuming it only if the pass achieved something.
+
+        "A destination object exists" is not "the destination is reachable":
+        with a real adapter whose backing store is down, every delivery
+        exhausts its retries and the pass absorbs nothing. Consuming the
+        one-shot on such a pass strands a dead peer's backlog for the whole
+        life of this process even though the store returns a minute later. So
+        a pass that attempted at least one entry and delivered none is treated
+        exactly like having no destination: nothing consumed, retried next
+        cycle. A pass that found no orphans at all, or delivered some and
+        failed others, does consume it.
         """
-        Drain orphan (non-own-PID) WAL entries to the central store once.
+        result = self._absorb_orphans_pass()
+        if result is None:
+            return
 
-        Compensates for the runtime drain partitioning (``mode="runtime"``):
-        no live worker drains a crashed peer's (dead-PID) WAL file, so this
-        one-shot startup pass reads peer/dead-PID files via
-        ``WriteAheadLog.recover_orphans()`` and syncs each entry through the
-        idempotent ``_sync_entry_to_adapter`` path.
+        absorbed, attempted = result
+        if attempted > 0 and absorbed == 0:
+            return
 
-        Invariants:
-        - Does **not** advance ``_last_processed_seq`` — orphan seqs live in
-          foreign (per-worker-independent) sequence spaces; advancing would
-          re-introduce cursor incoherence.
-        - Does **not** ``cleanup_processed`` cross-PID — orphan files are
-          reclaimed by the WAL's own retention.
-        - Idempotent — re-absorption of an as-yet-unreclaimed orphan, or a
-          still-live peer's not-yet-drained entry, is deduplicated within
-          ``_sync_entry_to_adapter``.
+        self._orphans_absorbed = True
 
-        Returns:
-            Number of orphan entries absorbed.
+    def _absorb_orphans_pass(self) -> tuple[int, int] | None:
+        """One absorb pass. ``(absorbed, attempted)``, or ``None`` if no destination.
+
+        The destination is resolved **first**: with nothing real to deliver
+        to, the pass costs one registry lookup instead of a full read of every
+        orphan file.
+
+        A pass aborts as soon as the first entry exhausts its retry budget
+        with nothing yet delivered. An unreachable store is a property of the
+        destination, not of the entry, so there is nothing to learn from
+        attempting the other N-1 — and this pass now runs inside the drain
+        loop, where the difference is one retry budget per cycle versus one
+        per entry.
         """
         wal = self._get_wal()
         if wal is None or not hasattr(wal, "recover_orphans"):
-            return 0
+            return (0, 0)
+
+        destination = self._resolve_central_destination()
+        if destination is None:
+            return None
 
         try:
             entries = wal.recover_orphans()
@@ -645,23 +797,17 @@ class AuditSyncWorker:
                 "audit_sync_worker.orphan_recover_failed",
                 error=e,
             )
-            return 0
+            return (0, 0)
 
         if not entries:
-            return 0
-
-        adapter = self._get_adapter()
-        if adapter is None:
-            # No central destination wired — this one-shot startup pass is a
-            # no-op: absorb nothing, advance no cursor, retain the orphan files
-            # for a later wired worker. (No anti-spam guard needed — this runs
-            # once at startup, not in the recurring _sync_batch loop.)
-            return 0
+            return (0, 0)
 
         absorbed = 0
+        attempted = 0
         for entry in entries:
+            attempted += 1
             try:
-                self._sync_entry_to_adapter(adapter, entry)
+                self._sync_entry_to_adapter(destination, entry)
                 # Note: no _last_processed_seq advance (foreign sequence space).
                 absorbed += 1
             except Exception as e:
@@ -670,6 +816,8 @@ class AuditSyncWorker:
                     entry_sequence=entry.sequence,
                     error=e,
                 )
+                if absorbed == 0:
+                    break
 
         if absorbed > 0:
             logger.info(
@@ -683,7 +831,37 @@ class AuditSyncWorker:
             except Exception:
                 pass
 
-        return absorbed
+        return (absorbed, attempted)
+
+    @fork_repaired
+    def absorb_orphans(self) -> int:
+        """
+        Drain orphan (dead-PID) WAL entries to the central store.
+
+        Compensates for the runtime drain partitioning (``mode="runtime"``):
+        no live worker drains a crashed peer's WAL file, so this pass reads
+        dead-PID files via ``WriteAheadLog.recover_orphans()`` and syncs each
+        entry through the idempotent ``_sync_entry_to_adapter`` path. Files
+        whose embedded PID is still running are excluded by the reader — their
+        owner is delivering them itself.
+
+        Scheduled as the drain loop's first action rather than performed by
+        the caller that starts the worker; this method stays public for
+        explicit one-off use.
+
+        Invariants:
+        - Does **not** advance ``_last_processed_seq`` — orphan seqs live in
+          foreign (per-worker-independent) sequence spaces; advancing would
+          re-introduce cursor incoherence.
+        - Deletes nothing. Orphan files are reclaimed by the WAL's own
+          retention, so a re-absorption is possible and is deduplicated within
+          ``_sync_entry_to_adapter``.
+
+        Returns:
+            Number of orphan entries absorbed.
+        """
+        result = self._absorb_orphans_pass()
+        return 0 if result is None else result[0]
 
     def _sync_entry_to_adapter(self, adapter: Any, entry: Any) -> None:  # noqa: C901
         """
@@ -859,6 +1037,7 @@ class AuditSyncWorker:
                 error=e,
             )
 
+    @fork_repaired
     def sync_now(self) -> tuple[int, int]:
         """
         Perform synchronization immediately (for testing/debugging).
@@ -868,6 +1047,7 @@ class AuditSyncWorker:
         """
         return self._sync_batch()
 
+    @fork_repaired
     def get_stats(self) -> dict[str, Any]:
         """Query synchronization statistics."""
         with self._lock:
@@ -889,8 +1069,16 @@ class AuditSyncWorker:
 
     @property
     def is_running(self) -> bool:
-        """Whether the worker is running."""
-        return self._running
+        """Whether a sync thread is actually running in this process.
+
+        Composed from thread aliveness rather than the control flag alone: a
+        fork child inherits ``_running=True`` with a thread that does not
+        exist here, and the audit health probe reads this property — a flag
+        read would report a healthy pipeline in a worker that has no sync
+        thread at all. Deliberately does not repair (a status read must not
+        mutate); the liveness composition is what makes it honest.
+        """
+        return self._running and self._thread is not None and self._thread.is_alive()
 
 
 # =============================================================================
@@ -906,19 +1094,24 @@ def start_sync_worker(
     """
     Helper function to start the Sync Worker.
 
-    Gets the singleton instance, absorbs any orphaned WAL entries, and starts
-    the drain. This is the single start path — the audit lifecycle delegates
-    here rather than repeating the sequence.
+    Gets the singleton instance and starts the drain. This is the single start
+    path — the audit lifecycle delegates here rather than repeating the
+    sequence.
+
+    Absorbing a crashed peer's orphan WAL entries is still part of starting,
+    but it is now scheduled as the drain thread's first action rather than
+    performed on the caller's thread: it precedes the first steady drain
+    exactly as before, while a slow or blocked absorb no longer holds up
+    process readiness. The one visible consequence is for a short-lived
+    process that calls this and exits immediately — its absorb may not
+    complete, and the entries are then delivered by the next long-lived
+    process rather than lost.
     """
     worker = AuditSyncWorker.get_instance(
         wal=wal,
         central_adapter=central_adapter,
         config=config,
     )
-    # Absorb a crashed peer's orphan (non-own-PID) WAL entries once before the
-    # steady runtime-partitioned drain begins. Skipping this strands a dead
-    # worker's audit entries forever, so it is part of starting, not an extra.
-    worker.absorb_orphans()
     worker.start()
     return worker
 

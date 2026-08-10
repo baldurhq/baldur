@@ -49,12 +49,22 @@ _lifecycle_lock = threading.Lock()
 class _AuditLifecycleState:
     """Mutable async-audit lifecycle flags owned by the active runtime."""
 
-    __slots__ = ("audit_shutdown_done", "shutdown_registered", "startup_completed")
+    __slots__ = (
+        "audit_shutdown_done",
+        "origin_pid",
+        "shutdown_registered",
+        "startup_completed",
+    )
 
     def __init__(self) -> None:
         self.startup_completed: bool = False
         self.shutdown_registered: bool = False
         self.audit_shutdown_done: bool = False
+        # PID of the process whose startup set the flags above. A fork child
+        # inherits the state as copied memory, so without this the child's
+        # startup would report "already started" over a pipeline none of whose
+        # threads survived the fork.
+        self.origin_pid: int | None = None
 
 
 def _lifecycle_state() -> _AuditLifecycleState:
@@ -155,6 +165,14 @@ def startup_async_audit_system() -> bool:
     3. Initialize AsyncHealingLogger and wire the callback
     4. Start the SyncWorker
 
+    The "already started" guard is PID-aware. Inherited flags describe the
+    parent's pipeline, whose threads do not exist in a forked child, so a
+    child treats them as not-started and proceeds with a real startup.
+
+    Completion is also conditional on the logger actually having started: a
+    swallowed init failure that still flipped the flag would report a started
+    pipeline forever and make the failure unretryable.
+
     Returns:
         True: started successfully
         False: failed to start, or already started
@@ -163,8 +181,16 @@ def startup_async_audit_system() -> bool:
 
     with _lifecycle_lock:
         if state.startup_completed:
-            logger.debug("async_audit_lifecycle.already_started")
-            return False
+            if state.origin_pid == os.getpid():
+                logger.debug("async_audit_lifecycle.already_started")
+                return False
+
+            logger.info(
+                "async_audit_lifecycle.inherited_startup_state_discarded",
+                inherited_pid=state.origin_pid,
+            )
+            state.startup_completed = False
+            state.audit_shutdown_done = False
 
         logger.info("async_audit_lifecycle.starting_async_audit_system")
 
@@ -185,12 +211,19 @@ def startup_async_audit_system() -> bool:
                 )
 
             # 3. Initialize and start AsyncHealingLogger
-            _initialize_async_logger()
+            logger_started = _initialize_async_logger()
 
             # 4. Start the SyncWorker
             _start_sync_worker()
 
+            if not logger_started:
+                # Leave the flags unset so a later call — the per-worker
+                # post-fork starter, or any explicit retry — tries again
+                # instead of reading a started pipeline that never was.
+                return False
+
             state.startup_completed = True
+            state.origin_pid = os.getpid()
             logger.info("async_audit_lifecycle.async_audit_system_started")
             return True
 
@@ -258,8 +291,13 @@ def _check_unprocessed_wal_entries(last_seq: int) -> int:
         return 0
 
 
-def _initialize_async_logger() -> None:
-    """Initialize AsyncHealingLogger and wire the flush callback."""
+def _initialize_async_logger() -> bool:
+    """Initialize AsyncHealingLogger and wire the flush callback.
+
+    Returns True only when the consumer was actually started. The caller
+    gates lifecycle completion on this, so a failure stays retryable rather
+    than being recorded as a successful startup.
+    """
     try:
         from baldur.utils.async_logger import AsyncHealingLogger
 
@@ -271,11 +309,13 @@ def _initialize_async_logger() -> None:
         AsyncHealingLogger.start()
 
         logger.info("async_audit_lifecycle.asynchealinglogger_initialized")
+        return True
     except Exception as e:
         logger.warning(
             "async_audit_lifecycle.asynchealinglogger_init_failed",
             error=e,
         )
+        return False
 
 
 def _start_sync_worker() -> None:
@@ -590,6 +630,7 @@ def reset_lifecycle_state() -> None:
     with _lifecycle_lock:
         state.startup_completed = False
         state.shutdown_registered = False
+        state.origin_pid = None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -620,16 +661,21 @@ def get_async_audit_metrics() -> dict[str, Any]:
         # Pull base statistics
         stats = AsyncHealingLogger.get_stats()
 
-        # Append queue size
-        queue_size = 0
-        try:
-            if AsyncHealingLogger._queue is not None:
-                queue_size = AsyncHealingLogger._queue.qsize()
-        except Exception:
-            pass
+        # Queue depth comes from the statistics read above, which is a
+        # repaired entry point; reaching into the queue object directly would
+        # read whatever a fork left behind.
+        queue_size = stats.get("current_queue_size", 0)
 
-        # Append worker state
-        worker_running = AsyncHealingLogger._running
+        # Worker state composes thread aliveness rather than reading the
+        # control flag: a fork child inherits the flag set with no consumer
+        # thread, and publishing that as "running" is the same lie the health
+        # probe used to tell.
+        worker_thread = AsyncHealingLogger._worker_thread
+        worker_running = (
+            AsyncHealingLogger._running
+            and worker_thread is not None
+            and worker_thread.is_alive()
+        )
 
         state = _lifecycle_state()
         return {

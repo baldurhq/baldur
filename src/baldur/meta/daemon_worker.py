@@ -84,6 +84,24 @@ class DaemonWorkerHandle:
         if self._iteration_duration_observer is not None:
             self._iteration_duration_observer(duration_seconds)
 
+    def reset_after_fork(self) -> None:
+        """Drop the statistics inherited from the process that created this.
+
+        Identity is deliberately preserved — the registry entry and the
+        respawn callback keep pointing at this object, so a respawn that races
+        a post-fork start converges instead of chasing a stale entry — but the
+        *observations* on it belong to the parent. Left inherited, a child
+        publishes the parent's respawn count and crash reason, and computes
+        heartbeat age from a heartbeat no thread in this process ever made,
+        which reads as a worker that died.
+        """
+        self.last_heartbeat_at = time.monotonic()
+        self.restart_count = 0
+        self.last_healthy_observed_at = None
+        self.last_respawn_attempt_at = None
+        self.last_crash_reason = None
+        self.is_stopping = False
+
     def record_crash(self, exc: BaseException) -> None:
         """Capture the last uncaught exception that escaped the loop target.
 

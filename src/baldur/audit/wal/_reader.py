@@ -21,6 +21,7 @@ from baldur.audit.wal._serialization import (
     verify_checksum,
 )
 from baldur.core.file_utils import safe_unlink
+from baldur.core.process_utils import fork_repaired, pid_alive
 from baldur.utils.serialization import fast_loads
 
 if TYPE_CHECKING:
@@ -49,6 +50,34 @@ def _wal_glob_pattern(file_prefix: str, mode: Literal["runtime", "startup"]) -> 
     if mode == "runtime":
         return f"{file_prefix}_*_{os.getpid()}.wal"
     return f"{file_prefix}_*.wal"
+
+
+def wal_file_owner_pid(wal_file: Path) -> int | None:
+    """PID embedded in a WAL filename, or ``None`` when it carries none.
+
+    Filenames are ``{prefix}_{timestamp}_{pid}.wal`` and both the prefix and
+    the timestamp contain underscores, so the owner is the last
+    underscore-separated segment of the stem.
+    """
+    try:
+        return int(wal_file.stem.rsplit("_", 1)[1])
+    except (IndexError, ValueError):
+        return None
+
+
+def is_live_peer_wal_file(wal_file: Path) -> bool:
+    """True when this file's embedded PID names a *different*, living process.
+
+    Such a file has an active writer that is not this process: it must never
+    be absorbed (its entries are being delivered by its own worker) and never
+    be unlinked (the owner would keep appending to an unlinked inode). A
+    filename with no parseable PID, and this process's own files, are both
+    False — the caller decides what to do with those.
+    """
+    owner = wal_file_owner_pid(wal_file)
+    if owner is None or owner == os.getpid():
+        return False
+    return pid_alive(owner)
 
 
 class WALReaderMixin:
@@ -263,6 +292,7 @@ class WALReaderMixin:
 
         return -1
 
+    @fork_repaired
     def recover_unprocessed(
         self,
         last_processed_seq: int = 0,
@@ -432,25 +462,34 @@ class WALReaderMixin:
         return entries  # return even a partial result — WAL minimizes data loss
 
     def _orphan_wal_files(self, file_prefix: str) -> list[Path]:
-        """Non-own-PID (orphan) WAL file paths in the shared ``wal_dir``.
+        """Dead-PID (orphan) WAL file paths in the shared ``wal_dir``.
 
         Computed as ``startup-glob`` (all PIDs) minus ``runtime-glob``
-        (this worker's PID) so the result is exactly peer/dead-PID files.
+        (this worker's PID), then minus the files whose embedded PID is still
+        alive. Without the liveness filter a forked child would read its
+        *living* parent's WAL file and re-deliver every entry the parent has
+        already delivered — the consumer's idempotency guard is a TTL cache,
+        not a durable acknowledgement, so it does not stop a re-read that
+        arrives later than the TTL.
+
+        PID reuse can make a dead peer's file look alive; the absorb is then
+        deferred, never lost.
         """
         all_files = set(self._wal_dir.glob(_wal_glob_pattern(file_prefix, "startup")))
         own_files = set(self._wal_dir.glob(_wal_glob_pattern(file_prefix, "runtime")))
-        return sorted(all_files - own_files)
+        return sorted(f for f in all_files - own_files if not is_live_peer_wal_file(f))
 
+    @fork_repaired
     def recover_orphans(self, last_processed_seq: int = 0) -> list:
         """
-        Recover unprocessed entries from orphan (non-own-PID) WAL files only.
+        Recover unprocessed entries from orphan (dead-PID) WAL files only.
 
-        Globs ``{file_prefix}_*.wal`` and **excludes this worker's own-PID
-        files**, so it returns entries from peer/dead-PID files only —
-        disjoint from this worker's own runtime drain
-        (``recover_unprocessed(mode="runtime")``). Used once at worker
-        startup to absorb a crashed peer's orphan entries to the central
-        store.
+        Globs ``{file_prefix}_*.wal``, then excludes this worker's own-PID
+        files **and** every file whose embedded PID is still running, so it
+        returns entries from dead-PID files only — disjoint from this
+        worker's own runtime drain (``recover_unprocessed(mode="runtime")``)
+        and from any live peer's. Used to absorb a crashed peer's orphan
+        entries to the central store.
 
         Unlike ``recover_unprocessed``, this reads via ``_read_file_entries``
         directly and emits **neither** the ``WAL_RECOVERED`` audit event nor
@@ -552,6 +591,7 @@ class WALReaderMixin:
 
         return sorted_entries
 
+    @fork_repaired
     def cleanup_processed(
         self,
         last_processed_seq: int,
@@ -567,13 +607,11 @@ class WALReaderMixin:
 
         Args:
             last_processed_seq: Last sequence already processed.
-            mode: ``"startup"`` (default) globs all PIDs — preserves
-                the existing safety contract for callers that drain
-                orphan files. ``"runtime"`` filters to this worker's
-                PID only — used by
-                ``ResilientStorageBackend._do_recovery()`` so a peer
-                worker's still-active WAL file is never deleted by
-                this worker (#470 G3).
+            mode: ``"startup"`` (default) globs all PIDs — dead peers'
+                files become eligible so a caller that drained them can
+                reclaim them. ``"runtime"`` filters to this worker's PID
+                only — used by ``ResilientStorageBackend._do_recovery()``
+                so a peer worker's file is out of scope entirely.
 
         Returns:
             Number of deleted files.
@@ -586,6 +624,14 @@ class WALReaderMixin:
 
             for wal_file in wal_files:
                 if self._current_file and wal_file == self._current_file:
+                    continue
+
+                # A living peer is still appending to its own file, and its
+                # sequence space is not the one ``last_processed_seq`` counts:
+                # under the all-PID startup glob a low peer ``max_seq`` would
+                # otherwise unlink a file whose owner keeps writing to the
+                # unlinked inode.
+                if is_live_peer_wal_file(wal_file):
                     continue
 
                 max_seq = self._get_file_max_sequence(wal_file)
