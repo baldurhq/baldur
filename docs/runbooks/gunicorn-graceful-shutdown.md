@@ -2,7 +2,7 @@
 
 > **Purpose**: Wire baldur's `GracefulShutdownCoordinator` into a gunicorn deployment so SIGTERM triggers a real drain — registered shutdown handlers fire, in-flight HTTP requests complete, and the load balancer evicts the worker socket before the process exits.
 > **Audience**: Operator deploying baldur under gunicorn (the canonical OSS WSGI server) at OSS or PRO tier.
-> **Cadence**: One-time read at deployment + revisit when changing `--graceful-timeout` or `BALDUR_SHUTDOWN_*` settings.
+> **Cadence**: One-time read at deployment + revisit when changing `--graceful-timeout`, `--timeout`, or any recovery-shutdown setting in the reference table below.
 
 ---
 
@@ -50,6 +50,51 @@ graceful_timeout = 35
 
 Both patterns import `baldur.adapters.gunicorn.hooks` at gunicorn's config-parse time, which is the signal baldur looks for when deciding whether to emit the `baldur.gunicorn_hooks_not_installed` WARNING.
 
+### Migrating off `baldur.server`
+
+`baldur.server` was a second hook surface carrying `post_fork_reset`, `post_worker_init_start` and `worker_exit_cleanup`. It is removed; `baldur.adapters.gunicorn` is the only hook surface baldur ships. If your `gunicorn.conf.py` looks like the left column, replace it with the right:
+
+```python
+# BEFORE — baldur.server (removed)
+def post_fork(server, worker):
+    from django.db import connections
+    for conn in connections.all():
+        conn.close()
+    from baldur.server import post_fork_reset
+    post_fork_reset(worker)
+
+def post_worker_init(worker):
+    from baldur.server import post_worker_init_start
+    post_worker_init_start(worker)
+
+def worker_exit(server, worker):
+    from baldur.server import worker_exit_cleanup
+    worker_exit_cleanup(worker)
+```
+
+```python
+# AFTER — baldur.adapters.gunicorn
+from baldur.adapters.gunicorn.hooks import (
+    post_worker_init,
+    worker_int,
+    worker_exit,
+)
+
+
+def post_fork(server, worker):
+    # Django's own responsibility — never a baldur hook member.
+    from django.db import connections
+    for conn in connections.all():
+        conn.close()
+```
+
+Two things to get right:
+
+- **Import at module level, not inside a hook body.** Under `--preload` the master parses the config and never runs `post_worker_init`; a function-body import leaves `baldur.adapters.gunicorn.hooks` out of the master's `sys.modules`, so the check below false-positives on a correctly wired deployment.
+- **`worker_int` is new to you.** The old surface had no SIGINT/SIGQUIT member; re-export it or those signals bypass the drain.
+
+The resets the old `post_fork_reset` performed are not carried over as a fourth hook. Three of the five were ineffective (the OpenTelemetry provider is set-once, the mmap snapshot premise matched no shipped code path, and gunicorn already reseeds the RNG in every worker before either hook runs); the Redis one is unnecessary because redis-py resets its connection pool on a pid change by itself. What remains rides `post_worker_init`.
+
 ---
 
 ## What the Hooks Do
@@ -58,7 +103,7 @@ Both patterns import `baldur.adapters.gunicorn.hooks` at gunicorn's config-parse
 |------|---------|----------------|
 | `post_worker_init` | After fork, when worker is ready | Marks `GUNICORN_WORKER=1`, populates `coordinator._tracker`, installs a *chained* SIGTERM handler that fires `coordinator.initiate_shutdown` then delegates to gunicorn's `handle_exit`, and **re-starts the `init()`-started background daemon workers for all adapters** (see below) |
 | `worker_int` | SIGINT/SIGQUIT forwarded to worker | Calls `coordinator.initiate_shutdown()` for parity with the chained SIGTERM handler |
-| `worker_exit` | Worker about to terminate | Blocks (up to 30s) waiting for the coordinator drain thread to complete, then stops Django background daemon threads cleanly |
+| `worker_exit` | Worker about to terminate (and, for an already-dead worker, in the master) | Returns immediately unless it is running in the worker it was handed; otherwise waits for the coordinator drain thread (`BALDUR_RECOVERY_SHUTDOWN_DEFAULT_DRAIN_TIMEOUT_SECONDS`), resets the Django background-thread start guards, flushes and closes the audit system — on every exit, including a `max_requests` recycle — and emits `shutdown.worker_exit_completed` |
 
 Why chained SIGTERM and not `worker_int`? Because gunicorn's `worker_int` only fires for SIGINT/SIGQUIT. The normal graceful-shutdown path is **SIGTERM forwarded from master to worker**, which runs gunicorn's `handle_exit` directly without invoking any user hook. Chaining is the only way to plug `coordinator.initiate_shutdown` into the worker's SIGTERM lifecycle without breaking gunicorn's own drain.
 
@@ -74,7 +119,7 @@ Background daemon workers started by `baldur.init()` — the meta-watchdog (dete
 
 `RequestTrackingMiddleware` (auto-injected via `configure_baldur()`) wraps every request in `RequestLifecycleContext`, which calls `coordinator._tracker.start_request()` on entry and `end_request(success=...)` on exit. The drain loop (`shutdown_coordinator._drain_and_shutdown`) reads `tracker.get_pending_count()` each cycle and only declares HTTP drained when count reaches 0.
 
-This means the drain loop **actually waits for in-flight HTTP work** instead of declaring itself done immediately. A 25s POST during shutdown completes naturally — gunicorn's `worker_exit` blocks on `coordinator.wait_for_shutdown(timeout=30.0)` until the drain loop finishes, the LB has already stopped routing new traffic (see "Retry-After Semantics" below), and the request returns its real response.
+This means the drain loop **actually waits for in-flight HTTP work** instead of declaring itself done immediately. A 25s POST during shutdown completes naturally — gunicorn's `worker_exit` blocks on `coordinator.wait_for_shutdown()` for `BALDUR_RECOVERY_SHUTDOWN_DEFAULT_DRAIN_TIMEOUT_SECONDS` (30.0 by default) until the drain loop finishes, the LB has already stopped routing new traffic (see "Retry-After Semantics" below), and the request returns its real response.
 
 If `BALDUR_REQUEST_TRACKING_MIDDLEWARE_ENABLED=False` (operator opt-out), the drain loop sees `pending_count=0` every cycle and exits as soon as registered handlers report drained — exactly the pre-471 behavior, plus the LB-eviction contract.
 
@@ -93,19 +138,19 @@ Content-Type: text/plain; charset=utf-8
 Service draining for shutdown.
 ```
 
-The `Retry-After` value is `coordinator.get_stats().remaining_drain_time` — i.e., how long the drain loop will still wait. Clients see a meaningful retry hint that aligns with real worker availability. For the rare case where `remaining_drain_time` is `None` (TERMINATING / TERMINATED phase racing with the middleware), the fallback is `BALDUR_SHUTDOWN_DRAIN_DEFAULT_RETRY_AFTER_SECONDS` (default 5s).
+The `Retry-After` value is `coordinator.get_stats().remaining_drain_time` — i.e., how long the drain loop will still wait. Clients see a meaningful retry hint that aligns with real worker availability. For the rare case where `remaining_drain_time` is `None` (TERMINATING / TERMINATED phase racing with the middleware), the fallback is `BALDUR_RECOVERY_SHUTDOWN_DRAIN_DEFAULT_RETRY_AFTER_SECONDS` (default 5s).
 
 **Why `Connection: close`?** L7 load balancers (envoy, nginx, GCLB, ALB) keep HTTP/1.1 keep-alive connections to the same worker socket even after a 503 — RFC 7230 §6.6 treats 503 as retryable-but-keep-alive by default. The `Connection: close` header is the standard signal that forces the LB to evict the socket and route subsequent requests to other workers. Without it, the LB would keep dispatching to the draining worker until the keep-alive timeout — well past the drain window.
 
 ### Liveness exemption
 
-`/api/baldur/health/live/` and `/api/baldur/health/ping/` (baldur-canonical) plus any path listed in `BALDUR_SHUTDOWN_DRAIN_LIVENESS_PATHS` (operator override) **stay 200 during drain**. Drain is a normal lifecycle phase, not a liveness failure. If liveness probes flipped to 503, k8s would SIGKILL the pod mid-drain — the opposite of what graceful shutdown is supposed to achieve.
+`/api/baldur/health/live/` and `/api/baldur/health/ping/` (baldur-canonical) plus any path listed in `BALDUR_RECOVERY_SHUTDOWN_DRAIN_LIVENESS_PATHS` (operator override) **stay 200 during drain**. Drain is a normal lifecycle phase, not a liveness failure. If liveness probes flipped to 503, k8s would SIGKILL the pod mid-drain — the opposite of what graceful shutdown is supposed to achieve.
 
 Use the override when your k8s `livenessProbe` targets a non-baldur path:
 
 ```yaml
 env:
-  - name: BALDUR_SHUTDOWN_DRAIN_LIVENESS_PATHS
+  - name: BALDUR_RECOVERY_SHUTDOWN_DRAIN_LIVENESS_PATHS
     value: '["/livez", "/healthz/live"]'
 ```
 
@@ -129,17 +174,19 @@ This makes k8s `readinessProbe` flip the pod's endpoint slice to NotReady, which
 
 ---
 
-## Pre-Flight Check: `--graceful-timeout` vs `BALDUR_SHUTDOWN_DEFAULT_DRAIN_TIMEOUT_SECONDS`
+## Pre-Flight Check: gunicorn's two timeouts vs `BALDUR_RECOVERY_SHUTDOWN_DEFAULT_DRAIN_TIMEOUT_SECONDS`
 
-The hard rule: **gunicorn's `--graceful-timeout` must be `>= BALDUR_SHUTDOWN_DEFAULT_DRAIN_TIMEOUT_SECONDS + buffer`**, where the buffer covers handler `on_force_shutdown` time. Concrete example:
+The hard rule: **gunicorn's `--graceful-timeout` must be `>= BALDUR_RECOVERY_SHUTDOWN_DEFAULT_DRAIN_TIMEOUT_SECONDS + buffer`**, where the buffer covers handler `on_force_shutdown` time. Concrete example:
 
 | Setting | Value |
 |---------|-------|
-| `BALDUR_SHUTDOWN_DEFAULT_DRAIN_TIMEOUT_SECONDS` | 30.0 (baldur default) |
+| `BALDUR_RECOVERY_SHUTDOWN_DEFAULT_DRAIN_TIMEOUT_SECONDS` | 30.0 (baldur default) |
 | Buffer for handler force-shutdown | 5.0 |
 | `gunicorn --graceful-timeout` | **35** (or higher) |
 
 If gunicorn's timeout is shorter, the master sends SIGKILL while the drain thread is still running. The WAL flush gets cut off, leader leases stay stuck, and in-flight POST bodies are lost — the symptoms graceful shutdown was supposed to prevent.
+
+**Also check `--timeout`, not only `--graceful-timeout`.** They govern different exits. `--graceful-timeout` bounds the shutdown path; `--timeout` (default 30) is the arbiter's worker watchdog and is what bounds `worker_exit` on the **recycle** path (`max_requests`, `--reload`), where no shutdown was ever initiated. `worker_exit` flushes and closes the audit system on that path too, so a slow audit destination can hold the hook past the watchdog and turn a routine recycle into a `WORKER TIMEOUT` (CRITICAL) plus a SIGABRT. A worker heartbeats at least every `timeout/2`, so it enters the hook with 15-30 s of watchdog budget left at the default. If your audit destination is remote or slow, raise `--timeout` rather than letting recycles page you. Setting `--timeout 0` disables the watchdog entirely — legitimate with `gthread`/`gevent`, but then nothing bounds the hook from outside.
 
 To inspect gunicorn's effective config:
 
@@ -151,7 +198,18 @@ baldur intentionally does **not** add a runtime drift-detection warning for this
 
 ---
 
-## Troubleshooting `baldur.gunicorn_hooks_not_installed` WARNING
+## Troubleshooting the hook-wiring check
+
+~2 seconds after `baldur.init()`, baldur reports which way the check went — exactly one of these two lines, once per process:
+
+```
+baldur.gunicorn_hooks_installed     [info]     the hooks are wired; SIGTERM reaches the coordinator
+baldur.gunicorn_hooks_not_installed [warning]  running under gunicorn with no hooks imported
+```
+
+Look for the INFO line after a wiring change: it is the positive confirmation. An *absent* WARNING is not the same evidence — a check that never ran, or a gunicorn that was never detected, also produces no WARNING.
+
+### `baldur.gunicorn_hooks_not_installed`
 
 If you see this WARNING in your logs ~2 seconds after `baldur.init()`:
 
@@ -166,7 +224,7 @@ hint=Running under gunicorn but baldur.adapters.gunicorn.hooks was not imported.
 
 **Fix**: pick one of the two wiring patterns above and redeploy.
 
-**Tunable**: `BALDUR_SHUTDOWN_HOOKS_CHECK_DELAY_SECONDS` (default 2.0, range 0.5–30.0). If `post_worker_init` runs late on your platform and the WARNING is a false positive, raise the delay.
+**Tunable**: `BALDUR_RECOVERY_SHUTDOWN_HOOKS_CHECK_DELAY_SECONDS` (default 2.0, range 0.5–30.0). If `post_worker_init` runs late on your platform and the WARNING is a false positive, raise the delay.
 
 **Suppress**: do not. The WARNING is intentionally fail-open — you keep serving traffic — but the underlying drain is broken. Suppressing the WARNING does not fix the drain.
 
@@ -184,9 +242,9 @@ This is intentional. Drain-503 is a process-lifecycle event, logged by `DrainAwa
 
 | Setting | Default | Range | Purpose |
 |---------|---------|-------|---------|
-| `BALDUR_SHUTDOWN_DEFAULT_DRAIN_TIMEOUT_SECONDS` | 30.0 | 5–300 | Drain loop deadline |
-| `BALDUR_SHUTDOWN_DRAIN_DEFAULT_RETRY_AFTER_SECONDS` | 5.0 | 1–300 | Retry-After fallback when phase != DRAINING |
-| `BALDUR_SHUTDOWN_DRAIN_LIVENESS_PATHS` | `[]` | `list[str]` | Extra liveness paths exempted from drain-503 |
-| `BALDUR_SHUTDOWN_HOOKS_CHECK_DELAY_SECONDS` | 2.0 | 0.5–30.0 | Delay before `gunicorn_hooks_not_installed` check |
+| `BALDUR_RECOVERY_SHUTDOWN_DEFAULT_DRAIN_TIMEOUT_SECONDS` | 30.0 | 5–300 | Drain loop deadline |
+| `BALDUR_RECOVERY_SHUTDOWN_DRAIN_DEFAULT_RETRY_AFTER_SECONDS` | 5.0 | 1–300 | Retry-After fallback when phase != DRAINING |
+| `BALDUR_RECOVERY_SHUTDOWN_DRAIN_LIVENESS_PATHS` | `[]` | `list[str]` | Extra liveness paths exempted from drain-503 |
+| `BALDUR_RECOVERY_SHUTDOWN_HOOKS_CHECK_DELAY_SECONDS` | 2.0 | 0.5–30.0 | Delay before `gunicorn_hooks_not_installed` check |
 | `BALDUR_DRAIN_AWARE_MIDDLEWARE_ENABLED` | True | bool | Toggle (Django settings only, not env) |
 | `BALDUR_REQUEST_TRACKING_MIDDLEWARE_ENABLED` | True | bool | Toggle (Django settings only, not env) |
