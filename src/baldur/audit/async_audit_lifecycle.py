@@ -305,12 +305,25 @@ def _start_sync_worker() -> None:
 
 _audit_shutdown_lock = threading.Lock()
 
+# Stage budgets consumed by the flush below. Named because the ceiling on
+# waiting for a *concurrent* flush is derived from them: only the sync-worker
+# join is a real bound, so the sum plus a margin is a chosen backstop, not a
+# proof of how long a healthy flush can take.
+_ASYNC_LOGGER_STOP_TIMEOUT_SECONDS = 5.0
+_SYNC_WORKER_STOP_TIMEOUT_SECONDS = 30.0
+_FLUSH_WAIT_MARGIN_SECONDS = 10.0
+_FLUSH_WAIT_TIMEOUT_SECONDS = (
+    _ASYNC_LOGGER_STOP_TIMEOUT_SECONDS
+    + _SYNC_WORKER_STOP_TIMEOUT_SECONDS
+    + _FLUSH_WAIT_MARGIN_SECONDS
+)
+
 
 def graceful_shutdown_audit_system() -> (
     None
 ):  # verified-by: test_log_critical_event_immediate_flush
     """
-    Graceful shutdown of the audit system.
+    Best-effort staged teardown of the audit system.
 
     Order:
     1. Flush AsyncHealingLogger (memory → WAL/adapter)
@@ -319,10 +332,19 @@ def graceful_shutdown_audit_system() -> (
     4. Save checkpoint
     5. Flush and close DiskPersistentBuffer (drain-positioned teardown)
 
-    Guarantees zero data loss.
+    Every stage catches, logs and continues, so a stage failure is not
+    reported to the caller and the teardown is best-effort rather than a
+    durability guarantee. Durability comes from the WAL-first write path:
+    a CRITICAL event is on disk before this function is ever reached, and
+    boot-time recovery replays whatever this teardown could not.
 
-    Thread-safe once-guard prevents double execution when both Gunicorn
-    worker_exit hook and ShutdownCoordinator trigger shutdown concurrently.
+    Concurrency contract: the gunicorn worker-exit hook and the shutdown
+    coordinator's drain thread can both trigger this concurrently. Exactly
+    one caller runs the body; a second caller waits for the first, up to
+    ``_FLUSH_WAIT_TIMEOUT_SECONDS``, and then gives up with a WARNING
+    rather than blocking forever — three of the five stages have no ceiling
+    of their own, so a wedged destination would otherwise hang the caller's
+    thread. A caller that gives up has run none of the stages.
 
     Skipped in test mode (BALDUR_TEST_MODE=true).
     """
@@ -330,33 +352,42 @@ def graceful_shutdown_audit_system() -> (
     if os.getenv("BALDUR_TEST_MODE", "").lower() == "true":
         return
 
-    state = _lifecycle_state()
-    with _audit_shutdown_lock:
+    if not _audit_shutdown_lock.acquire(timeout=_FLUSH_WAIT_TIMEOUT_SECONDS):
+        logger.warning(
+            "graceful_shutdown.concurrent_flush_wait_timeout",
+            waited_seconds=_FLUSH_WAIT_TIMEOUT_SECONDS,
+        )
+        return
+
+    try:
+        state = _lifecycle_state()
         if state.audit_shutdown_done:
             logger.debug("graceful_shutdown.already_completed")
             return
         state.audit_shutdown_done = True
 
-    logger.info("graceful_shutdown.starting_audit_system_shutdown")
+        logger.info("graceful_shutdown.starting_audit_system_shutdown")
 
-    # 1. Flush and stop AsyncHealingLogger
-    _shutdown_async_logger()
+        # 1. Flush and stop AsyncHealingLogger
+        _shutdown_async_logger()
 
-    # 2. Stop AuditSyncWorker
-    _shutdown_sync_worker()
+        # 2. Stop AuditSyncWorker
+        _shutdown_sync_worker()
 
-    # 3. Flush and close WAL
-    _shutdown_wal()
+        # 3. Flush and close WAL
+        _shutdown_wal()
 
-    # 4. Save final checkpoint
-    _save_final_checkpoint()
+        # 4. Save final checkpoint
+        _save_final_checkpoint()
 
-    # 5. Flush and close the disk-persistent buffer — literal-final:
-    #    the PRO WAL-failure fallback writes INTO this buffer, so it
-    #    must outlive the WAL step; checkpoint never touches it.
-    _shutdown_disk_buffer()
+        # 5. Flush and close the disk-persistent buffer — literal-final:
+        #    the PRO WAL-failure fallback writes INTO this buffer, so it
+        #    must outlive the WAL step; checkpoint never touches it.
+        _shutdown_disk_buffer()
 
-    logger.info("graceful_shutdown.audit_system_shutdown_complete")
+        logger.info("graceful_shutdown.audit_system_shutdown_complete")
+    finally:
+        _audit_shutdown_lock.release()
 
 
 def _reset_audit_shutdown_state() -> None:
@@ -372,8 +403,9 @@ def _shutdown_async_logger() -> None:
         # Flush remaining events
         AsyncHealingLogger.flush()
 
-        # Stop the worker (5 second timeout)
-        AsyncHealingLogger.stop(timeout=5.0)
+        # Stop the worker. Bounds the consumer-thread join only — the
+        # CRITICAL executor shutdown it then runs takes no timeout.
+        AsyncHealingLogger.stop(timeout=_ASYNC_LOGGER_STOP_TIMEOUT_SECONDS)
 
         logger.info("graceful_shutdown.asynchealinglogger_stopped")
     except Exception as e:
@@ -393,8 +425,9 @@ def _shutdown_sync_worker() -> None:
 
         sync_worker = AuditSyncWorker.get_instance()
 
-        # Wait for sync to drain (30 second timeout)
-        sync_worker.stop(timeout=30.0)
+        # Wait for sync to drain — a plain join, the one stage of the
+        # five with a real ceiling.
+        sync_worker.stop(timeout=_SYNC_WORKER_STOP_TIMEOUT_SECONDS)
 
         logger.info("graceful_shutdown.auditsyncworker_stopped")
     except Exception as e:
@@ -533,8 +566,8 @@ def _is_test_mode() -> bool:
 # 416 Part 5: register_shutdown_handlers() and its signal helpers
 # (_register_signal_handler, _handle_sigterm, _handle_sigint) were
 # deleted. They were superseded by AuditShutdownHandler +
-# GracefulShutdownCoordinator (registered via apps.py:323) and the
-# Gunicorn worker_exit_cleanup hook (server.py:165).
+# GracefulShutdownCoordinator (registered by the Django app config) and
+# the gunicorn worker-exit hook.
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
