@@ -142,7 +142,12 @@ _MOCK_CREATION_BUDGETS: dict[str, int] = {
     # legacy gunicorn hook-surface consolidation: -8 — the module-scoped suite
     # for the deleted second hook surface went with it, along with one hook test
     # covering a reseed the server itself performs before either hook runs.
-    "oss": 4342,
+    # gunicorn hook-surface test pass: -5 — the arbiter argument and the new
+    # worker stand-ins are SimpleNamespace objects. The hook branches on
+    # `worker.pid` and `worker.cfg.preload_app`, both of which a spec-less
+    # mock auto-generates: the process guard and the preload gate would each
+    # have taken a branch the test never chose.
+    "oss": 4337,
     "pro": 1800,
     "dormant": 401,
 }
