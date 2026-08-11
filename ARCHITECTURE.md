@@ -54,8 +54,8 @@ consumes this package as an ordinary dependency. The boundary is
 ## Enforced patterns
 
 These are mechanically checked by the fitness-function suite under
-`tests/architecture/`. When one fails, its message links to the rule. The main
-ones:
+`tests/architecture/`. When one fails, its message names the offending file and
+line. The main ones:
 
 - **`__all__`** is declared explicitly in every module (public API is opt-in).
 - **Exception hierarchy** — domain errors inherit `BaldurError` and implement
