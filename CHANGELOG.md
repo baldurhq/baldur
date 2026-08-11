@@ -33,6 +33,14 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
   entry — or run in production — and every one of those lines keeps its level. Losing a live
   Redis (`resilient_storage.degraded_mode_fallback`) stays CRITICAL in every posture.
 
+- Two boot warnings that described the framework's own defaults are gone. The leader-election
+  renewal-cadence warning fires only when *you* set `BALDUR_LEADER_ELECTION_RENEW_INTERVAL_SECONDS`
+  outside the recommended band — the derived default lands outside it by arithmetic, so it warned
+  on every boot about its own number — and it is renamed
+  `leader_election.renew_interval_outside_recommended_range` (from the malformed
+  `outside.recommended_range`). The unsafe-cadence `ValueError` is untouched.
+  `bulkhead_registry.thread_pool_unavailable` is WARNING only when a caller asked for
+  `bulkhead_type="thread_pool"`; the built-in `external_api` compartment reports at DEBUG.
 - A zero-config non-production `baldur.init()` no longer boots at alarm level: the nine
   `baldur.registry_memory_fallback` lines are INFO (the fallback stays visible; the alarm level was
   the defect), the secret-validation reports are INFO/DEBUG, and the WAL directory fallback is an
