@@ -500,8 +500,10 @@ def _validate_critical_secrets() -> None:
     fail-fast — before the admin server, scheduler, or background workers start.
 
     Behavior:
-    - Non-production: best-effort. ``validate_required_secrets`` logs the
-      missing-secret counts and ``init()`` continues.
+    - Non-production: best-effort. ``validate_required_secrets`` reports the
+      missing-secret counts and ``init()`` continues. Empty secrets are the
+      expected state of a zero-config dev boot, so the aggregate is INFO
+      there — the same reasoning that sets the per-secret levels.
     - Production + a CRITICAL secret missing: ``validate_required_secrets``
       raises ``RuntimeError`` (under ``is_production()``); this function lets it
       propagate out of ``init()`` to abort boot.
@@ -510,20 +512,24 @@ def _validate_critical_secrets() -> None:
     transient settings-read error never blocks a non-production startup.
     """
     try:
+        from baldur.runtime import is_production
         from baldur.settings.secrets import validate_required_secrets
 
         result = validate_required_secrets()
 
         critical_count = len(result.get("critical", []))
         warning_count = len(result.get("warning", []))
+        production = is_production()
 
         if critical_count > 0:
-            logger.error(
+            log = logger.error if production else logger.info
+            log(
                 "baldur.critical_secrets_configured_check",
                 critical_count=critical_count,
             )
         elif warning_count > 0:
-            logger.warning(
+            log = logger.warning if production else logger.info
+            log(
                 "baldur.important_secrets_configured_check",
                 warning_count=warning_count,
             )
@@ -1524,14 +1530,18 @@ def _wire_redis_registry(
             "memory-only mode."
         )
 
-    # non-production + no signal — WARNING + memory fallback.
-    logger.warning(
+    # Non-production + no signal — memory fallback, announced at INFO. The
+    # original goal was to make the silent fallback visible, and INFO keeps
+    # it visible; alarm level was the defect. Production never reaches here
+    # (it raised above), and the startup posture line states the same fact
+    # once for operators reading at the default level.
+    logger.info(
         "baldur.registry_memory_fallback",
         registry=adapter_type,
         reason="redis_url_unset",
         hint=(
             "Set BALDUR_REDIS_URL for distributed state. "
-            "Set BALDUR_TEST_MODE=true to suppress this warning."
+            "Set BALDUR_TEST_MODE=true to suppress this notice."
         ),
     )
     registry.set_default("memory")
@@ -1585,15 +1595,18 @@ def _wire_sql_django_registry(
             "deliberate memory-only mode."
         )
 
-    # non-production + no signal — WARNING + memory fallback.
-    logger.warning(
+    # Non-production + no signal — memory fallback, announced at INFO. Same
+    # reasoning as the Redis-keyed site above; this one keys on SQL/Django
+    # signals, so no Redis-posture predicate reaches it and it needs its own
+    # level decision. Production raised above.
+    logger.info(
         "baldur.registry_memory_fallback",
         registry=adapter_type,
         reason="sql_django_unset",
         hint=(
             "Set BALDUR_SQL_DSN or DJANGO_SETTINGS_MODULE+DATABASES "
             "for durable archival. Set BALDUR_TEST_MODE=true to "
-            "suppress this warning."
+            "suppress this notice."
         ),
     )
     registry.set_default("memory")

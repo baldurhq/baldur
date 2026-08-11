@@ -182,14 +182,34 @@ def reset_secrets_settings() -> None:
 reset_secrets = reset_secrets_settings
 
 
+def _report_unset_secrets(
+    secrets: dict[str, SecretStr],
+    event: str,
+    level: str,
+) -> list[str]:
+    """Report every empty secret in ``secrets`` at ``level``; return their names."""
+    log = getattr(logger, level)
+    unset = [name for name, secret in secrets.items() if not secret.get_secret_value()]
+    for name in unset:
+        log(event, secret_name=name)
+    return unset
+
+
 def validate_required_secrets(secrets: SecretsSettings | None = None) -> dict:
     """
     Verify that the core secrets are configured.
 
-    Security hardening:
+    Security hardening, in production:
     - CRITICAL secrets (encryption_key, audit_signing_key): ERROR log when unset
     - IMPORTANT secrets (database_password, redis_password): WARNING log when unset
     - OPTIONAL secrets: INFO log when unset
+
+    Outside production the CRITICAL and IMPORTANT reports drop to INFO and
+    DEBUG. Every one of these fields defaults to an empty ``SecretStr``, so
+    an empty secret is the expected state of a zero-config development boot;
+    a security ERROR that fires on every healthy dev machine teaches
+    operators to ignore security ERRORs. Production is where this is a real
+    finding, and there both the levels and the abort below are unchanged.
 
     In production, a missing CRITICAL secret raises RuntimeError.
 
@@ -223,39 +243,30 @@ def validate_required_secrets(secrets: SecretsSettings | None = None) -> dict:
         "aws_secret_access_key": secrets.aws_secret_access_key,
     }
 
-    result: dict[str, list[str]] = {"critical": [], "warning": [], "info": []}
-
-    # CRITICAL secret validation
-    for name, secret in critical_secrets.items():
-        if not secret.get_secret_value():
-            result["critical"].append(name)
-            logger.error(
-                "security.critical_secret_set_system",
-                secret_name=name,
-            )
-
-    # IMPORTANT secret validation
-    for name, secret in important_secrets.items():
-        if not secret.get_secret_value():
-            result["warning"].append(name)
-            logger.warning(
-                "security.important_secret_set_some",
-                secret_name=name,
-            )
-
-    # OPTIONAL secret validation
-    for name, secret in optional_secrets.items():
-        if not secret.get_secret_value():
-            result["info"].append(name)
-            logger.info(
-                "security.optional_secret_set",
-                secret_name=name,
-            )
-
-    # In production, missing CRITICAL secrets must abort startup.
     from baldur.runtime import is_production
 
-    if is_production() and result["critical"]:
+    production = is_production()
+
+    result: dict[str, list[str]] = {
+        "critical": _report_unset_secrets(
+            critical_secrets,
+            "security.critical_secret_set_system",
+            "error" if production else "info",
+        ),
+        "warning": _report_unset_secrets(
+            important_secrets,
+            "security.important_secret_set_some",
+            "warning" if production else "debug",
+        ),
+        "info": _report_unset_secrets(
+            optional_secrets,
+            "security.optional_secret_set",
+            "info",
+        ),
+    }
+
+    # In production, missing CRITICAL secrets must abort startup.
+    if production and result["critical"]:
         raise RuntimeError(
             f"[Security] CRITICAL secrets not configured in production: "
             f"{', '.join(result['critical'])}. "

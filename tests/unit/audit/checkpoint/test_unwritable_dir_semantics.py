@@ -95,7 +95,7 @@ class TestFileCheckpointStorageDirResolutionBehavior:
         with capture_logs() as logs:
             storage = FileCheckpointStorage()
 
-        warnings = log_events(logs, "storage.writable_dir_probe_failed")
+        warnings = log_events(logs, "storage.writable_dir_fallback")
         assert len(warnings) == 1
         assert warnings[0]["preferred"] == str(storage.resolved_dir.preferred)
         assert warnings[0]["fallback"] == str(storage.base_path)

@@ -129,7 +129,7 @@ class TestWireCacheAndStorageMatrixBehavior:
         bootstrap.reset_init_state()  # rebuild runtime with new env
 
         ProviderRegistry.cache.set_default("memory")  # baseline
-        with caplog.at_level("WARNING"):
+        with caplog.at_level("INFO"):
             bootstrap._wire_registry_defaults()
 
         # Default not flipped to redis.
@@ -189,7 +189,7 @@ class TestWireCacheAndStorageMatrixBehavior:
         assert ProviderRegistry.cache.get_default_name() == "redis"
         configure_fn.assert_called_once_with(backend)
 
-    def test_non_production_with_url_unset_warns_and_falls_back_to_memory(
+    def test_non_production_with_url_unset_reports_and_falls_back_to_memory(
         self, monkeypatch, isolated_cache_default, caplog
     ):
         """Row 4: non-prod + URL unset → WARNING + memory default."""
@@ -204,7 +204,7 @@ class TestWireCacheAndStorageMatrixBehavior:
         # Drift the default → wiring step must reset it to "memory".
         ProviderRegistry.cache.set_default("redis")
 
-        with caplog.at_level("WARNING"):
+        with caplog.at_level("INFO"):
             bootstrap._wire_registry_defaults()
 
         assert ProviderRegistry.cache.get_default_name() == "memory"
@@ -593,7 +593,7 @@ class TestWireRegistryDefaultsGroupABehavior:
         # the error to the offending row.
         assert "ProviderRegistry.cache" in message
 
-    def test_non_production_with_redis_url_unset_warns_and_keeps_memory_for_all(
+    def test_non_production_with_redis_url_unset_reports_and_keeps_memory_for_all(
         self, monkeypatch, isolated_all_wired_registries, caplog
     ):
         """non-prod + URL unset → WARNING per row, all 6 stay at memory."""
@@ -612,7 +612,7 @@ class TestWireRegistryDefaultsGroupABehavior:
         ProviderRegistry.cross_cluster_store.set_default("redis")
         bootstrap.reset_init_state()
 
-        with caplog.at_level("WARNING"):
+        with caplog.at_level("INFO"):
             bootstrap._wire_registry_defaults()
 
         for attr in GROUP_A_REGISTRY_ATTRS:
@@ -765,10 +765,10 @@ class TestWireRegistryDefaultsGroupBBehavior:
             registry = getattr(ProviderRegistry, attr)
             assert registry.get_default_name() == "django"
 
-    def test_non_production_with_neither_signal_set_warns_and_keeps_memory(
+    def test_non_production_with_neither_signal_set_reports_and_keeps_memory(
         self, monkeypatch, isolated_all_wired_registries, caplog
     ):
-        """non-prod + neither signal → WARNING per row, all stay at memory."""
+        """non-prod + neither signal → INFO per row, all stay at memory."""
         from baldur import bootstrap
         from baldur.factory.registry import ProviderRegistry
 
@@ -782,19 +782,19 @@ class TestWireRegistryDefaultsGroupBBehavior:
         _stub_redis_settings(monkeypatch)
         cm, _configure, _backend = _patch_eager_backend(wal_initialized=True)
 
-        with caplog.at_level("WARNING"), cm:
+        with caplog.at_level("INFO"), cm:
             bootstrap._wire_registry_defaults()
 
         for attr in GROUP_B_REGISTRY_ATTRS:
             registry = getattr(ProviderRegistry, attr)
             assert registry.get_default_name() == "memory"
-        # Setup has redis_set=True so Group A rows emit info, not the
-        # ``registry_memory_fallback`` warning — only Group B's 3 rows do.
-        warning_count = sum(
+        # Setup has redis_set=True so no Group A row reports a memory
+        # fallback — only Group B's 3 rows do.
+        fallback_count = sum(
             1 for r in caplog.records if "registry_memory_fallback" in r.message
         )
-        # At least one WARNING per Group B row is emitted.
-        assert warning_count >= len(GROUP_B_REGISTRY_ATTRS)
+        # At least one record per Group B row is emitted.
+        assert fallback_count >= len(GROUP_B_REGISTRY_ATTRS)
 
     def test_non_production_with_sql_dsn_set_wires_sql(
         self, monkeypatch, isolated_all_wired_registries
