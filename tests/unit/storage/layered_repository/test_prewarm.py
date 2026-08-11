@@ -9,6 +9,8 @@ Pins the ``LayeredRepositoryBase._ensure_l2_warmup_once`` contract:
 - Subsequent constructions short-circuit on the ``_warmup_done`` ClassVar.
 - Redis-down at construction time does NOT raise (fail-open).
 - Non-redis adapter types skip warmup entirely.
+- A degraded L2 backend skips warmup WITHOUT consuming the once-per-process
+  gate, so a construction after Redis recovery still warms.
 - ``_reset_warmup_state()`` re-arms the gate for tests.
 
 This file overrides the package-level autouse ``_suppress_background_drift_reconciliation``
@@ -189,6 +191,65 @@ class TestPrewarmBehavior:
 
         assert l2_mock.try_acquire_half_open_slot.call_count == 0
         assert l2_mock.delete_state.call_count == 0
+
+    def test_degraded_backend_skips_warmup_and_keeps_gate_armed(self):
+        """Degraded RSB → zero warmup calls, and _warmup_done stays False."""
+        from baldur.adapters.memory.circuit_breaker import (
+            LayeredCircuitBreakerStateRepository,
+        )
+        from baldur.adapters.memory.layered_repository.base import (
+            LayeredRepositoryBase,
+        )
+        from baldur.adapters.resilient.backend import ResilientStorageBackend
+
+        l2_mock = _make_l2_mock()
+        l2_mock._backend = MagicMock(spec=ResilientStorageBackend)
+        l2_mock._backend.is_degraded = True
+        # The degraded gate must fire BEFORE any delegation: a degraded
+        # backend has no live raw client, so a delegated call would die on
+        # the redis repo's caller-invariant assert.
+        l2_mock.try_acquire_half_open_slot.side_effect = AssertionError(
+            "must not delegate to a degraded backend"
+        )
+
+        LayeredCircuitBreakerStateRepository(l2_repo=l2_mock, adapter_type="redis")
+
+        assert l2_mock.try_acquire_half_open_slot.call_count == 0
+        assert l2_mock.delete_state.call_count == 0
+        # Skip is not failure: the gate stays armed for post-recovery ctors.
+        assert LayeredRepositoryBase._warmup_done is False
+
+    def test_construction_after_recovery_still_warms(self):
+        """Degraded skip → backend recovers → next ctor performs full warmup."""
+        from baldur.adapters.memory.circuit_breaker import (
+            LayeredCircuitBreakerStateRepository,
+        )
+        from baldur.adapters.memory.layered_repository.base import (
+            LayeredRepositoryBase,
+        )
+
+        _shutdown_executor()
+        LayeredRepositoryBase._reset_warmup_state()
+        LayeredRepositoryBase._executor = ThreadPoolExecutor(
+            max_workers=_TEST_MAX_WORKERS, thread_name_prefix="prewarm_test_inline"
+        )
+        expected_n = _TEST_MAX_WORKERS
+
+        from baldur.adapters.resilient.backend import ResilientStorageBackend
+
+        l2_mock = _make_l2_mock()
+        l2_mock._backend = MagicMock(spec=ResilientStorageBackend)
+        l2_mock._backend.is_degraded = True
+
+        LayeredCircuitBreakerStateRepository(l2_repo=l2_mock, adapter_type="redis")
+        assert l2_mock.try_acquire_half_open_slot.call_count == 0
+
+        # Redis recovers; the same process constructs another layered repo.
+        l2_mock._backend.is_degraded = False
+        LayeredCircuitBreakerStateRepository(l2_repo=l2_mock, adapter_type="redis")
+
+        assert l2_mock.try_acquire_half_open_slot.call_count == expected_n
+        assert LayeredRepositoryBase._warmup_done is True
 
     def test_reset_warmup_state_re_arms_gate(self):
         """_reset_warmup_state() lets a subsequent ctor re-trigger warmup."""
