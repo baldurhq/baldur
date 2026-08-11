@@ -62,6 +62,7 @@ class RedisConnectionFactory:
         socket_connect_timeout: float | None = None,
         retry_on_timeout: bool | None = None,
         max_connections: int | None = None,
+        unconfigured_probe: bool = False,
         **kwargs: Any,
     ) -> Any:
         """
@@ -79,6 +80,14 @@ class RedisConnectionFactory:
             retry_on_timeout: Retry on timeout errors. When None, defaults from
                 RedisSettings.retry_on_timeout.
             max_connections: Connection pool max connections
+            unconfigured_probe: The caller knows this URL is a default nobody
+                configured, so a failure here is the expected posture of a
+                zero-config run rather than an outage. Only the failure log
+                level changes — DEBUG without a traceback instead of ERROR
+                with one; the exception is re-raised either way. Defaults to
+                False, so any caller that does not know stays loud, including
+                every caller of a feature-local URL field that falls back to
+                the same default address.
             **kwargs: Additional redis-py options
 
         Returns:
@@ -124,11 +133,19 @@ class RedisConnectionFactory:
                 return self._create_cluster(url, common_kwargs)
             return self._create_standalone(url, common_kwargs)
         except Exception as e:
-            logger.exception(
-                "redis_factory.connection_failed",
-                url=self._mask_url(url),
-                error_type=type(e).__name__,
-            )
+            if unconfigured_probe:
+                logger.debug(
+                    "redis_factory.connection_failed",
+                    url=self._mask_url(url),
+                    error_type=type(e).__name__,
+                    error=str(e),
+                )
+            else:
+                logger.exception(
+                    "redis_factory.connection_failed",
+                    url=self._mask_url(url),
+                    error_type=type(e).__name__,
+                )
             raise
 
     def _inject_auth(self, url: str, kwargs: dict[str, Any]) -> None:

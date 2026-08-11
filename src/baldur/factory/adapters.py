@@ -425,11 +425,20 @@ def discover_rate_limit_storage_adapters() -> None:
             from baldur.adapters.redis.connection_factory import (
                 get_redis_connection_factory,
             )
-            from baldur.settings.redis import get_redis_settings
+            from baldur.settings.redis import (
+                get_redis_settings,
+                redis_absence_is_expected,
+            )
 
             settings = get_redis_settings()
             factory = get_redis_connection_factory()
-            client = factory.create(settings.url)
+            # Auto-detection probes this provider on every install, so on a
+            # zero-config run the failure is the framework finding its own
+            # default address unreachable — expected, not an outage.
+            client = factory.create(
+                settings.url,
+                unconfigured_probe=redis_absence_is_expected(),
+            )
             return RedisRateLimitStorage(client)
 
         if not reg.has_provider("redis"):
