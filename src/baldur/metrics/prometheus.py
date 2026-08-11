@@ -15,7 +15,7 @@ from __future__ import annotations
 import time
 from contextlib import contextmanager
 from datetime import datetime
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import structlog
 
@@ -54,7 +54,10 @@ class BaldurMetrics:
         self._initialized = False
 
         if not PROMETHEUS_AVAILABLE:
-            logger.warning("prometheus.unavailable")
+            # A posture, not a fault: the extra is optional and the framework
+            # works without it. The startup posture line carries the install
+            # hint for anyone who wanted metrics.
+            logger.info("prometheus.unavailable")
             return
 
         from baldur.metrics.recorders.auto_tuning import AutoTuningMetricRecorder
@@ -147,6 +150,33 @@ class BaldurMetrics:
         self.daemon_workers: DaemonWorkerMetricRecorder = DaemonWorkerMetricRecorder()
         self.bulkhead: BulkheadMetricRecorder = BulkheadMetricRecorder()
         self._initialized = True
+
+    def __getattr__(self, name: str) -> Any:
+        """Serve a no-op recorder for any unset attribute — absent extra only.
+
+        With the prometheus extra absent, ``__init__`` returns before
+        building the 30-odd recorders, so every ``self.dlq`` /
+        ``self.retry`` access would raise. Returning :data:`NOOP_METRIC`
+        instead is what makes the recording call sites' ``except`` arms
+        unreachable for that posture rather than firing once per call.
+
+        The ``PROMETHEUS_AVAILABLE`` arm is the decision, not an
+        optimization. ``__getattr__`` fires precisely when an attribute does
+        NOT exist, so an unguarded catch-all would answer the ~40 in-tree
+        capability probes (``hasattr(metrics, "dlq")``,
+        ``getattr(get_metrics(), "canary", None)``) with a truthy stub on a
+        fully-configured deployment, and would make two already-dead metric
+        writes silently "succeed" instead of staying visibly dead.
+
+        The underscore arm keeps ``_initialized``, copy/pickle and REPL
+        introspection probes out of the absorber.
+        """
+        if PROMETHEUS_AVAILABLE or name.startswith("_"):
+            raise AttributeError(name)
+
+        from baldur.metrics.registry import NOOP_METRIC
+
+        return NOOP_METRIC
 
     # =========================================================================
     # Backward-compatible delegate methods (for gradual caller migration)

@@ -32,15 +32,78 @@ except ImportError:
     # share a compatible annotation across conditional signatures.
     REGISTRY: Any = None  # type: ignore[no-redef]
 
-if not PROMETHEUS_AVAILABLE:
-    logger.warning("metrics.prometheus_unavailable")
-
-
 _PROMETHEUS_INSTALL_HINT = (
     "prometheus_client is required for metric registration but is not installed. "
     'Install with: pip install "baldur-framework[prometheus]" '
     "(quotes required in zsh/fish to prevent bracket glob expansion)."
 )
+
+
+# =============================================================================
+# No-op metric (the prometheus extra is absent)
+# =============================================================================
+
+
+class NoOpMetric:
+    """Null-object metric family used when the prometheus extra is absent.
+
+    Absence of a metrics backend is a posture, not a per-call fault — the
+    same stance OpenTelemetry's no-op MeterProvider and every statsd client
+    take. Recording against this object does nothing and never raises, so
+    the callers that record metrics need no absence branch of their own.
+
+    Its surface is the closure of the protocols the real recorders expose,
+    derived from those classes rather than listed here, because implicit
+    special-method lookup goes to the *type* and bypasses ``__getattr__``:
+
+    - attribute access returns ``self``, so a chain of any depth resolves;
+    - ``__call__`` returns ``self``, because the dominant consumer shape
+      resolves an attribute and then calls it;
+    - the context-manager pair exists because one recorder method is a
+      ``@contextmanager``, and a call-only stub passes right over that.
+
+    ``__exit__`` returns False: a stub that swallowed exceptions would turn
+    an absent optional dependency into a silent-failure factory. Dunder
+    lookups still raise ``AttributeError`` so copy, pickle and inspect
+    probes get honest answers.
+
+    Peer at the labeled-child contract: ``metrics/safe_gauge/noop.py``
+    ``NoOpGaugeChild``, which is reachable only through ``SafeGauge``.
+    """
+
+    __slots__ = ()
+
+    def __getattr__(self, name: str) -> NoOpMetric:
+        if name.startswith("__"):
+            raise AttributeError(name)
+        return self
+
+    def __call__(self, *args: Any, **kwargs: Any) -> NoOpMetric:
+        return self
+
+    def __enter__(self) -> NoOpMetric:
+        return self
+
+    def __exit__(self, *exc_info: object) -> bool:
+        return False
+
+
+NOOP_METRIC = NoOpMetric()
+
+
+def noop_metric_factory(*args: Any, **kwargs: Any) -> Any:
+    """Stand in for any ``get_or_create_*`` helper when prometheus is absent.
+
+    Absorbs all three helper signatures, including the histogram's optional
+    ``buckets``. Module-scope metric definitions bind this instead of the
+    raising helpers, which is what keeps those modules importable — and
+    therefore keeps their consumers from failing once per call.
+
+    Returns the shared :data:`NOOP_METRIC`, annotated ``Any`` because it
+    substitutes for helpers declared to return collector types: a narrower
+    annotation would make every substitution a type error.
+    """
+    return NOOP_METRIC
 
 
 # =============================================================================
@@ -238,9 +301,17 @@ def ensure_up_gauge() -> None:
     side-effect (fail-open), and this runs at module import, where a propagated
     raise would break every importer of the metrics registry.
 
+    Returns immediately when the prometheus extra is absent. That is not a
+    registration fault to warn about — it is the zero-config posture, and
+    this runs at *import* time, before anything has configured logging, so a
+    demoted line would still print. The install hint survives on the
+    ``get_or_create_*`` raise and in the startup posture line.
+
     The WARNING is the only diagnostic a name collision produces, so its event
     name is a fixed literal and carries the exception text.
     """
+    if not PROMETHEUS_AVAILABLE:
+        return
     try:
         get_or_create_gauge(UP_GAUGE_NAME, _UP_GAUGE_DESCRIPTION, []).set(1)
     except Exception as exc:

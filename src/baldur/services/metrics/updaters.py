@@ -13,8 +13,17 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from baldur.metrics.registry import get_or_create_gauge, get_registered_domains
+from baldur.metrics.registry import PROMETHEUS_AVAILABLE, get_registered_domains
 from baldur.utils.time import utc_now
+
+# The definition below runs at module scope, and the real helper raises when
+# the prometheus extra is absent — which made this module unimportable and
+# turned its consumers' per-call imports into a per-call WARNING. Binding the
+# no-op factory keeps the module importable with the definition untouched.
+if PROMETHEUS_AVAILABLE:
+    from baldur.metrics.registry import get_or_create_gauge
+else:
+    from baldur.metrics.registry import noop_metric_factory as get_or_create_gauge
 
 # Non-domain metric kept locally (was in definitions.py)
 _shadow_log_unsynced_count = get_or_create_gauge(

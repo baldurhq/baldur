@@ -109,25 +109,50 @@ class TestProtectImportsWithoutPrometheusBehavior:
         assert "OK" in result.stdout
 
 
-class TestServicesLazyAttrsRaiseWithoutPrometheusContract:
-    """services/__init__ PEP 562 lazy attrs raise ImportError on first access."""
+class TestServicesLazyAttrsResolveWithoutPrometheusContract:
+    """services/__init__ PEP 562 lazy attrs resolve without the extra.
+
+    They used to raise ImportError on first access, because the modules
+    behind them define their metrics at module scope and the registration
+    helpers raise when the extra is absent. Every consumer therefore failed
+    once per call and logged a WARNING per call. The definition modules now
+    bind the no-op factory instead, so the attributes resolve and recording
+    silently does nothing — the negative half of that change.
+    """
 
     @pytest.mark.parametrize(
         "attr_name",
         ["record_sla_breach", "collect_all_metrics"],
     )
-    def test_lazy_metric_attr_raises_importerror_with_install_hint(self, attr_name):
+    def test_lazy_metric_attr_resolves_to_a_callable(self, attr_name):
         # When
         result = _run_poisoned(
             f"""
             import baldur.services as s
-            try:
-                getattr(s, '{attr_name}')
-            except ImportError as e:
-                assert 'baldur-framework[prometheus]' in str(e), str(e)
-                print('OK')
-            else:
-                print('NO_RAISE')
+            value = getattr(s, '{attr_name}')
+            assert callable(value), type(value)
+            print('OK')
+            """
+        )
+        # Then
+        assert result.returncode == 0, f"stderr={result.stderr}"
+        assert "OK" in result.stdout, f"stdout={result.stdout}"
+
+    @pytest.mark.parametrize(
+        "module_name",
+        [
+            "baldur.services.metrics.definitions",
+            "baldur.services.metrics.recorders",
+            "baldur.services.metrics.updaters",
+        ],
+    )
+    def test_module_scope_definition_module_imports(self, module_name):
+        # When
+        result = _run_poisoned(
+            f"""
+            import importlib
+            importlib.import_module('{module_name}')
+            print('OK')
             """
         )
         # Then
