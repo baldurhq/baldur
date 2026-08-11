@@ -42,6 +42,7 @@ logger = structlog.get_logger()
 
 __all__ = [
     "emit_runtime_posture_once",
+    "get_runtime_posture",
     "init",
     "reset_init_state",
     "reset_runtime_posture",
@@ -2028,6 +2029,34 @@ def _resolve_metrics_posture() -> tuple[str, str | None]:
     return "disabled", "prometheus_extra_not_installed"
 
 
+def get_runtime_posture() -> dict[str, Any]:
+    """Describe what this install is actually running on, right now.
+
+    The single derivation behind both the one-line announcement and the
+    startup report's ``storage_backend`` / ``metrics_backend`` keys, so the
+    short line and the long report cannot disagree about the same process.
+    Pure: reads configuration and computes: no I/O, no logging, no latch.
+    """
+    storage, storage_reason = _resolve_storage_posture()
+    metrics, metrics_reason = _resolve_metrics_posture()
+
+    posture: dict[str, Any] = {
+        "storage": storage,
+        "metrics": metrics,
+        "init_called": _init_done,
+    }
+    if storage_reason:
+        posture["storage_reason"] = storage_reason
+        posture["storage_hint"] = _MEMORY_STORAGE_HINT
+    if metrics_reason:
+        posture["metrics_reason"] = metrics_reason
+        if metrics_reason == "prometheus_extra_not_installed":
+            from baldur.metrics.registry import PROMETHEUS_INSTALL_HINT
+
+            posture["metrics_hint"] = PROMETHEUS_INSTALL_HINT
+    return posture
+
+
 def emit_runtime_posture_once() -> None:
     """Announce, once per process, what this install is actually running on.
 
@@ -2059,25 +2088,9 @@ def emit_runtime_posture_once() -> None:
 
     from baldur.observability.structlog_config import POSTURE_LOGGER_NAME
 
-    storage, storage_reason = _resolve_storage_posture()
-    metrics, metrics_reason = _resolve_metrics_posture()
-
-    fields: dict[str, Any] = {
-        "storage": storage,
-        "metrics": metrics,
-        "init_called": _init_done,
-    }
-    if storage_reason:
-        fields["storage_reason"] = storage_reason
-        fields["storage_hint"] = _MEMORY_STORAGE_HINT
-    if metrics_reason:
-        fields["metrics_reason"] = metrics_reason
-        if metrics_reason == "prometheus_extra_not_installed":
-            from baldur.metrics.registry import PROMETHEUS_INSTALL_HINT
-
-            fields["metrics_hint"] = PROMETHEUS_INSTALL_HINT
-
-    structlog.get_logger(POSTURE_LOGGER_NAME).info("baldur.runtime_posture", **fields)
+    structlog.get_logger(POSTURE_LOGGER_NAME).info(
+        "baldur.runtime_posture", **get_runtime_posture()
+    )
 
 
 def reset_runtime_posture() -> None:
@@ -2093,18 +2106,17 @@ def _build_startup_report(ext_result: ExtensionResult) -> dict[str, Any]:
     Combines entry-point hook results (installation) with settings flag scan
     (configuration) into a single structured dict for INFO logging.
     """
-    storage_backend, _ = _resolve_storage_posture()
-    metrics_backend, _ = _resolve_metrics_posture()
+    posture = get_runtime_posture()
     report: dict[str, Any] = {
         "extensions": {
             "found": ext_result.found,
             "executed": ext_result.executed,
             "failed": ext_result.failed,
         },
-        # Same predicates the posture line uses, so the short announcement
+        # Same derivation the posture line uses, so the short announcement
         # and the long report cannot disagree about the same process.
-        "storage_backend": storage_backend,
-        "metrics_backend": metrics_backend,
+        "storage_backend": posture["storage"],
+        "metrics_backend": posture["metrics"],
     }
 
     features: dict[str, bool] = {}
