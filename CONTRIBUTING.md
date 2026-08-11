@@ -85,7 +85,7 @@ pytest tests/unit/ tests/architecture/ -n auto -q
 
 The architecture suite (`tests/architecture/`) is the set of fitness
 functions described in [ARCHITECTURE.md](ARCHITECTURE.md). If one fails, its
-message links to the matching rule.
+message names the offending file and line.
 
 ## Coding standards
 
