@@ -27,6 +27,7 @@ from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings
 
 from baldur.settings.base import make_settings_config
+from baldur.settings.redis import DEFAULT_REDIS_URL
 
 
 class ResilientStorageSettings(BaseSettings):
@@ -44,7 +45,7 @@ class ResilientStorageSettings(BaseSettings):
     model_config = make_settings_config("BALDUR_RESILIENT_STORAGE_")
 
     redis_url: str = Field(
-        default="redis://localhost:6379/0",
+        default=DEFAULT_REDIS_URL,
         min_length=1,
         description=(
             "Redis connection URL. When unset, falls back to "
