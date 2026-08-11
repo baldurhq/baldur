@@ -24,6 +24,13 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
   entry — or run in production — and every one of those lines keeps its level. Losing a live
   Redis (`resilient_storage.degraded_mode_fallback`) stays CRITICAL in every posture.
 
+- Without the `prometheus` extra, metric recording is a silent no-op instead of a warning per
+  protected call. `metrics.prometheus_unavailable` and `metrics.up_gauge_registration_failed` are
+  gone, `prometheus.unavailable` is INFO, and the `retry.*_recording_failed` /
+  `metrics.record_*_failed` families no longer fire for a missing extra — they still fire when the
+  extra is installed and a recorder actually breaks. Install the extra to get metrics back;
+  `pip install "baldur-framework[prometheus]"` is named in the startup posture line.
+
 ### Fixed
 
 - `BALDUR_RESILIENT_STORAGE_REDIS_URL` is finally honored at startup: the documented "a per-class

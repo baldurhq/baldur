@@ -22,12 +22,22 @@ from datetime import datetime
 import structlog
 
 from baldur.core.test_mode_context import TestModeContext
-from baldur.metrics.registry import (
-    get_or_create_counter,
-    get_or_create_gauge,
-    get_or_create_histogram,
-    resolve_domain_label,
-)
+from baldur.metrics.registry import PROMETHEUS_AVAILABLE, resolve_domain_label
+
+# The definitions below run at module scope, and the real helpers raise when
+# the prometheus extra is absent — which made this module unimportable and
+# turned its consumers' per-call imports into a per-call WARNING. Binding the
+# no-op factory keeps the module importable with every definition untouched.
+if PROMETHEUS_AVAILABLE:
+    from baldur.metrics.registry import (
+        get_or_create_counter,
+        get_or_create_gauge,
+        get_or_create_histogram,
+    )
+else:
+    from baldur.metrics.registry import noop_metric_factory as get_or_create_counter
+
+    get_or_create_gauge = get_or_create_histogram = get_or_create_counter
 
 logger = structlog.get_logger()
 

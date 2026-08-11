@@ -7,11 +7,24 @@ Metrics are organized by category for clarity.
 
 from __future__ import annotations
 
-from baldur.metrics.registry import (
-    get_or_create_counter,
-    get_or_create_gauge,
-    get_or_create_histogram,
-)
+from baldur.metrics.registry import PROMETHEUS_AVAILABLE
+
+# Every definition below runs at module scope, and the real helpers raise
+# when the prometheus extra is absent — which would make this module
+# unimportable and turn its consumers' per-call imports into a per-call
+# WARNING. Binding the no-op factory instead keeps the module importable and
+# leaves every definition line untouched, so a new metric needs no absence
+# arm of its own.
+if PROMETHEUS_AVAILABLE:
+    from baldur.metrics.registry import (
+        get_or_create_counter,
+        get_or_create_gauge,
+        get_or_create_histogram,
+    )
+else:
+    from baldur.metrics.registry import noop_metric_factory as get_or_create_counter
+
+    get_or_create_gauge = get_or_create_histogram = get_or_create_counter
 
 # =============================================================================
 # DLQ Outbox Metrics (impl doc 486 D4 / D11)

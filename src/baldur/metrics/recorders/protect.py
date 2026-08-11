@@ -103,10 +103,15 @@ _recorder_init_failed: bool = False
 def get_protect_recorder() -> ProtectMetricRecorder | None:
     """Return the lazy ProtectMetricRecorder singleton, or None if prometheus_client missing.
 
-    On first construction failure (e.g., ``prometheus_client`` not installed),
-    sets the sticky ``_recorder_init_failed`` flag so subsequent calls return
-    None immediately without re-running the failing constructor. Recovery
-    requires explicit ``reset_protect_recorder()``.
+    On first construction failure, sets the sticky ``_recorder_init_failed``
+    flag so subsequent calls return None immediately without re-running the
+    failing constructor. Recovery requires explicit
+    ``reset_protect_recorder()``.
+
+    A missing ``prometheus_client`` is the optional extra being absent — the
+    expected posture of an install that never asked for metrics — and logs
+    at DEBUG. Any other construction fault means the extra is installed and
+    something is actually wrong, and keeps the WARNING.
     """
     global _recorder, _recorder_init_failed
     if _recorder is not None:
@@ -115,6 +120,10 @@ def get_protect_recorder() -> ProtectMetricRecorder | None:
         return None
     try:
         _recorder = ProtectMetricRecorder()
+    except ImportError as e:
+        _recorder_init_failed = True
+        logger.debug("metrics.protect_recorder_unavailable_sticky", error=e)
+        _recorder = None
     except Exception as e:
         _recorder_init_failed = True
         logger.warning("metrics.protect_recorder_unavailable_sticky", error=e)

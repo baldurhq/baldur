@@ -44,7 +44,11 @@ class BackpressureMetrics:
         self._prefix = self._settings.metrics_prefix
 
         if not HAS_PROMETHEUS:
-            logger.warning("backpressure_metrics.prometheus_unavailable")
+            # A posture, not a fault — the extra is optional. Note this flag
+            # is the module's own find_spec probe, independent of the metrics
+            # registry's import-time bool, so a registry-scoped no-op never
+            # reaches here and a test must patch this name separately.
+            logger.debug("backpressure_metrics.prometheus_unavailable")
             return
 
         if not self._settings.metrics_enabled:
