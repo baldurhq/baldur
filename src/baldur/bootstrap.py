@@ -36,6 +36,7 @@ import structlog
 if TYPE_CHECKING:
     from baldur.factory.base import GenericProviderRegistry
     from baldur.runtime import BaldurRuntime
+    from baldur.settings.resilient_storage import ResilientStorageSettings
 
 logger = structlog.get_logger()
 
@@ -1668,24 +1669,27 @@ def _install_resilient_storage_backend(runtime: BaldurRuntime) -> None:
         configure_storage_backend,
     )
     from baldur.core.exceptions import ConfigurationError
-    from baldur.settings.redis import get_redis_settings
     from baldur.settings.resilient_storage import (
         ResilientStorageSettings,
         get_resilient_storage_settings,
     )
 
-    redis_url = get_redis_settings().url
     base_settings = get_resilient_storage_settings()
     # Carry over only the fields an operator actually supplied. Dumping every
     # field would mark them all as explicitly set, and the backend infers
     # "did the operator choose this directory?" from ``model_fields_set`` —
     # a full dump makes every default look operator-chosen.
+    #
+    # ``redis_url`` is deliberately NOT injected here: the settings class
+    # resolves BALDUR_REDIS_URL through its own validator, so injecting it
+    # would clobber a per-class override, mark the field operator-chosen on
+    # every boot, and fail ``min_length=1`` when BALDUR_REDIS_URL is empty.
     operator_supplied = {
         name: value
         for name, value in base_settings.model_dump().items()
         if name in base_settings.model_fields_set
     }
-    settings = ResilientStorageSettings(**{**operator_supplied, "redis_url": redis_url})
+    settings = ResilientStorageSettings(**operator_supplied)
     backend = ResilientStorageBackend(settings=settings)
     configure_storage_backend(backend)
 
@@ -1709,10 +1713,24 @@ def _install_resilient_storage_backend(runtime: BaldurRuntime) -> None:
 
     logger.info(
         "baldur.resilient_storage_backend_installed",
-        redis_url_source="BALDUR_REDIS_URL",
+        redis_url_source=_resilient_storage_redis_url_source(settings),
         wal_initialized=backend._wal_initialized,
         wal_on_fallback_dir=backend._wal_on_fallback_dir,
     )
+
+
+def _resilient_storage_redis_url_source(settings: ResilientStorageSettings) -> str:
+    """Name the channel the backend's Redis URL actually came from.
+
+    The three channels are distinguishable: a per-class override marks the
+    field explicitly-set, the project-wide variable is resolved by the
+    settings validator, and everything else is the shipped default.
+    """
+    if "redis_url" in settings.model_fields_set:
+        return "BALDUR_RESILIENT_STORAGE_REDIS_URL"
+    if os.environ.get("BALDUR_REDIS_URL"):
+        return "BALDUR_REDIS_URL"
+    return "default"
 
 
 def _wire_registry_defaults() -> None:

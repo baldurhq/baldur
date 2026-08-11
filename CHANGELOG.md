@@ -18,6 +18,11 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ### Fixed
 
+- `BALDUR_RESILIENT_STORAGE_REDIS_URL` is finally honored at startup: the documented "a per-class
+  override wins" precedence held everywhere except `baldur.init()`, which overwrote it with
+  `BALDUR_REDIS_URL` (or the localhost default). Deployments that set only the per-class variable
+  had the resilient backend dialing the wrong address, and now reach the host they configured.
+- `BALDUR_REDIS_URL=""` no longer crashes `baldur.init()` outside production.
 - Zero-config startup no longer logs repeated circuit-breaker warmup errors when Redis is absent.
 
 ## [1.4.0] - 2026-08-11

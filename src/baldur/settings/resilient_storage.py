@@ -132,9 +132,10 @@ class ResilientStorageSettings(BaseSettings):
 
         Keeps the localhost default and ``min_length=1``: the
         ``model_fields_set`` convention needs no empty-string sentinel.
-        Compatible with bootstrap's ``ResilientStorageSettings(redis_url=...)``
-        injection — an explicit kwarg sets ``model_fields_set`` so the
-        helper no-ops and the injected value is honored.
+        This validator is the only resolution path — startup wiring
+        constructs the class without supplying ``redis_url``, so a per-class
+        override (env var or explicit kwarg) always wins here and an
+        unsupplied field is never marked operator-chosen.
         """
         from baldur.settings.redis import apply_redis_url_fallback
 
