@@ -119,7 +119,13 @@ class RedisRateLimitStorage(RateLimitStorageInterface):
         return f"{self.KEY_PREFIX}:{key}:{suffix}"
 
     def is_available(self) -> bool:
-        """Check if Redis is available."""
+        """Check if Redis is available.
+
+        The unavailable edge is announced at WARNING, except when nobody
+        configured Redis outside production: this adapter is only
+        auto-constructed against the shipped default URL in that posture, so
+        the failure is the framework finding its own default unreachable.
+        """
         try:
             self._redis.ping()
             # v6.3.0: Recovered - a drift check is required
@@ -132,11 +138,19 @@ class RedisRateLimitStorage(RateLimitStorageInterface):
         except Exception as e:
             # v6.3.0: Record the Redis-unavailable metric
             if not self._fallback_mode:
+                from baldur.settings.redis import redis_absence_is_expected
+
                 record_ratelimit_redis_unavailable()
-                logger.warning(
-                    "redis_rate_limit_storage.redis_unavailable",
-                    error=e,
-                )
+                if redis_absence_is_expected():
+                    logger.debug(
+                        "redis_rate_limit_storage.redis_unavailable",
+                        error=e,
+                    )
+                else:
+                    logger.warning(
+                        "redis_rate_limit_storage.redis_unavailable",
+                        error=e,
+                    )
             self._fallback_mode = True
             set_ratelimit_fallback_mode(True)
             self._available = False

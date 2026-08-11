@@ -169,7 +169,18 @@ class TestResetInitStateChainBehavior:
 
 
 class TestInitNotCalledWarningBehavior:
-    """First-access WARNING fires once per registry when init() was never called."""
+    """First-access WARNING fires once per registry when init() was never called.
+
+    WARNING belongs to the configured posture: skipping ``init()`` with a
+    Redis configured silently discards that configuration, which is the case
+    this announcement exists for. With nothing configured the same
+    announcement drops to DEBUG, so each test here declares the configured
+    posture instead of inheriting whatever the host environment has.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _configured_redis_posture(self, monkeypatch):
+        monkeypatch.setenv("BALDUR_REDIS_URL", "redis://configured:6379/0")
 
     def test_cache_warning_fires_when_init_done_false_and_flag_unset(self, caplog):
         """First call → WARNING ``baldur.init_not_called_get_cache``."""

@@ -1273,22 +1273,41 @@ ProviderRegistry.recovery_adapter.set_default("oss-noop")
 # =============================================================================
 
 
+def _init_not_called_log(event: str, hint: str) -> None:
+    """Announce a registry access that preceded ``init()``, at the level the
+    situation deserves.
+
+    Skipping ``init()`` matters only when it loses something. With Redis
+    configured, the silent memory fallback discards the operator's
+    configuration — the case this warning was built for — so it stays a
+    WARNING. With nothing configured, decorator-only usage is first-class
+    quickstart usage that loses nothing, and the startup posture line
+    already announces the memory backend once; DEBUG.
+    """
+    from baldur.settings.redis import redis_explicitly_configured
+
+    if redis_explicitly_configured():
+        logger.warning(event, hint=hint)
+    else:
+        logger.debug(event, hint=hint)
+
+
 def _warn_if_init_not_called_cache() -> None:
-    """Emit a one-time WARNING when ``get_cache()`` runs before ``init()``.
+    """Announce, once, that ``get_cache()`` ran before ``init()``.
 
     Production deploys never trip this — ``baldur.init()`` is invariant
     on the framework-adapter startup paths. Ad-hoc utility / CLI / REPL
     scripts that import baldur for sub-features may legitimately skip
-    init(); the warning makes the silent memory fallback visible exactly
-    once per process.
+    init(); this makes the silent memory fallback visible exactly once per
+    process, at the level :func:`_init_not_called_log` decides.
     """
-    # warn once when get_cache() precedes init().
+    # log once when get_cache() precedes init().
     import baldur.bootstrap as _bootstrap
 
     if _bootstrap._init_done or _bootstrap._init_not_called_cache_warned:
         return
     _bootstrap._init_not_called_cache_warned = True
-    logger.warning(
+    _init_not_called_log(
         "baldur.init_not_called_get_cache",
         hint=(
             "ProviderRegistry.get_cache() invoked before baldur.init(). "
@@ -1299,23 +1318,22 @@ def _warn_if_init_not_called_cache() -> None:
 
 
 def _warn_if_init_not_called_storage() -> None:
-    """Emit a one-time WARNING when ``get_storage_backend()`` runs before ``init()``.
+    """Announce, once, that ``get_storage_backend()`` ran before ``init()``.
 
     Companion to :func:`_warn_if_init_not_called_cache`. Maximum two
-    WARNINGs per ad-hoc process (one per registry).
+    records per ad-hoc process (one per registry).
     """
     import baldur.bootstrap as _bootstrap
 
     if _bootstrap._init_done or _bootstrap._init_not_called_storage_warned:
         return
     _bootstrap._init_not_called_storage_warned = True
-    logger.warning(
+    _init_not_called_log(
         "baldur.init_not_called_get_storage_backend",
         hint=(
             "get_storage_backend() invoked before baldur.init(). The "
-            "backend will lazy-construct with default Redis URL "
-            "(redis://localhost:6379/0). Call baldur.init() at process "
-            "startup for environment-aware wiring."
+            "backend will lazy-construct with the default Redis URL. Call "
+            "baldur.init() at process startup for environment-aware wiring."
         ),
     )
 
