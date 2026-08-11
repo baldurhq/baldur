@@ -70,8 +70,10 @@ class DatabaseRateLimitStorage(RateLimitStorageInterface):
         Initialize database rate limit storage.
 
         Args:
-            repository_factory: Optional factory function to create repository.
-                              If None, uses Django ORM by default.
+            repository_factory: Factory function creating the rate-limit
+                state repository. Required in practice — this package ships
+                no Django repository, so an instance built without one can
+                never serve a request and reports itself unavailable.
         """
         self._repository_factory = repository_factory
         self._lock = threading.Lock()
@@ -94,9 +96,21 @@ class DatabaseRateLimitStorage(RateLimitStorageInterface):
         )
 
     def is_available(self) -> bool:
-        """Check if database is available."""
+        """Check if database is available.
+
+        A bare instance — no ``repository_factory`` — is unconfigured, not
+        broken: it was constructed by auto-detection probing every backend,
+        and it can never work by construction. Reporting that at DEBUG
+        without the doomed round-trip is behavior-preserving; a factory that
+        was supplied and then fails keeps the WARNING.
+        """
         if self._available is not None:
             return self._available
+
+        if self._repository_factory is None:
+            logger.debug("database_rate_limit_storage.not_configured")
+            self._available = False
+            return False
 
         try:
             repo = self._get_repository()

@@ -24,6 +24,14 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
   entry — or run in production — and every one of those lines keeps its level. Losing a live
   Redis (`resilient_storage.degraded_mode_fallback`) stays CRITICAL in every posture.
 
+- `baldur.init_not_called_get_cache` / `..._get_storage_backend` are WARNING only when Redis is
+  configured — the case where skipping `init()` really does discard your configuration. Ad-hoc
+  scripts and the decorator-only quickstart get DEBUG, and the startup posture line instead.
+- The rate-limit backend probes stop reporting unconfigured infrastructure as unavailable
+  infrastructure: `database_rate_limit_storage.database_unavailable` becomes a DEBUG
+  `..._not_configured` when no `repository_factory` was supplied (that instance can never work
+  by construction), and `redis_rate_limit_storage.redis_unavailable` is DEBUG when nobody
+  configured Redis outside production.
 - Without the `prometheus` extra, metric recording is a silent no-op instead of a warning per
   protected call. `metrics.prometheus_unavailable` and `metrics.up_gauge_registration_failed` are
   gone, `prometheus.unavailable` is INFO, and the `retry.*_recording_failed` /
