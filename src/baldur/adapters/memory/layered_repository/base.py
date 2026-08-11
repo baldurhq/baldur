@@ -192,6 +192,15 @@ class LayeredRepositoryBase:
         ``_warmup_done`` is set to True even on failure — do not retry from
         the constructor; subsequent real calls go through the normal
         ``_l2_healthy`` quarantine pathway.
+
+        Degraded skip: when the L2 repo's ResilientStorageBackend is already
+        degraded (no live redis client), warmup is skipped entirely — there is
+        no connection pool or Lua round-trip to warm, and delegating would
+        violate the redis repo's ``try_acquire_half_open_slot`` caller
+        invariant (it asserts a live raw client). The skip does NOT set
+        ``_warmup_done``: the skip path does no I/O, so re-checking on a later
+        construction is free, and a construction after Redis recovery still
+        gets its warmup.
         """
         if not self._l2 or self._adapter_type.lower() != "redis":
             return
@@ -199,6 +208,18 @@ class LayeredRepositoryBase:
         # Double-checked locking: unlocked fast-path for steady state,
         # locked slow-path for first-construction race.
         if LayeredRepositoryBase._warmup_done:
+            return
+
+        # getattr duck-probes guard absence only (test doubles without a
+        # backend, non-RSB-composed repos proceed as before); a real
+        # ResilientStorageBackend answers is_degraded without I/O.
+        l2_backend = getattr(self._l2, "_backend", None)
+        if l2_backend is not None and getattr(l2_backend, "is_degraded", False):
+            logger.debug(
+                "layered_repo.l2_warmup_skipped",
+                reason="l2_backend_degraded",
+                adapter_type=self._adapter_type,
+            )
             return
         with LayeredRepositoryBase._warmup_lock:
             if LayeredRepositoryBase._warmup_done:

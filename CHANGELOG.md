@@ -10,6 +10,10 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+### Fixed
+
+- Zero-config startup no longer logs repeated circuit-breaker warmup errors when Redis is absent.
+
 ## [1.4.0] - 2026-08-11
 
 ### Added
