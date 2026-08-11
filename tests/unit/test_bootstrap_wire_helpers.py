@@ -201,16 +201,16 @@ class TestWireRedisRegistryBehavior:
         assert "BALDUR_REDIS_URL or Django DATABASES" in message
         assert "configure Django DATABASES" in message
 
-    def test_redis_unset_in_non_production_warns_and_falls_back_to_memory(
+    def test_redis_unset_in_non_production_reports_and_falls_back_to_memory(
         self, cache_registry_isolated, fake_runtime, caplog
     ):
-        """non-prod + Redis unset → WARNING + ``set_default("memory")``."""
+        """non-prod + Redis unset → INFO + ``set_default("memory")``."""
         from baldur import bootstrap
 
         # Pre-drift to surface that the helper resets to memory.
         cache_registry_isolated.set_default("redis")
 
-        with caplog.at_level("WARNING"):
+        with caplog.at_level("INFO"):
             bootstrap._wire_redis_registry(
                 cache_registry_isolated,
                 target_name="redis",
@@ -236,10 +236,10 @@ class TestWireRedisRegistryBehavior:
         caplog,
         fallback_target,
     ):
-        """non-prod + neither signal → WARNING regardless of fallback (no Django)."""
+        """non-prod + neither signal → INFO regardless of fallback (no Django)."""
         from baldur import bootstrap
 
-        with caplog.at_level("WARNING"):
+        with caplog.at_level("INFO"):
             bootstrap._wire_redis_registry(
                 cache_registry_isolated,
                 target_name="redis",
@@ -320,13 +320,13 @@ class TestWireSqlDjangoRegistryBehavior:
         assert "Django DATABASES" in message
         assert "ProviderRegistry.recovery_session_repo" in message
 
-    def test_neither_signal_in_non_production_warns_and_falls_back_to_memory(
+    def test_neither_signal_in_non_production_reports_and_falls_back_to_memory(
         self, recovery_session_registry_isolated, fake_runtime, caplog
     ):
-        """non-prod + neither → WARNING + ``set_default("memory")``."""
+        """non-prod + neither → INFO + ``set_default("memory")``."""
         from baldur import bootstrap
 
-        with caplog.at_level("WARNING"):
+        with caplog.at_level("INFO"):
             bootstrap._wire_sql_django_registry(
                 recovery_session_registry_isolated,
                 sql_target="sql",

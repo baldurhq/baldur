@@ -297,8 +297,15 @@ def _resolve_fallback(
         )
         if key not in _warned_keys:
             _warned_keys.add(key)
-            logger.warning(
-                "storage.writable_dir_probe_failed",
+            # INFO, once per key: this branch is reachable only for a
+            # hardcoded default — an operator-chosen directory that is
+            # unwritable raises ConfigurationError before the fallback chain
+            # is walked — so it reports the framework relocating its own
+            # default, which is the expected outcome on any machine that
+            # does not have /var/log/baldur. Named for what happened, since
+            # the level table reserves `_failed` for WARNING and above.
+            logger.info(
+                "storage.writable_dir_fallback",
                 purpose=purpose,
                 preferred=str(preferred_path),
                 fallback=str(candidate),

@@ -33,6 +33,13 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
   entry — or run in production — and every one of those lines keeps its level. Losing a live
   Redis (`resilient_storage.degraded_mode_fallback`) stays CRITICAL in every posture.
 
+- A zero-config non-production `baldur.init()` no longer boots at alarm level: the nine
+  `baldur.registry_memory_fallback` lines are INFO (the fallback stays visible; the alarm level was
+  the defect), the secret-validation reports are INFO/DEBUG, and the WAL directory fallback is an
+  INFO `storage.writable_dir_fallback` — renamed from `storage.writable_dir_probe_failed`, since
+  it reports the framework relocating its own default, not a failure. **Production is unchanged**:
+  the missing-secret ERROR lines and the boot-aborting `RuntimeError` still fire, and both
+  memory-fallback branches still raise `ConfigurationError` before reaching the INFO line.
 - `baldur.init_not_called_get_cache` / `..._get_storage_backend` are WARNING only when Redis is
   configured — the case where skipping `init()` really does discard your configuration. Ad-hoc
   scripts and the decorator-only quickstart get DEBUG, and the startup posture line instead.

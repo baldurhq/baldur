@@ -69,7 +69,7 @@ class TestResolveWritableDirBehavior:
         assert resolved.path == preferred
         assert resolved.fell_back is False
         assert resolved.reason is None
-        assert log_events(logs, "storage.writable_dir_probe_failed") == []
+        assert log_events(logs, "storage.writable_dir_fallback") == []
 
     def test_unwritable_default_dir_falls_back_to_the_state_dir(
         self, writable_dir_chain, deny_dir, tmp_path
@@ -86,10 +86,10 @@ class TestResolveWritableDirBehavior:
         assert resolved.path.is_relative_to(writable_dir_chain.state)
         assert resolved.path.is_dir()
 
-    def test_unwritable_default_dir_emits_one_warning_naming_both_paths(
+    def test_unwritable_default_dir_emits_one_notice_naming_both_paths(
         self, writable_dir_chain, deny_dir, tmp_path
     ):
-        """The fallback warning names the preferred path, the fallback and the override."""
+        """The fallback notice names the preferred path, the fallback and the override."""
         preferred = tmp_path / "unwritable"
         deny_dir(preferred)
 
@@ -101,12 +101,12 @@ class TestResolveWritableDirBehavior:
                 env_override_name="BALDUR_AUDIT_PATH",
             )
 
-        warnings = log_events(logs, "storage.writable_dir_probe_failed")
+        warnings = log_events(logs, "storage.writable_dir_fallback")
         assert len(warnings) == 1
         assert warnings[0]["preferred"] == str(preferred)
         assert warnings[0]["fallback"] == str(resolved.path)
         assert warnings[0]["override_env"] == "BALDUR_AUDIT_PATH"
-        assert warnings[0]["log_level"] == "warning"
+        assert warnings[0]["log_level"] == "info"
 
     @posix_only
     def test_unwritable_default_dir_without_a_state_dir_falls_back_to_var_tmp(
@@ -466,7 +466,7 @@ class TestWritableDirLeafContract:
 
         assert first is second
         assert len(get_writable_dir_resolutions()) == 1
-        assert len(log_events(logs, "storage.writable_dir_probe_failed")) == 1
+        assert len(log_events(logs, "storage.writable_dir_fallback")) == 1
 
     def test_operator_set_resolve_raises_even_when_a_fallback_is_cached(
         self, writable_dir_chain, deny_dir, tmp_path
@@ -769,7 +769,7 @@ class TestWritableDirRegistryBehavior:
         assert len(results) == 8
         assert len({r.path for r in results}) == 1
         assert len(get_writable_dir_resolutions()) == 1
-        assert len(log_events(logs, "storage.writable_dir_probe_failed")) == 1
+        assert len(log_events(logs, "storage.writable_dir_fallback")) == 1
 
     def test_get_resolutions_returns_a_copy_that_cannot_corrupt_the_registry(
         self, writable_dir_chain, tmp_path
@@ -810,7 +810,7 @@ class TestWritableDirRegistryBehavior:
             reset_writable_dir_resolutions()
             resolve_writable_dir(preferred, purpose="checkpoint", operator_set=False)
 
-        assert len(log_events(logs, "storage.writable_dir_probe_failed")) == 2
+        assert len(log_events(logs, "storage.writable_dir_fallback")) == 2
 
 
 class TestWritableDirPurposeCollisionBehavior:
