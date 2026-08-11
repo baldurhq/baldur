@@ -40,6 +40,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `BALDUR_RESILIENT_STORAGE_REDIS_URL` is honored by `baldur.init()`, which overwrote it before.
 - `BALDUR_REDIS_URL=""` no longer crashes `baldur.init()` outside production.
 - Zero-config startup no longer logs repeated circuit-breaker warmup errors when Redis is absent.
+- Answering "is a Redis configured?" no longer imports Django into a process that never had it.
 
 ## [1.4.0] - 2026-08-11
 

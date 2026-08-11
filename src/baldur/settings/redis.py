@@ -191,15 +191,19 @@ def redis_explicitly_configured() -> bool:
     :data:`REDIS_INTENT_ENV_VARS`, and the two Django-shaped probes are the
     same two strategies ``baldur.adapters.redis`` runs.
 
-    Side-effect-free: neither Django probe imports Django into a process that
-    has not already loaded it. Each probe is wrapped independently, and the
-    function never raises — a failed probe returns False, which is accurate
-    rather than merely safe, since a framework that cannot be imported cannot
-    serve that acquisition strategy either.
+    Side-effect-free: :func:`_django_plausibly_in_play` gates both Django
+    probes, so neither imports Django into a process that has not already
+    loaded it. Each probe is wrapped independently, and the function never
+    raises — a failed probe returns False, which is accurate rather than
+    merely safe, since a framework that cannot be imported cannot serve that
+    acquisition strategy either.
     """
     for name in REDIS_INTENT_ENV_VARS:
         if os.environ.get(name, "").strip():
             return True
+
+    if not _django_plausibly_in_play():
+        return False
 
     if _django_settings_name_a_redis():
         return True
@@ -231,31 +235,57 @@ def redis_absence_is_expected() -> bool:
         return False
 
 
-def _django_settings_name_a_redis() -> bool:
-    """Django settings carry a truthy ``BALDUR_REDIS_URL`` attribute.
+def _django_plausibly_in_play() -> bool:
+    """Could this process be serving a Django-shaped acquisition strategy?
 
-    Reached when Django is plausibly in play — an environment variable names
-    a settings module, or ``django.conf`` is already imported, which covers
+    True when an environment variable names a settings module, or
+    ``django.conf`` is already imported — which covers
     ``settings.configure(...)`` called programmatically with no env var.
+
+    Gates BOTH Django probes rather than only the settings one: the
+    django_redis probe imports ``django_redis``, which pulls ``django.conf``
+    and ``django.core.cache`` in with it, so an unguarded call drags Django
+    into a Flask or plain-Python process that merely has the package
+    installed as a transitive dependency. Nothing is lost by returning early
+    — with no settings module named and Django never loaded there is no
+    ``CACHES`` to read, which is the same answer the probe would reach the
+    expensive way.
     """
     import sys
 
-    if "DJANGO_SETTINGS_MODULE" not in os.environ and "django.conf" not in sys.modules:
-        return False
+    return "DJANGO_SETTINGS_MODULE" in os.environ or "django.conf" in sys.modules
+
+
+def _django_settings_name_a_redis() -> bool:
+    """Django settings carry a truthy ``BALDUR_REDIS_URL`` attribute.
+
+    Callers gate this on :func:`_django_plausibly_in_play`.
+    """
     try:
         from django.conf import settings as django_settings
+    except ImportError:
+        return False
 
+    try:
         return bool(getattr(django_settings, "BALDUR_REDIS_URL", None))
     except Exception:
+        # An unconfigured settings object raises ImproperlyConfigured on
+        # attribute access; it cannot serve the acquisition strategy either.
         return False
 
 
 def _django_redis_cache_configured() -> bool:
-    """A ``CACHES`` entry names a django_redis backend."""
+    """A ``CACHES`` entry names a django_redis backend.
+
+    Callers gate this on :func:`_django_plausibly_in_play`.
+    """
     try:
         import django_redis  # noqa: F401
         from django.conf import settings as django_settings
+    except ImportError:
+        return False
 
+    try:
         caches = getattr(django_settings, "CACHES", None) or {}
         return any(
             "django_redis" in str(config.get("BACKEND", ""))
