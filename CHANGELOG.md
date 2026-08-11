@@ -15,6 +15,14 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `baldur.init()` applies baldur's log configuration itself, so its own startup lines are filtered
   from the first one. A deployment reading baldur's DEBUG/INFO output from `init()` now sees only
   WARNING-or-above unless it sets `BALDUR_LOG_LEVEL`.
+- A first Redis probe that fails when *nobody configured Redis* is now logged at DEBUG outside
+  production: `resilient_storage.degraded_mode_entered` (CRITICAL),
+  `resilient_storage.lazy_redis_probe_failed` (WARNING), `shadow_log.sync_failed` (WARNING) and
+  the `redis_factory.connection_failed` traceback (ERROR) no longer greet a zero-config first run.
+  Nothing changes for a configured Redis: set `BALDUR_REDIS_URL`, the bare `REDIS_URL`,
+  `BALDUR_RESILIENT_STORAGE_REDIS_URL`, Django's `BALDUR_REDIS_URL` or a django_redis `CACHES`
+  entry — or run in production — and every one of those lines keeps its level. Losing a live
+  Redis (`resilient_storage.degraded_mode_fallback`) stays CRITICAL in every posture.
 
 ### Fixed
 

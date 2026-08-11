@@ -254,7 +254,80 @@ class ResilientStorageBackend:
 
         return f"{self.config.key_prefix}{key}"
 
-    def _ensure_redis(self) -> bool:  # noqa: C901
+    def _probing_unconfigured_default(self) -> bool:
+        """Is the first-init probe dialing an address nobody configured?
+
+        True only when this backend's URL came from the shipped default
+        through every channel: no explicit ``redis_url`` (a per-class
+        environment variable or a construction kwarg both mark the field
+        operator-chosen), no Redis intent expressed anywhere else, and not
+        production. In that posture an unreachable Redis is the expected
+        state of a zero-config first run, not an incident.
+
+        Never raises — the underlying predicate resolves an unexpected
+        failure toward "configured", which keeps the loud path.
+        """
+        from baldur.settings.redis import redis_absence_is_expected
+
+        return (
+            "redis_url" not in self.config.model_fields_set
+            and redis_absence_is_expected()
+        )
+
+    def _report_first_probe_failure(
+        self, error: Exception, unconfigured_first_probe: bool
+    ) -> None:
+        """Announce a failed first-init Redis probe and arm the cooldown.
+
+        Called from inside ``self._lock`` — takes no lock of its own.
+
+        Loudness splits on whether anyone configured Redis. When they did
+        (or this is production), the three effects are byte-for-byte what
+        they have always been: a WARNING for the probe, an L2 forensic
+        record of the failed sync, and the CRITICAL degraded-mode entry.
+        When nobody did, the probe is the framework discovering its own
+        default address is unreachable on a zero-config run:
+
+        - the probe failure drops to DEBUG (it retries on a cooldown);
+        - the shadow record is skipped, because with no Redis configured
+          there is no sync intent to have failed. An ``allow_memory_only``
+          operator DID name a Redis and keeps the record;
+        - the CRITICAL is skipped, generalizing the ``allow_memory_only``
+          suppression that already existed.
+
+        The ``_degraded_critical_logged`` latch is set in every posture, so
+        once-per-outage semantics are identical.
+        """
+        err_msg = _safe_error_message(error)
+        if unconfigured_first_probe:
+            logger.debug("resilient_storage.lazy_redis_probe_failed", error=err_msg)
+        else:
+            logger.warning("resilient_storage.lazy_redis_probe_failed", error=err_msg)
+
+        self._next_redis_probe = time.monotonic() + self._REDIS_PROBE_INTERVAL
+        if self._degraded_critical_logged:
+            return
+
+        if self._shadow and not unconfigured_first_probe:
+            try:
+                self._shadow.record_sync_failure(
+                    service_name="redis_init",
+                    intended_state="connected",
+                    error=error,
+                    adapter_type="redis",
+                )
+            except Exception:
+                logger.debug("resilient_storage.shadow_record_failed")
+
+        if not (self.config.allow_memory_only or unconfigured_first_probe):
+            logger.critical(
+                "resilient_storage.degraded_mode_entered",
+                reason="redis_unavailable",
+                fallback="memory_wal",
+            )
+        self._degraded_critical_logged = True
+
+    def _ensure_redis(self) -> bool:
         """Lazy Redis init / degraded-mode recovery dispatch — called at
         start of each operation.
 
@@ -307,6 +380,12 @@ class ResilientStorageBackend:
         with self._lock:
             if self._redis_initialized:
                 return self._mode == ResilientStorageMode.REDIS
+
+            # Is this probe dialing an address nobody asked for? Evaluated
+            # once and passed down, so the factory's log level and this
+            # method's carry the same meaning rather than two guesses.
+            unconfigured_first_probe = self._probing_unconfigured_default()
+
             try:
                 from baldur.adapters.cache import RedisCacheAdapter
                 from baldur.settings.redis import get_redis_settings
@@ -315,6 +394,7 @@ class ResilientStorageBackend:
                     url=self.config.redis_url,
                     key_prefix="",
                     socket_connect_timeout=get_redis_settings().probe_connect_timeout,
+                    unconfigured_probe=unconfigured_first_probe,
                 )
                 self._redis.raw_client.ping()
                 self._redis_initialized = True
@@ -323,29 +403,7 @@ class ResilientStorageBackend:
                 self._recover_from_wal_on_startup()
                 return True
             except Exception as e:
-                err_msg = _safe_error_message(e)
-                logger.warning(
-                    "resilient_storage.lazy_redis_probe_failed", error=err_msg
-                )
-                self._next_redis_probe = time.monotonic() + self._REDIS_PROBE_INTERVAL
-                if not self._degraded_critical_logged:
-                    if self._shadow:
-                        try:
-                            self._shadow.record_sync_failure(
-                                service_name="redis_init",
-                                intended_state="connected",
-                                error=e,
-                                adapter_type="redis",
-                            )
-                        except Exception:
-                            logger.debug("resilient_storage.shadow_record_failed")
-                    if not self.config.allow_memory_only:
-                        logger.critical(
-                            "resilient_storage.degraded_mode_entered",
-                            reason="redis_unavailable",
-                            fallback="memory_wal",
-                        )
-                    self._degraded_critical_logged = True
+                self._report_first_probe_failure(e, unconfigured_first_probe)
                 return False
 
     @property

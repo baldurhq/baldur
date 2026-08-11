@@ -39,6 +39,7 @@ __all__ = [
     "REDIS_URL_ENV_VARS",
     "RedisSettings",
     "get_redis_settings",
+    "redis_absence_is_expected",
     "redis_explicitly_configured",
     "reset_redis_settings",
 ]
@@ -204,6 +205,30 @@ def redis_explicitly_configured() -> bool:
         return True
 
     return _django_redis_cache_configured()
+
+
+def redis_absence_is_expected() -> bool:
+    """Report whether an unreachable Redis is the expected posture here.
+
+    True when two facts hold at once: nobody named a Redis for this process
+    (:func:`redis_explicitly_configured` is False, so the framework would be
+    dialing its own default address), and this is not production. A
+    production process that never configured Redis bypasses every fail-loud
+    startup gate, so its degraded-mode announcement is the only signal it
+    gets — quiet posture is a non-production concession only.
+
+    Never raises. An unexpected failure of either input returns False, which
+    is the loud direction: this predicate can cost signal, never safety.
+    """
+    try:
+        if redis_explicitly_configured():
+            return False
+
+        from baldur.runtime import get_runtime
+
+        return not get_runtime().is_production
+    except Exception:
+        return False
 
 
 def _django_settings_name_a_redis() -> bool:

@@ -338,6 +338,7 @@ class RedisCacheAdapter(CacheProviderInterface):
         socket_timeout: float | None = None,
         socket_connect_timeout: float | None = None,
         retry_on_timeout: bool | None = None,
+        unconfigured_probe: bool = False,
     ) -> None:
         """
         Initialize Redis cache adapter.
@@ -367,6 +368,11 @@ class RedisCacheAdapter(CacheProviderInterface):
                 (default), resolves from RedisSettings.socket_connect_timeout.
             retry_on_timeout: Retry-on-timeout flag. When None (default),
                 resolves from RedisSettings.retry_on_timeout.
+            unconfigured_probe: Forwarded to the connection factory — the
+                caller knows this URL is a default nobody configured, so a
+                creation failure logs at DEBUG instead of ERROR + traceback.
+                Defaults to False, which keeps every caller that does not
+                know loud.
         """
         self._key_prefix = key_prefix
         self._default_ttl = default_ttl
@@ -389,6 +395,7 @@ class RedisCacheAdapter(CacheProviderInterface):
                 socket_connect_timeout=socket_connect_timeout,
                 retry_on_timeout=retry_on_timeout,
                 decode_responses=False,
+                unconfigured_probe=unconfigured_probe,
             )
 
         self._lua_registry: Any | None = None
