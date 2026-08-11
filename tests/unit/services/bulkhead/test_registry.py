@@ -234,26 +234,30 @@ class TestBulkheadRegistryGetOrCreate:
 
 
 class TestThreadPoolFallbackWarningBehavior:
-    """thread_pool_unavailable WARNING on the base builder seam (D2).
+    """thread_pool_unavailable on the base builder seam (D2).
 
     The base registry has no worker-pool implementation, so a thread-pool
-    request falls back to semaphore isolation and warns once per name at
-    compartment creation — stating the fallback semantics explicitly.
+    request falls back to semaphore isolation and says so once per name at
+    compartment creation, stating the fallback semantics explicitly. The
+    level splits on who asked: an explicit ``bulkhead_type="thread_pool"``
+    request got weaker semantics than it asked for (WARNING), while the
+    built-in compartment is the framework's own default — nobody requested
+    a worker pool there, so its absence is a tier fact (DEBUG).
     """
 
-    def test_builtin_external_api_construction_warns_once(self):
-        """Registry construction warns once for the EXTERNAL_API thread-pool request."""
+    def test_builtin_external_api_construction_reports_once_at_debug(self):
+        """Construction reports the EXTERNAL_API fallback once, at DEBUG."""
         with capture_logs() as logs:
             BulkheadRegistry()
 
-        warns = [
+        records = [
             e
             for e in logs
             if e.get("event") == "bulkhead_registry.thread_pool_unavailable"
         ]
-        assert len(warns) == 1
-        assert warns[0]["log_level"] == "warning"
-        assert warns[0]["bulkhead_name"] == ConnectionType.EXTERNAL_API.value
+        assert len(records) == 1
+        assert records[0]["log_level"] == "debug"
+        assert records[0]["bulkhead_name"] == ConnectionType.EXTERNAL_API.value
 
     def test_get_or_create_thread_pool_warns_once_per_name(self):
         """The WARNING fires at creation only — the cached lookup stays silent."""
@@ -273,6 +277,7 @@ class TestThreadPoolFallbackWarningBehavior:
             if e.get("event") == "bulkhead_registry.thread_pool_unavailable"
         ]
         assert len(warns) == 1
+        assert warns[0]["log_level"] == "warning"
         assert warns[0]["bulkhead_name"] == "pool_a"
 
     def test_warning_payload_states_fallback_semantics(self):

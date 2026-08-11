@@ -37,6 +37,14 @@ logger = structlog.get_logger()
 
 __all__ = ["BulkheadRegistry", "get_bulkhead_registry", "reset_bulkhead_registry"]
 
+# What a caller actually gets when a thread-pool compartment falls back to a
+# semaphore. Stated once so the two announcement sites cannot describe the
+# same substitution differently.
+_THREAD_POOL_FALLBACK_SEMANTICS = (
+    "semaphore isolation - no worker-pool offload; "
+    "timeout bounds admission wait only, not execution"
+)
+
 # Settings-owned built-in compartments: the four ConnectionType values.
 # These are protection compartments constructed from settings at registry
 # creation — unregister is blocked, overwrite is warned.
@@ -88,8 +96,14 @@ class BulkheadRegistry:
         time. A registry overlay that ships a worker pool overrides this
         method to build the real thread-pool compartment.
 
-        The WARNING fires once per name by construction: this builder runs
-        only at compartment creation, and created compartments are cached.
+        Deliberately silent: whether the substitution deserves an alarm
+        depends on who asked, and this builder cannot tell. Its two callers
+        can, so they announce it through
+        :meth:`_log_thread_pool_fallback` — WARNING when an operator
+        requested a worker pool and got weaker semantics than they asked
+        for, DEBUG for the built-in ``external_api`` compartment, where
+        nobody requested anything and the absence of a worker pool is a tier
+        fact rather than a fault.
 
         Args:
             name: Domain name
@@ -100,22 +114,49 @@ class BulkheadRegistry:
         Returns:
             Bulkhead instance
         """
-        logger.warning(
+        return SemaphoreBulkhead(name=name, max_concurrent=max_workers)
+
+    def _log_thread_pool_fallback(
+        self,
+        built: Bulkhead,
+        name: str,
+        max_concurrent: int,
+        *,
+        requested: bool,
+    ) -> None:
+        """Announce a thread-pool compartment that came back as a semaphore.
+
+        Silent when the builder produced a real worker pool — a registry
+        overlay that ships one inherits both call sites unchanged and simply
+        fails this type test. Fires once per name by construction: both call
+        sites run only at compartment creation, and compartments are cached.
+        """
+        if not isinstance(built, SemaphoreBulkhead):
+            return
+        log = logger.warning if requested else logger.debug
+        log(
             "bulkhead_registry.thread_pool_unavailable",
             bulkhead_name=name,
-            max_concurrent=max_workers,
+            max_concurrent=max_concurrent,
             fallback="semaphore",
-            semantics=(
-                "semaphore isolation - no worker-pool offload; "
-                "timeout bounds admission wait only, not execution"
-            ),
+            semantics=_THREAD_POOL_FALLBACK_SEMANTICS,
         )
-        return SemaphoreBulkhead(name=name, max_concurrent=max_workers)
 
     def _build_builtin_bulkheads(
         self, settings: BulkheadSettings
     ) -> dict[str, Bulkhead]:
         """Construct the settings-owned built-in compartments (single builder)."""
+        external_api = self._build_thread_pool_bulkhead(
+            name=ConnectionType.EXTERNAL_API.value,
+            max_workers=settings.external_api_max_workers,
+            queue_size=settings.external_api_queue_size,
+        )
+        self._log_thread_pool_fallback(
+            external_api,
+            ConnectionType.EXTERNAL_API.value,
+            settings.external_api_max_workers,
+            requested=False,
+        )
         return {
             ConnectionType.DATABASE.value: SemaphoreBulkhead(
                 name=ConnectionType.DATABASE.value,
@@ -125,11 +166,7 @@ class BulkheadRegistry:
                 name=ConnectionType.CACHE.value,
                 max_concurrent=settings.cache_max_concurrent,
             ),
-            ConnectionType.EXTERNAL_API.value: self._build_thread_pool_bulkhead(
-                name=ConnectionType.EXTERNAL_API.value,
-                max_workers=settings.external_api_max_workers,
-                queue_size=settings.external_api_queue_size,
-            ),
+            ConnectionType.EXTERNAL_API.value: external_api,
             ConnectionType.MESSAGE_QUEUE.value: SemaphoreBulkhead(
                 name=ConnectionType.MESSAGE_QUEUE.value,
                 max_concurrent=settings.message_queue_max_concurrent,
@@ -194,10 +231,16 @@ class BulkheadRegistry:
             if name not in self._bulkheads:
                 concurrent = max_concurrent or self._settings.default_max_concurrent
                 if bulkhead_type == "thread_pool":
-                    self._bulkheads[name] = self._build_thread_pool_bulkhead(
+                    built = self._build_thread_pool_bulkhead(
                         name=name,
                         max_workers=concurrent,
                     )
+                    # This caller asked for a worker pool, so weaker
+                    # semantics than requested are worth an alarm.
+                    self._log_thread_pool_fallback(
+                        built, name, concurrent, requested=True
+                    )
+                    self._bulkheads[name] = built
                 else:
                     self._bulkheads[name] = SemaphoreBulkhead(
                         name=name,

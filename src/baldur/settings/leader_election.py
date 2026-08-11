@@ -173,15 +173,24 @@ class LeaderElectionSettings(BaseSettings):
                 f"lease_ttl/2 ({max_allowed}s) for safe renewal"
             )
 
-        # Check recommended range (lease_ttl/4 ~ lease_ttl/3)
+        # Check recommended range (lease_ttl/4 ~ lease_ttl/3). The level
+        # depends on who chose the cadence: an operator who set an interval
+        # outside the band needs to hear it, while a framework-derived value
+        # outside the band is the framework talking to itself — and the
+        # shipped defaults land there by arithmetic, so this warned on every
+        # boot about its own numbers. The hard constraint above still raises,
+        # so no unsafe cadence becomes quieter.
         recommended_min = self.lease_ttl_seconds / 4
         recommended_max = self.lease_ttl_seconds / 3
         if not (recommended_min <= effective_interval <= recommended_max):
-            logger.warning(
-                "outside.recommended_range",
+            operator_chose_interval = "renew_interval_seconds" in self.model_fields_set
+            log = logger.warning if operator_chose_interval else logger.debug
+            log(
+                "leader_election.renew_interval_outside_recommended_range",
                 effective_interval=effective_interval,
                 recommended_min=recommended_min,
                 recommended_max=recommended_max,
+                operator_set=operator_chose_interval,
             )
 
         return self
