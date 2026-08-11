@@ -299,6 +299,55 @@ class TestThreadPoolFallbackWarningBehavior:
         assert "no worker-pool offload" in warn["semantics"]
         assert "admission wait only" in warn["semantics"]
 
+    def test_both_call_sites_describe_the_substitution_identically(self):
+        """One shared semantics string, so the two levels cannot drift into
+        two different descriptions of the same substitution."""
+        with capture_logs() as builtin_logs:
+            registry = BulkheadRegistry()
+        with capture_logs() as requested_logs:
+            registry.get_or_create(
+                "pool_c", max_concurrent=6, bulkhead_type="thread_pool"
+            )
+
+        def _semantics(logs):
+            return next(
+                e
+                for e in logs
+                if e.get("event") == "bulkhead_registry.thread_pool_unavailable"
+            )["semantics"]
+
+        assert _semantics(builtin_logs) == _semantics(requested_logs)
+
+    def test_a_registry_that_ships_a_worker_pool_announces_nothing(self):
+        """The announcement is a type test, not a tier assumption.
+
+        An overlay that overrides only the builder inherits both call sites
+        unchanged; a real worker pool simply fails the ``SemaphoreBulkhead``
+        check, and neither site says anything.
+        """
+        registry = BulkheadRegistry()
+        real_pool = _FakeThreadPoolBulkhead()
+
+        with capture_logs() as logs:
+            registry._log_thread_pool_fallback(real_pool, "pool_d", 6, requested=True)
+            registry._log_thread_pool_fallback(real_pool, "pool_e", 6, requested=False)
+
+        assert [
+            e
+            for e in logs
+            if e.get("event") == "bulkhead_registry.thread_pool_unavailable"
+        ] == []
+
+
+class _FakeThreadPoolBulkhead:
+    """Stands in for a registry overlay's real worker-pool compartment.
+
+    Deliberately neither a ``SemaphoreBulkhead`` subclass nor a spec'd
+    ``Mock`` of one: the production check is
+    ``isinstance(built, SemaphoreBulkhead)``, which a spec'd Mock does not
+    fail the way a real worker pool does.
+    """
+
 
 class TestBulkheadRegistryGetAsync:
     """Asynchronous bulkhead lookup tests."""
