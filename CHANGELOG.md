@@ -10,6 +10,12 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+### Changed
+
+- `baldur.init()` applies baldur's log configuration itself, so its own startup lines are filtered
+  from the first one. A deployment reading baldur's DEBUG/INFO output from `init()` now sees only
+  WARNING-or-above unless it sets `BALDUR_LOG_LEVEL`.
+
 ### Fixed
 
 - Zero-config startup no longer logs repeated circuit-breaker warmup errors when Redis is absent.
