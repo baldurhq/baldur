@@ -67,8 +67,13 @@ _LEVEL_PATTERNS: dict[str, re.Pattern[str]] = {
 # The posture announcement (D7) — exactly one line per process is the contract.
 POSTURE_EVENT = "baldur.runtime_posture"
 
-# Distributions the child must never block: they are the core install and are
-# present on every real clean install too.
+# Whose line is it? After configuration every record carries its logger name,
+# and baldur owns the root handler, so a host framework's own WARNING would be
+# rendered in the same JSON. Lines emitted before configuration have no logger
+# field at all — at that point only baldur has imported anything.
+_BALDUR_LOGGER = re.compile(r'"logger"\s*:\s*"baldur', re.IGNORECASE)
+_ANY_LOGGER = re.compile(r'"logger"\s*:', re.IGNORECASE)
+
 _CHILD_TIMEOUT_SECONDS = 300
 
 PATHS = ("decorator", "init")
@@ -248,6 +253,40 @@ class PathResult:
         return self.counts["warning+"]
 
 
+def baldur_lines_at_warning_or_above(lines: list[str]) -> list[str]:
+    """Select the WARNING-or-above lines that baldur itself emitted."""
+    return [
+        line
+        for line in lines
+        if _LEVEL_PATTERNS["warning+"].search(line)
+        and (_BALDUR_LOGGER.search(line) or not _ANY_LOGGER.search(line))
+    ]
+
+
+def _scan_log_file(path: Path) -> int:
+    """Gate an existing log file — a real framework boot captured by CI.
+
+    Shares the level patterns with the measured runs above, so "a baldur
+    WARNING-or-above line" has one definition rather than one per caller.
+    """
+    if not path.exists():
+        print(f"ERROR: no such log file: {path}", file=sys.stderr)
+        return 1
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    offending = baldur_lines_at_warning_or_above(lines)
+    if offending:
+        print(
+            f"FAIL: {path} holds {len(offending)} baldur WARNING-or-above "
+            "line(s) from a zero-config boot",
+            file=sys.stderr,
+        )
+        for line in offending:
+            print(line, file=sys.stderr)
+        return 1
+    print(f"OK: {path} holds no baldur WARNING-or-above line")
+    return 0
+
+
 def _child_environment(strict_log_validation: bool) -> dict[str, str]:
     """A zero-config environment: every ``BALDUR_*`` variable removed."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("BALDUR_")}
@@ -338,6 +377,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="emit the measurement as JSON instead of a table",
     )
+    parser.add_argument(
+        "--scan-log",
+        metavar="PATH",
+        help="instead of measuring, gate an existing log file (a real "
+        "framework boot captured by CI) for baldur WARNING-or-above lines",
+    )
     return parser.parse_args(argv)
 
 
@@ -345,6 +390,9 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv if argv is not None else sys.argv[1:])
     if args._child:
         return _child_main(args._child)
+
+    if args.scan_log:
+        return _scan_log_file(Path(args.scan_log))
 
     paths = PATHS if args.path == "both" else (args.path,)
     results = [_measure(path, args.strict_log_validation) for path in paths]
