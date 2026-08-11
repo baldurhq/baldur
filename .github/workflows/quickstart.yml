@@ -21,6 +21,7 @@ on:
       - "examples/quickstart_django/**"
       - "examples/quickstart_fastapi/**"
       - "examples/quickstart_flask/**"
+      - "scripts/check_zero_config_log_posture.py"
       - ".github/workflows/quickstart.yml"
   pull_request:
     paths:
@@ -29,6 +30,7 @@ on:
       - "examples/quickstart_django/**"
       - "examples/quickstart_fastapi/**"
       - "examples/quickstart_flask/**"
+      - "scripts/check_zero_config_log_posture.py"
       - ".github/workflows/quickstart.yml"
   workflow_dispatch:
 
@@ -136,3 +138,45 @@ jobs:
             exit 1
           fi
           echo "server.log clean of framework-independence leak markers"
+      - name: Assert the zero-config boot logged nothing alarming
+        # This is a real zero-config framework boot: the step above runs the
+        # documented server with no BALDUR_* variables and no Redis, so its
+        # log is the Django / FastAPI / Flask half of the posture guarantee.
+        # The scan shares its level patterns with the harness, so "a baldur
+        # WARNING-or-above line" has one definition rather than one per caller.
+        working-directory: examples/quickstart_${{ matrix.app }}
+        run: |
+          /tmp/qs/bin/python \
+            "${GITHUB_WORKSPACE}/scripts/check_zero_config_log_posture.py" \
+            --scan-log server.log
+
+  zero-config-posture:
+    # The bare install: no framework, no extras, no environment. Runs the
+    # committed harness on both zero-config paths — the decorator quickstart
+    # and baldur.init() — so the "clean install greets you quietly" claim is
+    # measured on every push rather than remembered from one session. Runs on
+    # Linux, which is also where the WAL default directory is genuinely
+    # unwritable, a posture the Windows dev host cannot reproduce.
+    name: zero-config-posture
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      - name: Build OSS wheel
+        run: |
+          pip install build
+          python -m build --wheel
+      - name: Install the bare wheel into a clean venv
+        run: |
+          python -m venv /tmp/bare
+          /tmp/bare/bin/python -m pip install --upgrade pip
+          WHEEL=$(ls dist/baldur_framework-*.whl)
+          /tmp/bare/bin/python -m pip install "${WHEEL}"
+      - name: Measure both zero-config paths
+        run: |
+          /tmp/bare/bin/python scripts/check_zero_config_log_posture.py \
+            --check --show-lines
