@@ -32,7 +32,7 @@ except ImportError:
     # share a compatible annotation across conditional signatures.
     REGISTRY: Any = None  # type: ignore[no-redef]
 
-_PROMETHEUS_INSTALL_HINT = (
+PROMETHEUS_INSTALL_HINT = (
     "prometheus_client is required for metric registration but is not installed. "
     'Install with: pip install "baldur-framework[prometheus]" '
     "(quotes required in zsh/fish to prevent bracket glob expansion)."
@@ -230,7 +230,7 @@ class MetricsBatchRecorder:
 def get_or_create_counter(name: str, description: str, labels: list[str]) -> Counter:
     """Get existing counter or create new one to avoid duplicate registration."""
     if not PROMETHEUS_AVAILABLE:
-        raise ImportError(_PROMETHEUS_INSTALL_HINT)
+        raise ImportError(PROMETHEUS_INSTALL_HINT)
     if name in REGISTRY._names_to_collectors:
         # _names_to_collectors values are Collector (the base class) at the
         # stub level; here the caller guarantees the name maps to a Counter.
@@ -244,7 +244,7 @@ def get_or_create_counter(name: str, description: str, labels: list[str]) -> Cou
 def get_or_create_gauge(name: str, description: str, labels: list[str]) -> Gauge:
     """Get existing gauge or create new one to avoid duplicate registration."""
     if not PROMETHEUS_AVAILABLE:
-        raise ImportError(_PROMETHEUS_INSTALL_HINT)
+        raise ImportError(PROMETHEUS_INSTALL_HINT)
     if name in REGISTRY._names_to_collectors:
         return cast(Gauge, REGISTRY._names_to_collectors[name])
     try:
@@ -261,7 +261,7 @@ def get_or_create_histogram(
 ) -> Histogram:
     """Get existing histogram or create new one to avoid duplicate registration."""
     if not PROMETHEUS_AVAILABLE:
-        raise ImportError(_PROMETHEUS_INSTALL_HINT)
+        raise ImportError(PROMETHEUS_INSTALL_HINT)
     if name in REGISTRY._names_to_collectors:
         return cast(Histogram, REGISTRY._names_to_collectors[name])
     try:

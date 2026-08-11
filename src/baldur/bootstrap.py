@@ -40,7 +40,13 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
-__all__ = ["init", "reset_init_state", "start_background_workers"]
+__all__ = [
+    "emit_runtime_posture_once",
+    "init",
+    "reset_init_state",
+    "reset_runtime_posture",
+    "start_background_workers",
+]
 
 # Writable-dir resolution identities of the two audit durability surfaces
 # whose statuses must agree. The checkpoint is found by purpose — a stable
@@ -119,6 +125,20 @@ class _RegistryWiring(NamedTuple):
 # Module-level idempotency state.
 _init_done: bool = False
 _init_lock: threading.Lock = threading.Lock()
+
+# What the posture line tells an operator running on memory. The metrics
+# counterpart is the install hint the metrics registry already owns.
+_MEMORY_STORAGE_HINT = (
+    "State is in-process only. Set BALDUR_REDIS_URL to share it across "
+    "workers and survive a restart."
+)
+
+# Startup posture announcement state. Lock-guarded rather than a bare bool:
+# the announcement is emitted from the protect entry points too, and two
+# threads making their first protected call at once would otherwise both
+# emit "exactly once".
+_posture_emitted: bool = False
+_posture_lock: threading.Lock = threading.Lock()
 
 # 463 D15 — known legacy aliases of "production" that previously satisfied
 # the four divergent in-tree precedents. Hard-failing them at startup
@@ -220,6 +240,11 @@ def init(
         logger.info("baldur.startup_report", **report)
 
         _init_done = True
+
+    # Announce the posture after the wiring it describes has completed. The
+    # once-latch makes whichever path runs first the only emitter, so a
+    # later first protect() call is a no-op.
+    emit_runtime_posture_once()
 
 
 def reset_init_state() -> None:
@@ -1964,18 +1989,109 @@ _FEATURE_SCAN: list[tuple[str, str, str, str]] = [
 ]
 
 
+def _resolve_storage_posture() -> tuple[str, str | None]:
+    """Where shared state lives, and why.
+
+    Derived from configuration, never from the backend's current mode: the
+    resilient backend constructs in DEGRADED and connects lazily, so a fresh
+    healthy process would always read "memory" from its own state.
+    """
+    from baldur.settings.redis import redis_explicitly_configured
+
+    if redis_explicitly_configured():
+        return "redis", None
+    return "memory", "redis_not_configured"
+
+
+def _resolve_metrics_posture() -> tuple[str, str | None]:
+    """Which metrics backend is actually recording, and why not, if not."""
+    try:
+        from baldur.metrics.registry import PROMETHEUS_AVAILABLE
+    except Exception:
+        return "disabled", "metrics_registry_unavailable"
+
+    if PROMETHEUS_AVAILABLE:
+        return "prometheus", None
+    return "disabled", "prometheus_extra_not_installed"
+
+
+def emit_runtime_posture_once() -> None:
+    """Announce, once per process, what this install is actually running on.
+
+    A zero-config process makes several capability decisions silently —
+    memory instead of Redis, no metrics backend, no ``init()``. Those used
+    to be inferable only from a scatter of warnings; with the warnings
+    correctly demoted, one INFO line owns the announcement instead.
+
+    Emitted through the posture logger, which carries an INFO floor: the
+    root level defaults to WARNING, so a line logged on any other baldur
+    logger would be dropped before reaching a handler. The logger is bound
+    here rather than at module scope because ``configure_structlog()``
+    caches loggers on first use, and a module-level proxy used before
+    configuration keeps its pre-configure binding.
+
+    Whichever entry point runs first is the only emitter: ``init()`` calls
+    this at the end of its step sequence, and the protect entry points call
+    it on the first protected call, so a process that never calls ``init()``
+    still gets the line.
+    """
+    global _posture_emitted
+
+    if _posture_emitted:
+        return
+    with _posture_lock:
+        if _posture_emitted:
+            return
+        _posture_emitted = True
+
+    from baldur.observability.structlog_config import POSTURE_LOGGER_NAME
+
+    storage, storage_reason = _resolve_storage_posture()
+    metrics, metrics_reason = _resolve_metrics_posture()
+
+    fields: dict[str, Any] = {
+        "storage": storage,
+        "metrics": metrics,
+        "init_called": _init_done,
+    }
+    if storage_reason:
+        fields["storage_reason"] = storage_reason
+        fields["storage_hint"] = _MEMORY_STORAGE_HINT
+    if metrics_reason:
+        fields["metrics_reason"] = metrics_reason
+        if metrics_reason == "prometheus_extra_not_installed":
+            from baldur.metrics.registry import PROMETHEUS_INSTALL_HINT
+
+            fields["metrics_hint"] = PROMETHEUS_INSTALL_HINT
+
+    structlog.get_logger(POSTURE_LOGGER_NAME).info("baldur.runtime_posture", **fields)
+
+
+def reset_runtime_posture() -> None:
+    """Re-arm the once-per-process posture announcement — tests only."""
+    global _posture_emitted
+    with _posture_lock:
+        _posture_emitted = False
+
+
 def _build_startup_report(ext_result: ExtensionResult) -> dict[str, Any]:
     """Build unified startup capability report.
 
     Combines entry-point hook results (installation) with settings flag scan
     (configuration) into a single structured dict for INFO logging.
     """
+    storage_backend, _ = _resolve_storage_posture()
+    metrics_backend, _ = _resolve_metrics_posture()
     report: dict[str, Any] = {
         "extensions": {
             "found": ext_result.found,
             "executed": ext_result.executed,
             "failed": ext_result.failed,
         },
+        # Same predicates the posture line uses, so the short announcement
+        # and the long report cannot disagree about the same process.
+        "storage_backend": storage_backend,
+        "metrics_backend": metrics_backend,
     }
 
     features: dict[str, bool] = {}
