@@ -94,7 +94,9 @@ _ROOT_BUDGETS: dict[str, int] = {
     # audit-watchdog removal: -1 — the deleted module carried one complexity noqa.
     # batch-op registry: -1 — _batch_write_ops_degraded dropped its C901/PLR0912
     # noqa when the per-phase op chains collapsed into _BATCH_OP_HANDLERS.
-    "baldur": 112,
+    # zero-config log posture: -1 — ResilientStorageBackend._ensure_redis dropped
+    # its C901 noqa when the first-init failure arm moved to its own method.
+    "baldur": 111,
     # 666: -1 — _update_config_with_meta refactored into _versioned_write +
     # _merge_changes + _post_write helpers, dropping its complexity noqa.
     "baldur_pro": 32,

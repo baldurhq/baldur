@@ -265,13 +265,20 @@ class TestEnsureRedisBehavior:
     # -- Side effects: logging --
 
     def test_logs_critical_once_on_first_failure(self, temp_wal_dir):
-        """D10: One-time CRITICAL log on first failure (allow_memory_only=False)."""
+        """D10: One-time CRITICAL log on first failure (allow_memory_only=False).
+
+        The explicit ``redis_url`` kwarg is what makes this the *configured*
+        posture: an operator named this Redis, so a probe failure is an
+        outage. With nothing configured the same probe is the framework
+        finding its own default unreachable, and stays quiet.
+        """
         from baldur.adapters.resilient.backend import ResilientStorageBackend
         from baldur.settings.resilient_storage import ResilientStorageSettings
 
         config = ResilientStorageSettings(
             wal_dir=temp_wal_dir,
             allow_memory_only=False,
+            redis_url="redis://configured:6379/0",
         )
         backend = ResilientStorageBackend(config)
 

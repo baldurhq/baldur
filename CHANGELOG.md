@@ -12,63 +12,32 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ### Added
 
-- One `baldur.runtime_posture` INFO line per process states what this install is actually running
-  on — `storage=memory|redis`, `metrics=disabled|prometheus`, whether `init()` ran, and what to set
-  to change either. It replaces the scatter of warnings that used to imply the same thing, and is
-  emitted on the first protected call or at the end of `init()`, whichever comes first. It logs on
-  its own `baldur.posture` logger with an INFO floor so the default WARNING root level does not
-  hide it; `BALDUR_LOG_LEVEL` silences it like anything else.
+- `baldur.runtime_posture` (INFO, once per process) — the storage and metrics backend in one line.
+- `baldur.posture` logger carries an INFO floor, so that line survives the default WARNING root.
 
 ### Changed
 
-- `baldur.init()` applies baldur's log configuration itself, so its own startup lines are filtered
-  from the first one. A deployment reading baldur's DEBUG/INFO output from `init()` now sees only
-  WARNING-or-above unless it sets `BALDUR_LOG_LEVEL`.
-- A first Redis probe that fails when *nobody configured Redis* is now logged at DEBUG outside
-  production: `resilient_storage.degraded_mode_entered` (CRITICAL),
-  `resilient_storage.lazy_redis_probe_failed` (WARNING), `shadow_log.sync_failed` (WARNING) and
-  the `redis_factory.connection_failed` traceback (ERROR) no longer greet a zero-config first run.
-  Nothing changes for a configured Redis: set `BALDUR_REDIS_URL`, the bare `REDIS_URL`,
-  `BALDUR_RESILIENT_STORAGE_REDIS_URL`, Django's `BALDUR_REDIS_URL` or a django_redis `CACHES`
-  entry — or run in production — and every one of those lines keeps its level. Losing a live
-  Redis (`resilient_storage.degraded_mode_fallback`) stays CRITICAL in every posture.
-
-- Two boot warnings that described the framework's own defaults are gone. The leader-election
-  renewal-cadence warning fires only when *you* set `BALDUR_LEADER_ELECTION_RENEW_INTERVAL_SECONDS`
-  outside the recommended band — the derived default lands outside it by arithmetic, so it warned
-  on every boot about its own number — and it is renamed
-  `leader_election.renew_interval_outside_recommended_range` (from the malformed
-  `outside.recommended_range`). The unsafe-cadence `ValueError` is untouched.
-  `bulkhead_registry.thread_pool_unavailable` is WARNING only when a caller asked for
-  `bulkhead_type="thread_pool"`; the built-in `external_api` compartment reports at DEBUG.
-- A zero-config non-production `baldur.init()` no longer boots at alarm level: the nine
-  `baldur.registry_memory_fallback` lines are INFO (the fallback stays visible; the alarm level was
-  the defect), the secret-validation reports are INFO/DEBUG, and the WAL directory fallback is an
-  INFO `storage.writable_dir_fallback` — renamed from `storage.writable_dir_probe_failed`, since
-  it reports the framework relocating its own default, not a failure. **Production is unchanged**:
-  the missing-secret ERROR lines and the boot-aborting `RuntimeError` still fire, and both
-  memory-fallback branches still raise `ConfigurationError` before reaching the INFO line.
-- `baldur.init_not_called_get_cache` / `..._get_storage_backend` are WARNING only when Redis is
-  configured — the case where skipping `init()` really does discard your configuration. Ad-hoc
-  scripts and the decorator-only quickstart get DEBUG, and the startup posture line instead.
-- The rate-limit backend probes stop reporting unconfigured infrastructure as unavailable
-  infrastructure: `database_rate_limit_storage.database_unavailable` becomes a DEBUG
-  `..._not_configured` when no `repository_factory` was supplied (that instance can never work
-  by construction), and `redis_rate_limit_storage.redis_unavailable` is DEBUG when nobody
-  configured Redis outside production.
-- Without the `prometheus` extra, metric recording is a silent no-op instead of a warning per
-  protected call. `metrics.prometheus_unavailable` and `metrics.up_gauge_registration_failed` are
-  gone, `prometheus.unavailable` is INFO, and the `retry.*_recording_failed` /
-  `metrics.record_*_failed` families no longer fire for a missing extra — they still fire when the
-  extra is installed and a recorder actually breaks. Install the extra to get metrics back;
-  `pip install "baldur-framework[prometheus]"` is named in the startup posture line.
+- A zero-config first run emits no WARNING-or-above baldur line, on both the decorator and `init()`.
+- `baldur.init()` configures logging first, so its own DEBUG/INFO output is filtered from line one.
+- **Breaking**: `storage.writable_dir_probe_failed` → INFO `storage.writable_dir_fallback`.
+- **Breaking**: `outside.recommended_range` → `leader_election.renew_interval_outside_range`.
+- That renewal-cadence line is DEBUG unless you set `BALDUR_LEADER_ELECTION_RENEW_INTERVAL_SECONDS`.
+- `resilient_storage.degraded_mode_entered` is DEBUG when no Redis was configured, non-production.
+- `resilient_storage.lazy_redis_probe_failed` / `shadow_log.sync_failed`: same demotion.
+- `redis_factory.connection_failed` drops to DEBUG for a probe against a URL nobody configured.
+- `resilient_storage.degraded_mode_fallback` (losing a live Redis) stays CRITICAL in every posture.
+- `baldur.registry_memory_fallback` → INFO; production still raises `ConfigurationError` first.
+- Secret-validation reports are INFO/DEBUG outside production; the production abort is unchanged.
+- `baldur.init_not_called_get_*` are WARNING only when Redis is configured, DEBUG otherwise.
+- `database_rate_limit_storage.database_unavailable` → DEBUG `..._not_configured` without a factory.
+- `redis_rate_limit_storage.redis_unavailable` is DEBUG when no Redis was configured.
+- Missing `prometheus` extra: recording is a silent no-op instead of a warning per protected call.
+- **Breaking**: `metrics.prometheus_unavailable` and `metrics.up_gauge_registration_failed` removed.
+- `prometheus.unavailable` → INFO; `metrics.protect_recorder_unavailable_sticky` → DEBUG.
 
 ### Fixed
 
-- `BALDUR_RESILIENT_STORAGE_REDIS_URL` is finally honored at startup: the documented "a per-class
-  override wins" precedence held everywhere except `baldur.init()`, which overwrote it with
-  `BALDUR_REDIS_URL` (or the localhost default). Deployments that set only the per-class variable
-  had the resilient backend dialing the wrong address, and now reach the host they configured.
+- `BALDUR_RESILIENT_STORAGE_REDIS_URL` is honored by `baldur.init()`, which overwrote it before.
 - `BALDUR_REDIS_URL=""` no longer crashes `baldur.init()` outside production.
 - Zero-config startup no longer logs repeated circuit-breaker warmup errors when Redis is absent.
 

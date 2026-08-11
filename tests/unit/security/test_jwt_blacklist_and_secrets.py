@@ -152,10 +152,17 @@ class TestValidateCriticalSecretsBehavior:
             mock_validate.assert_called_once()
 
     def test_validate_secrets_logs_critical_count(self):
-        """Missing CRITICAL secret -> error log."""
-        with patch(
-            "baldur.settings.secrets.validate_required_secrets",
-            return_value={"critical": ["encryption_key"], "warning": [], "info": []},
+        """Missing CRITICAL secret in production -> error log."""
+        with (
+            patch("baldur.runtime.is_production", return_value=True),
+            patch(
+                "baldur.settings.secrets.validate_required_secrets",
+                return_value={
+                    "critical": ["encryption_key"],
+                    "warning": [],
+                    "info": [],
+                },
+            ),
         ):
             with patch("baldur.bootstrap.logger") as mock_logger:
                 _validate_critical_secrets()
@@ -166,11 +173,41 @@ class TestValidateCriticalSecretsBehavior:
                     == "baldur.critical_secrets_configured_check"
                 )
 
+    def test_validate_secrets_reports_critical_count_at_info_outside_production(self):
+        """Empty secrets are the expected dev state -> INFO, not a security ERROR."""
+        with (
+            patch("baldur.runtime.is_production", return_value=False),
+            patch(
+                "baldur.settings.secrets.validate_required_secrets",
+                return_value={
+                    "critical": ["encryption_key"],
+                    "warning": [],
+                    "info": [],
+                },
+            ),
+        ):
+            with patch("baldur.bootstrap.logger") as mock_logger:
+                _validate_critical_secrets()
+
+                mock_logger.error.assert_not_called()
+                mock_logger.info.assert_called_once()
+                assert (
+                    mock_logger.info.call_args[0][0]
+                    == "baldur.critical_secrets_configured_check"
+                )
+
     def test_validate_secrets_logs_warning_count(self):
-        """Missing IMPORTANT secret -> warning log."""
-        with patch(
-            "baldur.settings.secrets.validate_required_secrets",
-            return_value={"critical": [], "warning": ["database_password"], "info": []},
+        """Missing IMPORTANT secret in production -> warning log."""
+        with (
+            patch("baldur.runtime.is_production", return_value=True),
+            patch(
+                "baldur.settings.secrets.validate_required_secrets",
+                return_value={
+                    "critical": [],
+                    "warning": ["database_password"],
+                    "info": [],
+                },
+            ),
         ):
             with patch("baldur.bootstrap.logger") as mock_logger:
                 _validate_critical_secrets()

@@ -186,7 +186,7 @@ class LeaderElectionSettings(BaseSettings):
             operator_chose_interval = "renew_interval_seconds" in self.model_fields_set
             log = logger.warning if operator_chose_interval else logger.debug
             log(
-                "leader_election.renew_interval_outside_recommended_range",
+                "leader_election.renew_interval_outside_range",
                 effective_interval=effective_interval,
                 recommended_min=recommended_min,
                 recommended_max=recommended_max,
