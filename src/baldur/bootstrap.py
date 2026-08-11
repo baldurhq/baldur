@@ -1330,10 +1330,16 @@ def _redis_url_configured() -> bool:
 
     Mirrors the inline ``redis_set`` computation in
     :func:`_wire_registry_defaults` (Group A reads ``os.environ`` directly
-    rather than ``RedisSettings.url`` because the settings default
-    ``redis://localhost:6379/0`` would mask the unset case). Consumed by
-    the ``event_journal_repo`` PRIORITY_CHAIN row as the first probe in
-    its ``redis > sql > memory`` chain.
+    rather than ``RedisSettings.url`` because the settings default would
+    mask the unset case). Consumed by the ``event_journal_repo``
+    PRIORITY_CHAIN row as the first probe in its ``redis > sql > memory``
+    chain.
+
+    Deliberately env-only, and deliberately NOT the broader
+    ``redis_explicitly_configured()`` predicate: wiring runs at a fixed
+    point in startup and must not depend on whether Django happens to be
+    imported yet. The predicate answers "did anyone name a Redis?" for log
+    posture; this answers "can wiring resolve one right now?".
     """
     redis_url = os.environ.get("BALDUR_REDIS_URL")
     return bool(redis_url and redis_url.strip())

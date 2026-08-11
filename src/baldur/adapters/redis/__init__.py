@@ -160,13 +160,15 @@ def _try_acquire_redis_client() -> Any | None:
 def _acquire_from_env() -> Any | None:
     """Resolve a Redis client from environment variables (Strategy 4).
 
-    Prefers the documented canonical ``BALDUR_REDIS_URL`` over the bare,
-    non-prefixed ``REDIS_URL``. The bare variable is retained only as a
-    lower-priority backward-compat fallback, reached when ``BALDUR_REDIS_URL``
-    is unset.
+    Reads the variables in ``REDIS_URL_ENV_VARS`` order: the documented
+    canonical ``BALDUR_REDIS_URL`` first, then the bare, non-prefixed
+    ``REDIS_URL``, retained only as a lower-priority backward-compat
+    fallback. Iterating the shared tuple instead of naming the variables here
+    is what keeps this strategy and ``redis_explicitly_configured()`` from
+    disagreeing about what counts as a configured Redis.
 
-    Returns the connected client, or ``None`` when neither variable is set or
-    the connection factory raises.
+    Returns the connected client, or ``None`` when no variable is set or the
+    connection factory raises.
     """
     try:
         import os
@@ -174,15 +176,14 @@ def _acquire_from_env() -> Any | None:
         from baldur.adapters.redis.connection_factory import (
             get_redis_connection_factory,
         )
+        from baldur.settings.redis import REDIS_URL_ENV_VARS
 
-        baldur_url = os.environ.get("BALDUR_REDIS_URL")
-        redis_url = baldur_url or os.environ.get("REDIS_URL")
-        if redis_url:
+        for name in REDIS_URL_ENV_VARS:
+            redis_url = os.environ.get(name)
+            if not redis_url:
+                continue
             # Source name only — a Redis URL can embed credentials.
-            logger.debug(
-                "redis.client_url_resolved",
-                source="BALDUR_REDIS_URL" if baldur_url else "REDIS_URL",
-            )
+            logger.debug("redis.client_url_resolved", source=name)
             return get_redis_connection_factory().create(redis_url)
     except (ImportError, Exception):
         pass

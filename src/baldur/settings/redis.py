@@ -33,7 +33,34 @@ from baldur.settings.field_types import HugeCount, ShortDuration
 
 logger = structlog.get_logger()
 
-__all__ = ["RedisSettings", "get_redis_settings", "reset_redis_settings"]
+__all__ = [
+    "DEFAULT_REDIS_URL",
+    "REDIS_INTENT_ENV_VARS",
+    "REDIS_URL_ENV_VARS",
+    "RedisSettings",
+    "get_redis_settings",
+    "redis_explicitly_configured",
+    "reset_redis_settings",
+]
+
+# The address the framework dials when nobody named one. Referenced by every
+# settings class that carries a Redis URL, so "the default" has one spelling.
+DEFAULT_REDIS_URL = "redis://localhost:6379/0"
+
+# Client-acquisition priority order: the documented canonical variable first,
+# the bare backward-compat one second. ``_acquire_from_env`` iterates this
+# tuple, which is what keeps the acquisition path and
+# :func:`redis_explicitly_configured` from disagreeing about what counts as a
+# Redis URL — a new source is added here once, not in two places.
+REDIS_URL_ENV_VARS: tuple[str, ...] = ("BALDUR_REDIS_URL", "REDIS_URL")
+
+# Everything that expresses Redis intent. Adds the feature-local override,
+# which is not a client-acquisition source but is unmistakably an operator
+# naming a Redis.
+REDIS_INTENT_ENV_VARS: tuple[str, ...] = (
+    *REDIS_URL_ENV_VARS,
+    "BALDUR_RESILIENT_STORAGE_REDIS_URL",
+)
 
 
 class RedisSettings(BaseSettings):
@@ -56,7 +83,7 @@ class RedisSettings(BaseSettings):
     # Connection URL (routing info only, no password)
     # ==========================================================================
     url: str = Field(
-        default="redis://localhost:6379/0",
+        default=DEFAULT_REDIS_URL,
         description="Redis connection URL (routing info only, no password in URL)",
     )
 
@@ -147,6 +174,70 @@ def reset_redis_settings() -> None:
         del get_config().adapters.__dict__["redis"]
     except KeyError:
         pass
+
+
+def redis_explicitly_configured() -> bool:
+    """Report whether anyone named a Redis for this process.
+
+    True when Redis intent was expressed through any documented channel;
+    False when the framework would be dialing its own default address that
+    nobody asked for. Components use it to tell "optional dependency never
+    configured" (an expected posture) apart from "configured and broken" (an
+    operational fault that must stay loud).
+
+    The channels mirror the live client-acquisition strategies rather than
+    restating them: the environment variables come from
+    :data:`REDIS_INTENT_ENV_VARS`, and the two Django-shaped probes are the
+    same two strategies ``baldur.adapters.redis`` runs.
+
+    Side-effect-free: neither Django probe imports Django into a process that
+    has not already loaded it. Each probe is wrapped independently, and the
+    function never raises — a failed probe returns False, which is accurate
+    rather than merely safe, since a framework that cannot be imported cannot
+    serve that acquisition strategy either.
+    """
+    for name in REDIS_INTENT_ENV_VARS:
+        if os.environ.get(name, "").strip():
+            return True
+
+    if _django_settings_name_a_redis():
+        return True
+
+    return _django_redis_cache_configured()
+
+
+def _django_settings_name_a_redis() -> bool:
+    """Django settings carry a truthy ``BALDUR_REDIS_URL`` attribute.
+
+    Reached when Django is plausibly in play — an environment variable names
+    a settings module, or ``django.conf`` is already imported, which covers
+    ``settings.configure(...)`` called programmatically with no env var.
+    """
+    import sys
+
+    if "DJANGO_SETTINGS_MODULE" not in os.environ and "django.conf" not in sys.modules:
+        return False
+    try:
+        from django.conf import settings as django_settings
+
+        return bool(getattr(django_settings, "BALDUR_REDIS_URL", None))
+    except Exception:
+        return False
+
+
+def _django_redis_cache_configured() -> bool:
+    """A ``CACHES`` entry names a django_redis backend."""
+    try:
+        import django_redis  # noqa: F401
+        from django.conf import settings as django_settings
+
+        caches = getattr(django_settings, "CACHES", None) or {}
+        return any(
+            "django_redis" in str(config.get("BACKEND", ""))
+            for config in caches.values()
+        )
+    except Exception:
+        return False
 
 
 def apply_redis_url_fallback(model: BaseSettings, field_name: str) -> None:
