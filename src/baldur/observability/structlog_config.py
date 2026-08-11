@@ -93,6 +93,14 @@ _COMPONENT_LOGGER_MAP: dict[str, list[str]] = {
 
 _configure_lock = threading.Lock()
 
+# The startup posture announcement's own logger name. It needs one because
+# the root level defaults to WARNING and _COMPONENT_LOGGER_MAP carries no
+# bootstrap namespace, so a one-line INFO summary of what this process is
+# actually running on would never reach a handler — the same reason
+# ``baldur.startup_report`` is invisible on a default run today.
+POSTURE_LOGGER_NAME = "baldur.posture"
+_POSTURE_FLOOR_LEVEL = logging.INFO
+
 
 class _StructlogState:
     """Runtime-scoped structlog configuration guard (450 Phase 4)."""
@@ -226,6 +234,16 @@ def configure_structlog() -> None:
         #   BALDUR_LOGGING_SETTINGS_CIRCUIT_BREAKER_LOG_LEVEL=WARNING
         # =====================================================================
         _apply_component_log_levels(settings)
+
+        # Floor the posture logger at INFO so the one-line startup summary
+        # survives the default WARNING root level. Keyed on the operator not
+        # having expressed a level intent — the same explicit-set convention
+        # the Redis posture predicate uses — so BALDUR_LOG_LEVEL=ERROR
+        # silences this line like anything else, and an operator who names
+        # the logger in their own config wins by writing it later.
+        if "BALDUR_LOG_LEVEL" not in os.environ:
+            logging.getLogger(POSTURE_LOGGER_NAME).setLevel(_POSTURE_FLOOR_LEVEL)
+
         state.configured = True
 
 
@@ -234,9 +252,11 @@ def reset_structlog_config() -> None:
 
     Clears the configured flag and also removes the ProcessorFormatter handlers
     registered on the root logger, so the next configure_structlog() call
-    rebuilds everything from the new configuration values.
+    rebuilds everything from the new configuration values. Restores the
+    posture logger to NOTSET so its INFO floor cannot leak across tests.
     """
     _structlog_state().configured = False
+    logging.getLogger(POSTURE_LOGGER_NAME).setLevel(logging.NOTSET)
 
     root = logging.getLogger()
     root.handlers = [

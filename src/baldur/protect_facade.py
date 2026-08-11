@@ -1017,6 +1017,40 @@ def _finalize_value(result: PolicyResult[T]) -> T:
     )
 
 
+def _protect_prelude() -> bool:
+    """Run the shared entry-point prelude; report whether protection is on.
+
+    Every public protect entry point begins the same way: configure logging,
+    read the enable flag, and — when protection is on — announce the runtime
+    posture once per process. Owning that sequence here is what keeps a
+    fifth entry point from silently skipping a step, which is exactly how
+    two of the four came to miss the announcement.
+
+    The posture line is placed *after* the enable check on purpose: a
+    deployment that turned protect() off should not be told which backend
+    the protection it disabled would have used.
+
+    Returns False when protection is disabled. Each caller then runs its own
+    disabled-path body — they are not interchangeable: ``protect`` /
+    ``aprotect`` return the raw value and let exceptions propagate, while
+    the ``*_with_meta`` pair returns a ``ProtectResult`` and captures the
+    failure instead of raising.
+    """
+    from baldur.observability.structlog_config import configure_structlog
+
+    configure_structlog()
+
+    from baldur.settings.protect import get_protect_settings
+
+    if not get_protect_settings().enabled:
+        return False
+
+    from baldur.bootstrap import emit_runtime_posture_once
+
+    emit_runtime_posture_once()
+    return True
+
+
 # =============================================================================
 # Sync public API
 # =============================================================================
@@ -1121,13 +1155,7 @@ def protect(  # verified-by: test_concurrent_duplicates_run_side_effect_exactly_
             ``idempotency_ttl`` / ``idempotency_execution_ttl`` is not a
             positive ``timedelta``.
     """
-    from baldur.observability.structlog_config import configure_structlog
-
-    configure_structlog()
-
-    from baldur.settings.protect import get_protect_settings
-
-    if not get_protect_settings().enabled:
+    if not _protect_prelude():
         return fn()
 
     dlq_flag, cb_flag = _resolve_flags(dlq, circuit_breaker)
@@ -1190,13 +1218,7 @@ def protect_with_meta(
     distinguish "already completed" from "in progress, retry later" from
     "couldn't verify").
     """
-    from baldur.observability.structlog_config import configure_structlog
-
-    configure_structlog()
-
-    from baldur.settings.protect import get_protect_settings
-
-    if not get_protect_settings().enabled:
+    if not _protect_prelude():
         start = time.perf_counter()
         try:
             value = fn()
@@ -1310,14 +1332,7 @@ async def aprotect(  # verified-by: test_concurrent_duplicates_run_side_effect_e
     post-execution mark the operation may run again after the gate record's TTL
     expires (an essential at-least-once limit — see ``protect``).
     """
-    from baldur.observability.structlog_config import configure_structlog
-
-    configure_structlog()
-
-    from baldur.settings.protect import get_protect_settings
-
-    settings = get_protect_settings()
-    if not settings.enabled:
+    if not _protect_prelude():
         return await fn()
 
     _guard_async_unsupported(retry)
@@ -1384,14 +1399,7 @@ async def aprotect_with_meta(
     ``PolicyOutcome.REJECTED``; ``metadata`` carries ``idempotency_decision`` /
     ``idempotency_unavailable`` as in ``protect_with_meta``).
     """
-    from baldur.observability.structlog_config import configure_structlog
-
-    configure_structlog()
-
-    from baldur.settings.protect import get_protect_settings
-
-    settings = get_protect_settings()
-    if not settings.enabled:
+    if not _protect_prelude():
         start = time.perf_counter()
         try:
             value = await fn()

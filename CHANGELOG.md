@@ -10,6 +10,15 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+### Added
+
+- One `baldur.runtime_posture` INFO line per process states what this install is actually running
+  on — `storage=memory|redis`, `metrics=disabled|prometheus`, whether `init()` ran, and what to set
+  to change either. It replaces the scatter of warnings that used to imply the same thing, and is
+  emitted on the first protected call or at the end of `init()`, whichever comes first. It logs on
+  its own `baldur.posture` logger with an INFO floor so the default WARNING root level does not
+  hide it; `BALDUR_LOG_LEVEL` silences it like anything else.
+
 ### Changed
 
 - `baldur.init()` applies baldur's log configuration itself, so its own startup lines are filtered
