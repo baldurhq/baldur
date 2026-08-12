@@ -217,8 +217,19 @@ class HealthCheckService:
         # configured-on but unregistered (the entitlement/wiring gap) is now a
         # meaningful misconfiguration — surface it once, never per-probe. A
         # fresh service instance (post ``reset_health_check_service``) re-arms
-        # the latch.
+        # the latch. The lock covers only the latch test-and-set: this service
+        # is a process singleton reached by both the refresh-timer thread and
+        # any request thread on an uncached health endpoint, and an unlocked
+        # check-then-act lets both observe False and both warn.
         self._enabled_but_unregistered_warned = False
+        self._enabled_but_unregistered_lock = threading.Lock()
+
+        # PRO-wheel presence, resolved on first use and kept for the life of
+        # the instance. The probe is a static packaging fact by its own
+        # contract, and the warn gate below re-evaluates on every health probe
+        # on the posture that never warns — an uncached ``find_spec`` there
+        # would walk ``sys.path`` forever.
+        self._pro_installed: bool | None = None
 
         # Whole-result readiness cache. Constructed with ttl_seconds=0.0 on
         # purpose: the real TTL is passed as ttl_override on every call, so a
@@ -802,29 +813,55 @@ class HealthCheckService:
             watchdog_last_check=watchdog_last_check,
         )
 
+    def _is_pro_installed(self) -> bool:
+        """Memoized PRO-wheel presence probe (see ``__init__``)."""
+        if self._pro_installed is None:
+            from baldur.utils.tier import is_pro_installed
+
+            self._pro_installed = is_pro_installed()
+        return self._pro_installed
+
     def _warn_watchdog_enabled_but_unregistered_once(self) -> None:
         """Emit a single latched WARNING for the watchdog entitlement/wiring gap.
 
-        558 made ``meta_watchdog.enabled`` default to ``True``, so a deployment
-        that has the Meta-Watchdog configured-on but registers no provider
-        (OSS, or PRO without an active entitlement) is a meaningful
-        misconfiguration worth surfacing — but *once*, not on every probe.
+        558 made ``meta_watchdog.enabled`` default to ``True``, so on an
+        install where a provider could ever arrive, configured-on but
+        unregistered is the entitlement/wiring gap worth surfacing — once, not
+        per probe. On an install where none can arrive and the flag is merely
+        riding its default, the same state is the permanent designed posture
+        and warning about it is noise; the DEBUG breadcrumbs at the call site
+        and on the start path stay the diagnostic trail.
 
-        Latched to the service instance so it never recurs on the hot path. The
-        settings read is itself fail-open: a failure to resolve settings must
-        not break the health cascade.
+        So the warn needs, beyond the caller-established "unregistered": the
+        flag on, AND either an explicitly configured flag (intent that can
+        never be satisfied here — silence would strand the operator) or a PRO
+        distribution that could register one.
+
+        The gate is evaluated *before* the lock is taken: on the never-warn
+        posture the latch never closes, so a lock ahead of the gate would be
+        acquired on every health probe forever. The settings read is fail-open:
+        a failure to resolve them must not break the health cascade.
         """
         if self._enabled_but_unregistered_warned:
             return
         try:
             from baldur.settings.meta_watchdog import get_meta_watchdog_settings
 
-            enabled = get_meta_watchdog_settings().enabled
+            settings = get_meta_watchdog_settings()
+            enabled = settings.enabled
+            explicitly_enabled = "enabled" in settings.model_fields_set
         except Exception:
             return
-        if enabled:
+        if not enabled:
+            return
+        if not (explicitly_enabled or self._is_pro_installed()):
+            return
+
+        with self._enabled_but_unregistered_lock:
+            if self._enabled_but_unregistered_warned:
+                return
             self._enabled_but_unregistered_warned = True
-            logger.warning("meta_watchdog.enabled_but_unregistered")
+        logger.warning("meta_watchdog.enabled_but_unregistered")
 
     def _get_cluster_info(self) -> tuple:
         """Query cluster information."""

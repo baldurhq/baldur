@@ -92,6 +92,16 @@ _CHILD_TIMEOUT_SECONDS = 300
 
 PATHS = ("decorator", "init")
 
+# How the init path waits for the first precomputed-cache refresh pass, so the
+# scheduled-job surface is measured rather than raced. The deadline is a floor
+# rather than a pure multiple of the refresh interval because expiry is a hard
+# failure: it is only ever *reached* on a run that was going to fail (the poll
+# returns the instant the pass completes), so extra margin costs nothing on a
+# green run and buys immunity to a starved CI box delaying a timer thread.
+_FIRST_PASS_POLL_INTERVAL_SECONDS = 0.25
+_MIN_FIRST_PASS_DEADLINE_SECONDS = 60.0
+_FIRST_PASS_DEADLINE_INTERVAL_MULTIPLIER = 2
+
 
 # ==========================================================================
 # Child side — runs inside the scrubbed interpreter
@@ -235,9 +245,53 @@ def _run_decorator_path() -> None:
 
 
 def _run_init_path() -> None:
+    """``baldur.init()``, then wait out one full precomputed-cache pass.
+
+    Without the wait the child exits before the worker's first pass and the
+    scheduled-job surface — the half of a zero-config boot that emits on a
+    cadence rather than once — goes unmeasured.
+
+    ``last_refresh_at`` is the signal rather than a sleep because the worker
+    assigns it *below* its per-key compute loop: observing it non-None proves
+    every compute of that pass has already run and already emitted whatever it
+    was going to emit. A wall-clock sleep proves neither.
+
+    Deadline expiry raises instead of returning. The verdict this harness
+    reports reads only the child's exit code and the WARNING+ line count, so a
+    run in which no pass ever ran (worker never started, module unimportable)
+    would otherwise print a clean bill of health for a surface it never
+    measured. Raising routes it into the existing child-failure channel.
+    """
+    import time
+
     import baldur
 
     baldur.init()
+
+    from baldur.services.precomputed_cache.worker import get_precomputed_cache_worker
+    from baldur.settings.precomputed_cache import get_precomputed_cache_settings
+
+    interval = get_precomputed_cache_settings().refresh_interval_seconds
+    deadline_seconds = max(
+        _MIN_FIRST_PASS_DEADLINE_SECONDS,
+        _FIRST_PASS_DEADLINE_INTERVAL_MULTIPLIER * interval,
+    )
+    worker = get_precomputed_cache_worker()
+
+    deadline = time.monotonic() + deadline_seconds
+    while worker.get_passive_health()["last_refresh_at"] is None:
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                "no precomputed-cache refresh pass completed within "
+                f"{deadline_seconds:.0f}s — the scheduled-job window was not "
+                "measured, so this run cannot report a posture"
+            )
+        time.sleep(_FIRST_PASS_POLL_INTERVAL_SECONDS)
+
+    # One further poll interval of settle: the pass's scheduling tail runs
+    # after the sentinel is set and can still emit (a failure there surfaces as
+    # ``precomputed_cache.refresh_pass_failed`` at WARNING).
+    time.sleep(_FIRST_PASS_POLL_INTERVAL_SECONDS)
 
 
 def _child_main(path: str) -> int:

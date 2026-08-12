@@ -138,30 +138,47 @@ jobs:
             exit 1
           fi
           echo "server.log clean of framework-independence leak markers"
-      - name: Report what the zero-config boot logged
+          # Cover the scheduled-job window before handing the log to the scan.
+          # A boot emits twice: once at import/startup, and again on the
+          # precomputed-cache worker's refresh cadence — and only the first
+          # half is in the log by the time readiness returns. The wait is
+          # derived from the installed settings rather than hand-authored so a
+          # future default change cannot silently leave the window uncovered.
+          WAIT=$(/tmp/qs/bin/python -c \
+            "from baldur.settings.precomputed_cache import get_precomputed_cache_settings; print(int(get_precomputed_cache_settings().refresh_interval_seconds) + 5)" \
+            2>/dev/null | tail -n 1)
+          case "$WAIT" in
+            ''|*[!0-9]*)
+              echo "could not derive the refresh window (got: '${WAIT}')"
+              exit 1
+              ;;
+          esac
+          echo "waiting ${WAIT}s to cover one precomputed-cache refresh pass"
+          sleep "$WAIT"
+          # Snapshot while the server is still running. The EXIT trap kills
+          # without waiting, so records written during shutdown can land in
+          # server.log after the next step has begun reading it — scanning the
+          # live file would make the blocking gate nondeterministic on a
+          # surface this measurement does not own. Every record emitted before
+          # this point is already flushed (the root handler flushes per
+          # record), so the snapshot is exactly boot + the covered window.
+          cp server.log server-boot.log
+      - name: Assert the zero-config boot logged nothing at WARNING or above
         # A real zero-config framework boot: the step above runs the
         # documented server with no BALDUR_* variables and no Redis, so its
         # log is the Django / FastAPI / Flask half of the posture guarantee.
         # The scan shares its level patterns with the harness, so "a baldur
         # WARNING-or-above line" has one definition rather than one per caller.
         #
-        # Report-only, and NOT because the check is wrong. The first run in
-        # which the boot's scheduled jobs fired before the log was scanned
-        # found four genuine WARNING/ERROR lines on the Django app: optional
-        # and licensed-tier components announcing their own absence, which is
-        # the same class the quiet-posture work removes, on a surface that
-        # work never inventoried. Two facts keep it from blocking today --
-        # whether those jobs land before the scan is a race, so a blocking
-        # step makes every unrelated push flaky, and the fix is four separate
-        # subsystems rather than a log-level change. Deleting the step would
-        # lose the only measurement of the framework paths, so it stays and
-        # prints. Restore the failing exit in the change that fixes the four.
+        # Blocking, and deterministic about what it covers: the step above
+        # waits out one full refresh pass and snapshots the log, so this reads
+        # boot plus the scheduled-job window rather than racing it — and reads
+        # a file no live process is still writing to.
         working-directory: examples/quickstart_${{ matrix.app }}
-        continue-on-error: true
         run: |
           /tmp/qs/bin/python \
             "${GITHUB_WORKSPACE}/scripts/check_zero_config_log_posture.py" \
-            --scan-log server.log
+            --scan-log server-boot.log
 
   zero-config-posture:
     # The bare install: no framework, no extras, no environment. Runs the

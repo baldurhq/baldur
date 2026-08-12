@@ -2029,6 +2029,22 @@ def _resolve_metrics_posture() -> tuple[str, str | None]:
     return "disabled", "prometheus_extra_not_installed"
 
 
+def _resolve_statistics_posture() -> str:
+    """Name the registered statistics adapter, or ``"none"``.
+
+    Reads the registry slot without resolving it: ``get_statistics_repo()``
+    *constructs* a NullStatisticsRepository when the slot is empty, which
+    would flip that class's once-per-process latch and emit from inside a
+    function documented as pure — and, because the startup report derives from
+    the same call, would do so before the posture line on every ``init()``.
+    """
+    from baldur.factory.registry import ProviderRegistry
+
+    if not ProviderRegistry.has_statistics_adapter():
+        return "none"
+    return type(ProviderRegistry.get_statistics_repo()).__name__
+
+
 def get_runtime_posture() -> dict[str, Any]:
     """Describe what this install is actually running on, right now.
 
@@ -2043,6 +2059,7 @@ def get_runtime_posture() -> dict[str, Any]:
     posture: dict[str, Any] = {
         "storage": storage,
         "metrics": metrics,
+        "statistics": _resolve_statistics_posture(),
         "init_called": _init_done,
     }
     if storage_reason:

@@ -63,7 +63,25 @@ def budget_status(ctx: RequestContext) -> ResponseContext:
         nocache:  Set to "true" to bypass cache (V3)
 
     V3 Optimization: Uses multi-tier cache for P95 < 20ms target.
+
+    Tier absence answers first: without the PRO distribution there is no
+    service to ask and no fail-safe response to build, so the handler returns
+    the designed-absence payload and logs nothing. Without the guard the
+    non-cached branch inverts this module's 200-fail-open contract — the
+    fail-safe builder imports a PRO symbol inside the except arm and its
+    ``ModuleNotFoundError`` escapes as HTTP 500.
     """
+    from baldur.utils.tier import is_pro_installed
+
+    if not is_pro_installed():
+        return ResponseContext.json(
+            {
+                "status": "unavailable",
+                "reason": "pro_not_installed",
+                "timestamp": utc_now().isoformat(),
+            }
+        )
+
     try:
         slo_name = ctx.get_query("slo_name", "availability")
         use_cache = ctx.get_query("nocache", "").lower() != "true"

@@ -37,10 +37,25 @@ def compute_health_status() -> dict[str, Any]:
 
 
 def compute_error_budget_status() -> dict[str, Any]:
-    """Compute error budget status for caching."""
-    try:
-        from baldur.utils.time import utc_now
+    """Compute error budget status for caching.
 
+    Tier absence is a designed state, not a failure: without the PRO
+    distribution there is no error-budget service to ask, so the compute
+    answers with the module's degraded-payload shape and logs nothing. A
+    *broken* PRO install keeps its ERROR log — the guard only covers the
+    case where the capability was never installed.
+    """
+    from baldur.utils.tier import is_pro_installed
+    from baldur.utils.time import utc_now
+
+    if not is_pro_installed():
+        return {
+            "status": "unavailable",
+            "reason": "pro_not_installed",
+            "timestamp": utc_now().isoformat(),
+        }
+
+    try:
         try:
             from baldur_pro.services.error_budget import (
                 get_error_budget_service,
@@ -115,10 +130,24 @@ def register_default_compute_functions() -> None:
     ``reset_precomputed_cache_worker()`` rebinds the global, a module-level
     ``_worker`` binding would otherwise register into the stale pre-reset
     instance while the run-state lives on the new one (test-only divergence).
+
+    The error-budget key is tier-gated the same way the scheduler filters its
+    own PRO-only jobs: refreshing a permanently-unavailable payload every pass
+    costs a compute plus an L1/L2 write and makes the worker's key list
+    overstate what this install can answer. The read path stays covered by the
+    compute's own tier guard.
     """
+    from baldur.utils.tier import is_pro_installed
+
     worker = get_precomputed_cache_worker()
     worker.register(CACHE_KEY_HEALTH, compute_health_status)
-    worker.register(CACHE_KEY_ERROR_BUDGET, compute_error_budget_status)
+    if is_pro_installed():
+        worker.register(CACHE_KEY_ERROR_BUDGET, compute_error_budget_status)
+    else:
+        logger.debug(
+            "precomputed_cache.pro_gated_key_skipped",
+            cache_key=CACHE_KEY_ERROR_BUDGET,
+        )
     worker.register(CACHE_KEY_POOL_STATUS, compute_pool_status)
     logger.info("precomputed_cache.compute_functions_registered")
 

@@ -51,9 +51,13 @@ class PgAdminProvider(ABC):
     (Django ``connections[alias].cursor()``, DB-API 2.0 ``conn.cursor()``,
     or noop). Callers should not assume any specific backend.
 
-    Availability gate: ``is_available()`` returns False for the no-op
-    implementation so consumers can omit PG-specific keys from their
-    response dicts when the underlying runtime cannot satisfy the contract.
+    Availability gate: ``is_available()`` returns False whenever the
+    underlying runtime cannot satisfy the contract — for the no-op
+    implementation, and equally for a backend-injected implementation whose
+    configured backend is not a PostgreSQL — so consumers can omit
+    PG-specific keys from their response dicts. It is a configuration test,
+    not a reachability test: a configured-but-unreachable postgres still
+    answers True and surfaces its failure when the SQL is executed.
     """
 
     @abstractmethod

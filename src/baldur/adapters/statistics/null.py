@@ -52,9 +52,16 @@ class NullStatisticsRepository(StatisticsRepositoryInterface):
     _warned: bool = False
 
     def __init__(self):
-        """Initialize NullStatisticsRepository."""
+        """Initialize NullStatisticsRepository.
+
+        The absence announced here is the designed zero-config default, not a
+        problem: no statistics adapter is registered until a host application
+        provides one. DEBUG matches how the same absence is already classified
+        on the registration path; the operator-facing answer to "what is this
+        install running on" is the runtime-posture line's ``statistics`` field.
+        """
         if not NullStatisticsRepository._warned:
-            logger.warning("null_statistics_repository.no_adapter_registered")
+            logger.debug("null_statistics_repository.no_adapter_registered")
             NullStatisticsRepository._warned = True
 
     # =========================================================================
