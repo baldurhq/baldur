@@ -110,6 +110,55 @@ class TestZeroConfigFirstContactPosture:
         assert measured["init"].counts["debug"] == 0
 
 
+class TestTheDetectorSeesEveryRendering:
+    """The gate's own falsifiability, in the renderings CI actually produces.
+
+    Everything above trusts one predicate to decide "was that a baldur
+    WARNING?". It has to hold for all three shapes a line can arrive in:
+    JSON (the configured default), plain console (pre-configuration), and
+    **coloured** console. The third is the one that bites — structlog's
+    ConsoleRenderer colours by default and does not gate that on a tty, so
+    on a Linux runner the level word arrives wrapped in escapes even though
+    stdout is a pipe. A detector that a terminal setting can silence reports
+    a clean run on a noisy one, which is the only failure mode of a gate
+    that nobody notices.
+    """
+
+    @staticmethod
+    def _console_line(colors: bool) -> str:
+        import structlog
+
+        return structlog.dev.ConsoleRenderer(colors=colors)(
+            None,
+            "warning",
+            {"event": "resilient_storage.lazy_redis_probe_failed", "level": "warning"},
+        )
+
+    def test_the_coloured_line_is_actually_coloured(self):
+        """Guards the case below from passing on an uncoloured fixture."""
+        assert "\x1b[" in self._console_line(colors=True)
+
+    @pytest.mark.parametrize("colors", [False, True], ids=["plain", "coloured"])
+    def test_a_console_warning_is_detected_in_either_rendering(self, harness, colors):
+        line = self._console_line(colors)
+
+        assert harness.baldur_lines_at_warning_or_above([line]) != []
+
+    def test_a_json_warning_is_detected(self, harness):
+        line = (
+            '{"event": "resilient_storage.lazy_redis_probe_failed", '
+            '"level": "warning", "logger": "baldur.adapters.resilient.backend"}'
+        )
+
+        assert harness.baldur_lines_at_warning_or_above([line]) != []
+
+    def test_someone_elses_warning_is_not_ours(self, harness):
+        """The gate must not fail on the host framework's own lines."""
+        line = '{"event": "startup", "level": "warning", "logger": "uvicorn.error"}'
+
+        assert harness.baldur_lines_at_warning_or_above([line]) == []
+
+
 class TestPostureAcrossInitAndProtect:
     """The latch spans entry points, and the report agrees with the line.
 
