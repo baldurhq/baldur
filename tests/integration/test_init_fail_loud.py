@@ -164,23 +164,48 @@ class TestInitTriggerMatrixIntegration:
             patched_eager_backend["backend"]
         )
 
-    def test_init_non_production_with_url_unset_warns_and_falls_back(
+    def test_init_non_production_with_url_unset_announces_and_falls_back(
         self, monkeypatch, caplog
     ):
-        """Row 4: non-prod + URL unset → WARNING + memory default."""
+        """Row 4: non-prod + URL unset → memory default, announced at INFO.
+
+        The announcement is deliberately below WARNING: a development boot
+        with no Redis configured is the expected posture, not a fault, and
+        the startup posture line states the same fact once. What this row
+        pins is that the fallback stays *visible* — the original defect was
+        it being silent — and that it is not upgraded back to an alarm.
+
+        ``init()`` now configures logging as its first step, which sets the
+        root level from the environment. ``caplog.at_level`` alone is
+        therefore not enough: it is applied before ``init()`` and overwritten
+        by it. Driving the level through the environment instead means this
+        asserts what an operator running at INFO would actually see, rather
+        than what a capture handler was told to keep.
+        """
         from baldur import bootstrap
         from baldur.factory.registry import ProviderRegistry
+        from baldur.observability.structlog_config import reset_structlog_config
 
         monkeypatch.delenv("BALDUR_TEST_MODE", raising=False)
         monkeypatch.setenv("BALDUR_ENVIRONMENT", "development")
         monkeypatch.delenv("BALDUR_REDIS_URL", raising=False)
+        monkeypatch.setenv("BALDUR_TEST_LOG_LEVEL", "INFO")
+        reset_structlog_config()
 
-        with _scaffold_init_subdeps():
-            with caplog.at_level("WARNING"):
+        try:
+            with _scaffold_init_subdeps(), caplog.at_level("INFO"):
                 bootstrap.init()
+        finally:
+            reset_structlog_config()
 
         assert ProviderRegistry.cache.get_default_name() == "memory"
-        assert any("registry_memory_fallback" in r.message for r in caplog.records)
+        fallback_records = [
+            record
+            for record in caplog.records
+            if "registry_memory_fallback" in record.getMessage()
+        ]
+        assert fallback_records
+        assert {record.levelname for record in fallback_records} == {"INFO"}
 
     def test_init_non_production_with_url_set_wires_redis_default(
         self, monkeypatch, patched_eager_backend

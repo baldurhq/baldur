@@ -15,7 +15,7 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Callable
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import structlog
 
@@ -84,7 +84,10 @@ class NoOpMetric:
     def __enter__(self) -> NoOpMetric:
         return self
 
-    def __exit__(self, *exc_info: object) -> bool:
+    def __exit__(self, *exc_info: object) -> Literal[False]:
+        # Literal, not bool: the type itself states that this stub can never
+        # suppress an exception, which is the property that keeps an absent
+        # optional dependency from becoming a silent-failure factory.
         return False
 
 
