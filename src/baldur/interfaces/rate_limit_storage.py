@@ -171,11 +171,13 @@ class RateLimitStorageInterface(ABC):
             cooldown wins.
 
         Note:
-            This default is best-effort: the read-modify-write below is atomic
-            only within a process, so two processes racing can still lose the
-            longer of two concurrent writes. Every adapter shipped with Baldur
-            overrides it with an atomic write; a bring-your-own implementation
-            should do the same to get the cross-process guarantee.
+            This default is best-effort, and the read-modify-write below takes no
+            lock at all: any writer landing between its read and its write loses
+            the longer of the two cooldowns — another thread of this process just
+            as much as another process. Every adapter shipped with Baldur
+            overrides it (memory and database under their own lock, Redis
+            server-side), so a bring-your-own implementation is the only one that
+            inherits this window, and it closes it by overriding too.
         """
         stored = self.get_state(key).cooldown_until
         effective = max(stored, cooldown_until)

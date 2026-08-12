@@ -15,6 +15,7 @@ middleware its own maximum), so each call site applies its own after parsing.
 
 from __future__ import annotations
 
+import math
 from email.utils import parsedate_to_datetime
 from typing import Any
 
@@ -37,28 +38,35 @@ def parse_retry_after(raw: Any) -> float | None:
             validation, so a caller need not know which form it holds.
 
     Returns:
-        The wait in seconds, or ``None`` when the value is absent, unparseable,
-        negative, NaN, or an HTTP-date already in the past. Every caller treats
-        ``None`` as "no usable header" and falls back to its own policy.
+        A finite, non-negative wait in seconds, or ``None`` when the value is
+        absent, unparseable, negative, NaN, infinite, or an HTTP-date already in
+        the past. Every caller treats ``None`` as "no usable header" and falls
+        back to its own policy.
 
     Note:
-        The NaN rejection is load-bearing, not decoration: ``float("nan")``
-        parses successfully and compares ``False`` against every threshold, so
-        an unrejected NaN propagates into a stored expiry that no later
-        comparison can end.
+        The non-finite rejection is load-bearing, not decoration. Neither NaN nor
+        infinity is a ``Retry-After`` any provider can send — RFC 9110's
+        delta-seconds is a non-negative integer — yet ``float()`` accepts the
+        spellings of both (``"nan"``, ``"inf"``, ``"Infinity"``, ``"1e999"``).
+        An unrejected NaN compares ``False`` against every threshold and becomes
+        a stored expiry no later comparison can end; an unrejected infinity
+        compares greater than every threshold and pins the caller at its own
+        ceiling — an hour of fleet-wide cooldown from a junk header, which a
+        monotonic store will then hold for the full hour.
     """
     if raw is None or raw == "":
         return None
 
     try:
         seconds = float(raw)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
+        # OverflowError is the int-too-large-to-convert case; like the other
+        # two it means "not a delta-seconds", so the date form gets its turn.
         seconds = _parse_http_date_seconds(raw)
         if seconds is None:
             return None
 
-    # Rejects negatives and NaN together: float("nan") >= 0 is False.
-    if not (seconds >= 0):
+    if not math.isfinite(seconds) or seconds < 0:
         return None
     return seconds
 

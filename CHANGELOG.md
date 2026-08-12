@@ -53,6 +53,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - Exponential backoff no longer overflows past ~1024 attempts, which had silently dropped cooldowns.
 - `on_rate_limited` accepts a raw `Retry-After` string; the documented direct-drive form raised.
 - `Retry-After` in HTTP-date form is honored, instead of falling back to the backoff ladder.
+- An infinite `Retry-After` reads as absent instead of clamping to the caller's maximum wait.
 
 ## [1.4.0] - 2026-08-11
 

@@ -675,7 +675,12 @@ class RateLimitCoordinator:
         Args:
             key: Rate limit key
             is_429: Function to detect if response is 429 (default: check status_code)
-            get_retry_after: Function to extract Retry-After from response
+            get_retry_after: Function to extract Retry-After from response. The
+                default reads the response's ``Retry-After`` header in both
+                RFC 9110 forms (delta-seconds and HTTP-date) and returns ``None``
+                for anything unusable. A replacement owns that coercion itself —
+                a bare ``float(header)`` raises on the HTTP-date form, and the
+                extractor's exceptions propagate to your caller.
             max_wait: Maximum seconds the wrapper may sleep on an active cooldown.
                 ``None`` uses the configured ``max_delay``. When the remaining
                 cooldown exceeds the bound the wrapper raises
@@ -698,7 +703,6 @@ class RateLimitCoordinator:
             @coordinator.rate_limit_aware(
                 "external_api",
                 is_429=lambda r: r.status_code == 429,
-                get_retry_after=lambda r: float(r.headers.get("Retry-After", 5)),
             )
             def call_external_api():
                 return requests.get(...)

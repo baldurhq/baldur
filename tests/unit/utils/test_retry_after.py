@@ -117,6 +117,35 @@ class TestParseRetryAfterContract:
         """
         assert parse_retry_after(raw) is None
 
+    @pytest.mark.parametrize(
+        "raw",
+        ["inf", "Infinity", "+INF", "1e999", float("inf")],
+        ids=["inf", "infinity-word", "signed-upper", "overflowing-literal", "float"],
+    )
+    def test_infinity_is_rejected_rather_than_passed_through(self, raw):
+        """NaN's mirror image, and the one with the larger blast radius.
+
+        ``float()`` accepts every spelling above, and infinity compares *greater*
+        than every threshold — so an unrejected one is not dropped, it is clamped
+        to whatever ceiling the caller applies. At the coordinator that is
+        ``retry_after_ceiling``: a junk header installs a full hour of fleet-wide
+        cooldown where "no usable header" would have installed the few-second
+        ladder, and a monotonic store then holds that hour until an operator
+        ``clear()``. No provider can send this — RFC 9110 delta-seconds is a
+        non-negative integer.
+        """
+        assert parse_retry_after(raw) is None
+
+    def test_an_integer_too_large_for_a_float_is_rejected_not_raised(self):
+        """Boundary: the coercion's third failure mode, which is not a ValueError.
+
+        ``float(10**400)`` raises ``OverflowError``. A client exposing an
+        oversized ``retry_after`` attribute would otherwise propagate it out of
+        the retry stage's 429 detection, where every other junk value is simply
+        "no header".
+        """
+        assert parse_retry_after(10**400) is None
+
 
 class TestRetryAfterCallSiteAdoptionBehavior:
     """The other parse sites compose the canonical parser, not their own coercion.

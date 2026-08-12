@@ -382,10 +382,12 @@ class RedisRateLimitStorage(RateLimitStorageInterface):
         """Move the cooldown end time later in one atomic server-side max-merge.
 
         Falls back to a read-modify-write when this Redis cannot run Lua. That
-        loses cross-process atomicity but is still monotonic within the process,
-        and it is the only acceptable degradation: raising here would reach every
-        caller's fail-open wrap and install no cooldown at all — the worst
-        outcome available, on exactly the storm the cooldown exists to damp.
+        fallback is unsynchronised — it is monotonic with respect to what it
+        read, so a longer write landing during its round trip is lost, whether
+        that writer is another thread here or another host. It is still the only
+        acceptable degradation: raising instead would reach every caller's
+        fail-open wrap and install no cooldown at all — the worst outcome
+        available, on exactly the storm the cooldown exists to damp.
         """
         if self._script_fallback:
             return self._extend_cooldown_unscripted(key, cooldown_until, ttl)
