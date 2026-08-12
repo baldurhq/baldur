@@ -24,7 +24,8 @@ Verification techniques (per UNIT_TEST_GUIDELINES §8):
 - §8.3 Idempotency (advisory lock acquire+release sequence).
 - §8.8 State transition (timeout_context restoration in finally).
 - §8.2 Exception/edge cases (release_lock_failed log on flaky cleanup).
-- §6.7 parametrize for backend pairs and lock matrix.
+- §8.4 Side effects (the availability probe's latched DEBUG breadcrumb).
+- §6.7 parametrize for backend pairs, the lock matrix, and probe outcomes.
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from structlog.testing import capture_logs
 
 from baldur.adapters.postgres.admin import PgAdmin
 from baldur.adapters.postgres.sessions import (
@@ -242,6 +244,103 @@ class TestPgAdminBasicSqlBehavior:
         assert pid == 12345
         assert "pg_backend_pid()" in cursor.executed[0][0]
         assert "pg_sleep(0.05)" in cursor.executed[0][0]
+
+
+# =============================================================================
+# A2. Availability probe — the vendor-honesty parameter
+# =============================================================================
+
+
+class TestPgAdminAvailabilityBehavior:
+    """``is_available()`` answers the injected probe, and fails toward absence.
+
+    The interface's own words are "True iff this provider can execute PG
+    admin SQL", but the Django- and DSN-backed instances answered True
+    unconditionally — so a Django deployment on sqlite ran
+    ``pg_stat_activity`` against it once per refresh pass. The optional probe
+    makes the answer honest without changing any direct construction, which
+    is why the omitted case still has to report True.
+
+    The probe is a configuration test, not a reachability test, so a raising
+    probe means "cannot tell" and the safe answer is absence: consumers omit
+    the PG-specific keys, which is the documented contract. The breadcrumb is
+    latched because this runs on every refresh pass — an unlatched DEBUG per
+    pass would be the log shape the change exists to remove.
+    """
+
+    PROBE_FAILED = "pg_admin.availability_probe_failed"
+
+    @staticmethod
+    def _admin(probe, label: str = "probe:default") -> PgAdmin:
+        """A PgAdmin whose backend callables are never reached.
+
+        ``is_available()`` consults only the probe, so the session/connection
+        seams stay unwired — a stub here would assert the stub.
+        """
+
+        def _unreachable():  # pragma: no cover - guards a wrong call site
+            raise AssertionError("is_available() must not touch the backend")
+
+        return PgAdmin(
+            get_session=_unreachable,
+            get_connection=_unreachable,
+            label=label,
+            availability_probe=probe,
+        )
+
+    @pytest.mark.parametrize(
+        ("probe", "expected"),
+        [
+            (None, True),
+            (lambda: True, True),
+            (lambda: False, False),
+        ],
+        ids=["probe_omitted", "probe_says_postgres", "probe_says_other_vendor"],
+    )
+    def test_is_available_reports_what_the_probe_answers(self, probe, expected):
+        assert self._admin(probe).is_available() is expected
+
+    def test_a_raising_probe_fails_toward_absence(self):
+        """ "Cannot tell" resolves to "omit the PG keys", never to a raise
+        escaping into the caller's refresh pass."""
+        admin = self._admin(lambda: 1 / 0)
+
+        assert admin.is_available() is False
+
+    def test_a_raising_probe_leaves_one_debug_breadcrumb(self):
+        admin = self._admin(lambda: 1 / 0, label="django:default")
+
+        with capture_logs() as logs:
+            admin.is_available()
+
+        records = [e for e in logs if e.get("event") == self.PROBE_FAILED]
+        assert len(records) == 1
+        assert records[0]["log_level"] == "debug"
+        assert records[0]["label"] == "django:default"
+        # The message, not a traceback: one per pass is the flood being removed.
+        assert records[0]["error"]
+
+    def test_a_second_failure_on_the_same_instance_adds_no_second_record(self):
+        """The half a single-call test cannot see: the latch is what keeps a
+        per-pass probe from becoming a per-pass log line."""
+        admin = self._admin(lambda: 1 / 0)
+
+        with capture_logs() as logs:
+            first = admin.is_available()
+            second = admin.is_available()
+
+        assert (first, second) == (False, False)
+        assert sum(1 for e in logs if e.get("event") == self.PROBE_FAILED) == 1
+
+    def test_a_fresh_instance_re_arms_the_breadcrumb(self):
+        """The latch is per instance, so a re-resolved provider still reports
+        a misconfiguration that is still there."""
+        self._admin(lambda: 1 / 0).is_available()
+
+        with capture_logs() as logs:
+            self._admin(lambda: 1 / 0).is_available()
+
+        assert sum(1 for e in logs if e.get("event") == self.PROBE_FAILED) == 1
 
 
 # =============================================================================
