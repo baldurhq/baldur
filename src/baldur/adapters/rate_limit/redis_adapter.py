@@ -16,6 +16,7 @@ Features:
 
 from __future__ import annotations
 
+import math
 import time
 from typing import Any
 
@@ -55,6 +56,49 @@ except ImportError:
 
 
 logger = structlog.get_logger()
+
+# Seconds of headroom added on top of a cooldown's remaining time when deriving
+# the Redis key TTL, so the key cannot be evicted in the instant before the
+# cooldown it carries expires. Not an operator tuning axis — the quantity is a
+# rounding cushion, not a policy.
+_COOLDOWN_TTL_MARGIN_SECONDS = 60
+
+_EXTEND_COOLDOWN_SCRIPT = "rate_limit_extend_cooldown"
+
+# Monotonic cooldown write, atomic across processes and hosts.
+#
+# Single KEY on purpose: the shared LuaScriptRegistry rejects multi-key calls
+# whose keys land in different hash slots, and on Redis Cluster a second key
+# named through ARGV is a non-local key the server refuses outright. The
+# last_updated bookkeeping therefore stays outside the script.
+#
+# The TTL is derived from the *effective* expiry, never from the caller's
+# candidate: a short headerless 429 arriving against a long honored cooldown
+# would otherwise shrink the key's TTL below the expiry it carries and let Redis
+# drop a live cooldown early. Only the script knows the effective value.
+LUA_EXTEND_COOLDOWN = """
+local stored = tonumber(redis.call('GET', KEYS[1]) or '0') or 0
+local candidate = tonumber(ARGV[1])
+local now = tonumber(ARGV[2])
+local configured_ttl = tonumber(ARGV[3])
+local margin = tonumber(ARGV[4])
+
+local effective = stored
+if candidate > effective then
+    effective = candidate
+end
+
+local ttl = math.ceil(effective - now) + margin
+if ttl < configured_ttl then
+    ttl = configured_ttl
+end
+if ttl < 1 then
+    ttl = 1
+end
+
+redis.call('SET', KEYS[1], string.format('%.6f', effective), 'EX', string.format('%d', ttl))
+return string.format('%.6f', effective)
+"""
 
 
 def _get_redis_ttl() -> int:
@@ -103,12 +147,21 @@ class RedisRateLimitStorage(RateLimitStorageInterface):
             redis_client: Redis client instance (redis.Redis or compatible)
             ttl: Redis key TTL (seconds). Taken from settings when None.
         """
+        from baldur.audit.performance.lua_registry import LuaScriptRegistry
+
         self._redis = redis_client
         self._ttl = ttl if ttl is not None else _get_redis_ttl()
         self._available: bool | None = None
         # v6.3.0: Fallback-mode and local-state tracking
         self._fallback_mode = False
         self._local_state: dict[str, RateLimitState] = {}  # Local fallback state
+        self._lua = LuaScriptRegistry(redis_client)
+        self._lua.register(_EXTEND_COOLDOWN_SCRIPT, LUA_EXTEND_COOLDOWN)
+        # Sticky once a reachable backend has proven it cannot run Lua (a client
+        # without scripting support, an ACL denying @scripting, an EVAL-rejecting
+        # proxy). Deliberately unlocked and never reset: the worst race is one
+        # extra WARNING per thread already inside the window, once per process.
+        self._script_fallback = False
 
     @property
     def storage_type(self) -> RateLimitStorageType:
@@ -242,26 +295,26 @@ class RedisRateLimitStorage(RateLimitStorageInterface):
         )
         pipeline.execute()
 
+    def _read_state(self, key: str) -> RateLimitState:
+        """Read the three state keys in one round trip. Lets Redis errors escape."""
+        pipeline = self._redis.pipeline()
+        pipeline.get(self._make_key(key, "cooldown_until"))
+        pipeline.get(self._make_key(key, "consecutive_429s"))
+        pipeline.get(self._make_key(key, "last_updated"))
+
+        results = pipeline.execute()
+
+        return RateLimitState(
+            key=key,
+            cooldown_until=float(results[0]) if results[0] else 0.0,
+            consecutive_429s=int(results[1]) if results[1] else 0,
+            last_updated=float(results[2]) if results[2] else 0.0,
+        )
+
     def get_state(self, key: str) -> RateLimitState:
         """Get rate limit state from Redis."""
         try:
-            pipeline = self._redis.pipeline()
-            pipeline.get(self._make_key(key, "cooldown_until"))
-            pipeline.get(self._make_key(key, "consecutive_429s"))
-            pipeline.get(self._make_key(key, "last_updated"))
-
-            results = pipeline.execute()
-
-            cooldown_until = float(results[0]) if results[0] else 0.0
-            consecutive_429s = int(results[1]) if results[1] else 0
-            last_updated = float(results[2]) if results[2] else 0.0
-
-            return RateLimitState(
-                key=key,
-                cooldown_until=cooldown_until,
-                consecutive_429s=consecutive_429s,
-                last_updated=last_updated,
-            )
+            return self._read_state(key)
 
         except Exception as e:
             logger.exception(
@@ -269,6 +322,18 @@ class RedisRateLimitStorage(RateLimitStorageInterface):
                 error=e,
             )
             return RateLimitState(key=key)
+
+    def get_state_strict(self, key: str) -> RateLimitState:
+        """Get rate limit state from Redis, raising instead of folding on failure."""
+        try:
+            return self._read_state(key)
+
+        except Exception as e:
+            logger.exception(
+                "redis_rate_limit_storage.get_state_strict_failed",
+                error=e,
+            )
+            raise RateLimitStorageUnavailableError(str(e)) from e
 
     def set_cooldown(
         self,
@@ -307,6 +372,125 @@ class RedisRateLimitStorage(RateLimitStorageInterface):
                 error=e,
             )
             raise RateLimitStorageUnavailableError(str(e)) from e
+
+    def extend_cooldown(
+        self,
+        key: str,
+        cooldown_until: float,
+        ttl: int | None = None,
+    ) -> float:
+        """Move the cooldown end time later in one atomic server-side max-merge.
+
+        Falls back to a read-modify-write when this Redis cannot run Lua. That
+        loses cross-process atomicity but is still monotonic within the process,
+        and it is the only acceptable degradation: raising here would reach every
+        caller's fail-open wrap and install no cooldown at all — the worst
+        outcome available, on exactly the storm the cooldown exists to damp.
+        """
+        if self._script_fallback:
+            return self._extend_cooldown_unscripted(key, cooldown_until, ttl)
+
+        try:
+            return self._extend_cooldown_scripted(key, cooldown_until, ttl)
+        except Exception as script_error:
+            # The plain-command path decides what this failure was: if it also
+            # fails the backend is down and the error propagates, if it succeeds
+            # the backend is reachable and scripting specifically is unusable.
+            effective = self._extend_cooldown_unscripted(key, cooldown_until, ttl)
+            self._script_fallback = True
+            logger.warning(
+                "redis_rate_limit_storage.script_fallback",
+                redis_key=key,
+                error=script_error,
+            )
+            return effective
+
+    def _extend_cooldown_scripted(
+        self,
+        key: str,
+        cooldown_until: float,
+        ttl: int | None,
+    ) -> float:
+        """Atomic max-merge through the shared Lua registry."""
+        now = time.time()
+        effective = float(
+            self._lua.execute(
+                _EXTEND_COOLDOWN_SCRIPT,
+                keys=[self._make_key(key, "cooldown_until")],
+                args=[
+                    repr(cooldown_until),
+                    repr(now),
+                    ttl or self._ttl,
+                    _COOLDOWN_TTL_MARGIN_SECONDS,
+                ],
+            )
+        )
+        self._touch_last_updated(key, now, self._covering_ttl(effective, now, ttl))
+        return effective
+
+    def _extend_cooldown_unscripted(
+        self,
+        key: str,
+        cooldown_until: float,
+        ttl: int | None,
+    ) -> float:
+        """Read-modify-write max-merge, for a Redis that cannot run Lua.
+
+        Reads strictly: a folded read would report no stored cooldown and let a
+        short candidate replace a live long one, which is the very regression
+        the monotonic contract exists to close.
+        """
+        now = time.time()
+        stored = self.get_state_strict(key).cooldown_until
+        effective = max(stored, cooldown_until)
+        covering_ttl = self._covering_ttl(effective, now, ttl)
+
+        try:
+            pipeline = self._redis.pipeline()
+            pipeline.set(
+                self._make_key(key, "cooldown_until"),
+                str(effective),
+                ex=covering_ttl,
+            )
+            pipeline.set(
+                self._make_key(key, "last_updated"),
+                str(now),
+                ex=covering_ttl,
+            )
+            pipeline.execute()
+        except Exception as e:
+            logger.exception(
+                "redis_rate_limit_storage.extend_cooldown_failed",
+                error=e,
+            )
+            raise RateLimitStorageUnavailableError(str(e)) from e
+
+        return effective
+
+    def _touch_last_updated(self, key: str, now: float, ttl: int) -> None:
+        """Write the last_updated marker beside the cooldown (best-effort).
+
+        Kept out of the Lua script because a second key would make the call
+        multi-key, which the shared registry rejects on standalone Redis and
+        Redis Cluster refuses outright. Nothing branches on this value, so an
+        unordered write beside the atomic one costs nothing.
+        """
+        try:
+            self._redis.set(self._make_key(key, "last_updated"), str(now), ex=ttl)
+        except Exception as e:
+            logger.debug(
+                "redis_rate_limit_storage.last_updated_write_skipped",
+                redis_key=key,
+                error=e,
+            )
+
+    def _covering_ttl(self, effective: float, now: float, ttl: int | None) -> int:
+        """TTL that outlives the effective expiry it is applied to."""
+        configured = ttl or self._ttl
+        return max(
+            configured,
+            math.ceil(effective - now) + _COOLDOWN_TTL_MARGIN_SECONDS,
+        )
 
     def increment_consecutive_429s(self, key: str) -> int:
         """Atomically increment 429 counter in Redis."""

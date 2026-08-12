@@ -10,6 +10,8 @@ from typing import Any
 
 import structlog
 
+from baldur.utils.retry_after import parse_retry_after
+
 logger = structlog.get_logger()
 
 
@@ -108,11 +110,13 @@ def _record_rate_limit_cooldown(
     consecutive_429s: int,
 ) -> None:
     """
-    Record the cooldown a 429 computed and the consecutive-429 count.
+    Record the cooldown now in force for the key and the consecutive-429 count.
 
-    Both values are true from the moment the cooldown is computed, so this is
-    recorded before the cooldown is stored — a store that then fails does not
-    invalidate either number.
+    Recorded after the store, because the in-force cooldown is what the store's
+    monotonic merge returns — it is not knowable before. A store that raises
+    therefore records neither value; the 429 counter, which precedes every
+    storage call, keeps climbing, and that divergence is the signal that the
+    coordination store is degraded.
 
     Ignored if the metric definitions are missing or the import fails (fail-open).
     """
@@ -183,12 +187,7 @@ def _default_is_429(response: Any) -> bool:
 
 
 def _default_get_retry_after(response: Any) -> float | None:
-    """Default Retry-After extraction."""
+    """Default Retry-After extraction (both RFC 9110 forms, via the canonical parser)."""
     if hasattr(response, "headers"):
-        retry_after = response.headers.get("Retry-After")
-        if retry_after:
-            try:
-                return float(retry_after)
-            except ValueError:
-                pass
+        return parse_retry_after(response.headers.get("Retry-After"))
     return None

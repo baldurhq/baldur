@@ -306,12 +306,12 @@ class TestBaldurMiddlewareParseRetryAfterContract:
         assert result is None
 
     def test_past_http_date_returns_none(self):
-        """이미 지난 HTTP-date는 seconds < 0이 되어 None을 반환해야 한다."""
+        """An HTTP-date already in the past yields negative seconds, hence None."""
         mw = _make_middleware(retry_after_max=9999)
         fixed_now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
 
         with patch(
-            "baldur.api.django.middleware.baldur.utc_now",
+            "baldur.utils.retry_after.utc_now",
             return_value=fixed_now,
         ):
             result = mw._parse_retry_after(
@@ -321,12 +321,12 @@ class TestBaldurMiddlewareParseRetryAfterContract:
         assert result is None
 
     def test_future_http_date_returns_positive_seconds(self):
-        """미래 HTTP-date는 양수 초를 반환해야 한다."""
+        """A future HTTP-date yields a positive number of seconds."""
         mw = _make_middleware(retry_after_max=999_999)
         fixed_now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
 
         with patch(
-            "baldur.api.django.middleware.baldur.utc_now",
+            "baldur.utils.retry_after.utc_now",
             return_value=fixed_now,
         ):
             # 2026-07-01 12:00:00 - 2026-06-01 12:00:00 = 30 days
@@ -338,12 +338,12 @@ class TestBaldurMiddlewareParseRetryAfterContract:
         assert result > 0
 
     def test_future_http_date_clamped_by_max(self):
-        """미래 HTTP-date도 max 초과 시 클램핑되어야 한다."""
+        """A future HTTP-date past the maximum is clamped to it, like the seconds form."""
         mw = _make_middleware(retry_after_max=60)
         fixed_now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
 
         with patch(
-            "baldur.api.django.middleware.baldur.utc_now",
+            "baldur.utils.retry_after.utc_now",
             return_value=fixed_now,
         ):
             result = mw._parse_retry_after(

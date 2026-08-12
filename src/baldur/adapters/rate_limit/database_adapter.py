@@ -182,6 +182,82 @@ class DatabaseRateLimitStorage(RateLimitStorageInterface):
             )
             raise
 
+    def extend_cooldown(
+        self,
+        key: str,
+        cooldown_until: float,
+        ttl: int | None = None,
+    ) -> float:
+        """Move the cooldown end time later, atomically within this process.
+
+        The read and the write are inlined under one lock hold rather than
+        composing the public ``get_state``/``set_cooldown`` pair: ``_lock`` is a
+        plain non-reentrant Lock that ``set_cooldown`` acquires itself, so the
+        natural composition would deadlock the calling thread on its first 429.
+
+        Cross-process atomicity would need a ``GREATEST``-style conditional
+        update, i.e. a change to the repository contract this adapter is
+        deliberately agnostic about. Two processes racing can therefore still
+        lose the longer of two concurrent writes here — use the Redis adapter
+        where that matters.
+
+        Returns:
+            The effective cooldown end time in force after this write.
+        """
+        try:
+            with self._lock:
+                repo = self._get_repository()
+                now = time.time()
+
+                data = repo.get(key)
+                stored = data.get("cooldown_until", 0.0) if data else 0.0
+                effective = max(stored, cooldown_until)
+
+                repo.upsert(
+                    rate_limit_key=key,
+                    data={
+                        "cooldown_until": effective,
+                        "last_updated": now,
+                    },
+                )
+
+                logger.debug(
+                    "database_rate_limit_storage.extend_cooldown",
+                    rate_limit_key=key,
+                    cooldown_until=effective,
+                )
+                return effective
+
+        except Exception as e:
+            logger.exception(
+                "database_rate_limit_storage.extend_cooldown_failed",
+                error=e,
+            )
+            raise
+
+    def get_state_strict(self, key: str) -> RateLimitState:
+        """Get rate limit state from the database, raising instead of folding on failure."""
+        try:
+            repo = self._get_repository()
+            data = repo.get(key)
+
+            if data is None:
+                return RateLimitState(key=key)
+
+            return RateLimitState(
+                key=key,
+                cooldown_until=data.get("cooldown_until", 0.0),
+                consecutive_429s=data.get("consecutive_429s", 0),
+                last_updated=data.get("last_updated", 0.0),
+            )
+
+        except Exception as e:
+            logger.exception(
+                "database_rate_limit_storage.get_state_strict_failed",
+                error=e,
+            )
+            raise
+
     def increment_consecutive_429s(self, key: str) -> int:
         """Increment 429 counter in database."""
         try:

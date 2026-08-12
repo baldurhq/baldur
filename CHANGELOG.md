@@ -36,6 +36,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - Missing `prometheus` extra: recording is a silent no-op instead of a warning per protected call.
 - **Breaking**: `metrics.prometheus_unavailable` and `metrics.up_gauge_registration_failed` removed.
 - `prometheus.unavailable` → INFO; `metrics.protect_recorder_unavailable_sticky` → DEBUG.
+- `on_rate_limited` returns the cooldown now in force for the key, not the delay this call computed.
+- `baldur_rate_limit_cooldown_seconds` buckets now reach 3600 s, so honored cooldowns leave `+Inf`.
 
 ### Fixed
 
@@ -45,6 +47,12 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `GET /error-budget/status/` answers 200 `unavailable` without PRO installed, instead of a 500.
 - Pool status omits `pg_stats` on a non-PostgreSQL backend instead of failing the whole payload.
 - The error-budget and pool-status cache jobs no longer log a traceback on every refresh pass.
+- 429 cooldowns are monotonic per key; a shorter concurrent write no longer cuts an honored one.
+- A debounce-suppressed 429 moves the all-clear it extended, instead of leaving it at the old time.
+- `RATE_LIMIT_COOLDOWN_END` carries `cooldown_until`, the expiry it was announced for.
+- Exponential backoff no longer overflows past ~1024 attempts, which had silently dropped cooldowns.
+- `on_rate_limited` accepts a raw `Retry-After` string; the documented direct-drive form raised.
+- `Retry-After` in HTTP-date form is honored, instead of falling back to the backoff ladder.
 
 ## [1.4.0] - 2026-08-11
 

@@ -550,14 +550,16 @@ class TestOnRateLimitedStorageUnavailableBehavior:
     Every caller wraps ``on_rate_limited`` fail-open, so a storage fault leaves
     no trace in the business path — the metrics are the only surviving signal,
     and they have to survive exactly the outage an operator needs them for.
-    Each recording site therefore sits at the earliest point where its values
-    are already true, which is what these exit paths pin.
+    Each recording site therefore sits at the earliest point where its value is
+    already true, which is what these exit paths pin: the 429 count precedes
+    every storage call, while the cooldown values are only known once the store
+    has merged them.
     """
 
     @pytest.mark.parametrize(
         "failing_call",
-        ["increment_consecutive_429s", "set_cooldown"],
-        ids=["increment", "set_cooldown"],
+        ["increment_consecutive_429s", "extend_cooldown"],
+        ids=["increment", "extend_cooldown"],
     )
     def test_storage_unavailable_still_counts_the_429(self, mock_storage, failing_call):
         """Whichever storage call fails, the 429 counter has already advanced."""
@@ -606,15 +608,16 @@ class TestOnRateLimitedStorageUnavailableBehavior:
         assert _sample("baldur_rate_limit_cooldown_seconds_count", key=key) is None
         assert _sample("baldur_rate_limit_consecutive_429s", key=key) is None
 
-    def test_storage_unavailable_on_set_cooldown_keeps_the_429_cooldown_values(
+    def test_storage_unavailable_on_extend_cooldown_records_no_cooldown_values(
         self, mock_storage
     ):
-        """A failing store still leaves the computed cooldown recorded.
+        """A failing store leaves both cooldown series untouched.
 
-        Positive half of the ordering: the cooldown is computed and recorded
-        before it is stored, so a store that then raises invalidates neither
-        number. The storage-degradation alert reads exactly this asymmetry —
-        429s climbing while cooldown observations do not.
+        The recorded cooldown is the one now *in force* for the key, and that
+        value only exists once the store's monotonic merge returns — so a store
+        that raises has nothing truthful to record. The storage-degradation
+        alert reads exactly this asymmetry: 429s climbing while cooldown
+        observations do not.
         """
         from baldur.interfaces.rate_limit_storage import (
             RateLimitStorageUnavailableError,
@@ -625,15 +628,15 @@ class TestOnRateLimitedStorageUnavailableBehavior:
 
         with patch.object(
             mock_storage,
-            "set_cooldown",
+            "extend_cooldown",
             side_effect=RateLimitStorageUnavailableError("coordination store down"),
         ):
             with pytest.raises(RateLimitStorageUnavailableError):
                 coordinator.on_rate_limited(key)
 
         assert _sample("baldur_rate_limit_429_total", key=key, status_code="429") == 1.0
-        assert _sample("baldur_rate_limit_cooldown_seconds_count", key=key) == 1.0
-        assert _sample("baldur_rate_limit_consecutive_429s", key=key) == 1.0
+        assert _sample("baldur_rate_limit_cooldown_seconds_count", key=key) is None
+        assert _sample("baldur_rate_limit_consecutive_429s", key=key) is None
 
 
 # =============================================================================
@@ -1073,50 +1076,6 @@ class TestRateLimitCoordinatorOnSuccess:
 
         coordinator.on_success("test_api")
         assert mock_storage.get_state("test_api").consecutive_429s == 0
-
-
-# =============================================================================
-# _schedule_cooldown_end_event scheduling
-# =============================================================================
-
-
-class TestRateLimitCoordinatorScheduleCooldownEnd:
-    """_schedule_cooldown_end_event scheduling tests."""
-
-    def test_schedule_skipped_when_delay_is_zero_or_negative(self, mock_storage):
-        """A past cooldown_until arms no timer."""
-        from baldur.services.rate_limit_coordinator import (
-            RateLimitCoordinator,
-            RateLimitCoordinatorConfig,
-        )
-
-        coordinator = RateLimitCoordinator(
-            storage=mock_storage, config=RateLimitCoordinatorConfig()
-        )
-
-        coordinator._schedule_cooldown_end_event("test_api", time.time() - 5)
-        assert "test_api" not in coordinator._cooldown_timers
-
-    def test_schedule_cancels_existing_timer(self, mock_storage):
-        """Re-scheduling the same key replaces its timer."""
-        from baldur.services.rate_limit_coordinator import (
-            RateLimitCoordinator,
-            RateLimitCoordinatorConfig,
-        )
-
-        coordinator = RateLimitCoordinator(
-            storage=mock_storage, config=RateLimitCoordinatorConfig()
-        )
-
-        coordinator._schedule_cooldown_end_event("test_api", time.time() + 60)
-        first_timer = coordinator._cooldown_timers.get("test_api")
-        assert first_timer is not None
-
-        coordinator._schedule_cooldown_end_event("test_api", time.time() + 120)
-        second_timer = coordinator._cooldown_timers.get("test_api")
-        assert second_timer is not first_timer
-
-        second_timer.cancel()
 
 
 # =============================================================================

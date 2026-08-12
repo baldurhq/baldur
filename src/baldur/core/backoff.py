@@ -136,8 +136,18 @@ class ExponentialBackoff(BackoffStrategy):
         )
 
     def calculate(self, attempt: int, context: PolicyContext | None = None) -> float:
-        """Calculate exponential delay with jitter, hard-capped at ``max_delay``."""
-        raw = self.base_delay * (self.multiplier ** (attempt - 1))
+        """Calculate exponential delay with jitter, hard-capped at ``max_delay``.
+
+        The exponentiation saturates instead of raising: ``multiplier ** attempt``
+        overflows a float around attempt 1025, and an unbounded attempt counter
+        does reach that depth. Any product that overflows is far above the cap,
+        so ``max_delay`` is the correct raw value — which is what the hard-cap
+        promise above already says the result would be.
+        """
+        try:
+            raw = self.base_delay * (self.multiplier ** (attempt - 1))
+        except OverflowError:
+            raw = self.max_delay
         return _apply_capped_jitter(
             raw, self.max_delay, self.jitter, self.jitter_factor
         )

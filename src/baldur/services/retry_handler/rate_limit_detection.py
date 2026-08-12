@@ -13,6 +13,8 @@ Usage:
 
 from __future__ import annotations
 
+from baldur.utils.retry_after import parse_retry_after
+
 __all__ = [
     "RATE_LIMIT_INDICATORS",
     "detect_rate_limit",
@@ -63,23 +65,15 @@ def detect_rate_limit(exception: Exception) -> tuple[bool, float | None]:
 
     retry_after: float | None = None
     if hasattr(exception, "retry_after"):
-        # Coerced like the header branch below, and for the same reason: a
-        # client may expose the raw header string. Uncoerced, it reaches the
-        # coordinator's numeric comparison and raises there — where the
-        # fail-open wrap drops the cooldown entirely, so a real 429 installs
+        # Parsed through the canonical parser, not a bare float(): a client may
+        # expose the raw header string in either RFC 9110 form. Uncoerced, it
+        # reaches the coordinator's numeric comparison and raises there — where
+        # the fail-open wrap drops the cooldown entirely, so a real 429 installs
         # no cooldown while the consecutive counter still advances.
-        try:
-            retry_after = float(exception.retry_after)  # type: ignore[attr-defined]
-        except (ValueError, TypeError):
-            pass
+        retry_after = parse_retry_after(exception.retry_after)  # type: ignore[attr-defined]
     elif hasattr(exception, "response"):
         response = exception.response  # type: ignore[attr-defined]
         if hasattr(response, "headers"):
-            retry_after_header = response.headers.get("Retry-After")
-            if retry_after_header:
-                try:
-                    retry_after = float(retry_after_header)
-                except (ValueError, TypeError):
-                    pass
+            retry_after = parse_retry_after(response.headers.get("Retry-After"))
 
     return is_rate_limited, retry_after
