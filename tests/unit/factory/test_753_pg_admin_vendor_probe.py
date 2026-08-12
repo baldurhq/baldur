@@ -79,6 +79,17 @@ class TestPgAdminResolvedProviderBehavior:
         the four log lines were measured on."""
         assert _django_default_alias_is_postgres() is False
 
+    def test_the_django_probe_declines_when_django_is_not_installed(self):
+        """Django ships in an extra, so the probe has to answer without it.
+
+        An unguarded import here would reach the caller's catch-all and be
+        answered the same way — but through an exception path and a
+        breadcrumb built for configuration faults, on an install where the
+        absence is neither a fault nor a configuration.
+        """
+        with patch.dict("sys.modules", {"django.db": None}):
+            assert _django_default_alias_is_postgres() is False
+
     def test_the_registry_resolved_django_provider_declines(self, zero_config_env):
         """What a framework boot resolves, not a hand-built instance: the
         probe has to survive the factory to reach production."""
