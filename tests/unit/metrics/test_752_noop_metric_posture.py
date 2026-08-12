@@ -311,6 +311,64 @@ class TestAbsentExtraRecordingSilenceBehavior:
         _assert_clean(result)
 
 
+class TestReadBackConsumersDoNotSeeTheStubBehavior:
+    """A null object stands in for *recording*, never for *reading*.
+
+    ``BaldurMetrics.__getattr__`` makes the capability probes stop
+    short-circuiting, which is harmless for the ~40 consumers that only
+    record: they call a no-op instead of skipping a call. One consumer reads
+    a value **back** through a recorder — ``MetricSyncService`` reads the
+    in-memory DLQ gauge and subtracts it from the store's actual count — and
+    for that one, a stub where a number belongs is not a no-op: attribute
+    access answers with the stub, the read "succeeds", and the arithmetic
+    downstream raises ``TypeError: unsupported operand type(s) for -: 'int'
+    and 'NoOpMetric'``, out through the admin drift-report handler.
+
+    So the probe cannot be "does the attribute exist" for a read consumer;
+    it has to be "is anything actually recording".
+    """
+
+    def test_the_drift_report_survives_an_absent_metrics_backend(self):
+        """``GET /metrics/drift-report`` — the handler has no try/except."""
+        result = _run_poisoned(
+            """
+            from baldur.services.metric_sync_service import MetricSyncService
+
+            report = MetricSyncService().get_drift_report()
+            assert 'metrics' in report, report
+            print('OK')
+            """
+        )
+        _assert_clean(result)
+
+    def test_a_dry_run_sync_survives_an_absent_metrics_backend(self):
+        """The second consumer of the same capture — ``POST /metrics/sync``."""
+        result = _run_poisoned(
+            """
+            from baldur.services.metric_sync_service import MetricSyncService
+
+            out = MetricSyncService().sync_metrics(dry_run=True, actor='t')
+            assert out['status'] == 'dry_run', out
+            print('OK')
+            """
+        )
+        _assert_clean(result)
+
+    def test_the_captured_gauge_state_is_empty_rather_than_stubbed(self):
+        """Empty, not zero-filled: a fabricated 0 in-memory count against a
+        non-zero store count would report drift that does not exist."""
+        result = _run_poisoned(
+            """
+            from baldur.services.metric_sync_service import MetricSyncService
+
+            captured = MetricSyncService()._capture_current_state(['payment'])
+            assert captured['dlq_pending'] == {}, captured
+            print('OK')
+            """
+        )
+        _assert_clean(result)
+
+
 class TestNoOpStubSatisfiesEveryRecorderProtocolContract:
     """The mechanized seal: the stub's surface is derived, never authored.
 
