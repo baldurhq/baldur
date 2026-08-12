@@ -289,8 +289,16 @@ def _django_default_alias_is_postgres() -> bool:
 
     Reads the vendor string without opening a connection, so it is safe to call
     on every availability check.
+
+    The import is guarded rather than left to raise into the caller's
+    catch-all: django ships in an extra, and "django is not installed here"
+    answers this probe's question exactly the way a sqlite alias does — the
+    instance is not wired to a PostgreSQL.
     """
-    from django.db import connections
+    try:
+        from django.db import connections
+    except ImportError:
+        return False
 
     return connections["default"].vendor == "postgresql"
 
