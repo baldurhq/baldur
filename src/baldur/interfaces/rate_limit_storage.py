@@ -144,6 +144,70 @@ class RateLimitStorageInterface(ABC):
         """
         pass
 
+    def extend_cooldown(
+        self,
+        key: str,
+        cooldown_until: float,
+        ttl: int | None = None,
+    ) -> float:
+        """Move the cooldown end time later, never earlier, and report the result.
+
+        A shared cooldown is written by every worker that observes a 429, and the
+        writes are not ordered: a worker whose provider sent no ``Retry-After``
+        computes a short ladder delay, and under a last-writer-wins store that
+        short write can replace an honored long one, resuming the whole fleet
+        before the provider's stated earliest time. Merging by ``max`` makes the
+        write commutative and idempotent, so the order stops mattering.
+
+        Args:
+            key: Unique identifier for the rate-limited resource
+            cooldown_until: Candidate Unix timestamp for the end of the cooldown
+            ttl: Time-to-live in seconds (for cleanup)
+
+        Returns:
+            The **effective** cooldown end time in force after this write —
+            ``max(stored, cooldown_until)``. Callers must use this rather than
+            their own candidate; the two differ whenever a peer's longer
+            cooldown wins.
+
+        Note:
+            This default is best-effort: the read-modify-write below is atomic
+            only within a process, so two processes racing can still lose the
+            longer of two concurrent writes. Every adapter shipped with Baldur
+            overrides it with an atomic write; a bring-your-own implementation
+            should do the same to get the cross-process guarantee.
+        """
+        stored = self.get_state(key).cooldown_until
+        effective = max(stored, cooldown_until)
+        self.set_cooldown(key, effective, ttl)
+        return effective
+
+    def get_state_strict(self, key: str) -> RateLimitState:
+        """Read the state like :meth:`get_state`, but raise on backend failure.
+
+        :meth:`get_state` folds a backend failure into a clean default state —
+        no cooldown — which is the right bias for a caller deciding whether to
+        wait, and the wrong one for a caller deciding whether a cooldown has
+        *ended*: an unreachable backend would read as "ended" and release the
+        fleet. This variant lets such a caller tell "no cooldown" apart from
+        "cannot tell".
+
+        Args:
+            key: Unique identifier for the rate-limited resource
+
+        Returns:
+            RateLimitState with current cooldown info
+
+        Raises:
+            RateLimitStorageError: The backend could not be read.
+
+        Note:
+            This default delegates to :meth:`get_state`, so a bring-your-own
+            implementation keeps the folding behavior until it overrides this
+            with a read that lets its backend errors propagate.
+        """
+        return self.get_state(key)
+
     @abstractmethod
     def increment_consecutive_429s(self, key: str) -> int:
         """

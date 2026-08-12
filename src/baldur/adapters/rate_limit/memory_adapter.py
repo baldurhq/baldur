@@ -160,6 +160,42 @@ class InMemoryRateLimitStorage(RateLimitStorageInterface):
                 cooldown_until=cooldown_until,
             )
 
+    def extend_cooldown(
+        self,
+        key: str,
+        cooldown_until: float,
+        ttl: int | None = None,
+    ) -> float:
+        """Move the cooldown end time later, atomically for this process.
+
+        Reads and writes inside one lock hold rather than composing the public
+        ``get_state``/``set_cooldown`` pair, so the max-merge cannot be split by
+        a concurrent writer. ``ttl`` is accepted for interface symmetry and
+        ignored — this store expires entries by sweep, not by key TTL.
+        """
+        with self._lock:
+            now = time.time()
+
+            if key not in self._data:
+                self._data[key] = {}
+
+            effective = max(self._data[key].get("cooldown_until", 0.0), cooldown_until)
+            self._data[key]["cooldown_until"] = effective
+            self._data[key]["last_updated"] = now
+
+            self._maybe_cleanup()
+
+            logger.debug(
+                "in_memory_rate_limit_storage.extend_cooldown",
+                rate_limit_key=key,
+                cooldown_until=effective,
+            )
+            return effective
+
+    def get_state_strict(self, key: str) -> RateLimitState:
+        """Read the state. Identical to ``get_state`` — an in-process dict cannot fail."""
+        return self.get_state(key)
+
     def increment_consecutive_429s(self, key: str) -> int:
         """Increment 429 counter in memory."""
         with self._lock:

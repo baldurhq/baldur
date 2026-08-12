@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from baldur.dlq.helpers import store_to_dlq
+from baldur.utils.retry_after import parse_retry_after
 from baldur.utils.time import utc_now
 
 if TYPE_CHECKING:
@@ -352,29 +353,17 @@ class BaldurMiddleware:
         return bool(response.get("X-RateLimit-Limit"))
 
     def _parse_retry_after(self, response: Any) -> float | None:
-        """Parse Retry-After header, supporting both seconds and HTTP-date formats.
+        """Read the response's Retry-After header, clamped to _retry_after_max.
 
-        Returns the wait time in seconds clamped to _retry_after_max, or None on
-        parse failure (fail-open — Retry-After simply not forwarded).
+        Parsing (both RFC 9110 forms, and the negative/NaN/past-date rejections)
+        belongs to the canonical parser; the ceiling is this middleware's own
+        policy and stays here.
+
+        Returns the wait time in seconds, or None on parse failure (fail-open —
+        Retry-After simply not forwarded).
         """
-        raw = response.get("Retry-After")
-        if not raw:
-            return None
-        try:
-            seconds = float(raw)
-        except (ValueError, TypeError):
-            # HTTP-date format: "Fri, 31 Dec 2025 23:59:59 GMT"
-            try:
-                from email.utils import parsedate_to_datetime
-
-                dt = parsedate_to_datetime(raw)
-                seconds = (dt - utc_now()).total_seconds()
-                if seconds < 0:
-                    return None
-            except Exception:
-                return None
-        # Guard against negative values and NaN (float("nan") >= 0 is False)
-        if not (seconds >= 0):
+        seconds = parse_retry_after(response.get("Retry-After"))
+        if seconds is None:
             return None
         return min(seconds, self._retry_after_max)
 

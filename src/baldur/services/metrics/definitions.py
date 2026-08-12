@@ -347,11 +347,15 @@ rate_limit_429_total = get_or_create_counter(
     ["key", "status_code"],
 )
 
+# Shares rate_limit_wait_seconds' bucket set, for the same reason and so the two
+# series stay comparable: an honored Retry-After can push a cooldown far past the
+# ladder cap, and collapsing those into +Inf makes the quantiles unreadable for
+# exactly the case the series exists to show.
 rate_limit_cooldown_seconds = get_or_create_histogram(
     "baldur_rate_limit_cooldown_seconds",
-    "Cooldown duration after 429 response",
+    "Cooldown in force for the key after a 429 response",
     ["key"],
-    buckets=(1, 5, 10, 30, 60, 120, 300),
+    buckets=(0.1, 0.5, 1, 5, 10, 30, 60, 120, 300, 900, 3600),
 )
 
 rate_limit_consecutive_429s = get_or_create_gauge(

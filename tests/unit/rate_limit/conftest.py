@@ -80,12 +80,29 @@ class MockInMemoryRateLimitStorage:
 
             return state
 
-    def set_cooldown(self, key: str, cooldown_until: float) -> None:
-        """Set the cooldown."""
+    def set_cooldown(
+        self, key: str, cooldown_until: float, ttl: int | None = None
+    ) -> None:
+        """Set the cooldown (last-writer-wins, like the real adapters)."""
         with self._lock:
             if key not in self._states:
                 self._states[key] = MockRateLimitState(key=key)
             self._states[key].cooldown_until = cooldown_until
+
+    def extend_cooldown(
+        self, key: str, cooldown_until: float, ttl: int | None = None
+    ) -> float:
+        """Move the cooldown end time later and return the effective value."""
+        with self._lock:
+            if key not in self._states:
+                self._states[key] = MockRateLimitState(key=key)
+            effective = max(self._states[key].cooldown_until, cooldown_until)
+            self._states[key].cooldown_until = effective
+            return effective
+
+    def get_state_strict(self, key: str) -> MockRateLimitState:
+        """Read the state; this double has no backend that can fail."""
+        return self.get_state(key)
 
     def increment_consecutive_429s(self, key: str) -> int:
         """Increment the consecutive-429 count."""
@@ -100,6 +117,11 @@ class MockInMemoryRateLimitStorage:
         with self._lock:
             if key in self._states:
                 self._states[key].consecutive_429s = 0
+
+    def clear(self, key: str) -> None:
+        """Drop all state for the key (the operator escape from a live cooldown)."""
+        with self._lock:
+            self._states.pop(key, None)
 
 
 # =============================================================================

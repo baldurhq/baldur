@@ -290,7 +290,7 @@
         "type": "prometheus",
         "uid": "mimir"
       },
-      "description": "How long the coordinator asks callers to back off (cooldown) versus how long callers actually sleep before proceeding (wait), at the 95th percentile. A wait p95 approaching the cooldown means the fleet is spending real time asleep on 429 backoff. Populates when an upstream raises an HTTP 429 to a @baldur.protected(retry=True) call.",
+      "description": "The cooldown in force on 429-limited keys versus how long callers actually sleep before proceeding, at the 95th percentile. Both describe the same wait for a caller that sleeps it out, so a wait p95 well below the cooldown means callers are deferring rather than sleeping. Populates when an upstream raises an HTTP 429 to a @baldur.protected(retry=True) call.",
       "targets": [
         {
           "expr": "histogram_quantile(0.95, sum by (le) (rate(baldur_rate_limit_cooldown_seconds_bucket[5m])))",

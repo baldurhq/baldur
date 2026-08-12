@@ -54,6 +54,7 @@ from baldur.interfaces.rate_limit_storage import (
     RateLimitState,
     RateLimitStorageInterface,
 )
+from baldur.utils.retry_after import parse_retry_after
 
 from .helpers import (
     _default_get_retry_after,
@@ -77,6 +78,13 @@ T = TypeVar("T")
 # Minimum cooldown floor (seconds) applied after backoff+jitter so a 429 always
 # yields a non-trivial wait even when jitter drives the computed delay toward zero.
 _MIN_COOLDOWN_SECONDS: float = 0.1
+
+# Smallest delay a cooldown-end timer is armed for. A cooldown already at or past
+# its expiry still owes exactly one all-clear, so the delay is clamped up to this
+# rather than skipped; it also keeps a re-armed timer strictly later than any
+# expiry a callback has already fired for, which is what makes the ownership
+# match below decidable.
+_MIN_COOLDOWN_END_DELAY_SECONDS: float = 0.001
 
 
 class RateLimitCoordinator:
@@ -159,8 +167,11 @@ class RateLimitCoordinator:
         self._canary_in_progress: dict[str, bool] = {}
         self._canary_lock = threading.Lock()
 
-        # Cooldown-end event timer tracking (for cancellation)
-        self._cooldown_timers: dict[str, threading.Timer] = {}
+        # Cooldown-end event timer tracking, per key: the armed Timer and the
+        # expiry it was armed for. The expiry doubles as the ownership token —
+        # a callback removes its own registration only, so a cancelled-and-
+        # replaced timer that already fired cannot unregister its successor.
+        self._cooldown_timers: dict[str, tuple[threading.Timer, float]] = {}
         self._timer_lock = threading.Lock()
 
     @classmethod
@@ -182,7 +193,7 @@ class RateLimitCoordinator:
             instance = cls._instance
             if instance is not None:
                 with instance._timer_lock:
-                    for timer in instance._cooldown_timers.values():
+                    for timer, _armed_expiry in instance._cooldown_timers.values():
                         timer.cancel()
                     instance._cooldown_timers.clear()
             cls._instance = None
@@ -226,24 +237,45 @@ class RateLimitCoordinator:
 
     def _schedule_cooldown_end_event(self, key: str, cooldown_until: float) -> None:
         """
-        Schedule a RATE_LIMIT_COOLDOWN_END event at the cooldown-end time.
+        Ensure a RATE_LIMIT_COOLDOWN_END event is armed for ``cooldown_until``.
 
-        Uses a threading Timer for asynchronous emission.
+        Called for **every** 429 this process observes, including one the event
+        debounce suppresses: a suppressed 429 still extends the shared cooldown,
+        and an all-clear left armed at the pre-extension time announces recovery
+        into a live cooldown.
+
+        An expiry equal to the armed one is a no-op, so a storm re-arms once per
+        real extension rather than once per 429. Any different expiry — later
+        through a peer's cooldown, earlier through the operator's ``clear()`` —
+        cancels the armed timer and replaces it.
+
+        A cooldown already at or past its expiry is armed at a small positive
+        delay rather than skipped, so it still yields exactly one all-clear.
 
         Args:
             key: Rate limit key
-            cooldown_until: Cooldown end time (Unix timestamp)
+            cooldown_until: Effective cooldown end time (Unix timestamp)
         """
-        delay = cooldown_until - time.time()
-        if delay <= 0:
-            return
+        now = time.time()
+        armed_expiry = max(cooldown_until, now + _MIN_COOLDOWN_END_DELAY_SECONDS)
+        delay = armed_expiry - now
 
         def emit_cooldown_end() -> None:
+            # Remove this timer's own registration only. A cancelled timer that
+            # had already fired would otherwise unregister the live successor
+            # that replaced it, leaving the key monitored by nothing.
+            with self._timer_lock:
+                registered = self._cooldown_timers.get(key)
+                if registered is None or registered[1] != armed_expiry:
+                    return
+                del self._cooldown_timers[key]
+
             _emit_rate_limit_event(
                 "RATE_LIMIT_COOLDOWN_END",
                 {
                     "key": key,
                     "cooldown_ended_at": time.time(),
+                    "cooldown_until": armed_expiry,
                 },
                 priority_name="NORMAL",
             )
@@ -252,20 +284,30 @@ class RateLimitCoordinator:
                 rate_limit_key=key,
             )
 
-            # Timer cleanup
-            with self._timer_lock:
-                self._cooldown_timers.pop(key, None)
-
-        # Cancel existing timer
         with self._timer_lock:
-            existing_timer = self._cooldown_timers.get(key)
-            if existing_timer:
-                existing_timer.cancel()
+            existing = self._cooldown_timers.get(key)
+            if existing is not None:
+                if existing[1] == armed_expiry:
+                    return
+                existing[0].cancel()
 
             timer = threading.Timer(delay, emit_cooldown_end)
             timer.daemon = True
-            timer.start()
-            self._cooldown_timers[key] = timer
+            try:
+                timer.start()
+            except RuntimeError as e:
+                # Refused at interpreter shutdown, and at a live process's
+                # thread ceiling. Leave no registry entry — the key re-arms on
+                # its next 429 — and say so: a rising rate of this line is the
+                # signal that thread pressure is disarming the all-clear.
+                self._cooldown_timers.pop(key, None)
+                logger.warning(
+                    "rate_limit_coordinator.cooldown_timer_arm_failed",
+                    rate_limit_key=key,
+                    error=str(e),
+                )
+                return
+            self._cooldown_timers[key] = (timer, armed_expiry)
 
     # =========================================================================
     # Canary Request Methods
@@ -395,7 +437,7 @@ class RateLimitCoordinator:
     def on_rate_limited(
         self,
         key: str,
-        retry_after: float | None = None,
+        retry_after: float | str | None = None,
         status_code: int = 429,
     ) -> float:
         """
@@ -404,13 +446,23 @@ class RateLimitCoordinator:
         Call this when you receive a 429 response.
         Sets a global cooldown for all workers and emits events.
 
+        The stored cooldown is **monotonic**: it moves only later. A worker whose
+        429 carried no header computes a short ladder delay, and letting that
+        replace a peer's honored ``Retry-After`` would resume the whole fleet
+        before the provider's stated earliest time. ``clear()`` remains the way
+        to shorten one deliberately.
+
         Args:
             key: Rate limit key
-            retry_after: Retry-After header value (seconds)
+            retry_after: Retry-After header value — seconds, or the raw header in
+                either RFC 9110 form. An unparseable, negative or already-past
+                value is treated as absent and the backoff ladder applies.
             status_code: HTTP status code (for logging)
 
         Returns:
-            Calculated cooldown duration in seconds
+            The cooldown now in force for the key, in seconds. This is the
+            **effective** wait, which exceeds the delay this call computed
+            whenever a peer's longer cooldown is still running.
         """
         # Count the 429 before any storage call: both of the calls below can
         # raise on a degraded backend and every caller wraps this handler
@@ -418,22 +470,38 @@ class RateLimitCoordinator:
         # exactly the outage an operator needs the count for.
         _record_rate_limit_429(key=key, status_code=status_code)
 
+        # Parsed at the boundary rather than at each caller: the documented
+        # direct-drive form passes the raw header, and an uncoerced string
+        # reaches the numeric comparison below and raises there — where every
+        # caller's fail-open wrap drops the cooldown entirely.
+        retry_after_seconds = parse_retry_after(retry_after)
+
         consecutive = self._storage.increment_consecutive_429s(key)
 
-        delay, honored, clamped = self._compute_cooldown(key, consecutive, retry_after)
+        delay, honored, clamped = self._compute_cooldown(
+            key, consecutive, retry_after_seconds
+        )
 
-        # Record the computed cooldown before storing it — the computation is
-        # pure and the increment already landed, so both values are true even
-        # if set_cooldown then raises.
+        # Monotonic merge: the store decides which cooldown wins, and everything
+        # downstream reports the winner rather than this call's proposal.
+        candidate_until = time.time() + delay
+        cooldown_until = self._storage.extend_cooldown(key, candidate_until)
+        in_force = max(0.0, cooldown_until - time.time())
+
+        # Recorded after the store, because the in-force value does not exist
+        # until the merge returns. A store that raises therefore records neither
+        # this histogram nor the consecutive gauge — the 429 counter above still
+        # climbs, and that divergence stays the storage-degradation signal.
         _record_rate_limit_cooldown(
             key=key,
-            cooldown_seconds=delay,
+            cooldown_seconds=in_force,
             consecutive_429s=consecutive,
         )
 
-        # Set global cooldown
-        cooldown_until = time.time() + delay
-        self._storage.set_cooldown(key, cooldown_until)
+        # Arm the all-clear for every 429, outside the event debounce below: a
+        # suppressed 429 extends the cooldown just the same, and an all-clear
+        # left at the pre-extension time announces recovery into a live cooldown.
+        self._schedule_cooldown_end_event(key, cooldown_until)
 
         # EventBus integration (debouncing applied — metrics above are not
         # debounced: a flattened counter is indistinguishable from a storm
@@ -454,9 +522,6 @@ class RateLimitCoordinator:
                 priority_name="HIGH",
             )
 
-            # Schedule cooldown-end event
-            self._schedule_cooldown_end_event(key, cooldown_until)
-
         # 317: Broadcast the 429 event cluster-wide via the Kafka distributed channel
         self._broadcast_to_cluster(key, consecutive, cooldown_until, delay)
 
@@ -466,9 +531,10 @@ class RateLimitCoordinator:
             status_code=status_code,
             consecutive=consecutive,
             delay=delay,
+            cooldown_in_force=in_force,
         )
 
-        return delay
+        return in_force
 
     def _compute_cooldown(
         self,
