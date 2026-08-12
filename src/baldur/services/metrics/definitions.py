@@ -23,8 +23,10 @@ if PROMETHEUS_AVAILABLE:
     )
 else:
     from baldur.metrics.registry import noop_metric_factory as get_or_create_counter
-
-    get_or_create_gauge = get_or_create_histogram = get_or_create_counter
+    from baldur.metrics.registry import noop_metric_factory as get_or_create_gauge
+    from baldur.metrics.registry import (
+        noop_metric_factory as get_or_create_histogram,
+    )
 
 # =============================================================================
 # DLQ Outbox Metrics (impl doc 486 D4 / D11)
