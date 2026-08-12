@@ -64,6 +64,20 @@ _LEVEL_PATTERNS: dict[str, re.Pattern[str]] = {
     "debug": re.compile(r'"level"\s*:\s*"debug"|\[debug\s*]', re.IGNORECASE),
 }
 
+# ConsoleRenderer wraps the level in colour by default, and its default is NOT
+# tty-gated — on Linux it colours even when stdout is a pipe, which is exactly
+# how CI captures it. The bracket arm above then sees `[<esc>[33m<esc>[1mwarning`
+# and matches nothing, so a real WARNING reads as a clean run. Every line is
+# stripped before matching; a detector that a terminal setting can silence is
+# not a gate.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def strip_ansi(line: str) -> str:
+    """Drop SGR/CSI escapes so the level and logger patterns can see the text."""
+    return _ANSI_RE.sub("", line)
+
+
 # The posture announcement (D7) — exactly one line per process is the contract.
 POSTURE_EVENT = "baldur.runtime_posture"
 
@@ -254,12 +268,20 @@ class PathResult:
 
 
 def baldur_lines_at_warning_or_above(lines: list[str]) -> list[str]:
-    """Select the WARNING-or-above lines that baldur itself emitted."""
+    """Select the WARNING-or-above lines that baldur itself emitted.
+
+    Strips colour itself rather than trusting the caller to have done it —
+    callers hand this raw subprocess output, and a coloured level word is
+    invisible to the patterns.
+    """
     return [
         line
         for line in lines
-        if _LEVEL_PATTERNS["warning+"].search(line)
-        and (_BALDUR_LOGGER.search(line) or not _ANY_LOGGER.search(line))
+        if _LEVEL_PATTERNS["warning+"].search(strip_ansi(line))
+        and (
+            _BALDUR_LOGGER.search(strip_ansi(line))
+            or not _ANY_LOGGER.search(strip_ansi(line))
+        )
     ]
 
 
@@ -272,7 +294,10 @@ def _scan_log_file(path: Path) -> int:
     if not path.exists():
         print(f"ERROR: no such log file: {path}", file=sys.stderr)
         return 1
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    lines = [
+        strip_ansi(line)
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines()
+    ]
     offending = baldur_lines_at_warning_or_above(lines)
     if offending:
         print(
@@ -309,7 +334,9 @@ def _measure(path: str, strict_log_validation: bool) -> PathResult:
     # Decode explicitly: text=True picks the console codepage on Windows and
     # can silently yield an empty stream on a decode failure.
     output = (completed.stdout + completed.stderr).decode("utf-8", errors="replace")
-    lines = [line for line in output.splitlines() if line.strip()]
+    # Normalise at ingestion so every downstream matcher — and every consumer
+    # of ``PathResult.lines`` — sees the text rather than the colouring.
+    lines = [strip_ansi(line) for line in output.splitlines() if line.strip()]
     counts = {
         level: sum(1 for line in lines if pattern.search(line))
         for level, pattern in _LEVEL_PATTERNS.items()
