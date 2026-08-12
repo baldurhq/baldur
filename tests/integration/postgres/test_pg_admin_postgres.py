@@ -399,3 +399,106 @@ class TestPgAdminCursorEscapeHatchesAgainstPostgres:
                 cursor.close()
             except Exception:
                 pass
+
+
+# =============================================================================
+# E. Availability probe against a real PostgreSQL
+# =============================================================================
+
+
+class TestPgAdminAvailabilityAgainstPostgres:
+    """The vendor probe's positive half — only a real postgres can assert it.
+
+    The unit suite drives the probe through injected callables, which pins
+    the branch but cannot show that the shipped probe answers True where it
+    should: a stub saying "yes" is the test asserting the stub. Here the DSN
+    the probe reads names the running database, so ``is_available()`` and the
+    ``pg_stats`` block it gates are both produced by the real chain.
+
+    This is the assertion that keeps the fix from being a blanket removal. A
+    guard that dropped the PG section outright would satisfy every
+    sqlite-side expectation and fail only here.
+    """
+
+    @pytest.fixture
+    def postgres_backed_pg_admin(self, monkeypatch):
+        """A DSN-backed provider carrying the probe the factory injects."""
+        pytest.importorskip("psycopg2")
+        from baldur.factory.adapters import _configured_sql_dialect_is_postgres
+        from baldur.settings.sql import reset_sql_settings
+
+        cfg = DatabaseTestConfig()
+        monkeypatch.setenv(
+            "BALDUR_SQL_DSN",
+            f"postgresql://{cfg.DEFAULT_USER}:{cfg.DEFAULT_PASSWORD}"
+            f"@{cfg.DEFAULT_HOST}:{cfg.DEFAULT_PORT}/{cfg.DEFAULT_DB}",
+        )
+        reset_sql_settings()
+        try:
+            yield PgAdmin(
+                get_session=dbapi_session_factory(_connect),
+                get_connection=_connect,
+                label="sql:integration",
+                availability_probe=_configured_sql_dialect_is_postgres,
+            )
+        finally:
+            reset_sql_settings()
+
+    def test_a_postgres_dsn_makes_the_shipped_probe_answer_true(
+        self, postgres_backed_pg_admin
+    ):
+        assert postgres_backed_pg_admin.is_available() is True
+
+    def test_the_pool_status_payload_carries_live_pg_stats(
+        self, postgres_backed_pg_admin, monkeypatch
+    ):
+        """End to end: the flag is True, so the compute reads
+        ``pg_stat_activity`` and the numbers come back from the server.
+
+        The pool and connection providers are held constant — they are not
+        what the flag decides, and neither is configured on this lane.
+        ``BALDUR_TEST_MODE`` has to go with them: the compute returns a
+        ``test_mode`` stub before consulting any provider, so leaving it set
+        would assert against a payload the flag never reached.
+        """
+        from unittest.mock import MagicMock, patch
+
+        monkeypatch.delenv("BALDUR_TEST_MODE", raising=False)
+
+        from baldur.factory import ProviderRegistry
+        from baldur.interfaces.database_health import (
+            DatabaseConnectionInfo,
+            DatabaseHealthProvider,
+        )
+        from baldur.interfaces.pool_info import PoolInfoProvider
+        from baldur.services.precomputed_cache.compute_functions import (
+            compute_pool_status,
+        )
+
+        pool_info = MagicMock(spec=PoolInfoProvider)
+        pool_info.get_pool_info.return_value = {}
+        db_health = MagicMock(spec=DatabaseHealthProvider)
+        db_health.check_connection.return_value = DatabaseConnectionInfo(
+            alias="default", vendor="postgresql", is_usable=True
+        )
+
+        with (
+            patch.object(ProviderRegistry.pool_info, "get", return_value=pool_info),
+            patch.object(
+                ProviderRegistry.database_health, "get", return_value=db_health
+            ),
+            patch.object(
+                ProviderRegistry.pg_admin, "get", return_value=postgres_backed_pg_admin
+            ),
+        ):
+            response = compute_pool_status()
+
+        assert set(response["pg_stats"]) == {
+            "total_connections",
+            "active",
+            "idle",
+            "idle_in_transaction",
+        }
+        # This very query holds a session open, so the server can never
+        # report zero here.
+        assert response["pg_stats"]["total_connections"] >= 1

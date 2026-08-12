@@ -336,3 +336,74 @@ class TestPostureAnnouncedOnEveryProtectSurfaceBehavior:
         source = Path(facade.__file__).read_text(encoding="utf-8")
 
         assert source.count("configure_structlog()") == 1
+
+
+class TestRuntimePostureStatisticsBehavior:
+    """753 D4 — the posture line answers what the demoted warning used to.
+
+    Dropping the null statistics repository's announcement to DEBUG removes
+    the only thing that told an operator no statistics adapter was
+    registered. The answer moves to the line that already describes what this
+    install is running on, so the absence is reported where someone looks for
+    it rather than where it happened to be constructed.
+
+    Deriving it must not construct anything: the registry's fallback builds a
+    fresh Null repository on every call when the slot is empty, and that
+    constructor flips a once-per-process latch and emits — inside a function
+    documented as pure, which the startup report calls a second time before
+    the posture line is even emitted.
+    """
+
+    @pytest.fixture(autouse=True)
+    def restored_statistics_slot(self):
+        """The slot is a class attribute; leave it as found."""
+        from baldur.factory.registry import ProviderRegistry
+
+        previous = ProviderRegistry._statistics_adapter
+        ProviderRegistry._statistics_adapter = None
+        yield
+        ProviderRegistry._statistics_adapter = previous
+
+    def test_an_unregistered_slot_reports_none(self):
+        assert get_runtime_posture()["statistics"] == "none"
+
+    def test_a_registered_adapter_is_reported_by_class_name(self):
+        """What a host application that registered one actually sees."""
+        from baldur.adapters.statistics.null import NullStatisticsRepository
+        from baldur.factory.registry import ProviderRegistry
+
+        class _HostAppStatisticsAdapter(NullStatisticsRepository):
+            def __init__(self) -> None:
+                """Stand in for a host adapter, minus the null announcement."""
+
+        ProviderRegistry._statistics_adapter = _HostAppStatisticsAdapter()
+
+        assert get_runtime_posture()["statistics"] == "_HostAppStatisticsAdapter"
+
+    def test_the_unregistered_branch_does_not_construct_the_null_repository(self):
+        """The purity negative: reading the slot, never resolving it.
+
+        A construct-to-inspect implementation would answer correctly and
+        still be wrong — it would move a latch flip and a log record into
+        every ``init()``, ahead of the line this field belongs to.
+        """
+        from baldur.adapters.statistics.null import NullStatisticsRepository
+
+        previous = NullStatisticsRepository._warned
+        NullStatisticsRepository._warned = False
+        try:
+            with capture_logs() as logs:
+                get_runtime_posture()
+
+            assert NullStatisticsRepository._warned is False
+            assert logs == []
+        finally:
+            NullStatisticsRepository._warned = previous
+
+    def test_the_announced_line_carries_the_field(self):
+        """Operator-facing or it does not count: the derivation is only half
+        the claim, the announcement is the other."""
+        with capture_logs() as logs:
+            emit_runtime_posture_once()
+
+        assert _posture_records(logs)[0]["statistics"] == "none"

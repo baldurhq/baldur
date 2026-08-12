@@ -26,7 +26,9 @@ from __future__ import annotations
 import importlib.util
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -84,6 +86,14 @@ class TestZeroConfigFirstContactPosture:
 
     @pytest.mark.parametrize("path", ["decorator", "init"])
     def test_the_child_run_completes(self, measured, path):
+        """On the ``init`` path this is now deadline-dependent by design.
+
+        That child waits for the precomputed-cache worker's first completed
+        pass and raises if none lands, so a failure here can mean "the child
+        measured nothing" rather than "the child logged something" — read the
+        traceback, not just the counts. The margin is wide (initial delay at
+        most one refresh interval against a sixty-second floor).
+        """
         assert measured[path].returncode == 0
 
     @pytest.mark.parametrize("path", ["decorator", "init"])
@@ -238,3 +248,74 @@ class TestPostureAcrossInitAndProtect:
         )
 
         assert output.count(harness.POSTURE_EVENT) == 1
+
+
+class TestTheHarnessRefusesToReportAnUnmeasuredRun:
+    """A run that measured nothing must not report a clean bill of health.
+
+    The init path now waits for the precomputed-cache worker's own post-loop
+    sentinel before returning, so the scheduled-job surface is measured
+    rather than raced. The failure mode that wait introduces is the
+    interesting one: the verdict this harness prints reads exactly two inputs
+    — the child's exit code and the WARNING+ line count — so a run in which
+    no pass ever completed (worker never started, module unimportable) emits
+    nothing at all and would otherwise print ``OK`` for a window it never
+    looked at.
+
+    Raising routes that into the existing child-failure channel. Both
+    directions are pinned here, because a guard that always raised would pass
+    a one-sided test and turn every green run red.
+
+    ``baldur.init()`` and the absence installer are stubbed: both are
+    process-global (background workers, a ``sys.modules`` rewrite) and
+    neither is what these cases are about — the wait loop and its exit are.
+    """
+
+    _DEADLINE_MESSAGE = "no precomputed-cache refresh pass completed"
+
+    @pytest.fixture
+    def quick_deadline(self, harness, monkeypatch):
+        """Compress the wait so the expiry path costs milliseconds.
+
+        The shipped floor is a full minute — deliberately generous, because
+        it is only ever reached on a run that was already going to fail.
+        """
+        monkeypatch.setattr(harness, "_MIN_FIRST_PASS_DEADLINE_SECONDS", 0.05)
+        monkeypatch.setattr(harness, "_FIRST_PASS_DEADLINE_INTERVAL_MULTIPLIER", 0)
+        monkeypatch.setattr(harness, "_FIRST_PASS_POLL_INTERVAL_SECONDS", 0.01)
+
+    @staticmethod
+    @contextmanager
+    def _worker_reporting(last_refresh_at):
+        """Serve a worker whose passive-health snapshot says what we choose."""
+
+        from baldur.services.precomputed_cache.worker import PrecomputedCacheWorker
+
+        worker = MagicMock(spec=PrecomputedCacheWorker)
+        worker.get_passive_health.return_value = {"last_refresh_at": last_refresh_at}
+        with (
+            patch("baldur.init"),
+            patch(
+                "baldur.services.precomputed_cache.worker.get_precomputed_cache_worker",
+                return_value=worker,
+            ),
+        ):
+            yield
+
+    def test_a_run_where_no_pass_completes_raises(self, harness, quick_deadline):
+        with self._worker_reporting(None):
+            with pytest.raises(RuntimeError, match=self._DEADLINE_MESSAGE):
+                harness._run_init_path()
+
+    def test_a_run_with_a_completed_pass_returns(self, harness, quick_deadline):
+        """The guard is a deadline, not an unconditional raise."""
+        with self._worker_reporting("2026-08-12T09:00:00+00:00"):
+            assert harness._run_init_path() is None
+
+    def test_the_failure_reaches_the_child_exit_channel(self, harness, quick_deadline):
+        """``_child_main`` does not catch it, so the process exits non-zero
+        and the parent reports the run instead of scoring it."""
+
+        with self._worker_reporting(None), patch.object(harness, "_install_absence"):
+            with pytest.raises(RuntimeError, match=self._DEADLINE_MESSAGE):
+                harness._child_main("init")

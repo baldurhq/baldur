@@ -486,3 +486,64 @@ class TestRecentActivity:
 
         assert activity.new_in_24h == 10
         assert activity.trend == "up"
+
+
+class TestNullStatisticsRepositoryAnnouncementBehavior:
+    """The absence it announces is the shipped default, not a problem.
+
+    A zero-config install registers no statistics adapter — that is the
+    designed state, and the registration path already classifies the same
+    absence at DEBUG. Announcing it at WARNING once per process told every
+    such install that something had gone wrong, on the boot the scheduled
+    health job first reached this constructor.
+
+    Demotion, not deletion: the event name and the once-per-process latch are
+    unchanged, so the absence stays greppable for anyone who goes looking,
+    and the operator-facing answer moved to the runtime-posture line's
+    ``statistics`` field.
+    """
+
+    EVENT = "null_statistics_repository.no_adapter_registered"
+
+    @pytest.fixture(autouse=True)
+    def rearmed_latch(self):
+        """The latch is class-level and process-wide; leave it as found."""
+        previous = NullStatisticsRepository._warned
+        NullStatisticsRepository._warned = False
+        yield
+        NullStatisticsRepository._warned = previous
+
+    def test_the_first_construction_announces_at_debug(self):
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            NullStatisticsRepository()
+
+        records = [entry for entry in logs if entry.get("event") == self.EVENT]
+        assert len(records) == 1
+        assert records[0]["log_level"] == "debug"
+
+    def test_no_construction_reaches_warning_or_above(self):
+        """The goal, stated as the gate states it."""
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            NullStatisticsRepository()
+
+        loud = [
+            entry
+            for entry in logs
+            if entry.get("log_level") in {"warning", "error", "critical"}
+        ]
+        assert loud == []
+
+    def test_a_second_construction_stays_silent(self):
+        """The registry constructs a fresh Null repo on every call when the
+        slot is empty, so the latch is what keeps this off the hot path."""
+        from structlog.testing import capture_logs
+
+        NullStatisticsRepository()
+        with capture_logs() as logs:
+            NullStatisticsRepository()
+
+        assert [entry for entry in logs if entry.get("event") == self.EVENT] == []
