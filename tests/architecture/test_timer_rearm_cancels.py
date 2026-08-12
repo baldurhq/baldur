@@ -19,10 +19,12 @@ single ``start()`` left two live daemon timers, sampled psutil at twice the
 configured interval, and left one chain permanently beyond ``stop()``.
 
 The rule fires on a store into ``self.<attr>`` or ``self.<attr>[key]`` whose
-value is a timer/thread construction -- directly, or through a local name bound
-to one in the same function. It is satisfied by a cancellation of that same
-slot earlier in the function: a ``.cancel()``/``.join()`` on it, or a call to a
-same-object helper whose name says it cancels or stops.
+value is a timer/thread construction -- directly, through a local name bound to
+one in the same function, or inside a tuple stored in that slot (a slot that
+keeps bookkeeping beside its timer holds one just as live as a bare store). It
+is satisfied by a cancellation of that same slot earlier in the function: a
+``.cancel()``/``.join()`` on it -- including on an element indexed out of such a
+tuple -- or a call to a same-object helper whose name says it cancels or stops.
 
 Not in scope: the first assignment in ``__init__`` (the slot starts empty, and
 ``None`` is not a construction), and any slot whose value the AST cannot
@@ -73,6 +75,23 @@ def _callee_name(node: ast.Call) -> str | None:
 def _is_construction(node: ast.expr) -> bool:
     """``threading.Timer(...)`` — bare or dotted."""
     return isinstance(node, ast.Call) and _callee_name(node) in _SCHEDULING_CALLABLES
+
+
+def _holds_timer(node: ast.expr, armed_locals: set[str]) -> bool:
+    """Whether the value being stored is, or carries, a live timer.
+
+    A slot that keeps bookkeeping beside its timer stores a tuple --
+    ``self._timers[key] = (timer, armed_expiry)`` -- and the timer inside it is
+    every bit as live as a bare one. Recognising only the bare form let a slot
+    leave this rule's scope by wrapping what it stores, silently.
+    """
+    if _is_construction(node):
+        return True
+    if isinstance(node, ast.Name) and node.id in armed_locals:
+        return True
+    if isinstance(node, ast.Tuple):
+        return any(_holds_timer(element, armed_locals) for element in node.elts)
+    return False
 
 
 def _locally_armed_names(func: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
@@ -160,9 +179,13 @@ def _releases_slot(
         ):
             return True
 
-    # A cancel on a local fetched from the slot.
+    # A cancel on a local fetched from the slot, including one indexed out of a
+    # tuple that slot holds: ``existing = self._timers.get(key)`` then
+    # ``existing[0].cancel()``.
     if func.attr in _RELEASING_CALLS:
         owner = func.value
+        if isinstance(owner, ast.Subscript):
+            owner = owner.value
         if isinstance(owner, ast.Name) and owner.id in aliases:
             return True
 
@@ -188,11 +211,7 @@ def _scan(path: Path) -> list[tuple[Path, int, str, str]]:
         for node in ast.walk(func):
             if not isinstance(node, ast.Assign):
                 continue
-            value = node.value
-            stores_timer = _is_construction(value) or (
-                isinstance(value, ast.Name) and value.id in armed_locals
-            )
-            if not stores_timer:
+            if not _holds_timer(node.value, armed_locals):
                 continue
             for target in node.targets:
                 slot = _slot_of(target)
@@ -261,4 +280,32 @@ class TestTimerRearmCancelsArchitecture:
         assert armed, (
             f"{repo_relative(path)} no longer stores a constructed timer on "
             "self. If the arming moved, update this fitness function's anchor."
+        )
+
+    def test_a_timer_stored_beside_its_bookkeeping_is_in_scope(self):
+        """The tuple-wrapped arming form is reached, not just the bare one.
+
+        The rate-limit coordinator stores ``(timer, armed_expiry)`` per key so a
+        fired callback can recognise its own registration. Read as a bare store
+        only, that value is not a timer construction and not a name bound to
+        one, so the whole arming site sat outside this rule while looking
+        perfectly covered.
+        """
+        path = oss_src_root() / "services" / "rate_limit_coordinator" / "coordinator.py"
+        assert path.is_file(), f"arming site moved or renamed: {path}"
+        tree = parse_ast(path)
+        assert tree is not None
+        armed = [
+            node
+            for func in ast.walk(tree)
+            if isinstance(func, ast.FunctionDef | ast.AsyncFunctionDef)
+            for node in ast.walk(func)
+            if isinstance(node, ast.Assign)
+            and _holds_timer(node.value, _locally_armed_names(func))
+            and any(_slot_of(target) is not None for target in node.targets)
+        ]
+        assert armed, (
+            f"{repo_relative(path)} no longer stores a timer on self in a form "
+            "this rule recognises. If the arming moved, follow it here — a rule "
+            "that reaches nothing reports no violations either."
         )

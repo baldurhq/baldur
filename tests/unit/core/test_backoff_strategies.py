@@ -448,3 +448,90 @@ class TestBackoffHardCapBehavior:
         )
         assert backoff.calculate(1) == 10.0
         assert backoff.calculate(10) == self._CAP  # saturated, no jitter
+
+
+# =============================================================================
+# Overflow saturation (the hard cap survives an unbounded attempt counter)
+# =============================================================================
+
+
+class TestBackoffOverflowSaturationBehavior:
+    """``multiplier ** attempt`` saturates at the cap instead of raising (#754 D10).
+
+    The exponentiation overflows a float just past attempt 1024, and one caller
+    feeds this an unbounded counter: the rate-limit coordinator's consecutive-429
+    count is reset only by a success or an operator ``clear()``, so a sustained
+    provider quota outage reaches that depth. Before saturation every
+    ``on_rate_limited`` past it raised ``OverflowError``, every caller swallowed
+    it fail-open, and no cooldown was installed at all — the self-DDoS guard
+    switching itself off at exactly the storm depth that needs it.
+    """
+
+    # 2.0 ** 1023 is the largest representable power of two, so attempt 1025
+    # (which computes 2.0 ** 1024) is the first overflowing attempt and 1024 the
+    # last one that still fits.
+    _LAST_REPRESENTABLE_ATTEMPT = 1024
+    _FIRST_OVERFLOWING_ATTEMPT = 1025
+
+    @pytest.mark.parametrize(
+        "multiplier",
+        [2.0, 2],
+        ids=["float-multiplier", "int-multiplier"],
+    )
+    def test_first_overflowing_attempt_returns_the_cap(self, multiplier):
+        """Both multiplier types overflow at the same depth, and both saturate.
+
+        A float multiplier raises from ``float.__pow__``; an int multiplier
+        builds an arbitrary-precision power and raises on the conversion in
+        ``base_delay * huge_int``. One catch covers both entry shapes.
+        """
+        backoff = ExponentialBackoff(
+            base_delay=1.0,
+            multiplier=multiplier,
+            max_delay=60.0,
+            jitter=False,
+        )
+
+        assert backoff.calculate(self._FIRST_OVERFLOWING_ATTEMPT) == backoff.max_delay
+
+    def test_saturation_is_continuous_across_the_overflow_boundary(self):
+        """Boundary: the last representable attempt and the first overflowing one agree.
+
+        Both are far above the cap, so the returned delay must not step at the
+        boundary — that continuity is what makes ``max_delay`` the right raw
+        value to substitute rather than a value chosen for convenience.
+        """
+        backoff = ExponentialBackoff(
+            base_delay=1.0,
+            multiplier=2.0,
+            max_delay=60.0,
+            jitter=False,
+        )
+
+        assert backoff.calculate(self._FIRST_OVERFLOWING_ATTEMPT) == backoff.calculate(
+            self._LAST_REPRESENTABLE_ATTEMPT
+        )
+
+    def test_overflowing_attempt_still_takes_the_at_saturation_jitter_regime(self):
+        """With jitter on, an overflowing attempt disperses inward below the cap.
+
+        The substituted raw value has to flow through the same jitter path as a
+        merely-large one: a short-circuit that returned the bare cap would make
+        every worker in a fleet wake at the identical instant.
+        """
+        jitter_factor = 0.3
+        backoff = ExponentialBackoff(
+            base_delay=1.0,
+            multiplier=2.0,
+            max_delay=60.0,
+            jitter=True,
+            jitter_factor=jitter_factor,
+        )
+        floor = backoff.max_delay * (1.0 - jitter_factor)
+
+        delays = [
+            backoff.calculate(self._FIRST_OVERFLOWING_ATTEMPT) for _ in range(200)
+        ]
+
+        assert all(floor <= d <= backoff.max_delay for d in delays)
+        assert len(set(delays)) > 1
