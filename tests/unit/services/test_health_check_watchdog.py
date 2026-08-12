@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from contextlib import ExitStack, contextmanager
 from datetime import UTC, datetime
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from structlog.testing import capture_logs
@@ -24,6 +23,7 @@ from baldur.services.health_check import (
     HealthCheckService,
     SystemHealthSummary,
 )
+from baldur.settings.meta_watchdog import MetaWatchdogSettings
 
 # 560 A7 log event names (single source of truth for assertions).
 WATCHDOG_DECORATION_FAILED = "health_check.watchdog_decoration_failed"
@@ -145,10 +145,18 @@ def _cascade_env(service, *, watchdog, settings_enabled=None):
         )
         stack.enter_context(wd_patch)
         if settings_enabled is not None:
+            # A real settings object, not a stand-in: the guard reads
+            # ``model_fields_set`` to tell an explicitly configured flag from
+            # one riding its default, and a namespace without that attribute
+            # sends the read into the guard's fail-open ``except`` — silently
+            # turning every "warns once" assertion into a green zero on any
+            # install where the tier term does not happen to carry the gate.
+            # Kwarg construction reports ``{"enabled"}``, which is also the
+            # honest encoding of what these cases assert.
             stack.enter_context(
                 patch(
                     "baldur.settings.meta_watchdog.get_meta_watchdog_settings",
-                    return_value=SimpleNamespace(enabled=settings_enabled),
+                    return_value=MetaWatchdogSettings(enabled=settings_enabled),
                 )
             )
         yield

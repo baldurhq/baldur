@@ -46,6 +46,14 @@ class PgAdmin(PgAdminProvider):
             and close it on a separate code path. Separating this from
             ``get_session`` keeps the context-managed contract honest.
         label: identifier used in log records (e.g. DB alias).
+        availability_probe: callable answering whether the injected backend
+            is a PostgreSQL. Omitted (the default) means "assume yes", which
+            preserves the behavior of every direct construction. The probe is
+            a configuration test, never a reachability test — it answers "is
+            the backend this instance is wired to a postgres?", not "is that
+            postgres up". It is evaluated per call rather than frozen at
+            construction so an instance built before the backend's settings
+            were resolvable cannot latch a wrong answer for the process.
     """
 
     def __init__(
@@ -53,13 +61,33 @@ class PgAdmin(PgAdminProvider):
         get_session: Callable[[], AbstractContextManager[Any]],
         get_connection: Callable[[], Any],
         label: str = "default",
+        availability_probe: Callable[[], bool] | None = None,
     ) -> None:
         self._get_session = get_session
         self._get_connection = get_connection
         self._label = label
+        self._availability_probe = availability_probe
+        self._availability_probe_failure_logged = False
 
     def is_available(self) -> bool:
-        return True
+        if self._availability_probe is None:
+            return True
+        try:
+            return bool(self._availability_probe())
+        except Exception as e:
+            # Fail toward absence: consumers omit the PG-specific keys, which
+            # is the documented contract for a provider that cannot answer.
+            # Latched to one record per instance and without a traceback —
+            # is_available() runs on every refresh pass, so the unlatched shape
+            # would itself be the log flood a quiet boot must not have.
+            if not self._availability_probe_failure_logged:
+                self._availability_probe_failure_logged = True
+                logger.debug(
+                    "pg_admin.availability_probe_failed",
+                    label=self._label,
+                    error=str(e),
+                )
+            return False
 
     # =========================================================================
     # Connection & Health Check

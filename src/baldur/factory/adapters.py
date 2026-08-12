@@ -284,6 +284,24 @@ def discover_database_health_adapters() -> None:
         pass
 
 
+def _django_default_alias_is_postgres() -> bool:
+    """Whether Django's default alias is wired to a PostgreSQL.
+
+    Reads the vendor string without opening a connection, so it is safe to call
+    on every availability check.
+    """
+    from django.db import connections
+
+    return connections["default"].vendor == "postgresql"
+
+
+def _configured_sql_dialect_is_postgres() -> bool:
+    """Whether the resolved SQL DSN / dialect override names a PostgreSQL."""
+    from baldur.settings.sql import SQLDialect, get_sql_settings
+
+    return get_sql_settings().resolved_dialect() == SQLDialect.POSTGRESQL
+
+
 def discover_pg_admin_adapters() -> None:
     """Auto-register available PostgreSQL admin SQL providers (515)."""
     from baldur.factory.registry import ProviderRegistry
@@ -302,6 +320,7 @@ def discover_pg_admin_adapters() -> None:
                 get_session=django_session_factory("default"),
                 get_connection=django_connection_factory("default"),
                 label="django:default",
+                availability_probe=_django_default_alias_is_postgres,
             )
 
         if not reg.has_provider("django"):
@@ -321,6 +340,7 @@ def discover_pg_admin_adapters() -> None:
                 get_session=dbapi_session_factory(factory),
                 get_connection=factory,
                 label="sql:default",
+                availability_probe=_configured_sql_dialect_is_postgres,
             )
 
         if not reg.has_provider("sql"):

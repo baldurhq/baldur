@@ -102,7 +102,14 @@ class StressTestService:
             return {"pool_type": "unknown", "error": str(e)}
 
     def get_pool_status(self) -> PoolStatusResult:
-        """Query the current connection pool state."""
+        """Query the current connection pool state.
+
+        The PG section is gated on the provider's availability flag, the same
+        way the precomputed-cache twin assembles this payload: on a backend
+        that cannot answer ``pg_stat_activity``, an ungated read collapses the
+        *whole* result to an error and the operator loses the pool section and
+        the connection flag too, not just the PG numbers.
+        """
         try:
             # Try SQLAlchemy pool info first
             pool_info = self.get_pool_info()
@@ -112,20 +119,23 @@ class StressTestService:
             db_provider = ProviderRegistry.database_health.get()
             conn_info = db_provider.check_connection("default")
 
-            # Query PostgreSQL connection stats (via repository)
-            stats = self._repo.get_connection_stats()
+            pg_stats: dict = {}
+            if self._repo.is_available():
+                # Query PostgreSQL connection stats (via repository)
+                stats = self._repo.get_connection_stats()
+                pg_stats = {
+                    "total_connections": stats.total_connections,
+                    "active": stats.active,
+                    "idle": stats.idle,
+                    "idle_in_transaction": stats.idle_in_transaction,
+                }
 
             is_exhausted = pool_info.get("pool_exhausted", False)
 
             return PoolStatusResult(
                 status="exhausted" if is_exhausted else "healthy",
                 sqlalchemy_pool=pool_info,
-                pg_stats={
-                    "total_connections": stats.total_connections,
-                    "active": stats.active,
-                    "idle": stats.idle,
-                    "idle_in_transaction": stats.idle_in_transaction,
-                },
+                pg_stats=pg_stats,
                 connection_usable=conn_info.is_usable,
                 use_connection_pool=os.getenv("USE_CONNECTION_POOL", "FALSE") == "TRUE",
             )

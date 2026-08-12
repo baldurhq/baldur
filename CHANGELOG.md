@@ -12,12 +12,14 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ### Added
 
-- `baldur.runtime_posture` (INFO, once per process) — the storage and metrics backend in one line.
+- `baldur.runtime_posture` (INFO, once per process) — storage, metrics and statistics backends.
 - `baldur.posture` logger carries an INFO floor, so that line survives the default WARNING root.
 
 ### Changed
 
-- A zero-config first run emits no WARNING-or-above baldur line, on both the decorator and `init()`.
+- A zero-config first run emits no WARNING-or-above baldur line, on every documented path.
+- `meta_watchdog.enabled_but_unregistered` is silent on an install that never set the flag itself.
+- `null_statistics_repository.no_adapter_registered` → DEBUG; the posture line reports it instead.
 - `baldur.init()` configures logging first, so its own DEBUG/INFO output is filtered from line one.
 - **Breaking**: `storage.writable_dir_probe_failed` → INFO `storage.writable_dir_fallback`.
 - **Breaking**: `outside.recommended_range` → `leader_election.renew_interval_outside_range`.
@@ -40,6 +42,9 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `BALDUR_RESILIENT_STORAGE_REDIS_URL` now wins over `BALDUR_REDIS_URL`, which overrode it before.
 - Zero-config startup no longer logs repeated circuit-breaker warmup errors when Redis is absent.
 - "Is a Redis configured?" no longer imports Django unless `DJANGO_SETTINGS_MODULE` is set.
+- `GET /error-budget/status/` answers 200 `unavailable` without PRO installed, instead of a 500.
+- Pool status omits `pg_stats` on a non-PostgreSQL backend instead of failing the whole payload.
+- The error-budget and pool-status cache jobs no longer log a traceback on every refresh pass.
 
 ## [1.4.0] - 2026-08-11
 
