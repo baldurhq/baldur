@@ -27,6 +27,35 @@ import pytest
 from baldur.bootstrap import _start_precomputed_cache_if_enabled
 
 
+def _expected_default_keys() -> set[str]:
+    """The keys ``register_default_compute_functions`` installs on this tree.
+
+    The error-budget key is tier-gated: an install without the PRO
+    distribution can never answer it, so registering it would refresh a
+    constant every pass and make the worker's key list overstate the
+    capability. That makes the *count* a property of the installed
+    distribution rather than of the wiring these cases assert, so it is
+    derived here instead of written down — and named, which is a stronger
+    assertion than a length ever was.
+
+    Deriving it is not circular: whether the gate itself picks the right
+    branch is pinned by the compute-function suite, with the tier probe
+    patched on both sides. These cases only need to know that the defaults
+    reached the worker the bootstrap actually started.
+    """
+    from baldur.services.precomputed_cache.constants import (
+        CACHE_KEY_ERROR_BUDGET,
+        CACHE_KEY_HEALTH,
+        CACHE_KEY_POOL_STATUS,
+    )
+    from baldur.utils.tier import is_pro_installed
+
+    keys = {CACHE_KEY_HEALTH, CACHE_KEY_POOL_STATUS}
+    if is_pro_installed():
+        keys.add(CACHE_KEY_ERROR_BUDGET)
+    return keys
+
+
 @pytest.fixture
 def non_gunicorn_autostart(monkeypatch):
     """Pass the autostart + non-master gates so the body runs.
@@ -154,14 +183,14 @@ class TestStartPrecomputedCacheRealWorker:
     def test_all_gates_pass_starts_real_worker(
         self, non_gunicorn_autostart, fresh_real_worker
     ):
-        """All gates pass → 3 compute functions registered and worker running."""
+        """All gates pass → the default compute functions are registered."""
         from baldur.services.precomputed_cache import get_precomputed_cache_worker
 
         _start_precomputed_cache_if_enabled()
 
         worker = get_precomputed_cache_worker()
         assert worker.is_running() is True
-        assert len(worker.get_stats()["registered_keys"]) == 3
+        assert set(worker.get_stats()["registered_keys"]) == _expected_default_keys()
 
     def test_double_call_idempotent(self, non_gunicorn_autostart, fresh_real_worker):
         """D5: two helper invocations yield exactly one running worker.
@@ -171,7 +200,7 @@ class TestStartPrecomputedCacheRealWorker:
         ``start_background_workers()`` into this same helper, so calling it twice
         reproduces the init()-then-per-worker double-start at the worker layer.
         The worker's ``_running`` guard makes the second ``start()`` a no-op;
-        ``register`` dict-overwrite keeps exactly 3 keys.
+        ``register`` dict-overwrite keeps the same key set.
         """
         from baldur.services.precomputed_cache import get_precomputed_cache_worker
 
@@ -184,7 +213,7 @@ class TestStartPrecomputedCacheRealWorker:
 
         assert second is first
         assert second.is_running() is True
-        assert len(second.get_stats()["registered_keys"]) == 3
+        assert set(second.get_stats()["registered_keys"]) == _expected_default_keys()
         # _running guard short-circuits start() → _started_at is not refreshed.
         assert second._started_at == started_at
 
@@ -205,4 +234,7 @@ class TestStartPrecomputedCacheRealWorker:
         reset_precomputed_cache_worker()
         register_default_compute_functions()
 
-        assert len(get_precomputed_cache_worker().get_stats()["registered_keys"]) == 3
+        assert (
+            set(get_precomputed_cache_worker().get_stats()["registered_keys"])
+            == _expected_default_keys()
+        )
