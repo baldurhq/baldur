@@ -22,12 +22,16 @@ from structlog.testing import capture_logs
 
 from baldur.adapters.cache.redis_adapter import RedisCacheAdapter
 from baldur.adapters.memory.shadow_logger import ShadowLogger
-from baldur.adapters.resilient.backend import ResilientStorageBackend
+from baldur.adapters.resilient.backend import (
+    ResilientStorageBackend,
+    ResilientStorageMode,
+)
 from baldur.settings.redis import DEFAULT_REDIS_URL
 from baldur.settings.resilient_storage import ResilientStorageSettings
 
 _PROBE_EVENT = "resilient_storage.lazy_redis_probe_failed"
 _DEGRADED_EVENT = "resilient_storage.degraded_mode_entered"
+_FALLBACK_EVENT = "resilient_storage.degraded_mode_fallback"
 _CONFIGURED_URL = "redis://configured-host:6379/4"
 
 
@@ -331,3 +335,83 @@ class TestEnsureRedisForwardsThePostureBehavior:
             if entry.get("log_level") in {"warning", "error", "critical"}
         ]
         assert noisy == []
+
+
+class TestConnectedThenLostStaysCriticalBehavior:
+    """Losing a Redis that WAS live is loud in every posture.
+
+    Every demotion here hangs off the first-init probe. A connection that
+    was established and then failed is a different method and a different
+    event, and it keeps its CRITICAL even on the zero-config machine — there
+    the operator's Redis genuinely went away, which is the one thing the
+    quiet posture must never hide.
+
+    The edge is unreachable until a successful connect has set
+    ``_mode = REDIS``: the backend constructs DEGRADED, which is why no
+    decision in this change may branch on the current mode.
+    """
+
+    @staticmethod
+    def _connect_then_break(backend, error: Exception) -> None:
+        """Put the backend in the post-connect state, holding a dying client."""
+        backend._redis_initialized = True
+        backend._mode = ResilientStorageMode.REDIS
+        backend._redis = MagicMock(spec=RedisCacheAdapter)
+        backend._redis.get.side_effect = error
+
+    @pytest.mark.parametrize(
+        "posture",
+        ["unconfigured", "configured", "production"],
+    )
+    def test_a_failing_live_client_still_announces_at_critical(
+        self, monkeypatch, make_backend, posture
+    ):
+        from baldur.runtime import reset_runtime
+
+        if posture == "configured":
+            monkeypatch.setenv("BALDUR_REDIS_URL", _CONFIGURED_URL)
+        elif posture == "production":
+            monkeypatch.setenv("BALDUR_ENVIRONMENT", "production")
+            reset_runtime()
+        backend = make_backend()
+        self._connect_then_break(backend, ConnectionError("server went away"))
+
+        with capture_logs() as logs:
+            assert backend.get("k") is None
+
+        records = _events(logs, _FALLBACK_EVENT)
+        assert len(records) == 1
+        assert records[0]["log_level"] == "critical"
+
+    def test_the_first_probe_event_is_not_the_one_that_fires(self, make_backend):
+        """Two edges, two events — only the first-probe one was demoted."""
+        backend = make_backend()
+        self._connect_then_break(backend, ConnectionError("server went away"))
+
+        with capture_logs() as logs:
+            backend.get("k")
+
+        assert _events(logs, _DEGRADED_EVENT) == []
+        assert _events(logs, _PROBE_EVENT) == []
+
+    def test_the_edge_announces_once_per_outage(self, make_backend):
+        """The guard is the mode write, unchanged by this document."""
+        backend = make_backend()
+        self._connect_then_break(backend, ConnectionError("server went away"))
+
+        with capture_logs() as logs:
+            backend._switch_to_degraded()
+            backend._switch_to_degraded()
+
+        assert len(_events(logs, _FALLBACK_EVENT)) == 1
+
+    def test_a_freshly_constructed_backend_cannot_announce_the_edge(self, make_backend):
+        """It constructs DEGRADED, so "is it degraded now?" is never the
+        question — the announcement belongs to the transition."""
+        backend = make_backend()
+        assert backend._mode is ResilientStorageMode.DEGRADED
+
+        with capture_logs() as logs:
+            backend._switch_to_degraded()
+
+        assert _events(logs, _FALLBACK_EVENT) == []

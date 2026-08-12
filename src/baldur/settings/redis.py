@@ -191,12 +191,17 @@ def redis_explicitly_configured() -> bool:
     :data:`REDIS_INTENT_ENV_VARS`, and the two Django-shaped probes are the
     same two strategies ``baldur.adapters.redis`` runs.
 
-    Side-effect-free: :func:`_django_plausibly_in_play` gates both Django
-    probes, so neither imports Django into a process that has not already
-    loaded it. Each probe is wrapped independently, and the function never
-    raises — a failed probe returns False, which is accurate rather than
-    merely safe, since a framework that cannot be imported cannot serve that
-    acquisition strategy either.
+    Import cost: :func:`_django_plausibly_in_play` gates both Django probes,
+    so a process that has neither named a settings module nor already loaded
+    Django never imports one. Where ``DJANGO_SETTINGS_MODULE`` IS set the
+    probes do import Django and django_redis — deliberately, because that is
+    the same work the acquisition strategies they mirror would do, and the
+    variable is the operator saying Django settings are in play.
+
+    Each probe is wrapped independently, and the function never raises — a
+    failed probe returns False, which is accurate rather than merely safe,
+    since a framework that cannot be imported cannot serve that acquisition
+    strategy either.
     """
     for name in REDIS_INTENT_ENV_VARS:
         if os.environ.get(name, "").strip():

@@ -267,12 +267,20 @@ class TestRedisAbsenceIsExpectedBehavior:
 
 
 class TestPredicateDjangoImportSideEffectContract:
-    """The predicate does not drag Django into a process that never loaded it.
+    """What the predicate is, and is not, allowed to import.
 
     ``django_redis`` imports ``django.conf`` and ``django.core.cache`` with
     it, so the CACHES probe has to sit behind the same "is Django plausibly
     in play" gate as the settings probe. A subprocess is the only honest
     seam: the test session itself always has Django loaded.
+
+    The gate is not an absolute ban, and the boundary is asserted from both
+    sides. A process that never named a settings module and never loaded
+    Django imports nothing. A process where ``DJANGO_SETTINGS_MODULE`` IS
+    set does import Django — deliberately, since that is exactly the work
+    the acquisition strategy it mirrors would do — and that half is pinned
+    too, so a future narrowing cannot silently turn a live channel into a
+    false negative.
     """
 
     def _probe_in_a_django_free_process(self, extra: str = "") -> str:
@@ -317,3 +325,18 @@ class TestPredicateDjangoImportSideEffectContract:
         )
 
         assert "RESULT True False False" in stdout
+
+    def test_a_named_settings_module_does_admit_the_django_probes(self):
+        """The other side of the gate, stated rather than left implied.
+
+        ``DJANGO_SETTINGS_MODULE`` is an operator saying Django settings are
+        in play, so both probes run and Django is imported. Narrowing this
+        further would turn a documented acquisition channel into a false
+        negative — the predicate would call an operator's configured Redis
+        "never configured" and quiet its outage.
+        """
+        stdout = self._probe_in_a_django_free_process(
+            extra='os.environ["DJANGO_SETTINGS_MODULE"] = "tests.testapp.settings"',
+        )
+
+        assert "RESULT False True True" in stdout

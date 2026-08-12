@@ -189,9 +189,20 @@ class MetricSyncService:
         # read accessor (works on both prometheus and OTEL backends).
         try:
             from baldur.metrics.prometheus import get_metrics
+            from baldur.metrics.registry import NOOP_METRIC
 
             metrics = get_metrics()
             recorder = getattr(metrics, "dlq", None)
+            if recorder is NOOP_METRIC:
+                # No metrics backend is recording, so there is no in-memory
+                # gauge to read back. The null object stands in for
+                # *recording* — every attribute answers with itself — so
+                # reading a count through it puts a stub where a number
+                # belongs and the drift arithmetic downstream raises
+                # TypeError. Treat it as "no recorder": dlq_pending stays
+                # empty and the report compares nothing, which is what this
+                # branch did before an absent extra had a stub at all.
+                recorder = None
 
             if recorder is not None:
                 for domain in target_domains:
