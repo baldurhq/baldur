@@ -57,15 +57,16 @@ def parse_retry_after(raw: Any) -> float | None:
     if raw is None or raw == "":
         return None
 
+    seconds: float | None
     try:
         seconds = float(raw)
     except (ValueError, TypeError, OverflowError):
         # OverflowError is the int-too-large-to-convert case; like the other
         # two it means "not a delta-seconds", so the date form gets its turn.
         seconds = _parse_http_date_seconds(raw)
-        if seconds is None:
-            return None
 
+    if seconds is None:
+        return None
     if not math.isfinite(seconds) or seconds < 0:
         return None
     return seconds
@@ -74,7 +75,7 @@ def parse_retry_after(raw: Any) -> float | None:
 def _parse_http_date_seconds(raw: Any) -> float | None:
     """Return the seconds remaining until an HTTP-date, or None if unusable."""
     try:
-        target = parsedate_to_datetime(raw)
-        return (target - utc_now()).total_seconds()
+        remaining: float = (parsedate_to_datetime(raw) - utc_now()).total_seconds()
     except Exception:
         return None
+    return remaining
