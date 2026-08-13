@@ -10,6 +10,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-08-13
+
 ### Changed
 
 - Rate-limit coordination and CB L2 boot hydration skip Redis when nobody configured one.
