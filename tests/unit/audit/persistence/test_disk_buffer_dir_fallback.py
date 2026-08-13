@@ -30,18 +30,25 @@ pytest.importorskip("lmdb", reason="disk buffer requires the lmdb extra")
 # return None — a host-capacity failure wearing this test's name.
 TEST_MAP_SIZE_MB = 16
 
+# Capping the map is not enough on its own: the free-space check measures the
+# whole volume, so a host that merely sits near the shipped 5% threshold trips
+# it once the rest of the suite's own footprint lands. Disabling the check is
+# what every other disk-buffer test file does, for the same reason.
+DISK_CHECK_DISABLED = 0.0
+
 
 @pytest.fixture
 def buffer_settings(tmp_path):
-    """Defaults-only settings, minus the two things that are host-sensitive.
+    """Defaults-only settings, minus the things that are host-sensitive.
 
     ``data_dir`` is deliberately left at its default — the whole point is that
-    the shipped default is unwritable — so only the map size and the shutdown
-    handler registration are pinned.
+    the shipped default is unwritable — so only the map size, the free-space
+    threshold and the shutdown handler registration are pinned.
     """
     return DiskBufferSettings(
         enable_shutdown_handlers=False,
         lmdb_map_size_mb=TEST_MAP_SIZE_MB,
+        disk_full_threshold=DISK_CHECK_DISABLED,
     )
 
 
