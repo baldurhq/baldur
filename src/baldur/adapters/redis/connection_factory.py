@@ -100,10 +100,11 @@ class RedisConnectionFactory:
                 ``username`` when the kwargs carry none. True by default
                 because most URLs handed here name the framework's own Redis.
                 Pass False for a URL that comes from a channel naming a
-                *different* server (a task broker, a second instance): sending
-                AUTH to a server with no password set fails every command with
-                ``ResponseError``, so a credential that belongs to one
-                instance must not travel to another.
+                *different* server (a task broker, a second instance): a
+                server with no password set rejects the AUTH, and redis-py
+                raises ``AuthenticationError`` from the connection handshake
+                — so every command fails, not just the first. A credential
+                that belongs to one instance must not travel to another.
             **kwargs: Additional redis-py options
 
         Returns:
