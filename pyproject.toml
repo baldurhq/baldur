@@ -1,5 +1,9 @@
 [build-system]
-requires = ["hatchling"]
+# hatchling 1.32.0 emits Metadata-Version 2.5, which the pinned
+# pypa/gh-action-pypi-publish's bundled twine rejects as invalid. Keep the
+# backend below 1.32 until the publish action understands metadata 2.5, then
+# drop this ceiling together with the action bump.
+requires = ["hatchling<1.32"]
 build-backend = "hatchling.build"
 
 [project]
