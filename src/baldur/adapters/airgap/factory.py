@@ -58,8 +58,12 @@ def _create_redis_adapter() -> AirGapStorageAdapter | None:
             get_redis_connection_factory,
         )
 
-        client = get_redis_connection_factory().create(redis_url)
-        client.ping()  # Connection test
+        factory = get_redis_connection_factory()
+        # Bounded admission probe on a throwaway client. The adapter built
+        # below is memoized by the airgap singleton for the process lifetime,
+        # so the shared client keeps its data-path timeouts untouched.
+        factory.probe(redis_url)
+        client = factory.create(redis_url)
 
         prefix = os.environ.get("BALDUR_AIRGAP_PREFIX", "sh:airgap:")
         ttl_str = os.environ.get("BALDUR_AIRGAP_TTL", "3600")

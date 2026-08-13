@@ -989,8 +989,14 @@ def create_redis_audit_buffer(
             get_redis_connection_factory,
         )
 
-        redis_client = get_redis_connection_factory().create(redis_url)
-        redis_client.ping()  # Verify connectivity
+        factory = get_redis_connection_factory()
+        # Admission on the bounded probe budget, through a throwaway client:
+        # the buffer below keeps this client for the process lifetime, so
+        # narrowing the shared client's connect timeout would make every later
+        # pool reconnect (Sentinel failover, a BGSAVE fork stall) fail fast and
+        # divert audit to file.
+        factory.probe(redis_url)
+        redis_client = factory.create(redis_url)
 
         fallback = None
         if fallback_log_dir:

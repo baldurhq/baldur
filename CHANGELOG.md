@@ -10,6 +10,20 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+### Changed
+
+- Rate-limit coordination and CB L2 boot hydration skip Redis when nobody configured one.
+- Migration: set `BALDUR_REDIS_URL` to keep using an unconfigured local Redis for either lane.
+- That posture is `BALDUR_ENVIRONMENT` != `production`, the default when the variable is unset.
+- Redis admission probes in audit, air-gap, metrics and rate-limit now bound the connect phase.
+- A connect that times out is retried once; a refusal is immediate. Data-path timeouts unchanged.
+- RQ broker connections take timeouts and credentials from the adapter, never `BALDUR_REDIS_*`.
+
+### Fixed
+
+- A first protected call no longer stalls for seconds with redis-py installed and no server.
+- The RQ broker client had no socket timeout at all; a black-holed host blocked ~21 s.
+
 ## [1.5.0] - 2026-08-13
 
 ### Added

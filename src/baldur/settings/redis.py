@@ -120,7 +120,10 @@ class RedisSettings(BaseSettings):
         description=(
             "Fast-fail connect timeout (seconds) for lazy Redis liveness probes. "
             "Deliberately shorter than socket_connect_timeout so an unreachable "
-            "Redis degrades the probe path quickly instead of blocking."
+            "Redis degrades the probe path quickly instead of blocking. "
+            "Distinct from ApiRateLimitSettings.redis_ping_timeout_ms, which "
+            "bounds a steady-state health ping on an already-admitted client: "
+            "this one bounds the first connect that decides admission."
         ),
     )
     retry_on_timeout: bool = Field(

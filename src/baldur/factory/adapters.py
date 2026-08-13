@@ -10,6 +10,19 @@ from __future__ import annotations
 
 from typing import Any
 
+import structlog
+
+logger = structlog.get_logger()
+
+# One announcement per outage, not one per resolution attempt.
+# ``get_rate_limit_storage()`` is re-entered by every component that resolves
+# storage, and each entry re-attempts the provider (the auto-detect loop
+# invalidates the cached instance on failure), so an unlatched line is one
+# WARNING per resolution rather than one per outage. Mirrors
+# ``RedisRateLimitStorage.is_available()``'s own ``if not self._fallback_mode:``
+# guard, which the admission probe now pre-empts.
+_rate_limit_redis_probe_failure_reported = False
+
 __all__ = [
     "discover_cache_adapters",
     "discover_queue_adapters",
@@ -430,6 +443,72 @@ def discover_web_framework_adapters() -> None:
         reg.set_default("django")
 
 
+def _probe_rate_limit_redis(factory: Any, url: str) -> None:
+    """Run the rate-limit admission probe, preserving the fallback signal.
+
+    ``RedisRateLimitStorage.is_available()`` is the only writer of the
+    fallback gauge and the unavailable counter in the tree, and the
+    auto-detect loop is its only caller — so a probe that refuses admission
+    before the adapter exists would leave the shipped "rate limiting fell
+    back to per-process" gauge reading 0 for the whole outage. This writes
+    what that method would have written, and logs at the level it would have
+    used, before letting the failure out.
+
+    Raises:
+        Exception: whatever the probe raised — the provider factory must
+            still fail so auto-detect moves on to the next backend.
+    """
+    global _rate_limit_redis_probe_failure_reported
+
+    try:
+        factory.probe(url)
+    except Exception as e:
+        _report_rate_limit_redis_probe_failure(e)
+        raise
+
+    _rate_limit_redis_probe_failure_reported = False
+
+
+def _report_rate_limit_redis_probe_failure(error: Exception) -> None:
+    """Record the metrics and announce a failed rate-limit admission probe."""
+    global _rate_limit_redis_probe_failure_reported
+
+    try:
+        from baldur.metrics.drift_metrics import (
+            record_ratelimit_redis_unavailable,
+            set_ratelimit_fallback_mode,
+        )
+    except ImportError:
+        pass
+    else:
+        record_ratelimit_redis_unavailable()
+        set_ratelimit_fallback_mode(True)
+
+    if _rate_limit_redis_probe_failure_reported:
+        return
+    _rate_limit_redis_probe_failure_reported = True
+
+    from baldur.settings.redis import redis_absence_is_expected
+
+    if redis_absence_is_expected():
+        # Nobody named a Redis outside production: the framework found its
+        # own default address unreachable and the memory store serves the
+        # lane. Fail-open with the main logic unaffected — LOGGING_STANDARDS
+        # §3.1 — and the same split is_available() already applies.
+        logger.debug(
+            "rate_limit_storage.redis_probe_failed",
+            error=str(error),
+        )
+    else:
+        logger.warning(
+            "rate_limit_storage.redis_probe_failed",
+            error=str(error),
+            # Named here so an operator whose Redis needs a longer connect
+            # than the probe budget does not have to find the knob.
+            escape_hatch="BALDUR_REDIS_PROBE_CONNECT_TIMEOUT",
+        )
+
+
 def discover_rate_limit_storage_adapters() -> None:
     """Auto-register available rate limit storage adapters.
 
@@ -460,9 +539,17 @@ def discover_rate_limit_storage_adapters() -> None:
 
             settings = get_redis_settings()
             factory = get_redis_connection_factory()
-            # Auto-detection probes this provider on every install, so on a
-            # zero-config run the failure is the framework finding its own
-            # default address unreachable — expected, not an outage.
+            # Admission first, on the bounded probe budget. Without it the
+            # auto-detect loop's is_available() ping is the first connect,
+            # and it runs on the data-path connect timeout inside the
+            # caller's own timed section — a first protected call in the
+            # "redis-py installed, no server" posture blocked for seconds and
+            # misfired the caller's fallback. After a successful probe that
+            # same ping costs an RTT, so nothing stalls twice.
+            _probe_rate_limit_redis(factory, settings.url)
+            # A zero-config run reaching the client build has a reachable
+            # Redis at the default address, but keep the demotion: a
+            # malformed default URL is still not an outage anyone caused.
             client = factory.create(
                 settings.url,
                 unconfigured_probe=redis_absence_is_expected(),

@@ -64,9 +64,13 @@ def _create_redis_adapter() -> MetricSourceAdapter:
         settings = get_metrics_settings()
         prefix = settings.redis_prefix
 
-        client = get_redis_connection_factory().create(redis_url, decode_responses=True)
-        # Test connection
-        client.ping()
+        factory = get_redis_connection_factory()
+        # Bounded admission probe on a throwaway client. The adapter built
+        # below is memoized by the metric-adapter singleton for the process
+        # lifetime, so the shared client keeps its data-path timeouts. The
+        # probe needs no decode_responses — it only pings.
+        factory.probe(redis_url)
+        client = factory.create(redis_url, decode_responses=True)
 
         logger.info(
             "metric_adapter.redis_adapter_connected",
