@@ -145,3 +145,11 @@ def sentinel_url() -> str:
 def sentinel_master_name() -> str:
     """Master name configured in sentinel.conf.template."""
     return _MASTER_NAME
+
+
+# The unconfigured-Redis posture fixture, re-exported for this package:
+# imported into a test module the name would shadow itself at every
+# parameter that requests it.
+from tests.factories.redis_posture import (  # noqa: E402, F401 - fixture registration
+    no_redis_posture,
+)
