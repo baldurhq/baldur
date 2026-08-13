@@ -153,9 +153,12 @@ class RQTaskAdapter(TaskQueueInterface):
             # Through the shared factory for bounded socket budgets and
             # Sentinel/Cluster routing — but taking nothing from RedisSettings
             # for this foreign broker channel. Credentials belong to baldur's
-            # own Redis: AUTH sent to an unauthenticated broker fails every
-            # command with ResponseError, which is not in the enqueue path's
-            # retryable set. retry_on_timeout stays False, redis-py's own
+            # own Redis: an unauthenticated broker rejects the AUTH during the
+            # connection handshake, so redis-py raises AuthenticationError and
+            # every command fails. That class is redis-py's own ConnectionError
+            # subclass, not the builtin one, so it is not in the enqueue path's
+            # retryable set below and the failure is immediate rather than
+            # three backoff rounds deep. retry_on_timeout stays False, redis-py's own
             # default and today's behavior here: rq assigns the job id
             # client-side before the write, so replaying a timed-out LPUSH
             # would push the same id twice.
