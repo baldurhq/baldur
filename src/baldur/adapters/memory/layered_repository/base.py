@@ -167,13 +167,59 @@ class LayeredRepositoryBase:
 
         # Initial load when an L2 store is configured
         if self._l2:
-            self._load_from_l2_with_timeout()
+            if self._l2_is_unconfigured_default():
+                logger.debug(
+                    "layered_repo.initial_load_skipped",
+                    reason="redis_not_configured",
+                    adapter_type=self._adapter_type,
+                )
+            else:
+                self._load_from_l2_with_timeout()
             # 479 D2: process-wide L2 warmup (executor threads + connection
             # pool + ResilientStorageBackend wrapper + Lua eval RTT).
             # Idempotent: only the first redis-l2 LayeredRepository in a
             # process pays the cost; subsequent constructions short-circuit
             # via the _warmup_done ClassVar.
             self._ensure_l2_warmup_once()
+
+    def _l2_is_unconfigured_default(self) -> bool:
+        """Is the L2 store about to dial a Redis address nobody named?
+
+        Gates the constructor's initial load only. The load runs in an
+        executor with a doubled timeout, so on a host whose loopback refuses
+        slowly it absorbed up to two seconds of the first protected call and
+        then announced its own timeout at WARNING against a Redis nobody
+        configured. Hot-path record operations sync to L2 fire-and-forget, so
+        declining the load costs the caller thread nothing.
+
+        Deliberately gated on configuration intent, not ``is_degraded``: a
+        ResilientStorageBackend constructs DEGRADED and stays that way until
+        its first probe, so an ``is_degraded`` gate would skip the load on
+        every healthy configured process too.
+
+        The backend's own predicate is asked rather than the bare settings
+        one because it additionally treats a construction kwarg or a
+        per-class environment variable as intent — a URL named that way is
+        never skipped, and the settings predicate cannot see it.
+
+        Guards absence only, in both directions. A custom L2 without a
+        ``_backend`` attribute (explicit injection), a ``_backend`` that is
+        some other object entirely — several unrelated adapters carry that
+        attribute name — and any answer that is not exactly ``True`` all fall
+        through to loading. The ``is True`` pin matters for spec'd test
+        doubles: a ``MagicMock`` answers the method with a truthy mock, and
+        under plain truthiness those constructions would silently stop
+        loading.
+
+        ``force_sync_from_l2()`` is untouched by design: the operator's
+        manual resync must keep working in this posture, and it is the
+        recourse for the state this skip declines to hydrate.
+        """
+        if self._adapter_type.lower() != "redis":
+            return False
+        l2_backend = getattr(self._l2, "_backend", None)
+        probe = getattr(l2_backend, "_probing_unconfigured_default", None)
+        return callable(probe) and probe() is True
 
     def _ensure_l2_warmup_once(self) -> None:
         """Once-per-process L2 warmup gate (479 D2).

@@ -28,6 +28,20 @@ F = TypeVar("F", bound=Callable)
 _RQ_RETRY_BASE_SECONDS: float = 1.0
 _RQ_RETRY_MULTIPLIER: float = 2.0
 
+# Socket budgets for the RQ broker connection.
+#
+# Stated here rather than inherited from ``RedisSettings`` because this URL
+# names a *foreign* channel — a task broker supplied by constructor arg, Django
+# ``settings.REDIS_URL``, or ``os.environ["REDIS_URL"]``, commonly a different
+# instance from baldur's own Redis. An operator who shortens
+# BALDUR_REDIS_SOCKET_TIMEOUT to make baldur's Redis fail fast must not thereby
+# impose that budget on the broker. The values match today's RedisSettings
+# defaults so the shipped numbers do not move; that is a one-time alignment,
+# NOT a live link — re-importing the settings default here would re-open the
+# coupling these constants exist to break.
+_BROKER_SOCKET_TIMEOUT_SECONDS: float = 5.0
+_BROKER_CONNECT_TIMEOUT_SECONDS: float = 5.0
+
 
 class RQTaskAdapter(TaskQueueInterface):
     """
@@ -128,7 +142,34 @@ class RQTaskAdapter(TaskQueueInterface):
 
                 redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 
-            self._connection = self.redis.from_url(redis_url)
+            from baldur.adapters.redis.connection_factory import (
+                get_redis_connection_factory,
+            )
+
+            # Touch the module accessor first so a missing redis-py still
+            # fails with the actionable install hint rather than the shared
+            # factory's bare ImportError.
+            _ = self.redis
+            # Through the shared factory for bounded socket budgets and
+            # Sentinel/Cluster routing — but taking nothing from RedisSettings
+            # for this foreign broker channel. Credentials belong to baldur's
+            # own Redis: AUTH sent to an unauthenticated broker fails every
+            # command with ResponseError, which is not in the enqueue path's
+            # retryable set. retry_on_timeout stays False, redis-py's own
+            # default and today's behavior here: rq assigns the job id
+            # client-side before the write, so replaying a timed-out LPUSH
+            # would push the same id twice.
+            #
+            # Data-path budgets, not the admission-probe class — this is an
+            # enqueue/result client, and it never serves a blocking dequeue
+            # (this module constructs no Worker).
+            self._connection = get_redis_connection_factory().create(
+                redis_url,
+                inject_settings_auth=False,
+                socket_timeout=_BROKER_SOCKET_TIMEOUT_SECONDS,
+                socket_connect_timeout=_BROKER_CONNECT_TIMEOUT_SECONDS,
+                retry_on_timeout=False,
+            )
         return self._connection
 
     def _get_queue(self, queue_name: str | None = None) -> Any:

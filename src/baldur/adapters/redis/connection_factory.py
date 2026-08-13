@@ -11,6 +11,7 @@ Ownership contract:
 from __future__ import annotations
 
 import re
+import time
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
@@ -20,6 +21,12 @@ if TYPE_CHECKING:
     from baldur.settings.redis import RedisSettings
 
 logger = structlog.get_logger()
+
+# A connect that timed out is retried exactly once by ``probe()``. One lost SYN
+# is the dominant transient on an otherwise reachable host; a second timeout is
+# evidence, not noise. Not an operator tuning axis — widening it would rebuild
+# the multi-second stall the bounded probe exists to remove.
+_PROBE_CONNECT_ATTEMPTS = 2
 
 
 __all__ = [
@@ -63,6 +70,7 @@ class RedisConnectionFactory:
         retry_on_timeout: bool | None = None,
         max_connections: int | None = None,
         unconfigured_probe: bool = False,
+        inject_settings_auth: bool = True,
         **kwargs: Any,
     ) -> Any:
         """
@@ -88,6 +96,14 @@ class RedisConnectionFactory:
                 False, so any caller that does not know stays loud, including
                 every caller of a feature-local URL field that falls back to
                 the same default address.
+            inject_settings_auth: Apply ``RedisSettings.password`` /
+                ``username`` when the kwargs carry none. True by default
+                because most URLs handed here name the framework's own Redis.
+                Pass False for a URL that comes from a channel naming a
+                *different* server (a task broker, a second instance): sending
+                AUTH to a server with no password set fails every command with
+                ``ResponseError``, so a credential that belongs to one
+                instance must not travel to another.
             **kwargs: Additional redis-py options
 
         Returns:
@@ -124,7 +140,8 @@ class RedisConnectionFactory:
         common_kwargs = {k: v for k, v in common_kwargs.items() if v is not None}
 
         # Inject auth from settings (not from URL, for security)
-        self._inject_auth(url, common_kwargs)
+        if inject_settings_auth:
+            self._inject_auth(url, common_kwargs)
 
         try:
             if url.startswith("redis+sentinel://"):
@@ -147,6 +164,89 @@ class RedisConnectionFactory:
                     error_type=type(e).__name__,
                 )
             raise
+
+    def probe(self, url: str, **kwargs: Any) -> None:
+        """Decide whether ``url`` is reachable, on a bounded connect budget.
+
+        Admission check for a call site that is about to build a
+        process-lifetime client. Returns None when the server answered PING;
+        re-raises the underlying exception otherwise.
+
+        The probe client is ephemeral and is closed before this returns, so
+        the verdict costs a connect budget and nothing else — the data client
+        the caller builds afterwards keeps its own untouched
+        ``RedisSettings`` timeouts. Bounding a *shared* client instead would
+        rewrite the data path: every later pool reconnect (Sentinel failover,
+        a BGSAVE fork stall) would fail at the probe budget rather than the
+        read budget.
+
+        Only the CONNECT phase is narrowed, to
+        ``RedisSettings.probe_connect_timeout``. ``socket_timeout`` keeps its
+        data-path value on purpose: a server that accepts the connection is
+        reachable, which is the question being asked, and a healthy Redis
+        that answers a PING slowly (fork/COW pause, a slow command on the
+        single thread) must not be judged unreachable and demoted for the
+        rest of the process.
+
+        ``retry_on_timeout`` is pinned False so an accepting-but-hung host
+        costs one read budget instead of two; the flag only acts after a
+        timeout has already elapsed, so a healthy-but-slow server never
+        reaches it.
+
+        One connect-phase retry, selected by elapsed time rather than
+        exception type — redis-py raises the same ``TimeoutError`` for both
+        phases. A failure that took at least the connect budget but less than
+        the read budget was a connect timeout (a refusal returns immediately;
+        a hung read costs at least the read budget), and one lost SYN should
+        not demote an otherwise reachable host. A refused connect is
+        definitive and is never retried.
+
+        Logs nothing: the caller's ``except`` owns the level and the metrics,
+        which is what keeps each site's existing log vocabulary intact.
+
+        Args:
+            url: Redis connection URL (same routing rules as :meth:`create`)
+            **kwargs: Additional redis-py options forwarded to :meth:`create`
+
+        Raises:
+            Exception: whatever the connect or PING raised on the last attempt
+
+        Note:
+            Not bounded here: DNS resolution runs before any redis-py timeout
+            applies, so an unresponsive resolver blocks for the OS resolver
+            budget regardless.
+        """
+        connect_budget = self._settings.probe_connect_timeout
+        read_budget = kwargs.get("socket_timeout")
+        if read_budget is None:
+            read_budget = self._settings.socket_timeout
+
+        for attempt in range(1, _PROBE_CONNECT_ATTEMPTS + 1):
+            started = time.monotonic()
+            client = None
+            try:
+                client = self.create(
+                    url,
+                    socket_connect_timeout=connect_budget,
+                    retry_on_timeout=False,
+                    **kwargs,
+                )
+                client.ping()
+                return
+            except Exception:
+                elapsed = time.monotonic() - started
+                was_connect_timeout = connect_budget <= elapsed < read_budget
+                if attempt == _PROBE_CONNECT_ATTEMPTS or not was_connect_timeout:
+                    raise
+            finally:
+                if client is not None:
+                    try:
+                        client.close()
+                    except Exception:
+                        # A client that cannot be closed has nothing left to
+                        # leak that the caller could act on, and the probe's
+                        # verdict is already decided.
+                        pass
 
     def _inject_auth(self, url: str, kwargs: dict[str, Any]) -> None:
         """Inject auth credentials from settings into kwargs.

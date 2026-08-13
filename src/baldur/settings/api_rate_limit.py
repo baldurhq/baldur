@@ -78,7 +78,13 @@ class ApiRateLimitSettings(BaseSettings):
         default=100,
         ge=10,
         le=1000,
-        description="Health check ping timeout in milliseconds (dedicated low-timeout client)",
+        description=(
+            "Health check ping timeout in milliseconds (dedicated low-timeout "
+            "client derived from the Django cache client). Distinct from "
+            "RedisSettings.probe_connect_timeout, which bounds the first "
+            "connect that decides admission: this one bounds a steady-state "
+            "ping on a client already in service."
+        ),
     )
 
     # =========================================================================

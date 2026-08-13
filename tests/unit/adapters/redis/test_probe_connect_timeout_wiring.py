@@ -242,12 +242,18 @@ class TestMetricSourceAdapterUsesTheConnectionFactory:
     def test_unreachable_redis_still_falls_back_to_the_null_adapter(
         self, redis_settings
     ):
-        """The fail direction is unchanged — the ping still degrades, not raises."""
+        """The fail direction is unchanged — admission degrades, not raises.
+
+        The verdict now comes from the factory's bounded ``probe()`` rather
+        than a bare ping on the client this site keeps for the process
+        lifetime, so the fault is injected there. The outcome under test is
+        the same one this case has always pinned.
+        """
         from baldur.adapters.metrics.base import NullMetricSourceAdapter
         from baldur.adapters.metrics.factory import _create_redis_adapter
 
         mock_factory = MagicMock(spec=RedisConnectionFactory)
-        mock_factory.create.return_value.ping.side_effect = OSError("unreachable")
+        mock_factory.probe.side_effect = OSError("unreachable")
 
         with (
             patch(
