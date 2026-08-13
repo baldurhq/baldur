@@ -249,6 +249,37 @@ class TestAuthInjectionBehavior:
         call_kwargs = mock_from_url.call_args[1]
         assert call_kwargs["password"] == "explicit_pass"
 
+    @patch("redis.from_url", autospec=True)
+    def test_foreign_channel_opts_out_of_settings_credentials(
+        self, mock_from_url, auth_factory
+    ):
+        """A URL naming a different server gets none of this Redis's auth.
+
+        AUTH sent to a server with no password set fails every command with
+        ``ResponseError``, so a credential belonging to one instance must not
+        travel to another.
+        """
+        auth_factory.create("redis://broker-host:6379/0", inject_settings_auth=False)
+
+        call_kwargs = mock_from_url.call_args[1]
+        assert "password" not in call_kwargs
+        assert "username" not in call_kwargs
+
+    @patch("redis.from_url", autospec=True)
+    def test_auth_injection_stays_on_for_callers_that_do_not_opt_out(
+        self, mock_from_url, auth_factory
+    ):
+        """The opt-out is a parameter, not a change of default.
+
+        Most URLs handed to the factory name the framework's own Redis, and
+        every existing caller passes nothing.
+        """
+        auth_factory.create("redis://host:6379/0")
+
+        call_kwargs = mock_from_url.call_args[1]
+        assert call_kwargs["password"] == "master_pass"
+        assert call_kwargs["username"] == "acl_user"
+
     @patch("redis.sentinel.Sentinel", autospec=True)
     def test_sentinel_password_separated_from_master_password(
         self, mock_sentinel_cls, auth_factory
