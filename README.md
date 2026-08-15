@@ -22,6 +22,12 @@ seconds — five charges fail and are captured with their context, the circuit
 breaker trips and shields the database, and once it is back Baldur replays
 all five automatically. Zero payments lost.*
 
+*The terminal view is a demo harness driving a real app; the DLQ depth and
+breaker state it prints are read live from the running system. In your own
+service the same story surfaces as Baldur's structured log events, live
+breaker state in the built-in web console, and the Prometheus/OpenTelemetry
+metrics.*
+
 ## Why Baldur?
 
 - **One decorator, whole pipeline.** `@baldur.protected("name")` composes
@@ -103,9 +109,10 @@ coroutine functions.
 | [Web console](docs/concepts/foundations/web-console.md) | Built-in operations console: live breaker state, controls, recovery |
 | [Precomputed cache](docs/concepts/oss/precomputed-cache.md) | Health/status endpoints answer from a warm cache, so constant probing stays cheap |
 
-The read path heals the same way. Here the same app loses its network path to
-Redis for 21 seconds — every request keeps returning 200 off the in-memory
-cache tier, and the Redis tier resyncs itself on recovery:
+The read path heals the same way. Here the same app (and the same demo
+harness) loses its network path to Redis for 21 seconds — every request keeps
+returning 200 off the in-memory cache tier, and the Redis tier resyncs itself
+on recovery:
 
 ![Terminal demo: a Django app keeps serving 200s through a 21-second Redis outage](https://raw.githubusercontent.com/baldurhq/baldur/main/.github/assets/redis-dies-app-survives.gif)
 
