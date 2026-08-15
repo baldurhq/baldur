@@ -15,6 +15,12 @@ and OpenTelemetry metrics, graceful shutdown, and a built-in web console. The
 core is framework-agnostic, with first-class adapters for Django, FastAPI,
 Flask, and Celery.
 
+![Terminal demo: a Django app keeps serving 200s through a 21-second Redis outage](https://raw.githubusercontent.com/baldurhq/baldur/main/.github/assets/redis-dies-app-survives.gif)
+
+*Real run, real timestamps: a Django app under live traffic loses its network
+path to Redis for 21 seconds — every request keeps returning 200 off the
+in-memory cache tier, and the Redis tier resyncs itself on recovery.*
+
 ## Why Baldur?
 
 - **One decorator, whole pipeline.** `@baldur.protected("name")` composes
