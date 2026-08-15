@@ -30,6 +30,12 @@ import logging
 import os
 import sys
 import time
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from baldur.interfaces.repositories import FailedOperationRepository
+
+__all__ = ["main"]
 
 # Demo-scale tuning so the whole story fits in ~30 seconds. Every knob is a
 # documented BALDUR_* setting; applied with setdefault so explicit env wins.
@@ -153,7 +159,7 @@ class _Demo:
 
         # -- observation taps: real read APIs, no side bookkeeping ----------
         self._cb = get_circuit_breaker_service()
-        self._dlq_repo = resolve_dlq_backing().repository
+        self._dlq_repo: FailedOperationRepository = resolve_dlq_backing().repository
         self.replay_batches: list[dict] = []
         get_event_bus().subscribe(
             EventType.DLQ_REPLAY_BATCH_COMPLETED,

@@ -258,6 +258,10 @@ KNOWN_DIRECT_READ_ENV_VARS: frozenset[str] = frozenset(
         # (599 D2 - the os.environ literals now live in baldur_pro, outside
         # this registry's OSS scan scope).
         "BALDUR_STRICT_CELL_CONTEXT",
+        # --- shipped demo scripts (read directly by design: the demo narrates
+        # the settings it seeds, so it reads them back the same way it set them) ---
+        "BALDUR_CB_RECOVERY_TIMEOUT",
+        "BALDUR_DEMO_VERBOSE",
     }
 )
 
