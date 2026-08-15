@@ -15,18 +15,22 @@ and OpenTelemetry metrics, graceful shutdown, and a built-in web console. The
 core is framework-agnostic, with first-class adapters for Django, FastAPI,
 Flask, and Celery.
 
-![Terminal demo: five charges fail during a Postgres outage, are captured to the DLQ, and are automatically replayed after recovery — zero payments lost](https://raw.githubusercontent.com/baldurhq/baldur/main/.github/assets/db-dies-no-payment-lost.gif)
+![Terminal demo: the payment gateway dies mid-traffic — five failed charges are captured, the breaker trips, and on recovery Baldur replays all five. Zero lost.](https://raw.githubusercontent.com/baldurhq/baldur/main/.github/assets/demo-self-healing.gif)
 
-*Real run, real timestamps: live checkout traffic loses its database for 20
-seconds — five charges fail and are captured with their context, the circuit
-breaker trips and shields the database, and once it is back Baldur replays
-all five automatically. Zero payments lost.*
+*Real run of the shipped demo: the gateway dies mid-traffic — five charges
+fail and are captured with their arguments, the circuit breaker opens and
+shields the dying dependency, and the moment it closes again Baldur replays
+all five for real. Zero lost. Reproduce it yourself:*
 
-*The terminal view is a demo harness driving a real app; the DLQ depth and
-breaker state it prints are read live from the running system. In your own
-service the same story surfaces as Baldur's structured log events, live
-breaker state in the built-in web console, and the Prometheus/OpenTelemetry
-metrics.*
+```bash
+pip install "baldur-framework[celery]"
+python -m baldur.scripts.demo_self_healing
+```
+
+*(The breaker states and DLQ tallies in the recording are read live from the
+running framework. In your own service the same story surfaces as Baldur's
+structured log events, live breaker state in the built-in web console, and
+the Prometheus/OpenTelemetry metrics.)*
 
 ## Why Baldur?
 
@@ -109,10 +113,10 @@ coroutine functions.
 | [Web console](docs/concepts/foundations/web-console.md) | Built-in operations console: live breaker state, controls, recovery |
 | [Precomputed cache](docs/concepts/oss/precomputed-cache.md) | Health/status endpoints answer from a warm cache, so constant probing stays cheap |
 
-The read path heals the same way. Here the same app (and the same demo
-harness) loses its network path to Redis for 21 seconds — every request keeps
-returning 200 off the in-memory cache tier, and the Redis tier resyncs itself
-on recovery:
+The read path heals the same way. Here a Django app under live HTTP traffic
+(recorded from a demo harness driving it) loses its network path to Redis for
+21 seconds — every request keeps returning 200 off the in-memory cache tier,
+and the Redis tier resyncs itself on recovery:
 
 ![Terminal demo: a Django app keeps serving 200s through a 21-second Redis outage](https://raw.githubusercontent.com/baldurhq/baldur/main/.github/assets/redis-dies-app-survives.gif)
 
