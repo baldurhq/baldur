@@ -15,11 +15,12 @@ and OpenTelemetry metrics, graceful shutdown, and a built-in web console. The
 core is framework-agnostic, with first-class adapters for Django, FastAPI,
 Flask, and Celery.
 
-![Terminal demo: a Django app keeps serving 200s through a 21-second Redis outage](https://raw.githubusercontent.com/baldurhq/baldur/main/.github/assets/redis-dies-app-survives.gif)
+![Terminal demo: five charges fail during a Postgres outage, are captured to the DLQ, and are automatically replayed after recovery — zero payments lost](https://raw.githubusercontent.com/baldurhq/baldur/main/.github/assets/db-dies-no-payment-lost.gif)
 
-*Real run, real timestamps: a Django app under live traffic loses its network
-path to Redis for 21 seconds — every request keeps returning 200 off the
-in-memory cache tier, and the Redis tier resyncs itself on recovery.*
+*Real run, real timestamps: live checkout traffic loses its database for 20
+seconds — five charges fail and are captured with their context, the circuit
+breaker trips and shields the database, and once it is back Baldur replays
+all five automatically. Zero payments lost.*
 
 ## Why Baldur?
 
@@ -101,6 +102,12 @@ coroutine functions.
 | [System control](docs/concepts/oss/system-control.md) | Instant kill switch and dry-run mode for Baldur's automation — no redeploy |
 | [Web console](docs/concepts/foundations/web-console.md) | Built-in operations console: live breaker state, controls, recovery |
 | [Precomputed cache](docs/concepts/oss/precomputed-cache.md) | Health/status endpoints answer from a warm cache, so constant probing stays cheap |
+
+The read path heals the same way. Here the same app loses its network path to
+Redis for 21 seconds — every request keeps returning 200 off the in-memory
+cache tier, and the Redis tier resyncs itself on recovery:
+
+![Terminal demo: a Django app keeps serving 200s through a 21-second Redis outage](https://raw.githubusercontent.com/baldurhq/baldur/main/.github/assets/redis-dies-app-survives.gif)
 
 ## Baldur PRO
 
