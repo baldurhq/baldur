@@ -176,7 +176,7 @@ class _Demo:
         state = self.cb_state()
         scol = _CB_COLOR.get(state, "")
         line = (
-            f"{DIM}{_now()}{R}  charge(order {self.order})  {verdict}"
+            f"{DIM}{_now()}{R}  charge(#{self.order})  {verdict}"
             f"  {DIM}cb{R} {scol}{state.upper()}{R}"
         )
         if extra:
@@ -224,20 +224,20 @@ class _Demo:
         except GatewayDownError:
             self.failed += 1
             if self.failed == 1:
-                note = "← failed, capturing"
+                note = "← capturing"
             elif self.cb_state() == "open":
                 note = "← breaker OPEN"
             else:
                 note = ""
             self.charge_line(
-                f"{RED}✖ GatewayDownError{R} {DIM}(retries exhausted){R}", extra=note
+                f"{RED}✖ GatewayDownError{R} {DIM}(retried){R}", extra=note
             )
-        except Exception as exc:  # CircuitBreakerOpenError — fail fast
+        except Exception:  # CircuitBreakerOpenError — fail fast
             self.rejected += 1
             ms = (time.perf_counter() - t0) * 1000
             self.charge_line(
-                f"{YELLOW}⚡ rejected in {ms:.1f}ms{R} {DIM}({type(exc).__name__}){R}",
-                extra="← breaker shields the gateway" if self.rejected == 1 else "",
+                f"{YELLOW}⚡ rejected in {ms:.1f}ms{R}",
+                extra="← shields the gateway" if self.rejected == 1 else "",
             )
 
     def capture_tally(self) -> None:
@@ -250,9 +250,7 @@ class _Demo:
         while self.captured < self.failed and time.monotonic() < deadline:
             time.sleep(0.5)
             self.captured = self.dlq_pending()
-        span = (
-            f"orders {self.first_order_down}-{self.first_order_down + self.failed - 1}"
-        )
+        span = f"#{self.first_order_down}-{self.first_order_down + self.failed - 1}"
         if self.captured == self.failed:
             _say(
                 f"  {MAGENTA}◆ {self.captured} failed charges captured to the DLQ{R}"
@@ -261,8 +259,7 @@ class _Demo:
         else:
             _say(
                 f"  {MAGENTA}◆ DLQ capture: {self.captured}/{self.failed}"
-                f" store-visible so far{R} {DIM}({span}; capture is async-durable"
-                f" — the replay tally below is the proof){R}"
+                f" store-visible so far{R} {DIM}(async-durable — see replay tally){R}"
             )
 
     def recovery(self) -> None:
@@ -305,8 +302,8 @@ class _Demo:
         replayed_orders = sorted(o for o in self.charged_orders if lo <= o < hi)
         _say(
             f"  {MAGENTA}⟳ auto-replay on circuit close: {BOLD}{self.replayed_ok}/"
-            f"{self.replayed_total}{R}{MAGENTA} captured charges re-executed{R}"
-            f" {DIM}(orders {replayed_orders[0]}-{replayed_orders[-1]},"
+            f"{self.replayed_total}{R}{MAGENTA} charges re-executed{R}"
+            f" {DIM}(#{replayed_orders[0]}-{replayed_orders[-1]},"
             f" dlq {self.dlq_pending()}){R}"
         )
 
