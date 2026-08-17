@@ -22,7 +22,6 @@ import pytest
 import redis
 
 from baldur.adapters.rate_limit.redis_adapter import (
-    _RECOVERY_PROBE_GATE_KEY,
     _RECOVERY_PROBE_KEY_NAME,
     RedisRateLimitStorage,
 )
@@ -59,11 +58,17 @@ def _probe_key() -> str:
 
 
 def _degrade(storage) -> None:
-    """Put the adapter in the state a mid-run outage leaves it in, then open the
-    probe window the transition just consumed."""
+    """Put the adapter in the state a mid-run outage leaves it in.
+
+    The probe slot the transition consumes is deliberately left consumed: that
+    consumed slot is what holds the steady outage path off Redis. Re-opening it
+    here would hand the very next caller an immediate verified recovery — this
+    server is healthy, only the mode is simulated — and the degraded window
+    these cases exist to observe would never occur. Both cases drive the exit
+    by calling it directly, which does not consult the gate at all.
+    """
     storage._enter_fallback(ConnectionError("simulated mid-run outage"))
     assert storage._fallback_mode is True, "setup failed: the outage was not latched"
-    storage._probe_gate.reset(_RECOVERY_PROBE_GATE_KEY)
 
 
 class TestRecoveryProbeAgainstRealRedis:
@@ -95,6 +100,12 @@ class TestRecoveryProbeAgainstRealRedis:
         A cooldown installed after recovery has to land in the shared store,
         where every other worker reads it — not in the per-worker one the
         degraded window served from.
+
+        The degraded half is asserted against a server that is *reachable* —
+        only the mode is simulated — so it pins the gate, not the outage: a
+        latched adapter whose probe slot is spent must leave a live Redis
+        untouched. A double cannot make that statement, because in a double the
+        write has nowhere to land either way.
         """
         # Given: a cooldown installed while degraded, held per worker only
         _degrade(storage)
