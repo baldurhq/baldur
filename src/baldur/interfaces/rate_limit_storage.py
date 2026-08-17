@@ -1,18 +1,25 @@
 """
 Rate Limit Storage Interface for Baldur System
 
-Abstract interface for distributed rate limit state management.
-Enables 100% Self-DDoS prevention across multi-server environments.
+Abstract interface for distributed rate limit state management, so a fleet
+backs off together instead of each worker hammering a rate-limiting dependency
+on its own.
 
 Design Principles:
 1. Pure Python - no framework dependencies
 2. ABC for provider contracts
 3. Thread-safe operations
-4. Fallback chain: Redis -> Database -> InMemory
+4. Backend chosen once, at resolution: Redis when one is configured, otherwise
+   the in-process store. The database backend is opt-in and needs a repository
+   factory the caller supplies.
 
-Key Insight:
-    "Every application has a database" - DB as guaranteed fallback
-    ensures 100% coverage regardless of customer infrastructure.
+Degradation:
+    Selection happens once, so a backend that loses its server afterwards has to
+    degrade in place. ``RedisRateLimitStorage`` does: it keeps enforcing the
+    cooldown from a per-worker in-memory store, reports the degraded window on
+    ``baldur_ratelimit_fallback_active``, and verifies the server accepts writes
+    again before returning to it. Coordination is per worker, not fleet-wide,
+    for the length of that window.
 """
 
 from __future__ import annotations

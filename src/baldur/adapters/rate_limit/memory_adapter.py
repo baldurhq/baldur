@@ -244,7 +244,13 @@ class InMemoryRateLimitStorage(RateLimitStorageInterface):
             )
 
     def clear_all(self) -> None:
-        """Clear all rate limit state (for testing)."""
+        """Clear all rate limit state.
+
+        Also the release step of the Redis adapter's runtime fallback: the
+        per-worker state it served during an outage is discarded wholesale once
+        the server is verified writable again, so nothing accumulates across
+        outages.
+        """
         with self._lock:
             self._data.clear()
             logger.debug("in_memory_rate_limit_storage.cleared_all_state")

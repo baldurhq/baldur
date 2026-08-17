@@ -284,11 +284,20 @@ groups:
   - name: rate_limit_alerts
     interval: 30s
     rules:
+      # Scope: a coordination store that RAISES when it cannot write — the
+      # database backend, or a bring-your-own adapter. The shipped Redis adapter
+      # is deliberately NOT covered: when its server dies mid-run it keeps
+      # enforcing a per-worker cooldown instead of raising, so its cooldown
+      # histogram keeps recording and this divergence never opens. Watch
+      # `baldur_ratelimit_fallback_active` (1 while degraded, per process) plus
+      # `baldur_ratelimit_redis_unavailable_total` for that adapter; no bundled
+      # rule reads them yet.
+      #
       # Storage-degradation reading (coupled to the coordinator's recording
       # order): the 429 counter is recorded before every storage call, the
       # cooldown histogram only after the consecutive-429 increment succeeds.
-      # A sustained gap therefore means the coordination store is rejecting
-      # writes and the shared cooldown has degraded to per-worker state.
+      # A sustained gap therefore means the store is rejecting writes and no
+      # cooldown is being installed at all for those keys.
       # Re-check this rule if the recording order ever changes.
       #
       # The `or ... * 0` leg is load-bearing, not defensive noise: on a
@@ -314,8 +323,8 @@ groups:
           severity: warning
           category: rate_limit
         annotations:
-          summary: "Rate-limit coordination store degraded"
-          description: "{{ $labels.key }}: {{ $value | printf \"%.2f\" }} 429/sec with no cooldown recorded — coordination store write failures."
+          summary: "Rate-limit coordination store rejecting writes (raising backend)"
+          description: "{{ $labels.key }}: {{ $value | printf \"%.2f\" }} 429/sec with no cooldown recorded — a store that raises installed none. Does not cover the Redis adapter; see baldur_ratelimit_fallback_active."
 
   # =========================================================================
   # Latency SLA Alerts
