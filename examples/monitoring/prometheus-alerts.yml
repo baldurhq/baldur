@@ -288,10 +288,17 @@ groups:
       # database backend, or a bring-your-own adapter. The shipped Redis adapter
       # is deliberately NOT covered: when its server dies mid-run it keeps
       # enforcing a per-worker cooldown instead of raising, so its cooldown
-      # histogram keeps recording and this divergence never opens. Watch
-      # `baldur_ratelimit_fallback_active` (1 while degraded, per process) plus
-      # `baldur_ratelimit_redis_unavailable_total` for that adapter; no bundled
-      # rule reads them yet.
+      # histogram keeps recording and this divergence never opens. Watch that
+      # adapter with `baldur_ratelimit_fallback_active == 1` (per process) AND
+      # `baldur_ratelimit_redis_unavailable_total > 0` — both conjuncts, never
+      # the gauge alone: a process that was never configured with a Redis
+      # latches the same gauge at 1 for its whole life and nothing there ever
+      # writes it back to 0, so on its own the gauge reads "degraded" on a
+      # default install with nothing degraded. The counter discriminates,
+      # because that path deliberately does not increment it — nothing was
+      # attempted, so no attempt failed. Use its raw value rather than rate():
+      # it is written once per transition, so a rate decays mid-outage. No
+      # bundled rule reads them yet.
       #
       # Storage-degradation reading (coupled to the coordinator's recording
       # order): the 429 counter is recorded before every storage call, the

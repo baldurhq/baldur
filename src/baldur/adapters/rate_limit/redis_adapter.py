@@ -113,7 +113,24 @@ _RECOVERY_PROBE_JITTER_RATIO = 0.2
 # Reply-message prefixes that mean "the stored value is the wrong shape" rather
 # than "the server is unusable". Narrow and protocol-stable; anything else falls
 # to the transport class, i.e. toward protecting the caller.
-_DATA_ERROR_REPLY_PREFIXES = ("WRONGTYPE", "ERR value is not an integer")
+#
+# Matched against the reply BODY, not against str(exc): two client-side rewrites
+# sit between the wire and the exception text, and matching the raw string means
+# the rule never fires against a real server.
+#   - redis-py strips a recognised error code before constructing the exception,
+#     so `ERR value is not an integer or out of range` arrives without its `ERR`.
+#     Both forms are listed, because a proxy or a non-redis-py client need not
+#     strip it.
+#   - a *pipelined* command's error is re-wrapped as
+#     `Command # N (CMD key) of pipeline caused error: <reply>` — and this
+#     adapter issues every read and every INCR through a pipeline, so this is
+#     the normal case here rather than the exotic one.
+_PIPELINE_ERROR_MARKER = "of pipeline caused error: "
+_DATA_ERROR_REPLY_PREFIXES = (
+    "WRONGTYPE",
+    "value is not an integer",
+    "ERR value is not an integer",
+)
 
 # How far to follow __cause__ when classifying a failure. Domain wrappers are
 # raised ``from`` the client error, so the classification has to survive one or
@@ -203,6 +220,11 @@ def _error_chain(error: BaseException) -> list[BaseException]:
     return chain
 
 
+def _reply_message_body(error: BaseException) -> str:
+    """The server's reply text, with the client's pipeline wrapper removed."""
+    return str(error).rsplit(_PIPELINE_ERROR_MARKER, 1)[-1]
+
+
 def _is_data_error(error: BaseException) -> bool:
     """Is this a wrong-shaped stored value rather than an unusable backend?
 
@@ -214,15 +236,15 @@ def _is_data_error(error: BaseException) -> bool:
     exists.
 
     The read arm raises ``ValueError``/``TypeError`` from parsing. The write arm
-    raises a bare reply error, so it is sorted by message prefix; an
-    unrecognised reply error falls to transport, never to a false all-clear.
+    raises a bare reply error, so it is sorted by the prefix of the reply body;
+    an unrecognised reply error falls to transport, never to a false all-clear.
     """
     for cause in _error_chain(error):
         if isinstance(cause, ValueError | TypeError):
             return True
-        if isinstance(cause, _REPLY_ERROR_TYPES) and str(cause).startswith(
-            _DATA_ERROR_REPLY_PREFIXES
-        ):
+        if isinstance(cause, _REPLY_ERROR_TYPES) and _reply_message_body(
+            cause
+        ).startswith(_DATA_ERROR_REPLY_PREFIXES):
             return True
     return False
 
@@ -303,6 +325,10 @@ class RedisRateLimitStorage(RateLimitStorageInterface):
         # fallback. The cooldown values themselves stay wall-clock, because they
         # are absolute deadlines compared across workers.
         self._probe_gate = CooldownGate(clock=time.monotonic)
+        # The jittered interval the current outage is gated on. Held rather than
+        # redrawn per call, and never zero — zero disables the gate outright,
+        # which would put a connect attempt back on every protected call.
+        self._probe_window_seconds = self._draw_probe_window()
         self._lua = LuaScriptRegistry(redis_client)
         self._lua.register(_EXTEND_COOLDOWN_SCRIPT, LUA_EXTEND_COOLDOWN)
         # Sticky once a reachable backend has proven it cannot run Lua (a client
@@ -327,11 +353,18 @@ class RedisRateLimitStorage(RateLimitStorageInterface):
     # Runtime-outage fallback: entry, service, verified exit
     # =========================================================================
 
-    def _probe_window(self) -> float:
-        """This reservation's probe interval, jittered.
+    def _draw_probe_window(self) -> float:
+        """Draw this outage's probe interval, jittered.
 
-        Resolved per reservation, and stored by the gate alongside the entry so
-        every entry is judged against its own window.
+        Drawn once per entry into fallback and held until the next entry, never
+        redrawn per call. ``CooldownGate`` evicts against the window stored with
+        the reservation but decides suppression against the CALL's value, so it
+        opens at the *minimum* of the two: a fresh draw on every denied call
+        would let a process taking many calls converge on the jitter floor, and
+        the whole fleet would re-align there — under exactly the 429 storm the
+        stagger exists for. One draw per outage keeps each worker on its own
+        phase, so the first worker out installs the cooldown in Redis and the
+        later ones read it instead of each spending their own 429.
         """
         interval = _get_recovery_probe_interval()
         return interval * random.uniform(
@@ -372,7 +405,10 @@ class RedisRateLimitStorage(RateLimitStorageInterface):
                 "redis_rate_limit_storage.redis_unavailable",
                 error=error,
             )
-        self._probe_gate.try_reserve(_RECOVERY_PROBE_GATE_KEY, self._probe_window())
+        self._probe_window_seconds = self._draw_probe_window()
+        self._probe_gate.try_reserve(
+            _RECOVERY_PROBE_GATE_KEY, self._probe_window_seconds
+        )
 
     def _recovery_verified_this_call(self) -> bool:
         """Did this caller win the probe slot and prove Redis usable again?
@@ -382,7 +418,7 @@ class RedisRateLimitStorage(RateLimitStorageInterface):
         consumed, so the next canary waits a full interval.
         """
         granted, _token = self._probe_gate.try_reserve(
-            _RECOVERY_PROBE_GATE_KEY, self._probe_window()
+            _RECOVERY_PROBE_GATE_KEY, self._probe_window_seconds
         )
         if not granted:
             return False

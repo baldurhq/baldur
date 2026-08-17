@@ -31,6 +31,7 @@ Four families are pinned here, each for a defect that shipped or was caught late
 
 from __future__ import annotations
 
+import itertools
 import time
 from unittest.mock import patch
 
@@ -39,6 +40,8 @@ from hypothesis import settings as hyp_settings
 from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, invariant, rule
 from pydantic import ValidationError
+from redis._parsers.base import BaseParser
+from redis.client import Pipeline
 from redis.exceptions import (
     ConnectionError as RedisConnectionError,
 )
@@ -84,8 +87,28 @@ _MISCONF_REPLY = (
     "not able to persist on disk."
 )
 _READONLY_REPLY = "READONLY You can't write against a read only replica."
+_OOM_REPLY = "OOM command not allowed when used memory > 'maxmemory'."
 _NON_INTEGER_REPLY = "ERR value is not an integer or out of range"
 _WRONGTYPE_REPLY = "WRONGTYPE Operation against a key holding the wrong kind of value"
+
+
+def _client_reply_error(wire: str, *, pipelined: bool) -> BaseException:
+    """The exception redis-py hands the adapter for a given server reply.
+
+    Built with redis-py's own parser and pipeline wrapper rather than by
+    constructing ``ResponseError(wire)``, because the two are not the same
+    string: the parser strips a recognised error code, and a pipelined
+    command's error is re-wrapped with the command that caused it. A double
+    that raises the wire text verbatim asserts against a shape no client ever
+    produces — and every read and every ``INCR`` this adapter issues is
+    pipelined, so the wrapped form is the normal case here.
+    """
+    error = BaseParser.parse_error(wire)
+    if pipelined:
+        Pipeline.annotate_exception(
+            None, error, 1, ("INCR", _redis_key(_KEY, "consecutive_429s"))
+        )
+    return error
 
 
 # =============================================================================
@@ -127,7 +150,18 @@ class _FakeRedisPipeline:
 
     def execute(self) -> list:
         queued, self._queued = self._queued, []
-        return [getattr(self._client, op)(*args, **kw) for op, args, kw in queued]
+        results = []
+        for number, (op, args, kw) in enumerate(queued, start=1):
+            try:
+                results.append(getattr(self._client, op)(*args, **kw))
+            except ResponseError as error:
+                # redis-py re-wraps a pipelined command's reply error with the
+                # command that caused it, which moves the reply text off the
+                # start of the message. Reproduced because the adapter reads
+                # that message to tell a wrong-shaped value from a dead server.
+                Pipeline.annotate_exception(None, error, number, (op.upper(), *args))
+                raise
+        return results
 
 
 class _FakeRedisClient:
@@ -151,7 +185,10 @@ class _FakeRedisClient:
         self.store: dict[str, str] = {}
         self.ttls: dict[str, int] = {}
         self.down = down
-        self.faults: dict[str, BaseException] = {}
+        # Wire-form reply messages, keyed by command. Stored as the server
+        # sends them and turned into exceptions by redis-py's own parser, so
+        # the double cannot disagree with the client about their shape.
+        self.faults: dict[str, str] = {}
         self.commands: list[str] = []
         self.script_shas: dict[str, str] = {}
 
@@ -165,11 +202,11 @@ class _FakeRedisClient:
             )
         fault = self.faults.get(command)
         if fault is not None:
-            raise fault
+            raise BaseParser.parse_error(fault)
 
     def refuse(self, command: str, message: str = _READONLY_REPLY) -> None:
         """Make one command answer a reply error while the rest keep working."""
-        self.faults[command] = ResponseError(message)
+        self.faults[command] = message
 
     # -- commands ----------------------------------------------------------
 
@@ -194,7 +231,7 @@ class _FakeRedisClient:
         try:
             value = int(raw)
         except ValueError:
-            raise ResponseError(_NON_INTEGER_REPLY) from None
+            raise BaseParser.parse_error(_NON_INTEGER_REPLY) from None
         value += 1
         self.store[name] = str(value)
         return value
@@ -491,37 +528,64 @@ class TestFailureClassificationContract:
         [
             (ValueError("could not convert string to float: 'soon'"), True),
             (TypeError("float() argument must be a string or a real number"), True),
-            (ResponseError(_WRONGTYPE_REPLY), True),
-            (ResponseError(_NON_INTEGER_REPLY), True),
-            (ResponseError(_MISCONF_REPLY), False),
-            (ResponseError(_READONLY_REPLY), False),
-            (
-                OutOfMemoryError(
-                    "OOM command not allowed when used memory > 'maxmemory'"
-                ),
-                False,
-            ),
-            (ReadOnlyError(_READONLY_REPLY), False),
             (RedisConnectionError("Connection refused."), False),
             (TimeoutError("Timeout reading from socket"), False),
         ],
         ids=[
             "parse_value_error",
             "parse_type_error",
+            "connection_refused",
+            "socket_timeout",
+        ],
+    )
+    def test_a_client_side_failure_is_decided_by_its_class(self, error, expected):
+        assert _is_data_error(error) is expected
+
+    @pytest.mark.parametrize("pipelined", [False, True], ids=["direct", "pipelined"])
+    @pytest.mark.parametrize(
+        ("wire", "expected"),
+        [
+            (_WRONGTYPE_REPLY, True),
+            (_NON_INTEGER_REPLY, True),
+            (_MISCONF_REPLY, False),
+            (_READONLY_REPLY, False),
+            (_OOM_REPLY, False),
+        ],
+        ids=[
             "wrongtype_reply",
             "non_integer_reply",
             "misconf_reply",
             "readonly_reply",
             "out_of_memory",
-            "read_only_replica",
-            "connection_refused",
-            "socket_timeout",
         ],
     )
-    def test_the_class_of_a_failure_is_decided_by_class_then_reply_prefix(
-        self, error, expected
+    def test_a_server_reply_is_decided_by_the_body_of_the_reply(
+        self, wire, expected, pipelined
     ):
+        """Both arrival shapes, because the adapter only ever sees the wrapped
+        one: every read and every ``INCR`` it issues goes through a pipeline."""
+        error = _client_reply_error(wire, pipelined=pipelined)
+
         assert _is_data_error(error) is expected
+
+    def test_the_client_moves_the_reply_text_off_the_start_of_the_message(self):
+        """Why the rule reads the reply body rather than ``str(exc)``.
+
+        Two client-side rewrites sit between the wire and the exception text:
+        redis-py strips a recognised error code, and a pipelined command's
+        error is re-wrapped with the command that caused it. A rule matching
+        the raw string is inert against every real server while still passing
+        against a double that raises the wire text verbatim — so the shipped
+        ``INCR``-on-a-non-integer guard would degrade the whole adapter and
+        flap it every probe interval, which is the outcome it exists to stop.
+        """
+        stripped = _client_reply_error(_NON_INTEGER_REPLY, pipelined=False)
+        wrapped = _client_reply_error(_WRONGTYPE_REPLY, pipelined=True)
+
+        assert not str(stripped).startswith(_NON_INTEGER_REPLY)
+        assert not str(wrapped).startswith(_WRONGTYPE_REPLY)
+        assert _is_data_error(stripped) is True
+        assert _is_data_error(wrapped) is True
 
     def test_a_data_fault_wrapped_in_the_domain_error_is_still_a_data_fault(self):
         """Wrappers are raised ``from`` the client error, so the walk has to
@@ -597,20 +661,28 @@ class TestDataFaultIsolationBehavior:
         assert storage._probe_gate.keys() == []
 
     @pytest.mark.parametrize(
-        ("reply", "error_type"),
+        ("reply", "client_class"),
         [
             (_MISCONF_REPLY, ResponseError),
             (_READONLY_REPLY, ReadOnlyError),
+            (_OOM_REPLY, OutOfMemoryError),
         ],
-        ids=["misconf", "readonly_replica"],
+        ids=["misconf", "readonly_replica", "out_of_memory"],
     )
     def test_a_server_unusable_reply_error_still_enters_fallback(
-        self, reply, error_type
+        self, reply, client_class
     ):
-        """The opposite of the two cases above: same exception class, and the
-        adapter must degrade rather than raise per key."""
+        """The opposite of the two cases above: the adapter must degrade rather
+        than raise per key.
+
+        The class the client produces is pinned alongside, because it is what
+        makes the split impossible to make on the class: two of these three are
+        dedicated subclasses and one is a bare ``ResponseError``, exactly like
+        the wrong-shaped-value replies above.
+        """
         storage, client, _clock = _make_storage()
-        client.faults["incr"] = error_type(reply)
+        client.faults["incr"] = reply
+        assert type(_client_reply_error(reply, pipelined=False)) is client_class
 
         counted = storage.increment_consecutive_429s(_KEY)
 
@@ -1004,16 +1076,16 @@ class TestRecoveryProbeCadenceBehavior:
         assert storage._fallback_mode is True
         assert _fallback_gauge() == 1
 
-    def test_each_reservation_resolves_its_own_jittered_window(self):
+    def test_each_outage_draws_its_own_jittered_window(self):
         """Redis dies once, so unjittered gates arm within one timeout of each
         other and the whole fleet exits on the same tick — each worker then
-        spending its own 429 on every still-cooling key. Resolved once per
-        process instead of once per reservation, staggering would not happen.
+        spending its own 429 on every still-cooling key. A constant here, or a
+        value resolved once for the whole process, would stagger nothing.
         """
         storage, _client, _clock = _make_storage()
         interval = _get_recovery_probe_interval()
 
-        windows = [storage._probe_window() for _ in range(20)]
+        windows = [storage._draw_probe_window() for _ in range(20)]
 
         assert len(set(windows)) > 1
         assert all(
@@ -1022,6 +1094,38 @@ class TestRecoveryProbeCadenceBehavior:
             <= interval * (1 + _RECOVERY_PROBE_JITTER_RATIO)
             for window in windows
         )
+
+    def test_a_held_window_is_not_eroded_by_the_calls_it_denies(self):
+        """The drawn window governs the outage, not the floor of the band.
+
+        ``CooldownGate`` evicts against the window stored with the reservation
+        but suppresses against the CALL's, so it opens at the *minimum* of the
+        two. A window redrawn on every denied call would therefore let a
+        process taking many calls slide down to the jitter floor — and a fleet
+        that entered together would re-align there, under exactly the 429 storm
+        the stagger exists for.
+        """
+        # Given: an outage whose window was drawn at the top of the band
+        ceiling = 1.0 + _RECOVERY_PROBE_JITTER_RATIO
+        with patch("random.uniform", return_value=ceiling):
+            storage, client, clock = _degraded_storage()
+        window = _get_recovery_probe_interval() * ceiling
+        assert storage._probe_window_seconds == pytest.approx(window)
+        client.down = False
+
+        # When: callers poll densely across the whole band below it
+        step = window / 100
+        for _ in range(99):
+            clock.advance(step)
+            storage.get_state(_KEY)
+
+        # Then: none of them opened the gate early, and crossing it does
+        assert storage._fallback_mode is True
+
+        clock.advance(step * 2)
+        storage.get_state(_KEY)
+
+        assert storage._fallback_mode is False
 
     def test_entering_fallback_consumes_a_slot_up_front(self):
         """The call that just paid a timeout must not immediately pay another."""
@@ -1160,6 +1264,72 @@ class TestAdapterConstructorSettingsToleranceBehavior:
         storage = RedisRateLimitStorage(_FakeRedisClient())
 
         assert storage._delegate._cleanup_interval == 100
+
+
+# =============================================================================
+# The coordinator on top of the degraded adapter
+# =============================================================================
+
+
+def _sample(name: str, **labels: str) -> float | None:
+    """Read one prometheus sample, or None where that series was never recorded."""
+    from prometheus_client import REGISTRY
+
+    return REGISTRY.get_sample_value(name, labels)
+
+
+# The rate-limit series are module-level collectors on the process-global
+# registry, so their values survive every test in the same worker. Recording
+# under a key nothing else has touched turns each read into an absolute value.
+_COORDINATOR_KEY_SEQUENCE = itertools.count()
+
+
+class TestCoordinatorOverADegradedAdapterBehavior:
+    """``on_rate_limited`` runs to completion, so both series keep recording.
+
+    This is what the shipped alert's re-scope rests on. "The 429 counter climbs
+    while the cooldown histogram stays flat" is the degradation signal for a
+    store that *raises* — and this adapter no longer does, so the divergence no
+    longer opens for it. Driven through the real adapter rather than a raising
+    mock, because the claim is about this adapter specifically; the mock-driven
+    twin of this case (the divergence that still opens for a raising store)
+    lives beside the coordinator and stays valid unchanged.
+    """
+
+    def test_a_429_during_an_outage_still_records_the_cooldown_it_installed(self):
+        from baldur.services.rate_limit_coordinator.coordinator import (
+            RateLimitCoordinator,
+            RateLimitCoordinatorConfig,
+        )
+
+        # Given: a coordinator over an adapter whose backend died mid-run
+        storage, _client, _clock = _degraded_storage()
+        key = f"outage_cooldown_{next(_COORDINATOR_KEY_SEQUENCE)}"
+        coordinator = RateLimitCoordinator(
+            storage=storage,
+            config=RateLimitCoordinatorConfig(
+                jitter_percent=0.0,
+                debounce_window_seconds=0.0,
+            ),
+        )
+
+        # When: the upstream returns a 429 (the all-clear timer and the event
+        # emit are stubbed out — neither is what this case pins, and the timer
+        # would outlive the test)
+        with (
+            patch.object(coordinator, "_schedule_cooldown_end_event"),
+            patch(
+                "baldur.services.rate_limit_coordinator"
+                ".coordinator._emit_rate_limit_event"
+            ),
+        ):
+            in_force = coordinator.on_rate_limited(key)
+
+        # Then: no exception, both series advanced, and the cooldown is real
+        assert in_force > 0
+        assert _sample("baldur_rate_limit_429_total", key=key, status_code="429") == 1.0
+        assert _sample("baldur_rate_limit_cooldown_seconds_count", key=key) == 1.0
+        assert storage.get_state(key).is_in_cooldown is True
 
 
 # =============================================================================
