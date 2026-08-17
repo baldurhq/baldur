@@ -188,27 +188,15 @@ emergency_cache_load_total = _get_or_create_counter(
 # RateLimiter Metrics - Redis state and fallback mode
 # =============================================================================
 
-# RateLimiter Redis drift metrics
+# RateLimiter Redis availability metrics
 ratelimit_redis_unavailable_total = _get_or_create_counter(
     f"{METRIC_PREFIX}_ratelimit_redis_unavailable_total",
     "Number of times Redis was unavailable for rate limiting",
 )
 
-ratelimit_state_drift_total = _get_or_create_counter(
-    f"{METRIC_PREFIX}_ratelimit_state_drift_total",
-    "Number of rate limit state drifts detected",
-    ["key"],
-)
-
 ratelimit_fallback_active = _get_or_create_gauge(
     f"{METRIC_PREFIX}_ratelimit_fallback_active",
     "Whether rate limiter is in fallback mode (1=yes, 0=no)",
-)
-
-ratelimit_reconciliation_total = _get_or_create_counter(
-    f"{METRIC_PREFIX}_ratelimit_reconciliation_total",
-    "Number of rate limit state reconciliations after Redis recovery",
-    ["result"],  # result: success, failed
 )
 
 
@@ -484,23 +472,10 @@ def record_ratelimit_redis_unavailable() -> None:
         ratelimit_redis_unavailable_total.inc()
 
 
-def record_ratelimit_drift(key: str) -> None:
-    """Record a rate limit state drift."""
-    if ratelimit_state_drift_total is not None:
-        ratelimit_state_drift_total.labels(key=key).inc()
-
-
 def set_ratelimit_fallback_mode(active: bool) -> None:
     """Set rate limiter fallback mode status."""
     if ratelimit_fallback_active is not None:
         ratelimit_fallback_active.set(1 if active else 0)
-
-
-def record_ratelimit_reconciliation(success: bool) -> None:
-    """Record a rate limit reconciliation."""
-    if ratelimit_reconciliation_total is not None:
-        result = "success" if success else "failed"
-        ratelimit_reconciliation_total.labels(result=result).inc()
 
 
 def record_config_env_changed(config_type: str) -> None:
@@ -735,13 +710,9 @@ __all__ = [
     "record_emergency_cache_load",
     # RateLimiter
     "ratelimit_redis_unavailable_total",
-    "ratelimit_state_drift_total",
     "ratelimit_fallback_active",
-    "ratelimit_reconciliation_total",
     "record_ratelimit_redis_unavailable",
-    "record_ratelimit_drift",
     "set_ratelimit_fallback_mode",
-    "record_ratelimit_reconciliation",
     # Config Cache
     "config_env_changed_total",
     "config_cache_invalidated_total",

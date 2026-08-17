@@ -534,23 +534,37 @@ class TestRedisScriptFallbackBehavior:
 
         assert client.script_attempts == attempts_after_first
 
-    def test_a_backend_that_is_actually_down_still_raises(self):
-        """The fallback covers a missing capability, not a missing server.
+    def test_a_backend_that_is_actually_down_installs_a_local_cooldown(self):
+        """A missing server is a different degradation — and it installs one too.
 
-        If the plain-command path fails too, the backend is down — and the
-        caller has to learn that rather than believe a cooldown was installed.
+        When the plain-command path fails as well the backend is down, and the
+        adapter enforces the cooldown from its per-worker store rather than
+        raising: raising would reach the caller's fail-open wrap and leave the
+        fleet with no cooldown at all for the length of the outage. The returned
+        value is the locally effective expiry, and a later read reports it.
         """
         storage, _client = _make_redis_storage(scripting=False, readable=False)
+        candidate = time.time() + HONORED_HEADER_COOLDOWN_SECONDS
 
-        with pytest.raises(RateLimitStorageUnavailableError):
-            storage.extend_cooldown("payment_api", time.time() + 60)
+        effective = storage.extend_cooldown("payment_api", candidate)
 
-    def test_a_write_failure_after_a_readable_backend_raises(self):
-        """The same for a backend that reads but cannot write."""
+        assert effective == candidate
+        assert storage.get_state("payment_api").is_in_cooldown is True
+
+    def test_a_write_failure_after_a_readable_backend_installs_a_local_cooldown(self):
+        """The same for a backend that reads but cannot write.
+
+        This is the read-only-replica window a Sentinel failover opens: reads
+        answer, writes are refused. Believing the read and dropping the write
+        would install nothing at all.
+        """
         storage, _client = _make_redis_storage(scripting=False, writable=False)
+        candidate = time.time() + HONORED_HEADER_COOLDOWN_SECONDS
 
-        with pytest.raises(RateLimitStorageUnavailableError):
-            storage.extend_cooldown("payment_api", time.time() + 60)
+        effective = storage.extend_cooldown("payment_api", candidate)
+
+        assert effective == candidate
+        assert storage.get_state("payment_api").is_in_cooldown is True
 
 
 # =============================================================================

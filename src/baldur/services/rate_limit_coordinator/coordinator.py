@@ -490,8 +490,12 @@ class RateLimitCoordinator:
 
         # Recorded after the store, because the in-force value does not exist
         # until the merge returns. A store that raises therefore records neither
-        # this histogram nor the consecutive gauge — the 429 counter above still
-        # climbs, and that divergence stays the storage-degradation signal.
+        # this histogram nor the consecutive gauge, while the 429 counter above
+        # still climbs. That divergence is the degradation signal for a store
+        # that raises — the database backend, or a bring-your-own adapter. The
+        # shipped Redis adapter no longer raises when its server dies mid-run:
+        # it serves a per-worker cooldown and reports the window on its own
+        # fallback gauge, so this histogram keeps recording throughout.
         _record_rate_limit_cooldown(
             key=key,
             cooldown_seconds=in_force,

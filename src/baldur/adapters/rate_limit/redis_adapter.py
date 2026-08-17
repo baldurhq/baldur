@@ -11,14 +11,18 @@ Features:
     - Atomic increment/set operations
     - Automatic TTL-based cleanup
     - Fastest option for distributed rate limiting
-    - v6.3.0: Drift detection and fallback metrics
+    - Per-worker cooldown fallback while Redis is unreachable, exited only on a
+      write-verified recovery
 """
 
 from __future__ import annotations
 
 import math
+import random
+import threading
 import time
-from typing import Any
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import structlog
 
@@ -29,11 +33,12 @@ from baldur.interfaces.rate_limit_storage import (
     RateLimitStorageUnavailableError,
 )
 
-# Drift detection metrics
+if TYPE_CHECKING:
+    from baldur.adapters.rate_limit.memory_adapter import InMemoryRateLimitStorage
+
+# Fallback-mode metrics
 try:
     from baldur.metrics.drift_metrics import (
-        record_ratelimit_drift,
-        record_ratelimit_reconciliation,
         record_ratelimit_redis_unavailable,
         set_ratelimit_fallback_mode,
     )
@@ -45,17 +50,25 @@ except ImportError:
     def record_ratelimit_redis_unavailable() -> None:
         return None
 
-    def record_ratelimit_drift(key: str) -> None:
-        return None
-
     def set_ratelimit_fallback_mode(active: bool) -> None:
         return None
 
-    def record_ratelimit_reconciliation(success: bool) -> None:
-        return None
+
+# A reply error is the only fault this adapter cannot sort by exception class:
+# redis-py raises a bare ResponseError both for a wrong-shaped stored value and
+# for a server that is unusable (MISCONF, OOM, READONLY). The class is imported
+# defensively because redis is an optional dependency.
+try:
+    from redis.exceptions import ResponseError
+
+    _REPLY_ERROR_TYPES: tuple[type[BaseException], ...] = (ResponseError,)
+except ImportError:  # pragma: no cover - redis absent
+    _REPLY_ERROR_TYPES = ()
 
 
 logger = structlog.get_logger()
+
+_T = TypeVar("_T")
 
 # Seconds of headroom added on top of a cooldown's remaining time when deriving
 # the Redis key TTL, so the key cannot be evicted in the instant before the
@@ -64,6 +77,48 @@ logger = structlog.get_logger()
 _COOLDOWN_TTL_MARGIN_SECONDS = 60
 
 _EXTEND_COOLDOWN_SCRIPT = "rate_limit_extend_cooldown"
+
+# Defaults applied when the settings tree cannot be read at all. The adapter
+# constructor is deliberately settings-tolerant: a raise there escapes backend
+# auto-detection and leaves the process with no outbound 429 coordination for
+# its whole life, which is strictly worse than running on a default.
+_DEFAULT_REDIS_TTL_SECONDS = 3600
+_DEFAULT_RECOVERY_PROBE_INTERVAL_SECONDS = 30
+_DEFAULT_DELEGATE_CLEANUP_INTERVAL_OPS = 100
+
+# Reserved key the recovery write-probe operates on. Two segments, so it cannot
+# collide with the three-segment real keys.
+_RECOVERY_PROBE_KEY_NAME = "__recovery_probe__"
+
+# The probe writes an integer-shaped value because the probe runs INCR against
+# what its own SET wrote. A float-shaped value would make a fully healthy,
+# fully permissive Redis answer "value is not an integer", and the process could
+# then never leave fallback. The data itself is meaningless.
+_RECOVERY_PROBE_VALUE = "0"
+
+# Insurance TTL on the probe key, in case the trailing DEL never lands.
+_RECOVERY_PROBE_TTL_SECONDS = 10
+
+# Single-slot key for the probe interval: one recovery attempt per interval per
+# process, not per rate-limit key.
+_RECOVERY_PROBE_GATE_KEY = "redis_recovery_probe"
+
+# Fraction of the probe interval the per-reservation jitter spans. Redis dies
+# once, so unjittered gates arm within one timeout of each other and the whole
+# fleet exits fallback on the same tick — each worker then spending its own 429
+# on every still-cooling key. Staggering collapses that to roughly one 429 per
+# key, because the first worker out installs the cooldown the later ones read.
+_RECOVERY_PROBE_JITTER_RATIO = 0.2
+
+# Reply-message prefixes that mean "the stored value is the wrong shape" rather
+# than "the server is unusable". Narrow and protocol-stable; anything else falls
+# to the transport class, i.e. toward protecting the caller.
+_DATA_ERROR_REPLY_PREFIXES = ("WRONGTYPE", "ERR value is not an integer")
+
+# How far to follow __cause__ when classifying a failure. Domain wrappers are
+# raised ``from`` the client error, so the classification has to survive one or
+# two hops; the bound keeps a pathological chain from being walked forever.
+_ERROR_CAUSE_DEPTH = 5
 
 # Monotonic cooldown write, atomic across processes and hosts.
 #
@@ -101,14 +156,75 @@ return string.format('%.6f', effective)
 """
 
 
-def _get_redis_ttl() -> int:
-    """Read the Redis TTL from RateLimitSettings."""
+def _rate_limit_setting(field: str, default: int) -> int:
+    """Read one RateLimitSettings integer field, defaulting when unreachable."""
     try:
         from baldur.settings.rate_limit import get_rate_limit_settings
 
-        return get_rate_limit_settings().redis_ttl
+        return int(getattr(get_rate_limit_settings(), field))
     except Exception:
-        return 3600  # 1 hour fallback
+        return default
+
+
+def _get_redis_ttl() -> int:
+    """Read the Redis TTL from RateLimitSettings."""
+    return _rate_limit_setting("redis_ttl", _DEFAULT_REDIS_TTL_SECONDS)
+
+
+def _get_recovery_probe_interval() -> int:
+    """Read the recovery-probe interval from RateLimitSettings."""
+    return _rate_limit_setting(
+        "redis_recovery_probe_interval_seconds",
+        _DEFAULT_RECOVERY_PROBE_INTERVAL_SECONDS,
+    )
+
+
+def _get_delegate_cleanup_interval() -> int:
+    """Read the sweep cadence the fallback delegate is constructed with.
+
+    Resolved here rather than left to the in-memory store's own ``None``
+    default, which reads the same settings class unguarded: that read inside
+    this adapter's constructor would turn one out-of-range BALDUR_RATE_LIMIT_*
+    value into a process with no outbound 429 coordination at all.
+    """
+    return _rate_limit_setting(
+        "memory_cleanup_interval_ops",
+        _DEFAULT_DELEGATE_CLEANUP_INTERVAL_OPS,
+    )
+
+
+def _error_chain(error: BaseException) -> list[BaseException]:
+    """The exception plus the causes it was raised ``from``, outermost first."""
+    chain: list[BaseException] = []
+    current: BaseException | None = error
+    while current is not None and len(chain) < _ERROR_CAUSE_DEPTH:
+        chain.append(current)
+        current = current.__cause__
+    return chain
+
+
+def _is_data_error(error: BaseException) -> bool:
+    """Is this a wrong-shaped stored value rather than an unusable backend?
+
+    A data fault belongs to exactly the key that carries it; a transport fault
+    belongs to the whole adapter. Degrading the adapter over one bad byte string
+    would drop every key onto the per-worker store, and — because the recovery
+    probe then passes against the healthy server while the next read re-poisons
+    — flap the mode, the gauge and the transition log for as long as the value
+    exists.
+
+    The read arm raises ``ValueError``/``TypeError`` from parsing. The write arm
+    raises a bare reply error, so it is sorted by message prefix; an
+    unrecognised reply error falls to transport, never to a false all-clear.
+    """
+    for cause in _error_chain(error):
+        if isinstance(cause, ValueError | TypeError):
+            return True
+        if isinstance(cause, _REPLY_ERROR_TYPES) and str(cause).startswith(
+            _DATA_ERROR_REPLY_PREFIXES
+        ):
+            return True
+    return False
 
 
 class RedisRateLimitStorage(RateLimitStorageInterface):
@@ -118,10 +234,23 @@ class RedisRateLimitStorage(RateLimitStorageInterface):
     Uses Redis for atomic distributed rate limit state management.
     Recommended for production multi-server environments.
 
-    v6.3.0: Drift detection
-    - Fallback-mode tracking and metrics
-    - Sync with local state once Redis recovers
-    - Drift detection and reconciliation
+    Runtime degradation:
+    - While Redis is unreachable every operation is served from a private
+      per-worker in-memory store, so the outbound cooldown keeps being enforced
+      rather than disappearing for the length of the outage. Coordination is per
+      worker for that window, not fleet-wide.
+    - The degraded window reads 1 on ``baldur_ratelimit_fallback_active``, and
+      each entry into it increments
+      ``baldur_ratelimit_redis_unavailable_total``.
+    - Recovery is verified before it is believed. One caller per probe interval
+      pings and then replays this adapter's own write vocabulary against a
+      reserved probe key, so a backend that answers PING while refusing writes
+      cannot produce a false all-clear.
+    - Nothing is carried back at recovery: the local store is discarded, and
+      each still-cooling key re-arms in Redis through its own next 429.
+    - The local store starts empty at every outage, so a cooldown that lived
+      only in Redis reads as absent on the first degraded call for that key and
+      is re-installed by that call's own 429.
 
     Key schema:
         ratelimit:{key}:cooldown_until - float timestamp
@@ -147,14 +276,33 @@ class RedisRateLimitStorage(RateLimitStorageInterface):
             redis_client: Redis client instance (redis.Redis or compatible)
             ttl: Redis key TTL (seconds). Taken from settings when None.
         """
+        from baldur.adapters.rate_limit.memory_adapter import InMemoryRateLimitStorage
         from baldur.audit.performance.lua_registry import LuaScriptRegistry
+        from baldur.core.rate_limiting import CooldownGate
 
         self._redis = redis_client
         self._ttl = ttl if ttl is not None else _get_redis_ttl()
         self._available: bool | None = None
-        # v6.3.0: Fallback-mode and local-state tracking
+        # Runtime-outage fallback. The delegate holds only what this worker
+        # observed during the current outage: it is cleared at every verified
+        # exit, so its resident set is bounded by the distinct coordination keys
+        # touched inside one outage window.
         self._fallback_mode = False
-        self._local_state: dict[str, RateLimitState] = {}  # Local fallback state
+        self._delegate: InMemoryRateLimitStorage = InMemoryRateLimitStorage(
+            cleanup_interval=_get_delegate_cleanup_interval()
+        )
+        # Serializes the mode transitions, the delegate clear, and the fallback
+        # writes' mode re-check. Never held across a network call.
+        self._sync_lock = threading.Lock()
+        # Collapses concurrent recovery attempts to one, including the ungated
+        # one arriving through is_available() on the registry-cached instance.
+        self._exit_attempt_lock = threading.Lock()
+        # Monotonic clock on purpose: the default wall clock can step backwards
+        # (an NTP correction, a resumed snapshot, a late container sync), which
+        # would shut the gate for the size of the step and strand the process in
+        # fallback. The cooldown values themselves stay wall-clock, because they
+        # are absolute deadlines compared across workers.
+        self._probe_gate = CooldownGate(clock=time.monotonic)
         self._lua = LuaScriptRegistry(redis_client)
         self._lua.register(_EXTEND_COOLDOWN_SCRIPT, LUA_EXTEND_COOLDOWN)
         # Sticky once a reachable backend has proven it cannot run Lua (a client
@@ -171,8 +319,187 @@ class RedisRateLimitStorage(RateLimitStorageInterface):
         """Generate Redis key with prefix."""
         return f"{self.KEY_PREFIX}:{key}:{suffix}"
 
+    def _recovery_probe_key(self) -> str:
+        """The reserved key the recovery write-probe operates on."""
+        return f"{self.KEY_PREFIX}:{_RECOVERY_PROBE_KEY_NAME}"
+
+    # =========================================================================
+    # Runtime-outage fallback: entry, service, verified exit
+    # =========================================================================
+
+    def _probe_window(self) -> float:
+        """This reservation's probe interval, jittered.
+
+        Resolved per reservation, and stored by the gate alongside the entry so
+        every entry is judged against its own window.
+        """
+        interval = _get_recovery_probe_interval()
+        return interval * random.uniform(
+            1.0 - _RECOVERY_PROBE_JITTER_RATIO,
+            1.0 + _RECOVERY_PROBE_JITTER_RATIO,
+        )
+
+    def _enter_fallback(self, error: BaseException) -> None:
+        """Latch the transition into per-worker service."""
+        with self._sync_lock:
+            self._enter_fallback_locked(error)
+
+    def _enter_fallback_locked(self, error: BaseException) -> None:
+        """Write every transition effect as one latched unit under the lock.
+
+        Only the False->True edge writes: the flag, the gauge, the unavailable
+        counter and one log line move together, so no interleaving can leave the
+        gauge disagreeing with the mode or double-count the transition.
+
+        The edge also consumes a probe slot, so the call that just failed does
+        not immediately pay a second Redis attempt through the recovery canary.
+        """
+        if self._fallback_mode:
+            return
+
+        from baldur.settings.redis import redis_absence_is_expected
+
+        self._fallback_mode = True
+        set_ratelimit_fallback_mode(True)
+        record_ratelimit_redis_unavailable()
+        if redis_absence_is_expected():
+            logger.debug(
+                "redis_rate_limit_storage.redis_unavailable",
+                error=error,
+            )
+        else:
+            logger.warning(
+                "redis_rate_limit_storage.redis_unavailable",
+                error=error,
+            )
+        self._probe_gate.try_reserve(_RECOVERY_PROBE_GATE_KEY, self._probe_window())
+
+    def _recovery_verified_this_call(self) -> bool:
+        """Did this caller win the probe slot and prove Redis usable again?
+
+        A denied reservation is the steady outage path: the delegate serves and
+        Redis is not touched. A granted one that fails its probe leaves the slot
+        consumed, so the next canary waits a full interval.
+        """
+        granted, _token = self._probe_gate.try_reserve(
+            _RECOVERY_PROBE_GATE_KEY, self._probe_window()
+        )
+        if not granted:
+            return False
+        return self._try_exit_fallback()
+
+    def _try_exit_fallback(self) -> bool:
+        """Verify Redis is usable and, if so, leave fallback. Never raises.
+
+        A successful ping alone is not recovery, so the ping is followed by a
+        write probe over this adapter's own command vocabulary. Any failure —
+        including an unexpected internal one — reports "still fallback": an
+        error escaping here would reach the caller's fail-open wrap after the
+        mode had already flipped.
+        """
+        with self._sync_lock:
+            if not self._fallback_mode:
+                # is_available()'s recovery half routes here on every ordinary
+                # resolution-time call, where the mode was never set. Without
+                # this the healthy admission path would pay the whole probe
+                # pipeline and clear a delegate it has no reason to touch.
+                return False
+
+        if not self._exit_attempt_lock.acquire(blocking=False):
+            return False
+        try:
+            self._redis.ping()
+            self._run_recovery_write_probe()
+            self._clear_fallback_after_verified_probe()
+            return True
+        except Exception as e:
+            # Fails closed on anything, the flip included: reporting "still
+            # fallback" costs one probe interval, while letting an internal
+            # error escape hands it to a fail-open wrap that would drop the
+            # caller's cooldown entirely.
+            logger.debug(
+                "redis_rate_limit_storage.recovery_probe_failed",
+                error=e,
+            )
+            return False
+        finally:
+            self._exit_attempt_lock.release()
+
+    def _run_recovery_write_probe(self) -> None:
+        """Prove the backend accepts this adapter's whole write vocabulary.
+
+        A backend that answers PING and reads while refusing writes — a
+        read-only failover replica, a MISCONF full disk — or one that accepts
+        SET while an ACL denies INCR/EXPIRE, must not produce a false all-clear.
+        EVAL is deliberately not probed: a reachable Lua-less Redis is genuinely
+        serviceable through the sticky unscripted path.
+        """
+        probe_key = self._recovery_probe_key()
+        pipeline = self._redis.pipeline()
+        pipeline.set(probe_key, _RECOVERY_PROBE_VALUE, ex=_RECOVERY_PROBE_TTL_SECONDS)
+        pipeline.incr(probe_key)
+        pipeline.expire(probe_key, _RECOVERY_PROBE_TTL_SECONDS)
+        pipeline.delete(probe_key)
+        pipeline.execute()
+
+    def _clear_fallback_after_verified_probe(self) -> None:
+        """Clear the mode, the gauge and the local state as one step.
+
+        The delegate is discarded rather than replayed: nothing it holds is
+        written back, and each still-cooling key re-arms in Redis through its own
+        next 429. A fallback write racing this clear either lands before it — and
+        is discarded with the rest — or finds the mode already clear under the
+        same lock and re-routes to Redis.
+        """
+        with self._sync_lock:
+            if not self._fallback_mode:
+                return
+            self._fallback_mode = False
+            set_ratelimit_fallback_mode(False)
+            self._delegate.clear_all()
+        logger.info("redis_rate_limit_storage.fallback_recovered")
+
+    def _dispatch(
+        self,
+        redis_call: Callable[[], _T],
+        delegate_call: Callable[[RateLimitStorageInterface], _T],
+        on_data_error: Callable[[Exception], _T],
+    ) -> _T:
+        """The wrapped-method flow every delegating method shares.
+
+        While the mode is set the delegate serves without touching Redis, except
+        for the one caller per probe interval whose reservation succeeds — it
+        runs the verified exit and, on success, proceeds on Redis. A transport
+        failure latches the outage and serves the delegate; a data failure keeps
+        this method's per-key behaviour and moves neither the mode, the gauge nor
+        the probe gate.
+        """
+        if self._fallback_mode and not self._recovery_verified_this_call():
+            with self._sync_lock:
+                if self._fallback_mode:
+                    return delegate_call(self._delegate)
+
+        try:
+            return redis_call()
+        except Exception as e:
+            if _is_data_error(e):
+                return on_data_error(e)
+            with self._sync_lock:
+                self._enter_fallback_locked(e)
+                return delegate_call(self._delegate)
+
+    # =========================================================================
+    # Availability
+    # =========================================================================
+
     def is_available(self) -> bool:
         """Check if Redis is available.
+
+        A resolution-time probe: the bool it returns is ping-based, as before.
+        Its recovery half routes through the same single-flight verified exit the
+        data paths use — a ping alone is never treated as recovery — and its
+        failure half through the same latched transition, so this method is not a
+        second, unsynchronised writer of the fallback mode or the gauge.
 
         The unavailable edge is announced at WARNING, except when nobody
         configured Redis outside production: this adapter is only
@@ -181,119 +508,18 @@ class RedisRateLimitStorage(RateLimitStorageInterface):
         """
         try:
             self._redis.ping()
-            # v6.3.0: Recovered - a drift check is required
-            if self._fallback_mode:
-                self._reconcile_after_recovery()
-            self._fallback_mode = False
-            set_ratelimit_fallback_mode(False)
-            self._available = True
-            return True
         except Exception as e:
-            # v6.3.0: Record the Redis-unavailable metric
-            if not self._fallback_mode:
-                from baldur.settings.redis import redis_absence_is_expected
-
-                record_ratelimit_redis_unavailable()
-                if redis_absence_is_expected():
-                    logger.debug(
-                        "redis_rate_limit_storage.redis_unavailable",
-                        error=e,
-                    )
-                else:
-                    logger.warning(
-                        "redis_rate_limit_storage.redis_unavailable",
-                        error=e,
-                    )
-            self._fallback_mode = True
-            set_ratelimit_fallback_mode(True)
+            self._enter_fallback(e)
             self._available = False
             return False
 
-    def _reconcile_after_recovery(self) -> None:
-        """Sync with local state after Redis recovers."""
-        if not self._local_state:
-            return
+        self._try_exit_fallback()
+        self._available = True
+        return True
 
-        for key, local_state in list(self._local_state.items()):
-            try:
-                redis_state = self._get_state_from_redis(key)
-                # Compare local state against Redis state
-                if redis_state is not None and (
-                    local_state.cooldown_until != redis_state.cooldown_until
-                    or local_state.consecutive_429s != redis_state.consecutive_429s
-                ):
-                    record_ratelimit_drift(key)
-                    logger.info(
-                        "redis_rate_limit_storage.drift_detected_syncing_local",
-                        redis_key=key,
-                    )
-                    # Choose the more conservative value (safety first)
-                    merged = self._merge_conservative(local_state, redis_state)
-                    self._save_to_redis(key, merged)
-                    record_ratelimit_reconciliation(success=True)
-            except Exception as e:
-                logger.warning(
-                    "redis_rate_limit_storage.reconciliation_failed",
-                    redis_key=key,
-                    error=e,
-                )
-                record_ratelimit_reconciliation(success=False)
-
-        self._local_state.clear()
-
-    def _get_state_from_redis(self, key: str) -> RateLimitState | None:
-        """Read state directly from Redis (internal use)."""
-        try:
-            pipeline = self._redis.pipeline()
-            pipeline.get(self._make_key(key, "cooldown_until"))
-            pipeline.get(self._make_key(key, "consecutive_429s"))
-            pipeline.get(self._make_key(key, "last_updated"))
-            results = pipeline.execute()
-
-            return RateLimitState(
-                key=key,
-                cooldown_until=float(results[0]) if results[0] else 0.0,
-                consecutive_429s=int(results[1]) if results[1] else 0,
-                last_updated=float(results[2]) if results[2] else 0.0,
-            )
-        except Exception:
-            return None
-
-    def _merge_conservative(
-        self,
-        local: RateLimitState,
-        remote: RateLimitState,
-    ) -> RateLimitState:
-        """Pick the more conservative of the two states."""
-        return RateLimitState(
-            key=local.key,
-            # Take the longer cooldown (safety first)
-            cooldown_until=max(local.cooldown_until, remote.cooldown_until),
-            # Take the higher 429 count
-            consecutive_429s=max(local.consecutive_429s, remote.consecutive_429s),
-            # Take the more recent timestamp
-            last_updated=max(local.last_updated, remote.last_updated),
-        )
-
-    def _save_to_redis(self, key: str, state: RateLimitState) -> None:
-        """Save state to Redis (internal use)."""
-        pipeline = self._redis.pipeline()
-        pipeline.set(
-            self._make_key(key, "cooldown_until"),
-            str(state.cooldown_until),
-            ex=self._ttl,
-        )
-        pipeline.set(
-            self._make_key(key, "consecutive_429s"),
-            str(state.consecutive_429s),
-            ex=self._ttl,
-        )
-        pipeline.set(
-            self._make_key(key, "last_updated"),
-            str(state.last_updated),
-            ex=self._ttl,
-        )
-        pipeline.execute()
+    # =========================================================================
+    # Reads
+    # =========================================================================
 
     def _read_state(self, key: str) -> RateLimitState:
         """Read the three state keys in one round trip. Lets Redis errors escape."""
@@ -311,20 +537,14 @@ class RedisRateLimitStorage(RateLimitStorageInterface):
             last_updated=float(results[2]) if results[2] else 0.0,
         )
 
-    def get_state(self, key: str) -> RateLimitState:
-        """Get rate limit state from Redis."""
-        try:
-            return self._read_state(key)
+    def _read_state_or_raise(self, key: str) -> RateLimitState:
+        """Strict read straight from Redis, never merged with the local state.
 
-        except Exception as e:
-            logger.exception(
-                "redis_rate_limit_storage.get_state_failed",
-                error=e,
-            )
-            return RateLimitState(key=key)
-
-    def get_state_strict(self, key: str) -> RateLimitState:
-        """Get rate limit state from Redis, raising instead of folding on failure."""
+        The unscripted write path needs the raise — a folded 0.0 would let a
+        short candidate overwrite a live long cooldown fleet-wide — without the
+        local merge the public strict read applies, because a locally-derived
+        value must not be written back into Redis.
+        """
         try:
             return self._read_state(key)
 
@@ -335,27 +555,84 @@ class RedisRateLimitStorage(RateLimitStorageInterface):
             )
             raise RateLimitStorageUnavailableError(str(e)) from e
 
+    def _merged_with_local(self, remote: RateLimitState) -> RateLimitState:
+        """Field-wise max of a fresh Redis read and the local fallback state.
+
+        Applies only while the fallback is active. In that window this process
+        is enforcing a cooldown Redis has not seen, and a caller handed the
+        remote value alone would read a definite "ended" for it — exactly the
+        answer the strict read exists to prevent.
+        """
+        with self._sync_lock:
+            if not self._fallback_mode:
+                return remote
+            local = self._delegate.get_state(remote.key)
+
+        return RateLimitState(
+            key=remote.key,
+            cooldown_until=max(remote.cooldown_until, local.cooldown_until),
+            consecutive_429s=max(remote.consecutive_429s, local.consecutive_429s),
+            last_updated=max(remote.last_updated, local.last_updated),
+        )
+
+    def get_state(self, key: str) -> RateLimitState:
+        """Get rate limit state from Redis, or from the local store while degraded."""
+
+        def on_data_error(error: Exception) -> RateLimitState:
+            logger.exception(
+                "redis_rate_limit_storage.get_state_failed",
+                error=error,
+            )
+            return RateLimitState(key=key)
+
+        return self._dispatch(
+            lambda: self._read_state(key),
+            lambda delegate: delegate.get_state(key),
+            on_data_error,
+        )
+
+    def get_state_strict(self, key: str) -> RateLimitState:
+        """Get rate limit state from Redis, raising instead of folding on failure.
+
+        Always attempts Redis, even while the fallback is active: serving the
+        per-worker store here would be exactly the fold this variant exists to
+        forbid. A successful read during that window is merged with the local
+        state, so a locally-enforced cooldown is never reported as ended.
+        """
+        try:
+            state = self._read_state_or_raise(key)
+        except RateLimitStorageUnavailableError as e:
+            if not _is_data_error(e):
+                self._enter_fallback(e)
+            raise
+        return self._merged_with_local(state)
+
+    # =========================================================================
+    # Writes
+    # =========================================================================
+
     def set_cooldown(
         self,
         key: str,
         cooldown_until: float,
         ttl: int | None = None,
     ) -> None:
-        """Set cooldown in Redis with TTL."""
-        try:
-            ttl = ttl or self._ttl
+        """Set cooldown in Redis with TTL, or in the local store while degraded."""
+
+        def on_redis() -> None:
+            ttl_seconds = ttl or self._ttl
             now = time.time()
 
             pipeline = self._redis.pipeline()
             pipeline.set(
                 self._make_key(key, "cooldown_until"),
                 str(cooldown_until),
-                ex=ttl,
+                ex=ttl_seconds,
             )
             pipeline.set(
                 self._make_key(key, "last_updated"),
                 str(now),
-                ex=ttl,
+                ex=ttl_seconds,
             )
             pipeline.execute()
 
@@ -363,15 +640,21 @@ class RedisRateLimitStorage(RateLimitStorageInterface):
                 "redis_rate_limit_storage.set_cooldown",
                 redis_key=key,
                 cooldown_until=cooldown_until,
-                ttl=ttl,
+                ttl=ttl_seconds,
             )
 
-        except Exception as e:
+        def on_data_error(error: Exception) -> None:
             logger.exception(
                 "redis_rate_limit_storage.set_cooldown_failed",
-                error=e,
+                error=error,
             )
-            raise RateLimitStorageUnavailableError(str(e)) from e
+            raise RateLimitStorageUnavailableError(str(error)) from error
+
+        self._dispatch(
+            on_redis,
+            lambda delegate: delegate.set_cooldown(key, cooldown_until, ttl),
+            on_data_error,
+        )
 
     def extend_cooldown(
         self,
@@ -388,7 +671,31 @@ class RedisRateLimitStorage(RateLimitStorageInterface):
         acceptable degradation: raising instead would reach every caller's
         fail-open wrap and install no cooldown at all — the worst outcome
         available, on exactly the storm the cooldown exists to damp.
+
+        When Redis itself is unreachable the merge runs against the local store
+        and the local effective time is returned, for the same reason.
         """
+
+        def on_data_error(error: Exception) -> float:
+            logger.exception(
+                "redis_rate_limit_storage.extend_cooldown_failed",
+                error=error,
+            )
+            raise RateLimitStorageUnavailableError(str(error)) from error
+
+        return self._dispatch(
+            lambda: self._extend_cooldown_on_redis(key, cooldown_until, ttl),
+            lambda delegate: delegate.extend_cooldown(key, cooldown_until, ttl),
+            on_data_error,
+        )
+
+    def _extend_cooldown_on_redis(
+        self,
+        key: str,
+        cooldown_until: float,
+        ttl: int | None,
+    ) -> float:
+        """Scripted max-merge, with the plain-command path as the capability fallback."""
         if self._script_fallback:
             return self._extend_cooldown_unscripted(key, cooldown_until, ttl)
 
@@ -438,34 +745,28 @@ class RedisRateLimitStorage(RateLimitStorageInterface):
     ) -> float:
         """Read-modify-write max-merge, for a Redis that cannot run Lua.
 
-        Reads strictly: a folded read would report no stored cooldown and let a
-        short candidate replace a live long one, which is the very regression
-        the monotonic contract exists to close.
+        Reads strictly, and straight from Redis: a folded read would report no
+        stored cooldown and let a short candidate replace a live long one, which
+        is the very regression the monotonic contract exists to close, and a read
+        merged with the local store would send a locally-derived value into Redis.
         """
         now = time.time()
-        stored = self.get_state_strict(key).cooldown_until
+        stored = self._read_state_or_raise(key).cooldown_until
         effective = max(stored, cooldown_until)
         covering_ttl = self._covering_ttl(effective, now, ttl)
 
-        try:
-            pipeline = self._redis.pipeline()
-            pipeline.set(
-                self._make_key(key, "cooldown_until"),
-                str(effective),
-                ex=covering_ttl,
-            )
-            pipeline.set(
-                self._make_key(key, "last_updated"),
-                str(now),
-                ex=covering_ttl,
-            )
-            pipeline.execute()
-        except Exception as e:
-            logger.exception(
-                "redis_rate_limit_storage.extend_cooldown_failed",
-                error=e,
-            )
-            raise RateLimitStorageUnavailableError(str(e)) from e
+        pipeline = self._redis.pipeline()
+        pipeline.set(
+            self._make_key(key, "cooldown_until"),
+            str(effective),
+            ex=covering_ttl,
+        )
+        pipeline.set(
+            self._make_key(key, "last_updated"),
+            str(now),
+            ex=covering_ttl,
+        )
+        pipeline.execute()
 
         return effective
 
@@ -495,8 +796,9 @@ class RedisRateLimitStorage(RateLimitStorageInterface):
         )
 
     def increment_consecutive_429s(self, key: str) -> int:
-        """Atomically increment 429 counter in Redis."""
-        try:
+        """Increment the 429 counter — atomically in Redis, or in the local store."""
+
+        def on_redis() -> int:
             redis_key = self._make_key(key, "consecutive_429s")
 
             # Atomic increment with TTL
@@ -505,7 +807,7 @@ class RedisRateLimitStorage(RateLimitStorageInterface):
             pipeline.expire(redis_key, self._ttl)
             results = pipeline.execute()
 
-            new_value = results[0]
+            new_value: int = results[0]
             logger.debug(
                 "redis_rate_limit_storage.incremented_counter",
                 redis_key=key,
@@ -513,31 +815,56 @@ class RedisRateLimitStorage(RateLimitStorageInterface):
             )
             return new_value
 
-        except Exception as e:
+        def on_data_error(error: Exception) -> int:
             logger.exception(
                 "redis_rate_limit_storage.increment_failed",
-                error=e,
+                error=error,
             )
-            raise RateLimitStorageUnavailableError(str(e)) from e
+            raise RateLimitStorageUnavailableError(str(error)) from error
+
+        return self._dispatch(
+            on_redis,
+            lambda delegate: delegate.increment_consecutive_429s(key),
+            on_data_error,
+        )
 
     def reset_consecutive_429s(self, key: str) -> None:
-        """Reset 429 counter in Redis."""
-        try:
+        """Reset the 429 counter. Best-effort toward Redis, as before.
+
+        Issued while Redis is unreachable it applies locally; the Redis-side
+        value survives the outage and self-heals on the next successful
+        coordinated call for that key.
+        """
+
+        def on_redis() -> None:
             self._redis.delete(self._make_key(key, "consecutive_429s"))
             logger.debug(
                 "redis_rate_limit_storage.reset_counter",
                 redis_key=key,
             )
 
-        except Exception as e:
+        def on_data_error(error: Exception) -> None:
             logger.exception(
                 "redis_rate_limit_storage.reset_failed",
-                error=e,
+                error=error,
             )
 
+        self._dispatch(
+            on_redis,
+            lambda delegate: delegate.reset_consecutive_429s(key),
+            on_data_error,
+        )
+
     def clear(self, key: str) -> None:
-        """Clear all rate limit state for a key."""
-        try:
+        """Clear all rate limit state for a key. Never raises, as before.
+
+        Best-effort toward Redis: issued while Redis is unreachable it clears the
+        local state this process is enforcing, and the Redis-side value survives
+        until recovery, so the fleet — this worker included — resumes honoring it
+        afterwards. The remedy is to re-issue the clear once Redis is back.
+        """
+
+        def on_redis() -> None:
             pipeline = self._redis.pipeline()
             pipeline.delete(self._make_key(key, "cooldown_until"))
             pipeline.delete(self._make_key(key, "consecutive_429s"))
@@ -549,8 +876,14 @@ class RedisRateLimitStorage(RateLimitStorageInterface):
                 redis_key=key,
             )
 
-        except Exception as e:
+        def on_data_error(error: Exception) -> None:
             logger.exception(
                 "redis_rate_limit_storage.clear_failed",
-                error=e,
+                error=error,
             )
+
+        self._dispatch(
+            on_redis,
+            lambda delegate: delegate.clear(key),
+            on_data_error,
+        )

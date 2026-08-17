@@ -13,6 +13,18 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 ### Added
 
 - Runnable self-healing demo: `python -m baldur.scripts.demo_self_healing` (no infra needed).
+- `BALDUR_RATE_LIMIT_REDIS_RECOVERY_PROBE_INTERVAL_SECONDS` (default 30) paces the recovery probe.
+
+### Changed
+
+- A Redis outage starting after resolution now keeps the outbound 429 cooldown, per worker.
+- `baldur_ratelimit_fallback_active` reads 1 there; leaving it needs a passing write probe.
+- **Breaking**: `extend_cooldown` / `increment_consecutive_429s` degrade there instead of raising.
+
+### Removed
+
+- **Breaking**: `baldur_ratelimit_state_drift_total` and `baldur_ratelimit_reconciliation_total`.
+- Neither ever emitted a sample; `baldur_ratelimit_fallback_active` reports the degraded window.
 
 ## [1.6.0] - 2026-08-13
 

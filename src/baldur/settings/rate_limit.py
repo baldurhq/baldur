@@ -97,13 +97,24 @@ class RateLimitSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Redis Storage TTL - from adapters/rate_limit/redis_adapter.py
+    # Redis storage dials - from adapters/rate_limit/redis_adapter.py
     # ==========================================================================
     redis_ttl: int = Field(
         default=3600,
         ge=60,
         le=86400,
         description="TTL for Rate Limit state stored in Redis (seconds). Default 1 hour.",
+    )
+    redis_recovery_probe_interval_seconds: IntervalDuration = Field(
+        default=30,
+        description=(
+            "Seconds between recovery probes while the Redis rate-limit store "
+            "is unreachable and the adapter is enforcing a per-worker cooldown "
+            "instead. One caller per interval per process pays the probe. "
+            "Read at call time, so it applies from the next probe onward; the "
+            "rate_limit domain has no runtime config-invalidation target, so a "
+            "live config change reaches a running process only on restart."
+        ),
     )
 
     # ==========================================================================
