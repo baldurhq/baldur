@@ -92,6 +92,13 @@ lands with `POST /config/pending/{pending_id}/cancel`. A GRACEFUL change returns
 `status: waiting` and lands after in-progress operations drain. An IMMEDIATE change
 returns `status: applied` right away.
 
+**Scheduled but never applying?** The job that lands DELAYED/GRACEFUL changes is a
+default scheduled job named `config_apply`. If it is switched off — via
+`BALDUR_SCHEDULER_DISABLED_JOBS=config_apply`, or `BALDUR_SCHEDULER_AUTOSTART=0` with
+no Celery beat running the lane instead — the console keeps reporting the change as
+pending and nothing ever applies it, until it expires on the 24 h sweep. Check those
+two variables before investigating the apply path itself.
+
 **2. Observation (reach).** After the value is persisted, a running consumer only acts
 on it according to its reach class — `on next read`, `within 30s (read cache TTL)`, or
 `after worker restart`. This is why a DELAYED `circuit_breaker` change can show

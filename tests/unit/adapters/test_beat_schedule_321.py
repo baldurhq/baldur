@@ -933,8 +933,19 @@ class TestIncludeConfigApplyGating:
     _APPLY_KEY = "apply-pending-config-changes"
 
     def test_config_apply_lane_present_by_default(self):
-        """The config-apply entry is in the default consolidated schedule."""
-        schedule = get_baldur_beat_schedule()
+        """The config-apply entry is in the default consolidated schedule.
+
+        "Default" now means default *for an entitled install* — the lane's own
+        getter composes nothing without an ACTIVE verdict, and the test process
+        carries no licence token, so the verdict is driven explicitly.
+        """
+        from baldur.core.entitlement import EntitlementResult, EntitlementStatus
+
+        with patch(
+            "baldur.core.entitlement.get_entitlement_status",
+            return_value=EntitlementResult(status=EntitlementStatus.ACTIVE),
+        ):
+            schedule = get_baldur_beat_schedule()
 
         assert self._APPLY_KEY in schedule
         assert (

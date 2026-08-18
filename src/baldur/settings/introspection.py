@@ -200,7 +200,6 @@ KNOWN_DIRECT_READ_ENV_VARS: frozenset[str] = frozenset(
         "BALDUR_META_WATCHDOG_AUTOSTART",
         "BALDUR_OTEL_AUTOSTART",
         "BALDUR_PRECOMPUTED_CACHE_AUTOSTART",
-        "BALDUR_SCHEDULER_AUTOSTART",
         "BALDUR_SYSTEM_METRICS_CACHE_AUTOSTART",
         # --- CLI config discovery (read before any settings class exists) ---
         "BALDUR_CONFIG",

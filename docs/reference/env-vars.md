@@ -149,6 +149,23 @@ BALDUR_EVENT_LOGGING_REPLAY_LOG_LEVEL=INFO
 BALDUR_EVENT_LOGGING_SLA_LOG_LEVEL=WARNING
 ```
 
+## Scheduled jobs
+
+Comma-separated names of the default scheduled jobs to skip at registration —
+the targeted form of `BALDUR_SCHEDULER_AUTOSTART=0`, which stops all of them.
+Valid names: `daily_report`, `sla_drift`, `cb_recovery`, `cb_override_expiry`,
+`archive_old_dlq_entries`, `cleanup_expired_config`, `config_apply`. An
+unrecognised name logs a warning and is otherwise ignored.
+
+Scope: the **in-process scheduler** only. On a Celery deployment the same jobs
+also run off beat lanes this variable does not reach, controlled by
+`configure_baldur_celery(include_*)` instead. The one exception is
+`config_apply`, whose beat lane honours this list as well.
+
+```bash
+BALDUR_SCHEDULER_DISABLED_JOBS=config_apply
+```
+
 ## Runtime config delivery (PRO)
 
 How often each process re-reads the stored configuration of every domain wired

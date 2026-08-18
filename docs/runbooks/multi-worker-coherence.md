@@ -8,7 +8,7 @@
 
 ## TL;DR
 
-- **Single host (default)** — works out-of-box, no external infra. One process per host elects itself via a local file lock and runs the scheduled jobs (including applying DELAYED/GRACEFUL config changes). Nothing to configure.
+- **Single host (default)** — works out-of-box, no external infra. One process per host elects itself via a local file lock and runs the scheduled jobs (including applying DELAYED/GRACEFUL config changes, on installs with an active PRO entitlement). Nothing to configure.
 - **Multiple pods/hosts** — set all three:
 
   ```bash
@@ -41,9 +41,9 @@ When these are at their defaults, everything is correct **on one host** and sile
 
 No configuration needed. With leader election disabled (the default), `baldur.init()` constructs the inline scheduler with a `LocalFileLeaderElector`: exactly one process per host acquires an OS file lock (`<temp>/baldur-scheduler-<service>.lock`) and runs the scheduled jobs; the others stay followers and take over automatically if the leader dies. This covers `gunicorn -w N` on a single host — the N workers contend for one lock, so only one runs the scheduler.
 
-The scheduled jobs include applying due **DELAYED/GRACEFUL** runtime-config changes (every 30s), so editing a delayed-default section in the console and clicking **Apply** now actually takes effect after the delay.
+The scheduled jobs include applying due **DELAYED/GRACEFUL** runtime-config changes (every 30s), so editing a delayed-default section in the console and clicking **Apply** now actually takes effect after the delay. That job is registered only where the PRO entitlement is active — the same condition that renders the console's runtime-config panel at all, so an install that can queue a delayed change is always one that applies it.
 
-To opt out entirely (e.g. you schedule jobs another way), set `BALDUR_SCHEDULER_AUTOSTART=0`.
+To opt out entirely (e.g. you schedule jobs another way), set `BALDUR_SCHEDULER_AUTOSTART=0`. To switch off individual jobs and leave the rest running, name them in `BALDUR_SCHEDULER_DISABLED_JOBS` (comma-separated) instead — see [Environment variables](../reference/env-vars.md#scheduled-jobs).
 
 ---
 
@@ -79,7 +79,7 @@ export BALDUR_LEADER_ELECTION_BACKEND=redis   # or kubernetes
 
 Requires `baldur-pro` (Redis elector) or `baldur-pro[kubernetes]`. This elects one scheduler **cluster-wide**. With leader election disabled across multiple hosts, the local file-lock elector elects one scheduler **per host** — the maintenance jobs are idempotent so this is bounded (duplicate, not wrong), but you get one scheduler per host rather than one per cluster.
 
-**Alternative — Celery beat.** If you already run Celery beat, call `configure_baldur_celery(app)` (it schedules `apply-pending-config-changes` every 30s on the `maintenance` queue) and disable the inline scheduler so it does not also run the jobs:
+**Alternative — Celery beat.** If you already run Celery beat, call `configure_baldur_celery(app)` (it schedules `apply-pending-config-changes` every 30s on the `maintenance` queue — like its inline twin, only where the PRO entitlement is active) and disable the inline scheduler so it does not also run the jobs:
 
 ```bash
 export BALDUR_SCHEDULER_AUTOSTART=0
