@@ -16,22 +16,22 @@ Baldur is an **AP system** (Available + Partition-tolerant per the CAP theorem).
 
 ## Background — What DEGRADED Mode Means
 
-`ResilientStorageBackend` (`src/baldur/adapters/resilient/backend.py:75`) operates in two modes:
+`ResilientStorageBackend` (`src/baldur/adapters/resilient/backend.py`) operates in two steady-state modes (plus a transient `RECOVERING` state while it re-syncs back to Redis):
 
 | Mode | Read source | Write target | Cross-worker visibility |
 |------|-------------|--------------|-------------------------|
 | `REDIS` | Redis (shared) | Redis (immediate) | ✅ All workers see writes |
 | `DEGRADED` | `self._memory` (local only) | WAL(disk fsync) + `self._memory` | ❌ Each worker isolated |
 
-DEGRADED is entered automatically when Redis becomes unreachable (`backend.py:766-771`). The WAL-First Write Protocol (`backend.py:432-464`) guarantees that writes survive process crash — every entry is fsynced to disk before being acknowledged. On Redis recovery, the WAL is replayed back into Redis (`backend.py:805-849`) — issue 470 wired the automatic trigger that makes this happen without operator intervention.
+DEGRADED is entered automatically when Redis becomes unreachable (`_switch_to_degraded`). The WAL-First Write Protocol (`_set_degraded`) guarantees that writes survive process crash — every entry is fsynced to disk before being acknowledged. On Redis recovery, the WAL is replayed back into Redis (`_replay_wal_entry` dispatch) — the automatic recovery trigger makes this happen without operator intervention.
 
-**Issue 470 changed nothing about DEGRADED-mode data semantics.** It only ensured workers leave DEGRADED automatically when Redis recovers, instead of staying stuck in DEGRADED for the rest of the process lifetime.
+**The automatic-recovery wiring changed nothing about DEGRADED-mode data semantics.** It only ensured workers leave DEGRADED automatically when Redis recovers, instead of staying stuck in DEGRADED for the rest of the process lifetime.
 
 ---
 
 ## The Five DEGRADED-Window Trade-offs
 
-These exist whenever Baldur is in DEGRADED mode, regardless of issue 470. They are the consequence of the CAP-theorem AP choice the framework made.
+These exist whenever Baldur is in DEGRADED mode, regardless of the automatic-recovery wiring. They are the consequence of the CAP-theorem AP choice the framework made.
 
 ### 1. DLQ delivery latency — NOT data loss
 
@@ -47,20 +47,21 @@ When workers are DEGRADED, each worker's local CB sees only its own request stre
 
 - **What is lost**: the property that 5 workers cooperatively decide CB OPEN within ~1 second based on combined statistics.
 - **What survives**: local per-worker CB still protects each worker's own traffic.
-- **Mitigation built in**: `_sync_memory_to_redis` (`backend.py:880-893`) runs `cb:*` keys through the drift reconciler ("Most Restrictive Wins") on recovery, so the merged state after recovery is the strictest of all workers' views.
+- **Mitigation built in**: `_sync_memory_to_redis` runs `cb:*` keys through the drift reconciler ("Most Restrictive Wins") on recovery, so the merged state after recovery is the strictest of all workers' views.
 
 ### 3. Counter undercount — REAL data loss
 
-The most subtle case. `incr` in DEGRADED is documented as "best effort, not truly atomic" (`backend.py:756`):
+The most subtle case. `incr` in DEGRADED is documented as "not truly atomic but best effort" (see `incr` in `backend.py`):
 
 ```python
 with self._lock:
     current = self._memory.get(key, 0)
     new_value = int(current) + 1
+    # (WAL record of the absolute new_value is written here, under the same lock)
     self._memory[key] = new_value
 ```
 
-On recovery, `_sync_memory_to_redis` (`backend.py:898`) writes via `set()` not `incrby()`:
+On recovery, `_sync_memory_to_redis` writes via `set()` not `incrby()`:
 
 ```python
 self._redis.set(full_key, value)  # overwrites — not additive
@@ -72,7 +73,7 @@ self._redis.set(full_key, value)  # overwrites — not additive
 - Redis recovers. A syncs first → `Redis[counter]=70`. B syncs next → `Redis[counter]=60`.
 - The +20 worth of A's increments is **permanently lost**.
 
-**This is real data loss**, and WAL replay does not fix it (replay also uses set-semantics, not incrby).
+**This is real data loss**, and WAL replay does not fix it (an `incr` WAL record carries the absolute value and replays with set-semantics, not incrby — see `_replay_set`).
 
 **Implication**: never use Baldur counters for billing meters, quota truth-of-record, or anything that requires SUM consistency. Use a database `INCREMENT` for those. Baldur counters are for rate-limit hints and observability where small drift is acceptable.
 
@@ -168,13 +169,15 @@ during a Redis blip?
 
 ## Frequency Estimates by Tier
 
+These are **operating estimates drawn from typical Redis topology behavior — not Baldur-measured values**. Your numbers depend on your infrastructure; treat the table as a planning prior, not a benchmark.
+
 | Tier | Redis topology | Expected blip frequency | Expected DEGRADED window per blip | Cumulative DEGRADED time/year |
 |------|---------------|-------------------------|----------------------------------|-------------------------------|
 | OSS (single Redis instance, dev/prod parity) | Standalone | Monthly hiccups | 30s ~ 5min | 0.05% ~ 0.5% |
 | PRO (Redis Sentinel, well-tuned) | Sentinel HA | Quarterly | 5s ~ 30s | < 0.01% |
 | PRO (Redis Cluster, multi-AZ ElastiCache) | Cluster, multi-AZ | Yearly | < 30s | < 0.001% |
 
-**For PRO operators, well-tuned Redis HA pushes the realistic data-loss exposure to 1~2 events per year, each affecting a sub-30-second window.** If your data-class assignments per the flowchart above are correct, this is comfortably inside a 99.9% SLO.
+**For PRO operators, the estimate above puts well-tuned Redis HA at 1~2 exposure events per year, each affecting a sub-30-second window.** If your data-class assignments per the flowchart above are correct, that envelope sits comfortably inside a 99.9% SLO.
 
 ---
 
@@ -197,7 +200,7 @@ Big-tech architectures concretely:
 
 **The pattern is universal**: critical truth-of-record in an ACID DB; everything else in a fast cache that explicitly trades consistency for availability. **Baldur's role is the second layer.** It is not a replacement for the first.
 
-Documented incidents at the largest scale: AWS S3 (2017 partial data loss in `us-east-1`), Google Cloud (Korea region permanent deletion 2024), Meta (6-hour BGP outage 2021), Cloudflare (multiple DNS outages). The CAP/FLP price is paid even at trillion-dollar engineering investment levels — the price tag just buys lower frequency, not zero.
+Documented incidents at the largest scale: AWS S3 (multi-hour `us-east-1` outage, 2017), Google Cloud (accidental permanent deletion of a customer's entire cloud subscription, 2024), Meta (6-hour BGP outage, 2021), Cloudflare (multiple global outages). The CAP/FLP price is paid even at trillion-dollar engineering investment levels — the price tag just buys lower frequency, not zero.
 
 ---
 
@@ -228,7 +231,7 @@ Before going to production with Baldur at PRO tier, verify each item.
 
 ### Backup / recovery
 
-- [ ] WAL directory `wal_dir` is mounted on durable disk (not tmpfs / ephemeral container disk). Production deployments fail-fast at startup if WAL init fails (`bootstrap.py:803-809`).
+- [ ] WAL directory `wal_dir` is mounted on durable disk (not tmpfs / ephemeral container disk). Production deployments fail-fast at startup if the WAL cannot honor the configured directory (`baldur.init()` raises `ConfigurationError`).
 - [ ] WAL volume has > 7 days of free space at peak ingest rate (`max_files × max_file_size_mb` × safety factor).
 - [ ] Database backups exist for the truth-of-record tier. Baldur cache is reconstructible — the database is not.
 
@@ -254,9 +257,9 @@ Before going to production with Baldur at PRO tier, verify each item.
 
 ### 4. Verify recovery
 
-- After Redis is reachable, workers should leave DEGRADED within `recovery_probe_interval + jitter` seconds (default ~5–10s, see issue 470 for the dispatch logic).
-- Check `resilient_storage.recovery_succeeded` events in logs.
-- Check that WAL backlog has drained — `_recovered_entries` metric returning to zero.
+- After Redis is reachable, workers should leave DEGRADED within `recovery_probe_interval + jitter` seconds (default ~5–10s).
+- Check `resilient_storage.recovery_succeeded` and `resilient_storage.redis_mode_recovered` events in logs.
+- Check that WAL backlog has drained — replayed WAL files are cleaned up after recovery, and the startup-replay path logs `resilient_storage.recovered_entries_wal` with the replayed count.
 
 ### 5. Audit the DEGRADED window for data divergence
 
