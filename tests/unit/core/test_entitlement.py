@@ -30,6 +30,7 @@ from baldur.core.entitlement import (
     reset_entitlement_status,
 )
 from baldur.core.exceptions import BaldurError
+from baldur.settings.license import reset_entitlement_settings
 
 # ── Helpers ──────────────────────────────────────────────────
 
@@ -505,6 +506,43 @@ class TestValidatorTtlCacheBehavior:
             validator.validate()  # t=100+86401, re-validates
 
         assert mock_validate.call_count == 2
+
+
+class TestForcedRevalidationSourceBehavior:
+    """force=True re-reads the licence source, not just the cached verdict."""
+
+    def setup_method(self):
+        reset_entitlement_settings()
+
+    def teardown_method(self):
+        reset_entitlement_settings()
+
+    def test_forced_revalidation_sees_a_token_that_arrived_after_the_first_read(
+        self, monkeypatch
+    ):
+        """A token injected after the first validation is still found.
+
+        EntitlementSettings is a process-global singleton, so a validation taken
+        before the token reached ``os.environ`` pins its empty snapshot for the
+        life of the process, and every later ``force=True`` re-checks a token it
+        can no longer see. That is reachable whenever something resolves the
+        verdict at import time — a Celery process composing its beat schedule —
+        while the deployment injects the token from inside Python (dotenv,
+        Django settings). The victim is the ``init()``-time re-validation that
+        decides whether the PRO tier registers at all.
+
+        INVALID rather than MISSING is the whole assertion: MISSING means the
+        validator never saw a token, which is the stale-snapshot failure.
+        """
+        monkeypatch.delenv("BALDUR_LICENSE_KEY", raising=False)
+        monkeypatch.delenv("BALDUR_LICENSE_FILE", raising=False)
+        validator = _EntitlementValidator()
+
+        assert validator.validate().status == EntitlementStatus.MISSING
+
+        monkeypatch.setenv("BALDUR_LICENSE_KEY", "arrived-after-the-first-read")
+
+        assert validator.validate(force=True).status == EntitlementStatus.INVALID
 
 
 class TestSingletonBehavior:

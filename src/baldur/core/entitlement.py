@@ -134,6 +134,10 @@ class _EntitlementValidator:
         """Validate entitlement token.
 
         Returns cached result if within TTL, otherwise re-validates.
+
+        A forced re-validation re-reads the licence *source*, not just the
+        cached verdict — see the comment below for why that distinction is
+        load-bearing.
         """
         now = time.monotonic()
         if (
@@ -142,6 +146,20 @@ class _EntitlementValidator:
             and (now - self._last_checked) < _RECHECK_TTL_SECONDS
         ):
             return self._cached_result
+
+        if force:
+            # EntitlementSettings is a process-global singleton, so a validation
+            # taken before the token reached os.environ pins its empty snapshot
+            # for the life of the process — and force would then re-run the
+            # signature check against a token it can no longer see, reporting
+            # MISSING forever. That includes the init()-time re-validation which
+            # decides whether the PRO tier registers at all. Reachable whenever
+            # something resolves the verdict at import time and the deployment
+            # injects its token from inside Python (dotenv, Django settings)
+            # rather than from the process environment.
+            from baldur.settings.license import reset_entitlement_settings
+
+            reset_entitlement_settings()
 
         result = self._do_validate()
         self._cached_result = result

@@ -257,7 +257,13 @@ def cleanup_expired_config_changes(max_age_hours: int | None = None):
 def _config_apply_lane_enabled() -> bool:
     """Whether the config-apply beat lane should be composed in this process.
 
-    Two independent gates, each with its own failure direction.
+    Installed-tier presence is answered first, and answers the whole question
+    on an OSS-only install: with the PRO distribution absent the verdict can
+    only be non-ACTIVE, so reading it would add a licence-file read, an INFO
+    line and two entitlement gauge writes to a tier this lane cannot serve.
+    Same ordering, for the same reason, as the in-process registration filters.
+
+    Then two independent gates, each with its own failure direction.
 
     The entitlement verdict is a tier boundary, so an indeterminate read skips
     the lane — matching the change *creation* surface, which is registry-gated
@@ -273,6 +279,12 @@ def _config_apply_lane_enabled() -> bool:
     Read once, wherever the operator composes the schedule. Neither gate
     re-checks afterwards.
     """
+    from baldur.utils.tier import is_pro_installed
+
+    if not is_pro_installed():
+        logger.debug("config_task.lane_skipped_pro_absent")
+        return False
+
     # Resolved by function-body import so a patched module attribute is seen
     # (tests and the scenario testbed both force a verdict that way).
     from baldur.core.entitlement import get_entitlement_status

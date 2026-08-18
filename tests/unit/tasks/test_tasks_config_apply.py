@@ -212,6 +212,11 @@ class TestConfigApplyBeatGateBehavior:
     verdict is a tier boundary, so an indeterminate read skips the lane, while
     the operator disable list is a convenience knob whose settings fault leaves
     the lane composed.
+
+    Installed-tier presence is answered ahead of both. Every arm below that
+    means to exercise a *gate* therefore forces PRO present — without it the
+    same assertions pass for the wrong reason in a PRO-absent checkout, where
+    the presence short-circuit answers first and nothing downstream runs.
     """
 
     _APPLY_KEY = "apply-pending-config-changes"
@@ -246,7 +251,7 @@ class TestConfigApplyBeatGateBehavior:
         ],
     )
     def test_both_gates_must_pass_for_the_lane_to_be_composed(
-        self, monkeypatch, status, disabled_jobs, expect_lane
+        self, monkeypatch, mock_pro_tier, status, disabled_jobs, expect_lane
     ):
         """Only the entitled-and-not-disabled corner composes an entry."""
         schedule = self._schedule_under(
@@ -258,7 +263,7 @@ class TestConfigApplyBeatGateBehavior:
         else:
             assert schedule == {}
 
-    def test_unreadable_verdict_composes_no_lane(self):
+    def test_unreadable_verdict_composes_no_lane(self, mock_pro_tier):
         """A tier boundary fails closed — an indeterminate read skips the lane."""
         with patch(
             "baldur.core.entitlement.get_entitlement_status",
@@ -266,7 +271,7 @@ class TestConfigApplyBeatGateBehavior:
         ):
             assert get_config_apply_beat_schedule() == {}
 
-    def test_scheduler_settings_failure_leaves_the_lane_composed(self):
+    def test_scheduler_settings_failure_leaves_the_lane_composed(self, mock_pro_tier):
         """A convenience knob fails open — the same direction the in-process
         scheduler's own read takes, so one variable cannot mean two different
         things in the two lanes."""
@@ -283,3 +288,19 @@ class TestConfigApplyBeatGateBehavior:
             schedule = get_config_apply_beat_schedule()
 
         assert self._APPLY_KEY in schedule
+
+    def test_pro_absent_composes_no_lane_and_never_reads_the_verdict(
+        self, mock_oss_tier
+    ):
+        """Installed-tier presence answers the whole question on an OSS install.
+
+        Without the PRO distribution the verdict can only be non-ACTIVE, so
+        reading it would put a licence-file read, an INFO line and two
+        entitlement gauge writes on a boot the lane cannot serve — the cost the
+        in-process registration filters short-circuit for the same reason.
+        """
+        with patch("baldur.core.entitlement.get_entitlement_status") as mock_verdict:
+            schedule = get_config_apply_beat_schedule()
+
+        assert schedule == {}
+        mock_verdict.assert_not_called()
