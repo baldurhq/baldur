@@ -932,12 +932,13 @@ class TestIncludeConfigApplyGating:
 
     _APPLY_KEY = "apply-pending-config-changes"
 
-    def test_config_apply_lane_present_by_default(self):
+    def test_config_apply_lane_present_by_default(self, mock_pro_tier):
         """The config-apply entry is in the default consolidated schedule.
 
-        "Default" now means default *for an entitled install* — the lane's own
-        getter composes nothing without an ACTIVE verdict, and the test process
-        carries no licence token, so the verdict is driven explicitly.
+        "Default" now means default *for an entitled PRO install* — the lane's
+        own getter composes nothing without the PRO distribution present and an
+        ACTIVE verdict, and the test process carries no licence token, so both
+        are driven explicitly.
         """
         from baldur.core.entitlement import EntitlementResult, EntitlementStatus
 
