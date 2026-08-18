@@ -72,14 +72,17 @@ yourself at startup.
 ### Circuit breaker
 
 **The circuit breaker won't open even though the dependency is clearly failing.**
-*Cause:* the breaker requires a **minimum number of calls** in its window before it can
-trip, so a barely-used endpoint can't flip on a single early failure. On a low-traffic
-service you simply haven't crossed that floor yet.
-*Fix:* this is working as designed — it prevents one failure on a quiet endpoint from
-opening the breaker on noise. If you genuinely need it to react sooner, raise the
-service's traffic in your reproduction, or take the dependency out of rotation manually
-with `force_open_circuit`. `BALDUR_CB_FAILURE_THRESHOLD` (default `5`) controls how many
-failures in the window trip it once the minimum-calls floor is met.
+*Cause:* the breaker opens on either of two triggers, and neither has fired yet. The
+count trigger needs `BALDUR_CB_FAILURE_THRESHOLD` (default `5`) failures **in a row** —
+any success in between resets the streak, so an intermittently failing dependency can
+stay under it indefinitely. The rate trigger (failure percentage over the recent-call
+window) is evaluated only once the window holds `BALDUR_CB_MINIMUM_CALLS` observations
+(default `10`), so a barely-used endpoint can't trip on a rate computed from a handful
+of requests.
+*Fix:* this is working as designed — intermittent failures and thin traffic are exactly
+the noise the triggers are built to ignore. If you genuinely need it to react sooner,
+lower `BALDUR_CB_FAILURE_THRESHOLD`, raise the service's traffic in your reproduction,
+or take the dependency out of rotation manually with `force_open_circuit`.
 
 **The circuit breaker opens almost immediately under load.**
 *Cause:* a burst of HTTP `429` (Too Many Requests) from the dependency is treated as a
@@ -129,9 +132,14 @@ def charge(order_id: str) -> dict:
 | Idempotency (dedup) | No | `idempotency_key=...` |
 | Dead-letter queue | No | `dlq=True` |
 
-On `async def` callsites, circuit breaker and retry are not available — request them on an
-async call and Baldur raises a clear error rather than pretending to protect it. Use
-`@baldur.aprotected` for async-only callsites.
+`async def` callsites are fully supported: `@baldur.protected` detects a coroutine
+function and routes it through the async path automatically, and `@baldur.aprotected` /
+`baldur.aprotect()` are the explicit async forms. Circuit breaker, retry, timeout,
+fallback, idempotency, and DLQ capture all apply on the async path with the same
+semantics — sync and async calls under the same name share one breaker. The one rejected
+shape is passing a pre-built **sync** retry policy object on the async path (a tenacity
+bridge is auto-converted; any other sync policy raises a clear error rather than
+pretending to protect the call).
 
 **A `protect()` / `@protected` call hangs and never returns.**
 *Cause:* `protect()` adds **no default wall-clock timeout**. If the I/O client inside the
@@ -404,8 +412,9 @@ a chaos experiment). Only one rollout per config type may be active.
 *Fix:* read the rollout's status — it reports the block reason. Clear the underlying condition
 (disable the kill switch, let Emergency Mode subside, finish the chaos experiment) or, for a
 genuine emergency, use the audited gate **bypass** (it demands a written reason and is flagged
-for post-incident review). A stalled rollout is auto-rolled-back by the watchdog after its
-deadline; `POST /canary/panic-rollback` reverts every active rollout at once.
+for post-incident review). A rollout stuck past its stage deadline is detected and
+escalated by the meta-watchdog's stalled-canary probe — rolling it back is an operator
+action; `POST /canary/panic-rollback` reverts every active rollout at once.
 
 **Governance blocks everything. `(PRO)`**
 *Cause:* the pre-action gate stops at the **first failing check**, in fixed order: kill switch
@@ -432,11 +441,11 @@ background eviction, a disk-durable outbox); notification delivery, audit, emerg
 thread-pool bulkheads, canary, throttle, governance, and the meta-watchdog all activate. A PRO
 subscription includes every PRO feature — they aren't unlocked one at a time.
 
-**The OSS "what you're missing" block vanished after I added PRO.**
-*Cause:* on OSS the daily report carries a "what you're missing" insights block that estimates
-the impact the PRO features would have had, drawn from your own production numbers. With PRO
-active you're no longer missing them, so that block is replaced by an "Automated Actions"
-section showing what PRO actually *did*.
+**The "PRO Insights" block vanished from the daily report after I added PRO.**
+*Cause:* on OSS the daily report carries a **PRO Insights** block — a what-you're-missing
+estimate of the impact the PRO features would have had, drawn from your own production
+numbers. With PRO active you're no longer missing them, so that block is suppressed and an
+"Automated Actions" section shows what PRO actually *did*.
 *Fix:* expected — this is the report honestly shifting from "here's what you're missing" to
 "here's what was handled for you." Nothing to do.
 
