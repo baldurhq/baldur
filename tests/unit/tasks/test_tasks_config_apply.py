@@ -110,13 +110,15 @@ class TestGetConfigApplyBeatSchedule:
     changes actually apply on the canonical multi-host (Celery beat) path.
 
     Every assertion here describes the composed lane, which the getter now
-    returns only under an ACTIVE entitlement verdict. The test process carries
-    no licence token, so the verdict is driven explicitly — without it these
-    would assert against an empty dict and pass or fail for the wrong reason.
+    returns only when the PRO distribution is present AND the entitlement
+    verdict is ACTIVE. The test process satisfies neither by default — it
+    carries no licence token, and a PRO-absent checkout fails the presence
+    check first — so both are driven explicitly. Without them these would
+    assert against an empty dict and pass or fail for the wrong reason.
     """
 
     @pytest.fixture(autouse=True)
-    def _entitled(self):
+    def _entitled_pro_install(self, mock_pro_tier):
         with patch(
             "baldur.core.entitlement.get_entitlement_status",
             return_value=EntitlementResult(status=EntitlementStatus.ACTIVE),
