@@ -1,7 +1,7 @@
 # DLQ Two-Layer Activation Runbook
 
 > **Purpose**: Activate Baldur's full "DLQ absorbs all failures" contract by configuring **both** layers of DLQ protection — view-level `@dlq_protect`/`@protected` AND middleware-level `BALDUR_DLQ_ELIGIBLE_PATHS`. Single-layer setups miss failures that originate before the view dispatcher (ORM connection setup, middleware-stage exceptions during downstream outages), producing 10–22 % absorption gaps under storm conditions.
-> **Audience**: Operators integrating Baldur into a Django app + anyone running scenario 7B.2 or the equivalent production storm.
+> **Audience**: Operators integrating Baldur into a Django app + anyone reproducing an equivalent production storm test.
 > **Cadence**: One-time setup per Django app + revisit when adding new failure-prone endpoints.
 
 ---
@@ -37,23 +37,24 @@ def _charge_impl(order_id, amount):
     ...
 ```
 
-`@dlq_protect` (or `@protected(dlq=True, retry=True)`) wraps the wrapped function body. When the body raises after retry exhaustion, `DLQSink.persist()` writes to `baldur:dlq:pending` in Redis. **What this catches**: anything raised AFTER the view's `def` line has been entered.
+`@dlq_protect` (or `@protected(dlq=True, retry=True)`) wraps the wrapped function body. When the body raises after retry exhaustion, the policy chain's `DLQSink` (`baldur.services.retry_handler.sinks`) hands the failure to `baldur.dlq.helpers.store_to_dlq`, which lands in `baldur:dlq:pending` in Redis. **What this catches**: anything raised AFTER the view's `def` line has been entered.
 
 **What this does NOT catch**: anything that fails BEFORE Django dispatches to the view function — including:
 - Connection-pool setup failures when the DB has just gone down
 - Middleware-stage exceptions (e.g., a session-load middleware accessing a dead DB)
 - Routing or DRF pre-dispatch errors
 
-Under steady-state production these are rare. **Under storm conditions** (downstream DB or auth service goes 100 % unreachable), they account for 10–22 % of all failures, depending on connection-pool warmup state and request RPS.
+Under steady-state production these are rare. **Under storm conditions** (downstream DB or auth service goes 100 % unreachable), they accounted for 10–22 % of all failures in measured storm runs.
 
 ### Layer 2: middleware-level
 
-`baldur.api.django.middleware.BaldurMiddleware` (`src/baldur/api/django/middleware/baldur.py`) wraps every request that matches a configured path pattern. Two paths into DLQ:
+`baldur.api.django.middleware.BaldurMiddleware` (`src/baldur/api/django/middleware/baldur.py`) wraps every request that matches a configured path pattern. Three paths into DLQ, all in `BaldurMiddleware.__call__`:
 
-1. **Preemptive (when middleware-CB is OPEN)** — `baldur.py:208-244`: middleware tracks its own domain-keyed CB based on observed 5xx responses. After `failure_threshold` 5xx responses on the same domain, middleware-CB OPENs and subsequent requests for that path go straight into DLQ without reaching the view.
-2. **At-exception in main path** — `baldur.py:263-282`: if the view raises a DB-related exception that escapes the view's own try/except, middleware catches it via its `MONITORED_DB_ERRORS` filter and stores to DLQ.
+1. **Preemptive (when middleware-CB is OPEN)** — middleware tracks its own domain-keyed CB based on observed 5xx responses. After `failure_threshold` 5xx responses on the same domain, middleware-CB OPENs and subsequent requests for that path go straight into DLQ without reaching the view.
+2. **At-exception in main path** — if the view raises a DB-related exception that escapes the view's own try/except, middleware catches it via its `MONITORED_DB_ERRORS` filter and stores to DLQ.
+3. **At-5xx-response** — a response that comes back with a monitored 5xx status (no exception escaping) on an eligible path is also stored to DLQ, alongside the CB failure recording.
 
-Both paths require `_is_dlq_eligible(request)` to return True, which requires `BALDUR_DLQ_ELIGIBLE_PATHS` to include the request path.
+All three paths require `_is_dlq_eligible(request)` to return True, which requires **both**: `BALDUR_DLQ_ELIGIBLE_PATHS` includes the request path AND the request method is `POST`, `PUT`, or `PATCH` — `GET`/`DELETE` requests are never middleware-stored (see `_is_dlq_eligible`).
 
 ### Why both layers are needed
 
@@ -116,7 +117,7 @@ MIDDLEWARE = [
 ]
 ```
 
-If `BaldurMiddleware` is not present, add it. The order matters — `HealthBridgeMiddleware` must precede `BaldurMiddleware` per the docstring at `baldur.py:19`.
+If `BaldurMiddleware` is not present, add it. The order matters — `HealthBridgeMiddleware` must precede `BaldurMiddleware` per the module docstring of `baldur/api/django/middleware/baldur.py`.
 
 ### Step 2.2 — Add `BALDUR_DLQ_ELIGIBLE_PATHS`
 
@@ -143,7 +144,7 @@ BALDUR_DOMAIN_MAPPING = {
 
 ### Step 2.3 — Restart the Django process
 
-`BaldurMiddleware._load_path_patterns()` reads settings **once per class** at first request (`baldur.py:172-173` `_paths_loaded` flag). A live process picks up the change only on restart.
+`BaldurMiddleware._load_path_patterns()` reads settings **once per class** at first request (the `_paths_loaded` class flag). A live process picks up the change only on restart.
 
 ```bash
 # Docker compose
@@ -174,13 +175,7 @@ Check the Django process logs immediately after restart:
 
 ### Step 3.1 — Drive a storm
 
-Either run the existing scenario:
-
-```bash
-python examples/scripts/cat7b2_run.py
-```
-
-Or simulate a downstream outage in production-like fashion: Toxiproxy block the DB / payment API for 60 s while driving steady RPS.
+Simulate a downstream outage in production-like fashion: block the DB / payment API at the network layer (e.g., Toxiproxy or a firewall rule) for 60 s while driving steady RPS with your load tool of choice.
 
 ### Step 3.2 — Check absorption rate
 
@@ -202,7 +197,7 @@ Inspect Django logs for the CB transition event:
 [info] [EventHandler] CB state changed: service=payment.charge, cell_id=, closed -> open
 ```
 
-If you see this within the first few seconds of the storm, middleware-CB is functioning. The bulk of subsequent failures will be absorbed via the preemptive path (`baldur.py:208-244`), keeping per-request latency at ~50 ms instead of the 3.5 s view-retry budget.
+If you see this within the first few seconds of the storm, middleware-CB is functioning. The bulk of subsequent failures will be absorbed via the preemptive path in `BaldurMiddleware.__call__`, keeping per-request latency at ~50 ms instead of the 3.5 s view-retry budget.
 
 **Common observation**: under a sustained 100 % downstream-failure storm with both layers, p50 latency drops from ~3500 ms (view-retry-bound) to ~50 ms (middleware-CB short-circuit) — that's the 2-layer architecture working as designed.
 
@@ -216,7 +211,7 @@ This was Cat 7B.2's original setup (2026-05-10). Single-run measurement got 97.3
 
 ### Mistake 2 — Forget to restart Django after editing settings
 
-`_paths_loaded` is class-level and one-shot. Hot-reload (`--reload` gunicorn flag) reloads the module but the class flag persists if the module isn't reloaded. Forced restart is the safest path.
+`_paths_loaded` is class-level and one-shot — it persists for the life of the process, and a settings-only edit may not trigger a hot-reload (`--reload` gunicorn flag) at all. Forced restart is the safest path.
 
 ### Mistake 3 — Regex pattern without anchors
 
@@ -224,21 +219,18 @@ This was Cat 7B.2's original setup (2026-05-10). Single-run measurement got 97.3
 
 ### Mistake 4 — Overlap with `BALDUR_INFRA_FAILURE_PATHS`
 
-Both lists are loaded by `_load_path_patterns`. `BALDUR_INFRA_FAILURE_PATHS` controls "treat 5xx as infrastructure failure for CB", which interacts with the middleware CB threshold. If a path matches both lists, behavior follows the dispatch order in `baldur.py:266-310` — DB exceptions go to `database` domain regardless, while 5xx-only responses route to the inferred domain. Generally safe to include the same paths in both lists.
+Both lists are loaded by `_load_path_patterns`. `BALDUR_INFRA_FAILURE_PATHS` controls "treat 5xx as infrastructure failure for CB", which interacts with the middleware CB threshold. If a path matches both lists, behavior follows the dispatch order in `BaldurMiddleware.__call__` — DB exceptions go to the `database` domain regardless, while 5xx-only responses route to the inferred domain. Generally safe to include the same paths in both lists.
 
 ### Mistake 5 — Assume `circuit_breaker=False` on `@protected` disables the middleware CB too
 
-It does NOT. View-level `circuit_breaker=False` only disables the view-stage CB inside the @protected wrapper. Middleware-CB tracks the same domain independently via its 5xx-response counter (`baldur.py:266-278`). This is intentional — the two CBs serve different roles. Cat 7B.2 explicitly relies on this fact to keep the view-retry path active while still benefiting from middleware preemptive DLQ.
+It does NOT. View-level `circuit_breaker=False` only disables the view-stage CB inside the @protected wrapper. Middleware-CB tracks the same domain independently via its 5xx-response counter in `BaldurMiddleware.__call__`. This is intentional — the two CBs serve different roles. Cat 7B.2 explicitly relies on this fact to keep the view-retry path active while still benefiting from middleware preemptive DLQ.
 
 ---
 
 ## Cross-References
 
-- `src/baldur/api/django/middleware/baldur.py:144-188` — `_load_path_patterns()` docstring with full settings examples (`BALDUR_INFRA_FAILURE_PATHS`, `BALDUR_DOMAIN_MAPPING`)
-- `src/baldur/api/django/middleware/baldur.py:208-244` — preemptive DLQ-store when middleware-CB is OPEN
-- `src/baldur/api/django/middleware/baldur.py:263-310` — at-exception DLQ-store in main path
-- `src/baldur/protect_facade.py:559-589` — `protect()` public API + view-level `@protected` decorator semantics
-- `examples/django_app/payment_app/settings.py` — reference `BALDUR_DLQ_ELIGIBLE_PATHS` setup for the testbed (added 2026-05-12 by `c88f1ab5 test(7B.2): activate middleware-level DLQ for 2-layer storm absorption (F3)`)
+- `src/baldur/api/django/middleware/baldur.py` — `_load_path_patterns()` docstring with full settings examples (`BALDUR_INFRA_FAILURE_PATHS`, `BALDUR_DOMAIN_MAPPING`); the preemptive, at-exception, and at-5xx DLQ-store paths all live in `BaldurMiddleware.__call__`
+- `src/baldur/protect_facade.py` — `protect()` public API + view-level `@protected` decorator semantics
 - Internal DLQ write-pressure scenario result — demonstrates the 1-layer vs 2-layer gap with measured numbers (not part of the published docs)
 - `docs/runbooks/data-consistency-boundaries.md` — sibling runbook on what to store in Baldur vs ACID DB; this runbook assumes you have read it
 - `docs/runbooks/protect-hang-troubleshooting.md` — sibling runbook on `protect()` hang diagnosis; relevant if view-retry path appears to stall under storm
@@ -257,4 +249,4 @@ If activating Layer 2 produces unexpected behavior (rare — the change is purel
 
 Restart Django. `dlq_eligible_paths_count=0` confirms rollback. Layer 1 (view-level @protected) continues to function normally — the layers are independent. No data migration or state cleanup is required.
 
-If you find any DLQ entries were stored by Layer 2 that you'd rather not have (e.g., entries from a 5xx that wasn't actually a downstream failure), drain them via the standard DLQ replay tooling — they're indistinguishable from Layer-1 entries once written.
+If you find any DLQ entries were stored by Layer 2 that you'd rather not have (e.g., entries from a 5xx that wasn't actually a downstream failure), drain them via the standard DLQ replay tooling. Layer-2 entries are identifiable: the middleware stamps `"source": "BaldurMiddleware"` and `"auto_stored": true` into each entry's metadata, so you can filter on that when triaging.
