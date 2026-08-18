@@ -196,3 +196,90 @@ class TestApplyPendingAuditAppliedKey:
         mock_audit = self._run_with_result({"status": "success", "applied_count": 9})
 
         assert self._applied_count(mock_audit) == 0
+
+
+class TestConfigApplyBeatGateBehavior:
+    """get_config_apply_beat_schedule() composes the lane only when both gates
+    pass (759 D3/D4).
+
+    On an unentitled install the task can only return ``blocked`` on cadence, so
+    composing it buys a WARNING and an audit row every 30s and nothing else. The
+    gate lives in the getter rather than in the consolidated-schedule loop
+    because the getter is itself a documented operator entry point, and a gate
+    one level up would be bypassed by it.
+
+    The two gates fail in opposite directions on purpose: the entitlement
+    verdict is a tier boundary, so an indeterminate read skips the lane, while
+    the operator disable list is a convenience knob whose settings fault leaves
+    the lane composed.
+    """
+
+    _APPLY_KEY = "apply-pending-config-changes"
+
+    @staticmethod
+    def _schedule_under(monkeypatch, *, status, disabled_jobs: str) -> dict:
+        """Compose the schedule under one (verdict, disable-list) combination."""
+        from baldur.settings.scheduler import reset_scheduler_settings
+
+        monkeypatch.setenv("BALDUR_SCHEDULER_DISABLED_JOBS", disabled_jobs)
+        reset_scheduler_settings()
+
+        with patch(
+            "baldur.core.entitlement.get_entitlement_status",
+            return_value=EntitlementResult(status=status),
+        ):
+            return get_config_apply_beat_schedule()
+
+    @pytest.mark.parametrize(
+        ("status", "disabled_jobs", "expect_lane"),
+        [
+            (EntitlementStatus.ACTIVE, "", True),
+            (EntitlementStatus.ACTIVE, "config_apply", False),
+            (EntitlementStatus.MISSING, "", False),
+            (EntitlementStatus.MISSING, "config_apply", False),
+        ],
+        ids=[
+            "entitled_and_enabled",
+            "entitled_but_disabled",
+            "unentitled_and_enabled",
+            "unentitled_and_disabled",
+        ],
+    )
+    def test_both_gates_must_pass_for_the_lane_to_be_composed(
+        self, monkeypatch, status, disabled_jobs, expect_lane
+    ):
+        """Only the entitled-and-not-disabled corner composes an entry."""
+        schedule = self._schedule_under(
+            monkeypatch, status=status, disabled_jobs=disabled_jobs
+        )
+
+        if expect_lane:
+            assert self._APPLY_KEY in schedule
+        else:
+            assert schedule == {}
+
+    def test_unreadable_verdict_composes_no_lane(self):
+        """A tier boundary fails closed — an indeterminate read skips the lane."""
+        with patch(
+            "baldur.core.entitlement.get_entitlement_status",
+            side_effect=RuntimeError("licence store down"),
+        ):
+            assert get_config_apply_beat_schedule() == {}
+
+    def test_scheduler_settings_failure_leaves_the_lane_composed(self):
+        """A convenience knob fails open — the same direction the in-process
+        scheduler's own read takes, so one variable cannot mean two different
+        things in the two lanes."""
+        with (
+            patch(
+                "baldur.core.entitlement.get_entitlement_status",
+                return_value=EntitlementResult(status=EntitlementStatus.ACTIVE),
+            ),
+            patch(
+                "baldur.settings.scheduler.get_scheduler_settings",
+                side_effect=RuntimeError("settings down"),
+            ),
+        ):
+            schedule = get_config_apply_beat_schedule()
+
+        assert self._APPLY_KEY in schedule
