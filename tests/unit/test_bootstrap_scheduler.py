@@ -24,11 +24,15 @@ import pytest
 from baldur.bootstrap import (
     _CELERY_TASK_NAMES,
     _DEFAULT_SCHEDULED_JOBS,
+    _ENTITLEMENT_GATED_JOBS,
     _PRO_GATED_JOBS,
     _build_celery_delegator,
     _build_config_apply_callable,
+    _entitlement_resolved_scheduled_jobs,
+    _read_scheduler_settings,
     _resolve_job_callable,
     _resolve_scheduler_elector,
+    _settings_resolved_scheduled_jobs,
     _start_default_scheduler,
     _tier_resolved_scheduled_jobs,
     _wrap_with_context,
@@ -36,6 +40,7 @@ from baldur.bootstrap import (
 from baldur.coordination.local_file_elector import LocalFileLeaderElector
 from baldur.coordination.scheduler import LeaderScheduler
 from baldur.core.entitlement import EntitlementResult, EntitlementStatus
+from baldur.settings.scheduler import SchedulerSettings, reset_scheduler_settings
 
 
 @pytest.fixture(autouse=True)
@@ -163,6 +168,270 @@ class TestTierResolvedScheduledJobsBehavior:
 
 
 # =============================================================================
+# Behavior — entitlement-resolved job registration (759 D3)
+# =============================================================================
+
+
+class TestEntitlementResolvedScheduledJobsBehavior:
+    """_entitlement_resolved_scheduled_jobs drops gated jobs without an ACTIVE verdict.
+
+    A second filter composed after the tier-presence one, not a branch inside it:
+    presence and licence are different questions with different failure modes.
+    Applying pending runtime-config changes is a licensed capability, so an
+    import probe standing in for the verdict lets an unentitled process import
+    PRO code on a cadence and stand ready to apply PRO config changes.
+
+    Entitlement is non-ACTIVE by default in the test process, so every arm that
+    wants the job kept drives the verdict explicitly.
+    """
+
+    @pytest.mark.parametrize(
+        ("status", "keeps_gated_jobs"),
+        [
+            (EntitlementStatus.ACTIVE, True),
+            (EntitlementStatus.MISSING, False),
+            (EntitlementStatus.INVALID, False),
+        ],
+        ids=["active", "missing", "invalid"],
+    )
+    def test_verdict_decides_whether_the_gated_jobs_survive(
+        self, status, keeps_gated_jobs
+    ):
+        """ACTIVE keeps the tuple whole; every other verdict drops exactly the
+        gated names, order otherwise preserved."""
+        with patch(
+            "baldur.core.entitlement.get_entitlement_status",
+            return_value=EntitlementResult(status=status),
+        ):
+            resolved = _entitlement_resolved_scheduled_jobs(_DEFAULT_SCHEDULED_JOBS)
+
+        if keeps_gated_jobs:
+            assert resolved == _DEFAULT_SCHEDULED_JOBS
+        else:
+            assert resolved == tuple(
+                job
+                for job in _DEFAULT_SCHEDULED_JOBS
+                if job[0] not in _ENTITLEMENT_GATED_JOBS
+            )
+
+    def test_unreadable_verdict_drops_the_gated_jobs(self):
+        """Indeterminate reads as not entitled — the same direction the change
+        *creation* surface fails in, so the applier is never the only half of
+        the feature left live."""
+        with patch(
+            "baldur.core.entitlement.get_entitlement_status",
+            side_effect=RuntimeError("licence store down"),
+        ):
+            resolved = _entitlement_resolved_scheduled_jobs(_DEFAULT_SCHEDULED_JOBS)
+
+        assert {job[0] for job in resolved} & set(_ENTITLEMENT_GATED_JOBS) == set()
+
+    def test_job_list_without_a_gated_name_never_reads_the_verdict(self):
+        """The short-circuit is load-bearing, so it is asserted directly.
+
+        No OSS-only boot calls get_entitlement_status() today; an unconditional
+        call would add a settings construction, a licence-file read, an INFO
+        line and two gauge writes to every boot of the tier this gate cannot
+        help. Without this assertion the short-circuit is invisible to tests.
+        """
+        ungated = tuple(
+            job
+            for job in _DEFAULT_SCHEDULED_JOBS
+            if job[0] not in _ENTITLEMENT_GATED_JOBS
+        )
+
+        with patch("baldur.core.entitlement.get_entitlement_status") as mock_verdict:
+            resolved = _entitlement_resolved_scheduled_jobs(ungated)
+
+        assert resolved is ungated
+        mock_verdict.assert_not_called()
+
+    def test_verdict_is_resolved_through_the_module_attribute_seam(
+        self, monkeypatch, mock_pro_tier
+    ):
+        """Patching baldur.core.entitlement's own attribute must reach the gate.
+
+        Both gates import the producer inside their function body precisely so a
+        replaced module attribute is seen — the tests and the scenario testbed
+        force a verdict that way. If a refactor hoists the import to module
+        level, bootstrap binds the real producer at import time and every
+        ACTIVE-arm test in this file starts passing vacuously against the
+        non-ACTIVE default. The hoist is asserted against directly, and the
+        registration arm is what the seam buys.
+        """
+        import baldur.bootstrap as bootstrap_module
+
+        assert not hasattr(bootstrap_module, "get_entitlement_status")
+
+        monkeypatch.setenv("BALDUR_SCHEDULER_AUTOSTART", "1")
+        reset_scheduler_settings()
+        mock_sched = MagicMock(spec=LeaderScheduler)
+
+        with (
+            patch(
+                "baldur.core.entitlement.get_entitlement_status",
+                return_value=EntitlementResult(status=EntitlementStatus.ACTIVE),
+            ),
+            patch(
+                "baldur.coordination.scheduler.get_leader_scheduler",
+                return_value=mock_sched,
+            ),
+        ):
+            _start_default_scheduler(task_backend="inline")
+
+        registered = {
+            call.kwargs.get("name") or call.args[0]
+            for call in mock_sched.add_job.call_args_list
+        }
+        assert set(_ENTITLEMENT_GATED_JOBS) <= registered
+
+
+# =============================================================================
+# Behavior — operator disable list (759 D4)
+# =============================================================================
+
+
+class TestDisabledJobsFilterBehavior:
+    """_settings_resolved_scheduled_jobs applies BALDUR_SCHEDULER_DISABLED_JOBS."""
+
+    @staticmethod
+    def _events(mock_logger, level: str, event: str) -> set[str]:
+        """Job names reported under ``event`` at ``level``."""
+        return {
+            call.kwargs["job"]
+            for call in getattr(mock_logger, level).call_args_list
+            if call.args and call.args[0] == event
+        }
+
+    def test_named_job_is_dropped_and_reported(self):
+        """The named job leaves the registered set and an INFO breadcrumb."""
+        import baldur.bootstrap as bootstrap_module
+
+        with patch.object(bootstrap_module, "logger") as mock_logger:
+            resolved = _settings_resolved_scheduled_jobs(
+                _DEFAULT_SCHEDULED_JOBS, ("config_apply",)
+            )
+
+        assert "config_apply" not in {job[0] for job in resolved}
+        assert resolved == tuple(
+            job for job in _DEFAULT_SCHEDULED_JOBS if job[0] != "config_apply"
+        )
+        assert self._events(
+            mock_logger, "info", "scheduler.job_disabled_by_settings"
+        ) == {"config_apply"}
+
+    def test_empty_disable_list_returns_the_incoming_tuple(self):
+        """The default costs nothing — same object back, no scan, no logging."""
+        import baldur.bootstrap as bootstrap_module
+
+        with patch.object(bootstrap_module, "logger") as mock_logger:
+            resolved = _settings_resolved_scheduled_jobs(_DEFAULT_SCHEDULED_JOBS, ())
+
+        assert resolved is _DEFAULT_SCHEDULED_JOBS
+        mock_logger.info.assert_not_called()
+        mock_logger.warning.assert_not_called()
+
+    def test_name_matching_no_default_job_is_reported_unknown(self):
+        """A misspelt name warns and otherwise changes nothing."""
+        import baldur.bootstrap as bootstrap_module
+
+        with patch.object(bootstrap_module, "logger") as mock_logger:
+            resolved = _settings_resolved_scheduled_jobs(
+                _DEFAULT_SCHEDULED_JOBS, ("config_aply",)
+            )
+
+        assert resolved == _DEFAULT_SCHEDULED_JOBS
+        assert self._events(
+            mock_logger, "warning", "scheduler.unknown_disabled_job"
+        ) == {"config_aply"}
+
+    def test_already_tier_filtered_job_name_is_not_reported_unknown(self):
+        """An OSS operator naming a PRO-gated job wrote correct config.
+
+        Unknown names are judged against the full default-job contract, never
+        against the already-filtered list — otherwise the operator is told their
+        correct configuration names a job that does not exist.
+        """
+        import baldur.bootstrap as bootstrap_module
+
+        oss_jobs = tuple(
+            job for job in _DEFAULT_SCHEDULED_JOBS if job[0] not in _PRO_GATED_JOBS
+        )
+        assert "config_apply" not in {job[0] for job in oss_jobs}
+
+        with patch.object(bootstrap_module, "logger") as mock_logger:
+            resolved = _settings_resolved_scheduled_jobs(oss_jobs, ("config_apply",))
+
+        assert resolved == oss_jobs
+        assert (
+            self._events(mock_logger, "warning", "scheduler.unknown_disabled_job")
+            == set()
+        )
+
+
+# =============================================================================
+# Behavior — scheduler settings read fallback (759 D4)
+# =============================================================================
+
+
+class TestSchedulerSettingsReadFallbackBehavior:
+    """_read_scheduler_settings never lets a settings fault stop the jobs."""
+
+    def test_settings_values_are_forwarded_verbatim(self):
+        """Both knobs come back as the settings object reports them.
+
+        Driven by a real SchedulerSettings rather than a double, so the parse
+        the reader depends on is the production one.
+        """
+        settings = SchedulerSettings(autostart=False, disabled_jobs="sla_drift")
+
+        with patch(
+            "baldur.settings.scheduler.get_scheduler_settings",
+            return_value=settings,
+        ):
+            assert _read_scheduler_settings() == (False, ("sla_drift",))
+
+    def test_settings_producer_failure_falls_back_to_running_everything(self):
+        """Fail-safe: a broken settings machinery must not silently stop the jobs."""
+        import baldur.bootstrap as bootstrap_module
+
+        with (
+            patch(
+                "baldur.settings.scheduler.get_scheduler_settings",
+                side_effect=RuntimeError("settings down"),
+            ),
+            patch.object(bootstrap_module, "logger") as mock_logger,
+        ):
+            result = _read_scheduler_settings()
+
+        assert result == (True, ())
+        assert any(
+            call.args and call.args[0] == "scheduler.settings_unavailable"
+            for call in mock_logger.warning.call_args_list
+        )
+
+    def test_second_field_read_cannot_re_raise_past_the_fallback(self):
+        """Both fields are read inside the one try.
+
+        The settings object is lazily constructed, so a read that succeeds for
+        autostart and then fails for the job list would escape a fallback that
+        wrapped only the first read.
+        """
+
+        class _FailsOnTheJobList:
+            autostart = False
+
+            def get_disabled_job_names(self):
+                raise RuntimeError("late fault")
+
+        with patch(
+            "baldur.settings.scheduler.get_scheduler_settings",
+            return_value=_FailsOnTheJobList(),
+        ):
+            assert _read_scheduler_settings() == (True, ())
+
+
+# =============================================================================
 # Behavior — AUTOSTART env gate and unknown backend fallback
 # =============================================================================
 
@@ -220,6 +489,87 @@ class TestStartDefaultSchedulerBehavior:
 
         assert pro_names - oss_names == set(_PRO_GATED_JOBS)
         assert oss_names - pro_names == set()
+
+    def test_autostart_disabled_never_reaches_the_entitlement_read(self, monkeypatch):
+        """Filter order: autostart is answered before any licence read.
+
+        The all-or-nothing off-switch is the escape hatch a test process or a
+        worker uses to stay inert; resolving a verdict behind it would put a
+        settings construction and a licence-file read back on that path.
+        """
+        monkeypatch.setenv("BALDUR_SCHEDULER_AUTOSTART", "0")
+        reset_scheduler_settings()
+
+        with (
+            patch("baldur.core.entitlement.get_entitlement_status") as mock_verdict,
+            patch("baldur.coordination.scheduler.get_leader_scheduler") as mock_get,
+        ):
+            _start_default_scheduler(task_backend="inline")
+
+        mock_verdict.assert_not_called()
+        mock_get.assert_not_called()
+
+    def test_oss_only_boot_never_reads_the_entitlement_verdict(
+        self, monkeypatch, mock_oss_tier
+    ):
+        """Filter order: installed-tier presence runs before the verdict.
+
+        On an OSS-only install the presence filter has already removed every
+        entitlement-gated job, so the second filter short-circuits and the boot
+        gains no licence read at all.
+        """
+        monkeypatch.setenv("BALDUR_SCHEDULER_AUTOSTART", "1")
+        reset_scheduler_settings()
+        mock_sched = MagicMock(spec=LeaderScheduler)
+
+        with (
+            patch("baldur.core.entitlement.get_entitlement_status") as mock_verdict,
+            patch(
+                "baldur.coordination.scheduler.get_leader_scheduler",
+                return_value=mock_sched,
+            ),
+        ):
+            _start_default_scheduler(task_backend="inline")
+
+        mock_verdict.assert_not_called()
+        assert "config_apply" not in self._registered_job_names(mock_sched)
+
+    def test_disabled_jobs_setting_removes_exactly_the_named_job(
+        self, monkeypatch, mock_pro_tier
+    ):
+        """The targeted off-switch drops its job and leaves every other one.
+
+        Run against a control boot rather than against the contract tuple, so a
+        job that fails to resolve its callable in this process cannot make the
+        blast-radius assertion pass or fail for an unrelated reason.
+        """
+        monkeypatch.setenv("BALDUR_SCHEDULER_AUTOSTART", "1")
+
+        def registered_with(disabled_jobs: str) -> set[str]:
+            from baldur.coordination.scheduler import reset_schedulers
+
+            reset_schedulers()
+            monkeypatch.setenv("BALDUR_SCHEDULER_DISABLED_JOBS", disabled_jobs)
+            reset_scheduler_settings()
+            mock_sched = MagicMock(spec=LeaderScheduler)
+            with (
+                patch(
+                    "baldur.core.entitlement.get_entitlement_status",
+                    return_value=EntitlementResult(status=EntitlementStatus.ACTIVE),
+                ),
+                patch(
+                    "baldur.coordination.scheduler.get_leader_scheduler",
+                    return_value=mock_sched,
+                ),
+            ):
+                _start_default_scheduler(task_backend="inline")
+            return self._registered_job_names(mock_sched)
+
+        control_names = registered_with("")
+        disabled_names = registered_with("config_apply")
+
+        assert control_names - disabled_names == {"config_apply"}
+        assert disabled_names - control_names == set()
 
     def test_autostart_env_zero_skips_scheduler_entirely(self, monkeypatch):
         """BALDUR_SCHEDULER_AUTOSTART=0 → no scheduler import or start.
