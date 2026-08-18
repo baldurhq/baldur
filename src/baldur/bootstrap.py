@@ -2591,7 +2591,17 @@ _DEFAULT_SCHEDULED_JOBS: tuple[tuple[str, str, str, float], ...] = (
 # Default jobs whose capability is PRO-only — registered only when the PRO
 # distribution is installed. The scheduled DLQ retention lifecycle is a PRO
 # capability, so on an OSS-only install this job could only fail on cadence.
-_PRO_GATED_JOBS: tuple[str, ...] = ("archive_old_dlq_entries",)
+# Applying pending runtime-config changes is PRO-only for the same reason: the
+# creation routes are PRO, so no pending change can exist that an OSS process
+# could apply.
+_PRO_GATED_JOBS: tuple[str, ...] = ("archive_old_dlq_entries", "config_apply")
+
+# Default jobs that additionally require an ACTIVE entitlement verdict, not
+# just an importable PRO distribution. Applying runtime-config changes is a
+# licensed capability and every other PRO service is registered on that same
+# verdict; an import probe standing in for it lets an unentitled process import
+# PRO code on a cadence and stand ready to apply PRO config changes.
+_ENTITLEMENT_GATED_JOBS: tuple[str, ...] = ("config_apply",)
 
 
 def _tier_resolved_scheduled_jobs() -> tuple[tuple[str, str, str, float], ...]:
@@ -2610,6 +2620,78 @@ def _tier_resolved_scheduled_jobs() -> tuple[tuple[str, str, str, float], ...]:
     return tuple(
         job for job in _DEFAULT_SCHEDULED_JOBS if job[0] not in _PRO_GATED_JOBS
     )
+
+
+def _entitlement_resolved_scheduled_jobs(
+    jobs: tuple[tuple[str, str, str, float], ...],
+) -> tuple[tuple[str, str, str, float], ...]:
+    """Drop entitlement-gated jobs unless the boot entitlement verdict is ACTIVE.
+
+    A second filter rather than a branch inside ``_tier_resolved_scheduled_jobs()``:
+    that function answers installed-tier presence, which is a different question
+    with a different failure mode, and widening it past its contract to make
+    this gate fit would take its contract test with it.
+
+    Composed after the presence filter, and short-circuits when the incoming
+    list carries no gated job — that ordering is load-bearing. No OSS-only boot
+    calls ``get_entitlement_status()`` today, so an unconditional call would add
+    a settings construction, a licence-file read, an INFO line and two gauge
+    writes to every boot of the tier this gate cannot help.
+
+    The verdict is read once, here. A licence that lapses later leaves the job
+    registered until the process restarts, identically to every other PRO
+    service registration.
+    """
+    gated_present = {job[0] for job in jobs} & set(_ENTITLEMENT_GATED_JOBS)
+    if not gated_present:
+        return jobs
+
+    # Resolved by function-body import so a patched module attribute is seen —
+    # both the unit tests and the scenario testbed force a verdict that way, and
+    # a module-level binding would silently exercise the non-ACTIVE branch.
+    from baldur.core.entitlement import get_entitlement_status
+
+    try:
+        entitlement_active = get_entitlement_status().is_active
+    except Exception as e:
+        # Indeterminate reads as not entitled: the same direction the change
+        # *creation* surface fails in, so the applier is never the only half
+        # of the feature that stays live.
+        logger.debug("scheduler.entitlement_verdict_unavailable", error=e)
+        entitlement_active = False
+
+    if entitlement_active:
+        return jobs
+
+    for job_name in sorted(gated_present):
+        logger.debug("scheduler.entitlement_gated_job_skipped", job=job_name)
+    return tuple(job for job in jobs if job[0] not in _ENTITLEMENT_GATED_JOBS)
+
+
+def _settings_resolved_scheduled_jobs(
+    jobs: tuple[tuple[str, str, str, float], ...],
+    disabled_job_names: tuple[str, ...],
+) -> tuple[tuple[str, str, str, float], ...]:
+    """Drop jobs the operator disabled, and warn about names that match none.
+
+    Unknown names are judged against the full ``_DEFAULT_SCHEDULED_JOBS``
+    contract, never against the already-filtered list: an OSS operator correctly
+    naming a PRO-gated job would otherwise be told their correct config names an
+    unknown job.
+    """
+    if not disabled_job_names:
+        return jobs
+
+    contract_names = {job[0] for job in _DEFAULT_SCHEDULED_JOBS}
+    for job_name in disabled_job_names:
+        if job_name not in contract_names:
+            logger.warning("scheduler.unknown_disabled_job", job=job_name)
+
+    disabled = set(disabled_job_names)
+    for job in jobs:
+        if job[0] in disabled:
+            logger.info("scheduler.job_disabled_by_settings", job=job[0])
+    return tuple(job for job in jobs if job[0] not in disabled)
 
 
 # Maps a scheduled job name → Celery @shared_task name, for task_backend="celery".
@@ -2829,6 +2911,27 @@ def _resolve_scheduler_elector(resource_name: str) -> Any | None:
     return LocalFileLeaderElector(resource_name)
 
 
+def _read_scheduler_settings() -> tuple[bool, tuple[str, ...]]:
+    """Return ``(autostart, disabled_job_names)``, falling back to run-everything.
+
+    Fail-safe: a settings-machinery fault must not silently stop the scheduled
+    jobs. Both fields are read inside the one try, so a lazily-constructed
+    singleton cannot re-raise past the fallback on the second read.
+
+    Operator input has no path here — ``autostart`` coerces rather than raising
+    and ``disabled_jobs`` is a string field that accepts anything — so this is
+    a backstop for the settings machinery, not a live degradation path.
+    """
+    try:
+        from baldur.settings.scheduler import get_scheduler_settings
+
+        scheduler_settings = get_scheduler_settings()
+        return scheduler_settings.autostart, scheduler_settings.get_disabled_job_names()
+    except Exception as e:
+        logger.warning("scheduler.settings_unavailable", error=e)
+        return True, ()
+
+
 def _start_default_scheduler(task_backend: str = "inline") -> None:  # noqa: C901
     """Register default scheduled jobs on ``get_leader_scheduler()`` and start it.
 
@@ -2838,10 +2941,16 @@ def _start_default_scheduler(task_backend: str = "inline") -> None:  # noqa: C90
     Escape hatch: ``BALDUR_SCHEDULER_AUTOSTART=0`` skips registration and
     start entirely. Intended for unit tests that call ``init()`` but do not
     want a live Leader Election / thread running in the test process.
+    ``BALDUR_SCHEDULER_DISABLED_JOBS`` is the targeted form — it names
+    individual default jobs and leaves the rest running.
+
+    Registration filters compose in this order: autostart, installed-tier
+    presence, entitlement verdict, operator disable list.
     """
 
-    autostart = os.environ.get("BALDUR_SCHEDULER_AUTOSTART", "1").strip().lower()
-    if autostart in {"0", "false", "no"}:
+    autostart, disabled_job_names = _read_scheduler_settings()
+
+    if not autostart:
         logger.debug("scheduler.autostart_disabled_env")
         return
 
@@ -2875,8 +2984,13 @@ def _start_default_scheduler(task_backend: str = "inline") -> None:  # noqa: C90
         logger.warning("scheduler.unavailable", error=e)
         return
 
+    resolved_jobs = _settings_resolved_scheduled_jobs(
+        _entitlement_resolved_scheduled_jobs(_tier_resolved_scheduled_jobs()),
+        disabled_job_names,
+    )
+
     registered = 0
-    for job_name, module_path, attr, interval in _tier_resolved_scheduled_jobs():
+    for job_name, module_path, attr, interval in resolved_jobs:
         func: Callable[[], Any] | None
         if task_backend == "celery":
             func = _build_celery_delegator(job_name)

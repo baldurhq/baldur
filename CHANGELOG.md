@@ -14,12 +14,23 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 - Runnable self-healing demo: `python -m baldur.scripts.demo_self_healing` (no infra needed).
 - `BALDUR_RATE_LIMIT_REDIS_RECOVERY_PROBE_INTERVAL_SECONDS` (default 30) paces the recovery probe.
+- `BALDUR_SCHEDULER_DISABLED_JOBS` switches off named default jobs without stopping the scheduler.
+- It governs the in-process scheduler; of those jobs only `config_apply` is honoured in beat too.
 
 ### Changed
 
+- **Breaking**: the `config_apply` job and its beat lane need an active entitlement, not just PRO.
+- Migration: an installed-but-unlicensed deployment stops applying DELAYED/GRACEFUL config changes.
+- It could not create those changes either, and any pending ones still expire on their own schedule.
+- Idle cost drops only with PRO installed but not entitled; a licensed install is unchanged.
 - A Redis outage starting after resolution now keeps the outbound 429 cooldown, per worker.
 - `baldur_ratelimit_fallback_active` reads 1 there; leaving it needs a passing write probe.
 - **Breaking**: `extend_cooldown` / `increment_consecutive_429s` degrade there instead of raising.
+
+### Fixed
+
+- An OSS-only Celery deployment no longer schedules the config-apply task it can never run.
+- That lane logged a `blocked` warning and wrote an audit row every 30s on every such install.
 
 ### Removed
 

@@ -4,6 +4,9 @@ Tests for Config Apply Tasks.
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from baldur.core.entitlement import EntitlementResult, EntitlementStatus
 from baldur.tasks.config_apply import (
     apply_pending_config_changes,
     get_config_apply_beat_schedule,
@@ -105,7 +108,20 @@ class TestGetConfigApplyBeatSchedule:
 
     The 30s ``maintenance``-queue lane is what makes DELAYED/GRACEFUL config
     changes actually apply on the canonical multi-host (Celery beat) path.
+
+    Every assertion here describes the composed lane, which the getter now
+    returns only under an ACTIVE entitlement verdict. The test process carries
+    no licence token, so the verdict is driven explicitly — without it these
+    would assert against an empty dict and pass or fail for the wrong reason.
     """
+
+    @pytest.fixture(autouse=True)
+    def _entitled(self):
+        with patch(
+            "baldur.core.entitlement.get_entitlement_status",
+            return_value=EntitlementResult(status=EntitlementStatus.ACTIVE),
+        ):
+            yield
 
     def test_contains_apply_pending_entry(self):
         """The schedule key is the canonical apply-pending entry."""

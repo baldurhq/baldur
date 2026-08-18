@@ -26,6 +26,11 @@ logger = structlog.get_logger()
 # Cache the settings at module load time
 _apply_settings = get_apply_strategy_settings()
 
+# The name this lane's in-process twin carries in the bootstrap default job
+# table. Both lanes honour the same operator disable list, so the spelling has
+# to match that table's row.
+_SCHEDULER_JOB_NAME = "config_apply"
+
 
 @shared_task(
     name="baldur.apply_pending_config_changes",
@@ -249,6 +254,53 @@ def cleanup_expired_config_changes(max_age_hours: int | None = None):
         }
 
 
+def _config_apply_lane_enabled() -> bool:
+    """Whether the config-apply beat lane should be composed in this process.
+
+    Two independent gates, each with its own failure direction.
+
+    The entitlement verdict is a tier boundary, so an indeterminate read skips
+    the lane — matching the change *creation* surface, which is registry-gated
+    and equally unavailable without an ACTIVE verdict. Without a verdict the
+    task can only return ``blocked`` on cadence, so composing it buys a WARNING
+    and an audit row every 30s and nothing else.
+
+    The operator disable list is a convenience knob, so a settings fault leaves
+    the lane composed — the same fail-safe direction the in-process scheduler's
+    own read takes, which keeps one variable from meaning two different things
+    in the two lanes.
+
+    Read once, wherever the operator composes the schedule. Neither gate
+    re-checks afterwards.
+    """
+    # Resolved by function-body import so a patched module attribute is seen
+    # (tests and the scenario testbed both force a verdict that way).
+    from baldur.core.entitlement import get_entitlement_status
+
+    try:
+        if not get_entitlement_status().is_active:
+            logger.debug("config_task.lane_skipped_not_entitled")
+            return False
+    except Exception as e:
+        logger.debug("config_task.entitlement_verdict_unavailable", error=e)
+        return False
+
+    try:
+        from baldur.settings.scheduler import get_scheduler_settings
+
+        disabled = (
+            _SCHEDULER_JOB_NAME in get_scheduler_settings().get_disabled_job_names()
+        )
+    except Exception as e:
+        logger.warning("config_task.scheduler_settings_unavailable", error=e)
+        return True
+
+    if disabled:
+        logger.info("config_task.lane_disabled_by_settings", job=_SCHEDULER_JOB_NAME)
+        return False
+    return True
+
+
 def get_config_apply_beat_schedule() -> dict[str, dict[str, Any]]:
     """Get Celery Beat schedule for applying pending config changes.
 
@@ -258,11 +310,20 @@ def get_config_apply_beat_schedule() -> dict[str, dict[str, Any]]:
     runs the task. Queue ``maintenance`` is used over ``realtime`` because the
     latter carries a 30s ``x-message-ttl`` that would race a 30s-period task.
 
+    Returns an **empty dict** unless the entitlement verdict is ACTIVE and the
+    operator has not named this job in ``BALDUR_SCHEDULER_DISABLED_JOBS``. The
+    gate lives here rather than in the consolidated-schedule loop because this
+    getter is also a documented operator entry point (see Usage), and a gate
+    one level up would be bypassed by it.
+
     Usage:
         from baldur.tasks.config_apply import get_config_apply_beat_schedule
 
         CELERY_BEAT_SCHEDULE.update(get_config_apply_beat_schedule())
     """
+    if not _config_apply_lane_enabled():
+        return {}
+
     return {
         "apply-pending-config-changes": {
             "task": "baldur.apply_pending_config_changes",

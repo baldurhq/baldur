@@ -4,7 +4,8 @@ Scope:
 - _start_default_scheduler AUTOSTART=0 early-return.
 - Default job list registers seven jobs (archive_old_dlq_entries, cb_recovery,
   cb_override_expiry, cleanup_expired_config, daily_report, sla_drift,
-  config_apply).
+  config_apply) once every registration filter passes — installed-tier
+  presence, then the entitlement verdict, then the operator disable list.
 - Unknown task_backend falls back to "inline" with WARNING log.
 - arq backend explicitly logs "not_implemented" and falls back to inline.
 - _build_celery_delegator returns None when Celery is missing.
@@ -34,6 +35,7 @@ from baldur.bootstrap import (
 )
 from baldur.coordination.local_file_elector import LocalFileLeaderElector
 from baldur.coordination.scheduler import LeaderScheduler
+from baldur.core.entitlement import EntitlementResult, EntitlementStatus
 
 
 @pytest.fixture(autouse=True)
@@ -177,11 +179,17 @@ class TestStartDefaultSchedulerBehavior:
         }
 
     def test_gate_only_removes_the_pro_job_from_the_registered_set(self, monkeypatch):
-        """OSS registers the PRO set minus exactly the gated job.
+        """OSS registers the PRO set minus exactly the gated jobs.
 
         Guards the blast radius: a gate that also dropped an unrelated job — or
         that dropped nothing — leaves this equality failing. Both tiers are
         driven in one test so the two registered sets are directly comparable.
+
+        The entitlement verdict is driven ACTIVE for both arms because presence
+        is no longer the only registration gate: the test process carries no
+        licence token, so otherwise the entitlement-gated job would be absent
+        from the PRO arm as well and the difference would understate the
+        presence gate it is measuring.
         """
         monkeypatch.setenv("BALDUR_SCHEDULER_AUTOSTART", "1")
 
@@ -194,6 +202,10 @@ class TestStartDefaultSchedulerBehavior:
                 patch(
                     "baldur.utils.tier.is_pro_installed",
                     return_value=pro_installed,
+                ),
+                patch(
+                    "baldur.core.entitlement.get_entitlement_status",
+                    return_value=EntitlementResult(status=EntitlementStatus.ACTIVE),
                 ),
                 patch(
                     "baldur.coordination.scheduler.get_leader_scheduler",
