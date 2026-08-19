@@ -328,27 +328,26 @@ jobs:
     # — a fetch chain that repaints in the wrong order spells correctly.
     #
     # One cell, not a matrix: the subject is browser-side JavaScript, which does
-    # not vary by Python or Django version. Chromium is a ~130 MB download, so
-    # it is cached on the Playwright version the lockless extra resolves to.
+    # not vary by Python or Django version.
+    #
+    # Chromium and its system libraries come baked into the official Playwright
+    # image, so this lane never runs apt. Installing them per run did: a slow
+    # Ubuntu mirror stalled the install past the job timeout and reddened the
+    # gate three times running, without a line of Baldur code having executed.
+    # The image also carries Python 3.12 and git, which is why this job needs
+    # neither setup-python nor a browser cache.
     runs-on: ubuntu-latest
+    container: mcr.microsoft.com/playwright/python:v1.62.0-noble
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
-        with:
-          python-version: "3.12"
-          cache: "pip"
       - run: pip install -e ".[dev,prometheus,test-e2e]"
-      - name: Resolve the installed Playwright version
-        id: pw
-        run: echo "version=$(python -c 'import playwright; print(playwright.__version__)')" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
-        id: chromium-cache
-        with:
-          path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-chromium-${{ steps.pw.outputs.version }}
-      - name: Install Chromium
-        run: playwright install --with-deps chromium
+      # A no-op while the extra resolves to the image's own Playwright. When a
+      # release moves ahead of the image tag, this fetches the browser build
+      # that version expects — a download, not an apt install, so the mirror
+      # cannot break it. Without it Playwright fails on the missing build.
+      - name: Install the Chromium build this Playwright expects
+        run: playwright install chromium
       # TEST_BROWSER_AVAILABLE=true asserts the lane actually RAN here. Without
       # it a broken browser install would auto-skip and the job would go green
       # having verified nothing — the exact failure mode this lane exists to
