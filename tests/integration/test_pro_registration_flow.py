@@ -155,6 +155,11 @@ class TestProRegistrationFlowIntegration:
                 "baldur_pro._validate_and_log_entitlement",
                 return_value=EntitlementStatus.ACTIVE,
             ),
+            # The ACTIVE branch also activates audit, which promotes the
+            # hash-chain backend and creates its log directory. Stood in for
+            # so the import loop under test does not depend on a writable
+            # working tree.
+            patch("baldur_pro._activate_pro_audit"),
             patch("importlib.import_module") as mock_import,
         ):
             mock_import.return_value = MagicMock()
@@ -191,6 +196,7 @@ class TestProRegistrationFlowIntegration:
                 "baldur_pro._validate_and_log_entitlement",
                 return_value=EntitlementStatus.ACTIVE,
             ),
+            patch("baldur_pro._activate_pro_audit"),
             patch("importlib.import_module", side_effect=selective_fail),
         ):
             register_pro_services()  # must not raise

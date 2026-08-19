@@ -13,6 +13,10 @@ Test scope:
    unlinked before the successful central write.
 4. No-adapter-wired guard: a drain with no central destination advances neither
    the cursor nor deletes the WAL, and warns once per unwired episode.
+5. Null-destination guard: the no-op audit adapter is not a destination.
+   ``_sync_batch`` resolves through ``_resolve_central_destination()``, so a
+   process whose registry falls back to ``NullAuditLogAdapter`` preserves the
+   WAL instead of counting every entry as delivered and unlinking the file.
 """
 
 from __future__ import annotations
@@ -29,7 +33,7 @@ from baldur.adapters.cache.memory_adapter import InMemoryCacheAdapter
 from baldur.audit.sync_worker import AuditSyncWorker, SyncWorkerConfig
 from baldur.audit.wal import WriteAheadLog
 from baldur.audit.wal._models import WALConfig
-from baldur.interfaces.audit_adapter import AuditEntry
+from baldur.interfaces.audit_adapter import AuditEntry, AuditLogAdapter
 from baldur.services.idempotency import IdempotencyService
 from baldur.services.idempotency.models import (
     IdempotencyDomain,
@@ -319,3 +323,132 @@ class TestSyncWorkerNoAdapter:
             if c.args and c.args[0] == "audit_sync_worker.central_adapter_unwired"
         ]
         assert len(unwired) == 1
+
+
+class TestSyncWorkerNullDestinationBehavior:
+    """The no-op audit adapter is not a delivery destination.
+
+    ``_get_adapter()`` cannot answer this: the registry falls back to
+    ``NullAuditLogAdapter``, so a booted process always gets an object back.
+    Delivering into it made ``_process_batch_entries`` count every entry as
+    synced, ``_post_sync_cleanup`` advance the cursor and ``cleanup_processed``
+    unlink the WAL file — permanent discard reported as delivery success.
+    ``_sync_batch`` now resolves through ``_resolve_central_destination()``.
+    """
+
+    @staticmethod
+    def _wal_files(directory) -> list[str]:
+        return glob.glob(os.path.join(str(directory), "*.wal"))
+
+    def test_registry_null_adapter_preserves_the_wal_and_delivers_nothing(
+        self, real_wal, tmp_path
+    ):
+        """The production shape: nothing injected, the registry resolves the
+        no-op adapter. This is the exact state an entitled-but-unwired or a
+        plain OSS install boots into."""
+        # Given: a buffered entry and a worker whose only destination is the
+        # registry's no-op fallback
+        from baldur.adapters.audit.null_adapter import NullAuditLogAdapter
+
+        real_wal.write({"event": "audit_e1"})
+        worker = AuditSyncWorker(
+            wal=real_wal,
+            central_adapter=None,
+            config=SyncWorkerConfig(max_retries=0),
+        )
+        null_adapter = NullAuditLogAdapter()
+
+        # When
+        with (
+            patch.object(worker, "_get_adapter", return_value=null_adapter),
+            patch("baldur.audit.sync_worker.logger") as mock_logger,
+        ):
+            synced, failed = worker.sync_now()
+
+        # Then: nothing counted as delivered, cursor unmoved, WAL retained
+        assert (synced, failed) == (0, 0)
+        assert worker._stats.total_synced == 0
+        assert worker._last_processed_seq == 0
+        assert len(self._wal_files(tmp_path)) == 1
+        # ...and the backlog is surfaced rather than hidden.
+        assert worker._stats.current_lag_entries == 1
+        unwired = [
+            c
+            for c in mock_logger.warning.call_args_list
+            if c.args and c.args[0] == "audit_sync_worker.central_adapter_unwired"
+        ]
+        assert len(unwired) == 1
+
+    def test_injected_null_adapter_is_refused_by_type_not_by_registry_name(
+        self, real_wal, tmp_path
+    ):
+        """Detection is by type. An explicitly-injected no-op adapter never
+        reaches the registry's default name, so a name-based check would
+        classify it as wired and drain into it."""
+        from baldur.adapters.audit.null_adapter import NullAuditLogAdapter
+
+        real_wal.write({"event": "audit_e1"})
+        worker = AuditSyncWorker(
+            wal=real_wal,
+            central_adapter=NullAuditLogAdapter(),
+            config=SyncWorkerConfig(max_retries=0),
+        )
+
+        synced, failed = worker.sync_now()
+
+        assert (synced, failed) == (0, 0)
+        assert worker._last_processed_seq == 0
+        assert len(self._wal_files(tmp_path)) == 1
+
+    def test_real_injected_adapter_still_drains_and_advances(
+        self, real_wal, tmp_path, fresh_idempotency_cache
+    ):
+        """The control arm: the guard must not refuse a genuine destination.
+
+        Without this the preservation assertions above would also pass on a
+        worker that never delivers anything at all.
+        """
+        adapter = MagicMock(spec=AuditLogAdapter)
+        worker = AuditSyncWorker(
+            wal=real_wal,
+            central_adapter=adapter,
+            config=SyncWorkerConfig(max_retries=0),
+        )
+        real_wal.write({"event": "audit_e1"})
+
+        synced, failed = worker.sync_now()
+
+        assert (synced, failed) == (1, 0)
+        assert worker._stats.total_synced == 1
+        assert worker._last_processed_seq == 1
+        assert adapter.log.call_count == 1
+        assert adapter.log.call_args.args[0].details["event"] == "audit_e1"
+
+    def test_wired_adapter_after_a_null_episode_re_arms_the_warning(
+        self, real_wal, tmp_path, fresh_idempotency_cache
+    ):
+        """The episode flag is cleared on recovery, so a *later* unwired
+        episode warns again rather than being swallowed by the first one."""
+        from baldur.adapters.audit.null_adapter import NullAuditLogAdapter
+
+        real_wal.write({"event": "audit_e1"})
+        worker = AuditSyncWorker(
+            wal=real_wal,
+            central_adapter=None,
+            config=SyncWorkerConfig(max_retries=0),
+        )
+        null_adapter = NullAuditLogAdapter()
+        real_adapter = MagicMock(spec=AuditLogAdapter)
+
+        with patch.object(worker, "_get_adapter", return_value=null_adapter):
+            worker.sync_now()
+        assert worker._no_adapter_warned is True
+
+        # When: a real backend is wired and the buffered entry drains
+        with patch.object(worker, "_get_adapter", return_value=real_adapter):
+            synced, _ = worker.sync_now()
+
+        # Then: the entry survived the unwired episode and the flag re-arms
+        assert synced == 1
+        assert real_adapter.log.call_count == 1
+        assert worker._no_adapter_warned is False
