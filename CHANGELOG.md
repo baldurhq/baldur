@@ -22,6 +22,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - The canary watchdog now runs on PRO-entitled installs, renewing rollout locks and alerting stalls.
 - It also runs off the in-process scheduler, so a non-Celery deployment gets the same three jobs.
 - `BALDUR_CANARY_WATCHDOG_ENABLE_AUTO_PROMOTE` and `..._ENABLE_AUTO_ROLLBACK` opt into its actions.
+- `audit_backend_wired` reads 0 when audit is on but every record would reach the no-op adapter.
 
 ### Changed
 
@@ -42,6 +43,10 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - That lane logged a `blocked` warning and wrote an audit row every 30s on every such install.
 - A supervised canary rollout's config-type lock no longer lapses at its TTL while the rollout runs.
 - `baldur_canary_governance_blocked_total` now records; its only emitter passed the wrong labels.
+- Audit records waiting in the write-ahead log are no longer deleted when no real backend is wired.
+- The sync worker counted the no-op adapter as a delivery target, so it reported them delivered.
+- `BALDUR_AUDIT_DISTRIBUTED_HASH_CHAIN=true` now reaches Redis; it silently ran a local chain.
+- The hash-chain audit directory falls back to a writable path instead of failing to construct.
 
 ### Removed
 

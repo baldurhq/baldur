@@ -23,6 +23,10 @@ logger = structlog.get_logger()
 # guard, which the admission probe now pre-empts.
 _rate_limit_redis_probe_failure_reported = False
 
+# Operator override for the hash-chain audit directory. Named here so the
+# factory and the writable-directory resolver report the same remedy.
+_AUDIT_LOG_DIR_ENV = "BALDUR_AUDIT_LOG_DIR"
+
 __all__ = [
     "discover_cache_adapters",
     "discover_queue_adapters",
@@ -161,26 +165,33 @@ def discover_audit_adapters() -> None:  # noqa: C901
         )
 
         def _create_hashchain_adapter() -> HashChainFileAuditLogAdapter:
-            """Factory for the file_hashchain adapter (D22 settings-aware)."""
+            """Factory for the settings-aware ``file_hashchain`` adapter.
+
+            The directory goes through the canonical writable-directory
+            resolver — the same contract the WAL, checkpoint storage and
+            disk buffer already use — so the zero-config relative default
+            falls back instead of raising on a read-only root filesystem,
+            while an operator-chosen directory still fails loudly.
+            """
+            from baldur.audit.config import create_hash_chain_redis_client
             from baldur.settings.audit import get_audit_settings
+            from baldur.utils.fs import resolve_writable_dir
 
             settings = get_audit_settings()
             redis_client: Any | None = None
             if settings.distributed_hash_chain:
-                try:
-                    # get_cache_adapter() is a duck-typed PRO extension; the
-                    # OSS ProviderRegistry doesn't declare it. Falls open to
-                    # in-process hash chain if no provider is registered.
-                    get_cache = getattr(ProviderRegistry, "get_cache_adapter", None)
-                    cache = get_cache() if callable(get_cache) else None
-                    if cache is not None:
-                        redis_client = getattr(cache, "_client", None) or getattr(
-                            cache, "redis", None
-                        )
-                except Exception:
-                    redis_client = None
+                redis_client = create_hash_chain_redis_client()
+
+            operator_log_dir = os.getenv(_AUDIT_LOG_DIR_ENV)
+            resolved_dir = resolve_writable_dir(
+                operator_log_dir or HashChainFileAuditLogAdapter.DEFAULT_LOG_DIR,
+                purpose="audit_hashchain",
+                operator_set=bool(operator_log_dir),
+                env_override_name=_AUDIT_LOG_DIR_ENV,
+            )
+
             return HashChainFileAuditLogAdapter(
-                log_dir=os.getenv("BALDUR_AUDIT_LOG_DIR", "logs/audit"),
+                log_dir=str(resolved_dir.path),
                 distributed_hash_chain=settings.distributed_hash_chain,
                 redis_client=redis_client,
                 use_file_lock=settings.use_file_lock,
