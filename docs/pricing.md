@@ -9,18 +9,18 @@ workloads.
 |  | **OSS** | **PRO** |
 |---|:---:|:---:|
 | **Price** | Free (Apache 2.0) | **$149 / month**  ·  **$1,490 / year** |
-| Circuit breaker | ✅ | ✅ |
+| Circuit breaker | ✅ | ✅ (＋cluster state propagation) |
 | Retry | ✅ | ✅ |
 | Idempotency | ✅ | ✅ |
 | Health check | ✅ | ✅ |
 | Metrics | ✅ | ✅ |
 | Graceful shutdown | ✅ | ✅ |
 | System control | ✅ | ✅ |
-| Built-in web console | ✅ | ✅ |
+| Built-in web console | ✅ | ✅ (＋PRO panels) |
 | Precomputed cache | ✅ | ✅ |
 | Bulkhead isolation | ✅ | ✅ (＋thread-pool) |
 | Dead-letter queue + replay (capture, view, single-entry) | ✅ | ✅ |
-| DLQ at scale (batch replay, adaptive, durable, archive/purge) | — | ✅ |
+| DLQ at scale (console batch replay, adaptive, durable, archive/purge) | — | ✅ |
 | Audit trail | — | ✅ |
 | Emergency mode | — | ✅ |
 | Governance gates | — | ✅ |
