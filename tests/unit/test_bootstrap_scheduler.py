@@ -63,7 +63,7 @@ class TestDefaultScheduledJobsContract:
     with exactly these names and intervals."""
 
     def test_default_jobs_contract(self):
-        """Exactly seven jobs, keyed by name, with known intervals."""
+        """Exactly ten jobs, keyed by name, with known intervals."""
         by_name = {
             name: interval for name, _mod, _attr, interval in _DEFAULT_SCHEDULED_JOBS
         }
@@ -76,6 +76,9 @@ class TestDefaultScheduledJobsContract:
             "archive_old_dlq_entries",
             "cleanup_expired_config",
             "config_apply",
+            "scan_zombie_rollouts",
+            "auto_promote_eligible",
+            "collect_canary_metrics",
         }
         # Daily cadence — 24h in seconds
         assert by_name["daily_report"] == 24 * 60 * 60.0
@@ -90,6 +93,10 @@ class TestDefaultScheduledJobsContract:
         assert by_name["cb_override_expiry"] == 60.0
         # 665 D2 — config apply every 30s
         assert by_name["config_apply"] == 30.0
+        # Canary watchdog twin lane — cadences match the Celery beat entries.
+        assert by_name["scan_zombie_rollouts"] == 300.0
+        assert by_name["auto_promote_eligible"] == 60.0
+        assert by_name["collect_canary_metrics"] == 120.0
 
     def test_override_expiry_job_is_not_pro_gated(self):
         """It ships on every install — Celery-less deployments are the point."""

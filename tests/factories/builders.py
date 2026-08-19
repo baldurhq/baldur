@@ -962,7 +962,6 @@ class WatchdogConfigBuilder:
         self._enable_auto_promote = True
         self._enable_auto_rollback = True
         self._notification_enabled = True
-        self._slack_channel = "#baldur-alerts"
 
     def default(self) -> "WatchdogConfigBuilder":
         """기본 Watchdog 설정."""
@@ -1024,12 +1023,13 @@ class WatchdogConfigBuilder:
         self._enable_auto_rollback = enabled
         return self
 
-    def with_notification(
-        self, enabled: bool = True, channel: str = "#baldur-alerts"
-    ) -> "WatchdogConfigBuilder":
-        """알림 설정."""
+    def with_notification(self, enabled: bool = True) -> "WatchdogConfigBuilder":
+        """Enable or disable watchdog notifications.
+
+        The Slack target is not a watchdog setting — it is resolved by the
+        unified notification manager from the payload's category/priority.
+        """
         self._notification_enabled = enabled
-        self._slack_channel = channel
         return self
 
     def build(self) -> dict[str, Any]:
@@ -1046,5 +1046,4 @@ class WatchdogConfigBuilder:
             "enable_auto_promote": self._enable_auto_promote,
             "enable_auto_rollback": self._enable_auto_rollback,
             "notification_enabled": self._notification_enabled,
-            "slack_channel": self._slack_channel,
         }

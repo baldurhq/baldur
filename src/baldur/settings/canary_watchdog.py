@@ -9,11 +9,11 @@ Source:
 
 Environment Variables:
     BALDUR_CANARY_WATCHDOG_ZOMBIE_THRESHOLD_MINUTES=30
-    BALDUR_CANARY_WATCHDOG_AUTO_ROLLBACK_MINUTES=60
+    BALDUR_CANARY_WATCHDOG_AUTO_ROLLBACK_AFTER_MINUTES=60
     BALDUR_CANARY_WATCHDOG_MAX_STAGE_DURATION_MINUTES=15
-    BALDUR_CANARY_WATCHDOG_ENABLE_AUTO_PROMOTE=true
-    BALDUR_CANARY_WATCHDOG_ENABLE_AUTO_ROLLBACK=true
-    BALDUR_CANARY_WATCHDOG_SLACK_CHANNEL=#baldur-alerts
+    BALDUR_CANARY_WATCHDOG_ENABLE_AUTO_PROMOTE=false
+    BALDUR_CANARY_WATCHDOG_ENABLE_AUTO_ROLLBACK=false
+    BALDUR_CANARY_WATCHDOG_NOTIFICATION_ENABLED=true
 """
 
 from pydantic import Field, model_validator
@@ -28,12 +28,16 @@ class CanaryWatchdogSettings(BaseSettings):
 
     Defines the zombie rollout detection threshold, automatic
     rollback/promotion, and notification settings.
+
+    Slack *targets* are not configured here: the watchdog's alerts route
+    through the unified notification manager, whose per-category Slack target
+    is owned by ``BALDUR_CHANNEL_ROUTING_CATEGORY_SLACK_TARGETS``.
     """
 
     model_config = make_settings_config("BALDUR_CANARY_WATCHDOG_")
 
     # ==========================================================================
-    # Zombie Detection (from canary_watchdog.py line 64)
+    # Zombie Detection
     # ==========================================================================
     zombie_threshold_minutes: int = Field(
         default=30,
@@ -43,7 +47,7 @@ class CanaryWatchdogSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Auto Rollback (from canary_watchdog.py line 65)
+    # Auto Rollback
     # ==========================================================================
     auto_rollback_after_minutes: int = Field(
         default=60,
@@ -53,7 +57,7 @@ class CanaryWatchdogSettings(BaseSettings):
     )
 
     # ==========================================================================
-    # Stage Duration (from canary_watchdog.py line 66)
+    # Stage Duration
     # ==========================================================================
     max_stage_duration_minutes: int = Field(
         default=15,
@@ -65,27 +69,22 @@ class CanaryWatchdogSettings(BaseSettings):
     # ==========================================================================
     # Feature Toggles
     # ==========================================================================
+    # Opt-in by default: the watchdog lane's non-mutating work (config-lock
+    # renewal, stall notification, metric collection) runs as soon as the lane
+    # is composed, but the two mutating actions stay off until an operator
+    # turns them on. Activating the lane must not start promoting or rolling
+    # back rollouts on installs that have never had either.
     enable_auto_promote: bool = Field(
-        default=True,
-        description="Enable automatic promotion",
+        default=False,
+        description="Enable automatic promotion (opt-in)",
     )
     enable_auto_rollback: bool = Field(
-        default=True,
-        description="Enable automatic rollback for zombies",
+        default=False,
+        description="Enable automatic rollback for zombies (opt-in)",
     )
     notification_enabled: bool = Field(
         default=True,
         description="Enable Slack notifications",
-    )
-
-    # ==========================================================================
-    # Notification (from canary_watchdog.py line 70)
-    # ==========================================================================
-    slack_channel: str = Field(
-        default="#baldur-alerts",
-        min_length=1,
-        max_length=100,
-        description="Notification Slack channel",
     )
 
     @model_validator(mode="after")

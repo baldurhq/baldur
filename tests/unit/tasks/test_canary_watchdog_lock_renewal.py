@@ -57,7 +57,6 @@ def watchdog_config():
         enable_auto_promote=True,
         enable_auto_rollback=True,
         notification_enabled=False,
-        slack_channel="#canary-alerts",
     )
 
 
@@ -217,9 +216,7 @@ class TestWatchdogRenewLockBehavior:
 
     def test_renew_lock_conflict_notifies_when_enabled(self):
         # Given: notifications enabled and a CONFLICT outcome.
-        config = CanaryWatchdogConfig(
-            notification_enabled=True, slack_channel="#canary-alerts"
-        )
+        config = CanaryWatchdogConfig(notification_enabled=True)
         service = Mock()
         service.renew_config_lock.return_value = LockRenewalOutcome.CONFLICT
         watchdog = _watchdog_with_service(config, service)
@@ -329,12 +326,10 @@ class TestWatchdogScanRenewsLocks:
 
 class TestLockConflictNotification:
     """The conflict alert is built directly (not via _send_notification) with a
-    config-type-scoped dedup_key and CHAOS category."""
+    config-type-scoped dedup_key and OPERATIONS category."""
 
-    def test_notify_lock_conflict_builds_dedup_keyed_chaos_payload(self):
-        config = CanaryWatchdogConfig(
-            notification_enabled=True, slack_channel="#canary-alerts"
-        )
+    def test_notify_lock_conflict_builds_dedup_keyed_operations_payload(self):
+        config = CanaryWatchdogConfig(notification_enabled=True)
         watchdog = RolloutWatchdog(config=config)
         rollout = _rollout(rollout_id="victim1", config_type="circuit_breaker")
 
@@ -348,10 +343,10 @@ class TestLockConflictNotification:
         manager.notify.assert_called_once()
         payload = manager.notify.call_args.args[0]
         assert payload.dedup_key == "canary_lock_conflict:circuit_breaker"
-        assert payload.category == NotificationCategory.CHAOS
+        assert payload.category == NotificationCategory.OPERATIONS
         assert payload.priority == NotificationPriority.HIGH
         assert payload.source == "canary_watchdog"
-        assert payload.channels == ["#canary-alerts"]
+        assert payload.channels == ["slack"]
         assert "victim1" in payload.message
 
     def test_notify_lock_conflict_isolates_notification_error(self):

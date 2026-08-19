@@ -55,9 +55,9 @@ class SchedulerSettings(BaseSettings):
             "Comma-separated default-job names to skip at registration, e.g. "
             "'config_apply,sla_drift'. Unknown names log a WARNING and are "
             "otherwise ignored. Scope: the in-process scheduler only, except "
-            "for config_apply whose celery beat lane honours the same list; "
-            "the other default jobs' celery twins are controlled by "
-            "configure_baldur_celery(include_*)."
+            "for config_apply and the canary watchdog jobs, whose celery beat "
+            "lanes honour the same list; the other default jobs' celery twins "
+            "are controlled by configure_baldur_celery(include_*)."
         ),
     )
 

@@ -33,6 +33,22 @@ class CanaryRolloutService(Protocol):
 
     def renew_config_lock(self, rollout: Any) -> Any: ...
 
+    def promote(
+        self,
+        rollout_id: str,
+        *args: Any,
+        expected_stage_index: int | None = None,
+        **kwargs: Any,
+    ) -> bool:
+        """Advance a rollout to its next stage.
+
+        ``expected_stage_index`` is an intent CAS for automated callers that
+        decide on a snapshot: the promote is refused when the rollout has
+        already moved past the stage the caller observed. ``None`` (manual and
+        console promotes) keeps the unconditional semantics.
+        """
+        ...
+
 
 # OSS consumer of this Protocol: tasks/canary_watchdog.py.
 @runtime_checkable
@@ -55,6 +71,10 @@ class CanaryRollout(Protocol):
     created_at: Any
     """``datetime`` at PRO impl; ``Any`` here to keep this OSS Protocol
     free of a datetime import constraint."""
+
+    current_stage_index: int
+    """Zero-based index of the stage the rollout is currently serving.
+    Read by OSS automation as the intent-CAS token for ``promote()``."""
 
     paused_at: Any
     """``datetime | None`` at PRO impl — when the rollout entered PAUSED.

@@ -313,8 +313,8 @@ class TestCanaryWatchdogConfigFromSettings:
         assert config.zombie_threshold_minutes == 30
         assert config.auto_rollback_after_minutes == 60
         assert config.max_stage_duration_minutes == 15
-        assert config.enable_auto_promote is True
-        assert config.enable_auto_rollback is True
+        assert config.enable_auto_promote is False
+        assert config.enable_auto_rollback is False
 
     def test_settings_override(self):
         """환경변수로 Settings 오버라이드 시 반영."""

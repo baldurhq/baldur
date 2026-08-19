@@ -154,17 +154,51 @@ BALDUR_EVENT_LOGGING_SLA_LOG_LEVEL=WARNING
 Comma-separated names of the default scheduled jobs to skip at registration —
 the targeted form of `BALDUR_SCHEDULER_AUTOSTART=0`, which stops all of them.
 Valid names: `daily_report`, `sla_drift`, `cb_recovery`, `cb_override_expiry`,
-`archive_old_dlq_entries`, `cleanup_expired_config`, `config_apply`. An
+`archive_old_dlq_entries`, `cleanup_expired_config`, `config_apply`,
+`scan_zombie_rollouts`, `auto_promote_eligible`, `collect_canary_metrics`. An
 unrecognised name logs a warning and is otherwise ignored.
 
 Scope: the **in-process scheduler** only. On a Celery deployment the same jobs
 also run off beat lanes this variable does not reach, controlled by
-`configure_baldur_celery(include_*)` instead. The one exception is
-`config_apply`, whose beat lane honours this list as well.
+`configure_baldur_celery(include_*)` instead. The exceptions are `config_apply`
+and the canary watchdog jobs, whose beat lanes honour this list as well.
 
 ```bash
 BALDUR_SCHEDULER_DISABLED_JOBS=config_apply
 ```
+
+## Canary watchdog (PRO)
+
+The canary watchdog supervises live canary rollouts. It runs on any install
+where the PRO distribution is present and the entitlement verdict is ACTIVE —
+on Celery off the beat lane, elsewhere off the in-process scheduler — and the
+worker or app process must have called `baldur.init()`, which is what registers
+the canary rollout service the jobs need.
+
+Its non-mutating work is always on: it renews each live rollout's config-type
+lock (without which the lock lapses at its TTL and a second rollout can be
+created for the same config type), alerts on rollouts that have stalled, and
+collects rollout metrics. The two **mutating** actions are opt-in and off by
+default, so activating the lane changes nothing on its own:
+
+```bash
+BALDUR_CANARY_WATCHDOG_ENABLE_AUTO_PROMOTE=true
+BALDUR_CANARY_WATCHDOG_ENABLE_AUTO_ROLLBACK=true
+```
+
+`ENABLE_AUTO_PROMOTE` promotes a stage once its `duration_minutes` observation
+window has elapsed and the pre-promote checks pass. `ENABLE_AUTO_ROLLBACK`
+rolls back rollouts that the watchdog has judged **stalled** and that have been
+stuck longer than `BALDUR_CANARY_WATCHDOG_AUTO_ROLLBACK_AFTER_MINUTES`. Note
+the two conditions compose: a `CANARY`-state rollout is judged stalled only
+after twice its current stage's `duration_minutes`, so a long stage waits for
+the stall verdict first — the rollback timer is not measured from stage entry.
+
+Before you enable the lane, review the rollouts that are already stalled — the
+meta-watchdog's `canary_rollout` probe lists them under `rollout_ids`, as does
+`get_active_rollouts()` — and resolve them. The first scan after activation
+alerts once per still-stalled rollout, and those alerts draw on the same
+notification budget as everything else.
 
 ## Runtime config delivery (PRO)
 

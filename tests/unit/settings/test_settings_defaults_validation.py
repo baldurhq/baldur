@@ -377,10 +377,9 @@ class TestCanaryWatchdogSettings:
         assert settings.zombie_threshold_minutes == 30
         assert settings.auto_rollback_after_minutes == 60
         assert settings.max_stage_duration_minutes == 15
-        assert settings.enable_auto_promote is True
-        assert settings.enable_auto_rollback is True
+        assert settings.enable_auto_promote is False
+        assert settings.enable_auto_rollback is False
         assert settings.notification_enabled is True
-        assert settings.slack_channel == "#baldur-alerts"
 
     def test_timing_validation(self):
         """auto_rollback_after_minutes must stay above zombie_threshold_minutes."""
