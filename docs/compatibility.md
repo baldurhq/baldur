@@ -26,12 +26,12 @@ Baldur's core is framework-agnostic; the framework adapters are optional extras.
 
 | Framework | Extra | Minimum | Tested in CI |
 |-----------|-------|---------|--------------|
-| Django | `baldur-framework[django]` | 4.2 | 4.2 LTS · 5.2 LTS · 6.0 |
+| Django | `baldur-framework[django]` | 4.2 | 4.2 LTS · 5.2 LTS · 6.0 · 6.1 |
 | FastAPI | `baldur-framework[fastapi]` | 0.100 | latest ≥ floor (smoke) |
 | Flask | `baldur-framework[flask]` | 2.3 | latest ≥ floor (smoke) |
 
-Django is tested against the 4.2 and 5.2 LTS lines plus the 6.0 feature
-release. FastAPI and Flask run a quickstart smoke test (install the extra, start
+Django is tested against the 4.2 and 5.2 LTS lines plus the 6.0 and 6.1
+feature releases. FastAPI and Flask run a quickstart smoke test (install the extra, start
 the app, hit a protected endpoint) against the latest release satisfying the
 floor; that lane runs whenever the package or a quickstart app changes rather
 than on every commit.
@@ -66,14 +66,15 @@ client floor installed by `baldur-framework[postgres]`.
 The Python × Django combinations are tested as a **full grid** — every pair the
 two projects both support is exercised on every commit:
 
-| Python | Django 4.2 LTS | Django 5.2 LTS | Django 6.0 |
-|--------|:--------------:|:--------------:|:----------:|
-| 3.11 | ✅ | ✅ | — |
-| 3.12 | ✅ | ✅ | ✅ |
-| 3.13 | — | ✅ | ✅ |
+| Python | Django 4.2 LTS | Django 5.2 LTS | Django 6.0 | Django 6.1 |
+|--------|:--------------:|:--------------:|:----------:|:----------:|
+| 3.11 | ✅ | ✅ | — | — |
+| 3.12 | ✅ | ✅ | ✅ | ✅ |
+| 3.13 | — | ✅ | ✅ | ✅ |
 
-The two blank cells are upstream limits rather than gaps in coverage: Django 6.0
-requires Python 3.12 or newer, and Django 4.2 supports Python 3.12 at most.
+The three blank cells are upstream limits rather than gaps in coverage: Django
+6.0 and 6.1 require Python 3.12 or newer, and Django 4.2 supports Python 3.12
+at most.
 Every remaining combination is a real CI job, so a failure identifies which
 axis — the Python version or the Django version — carries the incompatibility.
 
