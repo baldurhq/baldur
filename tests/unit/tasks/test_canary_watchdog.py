@@ -148,8 +148,8 @@ class TestCanaryWatchdogConfig:
 
         assert config.zombie_threshold_minutes == 30
         assert config.auto_rollback_after_minutes == 60
-        assert config.enable_auto_promote is True
-        assert config.enable_auto_rollback is True
+        assert config.enable_auto_promote is False
+        assert config.enable_auto_rollback is False
         assert config.notification_enabled is True
 
     def test_custom_values(self):
@@ -402,7 +402,9 @@ class TestRolloutWatchdog:
 
         assert result.scanned_count == 1
         assert result.promote_count == 1
-        mock_service.promote.assert_called_once_with(sample_rollout.id, force=False)
+        mock_service.promote.assert_called_once_with(
+            sample_rollout.id, force=False, expected_stage_index=0
+        )
 
     def test_auto_promote_disabled(self, sample_rollout):
         """auto_promote 비활성화 시 프로모션 안함."""

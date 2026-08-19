@@ -18,7 +18,10 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - It prints RSS, thread and CPU deltas per startup stage, plus the posture and host they came from.
 - `BALDUR_RATE_LIMIT_REDIS_RECOVERY_PROBE_INTERVAL_SECONDS` (default 30) paces the recovery probe.
 - `BALDUR_SCHEDULER_DISABLED_JOBS` switches off named default jobs without stopping the scheduler.
-- It governs the in-process scheduler; of those jobs only `config_apply` is honoured in beat too.
+- It governs the in-process scheduler; `config_apply` and the canary jobs honour it in beat too.
+- The canary watchdog now runs on PRO-entitled installs, renewing rollout locks and alerting stalls.
+- It also runs off the in-process scheduler, so a non-Celery deployment gets the same three jobs.
+- `BALDUR_CANARY_WATCHDOG_ENABLE_AUTO_PROMOTE` and `..._ENABLE_AUTO_ROLLBACK` opt into its actions.
 
 ### Changed
 
@@ -29,16 +32,21 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - A Redis outage starting after resolution now keeps the outbound 429 cooldown, per worker.
 - `baldur_ratelimit_fallback_active` reads 1 there; leaving it needs a passing write probe.
 - **Breaking**: `extend_cooldown` / `increment_consecutive_429s` degrade there instead of raising.
+- `BALDUR_CANARY_WATCHDOG_ENABLE_AUTO_PROMOTE` / `..._AUTO_ROLLBACK` default `true` → `false`.
 
 ### Fixed
 
 - An OSS-only Celery deployment no longer schedules the config-apply task it can never run.
 - That lane logged a `blocked` warning and wrote an audit row every 30s on every such install.
+- A supervised canary rollout's config-type lock no longer lapses at its TTL while the rollout runs.
+- `baldur_canary_governance_blocked_total` now records; its only emitter passed the wrong labels.
 
 ### Removed
 
 - **Breaking**: `baldur_ratelimit_state_drift_total` and `baldur_ratelimit_reconciliation_total`.
 - Neither ever emitted a sample; `baldur_ratelimit_fallback_active` reports the degraded window.
+- **Breaking**: `BALDUR_CANARY_WATCHDOG_SLACK_CHANNEL`; it never reached a delivery target.
+- Set the watchdog's channel via `BALDUR_CHANNEL_ROUTING_CATEGORY_SLACK_TARGETS` (`operations`).
 
 ## [1.6.0] - 2026-08-13
 

@@ -42,16 +42,11 @@ _RULE_ANCHOR = "#g70-schedule-registration-sync"
 
 # Composed beat entries whose task is known not to resolve. These are the
 # violations this rule was written to surface, kept as an explicit ratchet
-# rather than a silent pass: the fix activates automatic canary promotion and
-# rollback on installs where the lane has never run, which is a safety call
-# that has to be made deliberately, not as a side effect of adding a gate.
-# Shrink this set; never grow it. A new entry means a lane was composed
-# without registering its task.
+# rather than a silent pass: each remaining one is a wire-or-retire decision
+# nobody has made yet, not a wiring detail. Shrink this set; never grow it. A
+# new entry means a lane was composed without registering its task.
 _UNRESOLVED_ALLOWLIST: frozenset[str] = frozenset(
     {
-        "baldur.tasks.canary_watchdog.scan_zombie_rollouts",
-        "baldur.tasks.canary_watchdog.auto_promote_eligible",
-        "baldur.tasks.canary_watchdog.collect_canary_metrics",
         "baldur.tasks.postmortem_tasks.postmortem_auto_seal",
     }
 )

@@ -90,7 +90,11 @@ celery -A myproject worker -l info
 ```
 
 Each job lane is opt-out through an `include_*` flag, and multi-service
-deployments can isolate queues with `queue_prefix=`. The
+deployments can isolate queues with `queue_prefix=`. One lane composes itself
+conditionally: the canary watchdog appears only when the PRO distribution is
+installed and entitled, and its two mutating actions — automatic stage
+promotion and automatic rollback — stay off until you opt in (see
+[Canary watchdog](../reference/env-vars.md#canary-watchdog-pro)). The
 [multi-worker coherence runbook](https://github.com/baldurhq/baldur/blob/main/docs/runbooks/multi-worker-coherence.md)
 walks through the single-host-lock vs. distributed-beat decision.
 

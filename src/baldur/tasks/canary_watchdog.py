@@ -15,11 +15,19 @@ Thin Task, Fat Service principle:
 - All business logic lives in the RolloutWatchdog class.
 
 Celery Beat:
-    The composed schedule injects entries for these tasks, but the functions
-    below carry no task registration, so a worker cannot resolve the names and
-    the lane does not currently run. Registering them would start automatic
-    canary promotion and rollback on installs that have never had it, so the
-    activation is a deliberate decision rather than a wiring detail.
+    The three tasks below are registered under their dotted names and the
+    composed schedule injects their entries, gated on the PRO distribution
+    being installed AND the entitlement verdict being ACTIVE. The worker
+    process must have run ``baldur.init()``: the canary service is registered
+    by init()'s bootstrap hook, not by ``configure_baldur_celery()``, and a
+    task that cannot resolve it skips with a warning instead of failing.
+
+    Activation is behavior-preserving. The non-mutating work — config-lock
+    renewal, stall notification, metric collection — runs as soon as the lane
+    is composed. The two mutating actions (automatic promotion and automatic
+    rollback) are opt-ins, off by default, behind
+    ``BALDUR_CANARY_WATCHDOG_ENABLE_AUTO_PROMOTE`` /
+    ``BALDUR_CANARY_WATCHDOG_ENABLE_AUTO_ROLLBACK``.
 """
 
 from __future__ import annotations
@@ -38,6 +46,36 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
+# Channel *types* (not targets) the watchdog's alerts are pinned to. Pinning
+# keeps the unified manager's threshold/emergency escalation from lifting a
+# stuck-rollout alert onto a paging channel — paging for canary stalls is the
+# meta-watchdog escalation path's job. Concrete Slack targets are resolved by
+# the manager from the OPERATIONS category / HIGH priority routing.
+_ALERT_CHANNEL_TYPES = ("slack",)
+
+# Celery retry policy for the three lane tasks. Every entry carries an
+# ``expires`` shorter than its own cadence, so a task that keeps failing is
+# retried once and then left to the next tick rather than piling up.
+_TASK_MAX_RETRIES = 1
+_TASK_RETRY_DELAY_SECONDS = 60
+
+# Beat entry key -> the name this job carries in the in-process scheduler's
+# default job table (= the plain function name). Both lanes honour
+# ``BALDUR_SCHEDULER_DISABLED_JOBS`` under the same spelling, so an operator
+# disables a job once and it drops out of both.
+_BEAT_ENTRY_JOB_NAMES: dict[str, str] = {
+    "canary-scan-zombie-rollouts": "scan_zombie_rollouts",
+    "canary-auto-promote-eligible": "auto_promote_eligible",
+    "canary-collect-metrics": "collect_canary_metrics",
+}
+
+# Emitted when a task runs in a worker whose process never called
+# ``baldur.init()``, so the PRO canary service was never registered.
+_SERVICE_UNREGISTERED_HINT = (
+    "call baldur.init() during worker startup - the canary rollout service is "
+    "registered by init(), not by configure_baldur_celery()"
+)
+
 
 # =============================================================================
 # Watchdog Configuration
@@ -53,19 +91,17 @@ class CanaryWatchdogConfig:
         zombie_threshold_minutes: Time after which a rollout counts as stalled (default 30)
         auto_rollback_after_minutes: Wait time before automatic rollback (default 60)
         max_stage_duration_minutes: Maximum dwell time per stage (default 15)
-        enable_auto_promote: Enable automatic promotion
-        enable_auto_rollback: Enable automatic rollback for zombies
+        enable_auto_promote: Enable automatic promotion (opt-in, default off)
+        enable_auto_rollback: Enable automatic rollback for zombies (opt-in, default off)
         notification_enabled: Enable Slack notifications
-        slack_channel: Notification Slack channel
     """
 
     zombie_threshold_minutes: int = 30
     auto_rollback_after_minutes: int = 60
     max_stage_duration_minutes: int = 15
-    enable_auto_promote: bool = True
-    enable_auto_rollback: bool = True
+    enable_auto_promote: bool = False
+    enable_auto_rollback: bool = False
     notification_enabled: bool = True
-    slack_channel: str = "#baldur-alerts"
 
     @classmethod
     def from_settings(
@@ -105,7 +141,6 @@ class CanaryWatchdogConfig:
             notification_enabled=overrides.get(
                 "notification_enabled", s.notification_enabled
             ),
-            slack_channel=overrides.get("slack_channel", s.slack_channel),
         )
 
 
@@ -218,9 +253,11 @@ class RolloutWatchdog:
         Initialize RolloutWatchdog.
 
         Args:
-            config: Watchdog configuration (None for defaults)
+            config: Watchdog configuration; resolved from settings when None,
+                so every ``BALDUR_CANARY_WATCHDOG_*`` variable reaches the
+                singleton the Celery lane and the meta-watchdog probe share.
         """
-        self.config = config or CanaryWatchdogConfig()
+        self.config = config or CanaryWatchdogConfig.from_settings()
         self._service = None
 
     @property
@@ -385,11 +422,12 @@ class RolloutWatchdog:
 
         Built directly here rather than via ``_send_notification`` (which is
         ZombieRollout-shaped and closed to its two event types). HIGH priority,
-        CHAOS category for watchdog parity, with an explicit config-type-scoped
-        ``dedup_key`` so distinct config-type conflicts are not collapsed and
-        zombie alerts (which default to ``canary_watchdog:chaos``) do not
-        debounce against conflict alerts. The conflicting owner stays in the
-        service-layer ``canary_rollout.config_lock_conflict`` log.
+        OPERATIONS category — a rollout is a deployment operation, and the
+        chaos category belongs to chaos *experiment* notifications — with an
+        explicit config-type-scoped ``dedup_key`` so distinct config-type
+        conflicts are not collapsed and zombie alerts do not debounce against
+        conflict alerts. The conflicting owner stays in the service-layer
+        ``canary_rollout.config_lock_conflict`` log.
         """
         try:
             from baldur.models.notification import (
@@ -414,9 +452,9 @@ class RolloutWatchdog:
                         f"for the conflicting owner"
                     ),
                     priority=NotificationPriority.HIGH,
-                    category=NotificationCategory.CHAOS,
+                    category=NotificationCategory.OPERATIONS,
                     source="canary_watchdog",
-                    channels=[self.config.slack_channel],
+                    channels=list(_ALERT_CHANNEL_TYPES),
                     dedup_key=f"canary_lock_conflict:{rollout.config_type}",
                 )
             )
@@ -573,6 +611,12 @@ class RolloutWatchdog:
         """
         Send a Slack notification.
 
+        The ``dedup_key`` is scoped per rollout AND per event type, so two
+        distinct zombies in one scan both deliver, the same zombie re-detected
+        on the next scan is suppressed inside the cooldown window, and a
+        rollback alert is not debounced by the earlier detection alert for the
+        same rollout.
+
         Args:
             zombie: Zombie information
             event_type: Event type ("zombie_detected", "auto_rolled_back")
@@ -590,6 +634,7 @@ class RolloutWatchdog:
             service = get_unified_notification_manager()
 
             if event_type == "zombie_detected":
+                dedup_key = f"canary_zombie:{zombie.rollout_id}"
                 title = "Canary Watchdog: Zombie Rollout Detected"
                 message = (
                     f"⚠️ [Canary Watchdog] Zombie Rollout Detected\n"
@@ -602,6 +647,7 @@ class RolloutWatchdog:
                     f"• Action: Manual intervention required"
                 )
             elif event_type == "auto_rolled_back":
+                dedup_key = f"canary_rollback:{zombie.rollout_id}"
                 title = "Canary Watchdog: Auto Rollback Executed"
                 message = (
                     f"🔄 [Canary Watchdog] Auto Rollback Executed\n"
@@ -620,9 +666,10 @@ class RolloutWatchdog:
                     title=title,
                     message=message,
                     priority=NotificationPriority.HIGH,
-                    category=NotificationCategory.CHAOS,
+                    category=NotificationCategory.OPERATIONS,
                     source="canary_watchdog",
-                    channels=[self.config.slack_channel],
+                    channels=list(_ALERT_CHANNEL_TYPES),
+                    dedup_key=dedup_key,
                 )
             )
 
@@ -723,9 +770,16 @@ class RolloutWatchdog:
                 if elapsed < stage.duration_minutes:
                     continue
 
-                # Promote after metric validation
+                # Promote after metric validation. The observed stage index
+                # rides along as an intent CAS: a second promoter that already
+                # advanced this rollout makes the snapshot stale and the
+                # service refuses, so one observed window promotes one stage.
                 try:
-                    success = self.service.promote(rollout.id, force=False)
+                    success = self.service.promote(
+                        rollout.id,
+                        force=False,
+                        expected_stage_index=rollout.current_stage_index,
+                    )
                     if success:
                         result.promote_count += 1
                         logger.info(
@@ -754,7 +808,16 @@ class RolloutWatchdog:
             block_reason = (
                 governance.block_reason.value if governance.block_reason else "unknown"
             )
-            canary_governance_blocked_total.labels(block_reason=block_reason).inc()
+            # The counter declares the 221 region/tier label pair; the watchdog
+            # has no per-region or per-tier context, and the emit convention
+            # for that pair is the empty string = global / unspecified. Passing
+            # block_reason alone raises inside prometheus_client and takes the
+            # gauge write below down with it.
+            canary_governance_blocked_total.labels(
+                block_reason=block_reason,
+                region="",
+                tier="",
+            ).inc()
 
             pending_count = len(self.service.get_active_rollouts())
             canary_pending_promotion_gauge.labels(reason=block_reason).set(
@@ -786,6 +849,43 @@ reset_watchdog = reset_rollout_watchdog
 # =============================================================================
 
 
+def _canary_service_registered() -> bool:
+    """Whether ``baldur.init()`` has registered the PRO canary rollout service.
+
+    The registry slot is populated by init()'s bootstrap hook, so a plain
+    Celery worker that only ran ``configure_baldur_celery(app)`` sees it empty.
+    """
+    from baldur.factory.registry import ProviderRegistry
+
+    return ProviderRegistry.canary_rollout_service.safe_get() is not None
+
+
+def _service_unregistered_result(task_name: str) -> dict[str, Any]:
+    """Warn once and report a clean skip for a task with no canary service.
+
+    On an entitled install an empty slot is a misconfiguration rather than
+    normal flow, hence WARNING. Reporting a skip rather than raising keeps a
+    1-to-5-minute cadence from logging the same exception forever.
+
+    Args:
+        task_name: The lane task asking, carried into the log line.
+
+    Returns:
+        dict: the task's skip result.
+    """
+    logger.warning(
+        "canary_watchdog.task_skipped",
+        task=task_name,
+        reason="service_unregistered",
+        hint=_SERVICE_UNREGISTERED_HINT,
+    )
+    return {
+        "success": True,
+        "skipped": True,
+        "reason": "service_unregistered",
+    }
+
+
 def scan_zombie_rollouts() -> dict[str, Any]:
     """
     Renew config locks and handle zombie rollouts.
@@ -809,6 +909,9 @@ def scan_zombie_rollouts() -> dict[str, Any]:
             "zombies": [...],
         }
     """
+    if not _canary_service_registered():
+        return _service_unregistered_result("scan_zombie_rollouts")
+
     try:
         watchdog = get_rollout_watchdog()
         result = watchdog.scan_and_handle()
@@ -839,6 +942,9 @@ def auto_promote_eligible() -> dict[str, Any]:
             "promote_count": int,
         }
     """
+    if not _canary_service_registered():
+        return _service_unregistered_result("auto_promote_eligible")
+
     try:
         watchdog = get_rollout_watchdog()
         result = watchdog.auto_promote_eligible()
@@ -870,7 +976,7 @@ def collect_canary_metrics() -> dict[str, Any]:
 
         service = ProviderRegistry.canary_rollout_service.safe_get()
         if service is None:
-            raise RuntimeError("baldur_pro CanaryRolloutService not registered")
+            return _service_unregistered_result("collect_canary_metrics")
         active_rollouts = service.get_active_rollouts()
 
         metrics_count = 0
@@ -893,16 +999,131 @@ def collect_canary_metrics() -> dict[str, Any]:
 
 
 # =============================================================================
+# Celery Task Registration
+# =============================================================================
+
+# Guarded rather than a bare module-level import: the meta-watchdog's
+# stuck-canary probe imports this module to reach the shared watchdog
+# singleton, and a PRO install without Celery must keep that probe working
+# instead of degrading it to UNKNOWN.
+try:
+    from celery import shared_task
+
+    @shared_task(
+        name="baldur.tasks.canary_watchdog.scan_zombie_rollouts",
+        bind=True,
+        max_retries=_TASK_MAX_RETRIES,
+        default_retry_delay=_TASK_RETRY_DELAY_SECONDS,
+    )
+    def scan_zombie_rollouts_task(self):
+        """Celery task wrapper for scan_zombie_rollouts."""
+        return scan_zombie_rollouts()
+
+    @shared_task(
+        name="baldur.tasks.canary_watchdog.auto_promote_eligible",
+        bind=True,
+        max_retries=_TASK_MAX_RETRIES,
+        default_retry_delay=_TASK_RETRY_DELAY_SECONDS,
+    )
+    def auto_promote_eligible_task(self):
+        """Celery task wrapper for auto_promote_eligible."""
+        return auto_promote_eligible()
+
+    @shared_task(
+        name="baldur.tasks.canary_watchdog.collect_canary_metrics",
+        bind=True,
+        max_retries=_TASK_MAX_RETRIES,
+        default_retry_delay=_TASK_RETRY_DELAY_SECONDS,
+    )
+    def collect_canary_metrics_task(self):
+        """Celery task wrapper for collect_canary_metrics."""
+        return collect_canary_metrics()
+
+    CELERY_TASKS_AVAILABLE = True
+
+except ImportError:
+    logger.debug("canary_watchdog.celery_unavailable_registration_skipped")
+    CELERY_TASKS_AVAILABLE = False
+
+
+# =============================================================================
 # Celery Beat Schedule
 # =============================================================================
+
+
+def _canary_watchdog_lane_enabled() -> bool:
+    """Whether the canary watchdog beat lane should be composed in this process.
+
+    Installed-tier presence is answered first, and answers the whole question
+    on an OSS-only install: the lane's every task needs the PRO canary rollout
+    service, so with the PRO distribution absent the verdict can only be
+    non-ACTIVE and reading it would add a licence-file read, an INFO line and
+    two entitlement gauge writes to a tier this lane cannot serve. Same
+    ordering, for the same reason, as the in-process registration filters.
+
+    The entitlement verdict is a tier boundary, so an indeterminate read skips
+    the lane — matching the rollout *creation* surface, which is registry-gated
+    and equally unavailable without an ACTIVE verdict.
+
+    Read once, wherever the operator composes the schedule; neither gate
+    re-checks afterwards. The operator disable list is applied per entry by the
+    getter, since this lane carries three independently disableable jobs.
+    """
+    from baldur.utils.tier import is_pro_installed
+
+    if not is_pro_installed():
+        logger.debug("canary_watchdog.lane_skipped_pro_absent")
+        return False
+
+    # Resolved by function-body import so a patched module attribute is seen
+    # (tests and the scenario testbed both force a verdict that way).
+    from baldur.core.entitlement import get_entitlement_status
+
+    try:
+        if not get_entitlement_status().is_active:
+            logger.debug("canary_watchdog.lane_skipped_not_entitled")
+            return False
+    except Exception as e:
+        logger.debug("canary_watchdog.entitlement_verdict_unavailable", error=e)
+        return False
+
+    return True
+
+
+def _disabled_beat_entry_keys() -> set[str]:
+    """Beat entry keys the operator switched off via the scheduler settings.
+
+    The disable list is a convenience knob, so a settings fault leaves every
+    entry composed — the same fail-safe direction the in-process scheduler's
+    own read takes, which keeps one variable from meaning two things in the
+    two lanes.
+    """
+    try:
+        from baldur.settings.scheduler import get_scheduler_settings
+
+        disabled = set(get_scheduler_settings().get_disabled_job_names())
+    except Exception as e:
+        logger.warning("canary_watchdog.scheduler_settings_unavailable", error=e)
+        return set()
+
+    return {
+        entry_key
+        for entry_key, job_name in _BEAT_ENTRY_JOB_NAMES.items()
+        if job_name in disabled
+    }
 
 
 def get_canary_watchdog_beat_schedule() -> dict[str, Any]:
     """
     Canary Watchdog Celery Beat schedule configuration.
 
-    The entries this returns name tasks that are not registered, so they do not
-    resolve on a worker yet — see the module docstring.
+    Returns an **empty dict** unless the PRO distribution is installed and the
+    entitlement verdict is ACTIVE, and drops any individual entry whose job
+    name the operator named in ``BALDUR_SCHEDULER_DISABLED_JOBS`` (the same
+    names the in-process scheduler uses, so one setting covers both lanes).
+    The gate lives here rather than in the consolidated-schedule loop because
+    this getter is also a documented operator entry point (see Usage), and a
+    gate one level up would be bypassed by it.
 
     Returns:
         Dict[str, Any]: Celery Beat schedule configuration
@@ -913,9 +1134,12 @@ def get_canary_watchdog_beat_schedule() -> dict[str, Any]:
 
         CELERY_BEAT_SCHEDULE.update(get_canary_watchdog_beat_schedule())
     """
+    if not _canary_watchdog_lane_enabled():
+        return {}
+
     from celery.schedules import crontab
 
-    return {
+    schedule = {
         # Zombie rollout scan (every 5 minutes)
         "canary-scan-zombie-rollouts": {
             "task": "baldur.tasks.canary_watchdog.scan_zombie_rollouts",
@@ -944,3 +1168,12 @@ def get_canary_watchdog_beat_schedule() -> dict[str, Any]:
             },
         },
     }
+
+    for entry_key in _disabled_beat_entry_keys():
+        del schedule[entry_key]
+        logger.info(
+            "canary_watchdog.job_disabled_by_settings",
+            job=_BEAT_ENTRY_JOB_NAMES[entry_key],
+        )
+
+    return schedule

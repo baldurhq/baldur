@@ -54,8 +54,8 @@ entries:
   - {module: "bridge.py", class: "BridgeSettings", field: "tenacity_enabled", default: false, tier: "Core", env_var: "BALDUR_BRIDGE_TENACITY_ENABLED"}
   - {module: "bulkhead.py", class: "BulkheadSettings", field: "metrics_enabled", default: true, tier: "Core", env_var: "BALDUR_BULKHEAD_METRICS_ENABLED"}
   - {module: "canary_interlock.py", class: "CanaryInterlockSettings", field: "refresher_enabled", default: true, tier: "Core", env_var: "BALDUR_CANARY_INTERLOCK_REFRESHER_ENABLED"}
-  - {module: "canary_watchdog.py", class: "CanaryWatchdogSettings", field: "enable_auto_promote", default: true, tier: "Core", env_var: "BALDUR_CANARY_WATCHDOG_ENABLE_AUTO_PROMOTE"}
-  - {module: "canary_watchdog.py", class: "CanaryWatchdogSettings", field: "enable_auto_rollback", default: true, tier: "Core", env_var: "BALDUR_CANARY_WATCHDOG_ENABLE_AUTO_ROLLBACK"}
+  - {module: "canary_watchdog.py", class: "CanaryWatchdogSettings", field: "enable_auto_promote", default: false, tier: "Core", env_var: "BALDUR_CANARY_WATCHDOG_ENABLE_AUTO_PROMOTE"}
+  - {module: "canary_watchdog.py", class: "CanaryWatchdogSettings", field: "enable_auto_rollback", default: false, tier: "Core", env_var: "BALDUR_CANARY_WATCHDOG_ENABLE_AUTO_ROLLBACK"}
   - {module: "canary_watchdog.py", class: "CanaryWatchdogSettings", field: "notification_enabled", default: true, tier: "Core", env_var: "BALDUR_CANARY_WATCHDOG_NOTIFICATION_ENABLED"}
   - {module: "capacity_reservation.py", class: "CapacityReservationSettings", field: "enabled", default: false, tier: "Core", env_var: "BALDUR_CAPACITY_RESERVATION_ENABLED"}
   - {module: "cell_topology.py", class: "CellTopologySettings", field: "bulkhead_isolation_enabled", default: false, tier: "Core", env_var: "BALDUR_CELL_TOPOLOGY_BULKHEAD_ISOLATION_ENABLED"}

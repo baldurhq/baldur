@@ -122,7 +122,8 @@ class TestAutoPromoteStageAnchorBehavior:
             duration_minutes=5,
         )
         watchdog = _watchdog_with(
-            rollout, CanaryWatchdogConfig(notification_enabled=False)
+            rollout,
+            CanaryWatchdogConfig(notification_enabled=False, enable_auto_promote=True),
         )
 
         mock_governance = MagicMock()
@@ -144,7 +145,8 @@ class TestAutoPromoteStageAnchorBehavior:
             duration_minutes=5,
         )
         watchdog = _watchdog_with(
-            rollout, CanaryWatchdogConfig(notification_enabled=False)
+            rollout,
+            CanaryWatchdogConfig(notification_enabled=False, enable_auto_promote=True),
         )
 
         mock_governance = MagicMock()
@@ -156,7 +158,9 @@ class TestAutoPromoteStageAnchorBehavior:
             result = watchdog.auto_promote_eligible()
 
         assert result.promote_count == 1
-        watchdog._service.promote.assert_called_once_with(rollout.id, force=False)
+        watchdog._service.promote.assert_called_once_with(
+            rollout.id, force=False, expected_stage_index=0
+        )
 
     def test_legacy_rollout_falls_back_to_created_at(self):
         """Rollouts persisted before stage_started_at existed keep the old
@@ -167,7 +171,8 @@ class TestAutoPromoteStageAnchorBehavior:
             duration_minutes=5,
         )
         watchdog = _watchdog_with(
-            rollout, CanaryWatchdogConfig(notification_enabled=False)
+            rollout,
+            CanaryWatchdogConfig(notification_enabled=False, enable_auto_promote=True),
         )
 
         mock_governance = MagicMock()

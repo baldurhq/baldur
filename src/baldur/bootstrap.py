@@ -2585,6 +2585,31 @@ _DEFAULT_SCHEDULED_JOBS: tuple[tuple[str, str, str, float], ...] = (
         "_synthetic_config_apply",
         30.0,
     ),
+    # Canary watchdog twin lane. The Celery beat entries cover Celery
+    # deployments only, which left every Flask/FastAPI/plain-Python install
+    # with no config-lock renewal (a supervised rollout's lock lapses at its
+    # TTL, reopening the duplicate-create window) and no stall handling.
+    # Cadences match the beat entries. Resolved directly off the task module —
+    # unlike config_apply it imports Celery under a guard, so it stays
+    # importable on a Celery-less install.
+    (
+        "scan_zombie_rollouts",
+        "baldur.tasks.canary_watchdog",
+        "scan_zombie_rollouts",
+        300.0,
+    ),
+    (
+        "auto_promote_eligible",
+        "baldur.tasks.canary_watchdog",
+        "auto_promote_eligible",
+        60.0,
+    ),
+    (
+        "collect_canary_metrics",
+        "baldur.tasks.canary_watchdog",
+        "collect_canary_metrics",
+        120.0,
+    ),
 )
 
 
@@ -2593,15 +2618,29 @@ _DEFAULT_SCHEDULED_JOBS: tuple[tuple[str, str, str, float], ...] = (
 # capability, so on an OSS-only install this job could only fail on cadence.
 # Applying pending runtime-config changes is PRO-only for the same reason: the
 # creation routes are PRO, so no pending change can exist that an OSS process
-# could apply.
-_PRO_GATED_JOBS: tuple[str, ...] = ("archive_old_dlq_entries", "config_apply")
+# could apply. The canary watchdog jobs are PRO-only because every one of them
+# resolves the PRO canary rollout service before it can do anything.
+_PRO_GATED_JOBS: tuple[str, ...] = (
+    "archive_old_dlq_entries",
+    "config_apply",
+    "scan_zombie_rollouts",
+    "auto_promote_eligible",
+    "collect_canary_metrics",
+)
 
 # Default jobs that additionally require an ACTIVE entitlement verdict, not
 # just an importable PRO distribution. Applying runtime-config changes is a
 # licensed capability and every other PRO service is registered on that same
 # verdict; an import probe standing in for it lets an unentitled process import
-# PRO code on a cadence and stand ready to apply PRO config changes.
-_ENTITLEMENT_GATED_JOBS: tuple[str, ...] = ("config_apply",)
+# PRO code on a cadence and stand ready to apply PRO config changes. Canary
+# rollouts are licensed the same way, and their beat twins read the identical
+# verdict, so the two lanes cannot disagree about who may run them.
+_ENTITLEMENT_GATED_JOBS: tuple[str, ...] = (
+    "config_apply",
+    "scan_zombie_rollouts",
+    "auto_promote_eligible",
+    "collect_canary_metrics",
+)
 
 
 def _tier_resolved_scheduled_jobs() -> tuple[tuple[str, str, str, float], ...]:
@@ -2703,6 +2742,9 @@ _CELERY_TASK_NAMES: dict[str, str] = {
     "cb_recovery": "baldur.celery_tasks.check_circuit_breaker_recovery",
     "cb_override_expiry": "baldur.celery_tasks.expire_manual_overrides",
     "config_apply": "baldur.apply_pending_config_changes",
+    "scan_zombie_rollouts": "baldur.tasks.canary_watchdog.scan_zombie_rollouts",
+    "auto_promote_eligible": "baldur.tasks.canary_watchdog.auto_promote_eligible",
+    "collect_canary_metrics": "baldur.tasks.canary_watchdog.collect_canary_metrics",
 }
 
 
