@@ -342,10 +342,49 @@ def reset_init_state() -> None:
         # init() seeds from scratch.
         _drop_seeded_circuit_breaker_config()
 
+        # Step 3.7 — drop the audit provider/adapter/settings state that the
+        # entitlement hook writes. Audit is not a _REGISTRIES_TO_WIRE row (its
+        # default is owned by Step 5, not by backend probing), so the Step-3.5
+        # loop does not restore it.
+        _reset_audit_provider_state()
+
         # Step 4 — drop the runtime (eager-read env vars are re-read on rebuild).
         from baldur.runtime import reset_runtime
 
         reset_runtime()
+
+
+def _reset_audit_provider_state() -> None:
+    """Restore the three audit surfaces an entitlement hook can dirty.
+
+    The registry default, the cached adapter singleton and the settings
+    object are each restored inside their own try/except so one failure
+    does not strand the others — the same fail-soft shape as the reset
+    steps around this one. Without it a test that runs the hook leaks
+    ``"file_hashchain"``, a live adapter and a flipped master switch into
+    every later test in the same worker.
+    """
+    try:
+        from baldur.factory.registry import ProviderRegistry
+
+        ProviderRegistry.audit.clear_instances()
+        ProviderRegistry.audit.set_default("null")
+    except Exception as e:
+        logger.warning("baldur.audit_default_reset_failed", error=str(e))
+
+    try:
+        from baldur.adapters.audit.singleton import reset_audit_adapter
+
+        reset_audit_adapter()
+    except Exception as e:
+        logger.warning("baldur.audit_adapter_reset_failed", error=str(e))
+
+    try:
+        from baldur.settings.audit import reset_audit_settings
+
+        reset_audit_settings()
+    except Exception as e:
+        logger.warning("baldur.audit_settings_reset_failed", error=str(e))
 
 
 def _drop_seeded_circuit_breaker_config() -> None:
@@ -1937,9 +1976,13 @@ class ExtensionResult:
 def _run_pro_extensions() -> ExtensionResult:
     """Discover and invoke ``baldur.bootstrap_hooks`` entry points.
 
-    PRO package authors register a single hook function in their
-    pyproject.toml that flips audit settings to enabled and sets the
-    ``ProviderRegistry.audit`` default to ``"file_hashchain"``.
+    A PRO package author registers a single hook function in their
+    pyproject.toml. The audit part of that hook is conditional, not a
+    blanket flip: it switches the master switch on only when the operator
+    left ``BALDUR_AUDIT_ENABLED`` unset, and promotes the
+    ``ProviderRegistry.audit`` default to ``"file_hashchain"`` only when
+    no other backend has been selected and the promoted one is registered
+    and constructible.
 
     Hook failures are logged at WARNING and do NOT abort init().
     """
@@ -2260,13 +2303,20 @@ def _find_resolutions_by_env(
 def _apply_audit_default_provider() -> None:
     """Apply the audit default provider per AuditSettings.enabled.
 
-    OSS path:  ``enabled=False`` → leaves the module-level default which
-                is already ``"null"`` (set by ``registry.py`` at module
-                load), so this is a no-op.
-    PRO path:  the entry-point hook already called
-               ``ProviderRegistry.audit.set_default("file_hashchain")``,
-               so this function only logs the resolved name as
-               confirmation.
+    Disabled: re-asserts ``"null"`` — normally a no-op, since that is the
+    module-load default, but it also revokes any promotion a hook made
+    against an operator who switched audit off.
+
+    Enabled: leaves whatever default stands. A PRO entitlement hook may
+    have promoted the hash-chain backend; a host application may have
+    selected its own; neither is second-guessed here.
+
+    Enabled while the resolved default is still the no-op adapter is the
+    one combination that silently voids the trail — every record is
+    accepted and discarded — so it is reported twice: a WARNING naming the
+    condition, and the ``audit_backend_wired`` gauge, which is the channel
+    an alert can watch. The gauge is set on both outcomes, so a wired
+    process publishes 1 rather than leaving the series absent.
     """
     try:
         from baldur.factory import ProviderRegistry
@@ -2278,9 +2328,29 @@ def _apply_audit_default_provider() -> None:
             # Defense-in-depth: re-assert null even if a hook tried to override.
             ProviderRegistry.audit.set_default("null")
             current = "null"
+
+        if settings.enabled:
+            wired = current != "null"
+            if not wired:
+                logger.warning(
+                    "audit.backend_unwired",
+                    provider=current,
+                    reason="audit_enabled_but_default_provider_is_noop",
+                )
+            _set_audit_backend_wired_gauge(wired)
         logger.debug("audit.default_provider_set", provider=current)
     except Exception as e:
         logger.debug("audit.default_provider_set_failed", error=e)
+
+
+def _set_audit_backend_wired_gauge(wired: bool) -> None:
+    """Publish the audit-backend verdict as a series. Fail-open."""
+    try:
+        from baldur.metrics.audit_backend_metrics import set_audit_backend_wired
+
+        set_audit_backend_wired(wired)
+    except Exception as e:
+        logger.debug("audit.backend_wired_gauge_skipped", error=str(e))
 
 
 # =============================================================================

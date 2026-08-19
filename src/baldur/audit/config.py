@@ -173,10 +173,11 @@ class AuditConfig(SerializableMixin):
         """
         Get Redis client for distributed hash chain.
 
-        When distributed mode is enabled and no per-feature override
-        (AUDIT_HASH_CHAIN_REDIS_URL) is set, the URL is resolved from the
-        canonical BALDUR_REDIS_URL (RedisSettings.url) rather than a bare
-        localhost default.
+        Gated on this config's own ``hash_chain_distributed`` switch; the
+        URL resolution itself is delegated to
+        :func:`create_hash_chain_redis_client`, which the adapter factory
+        also calls (it gates on ``AuditSettings.distributed_hash_chain``
+        instead).
 
         Returns:
             Redis client if distributed mode enabled, None otherwise.
@@ -184,23 +185,50 @@ class AuditConfig(SerializableMixin):
         if not self.hash_chain_distributed:
             return None
 
-        try:
-            from baldur.adapters.redis.connection_factory import (
-                get_redis_connection_factory,
-            )
-            from baldur.settings.redis import get_redis_settings
+        return create_hash_chain_redis_client(self.hash_chain_redis_url)
 
-            redis_url = self.hash_chain_redis_url or get_redis_settings().url
-            return get_redis_connection_factory().create(redis_url)
-        except ImportError:
-            logger.warning("audit_config.redis_factory_unavailable")
-            return None
-        except Exception as e:
-            logger.warning(
-                "audit_config.create_redis_client_failed",
-                error=e,
-            )
-            return None
+
+def create_hash_chain_redis_client(redis_url: str | None = None) -> Any | None:
+    """Build the Redis client backing the distributed audit hash chain.
+
+    Resolution order: the ``redis_url`` argument (or its
+    ``AUDIT_HASH_CHAIN_REDIS_URL`` per-feature override when the argument
+    is omitted), then the canonical ``BALDUR_REDIS_URL``
+    (``RedisSettings.url``) — never a bare localhost default.
+
+    Callers decide *whether* a distributed chain is wanted; this helper
+    only answers *which client*. It is a sentinel-returning primitive: any
+    failure yields ``None`` with a WARNING, which every caller treats as
+    "fall back to the local file-locked chain".
+
+    Args:
+        redis_url: Explicit per-feature URL override. ``None`` falls back
+            to the env var, then to the canonical Redis URL.
+
+    Returns:
+        A Redis client, or ``None`` when one could not be built.
+    """
+    try:
+        from baldur.adapters.redis.connection_factory import (
+            get_redis_connection_factory,
+        )
+        from baldur.settings.redis import get_redis_settings
+
+        resolved_url = (
+            redis_url
+            or os.environ.get("AUDIT_HASH_CHAIN_REDIS_URL")
+            or get_redis_settings().url
+        )
+        return get_redis_connection_factory().create(resolved_url)
+    except ImportError:
+        logger.warning("audit_config.redis_factory_unavailable")
+        return None
+    except Exception as e:
+        logger.warning(
+            "audit_config.create_redis_client_failed",
+            error=e,
+        )
+        return None
 
 
 # Minimum retention period per regulation (defaults based on legal requirements)

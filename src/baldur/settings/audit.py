@@ -54,9 +54,13 @@ class AuditSettings(BaseSettings):
             "audit I/O is silenced (Pipeline A WAL, Pipeline B config-change "
             "events, env_snapshot fallback). Overrides fallback_enabled, "
             "metrics_enabled, load_shedding_enabled, and load_shedding/buffer "
-            "thresholds — those settings only apply when enabled=True. PRO-tier "
-            "consumers activate via the baldur.bootstrap_hooks entry "
-            "point (D4)."
+            "thresholds — those settings only apply when enabled=True. A "
+            "PRO-tier bootstrap hook switches this on during init() when — "
+            "and only when — BALDUR_AUDIT_ENABLED was left unset; an "
+            "explicit value of either polarity always wins. Like every "
+            "BALDUR_* field the environment is read once, when this "
+            "settings object is first built, so a value exported after "
+            "that is not honored."
         ),
     )
 

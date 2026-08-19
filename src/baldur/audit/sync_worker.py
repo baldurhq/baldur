@@ -697,7 +697,11 @@ class AuditSyncWorker:
         if wal is None:
             return 0, 0
 
-        adapter = self._get_adapter()
+        # Null-aware: the registry falls back to the no-op adapter, so
+        # ``_get_adapter()`` would hand back an object whose ``log()`` body
+        # is ``pass`` and every entry would be counted as delivered, the
+        # cursor advanced, and the WAL file unlinked.
+        adapter = self._resolve_central_destination()
         start_time = time.time()
         synced_count = 0
         failed_count = 0
@@ -715,7 +719,7 @@ class AuditSyncWorker:
                 self._stats.current_lag_entries = len(entries)
 
             if adapter is None:
-                # No central destination wired — surface the backlog via lag, but
+                # No real central destination — surface the backlog via lag, but
                 # do NOT advance the cursor or delete the WAL; entries wait for a
                 # wired adapter. Edge-triggered WARNING (once per unwired episode)
                 # so a growing WAL backlog is not mistaken for a stalled worker.
