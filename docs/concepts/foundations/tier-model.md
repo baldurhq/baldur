@@ -99,8 +99,10 @@ and the capture is already real: a final failure is set aside with the context n
 again, you can browse the backlog in the web console, and entries retry one at a time. What changes
 with PRO is the scale at which you *operate* that backlog. Add the PRO package and a license key and
 the **exact same code** gains one-click batch replay, success-rate-driven pacing, a disk-durable
-outbox, and archive/purge retention — the difference between recovering ten entries by hand and
-draining ten thousand automatically.
+outbox, and archive/purge retention — the difference between working a backlog one entry at a time
+and operating one ten thousand entries deep. On either tier, a replayed call executes the work
+again, so give `dlq=True` only to operations
+[safe to run a second time — a charge that must not double needs a dedup guard first](dlq-replay.md).
 
 ## Configuration
 
