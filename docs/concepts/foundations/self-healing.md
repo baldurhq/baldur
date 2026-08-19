@@ -42,16 +42,28 @@ A self-healing layer turns those into contained, automatic, recoverable events.
 ## How it works in Baldur
 
 You wrap a call with the `@baldur.protected` facade, one decorator that runs a circuit breaker by
-default and lets you opt in retry and a fallback:
+default and lets you opt in retry, a fallback, and dead-letter capture:
 
 ```python
 import baldur
 
 
-@baldur.protected("charge-customer", retry=True, fallback=lambda: {"status": "queued"})
+@baldur.protected(
+    "charge-customer",
+    retry=True,
+    dlq=True,
+    idempotency_key="order_id",
+    fallback=lambda: {"status": "queued"},
+)
 def charge(order_id: str) -> dict:
     return payment_gateway.charge(order_id)
 ```
+
+Two of these arguments are safety rails for a money path. Retry re-executes the call, so
+`idempotency_key` gives the charge a dedup guard: a duplicate attempt (a retry, a double-submit)
+[runs the side effect only once](../oss/idempotency.md). And `dlq=True` is an explicit opt-in:
+Baldur never captures request snapshots without it, and a replayed entry executes the work again,
+so grant it only to calls that are [safe to run a second time](dlq-replay.md).
 
 From then on, Baldur watches that call and responds to failure automatically:
 
@@ -68,22 +80,23 @@ flowchart LR
 - A **failing** dependency trips the circuit breaker, so your app stops hammering it and fails
   fast instead of hanging.
 - When a call still cannot succeed, a **fallback** runs so the caller still gets a safe answer
-  instead of an error, and work that must not be lost is set aside in the **dead-letter queue**
-  to replay later instead of dropped.
+  instead of an error, and work you opted in with `dlq=True` is set aside in the
+  **dead-letter queue** to replay later instead of dropped.
 
 Adoption stays cheap because there is nothing to stand up and nothing new to learn:
 
-- **Zero infrastructure to start.** With no configuration, Baldur runs on an in-memory fallback —
-  no Redis, no Docker, no environment variables. Add Redis only when you scale to multiple
-  processes. It is a library, not a sidecar or a separate service.
+- **Zero infrastructure to start.** With no configuration, Baldur runs on an in-memory fallback:
+  no external services and no environment variables required. Add Redis only when you scale to
+  multiple processes. It is a library, not a sidecar or a separate service.
 - **One API across frameworks.** The same `@baldur.protected` works on Django, FastAPI, and Flask.
 
-**Self-healing, honestly.** Baldur automates the failure responses it is designed for. It does
+**Where the automation stops.** Baldur automates the failure responses it is designed for. It does
 not fix bugs in your code or guarantee your app never fails. Its job is to keep your app
 responsive and your data safe *through* a failure, and to recover automatically once the
 dependency comes back. For a failure it cannot safely resolve on its own, Baldur's rule is to make
-it **loud, not silent**: the failure is surfaced (and, in a production setup, escalated to a
-human) rather than swallowed. Self-healing where it can; a clear hand-off where it cannot.
+it **loud, not silent**: the failure is surfaced in logs and metrics (and, with PRO's escalation
+channels, pushed to a human) rather than swallowed. Self-healing where it can; a clear hand-off
+where it cannot.
 
 ### The patterns it gives you
 
