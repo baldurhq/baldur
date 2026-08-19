@@ -8,8 +8,9 @@ Covers the watchdog half of the renewal wiring:
        governance gate (pins the absence — D5) and before the zombie check
        (D1).
     C. RolloutWatchdog._notify_lock_conflict — gated, config-type-scoped,
-       CHAOS-category Slack alert (D4).
+       OPERATIONS-category Slack alert (D4).
     D. WatchdogResult — renewal counters present in defaults and to_dict (D10).
+    E. scan_zombie_rollouts — the registered task entry point reaches renewal.
 
 The watchdog talks to a Mock service (existing precedent in
 test_canary_watchdog.py); renewal is observable via WatchdogResult counters and
@@ -26,6 +27,10 @@ pytestmark = pytest.mark.requires_pro
 from datetime import timedelta
 from unittest.mock import Mock, patch
 
+from baldur.factory.registry import ProviderRegistry
+from baldur.interfaces.canary import (
+    CanaryRolloutService as CanaryRolloutServiceProtocol,
+)
 from baldur.models.canary import LockRenewalOutcome
 from baldur.models.notification import (
     NotificationCategory,
@@ -35,6 +40,8 @@ from baldur.tasks.canary_watchdog import (
     CanaryWatchdogConfig,
     RolloutWatchdog,
     WatchdogResult,
+    reset_watchdog,
+    scan_zombie_rollouts,
 )
 from baldur.utils.time import utc_now
 from baldur_pro.services.canary import (
@@ -320,7 +327,73 @@ class TestWatchdogScanRenewsLocks:
 
 
 # =============================================================================
-# C. _notify_lock_conflict — gated, dedup-keyed, CHAOS-category alert (D4)
+# E. The registered task entry point reaches renewal
+# =============================================================================
+
+
+class TestScanTaskRenewsLocks:
+    """Renewal is the lane's headline non-mutating deliverable, so it is pinned
+    at the entry point beat actually publishes — not only at ``scan_and_handle``.
+
+    Between the two now sit the unregistered-service guard and the singleton
+    whose config comes from settings, either of which could swallow the whole
+    pass while every method-level case above stayed green.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _fresh_singletons(self):
+        from baldur.settings.canary_watchdog import reset_canary_watchdog_settings
+
+        reset_canary_watchdog_settings()
+        reset_watchdog()
+        yield
+        reset_watchdog()
+        reset_canary_watchdog_settings()
+
+    def test_scan_task_renews_every_active_rollout(self):
+        """A live rollout's config-type lock is extended on a default install.
+
+        No opt-in flag stands in front of renewal, so this is what activation
+        buys on its own: without it the lock lapses at ``lock_timeout_minutes``
+        and a second rollout can be created for the same config type.
+        """
+        service = Mock(spec=CanaryRolloutServiceProtocol)
+        service.get_active_rollouts.return_value = [
+            _rollout(state=CanaryState.CANARY, rollout_id="r1"),
+            _rollout(state=CanaryState.PAUSED, rollout_id="r2", config_type="dlq"),
+        ]
+        service.renew_config_lock.return_value = LockRenewalOutcome.RENEWED
+
+        with ProviderRegistry.canary_rollout_service.override(service):
+            result = scan_zombie_rollouts()
+
+        assert service.renew_config_lock.call_count == 2
+        assert result["renewed_count"] == 2
+        assert result["success"] is True
+
+    def test_scan_task_mutates_nothing_by_default(self):
+        """Renewal runs; promotion and rollback do not.
+
+        The same pass that proves renewal is live has to prove the two mutating
+        actions stayed off, or "behaviour-preserving activation" is only a
+        settings value rather than an observed property of the task.
+        """
+        service = Mock(spec=CanaryRolloutServiceProtocol)
+        service.get_active_rollouts.return_value = [
+            _rollout(state=CanaryState.CANARY, rollout_id="r1", age_minutes=600),
+        ]
+        service.renew_config_lock.return_value = LockRenewalOutcome.RENEWED
+
+        with ProviderRegistry.canary_rollout_service.override(service):
+            scan_zombie_rollouts()
+
+        service.renew_config_lock.assert_called_once()
+        service.rollback.assert_not_called()
+        service.promote.assert_not_called()
+
+
+# =============================================================================
+# C. _notify_lock_conflict — gated, dedup-keyed, OPERATIONS-category alert (D4)
 # =============================================================================
 
 

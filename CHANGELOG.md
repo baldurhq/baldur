@@ -32,7 +32,9 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - A Redis outage starting after resolution now keeps the outbound 429 cooldown, per worker.
 - `baldur_ratelimit_fallback_active` reads 1 there; leaving it needs a passing write probe.
 - **Breaking**: `extend_cooldown` / `increment_consecutive_429s` degrade there instead of raising.
-- `BALDUR_CANARY_WATCHDOG_ENABLE_AUTO_PROMOTE` / `..._AUTO_ROLLBACK` default `true` → `false`.
+- **Breaking**: `BALDUR_CANARY_WATCHDOG_ENABLE_AUTO_PROMOTE` / `..._ROLLBACK` default `false`.
+- Migration: set both to `true` to keep a hand-wired watchdog promoting and rolling back.
+- `promote()` takes `expected_stage_index`; the canary lane needs a matching `baldur-pro`.
 
 ### Fixed
 

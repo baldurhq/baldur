@@ -33,6 +33,8 @@ class CanaryRolloutService(Protocol):
 
     def renew_config_lock(self, rollout: Any) -> Any: ...
 
+    def rollback(self, rollout_id: str, *args: Any, **kwargs: Any) -> bool: ...
+
     def promote(
         self,
         rollout_id: str,
