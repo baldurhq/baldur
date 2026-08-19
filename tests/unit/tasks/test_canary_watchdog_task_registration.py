@@ -81,8 +81,13 @@ def _reset_watchdog_singleton(monkeypatch):
     The tasks resolve the watchdog singleton, whose config now comes from the
     settings singleton — so an ambient ``BALDUR_CANARY_WATCHDOG_*`` value would
     otherwise decide what the opt-in cases below observe.
+
+    The skip warning's once-per-task dedup set is process-wide for the same
+    reason it exists, so it is emptied here too: otherwise the first case to
+    warn for a task name would silence every later case asserting that warning.
     """
     from baldur.settings.canary_watchdog import reset_canary_watchdog_settings
+    from baldur.tasks.canary_watchdog import _service_unregistered_warned
 
     for var in (
         "BALDUR_CANARY_WATCHDOG_ENABLE_AUTO_PROMOTE",
@@ -90,11 +95,13 @@ def _reset_watchdog_singleton(monkeypatch):
     ):
         monkeypatch.delenv(var, raising=False)
 
+    _service_unregistered_warned.clear()
     reset_canary_watchdog_settings()
     reset_watchdog()
     yield
     reset_watchdog()
     reset_canary_watchdog_settings()
+    _service_unregistered_warned.clear()
 
 
 # =============================================================================
@@ -200,6 +207,40 @@ class TestCanaryWatchdogTaskGuardBehavior:
         assert mock_logger.warning.call_args.kwargs["task"] == "auto_promote_eligible"
         assert mock_logger.warning.call_args.kwargs["reason"] == "service_unregistered"
         assert "baldur.init()" in mock_logger.warning.call_args.kwargs["hint"]
+
+    def test_repeat_skip_warns_once_and_then_drops_to_debug(self):
+        """The dedup that makes the WARNING level affordable.
+
+        These tasks tick every 1, 2 and 5 minutes. An undeduplicated line at
+        WARNING would print thousands of times a day on one misconfigured
+        worker, and an operator who learns to filter it loses the one line that
+        told them ``baldur.init()`` is missing. Later ticks stay visible at
+        DEBUG, which costs nothing in a production log configuration.
+        """
+        import baldur.tasks.canary_watchdog as watchdog_module
+
+        with patch.object(watchdog_module, "logger") as mock_logger:
+            for _tick in range(5):
+                _service_unregistered_result("scan_zombie_rollouts")
+
+        assert mock_logger.warning.call_count == 1
+        assert [call.args[0] for call in mock_logger.debug.call_args_list] == [
+            "canary_watchdog.task_skipped"
+        ] * 4
+
+    def test_dedup_is_scoped_per_task_not_per_process(self):
+        """Three tasks, three first warnings — one silencing the others would
+        leave two of the lane's three jobs with no diagnostic at all."""
+        import baldur.tasks.canary_watchdog as watchdog_module
+
+        with patch.object(watchdog_module, "logger") as mock_logger:
+            for _task, task_name in _LANE_TASKS:
+                _service_unregistered_result(task_name)
+                _service_unregistered_result(task_name)
+
+        assert [call.kwargs["task"] for call in mock_logger.warning.call_args_list] == [
+            task_name for _task, task_name in _LANE_TASKS
+        ]
 
     @pytest.mark.parametrize(
         ("task", "task_name"),

@@ -32,6 +32,7 @@ Celery Beat:
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -53,9 +54,12 @@ logger = structlog.get_logger()
 # the manager from the OPERATIONS category / HIGH priority routing.
 _ALERT_CHANNEL_TYPES = ("slack",)
 
-# Celery retry policy for the three lane tasks. Every entry carries an
-# ``expires`` shorter than its own cadence, so a task that keeps failing is
-# retried once and then left to the next tick rather than piling up.
+# Celery retry budget for the three lane tasks, matching the cleanup lane's
+# wrapper convention. It bounds ``self.retry()``, which these wrappers do not
+# call and which no ``autoretry_for`` triggers, so nothing consumes it today.
+# What actually keeps a failing task from piling up is each beat entry's
+# ``expires`` being shorter than its own cadence: the tick is dropped and the
+# next publication takes over.
 _TASK_MAX_RETRIES = 1
 _TASK_RETRY_DELAY_SECONDS = 60
 
@@ -75,6 +79,15 @@ _SERVICE_UNREGISTERED_HINT = (
     "call baldur.init() during worker startup - the canary rollout service is "
     "registered by init(), not by configure_baldur_celery()"
 )
+
+# Task names already warned about. The cause is static (a process that never
+# ran init()), so the diagnostic is worth one WARNING and no more: the three
+# tasks tick on a 1/2/5-minute cadence and an undeduplicated line would print
+# thousands of times a day, forever, which is exactly the spam LOGGING_STANDARDS
+# refuses to spend a WARNING on. Same shape as the outbound-429 coordination
+# diagnostic in services/retry_handler/policy.py.
+_service_unregistered_warned: set[str] = set()
+_service_unregistered_warned_lock = threading.Lock()
 
 
 # =============================================================================
@@ -237,8 +250,10 @@ class RolloutWatchdog:
     - PROMOTING state for more than 5 minutes (failed transition)
 
     Automatic actions:
-    1. zombie_threshold reached: Slack notification
-    2. auto_rollback_after reached: automatic rollback + notification
+    1. zombie_threshold reached: stall notification
+    2. auto_rollback_after reached: automatic rollback + notification, only
+       where ``enable_auto_rollback`` is turned on — it is off by default, as
+       is ``enable_auto_promote`` for :meth:`auto_promote_eligible`
 
     Example:
         watchdog = RolloutWatchdog()
@@ -861,11 +876,13 @@ def _canary_service_registered() -> bool:
 
 
 def _service_unregistered_result(task_name: str) -> dict[str, Any]:
-    """Warn once and report a clean skip for a task with no canary service.
+    """Warn once per task and report a clean skip with no canary service.
 
     On an entitled install an empty slot is a misconfiguration rather than
     normal flow, hence WARNING. Reporting a skip rather than raising keeps a
-    1-to-5-minute cadence from logging the same exception forever.
+    1-to-5-minute cadence from logging the same exception forever — and the
+    once-per-task dedup is what stops the replacement line from becoming the
+    same flood one level down. Later ticks stay observable at DEBUG.
 
     Args:
         task_name: The lane task asking, carried into the log line.
@@ -873,12 +890,24 @@ def _service_unregistered_result(task_name: str) -> dict[str, Any]:
     Returns:
         dict: the task's skip result.
     """
-    logger.warning(
-        "canary_watchdog.task_skipped",
-        task=task_name,
-        reason="service_unregistered",
-        hint=_SERVICE_UNREGISTERED_HINT,
-    )
+    with _service_unregistered_warned_lock:
+        first_skip = task_name not in _service_unregistered_warned
+        _service_unregistered_warned.add(task_name)
+
+    if first_skip:
+        logger.warning(
+            "canary_watchdog.task_skipped",
+            task=task_name,
+            reason="service_unregistered",
+            hint=_SERVICE_UNREGISTERED_HINT,
+        )
+    else:
+        logger.debug(
+            "canary_watchdog.task_skipped",
+            task=task_name,
+            reason="service_unregistered",
+        )
+
     return {
         "success": True,
         "skipped": True,
