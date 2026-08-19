@@ -15,8 +15,8 @@ commit. Two facts matter for each dependency:
 |-----------|---------|--------------|
 | Python | 3.11 | 3.11 · 3.12 · 3.13 |
 
-Python is tested on the three current releases. There is no upper bound in the
-package metadata. Python 3.14 runs in CI as a non-blocking preview job — it
+There is no upper bound in the package metadata. Python 3.14 runs in CI as a
+non-blocking preview job — it
 collects a signal ahead of time and is not a supported version; it will be
 listed above once it is green and stays green.
 
@@ -30,10 +30,11 @@ Baldur's core is framework-agnostic; the framework adapters are optional extras.
 | FastAPI | `baldur-framework[fastapi]` | 0.100 | latest ≥ floor (smoke) |
 | Flask | `baldur-framework[flask]` | 2.3 | latest ≥ floor (smoke) |
 
-Django is tested against the two current LTS releases plus the latest feature
+Django is tested against the 4.2 and 5.2 LTS lines plus the 6.0 feature
 release. FastAPI and Flask run a quickstart smoke test (install the extra, start
 the app, hit a protected endpoint) against the latest release satisfying the
-floor.
+floor; that lane runs whenever the package or a quickstart app changes rather
+than on every commit.
 
 ## Background tasks
 
@@ -49,14 +50,14 @@ optional and only needed to share state across multiple workers.
 | Component | Minimum | Tested in CI |
 |-----------|---------|--------------|
 | Redis server | — | 7.x |
-| `redis-py` client | 4.0 | resolved from the extra |
+| `redis-py` client | 4.2 | resolved from the extra |
 | PostgreSQL server | — | 16.x |
 | `psycopg2-binary` client | 2.9 | resolved from the extra |
 
 The distinction matters: **Redis server 7.x** is the data store Baldur's
-integration suite runs against, while **`redis-py` 4.0** is the floor for the
-client library installed by `baldur-framework[redis]` (and by the `celery`,
-`arq`, and `rq` extras). The same split applies to PostgreSQL: **server 16.x**
+integration suite runs against, while **`redis-py` 4.2** is the floor for the
+client library installed by `baldur-framework[redis]` (and by the `celery` and
+`arq` extras; the `rq` extra gets the client transitively through `rq` itself). The same split applies to PostgreSQL: **server 16.x**
 is what the integration suite provisions, and **`psycopg2-binary` 2.9** is the
 client floor installed by `baldur-framework[postgres]`.
 
