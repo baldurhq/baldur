@@ -23,6 +23,7 @@ from unittest.mock import MagicMock, patch
 import psutil
 import pytest
 
+from baldur import ConfigurationError
 from baldur.scripts import measure_footprint as mf
 
 # =============================================================================
@@ -30,6 +31,12 @@ from baldur.scripts import measure_footprint as mf
 # =============================================================================
 
 _LEGACY_CONSOLE_ENCODING = "cp949"
+
+# main() defaults this one variable and imposes nothing else. The name is the
+# contract: production spells it inline, so there is no source constant to
+# reference.
+_ADMIN_PORT_VAR = "BALDUR_ADMIN_PORT"
+_EXPLICIT_ADMIN_PORT = "9999"
 
 
 class _SettleStillRunning(Exception):
@@ -498,6 +505,115 @@ class TestFormatStageBehavior:
         lines = mf.format_stage(after, before)
 
         assert lines[-1] == "      new threads: l2_sync_0, l2_sync_1"
+
+
+# =============================================================================
+# main - exit routing
+# =============================================================================
+
+
+class TestMainExitRoutingBehavior:
+    """Which of main()'s three exits is taken, and what it says on the way out.
+
+    The measurement is covered by the helper tests above and end to end by the
+    subprocess smoke, which only ever walks the exit-0 path. What nothing else
+    reaches is the routing between the exits. ``baldur.init`` is patched to a
+    no-op here, so no daemon thread and no outbox worker start - the leak that
+    forces the smoke into a subprocess does not apply, and these stay in-suite.
+    """
+
+    @pytest.fixture
+    def probe_env(self, monkeypatch):
+        """Pin the admin port and serve a stub process to main().
+
+        main() writes ``BALDUR_ADMIN_PORT`` into ``os.environ`` on its first
+        line; setting it here hands the key to monkeypatch so it cannot survive
+        into the next test on this xdist worker. psutil reads the OS process
+        table - the same I/O-crossing boundary the helper tests stub.
+        """
+        monkeypatch.setenv(_ADMIN_PORT_VAR, _EXPLICIT_ADMIN_PORT)
+        with patch("psutil.Process", return_value=_stub_process()):
+            yield
+
+    @pytest.fixture
+    def never_settles(self, monkeypatch):
+        """Retune the settle loop so its deadline expires on the first pass.
+
+        The floor is left at its real value, so no sample can qualify and the
+        loop exits the way a process that never settles exits - through its own
+        deadline, with the real ``_settle`` and ``settled_index`` running.
+        Patching ``_settle`` out would have skipped both.
+        """
+        monkeypatch.setattr(mf, "_SETTLE_SAMPLE_INTERVAL_SECONDS", 0.0)
+        monkeypatch.setattr(mf, "_SETTLE_TIMEOUT_SECONDS", 0.0)
+
+    def test_main_never_settling_exits_nonzero_without_a_citable_figure(
+        self, probe_env, never_settles, capsys
+    ):
+        """The one outcome the whole settle stage exists to prevent.
+
+        A process whose threads are still arriving has no quotable resident
+        cost. Printing one anyway would make the peak/settle distinction - the
+        reason this script has a settle stage at all - decorative.
+        """
+        # Given - init succeeds; the settle loop gives up (fixtures)
+        with patch("baldur.init"):
+            # When
+            exit_code = mf.main()
+
+        # Then
+        out = capsys.readouterr().out
+        assert exit_code == 1
+        assert "No citable resident figure" in out
+        assert "settled, citable" not in out
+        assert mf._COMPLETE_BOUNDARY in out
+
+    def test_main_configuration_error_names_the_cause_and_claims_no_measurement(
+        self, probe_env, capsys
+    ):
+        """init() refuses to start in production without shared storage.
+
+        That refusal is the framework's own posture rather than a fault in the
+        probe, so it is reported instead of raised - but it must not read as a
+        measurement that came out empty.
+        """
+        refusal = ConfigurationError("shared storage is required in production")
+
+        with patch("baldur.init", side_effect=refusal):
+            exit_code = mf.main()
+
+        out = capsys.readouterr().out
+        assert exit_code == 1
+        assert "baldur.init() refused to start" in out
+        assert str(refusal) in out
+        assert "No measurement was taken" in out
+        assert "settled, citable" not in out
+        assert mf._COMPLETE_BOUNDARY in out
+
+    def test_main_lets_every_other_init_failure_propagate(self, probe_env):
+        """Fail-loud: exactly one exception is caught, and this is not it.
+
+        A widened ``except`` would swallow a real fault and then report on a
+        process that never initialised - the opposite of what the one caught
+        case is for.
+        """
+        with patch("baldur.init", side_effect=RuntimeError("entitlement bus down")):
+            with pytest.raises(RuntimeError, match="entitlement bus down"):
+                mf.main()
+
+    def test_main_does_not_override_an_explicitly_configured_admin_port(
+        self, probe_env
+    ):
+        """setdefault, so a port the operator chose still wins.
+
+        The probe imposes exactly one value on the posture it is measuring, and
+        only where the operator expressed none. Asserted on the refusal path
+        because the environment write is main()'s first line, before any branch.
+        """
+        with patch("baldur.init", side_effect=ConfigurationError("no storage")):
+            mf.main()
+
+        assert os.environ[_ADMIN_PORT_VAR] == _EXPLICIT_ADMIN_PORT
 
 
 # =============================================================================
