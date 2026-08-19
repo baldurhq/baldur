@@ -33,12 +33,12 @@ jobs:
       # builds on rapid push, so runner leakage is bounded.
       fail-fast: false
       # Full grid over every Python x Django pair both projects declare support
-      # for, which is 7 of the 9 combinations. The two exclusions are upstream
-      # facts, not preferences: Django 6.0 pins requires-python >= 3.12, so
-      # 3.11/6.0 has no resolution at all; Django 4.2 classifies Python 3.12 as
-      # its ceiling, so 3.13/4.2 would install (its requires-python floor is
-      # 3.8) but run a combination Django itself does not support — a red cell
-      # there would be Django's news, not ours.
+      # for, which is 9 of the 12 combinations. The three exclusions are
+      # upstream facts, not preferences: Django 6.0 and 6.1 pin requires-python
+      # >= 3.12, so their 3.11 cells have no resolution at all; Django 4.2
+      # classifies Python 3.12 as its ceiling, so 3.13/4.2 would install (its
+      # requires-python floor is 3.8) but run a combination Django itself does
+      # not support — a red cell there would be Django's news, not ours.
       # A grid rather than a diagonal because fail-fast is off specifically so
       # the failing *axis* can be read off the results — which only works when
       # each version appears in more than one cell. It also covers the pairs a
@@ -57,12 +57,14 @@ jobs:
       # classifiers.
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
-        django-version: ["4.2", "5.2", "6.0"]
+        django-version: ["4.2", "5.2", "6.0", "6.1"]
         exclude:
           - python-version: "3.13"
             django-version: "4.2"
           - python-version: "3.11"
             django-version: "6.0"
+          - python-version: "3.11"
+            django-version: "6.1"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
@@ -104,9 +106,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Django 4.2 does not support 3.14, so only the two newer lines apply.
+        # Django 4.2 does not support 3.14, so only the newer lines apply.
         python-version: ["3.14"]
-        django-version: ["5.2", "6.0"]
+        django-version: ["5.2", "6.0", "6.1"]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6

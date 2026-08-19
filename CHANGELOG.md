@@ -12,6 +12,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ### Added
 
+- Django 6.1 joins the supported and CI-tested matrix (Python 3.12/3.13 cells).
 - Runnable self-healing demo: `python -m baldur.scripts.demo_self_healing` (no infra needed).
 - `BALDUR_RATE_LIMIT_REDIS_RECOVERY_PROBE_INTERVAL_SECONDS` (default 30) paces the recovery probe.
 - `BALDUR_SCHEDULER_DISABLED_JOBS` switches off named default jobs without stopping the scheduler.
