@@ -338,6 +338,38 @@ class TestCanaryWatchdogConfigFromSettings:
             assert config.auto_rollback_after_minutes == 90
             assert config.enable_auto_rollback is True
 
+    def test_env_reaches_the_shared_watchdog_singleton(self):
+        """The whole chain: env var -> settings singleton -> running watchdog.
+
+        ``from_settings()`` had no production caller, so the watchdog singleton
+        built plain dataclass defaults and every ``BALDUR_CANARY_WATCHDOG_*``
+        variable was inert on both the Celery lane and the meta-watchdog probe
+        that shares this instance. The two cases above pin the classmethod;
+        this one pins that the object the lane actually uses is built from it.
+        """
+        from baldur.settings.canary_watchdog import reset_canary_watchdog_settings
+        from baldur.tasks.canary_watchdog import (
+            get_rollout_watchdog,
+            reset_watchdog,
+        )
+
+        reset_watchdog()
+        try:
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "BALDUR_CANARY_WATCHDOG_ZOMBIE_THRESHOLD_MINUTES": "45",
+                    "BALDUR_CANARY_WATCHDOG_MAX_STAGE_DURATION_MINUTES": "7",
+                },
+            ):
+                reset_canary_watchdog_settings()
+                config = get_rollout_watchdog().config
+
+                assert config.zombie_threshold_minutes == 45
+                assert config.max_stage_duration_minutes == 7
+        finally:
+            reset_watchdog()
+
 
 class TestFromSettingsPatternConsistency:
     """from_settings() 패턴의 일관성 검증."""
