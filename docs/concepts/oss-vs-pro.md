@@ -14,7 +14,7 @@ relicenses anything in the core.
 
 | Capability | OSS core | PRO |
 |------------|:--------:|:---:|
-| Circuit breaker (incl. half-open recovery) | ✅ | ✅ |
+| Circuit breaker (incl. half-open recovery) | ✅ | ✅ (＋cluster state propagation) |
 | Retry with backoff | ✅ | ✅ |
 | Idempotency | ✅ | ✅ |
 | Health checks | ✅ | ✅ |
@@ -30,7 +30,7 @@ relicenses anything in the core.
 | Unified notification / alerting | — | ✅ |
 | Emergency mode (coordinated load shedding) | — | ✅ |
 | Throttle / adaptive rate limiting | — | ✅ |
-| Canary Recovery (config rollout + auto-rollback) | — | ✅ |
+| Canary Recovery (staged config rollout + prepared rollback) | — | ✅ |
 | Governance gates for risky automation | — | ✅ |
 | Meta-Watchdog (Baldur watching itself) | — | ✅ |
 
@@ -79,7 +79,8 @@ strength*: a compartment that requests `thread_pool` isolation gets a dedicated
 worker pool whose execution timeout **frees the caller** when a task runs away
 (on the OSS semaphore fallback, the timeout bounds only the wait for admission —
 once admitted, a hung call occupies the calling thread until it returns). The
-same code runs on both tiers; OSS logs a startup warning naming the fallback.
+same code runs on both tiers; the first time such a compartment is created on
+OSS, a warning names the fallback.
 
 ## A note on naming: "canary"
 
@@ -89,15 +90,17 @@ stating what each does:
 
 - **Circuit-breaker half-open recovery (OSS).** When an OSS circuit breaker
   leaves the OPEN state, it does not slam 100% of traffic back at the
-  dependency. It admits a bounded number of concurrent probe calls (capped by
-  `BALDUR_CB_HALF_OPEN_MAX_CALLS`) and reverts to OPEN at the first probe failure.
-  This is ordinary half-open probing — it does not step traffic back through
-  graduated percentages — and it operates on **in-process traffic to one
+  dependency. It admits a bounded number of probe calls per half-open window
+  (capped by `BALDUR_CB_HALF_OPEN_MAX_CALLS`) and reverts to OPEN at the first
+  probe failure. This is ordinary half-open probing — it does not step traffic
+  back through graduated percentages — and it operates on **traffic to one
   dependency**. See the [circuit breaker](oss/circuit-breaker.md).
 - **Canary Recovery (PRO).** A separate PRO feature that rolls a **configuration
-  change** out to a small slice of your fleet first, watches it, and restores
-  the previous configuration automatically if the rollout degrades. It operates
-  on **fleet-wide configuration**, not circuit-breaker traffic. See
+  change** out under staged supervision: time-boxed observation windows with
+  pass criteria, and the previous configuration snapshotted and ready to
+  restore. One call rolls it back, a single panic action rolls back every
+  active rollout, and an escalating emergency pulls the brake automatically. It
+  operates on **fleet-wide configuration**, not circuit-breaker traffic. See
   [Canary Recovery](pro/canary-recovery.md).
 
 In short: the OSS circuit breaker recovers *one breaker's traffic* with bounded
