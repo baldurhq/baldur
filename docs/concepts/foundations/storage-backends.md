@@ -22,16 +22,17 @@ before anything else:
 
 ### In-memory (the default)
 
-Out of the box Baldur stores everything in process memory. No Redis, no
-database, no environment variables — `pip install` → `@baldur.protected` →
-working code. This is the whole [quickstart](../../getting-started/index.md) path.
+Out of the box Baldur stores everything in process memory. There is nothing to
+install or configure beyond the package itself; this is the whole
+[quickstart](../../getting-started/index.md) path.
 
 Its one hard limit is that the store is **per process**. Run more than one worker
 (`gunicorn --workers N`, `uvicorn --workers N`, several Celery workers) and each
 gets its own copy: circuit breaker state, idempotency keys, and rate-limit
 counters diverge silently across workers. That breaks **correctness**, not just
-scale. The in-memory store also grows unbounded. Treat it as a single-process /
-development backend.
+scale. The store is also volatile: a process restart clears everything, so
+breaker state, idempotency keys, and dead letters start from zero. Treat it as a
+single-process / development backend.
 
 ### Redis (shared across workers)
 
@@ -70,8 +71,9 @@ export BALDUR_REDIS_PASSWORD=<master-password>
 export BALDUR_REDIS_SENTINEL_PASSWORD=<sentinel-node-password>   # if your sentinels require auth
 ```
 
-Use `rediss://` / `rediss+sentinel://` for TLS. Sentinel is the recommended
-topology at growth (PRO) scale; standalone Redis is fine for a single host.
+Use `rediss://` for TLS to a standalone Redis; the Sentinel scheme does not
+currently support TLS. Sentinel is the recommended topology at growth (PRO)
+scale; standalone Redis is fine for a single host.
 
 While Redis is briefly unreachable, workers stop sharing state — how each feature
 behaves during the outage (skip the tier, degrade, or fail closed) differs per
