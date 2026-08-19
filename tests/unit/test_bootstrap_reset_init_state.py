@@ -22,7 +22,7 @@ Verification techniques (per UNIT_TEST_GUIDELINES §8):
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -234,3 +234,135 @@ class TestResetInitStateWiredRegistryCleanup:
                 assert registry.get_default_name() == expected, (
                     f"cycle={cycle}: {wiring.registry_attr} not reset to {expected}"
                 )
+
+
+class TestResetAuditProviderStateBehavior:
+    """Step 3.7 — the three audit surfaces an entitlement hook can dirty.
+
+    Audit is not a ``_REGISTRIES_TO_WIRE`` row (its default is owned by Step 5,
+    not by backend probing), so the Step-3.5 loop above does not reach it.
+    Without this step a test that runs the PRO activation hook leaks
+    ``"file_hashchain"``, a live adapter and a flipped master switch into every
+    later test in the same worker.
+
+    Each surface is asserted on its own, after a run that dirtied that surface
+    — a single aggregate assertion would pass on a reset that restored only
+    one of the three.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_audit_env(self, monkeypatch):
+        """The settings surface is only observable with the env var unset."""
+        monkeypatch.delenv("BALDUR_AUDIT_ENABLED", raising=False)
+
+    def test_reset_restores_the_audit_default_to_null(self):
+        from baldur import bootstrap
+        from baldur.factory.registry import ProviderRegistry
+
+        # Given: a hook promoted the hash-chain backend
+        ProviderRegistry.audit.set_default("file_hashchain")
+
+        # When
+        bootstrap._reset_audit_provider_state()
+
+        # Then
+        assert ProviderRegistry.audit.get_default_name() == "null"
+
+    def test_reset_clears_cached_audit_instances(self):
+        from baldur import bootstrap
+        from baldur.factory.registry import ProviderRegistry
+
+        # Given: a resolved-and-cached adapter instance in the slot
+        ProviderRegistry.audit.get("null")
+        assert ProviderRegistry.audit._instances
+
+        # When
+        bootstrap._reset_audit_provider_state()
+
+        # Then
+        assert ProviderRegistry.audit._instances == {}
+
+    def test_reset_drops_the_cached_audit_adapter_singleton(self):
+        from baldur import bootstrap
+        from baldur.adapters.audit.singleton import get_audit_adapter
+        from baldur.runtime import get_runtime
+
+        # Given: an emitter already resolved the process-wide adapter
+        get_audit_adapter()
+        assert get_runtime().has_singleton("audit_adapter") is True
+
+        # When
+        bootstrap._reset_audit_provider_state()
+
+        # Then
+        assert get_runtime().has_singleton("audit_adapter") is False
+
+    def test_reset_rebuilds_the_audit_settings_object(self):
+        from baldur import bootstrap
+        from baldur.settings.audit import get_audit_settings, set_audit_settings
+
+        # Given: the hook flipped the master switch in memory
+        set_audit_settings(enabled=True)
+        assert get_audit_settings().enabled is True
+
+        # When
+        bootstrap._reset_audit_provider_state()
+
+        # Then: a fresh object read from the (unset) environment
+        assert get_audit_settings().enabled is False
+
+    def test_reset_leaves_no_explicit_marker_on_the_enabled_field(self):
+        """``model_fields_set`` is what the PRO hook's set-vs-default gate
+        reads, so a stale marker would make the next hook run skip the flip."""
+        from baldur import bootstrap
+        from baldur.settings.audit import get_audit_settings, set_audit_settings
+
+        set_audit_settings(enabled=True)
+
+        bootstrap._reset_audit_provider_state()
+
+        assert "enabled" not in get_audit_settings().model_fields_set
+
+    def test_one_failing_surface_does_not_strand_the_others(self, caplog):
+        """Fail-soft per surface — the same shape as the reset steps around it.
+
+        A registry that refuses to reset must not leave the adapter singleton
+        and the master switch dirty, which is the leak this step exists to
+        prevent.
+        """
+        from baldur import bootstrap
+        from baldur.adapters.audit.singleton import get_audit_adapter
+        from baldur.factory.registry import ProviderRegistry
+        from baldur.runtime import get_runtime
+        from baldur.settings.audit import get_audit_settings, set_audit_settings
+
+        # Given: all three surfaces dirty, and the first one broken
+        ProviderRegistry.audit.set_default("file_hashchain")
+        get_audit_adapter()
+        set_audit_settings(enabled=True)
+
+        # When
+        with patch.object(
+            ProviderRegistry.audit,
+            "clear_instances",
+            side_effect=RuntimeError("registry locked"),
+        ):
+            bootstrap._reset_audit_provider_state()
+
+        # Then: the later two surfaces are still restored
+        assert get_runtime().has_singleton("audit_adapter") is False
+        assert get_audit_settings().enabled is False
+        assert "baldur.audit_default_reset_failed" in caplog.text
+
+    def test_reset_init_state_reaches_step_3_7(self):
+        """Wiring: the step is not merely defined — ``reset_init_state()``
+        calls it, which is the only reason a leaked hook run gets cleaned up.
+        """
+        from baldur import bootstrap
+        from baldur.factory.registry import ProviderRegistry
+
+        ProviderRegistry.audit.set_default("file_hashchain")
+
+        bootstrap.reset_init_state()
+
+        assert ProviderRegistry.audit.get_default_name() == "null"

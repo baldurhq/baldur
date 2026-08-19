@@ -147,7 +147,13 @@ _MOCK_CREATION_BUDGETS: dict[str, int] = {
     # `worker.pid` and `worker.cfg.preload_app`, both of which a spec-less
     # mock auto-generates: the process guard and the preload gate would each
     # have taken a branch the test never chose.
-    "oss": 4337,
+    # audit activation test pass: -3 - the Redis connection-factory and client
+    # stand-ins in the hash-chain Redis-resolution suite are now spec'd
+    # (RedisConnectionFactory / redis.Redis), and its identity token became a
+    # plain object(). The pass's own new mocks are spec'd or real objects: the
+    # writable-dir stand-ins are real ResolvedDir dataclasses and the audit
+    # adapters are spec'd against AuditLogAdapter.
+    "oss": 4334,
     "pro": 1800,
     "dormant": 401,
 }
