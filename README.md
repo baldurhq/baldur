@@ -176,6 +176,13 @@ hand-rolling a circuit breaker. See
 See [Compatibility](docs/compatibility.md) for the full matrix, the
 Python × Django test grid, and the version support policy.
 
+## Early access
+
+Baldur is early, and it is looking for a small number of teams already running
+a Python service in production to work with directly. If that is you, the
+details and how to reach me are in
+[Discussions](https://github.com/baldurhq/baldur/discussions).
+
 ## License
 
 Baldur is released under the Apache License 2.0 — see [LICENSE](LICENSE) and
@@ -187,7 +194,7 @@ Contributions are welcome under the Apache License 2.0. Pull requests are
 accepted through a sign-off-based [DCO](https://developercertificate.org/) flow —
 see [CONTRIBUTING.md](CONTRIBUTING.md) for the full model.
 
-- **Ideas, or what you are running Baldur on** →
+- **Ideas, or showing what you built** →
   [Discussions](https://github.com/baldurhq/baldur/discussions).
 - **Bugs / feature requests / docs** → open an issue or a pull request.
 - **Security** → see [SECURITY.md](SECURITY.md) (no public issues for vulnerabilities).
