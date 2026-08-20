@@ -45,9 +45,9 @@ try:
     METRICS_AVAILABLE = True
 
 except ImportError:
-    # prometheus_client unavailable — use a dummy metric. _DummyMetric is a
-    # superset of GaugeMetric (labels + set), so .set() is a no-op that never
-    # raises inside a fail-open except block.
+    # prometheus_client unavailable — use a dummy metric. _DummyMetric
+    # implements GaugeMetric in full (labels + set + inc), so .set() is a no-op
+    # that never raises inside a fail-open except block.
     METRICS_AVAILABLE = False
 
     class _DummyMetric:
@@ -57,6 +57,9 @@ except ImportError:
             return self
 
         def set(self, value: float) -> None:
+            pass
+
+        def inc(self, amount: float = 1) -> None:
             pass
 
     audit_backend_wired = _DummyMetric()

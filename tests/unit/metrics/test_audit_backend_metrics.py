@@ -136,3 +136,25 @@ class TestAuditBackendMetricsNoPrometheusContract:
         # Then
         assert result.returncode == 0, f"stderr={result.stderr}"
         assert "OK" in result.stdout
+
+    def test_dummy_satisfies_the_gauge_metric_protocol(self):
+        """The module annotates the gauge as ``GaugeMetric``, which is labels +
+        set + inc. A dummy missing one of the three type-checks as a mismatched
+        assignment and, worse, raises AttributeError on the branch prometheus
+        is absent — the exact branch the fallback exists to keep quiet."""
+        # When
+        result = _run_poisoned(
+            """
+            from baldur.metrics._metric_protocol import GaugeMetric
+            from baldur.metrics.audit_backend_metrics import audit_backend_wired
+
+            assert isinstance(audit_backend_wired, GaugeMetric), type(
+                audit_backend_wired
+            )
+            audit_backend_wired.labels().inc()
+            print('OK')
+            """
+        )
+        # Then
+        assert result.returncode == 0, f"stderr={result.stderr}"
+        assert "OK" in result.stdout
