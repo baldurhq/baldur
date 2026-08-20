@@ -271,7 +271,7 @@ class ShadowEvaluatorService:
         Returns ``False`` today — no production path calls
         ``evaluate_for_rollout``.
         """
-        # TODO(v1.1): remove structural probe once the evaluate_for_rollout trigger is wired
+        # TODO: remove structural probe once the evaluate_for_rollout trigger is wired
         # Flip to a real "is a production trigger wired?" check when
         # evaluate_for_rollout gains a production caller; co-located here so the
         # auto-yield seam moves with the trigger it describes. See doc 556 / OOS #550.
