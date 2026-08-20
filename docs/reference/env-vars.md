@@ -29,6 +29,7 @@ BALDUR_RETRY_MAX_ELAPSED=30.0  # total wall-clock retry budget (s); unset = no b
 BALDUR_IDEMPOTENCY_ENABLED=true
 BALDUR_IDEMPOTENCY_DEFAULT_CACHE_TTL=60
 BALDUR_IDEMPOTENCY_GATE_MEMORY_TTL_SECONDS=1800
+BALDUR_PROTECT_DEFAULT_TIMEOUT_SECONDS=30  # unset (default) = no Baldur-level wall-clock bound on protect(); set to restore a global outer net. Per-call timeout= always wins
 ```
 
 ## DLQ
@@ -67,6 +68,11 @@ BALDUR_REPLAY_AUTOMATION_SERVICE_FAILURE_TYPE_MAP='{"payment_api": ["TIMEOUT", "
 BALDUR_AUDIT_ENABLED=true
 ```
 
+An active PRO entitlement switches the audit subsystem on at startup and selects
+the hash-chain backend, so a PRO install needs neither variable. Setting
+`BALDUR_AUDIT_ENABLED` yourself always wins — `false` keeps audit off on an
+entitled install, `true` switches it on without one.
+
 ## License (entitlement)
 
 ```bash
@@ -81,6 +87,10 @@ BALDUR_REDIS_URL=redis://localhost:6379
 BALDUR_REDIS_PASSWORD=<secret>            # Redis instance / Sentinel master password
 BALDUR_REDIS_SENTINEL_PASSWORD=<secret>   # Sentinel-node password (separate from master)
 BALDUR_REDIS_USERNAME=<acl-user>          # Redis 6.0+ ACL username
+BALDUR_REDIS_PROBE_CONNECT_TIMEOUT=0.5    # connect budget for the admission probe
+BALDUR_REDIS_SOCKET_TIMEOUT=5.0           # per-operation socket timeout (seconds) on the data path
+BALDUR_REDIS_RETRY_ON_TIMEOUT=true        # retry timed-out Redis operations instead of failing fast
+BALDUR_RESILIENT_STORAGE_RECOVERY_PROBE_INTERVAL=5.0  # cooldown between degraded-mode recovery probes
 BALDUR_SQL_DSN=postgresql://user:pass@host:5432/db
 ```
 
@@ -102,8 +112,32 @@ logs, stack traces, and APM. `BALDUR_REDIS_PASSWORD` authenticates the Redis
 instance (the master, under Sentinel); `BALDUR_REDIS_SENTINEL_PASSWORD`
 authenticates the Sentinel nodes themselves when they require auth separate from
 the master; `BALDUR_REDIS_USERNAME` supplies a Redis 6.0+ ACL username. Set only
-the ones your deployment needs, and use the `rediss://` / `rediss+sentinel://`
-scheme for TLS.
+the ones your deployment needs, and use the `rediss://` scheme for TLS
+(standalone only — the Sentinel scheme does not currently support TLS).
+
+`BALDUR_REDIS_PROBE_CONNECT_TIMEOUT` (default `0.5`) bounds only the first
+connect that decides whether a Redis is reachable, before Baldur builds the
+long-lived client for that lane. The data-path budgets
+(`BALDUR_REDIS_SOCKET_TIMEOUT`, `BALDUR_REDIS_SOCKET_CONNECT_TIMEOUT`) are
+unaffected by it. Raise it when a healthy Redis needs longer than half a second
+to accept a connection — a cross-region or heavily loaded instance — because
+otherwise that lane falls back as if the Redis were down. The rate-limit lane's
+probe-failure warning names this variable for exactly that reason.
+
+`BALDUR_REDIS_RETRY_ON_TIMEOUT` (default `true`) is the stall-vs-fast-fail lever
+during a total Redis outage — one where no failover can promote a replica. With
+retry on, an in-flight request on a Redis-touching path re-tries through the
+outage and usually completes once Redis returns; the worker stays occupied for
+the duration. With retry off, each Redis operation fails after roughly
+`BALDUR_REDIS_SOCKET_TIMEOUT` (default `5.0` seconds) and the worker is freed —
+at the cost of a client-visible, retriable error in place of a delayed success.
+Flip it to `false` only when stalled requests threaten to exhaust the worker
+pool under sustained load. `BALDUR_RESILIENT_STORAGE_RECOVERY_PROBE_INTERVAL`
+(default `5.0`) sets the cooldown between degraded-mode recovery probes; leave
+it at the default or shorten it so workers leave degraded mode quickly after
+Redis recovers. The operational context for all three — what degrades, what
+stalls, and the incident-response sequence — is the data-consistency-boundaries
+runbook shipped in the repository's `docs/runbooks/` directory.
 
 The RQ queue adapter is **not** yet routed through `BALDUR_REDIS_URL` and still
 reads only a bare, non-prefixed `REDIS_URL`. On that path, clear any leftover bare
@@ -142,11 +176,33 @@ BALDUR_HEALTH_CHECK_READINESS_TIMEOUT_FAIL_DIRECTION=not_ready
 
 ## Event logging (runtime level adjustment)
 
+The global log level is read from `BALDUR_LOG_LEVEL` (default `WARNING`;
+standard Python `logging` level names, e.g. `DEBUG`, `INFO`). It is a direct
+environment read applied once when logging is configured — set it before the
+process starts. `BALDUR_LOG_LEVEL=DEBUG` is the diagnostic switch the
+troubleshooting page relies on (e.g. to surface the `protect.composer_built`
+zone-composition event).
+
+The four event families below have their own runtime-adjustable overrides:
+
 ```bash
 BALDUR_EVENT_LOGGING_DLQ_LOG_LEVEL=INFO
 BALDUR_EVENT_LOGGING_CB_LOG_LEVEL=WARNING
 BALDUR_EVENT_LOGGING_REPLAY_LOG_LEVEL=INFO
 BALDUR_EVENT_LOGGING_SLA_LOG_LEVEL=WARNING
+```
+
+## Admin server
+
+Destructive admin operations (reset a breaker, purge the queue, flip the kill
+switch) are refused with `403` until the server is explicitly unlocked — a
+second gate on top of authentication, fail-closed by default. The unlock is
+deliberate friction: a console left open in a browser tab cannot force
+production. The admin server itself binds to localhost out of the box; its
+other knobs stay advanced/internal for now.
+
+```bash
+BALDUR_ADMIN_UNLOCK=1   # set-to-enable: allow ADMIN-level (destructive) operations
 ```
 
 ## Scheduled jobs
