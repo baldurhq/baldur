@@ -194,7 +194,9 @@ def create_hash_chain_redis_client(redis_url: str | None = None) -> Any | None:
     Resolution order: the ``redis_url`` argument (or its
     ``AUDIT_HASH_CHAIN_REDIS_URL`` per-feature override when the argument
     is omitted), then the canonical ``BALDUR_REDIS_URL``
-    (``RedisSettings.url``) — never a bare localhost default.
+    (``RedisSettings.url``). This helper hardcodes no URL of its own; when
+    nothing is configured anywhere, what it builds against is that
+    canonical setting's own default, which is a localhost URL.
 
     Callers decide *whether* a distributed chain is wanted; this helper
     only answers *which client*. It is a sentinel-returning primitive: any
