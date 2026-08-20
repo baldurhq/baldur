@@ -100,8 +100,9 @@ def get_leader_elector(
                     resource_name=resource_name,
                     hint=(
                         "leader election enabled but the redis elector is not "
-                        "registered. Install: pip install baldur-pro. Falling "
-                        "back to NoOpLeaderElector (never-leader)."
+                        "registered. The redis elector ships with the PRO "
+                        "build. Falling back to NoOpLeaderElector "
+                        "(never-leader)."
                     ),
                 )
                 elector = NoOpLeaderElector(resource_name, settings)
@@ -125,7 +126,7 @@ def get_leader_elector(
             except AdapterNotFoundError as exc:
                 raise RuntimeError(
                     "kubernetes leader elector requested but no K8s provider "
-                    "registered. Install: pip install baldur-pro[kubernetes]"
+                    "is registered."
                 ) from exc
             # provider_cls is the registered concrete elector (see comment
             # above); its constructor args are not on the abstract LeaderElector.

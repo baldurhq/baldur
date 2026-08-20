@@ -648,8 +648,8 @@ class RedisEventBus:
             from baldur.core.exceptions import AdapterError
 
             raise AdapterError(
-                "Kafka fallback requires baldur-pro[kafka]; install with: "
-                "pip install baldur-pro[kafka]"
+                "Kafka fallback requires the Kafka producer adapter, which "
+                "is not available in this installation."
             ) from e
 
         producer = get_kafka_producer()
