@@ -187,6 +187,8 @@ Contributions are welcome under the Apache License 2.0. Pull requests are
 accepted through a sign-off-based [DCO](https://developercertificate.org/) flow —
 see [CONTRIBUTING.md](CONTRIBUTING.md) for the full model.
 
+- **Ideas, or what you are running Baldur on** →
+  [Discussions](https://github.com/baldurhq/baldur/discussions).
 - **Bugs / feature requests / docs** → open an issue or a pull request.
 - **Security** → see [SECURITY.md](SECURITY.md) (no public issues for vulnerabilities).
 - **Usage questions / commercial** → `support@baldur.sh`.
