@@ -226,6 +226,7 @@ nav:
           - "Composing with @baldur.protected": concepts/foundations/composition.md
           - "Storage backends: in-memory, Redis, SQL": concepts/foundations/storage-backends.md
           - OSS vs PRO tier model: concepts/foundations/tier-model.md
+          - What Baldur costs your service: concepts/foundations/resource-budget.md
           - "OSS vs PRO: capability matrix": concepts/oss-vs-pro.md
           - Baldur and your service mesh: concepts/foundations/service-mesh.md
           - Rate limiting in Baldur: concepts/foundations/rate-limiting.md

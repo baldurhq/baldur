@@ -47,10 +47,11 @@ pip install "baldur-framework[django,redis]"  # combine extras with commas
 `BALDUR_LICENSE_FILE` is unset or invalid. Entitlement is **fail-open and silent** by
 design: an OSS install never breaks because a PRO knob was left set — the capability is
 simply inert.
-*Fix:* install the PRO package and supply the license:
+*Fix:* install the PRO build and supply the license. The PRO build is not published on
+public PyPI — your license key and a download link are emailed at checkout (see
+[Pricing](pricing.md)). Install the wheel from that link, then:
 
 ```bash
-pip install baldur-pro
 export BALDUR_LICENSE_KEY=<your-key>     # or BALDUR_LICENSE_FILE=/etc/baldur/license
 ```
 
@@ -434,12 +435,13 @@ emergency / budget condition.
 ## Migration
 
 **OSS → OSS + PRO: what changes, and what code do I rewrite?**
-Nothing in your application code. Install `baldur-pro` and set `BALDUR_LICENSE_KEY`, and the
-same `@baldur.protected` calls light up the PRO capabilities behind them: the OSS dead-letter
-queue gains its at-scale operations surface (adaptive batch replay, compressed retention,
-background eviction, a disk-durable outbox); notification delivery, audit, emergency mode,
-thread-pool bulkheads, canary, throttle, governance, and the meta-watchdog all activate. A PRO
-subscription includes every PRO feature — they aren't unlocked one at a time.
+Nothing in your application code. Install the PRO build emailed to you at checkout, set
+`BALDUR_LICENSE_KEY`, and the same `@baldur.protected` calls light up the PRO capabilities
+behind them: the OSS dead-letter queue gains its at-scale operations surface (adaptive batch
+replay, compressed retention, background eviction, a disk-durable outbox); notification
+delivery, audit, emergency mode, thread-pool bulkheads, canary, throttle, governance, and the
+meta-watchdog all activate. A PRO subscription includes every PRO feature — they aren't
+unlocked one at a time.
 
 **The "PRO Insights" block vanished from the daily report after I added PRO.**
 *Cause:* on OSS the daily report carries a **PRO Insights** block — a what-you're-missing

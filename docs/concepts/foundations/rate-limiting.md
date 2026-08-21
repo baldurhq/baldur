@@ -23,8 +23,8 @@ Five mechanisms make up Baldur's rate-limiting surface. Here is what each one li
 | Per-endpoint cap (`@rate_limit`) | inbound requests to one endpoint in a window; over-limit requests get `429` | **per instance** — each process counts on its own, so N instances admit up to N× the number | OSS, off by default |
 | `429`-storm detection (circuit breaker) | watches for a burst of `429`s coming *back* from a dependency and trips the breaker | per instance by default; fleet-shared when opted in | OSS, on by default (built into the circuit breaker, not a separate toggle). A detection signal that trips protection, not an admission cap |
 | Admin / control API protection | Baldur's own management endpoints, per client | **fleet-shared** via Redis (one real count across workers) | OSS, on out of the box |
-| Adaptive Throttle | inbound admission, with the cap moving up and down on live latency | per-instance count; the limit *value* is shared across the fleet | PRO |
-| Outbound cooldown coordination | calls your service makes to a dependency that rate-limits you; shares one backoff cooldown so the fleet backs off together | **fleet-shared** cooldown state | OSS, through the retry integration |
+| Adaptive Throttle | inbound admission, with the cap moving up and down on live latency | **per instance** — each process counts on its own *and* tunes its own limit value from the latency it observes | PRO |
+| Outbound cooldown coordination | calls your service makes to a dependency that rate-limits you; shares one backoff cooldown so the fleet backs off together | **fleet-shared** cooldown state — degrading to a per-worker cooldown while the shared store is unreachable, rather than to no cooldown | OSS, through the retry integration |
 
 The admin / control API row is worth calling out: Baldur rate-limits its *own* management API out of the box, and it is the one place Baldur enforces a genuinely shared, per-client count across all your workers by default (roughly 100 requests per minute per client). If the shared store is unavailable it falls back to a stricter per-instance limit rather than removing the limit, so an outage tightens the door instead of opening it.
 
@@ -60,7 +60,7 @@ There are no rate-limit-specific operator environment variables in the public al
 
 | Env Var | Default | What it controls |
 |---------|---------|------------------|
-| `BALDUR_REDIS_URL` | `redis://localhost:6379/0` | whether the admin-API count and the outbound cooldown are shared across workers; without it both fall back to per-instance |
+| `BALDUR_REDIS_URL` | `redis://localhost:6379/0` | whether the admin-API count and the outbound cooldown are shared across workers; leave it unset and both stay per-instance — outside production Baldur skips Redis here rather than dialing that default address |
 | `BALDUR_LICENSE_KEY` |  | PRO entitlement (unset in OSS mode); Adaptive Throttle activates when Baldur initializes with a valid license |
 
 The individual limits and windows (the per-endpoint cap, the admin-API rate, the throttle's floor and ceiling) are set in code or through advanced settings that are not part of the public operator-tunable environment-variable allowlist.

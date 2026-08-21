@@ -1,8 +1,9 @@
 # Canary Recovery
 
-> Rolls a configuration change out to a small slice of your fleet first, watches it, and restores
-> the previous configuration automatically if the rollout degrades or stalls — so a bad config
-> change becomes a contained incident instead of a fleet-wide one.
+> Rolls a configuration change out under staged supervision, watches it, and keeps the previous
+> configuration ready to restore (one call to roll back; automatic when an escalating emergency
+> pulls the brake) — so a bad config change becomes a contained incident instead of a fleet-wide
+> one.
 
 !!! info "PRO feature"
     Canary Recovery is a PRO-tier feature. It answers the production question every config change
@@ -24,15 +25,15 @@ effect in-process, without a redeploy — and on a single deployment that write 
 deployment at once. What the stages ration is not traffic but *supervision*: each stage is a
 time-boxed observation window with pass criteria and gates that decide whether the rollout may
 advance, stay put, or be taken back. The *recovery* half of the name is the other direction: at
-creation time Baldur snapshots the configuration being replaced, and rolling back (manually, or
-automatically when the rollout goes wrong) restores that snapshot through the same surface,
-again without restarting anything.
+creation time Baldur snapshots the configuration being replaced, and rolling back (manually, in
+a single panic action, or automatically when an escalating emergency pulls the brake) restores
+that snapshot through the same surface, again without restarting anything.
 
 !!! note "Not the same as the circuit breaker's recovery"
     The OSS [circuit breaker](../oss/circuit-breaker.md) also *recovers* after
-    tripping, but it is not a canary: it admits a bounded number of concurrent
-    half-open probe calls and reverts to OPEN on the first failure. That acts on
-    in-process traffic to a single dependency, not on fleet-wide configuration.
+    tripping, but it is not a canary: it admits a bounded number of half-open
+    probe calls and reverts to OPEN on the first failure. That acts on traffic
+    to a single dependency, not on fleet-wide configuration.
     Canary Recovery here is about rolling a **configuration change** out across
     your fleet and rolling it back. See [OSS vs PRO](../oss-vs-pro.md#a-note-on-naming-canary).
 
@@ -45,15 +46,15 @@ hits it. Canary Recovery turns that one-shot gamble into a supervised, reversibl
 
 - **A bad value is caught while someone is still watching.** The change lands inside a
   supervised observation window with pass criteria and a prepared rollback, so a value that
-  misbehaves is blocked from advancing and converges on automatic rollback, instead of sitting
-  in production until an unrelated incident review finds it.
+  misbehaves is blocked from advancing and reported while the way back is one call away, instead
+  of sitting in production until an unrelated incident review finds it.
 - **The way back is prepared before the way forward.** The previous values are captured when the
   rollout is created; recovery never depends on someone remembering what the old setting was at
   3 a.m.
-- **Forgotten rollouts clean themselves up.** A rollout that stalls (promotion blocked, an
-  operator pulled away mid-change) is detected, announced, and eventually rolled back
-  automatically. "A config change is live, its supervision never finished, and nobody remembers
-  why" stops being a failure mode.
+- **Forgotten rollouts do not stay invisible.** A rollout that stalls (promotion blocked, an
+  operator pulled away mid-change) is detected by Baldur's self-monitoring and escalated with
+  the rollout named. "A config change is live, its supervision never finished, and nobody
+  remembers why" stops being a silent failure mode.
 - **An escalating incident pulls the brake for you.** If Baldur's Emergency Mode climbs while
   rollouts are mid-flight, they are paused automatically — and at the highest severity, rolled
   back — without waiting for an operator to remember the canary among everything else on fire.
@@ -67,17 +68,17 @@ hits it. Canary Recovery turns that one-shot gamble into a supervised, reversibl
 
 A rollout is created with a **config type** (which configuration this changes), the **new
 values**, and its **stages**. Each stage names the clusters it watches, the share of the fleet
-they represent, how many minutes to observe (5 by default), whether it may **auto-promote** when
-that time passes, and the **pass criteria** the stage must meet to be considered healthy. At
+they represent, how many minutes to observe (5 by default), and the **pass criteria** the stage
+must meet to be considered healthy. At
 creation Baldur also records the configuration's current values — the snapshot that rollback
 will restore.
 
-Only one rollout can be active per config type: the rollout holds a lock on its config type
-until it reaches a terminal state, and creating a second rollout for the same config type is
-rejected, naming the rollout that holds the lock. The lock is kept alive for as long as the
-rollout is supervised, and it is self-clearing — an abandoned rollout lets its lock lapse, and
-the auto-rollback backstop (below) releases the lock of any started rollout that gets stuck, so
-no failure mode leaves a config type frozen forever.
+Only one rollout can be active per config type: the rollout holds a lock on its config type,
+and creating a second rollout for the same config type is rejected, naming the rollout that
+holds the lock. The lock is self-clearing: completion and rollback release it explicitly, an
+abandoned lock expires on its own after a timeout (30 minutes by default), and a
+created-but-never-started rollout whose lock lapsed is refused at start, because its rollback
+snapshot can no longer be trusted — so no failure mode leaves a config type frozen forever.
 
 The rollout then moves through an explicit lifecycle:
 
@@ -101,7 +102,7 @@ stateDiagram-v2
 Every transition is validated against this state machine — a completed or rolled-back rollout
 cannot be restarted, and cancel works only before the first stage is applied. State changes are
 saved with optimistic versioning: when two actors race (two operators, or an operator and the
-automatic watchdog), one wins and the other's action fails cleanly with a version conflict
+emergency brake), one wins and the other's action fails cleanly with a version conflict
 instead of corrupting the rollout.
 
 ### The gates in front of every step
@@ -158,34 +159,23 @@ window and blocks promotion when the criteria fail. It is an opt-in gate: it com
 time-series metrics source is connected — point `BALDUR_PROMETHEUS_URL` at your Prometheus (or any
 PromQL-compatible backend) and switch live evaluation on — until then,
 promotion is governed by stage duration, the governance gate, and — when Error Budget is enabled —
-the error-budget drain check above (the per-rollout metrics view fills in from the same source). A blocked or unhealthy rollout does not advance — which hands it to the
-watchdog below.
+the error-budget drain check above (the per-rollout metrics view fills in from the same source).
+A blocked or unhealthy rollout does not advance — which is where the stalled-rollout watch below
+picks it up.
 
-### The watchdog: automatic promotion, automatic recovery
+### The stalled-rollout watch
 
-Canary Recovery ships three background jobs with a ready-made schedule (for Celery deployments):
-a promotion check every minute, a stalled-rollout scan every 5 minutes, and metrics collection
-every 2 minutes.
-
-The **promotion check** advances stages marked auto-promote once their observation time has
-passed — through the same governance gate and metric validation as a manual promote, never
-around them. With auto-promote on every stage (the default), a healthy rollout walks itself to
-completion with no operator involvement.
-
-The **stalled-rollout scan** is the recovery backstop. A rollout is flagged as stalled when it
-sits in the canary state for more than twice its stage's observation time, or paused for more
-than 30 minutes — unless it was paused *by* governance or the error budget, which is a
-legitimate wait, not a stall. A stalled rollout triggers a high-priority notification naming the
-rollout, its config type, how long it has been stuck, and who created it. If it stays stuck past
-the auto-rollback deadline (60 minutes by default), the watchdog rolls it back automatically:
-the snapshot is restored, the action is audited under the watchdog's
-own identity, and a second notification reports what was rolled back and where. Degradation and
-abandonment thus converge on the same safe end state: blocked promotion stalls the rollout, and
-a stalled rollout becomes a rollback.
-
-The same 5-minute scan also keeps each active rollout's config-type lock renewed, which is what
-lets a long-running or long-paused rollout hold its lock past the lock timeout — so a second
-rollout for that config type stays rejected while the first is alive.
+Promotion is a supervised action: an operator, or your own automation calling the same API,
+advances the rollout stage by stage, and every promote re-passes the gates above. What Baldur
+watches for on its own is the rollout nobody finishes. Its self-monitoring probes every active
+rollout and reports one as **stuck** when it sits in the canary state for more than twice its
+stage's observation time, or paused for more than 30 minutes — unless it was paused *by*
+governance or the error budget, which is a legitimate wait, not a stall. A stuck rollout is
+escalated through the same channel as any other unhealthy component, naming the rollouts
+involved, so a human decides: resume it, promote it, or roll it back — the prepared snapshot
+makes the way back one call. Degradation and abandonment thus converge on the same place:
+blocked promotion stalls the rollout, and a stalled rollout is surfaced instead of quietly
+staying live.
 
 ### The emergency brake
 
@@ -204,9 +194,9 @@ in-flight rollout:
   bypass with its reason, the same no-quiet-override rule that applies to humans.
 
 A rollout paused by the brake does not resume on its own when the emergency clears — resuming
-stays an explicit action, re-checked against Emergency Mode. And the zombie watchdog keeps
-counting: an emergency pause that lingers past 30 minutes notifies, and past 60 minutes rolls
-back, so a prolonged emergency converges on the same safe end state as every other stall.
+stays an explicit action, re-checked against Emergency Mode. And the stalled-rollout watch
+keeps counting: an emergency pause that lingers past 30 minutes is reported as stuck, so a
+prolonged emergency pause is surfaced rather than forgotten.
 
 If the emergency state itself cannot be read, new starts and promotions are already blocked —
 the gate is fail-closed — and for in-flight rollouts the watch raises a critical alert after
@@ -228,12 +218,11 @@ is a luxury you don't have.
 | Creating a second rollout for a config type is rejected, naming the current holder | one active rollout per config type, enforced by lock |
 | Start or promote is refused with a governance message | kill switch engaged, Emergency Mode at level 2+, or the error budget exhausted (only with the error-budget gate enabled) — or the check itself failed (fail-closed) |
 | Start is refused because of running chaos experiments | experiments cover every target cluster; a partial overlap proceeds instead, with the conflicted clusters recorded in the audit trail |
-| The rollout advances on its own | the stage's observation time passed, auto-promote is on, and the gates passed |
-| A high-priority "zombie rollout" notification | the rollout stalled past its threshold |
+| The rollout is reported as stuck by Baldur's self-monitoring | it sat in the canary state past twice its stage's observation time, or paused past 30 minutes (a governance or error-budget pause is a legitimate wait, not a stall) |
 | A promotion is validated against stricter limits than the stage declared, with the tightened fields logged | the service's tier floor — resolved automatically from its config type — clamped the stage's criteria |
 | Every in-flight rollout pauses at once, marked paused by the safety interlock | Emergency Mode escalated to level 2 |
 | Every in-flight rollout rolls back, audited under the system's own identity as a flagged bypass | Emergency Mode escalated to level 3 |
-| The previous configuration is back in effect | manual rollback, panic rollback, or the watchdog's auto-rollback after 60 minutes stuck |
+| The previous configuration is back in effect | manual rollback, panic rollback, or the emergency brake at Level 3 |
 | An action fails with a version conflict | a concurrent actor changed the rollout first — no state corruption |
 | A bypass appears in the audit trail with reason and requester | someone bypassed a governance gate; a forced start during chaos is likewise recorded, with the clusters involved |
 | Completed and rolled-back rollouts appear in the daily report | both finishing outcomes — completion and rollback — are pushed to the ops summary |
@@ -243,8 +232,8 @@ the canary's error rates and latency before vs. after — is served by the admin
 detail views, per-rollout metrics, and history are readable with the viewer role, while every
 mutating action (create, start, promote, rollback, pause, resume, cancel, panic) requires the
 admin role. The Web Console shows the same picture in its **Canary Rollouts** panel. Lifecycle
-transitions are published on Baldur's event bus, automatic promotions blocked by governance are
-counted in Prometheus alongside a gauge of rollouts waiting to advance, and every lifecycle
+transitions are published on Baldur's event bus and counted in Prometheus (starts, stage
+advances, completions, rollbacks, and every governance bypass), and every lifecycle
 action lands in the audit trail with actor and reason. Finished rollouts are retained for 7 days for review.
 
 ## Configuration
@@ -257,8 +246,8 @@ action lands in the audit trail with actor and reason. Finished rollouts are ret
 | `BALDUR_PROMETHEUS_METRIC_NAMING` | `baldur` | query-template naming preset: `baldur` (built-in `baldur_http_*` RED metrics) or `otel` (OpenTelemetry HTTP semantic conventions). Full connection/scoping knobs (`BALDUR_PROMETHEUS_*`) are in the env-vars reference |
 
 Everything that shapes an individual rollout — stages, clusters, observation times,
-auto-promote, pass criteria — is part of the rollout you create, in the API call, not an
-environment variable. The framework-level tuning behind the defaults (watchdog thresholds, the
+pass criteria — is part of the rollout you create, in the API call, not an
+environment variable. The framework-level tuning behind the defaults (the stuck-rollout thresholds, the
 emergency brake's polling interval and failure posture, the config-type→service-tier mapping,
 governance severity levels, retention) is advanced / internal: it is not part of the
 public operator-tunable environment-variable allowlist yet.
