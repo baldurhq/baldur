@@ -40,7 +40,7 @@ You are wiring Baldur into a deployment or enabling a capability. Pick the goal.
 |---|---|
 | First production deploy — populate CRITICAL secrets and harden TLS | [secure-deployment.md](secure-deployment.md) |
 | Make SIGTERM drain cleanly under gunicorn (flush WAL, release leases, evict from LB) | [gunicorn-graceful-shutdown.md](gunicorn-graceful-shutdown.md) |
-| Turn on the Audit Trail (off by default) for compliance / regulated data | [audit-trail-activation.md](audit-trail-activation.md) |
+| Turn on the Audit Trail (on by default with an active PRO entitlement; off without one) for compliance / regulated data | [audit-trail-activation.md](audit-trail-activation.md) |
 | Honor the "DLQ absorbs ALL failures" contract in a Django app (both layers) | [dlq-two-layer-activation.md](dlq-two-layer-activation.md) |
 | Stand up metrics / Grafana / OTel (traces, logs) | [observability-stack-setup.md](observability-stack-setup.md) |
 | Add one-click action buttons to Slack alerts | [slack-alert-action-buttons.md](slack-alert-action-buttons.md) |
