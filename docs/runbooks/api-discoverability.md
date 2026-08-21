@@ -30,7 +30,7 @@ The `[openapi]` extras adds `drf-spectacular>=0.27`. Without it, the `/api/baldu
 
 ## Step 2 — Wire `drf_spectacular` into INSTALLED_APPS
 
-Baldur deliberately does **not** mutate your `INSTALLED_APPS` at import time (530 D12 — mutating consumer Django config is fragile). Add the entry yourself:
+Baldur deliberately does **not** mutate your `INSTALLED_APPS` at import time — mutating consumer Django config is fragile. Add the entry yourself:
 
 ```python
 # settings.py
@@ -65,7 +65,7 @@ curl -sS -H "Authorization: Bearer ${JWT}" http://localhost:8000/api/baldur/sche
 
 ## Step 4 — Browser access via Swagger UI
 
-Open `http://localhost:8000/api/baldur/docs/`. Swagger UI ships an **Authorize** button (top-right) that accepts a `Bearer <jwt>` value. After authorizing, subsequent calls to `/schema/` and the per-endpoint *Try it out* widgets attach the header automatically — no template override or `SessionAuthentication` fallback needed (530 D11).
+Open `http://localhost:8000/api/baldur/docs/`. Swagger UI ships an **Authorize** button (top-right) that accepts a `Bearer <jwt>` value. After authorizing, subsequent calls to `/schema/` and the per-endpoint *Try it out* widgets attach the header automatically — no template override or `SessionAuthentication` fallback needed.
 
 If you see a 403 on first load, you haven't authorized yet — that's the expected fail-secure default.
 
@@ -78,7 +78,7 @@ curl -sS -H "Authorization: Bearer ${ADMIN_JWT}" \
   http://localhost:8000/api/baldur/features/ | jq '.entitlement, (.features | length)'
 ```
 
-Response shape (abridged — full spec in 530 D9):
+Response shape (abridged):
 
 ```json
 {
@@ -99,7 +99,7 @@ For environments where the OpenAPI listing must not be exposed at all (e.g., a p
 BALDUR_OPENAPI_ENABLED=0
 ```
 
-The `/schema/`, `/docs/`, and `/redoc/` routes drop out of the URL conf entirely — requests return 404. The `/features/` endpoint remains available because it is admin-only and answers a separate operational question (530 D2).
+The `/schema/`, `/docs/`, and `/redoc/` routes drop out of the URL conf entirely — requests return 404. The `/features/` endpoint remains available because it is admin-only and answers a separate operational question.
 
 ## Step 7 — Customize titles / version (optional)
 
@@ -126,7 +126,7 @@ These pass through verbatim to drf-spectacular. The equivalent `BALDUR_OPENAPI_T
 | `/schema/` returns 403 | Caller is unauthenticated | Pass a valid `Authorization: Bearer <jwt>` |
 | `/features/` returns 403 for an authenticated caller | Caller is not in the `baldur_admin` group | Add the user to `baldur_admin` (or use a Django superuser) |
 | `/features/` returns an empty `features` array | Manifest YAML unreachable (force-include broke, env override points at a non-existent file) | Verify `python -c "from importlib.resources import files; print(files('baldur._data').joinpath('V1_LAUNCH_MANIFEST.yaml').is_file())"` returns `True` |
-| Schema body is missing request/response shapes for most endpoints | Expected — v1.0 ships paths-only baseline per 530 D6; only `/features/` is fully annotated. Per-view `@extend_schema` campaign is tracked as OOS #530-3 | None; consume the path inventory and rely on Baldur's source documentation for body shapes until the OOS campaign lands |
+| Schema body is missing request/response shapes for most endpoints | Expected — the schema ships a paths-only baseline by design; only `/features/` is fully annotated. A per-view `@extend_schema` campaign is on the maintainer backlog | None; consume the path inventory and rely on Baldur's source documentation for body shapes until that campaign lands |
 
 ---
 
