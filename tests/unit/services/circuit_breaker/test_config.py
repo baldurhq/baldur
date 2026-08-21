@@ -46,7 +46,7 @@ class TestCircuitBreakerConfig:
 
         config = CircuitBreakerConfig()
 
-        assert config.enabled is False
+        assert config.enabled is True
         assert config.failure_threshold == 5
         assert config.recovery_timeout == 60
         assert config.success_threshold == 2
