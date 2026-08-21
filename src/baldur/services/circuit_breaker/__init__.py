@@ -3,23 +3,41 @@ Circuit Breaker Module
 
 Provides circuit breaker functionality for external service protection.
 
+The breaker opens automatically on failure evidence, and an operator can also
+pin it open or closed; a manual force outranks the automatic verdict for as
+long as it lasts.
+
+Automatic tripping reads two OR'd triggers:
+
+- Consecutive failures reaching ``failure_threshold``. Traffic-independent,
+  so it is never gated on a minimum call count.
+- Failure rate over the recent-call window reaching
+  ``failure_rate_threshold``, evaluated once the window holds at least
+  ``minimum_calls`` observations.
+
+Recovery is probed through HALF_OPEN: after ``recovery_timeout`` elapses a
+bounded number of trial calls is admitted, and ``success_threshold`` successes
+close the circuit again.
+
 Features:
-- Toggle-based circuit breaker (not automatic failure counting)
-- Manual force open/close by operators
-- Conditional replay trigger when circuit breaker closes
+- Automatic open/close driven by the consecutive-failure and failure-rate triggers
+- Manual force open/close by operators, under an expiring lifetime
+- Conditional replay trigger when the circuit breaker closes
 - Rate limit cascade detection (auto-open CB on 429 storm)
 - Self-DDoS protection (prevent retry amplification)
 - Adaptive Threshold (Emergency Level integration)
 - Freeze Mode (freeze state on LOCKDOWN)
-- Panic Threshold (declare Emergency Level 3 when 70% OPEN is detected)
+- Panic Threshold (declare Emergency Level 3 when widespread OPEN is detected)
 
-Structure:
-- config.py: Configuration and types (~125 lines)
-- rate_limit_tracker.py: Rate limit tracking (~95 lines)
-- protection.py: Protection mixin (~250 lines)
-- manual_control.py: Manual control mixin (~350 lines)
-- service.py: Main service class (~285 lines)
-- convenience.py: Module-level functions (~135 lines)
+Structure (main modules):
+- config.py: Configuration, admission clamp, decision and result types
+- outcome_window.py: Call-outcome ratio window and the shared trip predicate
+- service.py: Main service class and the admission/record state machine
+- policy.py: Function-wrapping policy, the path ``protect()`` composes
+- protection.py: Protection mixin
+- manual_control.py: Manual control mixin
+- rate_limit_tracker.py: Rate limit tracking
+- convenience.py: Module-level functions
 - models.py: Advanced protection data models
 - adaptive_threshold.py: Emergency Level integrated threshold adjustment
 - freeze_mode.py: LOCKDOWN Freeze Mode
