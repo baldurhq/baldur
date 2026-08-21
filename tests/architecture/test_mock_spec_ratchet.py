@@ -153,7 +153,11 @@ _MOCK_CREATION_BUDGETS: dict[str, int] = {
     # plain object(). The pass's own new mocks are spec'd or real objects: the
     # writable-dir stand-ins are real ResolvedDir dataclasses and the audit
     # adapters are spec'd against AuditLogAdapter.
-    "oss": 4334,
+    # cleanup audit DLQ-slot fix: -2 - the three spec-less DLQ stand-ins in
+    # the cleanup audit suite collapsed into one fixture that fills the
+    # ProviderRegistry slot the service actually resolves. They were three
+    # copies of a stand-in the service never reached.
+    "oss": 4332,
     "pro": 1800,
     "dormant": 401,
 }
