@@ -37,19 +37,30 @@ TEST_MAP_SIZE_MB = 16
 DISK_CHECK_DISABLED = 0.0
 
 
+def host_insensitive_settings(**overrides) -> DiskBufferSettings:
+    """Build buffer settings with every host-sensitive knob pinned.
+
+    Every settings object in this file goes through here, so a test that needs
+    its own ``data_dir`` cannot silently reintroduce the host dependency by
+    constructing the settings directly.
+    """
+    return DiskBufferSettings(
+        enable_shutdown_handlers=False,
+        lmdb_map_size_mb=TEST_MAP_SIZE_MB,
+        disk_full_threshold=DISK_CHECK_DISABLED,
+        **overrides,
+    )
+
+
 @pytest.fixture
-def buffer_settings(tmp_path):
+def buffer_settings():
     """Defaults-only settings, minus the things that are host-sensitive.
 
     ``data_dir`` is deliberately left at its default — the whole point is that
     the shipped default is unwritable — so only the map size, the free-space
     threshold and the shutdown handler registration are pinned.
     """
-    return DiskBufferSettings(
-        enable_shutdown_handlers=False,
-        lmdb_map_size_mb=TEST_MAP_SIZE_MB,
-        disk_full_threshold=DISK_CHECK_DISABLED,
-    )
+    return host_insensitive_settings()
 
 
 class TestDiskBufferDirFallbackBehavior:
@@ -112,9 +123,7 @@ class TestDiskBufferDirFallbackBehavior:
         self, writable_dir_chain, tmp_path
     ):
         """Negative: a healthy directory must not be relocated."""
-        settings = DiskBufferSettings(
-            data_dir=str(tmp_path / "buffer"), enable_shutdown_handlers=False
-        )
+        settings = host_insensitive_settings(data_dir=str(tmp_path / "buffer"))
 
         buffer = DiskPersistentBuffer(settings=settings)
 
@@ -130,9 +139,7 @@ class TestDiskBufferDirFallbackBehavior:
         """An explicitly configured buffer directory fails loud."""
         chosen = tmp_path / "chosen-buffer"
         deny_dir(chosen)
-        settings = DiskBufferSettings(
-            data_dir=str(chosen), enable_shutdown_handlers=False
-        )
+        settings = host_insensitive_settings(data_dir=str(chosen))
 
         with pytest.raises(ConfigurationError) as exc_info:
             DiskPersistentBuffer(settings=settings)
