@@ -1,7 +1,12 @@
-"""
-CleanupService, PendingConfigService, ConfigHistoryService audit 호출 검증.
+"""Audit-call verification for the cleanup, pending-config and history services.
 
-각 서비스 메서드가 올바른 audit 함수를 호출하는지 mock으로 검증.
+Each service method is checked for the audit helper it must call, with the
+collaborator stubbed out.
+
+The DLQ-backed cases fill the ``dlq_service`` ProviderRegistry slot instead of
+patching the PRO factory that populates it in production: ``CleanupService``
+resolves the slot, so a test that patches the factory leaves the slot empty and
+asserts against a call that already raised before reaching the stub.
 """
 
 from unittest.mock import MagicMock, patch
@@ -9,33 +14,46 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+@pytest.fixture
+def mock_dlq_service(monkeypatch):
+    """Stub the DLQ service ``CleanupService`` resolves.
+
+    Filling the slot directly also keeps these tests tier-neutral: the
+    delegation under test is OSS code, and the stub stands in for the
+    collaborator rather than requiring it to be installed.
+    """
+    from baldur.factory.registry import ProviderRegistry
+
+    service = MagicMock()
+    monkeypatch.setattr(ProviderRegistry.dlq_service, "safe_get", lambda: service)
+    return service
+
+
 class TestCleanupServiceAudit:
-    """CleanupService audit 함수 호출 검증."""
+    """CleanupService audit-call verification."""
 
-    def test_archive_old_dlq_entries_calls_log_system_control_audit(self):
-        """archive_old_dlq_entries가 log_system_control_audit를 호출."""
-        pytest.importorskip("baldur_pro")
-        with patch("baldur_pro.services.dlq.get_dlq_service") as mock_dlq:
-            dlq_svc = MagicMock()
-            dlq_svc.archive_old_entries.return_value = 5
-            mock_dlq.return_value = dlq_svc
+    def test_archive_old_dlq_entries_calls_log_system_control_audit(
+        self, mock_dlq_service
+    ):
+        """archive_old_dlq_entries calls log_system_control_audit."""
+        mock_dlq_service.archive_old_entries.return_value = 5
 
-            with patch(
-                "baldur.services.cleanup_service.log_system_control_audit"
-            ) as mock_audit:
-                from baldur.services.cleanup_service import CleanupService
+        with patch(
+            "baldur.services.cleanup_service.log_system_control_audit"
+        ) as mock_audit:
+            from baldur.services.cleanup_service import CleanupService
 
-                service = CleanupService()
-                result = service.archive_old_dlq_entries(older_than_days=30)
+            service = CleanupService()
+            result = service.archive_old_dlq_entries(older_than_days=30)
 
-                assert result.success is True
-                mock_audit.assert_called_once()
-                call_kwargs = mock_audit.call_args.kwargs
-                assert call_kwargs["action"] == "archive_dlq"
-                assert call_kwargs["actor"] == "system"
+            assert result.success is True
+            mock_audit.assert_called_once()
+            call_kwargs = mock_audit.call_args.kwargs
+            assert call_kwargs["action"] == "archive_dlq"
+            assert call_kwargs["actor"] == "system"
 
     def test_cleanup_expired_config_calls_log_system_control_audit(self):
-        """cleanup_expired_config가 log_system_control_audit를 호출."""
+        """cleanup_expired_config calls log_system_control_audit."""
         with patch(
             "baldur.services.pending_config.get_pending_config_service"
         ) as mock_pending:
@@ -56,59 +74,55 @@ class TestCleanupServiceAudit:
                 call_kwargs = mock_audit.call_args.kwargs
                 assert call_kwargs["action"] == "cleanup_expired_config"
 
-    def test_purge_archived_dlq_dry_run_calls_log_system_control_audit(self):
-        """purge_archived_dlq_entries dry_run이 log_system_control_audit를 호출."""
-        pytest.importorskip("baldur_pro")
-        with patch("baldur_pro.services.dlq.get_dlq_service") as mock_dlq:
-            dlq_svc = MagicMock()
-            dlq_svc.count_archived_older_than.return_value = 10
-            mock_dlq.return_value = dlq_svc
+    def test_purge_archived_dlq_dry_run_calls_log_system_control_audit(
+        self, mock_dlq_service
+    ):
+        """purge_archived_dlq_entries in dry_run calls log_system_control_audit."""
+        mock_dlq_service.count_archived_older_than.return_value = 10
 
-            with patch(
-                "baldur.services.cleanup_service.log_system_control_audit"
-            ) as mock_audit:
-                from baldur.services.cleanup_service import CleanupService
+        with patch(
+            "baldur.services.cleanup_service.log_system_control_audit"
+        ) as mock_audit:
+            from baldur.services.cleanup_service import CleanupService
 
-                service = CleanupService()
-                result = service.purge_archived_dlq_entries(
-                    older_than_days=90, dry_run=True
-                )
+            service = CleanupService()
+            result = service.purge_archived_dlq_entries(
+                older_than_days=90, dry_run=True
+            )
 
-                assert result.success is True
-                mock_audit.assert_called_once()
-                call_kwargs = mock_audit.call_args.kwargs
-                assert call_kwargs["action"] == "purge_dlq_dry_run"
+            assert result.success is True
+            mock_audit.assert_called_once()
+            call_kwargs = mock_audit.call_args.kwargs
+            assert call_kwargs["action"] == "purge_dlq_dry_run"
 
-    def test_purge_archived_dlq_permanent_calls_log_system_control_audit(self):
-        """purge_archived_dlq_entries 영구삭제가 log_system_control_audit를 호출."""
-        pytest.importorskip("baldur_pro")
-        with patch("baldur_pro.services.dlq.get_dlq_service") as mock_dlq:
-            dlq_svc = MagicMock()
-            dlq_svc.purge_archived.return_value = 3
-            mock_dlq.return_value = dlq_svc
+    def test_purge_archived_dlq_permanent_calls_log_system_control_audit(
+        self, mock_dlq_service
+    ):
+        """purge_archived_dlq_entries permanent deletion calls the audit helper."""
+        mock_dlq_service.purge_archived.return_value = 3
 
-            with patch(
-                "baldur.services.cleanup_service.log_system_control_audit"
-            ) as mock_audit:
-                from baldur.services.cleanup_service import CleanupService
+        with patch(
+            "baldur.services.cleanup_service.log_system_control_audit"
+        ) as mock_audit:
+            from baldur.services.cleanup_service import CleanupService
 
-                service = CleanupService()
-                result = service.purge_archived_dlq_entries(
-                    older_than_days=90, dry_run=False
-                )
+            service = CleanupService()
+            result = service.purge_archived_dlq_entries(
+                older_than_days=90, dry_run=False
+            )
 
-                assert result.success is True
-                mock_audit.assert_called_once()
-                call_kwargs = mock_audit.call_args.kwargs
-                assert call_kwargs["action"] == "purge_dlq_permanent"
-                assert call_kwargs["new_state"]["permanent"] is True
+            assert result.success is True
+            mock_audit.assert_called_once()
+            call_kwargs = mock_audit.call_args.kwargs
+            assert call_kwargs["action"] == "purge_dlq_permanent"
+            assert call_kwargs["new_state"]["permanent"] is True
 
 
 class TestPendingConfigServiceAudit:
-    """PendingConfigService audit 함수 호출 검증."""
+    """PendingConfigService audit-call verification."""
 
     def test_cancel_pending_change_calls_log_config_apply_audit(self):
-        """cancel_pending_change가 log_config_apply_audit를 호출."""
+        """cancel_pending_change calls log_config_apply_audit."""
         with patch("baldur.services.pending_config.get_state_backend") as mock_backend:
             backend = MagicMock()
             backend.get.return_value = None
@@ -140,7 +154,7 @@ class TestPendingConfigServiceAudit:
 
 
 class TestConfigHistoryServiceAudit:
-    """ConfigHistoryService audit 함수 호출 검증."""
+    """ConfigHistoryService audit-call verification."""
 
     @pytest.fixture
     def mock_store(self):
@@ -153,7 +167,7 @@ class TestConfigHistoryServiceAudit:
         return store
 
     def test_save_version_calls_log_config_apply_audit(self, mock_store):
-        """save_version이 log_config_apply_audit를 호출."""
+        """save_version calls log_config_apply_audit."""
         with patch(
             "baldur.services.config_history.service.log_config_apply_audit"
         ) as mock_audit:
@@ -175,7 +189,7 @@ class TestConfigHistoryServiceAudit:
             assert call_kwargs["config_key"] == "circuit_breaker"
 
     def test_rollback_calls_log_rollback_audit(self, mock_store):
-        """rollback이 log_rollback_audit를 호출."""
+        """rollback calls log_rollback_audit."""
         version_data = {
             "version": 1,
             "timestamp": 1700000000.0,
