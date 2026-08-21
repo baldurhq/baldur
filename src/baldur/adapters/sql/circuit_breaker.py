@@ -7,8 +7,11 @@ per named breaker.
 
 Atomic operations (``atomic_force_open`` / ``atomic_force_close`` /
 ``atomic_reset`` / ``try_acquire_for_replay`` analogues) rely on
-``SELECT ... FOR UPDATE`` where supported; sqlite degrades to the
-implicit row-level locking provided by its single-writer model.
+``SELECT ... FOR UPDATE`` where supported. SQLite has no such clause, so
+the read-modify-write primitives issue a plain SELECT there: its
+single-writer model serializes the writes themselves but holds no lock
+across a read and the write that follows it, leaving concurrent processes
+free to interleave. Those primitives are per-process best-effort on SQLite.
 """
 
 from __future__ import annotations
@@ -258,11 +261,18 @@ class SQLCircuitBreakerStateRepository(
         """Atomic HALF_OPEN slot acquisition.
 
         Uses ``SELECT ... FOR UPDATE NOWAIT`` (PostgreSQL/MySQL 8+) to
-        serialize concurrent acquires; on lock contention, fails open with
-        ``(False, current_state, current_state)``. SQLite falls back
-        to its implicit single-writer model (no NOWAIT clause).
+        serialize concurrent acquires, which keeps the trial-slot count
+        exact cluster-wide. A caller that loses the lock race is rejected
+        with ``(False, current_state, current_state)`` rather than made to
+        wait: the slot belongs to whoever holds the row, and blocking here
+        would put lock waits on the admission path.
+
+        On SQLite the same SELECT runs without the clause (see the module
+        docstring), so two processes can both read ``count < limit`` and
+        both increment -- the cap is per-process best-effort there, not
+        cluster-wide exact. Single-process deployments are unaffected.
         """
-        # 476 D2/C6/D8: serialize acquires; fail open on contention.
+        # 476 D2/C6/D8: serialize acquires; reject the loser on contention.
         # Ensure the row exists so the SELECT below has a target.
         self.get_or_create(service_name)
 
@@ -286,7 +296,7 @@ class SQLCircuitBreakerStateRepository(
                 cursor.execute(self._prepare(select_sql), (service_name,))
                 row = cursor.fetchone()
             except Exception as e:
-                # Lock contention (LockNotAvailable) — fail-open per C6.
+                # Lock contention (LockNotAvailable): reject this caller per C6.
                 if self._should_commit(conn):
                     try:
                         conn.rollback()
