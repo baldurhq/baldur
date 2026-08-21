@@ -36,6 +36,9 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - **Breaking**: `BALDUR_CANARY_WATCHDOG_ENABLE_AUTO_PROMOTE` / `..._ROLLBACK` default `false`.
 - Migration: set both to `true` to keep a hand-wired watchdog promoting and rolling back.
 - `promote()` takes `expected_stage_index`; the canary lane needs a matching `baldur-pro`.
+- **Breaking**: `CircuitBreakerConfig()` defaults `enabled=True`, matching `BALDUR_CB_ENABLED`.
+- Migration: pass `CircuitBreakerConfig(enabled=False)` to keep a directly built config off.
+- The published API reference rendered `False`; a config from settings was always enabled.
 
 ### Fixed
 

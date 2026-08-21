@@ -57,7 +57,13 @@ __all__ = [
 class CircuitBreakerConfig:
     """Configuration for circuit breaker operations."""
 
-    enabled: bool = False
+    # Matches the shipped default (``BALDUR_CB_ENABLED``): every config the
+    # breaker actually runs on is built by ``from_settings()``, whose two
+    # source branches both default this on. A dataclass default of False is
+    # reachable only by a caller constructing a config directly -- and it is
+    # what the published API reference renders, so it must not contradict
+    # what a deployment does.
+    enabled: bool = True
     failure_threshold: int = 5
     recovery_timeout: int = 60  # seconds
     success_threshold: int = 2

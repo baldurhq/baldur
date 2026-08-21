@@ -58,12 +58,12 @@ class TestCircuitBreakerServiceInit:
 
         assert service.is_enabled is True
 
-    def test_is_enabled_false_by_default(self):
-        """Test is_enabled is False by default."""
+    def test_is_enabled_follows_a_disabled_config(self):
+        """Test is_enabled is False when the config disables the breaker."""
         from baldur.services.circuit_breaker.config import CircuitBreakerConfig
         from baldur.services.circuit_breaker.service import CircuitBreakerService
 
-        config = CircuitBreakerConfig()
+        config = CircuitBreakerConfig(enabled=False)
         mock_repo = InMemoryCircuitBreakerRepository()
         service = CircuitBreakerService(config=config, repository=mock_repo)
 
