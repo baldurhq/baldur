@@ -56,12 +56,14 @@ The knobs an operator sets most often. The full list lives in the API reference.
 
 | Env Var | Default | What it controls |
 |---------|---------|------------------|
-| `BALDUR_AUDIT_ENABLED` | `false` | Master switch for the audit subsystem — when off, no audit records are written |
+| `BALDUR_AUDIT_ENABLED` | `false` | Master switch for the audit subsystem. You rarely set it on PRO: an active entitlement switches audit on at startup while this variable is unset. Setting it yourself always wins — `false` keeps audit off on an entitled install, `true` switches it on without one |
 | `BALDUR_LICENSE_KEY` |  | PRO entitlement (unset in OSS mode); the Audit Trail ships with the PRO tier |
 | `BALDUR_SECRETS_AUDIT_SIGNING_KEY` |  | Keys the HMAC-SHA256 hash chain; a CRITICAL secret — in production, boot aborts if it is missing |
 | `BALDUR_AUDIT_DISTRIBUTED_HASH_CHAIN` | `false` | Redis-backed hash chain — required for multi-host deployments (≥2 pods) |
 
-The file hash-chain is the default, zero-config backend. Heavier backends are pluggable but need explicit activation, not just a connection string: a **Redis flush buffer** (turned on with `BALDUR_AUDIT_BUFFER_REDIS_ENABLED`, which stages records in Redis and drains them to the terminal store) and a **Postgres archival adapter** (wired in code against your Django audit model). Setting `BALDUR_REDIS_URL` or `BALDUR_SQL_DSN` alone does not switch the backend — those are shared connection inputs.
+The file hash-chain is the default, zero-config backend: on a PRO-entitled install it is switched on and selected for you, with no environment variable to set. If your application selects its own audit backend before Baldur starts, that choice is kept. Heavier backends are pluggable but need explicit activation, not just a connection string: a **Redis flush buffer** (turned on with `BALDUR_AUDIT_BUFFER_REDIS_ENABLED`, which stages records in Redis and drains them to the terminal store) and a **Postgres archival adapter** (wired in code against your Django audit model). Setting `BALDUR_REDIS_URL` or `BALDUR_SQL_DSN` alone does not switch the backend — those are shared connection inputs.
+
+Exporting the trail — JSONL, JSON, CSV or Parquet, to a file or to stdout — needs nothing beyond the PRO package. Exporting directly to an S3 bucket is the one target that needs an extra dependency: install the PRO build with its `aws` extra (`boto3`), otherwise that export target reports the missing extra rather than writing.
 
 ## See also
 

@@ -51,9 +51,13 @@ Adaptive Throttle replaces that frozen guess with a limit that tracks reality:
 - **Rejected work isn't thrown away.** A request turned away by the throttle can be parked and
   automatically replayed once the system recovers, so a transient overload costs you latency, not
   lost work.
-- **It stays sane when its own coordination store is down.** If the shared limit store becomes
-  unreachable, the throttle neither removes the limit (which would let a flood through) nor blocks
-  everything — it holds the last known-good limit until the store returns.
+- **A Redis outage never changes what you admit.** The adaptive limit lives in each worker's own
+  memory and is never waiting on a shared store, so there is no coordination store whose loss could
+  remove the limit or block everything. What an outage costs is coordination: the retry cooldown
+  that stops your fleet hammering a `429`-ing upstream is the one thing Baldur shares across
+  workers, and while the store is unreachable your workers stop backing off together — each worker
+  keeps its own per-worker cooldown (a provider's `Retry-After` is still honored) until the store
+  returns. Admission is unaffected either way.
 - **Your own fleet stops DDoSing your dependencies.** When an upstream you call starts returning
   `429`, every worker would normally retry at once and hammer it (and itself) harder. The built-in
   Rate Limit Coordinator makes the whole fleet back off together instead.
@@ -89,36 +93,42 @@ stateDiagram-v2
     [*] --> NORMAL
     NORMAL --> THROTTLING: a response crosses an SLA threshold, or the latency trend turns upward
     THROTTLING --> THROTTLING: still slow — the limit keeps stepping down (never below the floor)
-    THROTTLING --> RECOVERING: responses speed up again
+    THROTTLING --> RECOVERING: the pressure source stands down — a cooldown ends, an emergency clears
     RECOVERING --> NORMAL: the gradual ramp reaches full limit
     NORMAL --> FROZEN: top-level emergency, or the kill switch is engaged
     THROTTLING --> FROZEN: top-level emergency, or the kill switch is engaged
-    FROZEN --> RECOVERING: the emergency clears (or break-glass is used)
+    FROZEN --> RECOVERING: the emergency clears or the switch is released (or break-glass is used)
 ```
 
-**Gradual recovery (dampening).** When the pressure lifts (the dependency's circuit breaker
-closes, or an emergency stands down), the throttle does **not** snap the limit straight back to
-full. It ramps in stages (roughly 80% → 90% → 100%, about 30 seconds apart). While the ramp is in
-progress the gradient keeps computing in the background, but the higher limits it would suggest are
-deferred until the ramp completes — so the floodgates open on a schedule, not all at once.
+**Gradual recovery (dampening).** When the pressure source stands down (an emergency clears, a
+`429` cooldown against an upstream ends, the error budget recovers, or a hard stop is released),
+the throttle does **not** snap the limit straight back to full. It ramps in stages (roughly
+80% → 90% → 100%, about 30 seconds apart). The gradient keeps running while the ramp is in
+progress, but each scheduled stage re-asserts its own target when it lands, so the ramp's
+schedule — not the gradient — is what sets the pace at which the floodgates reopen.
 
 **Rejected requests are preserved.** A request the throttle turns away can be captured — together
-with the context needed to run it again — into Baldur's dead-letter queue. When the related circuit
-breaker recovers, those parked requests are replayed automatically in batches, once the system has
-recovered far enough to take them. A burst that was rejected because the system was briefly
-overloaded is run later instead of lost. (This uses the
-[DLQ + Replay](../foundations/dlq-replay.md) subsystem.)
+with the context needed to run it again — into Baldur's dead-letter queue (critical-tier
+rejections always, standard-tier by a configurable sample; non-essential rejections are not
+parked). When the throttle's own limit climbs back off its floor and recovery has gone far enough
+(half the starting limit, by default), the parked requests are replayed automatically in batches,
+paced to the capacity actually available. A burst that was rejected because the system was briefly
+overloaded is run later instead of lost. One prerequisite: a replayed request executes again from
+scratch, so park only work that is
+[safe to run twice — non-idempotent operations need a dedup guard first](../foundations/dlq-replay.md).
 
-**It moves in step with the circuit breaker.** Throttle and the circuit breaker share the same
-response-time data. Sustained critical latency that the throttle sees can feed the breaker's
-failure detection; and the breaker's state feeds back into the cap — while the breaker is open the
-throttle clamps toward its floor, and at half-open it admits only a reduced share — so the two
-protections reinforce each other instead of pulling in opposite directions.
+**It moves in step with the circuit breaker.** The breaker's state feeds directly into the cap:
+while the breaker is open the throttle clamps toward its floor, at half-open it admits only a
+reduced share, and when the breaker closes the limit returns to where it stood before the breaker
+opened. In the other direction, a response past the critical threshold raises a critical-latency
+signal on Baldur's event bus that other parts of Baldur react to. The two protections reinforce
+each other instead of pulling in opposite directions.
 
 **It degrades the right traffic first.** Each check can carry a tier — `critical`, `standard`, or
-`non_essential`. When the limit is being pulled down under pressure, critical-tier traffic is held
-to the pre-reduction limit, and when the error budget is in trouble, non-essential traffic is the
-first to be shed. The cuts land on the least important work.
+`non_essential`. When the limit has been pulled down because an upstream is answering `429`,
+critical-tier traffic is still checked against the limit that stood before that reduction, and
+when the error budget is in trouble, non-essential traffic is rejected outright. The cuts land on
+the least important work.
 
 **It can be frozen, and that's deliberate.** A top-level emergency or an engaged kill switch
 **freezes** limit changes: the gradient keeps computing so the throttle is ready to resume the
@@ -151,10 +161,10 @@ cooldown is active, make the call, and arm the next cooldown if it comes back `4
 | The admitted limit eases down (about 10%) | a response crosses the warning threshold, or the latency trend is rising |
 | The admitted limit creeps up one step | the latency trend is falling and the service has headroom |
 | The limit holds steady, still recomputing in the background | a top-level emergency or the kill switch has frozen application |
-| The limit ramps back in stages rather than jumping to full | a dependency recovered; the dampened ramp avoids a thundering herd |
+| The limit ramps back in stages rather than jumping to full | a `429` cooldown ended or an emergency stood down; the dampened ramp avoids a thundering herd |
 | A request is rejected with the current limit, remaining count, and latest latency attached | the in-window count reached the current limit |
-| A rejected request runs successfully later | it was captured to the DLQ and auto-replayed on recovery |
-| Critical-tier requests keep getting through while others are shed | the limit is being cut under pressure and tiering is protecting critical traffic |
+| A rejected request runs successfully later | it was captured to the DLQ and auto-replayed once the throttle's limit recovered |
+| Critical-tier requests keep getting through while others are shed | a `429`-driven reduction is holding critical traffic to its earlier limit, or the error budget is rejecting non-essential work |
 | Outbound calls to a rate-limited dependency all pause, then resume with one scout request first | the Rate Limit Coordinator set a shared cooldown and sent a canary on recovery |
 | A limit change appears in the audit trail with the latency and reason behind it | every SLA-driven adjustment is recorded |
 
@@ -171,7 +181,7 @@ react.
 | Env Var | Default | What it controls |
 |---------|---------|------------------|
 | `BALDUR_LICENSE_KEY` |  | PRO entitlement (unset in OSS mode) — Adaptive Throttle activates when Baldur initializes with a valid license |
-| `BALDUR_REDIS_URL` | `redis://localhost:6379/0` | where the distributed limit and cooldown state are shared across workers; without it the throttle runs per-process |
+| `BALDUR_REDIS_URL` | `redis://localhost:6379/0` | where the retry cooldown is shared across workers; leave it unset and it runs per-process — outside production the shared cooldown skips Redis rather than dialing that default address |
 
 The limit's shape — the floor, the ceiling, the starting value, the SLA thresholds, the sampling
 interval, and the recovery ramp — is set on the throttle when it is created, in code, alongside the

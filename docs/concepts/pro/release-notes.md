@@ -30,6 +30,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - Escalation PagerDuty severity now follows the event's level. At the default `BALDUR_META_WATCHDOG_PAGERDUTY_SEVERITY=critical`, each escalation is sent at its own level — component pages stay `critical`, while the informational channel self-test is sent as `info` instead of raising a critical-severity page for a test. Setting the variable to any other value keeps its previous meaning exactly: a forced global severity applied to every event, self-test included.
 
+### Removed
+
+- `ThrottleLuaScripts`, `RedisThrottleLimitManager`, `SafeOpenConfig`, `SafeOpenFallbackManager`, `ServiceSafeLimitState`, `RedisConnectionState`, `get_safe_open_fallback_manager` and `reset_safe_open_fallback_manager` — withdrawn from the Adaptive Throttle service, together with the shared-limit claims the documentation made for them: the Adaptive Throttle guide's `BALDUR_REDIS_URL` row, and the rate-limiting guide's fleet-scope table, which listed the limit value as shared across your fleet. What you admit is unchanged: the adaptive limit has always lived in each worker's own memory, and the retry cooldown the Rate Limit Coordinator shares across workers is unaffected.
+
 ### Fixed
 
 - The Daily Report's "Auto-replay" line now counts only replays the system started on its own. A batch replay you launched from the console or the REST API was counted there as well, so a digest section framed as unattended recovery work included work you had just done by hand — and the same batches inflated the Auto-Processing "Recovered" count they feed. Operator-initiated batches no longer appear on that line; they remain visible in the digest through the DLQ resolved count, and in the console and audit trail as before. Automatic replays (circuit-close recovery, traffic-aware, throttle-aware, and the DLQ consumer) are unaffected.
