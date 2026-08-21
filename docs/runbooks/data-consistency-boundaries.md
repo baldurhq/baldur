@@ -114,14 +114,14 @@ This is deliberate, and it is the same principle as the data rule above ("money 
 
 - **In-flight requests on Redis-touching paths stall** for the outage duration and then mostly complete successfully once Redis returns. A small number may hard-fail (client-visible, retriable) — there is **no silent data loss**.
 - The **vast majority** of requests (everything before and after the fault) is unaffected — only the requests in-flight during the outage stall. Recovery is bounded by **Redis returning**, not by any client timeout.
-- The blast radius is bounded by **in-flight concurrency**: under closed-loop / bounded load only the active requests stall. Under **open-loop high traffic**, stalling requests can accumulate and exhaust the worker pool → whole-service unavailability. That boundary (and its graceful upgrade — a circuit breaker on Baldur's own Redis path so the gate fail-closes *fast* with a 503 instead of stalling) is tracked in the maintainer scale-boundary log as **SB-038**.
+- The blast radius is bounded by **in-flight concurrency**: under closed-loop / bounded load only the active requests stall. Under **open-loop high traffic**, stalling requests can accumulate and exhaust the worker pool → whole-service unavailability. That boundary (and its graceful upgrade — a circuit breaker on Baldur's own Redis path so the gate fail-closes *fast* with a 503 instead of stalling) is on the maintainer backlog.
 
 ### The one knob that moves this today
 
 `BALDUR_REDIS_RETRY_ON_TIMEOUT` (default `true`) is the lever, **not** `BALDUR_REDIS_SOCKET_TIMEOUT`:
 
 - With retry **on** (default), each request re-tries the socket timeout through the whole outage, so the worker is never freed until Redis returns — the stall runs the full outage. Raising `socket_timeout` barely changes this.
-- With retry **off** (`BALDUR_REDIS_RETRY_ON_TIMEOUT=false`), each Redis op fast-fails at ~`socket_timeout` with no retry, so the worker is freed sooner and the app stays responsive for non-Redis paths — **at the cost of turning a delayed-success into a fast client-visible failure** (the client must retry). This is the operator's *stall-vs-fast-fail* lever until SB-038's Redis-path circuit breaker lands.
+- With retry **off** (`BALDUR_REDIS_RETRY_ON_TIMEOUT=false`), each Redis op fast-fails at ~`socket_timeout` with no retry, so the worker is freed sooner and the app stays responsive for non-Redis paths — **at the cost of turning a delayed-success into a fast client-visible failure** (the client must retry). This is the operator's *stall-vs-fast-fail* lever until that Redis-path circuit breaker lands.
 
 ### Operator response during a total-Redis-loss incident
 

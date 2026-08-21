@@ -15,7 +15,7 @@
 5. Review **Phase 5** to understand the audit / DLQ data-masking boundary before routing regulated data (PAN, SSN, etc.) through a Baldur-protected path.
 6. If you enable OpenTelemetry (`OTEL_ENABLED=true`) behind an untrusted public ingress, review **Phase 6** — strip the inbound W3C `baggage` header at the gateway.
 
-Out of scope here: reverse-proxy / WAF templates, secret-rotation procedures, RBAC group provisioning, log-redaction tuning. Those land in the broader Wave 7.5 hardening cookbook.
+Out of scope here: reverse-proxy / WAF templates, secret-rotation procedures, RBAC group provisioning, log-redaction tuning. Those land in a broader hardening cookbook still on the maintainer backlog.
 
 ---
 
