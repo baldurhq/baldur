@@ -10,6 +10,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-08-21
+
 ### Added
 
 - Django 6.1 joins the supported and CI-tested matrix (Python 3.12/3.13 cells).
