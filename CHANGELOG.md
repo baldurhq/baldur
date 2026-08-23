@@ -10,6 +10,20 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+### Fixed
+
+- An idle audit-enabled process no longer appends a WAL entry about its own WAL once a second.
+- Those entries reached the audit trail too, so the compliance ledger filled with self-reference.
+- The audit sync worker no longer re-reads the whole retained backlog to deliver one batch of it.
+- Its read is capped at `BALDUR_AUDIT_SYNC_BATCH_SIZE`; the lag gauge still reports the backlog.
+- A WAL checksum mismatch is now reported on best-effort reads too, not only on strict ones.
+
+### Removed
+
+- **Breaking**: the `WAL_RECOVERED` audit event; `baldur_wal_entries_recovered_total` counts it.
+- **Breaking**: `WAL_ROTATED` / `WAL_CORRUPTION_DETECTED` no longer reach the trail via the WAL.
+- Both still reach a wired `audit_adapter`, and log `wal.file_rotated` / `wal.corruption_detected`.
+
 ## [1.7.0] - 2026-08-21
 
 ### Added
