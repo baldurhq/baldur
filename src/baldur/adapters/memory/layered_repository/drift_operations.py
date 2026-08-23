@@ -58,6 +58,33 @@ class DriftOperationsMixin:
             errors: list[dict[str, Any]],
         ) -> None: ...
 
+    @staticmethod
+    def _routes_to_l1_repair(
+        result: DriftReconciliationResult,
+        l2_state: CircuitBreakerStateData,
+    ) -> bool:
+        """Decide whether a reconciliation result repairs L1 into L2.
+
+        The resolver's HALF_OPEN-XOR branch can name L1 the winner, and that
+        winner has to reach L2 -- otherwise the else branch copies the losing
+        L2 state back over the row that just won.
+
+        It routes there only while the L2 row is unpinned, though. The
+        repair's pin skip reads the *local* row's flag, so an unpinned L1 that
+        went HALF_OPEN during a quarantine would otherwise overwrite an
+        operator's pinned state in the durable store. A pinned L2 keeps the
+        L2-to-L1 copy instead: automatic timestamp wins yield to pins.
+        """
+        if result in (
+            DriftReconciliationResult.L1_WINS,
+            DriftReconciliationResult.TIMESTAMP_L1,
+        ):
+            return True
+        return (
+            result == DriftReconciliationResult.TIMESTAMP_HALF_OPEN_L1
+            and not l2_state.manually_controlled
+        )
+
     def _schedule_drift_reconciliation(self) -> None:
         """Schedule drift reconciliation in the background."""
 
@@ -135,10 +162,7 @@ class DriftOperationsMixin:
 
                 reconciled_count += 1
 
-                if result in (
-                    DriftReconciliationResult.L1_WINS,
-                    DriftReconciliationResult.TIMESTAMP_L1,
-                ):
+                if self._routes_to_l1_repair(result, l2_state):
                     self._repair_row_to_l2(l1_state.service_name)
                     l1_wins_count += 1
                 else:
@@ -280,10 +304,7 @@ class DriftOperationsMixin:
 
         self._incr_metrics(drift_reconciliation_count=1)
 
-        if result in (
-            DriftReconciliationResult.L1_WINS,
-            DriftReconciliationResult.TIMESTAMP_L1,
-        ):
+        if self._routes_to_l1_repair(result, l2_state):
             self._repair_row_to_l2(service_name)
             return {
                 "success": True,
