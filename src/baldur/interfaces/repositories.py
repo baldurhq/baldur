@@ -1326,7 +1326,8 @@ class CircuitBreakerStateRepository(ABC):
 
         State-machine branches (in evaluation order):
 
-        1. ``state == "half_open"`` AND ``count >= limit`` AND
+        1. ``state == "half_open"`` AND ``count >= limit`` AND the window
+           watermark is absent OR
            ``now - half_open_window_started_at > stuck_timeout_seconds``:
            Stuck-window auto-reset. Treat as a fresh OPEN→HALF_OPEN combo:
            reset ``half_open_request_count = 1``, ``success_count = 0``,
@@ -1336,11 +1337,34 @@ class CircuitBreakerStateRepository(ABC):
            ``success_count = 0``, ``half_open_request_count = 1``, set the
            window watermark. Return ``(True, "open", "half_open")``.
         3. ``state == "half_open"`` AND ``count < limit``: increment the
-           counter. Return ``(True, "half_open", "half_open")``.
-        4. ``state == "half_open"`` AND ``count >= limit`` (within window):
-           Reject. Return ``(False, "half_open", "half_open")``.
+           counter, stamping the window watermark when it is absent. Return
+           ``(True, "half_open", "half_open")``.
+        4. ``state == "half_open"`` AND ``count >= limit`` AND the window
+           watermark is present and within the window: Reject. Return
+           ``(False, "half_open", "half_open")``.
         5. Otherwise (CLOSED, manual override, etc.): no-op. Return
            ``(False, current_state, current_state)``.
+
+        Absent window watermark:
+
+        A ``half_open`` row may carry no ``half_open_window_started_at``.
+        Any lane that copies ``state`` without the window fields produces
+        that shape -- snapshot hydration, drift reconciliation, a whole-row
+        mirror into a durable store -- and every stored-value parser folds
+        an unparseable watermark into the same absent case. Implementations
+        MUST resolve it as follows:
+
+        - Branch 3 (under limit): an absent watermark MUST be stamped with
+          the current time in the same atomic operation as the increment. A
+          ``half_open`` row without a watermark is a window no acquire has
+          observed yet, and the first acquire starts it. By the time the
+          counter reaches ``limit``, a real watermark therefore always
+          exists, so a healthy window is never misread as stalled.
+        - Branch 1 (at limit): an absent watermark MUST be treated as older
+          than any timeout, firing the stuck-window auto-reset. This is the
+          fail-open direction and the defense line against a writer that
+          creates an at-limit row with no window: rejecting instead would
+          pin the breaker in HALF_OPEN with no path back out.
 
         Args:
             service_name: Service identifier

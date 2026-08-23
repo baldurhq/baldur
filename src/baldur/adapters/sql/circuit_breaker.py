@@ -313,6 +313,12 @@ class SQLCircuitBreakerStateRepository(
                 return (False, current_state, current_state)
 
             if row is None:
+                # Row vanished between get_or_create and the locked SELECT.
+                # Close the read transaction like every sibling branch does --
+                # returning without it strands the borrowed connection "idle
+                # in transaction" on PostgreSQL.
+                if self._should_commit(conn):
+                    conn.commit()
                 self._last_acquire_marker = "no_op"
                 return (False, "closed", "closed")
 
@@ -373,13 +379,19 @@ class SQLCircuitBreakerStateRepository(
                 return (True, "open", "half_open")
 
             if current_state == "half_open" and count < limit:
+                # COALESCE is the adoption stamp: a half_open row that arrived
+                # without a window (state-copy lane) gets one from the first
+                # acquire, in the same statement as the increment, so the
+                # counter never reaches the limit unwatermarked.
                 cursor.execute(
                     self._prepare(
                         f"UPDATE {_TABLE} SET "
                         f"half_open_request_count = half_open_request_count + 1, "
+                        f"half_open_window_started_at = "
+                        f"COALESCE(half_open_window_started_at, %s), "
                         f"updated_at = %s WHERE service_name = %s"
                     ),
-                    (self._dt_to_db(now), service_name),
+                    (self._dt_to_db(now), self._dt_to_db(now), service_name),
                 )
                 if self._should_commit(conn):
                     conn.commit()

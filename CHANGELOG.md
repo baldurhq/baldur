@@ -12,6 +12,10 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ### Fixed
 
+- A half-open circuit breaker whose trial window is missing no longer rejects every call forever.
+- Its first trial call now starts the window, so the breaker recovers instead of locking on Redis.
+- A half-open window rebuilt from a snapshot is no longer misread as stalled during a Redis outage.
+- It admitted one extra round of trial calls before stamping a window and repairing itself.
 - An idle audit-enabled process no longer appends a WAL entry about its own WAL once a second.
 - Those entries reached the audit trail too, so the compliance ledger filled with self-reference.
 - The audit sync worker no longer re-reads the whole retained backlog to deliver one batch of it.

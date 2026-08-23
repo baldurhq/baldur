@@ -750,7 +750,13 @@ class InMemoryCircuitBreakerStateRepository(CircuitBreakerStateRepository):
                     control_reason=entry.control_reason,
                     manual_override_expires_at=entry.manual_override_expires_at,
                     half_open_request_count=current_count + 1,
-                    half_open_window_started_at=window_started_at,
+                    # Adoption stamp: a half_open row with no watermark is a
+                    # window no acquire has observed yet, so the first acquire
+                    # starts it. Keeps "count > 0 implies watermark present"
+                    # true for rows a state-copy lane created without one.
+                    half_open_window_started_at=(
+                        window_started_at if window_started_at is not None else now_ts
+                    ),
                     created_at=entry.created_at,
                     updated_at=now_ts,
                 )
