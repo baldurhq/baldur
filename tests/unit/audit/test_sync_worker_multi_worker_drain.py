@@ -525,8 +525,10 @@ class TestSyncWorkerRuntimeDrain:
         synced, failed = worker.sync_now()
 
         # Only the 2 own-PID entries synced; the peer entry was filtered out.
+        # The lag gauge is deliberately not asserted here: it now reports the
+        # WAL's own in-memory sequence span rather than what this cycle read,
+        # and these files were fabricated on disk without ``wal.write()``.
         assert (synced, failed) == (2, 0)
-        assert worker.get_stats()["current_lag_entries"] == 2
 
     def test_sync_batch_calls_recover_unprocessed_runtime_mode(self, wal, wal_dir):
         """Dependency interaction: ``_sync_batch`` passes ``mode="runtime"``

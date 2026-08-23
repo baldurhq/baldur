@@ -310,6 +310,7 @@ class WALReaderMixin:
         self,
         last_processed_seq: int = 0,
         mode: Literal["runtime", "startup"] = "startup",
+        limit: int | None = None,
     ) -> list:
         """
         Recover entries with sequence > ``last_processed_seq``.
@@ -325,15 +326,25 @@ class WALReaderMixin:
                 by ``ResilientStorageBackend._do_recovery()`` so peer
                 workers' still-active WAL files are not over-replayed
                 or deleted during the lazy recovery loop.
+            limit: Optional ceiling on how many entries to return, for a
+                caller that consumes a fixed budget per call. ``None``
+                (default) replays the complete history above the cursor,
+                which is what every caller that reconstructs state needs.
+                A caller passing a limit MUST NOT treat a short result as
+                "nothing more to recover".
 
         Returns:
-            List of unprocessed ``WALEntry`` objects.
+            List of unprocessed ``WALEntry`` objects, ascending by sequence.
+            With ``limit`` set, the lowest ``limit`` of them.
         """
         glob_pattern = _wal_glob_pattern(self._config.file_prefix, mode)
         wal_files = sorted(self._wal_dir.glob(glob_pattern))
 
         if not wal_files:
             return []
+
+        if limit is not None:
+            return self._recover_bounded(wal_files, last_processed_seq, limit)
 
         try:
             from baldur.metrics.drift_metrics import record_wal_entries_recovered
@@ -536,6 +547,61 @@ class WALReaderMixin:
                         self._recovered_entries += 1
 
         return sorted(entries, key=lambda e: e.sequence)
+
+    def _recover_bounded(
+        self,
+        wal_files,
+        last_processed_seq: int,
+        limit: int,
+    ) -> list:
+        """Recovery capped at ``limit`` entries, lowest sequences first.
+
+        Each file is read only as far as its own first ``limit`` unprocessed
+        entries; the union is then sorted by sequence and truncated to
+        ``limit``. So the cost of one call is O(files x limit), not
+        O(backlog) — which is the point: a consumer that drains a fixed batch
+        per cycle must not re-read the whole retained backlog to use the first
+        batch of it.
+
+        The truncation returns exactly the globally lowest ``limit``
+        sequences. An entry above the cursor is missing from the result only
+        if its own file already contributed ``limit`` entries that all precede
+        it, in which case it is not among the lowest ``limit`` either. Sorting
+        the union rather than stopping at the first file that fills the budget
+        is what makes that true: filenames are timestamp-stamped, so a
+        backward clock step across a rotation can order a newer file first.
+
+        Reads are best-effort for the same reason the parallel path is. A
+        strict read decodes the checksum field with no ``errors=`` and ends
+        the file silently on a byte outside ASCII; a caller that then advanced
+        its cursor from a later file's entries would lose everything between
+        the corruption and that file's end, while the deletion predicate —
+        which does not read the checksum at all — would still unlink it.
+        """
+        collected: list = []
+
+        with self._lock:
+            for wal_file in wal_files:
+                from_file = 0
+                for entry in self._read_wal_file_best_effort(wal_file):
+                    if entry.sequence > last_processed_seq:
+                        collected.append(entry)
+                        from_file += 1
+                        if from_file >= limit:
+                            break
+
+        bounded = sorted(collected, key=lambda e: e.sequence)[:limit]
+        self._recovered_entries += len(bounded)
+
+        if bounded:
+            try:
+                from baldur.metrics.drift_metrics import record_wal_entries_recovered
+
+                record_wal_entries_recovered(len(bounded))
+            except ImportError:
+                pass
+
+        return bounded
 
     def _recover_chunked(
         self,
