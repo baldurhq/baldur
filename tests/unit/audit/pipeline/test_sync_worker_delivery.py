@@ -89,9 +89,9 @@ class TestSyncEntryDelivery:
         adapter.log.assert_called_once()
         delivered = adapter.log.call_args.args[0]
         assert isinstance(delivered, AuditEntry)
-        # The native shape was routed through from_wal_dict: event_type->action,
-        # float epoch preserved.
-        assert delivered.action == "CB_STATE_CHANGE"
+        # The native shape was routed through from_wal_dict: the action was
+        # derived from event_type in the enum's casing, float epoch preserved.
+        assert delivered.action == "cb_state_change"
         assert delivered.timestamp == _FIXED_DT
         assert delivered.details["old_state"] == "closed"
 

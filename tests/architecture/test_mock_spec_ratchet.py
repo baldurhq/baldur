@@ -167,7 +167,10 @@ _DECORATOR_PATCH_BUDGETS: dict[str, int] = {
     # cleanup-lane daily simulation: -1 — the patched PRO DLQ-service factory was
     # a dead seam (production resolves the registry slot instead), so it became a
     # slot stub rather than a decorator patch. The test can now actually fail.
-    "oss": 667,
+    # audit WAL seam: -4 — the DLQ-compression audit suite stopped patching the
+    # PRO audit writer per test and now stubs the WAL that writer resolves, so
+    # the real delivery-ownership rule runs instead of a stand-in for it.
+    "oss": 663,
     "pro": 434,
     "dormant": 144,
 }

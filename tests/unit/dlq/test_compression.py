@@ -53,6 +53,35 @@ from baldur_pro.services.dlq.compression import CompressResult, compress_entries
 # =============================================================================
 
 
+@contextmanager
+def _stub_audit_wal(helper_module_name, sequence=1):
+    """Run a PRO audit helper against a stub WAL, yielding the stub.
+
+    ``sequence`` is what the WAL hands back for a write; ``None`` stands for
+    "no WAL is available", the case where the helper's immediate delivery leg
+    runs. Assert on ``wal.write.call_args[0][0]`` to read the entry the writer
+    built.
+
+    Two deliberate choices. The WAL is stubbed rather than the writer, so this
+    file never names a ``baldur_pro`` internal — it ships to the public repo.
+    And the writer's own globals are patched rather than a dotted path,
+    because an autouse fixture drops the audit modules from ``sys.modules``
+    between tests: a helper can hold a writer from an earlier module object
+    that a path-based patch would miss. The import is deferred to entry so
+    the module is only required once a test has skipped on PRO's absence.
+    """
+    import importlib
+
+    from baldur.audit.wal import WriteAheadLog
+
+    module = importlib.import_module(f"baldur_pro.services.audit.{helper_module_name}")
+    wal = MagicMock(spec=WriteAheadLog)
+    wal.write.return_value = sequence
+    resolver = (lambda: None) if sequence is None else (lambda: wal)
+    with patch.dict(module._write_to_wal.__globals__, {"_get_wal": resolver}):
+        yield wal
+
+
 def _make_entry(
     *,
     id: int = 1,
@@ -612,37 +641,38 @@ class TestLogDlqCompressAuditBehavior:
     """log_dlq_compress_audit() WAL hybrid pattern behavior."""
 
     @patch("baldur_pro.services.audit.dlq_audit._get_audit_adapter")
-    @patch("baldur_pro.services.audit.dlq_audit._write_to_wal")
-    def test_writes_to_wal_first(self, mock_wal, mock_adapter):
+    def test_writes_to_wal_first(self, mock_adapter):
         """WAL write is called with DLQ_COMPRESS event type."""
         from baldur_pro.services.audit.dlq_audit import log_dlq_compress_audit
 
-        mock_wal.return_value = 42
         mock_adapter.return_value = None
 
-        result = log_dlq_compress_audit(
-            source_count=10, summary_count=2, details={"test": True}
-        )
+        with _stub_audit_wal("dlq_audit", sequence=42) as wal:
+            result = log_dlq_compress_audit(
+                source_count=10, summary_count=2, details={"test": True}
+            )
 
-        mock_wal.assert_called_once()
-        call_kwargs = mock_wal.call_args[1]
-        assert call_kwargs["event_type"] == "DLQ_COMPRESS"
-        assert call_kwargs["source"] == "DLQCompression"
+        wal.write.assert_called_once()
+        entry = wal.write.call_args[0][0]
+        assert entry["event_type"] == "DLQ_COMPRESS"
+        assert entry["source"] == "DLQCompression"
         assert result == 42
 
     @patch("baldur_pro.services.audit.dlq_audit._get_audit_adapter")
-    @patch("baldur_pro.services.audit.dlq_audit._write_to_wal")
-    def test_writes_to_adapter_directly(self, mock_wal, mock_adapter):
+    def test_writes_to_adapter_directly(self, mock_adapter):
         """Direct adapter write uses the canonical AuditEntry + log() (D3)."""
         from baldur.interfaces.audit_adapter import AuditEntry, AuditLogAdapter
         from baldur_pro.services.audit.dlq_audit import log_dlq_compress_audit
 
-        mock_wal.return_value = 1
         # spec'd adapter: a reintroduced phantom log_event would raise.
         mock_a = MagicMock(spec=AuditLogAdapter)
         mock_adapter.return_value = mock_a
 
-        log_dlq_compress_audit(source_count=10, summary_count=2, details={"key": "val"})
+        # No WAL is available, so the direct adapter leg is the deliverer.
+        with _stub_audit_wal("dlq_audit", sequence=None):
+            log_dlq_compress_audit(
+                source_count=10, summary_count=2, details={"key": "val"}
+            )
 
         mock_a.log.assert_called_once()
         entry = mock_a.log.call_args.args[0]
@@ -653,31 +683,32 @@ class TestLogDlqCompressAuditBehavior:
         assert entry.details["source"] == "DLQCompression"
 
     @patch("baldur_pro.services.audit.dlq_audit._get_audit_adapter")
-    @patch("baldur_pro.services.audit.dlq_audit._write_to_wal")
-    def test_fail_open_on_adapter_error(self, mock_wal, mock_adapter):
+    def test_fail_open_on_adapter_error(self, mock_adapter):
         """Adapter exception does not propagate — fail-open."""
         from baldur.interfaces.audit_adapter import AuditLogAdapter
         from baldur_pro.services.audit.dlq_audit import log_dlq_compress_audit
 
-        mock_wal.return_value = 1
         mock_a = MagicMock(spec=AuditLogAdapter)
         mock_a.log.side_effect = RuntimeError("adapter down")
         mock_adapter.return_value = mock_a
 
-        # Should not raise
-        result = log_dlq_compress_audit(source_count=10, summary_count=2, details={})
-        assert result == 1  # WAL result still returned
+        # No WAL record, so the failing adapter leg is the one that runs.
+        with _stub_audit_wal("dlq_audit", sequence=None):
+            # Should not raise
+            result = log_dlq_compress_audit(
+                source_count=10, summary_count=2, details={}
+            )
+        assert result is None  # no WAL record, so no sequence
 
     @patch("baldur_pro.services.audit.dlq_audit._get_audit_adapter")
-    @patch("baldur_pro.services.audit.dlq_audit._write_to_wal")
-    def test_no_adapter_skips_direct_write(self, mock_wal, mock_adapter):
+    def test_no_adapter_skips_direct_write(self, mock_adapter):
         """When adapter is None, direct write is skipped gracefully."""
         from baldur_pro.services.audit.dlq_audit import log_dlq_compress_audit
 
-        mock_wal.return_value = 1
         mock_adapter.return_value = None
 
-        result = log_dlq_compress_audit(source_count=5, summary_count=1, details={})
+        with _stub_audit_wal("dlq_audit", sequence=1):
+            result = log_dlq_compress_audit(source_count=5, summary_count=1, details={})
         assert result == 1
 
 

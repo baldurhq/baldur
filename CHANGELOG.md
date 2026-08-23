@@ -18,6 +18,12 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - Its read is capped at `BALDUR_AUDIT_SYNC_BATCH_SIZE`; the lag gauge still reports the backlog.
 - A WAL checksum mismatch is now reported on best-effort reads too, not only on strict ones.
 - A raising `on_corruption` hook no longer silently truncates the recovery read it fires in.
+- A circuit-breaker force run from the CLI is recorded as an operator action, not an automatic one.
+- Every `baldur` command that changes state carries a `user@host` identity into the audit trail.
+- An audit row's timestamp is the time of the audited event, so `query(start_time=)` filters on it.
+- It was previously the append time, which for buffered events lagged by a whole batch window.
+- Rows recovered from the write-ahead log carry a real action and target type, not raw event names.
+- A group-committed WAL entry now reaches the audit destination within one drain cycle.
 
 ### Removed
 

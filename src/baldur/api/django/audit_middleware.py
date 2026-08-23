@@ -590,9 +590,13 @@ class AuditMiddleware:
 
             action = action_map.get(event.event_type, AuditAction.CONFIG_CHANGE)
 
-            # Create the AuditEntry
+            # Create the AuditEntry. The event's own timestamp is carried
+            # explicitly — recording happens at response time, so the default
+            # would stamp the row when the request finished rather than when
+            # the audited thing happened.
             entry = AuditEntry(
                 action=action,
+                **({"timestamp": event.timestamp} if event.timestamp else {}),
                 actor_id=event.actor_id or request_context.get("actor_id"),
                 actor_type=event.actor_type,
                 context_type=ContextType.REQUEST,  # Middleware context

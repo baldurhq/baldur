@@ -4,10 +4,15 @@ Background Sync Worker - WAL → central store synchronization.
 Core component of the Fail-Open + WAL-based zero-loss guarantee.
 
 How it works:
-1. Read unsynced entries from the WAL (synced=False)
+1. Read the WAL entries above this worker's own cursor (the cursor is the
+   only "already delivered" marker — entries carry no per-entry synced flag)
 2. Attempt to write them to the central store
 3. On success, clean up the WAL entries (cleanup_processed)
 4. On failure, retry (exponential backoff)
+
+An entry that obtained a WAL sequence is delivered by this worker and by
+nothing else — the immediate delivery paths run only for events with no WAL
+record. That is what keeps one audited event to one row in the destination.
 
 Usage:
     from baldur.audit.sync_worker import AuditSyncWorker, SyncWorkerConfig
@@ -701,7 +706,7 @@ class AuditSyncWorker:
         """
         try:
             if hasattr(wal, "count_unprocessed"):
-                return wal.count_unprocessed(self._last_processed_seq)
+                return int(wal.count_unprocessed(self._last_processed_seq))
             entries = wal.recover_unprocessed(self._last_processed_seq, mode="runtime")
             return len(entries)
         except Exception as e:
@@ -710,6 +715,25 @@ class AuditSyncWorker:
                 error=e,
             )
             return 0
+
+    def _flush_writer_buffer(self, wal: Any) -> None:
+        """Force the writer's group-commit buffer to disk before reading.
+
+        With group commit enabled the writer returns a sequence for an entry
+        that lives only in process memory, so "the write returned a sequence"
+        does not imply "a reader can find it" — and this worker reads the file
+        through its own handle. Without this flush the entry stays invisible
+        until an unrelated later write happens to trip the flush condition.
+        The call is a no-op when group commit is disabled, and a WAL-like
+        object that cannot flush is left alone.
+        """
+        try:
+            wal.flush_group_commit()
+        except Exception as e:
+            logger.debug(
+                "audit_sync_worker.group_commit_flush_failed",
+                error=e,
+            )
 
     def _sync_batch(self) -> tuple[int, int]:
         """
@@ -721,6 +745,8 @@ class AuditSyncWorker:
         wal = self._get_wal()
         if wal is None:
             return 0, 0
+
+        self._flush_writer_buffer(wal)
 
         # The lag is the real backlog, not what one cycle read. The read is
         # capped at ``batch_size`` (100 by default), far below the audit health
