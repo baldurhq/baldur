@@ -379,20 +379,38 @@ class SQLCircuitBreakerStateRepository(
                 return (True, "open", "half_open")
 
             if current_state == "half_open" and count < limit:
-                # COALESCE is the adoption stamp: a half_open row that arrived
-                # without a window (state-copy lane) gets one from the first
-                # acquire, in the same statement as the increment, so the
-                # counter never reaches the limit unwatermarked.
-                cursor.execute(
-                    self._prepare(
-                        f"UPDATE {_TABLE} SET "
-                        f"half_open_request_count = half_open_request_count + 1, "
-                        f"half_open_window_started_at = "
-                        f"COALESCE(half_open_window_started_at, %s), "
-                        f"updated_at = %s WHERE service_name = %s"
-                    ),
-                    (self._dt_to_db(now), self._dt_to_db(now), service_name),
-                )
+                # Adoption stamp: a half_open row that arrived without a
+                # readable window (state-copy lane, or a value the read
+                # boundary could not parse) gets one from the first acquire,
+                # in the same statement as the increment, so the counter
+                # never reaches the limit unwatermarked. The decision reads
+                # the parsed watermark rather than testing NULL in SQL, so
+                # an unparseable stored value is repaired like an absent one
+                # -- the contract folds both into the same case. The row is
+                # locked for the whole method, so the read cannot go stale
+                # (on SQLite the module's best-effort caveat applies, and a
+                # double stamp writes two near-identical timestamps).
+                if watermark_dt is None:
+                    cursor.execute(
+                        self._prepare(
+                            f"UPDATE {_TABLE} SET "
+                            f"half_open_request_count = "
+                            f"half_open_request_count + 1, "
+                            f"half_open_window_started_at = %s, "
+                            f"updated_at = %s WHERE service_name = %s"
+                        ),
+                        (self._dt_to_db(now), self._dt_to_db(now), service_name),
+                    )
+                else:
+                    cursor.execute(
+                        self._prepare(
+                            f"UPDATE {_TABLE} SET "
+                            f"half_open_request_count = "
+                            f"half_open_request_count + 1, "
+                            f"updated_at = %s WHERE service_name = %s"
+                        ),
+                        (self._dt_to_db(now), service_name),
+                    )
                 if self._should_commit(conn):
                     conn.commit()
                 self._last_acquire_marker = "increment"
