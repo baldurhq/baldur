@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+from unittest.mock import patch
 
 import pytest
 
@@ -266,3 +267,172 @@ class TestPrintResponseBehavior:
         output = stream.getvalue()
         assert "EXOTIC" in output
         assert "2026-04-16" in output
+
+
+# =============================================================================
+# Behavior — run_handler attributes the work to the operator
+# =============================================================================
+
+
+class TestCliOperatorActorContext:
+    """A terminal invocation is attributed to the person who ran it.
+
+    Nothing under ``cli/`` used to set an actor, so ``ActorContext`` handed
+    back the system actor and an operator's ``baldur cb force-open`` was
+    recorded in the compliance ledger as an *automatic* open by the system —
+    exactly the distinction that ledger exists to make. ``run_handler`` is the
+    seam every handler-backed command routes through, so wrapping it here
+    attributes every state-changing command without each one repeating the
+    wiring.
+    """
+
+    @staticmethod
+    def _observed_actor(handler_body=None):
+        """Run a handler that reports the actor visible inside it."""
+        from baldur.context.actor_context import ActorContext
+
+        seen = {}
+
+        def handler(_ctx):
+            actor = ActorContext.get_current()
+            seen["actor_id"] = actor.actor_id
+            seen["actor_type"] = actor.actor_type
+            seen["source"] = actor.source
+            if handler_body is not None:
+                handler_body()
+            return ResponseContext.json({"ok": True})
+
+        run_handler(handler, build_request_context())
+        return seen
+
+    def test_the_handler_runs_under_a_non_system_actor(self):
+        """The defect in one line: the work must not look automatic."""
+        actor = self._observed_actor()
+
+        assert actor["actor_type"] != "system"
+
+    def test_the_actor_type_names_the_cli_entry_point(self):
+        """``cli`` matches ``ContextType.CLI``, so a ledger row's actor type
+        and context type name the same entry point."""
+        from baldur.cli._invoke import CLI_ACTOR_TYPE
+
+        assert CLI_ACTOR_TYPE == "cli"
+        assert self._observed_actor()["actor_type"] == "cli"
+
+    def test_the_actor_id_identifies_the_operator_and_host(self):
+        """``user@host`` — the same formula the management-command entry point
+        uses, so one operator reads the same whichever entry point they drove.
+        """
+        actor_id = self._observed_actor()["actor_id"]
+
+        assert actor_id
+        assert "@" in actor_id
+
+    def test_an_unresolvable_login_name_still_yields_an_identity(self):
+        """An unnamed operator is still a better record than none, so a host
+        with no resolvable login degrades rather than failing the command."""
+        import baldur.cli._invoke as invoke
+
+        with patch("getpass.getuser", side_effect=OSError("no login name")):
+            actor_id = invoke._operator_actor_id()
+
+        assert actor_id
+        assert "@" in actor_id
+        assert "unknown-user" in actor_id or actor_id.startswith("uid-")
+
+    def test_an_unresolvable_hostname_still_yields_an_identity(self):
+        import baldur.cli._invoke as invoke
+
+        with patch("socket.gethostname", side_effect=OSError("no hostname")):
+            actor_id = invoke._operator_actor_id()
+
+        assert actor_id.endswith("@unknown-host")
+
+    def test_the_source_falls_back_when_no_command_is_active(self):
+        """Driven outside a parsed command line, the source still names the
+        CLI rather than being left blank."""
+        from baldur.cli._invoke import CLI_ACTOR_SOURCE_FALLBACK
+
+        assert self._observed_actor()["source"] == CLI_ACTOR_SOURCE_FALLBACK
+
+    def test_the_source_names_the_invoked_command(self):
+        """Read from the active command context rather than passed in by each
+        command, so a new subcommand is attributed without editing this seam.
+        """
+        import click
+
+        @click.group()
+        def cli():
+            pass
+
+        @cli.command("force-open")
+        def force_open():
+            pass
+
+        with click.Context(
+            force_open,
+            info_name="force-open",
+            parent=click.Context(cli, info_name="baldur"),
+        ):
+            source = self._observed_actor()["source"]
+
+        assert source == "baldur force-open"
+
+    def test_an_existing_actor_is_not_overwritten(self):
+        """An identity established by an embedding caller wins — this fills a
+        gap, it never replaces attribution someone else already made."""
+        from baldur.context.actor_context import ActorContext
+
+        with ActorContext.set_actor(
+            actor_id="service-account", actor_type="api_client", source="embedded"
+        ):
+            actor = self._observed_actor()
+
+        assert actor["actor_id"] == "service-account"
+        assert actor["actor_type"] == "api_client"
+        assert actor["source"] == "embedded"
+
+    def test_the_attribution_does_not_outlive_the_call(self):
+        """The actor is scoped to the invocation: a leaked one would attribute
+        later background work to a terminal operator who has gone home."""
+        from baldur.context.actor_context import ActorContext
+
+        self._observed_actor()
+
+        assert ActorContext.is_set() is False
+
+    def test_a_missing_context_module_leaves_the_command_running(self):
+        """Fail-open: attribution is a side effect, so its module being
+        unavailable must leave the invocation unattributed rather than fail
+        the command an operator is running."""
+        import builtins
+
+        real_import = builtins.__import__
+
+        def without_actor_context(name, *args, **kwargs):
+            if name == "baldur.context.actor_context":
+                raise ImportError("no actor context in this build")
+            return real_import(name, *args, **kwargs)
+
+        def handler(_ctx):
+            return ResponseContext.json({"ok": True}, status_code=200)
+
+        with patch.object(builtins, "__import__", without_actor_context):
+            response = run_handler(handler, build_request_context())
+
+        assert response.status_code == 200
+
+    def test_a_handler_import_error_is_still_reported_as_a_handler_gap(self):
+        """The context import is resolved *before* the body runs, so an
+        ``ImportError`` raised by the handler itself is never mistaken for
+        this module being absent — it stays a 500 with the handler's message.
+        """
+
+        def handler(_ctx):
+            raise ImportError("the handler's own missing dependency")
+
+        response = run_handler(handler, build_request_context())
+
+        assert response.status_code == 500
+        assert response.body["error_type"] == "ImportError"
+        assert response.body["error"] == "the handler's own missing dependency"
