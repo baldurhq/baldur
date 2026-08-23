@@ -876,7 +876,12 @@ pro_import_boundary:
 # 519 G1+G2: -2 statements (StepResult relocated to baldur.models.saga, primitives.py + runbook_registry.py flipped)
 # 519 PR 2 (c) track: 5 module-level + ~120 in-function statements migrated to ProviderRegistry.<slot>.safe_get() — count dropped 338 -> 213
 # 519 PR 3 (d) types track: 23 module-level + ~30 in-function statements migrated to baldur.models.* / baldur.interfaces.* / PEP 562 lazy — count dropped 213 -> 161. 4 hedging rows retained per deviation (see Implementation Deviations from Doc).
-pro_import_boundary_count: 161
+# Re-snapshot: 161 was carried unchanged through work that kept retiring callsites, so the
+# ratchet had accumulated 27 statements of slack — it only fails on an increase, so a
+# decrease never forces an update. Measured 141 at the public-repo cutover and 134 now
+# (protect_facade, resilience/policies/__init__ + presets, cell_topology/health + registry,
+# tasks/integrity_tasks, audit/wal/__init__). Snapshot lowered to the measured count.
+pro_import_boundary_count: 134
 
 # G17c — OSS->Dormant import-boundary global-count snapshot (528 D10-v2).
 # Target = 0. Current sites (in-function lazy imports of baldur_dormant
