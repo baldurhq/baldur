@@ -12,6 +12,9 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ### Fixed
 
+- Drift reconciliation now propagates a local half-open winner to the shared store.
+- It previously copied the losing shared state back, undoing the resolution it had just made.
+- A shared row an operator pinned is exempt: the pinned state is copied to the local row instead.
 - A half-open circuit breaker whose trial window is missing no longer rejects every call forever.
 - Its first trial call now starts the window, so the breaker recovers instead of locking on Redis.
 - A half-open window rebuilt from a snapshot is no longer misread as stalled during a Redis outage.
