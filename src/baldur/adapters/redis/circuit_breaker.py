@@ -60,7 +60,10 @@ if count == nil then count = 0 end
 local watermark = tonumber(fields[3])
 
 if state == 'half_open' and count >= limit then
-    if watermark ~= nil and (now_unix - watermark) > stuck_timeout then
+    -- An absent (or unparseable) watermark counts as older than any timeout:
+    -- fail-open, so an at-limit row created without a window cannot pin the
+    -- breaker in HALF_OPEN forever.
+    if watermark == nil or (now_unix - watermark) > stuck_timeout then
         redis.call('HSET', key,
             'state', 'half_open',
             'success_count', '0',
@@ -85,6 +88,12 @@ end
 if state == 'half_open' and count < limit then
     redis.call('HINCRBY', key, 'half_open_request_count', 1)
     redis.call('HSET', key, 'updated_at', now_iso)
+    -- Adoption stamp: the first acquire starts a window the row arrived
+    -- without, so the counter never reaches the limit unwatermarked.
+    if watermark == nil then
+        redis.call('HSET', key,
+            'half_open_window_started_at', tostring(now_unix))
+    end
     return {1, 'half_open', 'half_open', 'increment'}
 end
 
