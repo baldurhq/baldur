@@ -60,7 +60,7 @@ def _wal_dir_bytes(wal_dir: Path) -> int:
 # =============================================================================
 
 
-class TestWALMetaEventDelivery:
+class TestWALMetaEventDeliveryBehavior:
     """``_deliver_meta_event`` delivers to a wired adapter, and to nothing else."""
 
     @pytest.mark.parametrize("event_type", META_EVENT_TYPES, ids=META_EVENT_TYPES)
@@ -160,7 +160,7 @@ class TestWALMetaEventDelivery:
 # =============================================================================
 
 
-class TestWALRotationReporting:
+class TestWALRotationReportingBehavior:
     """Rotation reports through a log line and a counter that do not depend on
     a wired adapter — the channels that replaced the WAL-write fallback.
     """

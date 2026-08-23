@@ -24,7 +24,6 @@ from pathlib import Path
 __all__ = [
     "RawRecord",
     "own_pid_wal_name",
-    "peer_pid_wal_name",
     "write_raw_wal_file",
 ]
 
@@ -85,8 +84,3 @@ def write_raw_wal_file(
 def own_pid_wal_name(prefix: str, stamp: str) -> str:
     """A filename this process owns — matched by the runtime glob."""
     return f"{prefix}_{stamp}_{os.getpid()}.wal"
-
-
-def peer_pid_wal_name(prefix: str, stamp: str) -> str:
-    """A filename this process does not own — excluded by the runtime glob."""
-    return f"{prefix}_{stamp}_{os.getpid() + 99999}.wal"

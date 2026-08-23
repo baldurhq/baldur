@@ -224,14 +224,26 @@ class WALReaderMixin:
                             },
                         )
                         if self._on_corruption:
-                            self._on_corruption(
-                                WALCorruptionError(
-                                    f"Checksum mismatch in {filepath}",
-                                    sequence=-1,
-                                    expected=checksum,
-                                    computed=computed_cs,
+                            # Guarded like ``_on_rotate``: unguarded, a host
+                            # callback that raises escapes into this
+                            # generator's blanket handler and ends the read
+                            # mid-file, so a recovery silently loses every
+                            # entry behind the corrupt one.
+                            try:
+                                self._on_corruption(
+                                    WALCorruptionError(
+                                        f"Checksum mismatch in {filepath}",
+                                        sequence=-1,
+                                        expected=checksum,
+                                        computed=computed_cs,
+                                    )
                                 )
-                            )
+                            except Exception as e:
+                                logger.warning(
+                                    "wal.corruption_callback_failed",
+                                    filepath=str(filepath),
+                                    error=str(e),
+                                )
 
                         if best_effort and not self._config.best_effort_recovery:
                             break
@@ -425,6 +437,8 @@ class WALReaderMixin:
         logger.info(
             "wal.parallel_recovery_completed",
             recovered_count=len(sorted_entries),
+            last_processed_seq=last_processed_seq,
+            new_last_seq=sorted_entries[-1].sequence if sorted_entries else None,
             parallel_workers=max_workers,
         )
 
