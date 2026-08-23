@@ -97,7 +97,7 @@ class WALReaderMixin:
         HEADER_SIZE: int
         MAGIC: bytes
 
-        def _record_audit_event(
+        def _deliver_meta_event(
             self, event_type: str, details: dict[str, Any]
         ) -> None: ...
 
@@ -198,31 +198,44 @@ class WALReaderMixin:
                     if not verify_checksum(data_bytes, checksum):
                         self._corrupted_entries += 1
 
-                        if best_effort:
-                            if self._config.best_effort_recovery:
-                                continue
+                        # Detection is unconditional: an integrity finding does
+                        # not depend on which mode the caller happened to read
+                        # in. Every best-effort read — the orphan absorb, the
+                        # multi-file drain, the bounded read — used to count the
+                        # bad record and move on with no metric, no callback and
+                        # no event, so a checksum mismatch was invisible on the
+                        # paths that take it most often. Only the control flow
+                        # below stays mode-dependent.
+                        computed_cs = compute_checksum(data_bytes)
+                        logger.warning(
+                            "wal.corruption_detected",
+                            filepath=str(filepath),
+                            expected_checksum=checksum,
+                            computed_checksum=computed_cs,
+                        )
+                        if has_metrics:
+                            record_wal_corruption()
+                        self._deliver_meta_event(
+                            event_type="WAL_CORRUPTION_DETECTED",
+                            details={
+                                "filepath": str(filepath),
+                                "expected_checksum": checksum,
+                                "computed_checksum": computed_cs,
+                            },
+                        )
+                        if self._on_corruption:
+                            self._on_corruption(
+                                WALCorruptionError(
+                                    f"Checksum mismatch in {filepath}",
+                                    sequence=-1,
+                                    expected=checksum,
+                                    computed=computed_cs,
+                                )
+                            )
+
+                        if best_effort and not self._config.best_effort_recovery:
                             break
-                        else:
-                            computed_cs = compute_checksum(data_bytes)
-                            error = WALCorruptionError(
-                                f"Checksum mismatch in {filepath}",
-                                sequence=-1,
-                                expected=checksum,
-                                computed=computed_cs,
-                            )
-                            if has_metrics:
-                                record_wal_corruption()
-                            self._record_audit_event(
-                                event_type="WAL_CORRUPTION_DETECTED",
-                                details={
-                                    "filepath": str(filepath),
-                                    "expected_checksum": checksum,
-                                    "computed_checksum": computed_cs,
-                                },
-                            )
-                            if self._on_corruption:
-                                self._on_corruption(error)
-                            continue
+                        continue
 
                     # JSON parsing
                     entry = self._parse_wal_record(data_bytes, checksum)
@@ -398,17 +411,6 @@ class WALReaderMixin:
         if has_metrics and sorted_entries:
             record_wal_entries_recovered(len(sorted_entries))
 
-        if sorted_entries:
-            self._record_audit_event(
-                event_type="WAL_RECOVERED",
-                details={
-                    "recovered_count": len(sorted_entries),
-                    "last_processed_seq": last_processed_seq,
-                    "new_last_seq": sorted_entries[-1].sequence,
-                    "parallel_workers": max_workers,
-                },
-            )
-
         logger.info(
             "wal.parallel_recovery_completed",
             recovered_count=len(sorted_entries),
@@ -492,8 +494,8 @@ class WALReaderMixin:
         entries to the central store.
 
         Unlike ``recover_unprocessed``, this reads via ``_read_file_entries``
-        directly and emits **neither** the ``WAL_RECOVERED`` audit event nor
-        the ``wal.parallel_recovery_completed`` log — the caller
+        directly and emits neither the ``wal.parallel_recovery_completed`` log
+        nor the recovered-entries counter — the caller
         (``AuditSyncWorker.absorb_orphans``) is responsible for its own
         summary event. It also does not advance ``_recovered_entries``.
 
@@ -548,6 +550,13 @@ class WALReaderMixin:
         memory use. Results are sorted/accumulated right after each file to
         lower the memory peak.
         """
+        try:
+            from baldur.metrics.drift_metrics import record_wal_entries_recovered
+
+            has_metrics = True
+        except ImportError:
+            has_metrics = False
+
         all_entries: list = []
         consumed = 0
 
@@ -578,15 +587,17 @@ class WALReaderMixin:
         sorted_entries = sorted(all_entries, key=lambda e: e.sequence)
         self._recovered_entries += len(sorted_entries)
 
+        # This path returns before ``recover_unprocessed`` reaches its own
+        # metric and completion log, so it carries both itself — otherwise a
+        # memory-guarded recovery is the one recovery an operator cannot see.
         if sorted_entries:
-            self._record_audit_event(
-                event_type="WAL_RECOVERED",
-                details={
-                    "recovered_count": len(sorted_entries),
-                    "last_processed_seq": last_processed_seq,
-                    "new_last_seq": sorted_entries[-1].sequence,
-                    "mode": "chunked",
-                },
+            if has_metrics:
+                record_wal_entries_recovered(len(sorted_entries))
+            logger.info(
+                "wal.chunked_recovery_completed",
+                recovered_count=len(sorted_entries),
+                last_processed_seq=last_processed_seq,
+                new_last_seq=sorted_entries[-1].sequence,
             )
 
         return sorted_entries

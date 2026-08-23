@@ -99,7 +99,10 @@ class WriteAheadLog(
             config: WAL configuration
             on_rotate: Callback on file rotation
             on_corruption: Callback when corruption is found
-            audit_adapter: Audit adapter (for event recording)
+            audit_adapter: Optional destination for WAL meta-events
+                (rotation, corruption). Unwired by default: without it the
+                meta-events reach the operator through their log lines and
+                counters only, never through this WAL's own contents.
         """
         self._config = config or WALConfig()
         self._on_rotate = on_rotate
@@ -322,7 +325,16 @@ class WriteAheadLog(
                 if old_file:
                     if HAS_DRIFT_METRICS:
                         record_wal_rotation()
-                    self._record_audit_event(
+                    # Unconditional channel. Meta-event delivery is opt-in
+                    # (a host-wired adapter), so the log line and the counter
+                    # are what an operator reads on every deployment.
+                    logger.info(
+                        "wal.file_rotated",
+                        old_file=str(old_file),
+                        old_size_bytes=old_size,
+                        file_prefix=self._config.file_prefix,
+                    )
+                    self._deliver_meta_event(
                         event_type="WAL_ROTATED",
                         details={
                             "old_file": str(old_file),
@@ -460,42 +472,43 @@ class WriteAheadLog(
     def __exit__(self, *args: Any) -> None:
         self.close()
 
-    def _record_audit_event(self, event_type: str, details: dict[str, Any]) -> None:
-        """Record a WAL meta-event (WAL_ROTATED / WAL_RECOVERED /
-        WAL_CORRUPTION_DETECTED) to the audit trail.
+    def _deliver_meta_event(self, event_type: str, details: dict[str, Any]) -> None:
+        """Deliver a WAL meta-event (WAL_ROTATED / WAL_CORRUPTION_DETECTED) to a
+        host-wired audit adapter.
 
         When an ``audit_adapter`` is wired, the meta-event is routed through
         the canonical ``AuditLogAdapter.log()`` contract; the emitting
         component is preserved in ``details["source"]`` since ``AuditEntry``
-        has no dedicated source field. With no adapter, it falls through to
-        the WAL itself. Both branches are fail-open.
-        """
-        if self._audit_adapter is not None:
-            try:
-                from baldur.interfaces.audit_adapter import AuditEntry
+        has no dedicated source field.
 
-                self._audit_adapter.log(
-                    AuditEntry(
-                        action=event_type,
-                        details={**details, "source": "WriteAheadLog"},
-                    )
-                )
-                return
-            except Exception:
-                pass
+        With no adapter the event is simply not delivered. A meta-event about
+        this WAL must never become content of this WAL: the next read of the
+        log finds it and reports it again, and a consumer that re-reads on a
+        timer turns that into an unbounded self-referential append. Every
+        emitting call site therefore carries its own unconditional log line and
+        counter, which are the channels that do not depend on a wired adapter.
+
+        Fail-open: a raising adapter is reported and swallowed, never
+        propagated into the write path this runs under.
+        """
+        if self._audit_adapter is None:
+            return
 
         try:
-            from baldur_pro.services.audit.base import _write_to_wal
+            from baldur.interfaces.audit_adapter import AuditEntry
 
-            _write_to_wal(
-                event_type=event_type,
-                source="WriteAheadLog",
-                details=details,
+            self._audit_adapter.log(
+                AuditEntry(
+                    action=event_type,
+                    details={**details, "source": "WriteAheadLog"},
+                )
             )
-        except ImportError:
-            pass
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(
+                "wal.meta_event_delivery_failed",
+                event_type=event_type,
+                error=str(e),
+            )
 
 
 # =============================================================================

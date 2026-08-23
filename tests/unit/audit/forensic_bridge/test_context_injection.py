@@ -69,68 +69,52 @@ class TestAuditContextAutoInjection:
                 assert call_kwargs["event_type"] == "SHADOW_LOG_RECOVERED"
                 assert call_kwargs["details"]["recovered_count"] == count
 
-    def test_wal_uses_write_to_wal_for_rotation(self, temp_wal_dir):
-        """WAL 로테이션 시 _write_to_wal() 호출."""
-        pytest.importorskip("baldur_pro")
+    def test_meta_event_without_adapter_leaves_the_wal_untouched(self, temp_wal_dir):
+        """어댑터가 없으면 메타 이벤트는 자신이 기술하는 WAL을 바꾸지 않는다."""
+        from pathlib import Path as _Path
+
         from baldur.audit.wal import WALConfig, WriteAheadLog
 
         config = WALConfig(
             wal_dir=temp_wal_dir,
-            max_file_size_mb=0.0001,  # 매우 작은 크기로 로테이션 유도
             sync_on_write=False,
+            max_files=1000,  # 보존 삭제가 바이트 수를 흔들지 않도록
+        )
+        wal = WriteAheadLog(config=config)  # audit_adapter=None
+
+        for i in range(5):
+            wal.write({"event": f"test_{i}"})
+        wal.flush()
+
+        def wal_dir_bytes() -> int:
+            return sum(f.stat().st_size for f in _Path(temp_wal_dir).glob("*.wal"))
+
+        entries_before = wal.get_stats().total_entries
+        bytes_before = wal_dir_bytes()
+        files_before = len(list(_Path(temp_wal_dir).glob("*.wal")))
+
+        # 1) 로테이션 메타 이벤트
+        wal._rotate_file()
+        assert len(list(_Path(temp_wal_dir).glob("*.wal"))) == files_before, (
+            "로테이션은 파일을 닫을 뿐 새 파일을 즉시 만들지 않음"
         )
 
-        with patch("baldur_pro.services.audit.base._write_to_wal") as mock_wal:
-            wal = WriteAheadLog(config=config)  # audit_adapter=None
+        # 2) 손상 감지 메타 이벤트 — 실제로 발동해야 단언이 유효함
+        target = sorted(_Path(temp_wal_dir).glob("*.wal"))[0]
+        with open(target, "r+b") as f:
+            f.seek(20)
+            f.write(b"CORRUPTED")
 
-            # 로테이션 유도
-            for i in range(50):
-                wal.write({"event": f"test_{i}", "data": "x" * 2000})
-
-            wal.close()
-
-            # WAL_ROTATED 이벤트가 기록되어야 함
-            rotation_calls = [
-                call
-                for call in mock_wal.call_args_list
-                if call[1].get("event_type") == "WAL_ROTATED"
-            ]
-            assert len(rotation_calls) > 0, "WAL_ROTATED 이벤트가 기록되어야 함"
-
-    def test_wal_audit_adapter_priority_over_write_to_wal(
-        self, temp_wal_dir, mock_audit_adapter
-    ):
-        """WAL에 audit_adapter가 주입되면 우선 사용."""
-        pytest.importorskip("baldur_pro")
-        from baldur.audit.wal import WALConfig, WriteAheadLog
-
-        config = WALConfig(
-            wal_dir=temp_wal_dir,
-            max_file_size_mb=0.0001,
-            sync_on_write=False,
+        wal2 = WriteAheadLog(config=config)  # audit_adapter=None
+        wal2.recover_unprocessed(last_processed_seq=0)
+        assert wal2.get_stats().corrupted_entries > 0, (
+            "손상 분기가 실제로 실행되어야 함"
         )
+        wal2.close()
+        wal.close()
 
-        with patch("baldur_pro.services.audit.base._write_to_wal") as mock_wal:
-            wal = WriteAheadLog(config=config, audit_adapter=mock_audit_adapter)
-
-            # 로테이션 유도
-            for i in range(50):
-                wal.write({"event": f"test_{i}", "data": "x" * 2000})
-
-            wal.close()
-
-            # audit_adapter가 우선 사용되어야 함
-            rotation_events = mock_audit_adapter.get_events_by_type("WAL_ROTATED")
-            if rotation_events:
-                # audit_adapter가 사용됨 → _write_to_wal은 호출되지 않아야 함
-                wal_rotation_calls = [
-                    call
-                    for call in mock_wal.call_args_list
-                    if call[1].get("event_type") == "WAL_ROTATED"
-                ]
-                assert len(wal_rotation_calls) == 0, (
-                    "audit_adapter가 있으면 _write_to_wal 호출 안됨"
-                )
+        assert wal.get_stats().total_entries == entries_before
+        assert wal_dir_bytes() == bytes_before
 
     def test_shadow_logger_graceful_on_import_error(self):
         """_write_to_wal import 실패 시 graceful 처리."""

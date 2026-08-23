@@ -20,8 +20,8 @@ class TestWALAuditIntegration:
         sig = inspect.signature(WriteAheadLog.__init__)
         assert "audit_adapter" in sig.parameters
 
-    def test_wal_recovered_event_on_recovery(self, temp_wal_dir, mock_audit_adapter):
-        """복구 시 WAL_RECOVERED 이벤트 기록."""
+    def test_recovery_emits_no_audit_event(self, temp_wal_dir, mock_audit_adapter):
+        """복구는 감사 이벤트를 남기지 않는다 (메트릭 + 로그로만 보고)."""
         from baldur.audit.wal import WALConfig, WriteAheadLog
 
         config = WALConfig(
@@ -41,11 +41,8 @@ class TestWALAuditIntegration:
         entries = wal2.recover_unprocessed(last_processed_seq=0)
         wal2.close()
 
-        if entries:
-            # WAL_RECOVERED 이벤트 확인
-            recovered_events = mock_audit_adapter.get_events_by_type("WAL_RECOVERED")
-            assert len(recovered_events) > 0, "WAL_RECOVERED 이벤트가 기록되어야 함"
-            assert "recovered_count" in recovered_events[-1]["details"]
+        assert entries, "복구된 엔트리가 있어야 이 단언이 유효함"
+        assert mock_audit_adapter.get_events_by_type("WAL_RECOVERED") == []
 
     def test_wal_rotated_event_on_rotation(self, temp_wal_dir, mock_audit_adapter):
         """로테이션 시 WAL_ROTATED 이벤트 기록."""
