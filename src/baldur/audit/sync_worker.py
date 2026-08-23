@@ -686,6 +686,31 @@ class AuditSyncWorker:
         except Exception:
             pass
 
+    def _count_pending(self, wal: Any) -> int:
+        """Backlog depth above the cursor, for the lag gauge.
+
+        Prefers ``count_unprocessed()``: it answers from the WAL's in-memory
+        sequence with no file reads, the substitution
+        ``async_audit_lifecycle._check_unprocessed_wal_entries`` already
+        documents as preferred. A WAL-like object that cannot answer falls
+        back to counting a full read, and an unreadable WAL reports 0.
+
+        Fail direction: a sequence span over-reports when entries were
+        physically reclaimed, i.e. it fails toward flagging a problem — the
+        safe direction for a health verdict.
+        """
+        try:
+            if hasattr(wal, "count_unprocessed"):
+                return wal.count_unprocessed(self._last_processed_seq)
+            entries = wal.recover_unprocessed(self._last_processed_seq, mode="runtime")
+            return len(entries)
+        except Exception as e:
+            logger.debug(
+                "audit_sync_worker.pending_count_failed",
+                error=e,
+            )
+            return 0
+
     def _sync_batch(self) -> tuple[int, int]:
         """
         Perform batch synchronization.
@@ -696,6 +721,17 @@ class AuditSyncWorker:
         wal = self._get_wal()
         if wal is None:
             return 0, 0
+
+        # The lag is the real backlog, not what one cycle read. The read is
+        # capped at ``batch_size`` (100 by default), far below the audit health
+        # probe's DEGRADED threshold, so deriving the lag from it would make
+        # that verdict unreachable. It is written here — above the empty-read
+        # early return — because a cycle that reads nothing is the steady state
+        # of a wired, idle process, and that cycle must still report the
+        # current backlog rather than leave the previous one standing.
+        pending_entries = self._count_pending(wal)
+        with self._lock:
+            self._stats.current_lag_entries = pending_entries
 
         # Null-aware: the registry falls back to the no-op adapter, so
         # ``_get_adapter()`` would hand back an object whose ``log()`` body
@@ -710,13 +746,20 @@ class AuditSyncWorker:
             # mode="runtime": read only this worker's own-PID entries — no
             # peer over-replay; the single in-memory cursor thresholds only
             # this worker's own (independent) sequence space (#470 G4).
-            entries = wal.recover_unprocessed(self._last_processed_seq, mode="runtime")
+            # ``limit`` is the drain's own budget, so the read can never grow
+            # past what this cycle is able to deliver.
+            entries = wal.recover_unprocessed(
+                self._last_processed_seq,
+                mode="runtime",
+                limit=self._config.batch_size,
+            )
             if not entries:
                 return 0, 0
 
+            # Redundant against a real WAL (the read is already capped) and
+            # kept as the invariant for a host-injected WAL-like object that
+            # ignores ``limit``: the batch never exceeds the budget.
             batch = entries[: self._config.batch_size]
-            with self._lock:
-                self._stats.current_lag_entries = len(entries)
 
             if adapter is None:
                 # No real central destination — surface the backlog via lag, but
@@ -726,7 +769,7 @@ class AuditSyncWorker:
                 if not self._no_adapter_warned:
                     logger.warning(
                         "audit_sync_worker.central_adapter_unwired",
-                        pending_entries=len(entries),
+                        pending_entries=pending_entries,
                     )
                     self._no_adapter_warned = True
                 return 0, 0
