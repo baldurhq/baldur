@@ -223,20 +223,20 @@ class TestWALRecoverOrphansBehavior:
 
         assert [e.sequence for e in entries] == [3]
 
-    def test_recover_orphans_emits_no_wal_recovered_event_no_recovered_advance(
+    def test_recover_orphans_emits_no_meta_event_no_recovered_advance(
         self, wal, wal_dir
     ):
         """Negative side effect: ``recover_orphans`` reads via
-        ``_read_file_entries`` directly — it must NOT emit the
-        ``WAL_RECOVERED`` audit event nor advance ``_recovered_entries``
-        (the caller owns its own summary event).
+        ``_read_file_entries`` directly — it must NOT deliver a WAL
+        meta-event nor advance ``_recovered_entries`` (the caller owns its
+        own summary event).
         """
         _create_raw_wal_file(
             wal_dir / _peer_pid_filename("001"),
             [{"seq": 9, "ts": 9.0, "data": {}}],
         )
 
-        with patch.object(wal, "_record_audit_event") as mock_event:
+        with patch.object(wal, "_deliver_meta_event") as mock_event:
             recovered_before = wal._recovered_entries
             entries = wal.recover_orphans()
 
