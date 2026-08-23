@@ -11,6 +11,7 @@ Tests for:
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -23,6 +24,35 @@ from baldur.services.event_bus.bus._saga_handlers import (
     _on_saga_completed,
     _on_saga_timed_out,
 )
+
+
+@contextmanager
+def _stub_audit_wal(helper_module_name, sequence=1):
+    """Run a PRO audit helper against a stub WAL, yielding the stub.
+
+    ``sequence`` is what the WAL hands back for a write; ``None`` stands for
+    "no WAL is available", the case where the helper's immediate delivery leg
+    runs. Assert on ``wal.write.call_args[0][0]`` to read the entry the writer
+    built.
+
+    Two deliberate choices. The WAL is stubbed rather than the writer, so this
+    file never names a ``baldur_pro`` internal — it ships to the public repo.
+    And the writer's own globals are patched rather than a dotted path,
+    because an autouse fixture drops the audit modules from ``sys.modules``
+    between tests: a helper can hold a writer from an earlier module object
+    that a path-based patch would miss. The import is deferred to entry so
+    the module is only required once a test has skipped on PRO's absence.
+    """
+    import importlib
+
+    from baldur.audit.wal import WriteAheadLog
+
+    module = importlib.import_module(f"baldur_pro.services.audit.{helper_module_name}")
+    wal = MagicMock(spec=WriteAheadLog)
+    wal.write.return_value = sequence
+    resolver = (lambda: None) if sequence is None else (lambda: wal)
+    with patch.dict(module._write_to_wal.__globals__, {"_get_wal": resolver}):
+        yield wal
 
 
 def _make_event(event_type: EventType, data: dict, source: str = "test") -> BaldurEvent:
@@ -50,10 +80,7 @@ class TestSagaHandlerContract:
             patch(
                 "baldur.services.event_bus.bus._saga_handlers._get_saga_handler_counter",
             ),
-            patch(
-                "baldur_pro.services.audit.saga_audit._write_to_wal",
-                return_value=1,
-            ),
+            _stub_audit_wal("saga_audit"),
         ):
             mock_settings.return_value = MagicMock(enabled=True)
             event = _make_event(EventType.SAGA_TIMED_OUT, data={})
@@ -75,10 +102,7 @@ class TestSagaHandlerContract:
             patch(
                 "baldur.services.event_bus.bus._saga_handlers._get_saga_handler_counter",
             ),
-            patch(
-                "baldur_pro.services.audit.saga_audit._write_to_wal",
-                return_value=1,
-            ),
+            _stub_audit_wal("saga_audit"),
         ):
             mock_settings.return_value = MagicMock(enabled=True)
             event = _make_event(EventType.SAGA_COMPENSATION_FAILED, data={})
@@ -255,10 +279,7 @@ class TestSagaHandlerBehavior:
             patch(
                 "baldur.services.event_bus.bus._saga_handlers._get_saga_handler_counter",
             ),
-            patch(
-                "baldur_pro.services.audit.saga_audit._write_to_wal",
-                return_value=1,
-            ) as mock_wal,
+            _stub_audit_wal("saga_audit") as stub_wal,
         ):
             mock_settings.return_value = MagicMock(enabled=True)
             event = _make_event(
@@ -271,8 +292,8 @@ class TestSagaHandlerBehavior:
             )
             _on_saga_timed_out(event)
 
-            mock_wal.assert_called_once()
-            call_kwargs = mock_wal.call_args[1]
+            stub_wal.write.assert_called_once()
+            call_kwargs = stub_wal.write.call_args[0][0]
             assert call_kwargs["event_type"] == "SAGA_TIMED_OUT"
             assert call_kwargs["domain"] == "saga"
             assert call_kwargs["target_id"] == "inst-42"
@@ -290,10 +311,7 @@ class TestSagaHandlerBehavior:
             patch(
                 "baldur.services.event_bus.bus._saga_handlers._get_saga_handler_counter",
             ),
-            patch(
-                "baldur_pro.services.audit.saga_audit._write_to_wal",
-                return_value=1,
-            ) as mock_wal,
+            _stub_audit_wal("saga_audit") as stub_wal,
         ):
             mock_settings.return_value = MagicMock(enabled=True)
             event = _make_event(
@@ -307,8 +325,8 @@ class TestSagaHandlerBehavior:
             )
             _on_saga_compensation_failed(event)
 
-            mock_wal.assert_called_once()
-            details = mock_wal.call_args[1]["details"]
+            stub_wal.write.assert_called_once()
+            details = stub_wal.write.call_args[0][0]["details"]
             assert details["failed_steps"] == ["step_payment", "step_inventory"]
             assert details["error_message"] == "timeout"
 
@@ -325,10 +343,7 @@ class TestSagaHandlerBehavior:
             patch(
                 "baldur.services.event_bus.bus._saga_handlers._get_saga_handler_counter",
             ) as mock_get_counter,
-            patch(
-                "baldur_pro.services.audit.saga_audit._write_to_wal",
-                return_value=1,
-            ),
+            _stub_audit_wal("saga_audit"),
         ):
             mock_settings.return_value = MagicMock(enabled=True)
             mock_counter = MagicMock()
@@ -374,10 +389,7 @@ class TestSagaHandlerBehavior:
             patch(
                 "baldur.services.event_bus.bus._saga_handlers._get_saga_handler_counter",
             ),
-            patch(
-                "baldur_pro.services.audit.saga_audit._write_to_wal",
-                return_value=1,
-            ),
+            _stub_audit_wal("saga_audit"),
         ):
             mock_settings.return_value = MagicMock(enabled=True)
             _on_saga_timed_out(_make_event(EventType.SAGA_TIMED_OUT, data={}))

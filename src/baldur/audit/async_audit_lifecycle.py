@@ -29,11 +29,13 @@ from __future__ import annotations
 import os
 import threading
 import time
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 import structlog
 
 from baldur.core.exceptions import ConfigurationError
+from baldur.utils.time import ensure_aware, from_iso_string
 
 if TYPE_CHECKING:
     pass
@@ -78,6 +80,25 @@ def _lifecycle_state() -> _AuditLifecycleState:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+def _event_time_kwarg(raw: Any) -> dict[str, Any]:
+    """Build the ``timestamp=`` kwarg carrying the event's own time.
+
+    This callback runs on the async logger's batched flush thread, so leaving
+    ``AuditEntry.timestamp`` to its default stamps every row with the flush
+    time rather than the time the audited thing happened. An absent or
+    unparseable value yields no kwarg, so the default still applies — a
+    malformed timestamp must not cost the whole entry.
+    """
+    if isinstance(raw, datetime):
+        return {"timestamp": ensure_aware(raw)}
+    if isinstance(raw, str) and raw:
+        try:
+            return {"timestamp": from_iso_string(raw.replace("Z", "+00:00"))}
+        except ValueError:
+            return {}
+    return {}
+
+
 def create_audit_flush_callback():
     """
     Create the AsyncHealingLogger batch flush callback.
@@ -112,6 +133,7 @@ def create_audit_flush_callback():
 
                     entry = AuditEntry(
                         action=action,
+                        **_event_time_kwarg(event_dict.get("timestamp")),
                         actor_id=event_dict.get("actor_id"),
                         actor_type=event_dict.get("actor_type", "system"),
                         target_type=event_dict.get("target_type"),

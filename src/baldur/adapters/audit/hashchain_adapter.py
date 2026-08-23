@@ -440,9 +440,16 @@ class HashChainFileAuditLogAdapter(AuditLogAdapter):
         present so the resulting H2 dict schema is identical to the
         ``LocalFileBackend.write()`` output for ``log_config_change()``
         callers.
+
+        The trace pair is surfaced out of ``details`` to the top level so
+        ``_build_entry()`` can record the trace the *event* carried rather
+        than the one ambient on the appending thread. ``_row_to_entry()``
+        maps both keys back into ``details``, so the round-trip is unchanged.
         """
         details = dict(entry.details or {})
         return {
+            "trace_id": details.pop("trace_id", None),
+            "trace_id_full": details.pop("trace_id_full", None),
             "config_type": entry.target_type or details.get("config_type", "unknown"),
             "config_key": entry.target_id or details.get("config_key", ""),
             "action": (
@@ -481,8 +488,17 @@ class HashChainFileAuditLogAdapter(AuditLogAdapter):
         correlation. The output dict is byte-compatible with the
         previous ``LocalFileBackend.write()`` schema so existing
         ``audit_{date}.jsonl`` files remain verifiable.
+
+        A row records the context of the *event*, not of the thread that
+        appended it: an entry carrying its own timestamp or trace pair keeps
+        them, and only an entry that carries neither falls back to the
+        appending thread's clock and ambient trace. Row timestamps are
+        therefore no longer monotonically non-decreasing along the chain
+        sequence — the chain is verified by hash linkage, not by timestamp
+        ordering, and range queries become correct rather than incorrect.
         """
-        now = utc_now()
+        recorded_at = event_dict.get("h1_timestamp")
+        now = recorded_at if isinstance(recorded_at, datetime) else utc_now()
 
         if self._mask_ip and event_dict.get("ip_address"):
             event_dict["ip_address"] = mask_ip(event_dict["ip_address"])
@@ -498,8 +514,16 @@ class HashChainFileAuditLogAdapter(AuditLogAdapter):
                 self._sensitive_fields,
             )
 
-        trace_id = get_trace_id()
-        trace_id_full = get_trace_id_full()
+        # Taken as a pair: a row must never mix one event's short id with the
+        # appending thread's ambient traceparent.
+        event_trace_id = event_dict.get("trace_id")
+        event_trace_id_full = event_dict.get("trace_id_full")
+        if event_trace_id or event_trace_id_full:
+            trace_id = event_trace_id
+            trace_id_full = event_trace_id_full
+        else:
+            trace_id = get_trace_id()
+            trace_id_full = get_trace_id_full()
 
         entry: dict[str, Any] = {
             "timestamp": now.isoformat(),

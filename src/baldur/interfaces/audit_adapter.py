@@ -368,15 +368,18 @@ class AuditEntry:
 
         Args:
             data: A WAL entry payload — the native ``log_*_audit`` shape (has
-                ``event_type``) or a ``to_dict()`` superset (has ``action``).
+                ``event_type``) or a ``to_dict()`` superset (has none).
 
         Returns:
             ``AuditEntry`` reconstructed from the WAL payload.
         """
-        # Native WAL shape: ``event_type`` present with no top-level
-        # ``action``. The ``to_dict()`` shape always carries ``action``, so
-        # this disjunction routes each schema to its own path unambiguously.
-        if "event_type" in data and "action" not in data:
+        # Native WAL shape: ``event_type`` present. The native payload may
+        # *also* carry an explicit ``action`` — the writer resolves it when the
+        # payload, not the event type, decides between two actions — so the
+        # presence of ``event_type`` alone selects the converter. Routing such
+        # an entry to ``from_dict`` instead would reset its float-epoch
+        # timestamp to now, the corruption this converter exists to prevent.
+        if "event_type" in data:
             return cls._from_native_wal_dict(data)
         return cls.from_dict(data)
 
@@ -384,18 +387,15 @@ class AuditEntry:
     def _from_native_wal_dict(cls, data: dict[str, Any]) -> AuditEntry:
         """Map the native ``_write_to_wal`` schema onto an ``AuditEntry``.
 
-        Field map: ``event_type``->``action`` (verbatim string — native event
-        types are upper-cased and miss the enum, so the recorded string is
-        kept when no enum member matches); float/int-epoch ``timestamp``
-        ->``datetime`` (original time preserved, never reset to now); direct
-        maps for actor/target/domain/result fields; native-only keys folded
+        Field map: the action is *derived* (see :meth:`_derive_native_action`);
+        float/int-epoch ``timestamp``->``datetime`` (original time preserved,
+        never reset to now); direct maps for actor/target/context/result
+        fields, with ``target_type`` falling back to ``source`` — the rule the
+        request-buffer path already applies — so a ledger row never records
+        ``"unknown"`` for a target the payload names; native-only keys folded
         into ``details`` without clobbering the inner ``details`` payload.
         """
-        event_type = data.get("event_type", "")
-        try:
-            action: AuditAction | str = AuditAction(event_type)
-        except ValueError:
-            action = event_type
+        action = cls._derive_native_action(data)
 
         ts = data.get("timestamp")
         try:
@@ -425,9 +425,9 @@ class AuditEntry:
         for native_key in (
             "record_id",
             "source",
-            "synced",
             "celery_context",
             "trace_id",
+            "trace_id_full",
         ):
             if native_key in data and native_key not in details:
                 details[native_key] = data[native_key]
@@ -435,18 +435,66 @@ class AuditEntry:
         raw_roles = data.get("actor_roles")
         actor_roles = list(raw_roles) if isinstance(raw_roles, (list, tuple)) else []
 
+        try:
+            context_type = ContextType(data.get("context_type", "unknown"))
+        except ValueError:
+            context_type = ContextType.UNKNOWN
+
         return cls(
             action=action,
             timestamp=timestamp,
             actor_id=data.get("actor_id"),
             actor_type=data.get("actor_type", "system"),
             actor_roles=actor_roles,
+            context_type=context_type,
+            target_type=data.get("target_type") or data.get("source"),
             target_id=data.get("target_id"),
+            service_name=data.get("service_name"),
             domain=data.get("domain"),
+            reason=data.get("reason"),
             details=details,
             success=bool(data.get("success", True)),
             error_message=data.get("error_message"),
         )
+
+    @staticmethod
+    def _derive_native_action(data: dict[str, Any]) -> AuditAction | str:
+        """Resolve the action a native WAL payload records.
+
+        Resolution order, first match wins:
+
+        1. an explicit ``action`` key — the writer resolved it because the
+           payload, not the event type, decides (a manual force-open and an
+           automatic one share one event type),
+        2. ``AuditAction(event_type)`` — the event type *is* an enum value,
+        3. ``AuditAction[event_type.upper()]`` — it matches an enum *name*,
+        4. ``event_type.lower()`` — no enum member exists, so the recorded
+           string is kept, normalised to the enum's casing so one vocabulary
+           reaches the ledger.
+
+        Derivation rather than a static table: a table cannot see the payload,
+        so it would record a manual force-open as automatic, and it would be a
+        hand-authored list needing an edit for every new event type.
+        """
+        explicit = data.get("action")
+        if explicit:
+            try:
+                return AuditAction(explicit)
+            except ValueError:
+                return str(explicit)
+
+        event_type = data.get("event_type", "")
+        if not isinstance(event_type, str):
+            return str(event_type)
+
+        try:
+            return AuditAction(event_type)
+        except ValueError:
+            pass
+        try:
+            return AuditAction[event_type.upper()]
+        except KeyError:
+            return event_type.lower()
 
 
 class AuditLogAdapter(ABC):

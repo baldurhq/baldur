@@ -2,9 +2,11 @@
 
 Provides a single, stable import target for OSS callsites that need to log
 audit entries. When ``baldur_pro.services.audit`` is installed, each wrapper
-delegates to the corresponding PRO function (preserving WAL writes,
-request-scoped buffering, and adapter routing). When PRO is not installed,
-each wrapper silently no-ops and returns ``None``.
+delegates to the corresponding PRO function, which writes the event to the
+WAL and leaves delivery to the background sync worker; only an event that
+obtains no WAL record falls through to request-scoped buffering or direct
+adapter routing. When PRO is not installed, each wrapper silently no-ops and
+returns ``None``.
 
 Each wrapper accepts ``*args, **kwargs`` and forwards them verbatim — the
 caller's exact argument shape (positional or keyword) is preserved into the

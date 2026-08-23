@@ -41,14 +41,16 @@ def _native_wal_entry(**overrides) -> dict:
     """A faithful native WAL payload mirroring ``_write_to_wal`` output.
 
     Kept in lockstep with the PRO writer's key set (record_id, event_type,
-    trace_id, source, details, success, error_message, domain, target_id,
-    actor_id, actor_type, actor_roles, celery_context, float-epoch timestamp,
-    synced) so the converter is tested against the real drain input.
+    trace_id, trace_id_full, source, details, success, error_message, domain,
+    target_id, target_type, actor_id, actor_type, actor_roles, celery_context,
+    float-epoch timestamp) so the converter is tested against the real drain
+    input.
     """
     entry = {
         "record_id": "audit-abc123def456",
         "event_type": "CB_STATE_CHANGE",
         "trace_id": "trace-001",
+        "trace_id_full": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
         "source": "CircuitBreaker",
         "details": {"old_state": "closed", "new_state": "open"},
         "success": True,
@@ -60,7 +62,6 @@ def _native_wal_entry(**overrides) -> dict:
         "actor_roles": ["admin"],
         "celery_context": None,
         "timestamp": _FIXED_EPOCH,
-        "synced": False,
     }
     entry.update(overrides)
     return entry
@@ -75,13 +76,13 @@ class TestFromWalDictDispatch:
     """``from_wal_dict()`` routes each schema to its own converter (669 D3)."""
 
     def test_native_shape_routes_to_native_converter(self):
-        """A dict with ``event_type`` and no top-level ``action`` takes the
-        native path — proven by the action deriving from ``event_type`` (a
-        plain ``from_dict`` would read the absent ``action`` key -> "")."""
+        """A dict with ``event_type`` takes the native path — proven by the
+        action deriving from ``event_type`` (a plain ``from_dict`` would read
+        the absent ``action`` key -> "")."""
         entry = AuditEntry.from_wal_dict(_native_wal_entry())
 
-        # Native path mapped event_type -> action; from_dict would give "".
-        assert entry.action == "CB_STATE_CHANGE"
+        # Native path derived the action from event_type; from_dict -> "".
+        assert entry.action == "cb_state_change"
         # ...and preserved the float epoch instead of resetting it.
         assert entry.timestamp == _FIXED_DT
 
@@ -97,24 +98,21 @@ class TestFromWalDictDispatch:
 
         assert AuditEntry.from_wal_dict(data) == AuditEntry.from_dict(data)
 
-    def test_action_present_wins_even_with_event_type(self):
-        """When BOTH ``action`` and ``event_type`` are present, ``action``
-        present routes to ``from_dict`` — ``event_type`` overflows into
-        ``details`` (native path would instead map it to ``action``)."""
-        data = {
-            "action": "cb_force_open",
-            "event_type": "CB_STATE_CHANGE",
-            "timestamp": "2020-06-15T12:00:00+00:00",
-        }
+    def test_event_type_selects_native_converter_despite_an_action(self):
+        """``event_type`` alone selects the converter. A native payload may
+        carry an explicit ``action`` — the writer resolves it when the payload,
+        not the event type, decides — and that action wins over the derivation
+        while the float epoch is still preserved."""
+        data = _native_wal_entry(action="cb_force_open")
 
         entry = AuditEntry.from_wal_dict(data)
 
         assert entry.action == AuditAction.CB_FORCE_OPEN
-        # from_dict overflowed the unknown key rather than mapping it.
-        assert entry.details["event_type"] == "CB_STATE_CHANGE"
+        # Routed natively: from_dict would have reset the float epoch to now.
+        assert entry.timestamp == _FIXED_DT
 
-    def test_neither_shape_delegates_to_from_dict(self):
-        """No ``event_type`` and no ``action`` -> ``from_dict`` (action "")."""
+    def test_no_event_type_delegates_to_from_dict(self):
+        """No ``event_type`` -> ``from_dict`` (action "")."""
         entry = AuditEntry.from_wal_dict({"actor_id": "x"})
 
         assert entry.action == ""
@@ -190,35 +188,52 @@ class TestFromNativeWalDict:
 
         assert entry.action is AuditAction.CB_FORCE_OPEN
 
-    @pytest.mark.parametrize("event_type", ["CB_STATE_CHANGE", "GOVERNANCE_BLOCKED"])
-    def test_event_type_uppercase_miss_kept_verbatim(self, event_type):
-        """Upper-cased native event types miss the (lowercase) enum values and
-        are kept as the verbatim recorded string, not dropped."""
+    def test_event_type_matching_an_enum_name_becomes_that_member(self):
+        """An upper-cased native event type misses the (lowercase) enum values
+        but matches an enum *name*, and is promoted to that member — so the
+        ledger records one action vocabulary, not two casings of it."""
+        entry = AuditEntry.from_wal_dict(
+            _native_wal_entry(event_type="GOVERNANCE_BLOCKED")
+        )
+
+        assert entry.action is AuditAction.GOVERNANCE_BLOCKED
+
+    @pytest.mark.parametrize("event_type", ["CB_STATE_CHANGE", "RATE_LIMITED"])
+    def test_event_type_with_no_enum_member_is_normalised(self, event_type):
+        """An event type with no enum member at all is kept as the recorded
+        string, normalised to the enum's casing rather than dropped."""
         entry = AuditEntry.from_wal_dict(_native_wal_entry(event_type=event_type))
 
-        assert entry.action == event_type
+        assert entry.action == event_type.lower()
         assert not isinstance(entry.action, AuditAction)
 
     # --- native-only keys -> details (set membership) ------------------------
 
     def test_native_only_keys_folded_into_details(self):
-        """``record_id``/``source``/``synced``/``celery_context``/``trace_id``
-        are folded into ``details`` (they have no first-class home)."""
+        """``record_id``/``source``/``celery_context`` and the trace pair are
+        folded into ``details`` (they have no first-class home)."""
         entry = AuditEntry.from_wal_dict(
             _native_wal_entry(
                 record_id="audit-xyz",
                 source="CircuitBreaker",
-                synced=False,
                 celery_context={"task": "t1"},
                 trace_id="trace-42",
+                trace_id_full="00-trace42-span01-01",
             )
         )
 
         assert entry.details["record_id"] == "audit-xyz"
         assert entry.details["source"] == "CircuitBreaker"
-        assert entry.details["synced"] is False
         assert entry.details["celery_context"] == {"task": "t1"}
         assert entry.details["trace_id"] == "trace-42"
+        assert entry.details["trace_id_full"] == "00-trace42-span01-01"
+
+    def test_synced_marker_is_not_folded_into_details(self):
+        """The retired ``synced`` marker never reaches a ledger row, even when
+        an entry written before its removal still carries it."""
+        entry = AuditEntry.from_wal_dict(_native_wal_entry(synced=False))
+
+        assert "synced" not in entry.details
 
     def test_inner_details_preserved_alongside_native_keys(self):
         """The helper's own inner ``details`` payload survives the fold."""
@@ -345,7 +360,7 @@ class TestFromWalDictPreservation:
             _native_wal_entry(event_type="RETRY_EXHAUSTED")
         )
 
-        assert entry.action == "RETRY_EXHAUSTED"
+        assert entry.action is AuditAction.RETRY_EXHAUSTED
 
     def test_timestamp_equals_original_epoch_not_reset_to_now(self):
         """The recovered timestamp equals the original float epoch — the core

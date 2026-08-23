@@ -1,17 +1,21 @@
-"""보안, 리전 격리, Blast Radius 서비스의 감사 통합 테스트.
+"""Audit integration tests for the security, region-isolation and Blast
+Radius services.
 
-테스트 대상:
-1. SecurityViolationService - 보안 위반 처리, IP 차단, 세션 무효화
-2. RegionalIsolationGate - 리전 격리/해제
-3. BlastRadiusService - 정책 설정, 의존성 추가, 서비스 격리/해제
+Under test:
+1. SecurityViolationService - violation handling, IP blocking, session
+   invalidation
+2. RegionalIsolationGate - region isolation / restore
+3. BlastRadiusService - policy setup, dependency registration, service
+   isolation / restore
 
-검증 항목:
-- log_security_violation_audit 호출 검증
-- log_region_isolation_audit 호출 검증
-- log_blast_radius_audit 호출 검증
-- WAL 기반 무손실 감사 기록
+Verified:
+- log_security_violation_audit is called
+- log_region_isolation_audit is called
+- log_blast_radius_audit is called
+- WAL-based lossless audit recording
 """
 
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -21,8 +25,37 @@ import pytest
 # =============================================================================
 
 
+@contextmanager
+def _stub_audit_wal(helper_module_name, sequence=1):
+    """Run a PRO audit helper against a stub WAL, yielding the stub.
+
+    ``sequence`` is what the WAL hands back for a write; ``None`` stands for
+    "no WAL is available", the case where the helper's immediate delivery leg
+    runs. Assert on ``wal.write.call_args[0][0]`` to read the entry the writer
+    built.
+
+    Two deliberate choices. The WAL is stubbed rather than the writer, so this
+    file never names a ``baldur_pro`` internal — it ships to the public repo.
+    And the writer's own globals are patched rather than a dotted path,
+    because an autouse fixture drops the audit modules from ``sys.modules``
+    between tests: a helper can hold a writer from an earlier module object
+    that a path-based patch would miss. The import is deferred to entry so
+    the module is only required once a test has skipped on PRO's absence.
+    """
+    import importlib
+
+    from baldur.audit.wal import WriteAheadLog
+
+    module = importlib.import_module(f"baldur_pro.services.audit.{helper_module_name}")
+    wal = MagicMock(spec=WriteAheadLog)
+    wal.write.return_value = sequence
+    resolver = (lambda: None) if sequence is None else (lambda: wal)
+    with patch.dict(module._write_to_wal.__globals__, {"_get_wal": resolver}):
+        yield wal
+
+
 class TestSecurityViolationAuditEventTypes:
-    """보안 위반 AuditEventType 열거형 테스트."""
+    """Security-violation AuditEventType enum tests."""
 
     def test_security_violation_event_type_exists(self):
         """Should have SECURITY_VIOLATION event type."""
@@ -77,10 +110,7 @@ class TestLogSecurityViolationAudit:
 
     def test_returns_wal_sequence_on_success(self):
         """Should return WAL sequence number."""
-        with patch(
-            "baldur_pro.services.audit.compliance_audit._write_to_wal",
-            return_value=42,
-        ):
+        with _stub_audit_wal("compliance_audit", sequence=42):
             from baldur_pro.services.audit import log_security_violation_audit
 
             result = log_security_violation_audit(
@@ -95,10 +125,7 @@ class TestLogSecurityViolationAudit:
 
     def test_writes_to_wal_with_correct_event_type(self):
         """Should write to WAL with SECURITY_VIOLATION event type."""
-        with patch(
-            "baldur_pro.services.audit.compliance_audit._write_to_wal",
-            return_value=1,
-        ) as mock_wal:
+        with _stub_audit_wal("compliance_audit", sequence=1) as wal:
             from baldur_pro.services.audit import log_security_violation_audit
 
             log_security_violation_audit(
@@ -111,8 +138,8 @@ class TestLogSecurityViolationAudit:
                 source_ip="10.0.0.1",
             )
 
-            mock_wal.assert_called_once()
-            call_kwargs = mock_wal.call_args[1]
+            wal.write.assert_called_once()
+            call_kwargs = wal.write.call_args[0][0]
             assert call_kwargs["event_type"] == "SECURITY_VIOLATION"
             assert call_kwargs["source"] == "SecurityViolationService"
             assert call_kwargs["details"]["violation_type"] == "injection_attempt"
@@ -123,10 +150,7 @@ class TestLogSecurityViolationAudit:
 
     def test_block_ip_action_uses_correct_event_type(self):
         """Should use SECURITY_IP_BLOCKED event type for block_ip action."""
-        with patch(
-            "baldur_pro.services.audit.compliance_audit._write_to_wal",
-            return_value=1,
-        ) as mock_wal:
+        with _stub_audit_wal("compliance_audit", sequence=1) as wal:
             from baldur_pro.services.audit import log_security_violation_audit
 
             log_security_violation_audit(
@@ -137,15 +161,12 @@ class TestLogSecurityViolationAudit:
                 severity="high",
             )
 
-            call_kwargs = mock_wal.call_args[1]
+            call_kwargs = wal.write.call_args[0][0]
             assert call_kwargs["event_type"] == "SECURITY_IP_BLOCKED"
 
     def test_invalidate_session_action_uses_correct_event_type(self):
         """Should use SECURITY_SESSION_INVALIDATED event type for invalidate_session action."""
-        with patch(
-            "baldur_pro.services.audit.compliance_audit._write_to_wal",
-            return_value=1,
-        ) as mock_wal:
+        with _stub_audit_wal("compliance_audit", sequence=1) as wal:
             from baldur_pro.services.audit import log_security_violation_audit
 
             log_security_violation_audit(
@@ -157,16 +178,13 @@ class TestLogSecurityViolationAudit:
                 user_id=42,
             )
 
-            call_kwargs = mock_wal.call_args[1]
+            call_kwargs = wal.write.call_args[0][0]
             assert call_kwargs["event_type"] == "SECURITY_SESSION_INVALIDATED"
             assert call_kwargs["details"]["user_id"] == 42
 
     def test_failed_result_sets_success_false(self):
         """Should set success=False when result is not 'success'."""
-        with patch(
-            "baldur_pro.services.audit.compliance_audit._write_to_wal",
-            return_value=1,
-        ) as mock_wal:
+        with _stub_audit_wal("compliance_audit", sequence=1) as wal:
             from baldur_pro.services.audit import log_security_violation_audit
 
             log_security_violation_audit(
@@ -177,7 +195,7 @@ class TestLogSecurityViolationAudit:
                 severity="high",
             )
 
-            call_kwargs = mock_wal.call_args[1]
+            call_kwargs = wal.write.call_args[0][0]
             assert call_kwargs["success"] is False
             assert "failed" in call_kwargs["error_message"]
 
@@ -196,10 +214,7 @@ class TestLogRegionIsolationAudit:
 
     def test_returns_wal_sequence_on_success(self):
         """Should return WAL sequence number."""
-        with patch(
-            "baldur_pro.services.audit.compliance_audit._write_to_wal",
-            return_value=55,
-        ):
+        with _stub_audit_wal("compliance_audit", sequence=55):
             from baldur_pro.services.audit import log_region_isolation_audit
 
             result = log_region_isolation_audit(
@@ -213,10 +228,7 @@ class TestLogRegionIsolationAudit:
 
     def test_isolate_action_uses_region_isolated_event_type(self):
         """Should use REGION_ISOLATED event type for isolate action."""
-        with patch(
-            "baldur_pro.services.audit.compliance_audit._write_to_wal",
-            return_value=1,
-        ) as mock_wal:
+        with _stub_audit_wal("compliance_audit", sequence=1) as wal:
             from baldur_pro.services.audit import log_region_isolation_audit
 
             log_region_isolation_audit(
@@ -228,7 +240,7 @@ class TestLogRegionIsolationAudit:
                 operator="cluster-a",
             )
 
-            call_kwargs = mock_wal.call_args[1]
+            call_kwargs = wal.write.call_args[0][0]
             assert call_kwargs["event_type"] == "REGION_ISOLATED"
             assert call_kwargs["source"] == "RegionalIsolationGate"
             assert call_kwargs["details"]["region"] == "seoul"
@@ -238,10 +250,7 @@ class TestLogRegionIsolationAudit:
 
     def test_restore_action_uses_region_restored_event_type(self):
         """Should use REGION_RESTORED event type for restore action."""
-        with patch(
-            "baldur_pro.services.audit.compliance_audit._write_to_wal",
-            return_value=1,
-        ) as mock_wal:
+        with _stub_audit_wal("compliance_audit", sequence=1) as wal:
             from baldur_pro.services.audit import log_region_isolation_audit
 
             log_region_isolation_audit(
@@ -252,16 +261,13 @@ class TestLogRegionIsolationAudit:
                 operator="ops-team",
             )
 
-            call_kwargs = mock_wal.call_args[1]
+            call_kwargs = wal.write.call_args[0][0]
             assert call_kwargs["event_type"] == "REGION_RESTORED"
             assert call_kwargs["details"]["action"] == "restore"
 
     def test_failed_isolation_sets_success_false(self):
         """Should set success=False for failed isolation."""
-        with patch(
-            "baldur_pro.services.audit.compliance_audit._write_to_wal",
-            return_value=1,
-        ) as mock_wal:
+        with _stub_audit_wal("compliance_audit", sequence=1) as wal:
             from baldur_pro.services.audit import log_region_isolation_audit
 
             log_region_isolation_audit(
@@ -271,7 +277,7 @@ class TestLogRegionIsolationAudit:
                 reason="Redis not available",
             )
 
-            call_kwargs = mock_wal.call_args[1]
+            call_kwargs = wal.write.call_args[0][0]
             assert call_kwargs["success"] is False
 
 
@@ -381,7 +387,8 @@ class TestSecurityViolationServiceAuditIntegration:
                 cache=mock_cache,
             )
 
-            # Django DB 세션 삭제의 DB 연결 시도를 방지 (테스트 대상이 아님)
+            # Keep Django session deletion from opening a DB connection —
+            # it is not what this test is about.
             with patch.object(
                 SecurityViolationService,
                 "_invalidate_django_db_sessions",
