@@ -80,7 +80,7 @@ def _fill(wal_instance: WriteAheadLog, count: int) -> None:
     wal_instance.flush()
 
 
-class TestSyncWorkerLagSource:
+class TestSyncWorkerLagSourceBehavior:
     """The lag is the backlog above the cursor, not what one cycle read."""
 
     def test_count_pending_prefers_count_unprocessed_over_a_read(self, wal):

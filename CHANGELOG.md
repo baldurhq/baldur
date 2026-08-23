@@ -17,6 +17,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - The audit sync worker no longer re-reads the whole retained backlog to deliver one batch of it.
 - Its read is capped at `BALDUR_AUDIT_SYNC_BATCH_SIZE`; the lag gauge still reports the backlog.
 - A WAL checksum mismatch is now reported on best-effort reads too, not only on strict ones.
+- A raising `on_corruption` hook no longer silently truncates the recovery read it fires in.
 
 ### Removed
 

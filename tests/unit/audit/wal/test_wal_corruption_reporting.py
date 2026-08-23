@@ -100,12 +100,17 @@ def _crc32_of_corrupt_record() -> str:
     return format(zlib.crc32(payload) & 0xFFFFFFFF, "08x")
 
 
+def _raise_always(error: WALCorruptionError) -> None:
+    """An ``on_corruption`` hook that fails, as a host's own hook may."""
+    raise RuntimeError("host corruption hook exploded")
+
+
 def _read(wal: WriteAheadLog, filepath: Path, mode: str) -> list:
     reader = wal._read_wal_file if mode == "strict" else wal._read_wal_file_best_effort
     return list(reader(filepath))
 
 
-class TestWALCorruptionReporting:
+class TestWALCorruptionReportingBehavior:
     """A checksum mismatch is reported through every channel, in every read
     mode — detection does not depend on which mode the caller happened to use.
     """
@@ -178,6 +183,28 @@ class TestWALCorruptionReporting:
         assert isinstance(seen[0], WALCorruptionError)
         assert seen[0].expected == BAD_CHECKSUM.decode("ascii")
         assert seen[0].computed == _crc32_of_corrupt_record()
+
+    @pytest.mark.parametrize("mode", READ_MODES, ids=READ_MODES)
+    def test_a_raising_on_corruption_hook_does_not_truncate_the_read(
+        self, tmp_path, make_wal, mode
+    ):
+        """The hook is a host callback and the report now fires on the reads a
+        running drain takes, so an unguarded raise would end the generator
+        mid-file and lose every entry behind the corrupt one.
+        """
+        wal = make_wal(on_corruption=_raise_always)
+        corrupt = _corrupt_file(tmp_path)
+
+        with capture_logs() as logs:
+            entries = _read(wal, corrupt, mode)
+
+        assert [e.sequence for e in entries] == [1, 3], (
+            "the record after the corrupt one is still yielded"
+        )
+        failures = log_events(logs, "wal.corruption_callback_failed")
+        assert len(failures) == 1
+        assert failures[0]["log_level"] == "warning"
+        assert failures[0]["filepath"] == str(corrupt)
 
     def test_an_intact_file_reports_no_corruption(
         self, tmp_path, make_wal, capturing_adapter

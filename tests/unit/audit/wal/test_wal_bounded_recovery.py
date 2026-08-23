@@ -123,7 +123,7 @@ class TestWALBoundedRecoveryContract:
 # =============================================================================
 
 
-class TestWALBoundedRecovery:
+class TestWALBoundedRecoveryBehavior:
     """``recover_unprocessed(limit=N)`` returns the globally lowest ``N``
     unprocessed entries and reads no more than it has to.
     """
@@ -269,7 +269,7 @@ class TestWALBoundedRecovery:
 # =============================================================================
 
 
-class TestWALBoundedRecoveryProperty:
+class TestWALBoundedRecoveryPropertyBehavior:
     """The bounded read's contract is a property, not an example."""
 
     BACKLOG = 40
@@ -323,11 +323,51 @@ class TestWALBoundedRecoveryProperty:
 
 
 # =============================================================================
+# Behavior: what each recovery path reports once the audit event is gone
+# =============================================================================
+
+
+class TestWALRecoveryCompletionReportingBehavior:
+    """The recovery completion log is the surviving carrier of the range the
+    deleted audit event used to name, so it has to carry the whole range.
+    """
+
+    def test_completion_log_names_the_range_it_recovered(self, wal, tmp_path):
+        _stamp(tmp_path, "20260101_000000", range(1, 6))
+        _stamp(tmp_path, "20260101_000001", range(6, 11))
+
+        with capture_logs() as logs:
+            entries = wal.recover_unprocessed(last_processed_seq=4)
+
+        assert [e.sequence for e in entries] == list(range(5, 11))
+        completed = log_events(logs, "wal.parallel_recovery_completed")
+        assert len(completed) == 1
+        assert completed[0]["recovered_count"] == 6
+        assert completed[0]["last_processed_seq"] == 4
+        assert completed[0]["new_last_seq"] == 10
+
+    def test_completion_log_reports_no_range_when_nothing_was_recovered(
+        self, wal, tmp_path
+    ):
+        """Branch outcome: the range fields must not index an empty result."""
+        _stamp(tmp_path, "20260101_000000", range(1, 6))
+        _stamp(tmp_path, "20260101_000001", range(6, 11))
+
+        with capture_logs() as logs:
+            assert wal.recover_unprocessed(last_processed_seq=10) == []
+
+        completed = log_events(logs, "wal.parallel_recovery_completed")
+        assert len(completed) == 1
+        assert completed[0]["recovered_count"] == 0
+        assert completed[0]["new_last_seq"] is None
+
+
+# =============================================================================
 # Behavior: the memory-guarded chunked path
 # =============================================================================
 
 
-class TestWALChunkedRecovery:
+class TestWALChunkedRecoveryBehavior:
     """The chunked path returns before the shared metric and completion log,
     so it carries both itself — otherwise a memory-guarded recovery is the one
     recovery an operator cannot see.
