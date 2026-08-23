@@ -15,6 +15,12 @@ Test Categories:
         - half_open under limit → increment (count++, watermark stable)
         - half_open at limit + fresh watermark → rejected
         - half_open at limit + stale watermark → stuck_recovery (D8)
+    A2. Absent window watermark (the state-copy row shape):
+        - half_open under limit + no watermark → increment, window stamped
+        - half_open at limit + no watermark → stuck_recovery (fail-open)
+        - unparseable stored watermark behaves exactly like an absent one
+        - a stamped window then rejects at the limit, admitting no extra
+          round of trial calls
     B. Cross-worker concurrent atomicity (Cat 6.4 / §392):
         - 50 threads + Barrier from state=OPEN, limit=10 →
           exactly 10 acquires; exactly 1 transition winner; counter
@@ -44,6 +50,10 @@ Test Categories:
         - 50 threads via Layered router from L2=HALF_OPEN, threshold=1 →
           exactly 1 did_close=True winner cluster-wide; L1 converges to
           CLOSED via writeback for both winner and race-losers
+    G. Drift repair into an emptied Redis:
+        - L1 half_open + missing durable key → repair recreates the row
+          without a window; the first acquire starts it and the window
+          still ages into stuck recovery (no permanent HALF_OPEN lockout)
 
 All tests require a running Redis instance.
 Marked with @pytest.mark.requires_redis for auto-skip.
@@ -273,6 +283,173 @@ class TestLuaAcquireRoundTrip:
         assert data["success_count"] == "0"
         watermark = float(data["half_open_window_started_at"])
         assert abs(watermark - time.time()) < 5.0
+
+
+# =============================================================================
+# A2. Absent Window Watermark (adoption stamp + fail-open recovery)
+# =============================================================================
+
+
+def _seed_half_open_without_watermark(repo, redis_test_client, count):
+    """Write the row shape every state-copy lane delivers into Redis.
+
+    ``get_or_create`` and ``update_state`` both leave
+    ``half_open_window_started_at`` alone -- the field belongs to the atomic
+    acquire primitives -- so a whole-row mirror of a HALF_OPEN L1 row lands
+    in Redis as ``half_open`` with a counter and no window.
+    """
+    repo.update_state(SVC, state="half_open", half_open_request_count=count)
+    assert not redis_test_client.hexists(_cb_key(repo), "half_open_window_started_at")
+
+
+class TestLuaAcquireWatermarkAbsent:
+    """The Lua branches for a HALF_OPEN row that carries no window.
+
+    Redis is the implementation where this shape used to be fatal: the
+    stuck-recovery guard required a parseable watermark, so an at-limit row
+    without one was rejected on every acquire and no branch could ever write
+    the watermark that would release it. Both halves of the contract are
+    verified here against real ``EVAL``, since no in-process double runs the
+    script.
+    """
+
+    def test_watermark_absent_under_limit_stamps_the_window(
+        self, redis_circuit_breaker_repository, redis_test_client
+    ):
+        """
+        Purpose:
+            Branch 3 must start a window the row arrived without, in the
+            same atomic eval as the increment.
+        Expected:
+            - Returns (True, "half_open", "half_open"); marker == "increment"
+            - half_open_request_count == "1"
+            - half_open_window_started_at now holds a fresh unix timestamp
+        """
+        repo = redis_circuit_breaker_repository
+        _seed_half_open_without_watermark(repo, redis_test_client, count=0)
+
+        allowed, prev, new_state = repo.try_acquire_half_open_slot(
+            SVC, limit=3, stuck_timeout_seconds=60
+        )
+
+        assert (allowed, prev, new_state) == (True, "half_open", "half_open")
+        assert repo._last_acquire_marker == "increment"
+        data = redis_test_client.hgetall(_cb_key(repo))
+        assert data["half_open_request_count"] == "1"
+        assert abs(float(data["half_open_window_started_at"]) - time.time()) < 5.0
+
+    def test_watermark_absent_at_limit_triggers_stuck_recovery(
+        self, redis_circuit_breaker_repository, redis_test_client
+    ):
+        """
+        Purpose:
+            Branch 1 must read an absent watermark as older than any
+            timeout. Rejecting instead pins the breaker in HALF_OPEN with no
+            path back out, which is the permanent lockout this closes.
+        Expected:
+            - Returns (True, "half_open", "half_open"); marker ==
+              "stuck_recovery"
+            - counter reset to 1, success_count reset to 0, fresh watermark
+        """
+        repo = redis_circuit_breaker_repository
+        _seed_half_open_without_watermark(repo, redis_test_client, count=3)
+        redis_test_client.hset(_cb_key(repo), "success_count", "5")
+
+        allowed, prev, new_state = repo.try_acquire_half_open_slot(
+            SVC, limit=3, stuck_timeout_seconds=60
+        )
+
+        assert (allowed, prev, new_state) == (True, "half_open", "half_open")
+        assert repo._last_acquire_marker == "stuck_recovery"
+        data = redis_test_client.hgetall(_cb_key(repo))
+        assert data["half_open_request_count"] == "1"
+        assert data["success_count"] == "0"
+        assert abs(float(data["half_open_window_started_at"]) - time.time()) < 5.0
+
+    @pytest.mark.parametrize(
+        "stored",
+        ["", "not-a-number", "10:00:00"],
+        ids=["empty", "garbage", "iso_like"],
+    )
+    def test_watermark_absent_garbage_value_is_equivalent(
+        self, redis_circuit_breaker_repository, redis_test_client, stored
+    ):
+        """
+        Purpose:
+            The contract folds an unparseable watermark into the absent
+            case — ``tonumber`` yields nil for both. A stored value that
+            survived the stamp would leave the window unreadable forever.
+        Expected:
+            - Under the limit: granted, and the garbage is replaced by a
+              parseable unix timestamp
+            - At the limit: stuck recovery, same as an absent watermark
+        """
+        repo = redis_circuit_breaker_repository
+        _seed_half_open_without_watermark(repo, redis_test_client, count=0)
+        cb_key = _cb_key(repo)
+        redis_test_client.hset(cb_key, "half_open_window_started_at", stored)
+
+        allowed, _prev, _new = repo.try_acquire_half_open_slot(
+            SVC, limit=3, stuck_timeout_seconds=60
+        )
+
+        assert allowed is True
+        assert repo._last_acquire_marker == "increment"
+        assert (
+            abs(
+                float(redis_test_client.hget(cb_key, "half_open_window_started_at"))
+                - time.time()
+            )
+            < 5.0
+        )
+
+        # Same value at the limit takes the recovery branch, not a rejection.
+        redis_test_client.hset(cb_key, "half_open_request_count", "3")
+        redis_test_client.hset(cb_key, "half_open_window_started_at", stored)
+
+        allowed, _prev, _new = repo.try_acquire_half_open_slot(
+            SVC, limit=3, stuck_timeout_seconds=60
+        )
+
+        assert allowed is True
+        assert repo._last_acquire_marker == "stuck_recovery"
+
+    def test_watermark_absent_row_driven_to_limit_rejects_within_window(
+        self, redis_circuit_breaker_repository, redis_test_client
+    ):
+        """
+        Purpose:
+            Negative half of the adoption stamp — once the counter has
+            climbed through branch 3 the window exists, so reaching the
+            limit inside stuck_timeout is an ordinary rejection rather than
+            another round of stuck recovery.
+        Expected:
+            - The first ``limit`` acquires are granted
+            - The next one returns (False, ...) with marker == "rejected"
+            - The counter stays at ``limit`` (no extra window admitted)
+        """
+        repo = redis_circuit_breaker_repository
+        limit = 3
+        _seed_half_open_without_watermark(repo, redis_test_client, count=0)
+
+        granted = [
+            repo.try_acquire_half_open_slot(SVC, limit=limit, stuck_timeout_seconds=60)[
+                0
+            ]
+            for _ in range(limit)
+        ]
+
+        allowed, _prev, _new = repo.try_acquire_half_open_slot(
+            SVC, limit=limit, stuck_timeout_seconds=60
+        )
+
+        assert granted == [True] * limit
+        assert allowed is False
+        assert repo._last_acquire_marker == "rejected"
+        assert (
+            int(redis_test_client.hget(_cb_key(repo), "half_open_request_count"))
+            == limit
+        )
 
 
 # =============================================================================
@@ -842,3 +1019,87 @@ class TestLayeredCloseCheckAtomicity:
         assert l1_final.state == "closed"
         assert l1_final.success_count == 0
         assert l1_final.half_open_request_count == 0
+
+
+# =============================================================================
+# G. Drift Repair After Redis Data Loss (the absent-watermark lockout lane)
+# =============================================================================
+
+
+class TestDriftRepairIntoRedisRecovers:
+    """A repaired HALF_OPEN row reaches Redis without a window, and heals.
+
+    The reachable route into the Redis absent-watermark shape: an L1 row
+    holds ``half_open``, the durable key is gone (standalone restart without
+    persistence, failover, an operator flush), and the drift pass repairs
+    the row up. That repair is a whole-row mirror, so it carries ``state``
+    but no window watermark. Before the adoption stamp the Lua script then
+    counted up to the limit and rejected every acquire thereafter, with no
+    branch that could ever write the watermark it demanded — the breaker
+    stayed HALF_OPEN until an operator intervened.
+    """
+
+    def test_repaired_row_stamps_its_window_and_recovers_when_stale(
+        self,
+        layered_cb_repo,
+        redis_test_client,
+    ):
+        """
+        Purpose:
+            Walk the whole lane end to end: repair a HALF_OPEN L1 row into
+            an empty Redis, then show the window it arrives without is
+            started by the first acquire and still ages into the
+            stuck-window recovery.
+        Expected:
+            - After the repair the Redis row is half_open with no watermark
+            - The first acquire writes a parseable watermark
+            - At the limit inside the window the acquire is rejected
+            - Backdating that watermark makes the next acquire recover
+              (marker "stuck_recovery"), proving the row is not pinned
+        """
+        repo = layered_cb_repo
+        service = "checkout-svc"
+        limit = 3
+
+        # Given: L1 holds half_open and the durable key is gone.
+        repo._l1.get_or_create(service)
+        repo._l1.update_state(service, state="half_open")
+        cb_key = repo._l2._backend._get_full_key(f"cb:{service}")
+        redis_test_client.delete(cb_key)
+
+        # When: the drift pass finds no L2 row and repairs L1 upward.
+        outcome = repo.reconcile_single_service(service)
+
+        # Then: the repaired row is the shape that used to lock the breaker.
+        assert outcome["action"] == "l1_to_l2"
+        assert redis_test_client.hget(cb_key, "state") == "half_open"
+        assert not redis_test_client.hexists(cb_key, "half_open_window_started_at")
+
+        # The first trial call starts the window the repair could not carry.
+        allowed, _prev, _new = repo.try_acquire_half_open_slot(
+            service, limit=limit, stuck_timeout_seconds=60
+        )
+        assert allowed is True
+        watermark = redis_test_client.hget(cb_key, "half_open_window_started_at")
+        assert abs(float(watermark) - time.time()) < 5.0
+
+        # Filling the window rejects while it is fresh...
+        for _ in range(limit - 1):
+            repo.try_acquire_half_open_slot(
+                service, limit=limit, stuck_timeout_seconds=60
+            )
+        allowed, _prev, _new = repo.try_acquire_half_open_slot(
+            service, limit=limit, stuck_timeout_seconds=60
+        )
+        assert allowed is False
+        assert repo._l2._last_acquire_marker == "rejected"
+
+        # ...and recovers once that window ages out — the path that did not
+        # exist while the watermark was missing.
+        redis_test_client.hset(cb_key, "half_open_window_started_at", "1.0")
+        allowed, _prev, _new = repo.try_acquire_half_open_slot(
+            service, limit=limit, stuck_timeout_seconds=60
+        )
+        assert allowed is True
+        assert repo._l2._last_acquire_marker == "stuck_recovery"
+        assert redis_test_client.hget(cb_key, "half_open_request_count") == "1"
