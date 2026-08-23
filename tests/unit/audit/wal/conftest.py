@@ -1,7 +1,8 @@
-"""
-WAL 단위 테스트 공통 fixtures.
+"""Shared fixtures for the WAL unit tests.
 
-test_jsonl.py, test_cleanup.py에서 공유하는 fixtures.
+``wal_dir`` / ``wal_file`` are shared by ``test_jsonl.py`` and
+``test_cleanup.py``; ``capturing_adapter`` is shared by
+``test_wal_meta_event_delivery.py`` and ``test_wal_corruption_reporting.py``.
 """
 
 from __future__ import annotations
@@ -10,10 +11,12 @@ from pathlib import Path
 
 import pytest
 
+from tests.factories.audit_adapters import CapturingAuditAdapter
+
 
 @pytest.fixture
 def wal_dir(tmp_path: Path) -> Path:
-    """WAL 파일용 임시 디렉토리."""
+    """Temporary directory for WAL files."""
     d = tmp_path / "wal"
     d.mkdir()
     return d
@@ -21,5 +24,11 @@ def wal_dir(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def wal_file(wal_dir: Path) -> Path:
-    """WAL JSONL 파일 경로."""
+    """Path of the WAL JSONL file."""
     return wal_dir / "test.jsonl"
+
+
+@pytest.fixture
+def capturing_adapter() -> CapturingAuditAdapter:
+    """A fresh capturing audit adapter per test."""
+    return CapturingAuditAdapter()

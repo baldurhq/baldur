@@ -1,18 +1,25 @@
-"""
-WAL Audit 통합 테스트.
+"""WAL <-> audit adapter integration tests.
 
-테스트 대상:
-- TestWALAuditIntegration: WAL Audit 통합
+Under test:
+- TestWALAuditIntegration: what a host-wired audit adapter does and does not
+  receive from a ``WriteAheadLog``.
 """
 
 from pathlib import Path
 
+from tests.factories.wal_records import RawRecord, own_pid_wal_name, write_raw_wal_file
+
+# A checksum field that is valid ASCII but cannot be the record's CRC32.
+# Rewriting the field leaves every record's length and offset untouched, so
+# the mismatch lands exactly where the test put it.
+BAD_CHECKSUM = b"deadbeef"
+
 
 class TestWALAuditIntegration:
-    """WAL Audit 통합 테스트."""
+    """WAL meta-events reach a wired adapter; recovery is not one of them."""
 
     def test_wal_init_accepts_audit_adapter(self):
-        """WAL 생성자에 audit_adapter 파라미터 존재 확인."""
+        """The constructor exposes the seam a host wires its adapter into."""
         import inspect
 
         from baldur.audit.wal import WriteAheadLog
@@ -21,7 +28,10 @@ class TestWALAuditIntegration:
         assert "audit_adapter" in sig.parameters
 
     def test_recovery_emits_no_audit_event(self, temp_wal_dir, mock_audit_adapter):
-        """복구는 감사 이벤트를 남기지 않는다 (메트릭 + 로그로만 보고)."""
+        """Recovery reports through a metric and a log line, never an audit
+        entry: it used to fire on ordinary steady-state reads rather than on a
+        real recovery, which is how it came to feed itself.
+        """
         from baldur.audit.wal import WALConfig, WriteAheadLog
 
         config = WALConfig(
@@ -29,46 +39,51 @@ class TestWALAuditIntegration:
             sync_on_write=False,
         )
 
-        # WAL 생성 및 기록
+        # Write through one WAL instance...
         wal = WriteAheadLog(config=config, audit_adapter=mock_audit_adapter)
         wal.write({"event": "test1"})
         wal.write({"event": "test2"})
         wal.write({"event": "test3"})
         wal.close()
 
-        # 새 WAL 인스턴스로 복구
+        # ...and recover through a fresh one.
         wal2 = WriteAheadLog(config=config, audit_adapter=mock_audit_adapter)
         entries = wal2.recover_unprocessed(last_processed_seq=0)
         wal2.close()
 
-        assert entries, "복구된 엔트리가 있어야 이 단언이 유효함"
+        assert entries, "entries must be recovered for this assertion to mean anything"
         assert mock_audit_adapter.get_events_by_type("WAL_RECOVERED") == []
 
     def test_wal_rotated_event_on_rotation(self, temp_wal_dir, mock_audit_adapter):
-        """로테이션 시 WAL_ROTATED 이벤트 기록."""
+        """A rotation delivers WAL_ROTATED to a wired adapter."""
         from baldur.audit.wal import WALConfig, WriteAheadLog
 
-        # 작은 파일 크기로 설정하여 빠른 로테이션 유도
+        # A tiny file-size cap forces rotation quickly.
         config = WALConfig(
             wal_dir=temp_wal_dir,
-            max_file_size_mb=0.0001,  # 매우 작은 크기
+            max_file_size_mb=0.0001,
             sync_on_write=False,
         )
 
         wal = WriteAheadLog(config=config, audit_adapter=mock_audit_adapter)
 
-        # 여러 번 기록하여 로테이션 유도
         for i in range(100):
             wal.write({"event": f"test_{i}", "data": "x" * 1000})
 
         wal.close()
 
-        # WAL_ROTATED 이벤트 확인
         rotated_events = mock_audit_adapter.get_events_by_type("WAL_ROTATED")
-        assert len(rotated_events) > 0, "WAL_ROTATED 이벤트가 기록되어야 함"
+        assert len(rotated_events) > 0
+        assert rotated_events[0]["source"] == "WriteAheadLog"
 
     def test_wal_corruption_detected_event(self, temp_wal_dir, mock_audit_adapter):
-        """체크섬 불일치 시 WAL_CORRUPTION_DETECTED 이벤트 기록."""
+        """A checksum mismatch delivers WAL_CORRUPTION_DETECTED to a wired
+        adapter, on the best-effort read a running drain actually takes.
+
+        The corruption is authored as a wrong checksum field rather than by
+        poking bytes at a fixed offset: the previous version of this test could
+        not tell whether the branch had been reached, so it asserted nothing.
+        """
         from baldur.audit.wal import WALConfig, WriteAheadLog
 
         config = WALConfig(
@@ -76,23 +91,35 @@ class TestWALAuditIntegration:
             sync_on_write=False,
         )
 
-        # WAL 생성 및 기록
-        wal = WriteAheadLog(config=config)
-        wal.write({"event": "test"})
+        # The WAL is constructed before the files are stamped:
+        # ``_init_or_recover`` strict-reads the last own-PID file, which would
+        # otherwise report this corruption once before the recovery below does.
+        wal = WriteAheadLog(config=config, audit_adapter=mock_audit_adapter)
+        wal_dir = Path(temp_wal_dir)
+        write_raw_wal_file(
+            wal_dir / own_pid_wal_name(config.file_prefix, "20260101_000000"),
+            [
+                RawRecord(sequence=1),
+                RawRecord(sequence=2, checksum=BAD_CHECKSUM),
+                RawRecord(sequence=3),
+            ],
+        )
+        # A second file puts the read on the parallel (best-effort) path, which
+        # is the one a running drain takes.
+        write_raw_wal_file(
+            wal_dir / own_pid_wal_name(config.file_prefix, "20260101_000001"),
+            [RawRecord(sequence=4)],
+        )
+
+        entries = wal.recover_unprocessed(last_processed_seq=0)
         wal.close()
 
-        # WAL 파일 손상 시뮬레이션
-        wal_files = list(Path(temp_wal_dir).glob("*.wal"))
-        if wal_files:
-            with open(wal_files[0], "r+b") as f:
-                f.seek(20)  # 데이터 영역으로 이동
-                f.write(b"CORRUPTED")
-
-        # 손상된 WAL 읽기 시도
-        wal2 = WriteAheadLog(config=config, audit_adapter=mock_audit_adapter)
-        wal2.recover_unprocessed(last_processed_seq=0)
-        wal2.close()
-
-        # 손상이 감지되면 WAL_CORRUPTION_DETECTED 이벤트 확인
-        mock_audit_adapter.get_events_by_type("WAL_CORRUPTION_DETECTED")
-        # 손상 위치에 따라 감지되지 않을 수 있음
+        assert [e.sequence for e in entries] == [1, 3, 4], (
+            "only the corrupt record is skipped"
+        )
+        detections = mock_audit_adapter.get_events_by_type("WAL_CORRUPTION_DETECTED")
+        assert len(detections) == 1
+        assert detections[0]["details"]["expected_checksum"] == BAD_CHECKSUM.decode(
+            "ascii"
+        )
+        assert detections[0]["source"] == "WriteAheadLog"
