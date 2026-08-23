@@ -28,7 +28,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from baldur.interfaces.audit_adapter import AuditAction, AuditEntry
+from baldur.interfaces.audit_adapter import AuditAction, AuditEntry, ContextType
 from tests.factories.time_helpers import freeze_time
 
 # A fixed, clearly-past epoch so "timestamp preserved" is distinguishable from
@@ -409,3 +409,206 @@ class TestFromWalDictPreservation:
 
         assert entry.success is False
         assert entry.error_message == "central rejected"
+
+
+# =============================================================================
+# Action derivation — the four resolution rules
+# =============================================================================
+
+
+class TestNativeActionDerivation:
+    """``_derive_native_action()``: explicit, enum-by-value, enum-by-name,
+    normalised verbatim — first match wins.
+
+    A static event-type -> action table cannot see the payload, so it would
+    file an operator's force-open as an automatic one; it would also need a
+    hand-authored edit for every new event type. The derivation replaces it.
+    """
+
+    def test_explicit_action_wins_over_the_event_type(self):
+        """Rule 1. The writer resolves the action when the payload — not the
+        event type — decides it (a manual force-open and an automatic one
+        share one event type), and that decision is final."""
+        entry = AuditEntry.from_wal_dict(
+            _native_wal_entry(event_type="CB_STATE_CHANGE", action="cb_force_open")
+        )
+
+        assert entry.action is AuditAction.CB_FORCE_OPEN
+
+    def test_explicit_action_with_no_enum_member_is_kept_verbatim(self):
+        """Rule 1, degraded: an explicit action outside the enum is still the
+        payload's decision, so it is recorded rather than discarded back to
+        the event type."""
+        entry = AuditEntry.from_wal_dict(
+            _native_wal_entry(event_type="CB_STATE_CHANGE", action="cb_quarantined")
+        )
+
+        assert entry.action == "cb_quarantined"
+        assert not isinstance(entry.action, AuditAction)
+
+    @pytest.mark.parametrize(
+        "explicit",
+        [None, "", 0, False],
+        ids=["none", "empty-string", "zero", "false"],
+    )
+    def test_an_empty_explicit_action_falls_through_to_derivation(self, explicit):
+        """Boundary: a falsy ``action`` means "not supplied" rather than "the
+        action is blank" — recording an empty action would erase the event
+        type the payload does carry."""
+        entry = AuditEntry.from_wal_dict(
+            _native_wal_entry(event_type="cb_force_open", action=explicit)
+        )
+
+        assert entry.action is AuditAction.CB_FORCE_OPEN
+
+    def test_event_type_that_is_an_enum_value_becomes_that_member(self):
+        """Rule 2."""
+        entry = AuditEntry.from_wal_dict(
+            _native_wal_entry(event_type="cb_auto_close", action=None)
+        )
+
+        assert entry.action is AuditAction.CB_AUTO_CLOSE
+
+    def test_event_type_that_is_an_enum_name_becomes_that_member(self):
+        """Rule 3: an upper-cased native event type misses the (lowercase)
+        enum values but matches an enum *name*, so one vocabulary — not two
+        casings of it — reaches the ledger."""
+        entry = AuditEntry.from_wal_dict(
+            _native_wal_entry(event_type="GOVERNANCE_BLOCKED", action=None)
+        )
+
+        assert entry.action is AuditAction.GOVERNANCE_BLOCKED
+
+    def test_event_type_with_no_enum_member_is_normalised(self):
+        """Rule 4: no member exists, so the recorded string is kept — cased
+        like the enum so the ledger reads consistently."""
+        entry = AuditEntry.from_wal_dict(
+            _native_wal_entry(event_type="POOL_LEAK_CLOSED", action=None)
+        )
+
+        assert entry.action == "pool_leak_closed"
+        assert not isinstance(entry.action, AuditAction)
+
+    def test_absent_event_type_derives_an_empty_action(self):
+        """Totality at the bottom of the ladder: nothing to derive from
+        yields the empty string rather than a raise."""
+        entry = AuditEntry.from_wal_dict({"event_type": ""})
+
+        assert entry.action == ""
+
+    @pytest.mark.parametrize(
+        "event_type",
+        [123, ["CB_STATE_CHANGE"], {"k": "v"}, None],
+        ids=["int", "list", "dict", "none"],
+    )
+    def test_a_non_string_event_type_is_stringified_not_raised(self, event_type):
+        """A corrupted WAL row must not become a poison entry stalling the
+        sync cursor: ``.upper()`` on a non-string would raise inside the
+        drain, so the value is stringified instead."""
+        entry = AuditEntry.from_wal_dict(
+            {"event_type": event_type, "record_id": "audit-x"}
+        )
+
+        assert isinstance(entry.action, str)
+        assert isinstance(entry, AuditEntry)
+
+
+# =============================================================================
+# Native field map — the columns a ledger row needs
+# =============================================================================
+
+
+class TestNativeWalFieldMap:
+    """The converter fills the fields a drained row would otherwise leave
+    blank: target type, service, reason, context type, full traceparent."""
+
+    # --- target_type, with the request path's fallback rule ------------------
+
+    def test_explicit_target_type_is_used(self):
+        """The writer passes a canonical value where one exists."""
+        entry = AuditEntry.from_wal_dict(
+            _native_wal_entry(target_type="circuit_breaker", source="CircuitBreaker")
+        )
+
+        assert entry.target_type == "circuit_breaker"
+
+    def test_target_type_falls_back_to_source(self):
+        """The rule the request-buffer path already applies, so a ledger row
+        never records ``"unknown"`` for a target the payload names."""
+        data = _native_wal_entry(source="PoolWatchdog")
+        data.pop("target_type", None)
+
+        entry = AuditEntry.from_wal_dict(data)
+
+        assert entry.target_type == "PoolWatchdog"
+
+    def test_target_type_absent_with_no_source_stays_none(self):
+        """Neither present: the field is left unset rather than invented."""
+        entry = AuditEntry.from_wal_dict({"event_type": "X"})
+
+        assert entry.target_type is None
+
+    def test_empty_target_type_falls_back_to_source(self):
+        """Boundary: an empty string means "not named" rather than a named
+        empty type."""
+        entry = AuditEntry.from_wal_dict(
+            _native_wal_entry(target_type="", source="CircuitBreaker")
+        )
+
+        assert entry.target_type == "CircuitBreaker"
+
+    # --- the remaining newly-mapped columns ----------------------------------
+
+    def test_service_name_is_mapped(self):
+        """Without this the ledger cannot attribute a row to a service."""
+        entry = AuditEntry.from_wal_dict(_native_wal_entry(service_name="payments"))
+
+        assert entry.service_name == "payments"
+
+    def test_reason_is_mapped(self):
+        """The reason column is what an auditor reads to understand a row."""
+        entry = AuditEntry.from_wal_dict(_native_wal_entry(reason="operator force"))
+
+        assert entry.reason == "operator force"
+
+    def test_context_type_is_mapped(self):
+        """A drained row keeps the entry point it was emitted from."""
+        entry = AuditEntry.from_wal_dict(_native_wal_entry(context_type="cli"))
+
+        assert entry.context_type is ContextType.CLI
+
+    @pytest.mark.parametrize(
+        "raw",
+        ["not-a-context", "", None, 7],
+        ids=["unknown-string", "empty", "none", "non-string"],
+    )
+    def test_an_unmappable_context_type_degrades_to_unknown(self, raw):
+        """Totality again: an unrecognised value must not raise inside the
+        drain, and must not silently claim a context the event never had."""
+        entry = AuditEntry.from_wal_dict(_native_wal_entry(context_type=raw))
+
+        assert entry.context_type is ContextType.UNKNOWN
+
+    def test_absent_context_type_is_unknown(self):
+        """The default when the writer recorded none."""
+        data = _native_wal_entry()
+        data.pop("context_type", None)
+
+        entry = AuditEntry.from_wal_dict(data)
+
+        assert entry.context_type is ContextType.UNKNOWN
+
+    def test_full_traceparent_reaches_the_row(self):
+        """The short id alone cannot join a row to a distributed trace, so the
+        full traceparent is carried alongside it."""
+        entry = AuditEntry.from_wal_dict(
+            _native_wal_entry(
+                trace_id="trace-001",
+                trace_id_full="00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+            )
+        )
+
+        assert entry.details["trace_id"] == "trace-001"
+        assert entry.details["trace_id_full"] == (
+            "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+        )
