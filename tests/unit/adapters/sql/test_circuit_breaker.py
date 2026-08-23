@@ -8,21 +8,62 @@ Coverage:
 - atomic_force_open returns (True, previous, new) tuple contract.
 - set_manual_control / clear_manual_control with TTL.
 - delete_state removes row and returns boolean.
+- try_acquire_half_open_slot state matrix, including the absent-watermark
+  contract and the row-vanished return path's transaction discipline.
 """
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
 
 from baldur.adapters.sql.circuit_breaker import (
+    _TABLE,
     SQLCircuitBreakerStateRepository,
 )
 from baldur.interfaces.repositories import CircuitBreakerStateEnum
+from baldur.utils.time import utc_now
 
 
 @pytest.fixture
 def cb(get_sqlite_conn) -> SQLCircuitBreakerStateRepository:
     return SQLCircuitBreakerStateRepository(get_sqlite_conn)
+
+
+def _seed_half_open(
+    cb: SQLCircuitBreakerStateRepository,
+    service_name: str,
+    *,
+    count: int,
+    window_age_seconds: float | None = None,
+    raw_watermark: str | None = None,
+) -> None:
+    """Seed a HALF_OPEN row with a chosen watermark shape.
+
+    A freshly created row holds ``half_open_window_started_at`` NULL and
+    ``update_state`` never writes that column, so leaving both keyword
+    arguments unset produces the absent-watermark shape a state-copy lane
+    delivers. ``window_age_seconds`` backdates a real timestamp;
+    ``raw_watermark`` writes an unparseable value, which the read boundary
+    folds into the same "absent" equivalence class.
+    """
+    cb.get_or_create(service_name)
+    cb.update_state(
+        service_name=service_name,
+        state=CircuitBreakerStateEnum.HALF_OPEN.value,
+        half_open_request_count=count,
+    )
+    if window_age_seconds is not None:
+        value = cb._dt_to_db(utc_now() - timedelta(seconds=window_age_seconds))
+    elif raw_watermark is not None:
+        value = raw_watermark
+    else:
+        return
+    cb._execute(
+        f"UPDATE {_TABLE} SET half_open_window_started_at = %s WHERE service_name = %s",
+        (value, service_name),
+    )
 
 
 class TestSQLCircuitBreakerCreationBehavior:
@@ -183,6 +224,227 @@ class TestSQLCircuitBreakerListingBehavior:
         cb.get_or_create("c")
         names = sorted(s.service_name for s in cb.get_all_states())
         assert names == ["a", "b", "c"]
+
+
+# ---------------------------------------------------------------------------
+# try_acquire_half_open_slot — state matrix + absent-watermark contract
+# ---------------------------------------------------------------------------
+
+
+class TestSQLTryAcquireHalfOpenSlotBehavior:
+    """The SQL side of the atomic slot acquisition.
+
+    Same five branches the in-memory and Redis primitives own. The
+    absent-watermark cases matter most here: the branch-3 UPDATE stamps a
+    missing window with ``COALESCE`` in the same statement as the
+    increment, so the counter can never reach the limit unwatermarked.
+    """
+
+    def test_open_state_transitions_and_stamps_the_window(self, cb):
+        cb.get_or_create("svc")
+        cb.update_state(service_name="svc", state=CircuitBreakerStateEnum.OPEN.value)
+
+        allowed, prev_state, new_state = cb.try_acquire_half_open_slot(
+            service_name="svc", limit=3, stuck_timeout_seconds=60
+        )
+
+        assert (allowed, prev_state, new_state) == (True, "open", "half_open")
+        assert cb._last_acquire_marker == "transition"
+        state = cb.get_by_service_name("svc")
+        assert state.half_open_request_count == 1
+        assert state.success_count == 0
+        assert state.half_open_window_started_at is not None
+
+    def test_closed_state_returns_no_op_without_writing(self, cb):
+        cb.get_or_create("svc")  # CLOSED by default
+
+        allowed, prev_state, new_state = cb.try_acquire_half_open_slot(
+            service_name="svc", limit=3, stuck_timeout_seconds=60
+        )
+
+        assert (allowed, prev_state, new_state) == (False, "closed", "closed")
+        assert cb._last_acquire_marker == "no_op"
+        assert cb.get_by_service_name("svc").half_open_request_count == 0
+
+    def test_watermark_absent_under_limit_stamps_the_window(self, cb):
+        """Branch 3: the first acquire starts a window the row arrived without."""
+        # Given — the state-copy shape: half_open, count 0, watermark NULL.
+        _seed_half_open(cb, "svc", count=0)
+        assert cb.get_by_service_name("svc").half_open_window_started_at is None
+
+        # When
+        allowed, _prev, _new = cb.try_acquire_half_open_slot(
+            service_name="svc", limit=3, stuck_timeout_seconds=60
+        )
+
+        # Then — granted as an ordinary increment, window now present.
+        assert allowed is True
+        assert cb._last_acquire_marker == "increment"
+        state = cb.get_by_service_name("svc")
+        assert state.half_open_request_count == 1
+        assert state.half_open_window_started_at is not None
+
+    def test_watermark_present_under_limit_is_not_overwritten_by_the_stamp(self, cb):
+        """COALESCE adopts a missing window; it never refreshes a live one."""
+        _seed_half_open(cb, "svc", count=1, window_age_seconds=30.0)
+        watermark_before = cb.get_by_service_name("svc").half_open_window_started_at
+
+        cb.try_acquire_half_open_slot(
+            service_name="svc", limit=3, stuck_timeout_seconds=60
+        )
+
+        state = cb.get_by_service_name("svc")
+        assert state.half_open_request_count == 2
+        assert state.half_open_window_started_at == watermark_before
+
+    def test_watermark_absent_at_limit_recovers_the_window(self, cb):
+        """Branch 1: no watermark counts as older than any timeout (fail-open)."""
+        _seed_half_open(cb, "svc", count=3)
+
+        allowed, _prev, _new = cb.try_acquire_half_open_slot(
+            service_name="svc", limit=3, stuck_timeout_seconds=60
+        )
+
+        assert allowed is True
+        assert cb._last_acquire_marker == "stuck_recovery"
+        state = cb.get_by_service_name("svc")
+        assert state.half_open_request_count == 1
+        assert state.success_count == 0
+        assert state.half_open_window_started_at is not None
+
+    def test_watermark_absent_row_driven_to_limit_rejects_within_stuck_timeout(
+        self, cb
+    ):
+        """Once the stamp lands, reaching the limit is an ordinary rejection."""
+        limit = 3
+        _seed_half_open(cb, "svc", count=0)
+        for _ in range(limit):
+            cb.try_acquire_half_open_slot(
+                service_name="svc", limit=limit, stuck_timeout_seconds=60
+            )
+
+        allowed, _prev, _new = cb.try_acquire_half_open_slot(
+            service_name="svc", limit=limit, stuck_timeout_seconds=60
+        )
+
+        assert allowed is False
+        assert cb._last_acquire_marker == "rejected"
+        assert cb.get_by_service_name("svc").half_open_request_count == limit
+
+
+class TestSQLTryAcquireWatermarkMatrixContract:
+    """Acquire matrix: watermark class x counter position -> contract outcome.
+
+    The same table the in-memory and Redis implementations satisfy. The
+    ``garbage`` rows are the load-bearing ones here: an unparseable stored
+    value folds to "absent" at the read boundary, so it must produce the
+    absent outcomes rather than a third behavior of its own.
+    """
+
+    _LIMIT = 3
+    _STUCK_TIMEOUT = 60
+
+    @pytest.mark.parametrize(
+        ("seed_kwargs", "initial_count", "expected_allowed", "expected_marker"),
+        [
+            ({}, 0, True, "increment"),
+            ({}, 3, True, "stuck_recovery"),
+            ({"raw_watermark": "not-a-timestamp"}, 0, True, "increment"),
+            ({"raw_watermark": "not-a-timestamp"}, 3, True, "stuck_recovery"),
+            ({"window_age_seconds": 0.0}, 0, True, "increment"),
+            ({"window_age_seconds": 0.0}, 3, False, "rejected"),
+            ({"window_age_seconds": 120.0}, 0, True, "increment"),
+            ({"window_age_seconds": 120.0}, 3, True, "stuck_recovery"),
+        ],
+        ids=[
+            "absent_under_limit",
+            "absent_at_limit",
+            "garbage_under_limit",
+            "garbage_at_limit",
+            "fresh_under_limit",
+            "fresh_at_limit",
+            "stale_under_limit",
+            "stale_at_limit",
+        ],
+    )
+    def test_watermark_absent_matrix_matches_the_contract(
+        self, cb, seed_kwargs, initial_count, expected_allowed, expected_marker
+    ):
+        """Every granted cell also leaves a readable watermark behind."""
+        _seed_half_open(cb, "svc", count=initial_count, **seed_kwargs)
+
+        allowed, _prev, _new = cb.try_acquire_half_open_slot(
+            service_name="svc",
+            limit=self._LIMIT,
+            stuck_timeout_seconds=self._STUCK_TIMEOUT,
+        )
+
+        assert allowed is expected_allowed
+        assert cb._last_acquire_marker == expected_marker
+        if allowed:
+            assert cb.get_by_service_name("svc").half_open_window_started_at is not None
+
+
+class _CommitCountingConnection:
+    """Connection proxy that counts commit/rollback without changing behavior.
+
+    ``_should_commit`` keys off ``id(conn)`` and every other call is
+    forwarded, so the repository cannot tell the difference — the counters
+    are the only observable the transaction-discipline test needs, and
+    sqlite's ``in_transaction`` cannot serve: a bare SELECT never opens an
+    implicit transaction there, so it reads False either way.
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.commits = 0
+        self.rollbacks = 0
+
+    def commit(self):
+        self.commits += 1
+        return self._inner.commit()
+
+    def rollback(self):
+        self.rollbacks += 1
+        return self._inner.rollback()
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+class TestSQLTryAcquireVanishedRowBehavior:
+    """The row-vanished return path closes its read transaction.
+
+    ``try_acquire_half_open_slot`` ensures the row exists, then re-reads it
+    under a lock. If the row was deleted in between, the method returns a
+    no-op — and every sibling branch commits or rolls back before it
+    returns. Skipping that here strands the borrowed connection "idle in
+    transaction" on PostgreSQL, holding a backend and blocking VACUUM.
+    """
+
+    def test_vanished_row_returns_no_op_and_commits_the_read(
+        self, sqlite_conn, monkeypatch
+    ):
+        # Given — a repo over a commit-counting connection, schema applied.
+        counting_conn = _CommitCountingConnection(sqlite_conn)
+        cb = SQLCircuitBreakerStateRepository(lambda: counting_conn)
+        cb.get_or_create("other")  # applies the schema; unrelated row
+        # The row-ensuring call is neutralized, so the locked SELECT that
+        # follows finds nothing — the concurrent-delete shape.
+        monkeypatch.setattr(cb, "get_or_create", lambda service_name: None)
+        counting_conn.commits = 0
+        counting_conn.rollbacks = 0
+
+        # When
+        allowed, prev_state, new_state = cb.try_acquire_half_open_slot(
+            service_name="vanished", limit=3, stuck_timeout_seconds=60
+        )
+
+        # Then — the no-op tuple, and the transaction is closed exactly once.
+        assert (allowed, prev_state, new_state) == (False, "closed", "closed")
+        assert cb._last_acquire_marker == "no_op"
+        assert counting_conn.commits == 1
+        assert counting_conn.rollbacks == 0
 
 
 # ---------------------------------------------------------------------------

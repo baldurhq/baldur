@@ -14,6 +14,8 @@ Covers:
   back).
 - D8 stuck-recovery observability: when L2 returns marker
   ``"stuck_recovery"``, ``half_open_stuck_recovery_total`` is incremented.
+- Degraded-mode admission over a hydrated HALF_OPEN row, which arrives
+  without its window watermark.
 """
 
 from __future__ import annotations
@@ -22,6 +24,8 @@ from concurrent.futures import TimeoutError as FuturesTimeoutError
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+from tests.factories.time_helpers import freeze_time
 
 
 @pytest.fixture
@@ -230,3 +234,79 @@ class TestLayeredTryAcquireBehavior:
             )
 
         mock_stuck.assert_not_called()
+
+
+class TestLayeredHydratedWatermarkAbsentBehavior:
+    """A hydrated HALF_OPEN row admits its window correctly on the L1 lane.
+
+    Both hydration lanes -- the construction-time load and the L1-miss
+    lane -- restore ``state`` from the durable snapshot but leave the window
+    fields at their layer-local values, because those belong to the atomic
+    slot primitives rather than to bulk transfer. A worker can therefore
+    hold ``half_open`` with counter 0 and no watermark. When L2 then goes
+    unavailable and admission falls back to that row, it must behave like a
+    window that has just started -- not like one that stalled.
+    """
+
+    @pytest.fixture
+    def hydrated_repo(self, repo):
+        """A degraded-mode repo whose L1 row came from a snapshot."""
+        from baldur.interfaces.repositories import CircuitBreakerStateData
+
+        repo._l1.hydrate_snapshot(
+            CircuitBreakerStateData(service_name="svc", state="half_open")
+        )
+        repo._l2_healthy = False  # L2 down: L1 owns admission (degraded mode)
+        return repo
+
+    def test_hydrated_row_carries_no_window_watermark(self, hydrated_repo):
+        """The premise every case below rests on: hydration drops the window."""
+        l1_state = hydrated_repo._l1.get_by_service_name("svc")
+
+        assert l1_state.state == "half_open"
+        assert l1_state.half_open_request_count == 0
+        assert l1_state.half_open_window_started_at is None
+
+    def test_first_fallback_acquire_stamps_the_window(self, hydrated_repo, l2_mock):
+        """SC3: the trial call that lands on the hydrated row starts its window."""
+        allowed, prev_state, new_state = hydrated_repo.try_acquire_half_open_slot(
+            service_name="svc", limit=3, stuck_timeout_seconds=60
+        )
+
+        assert (allowed, prev_state, new_state) == (True, "half_open", "half_open")
+        l2_mock.try_acquire_half_open_slot.assert_not_called()
+        l1_state = hydrated_repo._l1.get_by_service_name("svc")
+        assert l1_state.half_open_request_count == 1
+        assert l1_state.half_open_window_started_at is not None
+
+    def test_hydrated_window_rejects_at_limit_instead_of_recovering(
+        self, hydrated_repo
+    ):
+        """SC4 negative: the healthy window is no longer misread as stalled.
+
+        Driving the hydrated row to the cluster cap through the fallback lane
+        and asking once more, still well inside ``stuck_timeout``, must be an
+        ordinary rejection. Before the boundary rule the row still had no
+        watermark at that point, so the stuck-window auto-reset fired and
+        admitted another full window of trial calls.
+        """
+        limit = 3
+        with freeze_time("2026-02-10 10:00:00"):
+            granted = [
+                hydrated_repo.try_acquire_half_open_slot(
+                    service_name="svc", limit=limit, stuck_timeout_seconds=60
+                )[0]
+                for _ in range(limit)
+            ]
+
+            allowed, _prev, _new = hydrated_repo.try_acquire_half_open_slot(
+                service_name="svc", limit=limit, stuck_timeout_seconds=60
+            )
+
+        assert granted == [True] * limit
+        assert allowed is False
+        assert hydrated_repo._l1._last_acquire_marker == "rejected"
+        assert (
+            hydrated_repo._l1.get_by_service_name("svc").half_open_request_count
+            == limit
+        )

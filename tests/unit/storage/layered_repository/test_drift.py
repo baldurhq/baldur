@@ -361,3 +361,122 @@ class TestDriftReconciliation:
         assert stats["by_result"]["l2_wins"] == 1
         assert stats["by_result"]["no_drift"] == 1
         assert len(stats["affected_services"]) == 3
+
+
+class TestDriftRepairRoutingContract:
+    """Which reconciliation verdicts send the local row up to the shared store.
+
+    The resolver decides the winner; this predicate decides where that
+    winner has to be written. Its whole reason for existing is the
+    HALF_OPEN-XOR verdict that names the local row: without a route to the
+    repair, the caller's else branch copies the losing shared state back
+    over the row that just won. It yields to operator pins, though — the
+    repair's own skip only looks at the local flag, so a pinned shared row
+    keeps the copy-down behavior.
+    """
+
+    # Every verdict -> (routes when the shared row is unpinned,
+    #                  routes when it is pinned).
+    _ROUTING_TABLE = {
+        "l1_wins": (True, True),
+        "l2_wins": (False, False),
+        "timestamp_l1": (True, True),
+        "timestamp_l2": (False, False),
+        "timestamp_half_open_l1": (True, False),
+        "timestamp_half_open_l2": (False, False),
+        "no_drift": (False, False),
+        "skipped": (False, False),
+    }
+
+    def test_decision_table_covers_every_reconciliation_result(self):
+        """A new verdict must be given a route explicitly, not defaulted."""
+        from baldur.adapters.memory.circuit_breaker import DriftReconciliationResult
+
+        assert {r.value for r in DriftReconciliationResult} == set(self._ROUTING_TABLE)
+
+    @pytest.mark.parametrize("pinned", [False, True], ids=["unpinned", "pinned"])
+    @pytest.mark.parametrize("result_value", sorted(_ROUTING_TABLE))
+    def test_routing_decision_matches_the_table(self, result_value, pinned):
+        from baldur.adapters.memory.circuit_breaker import DriftReconciliationResult
+        from baldur.adapters.memory.layered_repository.drift_operations import (
+            DriftOperationsMixin,
+        )
+        from baldur.interfaces.repositories import CircuitBreakerStateData
+
+        result = DriftReconciliationResult(result_value)
+        l2_state = CircuitBreakerStateData(
+            service_name="svc",
+            state="open",
+            manually_controlled=pinned,
+        )
+        expected = self._ROUTING_TABLE[result_value][1 if pinned else 0]
+
+        assert DriftOperationsMixin._routes_to_l1_repair(result, l2_state) is expected
+
+
+class TestDriftHalfOpenWinnerRoutingBehavior:
+    """End-to-end: the XOR winner reaches L2 instead of being overwritten.
+
+    Drives the public ``reconcile_single_service`` entry point so the
+    routing predicate is exercised where it actually runs, and the reported
+    action names the direction the row was written.
+    """
+
+    @pytest.fixture
+    def repo(self, mock_l2_repo):
+        from baldur.adapters.memory.circuit_breaker import (
+            LayeredCircuitBreakerStateRepository,
+        )
+
+        repo = LayeredCircuitBreakerStateRepository(
+            l2_repo=mock_l2_repo,
+            adapter_type="redis",
+        )
+        # The default 50 ms L2 budget is tight enough to flake on a loaded
+        # xdist worker; the mock resolves instantly either way.
+        repo._get_timeout_seconds = lambda: 5.0
+        return repo
+
+    def _seed_newer_l1_half_open(self, repo, mock_l2_repo, *, l2_pinned):
+        """L1 HALF_OPEN (newer) drifting against an older L2 OPEN row."""
+        from baldur.interfaces.repositories import CircuitBreakerStateData
+        from baldur.utils.time import utc_now
+
+        repo._l1.get_or_create("svc")
+        repo._l1.update_state(service_name="svc", state="half_open")
+        l1_state = repo._l1.get_by_service_name("svc")
+
+        mock_l2_repo.get_by_service_name.return_value = CircuitBreakerStateData(
+            service_name="svc",
+            state="open",
+            manually_controlled=l2_pinned,
+            opened_at=utc_now() - timedelta(seconds=30),
+            updated_at=l1_state.updated_at - timedelta(seconds=10),
+        )
+
+    def test_unpinned_l2_receives_the_half_open_winner(self, repo, mock_l2_repo):
+        """The local HALF_OPEN win is repaired up, and survives locally."""
+        self._seed_newer_l1_half_open(repo, mock_l2_repo, l2_pinned=False)
+
+        outcome = repo.reconcile_single_service("svc")
+
+        assert outcome["action"] == "l1_to_l2"
+        assert outcome["winner_state"] == "half_open"
+        assert repo._l1.get_by_service_name("svc").state == "half_open"
+        mock_l2_repo.update_state.assert_called_once_with(
+            service_name="svc",
+            state="half_open",
+            failure_count=0,
+            success_count=0,
+            opened_at=None,
+        )
+
+    def test_pinned_l2_keeps_its_state_and_is_copied_down(self, repo, mock_l2_repo):
+        """An operator pin outranks an automatic timestamp win."""
+        self._seed_newer_l1_half_open(repo, mock_l2_repo, l2_pinned=True)
+
+        outcome = repo.reconcile_single_service("svc")
+
+        assert outcome["action"] == "l2_to_l1"
+        assert repo._l1.get_by_service_name("svc").state == "open"
+        mock_l2_repo.update_state.assert_not_called()

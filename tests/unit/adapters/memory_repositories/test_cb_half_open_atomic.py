@@ -9,6 +9,9 @@ Covers the L1 side of the HALF_OPEN slot acquisition contract:
 - ``reset_half_open_count`` idempotency + missing-entry handling.
 - ``update_state(reset_half_open_count=True)`` D9 atomic state-and-counter
   clear in a single round-trip.
+- The absent-watermark acquire contract: under the limit the first acquire
+  stamps the missing window, at the limit an absent watermark counts as
+  older than any timeout.
 """
 
 from __future__ import annotations
@@ -16,11 +19,16 @@ from __future__ import annotations
 from datetime import timedelta
 
 import pytest
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
 
 from baldur.adapters.memory import InMemoryCircuitBreakerStateRepository
-from baldur.interfaces.repositories import CircuitBreakerStateEnum
+from baldur.interfaces.repositories import (
+    CircuitBreakerStateData,
+    CircuitBreakerStateEnum,
+)
 from baldur.utils.time import utc_now
-from tests.factories.time_helpers import freeze_time
+from tests.factories.time_helpers import freeze_time, get_fixed_datetime
 
 
 @pytest.fixture
@@ -34,18 +42,22 @@ def _force_state(
     *,
     state: str,
     half_open_request_count: int = 0,
+    success_count: int | None = None,
     window_age_seconds: float | None = None,
 ) -> None:
     """Drive the repo into a target state without going through try_acquire.
 
     ``window_age_seconds`` lets the test set ``half_open_window_started_at``
     to an arbitrary point in the past so the D8 stuck-recovery branch can
-    be exercised deterministically without sleeping.
+    be exercised deterministically without sleeping. Leaving it ``None``
+    keeps the watermark unset — the shape every state-copy lane produces,
+    which the absent-watermark cases below drive.
     """
     repo.get_or_create(service)
     repo.update_state(
         service_name=service,
         state=state,
+        success_count=success_count,
         half_open_request_count=half_open_request_count,
     )
     if window_age_seconds is not None:
@@ -233,6 +245,289 @@ class TestInMemoryTryAcquireBehavior:
         assert allowed is False
         # Counter is unchanged.
         assert repo.get_by_service_name("svc").half_open_request_count == 0
+
+
+# =============================================================================
+# try_acquire_half_open_slot — absent watermark (adoption stamp + recovery)
+# =============================================================================
+
+
+class TestInMemoryTryAcquireWatermarkAbsentBehavior:
+    """A ``half_open`` row can arrive without its window watermark.
+
+    Every lane that copies ``state`` without the window fields produces
+    that shape: snapshot hydration, drift reconciliation's remote-wins
+    copy, and the whole-row mirrors into the durable store. The acquire
+    boundary owns it — under the limit the first acquire starts the
+    window, at the limit an absent watermark counts as older than any
+    timeout so the row cannot pin the breaker in HALF_OPEN.
+    """
+
+    def test_watermark_absent_under_limit_stamps_the_window_with_now(self, repo):
+        """Branch 3: the first acquire on an unwatermarked window starts it."""
+        # Given — the state-copy shape: half_open, count 0, no watermark.
+        with freeze_time("2026-02-10 10:00:00"):
+            _force_state(
+                repo,
+                "svc",
+                state=CircuitBreakerStateEnum.HALF_OPEN.value,
+                half_open_request_count=0,
+            )
+            assert repo.get_by_service_name("svc").half_open_window_started_at is None
+
+            # When — a trial call takes the under-limit branch.
+            allowed, prev_state, new_state = repo.try_acquire_half_open_slot(
+                service_name="svc", limit=3, stuck_timeout_seconds=60
+            )
+
+        # Then — granted as an ordinary increment, and the window now exists.
+        assert (allowed, prev_state, new_state) == (
+            True,
+            CircuitBreakerStateEnum.HALF_OPEN.value,
+            CircuitBreakerStateEnum.HALF_OPEN.value,
+        )
+        assert repo._last_acquire_marker == "increment"
+        state = repo.get_by_service_name("svc")
+        assert state.half_open_request_count == 1
+        assert state.half_open_window_started_at == get_fixed_datetime(
+            2026, 2, 10, 10, 0, 0
+        )
+
+    def test_watermark_present_under_limit_is_not_overwritten_by_the_stamp(self, repo):
+        """The stamp is an adoption, not a refresh: a live window survives.
+
+        Restamping on every increment would keep sliding the window's start
+        forward, so a genuinely stuck window would never age past
+        ``stuck_timeout`` and the recovery branch would be unreachable.
+        """
+        # Given — a window opened 30 s ago with room left in it.
+        _force_state(
+            repo,
+            "svc",
+            state=CircuitBreakerStateEnum.HALF_OPEN.value,
+            half_open_request_count=1,
+            window_age_seconds=30.0,
+        )
+        watermark_before = repo.get_by_service_name("svc").half_open_window_started_at
+
+        # When
+        repo.try_acquire_half_open_slot(
+            service_name="svc", limit=3, stuck_timeout_seconds=60
+        )
+
+        # Then — counter moved, watermark did not.
+        state = repo.get_by_service_name("svc")
+        assert state.half_open_request_count == 2
+        assert state.half_open_window_started_at == watermark_before
+
+    def test_watermark_absent_at_limit_recovers_the_window(self, repo):
+        """Branch 1: an at-limit row with no watermark is older than any timeout.
+
+        This is the fail-open defense line for a writer the adoption stamp
+        does not cover — the alternative reading (reject) is a permanent
+        lockout with no branch that can ever write the missing watermark.
+        """
+        # Given — at the limit, no watermark, a non-zero success_count that
+        # the auto-reset must clear.
+        _force_state(
+            repo,
+            "svc",
+            state=CircuitBreakerStateEnum.HALF_OPEN.value,
+            half_open_request_count=3,
+            success_count=5,
+        )
+
+        # When
+        allowed, prev_state, new_state = repo.try_acquire_half_open_slot(
+            service_name="svc", limit=3, stuck_timeout_seconds=60
+        )
+
+        # Then — the stuck-window auto-reset fires: grant, fresh window.
+        assert (allowed, prev_state, new_state) == (
+            True,
+            CircuitBreakerStateEnum.HALF_OPEN.value,
+            CircuitBreakerStateEnum.HALF_OPEN.value,
+        )
+        assert repo._last_acquire_marker == "stuck_recovery"
+        state = repo.get_by_service_name("svc")
+        assert state.half_open_request_count == 1
+        assert state.success_count == 0
+        assert state.half_open_window_started_at >= utc_now() - timedelta(seconds=5)
+
+    def test_watermark_absent_row_driven_to_limit_rejects_within_stuck_timeout(
+        self, repo
+    ):
+        """A hydrated window admits exactly ``limit`` trials, then rejects.
+
+        The negative half of the adoption stamp: once the counter climbs
+        through the under-limit branch the watermark exists, so reaching the
+        limit inside ``stuck_timeout`` is an ordinary rejection — not the
+        stuck-window recovery that an unwatermarked row used to trigger.
+        Frozen time keeps the window age at 0, well inside the timeout.
+        """
+        limit = 3
+        with freeze_time("2026-02-10 10:00:00"):
+            # Given — the hydrated shape, driven to the limit by real acquires.
+            _force_state(
+                repo,
+                "svc",
+                state=CircuitBreakerStateEnum.HALF_OPEN.value,
+                half_open_request_count=0,
+            )
+            for _ in range(limit):
+                repo.try_acquire_half_open_slot(
+                    service_name="svc", limit=limit, stuck_timeout_seconds=60
+                )
+
+            # When — one trial call too many, still inside the window.
+            allowed, _prev, _new = repo.try_acquire_half_open_slot(
+                service_name="svc", limit=limit, stuck_timeout_seconds=60
+            )
+
+        # Then — rejected. Pre-adoption this row still had no watermark and
+        # took the stuck-recovery branch, admitting another full window.
+        assert allowed is False
+        assert repo._last_acquire_marker == "rejected"
+        assert repo.get_by_service_name("svc").half_open_request_count == limit
+
+
+class TestInMemoryTryAcquireWatermarkMatrixContract:
+    """Acquire matrix: watermark class x counter position -> contract outcome.
+
+    The hardcoded cells are the contract itself — the same table the SQL and
+    Redis implementations must satisfy, which is why an absent watermark
+    reads as "not yet started" below the limit and as "older than any
+    timeout" at it.
+    """
+
+    _STUCK_TIMEOUT = 60
+    _LIMIT = 3
+
+    @pytest.mark.parametrize(
+        ("window_age_seconds", "initial_count", "expected_allowed", "expected_marker"),
+        [
+            (None, 0, True, "increment"),
+            (None, 3, True, "stuck_recovery"),
+            (0.0, 0, True, "increment"),
+            (0.0, 3, False, "rejected"),
+            (120.0, 0, True, "increment"),
+            (120.0, 3, True, "stuck_recovery"),
+        ],
+        ids=[
+            "absent_under_limit",
+            "absent_at_limit",
+            "fresh_under_limit",
+            "fresh_at_limit",
+            "stale_under_limit",
+            "stale_at_limit",
+        ],
+    )
+    def test_watermark_absent_matrix_matches_the_contract(
+        self,
+        repo,
+        window_age_seconds,
+        initial_count,
+        expected_allowed,
+        expected_marker,
+    ):
+        """Every cell also leaves a watermark behind when the slot is granted."""
+        _force_state(
+            repo,
+            "svc",
+            state=CircuitBreakerStateEnum.HALF_OPEN.value,
+            half_open_request_count=initial_count,
+            window_age_seconds=window_age_seconds,
+        )
+
+        allowed, _prev, _new = repo.try_acquire_half_open_slot(
+            service_name="svc",
+            limit=self._LIMIT,
+            stuck_timeout_seconds=self._STUCK_TIMEOUT,
+        )
+
+        assert allowed is expected_allowed
+        assert repo._last_acquire_marker == expected_marker
+        if allowed:
+            state = repo.get_by_service_name("svc")
+            assert state.half_open_window_started_at is not None
+
+
+# =============================================================================
+# Property: the counter never advances without a window watermark
+# =============================================================================
+
+# Every writer of the (half_open_request_count, half_open_window_started_at)
+# pair that a production caller can reach. ``update_state`` with an explicit
+# ``half_open_request_count`` is deliberately absent: it can set the counter
+# without a watermark, and no production caller passes that argument.
+_PAIR_WRITERS = (
+    "acquire",
+    "reset_half_open_count",
+    "update_state_reset_flag",
+    "mirror_half_open",
+    "mirror_open",
+    "hydrate_half_open_snapshot",
+)
+
+
+class TestInMemoryHalfOpenWatermarkPairProperties:
+    """``count > 0`` implies a watermark, whatever order the writers run in.
+
+    The example-based cases above pin the two acquire branches; this searches
+    interleavings of every other writer that touches the pair for a sequence
+    that strands a counter without its window — the shape that made a healthy
+    window read as stalled.
+    """
+
+    @settings(
+        max_examples=200,
+        deadline=None,
+        suppress_health_check=[HealthCheck.too_slow],
+    )
+    @given(
+        writers=st.lists(st.sampled_from(_PAIR_WRITERS), min_size=1, max_size=25),
+    )
+    def test_counter_never_advances_without_a_watermark(self, writers):
+        """After every writer, a non-zero counter carries a window start."""
+        # Given — a repo seeded with the hydrated shape the property targets.
+        repo = InMemoryCircuitBreakerStateRepository()
+        half_open = CircuitBreakerStateEnum.HALF_OPEN.value
+        repo.hydrate_snapshot(
+            CircuitBreakerStateData(service_name="svc", state=half_open)
+        )
+
+        for writer in writers:
+            # When — one writer runs.
+            if writer == "acquire":
+                repo.try_acquire_half_open_slot(
+                    service_name="svc", limit=3, stuck_timeout_seconds=60
+                )
+            elif writer == "reset_half_open_count":
+                repo.reset_half_open_count("svc")
+            elif writer == "update_state_reset_flag":
+                repo.update_state(
+                    service_name="svc",
+                    state=half_open,
+                    reset_half_open_count=True,
+                )
+            elif writer == "mirror_half_open":
+                repo.update_state(service_name="svc", state=half_open, success_count=1)
+            elif writer == "mirror_open":
+                repo.update_state(
+                    service_name="svc", state=CircuitBreakerStateEnum.OPEN.value
+                )
+            else:
+                repo.hydrate_snapshot(
+                    CircuitBreakerStateData(service_name="svc", state=half_open)
+                )
+
+            # Then — the pair is still coherent.
+            state = repo.get_by_service_name("svc")
+            if state.half_open_request_count > 0:
+                assert state.half_open_window_started_at is not None, (
+                    f"counter {state.half_open_request_count} without a watermark "
+                    f"after {writer!r}"
+                )
 
 
 # =============================================================================
