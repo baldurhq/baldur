@@ -30,6 +30,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - A WAL checksum mismatch is now reported on best-effort reads too, not only on strict ones.
 - A raising `on_corruption` hook no longer silently truncates the recovery read it fires in.
 - A circuit-breaker force run from the CLI is recorded as an operator action, not an automatic one.
+- A manual circuit-breaker reset is recorded as an operator action too, not an automatic close.
 - Every `baldur` command that changes state carries a `user@host` identity into the audit trail.
 - An audit row's timestamp is the time of the audited event, so `query(start_time=)` filters on it.
 - It was previously the append time, which for buffered events lagged by a whole batch window.

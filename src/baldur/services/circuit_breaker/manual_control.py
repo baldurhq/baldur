@@ -664,13 +664,23 @@ class ManualControlMixin:
                     new_state=new_state,
                     reason=reason,
                 )
-                # Audit - reset is a state-reset event
+                # Audit - reset is a state-reset event. The actor is read from
+                # context here for the same reason force_open reads it: the
+                # recorded action is derived from actor_type, so omitting it
+                # files an operator's reset as an automatic close. An
+                # automatic caller carries the system actor and still derives
+                # the AUTO variant, so reading it is correct on both paths.
                 if previous_state != new_state:
+                    from baldur.context.actor_context import ActorContext
+
+                    actor = ActorContext.get_current()
                     log_cb_state_change_audit(
                         cb_name=service_name,
                         old_state=previous_state,
                         new_state=new_state,
                         reason=f"reset: {reason}" if reason else "reset: manual",
+                        actor_id=actor.actor_id,
+                        actor_type=actor.actor_type,
                     )
                 # Push event - record the CB state-change metric
                 if previous_state != new_state:
