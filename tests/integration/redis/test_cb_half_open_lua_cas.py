@@ -54,6 +54,11 @@ Test Categories:
         - L1 half_open + missing durable key → repair recreates the row
           without a window; the first acquire starts it and the window
           still ages into stuck recovery (no permanent HALF_OPEN lockout)
+    H. Reject-path convergence after an in-place key loss (771):
+        - the Lua folds a missing hash into "closed", so a lost row and a
+          genuine cluster close reach the acquire as the same rejection;
+          the lane's own fresh read tells them apart — absent → mirror the
+          local state back up, present-closed → converge the local row
 
 All tests require a running Redis instance.
 Marked with @pytest.mark.requires_redis for auto-skip.
@@ -1103,3 +1108,130 @@ class TestDriftRepairIntoRedisRecovers:
         assert allowed is True
         assert repo._l2._last_acquire_marker == "stuck_recovery"
         assert redis_test_client.hget(cb_key, "half_open_request_count") == "1"
+
+
+# =============================================================================
+# H. Reject-path convergence after an in-place key loss (771)
+# =============================================================================
+
+
+class _InlineExecutor:
+    """Executor stub running submitted callables inline on a real Future.
+
+    The convergence lane is fire-and-forget on a shared pool; running it inline
+    makes the whole chain — acquire, detection, task — complete before the
+    call returns, with no polling or sleep. The Redis side is untouched: every
+    call the lane makes still crosses the wire.
+    """
+
+    def __init__(self):
+        self.calls = []
+
+    def submit(self, fn, *args, **kwargs):
+        from concurrent.futures import Future
+
+        future = Future()
+        self.calls.append((fn, future))
+        try:
+            future.set_result(fn(*args, **kwargs))
+        except BaseException as exc:  # noqa: BLE001 - mirrored onto the future
+            future.set_exception(exc)
+        return future
+
+    def result_for(self, fn):
+        matches = [future for submitted, future in self.calls if submitted == fn]
+        assert len(matches) == 1, f"expected exactly one submit of {fn}"
+        return matches[0].result()
+
+
+class TestRejectPathConvergenceAfterKeyLoss:
+    """The premise a mock L2 cannot produce.
+
+    The Lua script folds a missing hash into ``state='closed'``, so an
+    in-place key loss — a flush, an eviction — is indistinguishable from a
+    genuine cluster close at the acquire itself. What tells them apart is the
+    convergence task's own fresh read: ``hgetall`` on an absent key answers
+    nothing, while a real close answers a row. Only real Redis produces both
+    halves of that discrimination.
+    """
+
+    def test_key_deleted_under_a_half_open_l1_row_repairs_instead_of_closing(
+        self,
+        layered_cb_repo,
+        redis_test_client,
+    ):
+        """
+        Purpose:
+            Reproduce producer 1 end to end: the durable key vanishes while
+            the connection stays healthy and L1 still holds ``half_open``.
+            The acquire is rejected on a ``closed`` answer that is really an
+            absence, and the lane must repair rather than converge — keeping
+            protection while the dependency may still be down.
+        Expected:
+            - The acquire returns the store-authoritative rejection
+            - The no-op branch writes nothing, so the key is still absent
+            - The task reports ``repaired`` and the Redis row is restored
+              to this worker's state
+            - L1 is left holding ``half_open`` (nothing converged)
+        """
+        repo = layered_cb_repo
+        service = "checkout-svc"
+
+        # Given: L1 holds half_open and the durable key is gone.
+        repo._l1.get_or_create(service)
+        repo._l1.update_state(service, state="half_open")
+        cb_key = repo._l2._backend._get_full_key(f"cb:{service}")
+        redis_test_client.delete(cb_key)
+
+        # When: the acquire asks the shared store and is answered "closed".
+        executor = _InlineExecutor()
+        repo._get_executor = lambda: executor
+        allowed, prev_state, new_state = repo.try_acquire_half_open_slot(
+            service, limit=3, stuck_timeout_seconds=60
+        )
+
+        # Then: the rejection stands, and the loss was told apart from a close.
+        assert (allowed, prev_state, new_state) == (False, "closed", "closed")
+        assert repo._l2._last_acquire_marker == "no_op"
+        assert executor.result_for(repo._run_reject_path_convergence) == "repaired"
+        assert redis_test_client.hget(cb_key, "state") == "half_open"
+        assert repo._l1.get_by_service_name(service).state == "half_open"
+
+    def test_key_present_and_closed_converges_the_local_row(
+        self,
+        layered_cb_repo,
+        redis_test_client,
+    ):
+        """
+        Purpose:
+            The other half of the same discrimination: a genuine cluster
+            close produces the identical acquire answer, and must converge
+            the local row rather than repair it upward.
+        Expected:
+            - The acquire returns the same rejection tuple as the loss case
+            - The task reports ``converged``
+            - L1 moves to closed; the Redis row is left closed, not
+              overwritten with this worker's half_open
+        """
+        repo = layered_cb_repo
+        service = "checkout-svc"
+
+        # Given: the cluster is genuinely closed, this worker still trialling.
+        repo._l2.get_or_create(service)
+        repo._l2.update_state(service, state="closed")
+        repo._l1.get_or_create(service)
+        repo._l1.update_state(service, state="half_open")
+        cb_key = repo._l2._backend._get_full_key(f"cb:{service}")
+
+        # When
+        executor = _InlineExecutor()
+        repo._get_executor = lambda: executor
+        allowed, prev_state, new_state = repo.try_acquire_half_open_slot(
+            service, limit=3, stuck_timeout_seconds=60
+        )
+
+        # Then
+        assert (allowed, prev_state, new_state) == (False, "closed", "closed")
+        assert executor.result_for(repo._run_reject_path_convergence) == "converged"
+        assert repo._l1.get_by_service_name(service).state == "closed"
+        assert redis_test_client.hget(cb_key, "state") == "closed"
