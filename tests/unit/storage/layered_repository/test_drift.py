@@ -1,5 +1,5 @@
 """
-드리프트 복구 테스트.
+Drift reconciliation tests.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -115,17 +115,17 @@ class TestDriftReconcilerHalfOpenXorBehavior:
 
 
 class TestDriftReconciliation:
-    """드리프트 복구 테스트."""
+    """Drift reconciliation tests."""
 
     def setup_method(self):
-        """각 테스트 전 DriftReconciler 초기화."""
+        """Reset the DriftReconciler before each test."""
         from baldur.adapters.memory.circuit_breaker import get_drift_reconciler
 
         self.reconciler = get_drift_reconciler()
         self.reconciler.clear_history()
 
     def test_most_restrictive_wins_open_vs_closed(self):
-        """OPEN > CLOSED 우선순위."""
+        """OPEN > CLOSED priority."""
         from baldur.adapters.memory.circuit_breaker import (
             DriftReconciler,
             DriftReconciliationResult,
@@ -140,7 +140,7 @@ class TestDriftReconciliation:
             l2_state="closed",
         )
 
-        # Then: OPEN이 승리 (더 제한적)
+        # Then: OPEN wins (more restrictive)
         assert winner_state == "open"
         assert result == DriftReconciliationResult.L1_WINS
 
@@ -199,7 +199,7 @@ class TestDriftReconciliation:
         assert result == DriftReconciliationResult.TIMESTAMP_HALF_OPEN_L2
 
     def test_timestamp_tiebreaker_same_state(self):
-        """같은 상태면 타임스탬프로 결정."""
+        """Same state resolves by timestamp."""
         from baldur.adapters.memory.circuit_breaker import (
             DriftReconciler,
             DriftReconciliationResult,
@@ -209,9 +209,9 @@ class TestDriftReconciliation:
 
         now = datetime.now(UTC)
         l1_time = now - timedelta(seconds=5)
-        l2_time = now  # L2가 더 최신
+        l2_time = now  # L2 is newer
 
-        # When: 같은 상태, L2가 더 최신
+        # When: same state, L2 newer
         winner_state, result = reconciler.reconcile(
             service_name="test-service",
             l1_state="open",
@@ -220,11 +220,11 @@ class TestDriftReconciliation:
             l2_updated_at=l2_time,
         )
 
-        # Then: 같은 상태면 드리프트 없음
+        # Then: same state means no drift
         assert result == DriftReconciliationResult.NO_DRIFT
 
     def test_timestamp_tiebreaker_different_priority_same_level(self):
-        """같은 우선순위 레벨에서 타임스탬프로 결정."""
+        """Same priority level resolves by timestamp."""
         from baldur.adapters.memory.circuit_breaker import (
             DriftReconciler,
             DriftReconciliationResult,
@@ -244,11 +244,11 @@ class TestDriftReconciliation:
             l2_updated_at=l2_time,
         )
 
-        # 같은 상태면 NO_DRIFT
+        # Same state yields NO_DRIFT
         assert result == DriftReconciliationResult.NO_DRIFT
 
     def test_jitter_distribution(self):
-        """Jitter가 균등 분포."""
+        """Jitter is uniformly distributed."""
         from baldur.adapters.memory.circuit_breaker import DriftReconciler
 
         reconciler = DriftReconciler(
@@ -258,19 +258,19 @@ class TestDriftReconciliation:
 
         jitters = [reconciler.get_jitter() for _ in range(1000)]
 
-        # 평균이 약 2.5초 근처
+        # Mean lands near 2.5 seconds
         avg = sum(jitters) / len(jitters)
-        assert 2.0 < avg < 3.0, f"Jitter 평균이 예상 범위 벗어남: {avg}"
+        assert 2.0 < avg < 3.0, f"Jitter mean outside the expected range: {avg}"
 
-        # 최소/최대가 범위 내
+        # Min/max stay within the range
         assert min(jitters) >= 0.0
         assert max(jitters) <= 5.0
 
     def test_thundering_herd_prevention(self):
-        """Thundering Herd 방지."""
+        """Thundering herd prevention."""
         from baldur.adapters.memory.circuit_breaker import DriftReconciler
 
-        # Given: 100개 Reconciler (각 Pod 시뮬레이션)
+        # Given: 100 reconcilers (one per simulated pod)
         jitters = []
         for _ in range(100):
             reconciler = DriftReconciler(
@@ -279,37 +279,37 @@ class TestDriftReconciliation:
             )
             jitters.append(reconciler.get_jitter())
 
-        # Then: 고유 값들이 많이 생성됨
+        # Then: many unique values are produced
         unique_jitters = {round(j, 2) for j in jitters}
         assert len(unique_jitters) > 50, (
-            f"Jitter 분산 부족: {len(unique_jitters)} unique"
+            f"Insufficient jitter spread: {len(unique_jitters)} unique"
         )
 
-        # 시간대가 분산됨 (통계적 변동성을 고려하여 threshold 완화)
+        # Spread across the window (threshold relaxed for statistical variance)
         in_first_second = sum(1 for j in jitters if j < 1.0)
         in_last_second = sum(1 for j in jitters if j >= 4.0)
-        # 0-5초 범위에서 균등 분포 시 각 1초당 약 20%인 20개 예상
-        # 통계적 변동성 고려하여 5개 이상으로 완화 (기존 10에서 하향)
+        # A uniform 0-5s distribution expects ~20 per one-second bucket (20%)
+        # Relaxed to >= 5 for statistical variance (lowered from 10)
         assert in_first_second >= 5, (
-            f"첫 1초에 충분한 Jitter 분산 없음: {in_first_second}"
+            f"Not enough jitter spread in the first second: {in_first_second}"
         )
         assert in_last_second >= 5, (
-            f"마지막 1초에 충분한 Jitter 분산 없음: {in_last_second}"
+            f"Not enough jitter spread in the last second: {in_last_second}"
         )
 
     def test_reconciler_history_tracking(self):
-        """복구 기록 추적."""
+        """Reconciliation history tracking."""
         from baldur.adapters.memory.circuit_breaker import DriftReconciler
 
         reconciler = DriftReconciler()
         reconciler.clear_history()
 
-        # When: 여러 복구 실행
+        # When: several reconciliations run
         reconciler.reconcile("svc-1", "open", "closed")
         reconciler.reconcile("svc-2", "closed", "open")
         reconciler.reconcile("svc-3", "half_open", "half_open")
 
-        # Then: 기록 저장됨
+        # Then: history is recorded
         history = reconciler.get_history()
         assert len(history) == 3
         assert history[0].service_name == "svc-1"
@@ -317,7 +317,7 @@ class TestDriftReconciliation:
         assert history[2].service_name == "svc-3"
 
     def test_reconciler_stats(self):
-        """복구 통계."""
+        """Reconciliation statistics."""
         from baldur.adapters.memory.circuit_breaker import (
             DriftReconciler,
         )
@@ -325,12 +325,12 @@ class TestDriftReconciliation:
         reconciler = DriftReconciler()
         reconciler.clear_history()
 
-        # When: 여러 복구 실행
+        # When: several reconciliations run
         reconciler.reconcile("svc-1", "open", "closed")  # L1 wins
         reconciler.reconcile("svc-2", "closed", "open")  # L2 wins
         reconciler.reconcile("svc-3", "closed", "closed")  # No drift
 
-        # Then: 통계 확인
+        # Then: stats reflect them
         stats = reconciler.get_stats()
         assert stats["total_reconciliations"] == 3
         assert stats["by_result"]["l1_wins"] == 1
