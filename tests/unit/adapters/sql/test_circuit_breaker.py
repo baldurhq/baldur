@@ -235,9 +235,10 @@ class TestSQLTryAcquireHalfOpenSlotBehavior:
     """The SQL side of the atomic slot acquisition.
 
     Same five branches the in-memory and Redis primitives own. The
-    absent-watermark cases matter most here: the branch-3 UPDATE stamps a
-    missing window with ``COALESCE`` in the same statement as the
-    increment, so the counter can never reach the limit unwatermarked.
+    absent-watermark cases matter most here: branch 3 decides from the
+    watermark it already read under the row lock and stamps a missing (or
+    unreadable) window in the same statement as the increment, so the
+    counter can never reach the limit unwatermarked.
     """
 
     def test_open_state_transitions_and_stamps_the_window(self, cb):
@@ -285,7 +286,7 @@ class TestSQLTryAcquireHalfOpenSlotBehavior:
         assert state.half_open_window_started_at is not None
 
     def test_watermark_present_under_limit_is_not_overwritten_by_the_stamp(self, cb):
-        """COALESCE adopts a missing window; it never refreshes a live one."""
+        """The stamp adopts a missing window; it never refreshes a live one."""
         _seed_half_open(cb, "svc", count=1, window_age_seconds=30.0)
         watermark_before = cb.get_by_service_name("svc").half_open_window_started_at
 
