@@ -66,6 +66,8 @@ BALDUR_REPLAY_AUTOMATION_SERVICE_FAILURE_TYPE_MAP='{"payment_api": ["TIMEOUT", "
 
 ```bash
 BALDUR_AUDIT_ENABLED=true
+BALDUR_AUDIT_DISTRIBUTED_HASH_CHAIN=true   # set true on every pod of a multi-host deployment
+BALDUR_AUDIT_BUFFER_REDIS_ENABLED=true     # set-to-enable: Redis staging buffer for audit records
 ```
 
 An active PRO entitlement switches the audit subsystem on at startup and selects
@@ -73,12 +75,44 @@ the hash-chain backend, so a PRO install needs neither variable. Setting
 `BALDUR_AUDIT_ENABLED` yourself always wins — `false` keeps audit off on an
 entitled install, `true` switches it on without one.
 
+`BALDUR_AUDIT_DISTRIBUTED_HASH_CHAIN` (default `false`) moves hash-chain
+sequencing from a per-host file lock to Redis. A deployment where two or more
+hosts write one trail (K8s with 2+ pods) must set it `true` on every pod: file
+locks do not span hosts, so without it each host chains its entries
+independently. `BALDUR_AUDIT_BUFFER_REDIS_ENABLED` (default `false`) stages
+audit records in Redis and drains them to the terminal store in batches; it is
+subordinate to the master switch, so it only takes effect while audit is
+enabled. Both resolve their Redis connection through `BALDUR_REDIS_URL` (see
+Storage below).
+
 ## License (entitlement)
 
 ```bash
 BALDUR_LICENSE_KEY=<base64>
 BALDUR_LICENSE_FILE=/etc/baldur/license
 ```
+
+## Secrets (production boot gate)
+
+```bash
+BALDUR_SECRETS_AUDIT_SIGNING_KEY=<high-entropy-string>
+BALDUR_SECRETS_ENCRYPTION_KEY=<fernet-key>
+```
+
+Both are CRITICAL secrets: with `BALDUR_ENVIRONMENT=production` set, boot
+aborts (a `RuntimeError` out of `baldur.init()`) when either is missing. The
+gate runs before the audit switch is read, so it applies to every production
+deployment whether or not audit is enabled. Outside production both may stay
+unset — the zero-config development boot.
+
+`BALDUR_SECRETS_AUDIT_SIGNING_KEY` keys the audit hash chain: each entry's
+fingerprint becomes an HMAC-SHA256 keyed by this secret, so an actor who can
+rewrite the stored files still cannot recompute a chain that passes
+verification. `BALDUR_SECRETS_ENCRYPTION_KEY` encrypts the recoverable
+(forensic-level) masked values; when it is unset, that masking degrades to a
+non-recoverable form. Key generation, rotation, and the full
+CRITICAL/IMPORTANT/OPTIONAL classification live in the secure-deployment
+runbook shipped in the repository's `docs/runbooks/` directory.
 
 ## Storage
 
