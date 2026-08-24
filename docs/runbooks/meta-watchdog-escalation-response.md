@@ -1,6 +1,6 @@
 # Meta-Watchdog Escalation Response Runbook
 
-> **Purpose**: When Baldur's own Meta-Watchdog pages you — a `Baldur <component> Failure` notification on PagerDuty/Slack — this runbook tells you, **without reading the source**, how to diagnose and manually remediate each failure mode. At v1.0 the watchdog runs in **detect-and-escalate mode** (`recovery_enabled=False`): it autonomously notices when Baldur's self-healing has stalled and pages a human, but takes **no automatic recovery action**. You are that human.
+> **Purpose**: When Baldur's own Meta-Watchdog pages you — a `Baldur <component> Failure` notification on PagerDuty/Slack — this runbook tells you, **without reading the source**, how to diagnose and manually remediate each failure mode. By default the watchdog runs in **detect-and-escalate mode** (`recovery_enabled=False`): it autonomously notices when Baldur's self-healing has stalled and pages a human, but takes **no automatic recovery action**. You are that human.
 > **Audience**: On-call operator / SRE who received a `Baldur <component> Failure` page.
 > **Cadence**: On every page. Also review the per-component **Graduation Note** sections when deciding whether to promote a component to auto-recovery (Slice B/C).
 
@@ -31,7 +31,7 @@ The PRO `SelfHealerWatchdog` runs a probe loop on a background daemon thread (st
 
 Monitored components, in recovery-priority order (lower = more foundational; budget goes to infrastructure first):
 
-| Component | Priority | Class | Auto-recovery at v1.0 |
+| Component | Priority | Class | Auto-recovery |
 |---|---|---|---|
 | `redis` | 0 | Infrastructure (everything depends on it) | Off (Slice C target) |
 | `dlq` | 1 | Core data pipeline | Off (Slice C target) |
@@ -39,7 +39,7 @@ Monitored components, in recovery-priority order (lower = more foundational; bud
 | `recovery_pipeline` | 2 | Baldur internal | **None** (no impl — see §) |
 | `audit_system` | 2 | Compliance-critical | **Escalation-only by design** |
 | `daemon_workers` | 2 | Baldur internal — catch-all liveness for all 30 background worker threads; always active | **Probe-side respawn gate** (separate flag, off by default — see §) |
-| `chaos_scheduler` | 3 | Application-level (chaos experiments are off by default at v1.0) | Off (Slice B target) |
+| `chaos_scheduler` | 3 | Application-level (chaos experiments are off by default) | Off (Slice B target) |
 | `notification_channels` | 3 | Application-level (meta-critical) | Off (degraded fallback only) |
 | `precomputed_cache` | 3 | Application-level | Off (Slice B target) |
 | `error_budget_gate` | 3 | Application-level | **Escalation-only by design** |
@@ -55,7 +55,7 @@ All under the admin server (mount prefix is deployment-specific):
 |---|---|
 | `GET /meta-watchdog/status` | Overall + per-component health — **start here** |
 | `GET /meta-watchdog/liveness` | Is the watchdog itself alive (K8s liveness) |
-| `POST /meta-watchdog/force-check` | Trigger an immediate probe cycle (verify a fix). A `409` reply means a cycle is already in flight — the body still carries the last completed snapshot. Wait for it rather than re-posting in a loop |
+| `POST /meta-watchdog/force-check` | Trigger an immediate probe cycle (verify a fix) — **`409` means a cycle is already running**, and the body carries the last completed snapshot; retry once it finishes rather than polling in a tight loop |
 | `POST /meta-watchdog/escalation-test` | Send a test page (verify the delivery channel) |
 | `GET circuit_breaker_status` | Per-CB state (for the `circuit_breaker` section) |
 | `GET /health/pool` | Connection-pool health (for the `redis` section) |
@@ -259,7 +259,7 @@ Bespoke rows (the 2 respawn-ineligible workers) and the catch-all:
 
 ## chaos_scheduler — application-level (priority 3)
 
-**Symptom**: `Baldur chaos_scheduler Failure`. Relevant only when chaos experiments are scheduled (a PRO feature, off by default at v1.0). The probe's details include `zombie_experiments` — experiments whose lease/lifecycle has lapsed without cleanup.
+**Symptom**: `Baldur chaos_scheduler Failure`. Relevant only when chaos experiments are scheduled (a PRO feature, off by default). The probe's details include `zombie_experiments` — experiments whose lease/lifecycle has lapsed without cleanup.
 
 **Manual remediation**: inspect the chaos scheduler; pause scheduled experiments if they are the source of instability; clean up any zombie experiments the probe details name.
 
@@ -331,7 +331,7 @@ Operator-held levels (manually activated, not recovering) are deliberately exclu
 
 The watchdog ships as risk-graded slices, promoted by **data, not by date** (the `observe before you remediate` SRE maturity ladder):
 
-- **Slice A (v1.0, now)** — autonomous DETECTION + ESCALATION. No recovery actions. This is `recovery_enabled=False`.
+- **Slice A (the shipped default)** — autonomous DETECTION + ESCALATION. No recovery actions. This is `recovery_enabled=False`.
 - **Slice B (deferred)** — in-process auto-recovery: CB `force_close`, precomputed-cache worker restart, chaos-scheduler zombie cleanup. Low-blast-radius, same-process actions.
 - **Slice C (deferred)** — infrastructure-level recovery: Redis / DLQ-worker restart via `RecoveryInfrastructureAdapter`. Highest blast radius.
 
@@ -339,11 +339,11 @@ The watchdog ships as risk-graded slices, promoted by **data, not by date** (the
 
 `recovery_enabled` is a single bool, tracked as a tier contract (`Deferred/false`) in `baldur/_data/V1_LAUNCH_MANIFEST.yaml` and enforced by the v1.0-default-enable fitness function — so a slice promotion is **one manifest flip**, which is the data-driven gate.
 
-### Before you flip it: the pass budget caps recovery
+### Before you flip it: the pass budget is the recovery ceiling
 
-Recovery happens inside a watchdog pass, and the pass is capped by the budget described under the dead-man's-switch section (about 27 s at shipped defaults). Whichever allowance expires first wins, which makes the pass budget — not `recovery_total_timeout_seconds` — the number that actually governs. At shipped defaults it is below every recovery-side timeout (`recovery_total_timeout_seconds` 60 s, `k8s_api_timeout_seconds` 30 s, `docker_restart_timeout_seconds` 60 s, `docker_scale_timeout_seconds` 120 s), so an infrastructure restart cannot run to its own configured limit.
+Recovery runs inside one watchdog pass, and that pass is capped by the budget derived above (≈27 s at shipped defaults). Whichever runs out first wins, so the pass budget — not `recovery_total_timeout_seconds` — is the real allowance. At shipped defaults the budget is smaller than **every** recovery-side timeout (`recovery_total_timeout_seconds` 60 s, `k8s_api_timeout_seconds` 30 s, `docker_restart_timeout_seconds` 60 s, `docker_scale_timeout_seconds` 120 s), which means a Slice C infrastructure restart cannot finish inside its own configured timeout.
 
-You do not have to discover this at incident time: with `recovery_enabled=True` the watchdog logs one `watchdog.recovery_timeout_exceeds_budget` WARNING at start-up naming each field, its value and the effective budget. Buy recovery more time through the budget's inputs — a longer `probe_interval_seconds`, or a larger `BALDUR_DAEMON_WORKER_DEFAULT_STALENESS_MULTIPLIER` — since raising the recovery timeouts alone changes nothing. A longer interval also lengthens the expected inter-ping gap, so revisit your dead-man's-switch grace afterwards.
+The watchdog says so at start-up: with `recovery_enabled=True` it logs one `watchdog.recovery_timeout_exceeds_budget` WARNING naming each offending field, its value and the effective budget. To buy recovery more time, raise the budget's inputs — a longer `probe_interval_seconds` or a larger `BALDUR_DAEMON_WORKER_DEFAULT_STALENESS_MULTIPLIER` — rather than the recovery timeouts, which the budget overrides. Raising the interval also raises the expected inter-ping gap, so re-check your dead-man's-switch grace after changing it.
 
 ### The data source
 
@@ -393,7 +393,7 @@ If you suspect pages are **not arriving** (silence is not the same as healthy):
 1. `GET /meta-watchdog/liveness` — confirm the watchdog daemon is alive at all. Under Gunicorn `--preload`, threads do not survive `fork()`; the watchdog deliberately skips the master and runs in workers (see `gunicorn-graceful-shutdown.md`).
 2. `POST /meta-watchdog/escalation-test` — sends a synthetic page through the real channel.
 3. Check the fallback JSONL on disk — genuine delivery failures are recorded there even when no channel works. Any entries are pages you did not receive; action them.
-4. If the watchdog is alive but not paging, confirm `meta_watchdog.enabled` and `meta_watchdog.escalation_enabled` are both `True` (v1.0 defaults) and that the component is genuinely staying unhealthy for ≥ `self_cb_failure_threshold` cycles.
+4. If the watchdog is alive but not paging, confirm `meta_watchdog.enabled` and `meta_watchdog.escalation_enabled` are both `True` (the shipped defaults) and that the component is genuinely staying unhealthy for ≥ `self_cb_failure_threshold` cycles.
 5. If the pages stopped because the **process itself** died, none of the steps above can tell you — nothing in-process is left to answer. That is the gap the [outbound liveness beacon](#outbound-liveness-beacon-dead-mans-switch) covers, and it only helps if it was configured *before* the incident.
 
 ## Outbound liveness beacon (dead-man's switch)
@@ -423,16 +423,16 @@ Set your provider's grace period (how long it waits before paging) from **your o
 
 > Take the largest gap between consecutive pings your deployment actually produced, and set grace ≥ **3× that** — and **never below 10 minutes**.
 
-Measurement stays the rule, but there is now an **expected gap** to check your measurement against. A pass carries a wall-clock budget derived from the watchdog's own staleness watcher, so:
+**The measured rule above is still the one to follow, but you now have an expected value to sanity-check it against.** One pass is bounded by a wall-clock budget derived from the watchdog's own staleness watcher, so the *expected* inter-ping gap is:
 
 ```
 expected gap  =  probe_interval_seconds  +  pass budget
-pass budget   =  0.9 x probe_interval_seconds x min(staleness_multiplier - 1, 2)
+pass budget   =  0.9 × probe_interval_seconds × min(staleness_multiplier − 1, 2)
 ```
 
-Shipped defaults (`probe_interval_seconds=30`, `BALDUR_DAEMON_WORKER_DEFAULT_STALENESS_MULTIPLIER=2.0`) give 30 + 27, about **one minute**. What used to make this incomputable is capped now: probes run concurrently inside the budget instead of one after another, page delivery happens on its own thread rather than in the pass, recovery is clamped by the same budget, and a force-check answers `409` instead of queueing behind the loop. A measured maximum far above the expected value is a finding in its own right — look into it before you size around it.
+At shipped defaults (`probe_interval_seconds=30`, `BALDUR_DAEMON_WORKER_DEFAULT_STALENESS_MULTIPLIER=2.0`) that is 30 + 27 ≈ **1 minute**. Every term that previously made this un-computable is now capped: probes run concurrently under the budget rather than serially, escalation delivery has moved off the pass onto its own thread, recovery is clamped by the same budget, and a force-check no longer queues behind the loop (it answers `409` instead). If your measured maximum is wildly above the expected value, that gap is itself the finding — investigate it before sizing around it.
 
-**Keep the 10-minute floor.** A wedged logging sink is still unbounded on the loop thread, and the two errors are not symmetric: sizing too high costs you a slower page, sizing too low costs you false pages in the middle of the incidents this switch exists to survive.
+**The 10-minute floor stays.** One term on the loop thread is still unbounded — a wedged logging sink blocks whatever it is called from — and a dead-man's switch is asymmetric in the direction that matters: over-sizing costs you a slower page, under-sizing costs false pages during exactly the incidents this switch exists to survive.
 
 You do not need the beacon running to measure it. The watchdog already emits a per-pass heartbeat age, so its running maximum **is** the inter-ping gap:
 
@@ -475,9 +475,9 @@ They answer different questions and neither replaces the other:
 | Needs egress | Yes | No |
 | Fed by | The watchdog loop only | The watchdog loop only |
 
-Neither surface can be refreshed from outside, and that is the point: a liveness signal an HTTP caller can top up is a signal that reads green while the loop is dead. Polling `POST /meta-watchdog/force-check` no longer writes the liveness timestamp, so the endpoint reports the loop's own progress and nothing else.
+Both surfaces are now loop-fed, and for the same reason: a signal an HTTP caller can refresh is a signal that stays green while the loop is dead. An operator polling `POST /meta-watchdog/force-check` no longer touches the liveness timestamp, so the endpoint reports the loop's own progress and nothing else.
 
-The loop writes that timestamp on **every** iteration — including one it skipped because its self-circuit-breaker is open, and one whose health check raised. The endpoint answers *is the loop alive*, which is a restart decision, not *is the watchdog healthy*: restarting a pod mid-backoff would clear the backoff and drop straight back into the failure loop it is damping. For the health question read `self_cb_open` on `GET /meta-watchdog/status`.
+The loop writes that timestamp on **every** iteration, including one it skipped because its self-circuit-breaker is open and one whose health check raised. That is deliberate: the endpoint answers *is the loop alive* — a restart decision — not *is the watchdog healthy*. Restarting a pod during a self-CB backoff would clear the backoff and re-enter the failure loop the backoff exists to damp. Read `self_cb_open` on `GET /meta-watchdog/status` for the health question.
 
 Two more endpoint behaviors worth knowing before you rely on it: it returns `200` with `status: disabled` when the watchdog is disabled (not an error), and `500` on an internal error — `503` is specifically the stale-loop verdict. And because its timestamp lives in Redis and is shared across workers, one live worker can mask another's stuck loop.
 
