@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from baldur.adapters.memory.circuit_breaker import (
         InMemoryCircuitBreakerStateRepository,
     )
+    from baldur.core.rate_limiting import CooldownGate
     from baldur.interfaces.repositories import CircuitBreakerStateRepository
 
 logger = structlog.get_logger()
@@ -74,8 +75,7 @@ class RepositoryOperationsMixin:
         _l1: InMemoryCircuitBreakerStateRepository
         _l2: CircuitBreakerStateRepository | None
         _l2_healthy: bool
-        _reject_convergence_last_attempt: dict[str, float]
-        _reject_convergence_lock: threading.Lock
+        _reject_convergence_cooldown: CooldownGate
 
         def _get_timeout_seconds(self) -> float: ...
         def _get_executor(self) -> ThreadPoolExecutor: ...
@@ -367,35 +367,23 @@ class RepositoryOperationsMixin:
     def _should_schedule_reject_convergence(self, service_name: str) -> bool:
         """Has this service's convergence cooldown elapsed?
 
-        Read-only and lock-free — a single dict read, the cheap gate that keeps
-        the L1 row read off the per-request path. The binding check-and-set
-        happens later, in ``_claim_reject_convergence_attempt``.
+        The lock-free read on the shared cooldown gate — the cheap check that
+        keeps the L1 row read off the per-request path. The binding reservation
+        is taken later, when the lane is about to submit.
         """
-        last_attempt = self._reject_convergence_last_attempt.get(service_name)
-        return (
-            last_attempt is None
-            or (time.monotonic() - last_attempt) >= _REJECT_CONVERGENCE_COOLDOWN_SECONDS
+        return not self._reject_convergence_cooldown.is_suppressed(
+            service_name, _REJECT_CONVERGENCE_COOLDOWN_SECONDS
         )
 
-    def _claim_reject_convergence_attempt(self, service_name: str) -> bool:
-        """Take this service's convergence attempt slot, or report it taken.
-
-        Check-and-set under the throttle lock so two threads that both passed
-        the lock-free pre-check cannot both schedule.
-        """
-        with self._reject_convergence_lock:
-            if not self._should_schedule_reject_convergence(service_name):
-                return False
-            self._reject_convergence_last_attempt[service_name] = time.monotonic()
-            return True
-
     def _submit_reject_convergence(self, service_name: str) -> None:
-        """Take an in-flight permit and the cooldown stamp, then submit the task.
+        """Take an in-flight permit and the cooldown slot, then submit the task.
 
-        The permit is taken without blocking: when the lane is already at its
-        in-flight bound the detection is dropped and the cooldown is left
-        unconsumed, so the next rejected request retries rather than waiting
-        out a window this attempt never used.
+        The permit is taken first, and without blocking: when the lane is
+        already at its in-flight bound the detection is dropped before any
+        reservation, so the cooldown stays unconsumed and the next rejected
+        request retries rather than waiting out a window this attempt never
+        used. The reservation is what makes concurrent detections of the same
+        service resolve to a single task.
         """
         if not _reject_convergence_slots.acquire(blocking=False):
             logger.debug(
@@ -407,7 +395,10 @@ class RepositoryOperationsMixin:
 
         submitted = False
         try:
-            if not self._claim_reject_convergence_attempt(service_name):
+            reserved, _token = self._reject_convergence_cooldown.try_reserve(
+                service_name, _REJECT_CONVERGENCE_COOLDOWN_SECONDS
+            )
+            if not reserved:
                 return
             future = self._get_executor().submit(
                 self._run_reject_path_convergence, service_name
@@ -416,7 +407,11 @@ class RepositoryOperationsMixin:
             submitted = True
         finally:
             # Every path that did not hand the permit to a done-callback gives
-            # it back here — a lost claim race, or a submit that raised.
+            # it back here — a lost reservation race, or a submit that raised.
+            # The reservation itself is deliberately not rolled back on a submit
+            # failure: an executor that rejects a submit keeps rejecting them,
+            # and the cooldown is what stops a rejected service from retrying
+            # once per request.
             if not submitted:
                 _reject_convergence_slots.release()
 
