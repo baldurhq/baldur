@@ -274,7 +274,7 @@ class TestPrintResponseBehavior:
 # =============================================================================
 
 
-class TestCliOperatorActorContext:
+class TestCliOperatorActorContextBehavior:
     """A terminal invocation is attributed to the person who ran it.
 
     Nothing under ``cli/`` used to set an actor, so ``ActorContext`` handed
