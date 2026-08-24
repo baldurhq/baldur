@@ -594,9 +594,15 @@ class AuditMiddleware:
             # explicitly — recording happens at response time, so the default
             # would stamp the row when the request finished rather than when
             # the audited thing happened.
+            # Typed as Any-valued so the conditional splice stays compatible
+            # with every AuditEntry parameter under mypy's **-unpack check;
+            # an absent event time defers to AuditEntry's own default.
+            event_time_kwarg: dict[str, Any] = (
+                {"timestamp": event.timestamp} if event.timestamp else {}
+            )
             entry = AuditEntry(
                 action=action,
-                **({"timestamp": event.timestamp} if event.timestamp else {}),
+                **event_time_kwarg,
                 actor_id=event.actor_id or request_context.get("actor_id"),
                 actor_type=event.actor_type,
                 context_type=ContextType.REQUEST,  # Middleware context
