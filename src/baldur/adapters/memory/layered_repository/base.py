@@ -165,6 +165,15 @@ class LayeredRepositoryBase:
         self._metrics = _default_metrics()
         self._metrics_lock = threading.Lock()
 
+        # 771 D8: per-service pacing for the reject-path convergence lane —
+        # monotonic timestamp of the last attempt, check-and-set under its own
+        # small lock. Kept disjoint from the quarantine and metrics critical
+        # sections so the three never nest. Bounded by the distinct service
+        # count (the same cardinality L1 storage already carries), so it needs
+        # no expiry.
+        self._reject_convergence_last_attempt: dict[str, float] = {}
+        self._reject_convergence_lock = threading.Lock()
+
         # Initial load when an L2 store is configured
         if self._l2:
             if self._l2_is_unconfigured_default():
