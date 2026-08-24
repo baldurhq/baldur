@@ -7,10 +7,8 @@ Recovery uses the "Most Restrictive Wins" strategy for safety-first behavior.
 
 from __future__ import annotations
 
-import asyncio
 import random
 import threading
-import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -272,62 +270,6 @@ class DriftReconciler:
         if l2_state.lower() == "half_open":
             return l2_state, DriftReconciliationResult.TIMESTAMP_HALF_OPEN_L2, "l2"
         return l1_state, DriftReconciliationResult.TIMESTAMP_HALF_OPEN_L1, "l1"
-
-    def schedule_reconciliation_sync(
-        self,
-        service_name: str,
-        do_reconcile: Callable[[], None],
-    ) -> float:
-        """
-        Apply jitter, sleep synchronously, then run reconciliation.
-
-        Args:
-            service_name: service name
-            do_reconcile: function that performs the actual reconciliation
-
-        Returns:
-            applied jitter (seconds)
-        """
-        jitter = self.get_jitter()
-
-        if jitter > 0:
-            logger.debug(
-                "drift_reconciler.scheduling_reconciliation_jitter_applied",
-                service_name=service_name,
-                jitter=jitter,
-            )
-            time.sleep(jitter)
-
-        do_reconcile()
-        return jitter
-
-    async def schedule_reconciliation_async(
-        self,
-        service_name: str,
-        do_reconcile: Callable[[], None],
-    ) -> float:
-        """
-        Apply jitter, sleep asynchronously, then run reconciliation.
-
-        Args:
-            service_name: service name
-            do_reconcile: function that performs the actual reconciliation
-
-        Returns:
-            applied jitter (seconds)
-        """
-        jitter = self.get_jitter()
-
-        if jitter > 0:
-            logger.info(
-                "drift_reconciler.scheduling_reconciliation_jitter_applied",
-                service_name=service_name,
-                jitter=jitter,
-            )
-            await asyncio.sleep(jitter)
-
-        do_reconcile()
-        return jitter
 
     def get_history(self) -> list[DriftReconciliationRecord]:
         """Return the reconciliation history."""

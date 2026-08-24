@@ -247,30 +247,6 @@ class TestDriftReconciliation:
         # 같은 상태면 NO_DRIFT
         assert result == DriftReconciliationResult.NO_DRIFT
 
-    def test_jitter_applied_to_reconciliation(self):
-        """Jitter가 적용되어 지연됨."""
-        from baldur.adapters.memory.circuit_breaker import DriftReconciler
-
-        reconciler = DriftReconciler(
-            min_jitter_seconds=0.0,
-            max_jitter_seconds=0.01,  # 10ms
-        )
-
-        executed = []
-
-        def do_reconcile():
-            executed.append(True)
-
-        # When: 스케줄 실행
-        jitter = reconciler.schedule_reconciliation_sync(
-            service_name="test-service",
-            do_reconcile=do_reconcile,
-        )
-
-        # Then: 실행 완료 및 Jitter 값 반환
-        assert len(executed) == 1
-        assert 0.0 <= jitter <= 0.01
-
     def test_jitter_distribution(self):
         """Jitter가 균등 분포."""
         from baldur.adapters.memory.circuit_breaker import DriftReconciler
