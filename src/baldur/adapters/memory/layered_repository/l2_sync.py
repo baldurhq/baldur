@@ -154,6 +154,44 @@ class L2SyncMixin:
             self._handle_l2_error("sync", service_name, e, state.state)
             return False
 
+    def _sync_to_l2_inline(
+        self,
+        service_name: str,
+        state: CircuitBreakerStateData,
+    ) -> bool:
+        """Mirror one state snapshot to L2 on the calling thread.
+
+        The write body shared by every caller that already owns an executor
+        thread: the fire-and-forget mirror task and the convergence lane's
+        repair. Bounded by the adapter's own socket/statement timeout rather
+        than by ``future.result()``, because a task that submits its own work
+        and then waits for it occupies two pool slots — and on a pool sized 1
+        or 2 the inner task can never start, so the wait always times out and
+        three of them quarantine a perfectly healthy L2.
+
+        Every failure routes to ``_handle_l2_error`` so quarantine accounting
+        stays correct; nothing propagates to the caller.
+        """
+        if not self._l2:
+            return False
+
+        start_time = time.perf_counter()
+        try:
+            self._l2.get_or_create(service_name)
+            self._l2.update_state(
+                service_name=service_name,
+                state=state.state,
+                failure_count=state.failure_count,
+                success_count=state.success_count,
+                opened_at=state.opened_at,
+            )
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            self._handle_l2_success(elapsed_ms)
+            return True
+        except Exception as e:
+            self._handle_l2_error("sync", service_name, e, state.state)
+            return False
+
     def _sync_to_l2_async(
         self, service_name: str, state: CircuitBreakerStateData
     ) -> None:
@@ -176,39 +214,23 @@ class L2SyncMixin:
         if not self._l2 or not self._l2_healthy:
             return
 
-        def _sync():
-            start_time = time.perf_counter()
-            try:
-                self._l2.get_or_create(service_name)
-                self._l2.update_state(
-                    service_name=service_name,
-                    state=state.state,
-                    failure_count=state.failure_count,
-                    success_count=state.success_count,
-                    opened_at=state.opened_at,
-                )
-                elapsed_ms = (time.perf_counter() - start_time) * 1000
-                self._handle_l2_success(elapsed_ms)
-            except Exception as e:
-                self._handle_l2_error("sync", service_name, e, state.state)
-
         try:
             executor = self._get_executor()
-            executor.submit(_sync)
+            executor.submit(self._sync_to_l2_inline, service_name, state)
         except Exception as e:
             logger.warning(
                 "layered_repo.submit_sync_task_failed",
                 error=e,
             )
 
-    def _repair_row_to_l2(self, service_name: str) -> bool | None:
-        """Mirror one L1 row to L2 for repair — unless the row is pinned.
+    def _resolve_repair_row(self, service_name: str) -> CircuitBreakerStateData | None:
+        """Fresh-read the L1 row a repair would mirror, or ``None`` to skip it.
 
-        Every whole-row L1→L2 repair lane routes through here. Two properties
-        it guarantees that a direct mirror call does not:
+        The two properties every whole-row L1→L2 repair lane shares, decided in
+        one place so the timeout-bounded and inline variants cannot drift:
 
-        - **Freshness.** The row is re-read here, never taken from a snapshot
-          the caller took at the start of its pass. A snapshot predating an
+        - **Freshness.** The row is read here, never taken from a snapshot the
+          caller took at the start of its pass. A snapshot predating an
           operator's Block would otherwise be written back over it, leaving a
           CLOSED row that still reports itself manually controlled — a shape
           whose admission short-circuit admits everything.
@@ -219,14 +241,10 @@ class L2SyncMixin:
           operator's decision from the shared store.
 
         Skipping is safe rather than merely conservative: the manual-control
-        ops already write the pinned row through to L2 synchronously, so what
-        a skipped repair leaves behind is correct, not stale. Reconciliation
-        here is pin-*neutral* — it never creates, erases, or contradicts a pin;
-        it does not deliver one either.
-
-        Returns True when the mirror ran and succeeded, False when it ran and
-        failed, and ``None`` when nothing was attempted (row gone or pinned) —
-        a skip is not a failure and must not be reported as one.
+        ops already write the pinned row through to L2 synchronously, so what a
+        skipped repair leaves behind is correct, not stale. Reconciliation here
+        is pin-*neutral* — it never creates, erases, or contradicts a pin; it
+        does not deliver one either.
         """
         row = self._l1.get_by_service_name(service_name)
         if row is None:
@@ -240,6 +258,36 @@ class L2SyncMixin:
                 "layered_repo.repair_skipped_manually_controlled",
                 service_name=service_name,
             )
+            return None
+        return row
+
+    def _repair_row_to_l2_inline(self, service_name: str) -> bool | None:
+        """``_repair_row_to_l2`` for a caller that already owns a pool thread.
+
+        Identical freshness, pin-skip and tri-state contract; the mirror runs
+        on the calling thread instead of a nested submit. Used by the
+        convergence lane, whose task is already resident in the shared
+        executor.
+        """
+        row = self._resolve_repair_row(service_name)
+        if row is None:
+            return None
+        return self._sync_to_l2_inline(service_name, row)
+
+    def _repair_row_to_l2(self, service_name: str) -> bool | None:
+        """Mirror one L1 row to L2 for repair — unless the row is pinned.
+
+        The timeout-bounded variant, for callers on a request or scheduler
+        thread: the mirror is submitted to the shared executor and capped by
+        the adapter timeout. Freshness and pin neutrality come from
+        ``_resolve_repair_row``.
+
+        Returns True when the mirror ran and succeeded, False when it ran and
+        failed, and ``None`` when nothing was attempted (row gone or pinned) —
+        a skip is not a failure and must not be reported as one.
+        """
+        row = self._resolve_repair_row(service_name)
+        if row is None:
             return None
         return self._sync_to_l2_with_timeout(service_name, row)
 

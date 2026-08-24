@@ -46,6 +46,22 @@ from baldur.interfaces.repositories import (
 logger = structlog.get_logger()
 
 
+def _pin_is_active(state: CircuitBreakerStateData) -> bool:
+    """Whether the manual override on this row is still in force.
+
+    The same rule the service layer applies when it decides whether to honour
+    an override: manually controlled, and either open-ended or not yet past its
+    expiry. Evaluated here so a storage primitive can make the decision inside
+    the very lock hold that performs its write, rather than reading the row,
+    releasing, and writing against a view an operator may already have
+    replaced.
+    """
+    return bool(state.manually_controlled) and (
+        state.manual_override_expires_at is None
+        or state.manual_override_expires_at > _now()
+    )
+
+
 class InMemoryCircuitBreakerStateRepository(CircuitBreakerStateRepository):
     """
     In-memory implementation of CircuitBreakerStateRepository.
@@ -113,7 +129,11 @@ class InMemoryCircuitBreakerStateRepository(CircuitBreakerStateRepository):
         with self._lock:
             return self._get_or_create_unlocked(service_name)
 
-    def hydrate_snapshot(self, snapshot: CircuitBreakerStateData) -> None:
+    def hydrate_snapshot(
+        self,
+        snapshot: CircuitBreakerStateData,
+        skip_if_local_pin_active: bool = False,
+    ) -> bool:
         """Create-or-replace a row from a durable snapshot, pin fields included.
 
         The single primitive for wholesale restores from the durable layer:
@@ -135,9 +155,25 @@ class InMemoryCircuitBreakerStateRepository(CircuitBreakerStateRepository):
         which would corrupt the discriminator that decides whether a pin's
         lift is due, and the two writes are not atomic against a concurrent
         admission read. One locked replace avoids both.
+
+        Args:
+            snapshot: the durable row to restore.
+            skip_if_local_pin_active: decline the restore, inside the same lock
+                hold that would perform it, when the local row already carries
+                an override still in force. Convergence lanes acting on a
+                deliberately older remote read pass it so a pin placed here
+                after that read is not overwritten by the stale remote view.
+                The wholesale restore lanes leave it off: an absent or
+                never-hydrated local row has no local decision to protect.
+
+        Returns:
+            True when the row was written, False when the active-pin guard
+            declined it.
         """
         with self._lock:
             entry = self._storage.get(snapshot.service_name)
+            if skip_if_local_pin_active and entry is not None and _pin_is_active(entry):
+                return False
             if entry is None:
                 entry_id = self._next_id
                 self._next_id += 1
@@ -168,6 +204,7 @@ class InMemoryCircuitBreakerStateRepository(CircuitBreakerStateRepository):
                 created_at=created_at,
                 updated_at=_now(),
             )
+            return True
 
     def update_state(
         self,
@@ -285,6 +322,51 @@ class InMemoryCircuitBreakerStateRepository(CircuitBreakerStateRepository):
                 updated_at=_now(),
             )
             self._storage[service_name] = updated
+            return True
+
+    def converge_to_closed_unless_pinned(self, service_name: str) -> bool:
+        """Move an existing row to CLOSED in one lock hold, active pins excepted.
+
+        The write half of a convergence lane that has already established, from
+        a healthy shared store, that this service is closed cluster-wide. The
+        pin check and the write must not be split into two calls: an operator
+        forcing the breaker open between them would keep its manual-control
+        fields while the state flipped back to closed, leaving a row that is
+        pinned closed and can no longer trip for the pin's whole lifetime,
+        because outcome recording is suppressed while a pin is in force.
+
+        Writes the same fields the store-authoritative close writeback does —
+        counters cleared, OPEN-era timestamp dropped, half-open window
+        discarded — and leaves the manual-control fields exactly as it found
+        them.
+
+        Returns:
+            True when the row was transitioned. False when there is no local
+            row, or an override is in force, in which case nothing is written.
+        """
+        with self._lock:
+            entry = self._storage.get(service_name)
+            if entry is None or _pin_is_active(entry):
+                return False
+
+            self._storage[service_name] = CircuitBreakerStateData(
+                id=entry.id,
+                service_name=service_name,
+                state=CircuitBreakerStateEnum.CLOSED.value,
+                failure_count=0,
+                success_count=0,
+                last_failure_at=entry.last_failure_at,
+                opened_at=None,
+                manually_controlled=entry.manually_controlled,
+                controlled_by_id=entry.controlled_by_id,
+                control_reason=entry.control_reason,
+                manual_override_expires_at=entry.manual_override_expires_at,
+                half_open_request_count=0,
+                half_open_window_started_at=None,
+                metadata=dict(entry.metadata),
+                created_at=entry.created_at,
+                updated_at=_now(),
+            )
             return True
 
     def set_manual_control(

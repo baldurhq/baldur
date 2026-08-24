@@ -26,6 +26,7 @@ __all__ = [
     "record_half_open_stuck_recovery",
     "record_open_check_degraded_mode",
     "record_peer_propagation",
+    "record_reject_path_convergence",
     "reset_blocked_recorder",
 ]
 
@@ -128,6 +129,18 @@ class CBMetricRecorder(BaseMetricRecorder):
             f"{self.PREFIX}_circuit_breaker_peer_propagation_total",
             "Total peer CB state transitions applied to L1 via propagation",
             ["service", "to_state", "outcome"],
+        )
+        # 771 D9: the layered repository's reject-path convergence lane acted
+        # on an L1/L2 contradiction the acquire would otherwise keep
+        # discarding. ``outcome`` is ``converged`` (L1 moved to the cluster's
+        # CLOSED), ``repaired`` / ``repair_failed`` (L2 lost the row and L1 was
+        # mirrored back), ``skipped_pinned``, ``skipped`` or ``noop``. Like the
+        # peer apply, a repo-level L1 transition bypasses the service's
+        # on_state_changed path, so the cb_state gauge is refreshed here (R6).
+        self._reject_path_convergence_total = get_or_create_counter(
+            f"{self.PREFIX}_circuit_breaker_reject_path_convergence_total",
+            "Total reject-path L1/L2 contradictions handled by the convergence lane",
+            ["service", "outcome"],
         )
 
     def set_state(self, service: str, state: str, cell_id: str = "") -> None:
@@ -263,6 +276,32 @@ class CBMetricRecorder(BaseMetricRecorder):
         except Exception as e:
             logger.warning("metrics.record_cb_peer_propagation_failed", error=e)
 
+    def record_reject_path_convergence(self, service: str, outcome: str) -> None:
+        """Record a reject-path convergence outcome + refresh the gauge (771 D9).
+
+        On ``converged`` the repository moved L1 to CLOSED without passing
+        through the service's ``on_state_changed`` metric path, so the
+        ``circuit_breaker_state`` gauge is refreshed here (R6) — otherwise it
+        would keep reporting the pre-convergence state on a worker that is
+        admitting again, which reads to an operator as a stuck breaker. Every
+        other outcome leaves L1's state as it was and records the counter only;
+        ``repaired`` in particular changed L2, not L1.
+        """
+        try:
+            self._reject_path_convergence_total.labels(
+                service=service, outcome=outcome
+            ).inc()
+            if outcome == "converged":
+                # Composite key split at the metric boundary, as in
+                # record_peer_propagation: the gauge is labeled
+                # (base_service, cell_id).
+                from baldur.core.cb_namespace import parse_composite_cb_name
+
+                base_service, cell_id = parse_composite_cb_name(service)
+                self.set_state(base_service, "closed", cell_id=cell_id)
+        except Exception as e:
+            logger.warning("metrics.record_cb_reject_path_convergence_failed", error=e)
+
 
 # =============================================================================
 # Module-level sticky-flag cache for the CB recorder lookup.
@@ -351,3 +390,10 @@ def record_peer_propagation(service: str, to_state: str, outcome: str) -> None:
     rec = _lazy_recorder()
     if rec:
         rec.record_peer_propagation(service, to_state, outcome)
+
+
+def record_reject_path_convergence(service: str, outcome: str) -> None:
+    """Module-level shortcut for the reject-path convergence counter (771 D9)."""
+    rec = _lazy_recorder()
+    if rec:
+        rec.record_reject_path_convergence(service, outcome)

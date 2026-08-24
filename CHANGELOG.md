@@ -19,6 +19,10 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - Its first trial call now starts the window, so the breaker recovers instead of locking on Redis.
 - A half-open window rebuilt from a snapshot is no longer misread as stalled during a Redis outage.
 - It admitted one extra round of trial calls before stamping a window and repairing itself.
+- A circuit breaker the shared store reports closed no longer stays rejected on one worker.
+- That worker discarded the answer on every request until a restart; it now converges to it.
+- Where the shared store lost the row instead, the worker restores it rather than admitting.
+- `baldur_circuit_breaker_reject_path_convergence_total` counts each outcome, by service.
 - An idle audit-enabled process no longer appends a WAL entry about its own WAL once a second.
 - Those entries reached the audit trail too, so the compliance ledger filled with self-reference.
 - The audit sync worker no longer re-reads the whole retained backlog to deliver one batch of it.

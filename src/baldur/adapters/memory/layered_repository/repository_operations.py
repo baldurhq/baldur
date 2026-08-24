@@ -6,6 +6,7 @@ Provides CircuitBreakerStateRepository interface implementation with L1 priority
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import TimeoutError as FuturesTimeoutError
@@ -21,7 +22,7 @@ from baldur.interfaces.repositories import (
 )
 
 if TYPE_CHECKING:
-    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import Future, ThreadPoolExecutor
 
     from baldur.adapters.memory.circuit_breaker import (
         InMemoryCircuitBreakerStateRepository,
@@ -29,6 +30,37 @@ if TYPE_CHECKING:
     from baldur.interfaces.repositories import CircuitBreakerStateRepository
 
 logger = structlog.get_logger()
+
+# 771 D8: how long the reject-path convergence lane waits before re-attempting
+# the same service. The first detection schedules immediately; this paces
+# retries only, with the L2-recovery reconciliation pass as the backstop.
+_REJECT_CONVERGENCE_COOLDOWN_SECONDS = 30.0
+
+# 771 D10: process-wide bound on convergence tasks resident in the shared L2
+# executor. Each task performs its I/O inline, so this is exactly how many
+# pool slots the lane can occupy no matter how many services contradict at
+# once; convergence of a backlog serialises instead of crowding out the
+# request-path L2 calls that share the pool.
+_REJECT_CONVERGENCE_MAX_IN_FLIGHT = 2
+
+_reject_convergence_slots = threading.BoundedSemaphore(
+    _REJECT_CONVERGENCE_MAX_IN_FLIGHT
+)
+
+
+def _release_reject_convergence_slot(_future: Future) -> None:
+    """Return one in-flight permit — the lane's single release point.
+
+    Registered as the task's done-callback, which fires on normal completion,
+    on a task exception, and on cancellation (executor shutdown cancels queued
+    futures). The task body must not release: a permit leaked twice would
+    disable the lane for the rest of the process with no metric, log, or retry
+    to show for it.
+    """
+    try:
+        _reject_convergence_slots.release()
+    except ValueError:
+        logger.warning("layered_repo.reject_path_convergence_permit_over_released")
 
 
 class RepositoryOperationsMixin:
@@ -42,9 +74,12 @@ class RepositoryOperationsMixin:
         _l1: InMemoryCircuitBreakerStateRepository
         _l2: CircuitBreakerStateRepository | None
         _l2_healthy: bool
+        _reject_convergence_last_attempt: dict[str, float]
+        _reject_convergence_lock: threading.Lock
 
         def _get_timeout_seconds(self) -> float: ...
         def _get_executor(self) -> ThreadPoolExecutor: ...
+        def _repair_row_to_l2_inline(self, service_name: str) -> bool | None: ...
         def _sync_to_l2_async(
             self, service_name: str, state: CircuitBreakerStateData
         ) -> None: ...
@@ -189,6 +224,12 @@ class RepositoryOperationsMixin:
         calls don't read stale L1=open while L2 says half_open. Writeback
         failures are logged (``circuit_breaker.l1_writeback_failed``) but
         never roll back the L2-authoritative decision.
+
+        When L2 succeeds with ``allowed=False`` and answers ``closed`` while
+        L1 still holds a non-closed state, the two layers contradict each
+        other and every further request on this worker would be rejected on an
+        answer it keeps discarding. That case hands off to the convergence
+        lane (771 D1); the returned decision stays L2's, untouched.
         """
         if self._l2 and self._l2_healthy:
             timeout = self._get_timeout_seconds()
@@ -212,6 +253,9 @@ class RepositoryOperationsMixin:
 
                 if allowed:
                     self._writeback_l2_state_to_l1(service_name, prev_state, new_state)
+                self._maybe_schedule_reject_convergence(
+                    service_name, allowed, new_state
+                )
 
                 return (allowed, prev_state, new_state)
 
@@ -272,6 +316,233 @@ class RepositoryOperationsMixin:
                 new_state=new_state,
                 error=str(e),
             )
+
+    # =========================================================================
+    # Reject-path convergence lane (771)
+    #
+    # A healthy L2 that rejects with ``closed`` against a non-closed L1 row is
+    # answering a contradiction: the acquire keeps asking, keeps being told the
+    # cluster is closed, and — before this lane — kept discarding the answer,
+    # so one service stayed rejected on that worker until the breaker next
+    # tripped cluster-wide, the worker restarted, or an operator resynced.
+    # Detection is a tuple compare on the request path; the resolution runs on
+    # the shared L2 executor.
+    # =========================================================================
+
+    def _maybe_schedule_reject_convergence(
+        self, service_name: str, allowed: bool, new_state: str
+    ) -> None:
+        """Hand a reject-path contradiction to the convergence lane, if it is one.
+
+        Ordered so the request path pays as little as possible: the tuple shape
+        first, then the per-service cooldown, and only then the L1 read, which
+        takes the in-memory store's lock. A rejected service at several hundred
+        requests per second would otherwise pay that lock acquisition on every
+        single request — the exact read-path contention the store was reworked
+        to remove — instead of once per cooldown window.
+
+        The whole body is isolated: nothing here may raise into the acquire.
+        Placed bare inside the acquire's ``try``, a scheduling failure (an
+        executor shut down under the caller, say) would be caught by the L2
+        error handler, fall through to the L1 fallback, turn an
+        L2-authoritative rejection into a local admission, and tick the
+        consecutive-failure count toward a quarantine L2 never earned.
+        """
+        try:
+            if allowed or new_state != "closed":
+                return
+            if not self._should_schedule_reject_convergence(service_name):
+                return
+            l1_row = self._l1.get_by_service_name(service_name)
+            if l1_row is None or l1_row.state == "closed":
+                return
+            self._submit_reject_convergence(service_name)
+        except Exception as e:
+            logger.debug(
+                "layered_repo.reject_path_convergence_schedule_failed",
+                service_name=service_name,
+                error=str(e),
+            )
+
+    def _should_schedule_reject_convergence(self, service_name: str) -> bool:
+        """Has this service's convergence cooldown elapsed?
+
+        Read-only and lock-free — a single dict read, the cheap gate that keeps
+        the L1 row read off the per-request path. The binding check-and-set
+        happens later, in ``_claim_reject_convergence_attempt``.
+        """
+        last_attempt = self._reject_convergence_last_attempt.get(service_name)
+        return (
+            last_attempt is None
+            or (time.monotonic() - last_attempt) >= _REJECT_CONVERGENCE_COOLDOWN_SECONDS
+        )
+
+    def _claim_reject_convergence_attempt(self, service_name: str) -> bool:
+        """Take this service's convergence attempt slot, or report it taken.
+
+        Check-and-set under the throttle lock so two threads that both passed
+        the lock-free pre-check cannot both schedule.
+        """
+        with self._reject_convergence_lock:
+            if not self._should_schedule_reject_convergence(service_name):
+                return False
+            self._reject_convergence_last_attempt[service_name] = time.monotonic()
+            return True
+
+    def _submit_reject_convergence(self, service_name: str) -> None:
+        """Take an in-flight permit and the cooldown stamp, then submit the task.
+
+        The permit is taken without blocking: when the lane is already at its
+        in-flight bound the detection is dropped and the cooldown is left
+        unconsumed, so the next rejected request retries rather than waiting
+        out a window this attempt never used.
+        """
+        if not _reject_convergence_slots.acquire(blocking=False):
+            logger.debug(
+                "layered_repo.reject_path_convergence_deferred",
+                service_name=service_name,
+                reason="max_in_flight",
+            )
+            return
+
+        submitted = False
+        try:
+            if not self._claim_reject_convergence_attempt(service_name):
+                return
+            future = self._get_executor().submit(
+                self._run_reject_path_convergence, service_name
+            )
+            future.add_done_callback(_release_reject_convergence_slot)
+            submitted = True
+        finally:
+            # Every path that did not hand the permit to a done-callback gives
+            # it back here — a lost claim race, or a submit that raised.
+            if not submitted:
+                _reject_convergence_slots.release()
+
+    def _run_reject_path_convergence(self, service_name: str) -> str:
+        """Resolve one reject-path contradiction. Returns the outcome name.
+
+        Runs on the shared L2 executor and performs all of its L2 I/O inline on
+        that thread — never a nested submit, which on a pool of one or two
+        workers waits for a task that cannot start until this one returns.
+
+        Outcomes: ``converged`` (the local row was moved to the store's closed
+        state), ``repaired`` / ``repair_failed`` (the store had lost the row
+        and this worker's state was mirrored back), ``skipped_pinned`` (a
+        manual override in either layer), ``skipped`` (the store is
+        quarantined, degraded, or unreadable) and ``noop`` (the two layers no
+        longer disagree).
+        """
+        outcome = self._resolve_reject_path_convergence(service_name)
+        self._record_reject_path_convergence(service_name, outcome)
+
+        if outcome in ("converged", "repaired"):
+            logger.info(
+                "layered_repo.reject_path_convergence_applied",
+                service_name=service_name,
+                outcome=outcome,
+            )
+        else:
+            logger.debug(
+                "layered_repo.reject_path_convergence_noop",
+                service_name=service_name,
+                outcome=outcome,
+            )
+        return outcome
+
+    def _resolve_reject_path_convergence(self, service_name: str) -> str:
+        """Decide and apply the convergence direction for one service.
+
+        The direction comes from the task's own fresh L2 read, which is also
+        what tells a lost row apart from a genuine cluster close — the atomic
+        acquire folds both into the same ``closed`` answer:
+
+        - **row missing**: L2 is behind, so this worker's state is mirrored
+          back to it. Protection is kept while the dependency may still be
+          down, matching the direction the recovery-edge reconciliation
+          already takes on a missing row.
+        - **row present and closed**: L2 is authoritative, so the local row
+          converges to closed — the same trust the record paths already extend
+          to a healthy L2's ``closed`` answer. The reject path was the only
+          one that did not.
+        """
+        l2 = self._l2
+        if l2 is None or not self._l2_healthy or self._l2_backend_is_degraded():
+            return "skipped"
+
+        start_time = time.perf_counter()
+        try:
+            remote = l2.get_by_service_name(service_name)
+        except Exception as e:
+            self._handle_l2_error("reject_path_convergence", service_name, e)
+            return "skipped"
+
+        # A resilient backend answers a failed read from its process-local
+        # fallback instead of raising, and switches itself to degraded before
+        # returning. Anything it reported — "absent" included — is that
+        # fallback's view rather than the store's, so the decision is dropped
+        # instead of acted on: repairing against a false absence would write a
+        # fabricated default row into the write-ahead log, and the replay could
+        # erase a peer's pin once the store comes back.
+        if self._l2_backend_is_degraded():
+            return "skipped"
+
+        self._handle_l2_success((time.perf_counter() - start_time) * 1000)
+
+        try:
+            if remote is None:
+                repaired = self._repair_row_to_l2_inline(service_name)
+                if repaired is None:
+                    return "skipped_pinned"
+                return "repaired" if repaired else "repair_failed"
+
+            if remote.state != "closed":
+                return "noop"
+
+            if remote.manually_controlled:
+                # A pinned remote row is delivered whole, pin fields included.
+                # Copying its state alone would leave this worker unpinned and
+                # free to record outcomes, re-trip, and mirror an OPEN over the
+                # operator's still-active decision.
+                applied = self._l1.hydrate_snapshot(
+                    remote, skip_if_local_pin_active=True
+                )
+            else:
+                applied = self._l1.converge_to_closed_unless_pinned(service_name)
+            return "converged" if applied else "skipped_pinned"
+        except Exception as e:
+            logger.warning(
+                "layered_repo.reject_path_convergence_failed",
+                service_name=service_name,
+                error=str(e),
+            )
+            return "skipped"
+
+    def _l2_backend_is_degraded(self) -> bool:
+        """Is the L2 store's resilient backend serving from its local fallback?
+
+        Guards absence only, in both directions: an L2 without a backend
+        attribute, or a backend that is some other object entirely, reads as
+        not degraded and the caller proceeds as before. A real resilient
+        backend answers without I/O.
+        """
+        l2_backend = getattr(self._l2, "_backend", None)
+        return bool(
+            l2_backend is not None and getattr(l2_backend, "is_degraded", False)
+        )
+
+    @staticmethod
+    def _record_reject_path_convergence(service_name: str, outcome: str) -> None:
+        """Increment the reject-path convergence counter (771 D9)."""
+        try:
+            from baldur.metrics.recorders.circuit_breaker import (
+                record_reject_path_convergence,
+            )
+
+            record_reject_path_convergence(service_name, outcome)
+        except ImportError:
+            pass
 
     def apply_peer_cb_state(
         self,
