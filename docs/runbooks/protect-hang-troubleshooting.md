@@ -1,6 +1,6 @@
 # Protect Hang Troubleshooting Runbook
 
-> **Purpose**: Diagnose and resolve apparent hangs inside `baldur.protect()` / `aprotect()` / `@protected` zones after #482 flipped `ProtectSettings.default_timeout_seconds` from `30.0` to `None`. Before #482, every protected call had an outer 30-second wall-clock safety net by default. After #482, callers who do not pass an explicit `timeout=` argument or set the env var rely solely on the I/O-client's own timeout — and a misconfigured client (httpx with no `timeout=`, raw socket, blocking subprocess) can now hang the worker indefinitely.
+> **Purpose**: Diagnose and resolve apparent hangs inside `baldur.protect()` / `aprotect()` / `@protected` zones. `ProtectSettings.default_timeout_seconds` defaults to `None` — `protect()` adds no wall-clock safety net of its own. Callers who do not pass an explicit `timeout=` argument or set the env var rely solely on the I/O-client's own timeout — and a misconfigured client (httpx with no `timeout=`, raw socket, blocking subprocess) can hang the worker indefinitely.
 > **Audience**: Operator / SRE / on-call engineer triaging a hung worker, OR a developer who notices a request never returning under `protect()`.
 > **Cadence**: Incident-driven. Read once during onboarding; refer back when a hang is suspected.
 
@@ -8,11 +8,11 @@
 
 ## TL;DR
 
-After #482, `protect()` no longer adds a default 30 s timeout. Three resolution paths in order of preference:
+`protect()` does not add a default timeout. Three resolution paths in order of preference:
 
 1. **Add the timeout where the I/O happens** — set the client-level timeout on `httpx`, `psycopg`, `redis-py`, `requests`, `aiohttp`, etc. This is the right layer, because it surfaces a domain exception (`httpx.ReadTimeout` etc.) callers can branch on.
 2. **Pass `timeout=N` per-call** — `protect("name", fn, timeout=30)` re-introduces a `TimeoutPolicy` wall-clock bound for that one call.
-3. **Restore the framework-wide default** — set `BALDUR_PROTECT_DEFAULT_TIMEOUT_SECONDS=30` in the environment. This recovers pre-#482 behavior globally; expect ~30–50 μs/call overhead on the canonical default profile (the cost #482 was specifically removing).
+3. **Set a framework-wide default** — set `BALDUR_PROTECT_DEFAULT_TIMEOUT_SECONDS=30` in the environment. This gives every protected call a 30-second outer bound globally; expect ~30–50 μs/call overhead on the canonical default profile (the executor-submit cost the no-timeout default exists to avoid).
 
 Apply path 1 if you control the client. Apply path 2 if the call is a one-off or you cannot touch the client. Apply path 3 only as a temporary mitigation while paths 1–2 are rolled out.
 
@@ -23,11 +23,11 @@ Apply path 1 if you control the client. Apply path 2 if the call is a one-off or
 If any of the following match, this runbook is for you:
 
 - A worker thread / asyncio task is stuck inside a function decorated with `@protected` or wrapped by `protect()`, and never returns.
-- After upgrading past #482, latency p99 for a service jumped to "infinite" (timeouts piling up at the load balancer instead of inside the app).
+- Latency p99 for a service is effectively infinite (timeouts piling up at the load balancer instead of inside the app).
 - DEBUG logs show `protect.composer_built` events with `policies=["circuit_breaker"]` (no `"timeout"` entry) for the affected zone.
 - Your `httpx.AsyncClient(...)` / `psycopg.connect(...)` / `redis.Redis(...)` constructor was called without a `timeout=` argument, and no `BALDUR_PROTECT_DEFAULT_TIMEOUT_SECONDS` env var is set.
 
-If none match, this is probably not a #482-related hang — check `docs/runbooks/data-consistency-boundaries.md` and the standard observability dashboards instead.
+If none match, this is probably not a missing-timeout hang — check `docs/runbooks/data-consistency-boundaries.md` and the standard observability dashboards instead.
 
 ---
 
@@ -41,13 +41,13 @@ Set `BALDUR_LOG_LEVEL=DEBUG` (or whatever logging config your service uses to en
 event=protect.composer_built name=<your-service-name> timeout_seconds=None policies=['circuit_breaker']
 ```
 
-`timeout_seconds=None` and the absence of `'timeout'` in `policies` confirm the call has no Baldur-level wall-clock bound. If `'timeout'` IS in the list, this is not a #482 issue — investigate the client / downstream instead.
+`timeout_seconds=None` and the absence of `'timeout'` in `policies` confirm the call has no Baldur-level wall-clock bound. If `'timeout'` IS in the list, the zone already has a wall-clock bound — investigate the client / downstream instead.
 
-The DEBUG line is emitted exactly once per unique `(name, timeout_seconds)` tuple (cache miss only, per #482 D8), so you may need to restart the worker to see it. If you cannot enable DEBUG, inspect `baldur.protect_facade._composer_cache` directly via a debugger:
+The DEBUG line is emitted exactly once per unique composer-cache key (cache miss only), so you may need to restart the worker to see it. If you cannot enable DEBUG, inspect `baldur.protect_facade._composer_cache` directly via a debugger:
 
 ```python
 import baldur.protect_facade as p
-p._composer_cache  # dict[(name, timeout_seconds), PolicyComposer]
+p._composer_cache  # dict[(name, timeout_seconds, profile), PolicyComposer]
 ```
 
 ### Step 2 — Identify the I/O client missing its own timeout
@@ -64,7 +64,7 @@ Trace the protected function down to its outermost network or subprocess call. C
 | `subprocess.run` | **None** | `subprocess.run([...], timeout=30)` |
 | `urllib.request.urlopen` | **None** (uses `socket._GLOBAL_DEFAULT_TIMEOUT`) | `urlopen(url, timeout=30)` |
 
-The **`requests` library is the most common offender** — its default-no-timeout behavior is famously surprising and was the implicit reason `ProtectSettings.default_timeout_seconds=30` existed pre-#482.
+The **`requests` library is the most common offender** — its default-no-timeout behavior is famously surprising and is the main reason the framework-wide `BALDUR_PROTECT_DEFAULT_TIMEOUT_SECONDS` escape hatch exists.
 
 ### Step 3 — Reproduce locally with reduced timeout
 
@@ -122,11 +122,11 @@ def send_email(addr: str, body: str) -> None:
     ...
 ```
 
-Re-introduces the per-call `ThreadPoolExecutor.submit` cost (~30–50 μs on Windows) for that zone — the cost #482 was specifically removing. Acceptable for non-hot-path zones.
+Adds the per-call `ThreadPoolExecutor.submit` cost (~30–50 μs on Windows) for that zone — the cost the no-timeout default exists to avoid. Acceptable for non-hot-path zones.
 
 **Trade-off**: per-zone code change; per-call cost overhead returns for the modified zones only.
 
-### Path 3 (temporary) — Restore the global 30 s default
+### Path 3 (temporary) — Set a global 30 s default
 
 Most appropriate as a **mitigation while paths 1 or 2 are rolled out**, not as a permanent solution.
 
@@ -137,7 +137,7 @@ export BALDUR_PROTECT_DEFAULT_TIMEOUT_SECONDS=30
 
 After setting, restart the worker — `ProtectSettings` is read once and cached by `get_protect_settings()`. To force re-read in tests, call `reset_protect_settings()`.
 
-**Trade-off**: undoes the #482 hot-path optimization globally — every default-profile `protect()` call pays the executor-submit cost again. Acceptable as a temporary mitigation; not acceptable as the long-term answer.
+**Trade-off**: undoes the no-timeout hot-path optimization globally — every default-profile `protect()` call pays the executor-submit cost. Acceptable as a temporary mitigation; not acceptable as the long-term answer.
 
 ---
 
@@ -153,9 +153,9 @@ For Path 3, restart the worker and re-run Step 1: `policies` should now show `['
 
 ---
 
-## Why #482 Removed the Safety Net
+## Why There Is No Default Safety Net
 
-The 30 s default was originally established by #449 D7 under the rule "timeout is a pure safety feature like CB → on by default." 7A.1 microbenchmark regression #2 (post-#481) traced the per-call `ThreadPoolExecutor.submit` cost to ~30–50 μs on Windows, dominating the canonical `protect("name", fn)` profile. Industry-typical Python I/O clients enforce timeouts at their own boundary (see Step 2 table) — the 30 s outer net was rarely the firing deadline. The change traded the safety net for the hot-path performance, with this runbook + CHANGELOG migration hint covering the residual risk.
+An earlier internal design applied a 30-second outer timeout to every protected call, under the rule "timeout is a pure safety feature like CB → on by default." Microbenchmarking then traced the per-call `ThreadPoolExecutor.submit` cost to ~30–50 μs on Windows, dominating the canonical `protect("name", fn)` profile. Industry-typical Python I/O clients enforce timeouts at their own boundary (see Step 2 table) — the 30 s outer net was rarely the firing deadline. The default trades the safety net for hot-path performance, with this runbook covering the residual risk.
 
 ---
 
@@ -163,8 +163,8 @@ The 30 s default was originally established by #449 D7 under the rule "timeout i
 
 | Question | Answer |
 |----------|--------|
-| Does `protect("name", fn)` have a timeout by default after #482? | **No.** Set per-call `timeout=`, env var, or rely on the I/O-client's own timeout. |
-| What env var restores pre-#482 behavior? | `BALDUR_PROTECT_DEFAULT_TIMEOUT_SECONDS=30` |
+| Does `protect("name", fn)` have a timeout by default? | **No.** Set per-call `timeout=`, env var, or rely on the I/O-client's own timeout. |
+| What env var sets a framework-wide default timeout? | `BALDUR_PROTECT_DEFAULT_TIMEOUT_SECONDS=30` |
 | How do I confirm a zone has no timeout policy? | `BALDUR_LOG_LEVEL=DEBUG` → check `protect.composer_built` log for `'timeout'` in `policies`. |
 | Which I/O client is the most common offender? | `requests` — its default is no timeout. `psycopg` and raw `subprocess` are runners-up. |
-| Is `aprotect()` affected? | Yes — same setting controls both sync and async paths. The async chain has no CB/Retry by default (those are sync-only), so the post-#482 default async chain is empty. |
+| Is `aprotect()` affected? | Yes — the same setting controls both sync and async paths. With no timeout configured, the default async chain, like the sync one, is circuit-breaker only, with no wall-clock bound. |
