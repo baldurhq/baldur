@@ -16,6 +16,10 @@ Covers:
   ``"stuck_recovery"``, ``half_open_stuck_recovery_total`` is incremented.
 - Degraded-mode admission over a hydrated HALF_OPEN row, which arrives
   without its window watermark.
+- 771 D1 detection wiring at this call site: a rejected ``closed`` answer
+  over a non-closed L1 row is handed to the convergence lane, and an
+  ordinary rejection the two layers agree on is not. The lane's own logic
+  lives in ``test_reject_path_convergence.py``.
 """
 
 from __future__ import annotations
@@ -83,7 +87,12 @@ class TestLayeredTryAcquireBehavior:
         assert l1_state.success_count == 0
 
     def test_l1_writeback_skipped_when_l2_rejects(self, repo, l2_mock):
-        """No writeback on rejection — the local L1 must not echo a denial."""
+        """No writeback on rejection — the local L1 must not echo a denial.
+
+        A ``half_open`` rejection is also not a contradiction: the trial is in
+        progress and resolves itself, so nothing is handed to the convergence
+        lane either.
+        """
         repo._l1.get_or_create("svc")  # pre-existing CLOSED L1 state
         l2_mock.try_acquire_half_open_slot.return_value = (
             False,
@@ -92,14 +101,44 @@ class TestLayeredTryAcquireBehavior:
         )
         l2_mock._last_acquire_marker = "rejected"
 
-        with patch.object(
-            repo._l1, "update_state", wraps=repo._l1.update_state
-        ) as wrapped:
+        with (
+            patch.object(
+                repo._l1, "update_state", wraps=repo._l1.update_state
+            ) as wrapped,
+            patch.object(repo, "_submit_reject_convergence") as mock_converge,
+        ):
             repo.try_acquire_half_open_slot(
                 service_name="svc", limit=10, stuck_timeout_seconds=60
             )
 
         wrapped.assert_not_called()
+        mock_converge.assert_not_called()
+
+    def test_contradicting_rejection_is_handed_to_the_convergence_lane(
+        self, repo, l2_mock
+    ):
+        """771 D1: L2 rejects with ``closed`` while L1 still holds ``open``.
+
+        Every further request on this worker would be rejected on an answer the
+        acquire keeps discarding, so the call site hands the contradiction off
+        — while returning L2's decision untouched.
+        """
+        from baldur.interfaces.repositories import CircuitBreakerStateEnum
+
+        repo._l1.get_or_create("svc")
+        repo._l1.update_state(
+            service_name="svc", state=CircuitBreakerStateEnum.OPEN.value
+        )
+        l2_mock.try_acquire_half_open_slot.return_value = (False, "closed", "closed")
+        l2_mock._last_acquire_marker = "no_op"
+
+        with patch.object(repo, "_submit_reject_convergence") as mock_converge:
+            decision = repo.try_acquire_half_open_slot(
+                service_name="svc", limit=10, stuck_timeout_seconds=60
+            )
+
+        assert decision == (False, "closed", "closed")
+        mock_converge.assert_called_once_with("svc")
 
     def test_l1_writeback_failure_logged_and_l2_tuple_returned(self, repo, l2_mock):
         """D6: writeback raises → WARNING log, L2 tuple returned unchanged."""
