@@ -335,11 +335,15 @@ class RepositoryOperationsMixin:
         """Hand a reject-path contradiction to the convergence lane, if it is one.
 
         Ordered so the request path pays as little as possible: the tuple shape
-        first, then the per-service cooldown, and only then the L1 read, which
-        takes the in-memory store's lock. A rejected service at several hundred
-        requests per second would otherwise pay that lock acquisition on every
+        first, then the per-service cooldown, and only then the store-touching
+        work, which continues inside ``_submit_reject_convergence`` behind the
+        in-flight permit. A rejected service at several hundred requests per
+        second would otherwise pay an in-memory-store lock acquisition on every
         single request — the exact read-path contention the store was reworked
-        to remove — instead of once per cooldown window.
+        to remove — instead of once per cooldown window; and because a dropped
+        detection deliberately leaves the cooldown unconsumed, the same holds
+        while the lane is at its in-flight bound, so the permit gate too must
+        come before the L1 read.
 
         The whole body is isolated: nothing here may raise into the acquire.
         Placed bare inside the acquire's ``try``, a scheduling failure (an
@@ -352,9 +356,6 @@ class RepositoryOperationsMixin:
             if allowed or new_state != "closed":
                 return
             if not self._should_schedule_reject_convergence(service_name):
-                return
-            l1_row = self._l1.get_by_service_name(service_name)
-            if l1_row is None or l1_row.state == "closed":
                 return
             self._submit_reject_convergence(service_name)
         except Exception as e:
@@ -376,14 +377,16 @@ class RepositoryOperationsMixin:
         )
 
     def _submit_reject_convergence(self, service_name: str) -> None:
-        """Take an in-flight permit and the cooldown slot, then submit the task.
+        """Take a permit, confirm the contradiction, then submit the task.
 
-        The permit is taken first, and without blocking: when the lane is
-        already at its in-flight bound the detection is dropped before any
-        reservation, so the cooldown stays unconsumed and the next rejected
-        request retries rather than waiting out a window this attempt never
-        used. The reservation is what makes concurrent detections of the same
-        service resolve to a single task.
+        The permit is taken first, without blocking, and ahead of the
+        lock-taking L1 row read: a dropped detection deliberately leaves the
+        cooldown unconsumed so the next rejected request retries, which means
+        a cap-full window would otherwise re-pay that lock acquisition on
+        every rejected request for every further stuck service. At the bound
+        the detection is dropped before touching the store or any
+        reservation. The reservation is what makes concurrent detections of
+        the same service resolve to a single task.
         """
         if not _reject_convergence_slots.acquire(blocking=False):
             logger.debug(
@@ -395,6 +398,9 @@ class RepositoryOperationsMixin:
 
         submitted = False
         try:
+            l1_row = self._l1.get_by_service_name(service_name)
+            if l1_row is None or l1_row.state == "closed":
+                return
             reserved, _token = self._reject_convergence_cooldown.try_reserve(
                 service_name, _REJECT_CONVERGENCE_COOLDOWN_SECONDS
             )
@@ -407,11 +413,11 @@ class RepositoryOperationsMixin:
             submitted = True
         finally:
             # Every path that did not hand the permit to a done-callback gives
-            # it back here — a lost reservation race, or a submit that raised.
-            # The reservation itself is deliberately not rolled back on a submit
-            # failure: an executor that rejects a submit keeps rejecting them,
-            # and the cooldown is what stops a rejected service from retrying
-            # once per request.
+            # it back here — a confirm that found no contradiction, a lost
+            # reservation race, or a submit that raised. The reservation itself
+            # is deliberately not rolled back on a submit failure: an executor
+            # that rejects a submit keeps rejecting them, and the cooldown is
+            # what stops a rejected service from retrying once per request.
             if not submitted:
                 _reject_convergence_slots.release()
 
