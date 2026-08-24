@@ -176,36 +176,55 @@ class TestRejectConvergenceDetectionBehavior:
     """``_maybe_schedule_reject_convergence`` — shape, ordering, isolation."""
 
     @pytest.mark.parametrize(
-        ("allowed", "new_state", "l1_state"),
+        ("allowed", "new_state"),
         [
-            (True, CLOSED, OPEN),
-            (False, HALF_OPEN, OPEN),
-            (False, OPEN, OPEN),
-            (False, CLOSED, None),
-            (False, CLOSED, CLOSED),
+            (True, CLOSED),
+            (False, HALF_OPEN),
+            (False, OPEN),
         ],
         ids=[
             "negative_allowed_acquire",
             "negative_rejected_with_half_open_answer",
             "negative_rejected_with_open_answer",
-            "negative_no_local_row",
-            "negative_layers_agree_on_closed",
         ],
     )
-    def test_negative_shapes_schedule_nothing(self, repo, allowed, new_state, l1_state):
-        """Only a rejected ``closed`` answer over a non-closed local row is a
-        contradiction; every other combination is an ordinary decision.
+    def test_negative_shapes_schedule_nothing(self, repo, allowed, new_state):
+        """Only a rejected ``closed`` answer can be a contradiction; every
+        other tuple shape is an ordinary decision and stops before the lane.
 
         The ``half_open`` rejection in particular is a trial already in
         progress, which resolves itself when the trial closes or re-opens.
         """
-        if l1_state is not None:
-            _l1_state(repo, "svc", l1_state)
+        _l1_state(repo, "svc", OPEN)
 
         with patch.object(repo, "_submit_reject_convergence") as mock_submit:
             repo._maybe_schedule_reject_convergence("svc", allowed, new_state)
 
         mock_submit.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "l1_state",
+        [None, CLOSED],
+        ids=["negative_no_local_row", "negative_layers_agree_on_closed"],
+    )
+    def test_l1_negative_confirm_submits_nothing_and_returns_the_permit(
+        self, repo, l1_state
+    ):
+        """The store-side half of detection runs behind the permit: a row
+        that is absent or already closed is an ordinary decision, so nothing
+        is submitted, the permit taken to check comes back, and the cooldown
+        stays unconsumed.
+        """
+        if l1_state is not None:
+            _l1_state(repo, "svc", l1_state)
+        executor = _InlineExecutor()
+
+        with patch.object(repo, "_get_executor", return_value=executor):
+            repo._maybe_schedule_reject_convergence("svc", False, CLOSED)
+
+        assert executor.calls == []
+        assert _available_permits() == MAX_IN_FLIGHT
+        assert repo._should_schedule_reject_convergence("svc") is True
 
     def test_contradiction_hands_off_to_the_lane(self, repo):
         """The positive shape: rejected ``closed`` over a local ``half_open``."""
@@ -232,6 +251,29 @@ class TestRejectConvergenceDetectionBehavior:
             repo._maybe_schedule_reject_convergence("svc", False, CLOSED)
 
         wrapped_read.assert_not_called()
+
+    def test_cap_full_detection_is_dropped_before_the_l1_read(self, repo):
+        """Ordering: the in-flight permit gate also runs before the L1 read.
+
+        A dropped detection leaves the cooldown unconsumed by design, so
+        while the lane is at its bound every rejected request for a further
+        stuck service re-enters the handler; without the permit-first
+        ordering each of those requests would pay the store's lock for a
+        detection that cannot schedule anyway.
+        """
+        _l1_state(repo, "svc", HALF_OPEN)
+        for _ in range(MAX_IN_FLIGHT):
+            assert repository_operations._reject_convergence_slots.acquire(
+                blocking=False
+            )
+
+        with patch.object(
+            repo._l1, "get_by_service_name", wraps=repo._l1.get_by_service_name
+        ) as wrapped_read:
+            repo._maybe_schedule_reject_convergence("svc", False, CLOSED)
+
+        wrapped_read.assert_not_called()
+        assert repo._should_schedule_reject_convergence("svc") is True
 
     def test_scheduling_failure_is_swallowed_and_logged_at_debug(self, repo):
         """Nothing in the handler may raise into the acquire."""
@@ -358,7 +400,8 @@ class TestRejectConvergencePermitBehavior:
         the process, with no metric, log, or retry to show for it — two of
         those and the lane is silently off.
         """
-        # Given — a submit whose future is never run
+        # Given — a contradiction and a submit whose future is never run
+        _l1_state(repo, "svc", HALF_OPEN)
         pending: Future = Future()
         executor = MagicMock(spec=ThreadPoolExecutor)
         executor.submit.return_value = pending
@@ -374,6 +417,7 @@ class TestRejectConvergencePermitBehavior:
         assert _available_permits() == MAX_IN_FLIGHT
 
     def test_permit_is_restored_when_the_submit_itself_raises(self, repo):
+        _l1_state(repo, "svc", HALF_OPEN)
         executor = MagicMock(spec=ThreadPoolExecutor)
         executor.submit.side_effect = RuntimeError(
             "cannot schedule new futures after shutdown"
@@ -395,6 +439,8 @@ class TestRejectConvergencePermitBehavior:
         detections would find the semaphore empty and drop silently.
         """
         # Given — one cancelled task and one raising submit
+        for service in ("svc-a", "svc-b", "svc-c", "svc-d"):
+            _l1_state(repo, service, HALF_OPEN)
         pending: Future = Future()
         cancelling_executor = MagicMock(spec=ThreadPoolExecutor)
         cancelling_executor.submit.return_value = pending
@@ -440,6 +486,7 @@ class TestRejectConvergencePermitBehavior:
 
     def test_submit_consumes_the_cooldown_so_concurrent_detections_collapse(self, repo):
         """The reservation is what makes two detections resolve to one task."""
+        _l1_state(repo, "svc", HALF_OPEN)
         executor = _InlineExecutor()
 
         with patch.object(repo, "_get_executor", return_value=executor):
@@ -453,6 +500,7 @@ class TestRejectConvergencePermitBehavior:
         """Deliberate: an executor that rejects a submit keeps rejecting, and
         the cooldown is what stops a rejected service retrying once a request.
         """
+        _l1_state(repo, "svc", HALF_OPEN)
         executor = MagicMock(spec=ThreadPoolExecutor)
         executor.submit.side_effect = RuntimeError("shut down")
 
