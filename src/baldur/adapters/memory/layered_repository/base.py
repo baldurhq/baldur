@@ -12,6 +12,7 @@ caller thread.
 from __future__ import annotations
 
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -23,6 +24,7 @@ from baldur.adapters.memory.drift_reconciliation import (
     get_drift_reconciler,
 )
 from baldur.adapters.memory.shadow_logger import get_shadow_logger
+from baldur.core.rate_limiting import CooldownGate
 from baldur.interfaces.repositories import (
     CircuitBreakerStateRepository,
 )
@@ -165,14 +167,15 @@ class LayeredRepositoryBase:
         self._metrics = _default_metrics()
         self._metrics_lock = threading.Lock()
 
-        # 771 D8: per-service pacing for the reject-path convergence lane —
-        # monotonic timestamp of the last attempt, check-and-set under its own
-        # small lock. Kept disjoint from the quarantine and metrics critical
-        # sections so the three never nest. Bounded by the distinct service
-        # count (the same cardinality L1 storage already carries), so it needs
-        # no expiry.
-        self._reject_convergence_last_attempt: dict[str, float] = {}
-        self._reject_convergence_lock = threading.Lock()
+        # 771 D8: per-service pacing for the reject-path convergence lane. The
+        # shared cooldown primitive rather than another local last-fired map —
+        # it already offers exactly the two stages the lane needs: a lock-free
+        # suppression read for the per-request pre-check, and an atomic reserve
+        # that makes concurrent detections of one service resolve to one task.
+        # Driven by the monotonic clock, so the pacing survives a wall-clock
+        # step. Its own lock, disjoint from the quarantine and metrics
+        # critical sections.
+        self._reject_convergence_cooldown = CooldownGate(clock=time.monotonic)
 
         # Initial load when an L2 store is configured
         if self._l2:
@@ -307,8 +310,6 @@ class LayeredRepositoryBase:
         current Lua script the closed→closed branch does NOT ``HSET``, so
         no sentinel key is created. Recorded as OOS#479-1.
         """
-        import time as _time  # local import: scoped to perf measurement
-
         # Caller invariant: _ensure_l2_warmup_once gates this with `if self._l2`.
         assert self._l2 is not None
 
@@ -320,7 +321,7 @@ class LayeredRepositoryBase:
         max_workers = executor._max_workers
 
         barrier = threading.Barrier(parties=max_workers, timeout=barrier_timeout)
-        start = _time.perf_counter()
+        start = time.perf_counter()
 
         def warmup_worker():
             try:
@@ -364,7 +365,7 @@ class LayeredRepositoryBase:
             except Exception:
                 pass
 
-        elapsed_ms = (_time.perf_counter() - start) * 1000
+        elapsed_ms = (time.perf_counter() - start) * 1000
         logger.debug(
             "layered_repo.l2_warmup_completed",
             elapsed_ms=elapsed_ms,
