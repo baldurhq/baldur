@@ -4,7 +4,7 @@
 > domains at runtime. A safe change is: read the current value, apply through the
 > console/REST (not the raw store), confirm the apply response, then confirm the
 > *live* effect — because "the console shows my new value" and "the running code
-> uses my new value" are **two different things** in v1.0.
+> uses my new value" are **two different things**.
 > **Audience**: A PRO operator/on-call editing runtime config through the admin
 > console or the `/config/*` REST API, who needs to know a change's blast radius and
 > when it actually takes effect before touching a production setting.
@@ -20,25 +20,41 @@
   `**Takes effect**` line telling you which.
 - **Reach classes:**
   - `on next read` — the next request/operation picks it up, no restart (`retry`,
-    `rate_limit`, `replay_automation`, `sla`, `security`, `notification`, `forensic`,
-    `metrics`).
+    `rate_limit` — its four control-API fields only, see its entry, `replay_automation`,
+    `sla`, `security`, `notification`, `forensic`, `metrics`).
   - `within 30s (read cache TTL)` — the value is observed within a per-process
     read-cache TTL (~30s) on the pod that applied it, no restart (`idempotency`; also
     `metrics.enabled`).
+  - `within the delivery interval` — every process that runs the config delivery poll
+    re-reads the stored section and rebuilds its consumers within
+    `BALDUR_RUNTIME_CONFIG_WATCH_INTERVAL_SECONDS` (30s by default), no restart
+    (`circuit_breaker`). This is the one class that converges **every** pod, not just
+    the applier. Where the poll does not run — a gunicorn worker with no Baldur hooks,
+    a Celery prefork child, the interval set to `0` — the domain falls back to
+    `after worker restart` and says so in `runtime_apply`.
   - `after worker restart` — the value persists, but the live component keeps the old
-    value until you restart workers (`circuit_breaker`, `dlq`; plus a few
-    constructor-captured per-field exceptions called out in each domain entry —
-    `notification` channel targets, `idempotency` TTL fields, `metrics` install gates).
+    value until you restart workers (`dlq`; plus a few constructor-captured per-field
+    exceptions called out in each domain entry — `notification` channel targets,
+    `idempotency` TTL fields, `metrics` install gates).
   - `not currently reached` — the value persists and the console shows it, but no
-    running consumer reads it. No console-visible domain is in this class today; it
-    remains defined for fields deliberately curated out of the editable projection.
-- **Per-pod convergence.** Every reach class above describes the pod that *applied* the
-  change (and any pod after restart). In a multi-pod deployment, non-applier pods do not
-  converge on that timeline — the config cache is per-process and reloads only at process
-  start or on a console-display read, and the in-process config-updated signal is not a
-  cross-pod one — so other pods converge on restart (or via the deferred cross-pod
-  push-reload). This is the same cross-worker boundary the `circuit_breaker` / `dlq`
-  domains already carry, not a new limitation. See
+    running consumer reads it. Four editable `rate_limit` fields are in this class
+    (`middleware_rate_limit`, `middleware_window_seconds`, `decorator_enabled`,
+    `redis_ttl`): their readers go straight to the `BALDUR_RATE_LIMIT_*` env-var
+    surface and never consult the runtime-config manager, so the env value stays in
+    force — and a restart does not adopt the console value either, because the console
+    writes to the runtime-config store, not to the environment. See the `rate_limit`
+    entry. The class also covers fields deliberately curated out of the editable
+    projection.
+- **Per-pod convergence.** Apart from `within the delivery interval`, every reach class
+  above describes the pod that *applied* the change (and any pod after restart). In a
+  multi-pod deployment, non-applier pods do not converge on that timeline — the config
+  cache is per-process and reloads only at process start or on a console-display read,
+  and the in-process config-updated signal is not a cross-pod one — so other pods
+  converge on restart. `circuit_breaker` is the exception: its delivery poll runs in
+  every process, so non-applier pods converge on the same clock. Compare
+  `baldur_runtime_config_installed_fingerprint` across your scrape — pods serving the
+  same configuration publish the same value, so a spread is real divergence. This is the
+  same cross-worker boundary the remaining domains carry, not a new limitation. See
   [multi-worker-coherence.md](multi-worker-coherence.md).
 - **Always change through the console or `/config/*` REST.** Never mutate the backing
   store directly — that bypasses history + audit and leaves you no rollback.
@@ -54,8 +70,10 @@ base (the console/control plane, e.g. `http://localhost:9090`).
 
 1. **Know the reach class.** Find the domain in the `## Blast-radius map` below and
    read its `**Takes effect**` line — it tells you *when* a running consumer observes
-   the edit (`on next read`, `within 30s (read cache TTL)`, or `after worker restart`),
-   and flags any per-field exceptions.
+   the edit (`on next read`, `within 30s (read cache TTL)`, `within the delivery
+   interval`, `after worker restart`, or `not currently reached`), and flags any
+   per-field exceptions. `rate_limit` splits across two classes by field, so for that
+   domain the field you are editing decides.
 2. **Read the current value first.** `GET /config/<section>` (viewer). Record it — it
    is your manual rollback target if history is unavailable.
    - Section slugs are **hyphenated**: `/config/circuit-breaker`, `/config/rate-limit`,
@@ -96,14 +114,19 @@ returns `status: applied` right away.
 default scheduled job named `config_apply`. If it is switched off — via
 `BALDUR_SCHEDULER_DISABLED_JOBS=config_apply`, or `BALDUR_SCHEDULER_AUTOSTART=0` with
 no Celery beat running the lane instead — the console keeps reporting the change as
-pending and nothing ever applies it, until it expires on the 24 h sweep. Check those
-two variables before investigating the apply path itself.
+pending and nothing ever applies it, until it expires on the 24 h sweep. The job is
+also entitlement-gated in both lanes: without an active PRO entitlement it is never
+registered (and the beat schedule omits it), producing the same forever-pending
+symptom. Check those two variables — and the entitlement — before investigating the
+apply path itself.
 
 **2. Observation (reach).** After the value is persisted, a running consumer only acts
-on it according to its reach class — `on next read`, `within 30s (read cache TTL)`, or
-`after worker restart`. This is why a DELAYED `circuit_breaker` change can show
-"applied" in history yet the live breaker keeps the old threshold until you restart
-workers: the apply clock and the observation clock are different.
+on it according to its reach class — `on next read`, `within 30s (read cache TTL)`,
+`within the delivery interval`, or `after worker restart`. This is why a DELAYED `dlq`
+change can show "applied" in history yet the live consumer keeps the old value until you
+restart workers: the apply clock and the observation clock are different. Read
+`runtime_apply` on the response for the answer that comes from this process's own
+wiring rather than from this map.
 
 Cross-worker propagation (does pod B see a change applied on pod A) is governed by
 your topology — see [multi-worker-coherence.md](multi-worker-coherence.md).
@@ -119,14 +142,17 @@ Do not judge success by "the panel looks different". Read the response fields:
 - **`runtime_apply`** (inside `default_strategy`) — whether a change reaches processes
   that are **already running**, as `{mode, converges_within_seconds, detail}`. The
   `mode` is one of `live` (delivered to this process's consumers), `stored_only`
-  (stored, but delivery is not running here, so running processes keep the old value),
-  or `unverified` (runtime pickup by the consuming services is not verified for this
-  domain). It is derived from the process's own invalidation wiring rather than written
-  per domain, so it cannot claim an effect that did not happen — the console renders it
-  as a badge beside the apply strategy. **On this release every domain reports
-  `unverified`**, because no domain is wired for runtime pickup yet. So it does not yet
-  tell the domains in the reach-class map apart: keep using that map, and read
-  `unverified` as "stored — a running worker may keep the old value until it restarts".
+  (stored, but no bounded delivery runs here), or `unverified` (runtime pickup by the
+  consuming services is not verified for this domain). It is derived from the process's
+  own invalidation wiring rather than written per domain, so it cannot claim an effect
+  that did not happen — the console renders it as a badge beside the apply strategy.
+  **`circuit_breaker` reports `live` with its convergence bound wherever the delivery
+  poll runs, and every other domain reports `unverified`** — read `unverified` as
+  "stored — a running worker may keep the old value until it restarts", and keep using
+  the reach-class map for those domains. A `circuit_breaker` response that says
+  `stored_only` is telling you the poll is not running in the process that answered:
+  check `BALDUR_RUNTIME_CONFIG_WATCH_INTERVAL_SECONDS` and whether that process reached
+  the background starters.
   Note this is a *different question* from `status`/`applied_strategy`, which say when
   the value is **written to storage** and how long it stays cancellable.
 - **`applied_safe_defaults`** — a non-empty list here means one of your values was
@@ -150,7 +176,7 @@ Do not judge success by "the panel looks different". Read the response fields:
 - **HTTP 409 (`ROLLOUT_CONFLICT`)** — a *different* 409: the domain is under an active
   canary rollout holding its config lock (the body carries `error_code: ROLLOUT_CONFLICT`
   and names the owning rollout id). Re-applying will not help until the rollout ends — roll
-  it back / cancel it, or wait. See `## v1.0 limitations`.
+  it back / cancel it, or wait. See `## Limitations`.
 
 **Before moving to the next step:** the response `status` is `applied`/`scheduled`/
 `waiting` (not `error`), and you have read `applied_safe_defaults` — a clamp listed
@@ -186,8 +212,10 @@ Domains that reshape live traffic, latency, or recovery: `rate_limit`, `retry`,
 1. `GET /config/<section>` — record current.
 2. Change **one field**. Apply.
 3. Read the response; confirm no unintended clamp.
-4. Observe the live effect on the next requests/operations (these are `on next read`)
-   using the domain's watch panel/metrics below.
+4. Observe the live effect on the next requests/operations (these are `on next read`,
+   except the four `rate_limit` fields that are `not currently reached` — for those there
+   is nothing to observe, and the absence of an effect is not a fault) using the domain's
+   watch panel/metrics below.
 
 **Before moving to the next step:** the intended metric/panel moved in the expected
 direction within a few minutes, and no new breaker opens or DLQ inflow appeared on
@@ -202,14 +230,19 @@ wired, `security`, `idempotency`).
 2. Change **one field**, well inside the advisory range shown in the editor.
 3. These default to **DELAYED** — after applying you get a `pending_id`. Use the
    window to double-check the value; `POST /config/pending/{pending_id}/cancel` aborts.
-4. **Restart is required to observe** `circuit_breaker` / `dlq` (they are
-   `after worker restart`). Plan a rolling restart; until then the live component uses
-   the old value even though history shows the change applied.
-5. Watch the domain's panel closely through and after the restart.
+4. **`circuit_breaker` needs no restart** — it converges on every pod running the
+   delivery poll within `BALDUR_RUNTIME_CONFIG_WATCH_INTERVAL_SECONDS`. Confirm the
+   response's `runtime_apply.mode` is `live` before relying on that; `stored_only` or
+   `unverified` means you are back to `after worker restart` for this deployment.
+   **`dlq` still needs one** — plan a rolling restart; until then the live component
+   uses the old value even though history shows the change applied.
+5. Watch the domain's panel closely through the convergence window (and, for `dlq`,
+   through and after the restart).
 
-**Before moving to the next step:** history shows the change applied, the rolling
-restart completed, and the **Panel: Circuit Breakers** / **Panel: Dead Letter Queue**
-show healthy state (no unexpected open breakers, no DLQ inflow spike).
+**Before moving to the next step:** history shows the change applied, the convergence
+window has elapsed (and the `dlq` rolling restart completed), and the **Panel: Circuit
+Breakers** / **Panel: Dead Letter Queue** show healthy state (no unexpected open
+breakers, no DLQ inflow spike).
 
 ---
 
@@ -224,15 +257,24 @@ safety-critical domains — the most common misapplication and its cascade.
 
 - `notification` = the **Unified Notification** product feature (severity → channel
   routing).
-- `rate_limit` = the **admin control-plane API** limiter, **not** the Throttle feature.
+- `rate_limit` = the **inbound quota** family — chiefly the **admin control-plane API**
+  limiter, **not** the Throttle feature. It also carries the rate-limit *storage* dials,
+  whose consumer is the **outbound** 429 cooldown, not anything inbound.
 - `sla` = DLQ pending-item SLA-breach / expiry timing.
 - `forensic` = failure-capture audit routing.
 - `security` = violation-response thresholds (bans, session).
 
 ### `circuit_breaker`
 
-**Takes effect**: after worker restart — the change persists (DELAYED by default), but
-the running breaker keeps the old value until workers restart.
+**Takes effect**: within the delivery interval — every process running the config
+delivery poll re-reads the stored section and rebuilds its breakers within
+`BALDUR_RUNTIME_CONFIG_WATCH_INTERVAL_SECONDS` (30s by default), with no restart and
+without discarding in-flight protection state (open circuits stay open, recorded failure
+rates survive, per-service threshold overrides are untouched). The change is DELAYED by
+default, so the convergence clock starts when it is *stored*, not when you submit it.
+Confirm with `runtime_apply.mode` on the response: `stored_only` or `unverified` means
+the poll is not running in the process that answered, and that process is back to
+`after worker restart`.
 
 - **Risk tier**: safety-critical.
 - **Blast radius**: this domain bundles three groups that fail differently:
@@ -287,18 +329,48 @@ import and needs a worker restart.)
 
 ### `rate_limit`
 
-**Takes effect**: on next read — control-plane rate-limit values are read per request,
-so new requests see the change immediately (this is the admin control-API limiter, not
-your app's user-facing traffic).
+**Takes effect**: **per field, not per domain** — this is the one console-visible domain
+whose editable fields split across two reach classes. Read the split before you edit:
+
+- `on next read` — the four control-API fields (`control_api_rate_limit`,
+  `control_api_window_seconds`, `emergency_rate_limit`, `emergency_window_seconds`).
+  Their reader consults the runtime-config manager first, on every request, so new
+  requests see the change immediately with no restart. (This is the admin control-API
+  limiter, not your app's user-facing traffic.)
+- `not currently reached` — the other four (`middleware_rate_limit`,
+  `middleware_window_seconds`, `decorator_enabled`, `redis_ttl`). Their readers go
+  straight to `RateLimitSettings` (`BALDUR_RATE_LIMIT_*`) and never consult the manager,
+  so a console edit persists, returns `status: applied`, and is displayed — while the
+  env-var value stays in force. A restart does not adopt it either: the console writes to
+  the runtime-config store, not to the environment. To change one of these, set the env
+  var and restart workers. (`redis_ttl` is additionally captured once, when the storage
+  adapter is constructed.)
 
 - **Risk tier**: behavior-changing.
-- **Blast radius**: `control_api_rate_limit` / `emergency_rate_limit` (+ their window
-  fields) throttle the admin control API. Setting these too low can throttle your own
-  console/automation during an incident; the `emergency_*` pair applies while the
-  system is in emergency mode.
+- **Blast radius**: this domain bundles two groups with entirely different consumers:
+  - *Inbound quota* (`control_api_*`, `emergency_*`, `middleware_*`,
+    `decorator_enabled`) — the `control_api_*` pair throttles the admin control API, so
+    setting it too low throttles your own console/automation during an incident; the
+    `emergency_*` pair applies while the system is in emergency mode. `middleware_*` and
+    `decorator_enabled` govern your app's own inbound paths and count in-process, per
+    worker.
+  - *Storage dials* (`redis_ttl`, plus the env-var-only
+    `BALDUR_RATE_LIMIT_REDIS_RECOVERY_PROBE_INTERVAL_SECONDS`) — nothing inbound at all.
+    Their consumer is the **outbound** 429 cooldown store: `redis_ttl` is the floor on how
+    long a shared cooldown and its 429 counter survive in Redis (a longer cooldown extends
+    its own key past it), and the probe interval is how often a worker that lost Redis
+    re-checks whether it can return to the shared store. Neither is runtime-reachable.
+- **Coupled**: the storage dials sit under the outbound cooldown the retry integration
+  uses, so they change how long your fleet backs off from a `429`-ing dependency — not
+  how much traffic you admit. Nothing here touches the Throttle feature.
 - **Most common misapplication → cascade**: dropping `emergency_rate_limit` too low
-  starves the very control calls you need to drive recovery.
-- **Watch**: **Panel: System Control** (control-plane state); admin API 429s.
+  starves the very control calls you need to drive recovery. Second, and quieter: editing
+  `middleware_rate_limit` or `redis_ttl` in the console, seeing `status: applied`, and
+  concluding the limit changed — it did not, per the split above.
+- **Watch**: **Panel: System Control** (control-plane state); admin API 429s. For the
+  storage half, `baldur_ratelimit_fallback_active` — 1 means that process lost the shared
+  cooldown store and is coordinating per worker, and it returns to 0 within one probe
+  interval of Redis accepting writes again.
 
 ### `replay_automation`
 
@@ -382,7 +454,7 @@ layered settings overlay) on the next capture, no restart.
 - **Blast radius**: `audit_enabled` toggles whether forensic capture records at all;
   `error_message_max_length` bounds the captured error string. (The collection/masking
   toggle widgets were removed from the editor — they had no consumer; see
-  `## v1.0 limitations`.)
+  `## Limitations`.)
 - **Watch**: forensic/audit capture output.
 
 ### `metrics`
@@ -447,7 +519,7 @@ the rollback.
 
 ---
 
-## v1.0 limitations
+## Limitations
 
 Read these before trusting an edit — they are the honest gaps in the current release.
 
@@ -467,10 +539,11 @@ Read these before trusting an edit — they are the honest gaps in the current r
   The violation **response** path (temporary/permanent IP bans, suspicious-IP
   escalation) is unchanged. These fields are gone, not restorable to the editor.
 
-- **`circuit_breaker` and `dlq` take effect only after a worker restart.** Both capture
-  their config at worker construction, so an edit persists (and, for `circuit_breaker`,
-  applies DELAYED by default) but the live component keeps the old value until you
-  restart workers. Plan a rolling restart for a behavior-changing edit to either.
+- **`dlq` takes effect only after a worker restart.** The DLQ service captures its
+  config at worker construction, so an edit persists but the live component keeps the old
+  value until you restart workers. Plan a rolling restart for a behavior-changing edit.
+  `circuit_breaker` no longer needs one — it converges on the delivery poll — but confirm
+  `runtime_apply.mode` is `live` before relying on that in a given deployment.
 
 - **A domain under an active canary rollout is locked — edits return 409
   `ROLLOUT_CONFLICT`.** A canary rollout applies its config change through the same
@@ -486,7 +559,7 @@ Read these before trusting an edit — they are the honest gaps in the current r
   its TTL (`BALDUR_CANARY_LOCK_TIMEOUT_MINUTES`, default 30 min) if a rollout is abandoned,
   and an admin can force-release a zombie lock.
 
-- **Governance approvals are advisory (read-only) in v1.0.** The **Panel: Governance**
+- **Governance approvals are advisory (read-only).** The **Panel: Governance**
   approval queue is read-only: there is no approve/reject HTTP endpoint, and the apply
   path does **not** consult approvals before applying a change. Do not rely on a
   governance approval gating a config change — it does not block the apply. Enforce
