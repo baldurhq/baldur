@@ -269,21 +269,22 @@ Bespoke rows (the 2 respawn-ineligible workers) and the catch-all:
 
 ## canary_rollout — application-level (priority 3)
 
-**Symptom**: `Baldur canary_rollout Failure`. A **live** canary rollout is semantically stuck — wedged at a stage, not crashed (worker liveness is `daemon_workers`' job). Stuck means one of: in CANARY beyond 2× the stage duration, PAUSED past the zombie threshold, or PROMOTING past the transition window — the same stall definitions as the Celery canary watchdog (both read `RolloutWatchdog.detect_stalled_rollouts()`, a read-only shared singleton, so the two cannot drift). Active only when the PRO canary rollout service is registered; escalation-only.
+**Symptom**: `Baldur canary_rollout Failure`. A **live** canary rollout is semantically stuck — wedged at a stage, not crashed (worker liveness is `daemon_workers`' job). Stuck means one of: in CANARY beyond 2× the stage duration, PAUSED past the zombie threshold, or PROMOTING past the transition window — the same stall definitions as the canary watchdog lane, which runs off Celery beat or the in-process scheduler (both read `RolloutWatchdog.detect_stalled_rollouts()`, a read-only shared singleton, so the two cannot drift). Active only when the PRO canary rollout service is registered; escalation-only.
 
 **Diagnose**:
 - The page reason lists up to 5 stalled rollouts with per-rollout stall reasons: `N canary rollout(s) stalled: <reasons>`.
 - `GET /meta-watchdog/status` → `component_details.canary_rollout.details` carries `stalled_count` + `rollout_ids`.
 - Inspect each rollout in the Web Console canary panel, or via the canary service: `get_rollout(rollout_id)` / `get_active_rollouts()` / `get_paused_rollouts()`.
+- The canary watchdog's own scan alerts the same stall through the notification hub (Slack, `operations` category, deduplicated per rollout) — that alert and this page describe one condition, not two incidents.
 
-**Manual remediation** (per stalled state, via the canary service or its console actions):
+**Manual remediation** (per stalled state, via the canary service or its console actions). Where `BALDUR_CANARY_WATCHDOG_ENABLE_AUTO_ROLLBACK=true` (an opt-in, off by default), the watchdog itself rolls back a stalled rollout once it has been stuck past `BALDUR_CANARY_WATCHDOG_AUTO_ROLLBACK_AFTER_MINUTES` (default 60) — re-check the rollout's state before acting; the steps below are for the default posture, or the window before that timer:
 1. **PAUSED zombie**: decide the rollout's fate — `resume(rollout_id)` if the pause reason is resolved, `rollback(rollout_id, reason=...)` or `cancel(rollout_id, reason=...)` if abandoned.
 2. **CANARY stage overstay**: the stage health evaluation is not concluding — check the promotion gates (is a metrics provider connected? is governance blocking?), then `promote(rollout_id)` or `rollback(rollout_id, reason=...)` manually.
 3. **PROMOTING overstay**: the config transition is wedged mid-apply — check the runtime-config apply path (section lock, pending changes), then `rollback(rollout_id, reason=...)` if the target state cannot be reached.
 
 > **Verify before proceeding**: `POST /meta-watchdog/force-check`; `canary_rollout` healthy (`stalled_count` 0).
 
-**Graduation Note** — **escalation-only by design** (same class as `audit_system` / `error_budget_gate`): a stalled rollout needs a promote-vs-rollback judgment call; auto-resolving would either promote an unvalidated config or revert a healthy one. Never graduates.
+**Graduation Note** — **escalation-only by design** (same class as `audit_system` / `error_budget_gate`): a stalled rollout needs a promote-vs-rollback judgment call; auto-resolving would either promote an unvalidated config or revert a healthy one. Never graduates. (The canary watchdog's `ENABLE_AUTO_ROLLBACK` opt-in above is the operator-chosen exception, and it takes only the safe side of that call: it rolls back — never promotes — and only after the stall verdict plus the rollback timer.)
 
 ---
 
