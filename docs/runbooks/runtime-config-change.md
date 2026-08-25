@@ -555,9 +555,13 @@ Read these before trusting an edit — they are the honest gaps in the current r
   The console editor also shows a `locked` badge on the domain and disables its Apply.
   **Escape hatch**: roll back or cancel the rollout from the **Panel: Canary Rollouts**
   (or wait for it to finish), then re-apply. A per-`config_type` lock freezes the *whole*
-  domain (unrelated fields included) for the rollout's duration; the lock auto-expires at
-  its TTL (`BALDUR_CANARY_LOCK_TIMEOUT_MINUTES`, default 30 min) if a rollout is abandoned,
-  and an admin can force-release a zombie lock.
+  domain (unrelated fields included) for the rollout's duration. Do not plan on the lock's
+  TTL (`BALDUR_CANARY_LOCK_TIMEOUT_MINUTES`, default 30 min) expiring on its own: the
+  canary watchdog renews the lock of every started, non-terminal rollout on a 5-minute
+  cadence — a stalled rollout included — so on an entitled install the TTL frees the lock
+  only where nothing renews it (a created-but-never-started rollout, or a deployment whose
+  watchdog jobs are not running). The explicit release — rollback, cancel, or completion —
+  is the reliable path; an admin can still force-release a zombie lock.
 
 - **Governance approvals are advisory (read-only).** The **Panel: Governance**
   approval queue is read-only: there is no approve/reject HTTP endpoint, and the apply
