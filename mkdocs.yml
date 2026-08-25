@@ -97,7 +97,7 @@ plugins:
           - getting-started/flask.md: "Wire Baldur into a Flask app."
           - getting-started/celery.md: "Protect Celery tasks and run Baldur's scheduled maintenance on Celery beat."
           - getting-started/ai-assistants.md: "Teach an AI assistant the @baldur.protected idiom via baldur init-ai."
-          - compatibility.md: "Supported Python, Django, FastAPI, Flask, Celery, and Redis versions, and what CI tests on every commit."
+          - compatibility.md: "Supported Python, Django, FastAPI, Flask, Celery, Redis, and PostgreSQL versions, and what CI tests on every commit."
           - troubleshooting.md: "Fixes for the most common Baldur install, circuit-breaker, DLQ, notification, and operations issues."
         API Reference:
           - reference/index.md: "API Reference overview and module map."
@@ -114,7 +114,7 @@ plugins:
           - reference/adapters/memory/*.md
           - reference/api-admin.md: "Admin REST API surface."
           - reference/exceptions.md: "Exception hierarchy (BaldurError and subclasses)."
-          - reference/env-vars.md: "BALDUR_* environment-variable settings reference."
+          - reference/env-vars.md: "Operator-tunable BALDUR_* variables: resilience core, DLQ and replay, audit, license, Redis storage, scheduled jobs, Slack push, and the PRO canary-watchdog, runtime-config delivery, and escalation-paging knobs."
 
 markdown_extensions:
   # attr_list enables the Material `.md-button` class on the pricing CTA.
