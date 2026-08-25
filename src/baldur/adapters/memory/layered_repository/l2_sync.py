@@ -16,6 +16,7 @@ import structlog
 from baldur.interfaces.repositories import CircuitBreakerStateData
 
 if TYPE_CHECKING:
+    import threading
     from concurrent.futures import ThreadPoolExecutor
 
     from baldur.adapters.memory.circuit_breaker import (
@@ -39,6 +40,9 @@ class L2SyncMixin:
         _l2: CircuitBreakerStateRepository | None
         _l2_healthy: bool
         _shadow_logger: ShadowLogger
+        _mirror_lock: threading.Lock
+        _mirror_in_flight: set[str]
+        _mirror_dirty: set[str]
 
         def _get_timeout_seconds(self) -> float: ...
         def _get_executor(self) -> ThreadPoolExecutor: ...
@@ -114,8 +118,16 @@ class L2SyncMixin:
         self,
         service_name: str,
         state: CircuitBreakerStateData,
+        skip_if_pinned: bool = False,
     ) -> bool:
-        """Synchronize to L2 (timeout applied)."""
+        """Synchronize to L2 (timeout applied).
+
+        ``skip_if_pinned`` is the store-side half of pin neutrality, passed by
+        the repair lanes and left off by the manual-control write-through,
+        which is the operator's own write and must never be declined. See
+        ``_sync_to_l2_inline`` for why the OPEN-era timestamp needs an explicit
+        clear directive.
+        """
         if not self._l2:
             return False
 
@@ -130,6 +142,8 @@ class L2SyncMixin:
                 failure_count=state.failure_count,
                 success_count=state.success_count,
                 opened_at=state.opened_at,
+                clear_opened_at=state.opened_at is None,
+                skip_if_pinned=skip_if_pinned,
             )
 
         try:
@@ -158,16 +172,30 @@ class L2SyncMixin:
         self,
         service_name: str,
         state: CircuitBreakerStateData,
+        skip_if_pinned: bool = False,
     ) -> bool:
         """Mirror one state snapshot to L2 on the calling thread.
 
         The write body shared by every caller that already owns an executor
-        thread: the fire-and-forget mirror task and the convergence lane's
-        repair. Bounded by the adapter's own socket/statement timeout rather
-        than by ``future.result()``, because a task that submits its own work
-        and then waits for it occupies two pool slots — and on a pool sized 1
-        or 2 the inner task can never start, so the wait always times out and
-        three of them quarantine a perfectly healthy L2.
+        thread: the record-path mirror task and the convergence lane's repair.
+        Bounded by the adapter's own socket/statement timeout rather than by
+        ``future.result()``, because a task that submits its own work and then
+        waits for it occupies two pool slots — and on a pool sized 1 or 2 the
+        inner task can never start, so the wait always times out and three of
+        them quarantine a perfectly healthy L2.
+
+        A CLOSED snapshot carries no OPEN-era timestamp, and ``opened_at=None``
+        means "keep" at the storage boundary, so the clear is passed as an
+        explicit directive: without it the durable row would keep reporting the
+        instant it opened long after it closed, and no reader could tell which
+        half of the row was current.
+
+        ``skip_if_pinned`` extends pin neutrality to the store side. The
+        freshness gate reads the *local* row, so a worker that never hydrated a
+        peer's override has nothing to skip on and would write plain state over
+        an operator's decision; passing the directive moves the test into the
+        write itself. Repair lanes pass it; the manual-control write-through,
+        which is the operator's own write, does not.
 
         Every failure routes to ``_handle_l2_error`` so quarantine accounting
         stays correct; nothing propagates to the caller.
@@ -184,6 +212,8 @@ class L2SyncMixin:
                 failure_count=state.failure_count,
                 success_count=state.success_count,
                 opened_at=state.opened_at,
+                clear_opened_at=state.opened_at is None,
+                skip_if_pinned=skip_if_pinned,
             )
             elapsed_ms = (time.perf_counter() - start_time) * 1000
             self._handle_l2_success(elapsed_ms)
@@ -192,36 +222,86 @@ class L2SyncMixin:
             self._handle_l2_error("sync", service_name, e, state.state)
             return False
 
-    def _sync_to_l2_async(
-        self, service_name: str, state: CircuitBreakerStateData
-    ) -> None:
-        """Asynchronously mirror L1 state to L2 (fire-and-forget).
+    def _sync_to_l2_async(self, service_name: str) -> None:
+        """Mirror this service's current L1 row to L2, coalesced per service.
 
         Skipped entirely while L2 is quarantined (``_l2_healthy`` False) so a
-        degraded L2 stops accumulating doomed sync tasks on the shared
-        executor queue — every other L2-touching path already gates on
-        ``_l2_healthy``; this is the mirror path that did not. Skipped writes
-        are repaired by drift reconciliation once L2 recovers.
+        degraded L2 stops accumulating doomed sync tasks on the shared executor
+        queue — every other L2-touching path already gates on ``_l2_healthy``;
+        this is the mirror path that did not. Skipped writes are repaired by
+        drift reconciliation once L2 recovers.
 
-        Submits a single task that performs the L2 write inline (one worker
-        thread, not the submit-within-submit of ``_sync_to_l2_with_timeout``
-        that occupied two). The task's whole body is wrapped so every failure
-        routes to ``_handle_l2_error`` — without ``future.result()`` to
-        re-raise, an uncaught exception would be swallowed by the discarded
-        ``Future`` and would never advance ``_l2_consecutive_failures``, so
-        the quarantine the guard above relies on would never trip.
+        Takes a service name and nothing else. The task reads the row when it
+        runs rather than carrying a snapshot taken at submit time: a snapshot
+        is a decision made before the write it loses to. That is how a genuine
+        trip used to be erased — five failure records and the trip itself each
+        submitted their own snapshot, and whichever finished last decided the
+        durable state.
+
+        Fresh-reading alone is not enough, because the mirror submitted by the
+        trip-triggering failure record runs *concurrently with* the trip and
+        would still read a pre-trip row. So at most one task per service is in
+        flight, and a submit arriving while one runs sets a dirty flag instead
+        of queueing behind it; the running task re-reads and re-writes before it
+        exits. Combined with the nudge the trip issues after its L1 writeback,
+        the last same-service write this process performs always reflects
+        post-trip L1.
+
+        In-flight is marked before the submit and cleared if the submit raises:
+        an executor that rejects the task after the flag was set would
+        otherwise suppress this service's mirroring for the rest of the
+        process.
         """
         if not self._l2 or not self._l2_healthy:
             return
 
+        with self._mirror_lock:
+            if service_name in self._mirror_in_flight:
+                self._mirror_dirty.add(service_name)
+                return
+            self._mirror_in_flight.add(service_name)
+
         try:
-            executor = self._get_executor()
-            executor.submit(self._sync_to_l2_inline, service_name, state)
+            self._get_executor().submit(self._run_mirror_task, service_name)
         except Exception as e:
+            with self._mirror_lock:
+                self._mirror_in_flight.discard(service_name)
             logger.warning(
                 "layered_repo.submit_sync_task_failed",
                 error=e,
             )
+
+    def _run_mirror_task(self, service_name: str) -> None:
+        """Fresh-read and mirror one service until no newer write is pending.
+
+        The dirty flag is cleared *before* the read, so a write landing during
+        the mirror re-arms it and is picked up by another pass. The final
+        re-check and the in-flight release happen under one lock hold: split
+        into two, a submit arriving in between would see the service still in
+        flight, set a flag nobody is left to act on, and its write would never
+        reach the store.
+
+        The whole body is exception-safe by construction —
+        ``_repair_row_to_l2_inline`` routes every failure to the quarantine
+        handlers rather than raising — and the ``finally`` guard covers the rest
+        so a task that dies cannot leave the service permanently marked busy.
+        """
+        released = False
+        try:
+            while not released:
+                with self._mirror_lock:
+                    self._mirror_dirty.discard(service_name)
+
+                self._repair_row_to_l2_inline(service_name)
+
+                with self._mirror_lock:
+                    if service_name not in self._mirror_dirty:
+                        self._mirror_in_flight.discard(service_name)
+                        released = True
+        finally:
+            if not released:
+                with self._mirror_lock:
+                    self._mirror_in_flight.discard(service_name)
 
     def _resolve_repair_row(self, service_name: str) -> CircuitBreakerStateData | None:
         """Fresh-read the L1 row a repair would mirror, or ``None`` to skip it.
@@ -234,17 +314,29 @@ class L2SyncMixin:
           operator's Block would otherwise be written back over it, leaving a
           CLOSED row that still reports itself manually controlled — a shape
           whose admission short-circuit admits everything.
-        - **Pin neutrality.** A pinned row is skipped outright. The mirror
-          opens with L2 ``get_or_create``, which on a missing key writes the
-          default payload — including "not manually controlled" — so repairing
-          a pinned service after the durable row was lost would erase the
-          operator's decision from the shared store.
+        - **Pin neutrality.** A row under an override *still in force* is
+          skipped outright. The mirror opens with L2 ``get_or_create``, which on
+          a missing key writes the default payload — including "not manually
+          controlled" — so repairing a pinned service after the durable row was
+          lost would erase the operator's decision from the shared store.
+
+          Read through the expiry-aware predicate, never the raw flag: no
+          primitive clears ``manually_controlled`` on an automatic transition,
+          and only one process per host runs the sweep that does, so a raw-flag
+          skip would stop L2 delivery permanently for any service whose row this
+          worker once hydrated pinned — from the override's expiry until a
+          restart. A lapsed override no longer blocks repair, which is correct:
+          once it has expired there is no decision left to protect.
 
         Skipping is safe rather than merely conservative: the manual-control
         ops already write the pinned row through to L2 synchronously, so what a
         skipped repair leaves behind is correct, not stale. Reconciliation here
         is pin-*neutral* — it never creates, erases, or contradicts a pin; it
         does not deliver one either.
+
+        This gate reads the *local* row, so it cannot see an override a peer
+        placed and this worker never hydrated. The store-side half of that is
+        the ``skip_if_pinned`` directive the repair wrappers pass to the write.
         """
         row = self._l1.get_by_service_name(service_name)
         if row is None:
@@ -253,7 +345,7 @@ class L2SyncMixin:
                 service_name=service_name,
             )
             return None
-        if row.manually_controlled:
+        if row.is_pin_active():
             logger.debug(
                 "layered_repo.repair_skipped_manually_controlled",
                 service_name=service_name,
@@ -266,13 +358,13 @@ class L2SyncMixin:
 
         Identical freshness, pin-skip and tri-state contract; the mirror runs
         on the calling thread instead of a nested submit. Used by the
-        convergence lane, whose task is already resident in the shared
-        executor.
+        record-path mirror task and by the convergence lane, whose tasks are
+        already resident in the shared executor.
         """
         row = self._resolve_repair_row(service_name)
         if row is None:
             return None
-        return self._sync_to_l2_inline(service_name, row)
+        return self._sync_to_l2_inline(service_name, row, skip_if_pinned=True)
 
     def _repair_row_to_l2(self, service_name: str) -> bool | None:
         """Mirror one L1 row to L2 for repair — unless the row is pinned.
@@ -289,7 +381,7 @@ class L2SyncMixin:
         row = self._resolve_repair_row(service_name)
         if row is None:
             return None
-        return self._sync_to_l2_with_timeout(service_name, row)
+        return self._sync_to_l2_with_timeout(service_name, row, skip_if_pinned=True)
 
     def force_sync_from_l2(self) -> bool:
         """Force synchronization from L2 (administrative purpose)."""

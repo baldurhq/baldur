@@ -272,7 +272,9 @@ class TestStalePinRespectsRecovery:
         """The same path reached from an expired Allow rather than a Block.
 
         Automatic protection correctly trips the breaker once the force-close
-        lapses; that OPEN carries the stale flag, and it must not be bypassed.
+        lapses. The trip primitive clears the lapsed flag in the same write, so
+        the row rejoins the readers that still filter on it; what must hold is
+        that the fresh OPEN protects.
         """
         # Given: a force-closed circuit whose override has lapsed.
         service = _service(repo, recovery_timeout=600, failure_threshold=2)
@@ -288,10 +290,11 @@ class TestStalePinRespectsRecovery:
         service.record_failure(SERVICE)
         service.record_failure(SERVICE)
 
-        # Then: it is OPEN, still flagged — and it protects.
+        # Then: it is OPEN, the lapsed flag is gone — and it protects.
         tripped = repo.get_by_service_name(SERVICE)
         assert tripped.state == CircuitBreakerStateEnum.OPEN.value
-        assert tripped.manually_controlled is True
+        assert tripped.manually_controlled is False
+        assert tripped.manual_override_expires_at is None
         assert service.should_allow(SERVICE) is False
 
     def test_stale_pin_respects_recovery_gate_only_until_the_timeout_elapses(

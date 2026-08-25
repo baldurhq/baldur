@@ -25,6 +25,7 @@ import structlog
 
 from baldur.audit.helpers import log_cb_state_change_audit
 from baldur.dlq.helpers import store_to_dlq
+from baldur.interfaces.repositories import CIRCUIT_BREAKER_PINNED_TOKEN
 from baldur.metrics.recorders.circuit_breaker import record_blocked
 from baldur.services.event_bus.emitter import EventEmitterMixin
 from baldur.utils.time import utc_now
@@ -867,75 +868,127 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
         )
 
         if should_open and updated_state.state == "closed":
-            # Collect snapshot before opening
-            snapshot = self._collect_failure_snapshot(
+            self._trip_circuit_open(
                 service_name,
                 updated_state,
                 error_context,
+                effective_config=effective_config,
                 window_failures=window_failures,
                 window_total=window_total,
-                effective_config=effective_config,
             )
 
-            # Open the circuit
-            self.repository.update_state(
-                service_name=service_name,
-                state="open",
-                opened_at=utc_now(),
-            )
+    def _trip_circuit_open(
+        self,
+        service_name: str,
+        updated_state: CircuitBreakerStateData,
+        error_context: dict[str, Any] | None,
+        *,
+        effective_config: CircuitBreakerConfig,
+        window_failures: int,
+        window_total: int,
+    ) -> None:
+        """Perform the CLOSED -> OPEN trip this worker decided on.
 
-            # Outcomes observed before the trip say nothing about the rate
-            # after it — the next CLOSED period starts without evidence.
-            self._outcome_window.clear(service_name)
+        The decision is the caller's; this owns the write and everything that
+        follows it. Split out of ``record_failure`` so the decision path and the
+        transition's side effects read separately — the branch count of the two
+        together had outgrown one method.
 
-            # Log with snapshot
+        The atomic primitive performs the OPEN write under the repository's
+        single-winner guarantee, so the durable row is decided by one transition
+        rather than by whichever mirror of this failure burst finished last.
+        ``did_open`` then gates the cluster-logical side effects, exactly as the
+        shipped HALF_OPEN->OPEN path gates its own.
+        """
+        # Collect snapshot before opening
+        snapshot = self._collect_failure_snapshot(
+            service_name,
+            updated_state,
+            error_context,
+            window_failures=window_failures,
+            window_total=window_total,
+            effective_config=effective_config,
+        )
+
+        attempt = self.repository.trip_to_open(
+            service_name, updated_state.failure_count
+        )
+
+        # Outcomes observed before the trip say nothing about the rate after it
+        # — the next CLOSED period starts without evidence. This clear is
+        # unconditional: the window evidence was consumed by this worker's own
+        # decision regardless of who won the cluster write.
+        self._outcome_window.clear(service_name)
+
+        if attempt.state.state == CIRCUIT_BREAKER_PINNED_TOKEN:
+            # An operator's override swallowed a real failure burst. The
+            # local-pin skip in ``record_failure`` only covers calls made after
+            # the pinned row reached this worker, so without this line the first
+            # burst under a peer's override is invisible.
             logger.warning(
-                "circuit_breaker.circuit_auto_opened_failures",
+                "circuit_breaker.trip_blocked",
                 service_name=service_name,
-                updated_state=updated_state.failure_count,
-                window_failure_count=window_failures,
-                window_total_calls=window_total,
+                manual_override_expires_at=(
+                    attempt.state.manual_override_expires_at.isoformat()
+                    if attempt.state.manual_override_expires_at
+                    else None
+                ),
+            )
+            return
+
+        if not attempt.did_open:
+            return
+
+        # Log with snapshot
+        logger.warning(
+            "circuit_breaker.circuit_auto_opened_failures",
+            service_name=service_name,
+            updated_state=updated_state.failure_count,
+            window_failure_count=window_failures,
+            window_total_calls=window_total,
+        )
+
+        # Save audit log with snapshot
+        self._log_circuit_open_audit(service_name, snapshot)
+
+        # Apply burn rate multiplier to Error Budget. Gated with the rest: the
+        # budget it consumes is shared cluster-wide, so ungated it was charged
+        # once per tripping worker for one logical trip.
+        self._apply_burn_rate_multiplier(service_name, effective_config)
+
+        # Push event - record the CB state-change metric
+        try:
+            from baldur.metrics.event_handlers import (
+                CircuitBreakerEventHandler,
             )
 
-            # Save audit log with snapshot
-            self._log_circuit_open_audit(service_name, snapshot)
-
-            # Apply burn rate multiplier to Error Budget
-            self._apply_burn_rate_multiplier(service_name, effective_config)
-
-            # Push event - record the CB state-change metric
-            try:
-                from baldur.metrics.event_handlers import (
-                    CircuitBreakerEventHandler,
-                )
-
-                CircuitBreakerEventHandler.on_state_changed(
-                    service=service_name,
-                    from_state="closed",
-                    to_state="open",
-                )
-            except ImportError:
-                pass  # Metrics not available
-
-            # EventBus emission — Auto OPEN (outside _apply_burn_rate_multiplier
-            # try-except to guarantee emission regardless of EB consumer failures)
-            from baldur.services.event_bus import EventType
-
-            self._emit_event(
-                EventType.CIRCUIT_BREAKER_OPENED,
-                data={
-                    "service_name": service_name,
-                    "previous_state": "closed",
-                    "timestamp": utc_now().isoformat(),
-                    "trigger": "auto",
-                    # Denominators the config-shadow evaluator replays the trip
-                    # decision from. The journal subscriber stores event data
-                    # verbatim, so these persist without further wiring.
-                    "window_failure_count": window_failures,
-                    "window_total_calls": window_total,
-                    "consecutive_failure_count": updated_state.failure_count,
-                },
+            CircuitBreakerEventHandler.on_state_changed(
+                service=service_name,
+                from_state="closed",
+                to_state="open",
             )
+        except ImportError:
+            pass  # Metrics not available
+
+        # EventBus emission — Auto OPEN (outside _apply_burn_rate_multiplier
+        # try-except to guarantee emission regardless of EB consumer failures)
+        from baldur.services.event_bus import EventType
+
+        self._emit_event(
+            EventType.CIRCUIT_BREAKER_OPENED,
+            data={
+                "service_name": service_name,
+                "previous_state": "closed",
+                "timestamp": utc_now().isoformat(),
+                "trigger": "auto",
+                # Denominators the config-shadow evaluator replays the trip
+                # decision from. The journal subscriber stores event data
+                # verbatim, so these persist without further wiring.
+                "window_failure_count": window_failures,
+                "window_total_calls": window_total,
+                "consecutive_failure_count": updated_state.failure_count,
+            },
+        )
 
     def _should_open_circuit(
         self,

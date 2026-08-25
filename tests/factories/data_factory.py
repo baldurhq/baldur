@@ -104,6 +104,18 @@ class MockCircuitBreakerStateData:
     control_reason: str = ""
     manual_override_expires_at: datetime | None = None
 
+    def is_pin_active(self) -> bool:
+        """Mirror of ``CircuitBreakerStateData.is_pin_active``.
+
+        The production predicate reads the override through this method, so a
+        double that omits it is not a stand-in for the DTO — it raises inside
+        the code under test instead of answering the question.
+        """
+        return bool(self.manually_controlled) and (
+            self.manual_override_expires_at is None
+            or self.manual_override_expires_at > datetime.now(UTC)
+        )
+
 
 class TestDataFactory:
     """

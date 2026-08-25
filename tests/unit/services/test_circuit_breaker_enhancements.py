@@ -513,8 +513,11 @@ class TestRecordFailureIntegration:
         for _ in range(5):
             service.record_failure("test_service")
 
-        # update_state should NOT be called (circuit should not open)
-        mock_repository.update_state.assert_not_called()
+        # The trip primitive should NOT be called (circuit should not open).
+        # Asserted on the primitive, not on update_state: the trip stopped
+        # being an update_state call, so that assertion would now hold for
+        # a circuit that opened.
+        mock_repository.trip_to_open.assert_not_called()
 
     def test_record_failure_opens_circuit_when_conditions_met(
         self, mock_repository, base_config, mock_state
@@ -533,10 +536,11 @@ class TestRecordFailureIntegration:
             with patch.object(service, "_apply_burn_rate_multiplier"):
                 service.record_failure("test_service")
 
-        # update_state should be called to open circuit
-        mock_repository.update_state.assert_called()
-        call_kwargs = mock_repository.update_state.call_args[1]
-        assert call_kwargs["state"] == "open"
+        # The atomic trip primitive is the writer of the OPEN state, and it
+        # carries the failure count the decision was made on.
+        mock_repository.trip_to_open.assert_called_once_with(
+            "test_service", mock_state.failure_count
+        )
 
     def test_record_failure_collects_snapshot_when_opening(
         self, mock_repository, base_config, mock_state

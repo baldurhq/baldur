@@ -238,7 +238,7 @@ class TestLayeredOpenCheckDegradedMode:
         assert attempt.did_open is True
         assert attempt.state.state == "open"
         mock_degraded.assert_called_once_with("svc")
-        mock_sync.assert_called_once_with("svc", attempt.state)
+        mock_sync.assert_called_once_with("svc")
 
     def test_l2_generic_exception_falls_back_to_l1_with_degraded_counter(
         self, repo, l2_mock

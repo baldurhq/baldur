@@ -27,6 +27,7 @@ __all__ = [
     "record_open_check_degraded_mode",
     "record_peer_propagation",
     "record_reject_path_convergence",
+    "record_trip_degraded_mode",
     "reset_blocked_recorder",
 ]
 
@@ -116,6 +117,21 @@ class CBMetricRecorder(BaseMetricRecorder):
                 "(cross-process exactly-one contract relaxed to <=1 per worker "
                 "-- covers L2 unhealthy, timeout, exception, and stale-L2 "
                 "routing detection)."
+            ),
+            ["service"],
+        )
+        # 773 D1: the CLOSED -> OPEN automatic trip fell back to L1 because L2
+        # was unhealthy, timed out, raised, or answered with a state the
+        # routing does not recognize. While this counter is non-zero, the
+        # single-fire emission contract and the "an immediate read shows open"
+        # guarantee are relaxed to per-worker best-effort for that service.
+        self._trip_degraded_mode_total = get_or_create_counter(
+            f"{self.PREFIX}_circuit_breaker_trip_degraded_mode_total",
+            (
+                "Total CLOSED->OPEN automatic trips served by L1 fallback "
+                "(single-fire emission and synchronous store visibility "
+                "relaxed to per-worker best-effort -- covers L2 unhealthy, "
+                "timeout, exception, and unrecognized stored state)."
             ),
             ["service"],
         )
@@ -245,6 +261,13 @@ class CBMetricRecorder(BaseMetricRecorder):
             self._open_check_degraded_mode_total.labels(service=service).inc()
         except Exception as e:
             logger.warning("metrics.record_cb_open_check_degraded_failed", error=e)
+
+    def record_trip_degraded_mode(self, service: str) -> None:
+        """Record an L1-fallback CLOSED->OPEN automatic trip (773 D1)."""
+        try:
+            self._trip_degraded_mode_total.labels(service=service).inc()
+        except Exception as e:
+            logger.warning("metrics.record_cb_trip_degraded_failed", error=e)
 
     def record_peer_propagation(
         self, service: str, to_state: str, outcome: str
@@ -383,6 +406,13 @@ def record_open_check_degraded_mode(service: str) -> None:
     rec = _lazy_recorder()
     if rec:
         rec.record_open_check_degraded_mode(service)
+
+
+def record_trip_degraded_mode(service: str) -> None:
+    """Module-level shortcut for the trip degraded-mode counter (773 D1)."""
+    rec = _lazy_recorder()
+    if rec:
+        rec.record_trip_degraded_mode(service)
 
 
 def record_peer_propagation(service: str, to_state: str, outcome: str) -> None:

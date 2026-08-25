@@ -167,6 +167,16 @@ class LayeredRepositoryBase:
         self._metrics = _default_metrics()
         self._metrics_lock = threading.Lock()
 
+        # 773 D2: per-service coalescing for the record-path L2 mirror. At most
+        # one mirror task per service is in flight; a submit arriving while one
+        # runs sets the service dirty instead of queueing a second task, and the
+        # running task re-reads and re-writes before it exits. The lock is held
+        # only across flag flips, never across I/O, and is disjoint from the
+        # quarantine and metrics critical sections.
+        self._mirror_lock = threading.Lock()
+        self._mirror_in_flight: set[str] = set()
+        self._mirror_dirty: set[str] = set()
+
         # 771 D8: per-service pacing for the reject-path convergence lane. The
         # shared cooldown primitive rather than another local last-fired map —
         # it already offers exactly the two stages the lane needs: a lock-free
