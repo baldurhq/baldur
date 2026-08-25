@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from baldur.interfaces.repositories import (
+    CIRCUIT_BREAKER_PINNED_TOKEN,
     CircuitBreakerStateData,
     CircuitBreakerStateEnum,
     CircuitBreakerStateRepository,
@@ -204,6 +205,140 @@ return {0, state, ''}
 """
 
 
+# Wire-format notes shared by the two scripts below, both of which read the
+# manual-control fields:
+#
+# - Booleans are stored as the Python literals ``"True"`` / ``"False"``, and
+#   ``'False'`` is a truthy value in Lua. Every pin test is therefore a string
+#   comparison ``mc == 'True'``, never a bare truthiness check.
+# - ``manual_override_expires_at`` is stored as ``utc_now().isoformat()`` by
+#   every writer, so an expiry comparison is a lexicographic string compare
+#   against the caller's ``now`` stamped the same way. The two forms
+#   ``.isoformat()`` emits (with and without the microsecond group) stay
+#   order-preserving: '+' < '.' < digits in ASCII, so a truncated stamp
+#   compares exactly as its ``.000000`` floor. A caller that normalized the
+#   stamp differently would silently break the ordering.
+_LUA_PIN_ACTIVE_HELPER = """
+local function pin_active(mc, expires_at, now_iso)
+    if mc ~= 'True' then
+        return false
+    end
+    if expires_at == false or expires_at == nil or expires_at == '' then
+        return true
+    end
+    return expires_at > now_iso
+end
+"""
+
+
+# Atomic CLOSED -> OPEN automatic trip (773 D1). The safety-critical transition
+# that used to be written through the fire-and-forget mirror, where completion
+# order decided the durable row.
+#
+# KEYS[1] = full hash key for the CB
+# ARGV[1] = now_iso (opened_at / updated_at, and the pin-expiry comparand)
+# ARGV[2] = failure_count (int as string) — the count the caller decided on
+#
+# Returns {did_open (0|1), state, opened_at_iso, expires_at_iso}. Branches:
+#   - active pin (checked first): no write, return (0, 'pinned', '', <expiry>).
+#   - state in {'closed', 'missing'}: write the whole OPEN row; a lapsed pin
+#     flag is cleared by the same write (0-length strings). did_open=1.
+#   - state == 'open': race-loser -- no write, return the existing opened_at.
+#   - state == 'half_open': the cluster progressed to recovery testing -- no
+#     write, no clobber back to OPEN.
+#   - other: corrupted row -- no write; the wrapper falls back to L1.
+_LUA_TRIP_TO_OPEN = (
+    _LUA_PIN_ACTIVE_HELPER
+    + """
+local key = KEYS[1]
+local now_iso = ARGV[1]
+local failure_count = ARGV[2]
+
+local fields = redis.call('HMGET', key,
+    'state', 'opened_at', 'manually_controlled', 'manual_override_expires_at')
+local state = fields[1]
+if state == false or state == nil then
+    state = 'missing'
+end
+local opened_at = fields[2]
+if opened_at == false or opened_at == nil then
+    opened_at = ''
+end
+local mc = fields[3]
+local expires_at = fields[4]
+if expires_at == false or expires_at == nil then
+    expires_at = ''
+end
+
+if pin_active(mc, expires_at, now_iso) then
+    return {0, 'pinned', '', expires_at}
+end
+
+if state == 'closed' or state == 'missing' then
+    redis.call('HSET', key,
+        'state', 'open',
+        'failure_count', failure_count,
+        'success_count', '0',
+        'opened_at', now_iso,
+        'half_open_request_count', '0',
+        'half_open_window_started_at', '',
+        'manually_controlled', 'False',
+        'controlled_by_id', '',
+        'manual_override_expires_at', '',
+        'updated_at', now_iso)
+    return {1, 'open', now_iso, ''}
+end
+
+if state == 'open' then
+    return {0, 'open', opened_at, ''}
+end
+
+return {0, state, '', ''}
+"""
+)
+
+
+# Conditional whole-row state write for the record-path mirror (773 D2).
+# Same field set as the plain ``update_state`` HSET, but the write is elided
+# when the *stored* row carries an override still in force -- a worker that
+# never hydrated a peer's pin has no local row to skip on, and its mirror
+# would otherwise write plain state over the operator's decision.
+#
+# KEYS[1] = full hash key for the CB
+# ARGV[1] = now_iso (updated_at, and the pin-expiry comparand)
+# ARGV[2] = field/value pairs, flattened, as a single msgpack-free varargs
+#           tail starting at index 2.
+#
+# Returns 1 when the row was written, 0 when the pin declined it. A declined
+# write is a success for the caller: the store answered and elided by contract.
+_LUA_UPDATE_STATE_SKIP_IF_PINNED = (
+    _LUA_PIN_ACTIVE_HELPER
+    + """
+local key = KEYS[1]
+local now_iso = ARGV[1]
+
+local fields = redis.call('HMGET', key,
+    'manually_controlled', 'manual_override_expires_at')
+local mc = fields[1]
+local expires_at = fields[2]
+if expires_at == false or expires_at == nil then
+    expires_at = ''
+end
+
+if pin_active(mc, expires_at, now_iso) then
+    return 0
+end
+
+local updates = {}
+for i = 2, #ARGV do
+    updates[#updates + 1] = ARGV[i]
+end
+redis.call('HSET', key, unpack(updates))
+return 1
+"""
+)
+
+
 class RedisCircuitBreakerStateRepository(
     CircuitBreakerStateRepository
 ):  # verified-by: test_degraded_mode_writes_wal
@@ -341,6 +476,8 @@ class RedisCircuitBreakerStateRepository(
         last_failure_at: datetime | None = None,
         half_open_request_count: int | None = None,
         reset_half_open_count: bool = False,
+        clear_opened_at: bool = False,
+        skip_if_pinned: bool = False,
     ) -> bool:
         """
         Update circuit breaker state.
@@ -356,6 +493,15 @@ class RedisCircuitBreakerStateRepository(
             reset_half_open_count: If True, atomically clear the HALF_OPEN
                 counter and watermark in the same write (476 D9). Takes
                 precedence over ``half_open_request_count``.
+            clear_opened_at: If True, write an empty ``opened_at`` so a row
+                moving to CLOSED does not keep the timestamp of the OPEN it
+                left.
+            skip_if_pinned: If True, route the write through a conditional Lua
+                script that declines it when the stored row carries an override
+                still in force. Falls back to a read-check-write when the
+                backend has no live Redis client (degraded mode writes to the
+                memory + WAL path, where the "store" is process-local and the
+                check-then-write gap costs nothing).
 
         Returns:
             True on success
@@ -378,7 +524,9 @@ class RedisCircuitBreakerStateRepository(
             updates["failure_count"] = str(failure_count)
         if success_count is not None:
             updates["success_count"] = str(success_count)
-        if opened_at is not None:
+        if clear_opened_at:
+            updates["opened_at"] = ""
+        elif opened_at is not None:
             updates["opened_at"] = opened_at.isoformat()
         if last_failure_at is not None:
             updates["last_failure_at"] = last_failure_at.isoformat()
@@ -389,6 +537,59 @@ class RedisCircuitBreakerStateRepository(
         elif half_open_request_count is not None:
             updates["half_open_request_count"] = str(half_open_request_count)
 
+        if skip_if_pinned:
+            return self._write_unless_pinned(service_name, updates, now.isoformat())
+
+        return self._backend.hset(self._make_key(service_name), updates)
+
+    def _write_unless_pinned(
+        self,
+        service_name: str,
+        updates: dict[str, str],
+        now_iso: str,
+    ) -> bool:
+        """Apply ``updates`` unless the stored row carries an override in force.
+
+        The store-side half of pin neutrality. On a live Redis the check and
+        the write are one script invocation, so an override taken between them
+        cannot be overwritten.
+
+        Every other route falls back to a read-check-write through the backend:
+        no live client (degraded mode, where the row is process-local memory +
+        WAL and the gap costs nothing), or a script invocation that failed —
+        which must not become a raise, because the backend write is what owns
+        the degrade-and-WAL response to a Redis blip, and the mirror's caller
+        would otherwise count a survivable blip toward quarantining L2.
+
+        Returns True in both the written and the declined case — the caller
+        asked for a write it authorized the store to elide.
+        """
+        redis_client = self._backend.raw_redis_client
+        if redis_client is not None:
+            flattened: list[str] = []
+            for field_name, value in updates.items():
+                flattened.append(field_name)
+                flattened.append(value)
+            full_key = self._backend._get_full_key(self._make_key(service_name))
+            try:
+                redis_client.eval(
+                    _LUA_UPDATE_STATE_SKIP_IF_PINNED,
+                    1,
+                    full_key,
+                    now_iso,
+                    *flattened,
+                )
+                return True
+            except Exception as e:
+                logger.warning(
+                    "redis_cb_repo.pin_guarded_update_failed",
+                    service=service_name,
+                    error=e,
+                )
+
+        existing = self.get_state(service_name)
+        if existing is not None and existing.is_pin_active():
+            return True
         return self._backend.hset(self._make_key(service_name), updates)
 
     def try_acquire_half_open_slot(
@@ -1044,6 +1245,83 @@ class RedisCircuitBreakerStateRepository(
             id=None,
             state=state_str,
             failure_count=0,
+            success_count=0,
+            last_failure_at=None,
+            opened_at=opened_at,
+            manually_controlled=False,
+            controlled_by_id=None,
+            control_reason="",
+            manual_override_expires_at=None,
+            half_open_request_count=0,
+            half_open_window_started_at=None,
+            metadata={},
+            created_at=None,
+            updated_at=None,
+        )
+        return CircuitBreakerOpenAttempt(state=state_data, did_open=did_open)
+
+    def trip_to_open(self, service_name, failure_count):
+        """Atomic CLOSED -> OPEN automatic trip via Lua eval (773 D1).
+
+        Replaces the ABC's race-unsafe read-then-write default, and replaces
+        the fire-and-forget mirror as the writer of the trip: HMGET-decide-HSET
+        runs as one Redis command, so concurrent workers that each decided to
+        trip produce exactly one ``did_open=True`` and the durable row cannot be
+        decided by whichever snapshot finished last.
+
+        Branch contract: see ``CircuitBreakerStateRepository.trip_to_open``. The
+        pin fields are read in the same HMGET as the state, so the guard cannot
+        be evaluated against a row an operator replaced in between.
+
+        Auxiliary state fields (success_count, last_failure_at, etc.) are
+        synthesized as defaults rather than fetched in a second RTT -- callers
+        read ``did_open``, ``state.state`` and ``state.opened_at``, plus the pin
+        expiry on the declined branch.
+        """
+        from baldur.interfaces.repositories import (
+            CircuitBreakerOpenAttempt,
+            pinned_trip_attempt,
+        )
+
+        now_iso = utc_now().isoformat()
+        full_key = self._backend._get_full_key(self._make_key(service_name))
+
+        try:
+            redis_client = self._backend.raw_redis_client
+            result = redis_client.eval(
+                _LUA_TRIP_TO_OPEN,
+                1,
+                full_key,
+                now_iso,
+                str(failure_count),
+            )
+        except Exception as e:
+            logger.warning(
+                "redis_cb_repo.trip_to_open_failed",
+                service=service_name,
+                error=e,
+            )
+            raise
+
+        def _decode(value):
+            if isinstance(value, bytes):
+                return value.decode("utf-8")
+            return str(value) if value is not None else ""
+
+        did_open = bool(result[0])
+        state_str = _decode(result[1])
+        opened_at = self._parse_datetime(_decode(result[2]))
+
+        if state_str == CIRCUIT_BREAKER_PINNED_TOKEN:
+            return pinned_trip_attempt(
+                service_name, self._parse_datetime(_decode(result[3]))
+            )
+
+        state_data = CircuitBreakerStateData(
+            service_name=service_name,
+            id=None,
+            state=state_str,
+            failure_count=failure_count if did_open else 0,
             success_count=0,
             last_failure_at=None,
             opened_at=opened_at,

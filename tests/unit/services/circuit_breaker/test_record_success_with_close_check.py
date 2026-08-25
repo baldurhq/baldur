@@ -379,7 +379,7 @@ class TestLayeredRepoCloseCheckDelegation:
         assert attempt.did_close is True
         assert attempt.state.state == CircuitBreakerStateEnum.CLOSED.value
 
-    def test_sync_to_l2_called_with_attempt_state(self):
+    def test_sync_to_l2_is_nudged_after_the_close(self):
         from baldur.adapters.memory.layered_repository import (
             LayeredCircuitBreakerStateRepository,
         )
@@ -395,10 +395,15 @@ class TestLayeredRepoCloseCheckDelegation:
             service_name, success_threshold=1
         )
 
-        # Then: sync receives the post-close state (not pre-close).
-        repo._sync_to_l2_async.assert_called_once_with(service_name, attempt.state)
-        synced_state = repo._sync_to_l2_async.call_args[0][1]
-        assert synced_state.state == CircuitBreakerStateEnum.CLOSED.value
+        # Then: the mirror is nudged for this service, and the row it will
+        # read already carries the close -- the mirror fresh-reads when its
+        # task runs, so what matters is that the nudge follows the transition.
+        repo._sync_to_l2_async.assert_called_once_with(service_name)
+        assert attempt.state.state == CircuitBreakerStateEnum.CLOSED.value
+        assert (
+            repo._l1.get_by_service_name(service_name).state
+            == CircuitBreakerStateEnum.CLOSED.value
+        )
 
 
 # =============================================================================

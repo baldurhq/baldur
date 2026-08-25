@@ -193,6 +193,8 @@ class SQLCircuitBreakerStateRepository(
         last_failure_at: datetime | None = None,  # noqa: ARG002 — interface compat
         half_open_request_count: int | None = None,
         reset_half_open_count: bool = False,
+        clear_opened_at: bool = False,
+        skip_if_pinned: bool = False,
     ) -> bool:
         existing = self.get_by_service_name(service_name)
         if existing is None:
@@ -204,7 +206,11 @@ class SQLCircuitBreakerStateRepository(
         resolved_success = (
             success_count if success_count is not None else existing.success_count
         )
-        resolved_opened = opened_at if opened_at is not None else existing.opened_at
+        resolved_opened = (
+            None
+            if clear_opened_at
+            else (opened_at if opened_at is not None else existing.opened_at)
+        )
 
         if reset_half_open_count:
             resolved_half_open = 0
@@ -216,40 +222,41 @@ class SQLCircuitBreakerStateRepository(
             resolved_half_open = existing.half_open_request_count
             window_changed = False
 
+        set_clause = (
+            "state = %s, failure_count = %s, success_count = %s, opened_at = %s, "
+            "half_open_request_count = %s"
+        )
+        params: list[Any] = [
+            state,
+            resolved_fail,
+            resolved_success,
+            self._dt_to_db(resolved_opened),
+            resolved_half_open,
+        ]
         if window_changed:
-            self._execute(
-                f"UPDATE {_TABLE} SET state = %s, failure_count = %s, "
-                f"success_count = %s, opened_at = %s, "
-                f"half_open_request_count = %s, "
-                f"half_open_window_started_at = NULL, "
-                f"updated_at = %s "
-                f"WHERE service_name = %s",
-                (
-                    state,
-                    resolved_fail,
-                    resolved_success,
-                    self._dt_to_db(resolved_opened),
-                    resolved_half_open,
-                    self._dt_to_db(now),
-                    service_name,
-                ),
+            set_clause += ", half_open_window_started_at = NULL"
+        set_clause += ", updated_at = %s"
+        params.append(self._dt_to_db(now))
+
+        where_clause = "service_name = %s"
+        params.append(service_name)
+        if skip_if_pinned:
+            # The pin test belongs in the statement rather than in a preceding
+            # read: the record-path mirror is what asks for it, and an override
+            # taken between a check and the write is exactly the decision it
+            # must not overwrite. A statement that matches no row is a decline,
+            # not a failure.
+            where_clause += (
+                " AND NOT (manually_controlled <> 0 "
+                "AND (manual_override_expires_at IS NULL "
+                "OR manual_override_expires_at > %s))"
             )
-        else:
-            self._execute(
-                f"UPDATE {_TABLE} SET state = %s, failure_count = %s, "
-                f"success_count = %s, opened_at = %s, "
-                f"half_open_request_count = %s, updated_at = %s "
-                f"WHERE service_name = %s",
-                (
-                    state,
-                    resolved_fail,
-                    resolved_success,
-                    self._dt_to_db(resolved_opened),
-                    resolved_half_open,
-                    self._dt_to_db(now),
-                    service_name,
-                ),
-            )
+            params.append(self._dt_to_db(now))
+
+        self._execute(
+            f"UPDATE {_TABLE} SET {set_clause} WHERE {where_clause}",
+            tuple(params),
+        )
         return True
 
     def try_acquire_half_open_slot(  # noqa: C901, PLR0912, PLR0915
@@ -725,6 +732,133 @@ class SQLCircuitBreakerStateRepository(
             )
 
         # state in {closed, unknown}: stale sentinel -- no write.
+        return _attempt(current_state, current_opened_at, False)
+
+    def trip_to_open(self, service_name, failure_count):
+        """Atomic CLOSED -> OPEN automatic trip via SELECT FOR UPDATE NOWAIT.
+
+        Clones ``record_failure_with_open_check``'s locked read-decide-write:
+        the row-level lock serializes concurrent transactions, and on ``NOWAIT``
+        contention the driver exception is re-raised so the Layered wrapper
+        records the degraded-mode metric and falls back to L1. Leaving this
+        adapter on the ABC's race-unsafe default while the sibling primitive
+        sits one method above it would be an asymmetry with nothing saved.
+
+        Branch contract: see ``CircuitBreakerStateRepository.trip_to_open``. The
+        SQLite caveat in the module docstring applies here as it does to every
+        other primitive in this file.
+        """
+        self.get_or_create(service_name)
+
+        conn = self._borrow_connection()
+        cursor = conn.cursor()
+        try:
+            attempt = self._trip_to_open_locked(cursor, service_name, failure_count)
+            if self._should_commit(conn):
+                conn.commit()
+            return attempt
+        except Exception:
+            if self._should_commit(conn):
+                try:
+                    conn.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+            raise
+        finally:
+            try:
+                cursor.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _trip_to_open_locked(self, cursor, service_name, failure_count):
+        """Locked read-decide-write for ``trip_to_open``.
+
+        Runs inside the caller's transaction (the SELECT takes the row lock);
+        the caller commits / rolls back. Returns the ``CircuitBreakerOpenAttempt``
+        without committing. The pin columns are read by the same locked SELECT
+        as the state, so the guard cannot be evaluated against a row an
+        operator replaced in between.
+        """
+        from baldur.interfaces.repositories import (
+            CircuitBreakerOpenAttempt,
+            pinned_trip_attempt,
+        )
+
+        cols = "state, opened_at, manually_controlled, manual_override_expires_at"
+        if self._dialect == SQLDialect.SQLITE:
+            select_sql = f"SELECT {cols} FROM {_TABLE} WHERE service_name = %s"
+        else:
+            select_sql = (
+                f"SELECT {cols} FROM {_TABLE} WHERE service_name = %s FOR UPDATE NOWAIT"
+            )
+
+        cursor.execute(self._prepare(select_sql), (service_name,))
+        row = cursor.fetchone()
+
+        now = utc_now()
+        current_state = row[0] if row is not None else "missing"
+        current_opened_at = self._dt_from_db(row[1]) if row is not None else None
+        pinned = bool(row[2]) if row is not None else False
+        expires_at = self._dt_from_db(row[3]) if row is not None else None
+
+        if pinned and (expires_at is None or expires_at > now):
+            return pinned_trip_attempt(service_name, expires_at)
+
+        def _attempt(state_str, opened_at, did_open, count=0):
+            state_data = CircuitBreakerStateData(
+                service_name=service_name,
+                id=None,
+                state=state_str,
+                failure_count=count,
+                success_count=0,
+                last_failure_at=None,
+                opened_at=opened_at,
+                manually_controlled=False,
+                controlled_by_id=None,
+                control_reason="",
+                manual_override_expires_at=None,
+                half_open_request_count=0,
+                half_open_window_started_at=None,
+                metadata={},
+                created_at=None,
+                updated_at=None,
+            )
+            return CircuitBreakerOpenAttempt(state=state_data, did_open=did_open)
+
+        if current_state in (CircuitBreakerStateEnum.CLOSED.value, "missing"):
+            cursor.execute(
+                self._prepare(
+                    f"UPDATE {_TABLE} SET state = %s, failure_count = %s, "
+                    f"success_count = 0, opened_at = %s, "
+                    f"half_open_request_count = 0, "
+                    f"half_open_window_started_at = NULL, "
+                    # A pin reaching this branch has lapsed: clearing it in the
+                    # same write keeps the freshly opened row visible to the
+                    # readers that still filter on the raw flag. The reason is
+                    # kept, as the expiry sweep keeps it.
+                    f"manually_controlled = 0, controlled_by_id = NULL, "
+                    f"manual_override_expires_at = NULL, "
+                    f"updated_at = %s WHERE service_name = %s"
+                ),
+                (
+                    CircuitBreakerStateEnum.OPEN.value,
+                    failure_count,
+                    self._dt_to_db(now),
+                    self._dt_to_db(now),
+                    service_name,
+                ),
+            )
+            return _attempt(
+                CircuitBreakerStateEnum.OPEN.value, now, True, count=failure_count
+            )
+
+        if current_state == CircuitBreakerStateEnum.OPEN.value:
+            return _attempt(
+                CircuitBreakerStateEnum.OPEN.value, current_opened_at, False
+            )
+
+        # half_open (cluster progressed to recovery testing) or a corrupted
+        # value: no write, no clobber.
         return _attempt(current_state, current_opened_at, False)
 
     def set_manual_control(

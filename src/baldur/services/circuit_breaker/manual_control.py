@@ -17,6 +17,7 @@ from baldur.audit.helpers import (
 )
 from baldur.core.decision_logger import DecisionLogger, ReasonCode
 from baldur.core.execution_mode import get_execution_mode
+from baldur.interfaces.repositories import manual_pin_is_active
 from baldur.settings.circuit_breaker import MAX_MANUAL_OVERRIDE_TTL_MINUTES
 from baldur.utils.time import utc_now
 
@@ -42,18 +43,19 @@ logger = structlog.get_logger()
 def is_manual_pin_active(state: CircuitBreakerStateData) -> bool:
     """Whether the manual override on this row is still in force.
 
-    Enforcement expiry is evaluated per read rather than waiting for the
+    The service-side spelling of ``manual_pin_is_active``, which owns the rule:
+    enforcement expiry is evaluated per read rather than waiting for the
     background sweep, so an override stops being honoured at its promised
     instant even in a worker the sweep never reaches (only one process per host
     runs scheduled jobs, and in-memory pins are process-local by design).
 
-    A pin with no stored expiry reads as permanently active — that is the
-    correct reading of "manually controlled, no lifetime", and the reason the
-    service layer never creates one.
+    Reads the two fields rather than calling the row's own predicate: the
+    repository interface promises a shape, and enforcement here must keep
+    accepting any row carrying those fields — a Django model instance, a
+    layer's own DTO — not only ``CircuitBreakerStateData`` itself.
     """
-    return bool(state.manually_controlled) and (
-        state.manual_override_expires_at is None
-        or state.manual_override_expires_at > utc_now()
+    return manual_pin_is_active(
+        state.manually_controlled, state.manual_override_expires_at
     )
 
 

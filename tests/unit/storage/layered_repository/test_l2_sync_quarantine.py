@@ -23,8 +23,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 from structlog.testing import capture_logs
 
-from baldur.interfaces.repositories import CircuitBreakerStateData
-
 # Event name + threshold are the contract under test (hardcoded once here).
 L2_QUARANTINED_EVENT = "layered_repo.l2_quarantined"
 QUARANTINE_THRESHOLD = 3  # error_handling.py: _l2_consecutive_failures >= 3
@@ -61,6 +59,9 @@ def repo(mock_l2_repo):
     )
 
     r = LayeredCircuitBreakerStateRepository(l2_repo=mock_l2_repo, adapter_type="redis")
+    # The mirror reads the row when its task runs rather than carrying a
+    # snapshot taken at submit time, so the row it mirrors has to exist.
+    r._l1.get_or_create("svc")
     mock_l2_repo.reset_mock()
     r._l2_healthy = True
     r._l2_consecutive_failures = 0
@@ -82,7 +83,7 @@ class TestL2SyncQuarantineGuard:
 
         # When: an async mirror is attempted
         with patch.object(repo, "_get_executor", return_value=mock_executor):
-            repo._sync_to_l2_async("svc", CircuitBreakerStateData(service_name="svc"))
+            repo._sync_to_l2_async("svc")
 
         # Then: no executor work is queued and L2 is not touched
         mock_executor.submit.assert_not_called()
@@ -95,7 +96,7 @@ class TestL2SyncQuarantineGuard:
 
         # When
         with patch.object(repo, "_get_executor", return_value=inline):
-            repo._sync_to_l2_async("svc", CircuitBreakerStateData(service_name="svc"))
+            repo._sync_to_l2_async("svc")
 
         # Then: the healthy branch does submit
         assert inline.submit_count == 1
@@ -108,7 +109,7 @@ class TestL2SyncSingleSubmit:
         inline = _InlineExecutor()
 
         with patch.object(repo, "_get_executor", return_value=inline):
-            repo._sync_to_l2_async("svc", CircuitBreakerStateData(service_name="svc"))
+            repo._sync_to_l2_async("svc")
 
         # Exactly one submit: the collapsed body writes L2 inline rather than
         # submitting a wrapper that submits _do_sync again (which would be 2).
@@ -117,17 +118,19 @@ class TestL2SyncSingleSubmit:
     def test_sync_to_l2_async_performs_l2_write_and_records_success(
         self, repo, mock_l2_repo
     ):
-        # Given: a concrete L1 snapshot to mirror
-        state = CircuitBreakerStateData(service_name="svc", failure_count=2)
+        # Given: an L1 row the mirror task will read when it runs
+        repo._l1.record_failure("svc")
+        repo._l1.record_failure("svc")
+        state = repo._l1.get_by_service_name("svc")
         inline = _InlineExecutor()
 
         # When
         with patch.object(repo, "_get_executor", return_value=inline):
-            repo._sync_to_l2_async("svc", state)
+            repo._sync_to_l2_async("svc")
 
         # Then: the inline body does get_or_create + update_state and records
-        # success via _handle_l2_success (kwargs referenced from the snapshot,
-        # not hardcoded enum strings).
+        # success via _handle_l2_success (kwargs referenced from the row the
+        # task read, not hardcoded enum strings).
         mock_l2_repo.get_or_create.assert_called_once_with("svc")
         mock_l2_repo.update_state.assert_called_once_with(
             service_name="svc",
@@ -135,6 +138,8 @@ class TestL2SyncSingleSubmit:
             failure_count=state.failure_count,
             success_count=state.success_count,
             opened_at=state.opened_at,
+            clear_opened_at=state.opened_at is None,
+            skip_if_pinned=True,
         )
         assert repo._metrics["l2_sync_success_count"] == 1
 
@@ -156,7 +161,7 @@ class TestL2SyncErrorRouting:
 
         # When
         with patch.object(repo, "_get_executor", return_value=inline):
-            repo._sync_to_l2_async("svc", CircuitBreakerStateData(service_name="svc"))
+            repo._sync_to_l2_async("svc")
 
         # Then: routed to _handle_l2_error (sync-failure path), not the timeout
         # path -- so the quarantine trigger is armed.
@@ -172,7 +177,7 @@ class TestL2SyncErrorRouting:
 
         # When
         with patch.object(repo, "_get_executor", return_value=inline):
-            repo._sync_to_l2_async("svc", CircuitBreakerStateData(service_name="svc"))
+            repo._sync_to_l2_async("svc")
 
         # Then
         assert repo._l2_consecutive_failures == 1
@@ -193,23 +198,22 @@ class TestL2SyncQuarantineWiring:
         # Given: every async L2 write fails
         mock_l2_repo.get_or_create.side_effect = Exception("L2 down")
         inline = _InlineExecutor()
-        state = CircuitBreakerStateData(service_name="svc")
 
         with patch.object(repo, "_get_executor", return_value=inline):
             # Failures 1 and 2: below threshold -- still healthy, still submitting
-            repo._sync_to_l2_async("svc", state)
+            repo._sync_to_l2_async("svc")
             assert repo._l2_healthy is True
-            repo._sync_to_l2_async("svc", state)
+            repo._sync_to_l2_async("svc")
             assert repo._l2_healthy is True
 
             # Failure 3: trips the quarantine
-            repo._sync_to_l2_async("svc", state)
+            repo._sync_to_l2_async("svc")
             assert repo._l2_healthy is False
             assert repo._l2_consecutive_failures == QUARANTINE_THRESHOLD
             assert inline.submit_count == QUARANTINE_THRESHOLD
 
             # When: a subsequent sync runs while quarantined
-            repo._sync_to_l2_async("svc", state)
+            repo._sync_to_l2_async("svc")
 
         # Then: the now-effective D3 guard blocks it -- no 4th submit
         assert inline.submit_count == QUARANTINE_THRESHOLD

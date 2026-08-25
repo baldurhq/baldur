@@ -347,7 +347,7 @@ class TestLayeredRepoOpenCheckDelegation:
         assert attempt.did_open is True
         assert attempt.state.state == CircuitBreakerStateEnum.OPEN.value
 
-    def test_sync_to_l2_called_with_attempt_state(self):
+    def test_sync_to_l2_is_nudged_after_the_reopen(self):
         from baldur.adapters.memory.layered_repository import (
             LayeredCircuitBreakerStateRepository,
         )
@@ -361,10 +361,15 @@ class TestLayeredRepoOpenCheckDelegation:
         # When.
         attempt = repo.record_failure_with_open_check(service_name)
 
-        # Then: sync receives the post-re-open state (not pre).
-        repo._sync_to_l2_async.assert_called_once_with(service_name, attempt.state)
-        synced_state = repo._sync_to_l2_async.call_args[0][1]
-        assert synced_state.state == CircuitBreakerStateEnum.OPEN.value
+        # Then: the mirror is nudged for this service, and the row it will
+        # read already carries the re-open -- the mirror fresh-reads when its
+        # task runs, so what matters is that the nudge follows the transition.
+        repo._sync_to_l2_async.assert_called_once_with(service_name)
+        assert attempt.state.state == CircuitBreakerStateEnum.OPEN.value
+        assert (
+            repo._l1.get_by_service_name(service_name).state
+            == CircuitBreakerStateEnum.OPEN.value
+        )
 
 
 # =============================================================================

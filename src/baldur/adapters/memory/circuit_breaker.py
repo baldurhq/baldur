@@ -40,6 +40,7 @@ from baldur.interfaces.repositories import (
     CircuitBreakerStateData,
     CircuitBreakerStateEnum,
     CircuitBreakerStateRepository,
+    pinned_trip_attempt,
     resolve_manual_override_expiry,
 )
 
@@ -49,17 +50,13 @@ logger = structlog.get_logger()
 def _pin_is_active(state: CircuitBreakerStateData) -> bool:
     """Whether the manual override on this row is still in force.
 
-    The same rule the service layer applies when it decides whether to honour
-    an override: manually controlled, and either open-ended or not yet past its
-    expiry. Evaluated here so a storage primitive can make the decision inside
-    the very lock hold that performs its write, rather than reading the row,
+    Delegates to the rule's owner, ``CircuitBreakerStateData.is_pin_active()``,
+    and exists so the primitives below can make the decision inside the very
+    lock hold that performs their write, rather than reading the row,
     releasing, and writing against a view an operator may already have
     replaced.
     """
-    return bool(state.manually_controlled) and (
-        state.manual_override_expires_at is None
-        or state.manual_override_expires_at > _now()
-    )
+    return state.is_pin_active()
 
 
 class InMemoryCircuitBreakerStateRepository(CircuitBreakerStateRepository):
@@ -216,12 +213,23 @@ class InMemoryCircuitBreakerStateRepository(CircuitBreakerStateRepository):
         last_failure_at: datetime | None = None,
         half_open_request_count: int | None = None,
         reset_half_open_count: bool = False,
+        clear_opened_at: bool = False,
+        skip_if_pinned: bool = False,
     ) -> bool:
-        """Update circuit breaker state."""
+        """Update circuit breaker state.
+
+        ``clear_opened_at`` and ``skip_if_pinned`` are both evaluated inside the
+        single lock hold that performs the write, so neither can be decided
+        against a row an operator replaced in between.
+        """
         with self._lock:
             entry = self._storage.get(service_name)
             if entry is None:
                 return False
+            if skip_if_pinned and _pin_is_active(entry):
+                # Declined by contract, not failed: the caller counts this as a
+                # successful write it was asked to elide.
+                return True
 
             if reset_half_open_count:
                 resolved_half_open_count = 0
@@ -248,7 +256,11 @@ class InMemoryCircuitBreakerStateRepository(CircuitBreakerStateRepository):
                     if last_failure_at is not None
                     else entry.last_failure_at
                 ),
-                opened_at=opened_at if opened_at is not None else entry.opened_at,
+                opened_at=(
+                    None
+                    if clear_opened_at
+                    else (opened_at if opened_at is not None else entry.opened_at)
+                ),
                 manually_controlled=entry.manually_controlled,
                 controlled_by_id=entry.controlled_by_id,
                 control_reason=entry.control_reason,
@@ -611,6 +623,57 @@ class InMemoryCircuitBreakerStateRepository(CircuitBreakerStateRepository):
                 half_open_window_started_at=None,
                 created_at=entry.created_at,
                 updated_at=_now(),
+            )
+            self._storage[service_name] = updated
+            return CircuitBreakerOpenAttempt(state=updated, did_open=True)
+
+    def trip_to_open(
+        self,
+        service_name: str,
+        failure_count: int,
+    ) -> CircuitBreakerOpenAttempt:
+        """Atomic CLOSED -> OPEN trip under a single lock acquire.
+
+        The pin check, the state read and the OPEN write are one critical
+        section, so the row an operator pinned cannot be overwritten between
+        the check and the write, and two threads that both decided to trip
+        produce exactly one ``did_open=True``. Branch contract: see
+        ``CircuitBreakerStateRepository.trip_to_open``.
+        """
+        closed_state = CircuitBreakerStateEnum.CLOSED.value
+        open_state = CircuitBreakerStateEnum.OPEN.value
+        with self._lock:
+            entry = self._get_or_create_unlocked(service_name)
+
+            if _pin_is_active(entry):
+                return pinned_trip_attempt(
+                    service_name, entry.manual_override_expires_at
+                )
+
+            if entry.state != closed_state:
+                return CircuitBreakerOpenAttempt(state=entry, did_open=False)
+
+            now_ts = _now()
+            updated = CircuitBreakerStateData(
+                id=entry.id,
+                service_name=service_name,
+                state=open_state,
+                failure_count=failure_count,
+                success_count=0,
+                last_failure_at=entry.last_failure_at,
+                opened_at=now_ts,
+                # A pin that reached this branch has lapsed (the guard above
+                # cleared it): drop the flag in the same write so the freshly
+                # opened row stays visible to the raw-flag recovery filter.
+                manually_controlled=False,
+                controlled_by_id=None,
+                control_reason=entry.control_reason,
+                manual_override_expires_at=None,
+                half_open_request_count=0,
+                half_open_window_started_at=None,
+                metadata=dict(entry.metadata),
+                created_at=entry.created_at,
+                updated_at=now_ts,
             )
             self._storage[service_name] = updated
             return CircuitBreakerOpenAttempt(state=updated, did_open=True)

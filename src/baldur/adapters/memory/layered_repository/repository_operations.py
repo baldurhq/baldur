@@ -16,9 +16,11 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from baldur.interfaces.repositories import (
+    CIRCUIT_BREAKER_PINNED_TOKEN,
     CircuitBreakerCloseAttempt,
     CircuitBreakerOpenAttempt,
     CircuitBreakerStateData,
+    pinned_trip_attempt,
 )
 
 if TYPE_CHECKING:
@@ -80,11 +82,12 @@ class RepositoryOperationsMixin:
         def _get_timeout_seconds(self) -> float: ...
         def _get_executor(self) -> ThreadPoolExecutor: ...
         def _repair_row_to_l2_inline(self, service_name: str) -> bool | None: ...
-        def _sync_to_l2_async(
-            self, service_name: str, state: CircuitBreakerStateData
-        ) -> None: ...
+        def _sync_to_l2_async(self, service_name: str) -> None: ...
         def _sync_to_l2_with_timeout(
-            self, service_name: str, state: CircuitBreakerStateData
+            self,
+            service_name: str,
+            state: CircuitBreakerStateData,
+            skip_if_pinned: bool = False,
         ) -> bool: ...
         def _sync_pin_to_l2(
             self,
@@ -171,8 +174,15 @@ class RepositoryOperationsMixin:
         last_failure_at: datetime | None = None,
         half_open_request_count: int | None = None,
         reset_half_open_count: bool = False,
+        clear_opened_at: bool = False,
+        skip_if_pinned: bool = False,
     ) -> bool:
-        """Update L1, then asynchronously synchronize to L2 (476 D9 reset flag forwarded)."""
+        """Update L1, then asynchronously synchronize to L2 (476 D9 reset flag forwarded).
+
+        Both write directives are forwarded to L1; the mirror derives its own
+        ``clear_opened_at`` from the row it reads and always passes the pin
+        guard, so neither needs to be threaded through the async hand-off.
+        """
         result = self._l1.update_state(
             service_name=service_name,
             state=state,
@@ -182,12 +192,12 @@ class RepositoryOperationsMixin:
             last_failure_at=last_failure_at,
             half_open_request_count=half_open_request_count,
             reset_half_open_count=reset_half_open_count,
+            clear_opened_at=clear_opened_at,
+            skip_if_pinned=skip_if_pinned,
         )
 
         if result:
-            updated = self._l1.get_by_service_name(service_name)
-            if updated:
-                self._sync_to_l2_async(service_name, updated)
+            self._sync_to_l2_async(service_name)
 
             # 476 D9: forward the counter-reset directive to L2 explicitly so
             # the cluster-wide HALF_OPEN counter clears in the same transition
@@ -649,13 +659,13 @@ class RepositoryOperationsMixin:
     def record_failure(self, service_name: str) -> CircuitBreakerStateData:
         """Record a failure in L1, then synchronize to L2."""
         result = self._l1.record_failure(service_name)
-        self._sync_to_l2_async(service_name, result)
+        self._sync_to_l2_async(service_name)
         return result
 
     def record_success(self, service_name: str) -> CircuitBreakerStateData:
         """Record a success in L1, then synchronize to L2."""
         result = self._l1.record_success(service_name)
-        self._sync_to_l2_async(service_name, result)
+        self._sync_to_l2_async(service_name)
         return result
 
     def record_success_with_close_check(
@@ -742,7 +752,7 @@ class RepositoryOperationsMixin:
         attempt = self._l1.record_success_with_close_check(
             service_name, success_threshold
         )
-        self._sync_to_l2_async(service_name, attempt.state)
+        self._sync_to_l2_async(service_name)
         return attempt
 
     def _writeback_close_check_to_l1(
@@ -868,7 +878,7 @@ class RepositoryOperationsMixin:
     ) -> CircuitBreakerOpenAttempt:
         """L1-authoritative fallback for record_failure_with_open_check (656 D7)."""
         attempt = self._l1.record_failure_with_open_check(service_name)
-        self._sync_to_l2_async(service_name, attempt.state)
+        self._sync_to_l2_async(service_name)
         return attempt
 
     def _writeback_open_check_to_l1(
@@ -927,6 +937,198 @@ class RepositoryOperationsMixin:
         except ImportError:
             pass
 
+    def trip_to_open(
+        self,
+        service_name: str,
+        failure_count: int,
+    ) -> CircuitBreakerOpenAttempt:
+        """L2-authoritative CLOSED -> OPEN automatic trip (773 D1).
+
+        The trip used to be an ordinary ``update_state``: an L1 write plus a
+        fire-and-forget mirror racing the five failure records that produced it,
+        so a genuine trip could be erased from the shared store by its own
+        record path. Routing the state write to L2's atomic primitive (Redis
+        Lua / SQL row lock) makes the durable row the outcome of one
+        single-winner decision, and the local row a writeback of it.
+
+        Branches:
+
+        1. L2 healthy: submit ``L2.trip_to_open`` on the timeout-bounded
+           executor.
+        2. ``state=='open'``: writeback L1 to OPEN carrying the returned
+           ``opened_at`` (covers the winner and the race-loser alike). The
+           counters are left alone — L1 already holds the failure count the
+           preceding ``record_failure`` wrote.
+        3. ``state=='half_open'``: a peer tripped and the cluster already moved
+           on to recovery testing. Join the trial regime rather than clobbering
+           the store back to OPEN; the half-open counter and watermark stay
+           L2-owned.
+        4. ``state=='pinned'``: an override still in force declined the write.
+           The remote row is delivered whole so this worker enforces the
+           operator's decision from its next request, and the post-trip nudge is
+           deliberately skipped — mirroring here is exactly what the override
+           forbids.
+        5. anything else (unknown stored state, L2 timeout / exception /
+           unhealthy): record the degraded-mode metric and fall back to
+           ``_l1.trip_to_open`` plus a mirror. The local row still transitions
+           to OPEN, so protection is kept when the store cannot answer — but on
+           this branch ``did_open`` is a *local* verdict with no synchronous
+           store write, the same documented relaxation the close- and open-check
+           chains carry.
+
+        Every branch but ``pinned`` ends with a mirror nudge issued *after* its
+        L1 writeback. Combined with the per-service coalescing in
+        ``_sync_to_l2_async``, that is what makes the last same-service write
+        this process performs reflect post-trip L1: a mirror already in flight
+        re-runs against the written row, and one that already exited is
+        replaced by a task starting after it.
+        """
+        if self._l2 and self._l2_healthy:
+            timeout = self._get_timeout_seconds()
+            start_time = time.perf_counter()
+
+            try:
+                executor = self._get_executor()
+                future = executor.submit(
+                    self._l2.trip_to_open,
+                    service_name,
+                    failure_count,
+                )
+                attempt = future.result(timeout=timeout)
+                elapsed_ms = (time.perf_counter() - start_time) * 1000
+                self._handle_l2_success(elapsed_ms)
+
+                returned_state = attempt.state.state
+                if returned_state == CIRCUIT_BREAKER_PINNED_TOKEN:
+                    return self._hydrate_pinned_trip(service_name, attempt)
+
+                if returned_state not in {"open", "half_open"}:
+                    self._record_trip_degraded_mode(service_name)
+                    return self._l1_fallback_trip(service_name, failure_count)
+
+                self._writeback_trip_to_l1(service_name, attempt)
+                self._sync_to_l2_async(service_name)
+                return attempt
+
+            except FuturesTimeoutError:
+                self._handle_l2_timeout("trip_to_open", service_name)
+            except Exception as e:
+                self._handle_l2_error("trip_to_open", service_name, e)
+
+        # L2 unavailable / failed -- fall back to L1.
+        self._record_trip_degraded_mode(service_name)
+        return self._l1_fallback_trip(service_name, failure_count)
+
+    def _l1_fallback_trip(
+        self,
+        service_name: str,
+        failure_count: int,
+    ) -> CircuitBreakerOpenAttempt:
+        """L1-authoritative fallback for ``trip_to_open`` (773 D1 step 5)."""
+        attempt = self._l1.trip_to_open(service_name, failure_count)
+        self._sync_to_l2_async(service_name)
+        return attempt
+
+    def _writeback_trip_to_l1(
+        self,
+        service_name: str,
+        attempt: CircuitBreakerOpenAttempt,
+    ) -> None:
+        """Sync the L2-authoritative trip decision to L1 (773 D1 steps 2-3).
+
+        - ``state='open'``: transition L1 to OPEN carrying the store's
+          ``opened_at``. Counters are untouched — the failure count this trip
+          reports was written by the ``record_failure`` that preceded it.
+        - ``state='half_open'``: join the cluster's trial regime with a cleared
+          success count. The half-open counter and watermark belong to the
+          atomic slot primitives and stay L2-owned.
+
+        Writes go straight to L1 rather than through the layered
+        ``update_state``, which would re-enter the mirror — the shipped
+        writeback convention. Failures are logged and never roll back the
+        store-authoritative decision.
+        """
+        try:
+            self._l1.get_or_create(service_name)
+            if attempt.state.state == "open":
+                self._l1.update_state(
+                    service_name=service_name,
+                    state="open",
+                    opened_at=attempt.state.opened_at,
+                    reset_half_open_count=True,
+                )
+            else:  # half_open
+                self._l1.update_state(
+                    service_name=service_name,
+                    state="half_open",
+                    success_count=0,
+                )
+        except Exception as e:
+            logger.warning(
+                "circuit_breaker.l1_trip_writeback_failed",
+                service_name=service_name,
+                returned_state=attempt.state.state,
+                did_open=attempt.did_open,
+                error=str(e),
+            )
+
+    def _hydrate_pinned_trip(
+        self,
+        service_name: str,
+        attempt: CircuitBreakerOpenAttempt,
+    ) -> CircuitBreakerOpenAttempt:
+        """Deliver the store's pinned row to L1 after a declined trip (773 D1 step 4).
+
+        Copying the state alone would leave this worker unpinned and free to
+        record outcomes, re-trip, and mirror an OPEN over an override still in
+        force — so the remote row is delivered whole, pin fields included,
+        exactly as the convergence lane delivers one.
+
+        A failed delivery — the read raised, or the row vanished because the
+        override was lifted concurrently — is logged and returns the declined
+        verdict anyway. It never routes into the L1 fallback: a local OPEN
+        written here would land over the operator's Allow, which is the
+        inversion this branch exists to prevent.
+
+        The sentinel token is preserved in the returned attempt. The hydration
+        is what this worker enforces; the token is what the service reports, and
+        collapsing it into the hydrated state would make a suppressed trip
+        indistinguishable from an ordinary race-loser and silence the only log
+        line that says an override swallowed a failure burst.
+        """
+        expires_at = attempt.state.manual_override_expires_at
+        try:
+            remote = self._l2.get_by_service_name(service_name) if self._l2 else None
+            if remote is None:
+                logger.warning(
+                    "circuit_breaker.trip_pin_hydration_skipped",
+                    service_name=service_name,
+                    reason="remote_row_absent",
+                )
+            else:
+                self._l1.hydrate_snapshot(remote, skip_if_local_pin_active=True)
+                expires_at = remote.manual_override_expires_at
+        except Exception as e:
+            logger.warning(
+                "circuit_breaker.trip_pin_hydration_failed",
+                service_name=service_name,
+                error=str(e),
+            )
+
+        return pinned_trip_attempt(service_name, expires_at)
+
+    @staticmethod
+    def _record_trip_degraded_mode(service_name: str) -> None:
+        """Increment the trip degraded-mode counter (773 D1)."""
+        try:
+            from baldur.metrics.recorders.circuit_breaker import (
+                record_trip_degraded_mode,
+            )
+
+            record_trip_degraded_mode(service_name)
+        except ImportError:
+            pass
+
     def get_all_states(self) -> list[CircuitBreakerStateData]:
         """Look up all states in L1."""
         return self._l1.get_all_states()
@@ -942,9 +1144,7 @@ class RepositoryOperationsMixin:
         result = self._l1.reset(service_name)
 
         if result:
-            updated = self._l1.get_by_service_name(service_name)
-            if updated:
-                self._sync_to_l2_async(service_name, updated)
+            self._sync_to_l2_async(service_name)
 
         return result
 

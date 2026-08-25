@@ -248,6 +248,30 @@ class DLQCompressedEntry:
     archived_at: datetime | None = None
 
 
+def manual_pin_is_active(
+    manually_controlled: object,
+    manual_override_expires_at: datetime | None,
+) -> bool:
+    """Whether a manual override with these fields is still in force.
+
+    The single definition of the rule, taking the two fields rather than a row
+    so every layer can ask it of whatever it is holding: the service's
+    enforcement checks, the storage primitives deciding inside their own lock
+    hold, and the repair lanes.
+
+    The raw ``manually_controlled`` flag is not the question. No primitive
+    clears it on an automatic transition, and only one process per host runs
+    the sweep that does, so a lapsed flag keeps answering "pinned" in every
+    worker the sweep never reaches — which is how a raw-flag guard blocks
+    automatic supervision indefinitely. An override with no stored expiry reads
+    as permanently active: that is the correct reading of "manually controlled,
+    no lifetime", and the reason the service layer never creates one.
+    """
+    return bool(manually_controlled) and (
+        manual_override_expires_at is None or manual_override_expires_at > utc_now()
+    )
+
+
 @dataclass
 class CircuitBreakerStateData:
     """
@@ -301,6 +325,17 @@ class CircuitBreakerStateData:
         """Check if circuit is half-open (testing)"""
         return self.state == CircuitBreakerStateEnum.HALF_OPEN.value
 
+    def is_pin_active(self) -> bool:
+        """Whether the manual override on this row is still in force.
+
+        The row-shaped spelling of ``manual_pin_is_active``, for the storage
+        primitives that ask the question inside the very lock hold, transaction,
+        or script that performs their write.
+        """
+        return manual_pin_is_active(
+            self.manually_controlled, self.manual_override_expires_at
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class CircuitBreakerCloseAttempt:
@@ -321,20 +356,57 @@ class CircuitBreakerCloseAttempt:
 
 @dataclass(frozen=True, slots=True)
 class CircuitBreakerOpenAttempt:
-    """Result of an atomic record-failure-and-check-open attempt.
+    """Result of an atomic transition-to-OPEN attempt.
 
-    Returned by `CircuitBreakerStateRepository.record_failure_with_open_check`.
-    `did_open=True` indicates this caller observed `half_open` and atomically
-    transitioned the storage state to `open` in the same critical section.
+    Returned by both writers of the OPEN state:
+    `CircuitBreakerStateRepository.record_failure_with_open_check` (the
+    HALF_OPEN->OPEN re-open) and `CircuitBreakerStateRepository.trip_to_open`
+    (the CLOSED->OPEN automatic trip). `did_open=True` indicates this caller
+    performed the transition in the same critical section that read the state.
     Service-layer callers must emit the `CIRCUIT_BREAKER_OPENED` event (and run
     the audit / metrics side-effects) only when `did_open` is True — this is the
-    single-fire gate for the HALF_OPEN->OPEN failure path, the symmetric mirror
-    of `CircuitBreakerCloseAttempt.did_close`. A concurrent stale-view caller
-    that also read `half_open` sees `did_open=False`.
+    single-fire gate for the OPEN-writing paths, the symmetric mirror of
+    `CircuitBreakerCloseAttempt.did_close`. A concurrent stale-view caller sees
+    `did_open=False`.
+
+    `state.state` carries the storage state the attempt observed or wrote,
+    except for one sentinel: `CIRCUIT_BREAKER_PINNED_TOKEN`, which `trip_to_open`
+    returns when an active operator override declined the write.
     """
 
     state: CircuitBreakerStateData
     did_open: bool
+
+
+# Sentinel state token returned by ``trip_to_open`` when an operator override
+# still in force on the stored row declined the trip write. Never a stored
+# value: it tells the layered wrapper to deliver the pinned row whole instead
+# of writing a state back, and tells the service to log the suppressed trip
+# rather than run the cluster-logical side effects.
+CIRCUIT_BREAKER_PINNED_TOKEN = "pinned"
+
+
+def pinned_trip_attempt(
+    service_name: str,
+    expires_at: datetime | None,
+) -> CircuitBreakerOpenAttempt:
+    """Build the ``trip_to_open`` result for a store row an operator has pinned.
+
+    The one spelling of the declined-by-pin outcome, shared by every
+    implementation so the sentinel token and the fields the caller reports
+    cannot drift between adapters. The returned row carries the pin fields
+    rather than a circuit state — enough for the service to say what suppressed
+    the trip and until when, and nothing a writeback could mistake for one.
+    """
+    return CircuitBreakerOpenAttempt(
+        state=CircuitBreakerStateData(
+            service_name=service_name,
+            state=CIRCUIT_BREAKER_PINNED_TOKEN,
+            manually_controlled=True,
+            manual_override_expires_at=expires_at,
+        ),
+        did_open=False,
+    )
 
 
 @dataclass
@@ -1007,6 +1079,8 @@ class CircuitBreakerStateRepository(ABC):
         last_failure_at: datetime | None = None,
         half_open_request_count: int | None = None,
         reset_half_open_count: bool = False,
+        clear_opened_at: bool = False,
+        skip_if_pinned: bool = False,
     ) -> bool:
         """Update circuit breaker state.
 
@@ -1022,6 +1096,21 @@ class CircuitBreakerStateRepository(ABC):
                 cold-path transitions out of HALF_OPEN (record_failure,
                 record_success, force_open, force_close) so the state change
                 and counter reset commit in a single round-trip.
+            clear_opened_at: If True, drop the stored OPEN-era timestamp in the
+                same write. ``opened_at=None`` means "keep what is there", so a
+                write that moves a row to CLOSED needs an explicit directive to
+                scrub the timestamp of the OPEN it just left; without it the row
+                reads ``closed`` while still reporting when it opened, and no
+                reader can tell which of the two is current.
+            skip_if_pinned: If True, decline the write — inside the same lock
+                hold, transaction, or script that would perform it — when the
+                *stored* row carries an override still in force. Written for
+                the record-path mirror, whose freshness check reads the local
+                row: a worker that never hydrated a peer's override has nothing
+                local to skip on and would otherwise write its own state over
+                the operator's decision. A declined write is a success for the
+                caller: the store answered healthily and the write was elided by
+                contract.
 
         Returns:
             True on success
@@ -1128,6 +1217,86 @@ class CircuitBreakerStateRepository(ABC):
             )
             open_state = self.get_by_service_name(service_name) or state
             return CircuitBreakerOpenAttempt(state=open_state, did_open=True)
+        return CircuitBreakerOpenAttempt(state=state, did_open=False)
+
+    def trip_to_open(
+        self,
+        service_name: str,
+        failure_count: int,
+    ) -> CircuitBreakerOpenAttempt:
+        """Trip a CLOSED (or absent) circuit to OPEN, one winner per transition.
+
+        The write half of the automatic CLOSED->OPEN trip — the transition that
+        fires during failure bursts and was, until this primitive existed, the
+        only one written through the fire-and-forget mirror, where completion
+        order rather than call order decided what the durable row ended up
+        holding. The trip *decision* stays in the service (window evidence,
+        minimum calls, the effective config); this owns only the state write.
+
+        Race-unsafe default implementation: reads the row, then issues a
+        separate ``update_state``. Adapters that can perform the
+        read-decide-write atomically (InMemory under a single lock acquire,
+        Redis via Lua, SQL under a row lock) MUST override it — the override is
+        what makes ``did_open`` a single-fire gate rather than a hint.
+
+        Branches, identical in every implementation:
+
+        - stored row **actively pinned** (``is_pin_active()``, checked first):
+          no write, ``did_open=False``, state token
+          ``CIRCUIT_BREAKER_PINNED_TOKEN``. The expiry-aware predicate rather
+          than the raw flag: a lapsed flag left behind by a peer would
+          otherwise block every automatic trip from reaching the store until a
+          sweep that may never reach this row cleared it.
+        - stored ``closed`` **or missing**: write the whole OPEN row — the
+          caller's ``failure_count``, ``success_count=0``, ``opened_at=now``,
+          half-open counter and watermark cleared — and return
+          ``did_open=True``. Missing is the CLOSED default: absent is exactly
+          the state a trip fires from. A *lapsed* pin flag is cleared by the
+          same write, so the freshly opened row stays visible to the readers
+          that still filter on the raw flag.
+        - stored ``open``: a race-loser. No write; ``did_open=False`` carrying
+          the row's existing ``opened_at``.
+        - stored ``half_open``: the cluster already moved on to recovery
+          testing. No write; ``did_open=False``, state ``half_open``. Recency
+          over restrictiveness — clobbering back to OPEN would revert a
+          legitimate transition, and one further recorded failure re-opens the
+          cluster through ``record_failure_with_open_check``.
+        - anything else: no write; the stored state is returned unchanged.
+
+        Args:
+            service_name: Circuit breaker identifier.
+            failure_count: The consecutive-failure count the caller decided on,
+                stored verbatim so the durable row and the local one describe
+                the same trip.
+
+        Returns:
+            ``CircuitBreakerOpenAttempt(state, did_open)``. ``did_open`` is True
+            only for the caller whose write performed the CLOSED->OPEN
+            transition under the adapter's atomicity guarantee.
+        """
+        state = self.get_or_create(service_name)
+        if state.is_pin_active():
+            return pinned_trip_attempt(service_name, state.manual_override_expires_at)
+
+        if state.state == CircuitBreakerStateEnum.CLOSED.value:
+            now = utc_now()
+            self.update_state(
+                service_name=service_name,
+                state=CircuitBreakerStateEnum.OPEN.value,
+                failure_count=failure_count,
+                success_count=0,
+                opened_at=now,
+                reset_half_open_count=True,
+            )
+            if state.manually_controlled:
+                # Lapsed pin: the guard above already established it is out of
+                # force, and leaving the flag set would hide the freshly opened
+                # row from the recovery lane's raw-flag filter. The reason is
+                # kept, as the expiry sweep keeps it.
+                self.clear_manual_control(service_name, preserve_reason=True)
+            open_state = self.get_by_service_name(service_name) or state
+            return CircuitBreakerOpenAttempt(state=open_state, did_open=True)
+
         return CircuitBreakerOpenAttempt(state=state, did_open=False)
 
     @abstractmethod

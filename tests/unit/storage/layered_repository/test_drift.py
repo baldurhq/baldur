@@ -445,6 +445,8 @@ class TestDriftHalfOpenWinnerRoutingBehavior:
             failure_count=0,
             success_count=0,
             opened_at=None,
+            clear_opened_at=True,
+            skip_if_pinned=True,
         )
 
     def test_pinned_l2_keeps_its_state_and_is_copied_down(self, repo, mock_l2_repo):

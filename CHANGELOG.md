@@ -12,6 +12,13 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ### Fixed
 
+- A circuit breaker that trips no longer has its own failure records erase the trip from Redis.
+- The trip is one atomic store write now, so a worker no longer readmits traffic it should reject.
+- One open event and one error-budget charge per trip, instead of one per worker that tripped.
+- An operator's force-open or force-close is no longer overwritten by a worker's state mirror.
+- A trip is declined while an operator's override is in force, and logged rather than swallowed.
+- A closed circuit-breaker row no longer keeps the timestamp of the open it left.
+- `baldur_circuit_breaker_trip_degraded_mode_total` counts trips served locally on a store failure.
 - Drift reconciliation now propagates a local half-open winner to the shared store.
 - It previously copied the losing shared state back, undoing the resolution it had just made.
 - A shared row an operator pinned is exempt: the pinned state is copied to the local row instead.
