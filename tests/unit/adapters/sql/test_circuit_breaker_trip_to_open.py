@@ -9,8 +9,9 @@ What sqlite cannot supply is the ``FOR UPDATE NOWAIT`` half: the dialect split
 in the production code omits the clause for sqlite, and lock contention has no
 sqlite analogue. Contention is covered here at the transaction-discipline
 level (the exception is re-raised after a rollback so the layered wrapper can
-record degraded mode and fall back); the locking behavior itself belongs with
-the PostgreSQL integration tests.
+record degraded mode and fall back); the locking behavior itself is verified
+against a real server in
+``tests/integration/postgres/test_cb_nowait_contention_postgres.py``.
 """
 
 from __future__ import annotations
