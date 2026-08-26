@@ -149,13 +149,6 @@ def register_resilience_hooks() -> bool:
         return False
 
     if not _is_resilience_testing_enabled():
-        from baldur.runtime import is_production
-
-        reason = "production" if is_production() else "flag_disabled"
-        logger.info(
-            "resilience.bypass_hooks_skipped",
-            reason=reason,
-        )
         return False
 
     from baldur.core.hooks import BypassRegistry
