@@ -10,6 +10,10 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+### Fixed
+
+- A zero-config process no longer prints `resilience.bypass_hooks_skipped` to stdout on import.
+
 ## [1.8.0] - 2026-08-26
 
 ### Fixed
