@@ -20,9 +20,10 @@ from unittest.mock import Mock
 from baldur.interfaces.repositories import (
     CircuitBreakerStateData,
     FailedOperationData,
+    manual_pin_is_active,
 )
 
-# 상수는 constants.py에서 관리
+# Constants are managed in constants.py
 from tests.factories.constants import (
     DefaultValues,
     Domains,
@@ -109,11 +110,12 @@ class MockCircuitBreakerStateData:
 
         The production predicate reads the override through this method, so a
         double that omits it is not a stand-in for the DTO — it raises inside
-        the code under test instead of answering the question.
+        the code under test instead of answering the question. Delegates to the
+        rule's owner rather than restating it, so the double cannot drift from
+        the production predicate it stands in for.
         """
-        return bool(self.manually_controlled) and (
-            self.manual_override_expires_at is None
-            or self.manual_override_expires_at > datetime.now(UTC)
+        return manual_pin_is_active(
+            self.manually_controlled, self.manual_override_expires_at
         )
 
 

@@ -1101,7 +1101,7 @@ class RepositoryOperationsMixin:
             remote = self._l2.get_by_service_name(service_name) if self._l2 else None
             if remote is None:
                 logger.warning(
-                    "circuit_breaker.trip_pin_hydration_skipped",
+                    "circuit_breaker.trip_pin_hydration_failed",
                     service_name=service_name,
                     reason="remote_row_absent",
                 )
