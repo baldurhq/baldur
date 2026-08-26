@@ -58,22 +58,27 @@ closed and warm, issues:
 
 - **three commands per protected domain the request actually touches** - one to check whether
   the breaker is open, two to record the success.
-- **one plus the number of circuit breakers you have**, for the health snapshot the middleware
-  refreshes. This part does not depend on what the request did. It is a key scan followed by one
-  read per breaker found, and it runs on every request.
+- **one plus the number of circuit breakers you have**, but only if you added the health-bridge
+  middleware. That middleware is opt-in - the quickstart does not install it, and one runbook
+  does - and it refreshes a snapshot of every breaker on every request, as a key scan followed by
+  one read per breaker found. This part does not depend on what the request did.
 
-So a request touching two protected domains in a deployment with two breakers costs nine
-commands, and the same request in a deployment with six breakers costs thirteen. We measured both
-with a counter sitting where the socket would be, rather than reading it off the code.
+So with the health bridge installed, a request touching two protected domains costs nine commands
+in a two-breaker deployment and thirteen in a six-breaker one. We measured both with a counter
+sitting where the socket would be, rather than reading it off the code. Without that middleware,
+only the first term applies.
 
-The useful form for your own planning is therefore `(3 x domains touched) + 1 + your breaker
-count`, multiplied by your own round-trip time. That is a property of the code path rather than
-of our hardware, so it transfers where an absolute would not. On a network-backed setup this
-wait, not the framework's own Python work, is what the saturation-knee section below is about.
+The useful form for your own planning is therefore `3 x domains touched`, plus `1 + your breaker
+count` if you run the health bridge, multiplied by your own round-trip time. That is a property
+of the code path rather than of our hardware, so it transfers where an absolute would not. On a
+network-backed setup this wait, not the framework's own Python work, is what the saturation-knee
+section below is about.
 
-The second term growing with breaker count is a real cost, not a rounding detail: it is the term
-that gets worse as you protect more of your system, which is the opposite of what you want. We
-are treating it as a defect rather than as a property to document and leave alone.
+The second term is worth calling out rather than burying: it grows as you protect more of your
+system, which is the opposite of what you want from it, and it is paid per request for a snapshot
+that does not need to be that fresh. We are treating it as a defect to fix rather than as a
+property to document and leave alone. If you are latency-sensitive and running the health bridge
+today, that term is the first thing to look at.
 
 If you want an absolute for your own capacity planning, measure it on your own hardware. The
 command at the bottom of this page is a start; a load test against your own service is the rest.
