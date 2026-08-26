@@ -52,14 +52,28 @@ predicts your deployment far better than any number from our host would. A figur
 in-process store, with no network at all, is faster by more than an order of magnitude and
 describes nothing you would run.
 
-The protected request path has the same shape. A healthy request through the Django middleware
-chain, with the breaker closed and warm, issues **nine Redis commands**: two to check whether the
-breaker is open, four to record the success, and three for the health snapshot the middleware
-refreshes. That count comes from a counter sitting where the socket would be, not from reading
-the code, and it was re-counted on the current release. Nine is a property of the code path
-rather than of our hardware, so `9 x your RTT` is the Redis wait each protected request adds in
-your deployment. On a network-backed setup that wait, not the framework's own Python work, is
-what the saturation-knee section below is about.
+The protected request path has the same shape, and it is worth being precise about, because the
+count is not a constant. A healthy request through the Django middleware chain, with the breaker
+closed and warm, issues:
+
+- **three commands per protected domain the request actually touches** - one to check whether
+  the breaker is open, two to record the success.
+- **one plus the number of circuit breakers you have**, for the health snapshot the middleware
+  refreshes. This part does not depend on what the request did. It is a key scan followed by one
+  read per breaker found, and it runs on every request.
+
+So a request touching two protected domains in a deployment with two breakers costs nine
+commands, and the same request in a deployment with six breakers costs thirteen. We measured both
+with a counter sitting where the socket would be, rather than reading it off the code.
+
+The useful form for your own planning is therefore `(3 x domains touched) + 1 + your breaker
+count`, multiplied by your own round-trip time. That is a property of the code path rather than
+of our hardware, so it transfers where an absolute would not. On a network-backed setup this
+wait, not the framework's own Python work, is what the saturation-knee section below is about.
+
+The second term growing with breaker count is a real cost, not a rounding detail: it is the term
+that gets worse as you protect more of your system, which is the opposite of what you want. We
+are treating it as a defect rather than as a property to document and leave alone.
 
 If you want an absolute for your own capacity planning, measure it on your own hardware. The
 command at the bottom of this page is a start; a load test against your own service is the rest.
@@ -121,7 +135,9 @@ The setup, so you can judge the numbers rather than take them:
   against a second timing path that agreed with it to within about two percent on every run. The round-trip count
   comes from a stand-in sitting where the Redis socket would be: it keeps the client's real
   encoding work, answers with canned replies, opens no network connection, and counts the
-  commands the real middleware chain issues for one request.
+  commands the real middleware chain issues for one request. It was run at two different breaker
+  counts, which is how we know that count is a function of your deployment rather than a
+  constant.
 - **Version.** The per-request and per-entry figures were measured on the 1.1 line in July 2026;
   the saturation-knee figure was re-measured on the 1.6 line in August 2026. The per-call figure
   and the round-trip count were measured on the 1.8 line in August 2026. The dead-letter
@@ -130,9 +146,10 @@ The setup, so you can judge the numbers rather than take them:
 We re-measure when something plausibly moves a figure, and the dates above are the record of
 when that last happened. Re-measurement has moved published numbers before: the saturation-knee
 figure read 34.58% until a defect in the control arm was fixed, at which point it went up. It
-also confirms figures: the round-trip count was re-counted for the 1.8 release because a change
-to how the breaker writes its mirrored state could have moved it. It had not, and we know that
-because we counted rather than because we read the diff.
+also corrects them: the round-trip count was first written up here as a flat nine per request.
+Re-running the counter against a deployment with more circuit breakers showed it is nine only
+when you have two of them, and the paragraph above now says so. That is the whole reason we
+count rather than read the code - the code reads as a fixed sequence, and the meter disagreed.
 
 ## Measure it on your own hardware
 
