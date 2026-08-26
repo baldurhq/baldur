@@ -581,16 +581,46 @@ class RedisCircuitBreakerStateRepository(
                 )
                 return True
             except Exception as e:
-                logger.warning(
-                    "redis_cb_repo.pin_guarded_update_failed",
-                    service=service_name,
-                    error=e,
-                )
+                # Loudness splits on whether anyone named a Redis, the same
+                # way the backend splits the report of its own probe. A store
+                # someone configured that cannot take this write is an
+                # incident; the shipped default address being unreachable is
+                # the expected state of a zero-config run, where this write
+                # reported nothing at all before it grew the pin guard.
+                # Reporting it there fills a first run's console with connect
+                # failures at the background refresh cadence.
+                if self._writing_to_unconfigured_default():
+                    logger.debug(
+                        "redis_cb_repo.pin_guarded_update_failed",
+                        service=service_name,
+                        error=e,
+                    )
+                else:
+                    logger.warning(
+                        "redis_cb_repo.pin_guarded_update_failed",
+                        service=service_name,
+                        error=e,
+                    )
 
         existing = self.get_state(service_name)
         if existing is not None and existing.is_pin_active():
             return True
         return self._backend.hset(self._make_key(service_name), updates)
+
+    def _writing_to_unconfigured_default(self) -> bool:
+        """Is this write dialing a Redis address nobody named?
+
+        The backend is asked rather than the settings predicate because a
+        construction kwarg and a per-class environment variable also count as
+        operator intent, and only the backend can see those.
+
+        Answers False for anything that is not exactly ``True``. A spec'd test
+        double answers the probe with a truthy mock, and under plain
+        truthiness every such construction would silently go quiet — the
+        failing direction here is silence, so the pin matters.
+        """
+        probe = getattr(self._backend, "_probing_unconfigured_default", None)
+        return callable(probe) and probe() is True
 
     def try_acquire_half_open_slot(
         self,

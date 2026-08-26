@@ -347,6 +347,90 @@ class TestRedisUpdateStateSkipIfPinnedBehavior:
             for entry in caplog
         )
 
+    def test_unnamed_default_address_reports_the_failure_at_debug(self):
+        # Nobody named a Redis, so an unreachable one is the expected state of
+        # a zero-config run rather than an incident. Before this write grew a
+        # pin guard it reported nothing at all here; at WARNING it fills a
+        # first run's console at the background refresh cadence.
+        repo, backend = _make_repo(1)
+        backend.raw_redis_client.eval.side_effect = ConnectionError("blip")
+        backend.hset.return_value = True
+        backend._probing_unconfigured_default.return_value = True
+        unpinned_row = CircuitBreakerStateData(
+            service_name="svc", state=CircuitBreakerStateEnum.OPEN.value
+        )
+
+        with capture_logs() as caplog:
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr(repo, "get_state", lambda service_name: unpinned_row)
+                result = repo.update_state(
+                    service_name="svc",
+                    state=CircuitBreakerStateEnum.CLOSED.value,
+                    skip_if_pinned=True,
+                )
+
+        assert result is True
+        reports = [
+            entry
+            for entry in caplog
+            if entry.get("event") == "redis_cb_repo.pin_guarded_update_failed"
+        ]
+        assert len(reports) == 1
+        assert reports[0].get("log_level") == "debug"
+
+    def test_a_named_redis_keeps_the_failure_at_warning(self):
+        # The other half of the split, pinned explicitly rather than left to
+        # the spec'd double's truthiness: a store someone configured that
+        # cannot take the write is a real incident.
+        repo, backend = _make_repo(1)
+        backend.raw_redis_client.eval.side_effect = ConnectionError("blip")
+        backend.hset.return_value = True
+        backend._probing_unconfigured_default.return_value = False
+        unpinned_row = CircuitBreakerStateData(
+            service_name="svc", state=CircuitBreakerStateEnum.OPEN.value
+        )
+
+        with capture_logs() as caplog:
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr(repo, "get_state", lambda service_name: unpinned_row)
+                repo.update_state(
+                    service_name="svc",
+                    state=CircuitBreakerStateEnum.CLOSED.value,
+                    skip_if_pinned=True,
+                )
+
+        assert any(
+            entry.get("event") == "redis_cb_repo.pin_guarded_update_failed"
+            and entry.get("log_level") == "warning"
+            for entry in caplog
+        )
+
+    def test_a_backend_without_the_probe_stays_loud(self):
+        # Silence is the dangerous direction, so anything that is not exactly
+        # True keeps the WARNING — here a backend carrying no probe at all.
+        repo, backend = _make_repo(1)
+        backend.raw_redis_client.eval.side_effect = ConnectionError("blip")
+        backend.hset.return_value = True
+        del backend._probing_unconfigured_default
+        unpinned_row = CircuitBreakerStateData(
+            service_name="svc", state=CircuitBreakerStateEnum.OPEN.value
+        )
+
+        with capture_logs() as caplog:
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr(repo, "get_state", lambda service_name: unpinned_row)
+                repo.update_state(
+                    service_name="svc",
+                    state=CircuitBreakerStateEnum.CLOSED.value,
+                    skip_if_pinned=True,
+                )
+
+        assert any(
+            entry.get("event") == "redis_cb_repo.pin_guarded_update_failed"
+            and entry.get("log_level") == "warning"
+            for entry in caplog
+        )
+
     def test_no_live_client_declines_on_an_actively_pinned_row(self):
         # Degraded mode: the "store" is process-local memory + WAL, so a
         # check-then-write gap costs nothing — but the guard must still hold.
