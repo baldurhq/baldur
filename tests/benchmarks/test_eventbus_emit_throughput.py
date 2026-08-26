@@ -123,6 +123,28 @@ def _h4(event: Any) -> None:
 _HANDLERS = (_h0, _h1, _h2, _h3, _h4)
 
 
+@pytest.fixture(autouse=True)
+def _production_timeout_posture(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Pin the production handler timeout for this row, not the suite's.
+
+    The shared test conftest shortens
+    ``BALDUR_EVENT_BUS_HANDLER_TIMEOUT_SECONDS`` so that unrelated circuit
+    breaker / notification tests do not wait out the real budget per handler.
+    G1 asserts the production value, so under the default test environment
+    this row would abort before measuring anything. Establish the posture
+    here rather than assert whatever the ambient environment happens to be;
+    G1 then still catches a genuine change to the production default.
+
+    Removing the override (not overwriting it with a literal) keeps the
+    5.0 in one place — the settings field itself.
+    """
+    monkeypatch.delenv("BALDUR_EVENT_BUS_HANDLER_TIMEOUT_SECONDS", raising=False)
+    reset_event_bus_settings()
+    yield
+    # Let the next test re-read the suite-wide override monkeypatch restores.
+    reset_event_bus_settings()
+
+
 def _settings_guard_g1(bus: BaldurEventBus) -> None:
     """G1: confirm EventBusSettings + bus subscription count match the
     documented hot path.
