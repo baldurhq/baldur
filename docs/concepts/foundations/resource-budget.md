@@ -24,7 +24,7 @@ protocol described further down. Read the "What it means" column before quoting 
 
 | Cost | Figure | Measured | What it means |
 |---|---|---|---|
-| Per protected call, in-memory | **~39 µs** | 2026-08-26 | What the decorator itself adds to one call, on the default chain — circuit breaker only, in-memory state, no network anywhere in the path. Measured in-process on the same developer workstation. What transfers is the order of magnitude, tens of microseconds; the exact figure is ours, not yours. Point Baldur at Redis and this stops being the dominant term — see the round trips below. |
+| Per protected call, in-memory | **~39 µs** | 2026-08-26 | What the decorator itself adds to one call, on the default chain — circuit breaker only, in-memory state, no network anywhere in the path. Measured in-process on the same developer workstation. What transfers is the order of magnitude, tens of microseconds; the exact figure is ours, not yours. |
 | Per-request overhead, below saturation | **+1.1%** | 2026-07-14 | Server-side throughput cost of the full protected path, measured with headroom left on the host. Above saturation this stops being the right question; see the section on the saturation knee. |
 | Dead-letter entry, stored | **~953 B** | 2026-05-14 | Redis bytes per captured failure, end to end through the real capture path. Compressed, so a very different payload shape moves it; backlog memory tracks `entries x 953 B`, with the per-entry figure itself drifting by up to about 180 B between runs. |
 | Rate-limit tracker, per tracked request | **~124 B** | 2026-07-14 | Redis bytes per request inside the tracker's retention window. Rises slowly with tracker size, so it is measured at production-scale set sizes rather than small ones. |
@@ -51,34 +51,6 @@ dominated by Redis round trips, roughly a dozen per entry, so `1 / (fixed cost +
 predicts your deployment far better than any number from our host would. A figure measured on an
 in-process store, with no network at all, is faster by more than an order of magnitude and
 describes nothing you would run.
-
-The protected request path has the same shape, and it is worth being precise about, because the
-count is not a constant. A healthy request through the Django middleware chain, with the breaker
-closed and warm, issues:
-
-- **three commands per protected domain the request actually touches** - one to check whether
-  the breaker is open, two to record the success.
-- **one plus the number of circuit breakers you have**, but only if you added the health-bridge
-  middleware. That middleware is opt-in - the quickstart does not install it, and one runbook
-  does - and it refreshes a snapshot of every breaker on every request, as a key scan followed by
-  one read per breaker found. This part does not depend on what the request did.
-
-So with the health bridge installed, a request touching two protected domains costs nine commands
-in a two-breaker deployment and thirteen in a six-breaker one. We measured both with a counter
-sitting where the socket would be, rather than reading it off the code. Without that middleware,
-only the first term applies.
-
-The useful form for your own planning is therefore `3 x domains touched`, plus `1 + your breaker
-count` if you run the health bridge, multiplied by your own round-trip time. That is a property
-of the code path rather than of our hardware, so it transfers where an absolute would not. On a
-network-backed setup this wait, not the framework's own Python work, is what the saturation-knee
-section below is about.
-
-The second term is worth calling out rather than burying: it grows as you protect more of your
-system, which is the opposite of what you want from it, and it is paid per request for a snapshot
-that does not need to be that fresh. We are treating it as a defect to fix rather than as a
-property to document and leave alone. If you are latency-sensitive and running the health bridge
-today, that term is the first thing to look at.
 
 If you want an absolute for your own capacity planning, measure it on your own hardware. The
 command at the bottom of this page is a start; a load test against your own service is the rest.
@@ -134,27 +106,23 @@ The setup, so you can judge the numbers rather than take them:
 - **Repetition.** Three or more runs per arm, with the spread reported alongside the mean. A
   difference smaller than the observed spread is reported as "below the noise floor" rather than
   as a number.
-- **In-process measurements.** The per-call figure and the round-trip count come from inside a
-  single process rather than from a load test. The per-call cost is ten thousand timed calls
-  after a warm-up, on a machine checked to be otherwise idle before the run, cross-checked
-  against a second timing path that agreed with it to within about two percent on every run. The round-trip count
-  comes from a stand-in sitting where the Redis socket would be: it keeps the client's real
-  encoding work, answers with canned replies, opens no network connection, and counts the
-  commands the real middleware chain issues for one request. It was run at two different breaker
-  counts, which is how we know that count is a function of your deployment rather than a
-  constant.
+- **In-process measurements.** The per-call figure comes from inside a single process rather than
+  from a load test: ten thousand timed calls after a warm-up, on a machine checked to be
+  otherwise idle before the run, cross-checked against a second timing path that agreed with it
+  to within about two percent on every run.
 - **Version.** The per-request and per-entry figures were measured on the 1.1 line in July 2026;
   the saturation-knee figure was re-measured on the 1.6 line in August 2026. The per-call figure
-  and the round-trip count were measured on the 1.8 line in August 2026. The dead-letter
+  was measured on the 1.8 line in August 2026. The dead-letter
   entry cost dates to May 2026 and describes the compressed encoding still in use.
 
 We re-measure when something plausibly moves a figure, and the dates above are the record of
 when that last happened. Re-measurement has moved published numbers before: the saturation-knee
 figure read 34.58% until a defect in the control arm was fixed, at which point it went up. It
-also corrects them: the round-trip count was first written up here as a flat nine per request.
-Re-running the counter against a deployment with more circuit breakers showed it is nine only
-when you have two of them, and the paragraph above now says so. That is the whole reason we
-count rather than read the code - the code reads as a fixed sequence, and the meter disagreed.
+also withdraws them. A count of Redis round trips per protected request appeared on this page
+briefly and has been removed: the harness that produced it wired the circuit breaker to Redis
+directly, which is not what the framework does by default, so the number described a
+configuration you would not run. It is being re-measured against the default wiring before
+anything goes back here. The figure never reached a released version of this page.
 
 ## Measure it on your own hardware
 
