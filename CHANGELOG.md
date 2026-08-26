@@ -10,6 +10,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-08-26
+
 ### Fixed
 
 - A circuit breaker that trips no longer has its own failure records erase the trip from Redis.
