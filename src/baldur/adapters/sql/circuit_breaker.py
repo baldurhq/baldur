@@ -781,6 +781,7 @@ class SQLCircuitBreakerStateRepository(
         """
         from baldur.interfaces.repositories import (
             CircuitBreakerOpenAttempt,
+            manual_pin_is_active,
             pinned_trip_attempt,
         )
 
@@ -795,14 +796,18 @@ class SQLCircuitBreakerStateRepository(
         cursor.execute(self._prepare(select_sql), (service_name,))
         row = cursor.fetchone()
 
-        now = utc_now()
         current_state = row[0] if row is not None else "missing"
         current_opened_at = self._dt_from_db(row[1]) if row is not None else None
         pinned = bool(row[2]) if row is not None else False
         expires_at = self._dt_from_db(row[3]) if row is not None else None
 
-        if pinned and (expires_at is None or expires_at > now):
+        # The shared rule, then the write stamp: taking ``now`` after the check
+        # keeps the expiry comparand at or before ``opened_at``, so a lapsed
+        # pin's cleared row always satisfies the ``opened_at >= expires_at``
+        # lift-due discriminator.
+        if manual_pin_is_active(pinned, expires_at):
             return pinned_trip_attempt(service_name, expires_at)
+        now = utc_now()
 
         def _attempt(state_str, opened_at, did_open, count=0):
             state_data = CircuitBreakerStateData(

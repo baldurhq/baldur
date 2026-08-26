@@ -408,13 +408,16 @@ class ResilientStorageBackend:
 
     @property
     def raw_redis_client(self) -> Any:
-        """Return the underlying redis client, or None when Redis is inactive.
+        """Return the underlying redis client, or None when none was created.
 
         Public seam for composed repositories (the Redis DLQ and
         circuit-breaker state repositories) that need the raw client for
-        operations the cache interface does not expose. Returns None when the
-        backend has no live Redis adapter (degraded / uninitialized) so
-        callers can fall through to their degraded-mode path.
+        operations the cache interface does not expose. Returns None only when
+        the backend was constructed without a Redis adapter (uninitialized) —
+        entering DEGRADED mode does not clear the adapter, so the stale client
+        object is still returned and calls on it raise. Callers own their own
+        failure envelope: they fall through to their degraded-mode path from
+        the exception, not from a None check.
         """
         return self._redis.raw_client if self._redis is not None else None
 

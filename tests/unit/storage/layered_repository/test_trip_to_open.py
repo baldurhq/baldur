@@ -372,7 +372,8 @@ class TestPinnedTripHydrationBehavior:
         assert attempt.state.manual_override_expires_at == expires_at
         assert repo._l1.get_by_service_name(SVC).state != "open"
         assert any(
-            entry.get("event") == "circuit_breaker.trip_pin_hydration_skipped"
+            entry.get("event") == "circuit_breaker.trip_pin_hydration_failed"
+            and entry.get("reason") == "remote_row_absent"
             and entry.get("log_level") == "warning"
             for entry in caplog
         )
