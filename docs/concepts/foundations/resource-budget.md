@@ -24,6 +24,7 @@ protocol described further down. Read the "What it means" column before quoting 
 
 | Cost | Figure | Measured | What it means |
 |---|---|---|---|
+| Per protected call, in-memory | **~39 µs** | 2026-08-26 | What the decorator itself adds to one call, on the default chain — circuit breaker only, in-memory state, no network anywhere in the path. Measured in-process on the same developer workstation. What transfers is the order of magnitude, tens of microseconds; the exact figure is ours, not yours. Point Baldur at Redis and this stops being the dominant term — see the round trips below. |
 | Per-request overhead, below saturation | **+1.1%** | 2026-07-14 | Server-side throughput cost of the full protected path, measured with headroom left on the host. Above saturation this stops being the right question; see the section on the saturation knee. |
 | Dead-letter entry, stored | **~953 B** | 2026-05-14 | Redis bytes per captured failure, end to end through the real capture path. Compressed, so a very different payload shape moves it; backlog memory tracks `entries x 953 B`, with the per-entry figure itself drifting by up to about 180 B between runs. |
 | Rate-limit tracker, per tracked request | **~124 B** | 2026-07-14 | Redis bytes per request inside the tracker's retention window. Rises slowly with tracker size, so it is measured at production-scale set sizes rather than small ones. |
@@ -50,6 +51,15 @@ dominated by Redis round trips, roughly a dozen per entry, so `1 / (fixed cost +
 predicts your deployment far better than any number from our host would. A figure measured on an
 in-process store, with no network at all, is faster by more than an order of magnitude and
 describes nothing you would run.
+
+The protected request path has the same shape. A healthy request through the Django middleware
+chain, with the breaker closed and warm, issues **nine Redis commands**: two to check whether the
+breaker is open, four to record the success, and three for the health snapshot the middleware
+refreshes. That count comes from a counter sitting where the socket would be, not from reading
+the code, and it was re-counted on the current release. Nine is a property of the code path
+rather than of our hardware, so `9 x your RTT` is the Redis wait each protected request adds in
+your deployment. On a network-backed setup that wait, not the framework's own Python work, is
+what the saturation-knee section below is about.
 
 If you want an absolute for your own capacity planning, measure it on your own hardware. The
 command at the bottom of this page is a start; a load test against your own service is the rest.
@@ -105,13 +115,24 @@ The setup, so you can judge the numbers rather than take them:
 - **Repetition.** Three or more runs per arm, with the spread reported alongside the mean. A
   difference smaller than the observed spread is reported as "below the noise floor" rather than
   as a number.
+- **In-process measurements.** The per-call figure and the round-trip count come from inside a
+  single process rather than from a load test. The per-call cost is ten thousand timed calls
+  after a warm-up, on a machine checked to be otherwise idle before the run, cross-checked
+  against a second timing path that agreed with it to within about two percent on every run. The round-trip count
+  comes from a stand-in sitting where the Redis socket would be: it keeps the client's real
+  encoding work, answers with canned replies, opens no network connection, and counts the
+  commands the real middleware chain issues for one request.
 - **Version.** The per-request and per-entry figures were measured on the 1.1 line in July 2026;
-  the saturation-knee figure was re-measured on the 1.6 line in August 2026. The dead-letter
+  the saturation-knee figure was re-measured on the 1.6 line in August 2026. The per-call figure
+  and the round-trip count were measured on the 1.8 line in August 2026. The dead-letter
   entry cost dates to May 2026 and describes the compressed encoding still in use.
 
 We re-measure when something plausibly moves a figure, and the dates above are the record of
 when that last happened. Re-measurement has moved published numbers before: the saturation-knee
-figure read 34.58% until a defect in the control arm was fixed, at which point it went up.
+figure read 34.58% until a defect in the control arm was fixed, at which point it went up. It
+also confirms figures: the round-trip count was re-counted for the 1.8 release because a change
+to how the breaker writes its mirrored state could have moved it. It had not, and we know that
+because we counted rather than because we read the diff.
 
 ## Measure it on your own hardware
 
