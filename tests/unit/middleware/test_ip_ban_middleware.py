@@ -7,9 +7,9 @@ Loads ip_ban.py directly via importlib (no Django settings required).
 from __future__ import annotations
 
 import json
-import os
 import sys
 from importlib.util import module_from_spec, spec_from_file_location
+from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
@@ -22,28 +22,44 @@ import pytest
 # Same pattern as test_response_meta_region.py.
 
 
+_MODULE_NAME = "baldur.api.django.middleware.ip_ban"
+
+
+def _baldur_source(*parts: str) -> Path:
+    """Locate a module file inside the INSTALLED baldur package.
+
+    ``baldur.__file__`` is ``<repo>/src/baldur/__init__.py`` where the source
+    tree ships beside the tests, and the sibling clone's copy where it does
+    not, so one expression finds the file from either test tree. A
+    tree-relative ``../../../../src`` path resolves in only one of them, and
+    where it does not the direct load below fails, this whole file skips
+    silently, and the failed load leaves an empty module registered under the
+    real dotted name for the rest of the process. Importing ``baldur`` itself
+    is safe here -- it is the ``baldur.api.django.middleware`` package whose
+    Django init chain the direct load exists to bypass.
+    """
+    import baldur
+
+    return Path(baldur.__file__).resolve().parent.joinpath(*parts)
+
+
 def _load_ip_ban_module():
     """Load only the ip_ban.py module directly, without Django dependencies."""
-    ip_ban_path = os.path.normpath(
-        os.path.join(
-            os.path.dirname(__file__),
-            "..",
-            "..",
-            "..",
-            "..",
-            "src",
-            "baldur",
-            "api",
-            "django",
-            "middleware",
-            "ip_ban.py",
-        )
-    )
+    ip_ban_path = _baldur_source("api", "django", "middleware", "ip_ban.py")
 
-    spec = spec_from_file_location("baldur.api.django.middleware.ip_ban", ip_ban_path)
+    spec = spec_from_file_location(_MODULE_NAME, str(ip_ban_path))
     module = module_from_spec(spec)
-    sys.modules["baldur.api.django.middleware.ip_ban"] = module
-    spec.loader.exec_module(module)
+    sys.modules[_MODULE_NAME] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        # exec_module needs the name registered first (circular imports resolve
+        # through sys.modules), but a raising exec leaves an EMPTY module under
+        # the real dotted name. Any later import of it in the same worker then
+        # gets the stub, so a failure here becomes a collection error somewhere
+        # else. Unregister before propagating.
+        del sys.modules[_MODULE_NAME]
+        raise
     return module
 
 
