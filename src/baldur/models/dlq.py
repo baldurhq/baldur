@@ -6,8 +6,11 @@ installs (e.g., DLQConfig.from_settings() is called by adapter glue,
 DLQEntryResult is returned by the OSS audit fallback path, CleanupStats
 is consumed by both OSS interfaces.statistics and the PRO DLQ service).
 
-The DLQ orchestrator and repository classes remain PRO-tier — OSS
-callers reach them via the Protocols in :mod:`baldur.interfaces.dlq`.
+The OSS capture and read cores live in :mod:`baldur.services.dlq_capture`
+and :mod:`baldur.services.dlq_read`; the PRO ``DLQService`` inherits them
+and overlays the operate-at-scale surface. The ``dlq_service`` /
+``dlq_repository`` registry slots stay PRO-filled, so OSS callers reach
+those through the Protocols in :mod:`baldur.interfaces.dlq`.
 """
 
 from __future__ import annotations

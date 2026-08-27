@@ -280,7 +280,7 @@ nav:
           - Policy & ML strategy: reference/interfaces/policy_and_ml.md
           - Singleton protocols: reference/interfaces/singletons.md
       - Services:
-          - Service access: reference/services/access.md
+          - "Service access & replay": reference/services/access.md
           - Circuit breaker & rate limiting: reference/services/circuit_breaker.md
           - Bulkhead: reference/services/bulkhead.md
           - Idempotency: reference/services/idempotency.md
@@ -308,10 +308,10 @@ nav:
       - reference/env-vars.md
       - PRO (subscriber):
           - reference/pro/index.md
-          - Dead-letter queue: reference/pro/dlq.md
-          - Replay queue: reference/pro/replay.md
+          - Dead-letter queue at scale: reference/pro/dlq.md
+          - Replay queue (throttled): reference/pro/replay.md
           - Emergency mode: reference/pro/emergency-mode.md
-          - Bulkhead: reference/pro/bulkhead.md
+          - Bulkhead (thread-pool): reference/pro/bulkhead.md
           - Adaptive throttle: reference/pro/throttle.md
           - Canary rollout: reference/pro/canary.md
           - Unified notification: reference/pro/unified-notification.md

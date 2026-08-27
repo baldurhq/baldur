@@ -1,9 +1,10 @@
-"""``@dlq_protect`` — PRO-aliased preset of ``@protected``.
+"""``@dlq_protect`` — zero-message-loss preset of ``@protected``.
 
 Thin wrapper around ``baldur.protect_facade.protected()`` that pins the
-"zero message loss" PRO defaults: ``dlq=True``, ``retry=True``,
+"zero message loss" defaults: ``dlq=True``, ``retry=True``,
 ``circuit_breaker=True``. Other kwargs (``fallback``, ``timeout``,
-``context``) pass through unchanged.
+``context``) pass through unchanged. Capture works on a plain OSS install;
+PRO overlays the operate-at-scale surface on the same queue.
 """
 
 # Reference: 458 §D4.
@@ -33,10 +34,10 @@ def dlq_protect(
     | None
     | Literal[False] = _CONTEXT_FROM_UNSET,  # type: ignore[assignment]
 ) -> Callable[[Callable[..., T]], Callable[..., T]]:
-    """PRO-aliased ``@protected`` with zero-message-loss defaults pinned.
+    """``@protected`` with zero-message-loss defaults pinned.
 
     Equivalent to ``@protected(name, dlq=True, retry=True, circuit_breaker=True)``
-    but communicates the PRO value proposition at the decoration site.
+    but states the intent at the decoration site.
 
     Args:
         name: Identifier used for metrics/logging (passed to ``protect()``).

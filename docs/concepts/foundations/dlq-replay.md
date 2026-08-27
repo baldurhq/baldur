@@ -335,6 +335,7 @@ operate-at-scale surface on top.
 - [Capturing failures that happen before your view runs (Django)](https://github.com/baldurhq/baldur/blob/main/docs/runbooks/dlq-two-layer-activation.md) — `dlq=True` captures what the wrapped function raises; failures that occur earlier in the request (database connection setup, middleware-stage errors) reach the queue only once the Django middleware layer is configured as well
 - [Web Console](web-console.md) — the admin console where the DLQ panel lives
 - [Environment Variables](../../reference/env-vars.md) — the complete operator-tunable list
+- [Replay service API](../../reference/services/access.md) — the OSS `ReplayService`: single-entry, batch-by-failure-type, and on-recovery replay
 - [Dead-letter queue API (PRO)](../../reference/pro/dlq.md) — batch replay and management operations
 - [Replay queue API (PRO)](../../reference/pro/replay.md) — throttled replay options
 - [Getting Started](../../getting-started/index.md) — set it up
