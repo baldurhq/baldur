@@ -317,10 +317,12 @@ class TestRecordSuccessHotPathBudget:
         assert repository.calls == []
 
     def test_slow_path_success_does_reach_the_repository(self):
-        """Control: without a clean hint the reset write still happens.
+        """Control: without a clean hint the slow path still reads the row.
 
         Pins that the zero-call assertion above measures the fast path rather
-        than a proxy that never records anything.
+        than a proxy that never records anything. The recorded call is the
+        fresh state read — the reset write itself is skipped on this row,
+        because 775 D1 makes it conditional on a non-zero failure count.
         """
         repository = _CountingRepository(InMemoryCircuitBreakerStateRepository())
         service = _service(_config(), repository)

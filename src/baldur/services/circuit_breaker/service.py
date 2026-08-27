@@ -1317,12 +1317,23 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
                 service_name,
                 effective_config.sliding_window_size,
             )
-            # Reset failure count on success in closed state
-            self.repository.update_state(
-                service_name=service_name,
-                state="closed",
-                failure_count=0,
-            )
+            # 775 D1/D2: the write's only semantic is the consecutive-failure
+            # reset, so it is skipped when there is no count to reset. Every
+            # other field it supplies already equals the stored value, and the
+            # fields it omits resolve back to the stored value in all three
+            # adapters — on a row that is already CLOSED with failure_count 0
+            # the write changes nothing but the updated_at stamp. Do not
+            # restore the unconditional call: it cost one repository write plus
+            # a two-round-trip L2 mirror on every healthy success, and that
+            # mirror writes this worker's whole row over a peer worker's.
+            # `state` is the fresh read taken above, so the decision cannot be
+            # stale the way a caller-supplied hint can.
+            if state.failure_count != 0:
+                self.repository.update_state(
+                    service_name=service_name,
+                    state="closed",
+                    failure_count=0,
+                )
 
         if circuit_closed:
             # Recovery starts a fresh CLOSED period; outcomes from before the

@@ -10,6 +10,13 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+### Changed
+
+- A closed, healthy circuit breaker no longer writes its state on every recorded success.
+- Circuit-breaker writes to Redis now track state transitions rather than request volume.
+- A worker's success no longer resets a peer worker's open circuit or failure count in Redis.
+- A circuit-breaker row for a service that never trips now ages out of the daily stale-key sweep.
+
 ### Fixed
 
 - A zero-config process no longer prints `resilience.bypass_hooks_skipped` to stdout on import.
