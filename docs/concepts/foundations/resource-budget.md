@@ -61,34 +61,42 @@ The `+1.1%` in the table is measured with headroom on the host. Push the same se
 saturates and the picture changes sharply, so here is that number with everything you need to
 read it.
 
-**At the saturation knee, the total framework cost is a 36.21% shift in the ceiling** — a single
-synchronous worker's peak throughput drops by that much once Baldur is fully wired in. Most of the
-cost is middleware plus initialization and background work rather than the protective decorator
-itself, but the split between those two is not measured precisely enough to put a ratio on, so we
-do not publish one.
+**This figure is withdrawn pending re-measurement.** It read 36.21%: the drop in a single
+synchronous worker's peak throughput once Baldur was fully wired in. Two things happened to it.
 
-Four qualifiers, all load-bearing:
+First, a change to the circuit breaker removed a state write that ran on every successful
+request — and that write turned out to be most of what the measurement was measuring. Its
+traffic went from tens of thousands of background synchronisations per measured arm to none at
+all. Whatever the current cost is, the old figure describes a code path the framework no longer
+takes.
+
+Second, the re-measurement that established this did not clear the noise floor its own protocol
+requires. It ran on a host that was not quiet enough, and the throughput comparison it produced
+sits well inside its own measurement noise. So there is evidence against the old number and no
+licensed replacement for it.
+
+We would rather publish nothing here than a number we have evidence against. The re-measurement
+is scheduled; a figure goes back here when it clears its own gates, with its qualifiers.
+
+Three of those qualifiers will still apply whatever the number turns out to be, and they are
+worth reading now because they are what makes a saturation-knee figure hard to use:
 
 1. **The posture is one synchronous worker.** The measurement runs a single sync worker
    (`-w 1`) with the application and Redis on the same host. That is the configuration where
    the effect is largest and cleanest to isolate, not the configuration most people deploy.
-2. **The cost is I/O wait, and concurrency hides it.** What binds the ceiling is time spent
-   waiting on Redis round trips. A single sync worker has nothing else to do while it waits, so
-   the wait converts directly into lost throughput. Add workers, threads, or async and some of
-   that wait overlaps with useful work. How much depends on your configuration, which is
-   precisely why we cannot publish a corrected number for you.
-3. **It does not transfer.** Faster storage, a different worker model, or a service whose own
-   work dominates its request time will all read differently. Treat 36.21% as "what this costs
-   in the worst reasonable case we could construct", not as a number to plug into a capacity
-   plan.
-4. **It is a conservative floor, not a ceiling.** In the comparison run, the database saturated
-   on the bare reference side too, which flatters the bare arm. The real shift is at least this
-   large.
+2. **It does not transfer.** Faster storage, a different worker model, or a service whose own
+   work dominates its request time will all read differently. A saturation-knee figure is "what
+   this costs in the worst reasonable case we could construct", not a number to plug into a
+   capacity plan.
+3. **It is a conservative floor, not a ceiling.** In the comparison runs the database saturates
+   on the bare reference side too, which flatters the bare arm. The real shift is at least as
+   large as whatever is measured.
 
-The honest summary: below saturation the cost is around a percent, and at a single sync worker's
-saturation knee it is roughly a third of the ceiling. Both are true, they answer different
-questions, and quoting either one without saying which is which is how a real number turns into
-a misleading one.
+What still stands is the row in the table above: **below saturation the cost is around a
+percent.** That measurement has headroom on the host, does not depend on the withdrawn one, and
+answers a different question. Quoting a below-saturation figure and a saturation-knee figure
+without saying which is which is how a real number turns into a misleading one — which is also
+why the missing one is not quietly replaced with the one that remains.
 
 ## How these numbers were measured
 
@@ -110,19 +118,28 @@ The setup, so you can judge the numbers rather than take them:
   from a load test: ten thousand timed calls after a warm-up, on a machine checked to be
   otherwise idle before the run, cross-checked against a second timing path that agreed with it
   to within about two percent on every run.
-- **Version.** The per-request and per-entry figures were measured on the 1.1 line in July 2026;
-  the saturation-knee figure was re-measured on the 1.6 line in August 2026. The per-call figure
-  was measured on the 1.8 line in August 2026. The dead-letter
-  entry cost dates to May 2026 and describes the compressed encoding still in use.
+- **Version.** The per-request and per-entry figures were measured on the 1.1 line in July 2026.
+  The per-call figure was measured on the 1.8 line in August 2026. The dead-letter entry cost
+  dates to May 2026 and describes the compressed encoding still in use. The saturation-knee
+  figure was withdrawn in August 2026 and has no current value.
 
 We re-measure when something plausibly moves a figure, and the dates above are the record of
 when that last happened. Re-measurement has moved published numbers before: the saturation-knee
-figure read 34.58% until a defect in the control arm was fixed, at which point it went up. It
-also withdraws them. A count of Redis round trips per protected request appeared on this page
-briefly and has been removed: the harness that produced it wired the circuit breaker to Redis
-directly, which is not what the framework does by default, so the number described a
-configuration you would not run. It is being re-measured against the default wiring before
-anything goes back here. The figure never reached a released version of this page.
+figure read 34.58% until a defect in the control arm was fixed, at which point it went up to
+36.21%. It also withdraws them, and has now done so twice.
+
+A count of Redis round trips per protected request appeared on this page briefly and has been
+removed: the harness that produced it wired the circuit breaker to Redis directly, which is not
+what the framework does by default, so the number described a configuration you would not run.
+It is being re-measured against the default wiring before anything goes back here. That figure
+never reached a released version of this page.
+
+The saturation-knee figure is the second withdrawal, and unlike the first it had been published
+for weeks. We changed the framework in a way that removed most of what that measurement was
+measuring, and the re-measurement confirmed the change but was too noisy to license a
+replacement. Both halves are in the section above. The rule we are following is that a figure
+we have evidence against comes down when we learn that, not when we have something better to
+put in its place.
 
 ## Measure it on your own hardware
 
