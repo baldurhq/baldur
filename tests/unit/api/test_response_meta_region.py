@@ -20,9 +20,46 @@ Note:
 import os
 import sys
 from importlib.util import module_from_spec, spec_from_file_location
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+
+def _baldur_source(*parts: str) -> Path:
+    """Locate a module file inside the INSTALLED baldur package.
+
+    ``baldur.__file__`` is ``<repo>/src/baldur/__init__.py`` where the source
+    tree ships beside the tests, and the sibling clone's copy where it does
+    not, so one expression finds the file from either test tree. A
+    tree-relative ``../../../../src`` path resolves in only one of them, and
+    where it does not the direct load below fails, this whole file skips
+    silently, and the failed load leaves empty modules registered under the
+    real dotted names for the rest of the process. Importing ``baldur`` itself
+    is safe here -- it is the ``baldur.api`` package whose Django REST
+    Framework dependency the direct load exists to bypass.
+    """
+    import baldur
+
+    return Path(baldur.__file__).resolve().parent.joinpath(*parts)
+
+
+def _exec_in_place(module_name: str, path: Path):
+    """Execute one source file under its real dotted name."""
+    spec = spec_from_file_location(module_name, str(path))
+    module = module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        # exec_module needs the name registered first (the three modules here
+        # import each other by dotted name), but a raising exec leaves an EMPTY
+        # module under that name. Any later import of it in the same worker
+        # then gets the stub, so a failure here becomes a collection error
+        # somewhere else. Unregister before propagating.
+        del sys.modules[module_name]
+        raise
+    return module
 
 
 def load_response_module():
@@ -31,49 +68,18 @@ def load_response_module():
 
     The baldur.api package __init__.py loads django, so it is bypassed here.
     """
-    # Load by direct file path
-    response_path = os.path.join(
-        os.path.dirname(__file__),
-        "..",
-        "..",
-        "..",
-        "..",
-        "src",
-        "baldur",
-        "api",
-        "django",
-        "exceptions",
-        "response.py",
-    )
-    response_path = os.path.normpath(response_path)
+    # response.py needs codes.py and classifier.py loaded first.
+    exceptions_dir = _baldur_source("api", "django", "exceptions")
 
-    # codes.py and classifier.py are also required
-    codes_path = os.path.join(os.path.dirname(response_path), "codes.py")
-    classifier_path = os.path.join(os.path.dirname(response_path), "classifier.py")
-
-    # Load the codes module
-    codes_spec = spec_from_file_location(
-        "baldur.api.django.exceptions.codes", codes_path
+    codes_module = _exec_in_place(
+        "baldur.api.django.exceptions.codes", exceptions_dir / "codes.py"
     )
-    codes_module = module_from_spec(codes_spec)
-    sys.modules["baldur.api.django.exceptions.codes"] = codes_module
-    codes_spec.loader.exec_module(codes_module)
-
-    # Load the classifier module (depends on codes)
-    classifier_spec = spec_from_file_location(
-        "baldur.api.django.exceptions.classifier", classifier_path
+    classifier_module = _exec_in_place(
+        "baldur.api.django.exceptions.classifier", exceptions_dir / "classifier.py"
     )
-    classifier_module = module_from_spec(classifier_spec)
-    sys.modules["baldur.api.django.exceptions.classifier"] = classifier_module
-    classifier_spec.loader.exec_module(classifier_module)
-
-    # Load the response module
-    response_spec = spec_from_file_location(
-        "baldur.api.django.exceptions.response", response_path
+    response_module = _exec_in_place(
+        "baldur.api.django.exceptions.response", exceptions_dir / "response.py"
     )
-    response_module = module_from_spec(response_spec)
-    sys.modules["baldur.api.django.exceptions.response"] = response_module
-    response_spec.loader.exec_module(response_module)
 
     return response_module, codes_module, classifier_module
 

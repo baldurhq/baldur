@@ -11,9 +11,9 @@ import chain (same pattern as test_ip_ban_middleware.py).
 
 from __future__ import annotations
 
-import os
 import sys
 from importlib.util import module_from_spec, spec_from_file_location
+from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
@@ -22,31 +22,45 @@ import pytest
 # http_metrics.py direct load (bypass Django init chain)
 # ============================================================
 
-_HTTP_METRICS_PATH = os.path.normpath(
-    os.path.join(
-        os.path.dirname(__file__),
-        "..",
-        "..",
-        "..",
-        "..",
-        "src",
-        "baldur",
-        "api",
-        "django",
-        "middleware",
-        "http_metrics.py",
-    )
-)
-
 _MODULE_NAME = "baldur.api.django.middleware.http_metrics"
+
+
+def _baldur_source(*parts: str) -> Path:
+    """Locate a module file inside the INSTALLED baldur package.
+
+    ``baldur.__file__`` is ``<repo>/src/baldur/__init__.py`` where the source
+    tree ships beside the tests, and the sibling clone's copy where it does
+    not, so one expression finds the file from either test tree. A
+    tree-relative ``../../../../src`` path resolves in only one of them, and
+    where it does not the direct load below fails, this whole file skips
+    silently, and the failed load leaves an empty module registered under the
+    real dotted name for the rest of the process. Importing ``baldur`` itself
+    is safe here -- it is the ``baldur.api.django.middleware`` package whose
+    Django init chain the direct load exists to bypass.
+    """
+    import baldur
+
+    return Path(baldur.__file__).resolve().parent.joinpath(*parts)
+
+
+_HTTP_METRICS_PATH = _baldur_source("api", "django", "middleware", "http_metrics.py")
 
 
 def _load_http_metrics_module():
     """Load http_metrics.py directly without triggering Django init chain."""
-    spec = spec_from_file_location(_MODULE_NAME, _HTTP_METRICS_PATH)
+    spec = spec_from_file_location(_MODULE_NAME, str(_HTTP_METRICS_PATH))
     module = module_from_spec(spec)
     sys.modules[_MODULE_NAME] = module
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        # exec_module needs the name registered first (circular imports resolve
+        # through sys.modules), but a raising exec leaves an EMPTY module under
+        # the real dotted name. Any later import of it in the same worker then
+        # gets the stub, so a failure here becomes a collection error somewhere
+        # else. Unregister before propagating.
+        del sys.modules[_MODULE_NAME]
+        raise
     return module
 
 
