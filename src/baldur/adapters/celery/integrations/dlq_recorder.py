@@ -1,8 +1,9 @@
 """
 DLQ Recorder — store failed operations and classify failures.
 
-Wraps lazy imports to baldur_pro.services.dlq so the signal handler
-layer never crashes due to missing optional dependencies.
+Stores through ``baldur.dlq.helpers.store_to_dlq``, which resolves the PRO
+``DLQService`` when registered and the OSS ``DLQCaptureService`` otherwise,
+so the signal handler layer never crashes on a missing optional dependency.
 """
 
 from __future__ import annotations
@@ -121,7 +122,9 @@ class DLQRecorder:
             )
 
             if result is None:
-                # PRO DLQ store not loaded — OSS path is a no-op recorder.
+                # Defensive guard: the resolved backing (PRO DLQService or
+                # the OSS DLQCaptureService) returns a DLQEntryResult on
+                # every path, so there is nothing to log here.
                 return
 
             logger.info(

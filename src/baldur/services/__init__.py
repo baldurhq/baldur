@@ -20,7 +20,9 @@ Usage:
     if cb.is_open():
         return handle_fallback()
 
-    # DLQ (PRO — requires baldur-pro)
+    # DLQ at scale (PRO — requires baldur-pro). OSS capture needs no
+    # registry lookup: dlq=True / @dlq_protect stores through the resolved
+    # backing on a plain OSS install.
     from baldur.factory.registry import ProviderRegistry
 
     dlq = ProviderRegistry.dlq_service.safe_get()

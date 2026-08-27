@@ -1,9 +1,10 @@
 """OSS-side DLQ surface for the Baldur framework.
 
-This package provides thin-wrapper access to PRO DLQ + postmortem store
-helpers via :mod:`baldur.dlq.helpers`. OSS callsites import from
-``baldur.dlq.helpers`` so the OSS->PRO boundary is centralized at a single
-delegation point.
+This package centralizes the DLQ + postmortem store delegation at a single
+point, :mod:`baldur.dlq.helpers`. ``store_to_dlq`` resolves the PRO
+``DLQService`` when it is registered and the OSS ``DLQCaptureService``
+otherwise, so capture works on a plain OSS install; the compression and
+postmortem helpers stay PRO-only and no-op when PRO is absent.
 
 Note: ``baldur.services.dlq_outbox`` is a separate subsystem and is unrelated
 to this package.

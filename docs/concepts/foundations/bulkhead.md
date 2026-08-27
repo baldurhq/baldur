@@ -174,7 +174,8 @@ graceful shutdown drain; without PRO, the same compartments run as semaphore iso
 ## See also
 
 - [Circuit Breaker](../oss/circuit-breaker.md) — stops calling a dependency that keeps failing; Bulkhead caps how much capacity it can consume while it degrades. Production setups run both.
-- [Bulkhead API Reference](../../reference/pro/bulkhead.md) — full options and signatures
+- [Bulkhead API Reference](../../reference/services/bulkhead.md) — full options and signatures
+- [Bulkhead API Reference (PRO)](../../reference/pro/bulkhead.md) — the thread-pool overlay
 - [Admin REST API](../../reference/api-admin.md) — the read-only status surface
 - [Getting Started](../../getting-started/index.md) — set Baldur up
 - [Environment Variables](../../reference/env-vars.md) — the complete operator-tunable list
