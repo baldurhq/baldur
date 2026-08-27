@@ -25,12 +25,18 @@ Covered here:
 from __future__ import annotations
 
 import dataclasses
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from baldur.adapters.memory.circuit_breaker import (
     InMemoryCircuitBreakerStateRepository,
+)
+from baldur.core.time_provider import (
+    MockTimeProvider,
+    reset_time_provider,
+    set_time_provider,
 )
 from baldur.interfaces.repositories import (
     CircuitBreakerCloseAttempt,
@@ -378,3 +384,84 @@ class TestTripInterleavedWithSuccessBehavior:
         stored = real_repo.get_by_service_name(SERVICE)
         assert stored.state == CircuitBreakerStateEnum.CLOSED.value
         assert stored.failure_count == 0
+
+
+# =============================================================================
+# Behavior — the stamp stops tracking traffic and starts tracking transitions
+# =============================================================================
+
+
+class TestHealthySuccessDoesNotRestampBehavior:
+    """``updated_at`` now advances on a write, not on a request.
+
+    Two downstream lanes read this stamp and neither belongs to the circuit
+    breaker: the drift reconciler's half-open comparison, and the daily
+    stale-key sweep that deletes rows past a retention window. The whole
+    account of what this change does to them rests on one fact — a healthy
+    success no longer re-stamps the row — and nothing else asserts it. The
+    sibling call-count test would stay green against a variant that stopped
+    calling ``update_state`` but re-stamped the row some other way, which is
+    exactly the variant those two lanes would still see as live traffic.
+
+    Driven through the ``TimeProvider`` seam rather than by sleeping: the
+    system clock's granularity is coarser than a test's runtime on some
+    platforms, so a real-clock version of the negative half would pass for
+    the wrong reason and the positive half would be flaky.
+    """
+
+    CLOCK_STEP = timedelta(seconds=30)
+    HEALTHY_SUCCESS_COUNT = 10
+
+    @pytest.fixture
+    def clock(self):
+        """A mock clock the test advances by hand.
+
+        Reset in teardown so a failing assertion cannot leak the mock into
+        another test in this worker.
+        """
+        provider = MockTimeProvider(fixed_time=datetime(2026, 1, 1, 12, 0, tzinfo=UTC))
+        set_time_provider(provider)
+        try:
+            yield provider
+        finally:
+            reset_time_provider()
+
+    def test_healthy_successes_leave_the_stored_stamp_untouched(
+        self, clock, real_service, real_repo
+    ):
+        """Absence: the clock moves, the traffic flows, the stamp does not."""
+        # Given: a CLOSED row with nothing to reset.
+        real_repo.get_or_create(SERVICE)
+        before = real_repo.get_by_service_name(SERVICE).updated_at
+
+        # When: healthy successes spread across real elapsed time.
+        for _ in range(self.HEALTHY_SUCCESS_COUNT):
+            clock.advance(self.CLOCK_STEP)
+            real_service.record_success(SERVICE)
+
+        # Then: the row reads as untouched since it was created.
+        assert real_repo.get_by_service_name(SERVICE).updated_at == before
+
+    def test_a_success_that_writes_still_advances_the_stored_stamp(
+        self, clock, real_service, real_repo
+    ):
+        """Presence: the control for the absence above.
+
+        Without it, "the stamp did not move" is also what a repository whose
+        clock is frozen produces — which is literally what this fixture
+        installs.
+        """
+        # Given: a CLOSED row that does have a count to reset.
+        real_repo.get_or_create(SERVICE)
+        clock.advance(self.CLOCK_STEP)
+        real_service.record_failure(SERVICE)
+        before = real_repo.get_by_service_name(SERVICE).updated_at
+
+        # When: the success takes the reset-writing exit.
+        clock.advance(self.CLOCK_STEP)
+        real_service.record_success(SERVICE)
+
+        # Then: the write carried the stamp forward with it.
+        after = real_repo.get_by_service_name(SERVICE)
+        assert after.updated_at == before + self.CLOCK_STEP
+        assert after.failure_count == 0
