@@ -38,9 +38,9 @@ On top of that record, three properties make the trail safe to depend on:
 
 - **Privacy-safe identity.** Client IP addresses are masked: the host portion is redacted (for example `192.168.***.***`) rather than stored in full, and sensitive values inside a change (passwords, tokens, keys) are redacted. You keep the record of *who* acted without retaining the raw personal data.
 - **Trace correlation.** Each entry carries a trace ID, so an audit record can be lined up with the distributed trace of the request that caused it — connecting "this config changed" to the exact call that changed it.
-- **Tamper-evidence through a hash chain.** Each entry carries a cryptographic fingerprint: a SHA-256 hash computed over the entry's own contents *together with* the fingerprint of the entry immediately before it. The records are therefore linked into a chain, every entry bound to its predecessor back to the first. Editing or deleting any past entry changes its fingerprint and breaks the link to every entry that follows, something a value quietly rewritten in place cannot avoid. An integrity check walks the chain and reports whether it is intact, and where the first break is, so tampering is not just detectable but locatable rather than silent.
+- **Tamper-evidence through a hash chain.** Each entry carries a cryptographic fingerprint: a SHA-256 hash computed over the entry's own contents *together with* the fingerprint of the entry immediately before it. The records are therefore linked into a chain, every entry bound to its predecessor back to the first. Editing or deleting any past entry changes its fingerprint and breaks the link to every entry that follows, something a value quietly rewritten in place cannot avoid. In production the fingerprints are also keyed: the signing key you configure turns each hash into an HMAC, so someone who can rewrite the log files still cannot recompute a chain that passes verification, because they do not hold the key. An integrity check walks the chain and reports whether it is intact, and where the first break is, so tampering is not just detectable but locatable rather than silent.
 
-Records are kept for a configurable retention period and persist to your configured storage backend, so the trail survives restarts and is available long after the change it describes.
+Records persist to your configured storage backend, so the trail survives restarts and is available long after the change it describes. Baldur only ever appends to the trail: no built-in job deletes or archives old entries. If your compliance policy sets a retention limit, pruning the trail to it is a file-lifecycle task you own, with the export tool's date-range filter to carve out what to keep.
 
 | What you observe | When it happens |
 |------------------|-----------------|
@@ -48,7 +48,6 @@ Records are kept for a configurable retention period and persist to your configu
 | Client IP addresses appear masked (host portion redacted), not as raw values | any entry that captures a client IP |
 | An entry can be matched to a request's distributed trace | the change happened in the context of a traced request |
 | An integrity check reports whether the hash chain is intact, and pinpoints the first broken link | you verify the trail |
-| Older entries age out | the retention period passes |
 
 ## Configuration
 
@@ -61,9 +60,9 @@ The knobs an operator sets most often. The full list lives in the API reference.
 | `BALDUR_SECRETS_AUDIT_SIGNING_KEY` |  | Keys the HMAC-SHA256 hash chain; a CRITICAL secret — in production, boot aborts if it is missing |
 | `BALDUR_AUDIT_DISTRIBUTED_HASH_CHAIN` | `false` | Redis-backed hash chain — required for multi-host deployments (≥2 pods) |
 
-The file hash-chain is the default, zero-config backend: on a PRO-entitled install it is switched on and selected for you, with no environment variable to set. If your application selects its own audit backend before Baldur starts, that choice is kept. Heavier backends are pluggable but need explicit activation, not just a connection string: a **Redis flush buffer** (turned on with `BALDUR_AUDIT_BUFFER_REDIS_ENABLED`, which stages records in Redis and drains them to the terminal store) and a **Postgres archival adapter** (wired in code against your Django audit model). Setting `BALDUR_REDIS_URL` or `BALDUR_SQL_DSN` alone does not switch the backend — those are shared connection inputs.
+The file hash-chain is the default, zero-config backend: on a PRO-entitled install it is switched on and selected for you, with no environment variable to set. If your application selects its own audit backend before Baldur starts, that choice is kept, provided it is a real backend. Registering a do-nothing adapter is not a supported way to opt out, and startup will replace it; to keep audit off on an entitled install, set `BALDUR_AUDIT_ENABLED=false`. Heavier backends are pluggable but need explicit activation, not just a connection string: a **Redis flush buffer** (turned on with `BALDUR_AUDIT_BUFFER_REDIS_ENABLED`, which stages records in Redis and drains them to the terminal store) and a **Postgres archival adapter** (wired in code against your Django audit model). Setting `BALDUR_REDIS_URL` or `BALDUR_SQL_DSN` alone does not switch the backend — those are shared connection inputs.
 
-Exporting the trail — JSONL, JSON, CSV or Parquet, to a file or to stdout — needs nothing beyond the PRO package. Exporting directly to an S3 bucket is the one target that needs an extra dependency: install the PRO build with its `aws` extra (`boto3`), otherwise that export target reports the missing extra rather than writing.
+Exporting the trail as JSONL, JSON or CSV, to a file or to stdout, needs nothing beyond the PRO package. Two outputs ask for an extra install: Parquet needs the framework's `export` extra (`pyarrow`), and exporting directly to an S3 bucket needs the PRO build's `aws` extra (`boto3`). Either one, when missing, reports the missing dependency rather than writing.
 
 ## See also
 

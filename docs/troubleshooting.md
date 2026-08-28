@@ -345,17 +345,24 @@ live.
 ### Audit
 
 **The audit trail isn't recording anything. `(PRO)`**
-*Cause:* audit ships **disabled by default** (`BALDUR_AUDIT_ENABLED=false`), and the
-subsystem itself is a PRO capability.
-*Fix:* run PRO and turn audit on:
+*Cause:* which one depends on your tier. With an active PRO entitlement audit is **on by
+default**, so a silent trail usually means an explicit `BALDUR_AUDIT_ENABLED=false` is set
+somewhere, or the process was never restarted — audit is startup-wired, not a live toggle.
+Without an entitlement the switch alone is not enough: `BALDUR_AUDIT_ENABLED=true` starts the
+pipeline but selects no backend, so every record is accepted and discarded — startup says so
+with an `audit.backend_unwired` warning.
+*Fix:* on PRO, leave `BALDUR_AUDIT_ENABLED` unset and restart. Startup then logs
+`entitlement.pro_audit_activated` followed by `audit.startup_completed`, and the hash-chained
+trail lands in `BALDUR_AUDIT_LOG_DIR` — whose default `logs/audit` is **relative**, so in a
+container it is wiped on restart:
 
 ```bash
-export BALDUR_AUDIT_ENABLED=true
-export BALDUR_SQL_DSN=postgresql://user:pass@host:5432/db   # persistent audit storage (optional)
+export BALDUR_AUDIT_LOG_DIR=/var/lib/baldur/audit   # persistent volume
 ```
 
-Records flush through `BALDUR_REDIS_URL` and persist to your configured backend; the hash
-chain makes the trail tamper-evident.
+The hash chain makes the trail tamper-evident. Redis staging and SQL archival are separate
+backends that each need their own explicit activation — setting `BALDUR_REDIS_URL` or
+`BALDUR_SQL_DSN` alone does not move audit records.
 
 ### Admin console & control
 
