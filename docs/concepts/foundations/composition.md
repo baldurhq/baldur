@@ -22,7 +22,7 @@ owns the layering.
 import baldur
 
 
-@baldur.protected("charge-customer", retry=True, fallback=lambda: {"status": "queued"})
+@baldur.protected("charge-customer", retry=True, fallback=lambda: {"status": "unavailable"})
 def charge(order_id: str) -> dict:
     return payment_gateway.charge(order_id)
 ```

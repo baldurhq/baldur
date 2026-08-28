@@ -53,7 +53,7 @@ import baldur
     retry=True,
     dlq=True,
     idempotency_key="order_id",
-    fallback=lambda: {"status": "queued"},
+    fallback=lambda: {"status": "unavailable"},
 )
 def charge(order_id: str) -> dict:
     return payment_gateway.charge(order_id)
@@ -64,6 +64,11 @@ Two of these arguments are safety rails for a money path. Retry re-executes the 
 [runs the side effect only once](../oss/idempotency.md). And `dlq=True` is an explicit opt-in:
 Baldur never captures request snapshots without it, and a replayed entry executes the work again,
 so grant it only to calls that are [safe to run a second time](dlq-replay.md).
+
+The fallback is worth reading closely too. It answers `unavailable`, not `queued` — on a
+user-facing charge the honest answer is that nothing happened and the caller should try again.
+Promising a queue would commit you to charging a customer who may have already walked away, which
+is exactly the case [replay is not for](dlq-replay.md).
 
 From then on, Baldur watches that call and responds to failure automatically:
 
