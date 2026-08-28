@@ -26,11 +26,12 @@ that doc's ``Test Assessment`` section:
   ``oss_src_root`` (TestConsumerSrcRoots), and ``collect_long_form_flag_reads``
   resolving its ``roots=None`` default lazily through ``consumer_src_roots``
   (TestCollectLongFormFlagReadsRootDefault) — impl doc 664 D8
-- ``read_publish_allowlist`` shape parsing/rejection
-  (TestReadPublishAllowlistContract) and ``published_markdown_files``
-  allowlist expansion — slash-less directory entry, absent entry, re-exclude
-  glob vs directory, non-markdown entry
-  (TestPublishedMarkdownFilesContract) — impl doc 776 D2/D3
+- ``read_publish_allowlist`` block-scalar and per-line shape
+  parsing/rejection (TestReadPublishAllowlistContract) and
+  ``published_markdown_files`` allowlist expansion — slash-less directory
+  entry, absent entry, re-exclude glob vs directory, non-markdown entry, and
+  a re-walk on every call (TestPublishedMarkdownFilesContract) — impl doc
+  776 D2/D3
 """
 
 from __future__ import annotations
@@ -1087,6 +1088,26 @@ class TestReadPublishAllowlistContract:
         included, _ = read_publish_allowlist(_FIXTURE_ALLOWLIST)
         assert not any("validation" in entry for entry in included)
 
+    @pytest.mark.parametrize(
+        "indicator",
+        ["|", "|-", "|+", "|2", "|  # gitignore syntax, one pattern per line"],
+        ids=["plain", "strip", "keep", "indent", "trailing_comment"],
+    )
+    def test_publish_allowlist_literal_scalar_variants_parse_identically(
+        self, indicator: str
+    ):
+        """Every literal spelling keeps one pattern per line, so all are read.
+
+        The rejection below has to fire on the folding forms only. A chomping
+        or indentation indicator, or a comment after the indicator, reformats
+        the block without changing a single pattern mkdocs matches (verified
+        against the YAML loader: all five spellings yield the same three
+        newline-separated entries), so refusing them would red the gate on a
+        cosmetic edit.
+        """
+        text = f"exclude_docs: {indicator}\n  /*\n  !/index.md\n  /concepts/_*.md\n"
+        assert read_publish_allowlist(text) == (["index.md"], ["concepts/_*.md"])
+
     def test_publish_allowlist_shape_glob_re_include_raises(self):
         """A glob-bearing re-include is a form pathspec honours and this does not."""
         text = "exclude_docs: |\n  /*\n  !/getting-started/*.md\n"
@@ -1102,6 +1123,38 @@ class TestReadPublishAllowlistContract:
         """No ``exclude_docs:`` line means the publish scope is underivable."""
         with pytest.raises(ValueError, match="exclude_docs"):
             read_publish_allowlist("site_name: Fixture\nnav:\n  - Home: index.md\n")
+
+    @pytest.mark.parametrize(
+        ("yaml_text", "found"),
+        [
+            ("exclude_docs: >\n  /*\n  !/index.md\n", ">"),
+            ("exclude_docs: >-\n  /*\n  !/index.md\n", ">-"),
+            ('exclude_docs: ["/*", "!/index.md"]\n', '["/*", "!/index.md"]'),
+            ('exclude_docs: "/*"\n', '"/*"'),
+        ],
+        ids=["folded", "folded_strip", "flow_list", "quoted_scalar"],
+    )
+    def test_publish_allowlist_non_literal_scalar_raises_and_names_the_form(
+        self, yaml_text: str, found: str
+    ):
+        """Only a literal scalar survives; a folded or flow block is refused.
+
+        The folded form is the dangerous one, because it reads line-wise
+        exactly like a literal block and derives a plausible set. mkdocs joins
+        its entries into the single pattern ``/* !/index.md ...``, which
+        matches no file at all (verified against the same gitignore engine
+        mkdocs uses), so the site excludes NOTHING and serves the whole tree —
+        every unpublished authoring surface included — while this resolver
+        still reports the small allowlisted subset and every anchor passes.
+        The flow forms leave no block to walk and would resolve to an empty
+        set. Both are refused at the block rather than approximated.
+        """
+        with pytest.raises(ValueError, match="literal block scalar") as excinfo:
+            read_publish_allowlist(yaml_text)
+        assert repr(found) in str(excinfo.value), (
+            "the message must name the form it found, so a reformatted block "
+            "is fixable from the failure alone"
+        )
 
 
 class TestPublishedMarkdownFilesContract:
@@ -1192,6 +1245,34 @@ class TestPublishedMarkdownFilesContract:
             "newdir/page.md",
             "newdir/nested/more.md",
         }
+
+    def test_published_markdown_set_is_rewalked_on_every_call(self, docs_tree: Path):
+        """Repeated calls agree, and each one re-reads the tree it is given.
+
+        Nothing memoises the walk. The gates resolve the set once per scan and
+        share the module through conftest, so a cached first result would pin
+        every later scan in the session to whichever tree ran first — and a
+        page added under an already-allowlisted directory would stay unscanned
+        while the allowlist-derivation claim still held.
+        """
+        # Given: the same allowlist and the same tree, resolved twice
+        included, re_excluded = read_publish_allowlist(_FIXTURE_ALLOWLIST)
+        first = published_markdown_files(docs_tree, included, re_excluded)
+        second = published_markdown_files(docs_tree, included, re_excluded)
+
+        # Then: identical, in the same order — the sort makes the set stable
+        assert first == second
+
+        # When: a page lands under a directory the allowlist already covers
+        late = docs_tree / "getting-started" / "deep" / "late.md"
+        late.write_text("# late\n", encoding="utf-8")
+
+        # Then: the next call sees it, with no cache to reset
+        assert late in published_markdown_files(docs_tree, included, re_excluded)
+
+        # When / Then: and when it goes away the set follows the tree back
+        late.unlink()
+        assert published_markdown_files(docs_tree, included, re_excluded) == first
 
 
 __all__ = [

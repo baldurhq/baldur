@@ -582,6 +582,13 @@ _EXCLUDE_DOCS_KEY = "exclude_docs:"
 # expansion below does not, so it raises rather than being approximated.
 _GLOB_METACHARACTERS = ("*", "?", "[")
 
+# The block must keep one pattern per line, which only a literal scalar does
+# (``|``, with any chomping/indentation indicator). A folded ``>`` or a flow
+# scalar joins the entries onto ONE line, and the joined line matches no file:
+# mkdocs then excludes nothing and serves the whole tree, while a line-wise
+# parse still derives the allowlisted subset and every anchor still passes.
+_LITERAL_BLOCK_INDICATOR = "|"
+
 
 def read_publish_allowlist(yaml_text: str) -> tuple[list[str], list[str]]:
     """Return ``(included, re_excluded)`` path patterns from ``exclude_docs``.
@@ -591,15 +598,19 @@ def read_publish_allowlist(yaml_text: str) -> tuple[list[str], list[str]]:
     the custom tags elsewhere in ``mkdocs.yml``. Both lists are ``docs/``-
     relative with the leading ``/`` stripped.
 
-    Every non-blank, non-comment line must carry one of the three shapes
-    :func:`published_markdown_files` implements — the blanket ``/*``, a
-    glob-free ``!/<path>`` re-include, or a bare ``/<dir>/<glob>`` re-exclude.
-    Anything else raises and names the line, so a pattern form this resolver
-    cannot honour fails loudly instead of being silently mis-derived.
+    The block must be a literal scalar, since only that form keeps one pattern
+    per line; a folded or flow scalar is rejected rather than read line-wise,
+    because mkdocs matches the joined line against no file and would serve the
+    whole tree. Every non-blank, non-comment line must then carry one of the
+    three shapes :func:`published_markdown_files` implements — the blanket
+    ``/*``, a glob-free ``!/<path>`` re-include, or a bare ``/<dir>/<glob>``
+    re-exclude. Anything else raises and names what it found, so a form this
+    resolver cannot honour fails loudly instead of being silently mis-derived.
 
     Raises:
-        ValueError: the ``exclude_docs:`` block is absent, or a line carries a
-            shape this resolver does not implement.
+        ValueError: the ``exclude_docs:`` block is absent, is not a literal
+            block scalar, or a line carries a shape this resolver does not
+            implement.
     """
     lines = yaml_text.splitlines()
     start = next(
@@ -610,6 +621,16 @@ def read_publish_allowlist(yaml_text: str) -> tuple[list[str], list[str]]:
         raise ValueError(
             f"{_EXCLUDE_DOCS_KEY} block not found — the publish scope is "
             "underivable, so every published-markdown scan would be vacuous"
+        )
+
+    indicator = lines[start][len(_EXCLUDE_DOCS_KEY) :].strip()
+    if not indicator.startswith(_LITERAL_BLOCK_INDICATOR):
+        raise ValueError(
+            f"{_EXCLUDE_DOCS_KEY} must be a literal block scalar "
+            f"('{_LITERAL_BLOCK_INDICATOR}'), found {indicator!r} — a folded "
+            "or flow scalar joins the entries onto one line that matches no "
+            "file, so the site would publish the whole tree while this "
+            "resolver still derived only the allowlisted subset"
         )
 
     included: list[str] = []
