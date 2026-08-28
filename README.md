@@ -15,12 +15,16 @@ and OpenTelemetry metrics, graceful shutdown, and a built-in web console. The
 core is framework-agnostic, with first-class adapters for Django, FastAPI,
 Flask, and Celery.
 
-![Terminal demo: the payment gateway dies mid-traffic — five failed charges are captured, the breaker trips, and on recovery Baldur replays all five. Zero lost.](https://raw.githubusercontent.com/baldurhq/baldur/main/.github/assets/demo-self-healing.gif)
+![Terminal demo: the payment gateway becomes unreachable mid-traffic — five charges fail on the way out and are captured, the breaker trips, and on recovery Baldur replays all five. Zero lost.](https://raw.githubusercontent.com/baldurhq/baldur/main/.github/assets/demo-self-healing.gif)
 
-*Real run of the shipped demo: the gateway dies mid-traffic — five charges
-fail and are captured with their arguments, the circuit breaker opens and
-shields the dying dependency, and the moment it closes again Baldur replays
-all five for real. Zero lost. Reproduce it yourself:*
+*Real run of the shipped demo: the gateway goes unreachable mid-traffic — an
+infrastructure failure, not a declined card — so five charges fail and are
+captured with their arguments, the circuit breaker opens and shields the dying
+dependency, and the moment it closes again Baldur replays all five for real.
+Zero lost. (Replay is for work that failed on the way out, never for a business
+rejection, and never for a checkout the customer already walked away from —
+[where that line sits](docs/concepts/foundations/dlq-replay.md).) Reproduce it
+yourself:*
 
 ```bash
 pip install "baldur-framework[celery]"
@@ -34,10 +38,11 @@ the Prometheus/OpenTelemetry metrics.)*
 
 ## Why Baldur?
 
-- **One decorator, whole pipeline.** `@baldur.protected("name")` composes
-  circuit breaker, retry with backoff, timeout, fallback, and idempotency into
-  one ordered pipeline — instead of hand-wiring three separate libraries and
-  hoping they interact correctly under failure.
+- **One decorator, whole pipeline.** `@baldur.protected("name")` composes a
+  circuit breaker, a wall-clock budget, fallback, idempotency, and dead-letter
+  capture into one ordered pipeline — the parts your HTTP client or vendor SDK
+  leaves to you. Retry composes in too, for calls that don't retry themselves;
+  where your SDK already retries, keep it and let Baldur surround it.
 - **Zero-config start, production path built in.** Out of the box everything
   runs on an in-memory backend — no Redis, no env vars, no Docker. When you
   move to multiple workers, add Redis and the same code shares state across
@@ -70,28 +75,39 @@ pip install baldur-framework[prometheus]     # Prometheus metrics
 import baldur
 
 
-@baldur.protected("charge-customer")
-def charge(order_id: str) -> dict:
+@baldur.protected("llm-summarize")
+def summarize(doc_id: str) -> str:
     # Wrapped in a circuit breaker by default. With zero configuration this
-    # runs on an in-memory fallback — no Redis, no env vars, no Docker.
-    return payment_gateway.charge(order_id)
+    # runs on an in-memory backend — no Redis, no env vars, no Docker.
+    return llm_api.summarize(doc_id)
 ```
 
-When the payment gateway starts failing, the breaker opens and your service
-answers fast instead of stacking up timeouts. Need more than the default?
-Compose the pipeline declaratively:
+When a dependency starts failing — your payment gateway, your database, a model
+provider mid-incident — the breaker opens and your service answers fast instead
+of stacking up timeouts. Need more than the default? Compose the pipeline
+declaratively:
 
 ```python
 @baldur.protected(
-    "charge-customer",
-    retry=True,                              # retry with exponential backoff
-    timeout=5.0,                             # per-call time budget
-    fallback=lambda: {"status": "queued"},   # graceful answer while OPEN
-    idempotency_key="order_id",              # dedupe concurrent duplicates
+    "llm-summarize",
+    timeout=30.0,                            # one bound on what the caller waits
+    fallback=lambda: last_good_summary(),    # graceful answer while OPEN
+    idempotency_key="doc_id",                # a redelivered job pays once
 )
-def charge(order_id: str) -> dict:
-    return payment_gateway.charge(order_id)
+def summarize(doc_id: str) -> str:
+    return llm_api.summarize(doc_id)
 ```
+
+**Notice what isn't there: `retry=`.** Your SDK almost certainly retries
+already — `anthropic` and `openai` default to two attempts with backoff, boto3
+has an adaptive mode — and it retries better than a generic wrapper can,
+because it knows which status codes are worth another attempt and honours
+`retry-after`. Keep it. What no SDK gives you is the rest: a breaker, so a
+provider incident doesn't mean *every* request pays its retries before failing;
+one wall-clock bound on what your caller waits, retries included (an SDK's own
+worst case is `timeout × (max_retries + 1)` — 30 minutes at `anthropic`'s
+defaults); a fallback; and a dedup key that survives a job redelivery the SDK
+never sees. `retry=True` is there for the calls that don't retry themselves.
 
 Sync and async callables are both supported — the decorator auto-detects
 coroutine functions.
