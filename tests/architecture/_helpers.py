@@ -578,9 +578,16 @@ def directive_targets(reference_dir: Path = REFERENCE_DIR) -> Iterator[str]:
 
 _EXCLUDE_DOCS_KEY = "exclude_docs:"
 
-# A re-include carrying any of these is a form pathspec honours and the
-# expansion below does not, so it raises rather than being approximated.
+# A pattern carrying any of these outside a re-exclude's final segment is a
+# form pathspec honours and the expansion below does not, so it raises rather
+# than being approximated.
 _GLOB_METACHARACTERS = ("*", "?", "[")
+
+# Every suffix mkdocs treats as a documentation page (``mkdocs.utils.
+# markdown_extensions``). Walking ``*.md`` alone would leave a served
+# ``quickstart.markdown`` outside every scan built on this set, with the
+# non-emptiness anchors — which share the predicate — blind to it.
+_MARKDOWN_SUFFIXES = (".md", ".markdown", ".mdown", ".mkdn", ".mkd")
 
 # The block must keep one pattern per line, which only a literal scalar does
 # (``|``, with any chomping/indentation indicator). A folded ``>`` or a flow
@@ -604,13 +611,23 @@ def read_publish_allowlist(yaml_text: str) -> tuple[list[str], list[str]]:
     whole tree. Every non-blank, non-comment line must then carry one of the
     three shapes :func:`published_markdown_files` implements — the blanket
     ``/*``, a glob-free ``!/<path>`` re-include, or a bare ``/<dir>/<glob>``
-    re-exclude. Anything else raises and names what it found, so a form this
-    resolver cannot honour fails loudly instead of being silently mis-derived.
+    re-exclude whose glob, if any, sits in the final segment. Anything else
+    raises and names what it found, so a form this resolver cannot honour
+    fails loudly instead of being silently mis-derived.
+
+    Splitting the block into two unordered lists is exact only while every
+    re-include precedes every re-exclude, so that is asserted rather than
+    assumed. mkdocs matches last-wins; under that ordering a re-exclude that
+    matches a file is always the last match, which is what the expansion's
+    "drop after every include" pass reproduces. A ``!`` line below a
+    re-exclude breaks the equivalence — mkdocs re-publishes the page, the
+    expansion still drops it — so it raises here instead of deriving a set
+    narrower than the site serves.
 
     Raises:
         ValueError: the ``exclude_docs:`` block is absent, is not a literal
-            block scalar, or a line carries a shape this resolver does not
-            implement.
+            block scalar, a line carries a shape this resolver does not
+            implement, or a re-include appears below a re-exclude.
     """
     lines = yaml_text.splitlines()
     start = next(
@@ -651,9 +668,29 @@ def read_publish_allowlist(yaml_text: str) -> tuple[list[str], list[str]]:
                     "resolver expands a literal '!/<path>' only. Spell the "
                     "path out, or extend the expansion to honour the glob."
                 )
+            if re_excluded:
+                raise ValueError(
+                    f"exclude_docs re-include after a re-exclude: {entry!r} — "
+                    f"the block already carries {re_excluded[-1]!r}. mkdocs "
+                    "matches last-wins, so a later '!' re-publishes what an "
+                    "earlier re-exclude dropped, while this resolver applies "
+                    "every re-exclude after every re-include and would derive "
+                    "a narrower set than the site serves. Move the re-excludes "
+                    "below every '!' line."
+                )
             included.append(pattern.lstrip("/"))
         elif entry.startswith("/") and "/" in entry[1:]:
-            re_excluded.append(entry.lstrip("/"))
+            re_exclude = entry.lstrip("/")
+            head, _, _leaf = re_exclude.rstrip("/").rpartition("/")
+            if any(char in head for char in _GLOB_METACHARACTERS):
+                raise ValueError(
+                    f"unsupported exclude_docs re-exclude: {entry!r} — this "
+                    "resolver honours a glob in the final segment only and "
+                    "silently matches nothing when one appears in a directory "
+                    "segment. Spell the directory out, or extend the "
+                    "expansion to honour the glob."
+                )
+            re_excluded.append(re_exclude)
         else:
             raise ValueError(
                 f"unsupported exclude_docs entry: {entry!r} — expected '/*', "
@@ -665,7 +702,12 @@ def read_publish_allowlist(yaml_text: str) -> tuple[list[str], list[str]]:
 def published_markdown_files(
     docs_dir: Path, included: list[str], re_excluded: list[str]
 ) -> list[Path]:
-    """Return the ``.md`` files under ``docs_dir`` the site publishes, sorted.
+    """Return the markdown files under ``docs_dir`` the site publishes, sorted.
+
+    "Markdown" is every suffix mkdocs renders as a page, not ``.md`` alone —
+    a served ``quickstart.markdown`` that never entered this set would be
+    outside every scan built on it, with the anchors that share the predicate
+    unable to see the gap.
 
     A re-include is resolved by what it IS on disk, never by its suffix.
     mkdocs compiles a slash-less ``!/glossary`` to a pattern that matches the
@@ -681,8 +723,12 @@ def published_markdown_files(
     for entry in included:
         target = docs_dir / entry.rstrip("/")
         if entry.endswith("/") or target.is_dir():
-            found.update(target.rglob("*.md"))
-        elif entry.endswith(".md") and target.is_file():
+            found.update(
+                path
+                for path in target.rglob("*")
+                if path.suffix in _MARKDOWN_SUFFIXES and path.is_file()
+            )
+        elif target.suffix in _MARKDOWN_SUFFIXES and target.is_file():
             found.add(target)
 
     for pattern in re_excluded:

@@ -26,12 +26,12 @@ that doc's ``Test Assessment`` section:
   ``oss_src_root`` (TestConsumerSrcRoots), and ``collect_long_form_flag_reads``
   resolving its ``roots=None`` default lazily through ``consumer_src_roots``
   (TestCollectLongFormFlagReadsRootDefault) — impl doc 664 D8
-- ``read_publish_allowlist`` block-scalar and per-line shape
+- ``read_publish_allowlist`` block-scalar, per-line shape and pattern-order
   parsing/rejection (TestReadPublishAllowlistContract) and
   ``published_markdown_files`` allowlist expansion — slash-less directory
-  entry, absent entry, re-exclude glob vs directory, non-markdown entry, and
-  a re-walk on every call (TestPublishedMarkdownFilesContract) — impl doc
-  776 D2/D3
+  entry, absent entry, re-exclude glob vs directory, non-markdown entry,
+  every suffix mkdocs renders, and a re-walk on every call
+  (TestPublishedMarkdownFilesContract) — impl doc 776 D2/D3
 """
 
 from __future__ import annotations
@@ -1031,7 +1031,8 @@ def docs_tree(tmp_path: Path) -> Path:
     re-include, a directory re-include written both with and without a
     trailing slash, a re-excluded direct child alongside a same-prefixed file
     one level deeper, a wholesale re-excluded subtree, a non-markdown
-    re-include, and an allowlisted directory that does not exist.
+    re-include, an allowlisted directory that does not exist, and a page
+    written under one of the other suffixes mkdocs renders.
     """
     docs = tmp_path / "docs"
     (docs / "getting-started" / "deep").mkdir(parents=True)
@@ -1044,6 +1045,7 @@ def docs_tree(tmp_path: Path) -> Path:
         "standalone.md",
         "unpublished.md",
         "getting-started/install.md",
+        "getting-started/deep/nested.markdown",
         "getting-started/deep/nested.md",
         "glossary/terms.md",
         "glossary/sub/deep.md",
@@ -1119,6 +1121,39 @@ class TestReadPublishAllowlistContract:
         with pytest.raises(ValueError, match="getting-started/"):
             read_publish_allowlist(text)
 
+    def test_publish_allowlist_re_include_below_a_re_exclude_raises(self):
+        """Splitting into two unordered lists is exact only in that order.
+
+        mkdocs matches last-wins, so a ``!`` line below a re-exclude
+        re-publishes what the re-exclude dropped, while this resolver applies
+        every re-exclude after every re-include and would derive a set
+        NARROWER than the site serves — the coverage hole this whole resolver
+        exists to close, reappearing through pattern order. Refusing the
+        ordering is what makes the two-list expansion sound rather than lucky.
+        """
+        text = (
+            "exclude_docs: |\n  /*\n  !/index.md\n  /reference/pro/\n  !/reference/\n"
+        )
+        with pytest.raises(ValueError, match="re-include after a re-exclude"):
+            read_publish_allowlist(text)
+
+    def test_publish_allowlist_re_exclude_glob_outside_final_segment_raises(self):
+        """A glob in a directory segment matches nothing here, so it is refused.
+
+        The expansion splits a re-exclude at its last ``/`` and compares the
+        head to a real parent directory, so ``/reference/*/internal.md``
+        silently drops nothing while mkdocs excludes the page — the resolver
+        would scan a page the site does not serve.
+        """
+        text = "exclude_docs: |\n  /*\n  !/reference/\n  /reference/*/internal.md\n"
+        with pytest.raises(ValueError, match=r"/reference/\*/internal\.md"):
+            read_publish_allowlist(text)
+
+    def test_publish_allowlist_re_exclude_glob_in_final_segment_is_accepted(self):
+        """The supported spelling stays supported — the ban is placement-only."""
+        text = "exclude_docs: |\n  /*\n  !/concepts/\n  /concepts/_*.md\n"
+        assert read_publish_allowlist(text) == (["concepts/"], ["concepts/_*.md"])
+
     def test_publish_allowlist_shape_missing_block_raises(self):
         """No ``exclude_docs:`` line means the publish scope is underivable."""
         with pytest.raises(ValueError, match="exclude_docs"):
@@ -1167,6 +1202,7 @@ class TestPublishedMarkdownFilesContract:
             "index.md",
             "standalone.md",
             "getting-started/install.md",
+            "getting-started/deep/nested.markdown",
             "getting-started/deep/nested.md",
             "glossary/terms.md",
             "glossary/sub/deep.md",
@@ -1202,6 +1238,18 @@ class TestPublishedMarkdownFilesContract:
             "  !/index.md\n", "  !/index.md\n  !/gone.md\n"
         )
         assert "gone.md" not in _resolved(docs_tree, text)
+
+    def test_published_markdown_covers_every_suffix_mkdocs_renders(
+        self, docs_tree: Path
+    ):
+        """A page is every suffix mkdocs renders, not ``.md`` alone.
+
+        ``mkdocs.utils.markdown_extensions`` carries five suffixes. A walk
+        pinned to ``*.md`` leaves a served ``nested.markdown`` outside every
+        scan built on this set, and the non-emptiness anchors cannot see the
+        gap because they resolve pages through this same function.
+        """
+        assert "getting-started/deep/nested.markdown" in _resolved(docs_tree)
 
     def test_published_markdown_non_markdown_entry_contributes_nothing(
         self, docs_tree: Path

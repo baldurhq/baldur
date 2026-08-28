@@ -237,11 +237,15 @@ def _assert_published_set_discoverable(
       re-included directory and carries live doc-IDs, so a resolver that drops
       the re-exclude arm reds here instead of silently widening the scan.
     * **Coverage** — every re-include that resolves to markdown on disk
-      contributes at least one page. Derived from the live allowlist rather
-      than an authored page list, so it holds for whichever pages a given
-      checkout publishes: the two repos are deliberately not in the same
-      publish state, and an entry naming a path absent from the tree is a
-      normal state rather than a sync anomaly, so it is skipped, not failed.
+      contributes at least one page, asked entry by entry of the resolver
+      itself. Derived from the live allowlist rather than an authored page
+      list, so it holds for whichever pages a given checkout publishes: the
+      two repos are deliberately not in the same publish state, and an entry
+      naming a path absent from the tree is a normal state rather than a sync
+      anomaly, so it is skipped, not failed. This is the arm that reds when
+      the expansion drops a page the allowlist re-includes — the failure the
+      fixed anchors above cannot see, because they are satisfied by pages a
+      partial derivation still reaches.
     """
     rels = {_rel(path) for path in files}
     assert rels, (
@@ -268,15 +272,18 @@ def _assert_published_set_discoverable(
     scanned = set(files)
     uncovered: list[str] = []
     for entry in included:
-        target = docs_dir / entry.rstrip("/")
-        if target.is_dir():
-            pages = set(target.rglob("*.md"))
-            if pages and not pages & scanned:
-                uncovered.append(
-                    f"  !/{entry} — publishes {len(pages)} page(s), none scanned"
-                )
-        elif target.is_file() and target.suffix == ".md" and target not in scanned:
-            uncovered.append(f"  !/{entry} — allowlisted page not scanned")
+        # What this entry alone publishes, asked of the canonical resolver so
+        # the guard can never drift from the producer's own idea of a page —
+        # a check that re-implemented the walk would go blind to exactly the
+        # pages a widened producer started serving.
+        pages = set(published_markdown_files(docs_dir, [entry], []))
+        if not pages or pages & scanned:
+            continue
+        uncovered.append(
+            f"  !/{entry} — allowlisted page not scanned"
+            if len(pages) == 1
+            else f"  !/{entry} — publishes {len(pages)} pages, none scanned"
+        )
 
     assert not uncovered, (
         f"G24: allowlisted pages the derived set does not reach "
