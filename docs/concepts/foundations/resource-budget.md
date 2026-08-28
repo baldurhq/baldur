@@ -25,6 +25,7 @@ protocol described further down. Read the "What it means" column before quoting 
 | Cost | Figure | Measured | What it means |
 |---|---|---|---|
 | Per protected call, in-memory | **~39 µs** | 2026-08-26 | What the decorator itself adds to one call, on the default chain — circuit breaker only, in-memory state, no network anywhere in the path. Measured in-process on the same developer workstation. What transfers is the order of magnitude, tens of microseconds; the exact figure is ours, not yours. |
+| Per protected call, full chain over Redis | **+1.4 to +1.8 ms of CPU** | 2026-08-28 | What the decorator layer adds when the protected call also carries the idempotency decorator, so the path makes three Redis round trips instead of none. Server-side CPU per request, below saturation, one synchronous worker. Two independent runs licensed it; they landed 28% apart, which is why it is published as a range and not a point. The milliseconds are what transfers — the percentage they work out to is yours, not ours: here they were +16% to +21% of an 8.7 ms baseline call. |
 | Per-request overhead, below saturation | **+1.1%** | 2026-07-14 | Server-side throughput cost of the full protected path, measured with headroom left on the host. Above saturation this stops being the right question; see the section on the saturation knee. |
 | Dead-letter entry, stored | **~953 B** | 2026-05-14 | Redis bytes per captured failure, end to end through the real capture path. Compressed, so a very different payload shape moves it; backlog memory tracks `entries x 953 B`, with the per-entry figure itself drifting by up to about 180 B between runs. |
 | Rate-limit tracker, per tracked request | **~124 B** | 2026-07-14 | Redis bytes per request inside the tracker's retention window. Rises slowly with tracker size, so it is measured at production-scale set sizes rather than small ones. |
@@ -75,8 +76,15 @@ requires. It ran on a host that was not quiet enough, and the throughput compari
 sits well inside its own measurement noise. So there is evidence against the old number and no
 licensed replacement for it.
 
-We would rather publish nothing here than a number we have evidence against. The re-measurement
-is scheduled; a figure goes back here when it clears its own gates, with its qualifiers.
+We would rather publish nothing here than a number we have evidence against.
+
+The re-measurement has since run twice more, and it split in two. **The cost half now has an
+answer** — the new row in the table above: per request, the protected path burns 1.4 to 1.8 ms
+more CPU than the same path without it, and both runs agree that the decorator layer is
+essentially all of it. **The throughput half still does not.** Both runs measured a peak-throughput
+drop of about 16%, and both times that reading sat at half its own noise floor on a host that
+was not quiet — so by this page's own rule it is an observation, not a figure. A number goes
+back into this section when it clears that floor, and not before.
 
 Three of those qualifiers will still apply whatever the number turns out to be, and they are
 worth reading now because they are what makes a saturation-knee figure hard to use:
@@ -119,7 +127,8 @@ The setup, so you can judge the numbers rather than take them:
   otherwise idle before the run, cross-checked against a second timing path that agreed with it
   to within about two percent on every run.
 - **Version.** The per-request and per-entry figures were measured on the 1.1 line in July 2026.
-  The per-call figure was measured on the 1.8 line in August 2026. The dead-letter entry cost
+  Both per-call figures were measured on the 1.8 line in August 2026 — the in-memory one on
+  2026-08-26, the full-chain one on 2026-08-28. The dead-letter entry cost
   dates to May 2026 and describes the compressed encoding still in use. The saturation-knee
   figure was withdrawn in August 2026 and has no current value.
 
@@ -128,11 +137,20 @@ when that last happened. Re-measurement has moved published numbers before: the 
 figure read 34.58% until a defect in the control arm was fixed, at which point it went up to
 36.21%. It also withdraws them, and has now done so twice.
 
-A count of Redis round trips per protected request appeared on this page briefly and has been
+A count of Redis round trips per protected request appeared on this page briefly and was
 removed: the harness that produced it wired the circuit breaker to Redis directly, which is not
 what the framework does by default, so the number described a configuration you would not run.
-It is being re-measured against the default wiring before anything goes back here. That figure
-never reached a released version of this page.
+That figure never reached a released version of this page.
+
+**It has now been re-measured on the default wiring**, and the answer depends on which decorators
+you stack. A call carrying both the dead-letter and idempotency decorators makes **three round
+trips**: one read of the shared 429 cooldown before the attempt, one write to claim the
+idempotency key, and one to mark it complete. The circuit breaker makes **none** on a successful
+call — it used to write its state on every success, and that write was removed in August 2026.
+It reads Redis only when its circuit is missing from the local layer, which on a warm process is
+the first call and not the ones after it.
+A call carrying only the dead-letter decorator makes one. These are counts of what the code does,
+checked against a profile of the running service rather than derived from a settings file.
 
 The saturation-knee figure is the second withdrawal, and unlike the first it had been published
 for weeks. We changed the framework in a way that removed most of what that measurement was
