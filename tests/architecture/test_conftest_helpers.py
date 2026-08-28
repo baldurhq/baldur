@@ -26,6 +26,11 @@ that doc's ``Test Assessment`` section:
   ``oss_src_root`` (TestConsumerSrcRoots), and ``collect_long_form_flag_reads``
   resolving its ``roots=None`` default lazily through ``consumer_src_roots``
   (TestCollectLongFormFlagReadsRootDefault) — impl doc 664 D8
+- ``read_publish_allowlist`` shape parsing/rejection
+  (TestReadPublishAllowlistContract) and ``published_markdown_files``
+  allowlist expansion — slash-less directory entry, absent entry, re-exclude
+  glob vs directory, non-markdown entry
+  (TestPublishedMarkdownFilesContract) — impl doc 776 D2/D3
 """
 
 from __future__ import annotations
@@ -54,6 +59,8 @@ from tests.architecture._helpers import (
     load_baseline,
     optional_extras_modules,
     parse_ast,
+    published_markdown_files,
+    read_publish_allowlist,
     resolve_all_chain_files,
     resolve_callsites,
     symbol_of,
@@ -985,6 +992,208 @@ class TestCollectLongFormFlagReadsRootDefault:
         assert result == {"synthprobe_enabled": {"gate"}}
 
 
+# ---------------------------------------------------------------------------
+# Publish-allowlist resolver — Layer 1 of the two-layer anti-vacuous model.
+#
+# Synthetic input only: an inline ``exclude_docs`` block and a ``tmp_path``
+# tree, asserted against an EXACT expected set. Layer 2 (the discovery-wiring
+# assertion over the real tree) lives with each gate that consumes the set.
+# ---------------------------------------------------------------------------
+
+_FIXTURE_ALLOWLIST = """\
+site_name: Fixture
+exclude_docs: |
+  /*
+  # a comment line inside the block
+  !/index.md
+  !/standalone.md
+  !/robots.txt
+  !/getting-started/
+  !/glossary
+  !/concepts/
+  !/archive/
+  !/assets/
+  /concepts/_*.md
+  /archive/
+
+validation:
+  nav:
+    omitted_files: warn
+"""
+
+
+@pytest.fixture
+def docs_tree(tmp_path: Path) -> Path:
+    """A miniature ``docs/`` tree shaped like the real publish set.
+
+    Carries one of each arm the resolver has to get right: a single-page
+    re-include, a directory re-include written both with and without a
+    trailing slash, a re-excluded direct child alongside a same-prefixed file
+    one level deeper, a wholesale re-excluded subtree, a non-markdown
+    re-include, and an allowlisted directory that does not exist.
+    """
+    docs = tmp_path / "docs"
+    (docs / "getting-started" / "deep").mkdir(parents=True)
+    (docs / "glossary" / "sub").mkdir(parents=True)
+    (docs / "concepts" / "foundations").mkdir(parents=True)
+    (docs / "archive").mkdir(parents=True)
+
+    for rel in (
+        "index.md",
+        "standalone.md",
+        "unpublished.md",
+        "getting-started/install.md",
+        "getting-started/deep/nested.md",
+        "glossary/terms.md",
+        "glossary/sub/deep.md",
+        "concepts/guide.md",
+        "concepts/_TEMPLATE.md",
+        "concepts/foundations/_x.md",
+        "archive/old.md",
+    ):
+        (docs / rel).write_text("# page\n", encoding="utf-8")
+    (docs / "robots.txt").write_text("Sitemap: /sitemap.xml\n", encoding="utf-8")
+    return docs
+
+
+def _resolved(docs: Path, yaml_text: str = _FIXTURE_ALLOWLIST) -> set[str]:
+    """Resolve the fixture allowlist against ``docs``, as relative POSIX paths."""
+    included, re_excluded = read_publish_allowlist(yaml_text)
+    return {
+        path.relative_to(docs).as_posix()
+        for path in published_markdown_files(docs, included, re_excluded)
+    }
+
+
+class TestReadPublishAllowlistContract:
+    """`read_publish_allowlist` parses the supported shapes and rejects the rest."""
+
+    def test_publish_allowlist_shapes_are_parsed_into_two_lists(self):
+        included, re_excluded = read_publish_allowlist(_FIXTURE_ALLOWLIST)
+        assert included == [
+            "index.md",
+            "standalone.md",
+            "robots.txt",
+            "getting-started/",
+            "glossary",
+            "concepts/",
+            "archive/",
+            "assets/",
+        ], "the blanket /* and the comment line must not reach either list"
+        assert re_excluded == ["concepts/_*.md", "archive/"]
+
+    def test_publish_allowlist_stops_at_the_end_of_the_block_scalar(self):
+        """A dedented key after the block is not an allowlist entry."""
+        included, _ = read_publish_allowlist(_FIXTURE_ALLOWLIST)
+        assert not any("validation" in entry for entry in included)
+
+    def test_publish_allowlist_shape_glob_re_include_raises(self):
+        """A glob-bearing re-include is a form pathspec honours and this does not."""
+        text = "exclude_docs: |\n  /*\n  !/getting-started/*.md\n"
+        with pytest.raises(ValueError, match=r"!/getting-started/\*\.md"):
+            read_publish_allowlist(text)
+
+    def test_publish_allowlist_shape_unknown_entry_raises_and_names_the_line(self):
+        text = "exclude_docs: |\n  /*\n  getting-started/\n"
+        with pytest.raises(ValueError, match="getting-started/"):
+            read_publish_allowlist(text)
+
+    def test_publish_allowlist_shape_missing_block_raises(self):
+        """No ``exclude_docs:`` line means the publish scope is underivable."""
+        with pytest.raises(ValueError, match="exclude_docs"):
+            read_publish_allowlist("site_name: Fixture\nnav:\n  - Home: index.md\n")
+
+
+class TestPublishedMarkdownFilesContract:
+    """`published_markdown_files` expands the allowlist the way mkdocs serves it."""
+
+    def test_published_markdown_set_matches_the_allowlist_exactly(
+        self, docs_tree: Path
+    ):
+        assert _resolved(docs_tree) == {
+            "index.md",
+            "standalone.md",
+            "getting-started/install.md",
+            "getting-started/deep/nested.md",
+            "glossary/terms.md",
+            "glossary/sub/deep.md",
+            "concepts/guide.md",
+            "concepts/foundations/_x.md",
+        }
+
+    def test_published_markdown_slashless_directory_entry_covers_the_subtree(
+        self, docs_tree: Path
+    ):
+        """``!/glossary`` (no trailing slash) publishes the whole subtree.
+
+        The shape is ambiguous — syntactically identical to the live
+        ``!/robots.txt`` file entry — and mkdocs resolves it as a directory
+        prefix. Classifying by suffix instead of by disk type would contribute
+        zero pages here while every non-emptiness anchor still passed.
+        """
+        resolved = _resolved(docs_tree)
+        assert "glossary/terms.md" in resolved
+        assert "glossary/sub/deep.md" in resolved
+
+    def test_published_markdown_absent_directory_entry_contributes_nothing(
+        self, docs_tree: Path
+    ):
+        """``!/assets/`` names a path in neither repo — normal, not an error."""
+        resolved = _resolved(docs_tree)
+        assert not any(rel.startswith("assets/") for rel in resolved)
+
+    def test_published_markdown_absent_single_page_entry_contributes_nothing(
+        self, docs_tree: Path
+    ):
+        text = _FIXTURE_ALLOWLIST.replace(
+            "  !/index.md\n", "  !/index.md\n  !/gone.md\n"
+        )
+        assert "gone.md" not in _resolved(docs_tree, text)
+
+    def test_published_markdown_non_markdown_entry_contributes_nothing(
+        self, docs_tree: Path
+    ):
+        """``!/robots.txt`` is served, but this resolver scans markdown."""
+        assert not any(rel.endswith(".txt") for rel in _resolved(docs_tree)), (
+            "a non-.md re-include must not enter a markdown scan"
+        )
+
+    def test_published_markdown_re_exclude_glob_drops_direct_children_only(
+        self, docs_tree: Path
+    ):
+        """``/concepts/_*.md`` drops the direct child, not the nested namesake."""
+        resolved = _resolved(docs_tree)
+        assert "concepts/_TEMPLATE.md" not in resolved
+        assert "concepts/foundations/_x.md" in resolved
+
+    def test_published_markdown_re_exclude_directory_drops_the_whole_subtree(
+        self, docs_tree: Path
+    ):
+        assert not any(rel.startswith("archive/") for rel in _resolved(docs_tree))
+
+    def test_published_markdown_new_allowlist_entry_needs_no_code_edit(
+        self, docs_tree: Path
+    ):
+        """Allowlisting a directory puts its pages in the set, with no gate edit."""
+        (docs_tree / "newdir").mkdir()
+        (docs_tree / "newdir" / "page.md").write_text("# new\n", encoding="utf-8")
+        (docs_tree / "newdir" / "nested").mkdir()
+        (docs_tree / "newdir" / "nested" / "more.md").write_text(
+            "# more\n", encoding="utf-8"
+        )
+
+        before = _resolved(docs_tree)
+        assert not any(rel.startswith("newdir/") for rel in before)
+
+        text = _FIXTURE_ALLOWLIST.replace(
+            "  !/concepts/\n", "  !/concepts/\n  !/newdir/\n"
+        )
+        assert _resolved(docs_tree, text) - before == {
+            "newdir/page.md",
+            "newdir/nested/more.md",
+        }
+
+
 __all__ = [
     "TestBaselineBehavior",
     "TestCollectLongFormFlagReadsRootDefault",
@@ -994,6 +1203,8 @@ __all__ = [
     "TestOptionalExtrasContract",
     "TestOssSrcRoot",
     "TestParseAstBehavior",
+    "TestPublishedMarkdownFilesContract",
+    "TestReadPublishAllowlistContract",
     "TestResolveAllChainFilesContract",
     "TestResolveCallsitesBehavior",
     "TestSymbolOfBehavior",

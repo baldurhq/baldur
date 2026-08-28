@@ -562,6 +562,124 @@ def directive_targets(reference_dir: Path = REFERENCE_DIR) -> Iterator[str]:
 
 
 # ---------------------------------------------------------------------------
+# Published-markdown surface — the ``mkdocs.yml`` publish allowlist.
+#
+# The site's publish scope is the ``exclude_docs`` block: a blanket ``/*``
+# exclude, then ``!``-prefixed re-includes and bare re-excludes, matched
+# last-wins. Every gate that scans authored markdown derives its file set from
+# that block through these two functions, so a newly published page enters the
+# scans the moment its allowlist line lands — an authored path list regenerates
+# the coverage hole at the next published tree, and did.
+#
+# Both inputs are read from the SAME checkout, so the tree the site deploys
+# from and the tree the gate reads are the same by construction and no
+# cross-repo sync ordering can produce a served-but-unscanned page.
+# ---------------------------------------------------------------------------
+
+_EXCLUDE_DOCS_KEY = "exclude_docs:"
+
+# A re-include carrying any of these is a form pathspec honours and the
+# expansion below does not, so it raises rather than being approximated.
+_GLOB_METACHARACTERS = ("*", "?", "[")
+
+
+def read_publish_allowlist(yaml_text: str) -> tuple[list[str], list[str]]:
+    """Return ``(included, re_excluded)`` path patterns from ``exclude_docs``.
+
+    Read textually rather than through a YAML loader: the block is a literal
+    scalar whose lines are the entire input, so the parse stays independent of
+    the custom tags elsewhere in ``mkdocs.yml``. Both lists are ``docs/``-
+    relative with the leading ``/`` stripped.
+
+    Every non-blank, non-comment line must carry one of the three shapes
+    :func:`published_markdown_files` implements — the blanket ``/*``, a
+    glob-free ``!/<path>`` re-include, or a bare ``/<dir>/<glob>`` re-exclude.
+    Anything else raises and names the line, so a pattern form this resolver
+    cannot honour fails loudly instead of being silently mis-derived.
+
+    Raises:
+        ValueError: the ``exclude_docs:`` block is absent, or a line carries a
+            shape this resolver does not implement.
+    """
+    lines = yaml_text.splitlines()
+    start = next(
+        (i for i, line in enumerate(lines) if line.startswith(_EXCLUDE_DOCS_KEY)),
+        None,
+    )
+    if start is None:
+        raise ValueError(
+            f"{_EXCLUDE_DOCS_KEY} block not found — the publish scope is "
+            "underivable, so every published-markdown scan would be vacuous"
+        )
+
+    included: list[str] = []
+    re_excluded: list[str] = []
+    for raw in lines[start + 1 :]:
+        if raw.strip() and not raw.startswith((" ", "\t")):
+            break  # a dedented line ends the block scalar
+        entry = raw.strip()
+        if not entry or entry.startswith("#") or entry == "/*":
+            continue
+        if entry.startswith("!"):
+            pattern = entry[1:]
+            if not pattern.startswith("/") or any(
+                char in pattern for char in _GLOB_METACHARACTERS
+            ):
+                raise ValueError(
+                    f"unsupported exclude_docs re-include: {entry!r} — this "
+                    "resolver expands a literal '!/<path>' only. Spell the "
+                    "path out, or extend the expansion to honour the glob."
+                )
+            included.append(pattern.lstrip("/"))
+        elif entry.startswith("/") and "/" in entry[1:]:
+            re_excluded.append(entry.lstrip("/"))
+        else:
+            raise ValueError(
+                f"unsupported exclude_docs entry: {entry!r} — expected '/*', "
+                "'!/<path>', or a bare '/<dir>/<glob>' re-exclude"
+            )
+    return included, re_excluded
+
+
+def published_markdown_files(
+    docs_dir: Path, included: list[str], re_excluded: list[str]
+) -> list[Path]:
+    """Return the ``.md`` files under ``docs_dir`` the site publishes, sorted.
+
+    A re-include is resolved by what it IS on disk, never by its suffix.
+    mkdocs compiles a slash-less ``!/glossary`` to a pattern that matches the
+    whole ``glossary/`` subtree, so a suffix rule would contribute zero pages
+    for a directory a maintainer wrote without the trailing slash — while
+    every non-emptiness anchor still passed and the suite stayed green.
+
+    An entry naming a path absent from the tree contributes nothing and does
+    NOT raise: mkdocs serves no file from an absent path either, so an
+    allowlist naming one is the normal state, not a sync anomaly.
+    """
+    found: set[Path] = set()
+    for entry in included:
+        target = docs_dir / entry.rstrip("/")
+        if entry.endswith("/") or target.is_dir():
+            found.update(target.rglob("*.md"))
+        elif entry.endswith(".md") and target.is_file():
+            found.add(target)
+
+    for pattern in re_excluded:
+        if pattern.endswith("/"):
+            subtree = docs_dir / pattern.rstrip("/")
+            found = {path for path in found if subtree not in path.parents}
+            continue
+        parent, _, glob = pattern.rpartition("/")
+        parent_dir = docs_dir / parent
+        found = {
+            path
+            for path in found
+            if not (path.parent == parent_dir and Path(path.name).match(glob))
+        }
+    return sorted(found)
+
+
+# ---------------------------------------------------------------------------
 # Published-reference source-surface primitives (shared by G23/G24/G26/G27).
 #
 # mkdocstrings renders the docstrings of every symbol re-exported by a
@@ -1843,6 +1961,8 @@ __all__ = [
     "load_baseline",
     "optional_extras_modules",
     "parse_ast",
+    "published_markdown_files",
+    "read_publish_allowlist",
     "resolve_all_chain_files",
     "resolve_callsites",
     "resolve_test_ref_name",

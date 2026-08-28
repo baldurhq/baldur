@@ -20,11 +20,19 @@ The two rendered surfaces this rule gates:
   ``!^_`` filter actually renders, so a doc-ID added to a non-rendered
   docstring on a public-surface file is also flagged (and remediated by
   moving it to a ``#`` comment).
-* **(A) Authored markdown + nav/site metadata** — the published ``.md`` text
-  (``docs/index.md``, ``docs/getting-started/**``, ``docs/reference/**``) plus
-  ``mkdocs.yml``'s rendered string values (``site_name`` / ``site_description``
-  / ``nav`` leaf labels), parsed via ``mkdocs_safe_load`` so YAML comments — the
-  bulk of ``mkdocs.yml``'s own doc-IDs — are discarded by construction.
+* **(A) Authored markdown + nav/site metadata** — every ``.md`` page the site
+  publishes, derived at run time from ``mkdocs.yml``'s ``exclude_docs``
+  allowlist rather than from a path list authored here, so a newly published
+  page is scanned the moment its allowlist line lands. Plus ``mkdocs.yml``'s
+  rendered string values (``site_name`` / ``site_description`` / ``nav`` leaf
+  labels), parsed via ``mkdocs_safe_load`` so YAML comments — the bulk of
+  ``mkdocs.yml``'s own doc-IDs — are discarded by construction.
+
+Surface (A), the nav/metadata scan and the pure-matcher suites read only
+``docs/`` and ``mkdocs.yml``, so they run in BOTH repos — including the one the
+publish set is authored in and the site is deployed from, where this is the
+gate BEFORE publication rather than an incidental later detector. Only the two
+``:::``-resolver scans of surface (B) need ``src/baldur`` in-tree.
 
 Inline ``#`` source comments are intentionally retained for maintainer
 traceability (CLAUDE.md § Code Language Rules); mkdocstrings renders
@@ -54,6 +62,8 @@ from tests.architecture.conftest import (
     REFERENCE_DIR,
     directive_targets,
     mkdocs_safe_load,
+    published_markdown_files,
+    read_publish_allowlist,
 )
 from tests.architecture.conftest import (
     find_doc_ids as _find_doc_ids,
@@ -66,6 +76,17 @@ _SRC_ROOT = (PROJECT_ROOT / "src" / "baldur").resolve()
 _REFERENCE_DIR = REFERENCE_DIR
 _DOCS_DIR = PROJECT_ROOT / "docs"
 _MKDOCS_YML = PROJECT_ROOT / "mkdocs.yml"
+
+# Scoped to the two scans that actually need the source tree, so every other
+# surface runs wherever the docs are authored. ``_SRC_ROOT.is_dir()`` is the
+# local equivalent of the shared in-tree helper — both climb to the nearest
+# ``pyproject.toml`` and join ``src/baldur`` — and using this module's own
+# constant keeps its public twin identical apart from the conftest import
+# paths, where the predicate is true by construction and the marker is inert.
+_requires_oss_source = pytest.mark.skipif(
+    not _SRC_ROOT.is_dir(),
+    reason="::: resolver scan — runs where src/baldur is in-tree",
+)
 
 # ``_DOC_ID_PATTERNS`` / ``_DOC_ID_ALLOWLIST`` / ``_find_doc_ids`` /
 # ``_iter_docstrings`` are imported from ``_helpers`` (the canonical home,
@@ -179,19 +200,89 @@ def _resolve_reference_source_files(
     return files
 
 
-def _published_markdown_files(docs_dir: Path = _DOCS_DIR) -> list[Path]:
-    """Return the published ``.md`` set per the ``mkdocs.yml`` allowlist."""
-    files: list[Path] = []
-    index = docs_dir / "index.md"
-    if index.exists():
-        files.append(index)
-    getting_started = docs_dir / "getting-started"
-    if getting_started.exists():
-        files.extend(sorted(getting_started.rglob("*.md")))
-    reference = docs_dir / "reference"
-    if reference.exists():
-        files.extend(sorted(reference.rglob("*.md")))
-    return files
+def _published_markdown_files(
+    docs_dir: Path = _DOCS_DIR, mkdocs_yml: Path = _MKDOCS_YML
+) -> list[Path]:
+    """Return the published ``.md`` set, derived from the publish allowlist.
+
+    Reads ``mkdocs.yml``'s ``exclude_docs`` block and expands it against
+    ``docs_dir``. No path list is authored here, so a page enters this scan the
+    moment its allowlist line lands. Both inputs are parameters, so a synthetic
+    tree needs no monkeypatch.
+    """
+    included, re_excluded = read_publish_allowlist(
+        mkdocs_yml.read_text(encoding="utf-8")
+    )
+    return published_markdown_files(docs_dir, included, re_excluded)
+
+
+def _assert_published_set_discoverable(
+    files: list[Path],
+    docs_dir: Path = _DOCS_DIR,
+    mkdocs_yml: Path = _MKDOCS_YML,
+) -> None:
+    """Anti-vacuous-pass guard for the derived published-markdown set.
+
+    ``rglob`` reports an absent directory as an empty iterator, so no
+    completeness claim can rest on the walk itself — non-emptiness plus a few
+    anchors is the only absence signal available, which is why this guard
+    carries the fail-closed burden for every scan built on the derived set.
+
+    Two kinds of anchor:
+
+    * **Presence** — the set is non-empty and holds ``docs/index.md`` plus at
+      least one page under each of the two directory re-includes both repos
+      carry. The negative anchor is the load-bearing one:
+      ``docs/concepts/_TEMPLATE.md`` is the one file that is both inside a
+      re-included directory and carries live doc-IDs, so a resolver that drops
+      the re-exclude arm reds here instead of silently widening the scan.
+    * **Coverage** — every re-include that resolves to markdown on disk
+      contributes at least one page. Derived from the live allowlist rather
+      than an authored page list, so it holds for whichever pages a given
+      checkout publishes: the two repos are deliberately not in the same
+      publish state, and an entry naming a path absent from the tree is a
+      normal state rather than a sync anomaly, so it is skipped, not failed.
+    """
+    rels = {_rel(path) for path in files}
+    assert rels, (
+        "G24: the derived published-markdown set is empty — the exclude_docs "
+        "expansion is broken, so every scan built on it would pass vacuously."
+    )
+    assert "docs/index.md" in rels, (
+        "G24: docs/index.md missing from the derived published set — the "
+        "single-page re-include arm is broken."
+    )
+    for tree in ("docs/getting-started/", "docs/reference/"):
+        assert any(rel.startswith(tree) for rel in rels), (
+            f"G24: no page under {tree} in the derived published set — the "
+            "directory re-include arm is broken."
+        )
+    assert "docs/concepts/_TEMPLATE.md" not in rels, (
+        "G24: docs/concepts/_TEMPLATE.md is in the derived published set — the "
+        "re-exclude arm did not run. That file quotes the ban list as "
+        "instructional examples, so the gate would red on authoring "
+        "scaffolding the site never serves."
+    )
+
+    included, _ = read_publish_allowlist(mkdocs_yml.read_text(encoding="utf-8"))
+    scanned = set(files)
+    uncovered: list[str] = []
+    for entry in included:
+        target = docs_dir / entry.rstrip("/")
+        if target.is_dir():
+            pages = set(target.rglob("*.md"))
+            if pages and not pages & scanned:
+                uncovered.append(
+                    f"  !/{entry} — publishes {len(pages)} page(s), none scanned"
+                )
+        elif target.is_file() and target.suffix == ".md" and target not in scanned:
+            uncovered.append(f"  !/{entry} — allowlisted page not scanned")
+
+    assert not uncovered, (
+        f"G24: allowlisted pages the derived set does not reach "
+        f"({len(uncovered)} entry/entries). The site serves them, the scan "
+        "does not.\n" + "\n".join(uncovered)
+    )
 
 
 def _rel(path: Path) -> str:
@@ -204,6 +295,7 @@ def _rel(path: Path) -> str:
 class TestMkdocsInternalDocIdLeak:
     """G24 — the published mkdocs surface carries no internal doc-IDs."""
 
+    @_requires_oss_source
     def test_reference_source_set_is_resolvable(self):
         """Anti-vacuous-pass guard for the ``:::`` resolver.
 
@@ -234,6 +326,7 @@ class TestMkdocsInternalDocIdLeak:
             "package-target __all__ walk (::: baldur.interfaces) is broken."
         )
 
+    @_requires_oss_source
     def test_no_doc_ids_in_rendered_docstrings(self):
         offenders: list[str] = []
         for path in sorted(_resolve_reference_source_files()):
@@ -251,6 +344,21 @@ class TestMkdocsInternalDocIdLeak:
             "`#` comment or rephrase it out — these docstrings ship to "
             "baldur.sh/reference/.\n" + "\n".join(offenders)
         )
+
+    def test_published_markdown_set_is_discoverable(self):
+        """Anti-vacuous-pass guard for the derived markdown set (real tree)."""
+        _assert_published_set_discoverable(_published_markdown_files())
+
+    def test_broken_published_set_discovery_fails_loudly(self, tmp_path: Path):
+        """The guard reds when the allowlist resolves nothing in ``docs_dir``.
+
+        The companion to the assertion above: a guard that could never fail
+        would certify a broken resolver as discoverable.
+        """
+        files = _published_markdown_files(docs_dir=tmp_path)
+        assert files == [], "an empty docs tree must resolve to no pages"
+        with pytest.raises(AssertionError, match="published-markdown set is empty"):
+            _assert_published_set_discoverable(files, docs_dir=tmp_path)
 
     def test_no_doc_ids_in_published_markdown(self):
         offenders: list[str] = []
