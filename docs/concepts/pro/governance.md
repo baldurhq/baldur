@@ -48,37 +48,39 @@ def replay_dead_letters(self):
 
 Narrower decorators — `require_system_enabled`, `require_not_emergency`, `require_error_budget` — each guard a single dimension, and a service class can inherit `GovernanceCheckMixin` to call `check_governance()` or `is_automation_allowed()` inline when it needs the result rather than an all-or-nothing wrapper.
 
+One thing the gate does *not* do: it decides **whether** an action may run now, not whether the action is safe to run twice. Before you put automation like a dead-letter replay behind it, [make the replayed operation idempotent or give it a dedup guard](../oss/idempotency.md) — governance will happily allow a duplicate side effect through a passing check.
+
 ### Fail-open by design
 
 Governance is a guard, and a guard must never become the outage. If a check **cannot be evaluated** (its backing subsystem is unreachable or errors out), governance **fails open**: it allows the action rather than blocking it, and raises a **FAILSAFE alert** (rate-limited so it cannot storm) telling operators that automation is running *without* that guard. The safety stance is explicit: a broken governance check degrades to "unprotected but running," never to "everything blocked."
 
-So that the gate stays cheap on a hot path, each check reads live system state through a short-lived cache; a relevant state change — the emergency level moving, the kill switch flipping — invalidates that cache immediately, so the gate reflects the new state on the very next call rather than waiting for the cache to age out.
+So that the gate stays cheap on a hot path, each check reads system state through a short-lived cache (a configurable time-to-live, thirty seconds by default). Some transitions clear that cache at once: an error-budget threshold crossing, and an emergency raised by a critical security violation. Every other change, such as the kill switch flipping, is picked up as soon as the cached answer expires — the gate is never more than one cache lifetime behind the live state.
 
 ### Operating mode and automatic expiry
 
-Governance tracks a system-wide **operating mode**. **NORMAL** is business as usual; **STRICT** is a declared heightened-caution state that an operator can force (a reason is mandatory) and that a serious incident can trigger. Every STRICT activation records *who* set it, *why*, and *when*.
+Governance tracks a system-wide **operating mode**. **NORMAL** is business as usual; **STRICT** is a declared heightened-caution state that an operator forces (a reason is mandatory). Two further modes exist around that pair — **CAUTIOUS**, the gradual path back to normal, and **EMERGENCY**, the harshest clampdown — but the NORMAL↔STRICT declaration is the governance lifecycle. Forcing STRICT records *who* set it, *why*, and *when*.
 
-STRICT is deliberately **self-expiring**: a forgotten emergency state is its own hazard, so it does not stay on forever:
+The STRICT declaration is deliberately **self-expiring**: a forgotten emergency state is its own hazard, so it does not stay on forever:
 
 ```mermaid
 stateDiagram-v2
     [*] --> NORMAL
-    NORMAL --> STRICT: operator forces STRICT (reason required), or a serious incident
-    STRICT --> NORMAL: operator restores, or automatic expiry
+    NORMAL --> STRICT: operator forces STRICT (reason required)
+    STRICT --> NORMAL: operator restores, or the declaration expires
     NORMAL --> [*]
 ```
 
-While STRICT is active, governance walks an escalating notification timeline and finally stands the system down on its own (default timings shown; an operator can adjust them):
+While STRICT is active, governance walks an escalating notification timeline and finally retires the declaration on its own (default timings shown; an operator can adjust them):
 
 | Elapsed | What happens |
 |---------|--------------|
 | 4 hours | A **warning** notification is sent — the emergency has run long enough to need review |
-| 6 hours | A **final warning** is sent — automatic restore is approaching |
-| 8 hours | The system **auto-restores to NORMAL** and notifies, so a transient emergency cannot linger indefinitely |
+| 6 hours | A **final warning** is sent — automatic expiry is approaching |
+| 8 hours | The STRICT declaration **expires automatically** — the emergency record is cleared and a stand-down notification goes out, so a transient emergency cannot linger silently |
 
 ### Dual control and the status view
 
-Sensitive governance changes can be routed through an **approval workflow**: a request is filed, and a **different** admin must approve it — the system rejects an attempt to approve your own request (the four-eyes principle). Approval thresholds distinguish operator-level from admin-level actions.
+Sensitive governance changes can be routed through an **approval workflow**: a request is filed, and a **different** admin must approve it — the system rejects an attempt to approve your own request (the four-eyes principle). A request can cover a configuration change, a mode change, or an emergency action, and it expires on its own if nobody acts on it.
 
 At any time an operator can read a governance **status view**: the current operating mode, whether an emergency is active and why, the expiry countdown, the warning state, and the configured thresholds — the single place to answer "what is governance doing right now?"
 
@@ -87,14 +89,14 @@ At any time an operator can read a governance **status view**: the current opera
 | An automated action is blocked with a reason (`kill_switch`, `emergency_mode`, or `error_budget`) | the first failing check stops it before it runs |
 | A FAILSAFE alert warns that automation is running without a guard | a governance check could not be evaluated and failed open |
 | An audit entry recording why an action was or wasn't allowed | any block (and any Break Glass bypass) is written to the trail |
-| Warning, then final warning, then an automatic return to NORMAL | the system stays in STRICT past 4h / 6h / 8h |
+| Warning, then final warning, then an automatic expiry of the declared emergency | the system stays in STRICT past 4h / 6h / 8h |
 | An approval request that a second admin must clear | a sensitive change is filed for dual control |
 
 ## Configuration
 
-Governance is operated at **runtime through the admin REST API / Web Console**, not through environment variables — there is no enable flag to set in the environment. Through the admin endpoints an ADMIN-level operator forces the operating mode, files and approves change requests, and adjusts the governance settings: the emergency expiry and warning timings, the operator/admin approval thresholds, and the notification channels. VIEWER-level access can read the governance status, mode, and history.
+Governance is operated at **runtime through the admin surface**, not through environment variables — there is no enable flag to set in the environment. On the built-in admin server and Web Console, VIEWER-level access reads the governance status view and the approval queue, and an ADMIN-level operator adjusts the governance settings: the emergency expiry and warning timings, the approval thresholds, and the notification channels. Forcing the operating mode and filing or approving change requests ride the REST endpoints Baldur mounts inside your application through its framework integration.
 
-The gate's **safety semantics are fixed** and not operator-tunable: checks always run in the order above, the gate always stops at the first failure, every block is always audited, and an un-evaluable check always fails open. The **Break Glass** bypass is itself a runtime emergency control — engaging it is an audited action that requires a post-incident review.
+The gate's **safety semantics are fixed** and not operator-tunable: checks always run in the order above, the gate always stops at the first failure, every block is always audited, and an un-evaluable check always fails open. The **Break Glass** bypass is the one deployment-level exception: it is switched on in the deployment configuration rather than through the admin API, and while it is engaged every bypassed gate decision is written to the audit trail (on by default), with a post-incident review expected.
 
 These controls are **advanced / internal**: governance has no entries in the public operator-tunable environment-variable allowlist yet. Governance ships with the PRO tier; the admin endpoints are available once PRO is active, and report the feature as unavailable otherwise.
 

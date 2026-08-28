@@ -91,6 +91,7 @@ plugins:
         Docs:
           - index.md: "What Baldur is and the one-decorator quickstart."
           - what-is-baldur.md: "Orientation: what Baldur is, what it does when a call fails, where it sits in your stack."
+          - why-i-built-baldur.md: "The question that started the project, what the existing libraries did not answer, and four decisions behind it."
           - getting-started/index.md: "Install Baldur and protect your first call."
           - getting-started/django.md: "Wire Baldur into a Django project."
           - getting-started/fastapi.md: "Wire Baldur into a FastAPI app."
@@ -99,6 +100,7 @@ plugins:
           - getting-started/ai-assistants.md: "Teach an AI assistant the @baldur.protected idiom via baldur init-ai."
           - compatibility.md: "Supported Python, Django, FastAPI, Flask, Celery, Redis, and PostgreSQL versions, and what CI tests on every commit."
           - troubleshooting.md: "Fixes for the most common Baldur install, circuit-breaker, DLQ, notification, and operations issues."
+          - faq.md: "Common questions about Baldur — comparisons, overhead, Redis requirements, pricing, and when to use PRO."
         API Reference:
           - reference/index.md: "API Reference overview and module map."
           - reference/baldur/*.md
@@ -174,7 +176,9 @@ exclude_docs: |
   /*
   !/index.md
   !/what-is-baldur.md
+  !/why-i-built-baldur.md
   !/troubleshooting.md
+  !/faq.md
   !/compatibility.md
   !/support.md
   !/pricing.md
@@ -182,6 +186,7 @@ exclude_docs: |
   !/terms.md
   !/getting-started/
   !/concepts/
+  !/comparison/
   !/reference/
   !/assets/
   # robots.txt carries the Sitemap: directive so crawlers auto-discover the
@@ -212,6 +217,9 @@ not_in_nav: |
 
 nav:
   - "What is Baldur?": what-is-baldur.md
+  - Why I built Baldur: why-i-built-baldur.md
+  - Comparison:
+      - tenacity: comparison/tenacity.md
   - Pricing: pricing.md
   - Getting Started:
       - getting-started/index.md
@@ -255,6 +263,7 @@ nav:
           - Release Notes: concepts/pro/release-notes.md
   - Compatibility: compatibility.md
   - Troubleshooting: troubleshooting.md
+  - FAQ: faq.md
   - Support: support.md
   - Legal:
       - Privacy Policy: privacy.md

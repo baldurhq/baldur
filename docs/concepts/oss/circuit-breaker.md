@@ -92,8 +92,16 @@ to hold, leave both of those off.**
 
 A force takes effect in the process that receives it, and a process that starts afterwards picks it up
 when it loads shared state. A worker that was already running when you pressed the button keeps
-deciding from its own view of the breaker. **When a force has to hold for every request, which is
-usually the point of a maintenance window, run a single web worker.**
+deciding from its own view of the breaker until something makes it consult the shared record. A trip
+is one such moment: when your workers share a store (Redis or SQL) and a running worker's failures
+cross the threshold, the store refuses to let that trip overwrite your force. The worker adopts the
+force instead, enforces it from its next request, and logs a warning (`circuit_breaker.trip_blocked`)
+so the failure burst your force just swallowed still shows up in the logs. Baldur's routine background
+state sync declines to touch a forced breaker's shared record in the same way. None of this makes the
+pickup immediate: between your button press and that worker's next trip attempt, it still answers from
+its own view, and a worker that cannot reach the shared store falls back to its own local judgement,
+trips included. **When a force has to hold for every request from the first moment, which is usually
+the point of a maintenance window, run a single web worker.**
 
 !!! warning "Dry-run mode accepts a force but never rejects traffic"
     Under [dry-run (observe-only) mode](system-control.md) Baldur reports what it *would* have done
@@ -138,6 +146,9 @@ trips, it does not make that first trip arrive any sooner. It is opt-in — set
 weigh before you do: a peer's CLOSED is applied without checking whether this
 worker is holding an operator's force, so
 [a manual block can be lifted while you still need it](#taking-manual-control).
+That makes propagation the one automatic path that does not defer to a force. A
+peer's *trip* is the contrast case: it meets your force in the shared store, is
+declined, and that peer adopts the force instead.
 This coordinates the *same* breaker across workers; coordinating
 *different* breakers — so an open downstream breaker tightens the upstream ones —
 is outside the scope of the OSS circuit breaker.
