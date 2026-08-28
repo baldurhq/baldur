@@ -1,4 +1,12 @@
-# How Baldur compares to tenacity
+---
+title: Using tenacity with a circuit breaker in Python
+description: >-
+  tenacity retries a failed call. This page is about where retry alone stops
+  being enough in a Python service, and how to add a circuit breaker without
+  giving up tenacity.
+---
+
+# Using tenacity with a circuit breaker in Python
 
 > tenacity is the best-known way to retry a call in Python. This page is about where retry alone
 > stops being enough — and what to do about it without giving up tenacity.

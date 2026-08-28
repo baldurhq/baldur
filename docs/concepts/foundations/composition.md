@@ -1,6 +1,14 @@
+---
+title: Combining circuit breaker, retry, and fallback in Python
+description: >-
+  One Python decorator layers circuit breaker, retry, fallback, and a
+  dead-letter queue into a single pipeline — and the order they run in changes
+  how they behave.
+---
+
 # How `@baldur.protected` composes circuit breaker, retry, and fallback
 
-> One decorator layers circuit breaker, retry, fallback, and a dead-letter queue into a single pipeline — in the order that keeps them working together instead of against each other.
+> One Python decorator layers circuit breaker, retry, fallback, and a dead-letter queue into a single pipeline — in the order that keeps them working together instead of against each other.
 
 ## What is it?
 

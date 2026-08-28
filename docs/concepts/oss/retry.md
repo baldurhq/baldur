@@ -1,6 +1,13 @@
-# Retry
+---
+title: Retry with exponential backoff in Python
+description: >-
+  Why an immediate retry loop makes an outage worse, and how exponential backoff
+  with jitter retries a failed call safely in a Python service.
+---
 
-> Automatically tries a failed operation again — with smart, growing pauses between attempts — so a brief hiccup doesn't turn into a user-facing error.
+# Retry with exponential backoff in Python
+
+> Automatically tries a failed operation again — with smart, growing pauses between attempts — so a brief hiccup doesn't turn into a user-facing error in your Python service.
 
 ## What is it?
 
