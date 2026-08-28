@@ -1,6 +1,14 @@
-# Circuit Breaker
+---
+title: Circuit breaker for Python
+description: >-
+  How a circuit breaker stops one failing dependency from taking down a Python
+  service — the three states, when it trips, and what happens to a call while it
+  is open.
+---
 
-> Stops your app from hammering a failing dependency, so one slow service can't drag the rest down with it.
+# Circuit breaker for Python
+
+> Stops your Python app from hammering a failing dependency, so one slow service can't drag the rest down with it.
 
 ## What is it?
 

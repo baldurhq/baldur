@@ -1,4 +1,12 @@
-# Idempotency
+---
+title: Idempotency keys for Python services
+description: >-
+  How an idempotency key keeps a charge, an email, or a shipment from running
+  twice in a Python service when retries, double-clicks, or duplicate webhooks
+  replay the same request.
+---
+
+# Idempotency for Python services
 
 > Makes "this must never happen twice" operations safe — a card charge, an email, a shipment — by remembering which requests have already run and blocking the repeats, even when retries, double-clicks, or duplicate webhooks fire the same request again.
 

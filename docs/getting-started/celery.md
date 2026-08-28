@@ -1,3 +1,10 @@
+---
+title: Celery retry and circuit breaker for Python tasks
+description: >-
+  Protect Celery tasks in Python with retry, a circuit breaker, and a
+  dead-letter queue, and run scheduled maintenance on the beat you already have.
+---
+
 # Celery Quickstart
 
 Protect Celery tasks with Baldur, and let Baldur run its own scheduled
