@@ -76,7 +76,7 @@ import baldur
     "charge-customer",
     retry=True,
     idempotency_key="order_id",
-    fallback=lambda: {"status": "queued"},
+    fallback=lambda: {"status": "unavailable"},
 )
 def charge(order_id: str) -> dict:
     return payment_gateway.charge(order_id)
@@ -84,7 +84,8 @@ def charge(order_id: str) -> dict:
 
 `idempotency_key="order_id"` makes the dedup key *your* order id — the thing the network can't see —
 so a retried call charges once. `fallback=` hands the caller a domain answer when the charge can't
-go through. Capturing and replaying failed work is the
+go through — `unavailable`, so the caller retries, rather than a promise to charge them later.
+Capturing and replaying failed work is the
 [dead-letter queue](dlq-replay.md), reached from the same decorator with `dlq=True`.
 
 ### Running both, without fighting
