@@ -25,10 +25,11 @@ a post-build HTML scan):
   directives across ``docs/reference/**``. Reuses the doc-ID gate's resolver
   (each ``:::`` target -> its defining source file) and AST docstring
   extraction.
-* **(ii) Authored markdown** — the published ``.md`` text across the full
-  publish allowlist (root pages + ``getting-started/`` + ``concepts/`` +
-  ``reference/``). A page's intro prose and headings render even when a symbol
-  carries no docstring.
+* **(ii) Authored markdown** — every ``.md`` page the site publishes, derived
+  at run time from ``mkdocs.yml``'s ``exclude_docs`` allowlist rather than from
+  a path list authored here, so a newly published page is scanned the moment
+  its allowlist line lands. A page's intro prose and headings render even when
+  a symbol carries no docstring.
 * **(iii) Rendered symbol names** — the leaf name of every ``:::`` target plus
   the ``__all__`` member names of a whole-package/module target. A symbol name
   is a heading on the site, so ``NoOpKafkaEventBus`` discloses its family even
@@ -37,6 +38,11 @@ a post-build HTML scan):
 Deferred-feature names (the post-launch roadmap) are NOT gated here — a public
 token list would itself republish the roadmap this invariant exists to remove.
 That half runs privately.
+
+Surface (ii) and the pure-matcher suites read only ``docs/`` and
+``mkdocs.yml``, so they run in BOTH repos — including the one the publish set
+is authored in and the site is deployed from. Only the two scans that follow
+``:::`` targets into the source tree need ``src/baldur`` in-tree.
 
 Baseline is enforced-empty (no allowlist) — a leak is scrubbed, never
 baselined.
@@ -57,12 +63,17 @@ from tests.architecture.conftest import (
     REFERENCE_DIR,
     directive_targets,
     iter_docstrings,
+    published_markdown_files,
+    read_publish_allowlist,
 )
 from tests.architecture.test_mkdocs_internal_doc_id_leak import (
+    _assert_published_set_discoverable,
+    _requires_oss_source,
     _resolve_reference_source_files,
 )
 
 _DOCS_DIR = PROJECT_ROOT / "docs"
+_MKDOCS_YML = PROJECT_ROOT / "mkdocs.yml"
 
 
 # ---------------------------------------------------------------------------
@@ -134,22 +145,22 @@ def find_banned_symbol_tokens(name: str) -> list[str]:
     return sorted(_SYMBOL_NAME_NOUNS & components)
 
 
-def _published_markdown_files(docs_dir: Path = _DOCS_DIR) -> list[Path]:
-    """Return the published ``.md`` set per the ``mkdocs.yml`` publish allowlist.
+def _published_markdown_files(
+    docs_dir: Path = _DOCS_DIR, mkdocs_yml: Path = _MKDOCS_YML
+) -> list[Path]:
+    """Return the published ``.md`` set, derived from the publish allowlist.
 
-    The allowlist re-includes exactly the root pages (``docs/*.md``),
-    ``getting-started/``, ``concepts/`` (minus ``_``-prefixed scaffolding), and
-    ``reference/``. ``runbooks/`` / ``impl/`` / ``laws/`` are excluded and are
-    not scanned.
+    Reads ``mkdocs.yml``'s ``exclude_docs`` block and expands it against
+    ``docs_dir`` through the canonical resolver, so this gate and the doc-ID
+    gate can never disagree about what the site serves, and a newly published
+    tree needs no edit here. An unpublished page leaves the scan by the same
+    rule and loses no coverage — it cannot leak until it is allowlisted, and
+    allowlisting it is what puts it back.
     """
-    files: list[Path] = sorted(docs_dir.glob("*.md"))
-    for subdir in ("getting-started", "concepts", "reference"):
-        tree = docs_dir / subdir
-        if tree.exists():
-            files.extend(
-                sorted(p for p in tree.rglob("*.md") if not p.name.startswith("_"))
-            )
-    return files
+    included, re_excluded = read_publish_allowlist(
+        mkdocs_yml.read_text(encoding="utf-8")
+    )
+    return published_markdown_files(docs_dir, included, re_excluded)
 
 
 def scannable_markdown_lines(text: str) -> list[tuple[int, str]]:
@@ -221,20 +232,28 @@ def _rel(path: Path) -> str:
 class TestShippedOnlySurface:
     """G58 — the published OSS surface carries no existence-ban tokens."""
 
-    def test_scan_inputs_are_nonempty(self):
+    def test_published_markdown_set_is_discoverable(self):
+        """Anti-vacuous-pass guard for the derived markdown set.
+
+        Split from the ``:::``-resolver guards below so it runs in both repos:
+        the markdown scan reads only ``docs/`` and ``mkdocs.yml``, and gating
+        it on an in-tree source root would leave this gate's own adopted
+        resolver derived but never materialised where the docs are authored.
+        """
+        _assert_published_set_discoverable(_published_markdown_files())
+
+    @_requires_oss_source
+    def test_directive_scan_inputs_are_nonempty(self):
         """Anti-vacuous-pass guard: a broken resolver would pass every scan."""
         assert _resolve_reference_source_files(), (
             "G58: resolved zero reference source files — the ::: resolver is "
             "broken, so the docstring scan would pass vacuously."
         )
-        assert _published_markdown_files(), (
-            "G58: zero published markdown files discovered — the allowlist walk "
-            "is broken."
-        )
         assert _rendered_symbol_names(), (
             "G58: zero rendered symbol names discovered — the directive walk is broken."
         )
 
+    @_requires_oss_source
     def test_no_banned_tokens_in_rendered_docstrings(self):
         offenders: list[str] = []
         for path in sorted(_resolve_reference_source_files()):
@@ -271,6 +290,7 @@ class TestShippedOnlySurface:
             "the docs overclaim).\n" + "\n".join(offenders)
         )
 
+    @_requires_oss_source
     def test_no_banned_tokens_in_rendered_symbol_names(self):
         offenders: list[str] = []
         for name in sorted(_rendered_symbol_names()):
