@@ -67,11 +67,13 @@ You have three ways to replay the queued work:
   you resolve an entry by hand, or force-redrive one that is parked for review.
 - **Batch replay by failure type.** Replay everything of a given failure type at once from code,
   using the replay API (`batch_replay_by_failure_type`): for example, every database-timeout failure
-  after the database recovers. With PRO active, batch replay is also a one-click Web Console action
-  and a REST endpoint, and these replay-API batches can run in an **adaptive** mode: instead of a
+  after the database recovers. A batch started from the replay service can also run in an
+  **adaptive** mode (`replay_batch(..., use_adaptive=True)`, off by default): instead of a
   fixed batch size, Baldur watches the success rate of each batch and adjusts the next one, shrinking
   the batch when too many replays are still failing and growing it again after several clean batches,
-  staying between a floor and a ceiling you set.
+  staying between a floor and a ceiling you set. With PRO active, batch replay is also a one-click
+  Web Console action and a REST endpoint, and drains through a throttled replay queue that applies
+  rate limits and backpressure.
 - **Automatic on recovery.** When a dependency's circuit breaker closes again after an outage, Baldur
   sweeps that dependency's queued failures and replays them, so recovery and catch-up happen
   together.
@@ -90,7 +92,7 @@ returns to the needs-review state, so a force-redrive can never turn a poison-pi
 | You retry, resolve, or force-redrive a single entry | an operator action from the Web Console DLQ panel or the REST API |
 | A whole failure type replays in one call | `batch_replay_by_failure_type` from code, or the console/REST batch replay (**PRO**) |
 | Queued work drains on its own | a dependency's circuit breaker recovers and an automatic replay sweep runs |
-| A batch replay grows or shrinks batch by batch | **PRO** — adaptive batch sizing is enabled and the recent replay success rate changes |
+| A batch replay grows or shrinks batch by batch | adaptive batch sizing was opted in (`use_adaptive=True`) and the recent replay success rate changes |
 | An entry stops being retried and is parked in a needs-review state | its replay attempts are exhausted |
 | Old entries age out — expiring, then archiving | **PRO** — scheduled archive/purge retention is active |
 | New failures displace the oldest entries, or are rejected | the queue hits its size limit and the overflow strategy applies |
@@ -318,10 +320,11 @@ operate-at-scale surface on top.
   on-disk fallback when the store is unreachable, size limits with the
   `drop_oldest` / `reject` overflow strategies, the Web Console DLQ panel and the read REST
   endpoints (list, detail, facet counts, cleanup stats), the single-entry actions (retry, resolve,
-  force-redrive), batch replay by failure type from code, and automatic replay on circuit-breaker
+  force-redrive), batch replay by failure type from code with opt-in adaptive
+  (success-rate-driven) batch sizing, and automatic replay on circuit-breaker
   recovery with the armed/disarmed surface.
 - **With PRO active**: batch replay becomes a one-click console action and REST endpoint, replay
-  gains adaptive (success-rate-driven) batch sizing and a throttled replay queue, the
+  gains a throttled replay queue, the
   `compress_oldest` overflow strategy and its compressed summaries become available, evictions move
   off the capture path to a background water-level worker, the outbox gains its disk-durable mode
   and separate drain-worker liveness monitoring, scheduled archive/purge retention ages old

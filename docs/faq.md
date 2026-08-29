@@ -107,7 +107,8 @@ deployments.
 Point it at Redis when you need **cross-worker state sharing** (circuit
 breaker state, rate-limit counters, DLQ persistence across restarts).
 For production multi-worker deployments, Redis is recommended.
-PRO supports Redis Sentinel for high availability.
+Redis Sentinel works out of the box for high availability — point
+`BALDUR_REDIS_URL` at a `redis+sentinel://` URL and nothing else changes.
 
 ---
 

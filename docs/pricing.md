@@ -20,7 +20,7 @@ workloads.
 | Precomputed cache | ✅ | ✅ |
 | Bulkhead isolation | ✅ | ✅ (＋thread-pool) |
 | Dead-letter queue + replay (capture, view, single-entry) | ✅ | ✅ |
-| DLQ at scale (console batch replay, adaptive, durable, archive/purge) | — | ✅ |
+| DLQ at scale (console batch replay, adaptive pacing, durable, archive/purge) | — | ✅ |
 | Audit trail | — | ✅ |
 | Emergency mode | — | ✅ |
 | Governance gates | — | ✅ |
