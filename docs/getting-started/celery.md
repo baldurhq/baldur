@@ -67,7 +67,12 @@ setup_baldur_signals(
 ```
 
 `task_domain_mapping` groups tasks under a shared circuit-breaker / metric domain
-(every payment task trips one breaker); an unmapped task uses its own task name.
+(every payment task trips one breaker). An unmapped task is matched against
+built-in keyword patterns first (a name containing `pay`, `order`, `stock`,
+`email`, … lands in that domain), then falls under the first meaningful segment
+of its dotted name — `myproject.tasks.sync_products` becomes domain
+`myproject`, not the full task name — so map explicitly any task whose grouping
+matters.
 The circuit-breaker, dead-letter, metrics, and forensic-capture hooks each toggle
 independently (`cb_enabled` / `dlq_enabled` / `metrics_enabled` /
 `forensics_enabled`), all on by default. Durable failure capture and replay ship
