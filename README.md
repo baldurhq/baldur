@@ -194,9 +194,11 @@ Python × Django test grid, and the version support policy.
 
 ## Early access
 
-Baldur is early, and it is looking for a small number of teams already running
-a Python service in production to work with directly. If that is you, the
-details and how to reach me are in
+Baldur is in early access: the core is production-tested and the API is
+stable, but the project is young — minor releases may still ship breaking
+changes, always with a changelog entry. It is looking for a small number of
+teams already running a Python service in production to work with directly.
+If that is you, the details and how to reach me are in
 [Discussions](https://github.com/baldurhq/baldur/discussions).
 
 ## License
