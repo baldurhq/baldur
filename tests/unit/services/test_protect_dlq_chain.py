@@ -153,3 +153,50 @@ class TestProtectDlqChainBehavior:
         assert outcome.metadata.get("should_dlq") is True
         # DLQSink writes its sink_id back onto the result's metadata too.
         assert outcome.metadata.get("sink_id") == "dlq-7"
+
+    def test_served_fallback_suppresses_dlq_capture(self):
+        """A served fallback and DLQ capture are mutually exclusive.
+
+        The fallback wraps the chain outermost, so an absorbed failure ends as
+        SUCCESS_WITH_FALLBACK and sinks never run — with a fallback set,
+        ``dlq=True`` captures nothing. Arm 1 (no fallback) is the positive
+        control proving this seam observes capture under the exact same config.
+        """
+
+        def always_fails() -> None:
+            raise ValueError("always_fails")
+
+        # Arm 1 — positive control: no fallback → capture fires.
+        with patch(
+            "baldur.services.retry_handler.sinks.store_to_dlq",
+            return_value=MagicMock(success=True, dlq_id="dlq-ctl", error=None),
+        ) as mock_store:
+            with pytest.raises(ValueError):
+                protect(
+                    "test.fallback_exclusivity",
+                    always_fails,
+                    dlq=True,
+                    retry=self._retry_cfg(),
+                    circuit_breaker=False,
+                    timeout=None,
+                )
+        assert mock_store.call_count == 1
+
+        reset_protect_caches()
+
+        # Arm 2 — same config plus a fallback: served answer, zero capture.
+        with patch(
+            "baldur.services.retry_handler.sinks.store_to_dlq",
+            return_value=MagicMock(success=True, dlq_id="dlq-fb", error=None),
+        ) as mock_store:
+            result = protect(
+                "test.fallback_exclusivity",
+                always_fails,
+                dlq=True,
+                retry=self._retry_cfg(),
+                circuit_breaker=False,
+                timeout=None,
+                fallback=lambda: {"status": "unavailable"},
+            )
+        assert result == {"status": "unavailable"}
+        assert mock_store.call_count == 0
