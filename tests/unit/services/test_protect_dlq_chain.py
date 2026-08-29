@@ -166,10 +166,12 @@ class TestProtectDlqChainBehavior:
         def always_fails() -> None:
             raise ValueError("always_fails")
 
+        from baldur.models.dlq import DLQEntryResult
+
         # Arm 1 — positive control: no fallback → capture fires.
         with patch(
             "baldur.services.retry_handler.sinks.store_to_dlq",
-            return_value=MagicMock(success=True, dlq_id="dlq-ctl", error=None),
+            return_value=DLQEntryResult(success=True, dlq_id="dlq-ctl"),
         ) as mock_store:
             with pytest.raises(ValueError):
                 protect(
@@ -187,7 +189,7 @@ class TestProtectDlqChainBehavior:
         # Arm 2 — same config plus a fallback: served answer, zero capture.
         with patch(
             "baldur.services.retry_handler.sinks.store_to_dlq",
-            return_value=MagicMock(success=True, dlq_id="dlq-fb", error=None),
+            return_value=DLQEntryResult(success=True, dlq_id="dlq-fb"),
         ) as mock_store:
             result = protect(
                 "test.fallback_exclusivity",
