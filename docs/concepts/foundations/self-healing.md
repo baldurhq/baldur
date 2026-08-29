@@ -68,7 +68,11 @@ so grant it only to calls that are [safe to run a second time](dlq-replay.md).
 The fallback is worth reading closely too. It answers `unavailable`, not `queued` — on a
 user-facing charge the honest answer is that nothing happened and the caller should try again.
 Promising a queue would commit you to charging a customer who may have already walked away, which
-is exactly the case [replay is not for](dlq-replay.md).
+is exactly the case [replay is not for](dlq-replay.md). Setting a fallback also has a structural
+consequence: a served fallback counts as a handled call, so the failure is not captured for
+replay — here `dlq=True` matters only if the fallback itself ever fails. For a user-facing
+charge that is the honest pairing: the caller gets a final answer, and no queued copy of the
+charge survives to run behind their back.
 
 From then on, Baldur watches that call and responds to failure automatically:
 
@@ -78,15 +82,16 @@ flowchart LR
     B -->|"healthy"| C["dependency<br/>API · DB · queue"]
     B -. "transient failure" .-> D["retry with backoff"]
     B -. "dependency failing" .-> E["circuit breaker opens"]
-    B -. "all retries fail" .-> F["fallback → dead-letter queue"]
+    B -. "all retries fail" .-> F["fallback answer — or DLQ capture"]
 ```
 
 - A **transient** failure is retried with backoff, so a one-off blip never reaches the user.
 - A **failing** dependency trips the circuit breaker, so your app stops hammering it and fails
   fast instead of hanging.
-- When a call still cannot succeed, a **fallback** runs so the caller still gets a safe answer
-  instead of an error, and work you opted in with `dlq=True` is set aside in the
-  **dead-letter queue** to replay later instead of dropped.
+- When a call still cannot succeed, a **fallback** (if you set one) serves the caller a safe
+  answer instead of an error — and because that answer is final, the failure is *not* also
+  captured for replay. Without a fallback, work you opted in with `dlq=True` is set aside in
+  the **dead-letter queue** to replay later instead of dropped.
 
 Adoption stays cheap because there is nothing to stand up and nothing new to learn:
 
