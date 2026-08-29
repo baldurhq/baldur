@@ -31,14 +31,26 @@ Declare it just **below** `@app.task` so Celery registers the wrapped function:
 ```python
 import baldur
 from celery import Celery
+from celery.signals import worker_process_init
 
 app = Celery("myproject")
+
+@worker_process_init.connect
+def init_baldur(**_):
+    baldur.init()
 
 @app.task
 @baldur.protected("charge-customer", retry=True)
 def charge_customer(order_id):
     return payment_gateway.charge(order_id)
 ```
+
+One thing the other quickstarts get for free: on Django, FastAPI, and Flask the
+adapter calls `baldur.init()` at app startup, but nothing on Celery does it for
+you — connect it to `worker_process_init` as above so every worker process
+initializes Baldur once (repeat calls are no-ops). Without it, Baldur still
+protects calls on safe in-process defaults, but ignores your storage
+configuration and starts no background maintenance.
 
 The call now travels through a circuit breaker and retry. Add `fallback=` for a
 safe default, `idempotency_key="order_id"` to dedup a re-delivered task, or
@@ -130,7 +142,8 @@ export BALDUR_LOG_LEVEL=INFO   # circuit opened/closed, retries, ...
     not a tuning knob: give Baldur a shared backend before you run a second
     worker.
 
-Point Baldur at Redis so every worker shares state. No code changes needed — set
+Point Baldur at Redis so every worker shares state. With the
+`worker_process_init` hook from step 2 in place, no further code changes — set
 one environment variable before starting the workers:
 
 ```bash
