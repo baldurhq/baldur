@@ -20,6 +20,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 ### Fixed
 
 - A zero-config process no longer prints `resilience.bypass_hooks_skipped` to stdout on import.
+- A Celery task failure the DLQ rejected (disabled, overflow) is no longer logged as stored.
 
 ## [1.8.0] - 2026-08-26
 

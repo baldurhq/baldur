@@ -2,10 +2,12 @@
 Unit tests for DLQRecorder failure classification, entity extraction, and action lookup.
 
 Tests pattern constants, classify_failure_type priority, extract_entity_refs
-immutability, and recommended action mapping.
+immutability, recommended action mapping, and store() result handling.
 """
 
 from __future__ import annotations
+
+from unittest.mock import patch
 
 from baldur.adapters.celery.integrations.dlq_recorder import (
     _EXCEPTION_MESSAGE_PATTERNS,
@@ -14,6 +16,7 @@ from baldur.adapters.celery.integrations.dlq_recorder import (
     _RECOMMENDED_ACTIONS,
     DLQRecorder,
 )
+from baldur.models.dlq import DLQEntryResult
 
 # =========================================================================
 # Contract Tests
@@ -241,3 +244,59 @@ class TestGetRecommendedActionBehavior:
         """Unrecognized failure type returns fallback action."""
         result = DLQRecorder.get_recommended_action("NEVER_SEEN_BEFORE")
         assert result == "Review and retry manually"
+
+
+# =========================================================================
+# store() Result Handling
+# =========================================================================
+
+
+class TestDLQRecorderStoreResultHandling:
+    """store() logs from the backing's DLQEntryResult, not unconditionally."""
+
+    def _store(self) -> None:
+        DLQRecorder().store(
+            domain="payment",
+            task_name="tasks.charge",
+            task_id="t-1",
+            exception=ValueError("boom"),
+            args=(),
+            kwargs={},
+            einfo=None,
+        )
+
+    def test_success_result_logs_entry_stored(self) -> None:
+        """success=True logs baldur_dlq.entry_stored with the real dlq_id."""
+        with (
+            patch(
+                "baldur.adapters.celery.integrations.dlq_recorder.store_to_dlq",
+                return_value=DLQEntryResult.created("dlq-1"),
+            ),
+            patch(
+                "baldur.adapters.celery.integrations.dlq_recorder.logger",
+            ) as mock_logger,
+        ):
+            self._store()
+
+        mock_logger.info.assert_called_once()
+        assert mock_logger.info.call_args[0][0] == "baldur_dlq.entry_stored"
+        assert mock_logger.info.call_args[1]["dlq_id"] == "dlq-1"
+        mock_logger.warning.assert_not_called()
+
+    def test_rejected_result_logs_entry_store_failed_warning(self) -> None:
+        """success=False logs baldur_dlq.entry_store_failed at WARNING, never entry_stored."""
+        with (
+            patch(
+                "baldur.adapters.celery.integrations.dlq_recorder.store_to_dlq",
+                return_value=DLQEntryResult.failed("DLQ is disabled"),
+            ),
+            patch(
+                "baldur.adapters.celery.integrations.dlq_recorder.logger",
+            ) as mock_logger,
+        ):
+            self._store()
+
+        mock_logger.info.assert_not_called()
+        mock_logger.warning.assert_called_once()
+        assert mock_logger.warning.call_args[0][0] == "baldur_dlq.entry_store_failed"
+        assert mock_logger.warning.call_args[1]["error"] == "DLQ is disabled"

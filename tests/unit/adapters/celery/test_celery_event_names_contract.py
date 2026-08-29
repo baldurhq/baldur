@@ -183,6 +183,7 @@ class TestCeleryIntegrationEventNameContract:
         source = inspect.getsource(dlq_recorder)
         assert '"baldur_dlq.service_unavailable"' in source
         assert '"baldur_dlq.entry_stored"' in source
+        assert '"baldur_dlq.entry_store_failed"' in source
         assert '"baldur_dlq.store_failed"' in source
         # Old incorrect names absent
         assert '"baldur_dlq_service_available"' not in source
