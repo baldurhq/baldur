@@ -130,8 +130,8 @@ chain, in memory, with no network in the path.
   envelope](concepts/foundations/resource-budget.md) with its methodology.
 - **It is early access.** The API surface is stable, but a minor version can
   still carry a breaking change, with a changelog entry.
-- **It runs in a single region.** Redis Sentinel for high availability is a
-  PRO feature; anything wider than one region is out of scope.
+- **It runs in a single region.** Redis Sentinel covers high availability
+  within that region; anything wider than one region is out of scope.
 - **It is not a hosted service.** It runs inside your process, makes no calls
   home, and sends no telemetry.
 
