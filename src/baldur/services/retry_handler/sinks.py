@@ -134,9 +134,6 @@ class DLQSink:
                 recommended_action="manual_check",
             )
 
-            if result is None:
-                return None
-
             if result.success:
                 logger.info(
                     "dlq_sink.created_dlq_entry",

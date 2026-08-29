@@ -121,10 +121,16 @@ class DLQRecorder:
                 recommended_action=self.get_recommended_action(failure_type),
             )
 
-            if result is None:
-                # Defensive guard: the resolved backing (PRO DLQService or
-                # the OSS DLQCaptureService) returns a DLQEntryResult on
-                # every path, so there is nothing to log here.
+            if not result.success:
+                # The backing returns success=False when it rejects the
+                # store (DLQ disabled, overflow reject) — surface the
+                # rejection instead of logging the entry as stored.
+                logger.warning(
+                    "baldur_dlq.entry_store_failed",
+                    healing_domain=domain,
+                    failure_type=failure_type,
+                    error=result.error,
+                )
                 return
 
             logger.info(
