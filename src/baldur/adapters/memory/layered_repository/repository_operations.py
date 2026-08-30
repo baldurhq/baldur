@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from baldur.core.exceptions import UnconfiguredStoreError
 from baldur.interfaces.repositories import (
     CIRCUIT_BREAKER_PINNED_TOKEN,
     CircuitBreakerCloseAttempt,
@@ -269,6 +270,15 @@ class RepositoryOperationsMixin:
 
                 return (allowed, prev_state, new_state)
 
+            except UnconfiguredStoreError:
+                # 774 D2: L2 declined to dial a Redis nobody named. Nothing
+                # failed, so this must not tick the quarantine counter —
+                # hence a clause of its own, ahead of `except Exception`,
+                # which would otherwise swallow it into _handle_l2_error and
+                # quarantine a healthy process after three declines. The fall
+                # through lands on the same degraded-mode + L1 path below,
+                # so the observability of a declined transition is unchanged.
+                pass
             except FuturesTimeoutError:
                 self._handle_l2_timeout("try_acquire_half_open_slot", service_name)
             except Exception as e:
@@ -732,6 +742,10 @@ class RepositoryOperationsMixin:
                 self._writeback_close_check_to_l1(service_name, attempt)
                 return attempt
 
+            except UnconfiguredStoreError:
+                # 774 D2: a decline, not a failure — ahead of `except
+                # Exception` so it never reaches the quarantine counter.
+                pass
             except FuturesTimeoutError:
                 self._handle_l2_timeout("record_success_with_close_check", service_name)
             except Exception as e:
@@ -863,6 +877,10 @@ class RepositoryOperationsMixin:
                 self._writeback_open_check_to_l1(service_name, attempt)
                 return attempt
 
+            except UnconfiguredStoreError:
+                # 774 D2: a decline, not a failure — ahead of `except
+                # Exception` so it never reaches the quarantine counter.
+                pass
             except FuturesTimeoutError:
                 self._handle_l2_timeout("record_failure_with_open_check", service_name)
             except Exception as e:
@@ -1010,6 +1028,10 @@ class RepositoryOperationsMixin:
                 self._sync_to_l2_async(service_name)
                 return attempt
 
+            except UnconfiguredStoreError:
+                # 774 D2: a decline, not a failure — ahead of `except
+                # Exception` so it never reaches the quarantine counter.
+                pass
             except FuturesTimeoutError:
                 self._handle_l2_timeout("trip_to_open", service_name)
             except Exception as e:

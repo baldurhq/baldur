@@ -17,7 +17,7 @@ Re-exported at ``baldur`` top-level (12 names):
 
 Internal / nested-only (``baldur.core.exceptions``):
     ``AdapterInitializationError``, ``AdapterConnectionError``,
-    ``RecoveryAdapterError``, ``StoreError``,
+    ``RecoveryAdapterError``, ``StoreError``, ``UnconfiguredStoreError``,
     ``CircuitBreakerTransitionError``, ``InvalidStateTransitionError``,
     ``DLQEntryNotFoundError``, ``AuditError``, ``RunbookError``,
     ``SettingsValidationError``, ``StepExecutionError``, ``StepTimeoutError``,
@@ -38,6 +38,7 @@ __all__ = [
     "RecoveryAdapterError",
     # Store (domain state management)
     "StoreError",
+    "UnconfiguredStoreError",
     # Circuit Breaker
     "CircuitBreakerError",
     "CircuitBreakerTransitionError",
@@ -182,6 +183,45 @@ class StoreError(AdapterError):
     """
 
     pass
+
+
+class UnconfiguredStoreError(AdapterError):
+    """Raised when a store declines to reach for a Redis nobody configured.
+
+    Not a failure report — no connection was attempted. A store path whose
+    only fallback lives in its caller raises this instead of returning a
+    value that would read as a verdict from the store, so the caller takes
+    its local path knowing the store never answered.
+
+    Distinct from ``AdapterConnectionError``, which reports a dial that
+    failed. This one says the dial was declined: the address came from the
+    shipped default through every channel an operator could have used, and
+    this process has never reached a Redis there. A store someone named
+    keeps its ordinary loud failure.
+    """
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        service: str = "",
+        operation: str = "",
+    ):
+        if not message:
+            message = (
+                f"Store not configured: operation={operation!r}, service={service!r}"
+            )
+        super().__init__(message)
+        self.service = service
+        self.operation = operation
+
+    def extra_context(self) -> dict[str, Any]:
+        ctx = super().extra_context()
+        if self.service:
+            ctx["service"] = self.service
+        if self.operation:
+            ctx["operation"] = self.operation
+        return ctx
 
 
 # ── Circuit Breaker errors ───────────────────────────────────

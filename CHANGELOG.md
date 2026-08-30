@@ -36,6 +36,9 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - A forked worker (`gunicorn --preload`) now drains its own DLQ outbox instead of losing entries.
 - Its writer dies at the fork, so async stores reported success into a buffer nothing consumed.
 - Each worker restarts its own writer and leaves the parent's queued entries to the parent.
+- A zero-config run under failing traffic no longer warns about a Redis nobody configured.
+- Four circuit-breaker write paths dialed the default address directly, past the storage backend.
+- A store someone named keeps every warning; only a never-reached default address is skipped.
 
 ## [1.8.0] - 2026-08-26
 

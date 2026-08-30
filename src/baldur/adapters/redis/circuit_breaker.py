@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from baldur.core.exceptions import UnconfiguredStoreError
 from baldur.interfaces.repositories import (
     CIRCUIT_BREAKER_PINNED_TOKEN,
     CircuitBreakerStateData,
@@ -555,16 +556,29 @@ class RedisCircuitBreakerStateRepository(
         cannot be overwritten.
 
         Every other route falls back to a read-check-write through the backend:
-        no live client (degraded mode, where the row is process-local memory +
-        WAL and the gap costs nothing), or a script invocation that failed —
-        which must not become a raise, because the backend write is what owns
-        the degrade-and-WAL response to a Redis blip, and the mirror's caller
-        would otherwise count a survivable blip toward quarantining L2.
+        no client was ever built, the dial was declined because it would have
+        been aimed at an address nobody named and nothing has ever answered
+        there, or a script invocation that failed — which must not become a
+        raise, because the backend write is what owns the degrade-and-WAL
+        response to a Redis blip, and the mirror's caller would otherwise
+        count a survivable blip toward quarantining L2. On the declined route
+        the row is process-local memory + WAL, so the store-side guard and the
+        local re-check below are the same check and the gap costs nothing.
 
         Returns True in both the written and the declined case — the caller
         asked for a write it authorized the store to elide.
         """
-        redis_client = self._backend.raw_redis_client
+        # 774 D1/D2: the store-side guard is skipped rather than dialed when
+        # the address came from the shipped default and has never answered.
+        # This path owns its fallback outright — the read-check-write below
+        # runs whether or not the script was attempted — and in that posture
+        # the local store IS the store, so store-side and local pin
+        # neutrality are the same check.
+        redis_client = (
+            None
+            if self._declining_unreached_default()
+            else self._backend.raw_redis_client
+        )
         if redis_client is not None:
             flattened: list[str] = []
             for field_name, value in updates.items():
@@ -614,13 +628,41 @@ class RedisCircuitBreakerStateRepository(
         construction kwarg and a per-class environment variable also count as
         operator intent, and only the backend can see those.
 
-        Answers False for anything that is not exactly ``True``. A spec'd test
-        double answers the probe with a truthy mock, and under plain
-        truthiness every such construction would silently go quiet — the
-        failing direction here is silence, so the pin matters.
+        Posture only, with no reach term: it still selects the quiet report
+        for a process that reached this Redis once and is now between
+        connections, which is the window this level split exists for.
         """
-        probe = getattr(self._backend, "_probing_unconfigured_default", None)
-        return callable(probe) and probe() is True
+        from baldur.adapters.resilient.backend import probing_unconfigured_default
+
+        return probing_unconfigured_default(self._backend)
+
+    def _declining_unreached_default(self) -> bool:
+        """Should this path decline to dial at all?
+
+        Every Lua path here reaches the client directly, bypassing the
+        backend's availability gate and its probe cooldown, so each
+        invocation opens a connection of its own. The gate is reproduced
+        here: decline only when the backend has **never** reached a Redis
+        and nobody named one.
+
+        The reach half is what keeps the guard off a working deployment.
+        ``is_degraded`` would also be True for the whole degraded and
+        recovering window of a process whose Redis is answering again, and
+        the raw client stays usable throughout it — declining there would
+        drop the store-side pin guard and the cluster-wide single-winner
+        trip on every blip. "Ever reached" is monotonic, so a store that has
+        answered once keeps every store-side guarantee for the life of the
+        process, and only a never-reached, never-named address is skipped.
+
+        Both terms are read defensively: a backend that carries neither
+        attribute keeps dialing, which is the direction that preserves
+        today's behaviour for anything this repository does not recognise.
+        """
+        from baldur.adapters.resilient.backend import probing_unconfigured_default
+
+        if getattr(self._backend, "has_reached_redis", True) is not False:
+            return False
+        return probing_unconfigured_default(self._backend)
 
     def try_acquire_half_open_slot(
         self,
@@ -634,10 +676,21 @@ class RedisCircuitBreakerStateRepository(
         now_unix = now.timestamp()
         full_key = self._backend._get_full_key(self._make_key(service_name))
 
+        # 774 D2: above the try on purpose. A raise from inside it would be
+        # caught by this method's own handler and reported at WARNING before
+        # propagating — the exact line the decline exists to remove.
+        if self._declining_unreached_default():
+            self._last_acquire_marker = ""
+            raise UnconfiguredStoreError(
+                service=service_name, operation="try_acquire_half_open_slot"
+            )
+
         try:
-            # ResilientStorageBackend caller invariant: try_acquire_half_open_slot
-            # is invoked only from LayeredCircuitBreakerStateRepository, which
-            # gates on backend.is_degraded == False before delegating.
+            # Admission invariant: the caller's fallback lives one layer up,
+            # so this method never dials without the guard above having
+            # admitted it. The layered wrapper gates on its own L2-health flag,
+            # not on the backend's mode, which is why the admission has to be
+            # the adapter's own.
             redis_client = self._backend.raw_redis_client
             assert redis_client is not None
             result = redis_client.eval(
@@ -1169,6 +1222,11 @@ class RedisCircuitBreakerStateRepository(
         now_iso = utc_now().isoformat()
         full_key = self._backend._get_full_key(self._make_key(service_name))
 
+        if self._declining_unreached_default():
+            raise UnconfiguredStoreError(
+                service=service_name, operation="record_success_with_close_check"
+            )
+
         try:
             redis_client = self._backend.raw_redis_client
             result = redis_client.eval(
@@ -1245,6 +1303,11 @@ class RedisCircuitBreakerStateRepository(
         now_iso = utc_now().isoformat()
         full_key = self._backend._get_full_key(self._make_key(service_name))
 
+        if self._declining_unreached_default():
+            raise UnconfiguredStoreError(
+                service=service_name, operation="record_failure_with_open_check"
+            )
+
         try:
             redis_client = self._backend.raw_redis_client
             result = redis_client.eval(
@@ -1315,6 +1378,9 @@ class RedisCircuitBreakerStateRepository(
 
         now_iso = utc_now().isoformat()
         full_key = self._backend._get_full_key(self._make_key(service_name))
+
+        if self._declining_unreached_default():
+            raise UnconfiguredStoreError(service=service_name, operation="trip_to_open")
 
         try:
             redis_client = self._backend.raw_redis_client

@@ -9,9 +9,11 @@ for zero data loss guarantees.
 from baldur.adapters.resilient.backend import (
     ResilientStorageBackend,
     ResilientStorageMode,
+    probing_unconfigured_default,
 )
 
 __all__ = [
     "ResilientStorageBackend",
     "ResilientStorageMode",
+    "probing_unconfigured_default",
 ]

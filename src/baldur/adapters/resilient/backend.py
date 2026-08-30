@@ -127,6 +127,26 @@ _BATCH_OP_HANDLERS: dict[str, _BatchOpHandlers] = {
 }
 
 
+def probing_unconfigured_default(backend: object) -> bool:
+    """Would this backend's Redis dial be aimed at an address nobody named?
+
+    The one duck-probe over ``ResilientStorageBackend``'s own posture
+    predicate, so every consumer that has to answer this question asks it
+    the same way. Composed repositories and the layered wrapper both reach
+    a backend indirectly, and neither can assume the object it holds is one
+    of these.
+
+    Guards absence in both directions, and answers False for anything that
+    is not exactly ``True``. A custom store without the method, an object
+    that merely carries the attribute name, and a spec'd test double whose
+    every method answers with a truthy mock all fall through to the loud,
+    dialing path — silence is the dangerous direction here, so the pin on
+    ``is True`` is what keeps an unrecognised backend from going quiet.
+    """
+    probe = getattr(backend, "_probing_unconfigured_default", None)
+    return callable(probe) and probe() is True
+
+
 class ResilientStorageBackend:
     """
     Redis-First + Graceful Degradation + WAL.
@@ -725,6 +745,23 @@ class ResilientStorageBackend:
     def is_redis_available(self) -> bool:
         """Check if Redis is available."""
         return self._redis_initialized and self._mode == ResilientStorageMode.REDIS
+
+    @property
+    def has_reached_redis(self) -> bool:
+        """Has this backend ever reached a Redis at its address?
+
+        Monotonic for the life of the backend: it flips True inside the
+        lazy probe's success branch and is never cleared, so it stays True
+        across every later outage.
+
+        Deliberately NOT ``is_redis_available``, which additionally requires
+        the current mode to be REDIS and is therefore False for the whole
+        degraded and recovering window. A caller asking "has this address
+        ever answered" — to tell a never-configured default apart from a
+        store that is merely between connections — gets the wrong answer
+        from that one on every blip. Do not collapse the two.
+        """
+        return self._redis_initialized
 
     @property
     def degrade_count(self) -> int:
