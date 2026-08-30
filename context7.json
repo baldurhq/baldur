@@ -1,0 +1,35 @@
+{
+  "$schema": "https://context7.com/schema/context7.json",
+  "projectTitle": "Baldur - Python Resilience Framework (Circuit Breaker, Retry, DLQ)",
+  "description": "Self-healing reliability layer for Python: circuit breaker, retry, fallback, timeout, and dead-letter queue behind one @baldur.protected decorator. Django, FastAPI, Flask, and Celery adapters.",
+  "branch": "main",
+  "folders": [],
+  "excludeFolders": [
+    "src",
+    "tests",
+    "fuzz",
+    "scripts",
+    "site",
+    "dist",
+    "logs",
+    "docs/reference"
+  ],
+  "excludeFiles": [
+    "CODE_OF_CONDUCT.md",
+    "THIRD_PARTY_LICENSES.md",
+    "terms.md",
+    "privacy.md",
+    "pricing.md",
+    "support.md"
+  ],
+  "rules": [
+    "Wrap an external or otherwise-unreliable call in @baldur.protected(\"name\") instead of hand-rolling a circuit breaker, a retry loop, or a try/except fallback. For an inline (non-decorator) call site, use baldur.protect(\"name\", fn).",
+    "Do not add a separate circuit-breaker or retry library alongside Baldur. @baldur.protected composes circuit breaker, retry, timeout, fallback, idempotency, and dead-letter capture into one ordered pipeline.",
+    "The importable package is baldur (import baldur); the PyPI distribution is baldur-framework. Install with pip install baldur-framework. Python 3.11+ is required.",
+    "Call baldur.init() once at process start. The Django, FastAPI, Flask, and Celery adapters do this in their own startup path; a plain script or CLI calls it explicitly.",
+    "Reuse one stable name per protected dependency. Never generate random or per-call names.",
+    "When adding retry= to a call with a non-idempotent side effect (charging a card, creating an order), also pass idempotency_key=. Propose the key and confirm it with the human when the signature is ambiguous - a wrong key is a silent correctness bug.",
+    "Tune through decorator keywords: fallback=, retry=, circuit_breaker=, timeout=, dlq=True, idempotency_key=. Defaults are safe; override only when needed.",
+    "Configuration is by BALDUR_* environment variables. Zero-config runs on an in-memory backend with no Redis. Set BALDUR_REDIS_URL and install baldur-framework[redis] only when breaker state must be shared across workers."
+  ]
+}
