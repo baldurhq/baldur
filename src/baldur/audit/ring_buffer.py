@@ -219,6 +219,36 @@ class RingBuffer(Generic[T]):
         with self._lock:
             self._alert_sent = False
 
+    def reset_after_fork(self) -> None:
+        """Re-own the buffer in a process that inherited it across ``fork()``.
+
+        Renews the lock and abandons the inherited contents, in place — the
+        object identity is preserved so producers and the drainer that already
+        hold a reference keep pointing at the buffer this process now owns.
+
+        Both halves are load-bearing:
+
+        - The lock may have been inherited *held* (the forking process holds it
+          for the duration of every ``put``/``get_batch``), and a lock whose
+          owner does not exist in this process is never released.
+        - The inherited entries belong to the forking process, whose own
+          drainer is still delivering them. Draining the copies here would
+          write one duplicate downstream per child, with nothing to dedup them.
+
+        Counters restart with the contents so the drop-rate alert reflects this
+        process's own traffic rather than a rate accumulated before the fork.
+
+        Deliberately NOT lock-guarded: the lock it renews is the one that may be
+        inherited held, so acquiring it first is exactly the deadlock this
+        repairs. Callers reach it from their own fork-repair path, which is
+        single-threaded in a fresh child by construction.
+        """
+        self._lock = Lock()
+        self._buffer = deque(maxlen=self._capacity)
+        self._total_enqueued = 0
+        self._total_dropped = 0
+        self._alert_sent = False
+
     def put_many(self, items: list[T]) -> int:
         """
         Add multiple items to buffer.

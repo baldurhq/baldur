@@ -14,6 +14,7 @@ before they translate into customer-visible loss.
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from collections.abc import Callable
@@ -23,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from baldur.audit.ring_buffer import RingBuffer, RingBufferStats
+from baldur.core.process_utils import fork_repaired
 from baldur.services.dlq_outbox.worker import DLQOutboxWorker
 from baldur.settings.backpressure import BackpressureStrategy
 
@@ -61,6 +63,11 @@ class OutboxStats:
 # (D7) and by ``reset_dlq_outbox`` for test isolation (D8).
 _outbox: Outbox | None = None
 _outbox_lock = threading.Lock()
+
+# PID that built the singleton above. A mismatch means this process inherited
+# the outbox across ``fork()`` and must re-own it before using it.
+_outbox_origin_pid: int | None = None
+_outbox_repair_gate = threading.Lock()
 
 # Producer-side fail-open flag. Toggled by EventBus subscribers wired in
 # ``setup_dlq_outbox()`` (impl 489 D8): the cross-shape ``DaemonWorkerProbe``
@@ -159,6 +166,17 @@ class Outbox:
     def stop(self, timeout: float = 5.0) -> int:
         return self._worker.stop(timeout=timeout)
 
+    def repair_after_fork(self) -> None:
+        """Re-own the buffer and the writer this process inherited across fork.
+
+        Buffer first, writer second: the respawned writer starts draining the
+        moment it exists, and it must find this process's own (empty) buffer
+        rather than the copy of the parent's — whose entries the parent's own
+        live drainer is still delivering.
+        """
+        self._buffer.reset_after_fork()
+        self._worker.repair_after_fork()
+
     def flush_and_wait(self, timeout: float = 5.0) -> int:
         """Drain queued entries through the worker, blocking up to ``timeout``.
 
@@ -214,14 +232,65 @@ class Outbox:
 # =============================================================================
 
 
+def _repair_if_forked() -> None:
+    """Re-own the module singleton when this process inherited it via ``fork()``.
+
+    Runs at the head of both entry points that reach the singleton, *ahead* of
+    their ``_outbox is not None`` early returns — that is the whole point.
+    Without it neither entry point is reachable in a fork child: the inherited
+    singleton short-circuits ``get_outbox()`` into returning a producer whose
+    drainer is dead, and ``setup_dlq_outbox()`` into ``False`` without ever
+    calling ``start()``. Every async DLQ store in that child then reports
+    success into a buffer nothing consumes.
+
+    Both module locks are renewed before anything acquires them: the forking
+    process holds ``_outbox_lock`` across the whole build, so a fork taken at
+    that instant hands the child a lock no thread here will ever release. The
+    repair gate itself is entered only after an unlocked mismatch pre-check, so
+    the process that owns the state never holds it and it is never inherited
+    locked; inside, the mismatch is re-checked so a second thread returns
+    rather than repairing twice.
+
+    ``_worker_dead`` restarts False: the flag describes the parent's drainer,
+    and coercing every store to the sync writer on that basis would cost the
+    child the async path it is about to get back.
+    """
+    global _outbox_lock, _outbox_origin_pid
+    global _worker_dead, _worker_dead_lock, _worker_dead_coercions
+
+    origin = _outbox_origin_pid
+    if origin is None or origin == os.getpid():
+        return
+
+    with _outbox_repair_gate:
+        inherited_pid = _outbox_origin_pid
+        if inherited_pid is None or inherited_pid == os.getpid():
+            return  # another thread finished the repair first
+
+        _outbox_lock = threading.Lock()
+        _worker_dead_lock = threading.Lock()
+        _worker_dead = False
+        _worker_dead_coercions = 0
+
+        inherited = _outbox
+        _outbox_origin_pid = os.getpid()
+
+    if inherited is not None:
+        inherited.repair_after_fork()
+
+    logger.info("dlq_outbox.fork_state_repaired", inherited_pid=inherited_pid)
+
+
+@fork_repaired(repair=_repair_if_forked)
 def get_outbox() -> Outbox:
     """Return the process-singleton outbox, building lazily on first call.
 
     The eager-start path runs through ``setup_dlq_outbox`` from
     ``baldur.init()``; this lazy path covers tests / scripts that touch the
-    DLQ store before init().
+    DLQ store before init(). Fork-aware: defense in depth for the producer,
+    which reaches the singleton without going through the starter.
     """
-    global _outbox
+    global _outbox, _outbox_origin_pid
     if _outbox is not None:
         return _outbox
     with _outbox_lock:
@@ -229,13 +298,18 @@ def get_outbox() -> Outbox:
             return _outbox
         _outbox = Outbox.from_settings()
         _outbox.start()
+        _outbox_origin_pid = os.getpid()
         return _outbox
 
 
+@fork_repaired(repair=_repair_if_forked)
 def setup_dlq_outbox() -> bool:
     """Eager-start hook called from ``baldur.init()`` (D7).
 
-    Idempotent. Returns True on first start, False on re-entry.
+    Idempotent. Returns True on first start, False on re-entry — including in
+    a fork child, where the decorator has already re-owned and respawned the
+    inherited singleton by the time the early return is reached. "False" there
+    means "this process did not build one", not "nothing was started".
 
     Also wires the two ``DAEMON_WORKER_*`` EventBus subscribers (impl 489
     D8): when the cross-shape ``DaemonWorkerProbe`` reports the
@@ -244,12 +318,13 @@ def setup_dlq_outbox() -> bool:
     (preserves D11.4 fail-open). On a successful auto-respawn,
     ``_worker_dead`` flips back False so the async fast path resumes.
     """
-    global _outbox
+    global _outbox, _outbox_origin_pid
     with _outbox_lock:
         if _outbox is not None:
             return False
         _outbox = Outbox.from_settings()
         _outbox.start()
+        _outbox_origin_pid = os.getpid()
         _wire_worker_lifecycle_subscribers()
         logger.info("dlq_outbox.setup_completed")
         return True
@@ -295,7 +370,7 @@ def reset_dlq_outbox() -> int:
     rather than just clear so queued entries from the prior test do not
     surface in the next test's worker.
     """
-    global _outbox, _worker_dead, _worker_dead_coercions
+    global _outbox, _outbox_origin_pid, _worker_dead, _worker_dead_coercions
     with _outbox_lock:
         if _outbox is None:
             with _worker_dead_lock:
@@ -309,6 +384,7 @@ def reset_dlq_outbox() -> int:
             pass
         remaining = _outbox.stop(timeout=1.0)
         _outbox = None
+        _outbox_origin_pid = None
 
     with _worker_dead_lock:
         _worker_dead = False

@@ -67,7 +67,7 @@ class TestDLQOutboxWorkerSpawnHelperBehavior:
         finally:
             worker.stop(timeout=1.0)
 
-    def test_spawn_thread_called_again_rebinds_handle_thread(
+    def test_spawn_thread_after_death_rebinds_handle_thread(
         self, build_outbox, make_sync_writer, collected_writes
     ):
         """Respawn (re-call ``_spawn_thread``) updates ``handle.thread``."""
@@ -81,6 +81,14 @@ class TestDLQOutboxWorkerSpawnHelperBehavior:
             assert handle is not None
             assert handle.thread is original_thread
 
+            # And the writer thread has died — the only condition under which a
+            # respawn is wanted. The spawn helper guards on thread aliveness, so
+            # a live thread is deliberately left alone.
+            worker._stop_event.set()
+            original_thread.join(timeout=2.0)
+            assert not original_thread.is_alive()
+            worker._stop_event.clear()
+
             # When — simulate the respawn coordinator calling the helper
             # (which is exactly what ``handle.restart_callback`` points at).
             worker._spawn_thread()
@@ -93,9 +101,6 @@ class TestDLQOutboxWorkerSpawnHelperBehavior:
             assert worker._thread.is_alive()
         finally:
             worker.stop(timeout=1.0)
-            # Drain the orphan thread from the first start() — it is a daemon
-            # thread but we wait briefly so the test does not leak it visibly.
-            original_thread.join(timeout=1.0)
 
     def test_handle_restart_callback_points_at_spawn_thread(
         self, build_outbox, make_sync_writer, collected_writes

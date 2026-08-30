@@ -97,10 +97,10 @@ class TestBackgroundWorkerRegistryContract:
     widened it to 9; the per-process domain-gauge collector widened it to 10; the
     config-invalidation delivery starter widened it to 11; the redis event-bus
     listener revival widened it to 12; the audit-pipeline revival widened it
-    to 13."""
+    to 13; the DLQ outbox writer revival widened it to 14."""
 
-    def test_registry_contains_exactly_the_thirteen_oss_starters(self):
-        """Hardcoded set-equality against the thirteen expected starter callables."""
+    def test_registry_contains_exactly_the_fourteen_oss_starters(self):
+        """Hardcoded set-equality against the fourteen expected starter callables."""
         expected = {
             bootstrap._start_capacity_reservation_if_enabled,
             bootstrap._start_cell_topology_if_enabled,
@@ -115,12 +115,13 @@ class TestBackgroundWorkerRegistryContract:
             bootstrap._setup_config_invalidation_delivery,
             bootstrap._start_event_bus_listener_if_enabled,
             bootstrap._start_audit_pipeline_starter,
+            bootstrap._start_dlq_outbox_starter,
         }
 
         assert set(bootstrap._BACKGROUND_WORKER_STARTERS) == expected
         # No duplicate entries — set size collapses to the tuple length only when
         # every starter is distinct.
-        assert len(bootstrap._BACKGROUND_WORKER_STARTERS) == len(expected) == 13
+        assert len(bootstrap._BACKGROUND_WORKER_STARTERS) == len(expected) == 14
 
     def test_registry_entries_are_all_callable(self):
         assert all(callable(s) for s in bootstrap._BACKGROUND_WORKER_STARTERS)

@@ -34,7 +34,7 @@ from __future__ import annotations
 import functools
 import os
 from collections.abc import Callable
-from typing import Any, TypeVar
+from typing import Any, TypeVar, overload
 
 __all__ = [
     "fork_repaired",
@@ -82,7 +82,19 @@ def pid_alive(pid: int) -> bool:
         return True
 
 
-def fork_repaired(method: _F) -> _F:
+@overload
+def fork_repaired(method: _F) -> _F: ...
+
+
+@overload
+def fork_repaired(*, repair: Callable[[], None]) -> Callable[[_F], _F]: ...
+
+
+def fork_repaired(
+    method: _F | None = None,
+    *,
+    repair: Callable[[], None] | None = None,
+) -> Any:
     """Run the owner's ``_repair_if_forked()`` before the wrapped entry point.
 
     Components whose state does not survive ``fork()`` (locks with a recorded
@@ -97,21 +109,43 @@ def fork_repaired(method: _F) -> _F:
     gates assert that every public callable reaching repaired state carries it
     or is a written-down exemption.
 
-    Decorator order is pinned — ``@classmethod`` outermost, this decorator
-    directly beneath it. The reverse hands this function a ``classmethod``
-    object, which is not callable on the supported interpreter range.
+    Two forms, one marker:
 
-    Works for both instance and class methods: the repair is looked up on the
-    first positional argument, which is ``self`` or ``cls`` respectively.
+    - ``@fork_repaired`` (owner form) — for instance and class methods. The
+      repair is looked up on the first positional argument, which is ``self``
+      or ``cls`` respectively. Decorator order is pinned: ``@classmethod``
+      outermost, this decorator directly beneath it. The reverse hands this
+      function a ``classmethod`` object, which is not callable on the
+      supported interpreter range.
+    - ``@fork_repaired(repair=...)`` (module form) — for a module-level entry
+      point whose inherited state is module-scoped (a module singleton and the
+      locks guarding it) and so has no owner to look the repair up on. The
+      repair callable is named explicitly, which keeps the indirection
+      readable at the call site instead of resolving it through the wrapped
+      function's module at call time.
     """
 
-    @functools.wraps(method)
-    def wrapper(owner: Any, *args: Any, **kwargs: Any) -> Any:
-        owner._repair_if_forked()
-        return method(owner, *args, **kwargs)
+    def _decorate(target: _F) -> _F:
+        if repair is None:
 
-    wrapper.__fork_repaired__ = True  # type: ignore[attr-defined]
-    return wrapper  # type: ignore[return-value]
+            @functools.wraps(target)
+            def wrapper(owner: Any, *args: Any, **kwargs: Any) -> Any:
+                owner._repair_if_forked()
+                return target(owner, *args, **kwargs)
+
+        else:
+
+            @functools.wraps(target)
+            def wrapper(*args: Any, **kwargs: Any) -> Any:
+                repair()
+                return target(*args, **kwargs)
+
+        wrapper.__fork_repaired__ = True  # type: ignore[attr-defined]
+        return wrapper  # type: ignore[return-value]
+
+    if method is not None:
+        return _decorate(method)
+    return _decorate
 
 
 def is_gunicorn_worker() -> bool:
