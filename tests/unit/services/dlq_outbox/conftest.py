@@ -15,30 +15,28 @@ from baldur.settings.backpressure import BackpressureStrategy
 
 @pytest.fixture(autouse=True)
 def _reset_outbox_module_state():
-    """Ensure module-level singleton + worker_dead state is clean per test."""
+    """Ensure module-level singleton + worker_dead state is clean per test.
+
+    The origin-PID stamp is part of that state: a test that leaves a mismatched
+    PID behind makes the *next* test's first ``get_outbox()`` run the fork
+    repair, renewing module locks and respawning a writer out of nowhere.
+    """
     from baldur.services.dlq_outbox import outbox as outbox_module
 
-    # Pre-test cleanup
-    if outbox_module._outbox is not None:
-        try:
-            outbox_module._outbox.stop(timeout=1.0)
-        except Exception:
-            pass
-        outbox_module._outbox = None
-    outbox_module._worker_dead = False
-    outbox_module._worker_dead_coercions = 0
+    def _clear() -> None:
+        if outbox_module._outbox is not None:
+            try:
+                outbox_module._outbox.stop(timeout=1.0)
+            except Exception:
+                pass
+            outbox_module._outbox = None
+        outbox_module._outbox_origin_pid = None
+        outbox_module._worker_dead = False
+        outbox_module._worker_dead_coercions = 0
 
+    _clear()
     yield
-
-    # Post-test cleanup
-    if outbox_module._outbox is not None:
-        try:
-            outbox_module._outbox.stop(timeout=1.0)
-        except Exception:
-            pass
-        outbox_module._outbox = None
-    outbox_module._worker_dead = False
-    outbox_module._worker_dead_coercions = 0
+    _clear()
 
 
 @pytest.fixture
