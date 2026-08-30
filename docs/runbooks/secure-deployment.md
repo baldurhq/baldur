@@ -27,7 +27,7 @@ Baldur classifies secrets into three tiers (`src/baldur/settings/secrets.py`):
 
 | Tier | Secrets | Boot behavior when missing |
 |------|---------|---------------------------|
-| **CRITICAL** | `encryption_key`, `audit_signing_key` | `RuntimeError` raised in production (`BALDUR_ENVIRONMENT=production`); ERROR-level log in non-production |
+| **CRITICAL** | `encryption_key`, `audit_signing_key` | `ConfigurationError` raised in production (`BALDUR_ENVIRONMENT=production`); ERROR-level log in non-production |
 | **IMPORTANT** | `database_password`, `redis_password` | WARNING log; boot continues |
 | **OPTIONAL** | `toss_secret_key`, `slack_webhook_token`, `slack_bot_token`, `pagerduty_api_key`, `aws_access_key_id`, `aws_secret_access_key` | INFO log; boot continues |
 
@@ -151,7 +151,7 @@ Expected output:
 {'critical': [], 'warning': [...], 'info': [...]}
 ```
 
-If `critical` is non-empty, the listed secrets MUST be populated before boot. If `BALDUR_ENVIRONMENT=production`, the same check also raises `RuntimeError` and aborts startup — running it manually first gives a friendly preview of the same gate.
+If `critical` is non-empty, the listed secrets MUST be populated before boot. If `BALDUR_ENVIRONMENT=production`, the same check also raises `ConfigurationError` and aborts startup — running it manually first gives a friendly preview of the same gate.
 
 `warning` and `info` lists are informational only; populate them only when the corresponding integration is enabled.
 

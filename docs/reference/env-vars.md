@@ -100,7 +100,7 @@ BALDUR_SECRETS_ENCRYPTION_KEY=<fernet-key>
 ```
 
 Both are CRITICAL secrets: with `BALDUR_ENVIRONMENT=production` set, boot
-aborts (a `RuntimeError` out of `baldur.init()`) when either is missing. The
+aborts (a `ConfigurationError` out of `baldur.init()`) when either is missing. The
 gate runs before the audit switch is read, so it applies to every production
 deployment whether or not audit is enabled. Outside production both may stay
 unset — the zero-config development boot.

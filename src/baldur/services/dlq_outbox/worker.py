@@ -260,11 +260,13 @@ class DLQOutboxWorker:
         second one puts two drainers on one buffer, writing every entry
         twice, with ``stop()`` joining only the newer thread.
         """
-        already_live = self._thread is not None and self._thread.is_alive()
+        live_thread = self._thread
+        if live_thread is not None and not live_thread.is_alive():
+            live_thread = None
 
         self._spawn_lock = threading.Lock()
         self._stop_event = threading.Event()
-        if not already_live:
+        if live_thread is None:
             self._thread = None
 
         # The parent's counts describe the parent's writes. Kept, they would
@@ -284,10 +286,10 @@ class DLQOutboxWorker:
         # ``_is_running`` stays True: this worker is running in this process the
         # moment the spawn below returns, and stop() must remain reachable.
         self._is_running = True
-        if already_live:
+        if live_thread is not None:
             # The probe's writer is this process's own live thread; adopt it.
             if self._handle is not None:
-                self._handle.thread = self._thread
+                self._handle.thread = live_thread
             logger.info("dlq_outbox.worker_adopted_probe_respawn")
         else:
             self._spawn_thread()
