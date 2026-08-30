@@ -157,6 +157,15 @@ _REJECTED_LEGACY_ALIASES: frozenset[str] = frozenset(
 _init_not_called_cache_warned: bool = False
 _init_not_called_storage_warned: bool = False
 
+# True only while init() itself is running its steps. Read by the registry's
+# init-not-called announcements: several init() steps resolve registry
+# adapters before ``_init_done`` flips (the idempotency gate above all), and
+# by then the registry defaults are already wired — announcing "invoked
+# before baldur.init(), falling back to in-memory cache" from inside init()
+# is false on both halves. init() clears it in a ``finally``, so a failed
+# init() leaves later genuinely-pre-init accesses announced.
+_init_in_progress: bool = False
+
 # Once-per-process guard for the CB-state startup seed (D1), so a double
 # invocation (Django init() per worker + post_worker_init) schedules the seed
 # timer at most once per serving process.
@@ -188,7 +197,7 @@ def init(
             - ``"arq"``: reserved for future ``baldur-framework[arq]`` extra; currently
               falls back to inline with a WARNING log.
     """
-    global _init_done
+    global _init_done, _init_in_progress
 
     # Install the log-level filter before the first step can emit anything.
     # Until this runs, structlog's pre-configure default prints every level
@@ -213,37 +222,41 @@ def init(
 
         get_runtime()
 
-        _validate_startup_config(quarantine_callback=quarantine_callback)
-        _validate_critical_secrets()
-        _register_default_event_handlers()
-        _init_bridge_instrumentation()
-        _instrument_otel_if_enabled()
-        _register_shutdown_handlers()
-        _wire_registry_defaults()
-        _validate_idempotency_cache_in_production()
-        _install_idempotency_gate()
-        _emit_tier_setting_warnings()
-        ext_result = _run_pro_extensions()
-        _seed_circuit_breaker_config()
-        _warn_unknown_env_vars()
-        _apply_audit_default_provider()
-        _start_audit_pipeline_if_enabled()
-        _start_dlq_outbox_if_enabled()
-        _configure_error_budget_if_enabled()
-        _register_metrics_provider_if_configured()
-        _refresh_auto_replay_arming_gauge()
-        _record_env_snapshot()
-        _start_default_scheduler(task_backend=task_backend)
-        _register_sql_statistics_if_available()
-        _start_admin_server_if_enabled()
-        start_background_workers()
-        _arm_celery_bootstrap_receivers()
-        _schedule_celery_deferral_check()
+        _init_in_progress = True
+        try:
+            _validate_startup_config(quarantine_callback=quarantine_callback)
+            _validate_critical_secrets()
+            _register_default_event_handlers()
+            _init_bridge_instrumentation()
+            _instrument_otel_if_enabled()
+            _register_shutdown_handlers()
+            _wire_registry_defaults()
+            _validate_idempotency_cache_in_production()
+            _install_idempotency_gate()
+            _emit_tier_setting_warnings()
+            ext_result = _run_pro_extensions()
+            _seed_circuit_breaker_config()
+            _warn_unknown_env_vars()
+            _apply_audit_default_provider()
+            _start_audit_pipeline_if_enabled()
+            _start_dlq_outbox_if_enabled()
+            _configure_error_budget_if_enabled()
+            _register_metrics_provider_if_configured()
+            _refresh_auto_replay_arming_gauge()
+            _record_env_snapshot()
+            _start_default_scheduler(task_backend=task_backend)
+            _register_sql_statistics_if_available()
+            _start_admin_server_if_enabled()
+            start_background_workers()
+            _arm_celery_bootstrap_receivers()
+            _schedule_celery_deferral_check()
 
-        report = _build_startup_report(ext_result)
-        logger.info("baldur.startup_report", **report)
+            report = _build_startup_report(ext_result)
+            logger.info("baldur.startup_report", **report)
 
-        _init_done = True
+            _init_done = True
+        finally:
+            _init_in_progress = False
 
     # Announce the posture after the wiring it describes has completed. The
     # once-latch makes whichever path runs first the only emitter, so a
@@ -555,13 +568,18 @@ def _validate_critical_secrets() -> None:
       expected state of a zero-config dev boot, so the aggregate is INFO
       there — the same reasoning that sets the per-secret levels.
     - Production + a CRITICAL secret missing: ``validate_required_secrets``
-      raises ``RuntimeError`` (under ``is_production()``); this function lets it
-      propagate out of ``init()`` to abort boot.
+      raises ``ConfigurationError`` (under ``is_production()``); this function
+      lets it propagate out of ``init()`` to abort boot. ConfigurationError —
+      not a bare RuntimeError — because the Celery ``worker_init`` receiver
+      converts exactly that class to ``SystemExit``; anything else is
+      swallowed by celery's signal dispatch and the worker boots keyless on
+      pre-init defaults (observed live at 777 verify).
 
-    Non-``RuntimeError`` failures stay best-effort (logged, swallowed) so a
-    transient settings-read error never blocks a non-production startup.
+    Other failures stay best-effort (logged, swallowed) so a transient
+    settings-read error never blocks a non-production startup.
     """
     try:
+        from baldur.core.exceptions import ConfigurationError
         from baldur.runtime import is_production
         from baldur.settings.secrets import validate_required_secrets
 
@@ -586,7 +604,7 @@ def _validate_critical_secrets() -> None:
         else:
             logger.info("baldur.all_secrets_validated_successfully")
 
-    except RuntimeError as e:
+    except ConfigurationError as e:
         # Production CRITICAL secret missing -> re-raise to abort startup.
         # validate_required_secrets already logs per-secret ERROR/WARNING; this
         # adds one critical line with the aggregate error so operators get an
@@ -1342,7 +1360,8 @@ def reconcile_celery_deferral_posture(*, fork_lane: bool) -> None:
       import slower than the configured delay, plausible for a large Django
       app on a cold boot — a corrective INFO follows it, so the log does not
       end on a WARNING that has since been answered. Raise
-      ``BALDUR_HOOKS_CHECK_DELAY_SECONDS`` to stop paying for that once.
+      ``BALDUR_RECOVERY_SHUTDOWN_HOOKS_CHECK_DELAY_SECONDS`` to stop paying
+      for that once.
     - An earlier ``init()`` that *started* the starters rather than deferring
       them, in a process that is about to fork, is reported: those threads are
       dead in every child, and only what the per-worker recovery covers comes
@@ -4365,7 +4384,15 @@ def _start_event_bus_listener_if_enabled() -> None:
 # needed. Order-independent from the watchdog starter because every listener
 # spawn path is individually fork-safe.
 
+# Order note: the two starters that perform entry-point fork repair (audit
+# pipeline, DLQ outbox) run FIRST — before anything that can start the
+# meta-watchdog, whose ``DaemonWorkerProbe`` respawns a dead inherited writer
+# through the handle's ``restart_callback``. Repair-before-probe means the
+# probe's first tick always finds a live, re-owned writer instead of racing
+# the repair through the inherited spawn seam.
 _BACKGROUND_WORKER_STARTERS: tuple[Callable[[], None], ...] = (
+    _start_dlq_outbox_starter,
+    _start_audit_pipeline_starter,
     _start_capacity_reservation_if_enabled,
     _start_cell_topology_if_enabled,
     _start_meta_watchdog_if_enabled,
@@ -4378,8 +4405,6 @@ _BACKGROUND_WORKER_STARTERS: tuple[Callable[[], None], ...] = (
     _seed_circuit_breaker_state_if_enabled,
     _setup_config_invalidation_delivery,
     _start_event_bus_listener_if_enabled,
-    _start_audit_pipeline_starter,
-    _start_dlq_outbox_starter,
 )
 
 

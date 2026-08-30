@@ -18,6 +18,16 @@ Two success criteria live only here:
 - A production worker with no connection signal exits at ``worker_init``,
   before any fork, rather than booting on memory.
 
+Test Categories:
+    A. worker_init lifecycle:
+        - redis registry default resolved through the receiver-driven init()
+        - pre-init WARNING positive control + wired-worker negative
+        - fork lane defers the starters; non-fork lane serves in place
+        - production misconfig exits at worker_init, before any fork
+    B. worker_process_init lifecycle:
+        - the child un-defers the starters its parent deferred
+        - an inherited init() is not re-run over shared connection pools
+
 No infrastructure: ``BALDUR_REDIS_URL`` set without a live Redis is enough,
 because ``init()`` performs no I/O probe by design. Real fork-child
 thread liveness is not expressible here — ``os.fork`` is absent on the Windows

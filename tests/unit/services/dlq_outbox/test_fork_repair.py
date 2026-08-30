@@ -322,6 +322,37 @@ class TestOutboxWorkerForkRepairBehavior:
         assert dead_thread.is_alive() is False
         assert worker._thread.is_alive() is True
 
+    def test_repair_keeps_a_writer_the_probe_already_respawned(self, forked_worker):
+        """A probe respawn that beat the repair must not be stranded.
+
+        The ``DaemonWorkerProbe`` reaches ``_spawn_thread`` through the
+        inherited handle's ``restart_callback``; if its tick lands before the
+        entry-point repair (the repair-first starter order makes this
+        defense in depth, not the designed sequence), the repair used to null
+        the reference to that live writer and spawn a second one — two
+        drainers on one buffer, every entry written twice, and ``stop()``
+        joining only the newer thread.
+        """
+        # Given — the probe respawned the dead inherited writer first
+        _, _, worker = forked_worker
+        worker._spawn_thread()
+        probe_spawned = worker._thread
+        assert probe_spawned.is_alive() is True
+
+        # When — the fork repair runs afterwards
+        worker.repair_after_fork()
+
+        # Then — the probe's writer is kept; no second drainer exists
+        assert worker._thread is probe_spawned
+        assert worker.handle.thread is probe_spawned
+        assert worker.is_running is True
+        live_writers = [
+            t
+            for t in threading.enumerate()
+            if t.name == "DLQOutboxWorker" and t.is_alive()
+        ]
+        assert live_writers == [probe_spawned]
+
 
 class TestOutboxSpawnExclusionBehavior:
     """``_spawn_thread()`` is the single spawn seam.

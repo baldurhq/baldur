@@ -32,6 +32,7 @@ import pytest
 
 from baldur import bootstrap
 from baldur.bootstrap import _validate_critical_secrets
+from baldur.core.exceptions import ConfigurationError
 from baldur.settings.secrets import reset_secrets_settings
 
 _AUDIT_KEY_ENV = "BALDUR_SECRETS_AUDIT_SIGNING_KEY"
@@ -88,7 +89,7 @@ class TestValidateCriticalSecretsGate:
         _seed(monkeypatch, production=True, audit_signing_key=None)
 
         # Then the gate raises, naming the missing CRITICAL secret
-        with pytest.raises(RuntimeError, match="audit_signing_key"):
+        with pytest.raises(ConfigurationError, match="audit_signing_key"):
             _validate_critical_secrets()
 
     def test_production_with_empty_audit_signing_key_aborts(self, monkeypatch):
@@ -96,7 +97,7 @@ class TestValidateCriticalSecretsGate:
         _seed(monkeypatch, production=True, audit_signing_key="")
 
         # Then the empty key is treated as missing and aborts boot
-        with pytest.raises(RuntimeError, match="audit_signing_key"):
+        with pytest.raises(ConfigurationError, match="audit_signing_key"):
             _validate_critical_secrets()
 
     def test_production_with_unset_encryption_key_aborts(self, monkeypatch):
@@ -109,7 +110,7 @@ class TestValidateCriticalSecretsGate:
         )
 
         # Then the gate also covers encryption_key (D7 side benefit)
-        with pytest.raises(RuntimeError, match="encryption_key"):
+        with pytest.raises(ConfigurationError, match="encryption_key"):
             _validate_critical_secrets()
 
     def test_production_with_all_critical_secrets_set_passes(self, monkeypatch):
@@ -141,7 +142,7 @@ class TestValidateCriticalSecretsGate:
         _seed(monkeypatch, production=True, audit_signing_key=None)
 
         # Then the full init() path aborts — the gate is wired into init()
-        # before the heavy startup steps (SC #8: RuntimeError from baldur.init()
+        # before the heavy startup steps (SC #8: ConfigurationError from baldur.init()
         # on the central, non-Django path).
-        with pytest.raises(RuntimeError, match="CRITICAL secrets"):
+        with pytest.raises(ConfigurationError, match="CRITICAL secrets"):
             bootstrap.init()

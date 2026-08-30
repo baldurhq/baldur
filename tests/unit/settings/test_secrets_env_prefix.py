@@ -4,10 +4,10 @@ Wave 6A (doc 508) migrated every env var to the ``BALDUR_*`` prefix. Wave 6E
 (doc 529) discovered that ``SECURITY.md`` still instructed users to set the
 pre-migration ``SELFHEALING_*`` names — leading to silent boot crashes in
 production because the CRITICAL secrets (``encryption_key`` /
-``audit_signing_key``) raise ``RuntimeError`` when missing.
+``audit_signing_key``) raise ``ConfigurationError`` when missing.
 
 Existing tests at ``tests/unit/security/test_jwt_blacklist_and_secrets.py``
-mock ``validate_required_secrets`` via ``patch(..., side_effect=RuntimeError)``,
+mock ``validate_required_secrets`` via ``patch(..., side_effect=ConfigurationError)``,
 which only verifies the ``apps.ready()`` re-raise wrapper — the underlying
 env-var-to-settings-class binding is not exercised. A future rename of
 ``BALDUR_SECRETS_*`` (or its nested fields) would silently pass the mock-based

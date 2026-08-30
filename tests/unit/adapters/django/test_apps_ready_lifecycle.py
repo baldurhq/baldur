@@ -21,7 +21,7 @@ Propagating call sites (must NOT be silently swallowed):
     2. ``baldur.init()`` — ``AdminAuthRequiredError`` raised by
        ``_start_admin_server_if_enabled`` for a non-localhost bind
        without an API key (``bootstrap.py`` explicit re-raise).
-    3. ``baldur.init()`` — ``RuntimeError`` raised by the centralized secret
+    3. ``baldur.init()`` — ``ConfigurationError`` raised by the centralized secret
        gate (``bootstrap._validate_critical_secrets``) when CRITICAL secrets
        (``encryption_key``, ``audit_signing_key``) are unset in production.
        632 D7 lifted this out of the Django-only ``apps.py._validate_secrets``
@@ -68,7 +68,7 @@ def silent_inputs(monkeypatch):
     executes.
 
     Tests that need a propagating call site to raise (e.g. ``baldur.init``
-    surfacing the production secret-gate ``RuntimeError``) re-apply
+    surfacing the production secret-gate ``ConfigurationError``) re-apply
     :func:`monkeypatch.setattr` on top.
 
     .. note::
@@ -186,37 +186,37 @@ class TestReadyInitPropagationContract:
 
 
 class TestReadySecretsPropagationContract:
-    """Production CRITICAL-secret ``RuntimeError`` MUST propagate through ``ready()``.
+    """Production CRITICAL-secret ``ConfigurationError`` MUST propagate through ``ready()``.
 
     Since 632 D7 the secret gate lives inside ``baldur.init()``
     (``bootstrap._validate_critical_secrets``), so a missing ``encryption_key``
-    / ``audit_signing_key`` in production surfaces as a ``RuntimeError`` from
+    / ``audit_signing_key`` in production surfaces as a ``ConfigurationError`` from
     the ``baldur.init()`` call site in ``ready()``. ``ready()`` must not swallow
     it — best-effort silent recovery is unacceptable for security-critical
     secrets. (Same fail-loud contract previously held by the removed
     ``apps.py._validate_secrets`` step.)
     """
 
-    def test_ready_propagates_runtime_error_from_secret_gate(
+    def test_ready_propagates_configuration_error_from_secret_gate(
         self, app_config, silent_inputs, monkeypatch
     ):
-        """A secret-gate ``RuntimeError`` raised by ``baldur.init()`` propagates.
+        """A secret-gate ``ConfigurationError`` raised by ``baldur.init()`` propagates.
 
         The gate moved into ``baldur.init()`` (632 D7), so this reproduces the
         production path where ``_validate_critical_secrets`` re-raises the
-        ``validate_required_secrets`` ``RuntimeError`` and ``init()`` lets it
+        ``validate_required_secrets`` ``ConfigurationError`` and ``init()`` lets it
         out — ``ready()`` must surface it so the Django boot CrashLoops.
         """
 
         def _raise_secret_error(**kwargs):
-            raise RuntimeError(
+            raise ConfigurationError(
                 "[Security] CRITICAL secrets not configured in production: "
                 "encryption_key, audit_signing_key."
             )
 
         monkeypatch.setattr("baldur.init", _raise_secret_error, raising=False)
 
-        with pytest.raises(RuntimeError, match="CRITICAL secrets"):
+        with pytest.raises(ConfigurationError, match="CRITICAL secrets"):
             app_config.ready()
 
 
