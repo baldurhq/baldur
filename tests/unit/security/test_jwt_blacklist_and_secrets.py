@@ -15,6 +15,7 @@ import pytest
 
 from baldur.adapters.django.apps import BaldurConfig
 from baldur.bootstrap import _validate_critical_secrets
+from baldur.core.exceptions import ConfigurationError
 from baldur.services.security.hooks import (
     get_session_invalidation_hooks,
 )
@@ -234,32 +235,36 @@ class TestValidateCriticalSecretsBehavior:
                 )
 
     def test_validate_secrets_critical_failure_blocks_startup(self):
-        """Production CRITICAL secret missing -> RuntimeError re-raised (abort boot)."""
+        """Production CRITICAL secret missing -> ConfigurationError re-raised (abort boot)."""
         with patch(
             "baldur.settings.secrets.validate_required_secrets",
-            side_effect=RuntimeError("CRITICAL secrets not configured in production"),
+            side_effect=ConfigurationError(
+                "CRITICAL secrets not configured in production"
+            ),
         ):
-            with pytest.raises(RuntimeError, match="CRITICAL secrets not configured"):
+            with pytest.raises(
+                ConfigurationError, match="CRITICAL secrets not configured"
+            ):
                 _validate_critical_secrets()
 
     def test_validate_secrets_critical_failure_logs_resolution_guide(self):
-        """RuntimeError path logs a critical resolution line before re-raising."""
+        """ConfigurationError path logs a critical resolution line before re-raising."""
         with patch(
             "baldur.settings.secrets.validate_required_secrets",
-            side_effect=RuntimeError("CRITICAL secrets not configured"),
+            side_effect=ConfigurationError("CRITICAL secrets not configured"),
         ):
             with patch("baldur.bootstrap.logger") as mock_logger:
-                with pytest.raises(RuntimeError):
+                with pytest.raises(ConfigurationError):
                     _validate_critical_secrets()
 
                 mock_logger.critical.assert_called_once()
                 log_message = mock_logger.critical.call_args[0][0]
                 assert log_message == "baldur.secrets_validation_failed_resolution"
-                # The RuntimeError is forwarded on the error kwarg.
+                # The ConfigurationError is forwarded on the error kwarg.
                 assert "error" in mock_logger.critical.call_args[1]
 
     def test_validate_secrets_other_error_continues(self):
-        """Non-RuntimeError failures are best-effort (swallowed)."""
+        """Non-ConfigurationError failures are best-effort (swallowed)."""
         with patch(
             "baldur.settings.secrets.validate_required_secrets",
             side_effect=Exception("Unexpected error"),

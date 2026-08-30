@@ -1300,11 +1300,19 @@ def _warn_if_init_not_called_cache() -> None:
     scripts that import baldur for sub-features may legitimately skip
     init(); this makes the silent memory fallback visible exactly once per
     process, at the level :func:`_init_not_called_log` decides.
+
+    Silent while ``init()`` itself is mid-run: its own steps resolve the
+    cache after the registry defaults are wired but before ``_init_done``
+    flips, and announcing a memory fallback there is false twice over.
     """
     # log once when get_cache() precedes init().
     import baldur.bootstrap as _bootstrap
 
-    if _bootstrap._init_done or _bootstrap._init_not_called_cache_warned:
+    if (
+        _bootstrap._init_done
+        or _bootstrap._init_in_progress
+        or _bootstrap._init_not_called_cache_warned
+    ):
         return
     _bootstrap._init_not_called_cache_warned = True
     _init_not_called_log(
@@ -1325,7 +1333,11 @@ def _warn_if_init_not_called_storage() -> None:
     """
     import baldur.bootstrap as _bootstrap
 
-    if _bootstrap._init_done or _bootstrap._init_not_called_storage_warned:
+    if (
+        _bootstrap._init_done
+        or _bootstrap._init_in_progress
+        or _bootstrap._init_not_called_storage_warned
+    ):
         return
     _bootstrap._init_not_called_storage_warned = True
     _init_not_called_log(

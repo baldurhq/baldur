@@ -126,6 +126,22 @@ class TestBackgroundWorkerRegistryContract:
     def test_registry_entries_are_all_callable(self):
         assert all(callable(s) for s in bootstrap._BACKGROUND_WORKER_STARTERS)
 
+    def test_fork_repair_starters_run_before_the_watchdog_starter(self):
+        """Repair-before-probe ordering contract.
+
+        The two starters that perform entry-point fork repair (DLQ outbox,
+        audit pipeline) must precede the meta-watchdog starter: its
+        DaemonWorkerProbe respawns a dead inherited writer through the
+        handle's restart_callback, and a probe tick that lands before the
+        repair goes through the inherited spawn seam the repair is about to
+        replace.
+        """
+        order = list(bootstrap._BACKGROUND_WORKER_STARTERS)
+        watchdog_at = order.index(bootstrap._start_meta_watchdog_if_enabled)
+
+        assert order.index(bootstrap._start_dlq_outbox_starter) < watchdog_at
+        assert order.index(bootstrap._start_audit_pipeline_starter) < watchdog_at
+
 
 class TestStartBackgroundWorkersBehavior:
     """D4: ``start_background_workers()`` iterates the registry — delegating to

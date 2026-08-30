@@ -19,6 +19,7 @@ import structlog
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings
 
+from baldur.core.exceptions import ConfigurationError
 from baldur.settings.base import make_settings_config
 
 logger = structlog.get_logger()
@@ -211,7 +212,12 @@ def validate_required_secrets(secrets: SecretsSettings | None = None) -> dict:
     operators to ignore security ERRORs. Production is where this is a real
     finding, and there both the levels and the abort below are unchanged.
 
-    In production, a missing CRITICAL secret raises RuntimeError.
+    In production, a missing CRITICAL secret raises ConfigurationError —
+    the deliberate fail-loud class every framework adapter's startup path
+    aborts on. The class matters on Celery: the worker receiver converts
+    only this class to SystemExit, and celery's signal dispatch swallows a
+    plain Exception, so a bare RuntimeError would boot the worker on
+    pre-init defaults instead of stopping it.
 
     Args:
         secrets: SecretsSettings instance to validate (uses the singleton if None)
@@ -220,7 +226,7 @@ def validate_required_secrets(secrets: SecretsSettings | None = None) -> dict:
         {"critical": [...], "warning": [...], "info": [...]} list of unset secrets
 
     Raises:
-        RuntimeError: When a CRITICAL secret is unset in production
+        ConfigurationError: When a CRITICAL secret is unset in production
     """
     if secrets is None:
         secrets = get_secrets()
@@ -267,7 +273,7 @@ def validate_required_secrets(secrets: SecretsSettings | None = None) -> dict:
 
     # In production, missing CRITICAL secrets must abort startup.
     if production and result["critical"]:
-        raise RuntimeError(
+        raise ConfigurationError(
             f"[Security] CRITICAL secrets not configured in production: "
             f"{', '.join(result['critical'])}. "
             "Cannot start Baldur system without these secrets."

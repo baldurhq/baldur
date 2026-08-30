@@ -232,6 +232,56 @@ class TestInitNotCalledWarningBehavior:
         assert bootstrap._init_not_called_cache_warned is False
         assert all("init_not_called_get_cache" not in r.message for r in caplog.records)
 
+    def test_cache_warning_suppressed_while_init_is_in_progress(self, caplog):
+        """init()'s own steps resolve the cache mid-run; that is not "before init".
+
+        The registry defaults are wired before those steps ask, so the
+        announcement's "falling back to in-memory cache" would be false on
+        both halves — observed on a real celery worker boot (777). The
+        once-guard is NOT consumed, so a genuinely pre-init access after a
+        failed init() is still announced.
+        """
+        from baldur import bootstrap
+        from baldur.factory.registry import _warn_if_init_not_called_cache
+
+        bootstrap._init_done = False
+        bootstrap._init_not_called_cache_warned = False
+        bootstrap._init_in_progress = True
+        try:
+            with caplog.at_level("WARNING"):
+                _warn_if_init_not_called_cache()
+        finally:
+            bootstrap._init_in_progress = False
+
+        assert all("init_not_called_get_cache" not in r.message for r in caplog.records)
+        assert bootstrap._init_not_called_cache_warned is False
+
+        # init() failed and cleared the flag in its finally → the next
+        # pre-init access announces normally.
+        with caplog.at_level("WARNING"):
+            _warn_if_init_not_called_cache()
+        assert any("init_not_called_get_cache" in r.message for r in caplog.records)
+
+    def test_storage_warning_suppressed_while_init_is_in_progress(self, caplog):
+        """Companion suppression for the storage-registry announcement."""
+        from baldur import bootstrap
+        from baldur.factory.registry import _warn_if_init_not_called_storage
+
+        bootstrap._init_done = False
+        bootstrap._init_not_called_storage_warned = False
+        bootstrap._init_in_progress = True
+        try:
+            with caplog.at_level("WARNING"):
+                _warn_if_init_not_called_storage()
+        finally:
+            bootstrap._init_in_progress = False
+
+        assert all(
+            "init_not_called_get_storage_backend" not in r.message
+            for r in caplog.records
+        )
+        assert bootstrap._init_not_called_storage_warned is False
+
     def test_storage_warning_fires_when_init_done_false_and_flag_unset(self, caplog):
         """First call → WARNING ``baldur.init_not_called_get_storage_backend``."""
         from baldur import bootstrap

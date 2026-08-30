@@ -18,8 +18,11 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - A prefork worker starts them per pool child, so a recycled child comes back with its own.
 - A production Celery worker whose config `baldur.init()` rejects now exits before it forks.
 
+
 ### Changed
 
+- **Breaking**: a production boot missing a critical secret raises `ConfigurationError` now.
+- `RuntimeError` was invisible to the Celery abort path, which booted the worker keyless instead.
 - A closed, healthy circuit breaker no longer writes its state on every recorded success.
 - Circuit-breaker writes to Redis now track state transitions rather than request volume.
 - A worker's success no longer resets a peer worker's open circuit or failure count in Redis.
@@ -28,6 +31,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 ### Fixed
 
 - A zero-config process no longer prints `resilience.bypass_hooks_skipped` to stdout on import.
+- A wired boot no longer warns `init_not_called_get_cache` from inside `baldur.init()` itself.
 - A Celery task failure the DLQ rejected (disabled, overflow) is no longer logged as stored.
 - A forked worker (`gunicorn --preload`) now drains its own DLQ outbox instead of losing entries.
 - Its writer dies at the fork, so async stores reported success into a buffer nothing consumed.

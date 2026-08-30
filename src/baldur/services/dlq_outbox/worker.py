@@ -249,10 +249,23 @@ class DLQOutboxWorker:
 
         The buffer is repaired by the caller, which owns it; this method
         assumes the entries it drains are this process's own.
+
+        A writer that is already alive here is kept, not replaced. The
+        ``DaemonWorkerProbe`` reaches ``_spawn_thread`` through the inherited
+        handle's ``restart_callback``, and a tick that lands before this
+        repair respawns the dead writer through the *old* spawn seam. The
+        repair-first starter order makes that sequence unreachable on the
+        ``start_background_workers()`` path, so this branch is defense in
+        depth — but nulling the reference to a live writer and spawning a
+        second one puts two drainers on one buffer, writing every entry
+        twice, with ``stop()`` joining only the newer thread.
         """
+        already_live = self._thread is not None and self._thread.is_alive()
+
         self._spawn_lock = threading.Lock()
         self._stop_event = threading.Event()
-        self._thread = None
+        if not already_live:
+            self._thread = None
 
         # The parent's counts describe the parent's writes. Kept, they would
         # leave the conservation invariant (total_enqueued == written + failed
@@ -271,8 +284,14 @@ class DLQOutboxWorker:
         # ``_is_running`` stays True: this worker is running in this process the
         # moment the spawn below returns, and stop() must remain reachable.
         self._is_running = True
-        self._spawn_thread()
-        logger.info("dlq_outbox.worker_respawned_after_fork")
+        if already_live:
+            # The probe's writer is this process's own live thread; adopt it.
+            if self._handle is not None:
+                self._handle.thread = self._thread
+            logger.info("dlq_outbox.worker_adopted_probe_respawn")
+        else:
+            self._spawn_thread()
+            logger.info("dlq_outbox.worker_respawned_after_fork")
 
     def _writer_loop_with_crash_capture(self) -> None:
         """Wrap _writer_loop so an uncaught exception populates handle.last_crash_reason."""
