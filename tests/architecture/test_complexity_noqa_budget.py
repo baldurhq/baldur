@@ -96,7 +96,9 @@ _ROOT_BUDGETS: dict[str, int] = {
     # noqa when the per-phase op chains collapsed into _BATCH_OP_HANDLERS.
     # zero-config log posture: -1 — ResilientStorageBackend._ensure_redis dropped
     # its C901 noqa when the first-init failure arm moved to its own method.
-    "baldur": 111,
+    # celery worker bootstrap: -1 — setup_baldur_signals dropped its C901 noqa
+    # when the per-flag override chain moved into _apply_config_overrides.
+    "baldur": 110,
     # 666: -1 — _update_config_with_meta refactored into _versioned_write +
     # _merge_changes + _post_write helpers, dropping its complexity noqa.
     "baldur_pro": 32,
