@@ -219,7 +219,7 @@ class TestL2SyncQuarantineWiring:
         assert inline.submit_count == QUARANTINE_THRESHOLD
 
 
-class TestUnconfiguredDeclineIsNotAFailure:
+class TestUnconfiguredDeclineIsNotAFailureBehavior:
     """774 D2 -- an L2 that declined to dial never reaches the counter.
 
     A zero-config process calls this lane on every recovery attempt, so with

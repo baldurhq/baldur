@@ -1,14 +1,14 @@
 """
-Exception Hierarchy (312) 단위 테스트.
+Exception hierarchy (312) unit tests.
 
-검증 대상:
-- BaldurError base 클래스 및 전체 예외 계층
-- extra_context() 메서드
-- 각 도메인별 예외가 올바른 상속 체인을 가지는지
+Verification targets:
+- The BaldurError base class and the full exception hierarchy
+- The extra_context() method
+- Each domain exception carries the correct inheritance chain
 
-기법 분류:
-- 계약 검증: 예외 계층 구조, extra_context() 반환값
-- 동작 검증: catch-all 패턴, 메시지/코드 전달
+Technique classification:
+- Contract verification: exception hierarchy structure, extra_context() return values
+- Behavior verification: catch-all patterns, message/code propagation
 """
 
 from __future__ import annotations
@@ -35,82 +35,82 @@ from baldur.core.exceptions import (
 )
 
 # =============================================================================
-# 계약 검증 — 예외 계층 구조
+# Contract verification — exception hierarchy structure
 # =============================================================================
 
 
 class TestExceptionHierarchyContract:
-    """예외 계층 구조가 312 설계 계약대로 구성되어 있는지 검증."""
+    """Verify the exception hierarchy matches the 312 design contract."""
 
     def test_baldur_error_inherits_from_exception(self):
-        """BaldurError는 Exception을 상속해야 한다."""
+        """BaldurError must inherit from Exception."""
         assert issubclass(BaldurError, Exception)
 
     def test_adapter_error_inherits_from_baldur_error(self):
-        """AdapterError는 BaldurError를 상속해야 한다."""
+        """AdapterError must inherit from BaldurError."""
         assert issubclass(AdapterError, BaldurError)
 
     def test_adapter_not_found_inherits_from_adapter_error(self):
-        """AdapterNotFoundError는 AdapterError를 상속해야 한다."""
+        """AdapterNotFoundError must inherit from AdapterError."""
         assert issubclass(AdapterNotFoundError, AdapterError)
 
     def test_adapter_initialization_inherits_from_adapter_error(self):
-        """AdapterInitializationError는 AdapterError를 상속해야 한다."""
+        """AdapterInitializationError must inherit from AdapterError."""
         assert issubclass(AdapterInitializationError, AdapterError)
 
     def test_adapter_connection_inherits_from_adapter_error(self):
-        """AdapterConnectionError는 AdapterError를 상속해야 한다."""
+        """AdapterConnectionError must inherit from AdapterError."""
         assert issubclass(AdapterConnectionError, AdapterError)
 
     def test_circuit_breaker_error_inherits_from_baldur_error(self):
-        """CircuitBreakerError는 BaldurError를 상속해야 한다."""
+        """CircuitBreakerError must inherit from BaldurError."""
         assert issubclass(CircuitBreakerError, BaldurError)
 
     def test_circuit_breaker_transition_inherits_from_circuit_breaker_error(self):
-        """CircuitBreakerTransitionError는 CircuitBreakerError를 상속해야 한다."""
+        """CircuitBreakerTransitionError must inherit from CircuitBreakerError."""
         assert issubclass(CircuitBreakerTransitionError, CircuitBreakerError)
 
     def test_dlq_error_inherits_from_baldur_error(self):
-        """DLQError는 BaldurError를 상속해야 한다."""
+        """DLQError must inherit from BaldurError."""
         assert issubclass(DLQError, BaldurError)
 
     def test_dlq_entry_not_found_inherits_from_dlq_error(self):
-        """DLQEntryNotFoundError는 DLQError를 상속해야 한다."""
+        """DLQEntryNotFoundError must inherit from DLQError."""
         assert issubclass(DLQEntryNotFoundError, DLQError)
 
     def test_dlq_replay_error_inherits_from_dlq_error(self):
-        """DLQReplayError는 DLQError를 상속해야 한다."""
+        """DLQReplayError must inherit from DLQError."""
         assert issubclass(DLQReplayError, DLQError)
 
     def test_resilience_error_inherits_from_baldur_error(self):
-        """ResilienceError는 BaldurError를 상속해야 한다."""
+        """ResilienceError must inherit from BaldurError."""
         assert issubclass(ResilienceError, BaldurError)
 
     def test_retry_exhausted_inherits_from_resilience_error(self):
-        """RetryExhaustedError는 ResilienceError를 상속해야 한다."""
+        """RetryExhaustedError must inherit from ResilienceError."""
         assert issubclass(RetryExhaustedError, ResilienceError)
 
     def test_runbook_error_inherits_from_baldur_error(self):
-        """RunbookError는 BaldurError를 상속해야 한다."""
+        """RunbookError must inherit from BaldurError."""
         assert issubclass(RunbookError, BaldurError)
 
     def test_configuration_error_inherits_from_baldur_error(self):
-        """ConfigurationError는 BaldurError를 상속해야 한다."""
+        """ConfigurationError must inherit from BaldurError."""
         assert issubclass(ConfigurationError, BaldurError)
 
     def test_settings_validation_inherits_from_configuration_error(self):
-        """SettingsValidationError는 ConfigurationError를 상속해야 한다."""
+        """SettingsValidationError must inherit from ConfigurationError."""
         assert issubclass(SettingsValidationError, ConfigurationError)
 
     def test_adapter_not_found_is_not_value_error(self):
-        """AdapterNotFoundError는 ValueError가 아닌 AdapterError 계열이어야 한다."""
+        """AdapterNotFoundError must be in the AdapterError family, not ValueError."""
         err = AdapterNotFoundError("test")
         assert isinstance(err, AdapterError)
         assert isinstance(err, BaldurError)
         assert not isinstance(err, ValueError)
 
     def test_dlq_entry_not_found_is_not_value_error(self):
-        """DLQEntryNotFoundError는 ValueError가 아닌 DLQError 계열이어야 한다."""
+        """DLQEntryNotFoundError must be in the DLQError family, not ValueError."""
         err = DLQEntryNotFoundError("test")
         assert isinstance(err, DLQError)
         assert not isinstance(err, ValueError)
@@ -132,26 +132,26 @@ class TestExceptionHierarchyContract:
 
 
 # =============================================================================
-# 계약 검증 — extra_context() 메서드
+# Contract verification — the extra_context() method
 # =============================================================================
 
 
 class TestExtraContextContract:
-    """BaldurError.extra_context() 설계 계약 검증."""
+    """BaldurError.extra_context() design-contract verification."""
 
     def test_extra_context_with_code_returns_error_code(self):
-        """code가 설정된 경우 extra_context()에 error_code 키가 포함되어야 한다."""
+        """When code is set, extra_context() must include the error_code key."""
         err = BaldurError("test", code="E001")
         ctx = err.extra_context()
         assert ctx == {"error_code": "E001"}
 
     def test_extra_context_without_code_returns_empty_dict(self):
-        """code가 빈 문자열이면 extra_context()는 빈 dict를 반환해야 한다."""
+        """When code is an empty string, extra_context() must return an empty dict."""
         err = BaldurError("test")
         assert err.extra_context() == {}
 
     def test_extra_context_default_code_is_empty_string(self):
-        """code 기본값은 빈 문자열이어야 한다."""
+        """The code default must be an empty string."""
         err = BaldurError("test")
         assert err.code == ""
 
@@ -187,12 +187,12 @@ class TestExtraContextContract:
 
 
 # =============================================================================
-# 동작 검증 — catch-all 패턴
+# Behavior verification — catch-all patterns
 # =============================================================================
 
 
 class TestCatchAllPatternBehavior:
-    """BaldurError로 모든 라이브러리 에러를 포괄할 수 있는지 검증."""
+    """Verify BaldurError can cover every library error."""
 
     @pytest.mark.parametrize(
         "error_class",
@@ -214,33 +214,33 @@ class TestCatchAllPatternBehavior:
         ],
     )
     def test_baldur_error_catches_all_subclasses(self, error_class):
-        """BaldurError로 모든 서브클래스를 catch할 수 있어야 한다."""
+        """BaldurError must catch every subclass."""
         with pytest.raises(BaldurError):
             raise error_class("test error")
 
     def test_message_preserved_through_hierarchy(self):
-        """메시지가 예외 계층을 통해 보존되어야 한다."""
+        """Messages must be preserved through the exception hierarchy."""
         msg = "adapter xyz not found"
         err = AdapterNotFoundError(msg)
         assert str(err) == msg
 
     def test_code_preserved_through_hierarchy(self):
-        """code 인자가 서브클래스에서도 동작해야 한다."""
+        """The code argument must work in subclasses too."""
         err = DLQError("dlq failed", code="DLQ_001")
         assert err.code == "DLQ_001"
         assert err.extra_context() == {"error_code": "DLQ_001"}
 
 
 # =============================================================================
-# 동작 검증 — 외부 모듈 예외 계층 통합
+# Behavior verification — external-module exception hierarchy integration
 # =============================================================================
 
 
 class TestExternalExceptionIntegrationBehavior:
-    """외부 모듈(CB, Bulkhead, Hedging)의 예외가 계층에 통합되었는지 검증."""
+    """Verify external-module (CB, Bulkhead, Hedging) exceptions are integrated into the hierarchy."""
 
     def test_circuit_breaker_open_is_baldur_error(self):
-        """CircuitBreakerOpenError는 BaldurError 계열이어야 한다."""
+        """CircuitBreakerOpenError must be in the BaldurError family."""
         from baldur.services.circuit_breaker.exceptions import (
             CircuitBreakerOpenError,
         )
@@ -251,7 +251,7 @@ class TestExternalExceptionIntegrationBehavior:
         assert err.service_name == "payment"
 
     def test_bulkhead_full_is_resilience_error(self):
-        """BulkheadFullError는 ResilienceError 계열이어야 한다."""
+        """BulkheadFullError must be in the ResilienceError family."""
         pytest.importorskip("baldur_pro")
         from baldur_pro.services.bulkhead.exceptions import BulkheadFullError
 
@@ -260,7 +260,7 @@ class TestExternalExceptionIntegrationBehavior:
         assert isinstance(err, BaldurError)
 
     def test_bulkhead_timeout_is_resilience_error(self):
-        """BulkheadTimeoutError는 ResilienceError 계열이어야 한다."""
+        """BulkheadTimeoutError must be in the ResilienceError family."""
         pytest.importorskip("baldur_pro")
         from baldur_pro.services.bulkhead.exceptions import BulkheadTimeoutError
 
@@ -269,7 +269,7 @@ class TestExternalExceptionIntegrationBehavior:
         assert isinstance(err, BaldurError)
 
     def test_hedging_error_is_resilience_error(self):
-        """HedgingError는 ResilienceError 계열이어야 한다."""
+        """HedgingError must be in the ResilienceError family."""
         pytest.importorskip("baldur_pro")
         from baldur_pro.services.hedging.exceptions import HedgingError
 
@@ -278,7 +278,7 @@ class TestExternalExceptionIntegrationBehavior:
         assert isinstance(err, BaldurError)
 
     def test_hedging_timeout_is_resilience_error(self):
-        """HedgingTimeoutError는 ResilienceError 계열이어야 한다."""
+        """HedgingTimeoutError must be in the ResilienceError family."""
         pytest.importorskip("baldur_pro")
         from baldur_pro.services.hedging.exceptions import HedgingTimeoutError
 
@@ -287,7 +287,7 @@ class TestExternalExceptionIntegrationBehavior:
         assert isinstance(err, BaldurError)
 
     def test_hedging_all_failed_is_resilience_error(self):
-        """HedgingAllFailedError는 ResilienceError 계열이어야 한다."""
+        """HedgingAllFailedError must be in the ResilienceError family."""
         pytest.importorskip("baldur_pro")
         from baldur_pro.services.hedging.exceptions import HedgingAllFailedError
 
@@ -296,7 +296,7 @@ class TestExternalExceptionIntegrationBehavior:
         assert isinstance(err, BaldurError)
 
     def test_catch_resilience_error_catches_bulkhead_and_hedging(self):
-        """ResilienceError로 Bulkhead와 Hedging 예외를 모두 catch할 수 있어야 한다."""
+        """ResilienceError must catch both Bulkhead and Hedging exceptions."""
         pytest.importorskip("baldur_pro")
         from baldur_pro.services.bulkhead.exceptions import BulkheadFullError
         from baldur_pro.services.hedging.exceptions import HedgingTimeoutError
@@ -308,7 +308,7 @@ class TestExternalExceptionIntegrationBehavior:
             raise HedgingTimeoutError(timeout=1.0)
 
     def test_catch_circuit_breaker_error_catches_open_error(self):
-        """CircuitBreakerError로 CircuitBreakerOpenError를 catch할 수 있어야 한다."""
+        """CircuitBreakerError must catch CircuitBreakerOpenError."""
         from baldur.services.circuit_breaker.exceptions import (
             CircuitBreakerOpenError,
         )
@@ -318,12 +318,12 @@ class TestExternalExceptionIntegrationBehavior:
 
 
 # =============================================================================
-# Phase 4: 잔존 Exception 직접 상속 클래스 마이그레이션 (312 §8)
+# Phase 4: migration of remaining direct-Exception subclasses (312 §8)
 # =============================================================================
 
 
 class TestPhase4HierarchyContract:
-    """Phase 4 마이그레이션 예외 계층이 312 §8.2 설계 계약대로 구성되어 있는지 검증."""
+    """Verify the Phase 4 migration exception hierarchy matches the 312 §8.2 design contract."""
 
     # ── 4-A: interfaces/ ──
 
@@ -364,7 +364,7 @@ class TestPhase4HierarchyContract:
         assert issubclass(TaskQueueError, BaldurError)
 
     def test_task_queue_subclasses_inherit_through_chain(self):
-        """TaskNotFoundError, TaskTimeoutError 등이 TaskQueueError 체인을 유지."""
+        """TaskNotFoundError, TaskTimeoutError, etc. keep the TaskQueueError chain."""
         from baldur.interfaces.task_queue import (
             TaskNotFoundError,
             TaskQueueError,
@@ -384,7 +384,7 @@ class TestPhase4HierarchyContract:
         assert issubclass(WebFrameworkError, BaldurError)
 
     def test_web_framework_subclasses_inherit_through_chain(self):
-        """RouteNotFoundError 등이 WebFrameworkError 체인을 유지."""
+        """RouteNotFoundError, etc. keep the WebFrameworkError chain."""
         from baldur.interfaces.web_framework import (
             AuthenticationError,
             PermissionDeniedError,
@@ -406,7 +406,7 @@ class TestPhase4HierarchyContract:
         assert issubclass(IPCError, BaldurError)
 
     def test_ipc_subclasses_inherit_through_chain(self):
-        """IPCConnectionError 등 11개 서브클래스가 IPCError 체인을 유지."""
+        """The 11 IPC subclasses (IPCConnectionError, etc.) keep the IPCError chain."""
         from baldur.adapters.ipc.exceptions import (
             IPCAuthenticationError,
             IPCCircuitBreakerOpenError,
@@ -467,7 +467,7 @@ class TestPhase4HierarchyContract:
         assert issubclass(CascadeAuditError, BaldurError)
 
     def test_cascade_subclasses_inherit_through_chain(self):
-        """CascadeChainDepthExceeded 등이 CascadeAuditError 체인을 유지."""
+        """CascadeChainDepthExceeded, etc. keep the CascadeAuditError chain."""
         from baldur.audit.cascade_exceptions import (
             CascadeAuditError,
             CascadeChainDepthExceeded,
@@ -569,10 +569,10 @@ class TestPhase4HierarchyContract:
 
 
 class TestPhase4ExtraContextBehavior:
-    """Phase 4 마이그레이션 예외의 extra_context() 동작 검증."""
+    """Behavior verification of Phase 4 migration exceptions' extra_context()."""
 
     def test_ipc_error_extra_context_contains_jsonrpc_code(self):
-        """IPCConnectionError.extra_context()에 jsonrpc_code가 포함된다."""
+        """IPCConnectionError.extra_context() includes jsonrpc_code."""
         from baldur.adapters.ipc.exceptions import IPCConnectionError
 
         err = IPCConnectionError()
@@ -581,7 +581,7 @@ class TestPhase4ExtraContextBehavior:
         assert ctx["jsonrpc_code"] == -32003
 
     def test_ipc_error_extra_context_excludes_error_code_key(self):
-        """IPCError는 BaldurError의 str code 로직을 사용하지 않는다."""
+        """IPCError does not use BaldurError's str code logic."""
         from baldur.adapters.ipc.exceptions import IPCError
 
         err = IPCError("test", jsonrpc_code=None)
@@ -589,7 +589,7 @@ class TestPhase4ExtraContextBehavior:
         assert "error_code" not in ctx
 
     def test_cascade_chain_depth_exceeded_extra_context(self):
-        """CascadeChainDepthExceeded.extra_context()가 depth/max_depth/cascade_id를 반환."""
+        """CascadeChainDepthExceeded.extra_context() returns depth/max_depth/cascade_id."""
         from baldur.audit.cascade_exceptions import CascadeChainDepthExceeded
 
         err = CascadeChainDepthExceeded(depth=15, max_depth=10, cascade_id="c-abc")
@@ -599,7 +599,7 @@ class TestPhase4ExtraContextBehavior:
         assert ctx["cascade_id"] == "c-abc"
 
     def test_cascade_cycle_detected_extra_context(self):
-        """CascadeCycleDetected.extra_context()가 cycle_path/cascade_id를 반환."""
+        """CascadeCycleDetected.extra_context() returns cycle_path/cascade_id."""
         from baldur.audit.cascade_exceptions import CascadeCycleDetected
 
         err = CascadeCycleDetected(cycle_path=["A", "B", "A"], cascade_id="c-xyz")
@@ -608,7 +608,7 @@ class TestPhase4ExtraContextBehavior:
         assert ctx["cascade_id"] == "c-xyz"
 
     def test_cascade_integrity_error_extra_context(self):
-        """CascadeIntegrityError.extra_context()가 integrity 정보를 반환."""
+        """CascadeIntegrityError.extra_context() returns integrity info."""
         from baldur.audit.cascade_exceptions import CascadeIntegrityError
 
         err = CascadeIntegrityError(
@@ -620,7 +620,7 @@ class TestPhase4ExtraContextBehavior:
         assert ctx["details"] == {"k": "v"}
 
     def test_wal_corruption_error_extra_context(self):
-        """WALCorruptionError.extra_context()가 체크섬 정보를 반환."""
+        """WALCorruptionError.extra_context() returns checksum info."""
         from baldur.audit.wal._models import WALCorruptionError
 
         err = WALCorruptionError("bad", sequence=5, expected="abc", computed="xyz")
@@ -630,7 +630,7 @@ class TestPhase4ExtraContextBehavior:
         assert ctx["computed_checksum"] == "xyz"
 
     def test_config_lock_error_extra_context(self):
-        """ConfigLockError.extra_context()가 config_type/current_owner를 반환."""
+        """ConfigLockError.extra_context() returns config_type/current_owner."""
         pytest.importorskip("baldur_pro")
         from baldur_pro.services.canary.locking import ConfigLockError
 
@@ -640,7 +640,7 @@ class TestPhase4ExtraContextBehavior:
         assert ctx["current_owner"] == "r-1"
 
     def test_config_lock_error_extra_context_empty_fields_omitted(self):
-        """ConfigLockError — 빈 필드는 extra_context()에서 제외된다."""
+        """ConfigLockError — empty fields are omitted from extra_context()."""
         pytest.importorskip("baldur_pro")
         from baldur_pro.services.canary.locking import ConfigLockError
 
@@ -650,7 +650,7 @@ class TestPhase4ExtraContextBehavior:
         assert "current_owner" not in ctx
 
     def test_version_conflict_error_extra_context(self):
-        """VersionConflictError.extra_context()가 버전 충돌 정보를 반환."""
+        """VersionConflictError.extra_context() returns version-conflict info."""
         pytest.importorskip("baldur_pro")
         from baldur_pro.services.canary.versioning import VersionConflictError
 
@@ -667,7 +667,7 @@ class TestPhase4ExtraContextBehavior:
         assert ctx["config_type"] == "cb"
 
     def test_recovery_lock_error_extra_context(self):
-        """RecoveryLockError.extra_context()가 namespace/current_owner를 반환."""
+        """RecoveryLockError.extra_context() returns namespace/current_owner."""
         pytest.importorskip("baldur_pro")
         from baldur_pro.services.coordination.distributed_recovery_lock import (
             RecoveryLockError,
@@ -679,7 +679,7 @@ class TestPhase4ExtraContextBehavior:
         assert ctx["current_owner"] == "s-1"
 
     def test_automation_blocked_error_extra_context(self):
-        """AutomationBlockedError.extra_context()가 예산 정보를 반환."""
+        """AutomationBlockedError.extra_context() returns budget info."""
         pytest.importorskip("baldur_pro")
         from baldur_pro.services.error_budget_gate.exceptions import (
             AutomationBlockedError,
@@ -697,7 +697,7 @@ class TestPhase4ExtraContextBehavior:
         assert ctx["action"] == "chaos"
 
     def test_automation_blocked_error_to_dict_backward_compat(self):
-        """AutomationBlockedError.to_dict()가 기존 형태를 유지한다."""
+        """AutomationBlockedError.to_dict() keeps its existing shape."""
         pytest.importorskip("baldur_pro")
         from baldur_pro.services.error_budget_gate.exceptions import (
             AutomationBlockedError,
@@ -709,7 +709,7 @@ class TestPhase4ExtraContextBehavior:
         assert d["manual_mode_enforced"] is True
 
     def test_fatal_config_error_extra_context(self):
-        """FatalConfigError.extra_context()가 violations를 반환."""
+        """FatalConfigError.extra_context() returns violations."""
         from baldur.core.safe_defaults import FatalConfigError
 
         violations = {"security": {"rate_limit": "too high"}}
@@ -718,7 +718,7 @@ class TestPhase4ExtraContextBehavior:
         assert ctx["violations"] == violations
 
     def test_baldur_context_error_extra_context(self):
-        """BaldurContextError.extra_context()가 context_name/task_name을 반환."""
+        """BaldurContextError.extra_context() returns context_name/task_name."""
         from baldur.context.celery_context_utils import BaldurContextError
 
         err = BaldurContextError("cell_id", "my_task")
@@ -727,7 +727,7 @@ class TestPhase4ExtraContextBehavior:
         assert ctx["task_name"] == "my_task"
 
     def test_max_retries_exceeded_extra_context(self):
-        """MaxRetriesExceededError.extra_context()가 재시도 정보를 반환."""
+        """MaxRetriesExceededError.extra_context() returns retry info."""
         from baldur.services.retry_handler.models import MaxRetriesExceededError
 
         err = MaxRetriesExceededError(
@@ -742,7 +742,7 @@ class TestPhase4ExtraContextBehavior:
         assert ctx["last_error"] == "timeout"
 
     def test_max_retries_exceeded_extra_context_no_last_error(self):
-        """last_error가 None이면 extra_context()에서 제외된다."""
+        """When last_error is None, it is omitted from extra_context()."""
         from baldur.services.retry_handler.models import MaxRetriesExceededError
 
         err = MaxRetriesExceededError("max", retry_count=1, max_retries=3)
@@ -751,7 +751,7 @@ class TestPhase4ExtraContextBehavior:
 
 
 class TestPhase4CatchAllBehavior:
-    """Phase 4 예외가 도메인 base 및 BaldurError로 catch 가능한지 검증."""
+    """Verify Phase 4 exceptions are catchable via their domain base and BaldurError."""
 
     @pytest.mark.parametrize(
         ("import_path", "class_name"),
@@ -782,7 +782,7 @@ class TestPhase4CatchAllBehavior:
         ],
     )
     def test_baldur_error_catches_phase4_class(self, import_path, class_name):
-        """BaldurError로 Phase 4 예외를 catch할 수 있어야 한다."""
+        """BaldurError must catch Phase 4 exceptions."""
         import importlib
 
         if import_path.startswith(("baldur_pro", "baldur_dormant")):
@@ -793,7 +793,7 @@ class TestPhase4CatchAllBehavior:
             raise error_class("test")
 
     def test_baldur_error_catches_version_conflict(self):
-        """BaldurError로 VersionConflictError를 catch할 수 있어야 한다."""
+        """BaldurError must catch VersionConflictError."""
         pytest.importorskip("baldur_pro")
         from baldur_pro.services.canary.versioning import VersionConflictError
 
@@ -801,28 +801,28 @@ class TestPhase4CatchAllBehavior:
             raise VersionConflictError(5, 8, "admin", "cb")
 
     def test_baldur_error_catches_fatal_config(self):
-        """BaldurError로 FatalConfigError를 catch할 수 있어야 한다."""
+        """BaldurError must catch FatalConfigError."""
         from baldur.core.safe_defaults import FatalConfigError
 
         with pytest.raises(BaldurError):
             raise FatalConfigError({"security": {"k": "bad"}})
 
     def test_baldur_error_catches_context_error(self):
-        """BaldurError로 BaldurContextError를 catch할 수 있어야 한다."""
+        """BaldurError must catch BaldurContextError."""
         from baldur.context.celery_context_utils import BaldurContextError
 
         with pytest.raises(BaldurError):
             raise BaldurContextError("cell_id", "my_task")
 
     def test_baldur_error_catches_max_retries_exceeded(self):
-        """BaldurError로 MaxRetriesExceededError를 catch할 수 있어야 한다."""
+        """BaldurError must catch MaxRetriesExceededError."""
         from baldur.services.retry_handler.models import MaxRetriesExceededError
 
         with pytest.raises(BaldurError):
             raise MaxRetriesExceededError("max", retry_count=3, max_retries=3)
 
     def test_catch_audit_error_catches_all_audit_subclasses(self):
-        """AuditError로 cascade/mmap/wal 예외를 모두 catch할 수 있어야 한다."""
+        """AuditError must catch cascade/mmap/wal exceptions alike."""
         from baldur.audit.cascade_exceptions import CascadeChainDepthExceeded
         from baldur.audit.persistence.mmap_buffer import MmapBufferError
         from baldur.audit.wal._models import WALCorruptionError
@@ -838,14 +838,14 @@ class TestPhase4CatchAllBehavior:
             raise WALCorruptionError("bad", sequence=1, expected="a", computed="b")
 
     def test_catch_retry_exhausted_catches_max_retries_exceeded(self):
-        """RetryExhaustedError로 MaxRetriesExceededError를 catch할 수 있어야 한다."""
+        """RetryExhaustedError must catch MaxRetriesExceededError."""
         from baldur.services.retry_handler.models import MaxRetriesExceededError
 
         with pytest.raises(RetryExhaustedError):
             raise MaxRetriesExceededError("max", retry_count=3, max_retries=3)
 
     def test_catch_adapter_error_catches_ipc_and_web_framework(self):
-        """AdapterError로 IPCError와 WebFrameworkError를 모두 catch할 수 있어야 한다."""
+        """AdapterError must catch both IPCError and WebFrameworkError."""
         from baldur.adapters.ipc.exceptions import IPCConnectionError
         from baldur.interfaces.web_framework import RouteNotFoundError
 

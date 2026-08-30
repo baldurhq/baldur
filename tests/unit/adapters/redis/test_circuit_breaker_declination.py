@@ -11,7 +11,7 @@ The reach half is load-bearing and is deliberately not ``is_degraded``. That
 one is also True for the whole degraded and recovering window of a process
 whose Redis is answering again, where the raw client stays usable; gating on
 it would drop the store-side pin guard and the cluster-wide single-winner trip
-on every blip. ``TestBlipWindowKeepsDialing`` is the arm that separates the
+on every blip. ``TestBlipWindowKeepsDialingBehavior`` is the arm that separates the
 two implementations — an ``is_degraded``-based guard passes everything else in
 this module and fails only there.
 
@@ -279,7 +279,7 @@ class TestUnconfiguredLaneDeclinationBehavior:
 # =============================================================================
 
 
-class TestBlipWindowKeepsDialing:
+class TestBlipWindowKeepsDialingBehavior:
     """A process whose Redis answered once, and is now between connections.
 
     Driven through a real ``ResilientStorageBackend`` rather than a double:

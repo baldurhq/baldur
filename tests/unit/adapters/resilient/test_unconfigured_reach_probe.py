@@ -26,6 +26,7 @@ import tempfile
 from unittest.mock import MagicMock, patch
 
 import pytest
+import redis
 
 from baldur.adapters.cache.redis_adapter import RedisCacheAdapter
 from baldur.adapters.resilient.backend import (
@@ -80,7 +81,7 @@ def _connect(backend) -> MagicMock:
     The client the probe installs is returned so a caller can drive the
     later blip through the same object the raw-client seam hands out.
     """
-    client = MagicMock()
+    client = MagicMock(spec=redis.Redis)
     adapter = MagicMock(spec=RedisCacheAdapter)
     adapter.raw_client = client
     with patch("baldur.adapters.cache.RedisCacheAdapter", return_value=adapter):
