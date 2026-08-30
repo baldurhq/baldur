@@ -36,9 +36,14 @@ class TestBootstrapHelperWiring:
         """The helper starts the watchdog."""
         assert "watchdog.start()" in _bootstrap_helper_source()
 
-    def test_helper_skips_gunicorn_master(self):
-        """The helper skips the start in the gunicorn master (fork-safety)."""
-        assert "is_gunicorn_master" in _bootstrap_helper_source()
+    def test_helper_skips_fork_source(self):
+        """The helper skips the start in a fork source (fork-safety).
+
+        The predicate covers both pre-forking servers - the gunicorn master and
+        a celery worker main on a forking pool - so the per-worker hook is what
+        starts the watchdog in the process that serves.
+        """
+        assert "is_fork_source_process" in _bootstrap_helper_source()
 
     def test_helper_is_fail_soft(self):
         """The helper swallows ImportError and generic Exception (fail-soft)."""

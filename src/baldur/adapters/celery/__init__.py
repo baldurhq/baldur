@@ -47,6 +47,15 @@ if TYPE_CHECKING:
     from .beat_schedule import (
         validate_schedule as validate_schedule,
     )
+    from .bootstrap_hooks import (
+        connect_celery_bootstrap_receivers as connect_celery_bootstrap_receivers,
+    )
+    from .bootstrap_hooks import (
+        disconnect_celery_bootstrap_receivers as disconnect_celery_bootstrap_receivers,
+    )
+    from .bootstrap_hooks import (
+        is_celery_bootstrap_receivers_connected as is_celery_bootstrap_receivers_connected,
+    )
     from .signal_config import (
         SignalHooksSettings as SignalHooksSettings,
     )
@@ -132,6 +141,19 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "validate_schedule": (
         "baldur.adapters.celery.beat_schedule",
         "validate_schedule",
+    ),
+    # Worker bootstrap receivers (imports celery.signals)
+    "connect_celery_bootstrap_receivers": (
+        "baldur.adapters.celery.bootstrap_hooks",
+        "connect_celery_bootstrap_receivers",
+    ),
+    "disconnect_celery_bootstrap_receivers": (
+        "baldur.adapters.celery.bootstrap_hooks",
+        "disconnect_celery_bootstrap_receivers",
+    ),
+    "is_celery_bootstrap_receivers_connected": (
+        "baldur.adapters.celery.bootstrap_hooks",
+        "is_celery_bootstrap_receivers_connected",
     ),
     # Signal config
     "SignalHooksSettings": (
@@ -231,6 +253,10 @@ __all__ = [
     "setup_baldur_signals",
     "disconnect_baldur_signals",
     "is_signals_connected",
+    # Worker Bootstrap Receivers
+    "connect_celery_bootstrap_receivers",
+    "disconnect_celery_bootstrap_receivers",
+    "is_celery_bootstrap_receivers_connected",
     "get_signal_hooks_settings",
     "reset_signal_hooks_settings",
     "baldur_task",

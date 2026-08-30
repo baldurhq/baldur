@@ -114,11 +114,11 @@ Redis Sentinel works out of the box for high availability — point
 
 ## What frameworks does it support?
 
-Django, FastAPI, Flask, and Celery — each with a dedicated adapter. The
-Django, FastAPI, and Flask adapters hook the framework's startup lifecycle
-and call `baldur.init()` for you; the Celery adapter wires the task
-signals, and you call `baldur.init()` at worker start yourself (one line
-on `worker_process_init` — see the [Celery quickstart](getting-started/celery.md)). The core is
+Django, FastAPI, Flask, and Celery — each with a dedicated adapter, and each
+hooks the framework's startup lifecycle and calls `baldur.init()` for you. On
+Celery that is `setup_baldur_signals()` or `configure_baldur_celery()`; if you
+call neither and use `@baldur.protected` alone, connect it yourself with
+`@worker_process_init.connect` + `baldur.init()`. The core is
 framework-agnostic, so plain Python scripts and CLIs work too. See
 [Compatibility](compatibility.md) for the tested version matrix.
 

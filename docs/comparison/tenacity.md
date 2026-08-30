@@ -127,8 +127,8 @@ module", Baldur does not fit inside it, and that is a real difference rather tha
 
 **Setup.** tenacity is one decorator and no initialization. Baldur expects `baldur.init()` to run
 once at startup, so breaker state, storage, and metrics have somewhere to live. The framework
-adapters do that for you on Django, FastAPI, and Flask; on Celery you connect it to worker
-startup yourself. Either way it is a step tenacity does not have.
+adapters do that for you on Django, FastAPI, Flask, and Celery — but wiring the adapter is still
+a step tenacity does not have.
 
 **Runtime cost.** Composing several patterns is not free: a protected call does work a bare retry
 decorator does not. What it costs depends on your call profile more than on any single headline

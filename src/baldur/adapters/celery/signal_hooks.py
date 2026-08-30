@@ -29,6 +29,10 @@ from celery.signals import (
     task_success,
 )
 
+from baldur.adapters.celery.bootstrap_hooks import (
+    connect_celery_bootstrap_receivers,
+    disconnect_celery_bootstrap_receivers,
+)
 from baldur.adapters.celery.handlers.causation_handler import (
     CausationHandler,
 )
@@ -79,7 +83,53 @@ _trace_handler: TraceContextHandler | None = None
 # ---------------------------------------------------------------------------
 
 
-def setup_baldur_signals(  # noqa: C901
+def _apply_config_overrides(
+    config: SignalHooksSettings,
+    *,
+    enabled: bool | None,
+    cb_enabled: bool | None,
+    dlq_enabled: bool | None,
+    metrics_enabled: bool | None,
+    forensics_enabled: bool | None,
+    excluded_tasks: list[str] | None,
+    task_domain_mapping: dict[str, str] | None,
+) -> SignalHooksSettings:
+    """Return ``config`` with the caller's explicit overrides applied.
+
+    ``None`` means "not supplied" and leaves the settings-resolved value
+    alone — which is why each flag is tested against ``None`` rather than
+    truthiness, so an explicit ``False`` still overrides an enabled default.
+    The two collection arguments merge into the resolved value instead of
+    replacing it: they add exclusions and domain mappings to whatever the
+    environment already configured.
+    """
+    for field, value in (
+        ("enabled", enabled),
+        ("cb_enabled", cb_enabled),
+        ("dlq_enabled", dlq_enabled),
+        ("metrics_enabled", metrics_enabled),
+        ("forensics_enabled", forensics_enabled),
+    ):
+        if value is not None:
+            config = config.model_copy(update={field: value})
+
+    if excluded_tasks:
+        config = config.model_copy(
+            update={"excluded_tasks": config.excluded_tasks | set(excluded_tasks)}
+        )
+    if task_domain_mapping:
+        config = config.model_copy(
+            update={
+                "task_domain_mapping": {
+                    **config.task_domain_mapping,
+                    **task_domain_mapping,
+                }
+            }
+        )
+    return config
+
+
+def setup_baldur_signals(
     app: Any = None,
     enabled: bool | None = None,
     cb_enabled: bool | None = None,
@@ -128,24 +178,16 @@ def setup_baldur_signals(  # noqa: C901
             return
 
         # Build / retrieve config and apply overrides
-        config = get_signal_hooks_settings()
-
-        if enabled is not None:
-            config = config.model_copy(update={"enabled": enabled})
-        if cb_enabled is not None:
-            config = config.model_copy(update={"cb_enabled": cb_enabled})
-        if dlq_enabled is not None:
-            config = config.model_copy(update={"dlq_enabled": dlq_enabled})
-        if metrics_enabled is not None:
-            config = config.model_copy(update={"metrics_enabled": metrics_enabled})
-        if forensics_enabled is not None:
-            config = config.model_copy(update={"forensics_enabled": forensics_enabled})
-        if excluded_tasks:
-            new_excluded = config.excluded_tasks | set(excluded_tasks)
-            config = config.model_copy(update={"excluded_tasks": new_excluded})
-        if task_domain_mapping:
-            new_mapping = {**config.task_domain_mapping, **task_domain_mapping}
-            config = config.model_copy(update={"task_domain_mapping": new_mapping})
+        config = _apply_config_overrides(
+            get_signal_hooks_settings(),
+            enabled=enabled,
+            cb_enabled=cb_enabled,
+            dlq_enabled=dlq_enabled,
+            metrics_enabled=metrics_enabled,
+            forensics_enabled=forensics_enabled,
+            excluded_tasks=excluded_tasks,
+            task_domain_mapping=task_domain_mapping,
+        )
 
         # CRITICAL context restore failure -> prevent retries via dont_autoretry_for
         try:
@@ -186,6 +228,12 @@ def setup_baldur_signals(  # noqa: C901
         # Block Celery worker boot from overriding configure_structlog()
         connect_setup_logging_handler()
 
+        # Arm the worker-lifecycle receivers that call baldur.init().
+        # Connecting them here is what makes this call the whole of a Celery
+        # deployment's setup: without it the worker records task health on
+        # pre-init defaults, ignoring the storage configuration it was given.
+        connect_celery_bootstrap_receivers()
+
         _signals_connected = True
 
         logger.info(
@@ -225,6 +273,7 @@ def disconnect_baldur_signals() -> None:
                 task_postrun.disconnect(_trace_handler.on_postrun)
 
             disconnect_setup_logging_handler()
+            disconnect_celery_bootstrap_receivers()
 
             _failure_handler = None
             _success_handler = None

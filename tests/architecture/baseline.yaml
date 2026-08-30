@@ -672,6 +672,7 @@ optional_imports:
   - {file: "src/baldur/adapters/celery/baldur_task.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
   - {file: "src/baldur/adapters/celery/beat_schedule.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
   - {file: "src/baldur/adapters/celery/signal_handlers.py", reason: "511 D13: no-op setup_logging handler — celery.signals import gated by celery extras", ticket: "511"}
+  - {file: "src/baldur/adapters/celery/bootstrap_hooks.py", reason: "777 D1: worker-lifecycle receivers — celery.signals import gated by celery extras; every reach-through requires celery already imported", ticket: "777"}
   - {file: "src/baldur/adapters/celery/signal_hooks.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
   - {file: "src/baldur/adapters/celery/tasks/cell_evacuation.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
   - {file: "src/baldur/adapters/celery/tasks/config_shadow.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
