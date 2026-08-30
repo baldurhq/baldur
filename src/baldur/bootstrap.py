@@ -44,6 +44,7 @@ __all__ = [
     "emit_runtime_posture_once",
     "get_runtime_posture",
     "init",
+    "reconcile_celery_deferral_posture",
     "reset_init_state",
     "reset_runtime_posture",
     "start_background_workers",
@@ -236,6 +237,8 @@ def init(
         _register_sql_statistics_if_available()
         _start_admin_server_if_enabled()
         start_background_workers()
+        _arm_celery_bootstrap_receivers()
+        _schedule_celery_deferral_check()
 
         report = _build_startup_report(ext_result)
         logger.info("baldur.startup_report", **report)
@@ -275,10 +278,17 @@ def reset_init_state() -> None:
        ``BALDUR_ENVIRONMENT`` / ``BALDUR_TEST_MODE``).
     """
     global _init_done, _init_not_called_cache_warned, _init_not_called_storage_warned
+    global _background_starters_deferred
     with _init_lock:
         _init_done = False
         _init_not_called_cache_warned = False
         _init_not_called_storage_warned = False
+        _background_starters_deferred = None
+
+        # Step 0 — drop the celery deferral watchdog. A live Timer from the
+        # previous init() would otherwise report on a posture that no longer
+        # exists, in a process the next init() is about to re-decide.
+        _reset_celery_deferral_state()
 
         # Step 1 — drop the storage backend, draining WAL + Redis pool (D16).
         try:
@@ -1150,6 +1160,224 @@ def _schedule_gunicorn_hooks_check() -> None:
         timer.start()
     except Exception as exc:
         logger.debug("baldur.gunicorn_hooks_check_schedule_failed", error=exc)
+
+
+# =============================================================================
+# Celery starter-deferral posture
+# =============================================================================
+#
+# Deferring the background starters is the *designed* posture in a Celery
+# worker main process on a forking pool — the pool children start them. It is a
+# defect only when the deferral was decided from argv and no Celery worker
+# signal ever confirmed it, which means the adapter's bootstrap receivers were
+# never connected and nothing will un-defer. The state below separates the two
+# cases: the timer reports the second, and the ``worker_init`` receiver
+# reconciles by cancelling it.
+
+_celery_deferral_timer: threading.Timer | None = None
+_celery_deferral_warning_fired: bool = False
+_celery_posture_lock: threading.Lock = threading.Lock()
+
+# What the most recent ``start_background_workers()`` did in this process:
+# None until it has run, then True when the fork-source predicate suppressed
+# every start. Read by the reconciliation below to tell a worker main that
+# deferred by design from one that already started threads the fork will kill.
+_background_starters_deferred: bool | None = None
+
+
+def _arm_celery_bootstrap_receivers() -> None:
+    """Connect the Celery worker bootstrap receivers from ``init()`` itself.
+
+    The third arming site, and the only one a Django+Celery deployment
+    necessarily reaches: there, the Celery fixup calls ``django.setup()`` at
+    app-module import, the Django adapter initializes Baldur from ``ready()``,
+    and the app may never call either Celery adapter entry point. Without this
+    step the pool children of such a worker would inherit an ``init()`` whose
+    threads all died at the fork, with nothing connected to bring them back.
+
+    Two conditions, both required. This process must look like a Celery worker
+    — otherwise a web process that merely imports the Celery app would connect
+    receivers it will never fire. And celery must already be imported, which
+    the predicate itself requires: arming must never be the thing that pulls
+    celery into a process that had not loaded it.
+
+    Fail-soft: an adapter that cannot be imported (celery extras absent in a
+    process that somehow satisfied the predicate) leaves the pre-777 behavior,
+    which the deferral watchdog then reports.
+    """
+    try:
+        from baldur.core.process_utils import is_celery_worker_process
+
+        if not is_celery_worker_process():
+            return
+
+        from baldur.adapters.celery.bootstrap_hooks import (
+            connect_celery_bootstrap_receivers,
+        )
+
+        connect_celery_bootstrap_receivers()
+    except Exception as exc:
+        logger.debug("baldur.celery_bootstrap_receivers_arm_failed", error=exc)
+
+
+def _reset_celery_deferral_state() -> None:
+    """Cancel a pending deferral watchdog and clear its record (test isolation).
+
+    Called by ``reset_init_state()``. A Timer armed by the previous ``init()``
+    outlives it, so leaving it running would report on a posture the next
+    ``init()`` is about to decide again.
+    """
+    global _celery_deferral_timer, _celery_deferral_warning_fired
+
+    with _celery_posture_lock:
+        if _celery_deferral_timer is not None:
+            _celery_deferral_timer.cancel()
+            _celery_deferral_timer = None
+        _celery_deferral_warning_fired = False
+
+
+def _celery_bootstrap_receivers_connected() -> bool | None:
+    """Whether the Celery bootstrap receivers are registered, or None if unknown.
+
+    Reported alongside the deferral warning so the operator reads the right
+    remedy off one line: unconnected receivers are a wiring gap, connected ones
+    mean the check simply ran before the app finished importing.
+    """
+    try:
+        from baldur.adapters.celery.bootstrap_hooks import (
+            is_celery_bootstrap_receivers_connected,
+        )
+
+        return is_celery_bootstrap_receivers_connected()
+    except Exception:
+        return None
+
+
+def _schedule_celery_deferral_check() -> None:
+    """Schedule a one-shot report on starters deferred from argv alone.
+
+    Armed by ``init()`` only when this process looks like a Celery worker by
+    argv, has not marked itself as serving, and has *not* seen a ``worker_init``
+    signal — the one combination in which the deferral rests on a heuristic
+    with nothing to confirm or correct it. A healthy prefork parent arms
+    nothing: its ``worker_init`` receiver sets the signal-based flag before
+    ``init()`` runs, so this returns at the first check.
+
+    The delay is the one the gunicorn hooks check already reads
+    (``hooks_check_delay_seconds``), for the same reason: it has to outlast the
+    adapter's own import path so a correct-but-slow wiring does not warn.
+
+    Failures fall through silently — bootstrap must never block startup on a
+    diagnostic.
+    """
+    global _celery_deferral_timer
+
+    try:
+        from baldur.core.process_utils import (
+            is_celery_worker_main,
+            is_celery_worker_process,
+            is_celery_worker_serving,
+        )
+
+        if is_celery_worker_main() or is_celery_worker_serving():
+            return
+        if not is_celery_worker_process():
+            return
+
+        from baldur.settings.recovery_shutdown import (
+            get_recovery_shutdown_settings,
+        )
+
+        delay = get_recovery_shutdown_settings().hooks_check_delay_seconds
+
+        def _check_deferral_reconciled() -> None:
+            global _celery_deferral_warning_fired
+            try:
+                if is_celery_worker_main() or is_celery_worker_serving():
+                    return
+                with _celery_posture_lock:
+                    _celery_deferral_warning_fired = True
+                logger.warning(
+                    "baldur.celery_worker_init_not_observed",
+                    receivers_connected=_celery_bootstrap_receivers_connected(),
+                    hint=(
+                        "This process looks like a celery worker, so baldur "
+                        "deferred its background workers to the pool children "
+                        "- but no worker_init signal has reached baldur. With "
+                        "receivers_connected=False the celery adapter was "
+                        "never wired and nothing will start them: call "
+                        "setup_baldur_signals() or configure_baldur_celery() "
+                        "where you build the Celery app. With True the app "
+                        "import simply outran this check - raise "
+                        "BALDUR_RECOVERY_SHUTDOWN_HOOKS_CHECK_DELAY_SECONDS, "
+                        "and expect baldur.celery_deferral_reconciled next."
+                    ),
+                )
+            except Exception as exc:
+                logger.debug("baldur.celery_deferral_check_failed", error=exc)
+
+        with _celery_posture_lock:
+            if _celery_deferral_timer is not None:
+                _celery_deferral_timer.cancel()
+            timer = threading.Timer(delay, _check_deferral_reconciled)
+            timer.daemon = True
+            _celery_deferral_timer = timer
+        timer.start()
+    except Exception as exc:
+        logger.debug("baldur.celery_deferral_check_schedule_failed", error=exc)
+
+
+def reconcile_celery_deferral_posture(*, fork_lane: bool) -> None:
+    """Settle this process's starter posture once a Celery worker signal fires.
+
+    Called by the ``worker_init`` receiver *before* it runs ``init()``, so what
+    it reads is the state of any earlier initialization — the Django-fixup
+    path, where the fixup calls ``django.setup()`` at app-module import and
+    Baldur initializes there, ahead of every Celery signal.
+
+    Two reconciliations, disjoint by construction:
+
+    - A pending deferral watchdog is cancelled: this signal is exactly the
+      confirmation it was armed to wait for. If it already fired — an app
+      import slower than the configured delay, plausible for a large Django
+      app on a cold boot — a corrective INFO follows it, so the log does not
+      end on a WARNING that has since been answered. Raise
+      ``BALDUR_HOOKS_CHECK_DELAY_SECONDS`` to stop paying for that once.
+    - An earlier ``init()`` that *started* the starters rather than deferring
+      them, in a process that is about to fork, is reported: those threads are
+      dead in every child, and only what the per-worker recovery covers comes
+      back. The watchdog cannot see this one — no deferral happened — so it is
+      reported here or nowhere.
+    """
+    global _celery_deferral_timer
+
+    with _celery_posture_lock:
+        timer = _celery_deferral_timer
+        _celery_deferral_timer = None
+        already_warned = _celery_deferral_warning_fired
+
+    if timer is not None:
+        timer.cancel()
+    if already_warned:
+        logger.info(
+            "baldur.celery_deferral_reconciled",
+            hint=(
+                "A celery worker signal arrived after the deferral warning; "
+                "the background workers are wired after all."
+            ),
+        )
+
+    if fork_lane and _init_done and _background_starters_deferred is False:
+        logger.warning(
+            "baldur.celery_background_workers_started_pre_fork",
+            hint=(
+                "baldur.init() ran in this worker's main process before the "
+                "pool was known, so its background threads started here and do "
+                "not survive the fork into the pool children. Each child "
+                "recovers what start_background_workers() covers; the "
+                "scheduler and admin server stay in this process."
+            ),
+        )
 
 
 # =============================================================================
@@ -3248,18 +3476,19 @@ def _start_capacity_reservation_if_enabled() -> None:
     idempotent (``initialize()`` guards on ``_initialized``, ``start()`` on a live
     scheduler-thread check), so the Django runserver double-call is benign.
 
-    Fork-safety: skipped in the Gunicorn master because the scheduler is
+    Fork-safety: skipped in a fork source because the scheduler is
     thread-based and threads die after ``fork()`` — and ``init()`` is not re-run
-    in workers. The framework-agnostic ``post_worker_init`` hook re-runs
-    ``start_background_workers()`` per worker after setting ``GUNICORN_WORKER=1``,
-    where ``is_gunicorn_master()`` flips to False, so the worker performs the
+    in the processes it forks. The per-worker hooks — gunicorn
+    ``post_worker_init``, the Celery ``worker_process_init`` receiver — re-run
+    ``start_background_workers()`` in the serving process, where
+    ``is_fork_source_process()`` flips to False, so the worker performs the
     initialize + start itself (the master never builds fork-doomed state).
     """
     try:
-        from baldur.core.process_utils import is_gunicorn_master
+        from baldur.core.process_utils import is_fork_source_process
 
-        if is_gunicorn_master():
-            logger.debug("capacity_reservation.start_skipped_gunicorn_master")
+        if is_fork_source_process():
+            logger.debug("capacity_reservation.start_skipped_fork_source")
             return
 
         from baldur.settings.capacity_reservation import (
@@ -3306,19 +3535,20 @@ def _start_capacity_reservation_if_enabled() -> None:
 def _start_cell_topology_if_enabled() -> None:
     """Start CellTopologyService (EventBus + anti-entropy + health) when enabled.
 
-    Fork-safety: skipped in the Gunicorn master because the service is
+    Fork-safety: skipped in a fork source because the service is
     thread-based and threads die after ``fork()`` — and ``init()`` is not re-run
-    in workers. The framework-agnostic ``post_worker_init`` hook re-runs
-    ``start_background_workers()`` per worker after setting ``GUNICORN_WORKER=1``,
-    where ``is_gunicorn_master()`` flips to False. ``get_cell_topology_service()``
+    in the processes it forks. The per-worker hooks — gunicorn
+    ``post_worker_init``, the Celery ``worker_process_init`` receiver — re-run
+    ``start_background_workers()`` in the serving process, where
+    ``is_fork_source_process()`` flips to False. ``get_cell_topology_service()``
     returns a singleton with an ``_active``-guarded idempotent ``start()``, so the
     Django runserver double-call is benign.
     """
     try:
-        from baldur.core.process_utils import is_gunicorn_master
+        from baldur.core.process_utils import is_fork_source_process
 
-        if is_gunicorn_master():
-            logger.debug("cell_topology.start_skipped_gunicorn_master")
+        if is_fork_source_process():
+            logger.debug("cell_topology.start_skipped_fork_source")
             return
 
         from baldur.settings.cell_topology import get_cell_topology_settings
@@ -3347,11 +3577,12 @@ def _start_meta_watchdog_if_enabled() -> None:
     watchdog runs in slice A (``recovery_enabled=False``) — a detect+escalate
     loop that pages on a stuck/dead subsystem but takes no recovery action.
 
-    Fork-safety: skipped in the Gunicorn master because the watchdog is
+    Fork-safety: skipped in a fork source because the watchdog is
     thread-based and threads die after ``fork()`` — and ``init()`` is not re-run
-    in workers. The framework-agnostic ``post_worker_init`` hook re-runs
-    ``start_background_workers()`` per worker after setting ``GUNICORN_WORKER=1``,
-    where ``is_gunicorn_master()`` flips to False. The ``watchdog.start()`` is
+    in the processes it forks. The per-worker hooks — gunicorn
+    ``post_worker_init``, the Celery ``worker_process_init`` receiver — re-run
+    ``start_background_workers()`` in the serving process, where
+    ``is_fork_source_process()`` flips to False. The ``watchdog.start()`` is
     idempotent (``_running`` guard), so the Django runserver double-call
     (``init()`` started it; the service-level guard absorbs any repeat) is benign.
 
@@ -3370,10 +3601,10 @@ def _start_meta_watchdog_if_enabled() -> None:
         return
 
     try:
-        from baldur.core.process_utils import is_gunicorn_master
+        from baldur.core.process_utils import is_fork_source_process
 
-        if is_gunicorn_master():
-            logger.debug("watchdog.start_skipped_gunicorn_master")
+        if is_fork_source_process():
+            logger.debug("watchdog.start_skipped_fork_source")
             return
 
         from baldur.settings.meta_watchdog import get_meta_watchdog_settings
@@ -3406,11 +3637,12 @@ def _start_precomputed_cache_if_enabled() -> None:
     read-path (cache fills on demand) — the background loop that keeps tiers
     warm never executes, so each cold status endpoint pays full L3 compute.
 
-    Fork-safety: skipped in the Gunicorn master because the worker is
+    Fork-safety: skipped in a fork source because the worker is
     thread-based and threads die after ``fork()`` — and ``init()`` is not re-run
-    in workers. The framework-agnostic ``post_worker_init`` hook re-runs
-    ``start_background_workers()`` per worker after setting ``GUNICORN_WORKER=1``,
-    where ``is_gunicorn_master()`` flips to False. The worker's ``start()`` is
+    in the processes it forks. The per-worker hooks — gunicorn
+    ``post_worker_init``, the Celery ``worker_process_init`` receiver — re-run
+    ``start_background_workers()`` in the serving process, where
+    ``is_fork_source_process()`` flips to False. The worker's ``start()`` is
     idempotent (``_running`` guard), so the Django runserver double-call
     (``init()`` started it; the service-level guard absorbs any repeat) is benign.
 
@@ -3430,10 +3662,10 @@ def _start_precomputed_cache_if_enabled() -> None:
         return
 
     try:
-        from baldur.core.process_utils import is_gunicorn_master
+        from baldur.core.process_utils import is_fork_source_process
 
-        if is_gunicorn_master():
-            logger.debug("precomputed_cache.start_skipped_gunicorn_master")
+        if is_fork_source_process():
+            logger.debug("precomputed_cache.start_skipped_fork_source")
             return
 
         from baldur.settings.precomputed_cache import (
@@ -3473,11 +3705,12 @@ def _start_system_metrics_cache_if_enabled() -> None:
     in a test would otherwise spawn the psutil refresh timer thread). Mirrors
     ``BALDUR_PRECOMPUTED_CACHE_AUTOSTART`` / ``BALDUR_META_WATCHDOG_AUTOSTART``.
 
-    Fork-safety: skipped in the Gunicorn master because the cache is
+    Fork-safety: skipped in a fork source because the cache is
     thread-based and threads die after ``fork()`` — and ``init()`` is not re-run
-    in workers. The framework-agnostic ``post_worker_init`` hook re-runs
-    ``start_background_workers()`` per worker after setting ``GUNICORN_WORKER=1``,
-    where ``is_gunicorn_master()`` flips to False. The cache's ``start()`` is
+    in the processes it forks. The per-worker hooks — gunicorn
+    ``post_worker_init``, the Celery ``worker_process_init`` receiver — re-run
+    ``start_background_workers()`` in the serving process, where
+    ``is_fork_source_process()`` flips to False. The cache's ``start()`` is
     idempotent (``_running`` guard), so the Django runserver double-call is
     benign.
 
@@ -3492,10 +3725,10 @@ def _start_system_metrics_cache_if_enabled() -> None:
         return
 
     try:
-        from baldur.core.process_utils import is_gunicorn_master
+        from baldur.core.process_utils import is_fork_source_process
 
-        if is_gunicorn_master():
-            logger.debug("system_metrics_cache.start_skipped_gunicorn_master")
+        if is_fork_source_process():
+            logger.debug("system_metrics_cache.start_skipped_fork_source")
             return
 
         from baldur.settings.system_metrics_cache import (
@@ -3539,10 +3772,10 @@ def _start_rate_controller_if_enabled() -> None:
     start per worker once ``GUNICORN_WORKER=1`` flips the master check.
     """
     try:
-        from baldur.core.process_utils import is_gunicorn_master
+        from baldur.core.process_utils import is_fork_source_process
 
-        if is_gunicorn_master():
-            logger.debug("rate_controller.start_skipped_gunicorn_master")
+        if is_fork_source_process():
+            logger.debug("rate_controller.start_skipped_fork_source")
             return
 
         from baldur.settings.backpressure import get_backpressure_settings
@@ -3576,10 +3809,10 @@ def _start_hpa_exporter_if_enabled() -> None:
     start per worker once ``GUNICORN_WORKER=1`` flips the master check.
     """
     try:
-        from baldur.core.process_utils import is_gunicorn_master
+        from baldur.core.process_utils import is_fork_source_process
 
-        if is_gunicorn_master():
-            logger.debug("hpa_exporter.start_skipped_gunicorn_master")
+        if is_fork_source_process():
+            logger.debug("hpa_exporter.start_skipped_fork_source")
             return
 
         from baldur.settings.backpressure import get_backpressure_settings
@@ -3629,10 +3862,10 @@ def _start_bulkhead_metrics_updater_if_enabled() -> None:
         return
 
     try:
-        from baldur.core.process_utils import is_gunicorn_master
+        from baldur.core.process_utils import is_fork_source_process
 
-        if is_gunicorn_master():
-            logger.debug("bulkhead_metrics_updater.start_skipped_gunicorn_master")
+        if is_fork_source_process():
+            logger.debug("bulkhead_metrics_updater.start_skipped_fork_source")
             return
 
         from baldur.settings.bulkhead import get_bulkhead_settings
@@ -3695,10 +3928,10 @@ def _start_domain_gauge_updater_if_enabled() -> None:
         return
 
     try:
-        from baldur.core.process_utils import is_gunicorn_master
+        from baldur.core.process_utils import is_fork_source_process
 
-        if is_gunicorn_master():
-            logger.debug("domain_gauge_updater.start_skipped_gunicorn_master")
+        if is_fork_source_process():
+            logger.debug("domain_gauge_updater.start_skipped_fork_source")
             return
 
         from baldur.metrics.registry import PROMETHEUS_AVAILABLE
@@ -3770,11 +4003,11 @@ def _seed_circuit_breaker_state_if_enabled() -> None:
     """Schedule the per-process CB-state startup seed when enabled.
 
     Registered in ``_BACKGROUND_WORKER_STARTERS`` so it runs once per serving
-    process: the single-process admin-server / CLI (non-gunicorn) and each
-    gunicorn worker (re-invoked via ``post_worker_init`` once
-    ``GUNICORN_WORKER=1`` flips ``is_gunicorn_master()`` False). A direct
-    ``init()`` step would not reach forked workers — ``init()`` runs once in the
-    master and a Timer scheduled there does not survive ``fork()``.
+    process: the single-process admin-server / CLI (no pre-fork server) and each
+    forked worker, re-invoked by that server's per-worker hook once the serving
+    marker flips ``is_fork_source_process()`` False. A direct ``init()`` step
+    would not reach forked workers — ``init()`` runs once in the fork source and
+    a Timer scheduled there does not survive ``fork()``.
 
     The seed runs on a daemon ``threading.Timer`` with jitter so it never
     blocks startup nor stampedes shared Redis on multi-server restarts (same
@@ -3802,10 +4035,10 @@ def _seed_circuit_breaker_state_if_enabled() -> None:
         return
 
     try:
-        from baldur.core.process_utils import is_gunicorn_master
+        from baldur.core.process_utils import is_fork_source_process
 
-        if is_gunicorn_master():
-            logger.debug("cb_state_seed.start_skipped_gunicorn_master")
+        if is_fork_source_process():
+            logger.debug("cb_state_seed.start_skipped_fork_source")
             return
 
         from baldur.settings.metrics import get_metrics_settings
@@ -3917,10 +4150,10 @@ def _setup_config_invalidation_delivery() -> None:
     config domains: dormant and harmless.
     """
     try:
-        from baldur.core.process_utils import is_gunicorn_master
+        from baldur.core.process_utils import is_fork_source_process
 
-        if is_gunicorn_master():
-            logger.debug("config_invalidation.start_skipped_gunicorn_master")
+        if is_fork_source_process():
+            logger.debug("config_invalidation.start_skipped_fork_source")
             return
 
         from baldur.core.config_invalidation import (
@@ -3970,10 +4203,10 @@ def _start_audit_pipeline_starter() -> None:
     processes return at the settings gate.
     """
     try:
-        from baldur.core.process_utils import is_gunicorn_master
+        from baldur.core.process_utils import is_fork_source_process
 
-        if is_gunicorn_master():
-            logger.debug("audit.start_skipped_gunicorn_master")
+        if is_fork_source_process():
+            logger.debug("audit.start_skipped_fork_source")
             return
 
         _start_audit_pipeline_if_enabled()
@@ -4004,10 +4237,10 @@ def _start_dlq_outbox_starter() -> None:
     idempotent no-op ``init()`` already performs.
     """
     try:
-        from baldur.core.process_utils import is_gunicorn_master
+        from baldur.core.process_utils import is_fork_source_process
 
-        if is_gunicorn_master():
-            logger.debug("dlq_outbox.start_skipped_gunicorn_master")
+        if is_fork_source_process():
+            logger.debug("dlq_outbox.start_skipped_fork_source")
             return
 
         _start_dlq_outbox_if_enabled()
@@ -4037,10 +4270,10 @@ def _start_event_bus_listener_if_enabled() -> None:
     the backend gate without touching the singleton.
     """
     try:
-        from baldur.core.process_utils import is_gunicorn_master
+        from baldur.core.process_utils import is_fork_source_process
 
-        if is_gunicorn_master():
-            logger.debug("redis_event_bus.start_skipped_gunicorn_master")
+        if is_fork_source_process():
+            logger.debug("redis_event_bus.start_skipped_fork_source")
             return
 
         from baldur.settings.event_bus import get_event_bus_settings
@@ -4073,12 +4306,13 @@ def _start_event_bus_listener_if_enabled() -> None:
 # =============================================================================
 #
 # The OSS ``init()``-started background daemon workers, enumerated once so that
-# both ``init()`` and the gunicorn ``post_worker_init`` hook start the identical
-# set with no divergent hand-maintained list. Each starter carries its own
-# ``is_gunicorn_master()`` early-return, which makes the single
+# ``init()`` and every per-worker post-fork hook start the identical set with no
+# divergent hand-maintained list. Each starter carries its own
+# ``is_fork_source_process()`` early-return, which makes the single
 # ``start_background_workers()`` correct in both contexts: the skip fires during
-# ``init()`` (master / pre-fork) and passes after ``post_worker_init`` sets
-# ``GUNICORN_WORKER=1`` (per-worker, post-fork).
+# ``init()`` in a fork source (the gunicorn master, a Celery worker main on a
+# forking pool) and passes in the process that marked itself as serving —
+# gunicorn's ``post_worker_init``, Celery's ``worker_process_init`` receiver.
 #
 # ``rate_controller`` / ``hpa_exporter`` (615 D4/G6) are OSS ``baldur.scaling``
 # loops that were Django-only (apps.py F30); both default-OFF and
@@ -4113,7 +4347,7 @@ def _start_event_bus_listener_if_enabled() -> None:
 # it schedules a single jittered Timer that seeds the per-process
 # ``baldur_circuit_breaker_state`` gauge from the repo's actual state, so each
 # serving process exposes the CB-state series without waiting for an in-process
-# transition. It carries the same ``is_gunicorn_master()`` skip plus a
+# transition. It carries the same ``is_fork_source_process()`` skip plus a
 # once-per-process done-flag, and a ``BALDUR_CB_STATE_SEED_AUTOSTART`` test
 # hatch (``metrics.enabled`` defaults True, unlike the default-OFF scaling
 # loops).
@@ -4152,12 +4386,13 @@ _BACKGROUND_WORKER_STARTERS: tuple[Callable[[], None], ...] = (
 def start_background_workers() -> None:
     """Start the OSS ``init()``-started background daemon workers.
 
-    The single entry point consumed by both ``init()`` (where the per-starter
-    ``is_gunicorn_master()`` skip suppresses every start in the master / before
-    ``fork()``) and the gunicorn ``post_worker_init`` hook (where every enabled
-    worker starts per-forked-worker once ``GUNICORN_WORKER=1`` is set). Threads
-    do not survive ``fork()`` and ``init()`` is not re-run in workers, so the
-    post-fork hook is the only place a non-Django gunicorn worker starts these
+    The single entry point consumed by ``init()`` (where the per-starter
+    ``is_fork_source_process()`` skip suppresses every start in a fork source,
+    before ``fork()``) and by each server's per-worker post-fork hook — gunicorn
+    ``post_worker_init``, the Celery ``worker_process_init`` receiver — where
+    every enabled worker starts once the process has marked itself as serving.
+    Threads do not survive ``fork()`` and ``init()`` is not re-run in the forked
+    children, so the post-fork hook is the only place such a worker starts these
     proactive loops.
 
     Each starter is independently fail-soft (it swallows its own
@@ -4172,6 +4407,19 @@ def start_background_workers() -> None:
     shutdown-integration consumer shape so a resolve failure cannot abort the
     remaining starters.
     """
+    global _background_starters_deferred
+
+    # Record the posture, evaluated once for the whole pass. Each starter still
+    # asks for itself — this is the answer they all get, kept for the Celery
+    # reconciliation, which has to distinguish a process that deferred by design
+    # from one that started threads it is about to fork away from.
+    try:
+        from baldur.core.process_utils import is_fork_source_process
+
+        _background_starters_deferred = is_fork_source_process()
+    except Exception:
+        _background_starters_deferred = None
+
     for starter in _BACKGROUND_WORKER_STARTERS:
         starter()
 

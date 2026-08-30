@@ -31,26 +31,14 @@ Declare it just **below** `@app.task` so Celery registers the wrapped function:
 ```python
 import baldur
 from celery import Celery
-from celery.signals import worker_process_init
 
 app = Celery("myproject")
-
-@worker_process_init.connect
-def init_baldur(**_):
-    baldur.init()
 
 @app.task
 @baldur.protected("charge-customer", retry=True)
 def charge_customer(order_id):
     return payment_gateway.charge(order_id)
 ```
-
-One thing the other quickstarts get for free: on Django, FastAPI, and Flask the
-adapter calls `baldur.init()` at app startup, but nothing on Celery does it for
-you — connect it to `worker_process_init` as above so every worker process
-initializes Baldur once (repeat calls are no-ops). Without it, Baldur still
-protects calls on safe in-process defaults, but ignores your storage
-configuration and starts no background maintenance.
 
 The call now travels through a circuit breaker and retry. Add `fallback=` for a
 safe default, `idempotency_key="order_id"` to dedup a re-delivered task, or
@@ -60,8 +48,10 @@ safe default, `idempotency_key="order_id"` to dedup a re-delivered task, or
 
 Rather than decorate each task, connect Baldur to Celery's task signals once —
 in the module that builds your Celery app. Task failures, retries, and successes
-then feed Baldur's circuit breaker and metrics on their own, and trace/actor
-context is carried across the enqueue → execute hop:
+then feed Baldur's circuit breaker and metrics on their own, trace/actor context
+is carried across the enqueue → execute hop, and each worker process initializes
+Baldur at startup — reading your storage configuration and starting Baldur's own
+background maintenance, exactly as the Django, FastAPI, and Flask adapters do:
 
 ```python
 from celery import Celery
@@ -106,6 +96,9 @@ from baldur.adapters.celery import configure_baldur_celery
 configure_baldur_celery(app)
 ```
 
+This arms the same worker startup as step 3, so it is a complete setup on its
+own if you skipped that step.
+
 Then run beat and a worker as usual:
 
 ```bash
@@ -142,14 +135,19 @@ export BALDUR_LOG_LEVEL=INFO   # circuit opened/closed, retries, ...
     not a tuning knob: give Baldur a shared backend before you run a second
     worker.
 
-Point Baldur at Redis so every worker shares state. With the
-`worker_process_init` hook from step 2 in place, no further code changes — set
-one environment variable before starting the workers:
+Point Baldur at Redis so every worker shares state. With step 3 or step 4 in
+place, no further code changes — set one environment variable before starting
+the workers:
 
 ```bash
 pip install baldur-framework[celery,redis]
 export BALDUR_REDIS_URL=redis://localhost:6379/0
 ```
+
+Reading that variable is `baldur.init()`'s job, and steps 3 and 4 each run it in
+every worker for you. If you use neither and rely on `@baldur.protected` alone,
+the [FAQ](../faq.md#what-frameworks-does-it-support) has the one line that does
+it — without it Baldur keeps protecting calls, on per-process state.
 
 ## See also
 

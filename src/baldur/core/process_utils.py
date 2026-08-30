@@ -27,24 +27,75 @@ entirely, breaking gunicorn's own in-flight HTTP drain.
 Instead, cleanup logic runs via Gunicorn hooks (``worker_int``,
 ``worker_exit``) defined in gunicorn.conf.py — see
 ``baldur.adapters.gunicorn.hooks``.
+
+The second thing the process model decides is where background daemon threads
+may be started. ``is_fork_source_process()`` answers it for both supported
+pre-fork servers — the gunicorn master and a Celery worker main process on a
+forking pool — so the starters carry one predicate rather than one per server.
 """
 
 from __future__ import annotations
 
 import functools
 import os
+import sys
 from collections.abc import Callable
 from typing import Any, TypeVar, overload
 
 __all__ = [
     "fork_repaired",
+    "is_celery_worker_main",
+    "is_celery_worker_process",
+    "is_celery_worker_serving",
+    "is_fork_source_process",
     "is_gunicorn_master",
     "is_gunicorn_worker",
     "is_under_gunicorn",
+    "mark_celery_worker_main",
+    "mark_celery_worker_serving",
     "pid_alive",
 ]
 
 _F = TypeVar("_F", bound=Callable[..., Any])
+
+# Env-var marker for "this process serves work", mirroring the
+# ``GUNICORN_WORKER=1`` precedent. An env var rather than a module global
+# because the two carriers differ where it matters: billiard's spawn path
+# re-imports the app module in the child (a module global would come back
+# False there) while the child's ``os.environ`` is its own copy, so a prefork
+# parent that never sets it hands every child an unset marker.
+_CELERY_WORKER_SERVING_ENV_VAR = "BALDUR_CELERY_WORKER_SERVING"
+
+# argv[0] shapes that identify the celery launcher. The console script on
+# Windows keeps the ``.exe`` suffix; ``python -m celery`` sets argv[0] to the
+# package's own ``__main__.py`` instead of any program name.
+_CELERY_PROGRAM_NAMES = frozenset({"celery", "celery.exe"})
+_CELERY_MAIN_MODULE_SUFFIX = "/celery/__main__.py"
+
+# Celery's global options that consume the token after them, so the
+# subcommand scan does not mistake an option's value for the subcommand
+# (``celery -A worker worker`` names an app, then the subcommand). Flags that
+# take no value (``-C``/``--no-color``, ``-q``/``--quiet``, ``--version``,
+# ``--skip-checks``) need no entry — they are skipped as options either way.
+_CELERY_GLOBAL_VALUE_OPTIONS = frozenset(
+    {
+        "-A",
+        "--app",
+        "-b",
+        "--broker",
+        "--result-backend",
+        "--loader",
+        "--config",
+        "--workdir",
+    }
+)
+
+_CELERY_WORKER_SUBCOMMAND = "worker"
+
+# Set by the celery ``worker_init`` receiver. Signal-based truth about the
+# worker main process, so the argv heuristic below is only ever the fallback
+# for an init() that runs before any celery signal (the Django-fixup path).
+_celery_worker_main: bool = False
 
 
 def pid_alive(pid: int) -> bool:
@@ -195,3 +246,124 @@ def is_gunicorn_master() -> bool:
     invoked in worker pre-post_worker_init context.
     """
     return is_under_gunicorn() and not is_gunicorn_worker()
+
+
+def mark_celery_worker_main() -> None:
+    """Record that this process is a Celery worker's main process.
+
+    Set by the ``worker_init`` receiver, which Celery sends from the
+    ``WorkController`` constructor in every worker main process — CLI and
+    programmatic alike — before any pool exists. Signal-based, so it holds for
+    launcher shapes the argv heuristic cannot recognize.
+    """
+    global _celery_worker_main
+    _celery_worker_main = True
+
+
+def is_celery_worker_main() -> bool:
+    """Return True if a Celery ``worker_init`` signal was observed here.
+
+    Also True in a fork child, which inherits the flag from the pool parent —
+    which is why callers compose it with the serving marker rather than
+    reading it alone.
+    """
+    return _celery_worker_main
+
+
+def mark_celery_worker_serving() -> None:
+    """Record that this process runs tasks itself, rather than forking workers.
+
+    Set by the ``worker_process_init`` receiver (every prefork child, and the
+    solo pool's own main process) and by the ``worker_init`` receiver on a
+    non-forking pool. The prefork parent never sets it, so its children inherit
+    the marker unset and each one marks itself.
+    """
+    os.environ[_CELERY_WORKER_SERVING_ENV_VAR] = "1"
+
+
+def is_celery_worker_serving() -> bool:
+    """Return True if this process was marked as serving Celery tasks."""
+    return os.environ.get(_CELERY_WORKER_SERVING_ENV_VAR) == "1"
+
+
+def _celery_subcommand(args: list[str]) -> str | None:
+    """Return the celery subcommand in ``args``, or None if there is none.
+
+    Scans past the global options rather than reading ``args[0]``: the
+    subcommand follows them (``celery -A proj worker``), and it is the option
+    *values* that would otherwise be mistaken for it.
+    """
+    skip_next = False
+    for token in args:
+        if skip_next:
+            skip_next = False
+            continue
+        if token.startswith("-"):
+            if "=" not in token and token in _CELERY_GLOBAL_VALUE_OPTIONS:
+                skip_next = True
+            continue
+        return token
+    return None
+
+
+def is_celery_worker_process() -> bool:
+    """Return True if this process was launched as a Celery worker.
+
+    An argv heuristic, used only where signal-based truth is not yet
+    available: an ``init()`` that runs before any Celery signal — the
+    Django-fixup path, where the fixup calls ``django.setup()`` at app-module
+    import and the Django adapter's ``ready()`` initializes Baldur there.
+    Once ``worker_init`` fires, ``is_celery_worker_main()`` is authoritative.
+
+    Three conditions, all required: the launcher is celery (the console
+    script, or the ``python -m celery`` form), the subcommand is ``worker``,
+    and celery is actually imported here — which keeps a non-celery process
+    that merely happens to carry those arguments out of the answer.
+
+    Fails toward False. A launcher shape this does not recognize gets the
+    behavior of a process that never mentioned celery, which is the status
+    quo; a false positive would defer background workers in a process that
+    never forks, so the deferral carries its own watchdog.
+    """
+    if "celery" not in sys.modules:
+        return False
+
+    argv = sys.argv
+    if not argv:
+        return False
+
+    program = os.path.basename(argv[0])
+    if program not in _CELERY_PROGRAM_NAMES:
+        normalized = argv[0].replace("\\", "/")
+        if not normalized.endswith(_CELERY_MAIN_MODULE_SUFFIX):
+            return False
+
+    return _celery_subcommand(list(argv[1:])) == _CELERY_WORKER_SUBCOMMAND
+
+
+def is_fork_source_process() -> bool:
+    """Return True if this process forks the workers that will serve.
+
+    The single skip predicate the background-daemon starters consult. Threads
+    do not survive ``fork()``, so a process that exists to fork must not start
+    them: it would build state that is dead in every child while the child,
+    which never re-runs ``init()``, has none of its own. The per-worker hooks
+    (gunicorn ``post_worker_init``, the Celery ``worker_process_init``
+    receiver) mark the serving process and re-run
+    ``start_background_workers()`` there.
+
+    Two fork sources are recognized:
+
+    - the gunicorn master/arbiter;
+    - a Celery worker main process on a forking pool, known by the
+      ``worker_init`` signal or — before any signal has fired — by argv, and
+      in both cases only while this process has not marked itself as serving.
+
+    Everything else answers False, so outside celery this reduces exactly to
+    ``is_gunicorn_master()``.
+    """
+    if is_gunicorn_master():
+        return True
+    if is_celery_worker_serving():
+        return False
+    return is_celery_worker_main() or is_celery_worker_process()

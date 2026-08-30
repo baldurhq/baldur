@@ -121,11 +121,15 @@ impose a uniform `init_*` convention:
 | FastAPI | `fastapi_lifespan(app)` (async) | ASGI lifespan context manager |
 | Flask | `init_flask(app)` | Imperative `init_app(...)` factory hook |
 | Django | `BaldurConfig.ready()` in `AppConfig` | Class-based `apps.py` hook |
+| Celery | `setup_baldur_signals(app)` / `configure_baldur_celery(app)` | Worker-lifecycle signal receivers |
 | Plain Python / CLI | `baldur.init()` | Direct call from the CLI / script |
 
-All four call `baldur.init()` (or its equivalent) — the framework adapter
+All five call `baldur.init()` (or its equivalent) — the framework adapter
 is responsible for invoking the centralized wiring (cache + storage backend
-defaults, audit pipeline, scheduler, etc.).
+defaults, audit pipeline, scheduler, etc.). The Celery adapter calls it in the
+worker's own processes rather than at app-module import, because that is where
+the work runs: the worker main process on `worker_init`, and each pool child on
+`worker_process_init`.
 
 ---
 

@@ -610,6 +610,16 @@ def configure_baldur_celery(
     # 4. Task registration
     register_all_tasks_with_celery(app)
 
+    # 5. Worker-lifecycle receivers that call baldur.init(). The
+    # scheduled jobs injected above execute in workers, and they need the same
+    # wiring every other entry point does — so an app that reaches Baldur only
+    # through this call still gets an initialized worker.
+    from baldur.adapters.celery.bootstrap_hooks import (
+        connect_celery_bootstrap_receivers,
+    )
+
+    connect_celery_bootstrap_receivers()
+
     _celery_configured = True
     logger.info(
         "beat_schedule.celery_configured",
@@ -618,8 +628,18 @@ def configure_baldur_celery(
 
 
 def _reset_celery_configured() -> None:
-    """Reset idempotency guard (testing only)."""
+    """Reset idempotency guard (testing only).
+
+    Disconnects the bootstrap receivers too: they are connected inside the
+    guarded body above, so leaving them registered would let a later test's
+    signal reach a receiver this reset was supposed to have removed.
+    """
     global _celery_configured
+    from baldur.adapters.celery.bootstrap_hooks import (
+        disconnect_celery_bootstrap_receivers,
+    )
+
+    disconnect_celery_bootstrap_receivers()
     _celery_configured = False
 
 

@@ -10,6 +10,14 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+### Added
+
+- The Celery adapter calls `baldur.init()` in each worker itself, as the other adapters do.
+- `setup_baldur_signals()` or `configure_baldur_celery()` is now the whole of a Celery setup.
+- A Celery worker reads `BALDUR_REDIS_URL` and runs background maintenance with no extra receiver.
+- A prefork worker starts them per pool child, so a recycled child comes back with its own.
+- A production Celery worker whose config `baldur.init()` rejects now exits before it forks.
+
 ### Changed
 
 - A closed, healthy circuit breaker no longer writes its state on every recorded success.
@@ -22,9 +30,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - A zero-config process no longer prints `resilience.bypass_hooks_skipped` to stdout on import.
 - A Celery task failure the DLQ rejected (disabled, overflow) is no longer logged as stored.
 - A forked worker (`gunicorn --preload`) now drains its own DLQ outbox instead of losing entries.
-- Its writer does not survive the fork, so async DLQ stores reported success into a buffer nothing
-  consumed and were lost at exit. Each worker restarts its own writer and leaves the parent's
-  queued entries to the parent, which is still delivering them.
+- Its writer dies at the fork, so async stores reported success into a buffer nothing consumed.
+- Each worker restarts its own writer and leaves the parent's queued entries to the parent.
 
 ## [1.8.0] - 2026-08-26
 

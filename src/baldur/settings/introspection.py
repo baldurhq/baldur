@@ -194,6 +194,9 @@ KNOWN_DIRECT_READ_ENV_VARS: frozenset[str] = frozenset(
         "BALDUR_RECOVERY_ADAPTER",
         "BALDUR_TEST_MODE",
         "BALDUR_TIER_MANIFEST_PATH",
+        # Process-model marker baldur sets in its own environ (never an
+        # operator knob) — the Celery counterpart of GUNICORN_WORKER=1.
+        "BALDUR_CELERY_WORKER_SERVING",
         "BALDUR_BULKHEAD_METRICS_AUTOSTART",
         "BALDUR_CB_STATE_SEED_AUTOSTART",
         "BALDUR_DOMAIN_GAUGE_UPDATER_AUTOSTART",
