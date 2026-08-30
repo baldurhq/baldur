@@ -21,6 +21,10 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 - A zero-config process no longer prints `resilience.bypass_hooks_skipped` to stdout on import.
 - A Celery task failure the DLQ rejected (disabled, overflow) is no longer logged as stored.
+- A forked worker (`gunicorn --preload`) now drains its own DLQ outbox instead of losing entries.
+- Its writer does not survive the fork, so async DLQ stores reported success into a buffer nothing
+  consumed and were lost at exit. Each worker restarts its own writer and leaves the parent's
+  queued entries to the parent, which is still delivering them.
 
 ## [1.8.0] - 2026-08-26
 

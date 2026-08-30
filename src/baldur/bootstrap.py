@@ -3981,6 +3981,40 @@ def _start_audit_pipeline_starter() -> None:
         logger.warning("baldur.audit_pipeline_start_failed", error=exc)
 
 
+def _start_dlq_outbox_starter() -> None:
+    """Revive the DLQ outbox writer in this process.
+
+    Under ``gunicorn --preload`` the writer is a daemon thread started once in
+    the master by ``init()`` and dead in every forked worker. Without this
+    starter the worker's async DLQ stores — the default mode, on a
+    default-enabled outbox — land in a RingBuffer nothing drains while
+    ``store_failure`` reports success, and the buffer has no WAL behind it, so
+    the entries are lost at exit rather than deferred.
+
+    A plain delegation to the ``init()``-time starter, so the settings gate,
+    the PRO durable-wrapper install and the ImportError shield stay
+    single-sourced. ``setup_dlq_outbox()`` is fork-aware at its own entry
+    point: it re-owns the inherited singleton and respawns the writer before
+    reaching its idempotence guard, so there is nothing to pre-condition here.
+
+    Fork-safety: skipped in the gunicorn master, whose writer is already
+    running; ``post_worker_init`` re-runs it per worker once
+    ``GUNICORN_WORKER=1`` flips the master check. The outbox defaults to
+    enabled, so this runs in ordinary processes too — where it is the same
+    idempotent no-op ``init()`` already performs.
+    """
+    try:
+        from baldur.core.process_utils import is_gunicorn_master
+
+        if is_gunicorn_master():
+            logger.debug("dlq_outbox.start_skipped_gunicorn_master")
+            return
+
+        _start_dlq_outbox_if_enabled()
+    except Exception as exc:
+        logger.warning("baldur.dlq_outbox_start_failed", error=exc)
+
+
 def _start_event_bus_listener_if_enabled() -> None:
     """Revive the Redis event-bus listener thread in this process.
 
@@ -4056,10 +4090,13 @@ def _start_event_bus_listener_if_enabled() -> None:
 # invalidation, auto-tuning) are ``baldur_pro``-internal and live in
 # ``ProviderRegistry.startup_integrations`` instead (615 D1), iterated
 # by ``start_background_workers()`` after this OSS tuple.
-# ``dlq_outbox`` / ``default_scheduler`` / ``admin_server`` are excluded: they
-# have distinct per-process semantics (leader-election-gated scheduler,
-# single-socket admin server) that the uniform daemon-thread restart does not
-# fit. ``audit`` used to be excluded on the same grounds — a PID-isolated WAL —
+# ``default_scheduler`` / ``admin_server`` are excluded: they have distinct
+# per-process semantics (leader-election-gated scheduler, single-socket admin
+# server) that the uniform daemon-thread restart does not fit. ``dlq_outbox``
+# used to be listed alongside them, but its semantics are per-process like any
+# other daemon worker's — the exclusion cost every forked worker its outbox
+# drainer, silently, on default settings.
+# ``audit`` used to be excluded on the same grounds — a PID-isolated WAL —
 # but the pipeline's components now re-own their fork-inherited state at their
 # entry points, and the WAL repair preserves exactly that isolation: the child
 # abandons the inherited handle and lazily opens its own PID-stamped file. The
@@ -4108,6 +4145,7 @@ _BACKGROUND_WORKER_STARTERS: tuple[Callable[[], None], ...] = (
     _setup_config_invalidation_delivery,
     _start_event_bus_listener_if_enabled,
     _start_audit_pipeline_starter,
+    _start_dlq_outbox_starter,
 )
 
 

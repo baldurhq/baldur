@@ -12,9 +12,16 @@ Cross-shape observability + respawn (impl 489 D9):
   ``"DLQOutboxWorker"`` so the unified ``DaemonWorkerProbe`` picks it up.
 - ``_spawn_thread()`` is the per-thread spawn helper that ``restart_callback``
   points at — bypasses the public ``start()`` running-flag guard so the
-  respawn coordinator can re-create the dead thread.
+  respawn coordinator can re-create the dead thread. It is the single spawn
+  seam: a lock plus a thread-aliveness guard there is what keeps the respawn
+  coordinator and ``repair_after_fork()`` from starting one drainer each.
 - Loop body emits ``handle.heartbeat()`` and ``handle.observe_iteration(d)``
   per iteration so liveness staleness and gradual-slowdown metrics work.
+
+Fork safety: the writer is a daemon thread, so a process forked from one that
+already started it inherits ``_is_running=True`` and a thread that does not run
+there. ``repair_after_fork()`` re-owns that state and respawns; the outbox
+module reaches it from its own entry-point repair.
 """
 
 from __future__ import annotations
@@ -90,6 +97,12 @@ class DLQOutboxWorker:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._is_running = False
+        # Mutual exclusion between the two spawn paths — the fork-repair
+        # sequence and the ``DaemonWorkerProbe`` respawn coordinator, which
+        # reaches ``_spawn_thread`` through the handle's ``restart_callback``.
+        # Without it both can observe the dead inherited thread and start one
+        # writer each, and two drainers on one buffer write every entry twice.
+        self._spawn_lock = threading.Lock()
 
         # Resilience state (D11.2)
         self._consecutive_failures = 0
@@ -183,24 +196,83 @@ class DLQOutboxWorker:
         coordinator calls when the daemon thread has died (impl 489 D9).
         Public ``start()`` early-returns on the running flag, so a respawn
         callback that pointed at ``start()`` would silently no-op.
+
+        Guarded on the thread object rather than on ``_is_running``: the
+        respawn-callback contract forbids consulting the running flag (a fork
+        child inherits it True with a thread Python already marked stopped),
+        while an aliveness guard still lets a genuinely dead writer respawn and
+        stops a second live one. The guard and the ``handle.thread`` rebind sit
+        inside one lock so the fork-repair path and a probe tick cannot both
+        pass the check in the window between ``Thread.start()`` and the rebind.
         """
-        # A freshly spawned thread has nothing in flight by definition. Reset so
-        # a crash mid-_flush_batch (a BaseException escaping the per-entry
-        # finally, e.g. MemoryError) cannot leak a positive in_flight across the
-        # cross-shape respawn (impl 489 D9) — which would otherwise make
-        # flush_and_wait block to its timeout forever and break the conservation
-        # invariant permanently after recovery. Harmless on the initial start().
+        with self._spawn_lock:
+            existing = self._thread
+            if existing is not None and existing.is_alive():
+                logger.debug("dlq_outbox.spawn_skipped_writer_alive")
+                return
+
+            # A freshly spawned thread has nothing in flight by definition. Reset
+            # so a crash mid-_flush_batch (a BaseException escaping the per-entry
+            # finally, e.g. MemoryError) cannot leak a positive in_flight across
+            # the cross-shape respawn (impl 489 D9) — which would otherwise make
+            # flush_and_wait block to its timeout forever and break the
+            # conservation invariant permanently after recovery. Harmless on the
+            # initial start().
+            self._in_flight = 0
+            self._thread = threading.Thread(
+                target=self._writer_loop_with_crash_capture,
+                daemon=True,
+                name=_WORKER_NAME,
+            )
+            self._thread.start()
+            if self._handle is not None:
+                # Respawn: rebind the handle's thread reference so the probe
+                # observes the new thread on the next tick.
+                self._handle.thread = self._thread
+
+    def repair_after_fork(self) -> None:
+        """Re-own the writer state this process inherited across ``fork()``.
+
+        The inherited thread does not run here — ``fork()`` copies only the
+        calling thread — so without this the child holds ``_is_running=True``
+        with a dead writer, ``start()`` no-ops on that flag, and every entry
+        the child enqueues sits in a buffer nothing drains while
+        ``store_failure`` reports success.
+
+        Order is pinned: every lock and ``Event`` is renewed before anything
+        acquires one (each may have been inherited held by a thread that does
+        not exist here), then the statistics restart so this process publishes
+        its own, then the handle drops the parent's observations while keeping
+        its identity — the registry entry and the inherited ``restart_callback``
+        already point at this object, so a probe tick that races the respawn
+        below converges on it instead of chasing a stale entry.
+
+        The buffer is repaired by the caller, which owns it; this method
+        assumes the entries it drains are this process's own.
+        """
+        self._spawn_lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._thread = None
+
+        # The parent's counts describe the parent's writes. Kept, they would
+        # leave the conservation invariant (total_enqueued == written + failed
+        # + dropped + size + in_flight + dumped) open in the child, whose
+        # buffer counters restart at zero with its contents.
+        self._entries_written = 0
+        self._entries_failed = 0
+        self._entries_emergency_dumped = 0
         self._in_flight = 0
-        self._thread = threading.Thread(
-            target=self._writer_loop_with_crash_capture,
-            daemon=True,
-            name=_WORKER_NAME,
-        )
-        self._thread.start()
+        self._consecutive_failures = 0
+        self._backoff.reset()
+
         if self._handle is not None:
-            # Respawn: rebind the handle's thread reference so the probe
-            # observes the new thread on the next tick.
-            self._handle.thread = self._thread
+            self._handle.reset_after_fork()
+
+        # ``_is_running`` stays True: this worker is running in this process the
+        # moment the spawn below returns, and stop() must remain reachable.
+        self._is_running = True
+        self._spawn_thread()
+        logger.info("dlq_outbox.worker_respawned_after_fork")
 
     def _writer_loop_with_crash_capture(self) -> None:
         """Wrap _writer_loop so an uncaught exception populates handle.last_crash_reason."""
