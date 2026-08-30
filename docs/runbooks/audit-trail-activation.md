@@ -60,7 +60,7 @@ On an install with no PRO entitlement, `BALDUR_AUDIT_ENABLED=true` turns the sub
 
 ## Phase 1 — Provision the signing key (do this first)
 
-`BALDUR_SECRETS_AUDIT_SIGNING_KEY` is the HMAC-SHA256 key for the audit hash chain: each entry's `current_hash` is keyed by this secret, so an actor who cannot read the key cannot forge a chain that still verifies. It is classified **CRITICAL** — in production (`BALDUR_ENVIRONMENT=production`) a missing CRITICAL secret raises `RuntimeError` at boot.
+`BALDUR_SECRETS_AUDIT_SIGNING_KEY` is the HMAC-SHA256 key for the audit hash chain: each entry's `current_hash` is keyed by this secret, so an actor who cannot read the key cannot forge a chain that still verifies. It is classified **CRITICAL** — in production (`BALDUR_ENVIRONMENT=production`) a missing CRITICAL secret raises `ConfigurationError` at boot.
 
 ### Step 1.1 — Generate the key
 

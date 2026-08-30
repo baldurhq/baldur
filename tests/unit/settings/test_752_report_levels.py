@@ -23,6 +23,7 @@ import pytest
 from pydantic import SecretStr
 from structlog.testing import capture_logs
 
+from baldur.core.exceptions import ConfigurationError
 from baldur.settings.leader_election import LeaderElectionSettings
 from baldur.settings.secrets import SecretsSettings, validate_required_secrets
 
@@ -92,7 +93,7 @@ class TestSecretReportLevelBehavior:
         with capture_logs() as logs:
             try:
                 validate_required_secrets(empty_secrets)
-            except RuntimeError:
+            except ConfigurationError:
                 pass  # production aborts — the per-secret lines are already out
 
         assert _levels(logs, _CRITICAL_EVENT) == [critical_level] * 2
@@ -127,7 +128,7 @@ class TestSecretReportLevelBehavior:
         """The hard gate the demotion must not touch."""
         runtime_environment("production")
 
-        with pytest.raises(RuntimeError, match="encryption_key"):
+        with pytest.raises(ConfigurationError, match="encryption_key"):
             validate_required_secrets(empty_secrets)
 
     def test_a_configured_secret_is_not_reported_at_all(self, runtime_environment):
