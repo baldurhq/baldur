@@ -224,24 +224,23 @@ class LayeredRepositoryBase:
         per-class environment variable as intent — a URL named that way is
         never skipped, and the settings predicate cannot see it.
 
-        Guards absence only, in both directions. A custom L2 without a
+        Guards absence only, in both directions — a custom L2 without a
         ``_backend`` attribute (explicit injection), a ``_backend`` that is
-        some other object entirely — several unrelated adapters carry that
-        attribute name — and any answer that is not exactly ``True`` all fall
-        through to loading. The ``is True`` pin matters for spec'd test
-        doubles: a ``MagicMock`` answers the method with a truthy mock, and
-        under plain truthiness those constructions would silently stop
-        loading.
+        some other object entirely (several unrelated adapters carry that
+        attribute name), and any answer that is not exactly ``True`` all fall
+        through to loading. That handling belongs to the shared probe this
+        method delegates to, so the contract cannot drift between the
+        consumers that ask the same question.
 
         ``force_sync_from_l2()`` is untouched by design: the operator's
         manual resync must keep working in this posture, and it is the
         recourse for the state this skip declines to hydrate.
         """
+        from baldur.adapters.resilient.backend import probing_unconfigured_default
+
         if self._adapter_type.lower() != "redis":
             return False
-        l2_backend = getattr(self._l2, "_backend", None)
-        probe = getattr(l2_backend, "_probing_unconfigured_default", None)
-        return callable(probe) and probe() is True
+        return probing_unconfigured_default(getattr(self._l2, "_backend", None))
 
     def _ensure_l2_warmup_once(self) -> None:
         """Once-per-process L2 warmup gate (479 D2).
