@@ -1,10 +1,14 @@
-"""Shared fixtures for the compressed-DLQ adapter suites.
+"""Shared fixtures for the Redis adapter suites.
 
 Both compressed-entry suites in this directory drive the production read paths
 through ``FakeSortedSetBackend`` (kept in ``tests.factories.redis`` — the stub
 class outgrew the conftest size limit): the defects those paths exist to fix
 are ordering and routing ones, and a MagicMock returns whatever the test hands
 it, so it would pass against either ordering (§6.4).
+
+The unconfigured-Redis posture fixture is re-exported here rather than
+imported by each module: imported into a test module, the name shadows itself
+at every parameter that requests it.
 """
 
 from __future__ import annotations
@@ -17,6 +21,9 @@ from baldur.adapters.redis.dlq import RedisDLQRepository
 from baldur.interfaces.repositories import DLQCompressedEntry
 from baldur.utils.time import utc_now
 from tests.factories.redis import FakeSortedSetBackend
+from tests.factories.redis_posture import (
+    no_redis_posture,  # noqa: F401 - fixture registration
+)
 
 __all__ = ["FakeSortedSetBackend"]
 

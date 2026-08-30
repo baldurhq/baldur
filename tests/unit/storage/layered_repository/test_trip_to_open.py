@@ -251,6 +251,35 @@ class TestLayeredTripDegradedModeBehavior:
         assert repo._l1.get_by_service_name(SVC).state == "open"
         mock_degraded.assert_called_once_with(SVC)
 
+    def test_l2_decline_falls_back_to_l1_without_counting_a_failure(
+        self, repo, l2_mock
+    ):
+        """774 D2: a decline is not an outage, and must not be counted as one.
+
+        The clause is per call site, so this arm is what proves the trip's own
+        one sits ahead of ``except Exception`` rather than behind it.
+        """
+        from baldur.core.exceptions import UnconfiguredStoreError
+
+        _prime_l1_closed(repo)
+        l2_mock.trip_to_open.side_effect = UnconfiguredStoreError(
+            service=SVC, operation="trip_to_open"
+        )
+
+        with (
+            patch.object(repo, "_record_trip_degraded_mode") as mock_degraded,
+            patch.object(repo, "_sync_to_l2_async") as mock_sync,
+        ):
+            attempt = repo.trip_to_open(SVC, FAILURE_COUNT)
+
+        # L1's own verdict, plus the mirror nudge the fallback always issues.
+        assert attempt.did_open is True
+        assert repo._l1.get_by_service_name(SVC).state == "open"
+        mock_degraded.assert_called_once_with(SVC)
+        mock_sync.assert_called_once_with(SVC)
+        assert repo._l2_consecutive_failures == 0
+        assert repo._l2_healthy is True
+
     def test_quarantined_l2_is_never_asked(self, repo, l2_mock):
         _prime_l1_closed(repo)
         repo._l2_healthy = False

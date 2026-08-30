@@ -226,6 +226,38 @@ class TestLayeredTryAcquireBehavior:
         assert allowed is True
         mock_degraded.assert_called_once_with("svc")
 
+    def test_l2_decline_falls_back_to_l1_without_counting_a_failure(
+        self, repo, l2_mock
+    ):
+        """774 D2: L2 declined to dial a Redis nobody named — not a failure.
+
+        The decline lands on the same degraded-mode + L1 path an outage does,
+        so the transition stays as observable as it was. What must not happen
+        is the accounting: the clause sits ahead of ``except Exception``, and
+        behind it three declines would quarantine a healthy process.
+        """
+        from baldur.core.exceptions import UnconfiguredStoreError
+        from baldur.interfaces.repositories import CircuitBreakerStateEnum
+
+        repo._l1.get_or_create("svc")
+        repo._l1.update_state(
+            service_name="svc", state=CircuitBreakerStateEnum.OPEN.value
+        )
+        l2_mock.try_acquire_half_open_slot.side_effect = UnconfiguredStoreError(
+            service="svc", operation="try_acquire_half_open_slot"
+        )
+
+        with patch.object(repo, "_record_half_open_degraded_mode") as mock_degraded:
+            decision = repo.try_acquire_half_open_slot(
+                service_name="svc", limit=10, stuck_timeout_seconds=60
+            )
+
+        # L1's own verdict, unchanged by the route that reached it.
+        assert decision == (True, "open", "half_open")
+        mock_degraded.assert_called_once_with("svc")
+        assert repo._l2_consecutive_failures == 0
+        assert repo._l2_healthy is True
+
     def test_l2_unhealthy_skips_l2_call_entirely(self, repo, l2_mock):
         """When _l2_healthy=False, L2 is bypassed and L1 takes the call."""
         from baldur.interfaces.repositories import CircuitBreakerStateEnum

@@ -289,6 +289,38 @@ class TestLayeredRecordSuccessWithCloseCheckFallback:
         assert attempt.state.state == "half_open"
         mock_degraded.assert_called_once_with("svc")
 
+    def test_l2_decline_falls_back_to_l1_without_counting_a_failure(
+        self, repo, l2_mock
+    ):
+        """774 D2: a decline is not an outage, and must not be counted as one.
+
+        The clause is per call site, so this arm is what proves the close
+        check's own one sits ahead of ``except Exception``.
+        """
+        from baldur.core.exceptions import UnconfiguredStoreError
+
+        repo._l1.get_or_create("svc")
+        repo._l1.update_state(
+            service_name="svc",
+            state=CircuitBreakerStateEnum.HALF_OPEN.value,
+        )
+        l2_mock.record_success_with_close_check.side_effect = UnconfiguredStoreError(
+            service="svc", operation="record_success_with_close_check"
+        )
+
+        with (
+            patch.object(repo, "_record_close_check_degraded_mode") as mock_degraded,
+            patch.object(repo, "_sync_to_l2_async"),
+        ):
+            attempt = repo.record_success_with_close_check("svc", success_threshold=2)
+
+        # L1's own verdict: HALF_OPEN with success_count=1 against threshold 2.
+        assert attempt.state.state == "half_open"
+        assert attempt.did_close is False
+        mock_degraded.assert_called_once_with("svc")
+        assert repo._l2_consecutive_failures == 0
+        assert repo._l2_healthy is True
+
     def test_l2_unhealthy_skips_l2_call_entirely(self, repo, l2_mock):
         repo._l1.get_or_create("svc")
         repo._l1.update_state(

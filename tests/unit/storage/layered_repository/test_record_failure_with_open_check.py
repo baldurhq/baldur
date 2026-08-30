@@ -260,6 +260,35 @@ class TestLayeredOpenCheckDegradedMode:
         assert attempt.state.state == "open"
         mock_degraded.assert_called_once_with("svc")
 
+    def test_l2_decline_falls_back_to_l1_without_counting_a_failure(
+        self, repo, l2_mock
+    ):
+        """774 D2: a decline is not an outage, and must not be counted as one.
+
+        The clause is per call site, so this arm is what proves the open
+        check's own one sits ahead of ``except Exception``.
+        """
+        from baldur.core.exceptions import UnconfiguredStoreError
+
+        _prime_l1_half_open(repo)
+        l2_mock.record_failure_with_open_check.side_effect = UnconfiguredStoreError(
+            service="svc", operation="record_failure_with_open_check"
+        )
+
+        with (
+            patch.object(repo, "_record_open_check_degraded_mode") as mock_degraded,
+            patch.object(repo, "_sync_to_l2_async") as mock_sync,
+        ):
+            attempt = repo.record_failure_with_open_check("svc")
+
+        # L1's own verdict: HALF_OPEN -> OPEN, plus the mirror nudge.
+        assert attempt.did_open is True
+        assert attempt.state.state == "open"
+        mock_degraded.assert_called_once_with("svc")
+        mock_sync.assert_called_once_with("svc")
+        assert repo._l2_consecutive_failures == 0
+        assert repo._l2_healthy is True
+
     def test_l2_unhealthy_skips_l2_call_entirely(self, repo, l2_mock):
         _prime_l1_half_open(repo)
         repo._l2_healthy = False

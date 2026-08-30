@@ -352,9 +352,14 @@ class TestRedisUpdateStateSkipIfPinnedBehavior:
         # a zero-config run rather than an incident. Before this write grew a
         # pin guard it reported nothing at all here; at WARNING it fills a
         # first run's console at the background refresh cadence.
+        #
+        # The reach is pinned True rather than left to the spec'd double's
+        # truthy default: this is the blip window, where the dial goes through
+        # and the report is what splits on posture.
         repo, backend = _make_repo(1)
         backend.raw_redis_client.eval.side_effect = ConnectionError("blip")
         backend.hset.return_value = True
+        backend.has_reached_redis = True
         backend._probing_unconfigured_default.return_value = True
         unpinned_row = CircuitBreakerStateData(
             service_name="svc", state=CircuitBreakerStateEnum.OPEN.value
@@ -430,6 +435,62 @@ class TestRedisUpdateStateSkipIfPinnedBehavior:
             and entry.get("log_level") == "warning"
             for entry in caplog
         )
+
+    def test_a_never_reached_unnamed_store_is_not_dialed_at_all(self):
+        # The write that owns its fallback outright: rather than raise, it
+        # skips the script and takes the read-check-write below, where the
+        # "store" is the same process-local memory + WAL the script would
+        # have been mirroring. Nothing failed, so nothing is reported —
+        # not even the DEBUG the blip window keeps.
+        repo, backend = _make_repo(1)
+        backend.hset.return_value = True
+        backend.has_reached_redis = False
+        backend._probing_unconfigured_default.return_value = True
+        unpinned_row = CircuitBreakerStateData(
+            service_name="svc", state=CircuitBreakerStateEnum.OPEN.value
+        )
+
+        with capture_logs() as caplog:
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr(repo, "get_state", lambda service_name: unpinned_row)
+                result = repo.update_state(
+                    service_name="svc",
+                    state=CircuitBreakerStateEnum.CLOSED.value,
+                    skip_if_pinned=True,
+                )
+
+        assert result is True
+        backend.raw_redis_client.eval.assert_not_called()
+        backend.hset.assert_called_once()
+        assert [
+            entry
+            for entry in caplog
+            if entry.get("event") == "redis_cb_repo.pin_guarded_update_failed"
+        ] == []
+
+    def test_a_never_reached_unnamed_store_still_honors_an_active_pin(self):
+        # The skip is a change of route, not of verdict: the local re-check
+        # is the same pin neutrality the script would have enforced.
+        repo, backend = _make_repo(1)
+        backend.has_reached_redis = False
+        backend._probing_unconfigured_default.return_value = True
+        pinned_row = CircuitBreakerStateData(
+            service_name="svc",
+            state=CircuitBreakerStateEnum.OPEN.value,
+            manually_controlled=True,
+            manual_override_expires_at=utc_now() + timedelta(minutes=10),
+        )
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(repo, "get_state", lambda service_name: pinned_row)
+            result = repo.update_state(
+                service_name="svc",
+                state=CircuitBreakerStateEnum.CLOSED.value,
+                skip_if_pinned=True,
+            )
+
+        assert result is True
+        backend.hset.assert_not_called()
 
     def test_no_live_client_declines_on_an_actively_pinned_row(self):
         # Degraded mode: the "store" is process-local memory + WAL, so a
