@@ -219,6 +219,70 @@ class TestL2SyncQuarantineWiring:
         assert inline.submit_count == QUARANTINE_THRESHOLD
 
 
+class TestUnconfiguredDeclineIsNotAFailure:
+    """774 D2 -- an L2 that declined to dial never reaches the counter.
+
+    A zero-config process calls this lane on every recovery attempt, so with
+    the ``except UnconfiguredStoreError`` clause placed *after*
+    ``except Exception`` the third decline would quarantine an L2 that is
+    working exactly as designed -- and the one-shot WARNING would announce it.
+    Driving well past the threshold is what makes the ordering assertable:
+    below it the two placements are indistinguishable.
+    """
+
+    DECLINES = QUARANTINE_THRESHOLD * 2
+
+    @staticmethod
+    def _declining_l2(mock_l2_repo):
+        from baldur.core.exceptions import UnconfiguredStoreError
+
+        mock_l2_repo.try_acquire_half_open_slot.side_effect = UnconfiguredStoreError(
+            service="svc", operation="try_acquire_half_open_slot"
+        )
+        return mock_l2_repo
+
+    def test_repeated_declines_leave_l2_health_untouched(self, repo, mock_l2_repo):
+        self._declining_l2(mock_l2_repo)
+
+        for _ in range(self.DECLINES):
+            repo.try_acquire_half_open_slot(
+                service_name="svc", limit=10, stuck_timeout_seconds=60
+            )
+
+        health = repo.get_l2_health()
+        assert health["consecutive_failures"] == 0
+        assert health["healthy"] is True
+        assert repo._metrics["l2_sync_failure_count"] == 0
+
+    def test_repeated_declines_never_announce_a_quarantine(self, repo, mock_l2_repo):
+        self._declining_l2(mock_l2_repo)
+
+        with capture_logs() as cap:
+            for _ in range(self.DECLINES):
+                repo.try_acquire_half_open_slot(
+                    service_name="svc", limit=10, stuck_timeout_seconds=60
+                )
+
+        assert [e for e in cap if e.get("event") == L2_QUARANTINED_EVENT] == []
+
+    def test_a_declining_l2_is_still_asked_on_every_call(self, repo, mock_l2_repo):
+        """The consequence the counter would have had: L2 stops being asked.
+
+        The guard on ``_l2_healthy`` is what a quarantine turns off, so a
+        decline that ticked the counter would silently stop consulting L2 --
+        and keep it off for the rest of the process, including after an
+        operator finally names a Redis.
+        """
+        self._declining_l2(mock_l2_repo)
+
+        for _ in range(self.DECLINES):
+            repo.try_acquire_half_open_slot(
+                service_name="svc", limit=10, stuck_timeout_seconds=60
+            )
+
+        assert mock_l2_repo.try_acquire_half_open_slot.call_count == self.DECLINES
+
+
 class TestL2QuarantineEntryWarning:
     """D7 -- one-shot WARNING on the healthy->quarantined transition.
 

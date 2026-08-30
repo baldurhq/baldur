@@ -31,6 +31,7 @@ from baldur.core.exceptions import (
     RetryExhaustedError,
     RunbookError,
     SettingsValidationError,
+    UnconfiguredStoreError,
 )
 
 # =============================================================================
@@ -114,6 +115,21 @@ class TestExceptionHierarchyContract:
         assert isinstance(err, DLQError)
         assert not isinstance(err, ValueError)
 
+    def test_unconfigured_store_inherits_from_adapter_error(self):
+        """A declined dial is an adapter concern, catchable by the base class.
+
+        The layered wrapper catches it by name ahead of ``except Exception``;
+        anything broader that catches ``AdapterError`` has to keep seeing it.
+        """
+        assert issubclass(UnconfiguredStoreError, AdapterError)
+        assert issubclass(UnconfiguredStoreError, BaldurError)
+
+    def test_unconfigured_store_is_distinct_from_a_failed_connection(self):
+        """Nothing was dialed, so it must not read as a connection failure."""
+        err = UnconfiguredStoreError(service="svc", operation="trip_to_open")
+
+        assert not isinstance(err, AdapterConnectionError)
+
 
 # =============================================================================
 # 계약 검증 — extra_context() 메서드
@@ -138,6 +154,36 @@ class TestExtraContextContract:
         """code 기본값은 빈 문자열이어야 한다."""
         err = BaldurError("test")
         assert err.code == ""
+
+    def test_unconfigured_store_extra_context_carries_service_and_operation(self):
+        """The two fields a reader needs to locate a decline."""
+        err = UnconfiguredStoreError(service="payment", operation="trip_to_open")
+
+        ctx = err.extra_context()
+
+        assert ctx["service"] == "payment"
+        assert ctx["operation"] == "trip_to_open"
+
+    def test_unconfigured_store_extra_context_omits_empty_fields(self):
+        """Empty fields are dropped rather than bound as empty strings."""
+        err = UnconfiguredStoreError()
+
+        ctx = err.extra_context()
+
+        assert "service" not in ctx
+        assert "operation" not in ctx
+
+    def test_unconfigured_store_synthesizes_a_message_from_its_fields(self):
+        """Raised without a message at every site, so the default is the message."""
+        err = UnconfiguredStoreError(service="payment", operation="trip_to_open")
+
+        assert "payment" in str(err)
+        assert "trip_to_open" in str(err)
+
+    def test_unconfigured_store_keeps_an_explicit_message(self):
+        err = UnconfiguredStoreError("no store here", service="payment")
+
+        assert str(err) == "no store here"
 
 
 # =============================================================================
