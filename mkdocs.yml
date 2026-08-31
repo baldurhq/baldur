@@ -92,6 +92,7 @@ plugins:
           - index.md: "What Baldur is and the one-decorator quickstart."
           - what-is-baldur.md: "Orientation: what Baldur is, what it does when a call fails, where it sits in your stack."
           - why-i-built-baldur.md: "The question that started the project, what the existing libraries did not answer, and four decisions behind it."
+          - 99-circuit-breakers.md: "A survey of 99 hand-written circuit breakers in public Python code: what they get wrong and why nobody notices."
           - getting-started/index.md: "Install Baldur and protect your first call."
           - getting-started/django.md: "Wire Baldur into a Django project."
           - getting-started/fastapi.md: "Wire Baldur into a FastAPI app."
@@ -177,6 +178,7 @@ exclude_docs: |
   !/index.md
   !/what-is-baldur.md
   !/why-i-built-baldur.md
+  !/99-circuit-breakers.md
   !/troubleshooting.md
   !/faq.md
   !/compatibility.md
@@ -218,6 +220,7 @@ not_in_nav: |
 nav:
   - "What is Baldur?": what-is-baldur.md
   - Why I built Baldur: why-i-built-baldur.md
+  - "I read 99 hand-written circuit breakers": 99-circuit-breakers.md
   - Comparison:
       - tenacity: comparison/tenacity.md
   - Pricing: pricing.md

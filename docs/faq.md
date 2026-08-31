@@ -177,6 +177,43 @@ checklist.
 
 ---
 
+## How is PRO licensed?
+
+Per **organization**. One subscription covers the legal entity that
+purchased it — every developer, server, service, environment, and worker
+inside it. There are no per-seat, per-server, or per-call meters, and
+nothing to count. The license is non-transferable and does not permit
+redistributing the package or offering it to third parties as a service.
+
+---
+
+## What happens if my PRO subscription lapses?
+
+Your service keeps running. PRO is activated by a signed entitlement token
+verified **locally inside your process** — an Ed25519 signature check, no
+license server, no network call, so air-gapped environments work. When the
+token is missing, invalid, or expired, Baldur skips activating the PRO
+layer and the open-source core carries on with OSS behavior: protected
+calls keep working, nothing crashes, and no traffic is blocked. Access runs
+to the end of the period you paid for; renewing gets you a fresh token.
+
+---
+
+## What happens if MH WORKS goes away?
+
+The failure mode is designed to be boring. The open-source core is
+Apache-2.0 — it lives on GitHub and PyPI and remains yours to run, fork,
+and patch regardless of what happens to us. PRO installs as ordinary
+Python source you can read in your own environment, and its license
+check is a local signature verification — there is no license server
+that can go dark. Nothing you run stops working the day we do: PRO
+serves out the term you paid for, then steps aside exactly like a lapsed
+subscription, with the OSS core carrying on. What you would lose is
+renewals, updates, and support — not your running service, and not your
+data, which never left your network to begin with.
+
+---
+
 ## Is this a hosted service? Does it phone home?
 
 No, and no. Baldur is a Python package that runs entirely inside your

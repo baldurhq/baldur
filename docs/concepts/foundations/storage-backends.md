@@ -81,10 +81,11 @@ feature and is covered in the data-consistency runbook linked below.
 
 ### SQL / your relational database (advanced, optional)
 
-Baldur can also persist a subset of its own repositories — circuit breaker state,
-failed-operation records, incidents, forensics, and statistics — to a relational
-database through the SQL adapter. It works with any DB-API 2.0 driver (Postgres,
-MySQL, SQLite), selected by the DSN scheme:
+Baldur can also keep its **incident history** — security incidents,
+postmortems, recovery-session archives, and operational statistics — in a
+relational database through the SQL adapter, and the event journal can land
+there too when Redis is not configured. It works with any DB-API 2.0 driver
+(Postgres, MySQL, SQLite), selected by the DSN scheme:
 
 ```bash
 pip install baldur-framework[postgres]
@@ -92,10 +93,16 @@ export BALDUR_SQL_DSN=postgresql://user:pass@host:5432/db
 ```
 
 Reach for this when you want that history **durable and queryable in the database
-you already operate** rather than in Redis. It is an advanced backend and is not
-part of the tested compatibility matrix; the default multi-worker path is
-Redis, not SQL. Baldur is a resilience layer, not your system of record — it does
-not move your application's data here.
+you already operate** rather than in Redis.
+
+To be precise about the boundary: the **live** stores — circuit breaker state,
+idempotency keys, rate-limit windows, and the dead-letter queue — do not move
+to SQL. They live in memory or Redis, and the DLQ's durability story today is
+Redis with its persistence settings. The SQL backend holds the records Baldur
+writes *about* incidents, not the state it coordinates *during* them. It is an
+advanced backend and is not part of the tested compatibility matrix; the
+default multi-worker path is Redis, not SQL. Baldur is a resilience layer, not
+your system of record — it does not move your application's data here.
 
 ## Which do I need?
 
@@ -104,7 +111,7 @@ not move your application's data here.
 | Trying Baldur, or running a single process | In-memory | *nothing — it is the default* |
 | Running more than one worker or host | Redis | `BALDUR_REDIS_URL=redis://…` |
 | Running Redis with high availability | Redis Sentinel | `BALDUR_REDIS_URL=redis+sentinel://…` |
-| Wanting durable, queryable Baldur history in your RDBMS | SQL | `BALDUR_SQL_DSN=postgresql://…` |
+| Wanting durable, queryable incident history in your RDBMS | SQL | `BALDUR_SQL_DSN=postgresql://…` |
 
 ## See also
 
