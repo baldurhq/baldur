@@ -8,6 +8,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-08-31
+
 ### Added
 
 - PagerDuty incident close — the escalation transport can now send the Events API `resolve` verb for an incident it opened, using the same routing key and dedup key as the trigger that opened it. Its first user is the escalation channel self-test, which closes its own synthetic incident in the same call, so verifying a channel no longer leaves a real incident open for someone to remember. If the close does not land, the self-test result names the cause and says to close it by hand. Component-failure incidents are unchanged and remain manual-close.
