@@ -44,6 +44,17 @@ class DLQSettings(BaseSettings):
         default=True,
         description="Enable Dead Letter Queue",
     )
+    backend: str = Field(
+        default="",
+        description=(
+            "Storage backend for captured failures: 'memory', 'redis' or "
+            "'sql'. Empty (the default) lets the startup probe chain decide: "
+            "redis when BALDUR_REDIS_URL is set, else sql when a SQL DSN is "
+            "configured, else memory. Read from the environment at init() by "
+            "the failed-operation registry wiring, so mutating this field "
+            "programmatically after init() does not re-select the backend."
+        ),
+    )
     retry_delay: IntervalDuration = Field(
         default=60,
         description="Delay between retries in seconds",
@@ -238,6 +249,22 @@ class DLQSettings(BaseSettings):
     def _warn_retention_days(cls, v: int) -> int:
         """Warn if retention is very short (< 7 days)."""
         return warn_below(7, "safe_default.short_consider_using_data")(v)
+
+    @field_validator("backend")
+    @classmethod
+    def _normalize_backend(cls, v: str) -> str:
+        """Normalize the backend name — deliberately non-raising.
+
+        An unknown value is NOT rejected here. A raising membership check
+        would make the whole settings object unconstructable on an operator
+        typo, and every DLQ consumer resolves its config through
+        ``get_dlq_settings()`` — a typo would kill dead-letter capture
+        entirely instead of just the backend selection. Membership is
+        enforced where the value is consumed: the registry wiring checks the
+        name against the registered providers, warns when it does not match,
+        and falls through to the probe chain.
+        """
+        return v.strip().lower()
 
 
 # =============================================================================

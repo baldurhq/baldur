@@ -126,7 +126,16 @@ BALDUR_REDIS_SOCKET_TIMEOUT=5.0           # per-operation socket timeout (second
 BALDUR_REDIS_RETRY_ON_TIMEOUT=true        # retry timed-out Redis operations instead of failing fast
 BALDUR_RESILIENT_STORAGE_RECOVERY_PROBE_INTERVAL=5.0  # cooldown between degraded-mode recovery probes
 BALDUR_SQL_DSN=postgresql://user:pass@host:5432/db
+BALDUR_DLQ_BACKEND=sql                    # memory | redis | sql — where captured failures are stored
 ```
+
+`BALDUR_DLQ_BACKEND` selects the dead-letter store explicitly. Left unset,
+Baldur picks the first one the environment offers: `redis` when
+`BALDUR_REDIS_URL` is set, else `sql` when a DSN is configured, else `memory`.
+It is read at `baldur.init()`, so it takes effect at startup and a restart is
+needed to change it. An unrecognized value is logged as a warning and the
+probe chain decides instead; a backend that cannot be constructed (a missing
+driver, say) fails the boot in production and steps down the chain elsewhere.
 
 `BALDUR_SQL_DSN` is the canonical full-connection input. The discrete
 `BALDUR_POSTGRES_HOST`, `BALDUR_POSTGRES_PORT`, `BALDUR_POSTGRES_DATABASE`, and

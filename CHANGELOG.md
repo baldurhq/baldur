@@ -17,11 +17,17 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - A Celery worker reads `BALDUR_REDIS_URL` and runs background maintenance with no extra receiver.
 - A prefork worker starts them per pool child, so a recycled child comes back with its own.
 - A production Celery worker whose config `baldur.init()` rejects now exits before it forks.
+- `BALDUR_DLQ_BACKEND` keeps the dead-letter queue in your own database (`memory`/`redis`/`sql`).
+- Unset, it picks Redis, else a configured SQL DSN, else memory — parked calls survive a restart.
+- A dead-letter backend that cannot be built now fails the production boot, not the first capture.
+- The startup report names the dead-letter backend, so the configured store is visible at INFO.
 
 
 ### Changed
 
 - **Breaking**: a production boot missing a critical secret raises `ConfigurationError` now.
+- Dead-letter overflow eviction now targets the entries the size cap counts, so it shrinks them.
+- A late dead-letter statistics write can no longer reopen an entry that was already resolved.
 - `RuntimeError` was invisible to the Celery abort path, which booted the worker keyless instead.
 - A closed, healthy circuit breaker no longer writes its state on every recorded success.
 - Circuit-breaker writes to Redis now track state transitions rather than request volume.

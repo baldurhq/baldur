@@ -1315,10 +1315,10 @@ class TestRegistriesToWireContract:
     """
 
     def test_registries_to_wire_row_count(self):
-        """Cache (1) + 5 Group A + 3 Group B + 4 PRIORITY_CHAIN (570) = 13 rows."""
+        """Cache (1) + 5 Group A + 3 Group B + 5 PRIORITY_CHAIN = 14 rows."""
         from baldur.bootstrap import _REGISTRIES_TO_WIRE
 
-        assert len(_REGISTRIES_TO_WIRE) == 13
+        assert len(_REGISTRIES_TO_WIRE) == 14
 
     def test_registries_to_wire_attribute_set(self):
         """Every wired registry attribute must be listed exactly once.
@@ -1346,6 +1346,7 @@ class TestRegistriesToWireContract:
             "pg_admin",
             "pool_info",
             "event_journal_repo",
+            "failed_op_repo",
         ]
         assert attrs == expected
 
@@ -1389,11 +1390,12 @@ class TestRegistriesToWireContract:
 
     def test_registries_to_wire_group_c_kind(self):
         """PRIORITY_CHAIN rows: the 3 probe-surface registries (515 D6) plus
-        the ``event_journal_repo`` memory/redis/sql hybrid (570 D1).
+        the two memory/redis/sql hybrids — ``event_journal_repo`` (570 D1)
+        and ``failed_op_repo`` (778 D1).
 
         The probe-surface rows follow ``django > sql > noop`` (or
         ``django > noop`` for ``pool_info``, which has no SQL implementation
-        yet); event_journal follows ``redis > sql > memory``. The contract
+        yet); both hybrids follow ``redis > sql > memory``. The contract
         asserted here is structural (``target_name==""``, non-empty chain,
         ``env_override`` present) — it does NOT assert chain *content*, so
         the differing hybrid chain order does not break it.
@@ -1410,6 +1412,7 @@ class TestRegistriesToWireContract:
             "pg_admin",
             "pool_info",
             "event_journal_repo",
+            "failed_op_repo",
         ]
         for w in group_c:
             assert w.target_name == ""
@@ -1425,8 +1428,9 @@ class TestRegistriesToWireContract:
         """570 D4: each row's ``reset_baseline`` equals its module-load default.
 
         Probe-surface PRIORITY_CHAIN rows reset to ``"noop"`` (their only
-        registered default); every other row — Group A/B and the
-        event_journal memory/redis/sql hybrid — resets to ``"memory"``.
+        registered default); the event_journal hybrid and the Group A/B rows
+        reset to ``"memory"``; the dead-letter hybrid resets to ``"redis"``,
+        which is what ``factory/registry.py`` sets at module load.
         """
         from baldur.bootstrap import _REGISTRIES_TO_WIRE
 
@@ -1436,6 +1440,8 @@ class TestRegistriesToWireContract:
             assert by_attr[attr].reset_baseline == "noop"
         # The hybrid PRIORITY_CHAIN row (no noop adapter) resets to "memory".
         assert by_attr["event_journal_repo"].reset_baseline == "memory"
+        # The dead-letter hybrid's module-load default is "redis".
+        assert by_attr["failed_op_repo"].reset_baseline == "redis"
         # Representative Group A / Group B rows reset to "memory".
         assert by_attr["cache"].reset_baseline == "memory"
         assert by_attr["postmortem_repo"].reset_baseline == "memory"

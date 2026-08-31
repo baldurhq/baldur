@@ -114,6 +114,32 @@ _SELECT_COLS = (
     "created_at, updated_at, expires_at, data"
 )
 
+# An entry in one of these statuses is finished — it no longer occupies the
+# queue the size cap is about.
+_TERMINAL_STATUSES = (
+    FailedOperationStatus.RESOLVED.value,
+    FailedOperationStatus.REJECTED.value,
+    FailedOperationStatus.ARCHIVED.value,
+)
+
+# An entry a worker or an operator is currently holding. Evicting it would
+# delete work in flight, so eviction skips it.
+_EVICTION_PROTECTED_STATUSES = (
+    FailedOperationStatus.REPLAYING.value,
+    FailedOperationStatus.REVIEWING.value,
+)
+
+# Everything the eviction candidate query must exclude. The counts the cap
+# is enforced against exclude terminal entries, so candidates have to come
+# from that same population — otherwise a table holding enough old archived
+# rows evicts archived rows forever while the counted queue grows without
+# bound. Protected statuses come out too: a candidate window whose head
+# happens to be all REPLAYING would return zero evictions while evictable
+# entries sit right behind it, and the caller would read that as "the queue
+# is entirely in flight". Eviction still re-checks protection when it
+# deletes; this only stops protected rows from crowding out the candidates.
+_NON_EVICTABLE_STATUSES = _TERMINAL_STATUSES + _EVICTION_PROTECTED_STATUSES
+
 
 class SQLFailedOperationRepository(GenericSQLRepository, FailedOperationRepository):
     """DB-API 2.0 backed DLQ repository."""
@@ -996,34 +1022,36 @@ class SQLFailedOperationRepository(GenericSQLRepository, FailedOperationReposito
     # ----- Size-limit overflow ---------------------------------------------
 
     def count_all(self) -> int:
-        excluded = (
-            FailedOperationStatus.RESOLVED.value,
-            FailedOperationStatus.REJECTED.value,
-            FailedOperationStatus.ARCHIVED.value,
-        )
-        placeholders = ",".join([self._placeholder] * len(excluded))
+        placeholders = ",".join(["%s"] * len(_TERMINAL_STATUSES))
         row = self._fetch_one(
             f"SELECT COUNT(*) FROM {_TABLE} WHERE status NOT IN ({placeholders})",
-            excluded,
+            _TERMINAL_STATUSES,
         )
         return int(row[0]) if row else 0
 
     def count_by_domain(self, domain: str) -> int:
+        placeholders = ",".join(["%s"] * len(_TERMINAL_STATUSES))
         row = self._fetch_one(
-            f"SELECT COUNT(*) FROM {_TABLE} WHERE domain = %s", (domain,)
+            f"SELECT COUNT(*) FROM {_TABLE} WHERE domain = %s "
+            f"AND status NOT IN ({placeholders})",
+            (domain, *_TERMINAL_STATUSES),
         )
         return int(row[0]) if row else 0
 
     def get_oldest_ids(self, count: int, domain: str | None = None) -> list[str]:
+        excluded = ",".join(["%s"] * len(_NON_EVICTABLE_STATUSES))
         if domain is None:
             rows = self._fetch_all(
-                f"SELECT id FROM {_TABLE} ORDER BY created_at ASC LIMIT %s", (count,)
+                f"SELECT id FROM {_TABLE} WHERE status NOT IN ({excluded}) "
+                f"ORDER BY created_at ASC LIMIT %s",
+                (*_NON_EVICTABLE_STATUSES, count),
             )
         else:
             rows = self._fetch_all(
                 f"SELECT id FROM {_TABLE} WHERE domain = %s "
+                f"AND status NOT IN ({excluded}) "
                 f"ORDER BY created_at ASC LIMIT %s",
-                (domain, count),
+                (domain, *_NON_EVICTABLE_STATUSES, count),
             )
         return [str(r[0]) for r in rows]
 
@@ -1048,10 +1076,9 @@ class SQLFailedOperationRepository(GenericSQLRepository, FailedOperationReposito
         finally:
             cursor.close()
 
-    _EVICTION_PROTECTED = (
-        FailedOperationStatus.REPLAYING.value,
-        FailedOperationStatus.REVIEWING.value,
-    )
+    # The candidate query already excludes these; the delete re-checks so a
+    # row that entered replay between the two statements is still spared.
+    _EVICTION_PROTECTED = _EVICTION_PROTECTED_STATUSES
 
     def evict_oldest(self, count: int, domain: str | None = None) -> int:
         oldest = self.get_oldest_ids(count, domain)
