@@ -98,7 +98,9 @@ _ROOT_BUDGETS: dict[str, int] = {
     # its C901 noqa when the first-init failure arm moved to its own method.
     # celery worker bootstrap: -1 — setup_baldur_signals dropped its C901 noqa
     # when the per-flag override chain moved into _apply_config_overrides.
-    "baldur": 110,
+    # SQL circuit-breaker removal: -2 — the deleted adapter carried two
+    # complexity noqas (breaker state never lands in a relational database).
+    "baldur": 108,
     # 666: -1 — _update_config_with_meta refactored into _versioned_write +
     # _merge_changes + _post_write helpers, dropping its complexity noqa.
     "baldur_pro": 32,

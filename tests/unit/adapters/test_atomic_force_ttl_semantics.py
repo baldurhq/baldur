@@ -3,22 +3,20 @@
 ``atomic_force_open`` / ``atomic_force_close`` are the storage side of a manual
 override, and the adapters used to disagree about what a request means:
 
-- a non-positive TTL stored no expiry on SQL and memory (a permanent pin) but a
+- a non-positive TTL stored no expiry on memory (a permanent pin) but a
   *past* timestamp on Redis (an override that lapsed the instant it was
   written) — the same operator request meaning opposite things per backend;
 - ``atomic_force_close`` wrote no expiry column at all on Redis, so a previous
   block's expiry stayed on the row and governed the force-close pin.
 
 Both are now single-sourced in ``resolve_manual_override_expiry`` and every
-implementation writes the column explicitly. These tests hold the four
+implementation writes the column explicitly. These tests hold the live
 implementations to the same table, which is the only way a per-adapter
 regression shows up as a failure rather than as a backend-specific incident.
 """
 
 from __future__ import annotations
 
-import sqlite3
-from collections.abc import Iterator
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock
 
@@ -34,9 +32,7 @@ from baldur.adapters.redis.circuit_breaker import (
     RedisCircuitBreakerStateRepository,
 )
 from baldur.adapters.resilient.backend import ResilientStorageBackend
-from baldur.adapters.sql.circuit_breaker import SQLCircuitBreakerStateRepository
 from baldur.interfaces.repositories import resolve_manual_override_expiry
-from baldur.settings.sql import reset_sql_settings
 from baldur.utils.time import utc_now
 
 SERVICE = "payment-api"
@@ -88,19 +84,6 @@ def layered_repo() -> LayeredCircuitBreakerStateRepository:
     return LayeredCircuitBreakerStateRepository()
 
 
-@pytest.fixture
-def sql_repo(monkeypatch) -> Iterator[SQLCircuitBreakerStateRepository]:
-    """SQL repository over an in-memory sqlite database (no external infra)."""
-    monkeypatch.setenv("BALDUR_SQL_DSN", "sqlite:///:memory:")
-    reset_sql_settings()
-    conn = sqlite3.connect(":memory:", check_same_thread=False)
-    try:
-        yield SQLCircuitBreakerStateRepository(lambda: conn)
-    finally:
-        conn.close()
-        reset_sql_settings()
-
-
 def _redis_repo() -> tuple[RedisCircuitBreakerStateRepository, MagicMock]:
     """Redis repository whose backend records the hash it was asked to write.
 
@@ -120,7 +103,7 @@ def _redis_written_expiry(backend: MagicMock) -> str:
 
 
 # =============================================================================
-# Equivalence across the four implementations
+# Equivalence across the live implementations
 # =============================================================================
 
 
@@ -151,17 +134,6 @@ class TestAtomicForceTTLSemantics:
 
     @pytest.mark.parametrize("ttl", NO_EXPIRY_TTLS)
     @pytest.mark.parametrize("operation", ["atomic_force_open", "atomic_force_close"])
-    def test_sql_stores_no_expiry_for_a_non_positive_ttl(
-        self, sql_repo, ttl, operation
-    ):
-        """SQL: a non-positive TTL stores no expiry on either force op."""
-        getattr(sql_repo, operation)(SERVICE, reason="test", ttl_minutes=ttl)
-
-        row = sql_repo.get_by_service_name(SERVICE)
-        assert row.manual_override_expires_at is None
-
-    @pytest.mark.parametrize("ttl", NO_EXPIRY_TTLS)
-    @pytest.mark.parametrize("operation", ["atomic_force_open", "atomic_force_close"])
     def test_redis_stores_no_expiry_for_a_non_positive_ttl(self, ttl, operation):
         """Redis used to write ``now + ttl`` unguarded — a past timestamp."""
         repo, backend = _redis_repo()
@@ -178,20 +150,6 @@ class TestAtomicForceTTLSemantics:
         getattr(memory_repo, operation)(SERVICE, reason="test", ttl_minutes=30)
 
         stored = memory_repo.get_by_service_name(SERVICE).manual_override_expires_at
-        assert (
-            before + timedelta(minutes=30)
-            <= stored
-            <= utc_now() + timedelta(minutes=30)
-        )
-
-    @pytest.mark.parametrize("operation", ["atomic_force_open", "atomic_force_close"])
-    def test_sql_stores_the_requested_lifetime(self, sql_repo, operation):
-        """SQL: a positive TTL is stored as ``now + ttl``."""
-        before = utc_now()
-
-        getattr(sql_repo, operation)(SERVICE, reason="test", ttl_minutes=30)
-
-        stored = sql_repo.get_by_service_name(SERVICE).manual_override_expires_at
         assert (
             before + timedelta(minutes=30)
             <= stored
@@ -227,14 +185,6 @@ class TestForceCloseClearsAPreviousBlocksExpiry:
 
         row = memory_repo.get_by_service_name(SERVICE)
         assert row.manual_override_expires_at is None
-
-    def test_sql_force_close_overwrites_the_stored_expiry(self, sql_repo):
-        """SQL: a TTL-less force-close erases the block's stored expiry."""
-        sql_repo.atomic_force_open(SERVICE, reason="block", ttl_minutes=90)
-
-        sql_repo.atomic_force_close(SERVICE, reason="allow", ttl_minutes=None)
-
-        assert sql_repo.get_by_service_name(SERVICE).manual_override_expires_at is None
 
     def test_redis_force_close_writes_the_expiry_field_explicitly(self):
         """The Redis latent bug: the field was left out of the update map.
