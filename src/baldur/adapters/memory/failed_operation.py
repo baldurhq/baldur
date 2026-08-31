@@ -20,6 +20,38 @@ from baldur.interfaces.repositories import (
     FailedOperationStatus,
 )
 
+# An entry in one of these statuses is finished — it no longer occupies the
+# queue the size cap is about.
+_TERMINAL_STATUSES = frozenset(
+    {
+        FailedOperationStatus.RESOLVED.value,
+        FailedOperationStatus.REJECTED.value,
+        FailedOperationStatus.ARCHIVED.value,
+    }
+)
+
+# An entry a worker or an operator is currently holding. Evicting it would
+# delete work in flight, so eviction skips it.
+_EVICTION_PROTECTED_STATUSES = frozenset(
+    {
+        FailedOperationStatus.REPLAYING.value,
+        FailedOperationStatus.REVIEWING.value,
+    }
+)
+
+# Everything the eviction candidate scan must exclude. The counts the cap is
+# enforced against exclude terminal entries, so candidates have to come from
+# that same population — otherwise a store holding enough old archived
+# entries evicts archived entries forever while the counted queue grows
+# without bound. Protected statuses come out too: a candidate window whose
+# head happens to be all REPLAYING would return zero evictions while
+# evictable entries sit right behind it, and the caller would read that as
+# "the queue is entirely in flight". Eviction still re-checks protection when
+# it deletes; this only stops protected entries from crowding out the
+# candidates. Same population the Redis adapter gets for free — its count and
+# oldest-id lookups both key on the pending set.
+_NON_EVICTABLE_STATUSES = _TERMINAL_STATUSES | _EVICTION_PROTECTED_STATUSES
+
 
 class InMemoryFailedOperationRepository(FailedOperationRepository):
     """
@@ -782,33 +814,50 @@ class InMemoryFailedOperationRepository(FailedOperationRepository):
         """
         with self._lock:
             excluded = 0
-            for status in (
-                FailedOperationStatus.RESOLVED.value,
-                FailedOperationStatus.REJECTED.value,
-                FailedOperationStatus.ARCHIVED.value,
-            ):
+            for status in _TERMINAL_STATUSES:
                 excluded += len(self._index_by_status.get(status, set()))
             return len(self._storage) - excluded
 
     def count_by_domain(self, domain: str) -> int:
-        """Return DLQ item count for a specific domain."""
+        """Return active DLQ item count for a domain (same population as
+        :meth:`count_all`, scoped to one domain).
+
+        The per-domain cap is enforced against this number, so it has to
+        exclude the same finished entries the global count does — otherwise
+        a domain's cap trips on entries that were resolved days ago.
+        """
         with self._lock:
             domain_ids = self._index_by_domain.get(domain, set())
-            return len(domain_ids)
+            return sum(
+                1
+                for eid in domain_ids
+                if (entry := self._storage.get(eid)) is not None
+                and entry.status not in _TERMINAL_STATUSES
+            )
 
     def get_oldest_ids(self, count: int, domain: str | None = None) -> list[str]:
-        """Return IDs of the oldest items (by created_at)."""
+        """Return IDs of the oldest *evictable* items (by created_at).
+
+        Evictable = neither finished nor in flight; see
+        :data:`_NON_EVICTABLE_STATUSES` for why the candidate set is narrowed
+        rather than filtered after the fact.
+        """
         with self._lock:
             if domain:
-                domain_ids = self._index_by_domain.get(domain, set())
+                candidate_ids = self._index_by_domain.get(domain, set())
                 entries = [
                     (eid, self._storage[eid])
-                    for eid in domain_ids
+                    for eid in candidate_ids
                     if eid in self._storage
                 ]
             else:
                 entries = list(self._storage.items())
 
+            entries = [
+                pair
+                for pair in entries
+                if pair[1].status not in _NON_EVICTABLE_STATUSES
+            ]
             # Sort by created_at ascending (oldest first)
             entries.sort(key=lambda x: x[1].created_at or _now())
             return [eid for eid, _ in entries[:count]]
@@ -822,12 +871,9 @@ class InMemoryFailedOperationRepository(FailedOperationRepository):
             self._remove_from_index(entry_id, entry.status, entry.domain)
             return True
 
-    _EVICTION_PROTECTED = frozenset(
-        {
-            FailedOperationStatus.REPLAYING.value,
-            FailedOperationStatus.REVIEWING.value,
-        }
-    )
+    # The candidate scan already excludes these; the delete re-checks so an
+    # entry that entered replay between the two passes is still spared.
+    _EVICTION_PROTECTED = _EVICTION_PROTECTED_STATUSES
 
     def evict_oldest(self, count: int, domain: str | None = None) -> int:
         """Delete the oldest items, skipping entries in protected statuses."""

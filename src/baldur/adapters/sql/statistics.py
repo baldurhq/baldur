@@ -2,14 +2,16 @@
 SQL Statistics repository.
 
 Framework-free adapter for ``StatisticsRepositoryInterface`` backed by
-any DB-API 2.0 database. Reads from tables owned by other SQL repos
-(``baldur_dlq``, ``baldur_cb_state``) — does NOT declare its own schema.
+any DB-API 2.0 database. Reads ``baldur_dlq`` — the table the SQL
+dead-letter repository owns — and does NOT declare its own schema.
 
 Key design points:
 - All aggregation queries enforce a ``created_at`` time-range filter
   (default 30 days) to prevent unbounded full-table scans.
-- CB methods apply graceful degradation: catch OperationalError when
-  the CB table has not been bootstrapped yet and return empty defaults.
+- Circuit-breaker state never lands in SQL: it is volatile, high-frequency
+  coordination data and lives in memory or Redis. The CB read methods here
+  survive that by degrading to empty defaults, so a console panel backed by
+  this adapter renders an empty circuit-breaker section rather than failing.
 - Registered via ``ProviderRegistry.register_statistics_adapter()``
   singleton, NOT via GenericProviderRegistry.
 """
@@ -24,12 +26,9 @@ from typing import Any
 
 import structlog
 
-from baldur.adapters.sql.base import (
-    GenericSQLRepository,
-    dialect_upsert_clause,
-)
-from baldur.adapters.sql.circuit_breaker import _TABLE as CB_TABLE
+from baldur.adapters.sql.base import GenericSQLRepository
 from baldur.adapters.sql.failed_operation import _TABLE as DLQ_TABLE
+from baldur.interfaces.repositories import FailedOperationStatus
 from baldur.interfaces.statistics import (
     AuditTrailEntry,
     CircuitBreakerInfo,
@@ -52,6 +51,14 @@ logger = structlog.get_logger()
 
 _DEFAULT_RANGE_DAYS = 30
 
+# The circuit-breaker state table. Baldur never writes it: circuit-breaker
+# state is volatile, high-frequency coordination data and lives in memory or
+# Redis, so no SQL repository owns this table any more. The name is kept here
+# because an operator may still have a table left from an older install, or
+# may populate one themselves — the read methods below degrade to empty
+# results either way.
+_CB_TABLE = "baldur_cb_state"
+
 _ALLOWED_ORDER_COLS = frozenset(
     {
         "id",
@@ -68,12 +75,28 @@ _ALLOWED_ORDER_COLS = frozenset(
     }
 )
 
+# Statuses an entry never comes back from. Rendered as a SQL literal list
+# rather than bound parameters because the values come from a closed enum
+# this package owns — there is no operator input to inject, and the guarded
+# upsert below reads far better with the list inline than with six more
+# placeholders threaded through every dialect branch.
+_TERMINAL_STATUS_SQL = ", ".join(
+    f"'{status.value}'"
+    for status in (
+        FailedOperationStatus.RESOLVED,
+        FailedOperationStatus.REJECTED,
+        FailedOperationStatus.ARCHIVED,
+    )
+)
+
 
 class SQLStatisticsRepository(GenericSQLRepository, StatisticsRepositoryInterface):
     """DB-API 2.0 backed statistics repository.
 
-    Reads from ``baldur_dlq`` and ``baldur_cb_state`` tables directly.
-    Does not own a table — schema bootstrap is skipped.
+    Reads the ``baldur_dlq`` table directly and does not own a table —
+    schema bootstrap is skipped. The circuit-breaker methods read a table
+    Baldur never writes (CB state stays in memory or Redis) and return
+    empty results when it is absent.
     """
 
     def __init__(
@@ -523,7 +546,7 @@ class SQLStatisticsRepository(GenericSQLRepository, StatisticsRepositoryInterfac
     def get_circuit_breaker_summary(self) -> CircuitBreakerSummary:
         try:
             rows = self._fetch_all(
-                f"SELECT state, COUNT(*) FROM {CB_TABLE} GROUP BY state"
+                f"SELECT state, COUNT(*) FROM {_CB_TABLE} GROUP BY state"
             )
             summary = CircuitBreakerSummary()
             for state, count in rows:
@@ -547,7 +570,7 @@ class SQLStatisticsRepository(GenericSQLRepository, StatisticsRepositoryInterfac
         try:
             rows = self._fetch_all(
                 f"SELECT service_name, state, failure_count, success_count, "
-                f"last_failure_at, updated_at FROM {CB_TABLE}"
+                f"last_failure_at, updated_at FROM {_CB_TABLE}"
             )
             return [
                 CircuitBreakerInfo(
@@ -568,6 +591,66 @@ class SQLStatisticsRepository(GenericSQLRepository, StatisticsRepositoryInterfac
             return []
 
     # ----- Persistence (hybrid storage) -------------------------------------
+
+    # Columns the mirror refreshes on a repeat write, in dialect-safe order:
+    # ``status`` goes last because MySQL evaluates the assignment list left to
+    # right, and every guard below reads the *stored* status.
+    _PERSIST_UPDATE_COLS = (
+        "retry_count",
+        "resolved_at",
+        "updated_at",
+        "data",
+        "status",
+    )
+
+    def _persist_upsert_tail(self) -> str:
+        """Build the upsert tail that refuses to walk a finished entry backwards.
+
+        The mirror is written from snapshots, and snapshots arrive late: a
+        worker resolves an entry while a task carrying the older PENDING
+        picture is still in flight. A plain last-write-wins upsert lets that
+        task reopen a closed entry — and a reopened entry is a candidate for
+        replay again, which is the double execution the dead-letter queue
+        exists to prevent. So the update half applies only when the stored
+        entry is not already finished, or when the incoming snapshot is
+        itself a finished one. Terminal-to-terminal still lands, and a first
+        insert is untouched: the guard gates the conflict branch only.
+
+        The primary store stays authoritative — this only keeps the mirror
+        from moving backwards.
+        """
+        guard = (
+            f"{DLQ_TABLE}.status NOT IN ({_TERMINAL_STATUS_SQL}) "
+            f"OR {{incoming}}.status IN ({_TERMINAL_STATUS_SQL})"
+        )
+        if self._dialect == SQLDialect.POSTGRESQL:
+            assignments = ", ".join(
+                f"{c} = EXCLUDED.{c}" for c in self._PERSIST_UPDATE_COLS
+            )
+            return (
+                f"ON CONFLICT (id) DO UPDATE SET {assignments} "
+                f"WHERE {guard.format(incoming='EXCLUDED')}"
+            )
+        if self._dialect == SQLDialect.MYSQL:
+            # MySQL's upsert has no WHERE, so the guard rides each assignment.
+            # ``VALUES(col)`` is the incoming row; a bare column is the stored
+            # one, which is why ``status`` is assigned last.
+            mysql_guard = (
+                f"status NOT IN ({_TERMINAL_STATUS_SQL}) "
+                f"OR VALUES(status) IN ({_TERMINAL_STATUS_SQL})"
+            )
+            assignments = ", ".join(
+                f"{c} = IF({mysql_guard}, VALUES({c}), {c})"
+                for c in self._PERSIST_UPDATE_COLS
+            )
+            return f"ON DUPLICATE KEY UPDATE {assignments}"
+        assignments = ", ".join(
+            f"{c} = excluded.{c}" for c in self._PERSIST_UPDATE_COLS
+        )
+        return (
+            f"ON CONFLICT(id) DO UPDATE SET {assignments} "
+            f"WHERE {guard.format(incoming='excluded')}"
+        )
 
     def persist_entry(self, entry_data: dict[str, Any]) -> str | None:
         try:
@@ -599,17 +682,7 @@ class SQLStatisticsRepository(GenericSQLRepository, StatisticsRepositoryInterfac
                     )
                 }
             )
-            upsert_tail = dialect_upsert_clause(
-                self._dialect,
-                conflict_cols=["id"],
-                update_cols=[
-                    "status",
-                    "retry_count",
-                    "resolved_at",
-                    "updated_at",
-                    "data",
-                ],
-            )
+            upsert_tail = self._persist_upsert_tail()
             self._execute(
                 f"INSERT INTO {DLQ_TABLE} "
                 f"(id, domain, failure_type, status, entity_type, entity_id, "

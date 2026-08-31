@@ -33,6 +33,8 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 import structlog
 
+from baldur.settings.introspection import register_direct_read_env_vars
+
 if TYPE_CHECKING:
     from baldur.factory.base import GenericProviderRegistry
     from baldur.runtime import BaldurRuntime
@@ -110,9 +112,18 @@ class _RegistryWiring(NamedTuple):
     the same cold-process baseline. It is explicit per-row data rather
     than a kind→baseline heuristic because the baseline does not follow
     the dispatch kind: the probe-surface PRIORITY_CHAIN rows reset to
-    ``"noop"`` (their only safe default), while a hybrid PRIORITY_CHAIN
-    row that registers no ``noop`` adapter (e.g. ``event_journal_repo``,
-    memory/redis/sql) must reset to ``"memory"``.
+    ``"noop"`` (their only safe default), a hybrid PRIORITY_CHAIN row
+    that registers no ``noop`` adapter (``event_journal_repo``,
+    memory/redis/sql) resets to ``"memory"``, and ``failed_op_repo`` —
+    the other memory/redis/sql hybrid — resets to ``"redis"``, which is
+    its module-load default.
+
+    ``eager_validate`` (PRIORITY_CHAIN only) constructs the selected
+    provider once, at wiring time, so a backend that probes True but is
+    unusable — the classic case being a SQL DSN with no driver installed
+    — cannot masquerade as the wired default. Off by default: it costs an
+    eager construction per row, and the rows that carry durability
+    promises are the ones that need it.
     """
 
     backend_kind: _BackendKind
@@ -122,6 +133,7 @@ class _RegistryWiring(NamedTuple):
     priority_chain: tuple[tuple[str, Callable[[], bool]], ...] = ()
     env_override: str | None = None
     reset_baseline: str = "memory"
+    eager_validate: bool = False
 
 
 # Module-level idempotency state.
@@ -344,9 +356,10 @@ def reset_init_state() -> None:
         # baseline is its own ``reset_baseline`` (570 D4): the probe-surface
         # PRIORITY_CHAIN rows restore to "noop" (their only registered
         # default — "memory" is not a registered provider there and would
-        # break get() resolution), while a memory/redis/sql hybrid row
-        # restores to "memory". The reset target equals each row's
-        # module-load default, so the two stay symmetric by construction.
+        # break get() resolution), the event-journal hybrid restores to
+        # "memory", and the dead-letter hybrid restores to "redis". The
+        # reset target equals each row's module-load default, so the two
+        # stay symmetric by construction.
         try:
             from baldur.factory.registry import ProviderRegistry
 
@@ -1760,6 +1773,48 @@ _REGISTRIES_TO_WIRE: tuple[_RegistryWiring, ...] = (
         env_override="BALDUR_EVENT_JOURNAL_BACKEND",
         reset_baseline="memory",
     ),
+    # 778 D1/D3 — failed_op_repo is the second memory/redis/sql hybrid. The
+    # SQL dead-letter adapter shipped registered but unselectable: no knob,
+    # no wiring row, a hard "redis" module-load default. This row is what
+    # makes durable-in-your-own-database dead-letter capture reachable, and
+    # what lets a Redis-less deployment land on SQL rather than on memory
+    # (where a restart loses every parked call).
+    #
+    # reset_baseline is "redis" — NOT "memory" — because that is this
+    # registry's module-load default (factory/registry.py), and the reset
+    # target must equal it so a re-init starts from the cold-process
+    # baseline. Production posture is inherited from the cache row: with
+    # Redis unset in production, Phase 1 raises before this row runs.
+    #
+    # eager_validate is on: this row is the one that promises durability,
+    # and "sql selected, driver missing" would otherwise degrade to silent
+    # per-worker memory at first capture (the DI fallback policy defaults
+    # to ALLOW in every environment, production included).
+    _RegistryWiring(
+        _BackendKind.PRIORITY_CHAIN,
+        "failed_op_repo",
+        target_name="",
+        priority_chain=(
+            ("redis", _redis_url_configured),
+            ("sql", _postgres_dsn_configured),
+            ("memory", lambda: True),
+        ),
+        env_override="BALDUR_DLQ_BACKEND",
+        reset_baseline="redis",
+        eager_validate=True,
+    ),
+)
+
+
+# 778 D7 — every wiring override knob is a direct environment read, so the
+# startup unknown-env-var scan must know them or it warns an operator off a
+# var the framework itself defined. Derived from the table rather than
+# authored per name: a future row registers itself. The read site is
+# ``os.environ.get(wiring.env_override)`` — a variable, not a literal — so
+# these names are invisible to the Channel-1 source scan by construction,
+# which is exactly what Channel 2 exists for.
+register_direct_read_env_vars(
+    *(w.env_override for w in _REGISTRIES_TO_WIRE if w.env_override)
 )
 
 
@@ -1924,15 +1979,35 @@ def _wire_priority_chain_registry(
        AND ``BALDUR_SQL_DSN`` set) surface visibly without a debugger.
        Dual-config is a legitimate state, hence ``info`` rather than
        WARNING — only an invalid ``env_override`` warrants a warning.
+    4. An ``env_override`` naming a chain member whose own probe says
+       "not configured" is still honored — an explicit operator
+       choice outranks a probe — but it is announced at WARNING, because
+       the usual cause is a half-finished configuration (``…=sql`` with
+       no DSN set). Rows with ``eager_validate`` then find out for
+       certain; rows without it at least leave a breadcrumb.
 
     ``runtime.is_test_mode`` is handled by the caller's early return.
     """
     adapter_type = registry._adapter_type
 
+    matched = [
+        name
+        for name, probe in wiring.priority_chain
+        if probe() and registry.has_provider(name)
+    ]
+
     if wiring.env_override:
         env_val = (os.environ.get(wiring.env_override) or "").strip()
         if env_val:
             if registry.has_provider(env_val):
+                chain_names = [name for name, _probe in wiring.priority_chain]
+                if env_val in chain_names and env_val not in matched:
+                    logger.warning(
+                        "baldur.registry_env_override_probe_mismatch",
+                        registry=adapter_type,
+                        env_var=wiring.env_override,
+                        value=env_val,
+                    )
                 registry.set_default(env_val)
                 logger.info(
                     "baldur.registry_default_wired",
@@ -1940,6 +2015,7 @@ def _wire_priority_chain_registry(
                     backend=env_val,
                     source=wiring.env_override,
                 )
+                _eager_validate_wired_backend(registry, wiring, runtime, matched)
                 return
             logger.warning(
                 "baldur.registry_env_override_invalid",
@@ -1948,11 +2024,6 @@ def _wire_priority_chain_registry(
                 value=env_val,
             )
 
-    matched = [
-        name
-        for name, probe in wiring.priority_chain
-        if probe() and registry.has_provider(name)
-    ]
     if not matched:
         # Probe-surface fallback is intentional, not degradation. DEBUG
         # (not WARNING/INFO) avoids noise on legitimate non-Django
@@ -1983,6 +2054,80 @@ def _wire_priority_chain_registry(
             backend=winner,
             source="priority_chain",
         )
+    _eager_validate_wired_backend(registry, wiring, runtime, matched)
+
+
+def _eager_validate_wired_backend(
+    registry: GenericProviderRegistry,
+    wiring: _RegistryWiring,
+    runtime: BaldurRuntime,
+    candidates: list[str],
+) -> None:
+    """Construct the just-wired provider so an unusable one cannot hide.
+
+    A probe proves an environment variable is set, never that the backend
+    behind it works. ``BALDUR_SQL_DSN`` with no database driver installed
+    passes every probe, registers fine (the discover block imports only
+    stdlib), and raises ``ImportError`` at the first capture — where the DI
+    fallback swallows it into per-worker memory, silently, in production
+    too. An operator who asked for durable storage would get the opposite
+    with no log line saying so.
+
+    Constructing once at wiring time converts that into a startup verdict:
+
+    - construction succeeds → keep the selection. Note this proves the
+      driver is importable and the connection factory builds, NOT that the
+      database is reachable; an unreachable database stays a runtime event,
+      and the capture path already answers it with a WARNING-logged
+      local-file fallback.
+    - construction fails in production → ``ConfigurationError``. A
+      deployment that asked for a backend it cannot build is a misconfigured
+      deployment, and a crash-looping pod is louder than a lie.
+    - construction fails elsewhere → WARNING, then demote to the next
+      matched chain member. The terminal ``("memory", lambda: True)`` row
+      always constructs, so the loop always terminates on a usable default.
+
+    Opt-in per row (``eager_validate``); rows that do not set it keep the
+    lazy first-use behavior exactly.
+    """
+    if not wiring.eager_validate:
+        return
+
+    from baldur.core.exceptions import ConfigurationError
+
+    adapter_type = registry._adapter_type
+    selected = registry.get_default_name()
+    # Selected first, then the matched chain members as demotion targets.
+    remaining = [selected] if selected else []
+    remaining += [name for name in candidates if name != selected]
+
+    for name in remaining:
+        try:
+            registry.get(name)
+        except Exception as e:
+            if runtime.is_production:
+                raise ConfigurationError(
+                    f"ProviderRegistry.{adapter_type} selected backend "
+                    f"{name!r}, but it cannot be constructed: {e}. Install "
+                    "the backend's driver, correct the connection settings, "
+                    f"or select another backend via {wiring.env_override}."
+                ) from e
+            logger.warning(
+                "baldur.registry_backend_unusable",
+                registry=adapter_type,
+                backend=name,
+                error=str(e),
+            )
+            continue
+        if name != selected:
+            registry.set_default(name)
+            logger.warning(
+                "baldur.registry_backend_demoted",
+                registry=adapter_type,
+                requested=selected,
+                backend=name,
+            )
+        return
 
 
 def _install_resilient_storage_backend(runtime: BaldurRuntime) -> None:
@@ -2446,6 +2591,25 @@ def _build_startup_report(ext_result: ExtensionResult) -> dict[str, Any]:
         report["dlq_capture_backing"] = resolve_dlq_backing_tier()
     except Exception:
         report["dlq_capture_backing"] = "oss"
+
+    # Which store the captured failures land in (778 D3). The chain resolves
+    # at DEBUG when a single probe matches, so without this line the operator's
+    # INFO surface never names the DLQ backend at all — and "storage_backend"
+    # above describes the shared resilient backend, not this registry.
+    #
+    # This states the configured posture (the registry default), not a runtime
+    # guarantee. Eager validation keeps the default off an unusable backend, so
+    # the remaining divergences are runtime events (a store failure shows up as
+    # the local-file fallback WARNING), a repository injected programmatically,
+    # and a capture issued before init() — the capture service memoizes its
+    # repository on first store, so a pre-init capture binds the module-load
+    # default for the life of the process.
+    try:
+        from baldur.factory.registry import ProviderRegistry
+
+        report["dlq_backend"] = ProviderRegistry.failed_op_repo.get_default_name()
+    except Exception:
+        report["dlq_backend"] = None
 
     # Effective retry backoff. The advertised env vars and the ladder the retry
     # stage actually builds are two different things until something prints

@@ -1,7 +1,10 @@
 """
 Unit tests for DLQ eviction protection — REPLAYING/REVIEWING entries must survive eviction.
 
-Covers the R2 bug fix across all three adapter implementations:
+Covers the R2 bug fix across all three adapter implementations, plus the
+narrowing that put the memory and SQL adapters on the Redis adapter's
+eviction population — candidates are the entries the size cap actually
+counts, so an eviction always shrinks the number that triggered it:
 - InMemory: adapters/memory/failed_operation.py
 - Redis: adapters/redis/dlq_maintenance.py
 - Overflow: baldur_pro/services/dlq/overflow.py (drop_oldest delegation)
@@ -122,23 +125,35 @@ class TestInMemoryEvictionProtectionBehavior:
         assert evicted == 0
         assert repo.get_by_id(eid) is not None
 
-    def test_resolved_entry_is_evicted(self, repo):
-        """RESOLVED entries are NOT protected."""
+    def test_resolved_entry_is_not_an_eviction_candidate(self, repo):
+        """A RESOLVED entry is finished, so eviction leaves it alone.
+
+        Overflow eviction exists to bring the *counted* queue back under the
+        cap, and the count excludes finished entries. Deleting one would
+        report an eviction that shrank nothing. Retention/purge owns their
+        removal — this is the same population the Redis adapter evicts from.
+        """
         eid = _create_entry(repo)
         _set_status(repo, eid, FailedOperationStatus.RESOLVED.value)
         evicted = repo.evict_oldest(10)
-        assert evicted == 1
-        assert repo.get_by_id(eid) is None
+        assert evicted == 0
+        assert repo.get_by_id(eid) is not None
 
-    def test_archived_entry_is_evicted(self, repo):
-        """ARCHIVED entries are NOT protected."""
+    def test_archived_entry_is_not_an_eviction_candidate(self, repo):
+        """Same for ARCHIVED — outside the counted population, so untouched."""
         eid = _create_entry(repo)
         _set_status(repo, eid, FailedOperationStatus.ARCHIVED.value)
         evicted = repo.evict_oldest(10)
-        assert evicted == 1
+        assert evicted == 0
+        assert repo.get_by_id(eid) is not None
 
-    def test_mixed_statuses_only_protected_survive(self, repo):
-        """In a mixed set, only REPLAYING/REVIEWING survive eviction."""
+    def test_mixed_statuses_evict_only_the_evictable(self, repo):
+        """In a mixed set only the entries the cap counts are evicted.
+
+        This is the shape that used to neutralize the cap: with archived
+        entries in the candidate window, eviction spent its whole batch on
+        rows the count never included, so the counted queue never shrank.
+        """
         pending_id = _create_entry(repo)
         replaying_id = _create_entry(repo)
         reviewing_id = _create_entry(repo)
@@ -148,14 +163,17 @@ class TestInMemoryEvictionProtectionBehavior:
         _set_status(repo, reviewing_id, FailedOperationStatus.REVIEWING.value)
         _set_status(repo, resolved_id, FailedOperationStatus.RESOLVED.value)
 
+        counted_before = repo.count_all()
         evicted = repo.evict_oldest(10)
 
-        # PENDING + RESOLVED evicted, REPLAYING + REVIEWING survive
-        assert evicted == 2
+        # Only the PENDING entry is evictable; everything else survives.
+        assert evicted == 1
         assert repo.get_by_id(pending_id) is None
         assert repo.get_by_id(replaying_id) is not None
         assert repo.get_by_id(reviewing_id) is not None
-        assert repo.get_by_id(resolved_id) is None
+        assert repo.get_by_id(resolved_id) is not None
+        # The eviction moved the number the cap is enforced against.
+        assert repo.count_all() == counted_before - 1
 
     def test_eviction_count_excludes_protected(self, repo):
         """Return count reflects only actually evicted entries."""
