@@ -1,5 +1,7 @@
 {
   "$schema": "https://context7.com/schema/context7.json",
+  "url": "https://context7.com/baldurhq/baldur",
+  "public_key": "pk_PDN886CJcG9Ok1zzH5cqQ",
   "projectTitle": "Baldur - Python Resilience Framework (Circuit Breaker, Retry, DLQ)",
   "description": "Self-healing reliability layer for Python: circuit breaker, retry, fallback, timeout, and dead-letter queue behind one @baldur.protected decorator. Django, FastAPI, Flask, and Celery adapters.",
   "branch": "main",
