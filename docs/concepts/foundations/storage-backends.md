@@ -95,14 +95,35 @@ export BALDUR_SQL_DSN=postgresql://user:pass@host:5432/db
 Reach for this when you want that history **durable and queryable in the database
 you already operate** rather than in Redis.
 
-To be precise about the boundary: the **live** stores — circuit breaker state,
-idempotency keys, rate-limit windows, and the dead-letter queue — do not move
-to SQL. They live in memory or Redis, and the DLQ's durability story today is
-Redis with its persistence settings. The SQL backend holds the records Baldur
-writes *about* incidents, not the state it coordinates *during* them. It is an
-advanced backend and is not part of the tested compatibility matrix; the
-default multi-worker path is Redis, not SQL. Baldur is a resilience layer, not
-your system of record — it does not move your application's data here.
+**The dead-letter queue can live here too.** A parked call is business data —
+an order that did not go through — so it is the one live store worth keeping in
+a database you already back up. Select it explicitly, or let Baldur pick:
+
+```bash
+export BALDUR_DLQ_BACKEND=sql     # explicit
+```
+
+Left unset, Baldur picks the first backend the environment offers: Redis when
+`BALDUR_REDIS_URL` is set, otherwise SQL when a DSN is configured, otherwise
+memory. So a Redis deployment is unchanged, and a database-only deployment now
+lands on durable storage instead of losing its dead letters at the next
+restart. If the backend you selected cannot be constructed — the driver is not
+installed, say — Baldur says so at startup rather than quietly falling back:
+in production it refuses to boot, elsewhere it logs a warning and steps down
+the same chain.
+
+Be precise about what this makes durable: the **store**. By default capture is
+asynchronous — the entry is buffered in-process and written a moment later — so
+a process killed inside that window can still lose the most recent entries. Pass
+`mode="sync"` on the capture call when you need the write committed before the
+call returns.
+
+The other **live** stores — circuit breaker state, idempotency keys, and
+rate-limit windows — do not move to SQL. They are high-frequency coordination
+state and belong in memory or Redis. Baldur is a resilience layer, not your
+system of record — it does not move your application's data here. The SQL
+backend is advanced and is not part of the tested compatibility matrix; the
+default multi-worker path is Redis, not SQL.
 
 ## Which do I need?
 
@@ -112,9 +133,10 @@ your system of record — it does not move your application's data here.
 | Running more than one worker or host | Redis | `BALDUR_REDIS_URL=redis://…` |
 | Running Redis with high availability | Redis Sentinel | `BALDUR_REDIS_URL=redis+sentinel://…` |
 | Wanting durable, queryable incident history in your RDBMS | SQL | `BALDUR_SQL_DSN=postgresql://…` |
+| Wanting parked calls in the database you already back up | SQL | `BALDUR_SQL_DSN=…` + `BALDUR_DLQ_BACKEND=sql` |
 
 ## See also
 
 - [Getting Started](../../getting-started/index.md) — every quickstart ends with the Redis production step
-- [Environment Variables](../../reference/env-vars.md) — the `Storage` section lists `BALDUR_REDIS_URL`, `BALDUR_SQL_DSN`, and the per-feature Redis overrides
+- [Environment Variables](../../reference/env-vars.md) — the `Storage` section lists `BALDUR_REDIS_URL`, `BALDUR_SQL_DSN`, `BALDUR_DLQ_BACKEND`, and the per-feature Redis overrides
 - [Data consistency boundaries runbook](https://github.com/baldurhq/baldur/blob/main/docs/runbooks/data-consistency-boundaries.md) — which data belongs in Baldur vs. an ACID database, and how each feature behaves when a backend is unavailable

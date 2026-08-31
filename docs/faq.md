@@ -169,7 +169,7 @@ when you need:
   before circuit breaker overrides take effect.
 - **Unified notifications** — Slack, PagerDuty, or webhook alerts from
   one configuration.
-- **DLQ at scale** — batch replay, durable archival, and console-driven
+- **DLQ at scale** — batch replay, compression lifecycle, and console-driven
   operations for thousands of entries.
 
 The [tier model](concepts/foundations/tier-model.md) page has a decision
