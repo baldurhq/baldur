@@ -1504,3 +1504,595 @@ class TestBackendKindContract:
         from baldur.bootstrap import _BackendKind
 
         assert isinstance(_BackendKind.REDIS, str)
+
+
+# =============================================================================
+# 778 — failed_op_repo PRIORITY_CHAIN row (D1/D3) trigger matrix
+# =============================================================================
+
+# Names whose ambient presence would silently flip a probe. Every dead-letter
+# wiring case clears the whole set first and re-declares only what it means to
+# test, so a developer's own shell configuration cannot decide the outcome.
+_DLQ_WIRING_ENV_VARS = (
+    "BALDUR_TEST_MODE",
+    "BALDUR_REDIS_URL",
+    "BALDUR_SQL_DSN",
+    "BALDUR_DLQ_BACKEND",
+    "BALDUR_EVENT_JOURNAL_BACKEND",
+    "DJANGO_SETTINGS_MODULE",
+    "BALDUR_POSTGRES_HOST",
+    "BALDUR_POSTGRES_PORT",
+    "BALDUR_POSTGRES_DATABASE",
+    "BALDUR_POSTGRES_USER",
+)
+
+# A DSN the stdlib can build a connection factory from. The postgres DSN the
+# probe would otherwise synthesize needs a driver that may not be installed
+# where this suite runs, and ``eager_validate`` really does construct the
+# selected repository — so the sqlite form keeps the "dsn set" cases about
+# wiring rather than about the local package set.
+_SQLITE_DSN = "sqlite:///baldur-dlq-wiring-test.db"
+
+
+@pytest.fixture
+def dlq_wiring_env(monkeypatch):
+    """Neutral non-production environment for the dead-letter wiring row."""
+    for name in _DLQ_WIRING_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("BALDUR_ENVIRONMENT", "development")
+
+
+def _replace_failed_op_provider(name, factory):
+    """Swap one ``failed_op_repo`` provider and drop the cached instances.
+
+    Eager validation resolves through ``registry.get()``, which returns a
+    cached instance when one exists — an instance an earlier test may have
+    built. Clearing makes the swapped factory the thing that actually runs.
+    Both mutations are undone by ``isolated_all_wired_registries``.
+    """
+    from baldur.factory.registry import ProviderRegistry
+
+    ProviderRegistry.failed_op_repo.register(name, factory)
+    ProviderRegistry.failed_op_repo.clear_instances()
+
+
+def _unusable_backend():
+    """Stand-in for a backend that probes True and cannot be constructed."""
+    raise ImportError("baldur.sql: psycopg2 is required for postgresql DSNs")
+
+
+class TestWireRegistryDefaultsFailedOpRepoBehavior:
+    """778 D1/D3 — ``failed_op_repo`` wired as a PRIORITY_CHAIN row
+    (``redis > sql > memory``) with ``BALDUR_DLQ_BACKEND`` as the operator
+    ``env_override``.
+
+    Each case drives the full ``_wire_registry_defaults`` orchestration, so
+    the row is observed where it actually runs — after the cache row's
+    production gate and alongside every other row.
+
+    Unlike the event-journal row, this one carries ``eager_validate``, so a
+    resolution that lands on ``"sql"`` also constructs the repository. Cases
+    that mean to select SQL therefore configure a sqlite DSN.
+    """
+
+    def test_failed_op_repo_in_test_mode_keeps_the_module_load_redis_default(
+        self, monkeypatch, dlq_wiring_env, isolated_all_wired_registries
+    ):
+        """test_mode returns before any row applies.
+
+        The baseline this row falls back to is ``"redis"``, not ``"memory"``
+        — that is what ``factory/registry.py`` sets at module load.
+        """
+        from baldur import bootstrap
+        from baldur.factory.registry import ProviderRegistry
+
+        monkeypatch.setenv("BALDUR_TEST_MODE", "true")
+        monkeypatch.setenv("BALDUR_ENVIRONMENT", "production")
+        monkeypatch.setenv("BALDUR_REDIS_URL", "redis://x:6379/0")
+        bootstrap.reset_init_state()
+
+        bootstrap._wire_registry_defaults()
+
+        assert ProviderRegistry.failed_op_repo.get_default_name() == "redis"
+
+    def test_failed_op_repo_with_redis_url_set_wires_to_redis(
+        self, monkeypatch, dlq_wiring_env, isolated_all_wired_registries
+    ):
+        """Redis configured → the first chain probe wins, as it does today."""
+        from baldur import bootstrap
+        from baldur.factory.registry import ProviderRegistry
+
+        monkeypatch.setenv("BALDUR_REDIS_URL", "redis://dev:6379/0")
+        bootstrap.reset_init_state()
+
+        _stub_redis_settings(monkeypatch, url="redis://dev:6379/0")
+        cm, _configure, _backend = _patch_eager_backend(wal_initialized=True)
+
+        with cm:
+            bootstrap._wire_registry_defaults()
+
+        assert ProviderRegistry.failed_op_repo.get_default_name() == "redis"
+
+    def test_failed_op_repo_with_redis_unset_and_dsn_set_wires_to_sql(
+        self, monkeypatch, dlq_wiring_env, isolated_all_wired_registries
+    ):
+        """The whole point of the row.
+
+        A Redis-less deployment with a database used to land on memory,
+        where a restart lost every parked call. It now lands on the durable
+        store without the operator naming a backend at all.
+        """
+        from baldur import bootstrap
+        from baldur.factory.registry import ProviderRegistry
+
+        monkeypatch.setenv("BALDUR_SQL_DSN", _SQLITE_DSN)
+        bootstrap.reset_init_state()
+
+        bootstrap._wire_registry_defaults()
+
+        assert ProviderRegistry.failed_op_repo.get_default_name() == "sql"
+
+    def test_failed_op_repo_with_no_signal_resolves_the_memory_chain_terminal(
+        self, monkeypatch, dlq_wiring_env, isolated_all_wired_registries
+    ):
+        """Neither signal → the terminal ``("memory", True)`` member.
+
+        Pre-drifted to ``"redis"`` so the resolution is a visible move rather
+        than a pass-through over the module-load default.
+        """
+        from baldur import bootstrap
+        from baldur.factory.registry import ProviderRegistry
+
+        bootstrap.reset_init_state()
+        ProviderRegistry.failed_op_repo.set_default("redis")
+
+        bootstrap._wire_registry_defaults()
+
+        assert ProviderRegistry.failed_op_repo.get_default_name() == "memory"
+
+    def test_failed_op_repo_override_selects_sql_over_the_chains_redis_winner(
+        self, monkeypatch, dlq_wiring_env, isolated_all_wired_registries
+    ):
+        """An explicit operator choice outranks the probes.
+
+        Redis is configured, so the chain would resolve ``"redis"``; the knob
+        moves the dead-letter store to SQL without touching anything else.
+        """
+        from baldur import bootstrap
+        from baldur.factory.registry import ProviderRegistry
+
+        monkeypatch.setenv("BALDUR_REDIS_URL", "redis://dev:6379/0")
+        monkeypatch.setenv("BALDUR_SQL_DSN", _SQLITE_DSN)
+        monkeypatch.setenv("BALDUR_DLQ_BACKEND", "sql")
+        bootstrap.reset_init_state()
+
+        _stub_redis_settings(monkeypatch, url="redis://dev:6379/0")
+        cm, _configure, _backend = _patch_eager_backend(wal_initialized=True)
+
+        with cm:
+            bootstrap._wire_registry_defaults()
+
+        assert ProviderRegistry.failed_op_repo.get_default_name() == "sql"
+        # The knob is dead-letter-scoped: the other memory/redis/sql hybrid
+        # keeps resolving through its own chain.
+        assert ProviderRegistry.event_journal_repo.get_default_name() == "redis"
+
+    def test_failed_op_repo_override_selects_memory_over_the_chains_sql_winner(
+        self, monkeypatch, dlq_wiring_env, isolated_all_wired_registries
+    ):
+        """The override also works in the "less durable" direction."""
+        from baldur import bootstrap
+        from baldur.factory.registry import ProviderRegistry
+
+        monkeypatch.setenv("BALDUR_SQL_DSN", _SQLITE_DSN)
+        monkeypatch.setenv("BALDUR_DLQ_BACKEND", "memory")
+        bootstrap.reset_init_state()
+
+        ProviderRegistry.failed_op_repo.set_default("redis")
+
+        bootstrap._wire_registry_defaults()
+
+        assert ProviderRegistry.failed_op_repo.get_default_name() == "memory"
+
+    def test_failed_op_repo_unknown_override_warns_and_leaves_the_chain_in_charge(
+        self, monkeypatch, dlq_wiring_env, isolated_all_wired_registries
+    ):
+        """A typo must degrade to a warning plus a working queue.
+
+        This is the other half of the non-raising settings validator: the
+        name is rejected here, where rejecting it costs one log line, not in
+        ``DLQSettings`` where it would cost the whole dead-letter queue.
+        """
+        from structlog.testing import capture_logs
+
+        from baldur import bootstrap
+        from baldur.factory.registry import ProviderRegistry
+
+        monkeypatch.setenv("BALDUR_SQL_DSN", _SQLITE_DSN)
+        monkeypatch.setenv("BALDUR_DLQ_BACKEND", "postgres")
+        bootstrap.reset_init_state()
+
+        with capture_logs() as logs:
+            bootstrap._wire_registry_defaults()
+
+        assert ProviderRegistry.failed_op_repo.get_default_name() == "sql"
+        warned = [
+            e
+            for e in logs
+            if e.get("event") == "baldur.registry_env_override_invalid"
+            and e.get("registry") == "failed_op_repo"
+        ]
+        assert len(warned) == 1
+        assert warned[0]["value"] == "postgres"
+        assert warned[0]["env_var"] == "BALDUR_DLQ_BACKEND"
+        assert warned[0]["log_level"] == "warning"
+
+    def test_failed_op_repo_override_of_an_unprobed_backend_is_honored_but_announced(
+        self, monkeypatch, dlq_wiring_env, isolated_all_wired_registries
+    ):
+        """``BALDUR_DLQ_BACKEND=sql`` with no DSN configured.
+
+        The usual cause is a half-finished configuration, so the selection
+        stands — an explicit choice outranks a probe — and the mismatch is
+        announced rather than silently honored.
+
+        The provider is swapped for a trivially constructable stand-in: the
+        subject here is the warning and the selection, and without a DSN the
+        real factory would be resolving whatever driver happens to be
+        installed on the machine running the suite.
+        """
+        from structlog.testing import capture_logs
+
+        from baldur import bootstrap
+        from baldur.factory.registry import ProviderRegistry
+
+        monkeypatch.setenv("BALDUR_DLQ_BACKEND", "sql")
+        bootstrap.reset_init_state()
+        _replace_failed_op_provider("sql", lambda: MagicMock(name="sql-repo"))
+
+        with capture_logs() as logs:
+            bootstrap._wire_registry_defaults()
+
+        assert ProviderRegistry.failed_op_repo.get_default_name() == "sql"
+        mismatched = [
+            e
+            for e in logs
+            if e.get("event") == "baldur.registry_env_override_probe_mismatch"
+            and e.get("registry") == "failed_op_repo"
+        ]
+        assert len(mismatched) == 1
+        assert mismatched[0]["value"] == "sql"
+        assert mismatched[0]["log_level"] == "warning"
+
+    def test_failed_op_repo_override_matching_its_probe_is_not_announced(
+        self, monkeypatch, dlq_wiring_env, isolated_all_wired_registries
+    ):
+        """The mismatch warning is a mismatch warning, not an override warning.
+
+        Same override as the case above, this time with the DSN that makes
+        its probe true — nothing to announce.
+        """
+        from structlog.testing import capture_logs
+
+        from baldur import bootstrap
+        from baldur.factory.registry import ProviderRegistry
+
+        monkeypatch.setenv("BALDUR_SQL_DSN", _SQLITE_DSN)
+        monkeypatch.setenv("BALDUR_DLQ_BACKEND", "sql")
+        bootstrap.reset_init_state()
+
+        with capture_logs() as logs:
+            bootstrap._wire_registry_defaults()
+
+        assert ProviderRegistry.failed_op_repo.get_default_name() == "sql"
+        assert not [
+            e
+            for e in logs
+            if e.get("event") == "baldur.registry_env_override_probe_mismatch"
+            and e.get("registry") == "failed_op_repo"
+        ]
+
+    def test_failed_op_repo_reset_init_state_returns_the_default_to_redis(
+        self, monkeypatch, dlq_wiring_env, isolated_all_wired_registries
+    ):
+        """Enrolling the row in the wiring table enrolls it in the reset.
+
+        A reset returns every wired registry to its own module-load
+        baseline; for the dead-letter registry that baseline is ``"redis"``,
+        so a wired-then-reset process starts the next init from the same
+        cold-process state a fresh interpreter would.
+        """
+        from baldur import bootstrap
+        from baldur.factory.registry import ProviderRegistry
+
+        monkeypatch.setenv("BALDUR_SQL_DSN", _SQLITE_DSN)
+        bootstrap.reset_init_state()
+        bootstrap._wire_registry_defaults()
+        assert ProviderRegistry.failed_op_repo.get_default_name() == "sql"
+
+        bootstrap.reset_init_state()
+
+        assert ProviderRegistry.failed_op_repo.get_default_name() == "redis"
+        assert ProviderRegistry.failed_op_repo.get_cached_instances() == {}
+
+    def test_failed_op_repo_in_production_with_redis_url_set_wires_to_redis(
+        self, monkeypatch, dlq_wiring_env, isolated_all_wired_registries
+    ):
+        """In production the cache row guarantees Redis, so the chain's first
+        member matches by the time the dead-letter row runs."""
+        from baldur import bootstrap
+        from baldur.factory.registry import ProviderRegistry
+
+        monkeypatch.setenv("BALDUR_ENVIRONMENT", "production")
+        monkeypatch.setenv("BALDUR_REDIS_URL", "redis://prod:6379/0")
+        monkeypatch.setenv("BALDUR_SQL_DSN", _SQLITE_DSN)
+        bootstrap.reset_init_state()
+
+        _stub_redis_settings(monkeypatch, url="redis://prod:6379/0")
+        cm, _configure, _backend = _patch_eager_backend(wal_initialized=True)
+
+        with cm:
+            bootstrap._wire_registry_defaults()
+
+        assert ProviderRegistry.failed_op_repo.get_default_name() == "redis"
+
+    def test_failed_op_repo_in_production_without_redis_raises_at_the_cache_row_first(
+        self, monkeypatch, dlq_wiring_env, isolated_all_wired_registries
+    ):
+        """Production posture is inherited, not re-derived.
+
+        The cache row fails the boot before the chain phase is reached, so
+        the dead-letter row never has to decide what a production deployment
+        without Redis should mean.
+        """
+        from baldur import bootstrap
+        from baldur.factory.registry import ProviderRegistry
+
+        monkeypatch.setenv("BALDUR_ENVIRONMENT", "production")
+        bootstrap.reset_init_state()
+
+        with pytest.raises(ConfigurationError, match="BALDUR_REDIS_URL"):
+            bootstrap._wire_registry_defaults()
+
+        assert ProviderRegistry.failed_op_repo.get_default_name() == "redis"
+
+
+# =============================================================================
+# 778 — D9 eager backend validation
+# =============================================================================
+
+
+class TestEagerBackendValidationBehavior:
+    """778 D9 — the selected provider is constructed at wiring time.
+
+    A probe proves an environment variable is set, never that the backend
+    behind it works: ``BALDUR_SQL_DSN`` with no driver installed passes every
+    probe and only raises at the first capture, where the DI fallback
+    swallows it into per-worker memory — silently, production included. This
+    row constructs once at wiring time so that becomes a startup verdict.
+    """
+
+    def test_failed_op_repo_constructable_backend_keeps_the_selection_and_stays_quiet(
+        self, monkeypatch, dlq_wiring_env, isolated_all_wired_registries
+    ):
+        """The happy path constructs exactly once and demotes nothing."""
+        from structlog.testing import capture_logs
+
+        from baldur import bootstrap
+        from baldur.factory.registry import ProviderRegistry
+
+        built = []
+
+        def _build_sql_repo():
+            built.append(1)
+            return MagicMock(name="sql-repo")
+
+        monkeypatch.setenv("BALDUR_SQL_DSN", _SQLITE_DSN)
+        bootstrap.reset_init_state()
+        _replace_failed_op_provider("sql", _build_sql_repo)
+
+        with capture_logs() as logs:
+            bootstrap._wire_registry_defaults()
+
+        assert ProviderRegistry.failed_op_repo.get_default_name() == "sql"
+        assert len(built) == 1
+        assert not [
+            e
+            for e in logs
+            if e.get("event")
+            in {
+                "baldur.registry_backend_unusable",
+                "baldur.registry_backend_demoted",
+            }
+        ]
+
+    def test_failed_op_repo_unusable_backend_outside_production_warns_and_demotes(
+        self, monkeypatch, dlq_wiring_env, isolated_all_wired_registries
+    ):
+        """Development gets an honest posture instead of a silent lie.
+
+        The selection falls through to the next matched chain member — the
+        terminal ``memory`` always constructs — and both the cause and the
+        demotion are named, so the operator can see that "durable" did not
+        happen and why.
+        """
+        from structlog.testing import capture_logs
+
+        from baldur import bootstrap
+        from baldur.factory.registry import ProviderRegistry
+
+        monkeypatch.setenv("BALDUR_SQL_DSN", _SQLITE_DSN)
+        bootstrap.reset_init_state()
+        _replace_failed_op_provider("sql", _unusable_backend)
+
+        with capture_logs() as logs:
+            bootstrap._wire_registry_defaults()
+
+        assert ProviderRegistry.failed_op_repo.get_default_name() == "memory"
+
+        unusable = [
+            e for e in logs if e.get("event") == "baldur.registry_backend_unusable"
+        ]
+        assert len(unusable) == 1
+        assert unusable[0]["registry"] == "failed_op_repo"
+        assert unusable[0]["backend"] == "sql"
+        assert "psycopg2" in unusable[0]["error"]
+        assert unusable[0]["log_level"] == "warning"
+
+        demoted = [
+            e for e in logs if e.get("event") == "baldur.registry_backend_demoted"
+        ]
+        assert len(demoted) == 1
+        assert demoted[0]["requested"] == "sql"
+        assert demoted[0]["backend"] == "memory"
+        assert demoted[0]["log_level"] == "warning"
+
+    def test_failed_op_repo_unusable_backend_in_production_raises_naming_backend_and_knob(
+        self, monkeypatch, dlq_wiring_env, isolated_all_wired_registries
+    ):
+        """A production deployment that asked for a store it cannot build is
+        a misconfigured deployment — a crash-looping pod is louder than a lie.
+
+        The message has to carry both the backend that failed and the knob
+        that selects another one, or the operator is left guessing.
+        """
+        from baldur import bootstrap
+
+        monkeypatch.setenv("BALDUR_ENVIRONMENT", "production")
+        monkeypatch.setenv("BALDUR_REDIS_URL", "redis://prod:6379/0")
+        monkeypatch.setenv("BALDUR_SQL_DSN", _SQLITE_DSN)
+        monkeypatch.setenv("BALDUR_DLQ_BACKEND", "sql")
+        bootstrap.reset_init_state()
+        _replace_failed_op_provider("sql", _unusable_backend)
+
+        _stub_redis_settings(monkeypatch, url="redis://prod:6379/0")
+        cm, _configure, _backend = _patch_eager_backend(wal_initialized=True)
+
+        with cm, pytest.raises(ConfigurationError) as excinfo:
+            bootstrap._wire_registry_defaults()
+
+        message = str(excinfo.value)
+        assert "failed_op_repo" in message
+        assert "'sql'" in message
+        assert "BALDUR_DLQ_BACKEND" in message
+        assert "psycopg2" in message
+
+    def test_failed_op_repo_constructs_eagerly_while_a_flagless_row_does_not(
+        self, monkeypatch, dlq_wiring_env, isolated_all_wired_registries
+    ):
+        """The flag is opt-in, and the opt-out keeps lazy first-use behavior.
+
+        Both hybrids resolve ``"sql"`` in this environment; only the
+        dead-letter row — the one that carries the durability promise — pays
+        an eager construction for it.
+        """
+        from baldur import bootstrap
+        from baldur.factory.registry import ProviderRegistry
+
+        dlq_built: list[int] = []
+        journal_built: list[int] = []
+
+        def _build_dlq_repo():
+            dlq_built.append(1)
+            return MagicMock(name="sql-dlq")
+
+        def _build_journal_repo():
+            journal_built.append(1)
+            return MagicMock(name="sql-journal")
+
+        monkeypatch.setenv("BALDUR_SQL_DSN", _SQLITE_DSN)
+        bootstrap.reset_init_state()
+        _replace_failed_op_provider("sql", _build_dlq_repo)
+        ProviderRegistry.event_journal_repo.register("sql", _build_journal_repo)
+        ProviderRegistry.event_journal_repo.clear_instances()
+
+        bootstrap._wire_registry_defaults()
+
+        assert ProviderRegistry.failed_op_repo.get_default_name() == "sql"
+        assert ProviderRegistry.event_journal_repo.get_default_name() == "sql"
+        assert dlq_built == [1]
+        assert journal_built == []
+
+
+# =============================================================================
+# 778 — D3 startup report field / D7 derived env-var registration
+# =============================================================================
+
+
+class TestStartupReportDlqBackendBehavior:
+    """778 D3 — the operator's INFO surface names the dead-letter store.
+
+    A single-probe chain resolution logs at DEBUG, and ``storage_backend``
+    describes the shared resilient backend rather than this registry, so
+    without this field nothing at INFO says where captured failures land.
+    """
+
+    def test_report_names_the_wired_failed_op_repo_backend(
+        self, isolated_all_wired_registries
+    ):
+        """The field tracks the registry default, whatever it currently is."""
+        from baldur.bootstrap import ExtensionResult, _build_startup_report
+        from baldur.factory.registry import ProviderRegistry
+
+        ProviderRegistry.failed_op_repo.set_default("sql")
+
+        report = _build_startup_report(ExtensionResult())
+
+        assert report["dlq_backend"] == "sql"
+        assert report["dlq_backend"] == (
+            ProviderRegistry.failed_op_repo.get_default_name()
+        )
+
+    def test_report_follows_a_change_of_the_failed_op_repo_default(
+        self, isolated_all_wired_registries
+    ):
+        """Not a constant, and not the shared ``storage_backend`` value."""
+        from baldur.bootstrap import ExtensionResult, _build_startup_report
+        from baldur.factory.registry import ProviderRegistry
+
+        ProviderRegistry.failed_op_repo.set_default("memory")
+
+        report = _build_startup_report(ExtensionResult())
+
+        assert report["dlq_backend"] == "memory"
+
+
+class TestWiringEnvOverrideRegistrationContract:
+    """778 D7 — every wiring override knob is known to the startup scan.
+
+    The knobs are read as ``os.environ.get(wiring.env_override)`` — a
+    variable, not a literal — so the source scan cannot see them and the
+    startup pass used to warn operators off variables the framework itself
+    defined. The registration is derived from the wiring table, so a future
+    row registers itself; this test is derived the same way and would fail
+    for a row someone adds without one.
+    """
+
+    def test_every_wiring_env_override_resolves_as_a_known_var(self):
+        import baldur.bootstrap  # noqa: F401 — the import is what registers them
+        from baldur.bootstrap import _REGISTRIES_TO_WIRE
+        from baldur.settings.introspection import build_prefix_index, is_known_env_var
+
+        knobs = [w.env_override for w in _REGISTRIES_TO_WIRE if w.env_override]
+        index = build_prefix_index()
+
+        assert len(knobs) == len(set(knobs)), "an env_override is used by two rows"
+        # Guard against a vacuous pass: the assertion below means nothing if
+        # the table stopped carrying override knobs.
+        assert "BALDUR_DLQ_BACKEND" in knobs
+        unknown = [name for name in knobs if not is_known_env_var(name, index)]
+        assert unknown == []
+
+    def test_dlq_backend_is_known_through_its_settings_field_not_the_registry(self):
+        """778 D6 vs D7 — the dead-letter knob resolves both ways.
+
+        It is a real ``DLQSettings`` field, which is what lets it appear in
+        the env-var reference at all; the derived registration covers the
+        four knobs that back no field.
+        """
+        from baldur.settings.introspection import build_prefix_index, resolve_env_var
+
+        index = build_prefix_index()
+
+        assert resolve_env_var("BALDUR_DLQ_BACKEND", index)
+        assert not resolve_env_var("BALDUR_EVENT_JOURNAL_BACKEND", index)
