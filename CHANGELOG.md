@@ -10,6 +10,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-08-31
+
 ### Added
 
 - The Celery adapter calls `baldur.init()` in each worker itself, as the other adapters do.
@@ -22,15 +24,12 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - A dead-letter backend that cannot be built now fails the production boot, not the first capture.
 - The startup report names the dead-letter backend, so the configured store is visible at INFO.
 
-
 ### Changed
 
 - **Breaking**: a production boot missing a critical secret raises `ConfigurationError` now.
 - **Breaking**: `SQLCircuitBreakerStateRepository` removed — breaker state stays in memory or Redis.
 - **Breaking**: `ProviderRegistry.set_defaults(repo=…)` removed — set each registry's default.
 - Dead-letter overflow eviction now targets the entries the size cap counts, so it shrinks them.
-- A late dead-letter statistics write can no longer reopen an entry that was already resolved.
-- `RuntimeError` was invisible to the Celery abort path, which booted the worker keyless instead.
 - A closed, healthy circuit breaker no longer writes its state on every recorded success.
 - Circuit-breaker writes to Redis now track state transitions rather than request volume.
 - A worker's success no longer resets a peer worker's open circuit or failure count in Redis.
@@ -38,8 +37,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ### Fixed
 
-- Backend-override env values are case-insensitive now — `BALDUR_DLQ_BACKEND=SQL` selects sql.
-- A repeat dead-letter statistics write no longer erases the entry's `resolved_at` timestamp.
+- Backend-override env values are case-insensitive — `BALDUR_EVENT_JOURNAL_BACKEND=SQL` selects sql.
 - A zero-config process no longer prints `resilience.bypass_hooks_skipped` to stdout on import.
 - A wired boot no longer warns `init_not_called_get_cache` from inside `baldur.init()` itself.
 - A Celery task failure the DLQ rejected (disabled, overflow) is no longer logged as stored.
