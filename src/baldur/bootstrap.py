@@ -1997,7 +1997,10 @@ def _wire_priority_chain_registry(
     ]
 
     if wiring.env_override:
-        env_val = (os.environ.get(wiring.env_override) or "").strip()
+        # Lowercased to match the registered provider names (all lowercase by
+        # convention) — the DLQ settings field normalizes the same way, so
+        # "SQL" must mean sql here too, not "unknown backend".
+        env_val = (os.environ.get(wiring.env_override) or "").strip().lower()
         if env_val:
             if registry.has_provider(env_val):
                 chain_names = [name for name, _probe in wiring.priority_chain]

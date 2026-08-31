@@ -592,6 +592,35 @@ class TestSQLStatisticsPersistEntryMonotonicBehavior:
         assert detail["status"] == FailedOperationStatus.RESOLVED.value
         assert detail["error_message"] == "settled"
 
+    def test_persist_entry_stores_and_refreshes_the_snapshots_resolved_at(self, stats):
+        """The snapshot's ``resolved_at`` lands in the column and moves forward.
+
+        Retention and cleanup key on this column (``resolved_at IS NOT NULL
+        AND resolved_at < cutoff``). The upsert's conflict branch refreshes
+        it, so the insert half must bind it too — an upsert row that never
+        carried the column hands EXCLUDED/VALUES() a NULL, and every repeat
+        write of a finished entry erased the timestamp, hiding the row from
+        archival forever. (778 verify regression.)
+        """
+        from tests.factories.time_helpers import get_fixed_datetime
+
+        first = get_fixed_datetime(2026, 4, 14, 10, 0, 0)
+        later = get_fixed_datetime(2026, 4, 14, 11, 0, 0)
+
+        stats.persist_entry(
+            self._snapshot(
+                91008, FailedOperationStatus.RESOLVED.value, resolved_at=first
+            )
+        )
+        assert stats.get_entry_detail("91008")["resolved_at"] == first
+
+        stats.persist_entry(
+            self._snapshot(
+                91008, FailedOperationStatus.ARCHIVED.value, resolved_at=later
+            )
+        )
+        assert stats.get_entry_detail("91008")["resolved_at"] == later
+
     def test_sync_from_runtime_batches_carry_the_same_persist_entry_guard(self, stats):
         """``sync_from_runtime`` routes through the same upsert.
 
