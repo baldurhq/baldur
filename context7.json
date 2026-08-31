@@ -15,6 +15,10 @@
     "docs/reference"
   ],
   "excludeFiles": [
+    "meta-watchdog-escalation-response.md",
+    "runtime-config-change.md",
+    "data-consistency-boundaries.md",
+    "release-notes.md",
     "CODE_OF_CONDUCT.md",
     "THIRD_PARTY_LICENSES.md",
     "terms.md",
