@@ -7,6 +7,8 @@
 [![Docs](https://img.shields.io/badge/docs-baldur.sh-1f6feb.svg)](https://baldur.sh)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13522/badge)](https://www.bestpractices.dev/projects/13522)
 
+**English** | [한국어](README.ko.md)
+
 **Baldur** is a self-healing reliability layer for Python applications. It puts
 circuit breaker, retry, and fallback behind a single decorator, so a flaky
 downstream stops cascading into your service — and it ships the operational
