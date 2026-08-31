@@ -1,11 +1,14 @@
 """
-InMemoryFailedOperationRepository 테스트.
+Unit tests for InMemoryFailedOperationRepository.
 """
 
 import threading
 from datetime import UTC, datetime, timedelta
 
 import pytest
+
+from baldur.interfaces.repositories import FailedOperationStatus
+from tests.factories.time_helpers import freeze_time
 
 FIXED_NOW = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
 
@@ -22,7 +25,6 @@ class TestInMemoryFailedOperationRepository:
 
     def test_create_failed_operation(self, repo):
         """Test creating a new failed operation."""
-        from baldur.interfaces.repositories import FailedOperationStatus
 
         entry = repo.create(
             domain="payment",
@@ -82,7 +84,6 @@ class TestInMemoryFailedOperationRepository:
 
     def test_update_status(self, repo):
         """Test updating the status of a failed operation."""
-        from baldur.interfaces.repositories import FailedOperationStatus
 
         entry = repo.create(
             domain="payment",
@@ -107,7 +108,6 @@ class TestInMemoryFailedOperationRepository:
 
     def test_update_status_with_recommended_action(self, repo):
         """update_status() persists recommended_action (G3 escalation)."""
-        from baldur.interfaces.repositories import FailedOperationStatus
 
         entry = repo.create(
             domain="payment",
@@ -129,7 +129,6 @@ class TestInMemoryFailedOperationRepository:
 
     def test_update_status_empty_recommended_action_preserves_existing(self, repo):
         """Empty recommended_action does not overwrite existing value."""
-        from baldur.interfaces.repositories import FailedOperationStatus
 
         entry = repo.create(
             domain="payment",
@@ -269,8 +268,6 @@ class TestInMemoryCountArchivedOlderThanBehavior:
     def _create_archived_entry(self, repo, resolved_days_ago: int) -> None:
         from dataclasses import replace
 
-        from baldur.interfaces.repositories import FailedOperationStatus
-
         entry = repo.create(domain="payment", failure_type="timeout")
         repo.update_status(entry.id, FailedOperationStatus.RESOLVED.value)
         repo.update_status(entry.id, FailedOperationStatus.ARCHIVED.value)
@@ -310,9 +307,172 @@ class TestInMemoryCountArchivedOlderThanBehavior:
 
     def test_count_ignores_non_archived_status(self, repo):
         """Non-ARCHIVED entries are never counted."""
-        from baldur.interfaces.repositories import FailedOperationStatus
 
         entry = repo.create(domain="payment", failure_type="timeout")
         repo.update_status(entry.id, FailedOperationStatus.RESOLVED.value)
 
         assert repo.count_archived_older_than(0) == 0
+
+
+# =============================================================================
+# 778 D10 — the population overflow eviction draws its candidates from
+# =============================================================================
+
+# Twin of ``TestSQLDlqEvictionPopulationBehavior`` in
+# tests/unit/adapters/sql/test_failed_operation.py — same
+# fixture shape, same assertions. Both adapters had the same divergence and
+# both were narrowed to the population the Redis adapter gets for free, so
+# the two suites are deliberately readable side by side.
+
+
+def _mixed_status_population(repo, domain="payment"):
+    """Seed one entry per interesting status, oldest first.
+
+    The order matters: the two entries eviction must never spend its batch
+    on — an archived one and an in-flight one — are the two *oldest*, which
+    is exactly the shape that used to neutralize the cap.
+    """
+    created = {}
+    plan = [
+        ("archived", "2026-04-14 10:00:00", FailedOperationStatus.ARCHIVED.value),
+        ("replaying", "2026-04-14 10:01:00", FailedOperationStatus.REPLAYING.value),
+        ("resolved", "2026-04-14 10:02:00", FailedOperationStatus.RESOLVED.value),
+        ("reviewing", "2026-04-14 10:03:00", FailedOperationStatus.REVIEWING.value),
+        ("rejected", "2026-04-14 10:04:00", FailedOperationStatus.REJECTED.value),
+        ("pending_old", "2026-04-14 10:05:00", None),
+        ("pending_new", "2026-04-14 10:06:00", None),
+    ]
+    for key, at, status in plan:
+        with freeze_time(at):
+            entry = repo.create(domain=domain, failure_type="timeout")
+            if status is not None:
+                repo.update_status(entry.id, status)
+        created[key] = entry.id
+    return created
+
+
+class TestInMemoryDlqEvictionPopulationBehavior:
+    """778 D10 — ``count_by_domain`` and ``get_oldest_ids`` now describe the
+    same queue the size cap counts.
+
+    ``count_all`` always excluded finished entries, but the candidate query
+    ordered the whole store and the per-domain count had no status filter at
+    all. On a store carrying enough old archived rows, eviction spent every
+    batch on rows the count never included: the counted queue grew without
+    bound while the cap reported itself enforced.
+    """
+
+    @pytest.fixture
+    def repo(self):
+        from baldur.adapters.memory import InMemoryFailedOperationRepository
+
+        return InMemoryFailedOperationRepository()
+
+    def test_count_by_domain_excludes_finished_entries(self, repo):
+        """The per-domain cap must not trip on entries resolved days ago."""
+        _mixed_status_population(repo)
+
+        # 7 entries seeded; the archived, resolved and rejected ones are
+        # finished, leaving the 4 the cap is about.
+        assert repo.count_by_domain("payment") == 4
+        assert repo.count_by_domain("payment") == repo.count_all()
+
+    def test_count_by_domain_is_scoped_to_its_domain(self, repo):
+        """The narrowing did not cost the filter the method exists for."""
+        _mixed_status_population(repo, domain="payment")
+        repo.create(domain="notification", failure_type="smtp")
+
+        assert repo.count_by_domain("payment") == 4
+        assert repo.count_by_domain("notification") == 1
+
+    def test_get_oldest_ids_excludes_finished_entries(self, repo):
+        """Archived and resolved entries are not eviction candidates.
+
+        Retention and purge own their removal; deleting one here would
+        report an eviction that shrank nothing.
+        """
+        ids = _mixed_status_population(repo)
+
+        candidates = repo.get_oldest_ids(count=10)
+
+        assert ids["archived"] not in candidates
+        assert ids["resolved"] not in candidates
+        assert ids["rejected"] not in candidates
+
+    def test_get_oldest_ids_excludes_in_flight_entries(self, repo):
+        """A replaying or reviewing head must not crowd out the candidates.
+
+        With candidates merely non-terminal, a batch window whose head was
+        all REPLAYING returned zero evictions while evictable entries sat
+        right behind it — and the caller reads zero as "the whole queue is
+        in flight".
+        """
+        ids = _mixed_status_population(repo)
+
+        candidates = repo.get_oldest_ids(count=10)
+
+        assert ids["replaying"] not in candidates
+        assert ids["reviewing"] not in candidates
+
+    def test_get_oldest_ids_returns_the_evictable_oldest_first(self, repo):
+        """Ordering still holds inside the narrowed population."""
+        ids = _mixed_status_population(repo)
+
+        assert repo.get_oldest_ids(count=10) == [
+            ids["pending_old"],
+            ids["pending_new"],
+        ]
+
+    def test_eviction_candidates_survive_a_protected_and_terminal_head(self, repo):
+        """The single-candidate case, which is where the old shape failed.
+
+        The five oldest entries are all non-evictable, so a batch of one used
+        to come back holding an archived entry even though two evictable
+        entries were waiting.
+        """
+        ids = _mixed_status_population(repo)
+
+        assert repo.get_oldest_ids(count=1) == [ids["pending_old"]]
+
+    def test_get_oldest_ids_applies_the_same_filter_per_domain(self, repo):
+        """Domain-scoped candidates come from the domain-scoped population."""
+        payment = _mixed_status_population(repo, domain="payment")
+        _mixed_status_population(repo, domain="notification")
+
+        candidates = repo.get_oldest_ids(count=10, domain="payment")
+
+        assert candidates == [payment["pending_old"], payment["pending_new"]]
+
+    def test_eviction_shrinks_the_number_the_cap_is_enforced_against(self, repo):
+        """The property the whole narrowing exists to restore."""
+        ids = _mixed_status_population(repo)
+        counted_before = repo.count_all()
+
+        evicted = repo.evict_oldest(count=10)
+
+        assert evicted == 2
+        assert repo.count_all() == counted_before - evicted
+        assert repo.get_by_id(ids["pending_old"]) is None
+        assert repo.get_by_id(ids["pending_new"]) is None
+        # Finished and in-flight entries are all still there.
+        for key in ("archived", "resolved", "rejected", "replaying", "reviewing"):
+            assert repo.get_by_id(ids[key]) is not None
+
+    def test_eviction_on_an_entirely_non_evictable_population_is_a_no_op(self, repo):
+        """Nothing to evict is a legitimate answer, not a bug to route around.
+
+        The soft-cap accept branch upstream reads zero as "the population is
+        genuinely all protected or finished" — which is now true when it
+        happens, because the candidate query already dropped everything else.
+        """
+        with freeze_time("2026-04-14 10:00:00"):
+            archived = repo.create(domain="payment", failure_type="timeout")
+            repo.update_status(archived.id, FailedOperationStatus.ARCHIVED.value)
+        with freeze_time("2026-04-14 10:01:00"):
+            replaying = repo.create(domain="payment", failure_type="timeout")
+            repo.update_status(replaying.id, FailedOperationStatus.REPLAYING.value)
+
+        assert repo.get_oldest_ids(count=10) == []
+        assert repo.evict_oldest(count=10) == 0
+        assert repo.get_by_id(archived.id) is not None
+        assert repo.get_by_id(replaying.id) is not None

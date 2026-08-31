@@ -1,5 +1,5 @@
 """
-ProviderRegistry 테스트.
+Unit tests for ProviderRegistry.
 """
 
 import pytest
@@ -103,3 +103,76 @@ class TestProviderRegistry:
 
         repo = ProviderRegistry.get_failed_operation_repo()
         assert isinstance(repo, InMemoryFailedOperationRepository)
+
+
+class TestProviderRegistrySetDefaultsContract:
+    """778 D4 — ``set_defaults`` no longer carries a ``repo`` shortcut.
+
+    It used to set one provider name across the dead-letter, circuit-breaker
+    and security registries at once. The framework's own wiring contradicts
+    that: those three do not share a backend, and 778 wires the dead-letter
+    registry to a chain of its own while breaker state stays on Redis.
+    Callers set each registry's default individually.
+    """
+
+    def test_repo_keyword_is_rejected(self):
+        """Passing it raises rather than silently doing nothing.
+
+        Silent acceptance would be the worse outcome for a released
+        keyword: a caller carrying it forward would read "no error" as "my
+        three registries were set".
+        """
+        from baldur.factory import ProviderRegistry
+
+        with pytest.raises(TypeError, match="repo"):
+            ProviderRegistry.set_defaults(repo="memory")
+
+    def test_cache_and_queue_shortcuts_still_apply(self):
+        """The two parameters that survived still do their job."""
+        from baldur.factory import ProviderRegistry
+
+        with ProviderRegistry.cache.snapshot(), ProviderRegistry.queue.snapshot():
+            ProviderRegistry.set_defaults(cache="memory", queue="sync")
+
+            defaults = ProviderRegistry.get_defaults()
+            assert defaults["cache"] == "memory"
+            assert defaults["queue"] == "sync"
+
+    def test_the_replacement_sets_one_registry_without_touching_the_others(self):
+        """The migration path named in the removal's changelog entry.
+
+        Setting the dead-letter default must leave the breaker and security
+        registries where they were — the whole reason the shortcut went.
+        """
+        from baldur.factory import ProviderRegistry
+
+        with (
+            ProviderRegistry.failed_op_repo.snapshot(),
+            ProviderRegistry.circuit_breaker_repo.snapshot(),
+            ProviderRegistry.security_repo.snapshot(),
+        ):
+            ProviderRegistry.circuit_breaker_repo.set_default("redis")
+            ProviderRegistry.security_repo.set_default("memory")
+
+            ProviderRegistry.failed_op_repo.set_default("memory")
+
+            assert ProviderRegistry.failed_op_repo.get_default_name() == "memory"
+            assert ProviderRegistry.circuit_breaker_repo.get_default_name() == "redis"
+            assert ProviderRegistry.security_repo.get_default_name() == "memory"
+
+    def test_circuit_breaker_registry_offers_no_sql_provider(self):
+        """778 D4 — the removed adapter is gone from the registry too.
+
+        Registration is the framework advertising a surface; leaving "sql"
+        registered for breaker state would keep advertising a store no
+        wiring row, knob or documented path can select.
+        """
+        from baldur.factory import ProviderRegistry
+
+        names = set(ProviderRegistry.circuit_breaker_repo.list_providers())
+
+        assert "sql" not in names
+        assert {"memory", "redis", "layered"} <= names
+        # The dead-letter registry is the one that gained a selectable SQL
+        # backend in the same change — the contrast is the point.
+        assert "sql" in set(ProviderRegistry.failed_op_repo.list_providers())

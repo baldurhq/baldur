@@ -32,6 +32,7 @@ from baldur.interfaces.statistics import (
     CleanupStats,
     PaginatedResult,
 )
+from baldur.settings.sql import SQLDialect
 from tests.factories.time_helpers import freeze_time
 
 
@@ -446,3 +447,218 @@ class TestSQLStatisticsAsyncConfigBehavior:
 
     def test_get_async_persist_task_name_returns_none(self, stats):
         assert stats.get_async_persist_task_name() is None
+
+
+# =============================================================================
+# 778 D11 — the mirror upsert never walks a finished entry backwards
+# =============================================================================
+
+
+class TestSQLStatisticsPersistEntryMonotonicBehavior:
+    """778 D11 — a stale snapshot cannot reopen a finished entry.
+
+    The mirror is written from snapshots, and snapshots arrive late: a
+    replay worker resolves an entry while a task carrying the older PENDING
+    picture is still in flight. Under a plain last-write-wins upsert that
+    task reopened a closed entry — and a reopened entry is a replay
+    candidate again, which is the double execution the dead-letter queue
+    exists to prevent. Load-bearing now that the mirror table can be the
+    live store.
+    """
+
+    def _snapshot(self, entry_id, status, **overrides):
+        data = {
+            "id": entry_id,
+            "domain": "payment",
+            "failure_type": "timeout",
+            "status": status,
+            "entity_type": "order",
+            "entity_id": "42",
+            "error_message": "gateway timed out",
+        }
+        data.update(overrides)
+        return data
+
+    def _stored_status(self, stats, entry_id):
+        detail = stats.get_entry_detail(str(entry_id))
+        assert detail is not None
+        return detail["status"]
+
+    def test_persist_entry_stale_pending_snapshot_leaves_a_resolved_entry_resolved(
+        self, stats
+    ):
+        """The regression the guard exists for."""
+        stats.persist_entry(self._snapshot(91001, FailedOperationStatus.PENDING.value))
+        stats.persist_entry(self._snapshot(91001, FailedOperationStatus.RESOLVED.value))
+
+        stats.persist_entry(self._snapshot(91001, FailedOperationStatus.PENDING.value))
+
+        assert self._stored_status(stats, 91001) == (
+            FailedOperationStatus.RESOLVED.value
+        )
+
+    @pytest.mark.parametrize(
+        "terminal",
+        [
+            FailedOperationStatus.RESOLVED.value,
+            FailedOperationStatus.REJECTED.value,
+            FailedOperationStatus.ARCHIVED.value,
+        ],
+    )
+    def test_persist_entry_downgrades_no_terminal_status(self, stats, terminal):
+        """All three finished statuses are protected, not just ``resolved``."""
+        entry_id = 91100 + len(terminal)
+        stats.persist_entry(self._snapshot(entry_id, terminal))
+
+        stats.persist_entry(
+            self._snapshot(entry_id, FailedOperationStatus.REPLAYING.value)
+        )
+
+        assert self._stored_status(stats, entry_id) == terminal
+
+    def test_persist_entry_terminal_snapshot_still_updates_a_pending_entry(self, stats):
+        """The guard blocks regressions, not progress.
+
+        The mirror has to be able to learn that an entry finished, or it
+        would freeze at whatever status it first saw.
+        """
+        stats.persist_entry(self._snapshot(91002, FailedOperationStatus.PENDING.value))
+
+        stats.persist_entry(self._snapshot(91002, FailedOperationStatus.RESOLVED.value))
+
+        assert self._stored_status(stats, 91002) == (
+            FailedOperationStatus.RESOLVED.value
+        )
+
+    def test_persist_entry_terminal_snapshot_still_updates_a_terminal_entry(
+        self, stats
+    ):
+        """Terminal to terminal is a legitimate move (resolved, then archived)."""
+        stats.persist_entry(self._snapshot(91003, FailedOperationStatus.RESOLVED.value))
+
+        stats.persist_entry(self._snapshot(91003, FailedOperationStatus.ARCHIVED.value))
+
+        assert self._stored_status(stats, 91003) == (
+            FailedOperationStatus.ARCHIVED.value
+        )
+
+    def test_persist_entry_non_terminal_entry_takes_any_snapshot(self, stats):
+        """An unfinished entry is not guarded — the guard reads the *stored*
+        status, and an unfinished one has nothing to protect."""
+        stats.persist_entry(self._snapshot(91004, FailedOperationStatus.PENDING.value))
+
+        stats.persist_entry(
+            self._snapshot(91004, FailedOperationStatus.REPLAYING.value)
+        )
+
+        assert self._stored_status(stats, 91004) == (
+            FailedOperationStatus.REPLAYING.value
+        )
+
+    def test_persist_entry_first_insert_is_unguarded(self, stats):
+        """The guard gates the conflict branch only.
+
+        A brand-new entry arriving already finished — an archived row synced
+        from a runtime that outlived this mirror — inserts as it is.
+        """
+        stats.persist_entry(self._snapshot(91005, FailedOperationStatus.ARCHIVED.value))
+
+        assert self._stored_status(stats, 91005) == (
+            FailedOperationStatus.ARCHIVED.value
+        )
+
+    def test_persist_entry_blocked_update_leaves_the_other_columns_alone(self, stats):
+        """A refused status change refuses the whole update, not half of it.
+
+        The guard rides the conflict branch as a unit: letting the payload
+        land while the status is held back would leave the row describing an
+        attempt that the status says never reopened.
+        """
+        stats.persist_entry(
+            self._snapshot(
+                91006, FailedOperationStatus.RESOLVED.value, error_message="settled"
+            )
+        )
+
+        stats.persist_entry(
+            self._snapshot(
+                91006,
+                FailedOperationStatus.PENDING.value,
+                error_message="stale retry in flight",
+            )
+        )
+
+        detail = stats.get_entry_detail("91006")
+        assert detail["status"] == FailedOperationStatus.RESOLVED.value
+        assert detail["error_message"] == "settled"
+
+    def test_sync_from_runtime_batches_carry_the_same_persist_entry_guard(self, stats):
+        """``sync_from_runtime`` routes through the same upsert.
+
+        It is the other advertised mirror entry point, so a batch of stale
+        snapshots must not do what a single stale snapshot cannot.
+        """
+        stats.persist_entry(self._snapshot(91007, FailedOperationStatus.RESOLVED.value))
+
+        synced = stats.sync_from_runtime(
+            [self._snapshot(91007, FailedOperationStatus.PENDING.value)]
+        )
+
+        assert synced == 1
+        assert self._stored_status(stats, 91007) == (
+            FailedOperationStatus.RESOLVED.value
+        )
+
+
+class TestPersistUpsertTailContract:
+    """778 D11 — the upsert tail each dialect gets.
+
+    PostgreSQL and sqlite carry the guard in a ``WHERE`` on the conflict
+    branch; MySQL's upsert has no ``WHERE``, so the guard rides every
+    assignment instead — and ``status`` must be assigned last there, because
+    MySQL evaluates the assignment list left to right and every guard reads
+    the stored status.
+    """
+
+    def _repo(self, get_sqlite_conn, dialect):
+        return SQLStatisticsRepository(get_sqlite_conn, dialect=dialect)
+
+    def test_update_columns_end_with_status(self, get_sqlite_conn):
+        """The MySQL branch's correctness depends on this ordering."""
+        repo = self._repo(get_sqlite_conn, SQLDialect.SQLITE)
+
+        assert repo._PERSIST_UPDATE_COLS[-1] == "status"
+        assert set(repo._PERSIST_UPDATE_COLS) == {
+            "status",
+            "retry_count",
+            "resolved_at",
+            "updated_at",
+            "data",
+        }
+
+    @pytest.mark.parametrize(
+        ("dialect", "incoming_ref"),
+        [
+            (SQLDialect.POSTGRESQL, "EXCLUDED"),
+            (SQLDialect.SQLITE, "excluded"),
+        ],
+    )
+    def test_conflict_branch_dialects_guard_with_a_where(
+        self, get_sqlite_conn, dialect, incoming_ref
+    ):
+        tail = self._repo(get_sqlite_conn, dialect)._persist_upsert_tail()
+
+        assert " WHERE " in tail
+        assert "baldur_dlq.status NOT IN ('resolved', 'rejected', 'archived')" in tail
+        assert f"{incoming_ref}.status IN ('resolved', 'rejected', 'archived')" in tail
+
+    def test_mysql_guards_every_assignment_instead(self, get_sqlite_conn):
+        tail = self._repo(get_sqlite_conn, SQLDialect.MYSQL)._persist_upsert_tail()
+
+        assert tail.startswith("ON DUPLICATE KEY UPDATE ")
+        assert " WHERE " not in tail
+        for column in ("retry_count", "resolved_at", "updated_at", "data", "status"):
+            assert f"{column} = IF(" in tail
+        assert "VALUES(status) IN ('resolved', 'rejected', 'archived')" in tail
+        # Assigned last, so the guards ahead of it still read the stored row.
+        assert tail.rindex("status = IF(") > tail.rindex("data = IF(")
