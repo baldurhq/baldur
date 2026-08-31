@@ -18,7 +18,6 @@ from baldur.adapters.sql.base import (
     SchemaVersionManager,
     sql_transaction,
 )
-from baldur.adapters.sql.circuit_breaker import SQLCircuitBreakerStateRepository
 from baldur.adapters.sql.event_journal import SQLEventJournalRepository
 from baldur.adapters.sql.failed_operation import SQLFailedOperationRepository
 from baldur.adapters.sql.postmortem import SQLPostmortemRepository
@@ -30,7 +29,6 @@ __all__ = [
     "GenericSQLRepository",
     "SchemaVersionManager",
     "sql_transaction",
-    "SQLCircuitBreakerStateRepository",
     "SQLEventJournalRepository",
     "SQLFailedOperationRepository",
     "SQLPostmortemRepository",

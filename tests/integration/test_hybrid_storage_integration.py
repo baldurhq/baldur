@@ -247,7 +247,7 @@ class TestRedisBackendIntegration:
                 "redis",
                 lambda: RedisCircuitBreakerStateRepository(backend),
             )
-            ProviderRegistry.set_defaults(repo="redis")
+            ProviderRegistry.circuit_breaker_repo.set_default("redis")
 
             cb_repo = ProviderRegistry.get_circuit_breaker_repo()
             assert cb_repo is not None

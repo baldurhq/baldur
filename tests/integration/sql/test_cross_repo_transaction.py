@@ -1,7 +1,7 @@
 """
 Cross-repo transaction integration tests for 429 PR2.
 
-Two baldur repos (DLQ + CircuitBreakerState) share the same
+Two baldur repos (DLQ + SecurityIncident) share the same
 DB-API 2.0 connection; ``baldur.sql_transaction`` must commit the
 whole scope atomically and roll back both repos' writes on
 exception. The tests also cover the BALDUR_SQL_AUTOCOMMIT=1 escape
@@ -31,16 +31,13 @@ import sqlite3
 import pytest
 
 from baldur.adapters.sql import (
-    SQLCircuitBreakerStateRepository,
     SQLFailedOperationRepository,
+    SQLSecurityIncidentRepository,
     sql_transaction,
 )
 from baldur.adapters.sql.base import SchemaVersionManager
 from baldur.adapters.sql.connection import build_connection_factory
-from baldur.interfaces.repositories import (
-    CircuitBreakerStateEnum,
-    FailedOperationStatus,
-)
+from baldur.interfaces.repositories import FailedOperationStatus
 from baldur.settings.sql import reset_sql_settings
 
 
@@ -70,7 +67,7 @@ def repos(shared_conn):
     get_conn = lambda: shared_conn  # noqa: E731
     return (
         SQLFailedOperationRepository(get_conn),
-        SQLCircuitBreakerStateRepository(get_conn),
+        SQLSecurityIncidentRepository(get_conn),
     )
 
 
@@ -78,61 +75,65 @@ class TestCrossRepoTransactionBehavior:
     """sql_transaction commits / rolls back two repos atomically."""
 
     def test_commit_persists_writes_from_both_repos(self, repos, shared_conn):
-        dlq, cb = repos
+        dlq, sec = repos
         with sql_transaction(shared_conn):
             entry = dlq.create(domain="payment", failure_type="timeout")
-            cb.atomic_force_open("openai", reason="cascade")
+            incident = sec.create(incident_type="brute_force", severity="high")
             # Both writes are still inside the transaction scope.
 
         # After commit both repos observe the writes.
         assert dlq.get_by_id(entry.id).status == FailedOperationStatus.PENDING.value
-        assert (
-            cb.get_by_service_name("openai").state == CircuitBreakerStateEnum.OPEN.value
-        )
+        assert sec.get_by_id(incident.id).incident_type == "brute_force"
 
     def test_exception_rolls_back_both_repos(self, repos, shared_conn):
-        dlq, cb = repos
+        dlq, sec = repos
+        written: list[int] = []
         with pytest.raises(RuntimeError):
             with sql_transaction(shared_conn):
                 dlq.create(domain="payment", failure_type="timeout")
-                cb.atomic_force_open("openai", reason="x")
+                written.append(
+                    sec.create(incident_type="brute_force", severity="high").id
+                )
                 raise RuntimeError("simulated failure")
 
         # Neither repo's write survived.
         stats = dlq.get_statistics()
         assert stats["total"] == 0
-        assert cb.get_by_service_name("openai") is None
+        assert sec.get_by_id(written[0]) is None
 
     def test_sequential_transactions_are_independent(self, repos, shared_conn):
         """A second transaction on the same conn is not polluted by the first."""
-        dlq, cb = repos
+        dlq, sec = repos
         with sql_transaction(shared_conn):
             entry_a = dlq.create(domain="payment", failure_type="timeout")
 
         # Independent second txn — same conn, re-entered cleanly.
         with sql_transaction(shared_conn):
             entry_b = dlq.create(domain="payment", failure_type="http_5xx")
-            cb.atomic_force_open("openai", reason="y")
+            incident = sec.create(incident_type="brute_force", severity="low")
 
         assert dlq.get_by_id(entry_a.id) is not None
         assert dlq.get_by_id(entry_b.id) is not None
-        assert cb.get_by_service_name("openai").state == "open"
+        assert sec.get_by_id(incident.id) is not None
 
     def test_nested_transaction_inner_does_not_commit_early(self, repos, shared_conn):
         """Re-entering sql_transaction is a no-op; outer owns commit/rollback."""
-        dlq, cb = repos
+        dlq, sec = repos
+        written: list[int] = []
 
         with pytest.raises(RuntimeError):
             with sql_transaction(shared_conn):
                 dlq.create(domain="payment", failure_type="timeout")
                 with sql_transaction(shared_conn):
-                    cb.atomic_force_open("openai", reason="inner")
+                    written.append(
+                        sec.create(incident_type="brute_force", severity="high").id
+                    )
                 # Raising AFTER inner "completes" must still roll everything
                 # back — proves the inner did not commit its subset.
                 raise RuntimeError("boom")
 
         assert dlq.get_statistics()["total"] == 0
-        assert cb.get_by_service_name("openai") is None
+        assert sec.get_by_id(written[0]) is None
 
 
 class TestAutocommitDelegatedEscapeHatchBehavior:

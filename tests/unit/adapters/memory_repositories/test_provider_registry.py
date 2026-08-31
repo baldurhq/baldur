@@ -90,13 +90,13 @@ class TestProviderRegistry:
 
         assert repo1 is repo2
 
-    def test_registry_set_defaults_to_memory(self):
-        """Test setting default to memory provider."""
+    def test_registry_set_default_to_memory(self):
+        """Test setting the DLQ registry's default to the memory provider."""
         from baldur.adapters.memory import InMemoryFailedOperationRepository
         from baldur.factory import ProviderRegistry
 
         ProviderRegistry.clear_instances()
-        ProviderRegistry.set_defaults(repo="memory")
+        ProviderRegistry.failed_op_repo.set_default("memory")
 
         defaults = ProviderRegistry.get_defaults()
         assert defaults["repo"] == "memory"

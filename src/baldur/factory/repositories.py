@@ -117,18 +117,10 @@ def discover_circuit_breaker_repos() -> None:  # noqa: C901
     except ImportError:
         pass
 
-    # SQL-based (DB-API 2.0 — PostgreSQL / MySQL / SQLite)
-    try:
-        from baldur.adapters.sql import SQLCircuitBreakerStateRepository
-        from baldur.adapters.sql.connection import build_connection_factory
-
-        def _create_sql_cb_repo():
-            return SQLCircuitBreakerStateRepository(build_connection_factory())
-
-        if not reg.has_provider("sql"):
-            reg.register("sql", _create_sql_cb_repo)
-    except ImportError:
-        pass
+    # No SQL provider. Breaker state is volatile, high-frequency coordination
+    # data written on every call outcome; a relational database is the wrong
+    # store for it, and no mainstream resilience library keeps live breaker
+    # state there either. Every name registered above is selectable.
 
 
 def discover_security_repos() -> None:

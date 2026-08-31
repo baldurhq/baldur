@@ -7,22 +7,23 @@ Coverage:
 - DLQ list/detail: paginated list, entry detail with JSON data.
 - SLA breach detection.
 - Cleanup: cleanup stats, archive old, purge archived.
-- CB statistics: summary and list (graceful degradation).
+- CB statistics: summary and list (graceful degradation). Baldur never
+  writes ``baldur_cb_state`` — breaker state lives in memory or Redis — so
+  these tests seed the table directly, the way an operator's own table or a
+  leftover from an older install would present itself.
 - Persistence: persist_entry upsert, sync_from_runtime batch.
 - Audit trail: get/link audit trail entries.
 - Async config: should_persist_async / get_async_persist_task_name.
 - Graceful degradation: CB methods return defaults when table missing.
 
-Requires both ``baldur_dlq`` and ``baldur_cb_state`` tables to be
-bootstrapped via their respective repository constructors sharing the
-same sqlite in-memory connection.
+``baldur_dlq`` is bootstrapped by its repository constructor on the shared
+sqlite in-memory connection.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from baldur.adapters.sql.circuit_breaker import SQLCircuitBreakerStateRepository
 from baldur.adapters.sql.failed_operation import SQLFailedOperationRepository
 from baldur.adapters.sql.statistics import SQLStatisticsRepository
 from baldur.interfaces.repositories import FailedOperationStatus
@@ -36,11 +37,9 @@ from tests.factories.time_helpers import freeze_time
 
 @pytest.fixture
 def _bootstrap_tables(get_sqlite_conn):
-    """Bootstrap DLQ + CB tables by triggering a read on each repo."""
+    """Bootstrap the DLQ table by triggering a read on its repository."""
     dlq_repo = SQLFailedOperationRepository(get_sqlite_conn)
-    cb_repo = SQLCircuitBreakerStateRepository(get_sqlite_conn)
     dlq_repo.get_by_id(0)
-    cb_repo.get_by_service_name("__bootstrap__")
 
 
 @pytest.fixture
@@ -49,8 +48,31 @@ def dlq(get_sqlite_conn, _bootstrap_tables) -> SQLFailedOperationRepository:
 
 
 @pytest.fixture
-def cb(get_sqlite_conn, _bootstrap_tables) -> SQLCircuitBreakerStateRepository:
-    return SQLCircuitBreakerStateRepository(get_sqlite_conn)
+def cb_table(get_sqlite_conn, _bootstrap_tables):
+    """Create ``baldur_cb_state`` and return a seeder for it.
+
+    No Baldur repository writes this table — breaker state is volatile
+    coordination data and stays in memory or Redis. The statistics adapter
+    still reads it, because an operator may keep such a table themselves or
+    have one left from an older install, so the read path is exercised
+    against a table this test populates by hand.
+    """
+    conn = get_sqlite_conn()
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS baldur_cb_state ("
+        "service_name TEXT PRIMARY KEY, state TEXT, failure_count INTEGER, "
+        "success_count INTEGER, last_failure_at TEXT, updated_at TEXT)"
+    )
+
+    def seed(service_name: str, state: str = "closed", failure_count: int = 0):
+        conn.execute(
+            "INSERT INTO baldur_cb_state "
+            "(service_name, state, failure_count, success_count, "
+            "last_failure_at, updated_at) VALUES (?, ?, ?, 0, NULL, NULL)",
+            (service_name, state, failure_count),
+        )
+
+    return seed
 
 
 @pytest.fixture
@@ -309,25 +331,23 @@ class TestSQLStatisticsCleanupBehavior:
 class TestSQLStatisticsCBSummaryBehavior:
     """Circuit breaker summary and list."""
 
-    def test_empty_cb_table_returns_zero_summary(self, stats):
+    def test_empty_cb_table_returns_zero_summary(self, stats, cb_table):
         summary = stats.get_circuit_breaker_summary()
         assert isinstance(summary, CircuitBreakerSummary)
         assert summary.total == 0
 
-    def test_cb_summary_counts_by_state(self, stats, cb):
-        cb.get_or_create("api-gateway")
-        cb.get_or_create("payment-svc")
-        cb.update_state("payment-svc", state="open", failure_count=5)
+    def test_cb_summary_counts_by_state(self, stats, cb_table):
+        cb_table("api-gateway")
+        cb_table("payment-svc", state="open", failure_count=5)
 
         summary = stats.get_circuit_breaker_summary()
         assert summary.total == 2
         assert summary.closed == 1
         assert summary.open == 1
 
-    def test_list_circuit_breakers_returns_all(self, stats, cb):
-        cb.get_or_create("api-gateway")
-        cb.get_or_create("payment-svc")
-        cb.update_state("payment-svc", state="open", failure_count=5)
+    def test_list_circuit_breakers_returns_all(self, stats, cb_table):
+        cb_table("api-gateway")
+        cb_table("payment-svc", state="open", failure_count=5)
 
         breakers = stats.list_circuit_breakers()
         assert len(breakers) == 2

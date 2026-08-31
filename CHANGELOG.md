@@ -26,6 +26,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 ### Changed
 
 - **Breaking**: a production boot missing a critical secret raises `ConfigurationError` now.
+- **Breaking**: `SQLCircuitBreakerStateRepository` removed — breaker state stays in memory or Redis.
+- **Breaking**: `ProviderRegistry.set_defaults(repo=…)` removed — set each registry's default.
 - Dead-letter overflow eviction now targets the entries the size cap counts, so it shrinks them.
 - A late dead-letter statistics write can no longer reopen an entry that was already resolved.
 - `RuntimeError` was invisible to the Celery abort path, which booted the worker keyless instead.

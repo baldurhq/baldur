@@ -74,8 +74,8 @@ def sql_transaction(conn: Any) -> Any:
     Usage::
 
         with sql_transaction(conn):
-            dlq_repo.save(...)
-            cb_repo.update(...)
+            dlq_repo.create(...)
+            postmortem_repo.save(...)
         # single commit (or rollback on exception) applies to both.
 
     All repositories whose ``get_connection`` returns ``conn`` during

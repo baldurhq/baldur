@@ -972,23 +972,23 @@ class ProviderRegistry:
         cls,
         cache: str | None = None,
         queue: str | None = None,
-        repo: str | None = None,
     ) -> None:
         """Set default providers.
+
+        There is deliberately no ``repo`` shortcut. It used to set one name
+        across the dead-letter, circuit-breaker and security registries at
+        once, which the framework's own wiring contradicts — those three do
+        not share a backend. Set each registry's default individually, e.g.
+        ``ProviderRegistry.failed_op_repo.set_default("sql")``.
 
         Args:
             cache: Default cache provider name
             queue: Default task queue name
-            repo: Default repository name (applied to all repo registries)
         """
         if cache:
             cls.cache.set_default(cache)
         if queue:
             cls.queue.set_default(queue)
-        if repo:
-            cls.failed_op_repo.set_default(repo)
-            cls.circuit_breaker_repo.set_default(repo)
-            cls.security_repo.set_default(repo)
 
         logger.info(
             "registry.defaults_updated",
