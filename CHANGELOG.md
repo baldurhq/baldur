@@ -38,6 +38,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ### Fixed
 
+- Backend-override env values are case-insensitive now — `BALDUR_DLQ_BACKEND=SQL` selects sql.
+- A repeat dead-letter statistics write no longer erases the entry's `resolved_at` timestamp.
 - A zero-config process no longer prints `resilience.bypass_hooks_skipped` to stdout on import.
 - A wired boot no longer warns `init_not_called_get_cache` from inside `baldur.init()` itself.
 - A Celery task failure the DLQ rejected (disabled, overflow) is no longer logged as stored.

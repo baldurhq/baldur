@@ -687,8 +687,8 @@ class SQLStatisticsRepository(GenericSQLRepository, StatisticsRepositoryInterfac
                 f"INSERT INTO {DLQ_TABLE} "
                 f"(id, domain, failure_type, status, entity_type, entity_id, "
                 f"user_id, retry_count, max_retries, error_code, "
-                f"created_at, updated_at, data) "
-                f"VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                f"resolved_at, created_at, updated_at, data) "
+                f"VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
                 f"{upsert_tail}",
                 (
                     entry_id,
@@ -701,6 +701,12 @@ class SQLStatisticsRepository(GenericSQLRepository, StatisticsRepositoryInterfac
                     entry_data.get("retry_count", 0),
                     entry_data.get("max_retries", 2),
                     entry_data.get("error_code", ""),
+                    # Bound explicitly: ``resolved_at`` is one of the columns
+                    # the conflict branch refreshes, and an upsert row that
+                    # never carried the column hands EXCLUDED/VALUES() a NULL
+                    # — every repeat write of a finished entry would erase the
+                    # timestamp the retention queries key on.
+                    self._dt_to_db(entry_data.get("resolved_at")),
                     self._dt_to_db(entry_data.get("created_at") or now),
                     self._dt_to_db(now),
                     payload,

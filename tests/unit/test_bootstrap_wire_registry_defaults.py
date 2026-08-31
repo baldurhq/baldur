@@ -1744,11 +1744,12 @@ class TestWireRegistryDefaultsFailedOpRepoBehavior:
         from structlog.testing import capture_logs
 
         from baldur import bootstrap
+        from baldur.adapters.memory import InMemoryFailedOperationRepository
         from baldur.factory.registry import ProviderRegistry
 
         monkeypatch.setenv("BALDUR_DLQ_BACKEND", "sql")
         bootstrap.reset_init_state()
-        _replace_failed_op_provider("sql", lambda: MagicMock(name="sql-repo"))
+        _replace_failed_op_provider("sql", InMemoryFailedOperationRepository)
 
         with capture_logs() as logs:
             bootstrap._wire_registry_defaults()
@@ -1789,6 +1790,38 @@ class TestWireRegistryDefaultsFailedOpRepoBehavior:
             e
             for e in logs
             if e.get("event") == "baldur.registry_env_override_probe_mismatch"
+            and e.get("registry") == "failed_op_repo"
+        ]
+
+    def test_failed_op_repo_uppercase_override_selects_its_backend(
+        self, monkeypatch, dlq_wiring_env, isolated_all_wired_registries
+    ):
+        """``BALDUR_DLQ_BACKEND=SQL`` means sql, not "unknown backend".
+
+        The settings field lowercases the value because case is operator
+        noise, not intent — and the wiring consumes the same variable, so it
+        has to read it the same way. Before the wiring normalized case, an
+        uppercase spelling degraded the operator's explicit choice into an
+        invalid-override warning plus whatever the chain decided.
+        (778 verify regression.)
+        """
+        from structlog.testing import capture_logs
+
+        from baldur import bootstrap
+        from baldur.factory.registry import ProviderRegistry
+
+        monkeypatch.setenv("BALDUR_SQL_DSN", _SQLITE_DSN)
+        monkeypatch.setenv("BALDUR_DLQ_BACKEND", "SQL")
+        bootstrap.reset_init_state()
+
+        with capture_logs() as logs:
+            bootstrap._wire_registry_defaults()
+
+        assert ProviderRegistry.failed_op_repo.get_default_name() == "sql"
+        assert not [
+            e
+            for e in logs
+            if e.get("event") == "baldur.registry_env_override_invalid"
             and e.get("registry") == "failed_op_repo"
         ]
 
@@ -1879,13 +1912,14 @@ class TestEagerBackendValidationBehavior:
         from structlog.testing import capture_logs
 
         from baldur import bootstrap
+        from baldur.adapters.memory import InMemoryFailedOperationRepository
         from baldur.factory.registry import ProviderRegistry
 
         built = []
 
         def _build_sql_repo():
             built.append(1)
-            return MagicMock(name="sql-repo")
+            return InMemoryFailedOperationRepository()
 
         monkeypatch.setenv("BALDUR_SQL_DSN", _SQLITE_DSN)
         bootstrap.reset_init_state()
@@ -1987,6 +2021,10 @@ class TestEagerBackendValidationBehavior:
         an eager construction for it.
         """
         from baldur import bootstrap
+        from baldur.adapters.memory import (
+            InMemoryEventJournalRepository,
+            InMemoryFailedOperationRepository,
+        )
         from baldur.factory.registry import ProviderRegistry
 
         dlq_built: list[int] = []
@@ -1994,11 +2032,11 @@ class TestEagerBackendValidationBehavior:
 
         def _build_dlq_repo():
             dlq_built.append(1)
-            return MagicMock(name="sql-dlq")
+            return InMemoryFailedOperationRepository()
 
         def _build_journal_repo():
             journal_built.append(1)
-            return MagicMock(name="sql-journal")
+            return InMemoryEventJournalRepository()
 
         monkeypatch.setenv("BALDUR_SQL_DSN", _SQLITE_DSN)
         bootstrap.reset_init_state()
