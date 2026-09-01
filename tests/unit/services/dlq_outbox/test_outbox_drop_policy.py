@@ -166,6 +166,22 @@ class TestOutboxDropPolicyBehavior:
         mock_counter.labels.assert_called_with(domain="default")
         mock_counter.labels.return_value.inc.assert_called_once_with(50)
 
+    def test_drops_observed_swallows_metric_failure(self):
+        """A metric-registry error must not disrupt the drain that reports it."""
+
+        # Given a counter whose label lookup fails
+        class _BrokenCounter:
+            def labels(self, **kwargs):
+                raise RuntimeError("registry error")
+
+        # When
+        with patch(
+            "baldur.services.metrics.definitions.dlq_outbox_drops_total",
+            new=_BrokenCounter(),
+        ):
+            # Then — does not raise
+            _on_drops_observed(50)
+
     def test_threshold_callback_emits_eventbus_event(self):
         """EventBus emits ``DLQ_OUTBOX_DROP_THRESHOLD_BREACHED`` event."""
         # Given

@@ -7,6 +7,7 @@ DLQSink(Dead Letter Queue Sink) 단위 테스트.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -17,7 +18,11 @@ from baldur.interfaces.resilience_policy import (
     PolicyOutcome,
     PolicyResult,
 )
+from baldur.models.dlq import DLQEntryResult
+from baldur.services.bulkhead.exceptions import BulkheadFullError
+from baldur.services.circuit_breaker.exceptions import CircuitBreakerOpenError
 from baldur.services.retry_handler.sinks import DLQSink
+from tests.factories import dry_run_active
 
 # 518 batch (a): the sticky-flag baldur_pro resolver (``#485 D1b/G4``) and its
 # ``_reset_baldur_pro_dlq_resolver`` cache reset were removed once
@@ -291,3 +296,357 @@ class TestExtractContextFieldsUserIdPrecedenceContract:
         ctx = PolicyContext(extra={"request_data": {"order_id": "o-1", "amount": 100}})
         fields = DLQSink._extract_context_fields(ctx)
         assert fields["request_data"] == {"order_id": "o-1", "amount": 100}
+
+
+# =============================================================================
+# DLQSink — open-circuit rejection terminal
+# =============================================================================
+#
+# The rejected call never ran, so there is no retry history and no
+# ``should_dlq`` verdict: the store is gated on the capture flag instead, and
+# the entry is stored under the rejecting breaker's own name so the
+# on-recovery sweep can find it again.
+
+
+def _rejection_result(
+    service_name: str = "payment_api",
+    state: str = "open",
+    *,
+    with_service_name: bool = True,
+) -> PolicyResult:
+    """A REJECTED terminal carrying only the CB policy's own metadata keys.
+
+    The rejection path never runs retry, so ``domain`` / ``should_dlq`` are
+    genuinely absent — reproducing that is the point of building the result
+    by hand rather than reusing the FAILURE fixture.
+    """
+    metadata: dict[str, object] = {"state": state}
+    if with_service_name:
+        metadata["service_name"] = service_name
+    return PolicyResult(
+        outcome=PolicyOutcome.REJECTED,
+        total_attempts=1,
+        metadata=metadata,
+        executed_policies=["circuit_breaker"],
+    )
+
+
+def _capture_settings(enabled: bool = True) -> SimpleNamespace:
+    return SimpleNamespace(open_circuit_capture_enabled=enabled)
+
+
+class TestDLQSinkOpenCircuitContract:
+    """The stored entry's shape — spec values, hardcoded."""
+
+    def _store_call(self, mock_store) -> dict:
+        assert mock_store.call_count == 1
+        return mock_store.call_args.kwargs
+
+    def test_entry_is_stored_under_the_rejecting_breaker_name(self):
+        with (
+            patch(
+                "baldur.settings.dlq.get_dlq_settings",
+                return_value=_capture_settings(),
+            ),
+            patch(
+                "baldur.services.retry_handler.sinks.store_to_dlq",
+                return_value=DLQEntryResult.created("dlq-oc-1"),
+            ) as mock_store,
+        ):
+            DLQSink().handle_failure(
+                CircuitBreakerOpenError("payment_api"),
+                PolicyContext(domain="ignored_by_the_rejection_branch"),
+                _rejection_result("payment_api"),
+            )
+
+        assert self._store_call(mock_store)["domain"] == "payment_api"
+
+    def test_failure_type_is_the_open_circuit_spec_value(self):
+        with (
+            patch(
+                "baldur.settings.dlq.get_dlq_settings",
+                return_value=_capture_settings(),
+            ),
+            patch(
+                "baldur.services.retry_handler.sinks.store_to_dlq",
+                return_value=DLQEntryResult.created("dlq-oc-1"),
+            ) as mock_store,
+        ):
+            DLQSink().handle_failure(
+                CircuitBreakerOpenError("payment_api"),
+                None,
+                _rejection_result(),
+            )
+
+        assert self._store_call(mock_store)["failure_type"] == "CIRCUIT_BREAKER_OPEN"
+
+    def test_metadata_source_marks_the_entry_as_a_policy_chain_capture(self):
+        """The sweep joins on this value — an entry without it is never swept."""
+        with (
+            patch(
+                "baldur.settings.dlq.get_dlq_settings",
+                return_value=_capture_settings(),
+            ),
+            patch(
+                "baldur.services.retry_handler.sinks.store_to_dlq",
+                return_value=DLQEntryResult.created("dlq-oc-1"),
+            ) as mock_store,
+        ):
+            DLQSink().handle_failure(
+                CircuitBreakerOpenError("payment_api"),
+                None,
+                _rejection_result(),
+            )
+
+        metadata = self._store_call(mock_store)["metadata"]
+        assert metadata["source"] == "policy_chain"
+        assert metadata["service_name"] == "payment_api"
+        assert metadata["circuit_state"] == "open"
+        assert metadata["executed_policies"] == ["circuit_breaker"]
+
+    def test_recommended_action_is_replay(self):
+        with (
+            patch(
+                "baldur.settings.dlq.get_dlq_settings",
+                return_value=_capture_settings(),
+            ),
+            patch(
+                "baldur.services.retry_handler.sinks.store_to_dlq",
+                return_value=DLQEntryResult.created("dlq-oc-1"),
+            ) as mock_store,
+        ):
+            DLQSink().handle_failure(
+                CircuitBreakerOpenError("payment_api"),
+                None,
+                _rejection_result(),
+            )
+
+        kwargs = self._store_call(mock_store)
+        assert kwargs["recommended_action"] == "replay"
+        assert kwargs["error_code"] == "CircuitBreakerOpenError"
+
+    def test_replay_payload_comes_from_the_call_context(self):
+        """The captured call's arguments are what makes the entry replayable."""
+        ctx = PolicyContext(
+            order_id="ORD-77",
+            user_id="42",
+            extra={"request_data": {"order_id": "ORD-77", "amount": 100}},
+        )
+        with (
+            patch(
+                "baldur.settings.dlq.get_dlq_settings",
+                return_value=_capture_settings(),
+            ),
+            patch(
+                "baldur.services.retry_handler.sinks.store_to_dlq",
+                return_value=DLQEntryResult.created("dlq-oc-1"),
+            ) as mock_store,
+        ):
+            DLQSink().handle_failure(
+                CircuitBreakerOpenError("payment_api"), ctx, _rejection_result()
+            )
+
+        kwargs = self._store_call(mock_store)
+        assert kwargs["entity_id"] == "ORD-77"
+        assert kwargs["user_id"] == 42
+        assert kwargs["request_data"] == {"order_id": "ORD-77", "amount": 100}
+
+
+class TestDLQSinkOpenCircuitBehavior:
+    """Gating, fail-open posture, and the dispatch marker."""
+
+    @staticmethod
+    def _run(
+        error: Exception,
+        *,
+        capture_enabled: bool = True,
+        store_return=None,
+        store_side_effect=None,
+        result: PolicyResult | None = None,
+    ):
+        """Run the rejection branch and hand back (return value, store mock)."""
+        store_kwargs: dict = {}
+        if store_side_effect is not None:
+            store_kwargs["side_effect"] = store_side_effect
+        else:
+            store_kwargs["return_value"] = store_return or DLQEntryResult.created(
+                "dlq-oc"
+            )
+        with (
+            patch(
+                "baldur.settings.dlq.get_dlq_settings",
+                return_value=_capture_settings(capture_enabled),
+            ),
+            patch(
+                "baldur.services.retry_handler.sinks.store_to_dlq", **store_kwargs
+            ) as mock_store,
+        ):
+            ret = DLQSink().handle_failure(
+                error, None, result if result is not None else _rejection_result()
+            )
+        return ret, mock_store
+
+    def test_capture_flag_on_stores_and_returns_the_entry_id(self):
+        ret, mock_store = self._run(CircuitBreakerOpenError("payment_api"))
+
+        assert ret == "dlq-oc"
+        assert mock_store.call_count == 1
+
+    def test_capture_flag_off_stores_nothing(self):
+        """Negative half: the flag restores the pre-capture behavior exactly."""
+        ret, mock_store = self._run(
+            CircuitBreakerOpenError("payment_api"), capture_enabled=False
+        )
+
+        assert ret is None
+        mock_store.assert_not_called()
+
+    def test_non_circuit_rejection_stores_nothing(self):
+        """A bulkhead-full rejection is a REJECTED terminal too — not captured."""
+        ret, mock_store = self._run(
+            BulkheadFullError("payment_api", max_concurrent=2, active_count=2)
+        )
+
+        assert ret is None
+        mock_store.assert_not_called()
+
+    def test_settings_read_failure_skips_capture_not_the_rejection(self):
+        """Fail-open: an unreadable settings singleton must not raise."""
+        with (
+            patch(
+                "baldur.settings.dlq.get_dlq_settings",
+                side_effect=RuntimeError("settings backend down"),
+            ),
+            patch("baldur.services.retry_handler.sinks.store_to_dlq") as mock_store,
+        ):
+            ret = DLQSink().handle_failure(
+                CircuitBreakerOpenError("payment_api"), None, _rejection_result()
+            )
+
+        assert ret is None
+        mock_store.assert_not_called()
+
+    def test_settings_read_failure_is_observable_as_a_skip(self):
+        with (
+            patch(
+                "baldur.settings.dlq.get_dlq_settings",
+                side_effect=RuntimeError("settings backend down"),
+            ),
+            patch("baldur.services.retry_handler.sinks.store_to_dlq"),
+            capture_logs() as logs,
+        ):
+            DLQSink().handle_failure(
+                CircuitBreakerOpenError("payment_api"), None, _rejection_result()
+            )
+
+        assert [
+            e for e in logs if e.get("event") == "dlq_sink.open_circuit_capture_skipped"
+        ]
+
+    def test_store_exception_does_not_propagate(self):
+        ret, _ = self._run(
+            CircuitBreakerOpenError("payment_api"),
+            store_side_effect=RuntimeError("DLQ down"),
+        )
+
+        assert ret is None
+
+    def test_store_failure_result_returns_none(self):
+        ret, _ = self._run(
+            CircuitBreakerOpenError("payment_api"),
+            store_return=DLQEntryResult.failed("redis_down"),
+        )
+
+        assert ret is None
+
+    def test_observe_only_mode_stores_nothing(self):
+        """Shadow mode decides without acting — a durable entry is an action."""
+        with (
+            patch(
+                "baldur.settings.dlq.get_dlq_settings",
+                return_value=_capture_settings(),
+            ),
+            patch("baldur.services.retry_handler.sinks.store_to_dlq") as mock_store,
+            dry_run_active(),
+        ):
+            ret = DLQSink().handle_failure(
+                CircuitBreakerOpenError("payment_api"), None, _rejection_result()
+            )
+
+        assert ret is None
+        mock_store.assert_not_called()
+
+    def test_service_name_falls_back_to_the_exception_when_metadata_lacks_it(self):
+        _ret, mock_store = self._run(
+            CircuitBreakerOpenError("charge_gateway"),
+            result=_rejection_result("charge_gateway", with_service_name=False),
+        )
+
+        assert mock_store.call_args.kwargs["domain"] == "charge_gateway"
+
+    def test_retry_exhaustion_terminal_still_gates_on_should_dlq(self):
+        """Regression guard: the new REJECTED branch must not change the
+        FAILURE terminal's Dumb-Sink contract."""
+        failure = PolicyResult(
+            outcome=PolicyOutcome.FAILURE,
+            total_attempts=3,
+            metadata={"should_dlq": False, "domain": "test"},
+        )
+        with patch("baldur.services.retry_handler.sinks.store_to_dlq") as mock_store:
+            ret = DLQSink().handle_failure(ValueError("boom"), None, failure)
+
+        assert ret is None
+        mock_store.assert_not_called()
+
+
+class TestDLQSinkOpenCircuitMarkerBehavior:
+    """The dispatch marker is what makes one rejected call one entry."""
+
+    @staticmethod
+    def _dispatch(store_result) -> CircuitBreakerOpenError:
+        error = CircuitBreakerOpenError("payment_api")
+        with (
+            patch(
+                "baldur.settings.dlq.get_dlq_settings",
+                return_value=_capture_settings(),
+            ),
+            patch(
+                "baldur.services.retry_handler.sinks.store_to_dlq",
+                return_value=store_result,
+            ),
+        ):
+            DLQSink().handle_failure(error, None, _rejection_result())
+        return error
+
+    def test_successful_dispatch_marks_the_exception_with_the_entry_id(self):
+        error = self._dispatch(DLQEntryResult.created("dlq-oc-9"))
+
+        assert error.dlq_capture_dispatched is True
+        assert error.dlq_id == "dlq-oc-9"
+
+    def test_async_pre_ack_marks_the_flag_even_with_no_entry_id(self):
+        """The id-truthiness trap: the async outbox acks before an id exists,
+        so a later layer testing the id would store the rejection twice."""
+        error = self._dispatch(DLQEntryResult(success=True, dlq_id=None))
+
+        assert error.dlq_capture_dispatched is True
+        assert error.dlq_id is None
+
+    def test_failed_store_leaves_the_exception_unmarked(self):
+        """Nothing was parked, so the next capture layer must still try."""
+        error = self._dispatch(DLQEntryResult.failed("down"))
+
+        assert error.dlq_capture_dispatched is False
+
+    def test_disabled_capture_leaves_the_exception_unmarked(self):
+        error = CircuitBreakerOpenError("payment_api")
+        with (
+            patch(
+                "baldur.settings.dlq.get_dlq_settings",
+                return_value=_capture_settings(False),
+            ),
+            patch("baldur.services.retry_handler.sinks.store_to_dlq"),
+        ):
+            DLQSink().handle_failure(error, None, _rejection_result())
+
+        assert error.dlq_capture_dispatched is False

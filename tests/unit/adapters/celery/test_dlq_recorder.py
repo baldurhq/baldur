@@ -7,6 +7,7 @@ immutability, recommended action mapping, and store() result handling.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from baldur.adapters.celery.integrations.dlq_recorder import (
@@ -17,6 +18,7 @@ from baldur.adapters.celery.integrations.dlq_recorder import (
     DLQRecorder,
 )
 from baldur.models.dlq import DLQEntryResult
+from baldur.services.circuit_breaker.exceptions import CircuitBreakerOpenError
 
 # =========================================================================
 # Contract Tests
@@ -301,3 +303,207 @@ class TestDLQRecorderStoreResultHandling:
         mock_logger.warning.assert_called_once()
         assert mock_logger.warning.call_args[0][0] == "baldur_dlq.entry_store_failed"
         assert mock_logger.warning.call_args[1]["error"] == "DLQ is disabled"
+
+
+# =========================================================================
+# Contract Tests — open-circuit classification
+# =========================================================================
+
+
+class TestDLQRecorderOpenCircuitPatternsContract:
+    """The circuit-breaker rejection's classification is a type-name match."""
+
+    def test_circuit_breaker_open_is_an_exception_type_pattern(self) -> None:
+        """Matching on the type name — not the message — is what keeps a
+        service name containing a keyword from choosing the failure type."""
+        assert _EXCEPTION_TYPE_PATTERNS["CIRCUIT_BREAKER_OPEN"] == [
+            "circuitbreakeropen"
+        ]
+
+    def test_circuit_breaker_open_has_a_recommended_action(self) -> None:
+        """A stored entry needs an operator-facing next step."""
+        assert (
+            _RECOMMENDED_ACTIONS["CIRCUIT_BREAKER_OPEN"]
+            == "Wait for circuit recovery, then auto-replay"
+        )
+
+
+# =========================================================================
+# Behavior Tests — open-circuit classification
+# =========================================================================
+
+
+class TestDLQRecorderClassificationBehavior:
+    """``classify_failure_type`` on a circuit-breaker rejection.
+
+    The field is replay-selecting: an entry typed ``UNKNOWN_ERROR`` cannot be
+    picked out of the queue by what actually went wrong.
+    """
+
+    def test_circuit_breaker_open_error_classifies_as_circuit_breaker_open(
+        self,
+    ) -> None:
+        exc = CircuitBreakerOpenError("payment_api")
+
+        assert DLQRecorder.classify_failure_type(exc) == "CIRCUIT_BREAKER_OPEN"
+
+    def test_service_name_with_a_gateway_keyword_does_not_divert_the_type(
+        self,
+    ) -> None:
+        """The rejection message embeds the breaker's name. A service called
+        ``payment-gateway`` must still classify by the exception's type, not by
+        the ``gateway`` keyword its message happens to carry."""
+        exc = CircuitBreakerOpenError("payment-gateway")
+
+        assert "gateway" in str(exc).lower()
+        assert DLQRecorder.classify_failure_type(exc) == "CIRCUIT_BREAKER_OPEN"
+
+    def test_service_name_with_an_auth_keyword_does_not_divert_the_type(self) -> None:
+        exc = CircuitBreakerOpenError("auth-service")
+
+        assert DLQRecorder.classify_failure_type(exc) == "CIRCUIT_BREAKER_OPEN"
+
+    def test_recommended_action_follows_the_classification(self) -> None:
+        exc = CircuitBreakerOpenError("payment_api")
+
+        failure_type = DLQRecorder.classify_failure_type(exc)
+
+        assert (
+            DLQRecorder.get_recommended_action(failure_type)
+            == _RECOMMENDED_ACTIONS["CIRCUIT_BREAKER_OPEN"]
+        )
+
+
+# =========================================================================
+# Behavior Tests — cross-layer dedup
+# =========================================================================
+
+
+class TestDLQRecorderDedupBehavior:
+    """One rejected call, one entry.
+
+    A task body whose ``protect(dlq=True)`` call was rejected raises that same
+    exception object out of the task, so the Celery capture site sees a
+    rejection the policy-chain sink has already parked. Storing it again would
+    put one call in the queue twice — and a duplicate replay is the outcome the
+    queue exists to prevent.
+    """
+
+    @staticmethod
+    def _store(exception: Exception) -> None:
+        DLQRecorder().store(
+            domain="payment",
+            task_name="tasks.charge",
+            task_id="t-1",
+            exception=exception,
+            args=(),
+            kwargs={},
+            einfo=None,
+        )
+
+    def test_already_captured_rejection_is_not_stored_again(self) -> None:
+        error = CircuitBreakerOpenError("payment_api")
+        error.mark_dlq_capture_dispatched("dlq-1")
+
+        with patch(
+            "baldur.adapters.celery.integrations.dlq_recorder.store_to_dlq"
+        ) as mock_store:
+            self._store(error)
+
+        mock_store.assert_not_called()
+
+    def test_unmarked_rejection_is_stored(self) -> None:
+        """Positive control: without the marker this IS the capture site."""
+        with patch(
+            "baldur.adapters.celery.integrations.dlq_recorder.store_to_dlq",
+            return_value=DLQEntryResult.created("dlq-2"),
+        ) as mock_store:
+            self._store(CircuitBreakerOpenError("payment_api"))
+
+        mock_store.assert_called_once()
+
+    def test_async_pre_ack_marker_still_suppresses_the_second_store(self) -> None:
+        """The outbox acks with no id — the flag, not the id, is the signal."""
+        error = CircuitBreakerOpenError("payment_api")
+        error.mark_dlq_capture_dispatched(None)
+
+        with patch(
+            "baldur.adapters.celery.integrations.dlq_recorder.store_to_dlq"
+        ) as mock_store:
+            self._store(error)
+
+        assert error.dlq_id is None
+        mock_store.assert_not_called()
+
+    def test_ordinary_failure_is_unaffected_by_the_dedup_gate(self) -> None:
+        """Only an exception a capture layer marked is skipped."""
+        with patch(
+            "baldur.adapters.celery.integrations.dlq_recorder.store_to_dlq",
+            return_value=DLQEntryResult.created("dlq-3"),
+        ) as mock_store:
+            self._store(ValueError("boom"))
+
+        mock_store.assert_called_once()
+
+    def test_skip_is_observable_as_a_debug_log(self) -> None:
+        error = CircuitBreakerOpenError("payment_api")
+        error.mark_dlq_capture_dispatched("dlq-1")
+
+        with (
+            patch("baldur.adapters.celery.integrations.dlq_recorder.store_to_dlq"),
+            patch(
+                "baldur.adapters.celery.integrations.dlq_recorder.logger"
+            ) as mock_logger,
+        ):
+            self._store(error)
+
+        mock_logger.debug.assert_called_once()
+        assert (
+            mock_logger.debug.call_args[0][0]
+            == "baldur_dlq.entry_store_skipped_already_captured"
+        )
+
+    def test_one_rejected_call_yields_exactly_one_store_across_both_layers(
+        self,
+    ) -> None:
+        """Exactly-once across the sink and the Celery layer in one attempt.
+
+        Both layers are counted against ONE store double, so the assertion is
+        the entry count a real attempt produces — not two independent
+        per-layer checks that could each pass while the pair double-stores.
+        """
+        from baldur.interfaces.resilience_policy import PolicyOutcome, PolicyResult
+        from baldur.services.retry_handler.sinks import DLQSink
+
+        error = CircuitBreakerOpenError("payment_api")
+        rejection = PolicyResult(
+            outcome=PolicyOutcome.REJECTED,
+            total_attempts=1,
+            metadata={"service_name": "payment_api", "state": "open"},
+        )
+        calls: list[str] = []
+
+        def _record_store(**kwargs: object) -> DLQEntryResult:
+            calls.append(str(kwargs.get("failure_type")))
+            return DLQEntryResult.created("dlq-only-one")
+
+        with (
+            patch(
+                "baldur.settings.dlq.get_dlq_settings",
+                return_value=SimpleNamespace(open_circuit_capture_enabled=True),
+            ),
+            patch(
+                "baldur.services.retry_handler.sinks.store_to_dlq",
+                side_effect=_record_store,
+            ),
+            patch(
+                "baldur.adapters.celery.integrations.dlq_recorder.store_to_dlq",
+                side_effect=_record_store,
+            ),
+        ):
+            # Layer 1 — the policy-chain sink parks the rejection.
+            DLQSink().handle_failure(error, None, rejection)
+            # Layer 2 — the same exception object propagates out of the task.
+            self._store(error)
+
+        assert calls == ["CIRCUIT_BREAKER_OPEN"]

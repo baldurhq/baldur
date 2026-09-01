@@ -2,7 +2,8 @@
 Unit tests for baldur_task decorator.
 
 Tests success/failure recording, custom domain/service parameters,
-and feature toggle suppression (track_cb, track_dlq).
+feature toggle suppression (track_cb, track_dlq), and the observe-only gate
+on the except path.
 """
 
 from __future__ import annotations
@@ -10,12 +11,14 @@ from __future__ import annotations
 from unittest.mock import patch
 
 import pytest
+from structlog.testing import capture_logs
 
 from baldur.adapters.celery.baldur_task import baldur_task
 from baldur.adapters.celery.signal_config import (
     SignalHooksSettings,
     reset_signal_hooks_settings,
 )
+from tests.factories import dry_run_active
 
 # =========================================================================
 # Behavior Tests
@@ -196,3 +199,114 @@ class TestBaldurTaskDecoratorBehavior:
 
         result = task_with_kwargs(1, b=20)
         assert result == 21
+
+
+# =========================================================================
+# Behavior Tests — observe-only (shadow) parity on the except path
+# =========================================================================
+#
+# Recording a circuit failure and writing a DLQ entry are both state-mutating
+# interventions, and observe-only had already ruled them out. The sibling
+# task_failure signal handler gated them; this decorator gated on nothing.
+
+
+class TestBaldurTaskObserveOnlyBehavior:
+    """Shadow mode suppresses the two interventions the except path takes."""
+
+    def setup_method(self) -> None:
+        reset_signal_hooks_settings()
+
+    def teardown_method(self) -> None:
+        reset_signal_hooks_settings()
+
+    @pytest.fixture
+    def _patch_deps(self):
+        with (
+            patch(
+                "baldur.adapters.celery.baldur_task.CircuitBreakerRecorder",
+                autospec=True,
+            ) as mock_cb_cls,
+            patch(
+                "baldur.adapters.celery.baldur_task.DLQRecorder",
+                autospec=True,
+            ) as mock_dlq_cls,
+            patch(
+                "baldur.adapters.celery.baldur_task.get_signal_hooks_settings",
+                return_value=SignalHooksSettings(),
+            ),
+        ):
+            yield {"cb_cls": mock_cb_cls, "dlq_cls": mock_dlq_cls}
+
+    def test_shadow_mode_records_no_circuit_failure(self, _patch_deps: dict) -> None:
+        @baldur_task()
+        def failing_task() -> None:
+            raise RuntimeError("boom")
+
+        with dry_run_active(), pytest.raises(RuntimeError):
+            failing_task()
+
+        _patch_deps["cb_cls"].return_value.record_failure.assert_not_called()
+
+    def test_shadow_mode_stores_no_dlq_entry(self, _patch_deps: dict) -> None:
+        @baldur_task()
+        def failing_task() -> None:
+            raise RuntimeError("boom")
+
+        with dry_run_active(), pytest.raises(RuntimeError):
+            failing_task()
+
+        _patch_deps["dlq_cls"].return_value.store.assert_not_called()
+
+    def test_shadow_mode_still_propagates_the_exception(
+        self, _patch_deps: dict
+    ) -> None:
+        """Suppression is about the framework's own side effects — the task's
+        own failure still reaches Celery."""
+
+        @baldur_task()
+        def failing_task() -> None:
+            raise RuntimeError("boom")
+
+        with dry_run_active(), pytest.raises(RuntimeError, match="boom"):
+            failing_task()
+
+    def test_shadow_mode_reports_the_would_have_decision(
+        self, _patch_deps: dict
+    ) -> None:
+        @baldur_task(domain="billing", service_name="billing_svc")
+        def failing_task() -> None:
+            raise RuntimeError("boom")
+
+        with dry_run_active(), capture_logs() as logs, pytest.raises(RuntimeError):
+            failing_task()
+
+        suppressed = [
+            entry
+            for entry in logs
+            if entry.get("event") == "execution_mode.intervention_suppressed"
+        ]
+        assert len(suppressed) == 1
+        assert suppressed[0]["action"] == "celery_failure_intervention"
+        assert suppressed[0]["service_name"] == "billing_svc"
+        assert suppressed[0]["domain"] == "billing"
+
+    def test_the_mode_is_resolved_once_for_both_interventions(
+        self, _patch_deps: dict
+    ) -> None:
+        """One resolution covers the CB record and the DLQ store — the two
+        must not be able to disagree about which mode is active."""
+
+        @baldur_task()
+        def failing_task() -> None:
+            raise RuntimeError("boom")
+
+        with (
+            patch(
+                "baldur.adapters.celery.baldur_task.intervention_suppressed",
+                return_value=True,
+            ) as mock_suppressed,
+            pytest.raises(RuntimeError),
+        ):
+            failing_task()
+
+        mock_suppressed.assert_called_once()
