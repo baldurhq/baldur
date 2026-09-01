@@ -14,6 +14,7 @@ UNIT_TEST_GUIDELINES.md 준수:
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import Callable
 from typing import Any
 
@@ -33,9 +34,13 @@ from baldur.resilience.policies.composer import (
     PolicyComposer,
     _classify_exception_outcome,
     _FallbackApplied,
+    _is_open_circuit_rejection,
+    _SyncSinkToAsyncAdapter,
+    _terminal_reaches_sinks,
     compose,
     compose_async,
 )
+from baldur.services.bulkhead.exceptions import BulkheadFullError
 from baldur.services.circuit_breaker.exceptions import CircuitBreakerOpenError
 
 # =============================================================================
@@ -1507,3 +1512,392 @@ class TestComposerFallbackInputFidelity:
         result = composer.execute(self._throw(RuntimeError("boom")))
 
         assert result.metadata["fallback_used"] is True
+
+
+# =============================================================================
+# Behavior — open-circuit rejection capture (sink terminal routing)
+# =============================================================================
+
+
+class _CircuitOpenPolicy:
+    """Policy that rejects the way an OPEN circuit breaker does.
+
+    Mirrors the real breaker's reject shape: a REJECTED ``PolicyResult``
+    carrying a ``CircuitBreakerOpenError`` plus the breaker's own metadata
+    keys. The chain wrapper re-raises that error, so the composer terminal
+    classifies it as REJECTED exactly as it does in production — which is what
+    makes the routing under test the production routing.
+    """
+
+    def __init__(self, service_name: str = "payment_api") -> None:
+        self._service_name = service_name
+
+    @property
+    def name(self) -> str:
+        return "circuit_breaker"
+
+    def execute(
+        self,
+        func: Callable[..., Any],
+        *args: Any,
+        context: PolicyContext | None = None,
+        **kwargs: Any,
+    ) -> PolicyResult:
+        return PolicyResult(
+            value=None,
+            outcome=PolicyOutcome.REJECTED,
+            error=CircuitBreakerOpenError(self._service_name),
+            metadata={"service_name": self._service_name, "state": "open"},
+        )
+
+
+class _AsyncCircuitOpenPolicy(_CircuitOpenPolicy):
+    """Async twin of ``_CircuitOpenPolicy``."""
+
+    async def execute(  # type: ignore[override]
+        self,
+        func: Callable[..., Any],
+        *args: Any,
+        context: PolicyContext | None = None,
+        **kwargs: Any,
+    ) -> PolicyResult:
+        return PolicyResult(
+            value=None,
+            outcome=PolicyOutcome.REJECTED,
+            error=CircuitBreakerOpenError(self._service_name),
+            metadata={"service_name": self._service_name, "state": "open"},
+        )
+
+
+class _BulkheadFullPolicy:
+    """Policy that rejects on a full bulkhead.
+
+    A REJECTED terminal that is deliberately NOT captured — which of the other
+    rejection shapes represent parkable work is a separate decision.
+    """
+
+    @property
+    def name(self) -> str:
+        return "bulkhead"
+
+    def execute(
+        self,
+        func: Callable[..., Any],
+        *args: Any,
+        context: PolicyContext | None = None,
+        **kwargs: Any,
+    ) -> PolicyResult:
+        return PolicyResult(
+            value=None,
+            outcome=PolicyOutcome.REJECTED,
+            error=BulkheadFullError("payment_api", max_concurrent=2, active_count=2),
+        )
+
+
+class _ThreadRecordingSink:
+    """Sink that records the thread it ran on, so the async composer's offload
+    channel is observable without mocking the adapter."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[Exception, PolicyContext | None, PolicyResult]] = []
+        self.thread_idents: list[int] = []
+
+    def handle_failure(
+        self,
+        error: Exception,
+        context: PolicyContext | None,
+        policy_result: PolicyResult,
+    ) -> str | None:
+        self.thread_idents.append(threading.get_ident())
+        self.calls.append((error, context, policy_result))
+        return "sink-oc"
+
+
+def _throwing(exc: BaseException) -> Callable[[], Any]:
+    """Callable that raises ``exc`` — the exception-terminal entry point."""
+
+    def _raise() -> Any:
+        raise exc
+
+    return _raise
+
+
+class TestSinkTerminalRoutingBehavior:
+    """``_terminal_reaches_sinks`` / ``_is_open_circuit_rejection`` decision table.
+
+    The arming flag is the boundary: an open-circuit rejection is the ONLY
+    non-FAILURE terminal that crosses it, and it crosses only when armed.
+    """
+
+    @pytest.mark.parametrize(
+        ("outcome", "error", "armed", "expected"),
+        [
+            # FAILURE is the historical sink terminal — arming is irrelevant.
+            (PolicyOutcome.FAILURE, RuntimeError("boom"), False, True),
+            (PolicyOutcome.FAILURE, RuntimeError("boom"), True, True),
+            # The boundary: same terminal, arming off then on.
+            (
+                PolicyOutcome.REJECTED,
+                CircuitBreakerOpenError("payment_api"),
+                False,
+                False,
+            ),
+            (
+                PolicyOutcome.REJECTED,
+                CircuitBreakerOpenError("payment_api"),
+                True,
+                True,
+            ),
+            # Guard veto — REJECTED with no error at all.
+            (PolicyOutcome.REJECTED, None, True, False),
+            # Other rejection shapes keep the original "never reaches a sink".
+            (
+                PolicyOutcome.REJECTED,
+                BulkheadFullError("payment_api", 2, 2),
+                True,
+                False,
+            ),
+            (PolicyOutcome.REJECTED, PolicyRejectedException("blocked"), True, False),
+            (PolicyOutcome.TIMEOUT, TimeoutPolicyError(5.0), True, False),
+            (PolicyOutcome.SUCCESS_WITH_FALLBACK, None, True, False),
+            (PolicyOutcome.SUCCESS, None, True, False),
+        ],
+    )
+    def test_terminal_routing_depends_on_outcome_error_and_arming(
+        self, outcome, error, armed, expected
+    ):
+        result = PolicyResult(value=None, outcome=outcome, error=error)
+
+        assert (
+            _terminal_reaches_sinks(result, captures_open_circuit_rejections=armed)
+            is expected
+        )
+
+    @pytest.mark.parametrize(
+        ("outcome", "error", "expected"),
+        [
+            (PolicyOutcome.REJECTED, CircuitBreakerOpenError("payment_api"), True),
+            (PolicyOutcome.REJECTED, None, False),
+            (PolicyOutcome.REJECTED, BulkheadFullError("payment_api", 2, 2), False),
+            (PolicyOutcome.REJECTED, PolicyRejectedException("blocked"), False),
+            # The outcome half of the predicate: the same error on a non-REJECTED
+            # terminal is not an open-circuit rejection.
+            (PolicyOutcome.FAILURE, CircuitBreakerOpenError("payment_api"), False),
+        ],
+    )
+    def test_open_circuit_rejection_predicate_narrows_rejected(
+        self, outcome, error, expected
+    ):
+        result = PolicyResult(value=None, outcome=outcome, error=error)
+
+        assert _is_open_circuit_rejection(result) is expected
+
+
+class TestComposerRejectionCaptureBehavior:
+    """``PolicyComposer.execute`` delivers an armed open-circuit rejection."""
+
+    def test_armed_composer_delivers_open_circuit_rejection_to_sink(self, composer):
+        # Given an armed composer whose breaker is OPEN
+        sink = MockSink(sink_id="dlq-oc-1")
+        composer.add(_CircuitOpenPolicy()).add_sink(sink)
+        composer.capture_open_circuit_rejections()
+
+        # When the call is rejected
+        result = composer.execute(lambda: "never runs")
+
+        # Then the rejection reached the sink and the terminal is unchanged
+        assert result.outcome == PolicyOutcome.REJECTED
+        assert isinstance(result.error, CircuitBreakerOpenError)
+        assert len(sink.calls) == 1
+        assert sink.calls[0][0] is result.error
+
+    def test_unarmed_composer_leaves_open_circuit_rejection_uncaptured(self, composer):
+        """Negative half: without arming the same rejection reaches no sink."""
+        sink = MockSink()
+        composer.add(_CircuitOpenPolicy()).add_sink(sink)
+
+        result = composer.execute(lambda: "never runs")
+
+        assert result.outcome == PolicyOutcome.REJECTED
+        assert sink.calls == []
+
+    def test_armed_composer_still_skips_guard_rejection(self, composer):
+        """Re-pin: a guard veto carries no error, so it reaches no sink even armed."""
+        sink = MockSink()
+        composer.add_guard(MockGuard(allowed=False, reason="blocked"))
+        composer.add_sink(sink)
+        composer.capture_open_circuit_rejections()
+
+        result = composer.execute(lambda: "ok")
+
+        assert result.outcome == PolicyOutcome.REJECTED
+        assert result.error is None
+        assert sink.calls == []
+
+    def test_armed_composer_skips_bulkhead_rejection(self, composer):
+        """A bulkhead-full REJECTED terminal is not open-circuit capture."""
+        sink = MockSink()
+        composer.add(_BulkheadFullPolicy()).add_sink(sink)
+        composer.capture_open_circuit_rejections()
+
+        result = composer.execute(lambda: "never runs")
+
+        assert result.outcome == PolicyOutcome.REJECTED
+        assert isinstance(result.error, BulkheadFullError)
+        assert sink.calls == []
+
+    def test_armed_composer_skips_timeout_terminal(self, composer):
+        """A TIMEOUT terminal is a different loss shape — no capture."""
+        sink = MockSink()
+        # A policy in the chain is what routes the exception through the
+        # classifying terminal; an empty chain reports every raise as FAILURE.
+        composer.add(MockPolicy("wrapper")).add_sink(sink)
+        composer.capture_open_circuit_rejections()
+
+        result = composer.execute(_throwing(TimeoutPolicyError(5.0)))
+
+        assert result.outcome == PolicyOutcome.TIMEOUT
+        assert sink.calls == []
+
+    def test_armed_composer_skips_served_fallback(self, composer):
+        """A served fallback answers the caller, so nothing is parked."""
+        from baldur.resilience.policies.fallback import FallbackPolicy
+
+        sink = MockSink()
+        composer.add(FallbackPolicy(default_value="degraded"))
+        composer.add(_CircuitOpenPolicy())
+        composer.add_sink(sink)
+        composer.capture_open_circuit_rejections()
+
+        result = composer.execute(lambda: "never runs")
+
+        assert result.outcome == PolicyOutcome.SUCCESS_WITH_FALLBACK
+        assert result.value == "degraded"
+        assert sink.calls == []
+
+    def test_sink_receives_rejecting_breaker_metadata(self, composer):
+        """The sink needs the rejecting breaker's own keys to build the entry."""
+        sink = MockSink()
+        composer.add(_CircuitOpenPolicy(service_name="charge_gateway")).add_sink(sink)
+        composer.capture_open_circuit_rejections()
+
+        composer.execute(lambda: "never runs")
+
+        delivered_result = sink.calls[0][2]
+        assert delivered_result.metadata["service_name"] == "charge_gateway"
+        assert delivered_result.metadata["state"] == "open"
+
+    def test_sink_receives_context_on_rejection(self, composer):
+        """The call's PolicyContext travels with the rejection — it carries the
+        replay payload the entry is built from."""
+        sink = MockSink()
+        ctx = PolicyContext(order_id="ORD-9")
+        composer.add(_CircuitOpenPolicy()).add_sink(sink)
+        composer.capture_open_circuit_rejections()
+
+        composer.execute(lambda: "never runs", context=ctx)
+
+        assert sink.calls[0][1] is ctx
+
+    def test_rejection_capture_writes_sink_id_onto_result_metadata(self, composer):
+        sink = MockSink(sink_id="dlq-oc-7")
+        composer.add(_CircuitOpenPolicy()).add_sink(sink)
+        composer.capture_open_circuit_rejections()
+
+        result = composer.execute(lambda: "never runs")
+
+        assert result.metadata["sink_id"] == "dlq-oc-7"
+
+    def test_sink_failure_leaves_the_rejection_intact(self, composer):
+        """Capture is a side effect: a raising sink must not change the answer."""
+        composer.add(_CircuitOpenPolicy()).add_sink(MockFailingSink())
+        composer.capture_open_circuit_rejections()
+
+        result = composer.execute(lambda: "never runs")
+
+        assert result.outcome == PolicyOutcome.REJECTED
+        assert isinstance(result.error, CircuitBreakerOpenError)
+
+    def test_capture_open_circuit_rejections_returns_self_for_chaining(self, composer):
+        assert composer.capture_open_circuit_rejections() is composer
+
+
+class TestAsyncComposerRejectionCaptureBehavior:
+    """``AsyncPolicyComposer`` routes the same terminal through its normalized
+    sink channel — so a sync sink keeps running off the event loop."""
+
+    @staticmethod
+    async def _never_runs() -> str:
+        return "never runs"
+
+    def test_armed_async_composer_delivers_open_circuit_rejection_to_sink(
+        self, async_composer
+    ):
+        sink = MockSink(sink_id="dlq-oc-async")
+        async_composer.add(_AsyncCircuitOpenPolicy()).add_sink(sink)
+        async_composer.capture_open_circuit_rejections()
+
+        result = asyncio.run(async_composer.execute(self._never_runs))
+
+        assert result.outcome == PolicyOutcome.REJECTED
+        assert isinstance(result.error, CircuitBreakerOpenError)
+        assert len(sink.calls) == 1
+        assert result.metadata["sink_id"] == "dlq-oc-async"
+
+    def test_unarmed_async_composer_leaves_the_rejection_uncaptured(
+        self, async_composer
+    ):
+        sink = MockSink()
+        async_composer.add(_AsyncCircuitOpenPolicy()).add_sink(sink)
+
+        result = asyncio.run(async_composer.execute(self._never_runs))
+
+        assert result.outcome == PolicyOutcome.REJECTED
+        assert sink.calls == []
+
+    def test_armed_async_composer_still_skips_guard_rejection(self, async_composer):
+        sink = MockSink()
+        async_composer.add_guard(MockGuard(allowed=False, reason="blocked"))
+        async_composer.add_sink(sink)
+        async_composer.capture_open_circuit_rejections()
+
+        result = asyncio.run(async_composer.execute(self._never_runs))
+
+        assert result.outcome == PolicyOutcome.REJECTED
+        assert sink.calls == []
+
+    def test_rejection_capture_runs_the_sync_sink_off_the_event_loop(
+        self, async_composer
+    ):
+        """Dispatch-channel identity: the rejection travels the add-time
+        normalized channel, so the sync sink runs on the offload thread rather
+        than blocking the loop that is still serving other requests."""
+        sink = _ThreadRecordingSink()
+        async_composer.add(_AsyncCircuitOpenPolicy()).add_sink(sink)
+        async_composer.capture_open_circuit_rejections()
+
+        loop_thread: list[int] = []
+
+        async def _run():
+            loop_thread.append(threading.get_ident())
+            return await async_composer.execute(self._never_runs)
+
+        asyncio.run(_run())
+
+        assert len(sink.thread_idents) == 1
+        assert sink.thread_idents[0] != loop_thread[0]
+
+    def test_sync_sink_is_wrapped_by_the_offload_adapter_at_add_time(
+        self, async_composer
+    ):
+        """The offload is inherited by construction — the composer stores the
+        adapter, not the raw sink, so no dispatch path can bypass it."""
+        sink = MockSink()
+        async_composer.add_sink(sink)
+
+        assert isinstance(async_composer._sinks[0], _SyncSinkToAsyncAdapter)
+
+    def test_capture_open_circuit_rejections_returns_self_for_chaining(
+        self, async_composer
+    ):
+        assert async_composer.capture_open_circuit_rejections() is async_composer

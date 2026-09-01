@@ -22,14 +22,17 @@ from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 from pydantic import ValidationError
+from structlog.testing import capture_logs
 
 from baldur.api.django.middleware.baldur import BaldurMiddleware
+from baldur.models.dlq import DLQEntryResult
 from baldur.services.circuit_breaker.service import CircuitBreakerService
 from baldur.settings.middleware import (
     BaldurMiddlewareSettings,
     get_middleware_settings,
     reset_middleware_settings,
 )
+from tests.factories import dry_run_active
 
 # =============================================================================
 # Test helpers
@@ -1042,3 +1045,115 @@ class TestPoolCircuitBreakerStateCasingContract:
         from baldur.api.django.pool_circuit_breaker import PoolCircuitBreaker
 
         assert getattr(PoolCircuitBreaker, constant_name) == canonical_value
+
+
+# =============================================================================
+# Observe-only (shadow) parity — Behavior
+# =============================================================================
+#
+# Observe-only promises to decide without acting. The preemptive branch is two
+# interventions in one — it refuses the request AND writes a durable entry — so
+# the mode has to be resolved BEFORE the branch acts; resolving it afterwards
+# would already have done both.
+
+
+class TestBaldurMiddlewareObserveOnlyBehavior:
+    """Shadow mode suppresses the preemptive 503 and its DLQ write."""
+
+    def _preemptive_mw(self) -> BaldurMiddleware:
+        """Middleware whose next request would take the preemptive branch."""
+        passthrough = FakeResponse(200)
+        mw = BaldurMiddleware(get_response=lambda r: passthrough)
+        mw._initialized = True
+        mw._audit_logger = None
+        mw._cb_service = None
+        mw._cb_status_codes = frozenset({500, 502, 503, 504})
+        mw._rate_limit_codes = frozenset({429})
+        mw._retry_after_max = 300
+        mw._is_cb_open = Mock(spec=BaldurMiddleware._is_cb_open, return_value=True)
+        mw._is_dlq_eligible = Mock(
+            spec=BaldurMiddleware._is_dlq_eligible, return_value=True
+        )
+        mw._store_to_dlq = Mock(
+            spec=BaldurMiddleware._store_to_dlq, return_value="dlq-1"
+        )
+        return mw
+
+    def test_active_mode_rejects_and_stores(self):
+        """Positive control: the branch really does both interventions."""
+        mw = self._preemptive_mw()
+
+        response = mw(FakeRequest(path="/api/orders/", method="POST"))
+
+        assert response.status_code == 503
+        mw._store_to_dlq.assert_called_once()
+
+    def test_shadow_mode_neither_rejects_nor_stores(self):
+        mw = self._preemptive_mw()
+
+        with dry_run_active():
+            response = mw(FakeRequest(path="/api/orders/", method="POST"))
+
+        assert response.status_code == 200
+        mw._store_to_dlq.assert_not_called()
+
+    def test_shadow_mode_reports_the_would_have_decision(self):
+        """Suppressed is not silent — the mode's whole value is the report."""
+        mw = self._preemptive_mw()
+
+        with dry_run_active(), capture_logs() as logs:
+            mw(FakeRequest(path="/api/orders/", method="POST"))
+
+        suppressed = [
+            entry
+            for entry in logs
+            if entry.get("event") == "execution_mode.intervention_suppressed"
+        ]
+        assert len(suppressed) == 1
+        assert suppressed[0]["action"] == "circuit_breaker_reject"
+        assert suppressed[0]["would_reject"] is True
+        assert suppressed[0]["would_store_dlq"] is True
+
+    def test_preemptive_suppression_predicate_follows_the_mode(self):
+        mw = self._preemptive_mw()
+        request = FakeRequest(path="/api/orders/", method="POST")
+
+        assert mw._preemptive_intervention_suppressed(request) is False
+        with dry_run_active():
+            assert mw._preemptive_intervention_suppressed(request) is True
+
+
+class TestBaldurMiddlewareStoreToDlqObserveOnlyBehavior:
+    """``_store_to_dlq`` carries the same suppression as the policy-chain sink.
+
+    Gating it here rather than only at the preemptive branch covers the
+    at-exception and at-5xx call sites too.
+    """
+
+    _REQUEST_DATA = {"path": "/api/orders/", "method": "POST", "headers": {}}
+    _ERROR_CONTEXT = {"error_type": "CIRCUIT_BREAKER_OPEN", "error_message": "open"}
+
+    def test_active_mode_writes_the_entry(self):
+        """Positive control: the same call stores when the mode permits."""
+        mw = _make_middleware()
+
+        with patch(
+            "baldur.api.django.middleware.baldur.store_to_dlq",
+            return_value=DLQEntryResult.created("dlq-9"),
+        ) as mock_store:
+            dlq_id = mw._store_to_dlq(self._REQUEST_DATA, self._ERROR_CONTEXT)
+
+        assert dlq_id == "dlq-9"
+        mock_store.assert_called_once()
+
+    def test_shadow_mode_writes_nothing_and_returns_none(self):
+        mw = _make_middleware()
+
+        with (
+            patch("baldur.api.django.middleware.baldur.store_to_dlq") as mock_store,
+            dry_run_active(),
+        ):
+            dlq_id = mw._store_to_dlq(self._REQUEST_DATA, self._ERROR_CONTEXT)
+
+        assert dlq_id is None
+        mock_store.assert_not_called()
