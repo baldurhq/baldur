@@ -21,7 +21,12 @@ Hook observation scope — 2-layer structure:
 
 Sink handling:
 - Runs synchronously (blocking), per the FailureSink Protocol
-- A DLQ write is a local DB write, so it costs a few ms
+- Reached by the FAILURE terminal, and — on a composer armed via
+  ``capture_open_circuit_rejections()`` — by an open-circuit rejection too
+- Cost depends on the sink's own store mode: the DLQ sink's default async
+  outbox path still masks and serializes the payload on this thread before
+  handing it over, and a sync-store configuration additionally pays the write
+  (a few ms). On the async composer both run off the event loop
 
 Preventing duplicate FallbackPolicy execution:
 - Inside the composer chain, _apply_fallback() is called instead of execute()
@@ -237,6 +242,37 @@ def _classify_exception_outcome(error: BaseException) -> PolicyOutcome:
     return PolicyOutcome.FAILURE
 
 
+def _is_open_circuit_rejection(result: PolicyResult) -> bool:
+    """True when this terminal is a call an OPEN circuit refused to run.
+
+    Narrower than ``outcome == REJECTED``: a guard veto carries no error at all,
+    and a bulkhead-full or timeout terminal is a different kind of loss whose
+    capture semantics are not decided here.
+    """
+    if result.outcome != PolicyOutcome.REJECTED or result.error is None:
+        return False
+    from baldur.services.circuit_breaker.exceptions import CircuitBreakerOpenError
+
+    return isinstance(result.error, CircuitBreakerOpenError)
+
+
+def _terminal_reaches_sinks(
+    result: PolicyResult, *, captures_open_circuit_rejections: bool
+) -> bool:
+    """Whether a non-success terminal is delivered to the sink channel.
+
+    FAILURE has always been the sink terminal. An open-circuit REJECTED
+    terminal joins it only on a composer wired for open-circuit capture: the
+    breaker rejects in microseconds and drops whatever the call carried, so
+    without this the work is lost precisely during the outage the DLQ exists
+    for. Every other rejection shape keeps the original "REJECTED never reaches
+    a sink" behavior.
+    """
+    if result.outcome == PolicyOutcome.FAILURE:
+        return True
+    return captures_open_circuit_rejections and _is_open_circuit_rejection(result)
+
+
 def _fallback_source(metadata: dict[str, Any]) -> str | None:
     """Derive the served fallback's source label from its result metadata.
 
@@ -360,6 +396,7 @@ class PolicyComposer(Generic[T]):
         self._guards: list[PolicyGuard] = []
         self._hooks: list[PolicyHook] = []
         self._sinks: list[FailureSink] = []
+        self._captures_open_circuit_rejections = False
 
     # === Builder API ===
 
@@ -388,6 +425,18 @@ class PolicyComposer(Generic[T]):
     def add_sink(self, sink: FailureSink) -> PolicyComposer[T]:
         """Add a FailureSink. Handles the terminal failure."""
         self._sinks.append(sink)
+        return self
+
+    def capture_open_circuit_rejections(self) -> PolicyComposer[T]:
+        """Also deliver an open-circuit rejection to the sinks.
+
+        Arming belongs here rather than on the circuit-breaker policy: policy
+        instances are cached per service name and shared by every call site of
+        that name, so a flag carried there would leak one call site's capture
+        choice onto its neighbours. A composer is built per profile, which is
+        exactly the granularity the choice has.
+        """
+        self._captures_open_circuit_rejections = True
         return self
 
     # === Execution ===
@@ -464,7 +513,12 @@ class PolicyComposer(Generic[T]):
             self._notify_hooks_failure(result, context=context)
 
             # Step 4: Sink handling — synchronous, blocking
-            if result.outcome == PolicyOutcome.FAILURE:
+            if _terminal_reaches_sinks(
+                result,
+                captures_open_circuit_rejections=(
+                    self._captures_open_circuit_rejections
+                ),
+            ):
                 self._process_sinks(result, context, args, kwargs)
 
         return result
@@ -723,6 +777,7 @@ class AsyncPolicyComposer(Generic[T]):
         self._guards: list[AsyncPolicyGuard] = []
         self._hooks: list[AsyncPolicyHook] = []
         self._sinks: list[AsyncFailureSink] = []
+        self._captures_open_circuit_rejections = False
 
     # === Builder API ===
 
@@ -746,6 +801,16 @@ class AsyncPolicyComposer(Generic[T]):
     def add_sink(self, sink: FailureSink | AsyncFailureSink) -> AsyncPolicyComposer[T]:
         """Add a FailureSink (add-time normalize: async pass-through / sync wrap)."""
         self._sinks.append(_normalize_sink(sink))
+        return self
+
+    def capture_open_circuit_rejections(self) -> AsyncPolicyComposer[T]:
+        """Also deliver an open-circuit rejection to the sinks (sync-symmetric).
+
+        The rejection travels the same normalized sink channel as the FAILURE
+        terminal, so a sync store inherits the add-time ``to_thread`` offload
+        and the event loop keeps serving while the rejected call is captured.
+        """
+        self._captures_open_circuit_rejections = True
         return self
 
     # === Execution ===
@@ -834,8 +899,14 @@ class AsyncPolicyComposer(Generic[T]):
             if self._hooks:
                 await self._notify_hooks_failure(result, context=context)
 
-            # Sink processing — only on the FAILURE terminal.
-            if result.outcome == PolicyOutcome.FAILURE and self._sinks:
+            # Sink processing — the FAILURE terminal, plus an armed
+            # open-circuit rejection.
+            if self._sinks and _terminal_reaches_sinks(
+                result,
+                captures_open_circuit_rejections=(
+                    self._captures_open_circuit_rejections
+                ),
+            ):
                 await self._process_sinks(result, context, args, kwargs)
 
         return result

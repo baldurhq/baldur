@@ -22,11 +22,27 @@ class CircuitBreakerOpenError(PolicyRejectedException, CircuitBreakerError):
 
     Attributes:
         service_name: Identifier of the service whose CB is OPEN.
+        dlq_capture_dispatched: ``True`` once a layer has handed this rejection
+            to the DLQ store. Later capture layers in the same process read it
+            off the propagating instance and skip their own store, so one
+            rejected call yields one entry.
+        dlq_id: Identifier of that entry when the store returned one
+            synchronously. ``None`` on the async outbox path, which acks before
+            the id exists — so a dedup check must read
+            ``dlq_capture_dispatched``, never the truthiness of this field.
     """
 
     def __init__(self, service_name: str, message: str | None = None):
         self.service_name = service_name
+        self.dlq_capture_dispatched = False
+        self.dlq_id: str | None = None
         super().__init__(message or f"Circuit breaker '{service_name}' is OPEN")
+
+    def mark_dlq_capture_dispatched(self, dlq_id: str | None = None) -> None:
+        """Record that this rejection's DLQ store has been dispatched."""
+        self.dlq_capture_dispatched = True
+        if dlq_id is not None:
+            self.dlq_id = dlq_id
 
     def extra_context(self) -> dict:
         return {"service_name": self.service_name}

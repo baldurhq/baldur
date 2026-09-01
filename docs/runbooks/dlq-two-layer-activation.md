@@ -1,23 +1,46 @@
-# DLQ Two-Layer Activation Runbook
+# DLQ Capture Activation Runbook
 
-> **Purpose**: Activate Baldur's full "DLQ absorbs all failures" contract by configuring **both** layers of DLQ protection — view-level `@dlq_protect`/`@protected` AND middleware-level `BALDUR_DLQ_ELIGIBLE_PATHS`. Single-layer setups miss failures that originate before the view dispatcher (ORM connection setup, middleware-stage exceptions during downstream outages), producing 10–22 % absorption gaps under storm conditions.
-> **Audience**: Operators integrating Baldur into a Django app + anyone reproducing an equivalent production storm test.
-> **Cadence**: One-time setup per Django app + revisit when adding new failure-prone endpoints.
+> **Purpose**: Get every failure your deployment can park into the DLQ, and know exactly which ones that is. What "every" covers differs by framework, so this runbook states the contract per surface and the activation step each one needs — then walks the Django two-layer setup, which is the only surface with a request-boundary layer.
+> **Audience**: Operators integrating Baldur into any supported surface — Django, Flask, FastAPI, Celery, plain Python — plus anyone reproducing an equivalent production storm test.
+> **Cadence**: One-time setup per service + revisit when adding new failure-prone endpoints.
 
 ---
 
-## TL;DR
+## What each surface captures
 
-Baldur ships **two independent DLQ-storage layers** for Django apps:
+The protected-call layer (`@dlq_protect`, `@protected(dlq=True)`) is framework-neutral and carries two capture triggers: **retry exhaustion** (the call ran and kept failing) and **open-circuit rejection** (the breaker refused to run it at all). Everything beyond that is Django-only, because Django is the one surface with a request-boundary middleware.
+
+| Surface | What reaches the queue | How you turn it on |
+|---|---|---|
+| **Django** | Both layers: retry exhaustion + open-circuit rejection from the protected call, **plus** failures that happen before the view runs and a preemptive store while the middleware circuit is OPEN | Phase 1 (`@dlq_protect` / `@protected(dlq=True)`) **and** Phase 2 (`BALDUR_DLQ_ELIGIBLE_PATHS`) |
+| **Flask** | The protected-call layer: retry exhaustion + open-circuit rejection | Phase 1 only. Wrap the function that calls the failing dependency |
+| **FastAPI** | Same as Flask. The capture runs off the event loop, so a rejected request being parked does not stall the others | Phase 1 only |
+| **plain Python** (CLI, worker script) | Same as Flask. The call still raises `CircuitBreakerOpenError` to your code after the entry is written — capture does not change the function's contract | Phase 1 only |
+| **Celery** | The protected-call layer inside the task body, **plus** a terminal capture when a task exhausts its Celery retries | Phase 1 inside the task body, and/or `setup_baldur_signals()` for the terminal capture |
+
+Open-circuit capture is on by default wherever `dlq=True` is; `BALDUR_DLQ_OPEN_CIRCUIT_CAPTURE_ENABLED=false` turns it off and leaves only the retry-exhaustion trigger.
+
+**What no surface captures today**: a call rejected by a full bulkhead, and a whole-sequence timeout. Both end the call without reaching the DLQ; on Django the resulting 5xx is picked up by Phase 2, elsewhere the work is lost.
+
+**Two caveats worth knowing before you tune the middleware**:
+
+- The shared Flask/FastAPI middleware can pre-flight a circuit check if you pass it a `service_name`. That rejects the request **before** your protected call runs, so on an endpoint whose capture you rely on, the pre-flight starves it — the request is refused with a 503 and nothing is parked. Do not enable the pre-flight on capture-eligible endpoints.
+- Only Django has a middleware-level circuit breaker of its own (the 5xx-observation one described below). On the other frameworks the only breaker is the one inside `protect()`.
+
+---
+
+## TL;DR — the Django two layers
+
+Django ships **two independent DLQ-storage layers**:
 
 | Layer | Where it fires | What it catches |
 |---|---|---|
-| **View-level** (`@dlq_protect`, `@protected(dlq=True)`) | Inside the wrapped function body | Failures inside business logic — anything the function raises after retry exhaustion |
+| **View-level** (`@dlq_protect`, `@protected(dlq=True)`) | Inside the wrapped function body | Failures inside business logic — what the function raises after retry exhaustion, and what its circuit rejects while OPEN |
 | **Middleware-level** (`BaldurMiddleware` + `BALDUR_DLQ_ELIGIBLE_PATHS`) | At the Django request boundary | Failures BEFORE the view runs (ORM connection setup, middleware-layer exceptions) AND preemptive store when middleware-CB is OPEN |
 
-The two layers are independent — view-CB is for business-logic flow control, middleware-CB is for cross-cutting infrastructure protection. **Both must be activated** for the framework's "DLQ absorbs ALL failures" contract to hold in production. Cat 7B.2 reverse-verify (2026-05-12) measured the gap: 1-layer setup absorbs 78–97 % of storm failures with high between-run variance; 2-layer setup deterministically absorbs 100 % (run-to-run ZCARD identical) and sustains 19× higher RPS by short-circuiting view-retry via middleware-CB.
+The two layers are independent — view-CB is for business-logic flow control, middleware-CB is for cross-cutting infrastructure protection. **Both are needed on Django** to cover the pre-dispatch window. Cat 7B.2 reverse-verify (2026-05-12) measured the gap: 1-layer setup absorbs 78–97 % of storm failures with high between-run variance; 2-layer setup deterministically absorbs 100 % (run-to-run ZCARD identical) and sustains 19× higher RPS by short-circuiting view-retry via middleware-CB.
 
-**The single most important rule**: **if your README/SLO promises "we absorb every failure under storm", enable both layers**. View-level alone is correct architecture for the business-logic flow but does not honor the framework-level "all failures" contract by itself.
+**The single most important rule**: state your SLO against the surface table above, not against the word "all". On Django, a promise about failures that begin before the view needs Phase 2 enabled.
 
 ---
 
@@ -37,7 +60,7 @@ def _charge_impl(order_id, amount):
     ...
 ```
 
-`@dlq_protect` (or `@protected(dlq=True, retry=True)`) wraps the wrapped function body. When the body raises after retry exhaustion, the policy chain's `DLQSink` (`baldur.services.retry_handler.sinks`) hands the failure to `baldur.dlq.helpers.store_to_dlq`, which lands in `baldur:dlq:pending` in Redis. **What this catches**: anything raised AFTER the view's `def` line has been entered.
+`@dlq_protect` (or `@protected(dlq=True, retry=True)`) wraps the wrapped function body. When the body raises after retry exhaustion, the policy chain's `DLQSink` (`baldur.services.retry_handler.sinks`) hands the failure to `baldur.dlq.helpers.store_to_dlq`, which lands in `baldur:dlq:pending` in Redis. Once the function's circuit OPENs, later calls are rejected without running — those are parked too, under failure type `CIRCUIT_BREAKER_OPEN`. **What this catches**: anything raised AFTER the view's `def` line has been entered, plus anything the circuit refused to let in.
 
 **What this does NOT catch**: anything that fails BEFORE Django dispatches to the view function — including:
 - Connection-pool setup failures when the DB has just gone down
@@ -62,7 +85,7 @@ A failure starting from the same downstream outage can land in either layer depe
 
 - Pre-dispatch failures get a 5xx response from Django but no DLQ entry
 - After middleware-CB OPENs, every request becomes a fast 5xx with no DLQ entry
-- Result: real-world absorption rate drops 10–22 % vs. the "all failures" framework promise
+- Result: real-world absorption rate drops 10–22 % against the whole-request failure count
 
 ---
 
@@ -203,11 +226,48 @@ If you see this within the first few seconds of the storm, middleware-CB is func
 
 ---
 
+## Phase 4 — Activate replay for what you captured
+
+Capture parks the work; replay is what finishes it. An entry nothing can replay is a record of a loss, not a recovery. Two things gate automatic replay:
+
+1. **A replay handler registered for the entry's domain.** `register_replay_handler(YourHandler())` — without one, the on-recovery sweep skips that domain entirely and its entries wait for an operator. (It skips deliberately: an unregistered domain would spend each entry's replay budget on a handler that cannot run, and escalate them to manual review.)
+2. **A `service_failure_type_map` entry** naming which failure types to sweep when a circuit closes.
+
+### Open-circuit entries need no map entry
+
+Entries parked because the circuit was OPEN (`CIRCUIT_BREAKER_OPEN`) are swept automatically when that same circuit closes — the circuit that recovered is by construction the one that rejected them, which is the whole eligibility question. You only need the handler.
+
+**Do not add `CIRCUIT_BREAKER_OPEN` to `service_failure_type_map`.** Mapped types are selected by type alone, across every domain, so a mapping would pull in another service's entries whose dependency is still down, drive them straight back into it, and spend their replay budget.
+
+Because of this, **a registered handler now receives entries of that type** — its `replay()` must accept them or route them onward.
+
+### Register the handler under the stored domain name
+
+The domain an entry is stored under is the normalized form of the `protect()` name: lower-cased, with `-` turned into `_`. So `@protected(name="Payment-API")` parks under `payment_api`, and that is the domain to register for.
+
+A name that cannot be normalized into a domain at all — one starting with a digit, such as `3ds-gateway` — lands in the shared unclassifiable bucket. Those entries are never swept automatically, because the bucket is not a service identity; they stay operator-driven. Use canonical names (`ds3_gateway`) for anything you want auto-replayed.
+
+### Verify
+
+Close the circuit (stop the fault, wait out `recovery_timeout`) and watch the log:
+
+```
+[info] replay_service.circuit_close_replay service_name=payment_api batch_result=12 success_count=12 failed_count=0
+```
+
+If `batch_result` stays 0 while entries are pending, check the DEBUG line naming the reason:
+
+```
+[debug] replay_service.open_circuit_auto_replay_skipped healing_domain=payment_api reason=no_replay_handler_registered
+```
+
+---
+
 ## Common Mistakes
 
-### Mistake 1 — Activate only view-level, advertise "absorbs all failures"
+### Mistake 1 — Activate only view-level on Django, then promise whole-request absorption
 
-This was Cat 7B.2's original setup (2026-05-10). Single-run measurement got 97.3 % absorption (G7 < 5 % tolerance), but reverse-verify on 2026-05-12 showed between-run variance of 10–22 %. The framework's "all failures" promise was being half-tested. Always activate both layers if the SLO depends on the "all" word.
+This was Cat 7B.2's original setup (2026-05-10). Single-run measurement got 97.3 % absorption (G7 < 5 % tolerance), but reverse-verify on 2026-05-12 showed between-run variance of 10–22 %. The claim was being half-tested. On Django, activate both layers when the SLO is stated per request rather than per protected call.
 
 ### Mistake 2 — Forget to restart Django after editing settings
 

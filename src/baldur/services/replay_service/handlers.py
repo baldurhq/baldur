@@ -135,6 +135,18 @@ def register_replay_handler(handler: ReplayHandler) -> None:
     _replay_handlers[handler.domain] = handler
 
 
+def has_replay_handler(domain: str) -> bool:
+    """Whether a real (non-default) replay handler is registered for a domain.
+
+    ``get_replay_handler`` never returns nothing — an unregistered domain gets
+    a ``DefaultReplayHandler`` whose ``replay()`` always fails. An automatic
+    lane that selects entries for such a domain would spend each one's replay
+    budget on a guaranteed failure and escalate them to review, so it asks this
+    first instead.
+    """
+    return domain in _replay_handlers
+
+
 def get_replay_handler(domain: str) -> ReplayHandler:
     """
     Get the replay handler for a domain.

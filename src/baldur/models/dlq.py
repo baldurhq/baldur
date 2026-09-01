@@ -20,6 +20,22 @@ from typing import Any
 
 from baldur.settings import get_dlq_settings
 
+OPEN_CIRCUIT_FAILURE_TYPE: str = "CIRCUIT_BREAKER_OPEN"
+"""``failure_type`` of an entry captured because an OPEN circuit rejected the call.
+
+Written by every layer that parks such a call and read by the on-recovery
+sweep that replays them, so the producing and selecting ends cannot drift.
+"""
+
+POLICY_CHAIN_CAPTURE_SOURCE: str = "policy_chain"
+"""``metadata["source"]`` stamped on entries the ``protect()`` policy chain captured.
+
+Distinguishes them from entries a request-boundary layer stored under a
+path-inferred domain: only a policy-chain entry's domain names the circuit that
+actually rejected the call, so only those are safe to sweep on that circuit's
+recovery.
+"""
+
 
 @dataclass
 class DLQConfig:
@@ -113,7 +129,13 @@ class CleanupStats:
         return self.archived_older_than_90_days
 
 
-__all__ = ["CleanupStats", "DLQConfig", "DLQEntryResult"]
+__all__ = [
+    "OPEN_CIRCUIT_FAILURE_TYPE",
+    "POLICY_CHAIN_CAPTURE_SOURCE",
+    "CleanupStats",
+    "DLQConfig",
+    "DLQEntryResult",
+]
 
 
 # Suppress ruff F401 — Any is reserved for forward-compatible field annotations.

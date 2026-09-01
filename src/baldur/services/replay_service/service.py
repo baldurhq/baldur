@@ -29,12 +29,14 @@ import structlog
 from baldur.audit.helpers import log_dlq_replay_audit, log_dlq_replay_blocked_audit
 from baldur.audit.trace import extract_origin_trace
 from baldur.interfaces.repositories import ResolutionTrigger
+from baldur.models.dlq import OPEN_CIRCUIT_FAILURE_TYPE, POLICY_CHAIN_CAPTURE_SOURCE
 from baldur.services.event_bus.emitter import EventEmitterMixin
 from baldur.settings import get_config
 from baldur.settings.replay_automation import get_replay_automation_settings
+from baldur.utils.domain_validation import FALLBACK_DOMAIN, resolve_stored_domain
 from baldur.utils.time import ensure_aware, utc_now
 
-from .handlers import _truncate_gate, get_replay_handler
+from .handlers import _truncate_gate, get_replay_handler, has_replay_handler
 from .models import BatchReplayResult, ReplayResult
 
 if TYPE_CHECKING:
@@ -1301,6 +1303,46 @@ class ReplayService(EventEmitterMixin):
                         error=str(exc),
                     )
 
+    def _resolve_open_circuit_replay_domain(
+        self, service_name: str, mapped_failure_types: list[str]
+    ) -> str | None:
+        """Domain whose open-circuit captures this sweep may replay, or None.
+
+        The join runs through the same projection the store used, so a protect
+        name the store quietly reprojected (``Payment-API`` is captured under
+        ``payment_api``) is still found here — deriving it a second time by
+        hand is what made these entries permanently unreachable before.
+
+        Returns None, and the entries stay operator-driven, when:
+
+        - the name has no domain identity of its own (it landed in the
+          unclassifiable bucket, which pools unrelated names);
+        - no replay handler is registered for it, so every selected entry would
+          burn its budget on a handler that cannot run;
+        - the operator already mapped the type, whose lane covers it — running
+          both would fetch the same entry twice in one sweep.
+        """
+        if OPEN_CIRCUIT_FAILURE_TYPE in mapped_failure_types:
+            return None
+
+        domain = resolve_stored_domain(service_name)
+        if domain == FALLBACK_DOMAIN:
+            logger.debug(
+                "replay_service.open_circuit_auto_replay_skipped",
+                service_name=service_name,
+                reason="domain_not_addressable",
+            )
+            return None
+        if not has_replay_handler(domain):
+            logger.debug(
+                "replay_service.open_circuit_auto_replay_skipped",
+                healing_domain=domain,
+                service_name=service_name,
+                reason="no_replay_handler_registered",
+            )
+            return None
+        return domain
+
     def _replay_on_circuit_close_locked(  # noqa: C901, PLR0912
         self,
         service_name: str,
@@ -1326,7 +1368,17 @@ class ReplayService(EventEmitterMixin):
         # (e.g., ["TIMEOUT", "TIMEOUT"]), which would dilute the divmod
         # quota allocation by issuing repeated queries against the same ID pool.
         failure_types = list(dict.fromkeys(failure_type_map.get(service_name, [])))
-        if not failure_types:
+
+        # Open-circuit captures need no map entry: the circuit that just closed
+        # is the one that rejected them, which is the whole eligibility test.
+        # Resolved BEFORE the empty-map branch below, because the deployment
+        # that produces these entries — plain `dlq=True`, no RuntimeConfig at
+        # all — is exactly the one that early-returns there.
+        auto_domain = self._resolve_open_circuit_replay_domain(
+            service_name, failure_types
+        )
+
+        if not failure_types and auto_domain is None:
             # Operator misconfig: `service_failure_type_map` has no entry for
             # this service. Surface through the same channels as governance
             # blocks (WARNING log + DLQ_REPLAY_BLOCKED event + metric + audit)
@@ -1402,15 +1454,21 @@ class ReplayService(EventEmitterMixin):
 
         max_replays = self.config["max_replay_attempts"]
         entries: list[FailedOperationData] = []
+        # One fill lane per selection. Operator-mapped types select by type
+        # alone (unchanged); the open-circuit lane additionally scopes to the
+        # closing service's own domain.
+        lanes: list[tuple[str, str | None]] = [(ft, None) for ft in failure_types]
+        if auto_domain is not None:
+            lanes.append((OPEN_CIRCUIT_FAILURE_TYPE, auto_domain))
         # Per-type fairness quota (D1): divmod proportional split prevents
         # the first failure_type's backlog from starving the rest of the
         # recovered service's mapped types on circuit-close replay.
-        quota_base, extra = divmod(max_items, len(failure_types))
+        quota_base, extra = divmod(max_items, len(lanes))
         logger.debug(
             "replay_service.quota_allocated",
             service_name=service_name,
             max_items=max_items,
-            n_types=len(failure_types),
+            n_types=len(lanes),
             quota_base=quota_base,
             extra=extra,
         )
@@ -1418,17 +1476,32 @@ class ReplayService(EventEmitterMixin):
         # cap may have left eligible entries undrained. Derived from the
         # existing fill loop at zero extra query (no eligible-count scan).
         capped = False
-        for i, ft in enumerate(failure_types):
+        for i, (ft, lane_domain) in enumerate(lanes):
             quota = quota_base + (1 if i < extra else 0)
             if quota <= 0:
                 break
             batch = self.repository.find_replayable(
                 max_retries=max_replays,
+                domain=lane_domain,
                 failure_type=ft,
                 limit=quota,
             )
             if len(batch) == quota:
                 capped = True
+            if lane_domain is not None:
+                # A domain+type match does not by itself prove the circuit that
+                # closed is the circuit that rejected: a request-boundary layer
+                # stores the same failure type under a path-inferred domain
+                # while the dead dependency was something else entirely.
+                # Replaying those here would drive them straight back into it
+                # and spend their budget. Only a policy-chain capture carries
+                # the rejecting breaker's own name as its domain.
+                batch = [
+                    entry
+                    for entry in batch
+                    if (entry.metadata or {}).get("source")
+                    == POLICY_CHAIN_CAPTURE_SOURCE
+                ]
             entries.extend(batch)
             logger.debug(
                 "replay_service.quota_filled",
