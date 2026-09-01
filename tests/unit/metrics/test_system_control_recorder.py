@@ -38,16 +38,29 @@ def system_control_recorder():
 class TestSystemControlRecorderContract:
     """R8: SystemControlMetricRecorder contract values."""
 
-    def test_exports_five_convenience_functions(self):
-        """__all__ includes class + 5 convenience functions."""
+    def test_exports_six_convenience_functions(self):
+        """__all__ includes class + 6 convenience functions."""
         from baldur.metrics.recorders.system_control import __all__
 
         assert "SystemControlMetricRecorder" in __all__
         assert "set_sc_enabled" in __all__
         assert "set_sc_dry_run" in __all__
+        assert "set_sc_persist_dirty" in __all__
         assert "record_sc_state_change" in __all__
         assert "record_sc_disabled_duration" in __all__
         assert "record_sc_disabled" in __all__
+
+    def test_persist_dirty_gauge_name_and_help(self):
+        """The gauge name is the operator-facing contract."""
+        from baldur.metrics.recorders.system_control import (
+            SystemControlMetricRecorder,
+        )
+
+        prefix = SystemControlMetricRecorder.PREFIX
+        assert (
+            SystemControlMetricRecorder()._persist_dirty._name
+            == f"{prefix}_system_control_persist_dirty"
+        )
 
 
 # =============================================================================
@@ -69,6 +82,23 @@ class TestSystemControlRecorderBehavior:
     def test_set_dry_run(self, system_control_recorder):
         """set_dry_run does not raise."""
         system_control_recorder.set_dry_run(True)
+
+    def test_set_persist_dirty_sets_and_clears_the_gauge(self, system_control_recorder):
+        """1 while the local state is unpersisted, 0 once a retry lands."""
+        with patch.object(system_control_recorder._persist_dirty, "set") as mock_set:
+            system_control_recorder.set_persist_dirty(True)
+            system_control_recorder.set_persist_dirty(False)
+
+        assert [c.args for c in mock_set.call_args_list] == [(1,), (0,)]
+
+    def test_set_persist_dirty_swallows_a_failing_gauge(self, system_control_recorder):
+        """Metrics are fail-open: a broken gauge must not abort a kill switch."""
+        with patch.object(
+            system_control_recorder._persist_dirty,
+            "set",
+            side_effect=RuntimeError("registry closed"),
+        ):
+            system_control_recorder.set_persist_dirty(True)
 
     def test_record_state_change_valid_actions(self, system_control_recorder):
         """record_state_change with each valid action does not raise."""
@@ -110,6 +140,22 @@ class TestSystemControlConvenienceFunctionsBehavior:
         ):
             set_sc_enabled(True)
         mock_recorder.set_enabled.assert_called_once_with(True)
+
+    def test_set_sc_persist_dirty_delegates_to_recorder(self):
+        """set_sc_persist_dirty forwards its argument to set_persist_dirty."""
+        from baldur.metrics.recorders.system_control import (
+            SystemControlMetricRecorder,
+            set_sc_persist_dirty,
+        )
+
+        mock_recorder = MagicMock(spec=SystemControlMetricRecorder)
+        with patch(
+            "baldur.metrics.recorders.system_control._lazy_recorder",
+            return_value=mock_recorder,
+            autospec=True,
+        ):
+            set_sc_persist_dirty(True)
+        mock_recorder.set_persist_dirty.assert_called_once_with(True)
 
 
 # =============================================================================
