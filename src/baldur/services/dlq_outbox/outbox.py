@@ -6,10 +6,15 @@ and calls ``RingBuffer.put`` (lock-bounded ~50-100 ns). The ``enqueue_time``
 is used by the worker to observe ``dlq_outbox_processing_delay_seconds``
 when popping the entry (D4 leading-indicator).
 
-Drop policy: DROP_OLDEST. The drop-rate threshold callback emits
-``dlq.outbox_drop_threshold_breached`` log + Prometheus counter +
-``DLQ_OUTBOX_DROP_THRESHOLD_BREACHED`` EventBus event so operators see drops
-before they translate into customer-visible loss.
+Drop policy: DROP_OLDEST. Drops are accounted on the worker thread, one window
+per drain cycle (779 D12): every dropped entry is counted into
+``dlq_outbox_drops_total``, and a window whose drop rate exceeds the threshold
+emits ``dlq.outbox_drop_threshold_breached`` + the
+``DLQ_OUTBOX_DROP_THRESHOLD_BREACHED`` EventBus event, so operators see drops
+before they translate into customer-visible loss. Windowed and worker-side by
+design: a lifetime rate silences a late burst in a long-lived process, and the
+buffer's own callback would run that alert under the ring lock on a request
+thread.
 """
 
 from __future__ import annotations
@@ -25,7 +30,7 @@ import structlog
 
 from baldur.audit.ring_buffer import RingBuffer, RingBufferStats
 from baldur.core.process_utils import fork_repaired
-from baldur.services.dlq_outbox.worker import DLQOutboxWorker
+from baldur.services.dlq_outbox.worker import DLQOutboxWorker, DropWindow
 from baldur.settings.backpressure import BackpressureStrategy
 
 if TYPE_CHECKING:
@@ -111,11 +116,12 @@ class Outbox:
 
         settings = get_dlq_outbox_settings()
 
+        # No ``on_drop_threshold``: the buffer's own callback fires under its
+        # lock on the producer thread. Drop accounting and alerting belong to
+        # the worker, which already wakes each cycle and blocks nobody.
         buffer: RingBuffer = RingBuffer(
             capacity=settings.capacity,
             strategy=BackpressureStrategy.DROP_OLDEST,
-            drop_rate_threshold=settings.drop_rate_threshold,
-            on_drop_threshold=_on_drop_threshold,
         )
 
         if sync_writer is None:
@@ -130,6 +136,9 @@ class Outbox:
             flush_interval_seconds=settings.flush_interval_seconds,
             on_emergency_dump=emergency_dump,
             on_processing_delay=_on_processing_delay,
+            on_drops_observed=_on_drops_observed,
+            on_drop_alert=_on_drop_threshold,
+            drop_rate_threshold=settings.drop_rate_threshold,
         )
         return cls(buffer=buffer, worker=worker)
 
@@ -481,30 +490,43 @@ def _default_emergency_dump(batch: list[dict[str, Any]]) -> None:
 
 
 # =============================================================================
-# Drop-rate alert callback (D4)
+# Drop accounting + drop-rate alert callbacks (D4, reworked by 779 D12)
 # =============================================================================
 
 
-def _on_drop_threshold(stats: RingBufferStats) -> None:
-    """RingBuffer drop-rate threshold callback.
+def _on_drops_observed(dropped: int) -> None:
+    """Count a drain cycle's dropped entries into ``dlq_outbox_drops_total``.
 
-    1. WARNING log
-    2. Prometheus counter increment
-    3. DLQ_OUTBOX_DROP_THRESHOLD_BREACHED EventBus event
+    Summed per window, so the counter reads as the number of entries actually
+    lost — not as the number of times an alert happened to fire.
     """
-    logger.warning(
-        "dlq.outbox_drop_threshold_breached",
-        capacity=stats.capacity,
-        size=stats.size,
-        total_dropped=stats.total_dropped,
-        drop_rate=stats.drop_rate,
-    )
     try:
         from baldur.services.metrics.definitions import dlq_outbox_drops_total
 
-        dlq_outbox_drops_total.labels(domain="default").inc()
+        dlq_outbox_drops_total.labels(domain="default").inc(dropped)
     except Exception:
         pass
+
+
+def _on_drop_threshold(window: DropWindow) -> None:
+    """Worker-side windowed drop-rate alert.
+
+    1. WARNING log
+    2. DLQ_OUTBOX_DROP_THRESHOLD_BREACHED EventBus event
+
+    The entry count is published by :func:`_on_drops_observed` every cycle, so
+    this stays purely an alert — re-armable per window, unlike the once-per-
+    process latch it replaces.
+    """
+    logger.warning(
+        "dlq.outbox_drop_threshold_breached",
+        capacity=window.capacity,
+        size=window.size,
+        dropped_in_window=window.dropped,
+        enqueued_in_window=window.enqueued,
+        total_dropped=window.total_dropped,
+        drop_rate=window.drop_rate,
+    )
 
     try:
         from baldur.services.event_bus.bus.convenience import get_event_bus
@@ -517,10 +539,12 @@ def _on_drop_threshold(stats: RingBufferStats) -> None:
         bus.emit(
             EventType.DLQ_OUTBOX_DROP_THRESHOLD_BREACHED,
             data={
-                "capacity": stats.capacity,
-                "size": stats.size,
-                "total_dropped": stats.total_dropped,
-                "drop_rate": stats.drop_rate,
+                "capacity": window.capacity,
+                "size": window.size,
+                "dropped_in_window": window.dropped,
+                "enqueued_in_window": window.enqueued,
+                "total_dropped": window.total_dropped,
+                "drop_rate": window.drop_rate,
             },
             source="dlq_outbox",
             priority=EventPriority.HIGH,

@@ -14,9 +14,24 @@ from unittest.mock import MagicMock, patch
 from baldur.audit.ring_buffer import RingBuffer, RingBufferStats
 from baldur.services.dlq_outbox.outbox import (
     _on_drop_threshold,
+    _on_drops_observed,
     _on_processing_delay,
 )
+from baldur.services.dlq_outbox.worker import DropWindow
 from baldur.settings.backpressure import BackpressureStrategy
+
+
+def _drop_window() -> DropWindow:
+    """One breached drain-cycle window: 50 of 200 dropped, 900 dropped for life."""
+    return DropWindow(
+        dropped=50,
+        enqueued=200,
+        drop_rate=0.25,
+        capacity=10,
+        size=10,
+        total_dropped=900,
+    )
+
 
 # =============================================================================
 # Behavior — DROP_OLDEST eviction + drop-threshold callback
@@ -124,17 +139,9 @@ class TestOutboxDropPolicyBehavior:
         # Given
         import logging
 
-        stats = RingBufferStats(
-            capacity=10,
-            size=10,
-            total_enqueued=200,
-            total_dropped=50,
-            drop_rate=0.25,
-        )
-
         # When
         with caplog.at_level(logging.WARNING):
-            _on_drop_threshold(stats)
+            _on_drop_threshold(_drop_window())
 
         # Then — structlog routes through std logging at WARNING
         assert any(
@@ -143,16 +150,9 @@ class TestOutboxDropPolicyBehavior:
             for rec in caplog.records
         )
 
-    def test_threshold_callback_increments_prometheus_counter(self):
-        """``dlq_outbox_drops_total`` is incremented on threshold breach."""
+    def test_drops_observed_increments_counter_by_entry_count(self):
+        """``dlq_outbox_drops_total`` advances by the window's dropped count."""
         # Given
-        stats = RingBufferStats(
-            capacity=10,
-            size=10,
-            total_enqueued=200,
-            total_dropped=50,
-            drop_rate=0.25,
-        )
         mock_counter = MagicMock()
 
         # When
@@ -160,22 +160,15 @@ class TestOutboxDropPolicyBehavior:
             "baldur.services.metrics.definitions.dlq_outbox_drops_total",
             mock_counter,
         ):
-            _on_drop_threshold(stats)
+            _on_drops_observed(50)
 
-        # Then
+        # Then — one increment of 50, not one increment per alert
         mock_counter.labels.assert_called_with(domain="default")
-        mock_counter.labels.return_value.inc.assert_called_once()
+        mock_counter.labels.return_value.inc.assert_called_once_with(50)
 
     def test_threshold_callback_emits_eventbus_event(self):
         """EventBus emits ``DLQ_OUTBOX_DROP_THRESHOLD_BREACHED`` event."""
         # Given
-        stats = RingBufferStats(
-            capacity=10,
-            size=10,
-            total_enqueued=200,
-            total_dropped=50,
-            drop_rate=0.25,
-        )
         mock_bus = MagicMock()
 
         # When
@@ -183,7 +176,7 @@ class TestOutboxDropPolicyBehavior:
             "baldur.services.event_bus.bus.convenience.get_event_bus",
             return_value=mock_bus,
         ):
-            _on_drop_threshold(stats)
+            _on_drop_threshold(_drop_window())
 
         # Then
         from baldur.services.event_bus.bus.event_types import EventType
@@ -192,29 +185,22 @@ class TestOutboxDropPolicyBehavior:
         called_args, called_kwargs = mock_bus.emit.call_args
         # First positional arg is the EventType
         assert called_args[0] == EventType.DLQ_OUTBOX_DROP_THRESHOLD_BREACHED
-        # Data payload carries breach context
-        assert called_kwargs["data"]["total_dropped"] == 50
+        # Data payload carries breach context — windowed AND lifetime
+        assert called_kwargs["data"]["dropped_in_window"] == 50
+        assert called_kwargs["data"]["enqueued_in_window"] == 200
+        assert called_kwargs["data"]["total_dropped"] == 900
         assert called_kwargs["data"]["drop_rate"] == 0.25
         assert called_kwargs["source"] == "dlq_outbox"
 
     def test_threshold_callback_swallows_event_emit_failure(self):
         """Event-bus failure does not propagate (fail-open)."""
-        # Given
-        stats = RingBufferStats(
-            capacity=10,
-            size=10,
-            total_enqueued=200,
-            total_dropped=50,
-            drop_rate=0.25,
-        )
-
         # When
         with patch(
             "baldur.services.event_bus.bus.convenience.get_event_bus",
             side_effect=RuntimeError("bus dead"),
         ):
             # Then — does not raise
-            _on_drop_threshold(stats)
+            _on_drop_threshold(_drop_window())
 
 
 # =============================================================================

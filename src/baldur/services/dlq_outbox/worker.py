@@ -29,6 +29,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -58,6 +59,25 @@ _BACKOFF_MAX_DELAY = 10.0
 _WORKER_NAME = "DLQOutboxWorker"
 
 
+@dataclass(frozen=True)
+class DropWindow:
+    """Ring-buffer drop accounting for ONE worker cycle.
+
+    ``dropped`` / ``enqueued`` / ``drop_rate`` describe the window since the
+    previous cycle's read; ``total_dropped`` is the buffer's lifetime count.
+    The windowed rate is what an alert must be judged on: a lifetime rate
+    dilutes a late drop episode against every enqueue the process ever made,
+    so a long-lived process silences exactly the bursts an operator needs.
+    """
+
+    dropped: int
+    enqueued: int
+    drop_rate: float
+    capacity: int
+    size: int
+    total_dropped: int
+
+
 class DLQOutboxWorker:
     """Daemon-thread drainer for the DLQ outbox RingBuffer.
 
@@ -71,11 +91,17 @@ class DLQOutboxWorker:
             flush_interval_seconds=settings.flush_interval_seconds,
             on_emergency_dump=lambda batch: ...,
             on_processing_delay=lambda enqueue_time: ...,
+            on_drops_observed=lambda count: ...,
+            on_drop_alert=lambda window: ...,
         )
         worker.start()
 
     The ``sync_writer`` callable is the only mockable surface for unit tests
     (per Testability Notes in 486).
+
+    The worker also owns ring-drop accounting: each cycle it reads the buffer's
+    counters and reports the window's drops, so the producer threads never pay
+    for alerting the backpressure they hit (779 D12).
     """
 
     def __init__(
@@ -86,6 +112,9 @@ class DLQOutboxWorker:
         flush_interval_seconds: float = 0.1,
         on_emergency_dump: Callable[[list[dict[str, Any]]], None] | None = None,
         on_processing_delay: Callable[[float, str], None] | None = None,
+        on_drops_observed: Callable[[int], None] | None = None,
+        on_drop_alert: Callable[[DropWindow], None] | None = None,
+        drop_rate_threshold: float = 0.01,
     ) -> None:
         self._buffer = buffer
         self._sync_writer = sync_writer
@@ -93,6 +122,17 @@ class DLQOutboxWorker:
         self._flush_interval = flush_interval_seconds
         self._on_emergency_dump = on_emergency_dump
         self._on_processing_delay = on_processing_delay
+        self._on_drops_observed = on_drops_observed
+        self._on_drop_alert = on_drop_alert
+        self._drop_rate_threshold = drop_rate_threshold
+
+        # Watermarks for the per-cycle drop window. Drop accounting lives on
+        # this thread rather than in the buffer's own put(): that callback runs
+        # under the ring lock on whichever request thread happened to overflow
+        # it, and a WARNING + metric + awaited bus.emit there would block
+        # rejecting threads for as long as the slowest event handler takes.
+        self._last_seen_enqueued = 0
+        self._last_seen_dropped = 0
 
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -280,6 +320,12 @@ class DLQOutboxWorker:
         self._consecutive_failures = 0
         self._backoff.reset()
 
+        # The buffer's counters restart with its contents in the child, so the
+        # watermarks must restart too — otherwise the first window's delta is
+        # negative and this process's drops stay invisible until it catches up.
+        self._last_seen_enqueued = 0
+        self._last_seen_dropped = 0
+
         if self._handle is not None:
             self._handle.reset_after_fork()
 
@@ -396,6 +442,52 @@ class DLQOutboxWorker:
         self._flush_batch(self._buffer.get_batch(max_size=self._batch_size))
         return time.monotonic(), True
 
+    def _observe_drop_window(self) -> None:
+        """Account this cycle's ring drops and evaluate the windowed drop rate.
+
+        ``get_stats()`` is a lock-scoped counter read, so the producer threads
+        pay nothing for the accounting and the alert work — a WARNING log, a
+        counter increment and an awaited event emit — runs here instead of
+        under the ring lock inside ``put``.
+
+        The counters are cumulative, so a cycle delayed by a slow batch store
+        reports the full delta on its next pass: drop visibility can lag by a
+        cycle, never vanish. The rate is evaluated only when the window
+        enqueued something — a drop happens only inside ``put``, which counts
+        the enqueue first, so a zero-enqueue window has zero drops and there is
+        no 0/0 to divide.
+        """
+        stats = self._buffer.get_stats()
+        dropped = max(0, stats.total_dropped - self._last_seen_dropped)
+        enqueued = max(0, stats.total_enqueued - self._last_seen_enqueued)
+        self._last_seen_dropped = stats.total_dropped
+        self._last_seen_enqueued = stats.total_enqueued
+
+        if dropped and self._on_drops_observed is not None:
+            try:
+                self._on_drops_observed(dropped)
+            except Exception:
+                pass  # An accounting failure must never disrupt the drain
+
+        if not enqueued or self._on_drop_alert is None:
+            return
+        drop_rate = dropped / enqueued
+        if drop_rate <= self._drop_rate_threshold:
+            return
+        try:
+            self._on_drop_alert(
+                DropWindow(
+                    dropped=dropped,
+                    enqueued=enqueued,
+                    drop_rate=drop_rate,
+                    capacity=stats.capacity,
+                    size=stats.size,
+                    total_dropped=stats.total_dropped,
+                )
+            )
+        except Exception:
+            pass  # An alert failure must never disrupt the drain
+
     def _writer_loop(self) -> None:  # noqa: C901
         """Background drain loop with per-iteration error containment (D11.1).
 
@@ -410,6 +502,7 @@ class DLQOutboxWorker:
             iter_start = time.monotonic()
             try:
                 last_flush, flushed = self._drain_once(last_flush)
+                self._observe_drop_window()
 
                 if flushed and self._consecutive_failures >= _FAILURE_BACKOFF_THRESHOLD:
                     # D11.2 — backoff sleep prevents busy-loop on extended
