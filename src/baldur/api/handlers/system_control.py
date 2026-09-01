@@ -43,6 +43,9 @@ def system_status(ctx: RequestContext) -> ResponseContext:
             "system": "baldur",
             "status": "enabled" if state.enabled else "disabled",
             **state.to_dict(),
+            # True when this node's last state write to the shared backend
+            # failed: other nodes still read the pre-flip value.
+            "persist_dirty": manager.is_persist_dirty(),
             "backend": backend_info,
             "timestamp": utc_now().isoformat(),
         }

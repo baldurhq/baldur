@@ -638,19 +638,19 @@ class RedisEventBus:
         Uses the framework's existing Kafka producer infrastructure instead of
         creating ad-hoc producers per event. The singleton handles connection
         pooling, async delivery callbacks, and WAL-backed error recovery.
+
+        An installation without the Kafka producer adapter never opted into
+        Kafka at all, so its absence is logged quietly and the event goes
+        straight to the WAL. A producer that IS installed but fails keeps the
+        loud path — that one is a real misconfiguration.
         """
-        # 528 D10-v2: Kafka producer relocated to baldur_dormant. Falls
-        # open with a clear error when baldur_dormant or its kafka extra
-        # is not installed.
+        # 528 D10-v2: Kafka producer relocated to baldur_dormant.
         try:
             from baldur_dormant.adapters.kafka.producer import get_kafka_producer
-        except ImportError as e:
-            from baldur.core.exceptions import AdapterError
-
-            raise AdapterError(
-                "Kafka fallback requires the Kafka producer adapter, which "
-                "is not available in this installation."
-            ) from e
+        except ImportError:
+            logger.debug("redis_event_bus.kafka_fallback_not_installed")
+            self._write_to_wal(event)
+            return
 
         producer = get_kafka_producer()
         success = producer.publish(

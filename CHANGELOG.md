@@ -10,6 +10,16 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+### Fixed
+
+- Pulling the kill switch now stops governed automation on the next check, not up to 30s later.
+- `/system/disable/` publishes the flip, so the throttle and auto-tuning react to it at last.
+- A kill switch flipped on one server is now seen by the others within one cache window.
+- A state write that fails no longer lets a later refresh quietly re-enable the system.
+- `/system/status/` reports `persist_dirty` when this node's state has not reached the backend.
+- An install without the optional Kafka adapter no longer logs a Kafka error per critical event.
+- An install without the PRO throttle no longer logs a warning on every kill-switch flip.
+
 ## [1.9.0] - 2026-08-31
 
 ### Added

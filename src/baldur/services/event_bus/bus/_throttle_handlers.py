@@ -78,7 +78,11 @@ def _on_emergency_level_changed_throttle(event: BaldurEvent) -> None:
 
         throttle = ProviderRegistry.adaptive_throttle.safe_get()
         if throttle is None:
-            raise RuntimeError("baldur_pro AdaptiveThrottle not registered")
+            # No throttle provider registered — the normal state of an
+            # OSS-only install, not a failure. Same quiet posture as the
+            # ImportError branch below.
+            logger.debug("event_handler.throttle_provider_unavailable")
+            return
         impl = _as_any(throttle)
         previous_limit = impl.current_limit
 
@@ -117,7 +121,11 @@ def _on_kill_switch_activated_throttle(event: BaldurEvent) -> None:
 
         throttle = ProviderRegistry.adaptive_throttle.safe_get()
         if throttle is None:
-            raise RuntimeError("baldur_pro AdaptiveThrottle not registered")
+            # No throttle provider registered — the normal state of an
+            # OSS-only install, not a failure. A WARNING here would read as
+            # a fault on the operator's most-watched action.
+            logger.debug("event_handler.throttle_provider_unavailable")
+            return
         impl = _as_any(throttle)
         previous_limit = impl.current_limit
 
