@@ -152,7 +152,10 @@ class SystemControlManager(EventEmitterMixin):
         self._flip_lock = threading.Lock()
         # Set when a state write to the backend failed; the local state is
         # then newer than the shared backend until a retry succeeds.
-        self._persist_dirty = False
+        # Annotated: this ``__init__`` carries no return type, so a bare
+        # assignment here leaves the attribute ``Any`` and every reader that
+        # promises ``bool`` returns Any instead.
+        self._persist_dirty: bool = False
         self._backend: StateBackend = get_state_backend()
         self._load_state()
         self._initialized = True
