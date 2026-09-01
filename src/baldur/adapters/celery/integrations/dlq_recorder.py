@@ -13,6 +13,7 @@ from typing import Any
 import structlog
 
 from baldur.dlq.helpers import store_to_dlq
+from baldur.models.dlq import OPEN_CIRCUIT_FAILURE_TYPE
 from baldur.utils.time import utc_now
 
 __all__ = ["DLQRecorder"]
@@ -23,9 +24,13 @@ logger = structlog.get_logger()
 # Failure Classification Patterns
 # ---------------------------------------------------------------------------
 
-# Exception type name patterns -> failure type
+# Exception type name patterns -> failure type. Matched before the message
+# patterns below, which is what keeps a task whose service name contains
+# "gateway" or "auth" from diverting a circuit-breaker rejection to the wrong
+# type via its message text.
 _EXCEPTION_TYPE_PATTERNS: dict[str, list[str]] = {
     "NETWORK_ERROR": ["connection", "timeout", "network", "socket"],
+    OPEN_CIRCUIT_FAILURE_TYPE: ["circuitbreakeropen"],
 }
 
 # Exception message patterns -> failure type (order matters, first match wins)
@@ -42,6 +47,7 @@ _EXCEPTION_MESSAGE_PATTERNS: list[tuple[list[str], str]] = [
 # Recommended action lookup
 _RECOMMENDED_ACTIONS: dict[str, str] = {
     "NETWORK_ERROR": "Wait for network recovery, then auto-replay",
+    OPEN_CIRCUIT_FAILURE_TYPE: "Wait for circuit recovery, then auto-replay",
     "TIMEOUT": "Increase timeout or retry with backoff",
     "CONNECTION_ERROR": "Check external service availability",
     "RATE_LIMITED": "Wait for rate limit window, then retry",
@@ -78,7 +84,23 @@ class DLQRecorder:
         kwargs: dict | None,
         einfo: Any,
     ) -> None:
-        """Store a failed operation to DLQ."""
+        """Store a failed operation to DLQ.
+
+        Skips exceptions the policy chain already parked. A task body whose
+        ``@protected(dlq=True)`` call was rejected by an OPEN circuit raises
+        that same exception object out of the task, so both Celery capture
+        sites see a rejection the sink has already stored — storing it again
+        would put one rejected call in the queue twice, and a duplicate replay
+        is the outcome the queue exists to prevent.
+        """
+        if getattr(exception, "dlq_capture_dispatched", False):
+            logger.debug(
+                "baldur_dlq.entry_store_skipped_already_captured",
+                healing_domain=domain,
+                task_name=task_name,
+            )
+            return
+
         try:
             failure_type = self.classify_failure_type(exception)
 

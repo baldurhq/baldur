@@ -77,6 +77,7 @@ entries:
   - {module: "distributed_lock.py", class: "DistributedLockSettings", field: "local_fallback_enabled", default: false, tier: "Core", env_var: "BALDUR_DISTRIBUTED_LOCK_LOCAL_FALLBACK_ENABLED"}
   - {module: "dlq.py", class: "DLQSettings", field: "enabled", default: true, tier: "Core", env_var: "BALDUR_DLQ_ENABLED"}
   - {module: "dlq.py", class: "DLQSettings", field: "entry_payload_compression_enabled", default: true, tier: "Core", env_var: "BALDUR_DLQ_ENTRY_PAYLOAD_COMPRESSION_ENABLED"}
+  - {module: "dlq.py", class: "DLQSettings", field: "open_circuit_capture_enabled", default: true, tier: "Core", env_var: "BALDUR_DLQ_OPEN_CIRCUIT_CAPTURE_ENABLED"}
   - {module: "dlq_outbox.py", class: "DLQOutboxSettings", field: "enabled", default: true, tier: "Core", env_var: "BALDUR_DLQ_OUTBOX_ENABLED"}
   - {module: "governance.py", class: "GovernanceSettings", field: "break_glass_enabled", default: false, tier: "Core", env_var: "BALDUR_GOVERNANCE_BREAK_GLASS_ENABLED"}
   - {module: "hedging.py", class: "HedgingSettings", field: "enabled", default: true, tier: "Core", env_var: "BALDUR_HEDGING_ENABLED"}

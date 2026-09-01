@@ -231,6 +231,7 @@ def _get_or_build_dlq_protect_composer(
             composer.add(timeout_policy)
         composer.add(retry_policy)
         composer.add_sink(_DLQ_SINK)
+        composer.capture_open_circuit_rejections()
         _composer_cache[key] = composer
         logger.debug(
             "protect.composer_built",
@@ -782,6 +783,7 @@ def _build_sync_composer(
         composer.add(RetryPolicy(config=retry_cfg))
     if dlq:
         composer.add_sink(_DLQ_SINK)
+        composer.capture_open_circuit_rejections()
     logger.debug(
         "protect.composer_built",
         name=name,
@@ -896,6 +898,7 @@ def _build_async_composer(
         composer.add(AsyncRetryPolicy.from_policy_config(retry_cfg))
     if dlq:
         composer.add_sink(_DLQ_SINK)
+        composer.capture_open_circuit_rejections()
     logger.debug(
         "protect.composer_built",
         name=name,

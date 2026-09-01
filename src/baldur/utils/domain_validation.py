@@ -105,9 +105,48 @@ def validate_and_normalize_domain(domain: object) -> str:
     return normalized
 
 
+def resolve_stored_domain(domain: object) -> str:
+    """Project a raw domain input onto the form DLQ entries are stored under.
+
+    Total on any input — validate, then retry through the label
+    canonicalization, then fall back to the unclassifiable bucket. That ladder
+    is what the DLQ store walks, so anything that needs to look up entries by
+    the name they were captured under MUST come through here instead of
+    re-deriving the projection: the two steps disagree exactly where it
+    matters. ``payment-api`` fails validation outright yet canonicalizes to the
+    perfectly valid ``payment_api``, so a caller that only validates either
+    raises or searches for a name nothing was ever stored under.
+
+    Returns:
+        The stored form. ``FALLBACK_DOMAIN`` means the input has no domain
+        identity of its own — it shares one bucket with every other rejected
+        name, so matching on it is not an identity match.
+    """
+    try:
+        return validate_and_normalize_domain(domain)
+    except DomainValidationError:
+        pass
+
+    # Imported here: the metric registry imports this module, so the label
+    # vocabulary can only be reached from inside the call.
+    from baldur.metrics.registry import (
+        NON_REGISTRABLE_DOMAIN_LABELS,
+        canonicalize_domain_label,
+    )
+
+    canonical = canonicalize_domain_label(domain)
+    if canonical in NON_REGISTRABLE_DOMAIN_LABELS:
+        return FALLBACK_DOMAIN
+    try:
+        return validate_and_normalize_domain(canonical)
+    except DomainValidationError:
+        return FALLBACK_DOMAIN
+
+
 __all__ = [
     "FALLBACK_DOMAIN",
     "MAX_DOMAIN_LENGTH",
     "DomainRejectReason",
+    "resolve_stored_domain",
     "validate_and_normalize_domain",
 ]

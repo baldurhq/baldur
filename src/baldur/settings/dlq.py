@@ -230,6 +230,21 @@ class DLQSettings(BaseSettings):
     )
 
     # ==========================================================================
+    # Open-circuit capture (779 D6)
+    # ==========================================================================
+    open_circuit_capture_enabled: bool = Field(
+        default=True,
+        description=(
+            "Capture a protected call that an OPEN circuit rejected, so the "
+            "work it carried is replayed on recovery instead of dropped. "
+            "Applies only to the policy chain built by protect(dlq=True) / "
+            "@dlq_protect — the Django middleware's preemptive store and the "
+            "Celery terminal capture have their own switches. Set False to "
+            "keep only the retry-exhaustion capture."
+        ),
+    )
+
+    # ==========================================================================
     # Composite Index (544 D3 — domain registry cardinality alert)
     # ==========================================================================
     domain_cardinality_alert_threshold: int = Field(

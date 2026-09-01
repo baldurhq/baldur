@@ -10,8 +10,20 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+### Added
+
+- A call an open circuit rejects is now parked in the dead-letter queue, on every framework.
+- Those entries replay on their own when that circuit closes, if the domain has a replay handler.
+- `BALDUR_DLQ_OPEN_CIRCUIT_CAPTURE_ENABLED=false` keeps only the retry-exhaustion capture.
+
 ### Fixed
 
+- `dlq_outbox_drops_total` now counts every dropped entry instead of once per alert.
+- A late burst of outbox drops now alerts; the drop rate is measured per drain cycle.
+- Outbox drop alerting no longer runs on the request thread that hit the backpressure.
+- Shadow mode no longer refuses a request or writes a queue entry from the Django middleware.
+- Shadow mode no longer records a circuit failure or a queue entry from `@baldur_task`.
+- A Celery task failing on an open circuit is now typed `CIRCUIT_BREAKER_OPEN`, not `UNKNOWN_ERROR`.
 - Pulling the kill switch now stops governed automation on the next check, not up to 30s later.
 - `/system/disable/` publishes the flip, so the throttle and auto-tuning react to it at last.
 - A kill switch flipped on one server is now seen by the others within one cache window.

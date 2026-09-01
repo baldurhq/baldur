@@ -44,14 +44,15 @@ class TestDLQRecorderPatternsContract:
         _keywords, failure_type = _EXCEPTION_MESSAGE_PATTERNS[0]
         assert failure_type == "RATE_LIMITED"
 
-    def test_recommended_actions_maps_9_failure_types(self) -> None:
-        """_RECOMMENDED_ACTIONS has 9 entries."""
-        assert len(_RECOMMENDED_ACTIONS) == 9
+    def test_recommended_actions_maps_10_failure_types(self) -> None:
+        """_RECOMMENDED_ACTIONS has 10 entries."""
+        assert len(_RECOMMENDED_ACTIONS) == 10
 
     def test_recommended_actions_contains_expected_keys(self) -> None:
         """_RECOMMENDED_ACTIONS includes all expected failure types."""
         expected_keys = {
             "NETWORK_ERROR",
+            "CIRCUIT_BREAKER_OPEN",
             "TIMEOUT",
             "CONNECTION_ERROR",
             "RATE_LIMITED",

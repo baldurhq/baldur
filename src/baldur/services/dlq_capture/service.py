@@ -33,11 +33,7 @@ from baldur.core.exceptions import DomainValidationError
 from baldur.decorators.domain_tag import get_current_domain
 from baldur.metrics.event_handlers import DLQMetricEventHandler
 from baldur.metrics.prometheus import get_metrics
-from baldur.metrics.registry import (
-    NON_REGISTRABLE_DOMAIN_LABELS,
-    canonicalize_domain_label,
-    register_domain,
-)
+from baldur.metrics.registry import register_domain
 from baldur.models.dlq import DLQConfig, DLQEntryResult
 from baldur.services.dlq_capture.overflow import (
     enforce_overflow_eviction,
@@ -46,6 +42,7 @@ from baldur.services.dlq_capture.overflow import (
 from baldur.settings.dlq import get_dlq_settings
 from baldur.utils.domain_validation import (
     FALLBACK_DOMAIN,
+    resolve_stored_domain,
     validate_and_normalize_domain,
 )
 from baldur.utils.serialization import fast_dumps_str
@@ -290,22 +287,13 @@ class DLQCaptureService:
             # spelling the metric registry admits (``payment-api`` ->
             # ``payment_api``) is STORED under that same form instead of
             # splitting into two label values across the retry and DLQ
-            # families. The skip-list keeps an empty/blank domain on the
-            # rejection path: ``""`` canonicalizes to the unclassified bucket,
-            # which must stay distinct from a real domain.
+            # families. It lives in ``resolve_stored_domain`` so a reader that
+            # needs to find these entries again derives the same answer by
+            # construction rather than by re-authoring the ladder.
             # Idempotent under the async outbox round-trip: the canonical form
             # re-validates as a first-try pass.
-            _canonical = canonicalize_domain_label(domain)
-            _recovered: str | None = None
-            if _canonical not in NON_REGISTRABLE_DOMAIN_LABELS:
-                try:
-                    _recovered = validate_and_normalize_domain(_canonical)
-                except DomainValidationError:
-                    _recovered = None
-
-            if _recovered is not None:
-                domain = _recovered
-            else:
+            domain = resolve_stored_domain(domain)
+            if domain == FALLBACK_DOMAIN:
                 try:
                     DLQMetricEventHandler.on_domain_rejected(
                         site="store_failure",
@@ -319,7 +307,6 @@ class DLQCaptureService:
                         reason=getattr(_dom_err.reason, "value", _dom_err.reason),
                         original_preview=str(_dom_err.original_domain)[:32],
                     )
-                domain = FALLBACK_DOMAIN
 
         # Declaration site: ``domain`` is an explicit parameter of the public
         # DLQ entry point, so a direct caller's domain gets its own label on the
