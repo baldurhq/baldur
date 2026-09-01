@@ -20,6 +20,8 @@ The protected-call layer (`@dlq_protect`, `@protected(dlq=True)`) is framework-n
 
 Open-circuit capture is on by default wherever `dlq=True` is; `BALDUR_DLQ_OPEN_CIRCUIT_CAPTURE_ENABLED=false` turns it off and leaves only the retry-exhaustion trigger.
 
+The **How you turn it on** column covers capture only. Finishing the parked work is Phase 4, and it does not follow from capture: automatic replay is dispatched by a Celery task, so a surface without the Celery extra and a worker parks the work correctly and then leaves it for an operator. Read Phase 4 before treating recovery as hands-off.
+
 **What no surface captures today**: a call rejected by a full bulkhead, and a whole-sequence timeout. Both end the call without reaching the DLQ; on Django the resulting 5xx is picked up by Phase 2, elsewhere the work is lost.
 
 **Two caveats worth knowing before you tune the middleware**:
@@ -228,14 +230,37 @@ If you see this within the first few seconds of the storm, middleware-CB is func
 
 ## Phase 4 — Activate replay for what you captured
 
-Capture parks the work; replay is what finishes it. An entry nothing can replay is a record of a loss, not a recovery. Two things gate automatic replay:
+Capture parks the work; replay is what finishes it. An entry nothing can replay is a record of a loss, not a recovery.
 
-1. **A replay handler registered for the entry's domain.** `register_replay_handler(YourHandler())` — without one, the on-recovery sweep skips that domain entirely and its entries wait for an operator. (It skips deliberately: an unregistered domain would spend each entry's replay budget on a handler that cannot run, and escalate them to manual review.)
-2. **A `service_failure_type_map` entry** naming which failure types to sweep when a circuit closes.
+Automatic replay is a **chain of five links**, and the first broken one stops it. They are evaluated in this order, and the one that stopped it is reported as `missing_link`:
+
+| Link | What is missing | How to satisfy it |
+|---|---|---|
+| `disabled` | on-recovery replay is switched off | `BALDUR_REPLAY_AUTOMATION_ON_RECOVERY_ENABLED=true` |
+| `celery_missing` | the on-recovery dispatch task cannot be imported — the Celery extra is not installed | `pip install 'baldur-framework[celery]'` |
+| `worker_missing` | no worker consumes the `dlq_processing` queue | `celery -A <app> worker -Q dlq_processing` |
+| `map_unconfigured` | no `service_failure_type_map` entry names which failure types to sweep when that service's circuit closes | add one — **except for `CIRCUIT_BREAKER_OPEN`; see below** |
+| `handler_missing` | no replay handler is registered for the entry's domain | `register_replay_handler(YourHandler())` |
+
+`disabled` and `celery_missing` are hard prerequisites: while either is missing, the links below them are not evaluated at all.
+
+The handler link deserves its reason. Without a registered handler the sweep skips that domain deliberately rather than trying — an unregistered domain would spend each entry's replay budget on a handler that cannot run, and escalate the entries to manual review.
+
+### The two links that surprise non-Celery deployments
+
+Capture is framework-neutral: a Flask, FastAPI or plain-Python service parks open-circuit rejections with no Celery installed anywhere. **Dispatch is not.** The on-recovery sweep has exactly one trigger — a Celery task — so a deployment without the Celery extra *and* a worker on `dlq_processing` captures the work and then never replays it automatically.
+
+Nothing is lost when this happens: the entries sit `PENDING` and stay replayable from the console. But the recovery half is manual until both links are in place, and the log says so on every circuit close:
+
+```text
+[warning] event_handler.replay_dispatch_blocked service_name=payment_api reason=celery_missing queue=dlq_processing
+```
+
+If you are running one of these surfaces and want the automatic half, install the Celery extra and run the worker. If you would rather not adopt Celery, plan the recovery as an operator step and watch for that warning — it is the signal that entries are accumulating with nothing scheduled to drain them.
 
 ### Open-circuit entries need no map entry
 
-Entries parked because the circuit was OPEN (`CIRCUIT_BREAKER_OPEN`) are swept automatically when that same circuit closes — the circuit that recovered is by construction the one that rejected them, which is the whole eligibility question. You only need the handler.
+Entries parked because the circuit was OPEN (`CIRCUIT_BREAKER_OPEN`) are swept automatically when that same circuit closes — the circuit that recovered is by construction the one that rejected them, which is the whole eligibility question. Of the five links above they need every one except `map_unconfigured`.
 
 **Do not add `CIRCUIT_BREAKER_OPEN` to `service_failure_type_map`.** Mapped types are selected by type alone, across every domain, so a mapping would pull in another service's entries whose dependency is still down, drive them straight back into it, and spend their replay budget.
 
