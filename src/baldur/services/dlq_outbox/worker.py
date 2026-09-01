@@ -442,7 +442,7 @@ class DLQOutboxWorker:
         self._flush_batch(self._buffer.get_batch(max_size=self._batch_size))
         return time.monotonic(), True
 
-    def _observe_drop_window(self) -> None:
+    def _observe_drop_window(self, *, alert: bool = True) -> None:
         """Account this cycle's ring drops and evaluate the windowed drop rate.
 
         ``get_stats()`` is a lock-scoped counter read, so the producer threads
@@ -452,10 +452,20 @@ class DLQOutboxWorker:
 
         The counters are cumulative, so a cycle delayed by a slow batch store
         reports the full delta on its next pass: drop visibility can lag by a
-        cycle, never vanish. The rate is evaluated only when the window
-        enqueued something — a drop happens only inside ``put``, which counts
-        the enqueue first, so a zero-enqueue window has zero drops and there is
-        no 0/0 to divide.
+        cycle, never vanish. That "next pass" has to exist even when there is
+        no next iteration, which is why the loop's exit runs one final
+        observation — entries dropped while the last ``wait`` was in flight
+        would otherwise be dropped from the accounting too. The rate is
+        evaluated only when the window enqueued something — a drop happens only
+        inside ``put``, which counts the enqueue first, so a zero-enqueue
+        window has zero drops and there is no 0/0 to divide.
+
+        Args:
+            alert: Whether a breached window may run the alert callback. The
+                shutdown observation passes False: its counter update is what
+                makes the loss visible afterwards, while its alert would emit
+                onto an event bus that is itself being torn down, on the thread
+                ``stop()`` is waiting to join.
         """
         stats = self._buffer.get_stats()
         dropped = max(0, stats.total_dropped - self._last_seen_dropped)
@@ -469,7 +479,7 @@ class DLQOutboxWorker:
             except Exception:
                 pass  # An accounting failure must never disrupt the drain
 
-        if not enqueued or self._on_drop_alert is None:
+        if not alert or not enqueued or self._on_drop_alert is None:
             return
         drop_rate = dropped / enqueued
         if drop_rate <= self._drop_rate_threshold:
@@ -539,6 +549,12 @@ class DLQOutboxWorker:
                 self._flush_batch(tail)
         except Exception as e:
             logger.exception("dlq_outbox.final_drain_error", error=e)
+
+        # Close the last window. Everything dropped since the loop's final
+        # observation happened while it was waiting to be told to stop, and
+        # there is no further iteration to report it — without this the drops
+        # that a shutdown-under-load produces never reach the counter at all.
+        self._observe_drop_window(alert=False)
 
     def _flush_batch(self, batch: list[tuple[float, dict[str, Any]]]) -> None:
         """Dispatch a batch to ``sync_writer``, recording per-entry outcomes."""

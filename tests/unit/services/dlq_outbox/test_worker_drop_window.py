@@ -320,6 +320,74 @@ class TestOutboxDropWindowBehavior:
 
 
 # =============================================================================
+# Behavior — the window the loop never gets to
+# =============================================================================
+
+
+class TestOutboxDropWindowAtShutdownBehavior:
+    """The last window has no next cycle to report it.
+
+    "Visibility can lag by a cycle, never vanish" only holds while another
+    cycle is coming. Everything the ring drops while the loop sits in its
+    final ``wait`` is reported by nobody unless the exit path closes the
+    window — and a process shutting down under load is exactly when a full
+    ring is dropping.
+    """
+
+    def test_drops_during_the_final_wait_still_reach_the_counter(self):
+        observed: list[int] = []
+        buffer: RingBuffer = RingBuffer(
+            capacity=5, strategy=BackpressureStrategy.DROP_OLDEST
+        )
+        worker = DLQOutboxWorker(
+            buffer=buffer,
+            sync_writer=lambda kwargs: None,
+            batch_size=1,
+            # Long enough that the overflow below lands inside one wait.
+            flush_interval_seconds=0.5,
+            on_drops_observed=observed.append,
+        )
+
+        worker.start()
+        try:
+            deadline = time.monotonic() + 2.0
+            while not worker.is_alive and time.monotonic() < deadline:
+                time.sleep(0.01)
+            # Overflow the ring while the loop is parked in stop_event.wait().
+            for i in range(20):
+                buffer.put((0.0, {"i": i}))
+            dropped = buffer.get_stats().total_dropped
+        finally:
+            worker.stop(timeout=2.0)
+
+        assert dropped > 0
+        assert sum(observed) == dropped
+
+    def test_the_shutdown_observation_does_not_alert(self):
+        """The counter update is what makes the loss visible afterwards; the
+        alert would emit onto a bus being torn down, on the thread ``stop()``
+        is waiting to join."""
+        buffer = _CountedBuffer()
+        alerter = _alerter()
+        worker = _worker(buffer, on_drop_alert=alerter)
+        buffer.advance(enqueued=100, dropped=90)
+
+        worker._observe_drop_window(alert=False)
+
+        alerter.assert_not_called()
+
+    def test_the_shutdown_observation_still_counts(self):
+        buffer = _CountedBuffer()
+        observed = _observer()
+        worker = _worker(buffer, on_drops_observed=observed)
+        buffer.advance(enqueued=100, dropped=90)
+
+        worker._observe_drop_window(alert=False)
+
+        observed.assert_called_once_with(90)
+
+
+# =============================================================================
 # Behavior — the producer thread pays nothing
 # =============================================================================
 
