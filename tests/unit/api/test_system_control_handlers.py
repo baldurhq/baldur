@@ -94,6 +94,33 @@ class TestSystemStatusBehavior:
         assert resp.body["status"] == "disabled"
 
 
+class TestSystemStatusPersistDirtyContract:
+    """The status response exposes whether this node diverged from the backend."""
+
+    def _status_body(self, persist_dirty: bool) -> dict:
+        from baldur.services.system_control import SystemControlManager
+
+        manager = MagicMock(spec=SystemControlManager)
+        manager.get_state.return_value = _mock_state(enabled=False)
+        manager.get_backend_info.return_value = {"type": "redis"}
+        manager.is_persist_dirty.return_value = persist_dirty
+
+        with patch(
+            "baldur.api.handlers.system_control.get_system_control",
+            return_value=manager,
+        ):
+            return system_status(_make_ctx()).body
+
+    def test_status_reports_persist_dirty_true_when_the_last_write_failed(self):
+        """A dirty node still serves its own flip while other nodes read the
+        pre-flip value - the operator needs to see that from the status page."""
+        assert self._status_body(True)["persist_dirty"] is True
+
+    def test_status_reports_persist_dirty_false_when_the_state_is_persisted(self):
+        """Negative twin: the field is sourced from the manager, not a constant."""
+        assert self._status_body(False)["persist_dirty"] is False
+
+
 # =============================================================================
 # system_enable / system_disable
 # =============================================================================

@@ -1,11 +1,11 @@
 """
-RedisEventBus 이벤트 전파 폴백 체인 테스트.
+RedisEventBus event-propagation fallback chain tests.
 
-테스트 대상:
-- _is_critical_event(): 크리티컬 이벤트 판별
-- publish(): Redis → Kafka → WAL 폴백 체인
-- _publish_to_kafka_fallback(): Kafka 폴백 발행
-- _write_to_wal(): WAL 최종 안전망
+Targets:
+- _is_critical_event(): critical event classification
+- publish(): Redis -> Kafka -> WAL fallback chain
+- _publish_to_kafka_fallback(): Kafka fallback publish
+- _write_to_wal(): the WAL as the final safety net
 """
 
 from __future__ import annotations
@@ -57,44 +57,44 @@ def _make_normal_event() -> BaldurEvent:
 
 
 # =============================================================================
-# CRITICAL_EVENT_TYPES 계약 검증
+# CRITICAL_EVENT_TYPES contract
 # =============================================================================
 
 
 class TestCriticalEventTypesContract:
-    """크리티컬 이벤트 타입 계약값 검증."""
+    """Contract values of the critical event type set."""
 
     def test_contains_region_primary_changed(self) -> None:
-        """REGION_PRIMARY_CHANGED가 크리티컬 이벤트에 포함된다."""
+        """REGION_PRIMARY_CHANGED is a critical event."""
         assert EventType.REGION_PRIMARY_CHANGED in CRITICAL_EVENT_TYPES
 
     def test_contains_emergency_activated(self) -> None:
-        """EMERGENCY_ACTIVATED가 크리티컬 이벤트에 포함된다."""
+        """EMERGENCY_ACTIVATED is a critical event."""
         assert EventType.EMERGENCY_ACTIVATED in CRITICAL_EVENT_TYPES
 
     def test_contains_kill_switch_activated(self) -> None:
-        """KILL_SWITCH_ACTIVATED가 크리티컬 이벤트에 포함된다."""
+        """KILL_SWITCH_ACTIVATED is a critical event."""
         assert EventType.KILL_SWITCH_ACTIVATED in CRITICAL_EVENT_TYPES
 
     def test_count(self) -> None:
-        """크리티컬 이벤트 타입은 3개이다."""
+        """There are exactly three critical event types."""
         assert len(CRITICAL_EVENT_TYPES) == 3
 
     def test_is_frozenset(self) -> None:
-        """CRITICAL_EVENT_TYPES은 frozenset이다."""
+        """CRITICAL_EVENT_TYPES is a frozenset."""
         assert isinstance(CRITICAL_EVENT_TYPES, frozenset)
 
 
 # =============================================================================
-# _is_critical_event() 동작 검증
+# _is_critical_event() behavior
 # =============================================================================
 
 
 class TestIsCriticalEventBehavior:
-    """_is_critical_event() 동작 검증."""
+    """_is_critical_event() behavior tests."""
 
     def test_critical_event_returns_true(self) -> None:
-        """크리티컬 이벤트 타입이면 True를 반환한다."""
+        """Returns True for every critical event type."""
         bus = _make_bus_no_redis()
         for event_type in CRITICAL_EVENT_TYPES:
             event = BaldurEvent(
@@ -105,7 +105,7 @@ class TestIsCriticalEventBehavior:
             assert bus._is_critical_event(event) is True
 
     def test_non_critical_event_returns_false(self) -> None:
-        """비크리티컬 이벤트 타입이면 False를 반환한다."""
+        """Returns False for a non-critical event type."""
         bus = _make_bus_no_redis()
         event = BaldurEvent(
             event_type=EventType.CONFIG_UPDATED,
@@ -116,15 +116,15 @@ class TestIsCriticalEventBehavior:
 
 
 # =============================================================================
-# publish() 폴백 체인 동작 검증
+# publish() fallback chain behavior
 # =============================================================================
 
 
 class TestPublishFallbackChainBehavior:
-    """publish() Redis → Kafka → WAL 폴백 체인 동작 검증."""
+    """publish() Redis -> Kafka -> WAL fallback chain behavior."""
 
     def test_redis_success_does_not_trigger_fallback(self) -> None:
-        """Redis 발행 성공 시 Kafka/WAL 폴백이 호출되지 않는다."""
+        """A successful Redis publish calls neither the Kafka nor the WAL fallback."""
         mock_redis = MagicMock()
         bus = _make_bus_with_redis(mock_redis)
 
@@ -138,7 +138,7 @@ class TestPublishFallbackChainBehavior:
             mock_wal.assert_not_called()
 
     def test_redis_failure_triggers_kafka_for_critical(self) -> None:
-        """Redis 실패 + 크리티컬 이벤트 → Kafka 폴백 호출."""
+        """Redis failure on a critical event falls back to Kafka."""
         mock_redis = MagicMock()
         mock_redis.publish.side_effect = Exception("Redis down")
         bus = _make_bus_with_redis(mock_redis)
@@ -153,7 +153,7 @@ class TestPublishFallbackChainBehavior:
             mock_wal.assert_not_called()
 
     def test_redis_failure_no_kafka_for_non_critical(self) -> None:
-        """Redis 실패 + 비크리티컬 이벤트 → Kafka 폴백 호출되지 않음."""
+        """Redis failure on a non-critical event does not fall back to Kafka."""
         mock_redis = MagicMock()
         mock_redis.publish.side_effect = Exception("Redis down")
         bus = _make_bus_with_redis(mock_redis)
@@ -168,7 +168,7 @@ class TestPublishFallbackChainBehavior:
             mock_wal.assert_not_called()
 
     def test_redis_and_kafka_failure_triggers_wal(self) -> None:
-        """Redis + Kafka 모두 실패 시 크리티컬 이벤트는 WAL에 기록된다."""
+        """With Redis and Kafka both failing, a critical event lands in the WAL."""
         mock_redis = MagicMock()
         mock_redis.publish.side_effect = Exception("Redis down")
         bus = _make_bus_with_redis(mock_redis)
@@ -184,7 +184,7 @@ class TestPublishFallbackChainBehavior:
             mock_wal.assert_called_once()
 
     def test_no_redis_client_triggers_kafka_fallback(self) -> None:
-        """Redis 클라이언트가 없으면 크리티컬 이벤트는 Kafka로 폴백."""
+        """With no Redis client, a critical event falls back to Kafka."""
         bus = _make_bus_no_redis()
 
         with patch.object(bus, "_publish_to_kafka_fallback") as mock_kafka:
@@ -192,7 +192,7 @@ class TestPublishFallbackChainBehavior:
             mock_kafka.assert_called_once()
 
     def test_local_bus_always_receives_event(self) -> None:
-        """로컬 핸들러에는 항상 이벤트가 전달된다."""
+        """Local handlers always receive the event."""
         mock_redis = MagicMock()
         mock_redis.publish.side_effect = Exception("Redis down")
         bus = _make_bus_with_redis(mock_redis)
@@ -225,7 +225,7 @@ class TestPublishFallbackChainBehavior:
 
 
 # =============================================================================
-# _publish_to_kafka_fallback() 동작 검증
+# _publish_to_kafka_fallback() behavior
 # =============================================================================
 
 
@@ -254,6 +254,40 @@ class TestPublishToKafkaFallbackBehavior:
 
         mock_wal.assert_called_once_with(event)
 
+    def test_kafka_not_installed_logs_quietly_instead_of_at_exception_level(
+        self,
+    ) -> None:
+        """The absence of a never-installed optional adapter is DEBUG, not an
+        exception.
+
+        publish() logs ``redis_event_bus.kafka_fallback_failed`` at exception
+        level whenever this method raises. While it raised AdapterError on the
+        baldur_dormant ImportError, an OSS-only install with Redis down
+        reported a Kafka misconfiguration on every critical event - including
+        every kill-switch flip.
+        """
+        bus = _make_bus_no_redis()
+        event = BaldurEvent(
+            event_type=EventType.KILL_SWITCH_ACTIVATED,
+            data={},
+            source="system_control",
+        )
+
+        # The private tree runs with baldur_dormant present, so the
+        # not-installed branch has to be forced rather than relied on.
+        with patch("baldur.services.event_bus.redis_bus.logger") as mock_logger:
+            with patch.dict(
+                "sys.modules", {"baldur_dormant.adapters.kafka.producer": None}
+            ):
+                with patch.object(bus, "_write_to_wal"):
+                    bus._publish_to_kafka_fallback(event)
+
+        mock_logger.debug.assert_called_once_with(
+            "redis_event_bus.kafka_fallback_not_installed"
+        )
+        mock_logger.exception.assert_not_called()
+        mock_logger.warning.assert_not_called()
+
     def test_calls_kafka_producer_singleton(self) -> None:
         """Uses get_kafka_producer() singleton for fire-and-forget publish."""
         pytest.importorskip("baldur_dormant")
@@ -275,19 +309,19 @@ class TestPublishToKafkaFallbackBehavior:
 
 
 # =============================================================================
-# _write_to_wal() 동작 검증
+# _write_to_wal() behavior
 # =============================================================================
 
 
 class TestWriteToWalBehavior:
-    """_write_to_wal() 동작 검증."""
+    """_write_to_wal() behavior tests."""
 
     @patch("baldur.audit.wal.WriteAheadLog")
     @patch("baldur.audit.wal._models.WALConfig")
     def test_writes_event_to_wal(
         self, mock_config_cls: MagicMock, mock_wal_cls: MagicMock
     ) -> None:
-        """크리티컬 이벤트를 WAL에 기록한다."""
+        """Writes a critical event to the WAL."""
         mock_wal = MagicMock()
         mock_wal_cls.return_value = mock_wal
 
@@ -302,7 +336,7 @@ class TestWriteToWalBehavior:
         mock_wal.write.assert_called_once()
 
     def test_wal_import_failure_does_not_raise(self) -> None:
-        """WAL import 실패 시 예외가 전파되지 않는다."""
+        """A WAL import failure does not propagate."""
         bus = _make_bus_no_redis()
         event = BaldurEvent(
             event_type=EventType.REGION_PRIMARY_CHANGED,
@@ -313,5 +347,5 @@ class TestWriteToWalBehavior:
             "baldur.audit.wal.WriteAheadLog",
             side_effect=ImportError("no WAL module"),
         ):
-            # 예외 없이 완료
+            # Completes without raising
             bus._write_to_wal(event)

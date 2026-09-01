@@ -1237,3 +1237,162 @@ class TestEmergencyResolveNotificationBehavior:
             )
             # Should not raise
             _on_emergency_level_changed(event)
+
+
+# =============================================================================
+# Governance cache invalidation — the flip reaches the pre-action gate (768 D4)
+# =============================================================================
+
+
+_GOVERNANCE_INVALIDATING_EVENTS = [
+    EventType.KILL_SWITCH_ACTIVATED,
+    EventType.KILL_SWITCH_DEACTIVATED,
+    EventType.EMERGENCY_LEVEL_CHANGED,
+]
+
+_GOVERNANCE_EVENT_IDS = [
+    "kill_switch_activated",
+    "kill_switch_deactivated",
+    "emergency_level_changed",
+]
+
+
+class TestGovernanceCacheInvalidationHandlerBehavior:
+    """_invalidate_governance_cache clears the gate's verdict cache."""
+
+    @pytest.mark.parametrize(
+        "event_type", _GOVERNANCE_INVALIDATING_EVENTS, ids=_GOVERNANCE_EVENT_IDS
+    )
+    def test_resolved_provider_is_invalidated_once_per_event(self, event_type):
+        """Every subscribed event clears the cache through the registry slot."""
+        from baldur.factory.registry import ProviderRegistry
+        from baldur.interfaces.governance import NoOpGovernanceChecker
+        from baldur.services.event_bus.bus.default_handlers import (
+            _invalidate_governance_cache,
+        )
+
+        checker = MagicMock(spec=NoOpGovernanceChecker)
+        with patch.object(ProviderRegistry.governance, "get", return_value=checker):
+            _invalidate_governance_cache(_make_event(event_type, data={}))
+
+        checker.invalidate_governance_cache.assert_called_once_with()
+
+    @pytest.mark.parametrize(
+        "event_type", _GOVERNANCE_INVALIDATING_EVENTS, ids=_GOVERNANCE_EVENT_IDS
+    )
+    def test_noop_checker_makes_the_handler_a_silent_no_op(self, event_type):
+        """PRO-absent the registry resolves the NoOp checker: nothing to clear,
+        nothing to report — no WARNING on the operator's most-watched action."""
+        from baldur.factory.registry import ProviderRegistry
+        from baldur.interfaces.governance import NoOpGovernanceChecker
+        from baldur.services.event_bus.bus.default_handlers import (
+            _invalidate_governance_cache,
+        )
+
+        with patch(
+            "baldur.services.event_bus.bus.default_handlers.logger"
+        ) as mock_logger:
+            with patch.object(
+                ProviderRegistry.governance, "get", return_value=NoOpGovernanceChecker()
+            ):
+                _invalidate_governance_cache(_make_event(event_type, data={}))
+
+        mock_logger.warning.assert_not_called()
+
+    def test_provider_failure_logs_a_warning_and_does_not_propagate(self):
+        """The handler is awaited by the flip: a raising provider must not turn
+        an operator's disable() into an exception."""
+        from baldur.factory.registry import ProviderRegistry
+        from baldur.interfaces.governance import NoOpGovernanceChecker
+        from baldur.services.event_bus.bus.default_handlers import (
+            _invalidate_governance_cache,
+        )
+
+        checker = MagicMock(spec=NoOpGovernanceChecker)
+        checker.invalidate_governance_cache.side_effect = RuntimeError("cache gone")
+
+        with patch(
+            "baldur.services.event_bus.bus.default_handlers.logger"
+        ) as mock_logger:
+            with patch.object(ProviderRegistry.governance, "get", return_value=checker):
+                _invalidate_governance_cache(
+                    _make_event(EventType.KILL_SWITCH_ACTIVATED, data={})
+                )
+
+        mock_logger.warning.assert_called_once_with(
+            "event_bus.governance_cache_invalidation_failed"
+        )
+
+
+class TestGovernanceInvalidationRegistrationContract:
+    """register_default_handlers wires the invalidation on all three events."""
+
+    def setup_method(self):
+        from baldur.services.event_bus import get_event_bus
+
+        self.bus = get_event_bus()
+        self.bus.reset()
+
+    def teardown_method(self):
+        self.bus.reset()
+
+    @pytest.mark.parametrize(
+        "event_type", _GOVERNANCE_INVALIDATING_EVENTS, ids=_GOVERNANCE_EVENT_IDS
+    )
+    def test_handler_subscribed_at_critical_priority_and_awaited(self, event_type):
+        """CRITICAL orders the clear ahead of the behavioral consumers;
+        await_result=True is what makes "the flip call returned" imply "the
+        gate in this process is already fresh"."""
+        from baldur.services.event_bus.bus.default_handlers import (
+            register_default_handlers,
+        )
+
+        register_default_handlers()
+
+        subs = self.bus.get_subscriptions(event_type)
+        handler = next(
+            s for s in subs if s["handler_name"] == "_invalidate_governance_cache"
+        )
+        assert handler["priority"] == EventPriority.CRITICAL.name
+        assert handler["await_result"] is True
+
+
+# =============================================================================
+# Throttle handlers with no provider registered (768 D11)
+# =============================================================================
+
+
+class TestThrottleHandlerProviderAbsentBehavior:
+    """An OSS-only install has no throttle provider — that is not a failure."""
+
+    @pytest.mark.parametrize(
+        ("handler_name", "event_type"),
+        [
+            ("_on_kill_switch_activated_throttle", EventType.KILL_SWITCH_ACTIVATED),
+            (
+                "_on_emergency_level_changed_throttle",
+                EventType.EMERGENCY_LEVEL_CHANGED,
+            ),
+        ],
+        ids=["kill_switch_activated", "emergency_level_changed"],
+    )
+    def test_absent_provider_logs_debug_and_returns_without_warning(
+        self, handler_name, event_type
+    ):
+        """safe_get() -> None returns early at DEBUG instead of raising into
+        the except-branch WARNING, which read as a fault on every flip."""
+        from baldur.factory.registry import ProviderRegistry
+        from baldur.services.event_bus.bus import _throttle_handlers
+
+        handler = getattr(_throttle_handlers, handler_name)
+
+        with patch.object(_throttle_handlers, "logger") as mock_logger:
+            with patch.object(
+                ProviderRegistry.adaptive_throttle, "safe_get", return_value=None
+            ):
+                handler(_make_event(event_type, data={"level": 2}))
+
+        mock_logger.debug.assert_called_once_with(
+            "event_handler.throttle_provider_unavailable"
+        )
+        mock_logger.warning.assert_not_called()
