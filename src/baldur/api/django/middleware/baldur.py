@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from baldur.core.execution_mode import intervention_suppressed
 from baldur.dlq.helpers import store_to_dlq
 from baldur.utils.retry_after import parse_retry_after
 from baldur.utils.time import utc_now
@@ -215,7 +216,11 @@ class BaldurMiddleware:
         # =====================================================================
         # Preemptive DLQ storage when CB is OPEN (automatic routing)
         # =====================================================================
-        if self._is_cb_open(request) and self._is_dlq_eligible(request):
+        if (
+            self._is_cb_open(request)
+            and self._is_dlq_eligible(request)
+            and not self._preemptive_intervention_suppressed(request)
+        ):
             error_context = {
                 "error_type": "CIRCUIT_BREAKER_OPEN",
                 "error_message": "Circuit breaker is OPEN - request queued for later retry",
@@ -605,6 +610,22 @@ class BaldurMiddleware:
         except Exception:
             pass
 
+    def _preemptive_intervention_suppressed(self, request: HttpRequest) -> bool:
+        """Observe-only: report the 503 + store this request would have taken.
+
+        Resolved before the branch acts, not inside it. Shadow mode promises to
+        decide without intervening, and the preemptive branch is two
+        interventions in one — it refuses the request AND writes a durable
+        entry — so evaluating the mode afterwards would already have done both.
+        """
+        return intervention_suppressed(
+            service_name=self._infer_domain(request.path),
+            action="circuit_breaker_reject",
+            would_reject=True,
+            would_store_dlq=True,
+            path=request.path,
+        )
+
     def _store_to_dlq(
         self,
         request_data: dict[str, Any],
@@ -614,10 +635,21 @@ class BaldurMiddleware:
         """Store failed request to DLQ.
 
         Returns the opaque repository-issued entry id, or ``None`` when the DLQ
-        was unavailable or the store failed.
+        was unavailable, the store failed, or observe-only mode suppressed it.
         """
         try:
             domain = self._infer_domain(request_data.get("path", ""))
+
+            # Observe-only (dry-run / shadow / evaluation): suppress the write,
+            # log the would-store decision, and return None as if nothing
+            # stored — the same posture the policy-chain DLQ sink takes.
+            if intervention_suppressed(
+                service_name=domain,
+                action="dlq_store",
+                error_type=error_context.get("error_type", ""),
+                path=request_data.get("path"),
+            ):
+                return None
 
             # impl doc 486 D2 G4 — middleware needs the real ``dlq_id`` for the
             # HTTP response + audit, so opt into sync dispatch explicitly.

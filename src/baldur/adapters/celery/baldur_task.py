@@ -16,6 +16,7 @@ from baldur.adapters.celery.signal_config import (
     extract_service_name,
     get_signal_hooks_settings,
 )
+from baldur.core.execution_mode import intervention_suppressed
 
 __all__ = ["baldur_task"]
 
@@ -66,11 +67,21 @@ def baldur_task(
                 return result
 
             except Exception as e:
+                # Observe-only (dry-run / shadow / evaluation): suppress the
+                # two state-mutating interventions, matching the task_failure
+                # signal handler. Resolved once for both.
+                observe_only = intervention_suppressed(
+                    service_name=resolved_service,
+                    action="celery_failure_intervention",
+                    task_name=task_name,
+                    domain=resolved_domain,
+                )
+
                 # Record failure
-                if track_cb:
+                if track_cb and not observe_only:
                     cb_recorder.record_failure(resolved_service, task_name, e)
 
-                if track_dlq:
+                if track_dlq and not observe_only:
                     try:
                         from celery import current_task
 
