@@ -241,6 +241,8 @@ Entries parked because the circuit was OPEN (`CIRCUIT_BREAKER_OPEN`) are swept a
 
 Because of this, **a registered handler now receives entries of that type** — its `replay()` must accept them or route them onward.
 
+**One case where the sweep needs help: Django running both layers.** The request-boundary layer parks its preemptive entries under `CIRCUIT_BREAKER_OPEN` as well, filed under the domain it infers from the path. When that inferred domain is the same name your `protect()` call uses, both layers' entries share one domain and one failure type — and the sweep fetches a batch by domain and type first, keeping only the protected-call captures afterwards. A storm's worth of request-boundary entries can therefore fill the whole batch and leave nothing to replay; because they stay PENDING, the next sweep fetches the same ones again. The symptom is `batch_result=0` with entries visibly pending and no `open_circuit_auto_replay_skipped` line naming a reason. Two ways out: redrive the protected-call entries from the console — they carry `"source": "policy_chain"` in their metadata — or give the two layers different names, mapping the path to `payments_http` while the protected call keeps `payment_api`.
+
 ### Register the handler under the stored domain name
 
 The domain an entry is stored under is the normalized form of the `protect()` name: lower-cased, with `-` turned into `_`. So `@protected(name="Payment-API")` parks under `payment_api`, and that is the domain to register for.
