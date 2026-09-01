@@ -120,7 +120,11 @@ def resolve_stored_domain(domain: object) -> str:
     Returns:
         The stored form. ``FALLBACK_DOMAIN`` means the input has no domain
         identity of its own — it shares one bucket with every other rejected
-        name, so matching on it is not an identity match.
+        name, so matching on it is not an identity match. That return is also
+        the one value this projection does not reproject onto itself
+        (``FALLBACK_DOMAIN`` is upper-case and validates on a second pass), so
+        a caller must treat it as a terminal verdict and stop, never feed it
+        back in.
     """
     try:
         return validate_and_normalize_domain(domain)
