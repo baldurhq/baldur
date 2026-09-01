@@ -21,10 +21,12 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest
+
 from tests.architecture.conftest import (
-    DEFAULT_SRC_ROOTS,
     collect_violations,
     parse_ast,
+    src_root_params,
     symbol_of,
     walk_src,
 )
@@ -76,9 +78,10 @@ def _scan(path: Path) -> list[tuple[Path, int, str, str]]:
 class TestHealthCheckNamingContract:
     """G6 — `is_healthy` MUST be declared as `@property`."""
 
-    def test_no_unbaselined_violations(self):
+    @pytest.mark.parametrize("root", src_root_params())
+    def test_no_unbaselined_violations(self, root):
         raw: list[tuple[Path, int | None, str | None, str | None]] = []
-        for path in walk_src(DEFAULT_SRC_ROOTS):
+        for path in walk_src([root]):
             for offender_path, line, symbol, extra in _scan(path):
                 raw.append((offender_path, line, symbol, extra))
 

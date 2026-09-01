@@ -1,8 +1,12 @@
-"""G9 — `__all__` explicitly declared on every public module.
+"""G9 — `__all__` declared on every module the published reference reads.
 
-Per D7, the scope is every `_`-prefix-free `.py` module under `src/baldur/` +
-`src/baldur_pro/`, excluding `__init__.py` (re-export hubs have a separate
-convention).
+Scope is the set of modules a ``:::`` directive renders WHOLE, resolved by the
+shared reference-directive classifier: a whole-package directive (mkdocstrings
+reads the ``__all__`` in that package's ``__init__.py``), a plain-module
+directive (it reads that file's ``__all__``), and any package the reference
+covers leaf-by-leaf (the completeness rule compares its ``__all__`` against the
+rendered leaves). A per-symbol directive renders one object and never consults
+``__all__``, so the symbol's own module is out of scope.
 
 Two contracts are validated:
     (a) An ``__all__`` assignment exists at module level. Missing it produces
@@ -15,6 +19,17 @@ Two contracts are validated:
         ``ImportFrom`` name. Modules with module-level ``__getattr__`` skip
         (b) because names are resolved at attribute access time.
 
+Why this scope and not every module: ``__all__`` has exactly one mechanical
+reader here — mkdocstrings. Nothing else consults it (star-imports have no call
+site in the source tree, and no lint rule keys on it), so enforcing it on
+modules the reference never renders bought a permanently-baselined majority and
+no guarantee. On the rendered set the rule closes a real hole: a package that
+loses its ``__all__`` degrades the reference-completeness check to a vacuous
+pass, silently dropping symbols from the published API reference.
+
+Baseline is enforced-empty — a rendered module's ``__all__`` is fixed, never
+baselined.
+
 Rule registry: ``ARCHITECTURE.md#g9-all-declaration``
 """
 
@@ -24,14 +39,23 @@ import ast
 from pathlib import Path
 
 from tests.architecture.conftest import (
-    DEFAULT_SRC_ROOTS,
     collect_violations,
     parse_ast,
-    walk_src,
+    reference_read_modules,
 )
 
 _RULE_KEY = "all_declaration"
 _RULE_ANCHOR = "#g9-all-declaration"
+
+# Non-vacuity anchors. The scope is small and import-resolved, so a broken
+# resolver (or a reference page losing its directives) would empty it and turn
+# the rule green for the wrong reason. These are OSS-only on purpose: a
+# PRO-absent checkout legitimately resolves no ``baldur_pro`` target.
+_SANITY_ANCHOR_MODULES: tuple[str, ...] = (
+    "baldur",
+    "baldur.interfaces",
+    "baldur.adapters.django",
+)
 
 
 def _has_module_getattr(tree: ast.Module) -> bool:
@@ -101,7 +125,7 @@ def _audit_module(path: Path) -> tuple[int | None, str] | None:
     if assignment is None:
         return (None, "missing __all__ declaration")
 
-    value = assignment.value if isinstance(assignment, ast.Assign) else assignment.value
+    value = assignment.value
     if value is None:
         return (assignment.lineno, "__all__ has no value")
 
@@ -127,16 +151,26 @@ def _audit_module(path: Path) -> tuple[int | None, str] | None:
 
 
 class TestAllDeclarationContract:
-    """G9 — public modules MUST declare and correctly populate `__all__`."""
+    """G9 — reference-rendered modules MUST declare and populate `__all__`."""
+
+    def test_scope_is_not_vacuous(self):
+        rendered = reference_read_modules()
+        assert rendered, (
+            "G9: the reference-rendered module set is empty — the directive "
+            "resolver or the reference pages regressed, and the rule below "
+            "would pass vacuously."
+        )
+        resolved = set(rendered.values())
+        missing = [name for name in _SANITY_ANCHOR_MODULES if name not in resolved]
+        assert not missing, (
+            f"G9: reference-rendered set lost known anchors {missing}. "
+            "Either the reference dropped their directives or the resolver "
+            "stopped classifying them as rendered modules."
+        )
 
     def test_no_unbaselined_violations(self):
         raw: list[tuple[Path, int | None, str | None, str | None]] = []
-        modules = walk_src(
-            DEFAULT_SRC_ROOTS,
-            exclude_underscore=True,
-            exclude_init=True,
-        )
-        for path in modules:
+        for path in sorted(reference_read_modules()):
             result = _audit_module(path)
             if result is None:
                 continue
@@ -146,6 +180,7 @@ class TestAllDeclarationContract:
         violations = collect_violations(_RULE_KEY, raw, _RULE_ANCHOR)
         assert not violations, (
             f"G9: __all__ declaration regressions ({len(violations)}). "
-            "Either declare __all__ in the offending module or add a baseline entry "
-            "under `all_declaration:` with reason+ticket.\n" + "\n".join(violations)
+            "The published reference renders these modules whole and reads "
+            "their __all__ — declare it in the offending module.\n"
+            + "\n".join(violations)
         )

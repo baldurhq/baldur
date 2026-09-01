@@ -26,12 +26,14 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest
+
 from tests.architecture.conftest import (
-    DEFAULT_SRC_ROOTS,
     PROJECT_ROOT,
     collect_violations,
     parse_ast,
     resolve_callsites,
+    src_root_params,
     walk_src,
 )
 
@@ -103,10 +105,10 @@ def _collect_module_level_setups(
     return found
 
 
-def _scan_definitions() -> dict[str, list[tuple[Path, int]]]:
+def _scan_definitions(roots) -> dict[str, list[tuple[Path, int]]]:
     """Return ``{function_name: [(file, lineno), ...]}`` for every setup/start def."""
     definitions: dict[str, list[tuple[Path, int]]] = {}
-    for path in walk_src(DEFAULT_SRC_ROOTS):
+    for path in walk_src(roots):
         tree = parse_ast(path)
         if tree is None:
             continue
@@ -118,8 +120,9 @@ def _scan_definitions() -> dict[str, list[tuple[Path, int]]]:
 class TestStartupWiringContract:
     """G7 — every `setup_*()` / `start_*()` must be invoked from an entry point."""
 
-    def test_no_unbaselined_violations(self):
-        definitions = _scan_definitions()
+    @pytest.mark.parametrize("root", src_root_params())
+    def test_no_unbaselined_violations(self, root):
+        definitions = _scan_definitions([root])
         if not definitions:
             return
         invoked = resolve_callsites(_entry_point_roots(), set(definitions))

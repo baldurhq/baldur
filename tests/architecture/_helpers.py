@@ -37,6 +37,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, NamedTuple
 
+import pytest
 import yaml
 
 
@@ -156,6 +157,35 @@ def walk_src(
         for path in root.rglob("*.py"):
             if _passes_filters(path.name):
                 yield path
+
+
+def src_root_params() -> list[Any]:
+    """Per-root pytest params for a rule that walks ``DEFAULT_SRC_ROOTS``.
+
+    A rule that walks the roots as one set scans NOTHING for a root that is
+    absent from the checkout — and reports that as a pass. Only the core tier
+    ships here, so the private-tier root is not there and every such rule went
+    green having read none of its files. Green then meant "the half I can see
+    is clean", but read as "the rule is clean".
+
+    Parametrizing splits the two: the absent root reports SKIPPED with its
+    reason (the repo that ships that source runs it), the present root still
+    runs.
+    """
+    params: list[Any] = []
+    for root in DEFAULT_SRC_ROOTS:
+        marks = ()
+        if not root.is_dir():
+            marks = (
+                pytest.mark.skip(
+                    reason=(
+                        f"{root.name} is not in this checkout — its scan runs in "
+                        "the repo that ships that source"
+                    )
+                ),
+            )
+        params.append(pytest.param(root, id=root.name, marks=marks))
+    return params
 
 
 @lru_cache(maxsize=4096)
@@ -559,6 +589,144 @@ def directive_targets(reference_dir: Path = REFERENCE_DIR) -> Iterator[str]:
             match = _DIRECTIVE_RE.match(line)
             if match:
                 yield match.group(1)
+
+
+# ---------------------------------------------------------------------------
+# Reference-directive classification — which module does a ``:::`` target name?
+#
+# mkdocstrings reads a module's ``__all__`` only when the directive renders that
+# module WHOLE (a package, or a plain module). A per-symbol directive
+# (``::: pkg.mod.Symbol``) renders one object and never consults ``__all__``.
+# Two gates need this distinction and MUST NOT answer it twice: the
+# reference-completeness rule asks "which package's ``__all__`` must the
+# reference cover?", the ``__all__``-declaration rule asks "which files does the
+# reference actually read?". Both resolve through the functions below, so a
+# classification change reaches both at once.
+# ---------------------------------------------------------------------------
+
+
+def spec_kind(name: str) -> str:
+    """Classify a dotted name via ``find_spec`` WITHOUT importing it.
+
+    Returns ``"package"`` (has a submodule search path), ``"module"`` (a plain
+    module file), ``"absent"`` (the import system finds no such module — a
+    genuine symbol such as a class/function), or ``"error"`` (a parent in the
+    path is not a package, e.g. the ``pkg.module.symbol`` disambiguation form).
+
+    ``find_spec`` imports a target's *parent* packages to locate it but never
+    executes the target's own module body, so this stays cheap and free of
+    optional-extra side effects.
+    """
+    try:
+        spec = importlib.util.find_spec(name)
+    except (ImportError, AttributeError, ValueError):
+        return "error"
+    if spec is None:
+        return "absent"
+    return "package" if spec.submodule_search_locations is not None else "module"
+
+
+def spec_origin(name: str) -> Path | None:
+    """Return the on-disk file backing ``name``, or None when it has none.
+
+    For a package this is its ``__init__.py`` — the file whose ``__all__``
+    mkdocstrings reads for a whole-package directive.
+    """
+    try:
+        spec = importlib.util.find_spec(name)
+    except (ImportError, AttributeError, ValueError):
+        return None
+    if spec is None or not spec.origin:
+        return None
+    return Path(spec.origin)
+
+
+def attributed_package(parent: str) -> str | None:
+    """Return the package a leaf directive is attributed to, or None.
+
+    The leaf is attributed to ``parent`` when ``parent`` is itself a package, or
+    to the grandparent when ``parent`` is a non-package module directly under a
+    package (the ``::: pkg.module.symbol`` decorators form). Returns None when
+    neither resolves to a package.
+    """
+    kind = spec_kind(parent)
+    if kind == "package":
+        return parent
+    if kind == "module" and "." in parent:
+        grandparent = parent.rsplit(".", 1)[0]
+        if spec_kind(grandparent) == "package":
+            return grandparent
+    return None
+
+
+def scan_reference_directives(
+    reference_dir: Path = REFERENCE_DIR,
+) -> tuple[set[str], dict[str, set[str]], set[str]]:
+    """Walk every reference ``:::`` directive once.
+
+    Returns ``(whole_package_packages, leaf_covered, obligated)``:
+
+    * ``whole_package_packages`` — packages rendered by a whole-package ``:::``
+      (complete by construction; never need importing for the check);
+    * ``leaf_covered`` — ``{package: {leaf, ...}}`` accumulated from symbol and
+      plain-module directives;
+    * ``obligated`` — every package whose ``__all__`` the reference must cover.
+    """
+    whole_package: set[str] = set()
+    leaf_covered: dict[str, set[str]] = defaultdict(set)
+    obligated: set[str] = set()
+
+    for target in directive_targets(reference_dir):
+        kind = spec_kind(target)
+        if kind == "package":
+            whole_package.add(target)
+            obligated.add(target)
+            continue
+        if "." not in target:
+            continue
+        parent, leaf = target.rsplit(".", 1)
+        attributed = attributed_package(parent)
+        if attributed is None:
+            continue
+        leaf_covered[attributed].add(leaf)
+        # A plain-module target (``baldur.protect_facade`` / ``baldur.core.exceptions``)
+        # contributes a covered leaf but does NOT obligate its parent — only a
+        # genuine symbol (``absent`` / ``error``) obligates.
+        if kind != "module":
+            obligated.add(attributed)
+
+    return whole_package, dict(leaf_covered), obligated
+
+
+def reference_read_modules(reference_dir: Path = REFERENCE_DIR) -> dict[Path, str]:
+    """Return ``{file: dotted name}`` for every module the reference reads whole.
+
+    Two directive shapes reach a module's ``__all__``:
+
+    * a whole-package directive — mkdocstrings renders the package and reads the
+      ``__all__`` in its ``__init__.py``;
+    * a plain-module directive — it reads that module file's ``__all__``.
+
+    A package that only ever appears as the parent of per-symbol directives is
+    ALSO included: the completeness rule compares its ``__all__`` against the
+    rendered leaves, so an absent ``__all__`` there degrades that check to a
+    vacuous pass rather than failing it.
+
+    Absent targets resolve to nothing and drop out, which is what a checkout
+    without the PRO distribution should see.
+    """
+    whole, _covered, obligated = scan_reference_directives(reference_dir)
+    names = set(whole) | set(obligated)
+    for target in directive_targets(reference_dir):
+        if spec_kind(target) == "module":
+            names.add(target)
+
+    read: dict[Path, str] = {}
+    for name in sorted(names):
+        origin = spec_origin(name)
+        if origin is not None:
+            read[origin.resolve()] = name
+    return read
 
 
 # ---------------------------------------------------------------------------
@@ -2008,6 +2176,7 @@ __all__ = [
     "collect_test_def_names",
     "collect_violations",
     "core_dependency_modules",
+    "attributed_package",
     "directive_targets",
     "discover_bool_config_fields",
     "discover_enable_fields",
@@ -2030,8 +2199,13 @@ __all__ = [
     "parse_ast",
     "published_markdown_files",
     "read_publish_allowlist",
+    "reference_read_modules",
     "resolve_all_chain_files",
     "resolve_callsites",
+    "scan_reference_directives",
+    "spec_kind",
+    "spec_origin",
+    "src_root_params",
     "resolve_test_ref_name",
     "symbol_of",
     "verified_by_ref",

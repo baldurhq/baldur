@@ -56,6 +56,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest
+
 from tests.architecture._helpers import _load_baseline_document
 from tests.architecture.conftest import (
     PROJECT_ROOT,
@@ -216,9 +218,20 @@ def _count_all_dormant_imports(path: Path) -> int:
     return count
 
 
+# The rule is "OSS code must not import PRO", so it has no private-tree half to
+# fall back on: with `src/baldur` absent it walks an empty file set and reports a
+# pass. Skip visibly instead — the public repo, where that source is in-tree,
+# is where this rule runs.
+_OSS_SOURCE_REQUIRED = pytest.mark.skipif(
+    not (PROJECT_ROOT / "src" / "baldur").is_dir(),
+    reason="baldur is not in this checkout — the OSS import-boundary scan runs in the public repo",
+)
+
+
 class TestProImportBoundary:
     """G17 — OSS code must not module-level-import baldur_pro."""
 
+    @_OSS_SOURCE_REQUIRED
     def test_no_unbaselined_module_level_pro_imports(self):
         roots = [PROJECT_ROOT / "src" / "baldur"]
         raw: list[tuple[Path, int | None, str | None, str | None]] = []
@@ -239,6 +252,7 @@ class TestProImportBoundary:
 class TestProImportCount:
     """G17b — global count of baldur_pro imports must not increase."""
 
+    @_OSS_SOURCE_REQUIRED
     def test_pro_import_count_does_not_exceed_snapshot(self):
         roots = [PROJECT_ROOT / "src" / "baldur"]
         observed = 0
@@ -274,6 +288,7 @@ class TestDormantImportCount:
     Target = 0.
     """
 
+    @_OSS_SOURCE_REQUIRED
     def test_dormant_import_count_does_not_exceed_snapshot(self):
         roots = [PROJECT_ROOT / "src" / "baldur"]
         observed = 0
