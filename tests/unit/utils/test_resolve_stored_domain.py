@@ -62,17 +62,27 @@ class TestResolveStoredDomainBehavior:
         assert resolve_stored_domain(raw) == expected
 
     def test_max_length_boundary_passes(self):
-        """Just under the cap validates; just over falls to the bucket."""
+        """A name exactly at the cap validates (over it is in the table above)."""
         at_cap = "a" * MAX_DOMAIN_LENGTH
 
         assert resolve_stored_domain(at_cap) == at_cap
 
-    def test_projection_is_idempotent(self):
+    def test_a_resolved_name_is_idempotent(self):
         """The async outbox round-trip re-projects an already-stored domain;
         a second pass must not move it."""
         once = resolve_stored_domain("Payment-API")
 
         assert resolve_stored_domain(once) == once
+
+    def test_the_bucket_verdict_is_terminal_not_a_name_to_reproject(self):
+        """``FALLBACK_DOMAIN`` is the one output that does not round-trip: it
+        is upper-case, so a second pass validates it into ``other_domain``.
+        Pinned so a caller learns it here rather than by joining on a name
+        nothing was stored under."""
+        bucket = resolve_stored_domain("3ds-gateway")
+
+        assert bucket == FALLBACK_DOMAIN
+        assert resolve_stored_domain(bucket) != bucket
 
     def test_never_raises_on_hostile_input(self):
         """Total by construction — the store calls this from inside an
