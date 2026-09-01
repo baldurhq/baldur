@@ -185,8 +185,12 @@ class SystemControlManager(EventEmitterMixin):
 
         Never raises: a backend outage must not abort an in-process kill
         switch. Because the failure is invisible to callers, it is recorded
-        in ``_persist_dirty`` so ``_refresh_state`` retries the write and
-        refuses to overwrite the newer local state meanwhile.
+        in ``_persist_dirty``; ``_refresh_state`` decides what to do with it,
+        and only in the fail-closed direction does it hold the local state.
+
+        The failure is announced once per episode: at exception level when
+        the state first diverges, then at DEBUG for each retry, because every
+        refresh retries and a refresh happens on every governance cache miss.
 
         Caller contract: must hold ``_state_lock``.
         """
@@ -198,27 +202,63 @@ class SystemControlManager(EventEmitterMixin):
             set_sc_persist_dirty(False)
             logger.debug("system_control.state_saved")
         except Exception as e:
+            already_dirty = self._persist_dirty
             self._persist_dirty = True
             set_sc_persist_dirty(True)
-            logger.exception(
-                "system_control.save_state_failed",
-                error=e,
-            )
+            if already_dirty:
+                # The divergence was already announced when it started, and
+                # every refresh retries the write — re-announcing would put a
+                # traceback on every governance cache miss for as long as the
+                # backend stays down. The standing signals are the gauge and
+                # the status field.
+                logger.debug(
+                    "system_control.persist_retry_failed",
+                    error=e,
+                )
+            else:
+                logger.exception(
+                    "system_control.save_state_failed",
+                    error=e,
+                )
 
     def _refresh_state(self) -> SystemState:
         """Refresh state from backend (for multi-server sync).
 
-        While a previous write is still unpersisted the local state is newer
+        While an unpersisted **disable** is pending the local state is newer
         than the backend, so the write is retried first and — if it still
         fails — the backend read is skipped entirely. Reading it would
         resurrect the pre-flip value and silently undo a kill switch.
 
+        An unpersisted **enable** gets no such protection. The retry is a
+        last-writer-wins write with no version check, so holding one would
+        let a node whose enable never landed overwrite a kill switch another
+        node committed meanwhile — the fail-open direction, and the one this
+        guard exists to prevent. Such a pending enable is dropped and the
+        backend decides.
+
         Caller contract: must hold ``_state_lock``.
         """
+        if self._persist_dirty and self._cached_state.enabled:
+            # Fail-open direction — do not retry, do not hold. Announced
+            # once (the flag is cleared here), because an operator whose
+            # enable is being discarded has to hear about it.
+            logger.warning(
+                "system_control.unpersisted_enable_discarded",
+                enabled_by=self._cached_state.enabled_by,
+            )
+            self._persist_dirty = False
+            set_sc_persist_dirty(False)
+
         if self._persist_dirty:
             self._save_state()
             if self._persist_dirty:
-                logger.warning(
+                # DEBUG, not WARNING: this fires on every refresh (so on every
+                # governance cache miss) for the whole dirty window, and the
+                # skip is what keeps the kill switch closed rather than a
+                # protection going inert. The divergence itself is announced
+                # once at exception level, and stands in the persist_dirty
+                # gauge and status field.
+                logger.debug(
                     "system_control.refresh_skipped_persist_dirty",
                     enabled=self._cached_state.enabled,
                 )

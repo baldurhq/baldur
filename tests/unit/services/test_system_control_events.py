@@ -345,6 +345,59 @@ class TestSystemControlPersistDirtyBehavior:
             flip_env.manager.get_state(refresh=True)
             assert mock_gauge.call_args_list[-1].args == (False,)
 
+    def test_repeated_retry_failures_are_announced_only_once(self, flip_env):
+        """A dirty node retries the write on every refresh — and every
+        governance cache miss is a refresh.
+
+        Announcing each retry at exception level would put a traceback on the
+        gate's miss path for as long as the backend stays down; the standing
+        signals are the gauge and the status field instead.
+        """
+        flip_env.seed_backend(enabled=True)
+        flip_env.backend.fail_writes = True
+
+        flip_env.manager.disable(actor=ACTOR, reason=REASON)
+
+        with patch("baldur.services.system_control.logger") as mock_logger:
+            for _ in range(3):
+                flip_env.manager.get_state(refresh=True)
+
+        assert mock_logger.exception.call_count == 0
+        assert mock_logger.warning.call_count == 0
+
+    def test_unpersisted_enable_never_overwrites_a_newer_remote_disable(self, flip_env):
+        """The retry must not blind-write a stale 'enabled' over a live flip.
+
+        The guard exists to keep an unpersisted *disable* closed. Applying it
+        to an unpersisted *enable* points it the other way: the retry is a
+        last-writer-wins write, so a node whose enable never landed would
+        resurrect it over a kill switch another node committed meanwhile --
+        lifting that kill switch cluster-wide, with no event published.
+        """
+        # Given: this node's enable() could not be persisted
+        flip_env.seed_backend(enabled=False)
+        flip_env.backend.fail_writes = True
+        flip_env.manager.enable(actor=ACTOR, reason="incident resolved")
+        assert flip_env.manager.is_enabled() is True
+
+        # And: the backend recovers, and another node commits a kill switch
+        # before this one has refreshed
+        flip_env.backend.fail_writes = False
+        flip_env.backend.set(
+            STATE_KEY,
+            SystemState(
+                enabled=False, disabled_by="other-pod", disabled_reason=REASON
+            ).to_dict(),
+        )
+
+        # When: this node refreshes (a governance cache miss, a status poll)
+        state = flip_env.manager.get_state(refresh=True)
+
+        # Then: the remote kill switch stands, here and in the backend
+        assert state.enabled is False
+        assert flip_env.backend.get(STATE_KEY)["enabled"] is False
+        assert flip_env.backend.get(STATE_KEY)["disabled_by"] == "other-pod"
+
     def test_dirty_flip_still_emits_and_blocks_locally(self, flip_env):
         """The in-process flip, its event and local blocking all survive a
         backend outage — only cross-process propagation waits for the retry."""
