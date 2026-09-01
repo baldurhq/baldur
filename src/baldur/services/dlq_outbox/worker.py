@@ -384,8 +384,11 @@ class DLQOutboxWorker:
             )
 
         # Drain any entries still queued at deadline through the emergency
-        # path so no data is lost on shutdown timeout.
-        remaining = self._buffer.get_all() if self._buffer is not None else []
+        # path so no data is lost on shutdown timeout. ``drain_all`` copies and
+        # empties in one lock scope: a ``put`` landing between a read and a
+        # separate clear would otherwise be discarded without ever reaching the
+        # dump.
+        remaining = self._buffer.drain_all() if self._buffer is not None else []
         if remaining:
             logger.warning(
                 "dlq_outbox.shutdown_emergency_dump",
@@ -399,8 +402,6 @@ class DLQOutboxWorker:
                         "dlq_outbox.emergency_dump_failed",
                         error=e,
                     )
-            # Clear after dump regardless — on_emergency_dump owns persistence.
-            self._buffer.clear()
             # Account the dumped entries in the terminal bucket so the
             # conservation invariant stays closed across shutdown (they left
             # ``size`` via the emergency path, not the normal write path).

@@ -339,6 +339,26 @@ class RingBuffer(Generic[T]):
         with self._lock:
             return list(self._buffer)
 
+    def drain_all(self) -> list[T]:
+        """
+        Return every item and empty the buffer, atomically.
+
+        The read and the removal happen in ONE lock scope, so an item put
+        while a caller is draining is either returned to that caller or left
+        for the next one — never removed without being handed over. A
+        ``get_all()`` followed by ``clear()`` cannot promise that: an item
+        landing between the two calls is cleared unread, which on a shutdown
+        drain means the entry is discarded without reaching its emergency
+        destination.
+
+        Returns:
+            A list of every item that was in the buffer
+        """
+        with self._lock:
+            drained = list(self._buffer)
+            self._buffer.clear()
+            return drained
+
     def clear(self) -> int:
         """
         Clear all items from buffer.
