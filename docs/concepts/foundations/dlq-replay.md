@@ -335,7 +335,7 @@ operate-at-scale surface on top.
 - [Circuit Breaker](../oss/circuit-breaker.md) — the recovery signal that triggers automatic replay
 - [Idempotency](../oss/idempotency.md) — the dedup guard that makes an operation safe to replay
 - [Which operations are safe to auto-replay (vs. need an ACID store)](https://github.com/baldurhq/baldur/blob/main/docs/runbooks/data-consistency-boundaries.md) — the data-consistency boundaries runbook
-- [Capturing failures that happen before your view runs (Django)](https://github.com/baldurhq/baldur/blob/main/docs/runbooks/dlq-two-layer-activation.md) — `dlq=True` captures what the wrapped function raises; failures that occur earlier in the request (database connection setup, middleware-stage errors) reach the queue only once the Django middleware layer is configured as well
+- [Which failures reach the queue, per framework](https://github.com/baldurhq/baldur/blob/main/docs/runbooks/dlq-two-layer-activation.md) — `dlq=True` captures what the wrapped function raises and what its open circuit rejects, on every framework; failures that occur earlier in a Django request (database connection setup, middleware-stage errors) reach the queue only once the Django middleware layer is configured as well
 - [Web Console](web-console.md) — the admin console where the DLQ panel lives
 - [Environment Variables](../../reference/env-vars.md) — the complete operator-tunable list
 - [Replay service API](../../reference/services/access.md) — the OSS `ReplayService`: single-entry, batch-by-failure-type, and on-recovery replay
