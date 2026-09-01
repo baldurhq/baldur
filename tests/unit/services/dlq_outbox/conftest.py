@@ -91,6 +91,8 @@ def build_outbox():
         on_drop_threshold=None,
         on_emergency_dump=None,
         on_processing_delay=None,
+        on_drops_observed=None,
+        on_drop_alert=None,
     ) -> tuple[Outbox, RingBuffer, DLQOutboxWorker]:
         buffer: RingBuffer = RingBuffer(
             capacity=capacity,
@@ -105,6 +107,9 @@ def build_outbox():
             flush_interval_seconds=flush_interval_seconds,
             on_emergency_dump=on_emergency_dump,
             on_processing_delay=on_processing_delay,
+            on_drops_observed=on_drops_observed,
+            on_drop_alert=on_drop_alert,
+            drop_rate_threshold=drop_rate_threshold,
         )
         outbox = Outbox(buffer=buffer, worker=worker)
         return outbox, buffer, worker

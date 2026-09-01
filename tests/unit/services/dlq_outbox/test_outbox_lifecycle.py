@@ -251,7 +251,9 @@ class TestOutboxFromSettingsContract:
         try:
             captured["capacity"] = outbox.buffer.capacity
             captured["strategy"] = outbox.buffer._strategy
-            captured["drop_rate_threshold"] = outbox.buffer._drop_rate_threshold
+            # The drop-rate threshold is evaluated by the worker, per drain
+            # cycle — the buffer no longer carries an alert callback.
+            captured["drop_rate_threshold"] = outbox.worker._drop_rate_threshold
             captured["batch_size"] = outbox.worker._batch_size
             captured["flush_interval"] = outbox.worker._flush_interval
 
