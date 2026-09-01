@@ -33,7 +33,9 @@ contributes a covered leaf to its parent package but does NOT obligate anything
 reference packages.
 
 Classification is driven by ``importlib.util.find_spec`` (which inspects the
-import system WITHOUT executing a target's ``__init__``), so the rule never
+import system WITHOUT executing a target's ``__init__``) and lives in the
+shared helpers, so the ``__all__``-declaration rule classifies directives
+identically instead of growing a second resolver. The rule never
 imports optional-extra adapters (``django`` / ``fastapi`` / ``flask`` /
 ``gunicorn``) — their pages are whole-package directives and therefore complete
 by construction. Only the leaf-split packages (all core, no extras) are fully
@@ -53,11 +55,12 @@ Rule registry:
 from __future__ import annotations
 
 import importlib
-import importlib.util
-from collections import defaultdict
 from pathlib import Path
 
-from tests.architecture.conftest import REFERENCE_DIR, directive_targets
+from tests.architecture.conftest import (
+    REFERENCE_DIR,
+    scan_reference_directives,
+)
 
 # Reviewed, enforced-near-empty allowlist of ``(package, leaf)`` public symbols
 # that genuinely cannot be rendered by a per-symbol ``:::`` directive. A real
@@ -134,85 +137,9 @@ _SANITY_ANCHOR_PACKAGES: tuple[str, ...] = (
 )
 
 
-def _spec_kind(name: str) -> str:
-    """Classify a dotted name via ``find_spec`` WITHOUT importing it.
-
-    Returns ``"package"`` (has a submodule search path), ``"module"`` (a plain
-    module file), ``"absent"`` (the import system finds no such module — a
-    genuine symbol such as a class/function), or ``"error"`` (a parent in the
-    path is not a package, e.g. the ``pkg.module.symbol`` disambiguation form).
-
-    ``find_spec`` imports a target's *parent* packages to locate it but never
-    executes the target's own module body, so this stays cheap and free of
-    optional-extra side effects.
-    """
-    try:
-        spec = importlib.util.find_spec(name)
-    except (ImportError, AttributeError, ValueError):
-        return "error"
-    if spec is None:
-        return "absent"
-    return "package" if spec.submodule_search_locations is not None else "module"
-
-
-def _attributed_package(parent: str) -> str | None:
-    """Return the package a leaf directive is attributed to, or None.
-
-    The leaf is attributed to ``parent`` when ``parent`` is itself a package, or
-    to the grandparent when ``parent`` is a non-package module directly under a
-    package (the ``::: pkg.module.symbol`` decorators form). Returns None when
-    neither resolves to a package.
-    """
-    kind = _spec_kind(parent)
-    if kind == "package":
-        return parent
-    if kind == "module" and "." in parent:
-        grandparent = parent.rsplit(".", 1)[0]
-        if _spec_kind(grandparent) == "package":
-            return grandparent
-    return None
-
-
-def _scan(reference_dir: Path) -> tuple[set[str], dict[str, set[str]], set[str]]:
-    """Walk every reference ``:::`` directive once.
-
-    Returns ``(whole_package_packages, leaf_covered, obligated)``:
-
-    * ``whole_package_packages`` — packages rendered by a whole-package ``:::``
-      (complete by construction; never need importing for the check);
-    * ``leaf_covered`` — ``{package: {leaf, ...}}`` accumulated from symbol and
-      plain-module directives;
-    * ``obligated`` — every package whose ``__all__`` the reference must cover.
-    """
-    whole_package: set[str] = set()
-    leaf_covered: dict[str, set[str]] = defaultdict(set)
-    obligated: set[str] = set()
-
-    for target in directive_targets(reference_dir):
-        kind = _spec_kind(target)
-        if kind == "package":
-            whole_package.add(target)
-            obligated.add(target)
-            continue
-        if "." not in target:
-            continue
-        parent, leaf = target.rsplit(".", 1)
-        attributed = _attributed_package(parent)
-        if attributed is None:
-            continue
-        leaf_covered[attributed].add(leaf)
-        # A plain-module target (``baldur.protect_facade`` / ``baldur.core.exceptions``)
-        # contributes a covered leaf but does NOT obligate its parent — only a
-        # genuine symbol (``absent`` / ``error``) obligates.
-        if kind != "module":
-            obligated.add(attributed)
-
-    return whole_package, dict(leaf_covered), obligated
-
-
 def _obligated_packages(reference_dir: Path = REFERENCE_DIR) -> set[str]:
     """Return the set of packages whose ``__all__`` the reference must cover."""
-    _whole, _covered, obligated = _scan(reference_dir)
+    _whole, _covered, obligated = scan_reference_directives(reference_dir)
     return obligated
 
 
@@ -222,7 +149,7 @@ def _covered_leaves(package: str, reference_dir: Path = REFERENCE_DIR) -> set[st
     A whole-package directive covers all of ``package.__all__``; otherwise the
     accumulated per-leaf coverage is returned.
     """
-    whole, covered, _obligated = _scan(reference_dir)
+    whole, covered, _obligated = scan_reference_directives(reference_dir)
     if package in whole:
         module = _safe_import(package)
         return set(getattr(module, "__all__", ())) if module is not None else set()
@@ -247,7 +174,7 @@ def _uncovered_symbols(
     imported. Symbol-obligated packages (all core, no optional extras) are
     imported to read ``__all__`` and compared against their covered leaves.
     """
-    whole, covered, obligated = _scan(reference_dir)
+    whole, covered, obligated = scan_reference_directives(reference_dir)
     gaps: dict[str, set[str]] = {}
     for package in obligated:
         if package in whole:
@@ -271,7 +198,7 @@ class TestOssReferenceSurfaceComplete:
 
     def test_obligated_and_covered_sets_are_nonempty(self):
         """Anti-vacuous-pass guard: a broken resolver would pass vacuously."""
-        whole, covered, obligated = _scan(REFERENCE_DIR)
+        whole, covered, obligated = scan_reference_directives(REFERENCE_DIR)
         assert obligated, (
             "G25: zero obligated packages discovered — the directive resolver is "
             "broken, so the completeness check would pass vacuously."

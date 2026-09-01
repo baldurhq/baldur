@@ -24,10 +24,12 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest
+
 from tests.architecture.conftest import (
-    PROJECT_ROOT,
     collect_violations,
     parse_ast,
+    src_root_params,
     symbol_of,
     walk_src,
 )
@@ -48,12 +50,9 @@ _BUSINESS_LOGIC_SUBDIRS = (
 )
 
 
-def _business_logic_roots() -> list[Path]:
+def _business_logic_roots(parents) -> list[Path]:
     roots: list[Path] = []
-    for parent in (
-        PROJECT_ROOT / "src" / "baldur",
-        PROJECT_ROOT / "src" / "baldur_pro",
-    ):
+    for parent in parents:
         if not parent.exists():
             continue
         for subdir in _BUSINESS_LOGIC_SUBDIRS:
@@ -109,9 +108,10 @@ def _scan(path: Path) -> list[tuple[Path, int, str, str]]:
 class TestNoPrintContract:
     """G14 — business-logic dirs MUST use `structlog`, not `print()`."""
 
-    def test_no_unbaselined_violations(self):
+    @pytest.mark.parametrize("root", src_root_params())
+    def test_no_unbaselined_violations(self, root):
         raw: list[tuple[Path, int | None, str | None, str | None]] = []
-        for path in walk_src(_business_logic_roots()):
+        for path in walk_src(_business_logic_roots([root])):
             for offender_path, line, symbol, extra in _scan(path):
                 raw.append((offender_path, line, symbol, extra))
 
