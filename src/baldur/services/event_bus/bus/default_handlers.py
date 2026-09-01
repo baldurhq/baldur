@@ -243,6 +243,30 @@ def _notify_emergency_level_resolved(
         )
 
 
+def _invalidate_governance_cache(event: BaldurEvent):
+    """
+    Clear the governance gate's result cache on a governing state change.
+
+    Subscribed to the kill-switch and emergency-level events so an operator
+    flip reaches the pre-action gate on the very next check instead of
+    riding out the cache TTL. PRO-absent, the registry resolves the NoOp
+    checker and this is a no-op.
+
+    Deliberately filtered by neither source nor namespace: the clear is
+    idempotent and carries no scope-specific behavior, so an unnecessary
+    invalidation costs one recompute while a skipped one re-serves a stale
+    verdict. Lock-light by design — it takes only the governance cache's own
+    lock, so it stays deadlock-free even when the publisher emits while
+    holding its state lock.
+    """
+    try:
+        from baldur.factory.registry import ProviderRegistry
+
+        ProviderRegistry.governance.get().invalidate_governance_cache()
+    except Exception:
+        logger.warning("event_bus.governance_cache_invalidation_failed")
+
+
 def _on_error_budget_critical(event: BaldurEvent):
     """
     Log, audit, and invalidate governance cache on error budget CRITICAL threshold.
@@ -511,6 +535,22 @@ def register_default_handlers():  # noqa: PLR0915
         priority=EventPriority.HIGH,
         await_result=False,
     )
+
+    # Governance cache invalidation — CRITICAL so the gate is fresh before
+    # the behavioral consumers run, and awaited so "the flip call returned"
+    # implies "the gate in this process is already fresh". Safe under the
+    # EmergencyManager's under-lock emission above: this handler takes only
+    # the governance cache lock, never the manager's state lock.
+    for _governance_event in (
+        EventType.KILL_SWITCH_ACTIVATED,
+        EventType.KILL_SWITCH_DEACTIVATED,
+        EventType.EMERGENCY_LEVEL_CHANGED,
+    ):
+        bus.subscribe(
+            _governance_event,
+            _invalidate_governance_cache,
+            priority=EventPriority.CRITICAL,
+        )
 
     # Error Budget events
     bus.subscribe(

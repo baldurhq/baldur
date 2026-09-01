@@ -232,10 +232,12 @@ class TestPublishFallbackChainBehavior:
 class TestPublishToKafkaFallbackBehavior:
     """_publish_to_kafka_fallback() behavior tests."""
 
-    def test_raises_when_kafka_import_fails(self) -> None:
-        """AdapterError when baldur_dormant kafka producer is not importable."""
-        from baldur.core.exceptions import AdapterError
+    def test_falls_through_to_wal_quietly_when_kafka_not_installed(self) -> None:
+        """No Kafka adapter installed -> quiet log + WAL write, no exception.
 
+        An install that never opted into Kafka must not have every critical
+        event report a Kafka misconfiguration; the WAL is the real safety net.
+        """
         bus = _make_bus_no_redis()
         event = BaldurEvent(
             event_type=EventType.REGION_PRIMARY_CHANGED,
@@ -247,8 +249,10 @@ class TestPublishToKafkaFallbackBehavior:
         with patch.dict(
             "sys.modules", {"baldur_dormant.adapters.kafka.producer": None}
         ):
-            with pytest.raises((AdapterError, ImportError)):
+            with patch.object(bus, "_write_to_wal") as mock_wal:
                 bus._publish_to_kafka_fallback(event)
+
+        mock_wal.assert_called_once_with(event)
 
     def test_calls_kafka_producer_singleton(self) -> None:
         """Uses get_kafka_producer() singleton for fire-and-forget publish."""

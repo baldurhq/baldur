@@ -23,6 +23,7 @@ __all__ = [
     "SystemControlMetricRecorder",
     "set_sc_enabled",
     "set_sc_dry_run",
+    "set_sc_persist_dirty",
     "record_sc_state_change",
     "record_sc_disabled_duration",
     "record_sc_disabled",
@@ -30,7 +31,7 @@ __all__ = [
 
 
 class SystemControlMetricRecorder(BaseMetricRecorder):
-    """System Control metric definitions and recording (5 methods).
+    """System Control metric definitions and recording (6 methods).
 
     DD-6: String interface for action labels.
     """
@@ -44,6 +45,12 @@ class SystemControlMetricRecorder(BaseMetricRecorder):
         self._dry_run = get_or_create_gauge(
             f"{self.PREFIX}_system_control_dry_run",
             "1=dry_run active, 0=live mode",
+            [],
+        )
+        self._persist_dirty = get_or_create_gauge(
+            f"{self.PREFIX}_system_control_persist_dirty",
+            "1=last state write failed and is not yet persisted "
+            "(local state diverges from the shared backend), 0=clean",
             [],
         )
         self._state_changes_total = get_or_create_counter(
@@ -76,6 +83,13 @@ class SystemControlMetricRecorder(BaseMetricRecorder):
             self._dry_run.set(1 if dry_run else 0)
         except Exception as e:
             logger.warning("metrics.set_sc_dry_run_failed", error=e)
+
+    def set_persist_dirty(self, dirty: bool) -> None:
+        """Set the persist-dirty gauge (state write failed / retried)."""
+        try:
+            self._persist_dirty.set(1 if dirty else 0)
+        except Exception as e:
+            logger.warning("metrics.set_sc_persist_dirty_failed", error=e)
 
     def record_state_change(self, action: str) -> None:
         """Record a state change.
@@ -124,6 +138,12 @@ def set_sc_dry_run(dry_run: bool) -> None:
     rec = _lazy_recorder()
     if rec:
         rec.set_dry_run(dry_run)
+
+
+def set_sc_persist_dirty(dirty: bool) -> None:
+    rec = _lazy_recorder()
+    if rec:
+        rec.set_persist_dirty(dirty)
 
 
 def record_sc_state_change(action: str) -> None:

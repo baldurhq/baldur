@@ -29,6 +29,8 @@ import structlog
 from baldur.audit.helpers import log_system_control_audit
 from baldur.core.serializable import SerializableMixin
 from baldur.core.state_backend import StateBackend, get_state_backend
+from baldur.services.event_bus.bus.event_types import EventPriority, EventType
+from baldur.services.event_bus.emitter import EventEmitterMixin
 from baldur.utils.time import utc_now
 
 try:
@@ -38,6 +40,7 @@ try:
         record_sc_state_change,
         set_sc_dry_run,
         set_sc_enabled,
+        set_sc_persist_dirty,
     )
 except ImportError:
 
@@ -45,6 +48,9 @@ except ImportError:
         return None
 
     def set_sc_dry_run(dry_run: bool) -> None:
+        return None
+
+    def set_sc_persist_dirty(dirty: bool) -> None:
         return None
 
     def record_sc_state_change(action: str) -> None:
@@ -89,7 +95,7 @@ STATE_KEY = "system_control"
 # =============================================================================
 
 
-class SystemControlManager:
+class SystemControlManager(EventEmitterMixin):
     """
     Manages global baldur system state with pluggable backend.
 
@@ -98,6 +104,9 @@ class SystemControlManager:
     - Pluggable backends (File, Redis, Memory)
     - Automatic state recovery on restart
     - Shared state across servers (with Redis backend)
+    - Kill-switch flips published on the event bus, so subscribers
+      (governance gate cache, throttle, auto-tuning) react without
+      waiting out their own caches
 
     Usage:
         manager = SystemControlManager()
@@ -121,6 +130,9 @@ class SystemControlManager:
     _instance: SystemControlManager | None = None
     _lock = threading.Lock()
 
+    # EventEmitterMixin: event source identifier
+    _event_source = "system_control"
+
     def __new__(cls):
         if cls._instance is None:
             with cls._lock:
@@ -134,6 +146,13 @@ class SystemControlManager:
             return
 
         self._state_lock = threading.Lock()
+        # Outer lock spanning refresh -> mutate -> save -> emit in
+        # enable()/disable(), so same-process emission order equals commit
+        # order. Readers (is_enabled/get_state) never take it.
+        self._flip_lock = threading.Lock()
+        # Set when a state write to the backend failed; the local state is
+        # then newer than the shared backend until a retry succeeds.
+        self._persist_dirty = False
         self._backend: StateBackend = get_state_backend()
         self._load_state()
         self._initialized = True
@@ -162,18 +181,49 @@ class SystemControlManager:
             self._cached_state = SystemState()
 
     def _save_state(self) -> None:
-        """Save state to backend."""
+        """Save state to backend, recording a failed write as persist-dirty.
+
+        Never raises: a backend outage must not abort an in-process kill
+        switch. Because the failure is invisible to callers, it is recorded
+        in ``_persist_dirty`` so ``_refresh_state`` retries the write and
+        refuses to overwrite the newer local state meanwhile.
+
+        Caller contract: must hold ``_state_lock``.
+        """
         try:
             self._backend.set(STATE_KEY, self._cached_state.to_dict())
+            if self._persist_dirty:
+                logger.info("system_control.persist_retry_succeeded")
+            self._persist_dirty = False
+            set_sc_persist_dirty(False)
             logger.debug("system_control.state_saved")
         except Exception as e:
+            self._persist_dirty = True
+            set_sc_persist_dirty(True)
             logger.exception(
                 "system_control.save_state_failed",
                 error=e,
             )
 
     def _refresh_state(self) -> SystemState:
-        """Refresh state from backend (for multi-server sync)."""
+        """Refresh state from backend (for multi-server sync).
+
+        While a previous write is still unpersisted the local state is newer
+        than the backend, so the write is retried first and — if it still
+        fails — the backend read is skipped entirely. Reading it would
+        resurrect the pre-flip value and silently undo a kill switch.
+
+        Caller contract: must hold ``_state_lock``.
+        """
+        if self._persist_dirty:
+            self._save_state()
+            if self._persist_dirty:
+                logger.warning(
+                    "system_control.refresh_skipped_persist_dirty",
+                    enabled=self._cached_state.enabled,
+                )
+                return self._cached_state
+
         data = self._backend.get(STATE_KEY)
         if data:
             self._cached_state = SystemState.from_dict(data)
@@ -200,6 +250,32 @@ class SystemControlManager:
             reason=reason,
         )
 
+    def _emit_kill_switch_event(self, activated: bool, actor: str, reason: str) -> None:
+        """Publish the kill-switch transition this process just observed.
+
+        Called after ``_state_lock`` is released but still under
+        ``_flip_lock``: subscribers of these events are awaited, and holding
+        the state lock across them would block every ``is_enabled()`` reader
+        for the handler timeout.
+
+        Emission is fail-safe (``EventEmitterMixin`` drops and logs), so a
+        broken bus degrades subscribers to their own cache TTLs.
+        """
+        if activated:
+            event_type = EventType.KILL_SWITCH_ACTIVATED
+            priority = EventPriority.CRITICAL
+        else:
+            # Not force-propagated during an infra outage: a lost re-enable
+            # only delays resumption elsewhere, which is the safe direction.
+            event_type = EventType.KILL_SWITCH_DEACTIVATED
+            priority = EventPriority.HIGH
+
+        self._emit_event(
+            event_type,
+            data={"reason": reason, "activated_by": actor},
+            priority=priority,
+        )
+
     def is_enabled(self) -> bool:
         """
         Check if baldur system is enabled.
@@ -209,6 +285,18 @@ class SystemControlManager:
         """
         with self._state_lock:
             return self._cached_state.enabled
+
+    def is_persist_dirty(self) -> bool:
+        """Whether the most recent state write failed and is still unpersisted.
+
+        True means this process's state is newer than the shared backend:
+        other processes keep reading the pre-flip value until a retry
+        succeeds. Every ``_refresh_state()`` caller retries the write, so
+        governance cache misses, later flips and admin status polls all
+        drive the recovery.
+        """
+        with self._state_lock:
+            return self._persist_dirty
 
     def get_state(self, refresh: bool = True) -> SystemState:
         """
@@ -223,46 +311,66 @@ class SystemControlManager:
             return SystemState.from_dict(self._cached_state.to_dict())
 
     def enable(self, actor: str = "system", reason: str = "") -> SystemState:
-        """Enable baldur system."""
-        with self._state_lock:
-            # Refresh first for multi-server consistency
-            self._refresh_state()
-            old_state = self._cached_state.to_dict()
-            was_enabled = self._cached_state.enabled
+        """Enable baldur system.
 
-            self._cached_state.enabled = True
-            self._cached_state.enabled_at = utc_now().isoformat()
-            self._cached_state.enabled_by = actor
-            self._save_state()
+        Publishes ``KILL_SWITCH_DEACTIVATED`` when this process observes the
+        transition — including when the refresh itself performs it (another
+        process already flipped the backend) or when the local mirror was
+        wrongly enabled. Either sample differing from the committed value is
+        a transition this process observed, and its subscribers still need
+        the event.
+        """
+        with self._flip_lock:
+            with self._state_lock:
+                # Sampled BEFORE the refresh: a refresh-performed transition
+                # leaves the post-refresh sample already committed-valued.
+                was_enabled_local = self._cached_state.enabled
 
-            set_sc_enabled(True)
-            record_sc_state_change("enable")
-            if not was_enabled and self._cached_state.disabled_at:
-                try:
-                    from baldur.utils.time import from_iso_string
+                # Refresh first for multi-server consistency
+                self._refresh_state()
+                old_state = self._cached_state.to_dict()
+                was_enabled = self._cached_state.enabled
 
-                    disabled_at = from_iso_string(self._cached_state.disabled_at)
-                    record_sc_disabled_duration(
-                        (utc_now() - disabled_at).total_seconds()
+                self._cached_state.enabled = True
+                self._cached_state.enabled_at = utc_now().isoformat()
+                self._cached_state.enabled_by = actor
+                self._save_state()
+
+                set_sc_enabled(True)
+                record_sc_state_change("enable")
+                if not was_enabled and self._cached_state.disabled_at:
+                    try:
+                        from baldur.utils.time import from_iso_string
+
+                        disabled_at = from_iso_string(self._cached_state.disabled_at)
+                        record_sc_disabled_duration(
+                            (utc_now() - disabled_at).total_seconds()
+                        )
+                    except (ValueError, TypeError):
+                        logger.warning(
+                            "system_control.disabled_duration_parse_failed",
+                            disabled_at=self._cached_state.disabled_at,
+                        )
+
+                new_state = self._cached_state.to_dict()
+
+                if not was_enabled:
+                    logger.info(
+                        "system_control.system_enabled_reason",
+                        actor=actor,
+                        value=reason or "N/A",
                     )
-                except (ValueError, TypeError):
-                    logger.warning(
-                        "system_control.disabled_duration_parse_failed",
-                        disabled_at=self._cached_state.disabled_at,
-                    )
+                    # Audit record
+                    self._log_audit("enable", actor, old_state, new_state, reason)
 
-            new_state = self._cached_state.to_dict()
+                state = SystemState.from_dict(self._cached_state.to_dict())
 
-            if not was_enabled:
-                logger.info(
-                    "system_control.system_enabled_reason",
-                    actor=actor,
-                    value=reason or "N/A",
+            if not was_enabled_local or not was_enabled:
+                self._emit_kill_switch_event(
+                    activated=False, actor=actor, reason=reason
                 )
-                # Audit record
-                self._log_audit("enable", actor, old_state, new_state, reason)
 
-            return SystemState.from_dict(self._cached_state.to_dict())
+            return state
 
     def disable(self, actor: str = "system", reason: str = "") -> SystemState:
         """
@@ -270,35 +378,48 @@ class SystemControlManager:
 
         This immediately stops all baldur operations.
         State is persisted and shared across servers (with Redis backend).
+
+        Publishes ``KILL_SWITCH_ACTIVATED`` when this process observes the
+        transition, so subscribers (governance gate cache, throttle,
+        auto-tuning) react without waiting out their own caches. See
+        ``enable()`` for why both the pre- and post-refresh views gate it.
         """
-        with self._state_lock:
-            # Refresh first for multi-server consistency
-            self._refresh_state()
-            old_state = self._cached_state.to_dict()
-            was_enabled = self._cached_state.enabled
+        with self._flip_lock:
+            with self._state_lock:
+                was_enabled_local = self._cached_state.enabled
 
-            self._cached_state.enabled = False
-            self._cached_state.disabled_at = utc_now().isoformat()
-            self._cached_state.disabled_by = actor
-            self._cached_state.disabled_reason = reason
-            self._save_state()
+                # Refresh first for multi-server consistency
+                self._refresh_state()
+                old_state = self._cached_state.to_dict()
+                was_enabled = self._cached_state.enabled
 
-            set_sc_enabled(False)
-            record_sc_state_change("disable")
-            record_sc_disabled()
+                self._cached_state.enabled = False
+                self._cached_state.disabled_at = utc_now().isoformat()
+                self._cached_state.disabled_by = actor
+                self._cached_state.disabled_reason = reason
+                self._save_state()
 
-            new_state = self._cached_state.to_dict()
+                set_sc_enabled(False)
+                record_sc_state_change("disable")
+                record_sc_disabled()
 
-            if was_enabled:
-                logger.warning(
-                    "system_control.system_disabled_kill_switch",
-                    actor=actor,
-                    value=reason or "N/A",
-                )
-                # Audit record
-                self._log_audit("disable", actor, old_state, new_state, reason)
+                new_state = self._cached_state.to_dict()
 
-            return SystemState.from_dict(self._cached_state.to_dict())
+                if was_enabled:
+                    logger.warning(
+                        "system_control.system_disabled_kill_switch",
+                        actor=actor,
+                        value=reason or "N/A",
+                    )
+                    # Audit record
+                    self._log_audit("disable", actor, old_state, new_state, reason)
+
+                state = SystemState.from_dict(self._cached_state.to_dict())
+
+            if was_enabled_local or was_enabled:
+                self._emit_kill_switch_event(activated=True, actor=actor, reason=reason)
+
+            return state
 
     def enable_dry_run(self, actor: str = "system") -> SystemState:
         """
