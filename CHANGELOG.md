@@ -25,6 +25,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ### Fixed
 
+- `shutdown.worker_drained` now carries `aborted`, so a forced drain no longer reads as a clean one.
 - Open-circuit auto-replay with no `service_failure_type_map` no longer reports the loop disarmed.
 - A console poll no longer hangs on a broker that died after the process connected.
 - A worker that exits no longer silently loses the DLQ entries buffered in its outbox.

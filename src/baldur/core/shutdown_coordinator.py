@@ -631,12 +631,12 @@ class GracefulShutdownCoordinator:
             self._shutdown_started_at = utc_now()
             set_shutdown_phase(self._phase)
 
-        # NOTE: structlog's first emit from an OS signal-handler context
-        # may be dropped (signal interrupting logging-internal lock).
         # The metric increment below is the canonical "shutdown initiated"
-        # marker for operator dashboards — its critical section is far
-        # shorter than logging's handler chain, so it survives the signal-
-        # handler context where the log line below may not.
+        # marker for operator dashboards: it is level-independent, whereas
+        # the INFO line beside it is emitted only when the process-wide
+        # configured level admits INFO. Both run on the same path — the log
+        # line is not conditional on a frame or a thread — so a dashboard
+        # built on the metric keeps working under the default WARNING floor.
         record_shutdown_initiated()
         logger.info("shutdown.graceful_initiated")
 

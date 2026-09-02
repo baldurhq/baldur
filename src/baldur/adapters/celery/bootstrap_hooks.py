@@ -454,7 +454,15 @@ def _on_worker_shutdown(**kwargs: Any) -> None:
         drained = coordinator.wait_for_shutdown(timeout=drain_wait)
 
         if drained:
-            logger.info("shutdown.worker_drained", worker_id=pid)
+            # ``aborted`` keeps one schema behind one event name across
+            # adapters: the forced path also reaches TERMINATED, so a drain
+            # the coordinator cut short satisfies this same predicate and is
+            # told apart only by the count of requests it abandoned.
+            logger.info(
+                "shutdown.worker_drained",
+                worker_id=pid,
+                aborted=coordinator.get_stats().aborted_count,
+            )
         elif coordinator.phase != ShutdownPhase.RUNNING:
             logger.warning(
                 "shutdown.worker_drain_incomplete",

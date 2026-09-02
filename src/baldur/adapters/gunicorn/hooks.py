@@ -46,10 +46,10 @@ Hook responsibilities
     before process termination — and, for a worker that died before the
     signal sent to it landed, also in the master, which is why the body
     starts by confirming it is running in the worker it was handed.
-    Waits for the coordinator drain thread to complete, emits a reliable
-    shutdown-complete log from the worker's main process (the coordinator's
-    own terminal logs run in a signal frame or a daemon thread and can be
-    dropped/killed), resets the Django background-thread start guards, tears
+    Waits for the coordinator drain thread to complete, emits a
+    shutdown-complete log from the worker's main process — the last point in
+    the worker's life at which the outcome of the drain is still knowable —
+    resets the Django background-thread start guards, tears
     the DLQ outbox down and flushes the audit system — the last two
     unconditionally, so a non-signal exit (``max_requests`` recycle,
     ``--reload``) still spills the buffered DLQ entries, closes the WAL and
@@ -250,16 +250,25 @@ def worker_exit(server: Any, worker: Any) -> None:
         coordinator = get_shutdown_coordinator()
         drained = coordinator.wait_for_shutdown(timeout=drain_wait)
 
-        # Reliable shutdown-complete signal. worker_exit runs in the worker's
-        # main process — not the OS signal-handler frame (where
-        # shutdown.graceful_initiated may be dropped) and not the daemon drain
-        # thread (which can be killed before shutdown.in_flight_drained lands),
-        # so this is the one terminal log that survives a real worker exit.
-        # It reports the drain predicate, which the coordinator satisfies
-        # before it runs handler teardown — the flush below may still be
-        # ahead of us.
+        # Terminal shutdown-complete signal, emitted last so it reports the
+        # drain predicate the coordinator satisfies before handler teardown —
+        # the flush below may still be ahead of us. Whether an operator sees
+        # this line is a pure function of the configured level: init()
+        # configures logging as its first step, so every process that boots
+        # Baldur runs one pipeline from boot to exit, and an INFO marker is
+        # absent exactly when the configured level is above INFO. Absence is
+        # therefore never evidence that the drain did not run.
+        #
+        # ``aborted`` distinguishes the two drains that reach this branch: a
+        # clean drain reports 0, a drain the coordinator force-terminated
+        # reports the requests it abandoned (the forced path also reaches
+        # TERMINATED, so it satisfies the same predicate).
         if drained:
-            logger.info("shutdown.worker_drained", worker_id=worker_id)
+            logger.info(
+                "shutdown.worker_drained",
+                worker_id=worker_id,
+                aborted=coordinator.get_stats().aborted_count,
+            )
         elif coordinator.phase != ShutdownPhase.RUNNING:
             # Shutdown was initiated but drain did not reach TERMINATED within
             # the wait timeout (drain-timeout / forced termination).
