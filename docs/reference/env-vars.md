@@ -37,11 +37,15 @@ BALDUR_PROTECT_DEFAULT_TIMEOUT_SECONDS=30  # unset (default) = no Baldur-level w
 Dead-letter capture ships in the OSS core: a failed operation is recorded with
 the context needed to replay it, size limits plus the overflow strategy bound
 the queue, and the non-blocking outbox keeps capture off the request hot path.
+On every exit path — a signalled stop or a worker recycle — the outbox is torn
+down under one budget so buffered entries reach the store or the local fallback
+instead of dying with the process.
 
 ```bash
 BALDUR_DLQ_ENABLED=true
 BALDUR_DLQ_MAX_SIZE=100000
 BALDUR_DLQ_OUTBOX_ENABLED=true
+BALDUR_DLQ_OUTBOX_JOIN_TIMEOUT_SECONDS=5.0  # total teardown budget (s) per exiting process: flush buffered entries, join the writer, then spill the rest to the local fallback; 0.1-60. Keep it below the process watchdog (gunicorn --timeout, Kubernetes terminationGracePeriodSeconds); a non-zero remainder at the deadline is reported as dlq_outbox.shutdown_dump_incomplete
 ```
 
 ## Replay automation
