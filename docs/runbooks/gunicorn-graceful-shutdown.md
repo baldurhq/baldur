@@ -123,6 +123,12 @@ This means the drain loop **actually waits for in-flight HTTP work** instead of 
 
 If `BALDUR_REQUEST_TRACKING_MIDDLEWARE_ENABLED=False` (operator opt-out), the drain loop sees `pending_count=0` every cycle and exits as soon as registered handlers report drained — exactly the pre-471 behavior, plus the LB-eviction contract.
 
+### Reading the drain outcome
+
+When the drain reaches `TERMINATED`, `worker_exit` emits `shutdown.worker_drained` (INFO) carrying **`aborted`** — the number of tracked in-flight requests the coordinator gave up on. A drain that converged reports `aborted=0`; one that ran out `BALDUR_RECOVERY_SHUTDOWN_DEFAULT_DRAIN_TIMEOUT_SECONDS` and force-terminated reports what it abandoned.
+
+`aborted` counts **tracked** requests, so it reads `0` whenever nothing feeds the tracker — the opt-out above, a hand-written `MIDDLEWARE` list that omits `RequestTrackingMiddleware`, or a non-Django app running under these hooks — and also when the force was caused by a registered shutdown handler that never reported drained rather than by pending requests. In each of those cases a forced drain and a clean one emit an identical line. The discriminator is the coordinator's own `shutdown.drain_timeout_reached` (WARNING), which survives the default WARNING log level that hides the INFO marker entirely — so on a default-configured deployment that WARNING is the drain-outcome signal, and `BALDUR_LOG_LEVEL=INFO` is what makes the terminal markers visible at all.
+
 ---
 
 ## Retry-After Semantics
