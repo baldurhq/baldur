@@ -76,7 +76,10 @@ def collection_env(repository):
     """Wire the collection body to the spy repository and spy recorders.
 
     The circuit-breaker updater reads a different repository entirely and is
-    stubbed out so a tick's DLQ behaviour is what these tests observe.
+    stubbed out so a tick's DLQ behaviour is what these tests observe. The
+    arming probe's broker seam is stubbed for the same reason and one more: a
+    tick now refreshes the armed gauge, and an unpatched probe would dial the
+    default broker URL for real.
     """
     facade = SimpleNamespace(
         dlq=MagicMock(spec=DLQMetricRecorder),
@@ -95,6 +98,9 @@ def collection_env(repository):
         patch(
             "baldur.services.metrics.updaters.update_circuit_breaker_gauges",
             return_value={},
+        ),
+        patch(
+            "baldur.services.replay_service.arming._probe_dlq_worker", return_value="ok"
         ),
     ):
         yield facade

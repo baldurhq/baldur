@@ -15,9 +15,18 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - A call an open circuit rejects is now parked in the dead-letter queue, on every framework.
 - Those entries replay on their own when that circuit closes, if the domain has a replay handler.
 - `BALDUR_DLQ_OPEN_CIRCUIT_CAPTURE_ENABLED=false` keeps only the retry-exhaustion capture.
+- `auto_replay.lanes` and `auto_replay.last_dispatch` show which sweep can run and what it did.
+
+### Changed
+
+- **Breaking**: `auto_replay.armed` is `null` while a prerequisite could not be verified.
+- **Breaking**: `unverified_link` names the prerequisite behind an `armed: null` answer.
+- **Breaking**: `baldur_dlq_auto_replay_armed` is 0 until every prerequisite is verified.
 
 ### Fixed
 
+- Open-circuit auto-replay with no `service_failure_type_map` no longer reports the loop disarmed.
+- A console poll no longer hangs on a broker that died after the process connected.
 - A worker that exits no longer silently loses the DLQ entries buffered in its outbox.
 - A Celery worker now runs a shutdown pipeline at all: drain, DLQ flush, audit flush, exit log.
 - A `maxtasksperchild` / `max_requests` recycle now flushes its DLQ buffer before exiting.

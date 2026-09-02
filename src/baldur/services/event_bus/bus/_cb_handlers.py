@@ -313,15 +313,19 @@ def _get_replay_automation_config() -> dict | None:
         return None
 
 
-def _record_dispatch_outcome(outcome: str, *, armed: bool) -> None:
-    """Emit the on-recovery dispatch counter + non-I/O armed gauge (fail-open)."""
-    try:
-        from baldur.metrics.prometheus import get_metrics
+def _record_dispatch_outcome(
+    outcome: str, *, service_name: str, error: str | None = None
+) -> None:
+    """Hand one dispatch evaluation to the arming ledger (fail-open).
 
-        recorder = getattr(get_metrics(), "dlq", None)
-        if recorder is not None:
-            recorder.record_replay_dispatch(outcome)
-            recorder.set_auto_replay_armed(armed)
+    The dispatch path no longer writes the armed gauge: the arming probe is its
+    only writer, so the gauge is reproducible from one source. What this path
+    observed reaches the operator surfaces as ``last_dispatch`` instead.
+    """
+    try:
+        from baldur.services.replay_service.arming import record_dispatch_outcome
+
+        record_dispatch_outcome(outcome, service_name=service_name, error=error)
     except Exception:
         pass
 
@@ -344,7 +348,8 @@ def _on_circuit_breaker_closed(event: BaldurEvent):
 
     Config precedence: RuntimeConfig (present) → static
     ``ReplayAutomationSettings`` (fallback, env-honoring). Each evaluation
-    updates the dispatch counter + armed gauge.
+    updates the dispatch counter; an attempt also updates the ledger the
+    arming surface reports as ``last_dispatch``.
     """
     service_name = event.data.get("service_name", "unknown")
 
@@ -391,7 +396,7 @@ def _on_circuit_breaker_closed(event: BaldurEvent):
             "event_handler.circuit_breaker_closed_track",
             service_name=service_name,
         )
-        _record_dispatch_outcome("skipped_disabled", armed=False)
+        _record_dispatch_outcome("skipped_disabled", service_name=service_name)
         return
 
     max_items = config.get("on_recovery_max_items", settings.on_recovery_max_items)
@@ -411,7 +416,7 @@ def _on_circuit_breaker_closed(event: BaldurEvent):
             service_name=service_name,
             max_items=max_items,
         )
-        _record_dispatch_outcome("dispatched", armed=True)
+        _record_dispatch_outcome("dispatched", service_name=service_name)
     except ImportError:
         # Armed (enabled) but the Celery task is unavailable — the guarantee
         # is undeliverable. WARNING with remediation rather than a silent
@@ -427,14 +432,14 @@ def _on_circuit_breaker_closed(event: BaldurEvent):
                 "drain the DLQ manually via the console Replay action."
             ),
         )
-        _record_dispatch_outcome("celery_missing", armed=False)
+        _record_dispatch_outcome("celery_missing", service_name=service_name)
     except Exception as e:
         logger.exception(
             "event_handler.trigger_track_replay_failed",
             service_name=service_name,
             error=e,
         )
-        _record_dispatch_outcome("error", armed=False)
+        _record_dispatch_outcome("error", service_name=service_name, error=str(e))
 
 
 def _on_circuit_breaker_closed_postmortem(event: BaldurEvent):

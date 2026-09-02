@@ -5,7 +5,8 @@ Target: ``baldur.services.event_bus.bus._cb_handlers``
     - ``_on_circuit_breaker_closed`` — armed-aware skip semantics (D3): a
       CB auto-CLOSE either dispatches, skips (disabled), or WARNs
       (armed-but-undeliverable / error) — never goes silently inert. Each
-      outcome records a dispatch counter + armed gauge. The dispatch path is
+      outcome records a dispatch counter; an attempt also lands in the arming
+      ledger the operator surfaces read as ``last_dispatch``. The dispatch path is
       slot-blind (710): it never consults the PRO ``dlq_service`` slot —
       auto-replay on CB recovery is OSS.
     - ``_get_replay_automation_config`` — the 617 reader pattern (D1):
@@ -130,7 +131,7 @@ class TestOnRecoveryDispatchVisibilityBehavior:
 
         # Then: the slot was never read and the dispatch proceeded on OSS.
         task_mock.delay.assert_called_once()
-        record.assert_called_once_with("dispatched", armed=True)
+        record.assert_called_once_with("dispatched", service_name="payment-api")
         # Negatives: the old pro_absent categorization never occurs.
         assert _events(cap, "event_handler.replay_dispatch_skipped") == []
         assert all(
@@ -156,7 +157,7 @@ class TestOnRecoveryDispatchVisibilityBehavior:
         assert len(infos) == 1
         assert infos[0]["log_level"] == "info"
         assert task_mock.delay.call_count == 0
-        record.assert_called_once_with("skipped_disabled", armed=False)
+        record.assert_called_once_with("skipped_disabled", service_name="payment-api")
 
     def test_armed_dispatches_task_with_service_and_max_items(self):
         # Given: enabled + a configured max_items.
@@ -176,7 +177,7 @@ class TestOnRecoveryDispatchVisibilityBehavior:
         # Then: exactly-once dispatch with the resolved kwargs, counter=dispatched.
         task_mock.delay.assert_called_once_with(service_name="orders-api", max_items=42)
         assert len(_events(cap, "event_handler.circuit_breaker_closed_triggered")) == 1
-        record.assert_called_once_with("dispatched", armed=True)
+        record.assert_called_once_with("dispatched", service_name="orders-api")
 
     def test_armed_but_celery_missing_warns_with_remediation(self):
         # Given: armed (enabled) but the Celery task import fails.
@@ -201,7 +202,7 @@ class TestOnRecoveryDispatchVisibilityBehavior:
         assert blocked[0]["reason"] == "celery_missing"
         assert blocked[0]["queue"] == "dlq_processing"
         assert "remediation" in blocked[0]
-        record.assert_called_once_with("celery_missing", armed=False)
+        record.assert_called_once_with("celery_missing", service_name="payment-api")
 
     def test_dispatch_broker_error_takes_error_path(self):
         # Given: the task imports fine but ``.delay`` raises a non-ImportError.
@@ -222,7 +223,9 @@ class TestOnRecoveryDispatchVisibilityBehavior:
         # Then: the existing ERROR path is kept (handler does not crash), and
         # the counter records error.
         assert len(_events(cap, "event_handler.trigger_track_replay_failed")) == 1
-        record.assert_called_once_with("error", armed=False)
+        record.assert_called_once_with(
+            "error", service_name="payment-api", error="broker down"
+        )
 
     def test_armed_skip_semantics_are_never_a_silent_debug_when_undeliverable(self):
         # Regression for the claim-wiring class this doc fixes: an armed-but-

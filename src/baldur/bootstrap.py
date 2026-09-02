@@ -254,7 +254,6 @@ def init(
             _start_dlq_outbox_if_enabled()
             _configure_error_budget_if_enabled()
             _register_metrics_provider_if_configured()
-            _refresh_auto_replay_arming_gauge()
             _record_env_snapshot()
             _start_default_scheduler(task_backend=task_backend)
             _register_sql_statistics_if_available()
@@ -2827,22 +2826,6 @@ def _start_audit_pipeline_if_enabled() -> None:
 # =============================================================================
 # Step 6b — Start DLQ outbox worker (impl doc 486 D7)
 # =============================================================================
-
-
-def _refresh_auto_replay_arming_gauge() -> None:
-    """Prime the on-recovery auto-replay armed gauge at startup (non-I/O links).
-
-    The worker ping (broker I/O) is skipped so init stays non-blocking — the
-    gauge reflects the non-I/O prerequisites (enabled, celery importable, map
-    configured, handler registered). The full worker-inclusive evaluation runs
-    on each arming-probe invocation. Fail-open.
-    """
-    try:
-        from baldur.services.replay_service.arming import refresh_armed_gauge
-
-        refresh_armed_gauge(check_worker=False)
-    except Exception as e:
-        logger.debug("baldur.auto_replay_arming_gauge_skipped", error=str(e))
 
 
 def _start_dlq_outbox_if_enabled() -> None:

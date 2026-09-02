@@ -186,27 +186,19 @@ def dlq_replay(ctx: RequestContext) -> ResponseContext:
 def _auto_replay_arming_block() -> dict:
     """Compute the on-recovery arming block for the stats payload (fail-open).
 
-    Uses the arming probe as the single source of truth. Any error resolves to
-    a ``probe_failed`` block (``armed: null``) rather than a 500 — the console
-    polls this handler, so it must never fault on a probe hiccup.
+    Uses the arming probe as the single source of truth, serialised by its own
+    ``to_dict`` so this handler holds no second copy of the shape. Any error
+    resolves to a ``probe_failed`` block (``armed: null``) rather than a 500 —
+    the console polls this handler, so it must never fault on a probe hiccup.
     """
     try:
         from baldur.services.replay_service.arming import get_on_recovery_arming_status
 
-        status = get_on_recovery_arming_status()
-        return {
-            "armed": status.armed,
-            "missing_link": status.missing_link,
-            "missing_links": status.missing_links,
-            "links": status.links,
-        }
+        return get_on_recovery_arming_status().to_dict()
     except Exception:
-        return {
-            "armed": None,
-            "missing_link": "probe_failed",
-            "missing_links": ["probe_failed"],
-            "links": {},
-        }
+        from baldur.services.replay_service.arming import ArmingStatus
+
+        return ArmingStatus.probe_failed().to_dict()
 
 
 def dlq_cleanup_stats(ctx: RequestContext) -> ResponseContext:

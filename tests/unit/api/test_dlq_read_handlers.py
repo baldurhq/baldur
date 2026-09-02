@@ -195,6 +195,12 @@ class TestDlqReadHandlersSlotEmpty:
         monkeypatch.setattr(
             "baldur.services.dlq_read.get_dlq_read_service", lambda: service
         )
+        # cleanup_stats carries the auto_replay block, whose worker link is a
+        # broker round-trip. Stubbed at the probe seam so this resolution test
+        # never dials the default broker URL.
+        monkeypatch.setattr(
+            "baldur.services.replay_service.arming._probe_dlq_worker", lambda: "ok"
+        )
         handler, build_ctx = _OSS_HANDLER_CASES[name]
 
         resp = handler(build_ctx())  # must not raise RuntimeError

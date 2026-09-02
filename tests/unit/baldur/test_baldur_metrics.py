@@ -283,6 +283,10 @@ class TestTrackRecoveryTimeContextManager:
 class TestCollectAllMetrics:
     """Tests for collect_all_metrics function."""
 
+    # The tick's last step refreshes the on-recovery armed gauge, which is a
+    # broker round-trip on an unpatched process. Patched here for the same
+    # reason the four updaters are: this test is about the aggregation shape.
+    @patch("baldur.services.replay_service.arming.refresh_armed_gauge", autospec=True)
     @patch("baldur.services.metrics.updaters.update_retry_success_rates")
     @patch("baldur.services.metrics.updaters.update_circuit_breaker_gauges")
     @patch("baldur.services.metrics.updaters.update_dlq_status_gauges")
@@ -293,6 +297,7 @@ class TestCollectAllMetrics:
         mock_status,
         mock_cb,
         mock_success,
+        mock_refresh_armed,
     ):
         """
         Purpose:
