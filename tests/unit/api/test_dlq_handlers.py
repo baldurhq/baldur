@@ -209,7 +209,16 @@ class TestDlqCleanupStatsBehavior:
     def test_returns_full_stats_shape(self):
         service = MagicMock()
         service.get_cleanup_stats.return_value = _mock_cleanup_stats()
-        with patch("baldur_pro.services.dlq.get_dlq_service", return_value=service):
+        # The payload's auto_replay block asks the broker which queues the live
+        # workers consume. Stubbed at the probe seam: nothing here is about that
+        # link, and an unpatched probe dials the default broker URL for real.
+        with (
+            patch("baldur_pro.services.dlq.get_dlq_service", return_value=service),
+            patch(
+                "baldur.services.replay_service.arming._probe_dlq_worker",
+                return_value="ok",
+            ),
+        ):
             resp = dlq_cleanup_stats(_make_ctx())
         assert resp.body["total"] == 100
         # can_archive/can_purge are CleanupStats-derived int counts.

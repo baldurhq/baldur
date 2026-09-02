@@ -432,6 +432,11 @@ def collect_all_metrics() -> dict:
     once rather than three times, and the pending updater's cross-key
     consistency check compares two numbers from the same read.
 
+    The on-recovery arming gauge is refreshed last, after the heartbeat
+    decision: without it a deployment that never closes a circuit would publish
+    its startup verdict forever, and a broker that dies later would never move
+    the gauge.
+
     Emits the ``metric_collection`` heartbeat only when the DLQ **status**
     family was actually written. That family carries the pending total the
     bundled backlog alerts page on, so the dead-man's switch advances exactly
@@ -469,6 +474,14 @@ def collect_all_metrics() -> dict:
         from baldur.services.metrics.recorders import emit_heartbeat
 
         emit_heartbeat(component=METRIC_COLLECTION_HEARTBEAT_COMPONENT)
+
+    # Separate failure domain again, and last on purpose: the arming probe pays
+    # a bounded broker round-trip, so it runs after the heartbeat decision and
+    # can never withhold a heartbeat this tick would otherwise have emitted.
+    # It contains its own exceptions, so it cannot end the tick chain either.
+    from baldur.services.replay_service.arming import refresh_armed_gauge
+
+    refresh_armed_gauge()
 
     return {
         "dlq_pending_by_domain": pending or {},

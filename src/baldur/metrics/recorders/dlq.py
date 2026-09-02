@@ -104,12 +104,13 @@ class DLQMetricRecorder(BaseMetricRecorder):
             ["domain"],
         )
         # On-recovery auto-replay arming state (0/1, empty label). Answers "is the
-        # event-driven DLQ auto-replay loop armed right now?" — set at startup
-        # (non-I/O links), each arming-probe invocation, and each on-recovery
-        # dispatch evaluation. Mirrors the system-control enabled gauge shape.
+        # event-driven DLQ auto-replay loop armed right now?" — written by the
+        # arming probe alone, on each evaluation. Mirrors the system-control
+        # enabled gauge shape.
         self._auto_replay_armed = get_or_create_gauge(
             f"{self.PREFIX}_dlq_auto_replay_armed",
-            "1=DLQ auto-replay armed on recovery, 0=disarmed (a prerequisite is missing)",
+            "1=every on-recovery replay prerequisite verified in this process, "
+            "0=a prerequisite is missing or could not be verified",
             [],
         )
         # On-recovery dispatch outcome counter. Passive consumption assurance for
@@ -259,7 +260,12 @@ class DLQMetricRecorder(BaseMetricRecorder):
             logger.warning("metrics.record_dlq_force_redrive_exhausted_failed", error=e)
 
     def set_auto_replay_armed(self, armed: bool) -> None:
-        """Set the on-recovery auto-replay armed gauge (1=armed, 0=disarmed)."""
+        """Set the on-recovery auto-replay armed gauge.
+
+        1 only when every prerequisite was verified; 0 when one is missing and
+        equally when one could not be verified — the caller folds that
+        distinction, which the REST arming block carries in full.
+        """
         try:
             self._auto_replay_armed.set(1 if armed else 0)
         except Exception as e:

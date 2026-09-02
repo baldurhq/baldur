@@ -232,19 +232,32 @@ If you see this within the first few seconds of the storm, middleware-CB is func
 
 Capture parks the work; replay is what finishes it. An entry nothing can replay is a record of a loss, not a recovery.
 
-Automatic replay is a **chain of five links**, and the first broken one stops it. They are evaluated in this order, and the one that stopped it is reported as `missing_link`:
+Two sweeps can drain the queue on recovery, and they do not need the same things. The **open-circuit** sweep replays what an OPEN circuit rejected; the **mapped** sweep replays the failure types you listed for that service. Four links are shared, and each sweep adds one of its own:
 
-| Link | What is missing | How to satisfy it |
-|---|---|---|
-| `disabled` | on-recovery replay is switched off | `BALDUR_REPLAY_AUTOMATION_ON_RECOVERY_ENABLED=true` |
-| `celery_missing` | the on-recovery dispatch task cannot be imported — the Celery extra is not installed | `pip install 'baldur-framework[celery]'` |
-| `worker_missing` | no worker consumes the `dlq_processing` queue | `celery -A <app> worker -Q dlq_processing` |
-| `map_unconfigured` | no `service_failure_type_map` entry names which failure types to sweep when that service's circuit closes | add one — **except for `CIRCUIT_BREAKER_OPEN`; see below** |
-| `handler_missing` | no replay handler is registered for the entry's domain | `register_replay_handler(YourHandler())` |
+| Link | Lane | What is missing | How to satisfy it |
+|---|---|---|---|
+| `disabled` | both | on-recovery replay is switched off | `BALDUR_REPLAY_AUTOMATION_ON_RECOVERY_ENABLED=true` |
+| `celery_missing` | both | the on-recovery dispatch task cannot be imported — the Celery extra is not installed | `pip install 'baldur-framework[celery]'` |
+| `worker_missing` | both | no worker consumes the `dlq_processing` queue | `celery -A <app> worker -Q dlq_processing` |
+| `handler_missing` | both | no replay handler is registered for the entry's domain | `register_replay_handler(YourHandler())` |
+| `map_unconfigured` | mapped | no `service_failure_type_map` entry names which failure types to sweep when that service's circuit closes | add one — **except for `CIRCUIT_BREAKER_OPEN`; see below** |
+| `open_circuit_capture_disabled` | open-circuit | open-circuit capture is switched off, so nothing produces the entries that sweep drains | `BALDUR_DLQ_OPEN_CIRCUIT_CAPTURE_ENABLED=true` |
+
+The open-circuit lane needs every shared link plus capture enabled; the mapped lane needs every shared link plus a map entry. `armed` is true when **either** lane has all of its links — `lanes` in the same block shows which one, and `missing_link` names the first broken link only when neither lane can run.
 
 `disabled` and `celery_missing` are hard prerequisites: while either is missing, the links below them are not evaluated at all.
 
 The handler link deserves its reason. Without a registered handler the sweep skips that domain deliberately rather than trying — an unregistered domain would spend each entry's replay budget on a handler that cannot run, and escalate the entries to manual review.
+
+`handler_missing` measures **the process answering the request**, while the sweep runs in the Celery worker. A handler registered only in the worker reads `handler_missing` on the web process while the loop drains fine; one registered only in the web process reads armed while the worker drains nothing. Register replay handlers in every process — import the handler module from both the app and the worker.
+
+### When the answer is "unverified"
+
+`armed` has a third value. `null` means a prerequisite could not be **verified** — not that it is missing. The usual cause is a broker the worker probe could not reach, which is exactly the case where a "yes, it is armed" answer would be a lie: the dispatch would fail on every circuit close. `unverified_link` names the link, and the console badge reads *auto-replay unverified*.
+
+The Prometheus gauge folds the same way: `baldur_dlq_auto_replay_armed` is `1` only when a lane verified every prerequisite, and `0` both when one is missing and when one could not be verified. The bundled `DLQAutoReplayDisarmed` rule pages on `== 0` with `for: 10m`, so a broker blip shorter than the probe's cache window does not wake anyone.
+
+The block also carries `last_dispatch`: the outcome, timestamp and pid of the last dispatch this process actually attempted (`dispatched` or `error`), or `null` if it has attempted none since it started. It answers "did the loop ever fire here, and what happened?" without predicting whether the next one will.
 
 ### The two links that surprise non-Celery deployments
 
@@ -260,7 +273,7 @@ If you are running one of these surfaces and want the automatic half, install th
 
 ### Open-circuit entries need no map entry
 
-Entries parked because the circuit was OPEN (`CIRCUIT_BREAKER_OPEN`) are swept automatically when that same circuit closes — the circuit that recovered is by construction the one that rejected them, which is the whole eligibility question. Of the five links above they need every one except `map_unconfigured`.
+Entries parked because the circuit was OPEN (`CIRCUIT_BREAKER_OPEN`) are swept automatically when that same circuit closes — the circuit that recovered is by construction the one that rejected them, which is the whole eligibility question. That is the open-circuit lane in the table above: every shared link plus `open_circuit_capture_disabled`, and no map entry at all. On the shipped defaults (capture on, no map configured) the surface reports `armed: true` with `lanes.mapped.armed` false — the open-circuit sweep runs, the mapped one has nothing to select by.
 
 **Do not add `CIRCUIT_BREAKER_OPEN` to `service_failure_type_map`.** Mapped types are selected by type alone, across every domain, so a mapping would pull in another service's entries whose dependency is still down, drive them straight back into it, and spend their replay budget.
 

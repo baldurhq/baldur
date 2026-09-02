@@ -1248,10 +1248,15 @@
     // leaving it half-configured") produce the warning it promises to remove.
     // An off switch someone chose is a configuration statement, not a defect;
     // every other missing link means the feature is on and cannot fire.
+    //
+    // `armed === null` is the third state: a prerequisite could not be
+    // verified. An unverified guarantee is not a delivered one, so it warns
+    // like a disarmed loop rather than reading as healthy.
     var ar = (data && data.auto_replay) || null;
     if (ar && ar.armed === false && ar.missing_link !== "disabled") {
       return "warn";
     }
+    if (ar && ar.armed === null) { return "warn"; }
     if ((bs.pending || 0) + (bs.requires_review || 0) + (bs.reviewing || 0)
         + (bs.replaying || 0) > 0) { return "warn"; }
     return "ok";
@@ -1471,8 +1476,20 @@
     var wrap = el("div", "dlq-armed");
     if (ar.armed === true) {
       wrap.appendChild(el("span", "tag ok", "auto-replay armed"));
+      // One armed lane is enough for the headline, but "armed" alone would
+      // hide that the mapped sweep cannot run — the state a deployment with no
+      // failure-type map is in by default.
+      var mapped = (ar.lanes || {}).mapped;
+      if (mapped && mapped.armed !== true) {
+        wrap.appendChild(el("span", "dlq-armed-more",
+          " · open-circuit captures only"));
+      }
     } else if (ar.armed === null) {
-      wrap.appendChild(el("span", "tag", "auto-replay: probe failed"));
+      wrap.appendChild(el("span", "tag warn",
+        ar.unverified_link === "probe_failed"
+          ? "auto-replay: probe failed"
+          : "auto-replay unverified: "
+            + (ar.unverified_link ? replayLinkText(ar.unverified_link) : "unknown")));
     } else if (ar.missing_link === "disabled") {
       // Neutral tag, no remaining-links list: nothing is missing, the feature
       // is off because someone turned it off.
@@ -1488,6 +1505,13 @@
       }
     }
     bodyEl.appendChild(wrap);
+    // The last attempt this process observed. Absent on a process that has
+    // never dispatched, which is not the same as a failed one.
+    var ld = ar.last_dispatch;
+    if (ld) {
+      bodyEl.appendChild(el("div", "dlq-armed-more",
+        "last dispatch: " + ld.outcome + " · " + ld.at + " (pid " + ld.pid + ")"));
+    }
   }
 
   function renderDlqStats(bodyEl, data) {
@@ -2813,7 +2837,11 @@
       if (parked) { parts.push(parked + " parked awaiting replay"); }
       if (lost) { parts.push(lost + " past recovery"); }
       var ar = d.auto_replay;
-      if (ar && ar.armed === false) {
+      if (ar && ar.armed === null) {
+        parts.push("auto-replay unverified"
+          + (isReported(ar.unverified_link)
+            ? " — " + replayLinkText(ar.unverified_link) : ""));
+      } else if (ar && ar.armed === false) {
         // "disarmed — replay is switched off" reads as a fault report about a
         // switch the operator chose. It is one clause, in their own terms.
         parts.push(ar.missing_link === "disabled"
@@ -3007,6 +3035,7 @@
     celery_missing: "Celery is not installed",
     worker_missing: "no worker is consuming the replay queue",
     map_unconfigured: "no domain-to-task map is configured",
+    open_circuit_capture_disabled: "open-circuit capture is switched off",
     handler_missing: "no replay handler is registered",
     probe_failed: "the worker probe failed"
   };

@@ -82,6 +82,24 @@ groups:
           summary: "DLQ spike detected"
           description: "DLQ pending items increased {{ $value | printf \"%.1f\" }}x in 5 minutes."
 
+      # The on-recovery replay loop is a guarantee, and this gauge is 1 only
+      # while every prerequisite behind it has been positively verified in the
+      # answering process — 0 covers both "a prerequisite is missing" and "a
+      # prerequisite could not be verified" (an unreachable broker, most often).
+      # `for: 10m` is the hysteresis: the worker-presence verdict is cached for
+      # a short TTL, so a broker blip shorter than that can drop the gauge for
+      # one collection interval without anything being wrong for long.
+      # GET /dlq/cleanup/stats -> auto_replay names the link.
+      - alert: DLQAutoReplayDisarmed
+        expr: baldur_dlq_auto_replay_armed == 0
+        for: 10m
+        labels:
+          severity: warning
+          category: dlq
+        annotations:
+          summary: "DLQ auto-replay is not armed"
+          description: "Automatic DLQ replay on circuit recovery is not armed on {{ $labels.instance }}: a prerequisite is missing or could not be verified. GET /dlq/cleanup/stats -> auto_replay names the link (missing_link or unverified_link)."
+
       # Dead man's switch for the per-process gauge collector. Every serving
       # process emits this heartbeat when it successfully refreshes the DLQ
       # status family — the family the three rules above page on — so a stalled

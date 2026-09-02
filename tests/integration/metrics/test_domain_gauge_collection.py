@@ -67,6 +67,23 @@ def _series_value(text: str, metric: str, **labels: str) -> float | None:
 
 
 @pytest.fixture(autouse=True)
+def _stub_arming_worker_probe():
+    """Keep the real ticks below off the broker.
+
+    A tick's last step refreshes the on-recovery armed gauge, whose worker link
+    is a broker round-trip. Nothing here is about that link, and an unpatched
+    probe would dial the default broker URL from the test process.
+    """
+    from unittest.mock import patch
+
+    with patch(
+        "baldur.services.replay_service.arming._probe_dlq_worker",
+        return_value="ok",
+    ):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def _clean_domain_registry():
     """The per-process domain registry is global; restore it around each test."""
     reset_registered_domains()
