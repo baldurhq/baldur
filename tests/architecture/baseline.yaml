@@ -243,6 +243,7 @@ optional_imports:
   - {file: "src/baldur/meta/recovery_adapter.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
   - {file: "src/baldur/metrics/endpoint_normalizer.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
   - {file: "src/baldur/metrics/recorders/daemon_worker.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
+  - {file: "src/baldur/services/replay_service/arming.py", reason: "781: broker connect-timeout read - celery import gated by the celery_missing link, which returns before any broker work when the extra is absent", ticket: "781", target_remove_by: 2026-12-01}
   - {file: "src/baldur/settings/system_control.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
   - {file: "src/baldur/tasks/canary_watchdog.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
   - {file: "src/baldur/tasks/chaos_scheduler.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
