@@ -651,6 +651,70 @@ class TestWorkerExitPipelineBehavior:
         assert len(matching) == 1
         assert matching[0]["aborted"] == expected_aborted
 
+    def test_a_handler_forced_drain_still_reports_zero_abandoned(self):
+        """The abandoned count is the *request tracker's*, so it answers "was
+        this drain cut short" only when the force had requests to abandon. A
+        drain the coordinator cut short because a registered handler never
+        reported drained — with nothing in flight — reports ``aborted=0``, the
+        same value a clean drain reports.
+
+        Pinned, not fixed: which marker a forced drain should carry is the
+        category question this change deliberately leaves open. What the pair
+        of assertions below fixes is the *reading*: the discriminator in this
+        case is the coordinator's own ``shutdown.drain_timeout_reached``, and
+        it is a WARNING, so it survives the default level floor that hides the
+        terminal INFO marker entirely."""
+        from baldur.adapters.gunicorn.hooks import worker_exit
+        from baldur.core.shutdown_coordinator import (
+            GracefulShutdownCoordinator,
+            RequestTracker,
+            ShutdownHandler,
+            ShutdownPhase,
+            configure_shutdown_coordinator,
+        )
+
+        class _NeverDrains(ShutdownHandler):
+            """A handler whose drain never completes, which is what pushes the
+            coordinator onto its forced path with an empty tracker."""
+
+            def on_shutdown_start(self) -> None: ...
+
+            def is_drain_complete(self) -> bool:
+                return False
+
+            def on_drain_complete(self) -> None: ...
+
+            def on_force_shutdown(self, pending_requests) -> None: ...
+
+        # Given — a drain forced by the handler, not by pending requests
+        coordinator = GracefulShutdownCoordinator(
+            request_tracker=RequestTracker(),
+            drain_timeout=0.2,
+            check_interval=0.01,
+        )
+        coordinator.register_handler(_NeverDrains())
+
+        # When — the drain and the hook share one capture, so the WARNING the
+        # drain thread emits is observable next to the marker the hook emits
+        with capture_logs() as cap_logs:
+            coordinator.initiate_shutdown()
+            assert coordinator.wait_for_shutdown(timeout=5.0)
+            configure_shutdown_coordinator(coordinator)
+            worker_exit(_arbiter(), _exiting_worker())
+
+        # Then
+        assert coordinator.phase is ShutdownPhase.TERMINATED
+
+        drained = [e for e in cap_logs if e.get("event") == "shutdown.worker_drained"]
+        assert len(drained) == 1
+        assert drained[0]["aborted"] == 0
+
+        forced = [
+            e for e in cap_logs if e.get("event") == "shutdown.drain_timeout_reached"
+        ]
+        assert len(forced) == 1
+        assert forced[0]["log_level"] == "warning"
+
     def test_a_failing_stats_read_replaces_the_marker_with_its_warning(self):
         """The abandoned-count read sits inside the drain try-block, so a
         coordinator whose stats read raises loses the terminal INFO marker

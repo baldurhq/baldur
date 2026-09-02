@@ -455,9 +455,12 @@ def _on_worker_shutdown(**kwargs: Any) -> None:
 
         if drained:
             # ``aborted`` keeps one schema behind one event name across
-            # adapters: the forced path also reaches TERMINATED, so a drain
-            # the coordinator cut short satisfies this same predicate and is
-            # told apart only by the count of requests it abandoned.
+            # adapters. The value is the request tracker's abandoned count,
+            # and nothing feeds that tracker in a celery worker — only the
+            # Django request-tracking middleware does — so on this adapter the
+            # field is schema parity rather than information: 0 on every
+            # drain, clean or force-terminated. What tells those two apart
+            # here is the coordinator's own drain-timeout WARNING.
             logger.info(
                 "shutdown.worker_drained",
                 worker_id=pid,
