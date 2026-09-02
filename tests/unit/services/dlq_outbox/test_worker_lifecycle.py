@@ -20,10 +20,12 @@ import time
 from unittest.mock import patch
 
 import pytest
+from structlog.testing import capture_logs
 
 from baldur.metrics.recorders.daemon_worker import (
     get_registered_daemon_workers,
 )
+from baldur.models.dlq import DLQEntryResult
 
 
 @pytest.fixture(autouse=True)
@@ -623,3 +625,666 @@ class TestDLQOutboxWorkerEntryConservationBehavior:
         worker._entries_emergency_dumped = 2
         assert outbox.get_stats().in_flight == 3
         assert outbox.get_stats().entries_emergency_dumped == 2
+
+
+# =============================================================================
+# Shutdown rescue — the bounded dump, its written count, and the batch tail
+#
+# ``stop()`` is driven directly with ``_is_running`` set and no live thread.
+# The rescue is a pure function of the ring contents, the published batch and
+# the callback's answer, so a real drainer would only add timing noise to
+# assertions that are about accounting.
+# =============================================================================
+
+
+def _armed_worker(build_outbox, sync_writer, **kwargs):
+    """A worker ``stop()`` will act on, with no thread and no timing.
+
+    ``stop()`` returns 0 immediately unless it believes it is running, and
+    joins ``self._thread`` only when one exists — so the flag alone is enough
+    to reach the rescue, deterministically.
+    """
+    outbox, buffer, worker = build_outbox(sync_writer, **kwargs)
+    worker._is_running = True
+    return outbox, buffer, worker
+
+
+def _entry(failure_type: str) -> tuple[float, dict]:
+    """One buffered capture, in the ``(enqueue_time, kwargs)`` shape."""
+    return (time.monotonic(), {"domain": "payment", "failure_type": failure_type})
+
+
+class TestDLQOutboxWorkerBoundedDumpBehavior:
+    """``stop(dump_deadline=…)`` — the bound reaches the per-entry loop."""
+
+    def test_stop_forwards_the_dump_deadline_to_the_emergency_callback(
+        self, build_outbox, make_sync_writer, collected_writes
+    ):
+        """The deadline is enforced inside the callback's loop, so it has to
+        arrive there verbatim — a dump bounded anywhere else would overshoot by
+        a whole batch instead of a single fsync."""
+        # Given
+        seen: list[float | None] = []
+
+        def dump(batch, deadline=None):
+            seen.append(deadline)
+            return len(batch)
+
+        _, buffer, worker = _armed_worker(
+            build_outbox, make_sync_writer(collected_writes), on_emergency_dump=dump
+        )
+        buffer.put(_entry("PG_TIMEOUT"))
+        deadline = time.monotonic() + 30.0
+
+        # When
+        worker.stop(timeout=0.01, dump_deadline=deadline)
+
+        # Then
+        assert seen == [deadline]
+
+    def test_stop_with_no_dump_deadline_forwards_none_for_an_unbounded_dump(
+        self, build_outbox, make_sync_writer, collected_writes
+    ):
+        """The test-isolation reset path wants an unbounded dump; ``None`` is
+        how it says so, and must not be turned into a computed instant."""
+        # Given
+        seen: list[float | None] = []
+
+        def dump(batch, deadline=None):
+            seen.append(deadline)
+            return len(batch)
+
+        _, buffer, worker = _armed_worker(
+            build_outbox, make_sync_writer(collected_writes), on_emergency_dump=dump
+        )
+        buffer.put(_entry("PG_TIMEOUT"))
+
+        # When
+        worker.stop(timeout=0.01)
+
+        # Then
+        assert seen == [None]
+
+    def test_dump_deadline_is_not_forwarded_when_nothing_remains(
+        self, build_outbox, make_sync_writer, collected_writes
+    ):
+        """Boundary: an empty rescue calls no callback at all, so a clean exit
+        pays nothing for the dump path."""
+        # Given
+        calls: list[tuple] = []
+
+        def dump(batch, deadline=None):
+            calls.append((batch, deadline))
+            return len(batch)
+
+        _, _, worker = _armed_worker(
+            build_outbox, make_sync_writer(collected_writes), on_emergency_dump=dump
+        )
+
+        # When
+        dumped = worker.stop(timeout=0.01, dump_deadline=time.monotonic() + 30.0)
+
+        # Then
+        assert calls == []
+        assert dumped == 0
+        assert worker.entries_shutdown_residual == 0
+
+    def test_a_raising_dump_callback_leaves_every_entry_residual(
+        self, build_outbox, make_sync_writer, collected_writes
+    ):
+        """A callback that blows up wrote nothing — the entries are gone, and
+        the teardown has to say so rather than report a rescue."""
+
+        # Given
+        def dump(batch, deadline=None):
+            raise RuntimeError("fallback tier is wedged")
+
+        _, buffer, worker = _armed_worker(
+            build_outbox, make_sync_writer(collected_writes), on_emergency_dump=dump
+        )
+        for i in range(3):
+            buffer.put(_entry(f"PG_TIMEOUT_{i}"))
+
+        # When
+        dumped = worker.stop(timeout=0.01)
+
+        # Then
+        assert dumped == 0
+        assert worker.entries_emergency_dumped == 0
+        assert worker.entries_shutdown_residual == 3
+
+    def test_an_absent_dump_callback_leaves_every_entry_residual(
+        self, build_outbox, make_sync_writer, collected_writes
+    ):
+        """No wiring is not zero loss: the entries still existed."""
+        # Given
+        _, buffer, worker = _armed_worker(
+            build_outbox, make_sync_writer(collected_writes), on_emergency_dump=None
+        )
+        for i in range(2):
+            buffer.put(_entry(f"PG_TIMEOUT_{i}"))
+
+        # When
+        dumped = worker.stop(timeout=0.01)
+
+        # Then
+        assert dumped == 0
+        assert worker.entries_shutdown_residual == 2
+
+
+class TestDLQOutboxWorkerDumpWrittenCountBehavior:
+    """The dumped bucket follows what the dump WROTE, not what it was handed."""
+
+    def test_dump_written_count_follows_a_callback_that_wrote_fewer(
+        self, build_outbox, make_sync_writer, collected_writes
+    ):
+        """The deadline case, seen from the worker: a partially-completed dump
+        must not read as a completed one. Counting the handed batch would
+        report a wedged fallback tier as a rescue."""
+        # Given — five handed, the callback reports two written
+        _, buffer, worker = _armed_worker(
+            build_outbox,
+            make_sync_writer(collected_writes),
+            on_emergency_dump=lambda batch, deadline=None: 2,
+        )
+        for i in range(5):
+            buffer.put(_entry(f"PG_TIMEOUT_{i}"))
+
+        # When
+        dumped = worker.stop(timeout=0.01)
+
+        # Then
+        assert dumped == 2
+        assert worker.entries_emergency_dumped == 2
+        assert worker.entries_shutdown_residual == 3
+
+    def test_dump_written_count_is_clamped_to_what_was_handed_over(
+        self, build_outbox, make_sync_writer, collected_writes
+    ):
+        """An over-reporting callback must not manufacture a negative residual
+        — the bucket that would go negative is the one an operator reads."""
+        # Given
+        _, buffer, worker = _armed_worker(
+            build_outbox,
+            make_sync_writer(collected_writes),
+            on_emergency_dump=lambda batch, deadline=None: 99,
+        )
+        buffer.put(_entry("PG_TIMEOUT"))
+
+        # When
+        dumped = worker.stop(timeout=0.01)
+
+        # Then
+        assert dumped == 1
+        assert worker.entries_shutdown_residual == 0
+
+    @pytest.mark.parametrize(
+        "reported",
+        [None, "2", True, -1],
+        ids=["none", "string", "bool", "negative"],
+    )
+    def test_dump_written_count_ignores_an_uncountable_callback_return(
+        self, build_outbox, make_sync_writer, collected_writes, reported
+    ):
+        """``on_emergency_dump`` is injectable, so a callable that answers with
+        something other than a count is reachable. ``True`` is the trap: it is
+        an ``int`` subclass, and read as one it would rescue an entry on paper.
+        """
+        # Given
+        _, buffer, worker = _armed_worker(
+            build_outbox,
+            make_sync_writer(collected_writes),
+            on_emergency_dump=lambda batch, deadline=None: reported,
+        )
+        buffer.put(_entry("PG_TIMEOUT"))
+
+        # When
+        dumped = worker.stop(timeout=0.01)
+
+        # Then — nothing claimed, everything reported gone
+        assert dumped == 0
+        assert worker.entries_emergency_dumped == 0
+        assert worker.entries_shutdown_residual == 1
+
+    def test_dump_written_count_shortfall_is_reported_at_critical(
+        self, build_outbox, make_sync_writer, collected_writes
+    ):
+        """The one line an operator needs: these entries existed, reached no
+        destination, and are gone with this process."""
+        # Given
+        _, buffer, worker = _armed_worker(
+            build_outbox,
+            make_sync_writer(collected_writes),
+            on_emergency_dump=lambda batch, deadline=None: 1,
+        )
+        for i in range(4):
+            buffer.put(_entry(f"PG_TIMEOUT_{i}"))
+
+        # When
+        with capture_logs() as cap_logs:
+            worker.stop(timeout=0.01)
+
+        # Then
+        incomplete = [
+            e
+            for e in cap_logs
+            if e.get("event") == "dlq_outbox.shutdown_dump_incomplete"
+        ]
+        assert len(incomplete) == 1
+        assert incomplete[0]["log_level"] == "critical"
+        assert incomplete[0]["entries_dumped"] == 1
+        assert incomplete[0]["entries_residual"] == 3
+        assert incomplete[0]["entries_handed"] == 4
+
+    def test_a_complete_dump_emits_no_incomplete_line(
+        self, build_outbox, make_sync_writer, collected_writes
+    ):
+        """Negative control for the CRITICAL above — a rescue that worked must
+        not page anyone."""
+        # Given
+        _, buffer, worker = _armed_worker(
+            build_outbox,
+            make_sync_writer(collected_writes),
+            on_emergency_dump=lambda batch, deadline=None: len(batch),
+        )
+        for i in range(3):
+            buffer.put(_entry(f"PG_TIMEOUT_{i}"))
+
+        # When
+        with capture_logs() as cap_logs:
+            dumped = worker.stop(timeout=0.01)
+
+        # Then
+        assert dumped == 3
+        assert worker.entries_shutdown_residual == 0
+        assert not [
+            e
+            for e in cap_logs
+            if e.get("event") == "dlq_outbox.shutdown_dump_incomplete"
+        ]
+
+
+class TestDLQOutboxWorkerPendingBatchRescueBehavior:
+    """The half of the rescue that is not on the ring any more.
+
+    Entries the writer has already popped live only in a local list inside
+    ``_flush_batch``. A join that times out mid-batch takes them to the grave,
+    counted by nothing but ``in_flight`` — so ``stop()`` reads the published
+    batch as well as the ring. Assertions are on the dumped *set*, never on
+    which thread got where first.
+    """
+
+    def test_pending_batch_tail_is_handed_to_the_dump(
+        self, build_outbox, make_sync_writer, collected_writes
+    ):
+        # Given — two of a four-entry batch resolved before the teardown landed
+        handed: list[list[dict]] = []
+        _, _, worker = _armed_worker(
+            build_outbox,
+            make_sync_writer(collected_writes),
+            on_emergency_dump=lambda batch, deadline=None: (
+                handed.append(batch) or len(batch)
+            ),
+        )
+        worker._pending_batch = [_entry(f"E{i}") for i in range(4)]
+        worker._pending_index = 2
+
+        # When
+        worker.stop(timeout=0.01)
+
+        # Then — only the unresolved tail
+        assert [e["failure_type"] for e in handed[0]] == ["E2", "E3"]
+
+    def test_pending_batch_fully_resolved_hands_nothing_over(
+        self, build_outbox, make_sync_writer, collected_writes
+    ):
+        """Negative: a batch the writer finished must not be dumped again. The
+        rescue is at-least-once by design, but only for the entry in flight."""
+        # Given
+        calls: list[list[dict]] = []
+        _, _, worker = _armed_worker(
+            build_outbox,
+            make_sync_writer(collected_writes),
+            on_emergency_dump=lambda batch, deadline=None: (
+                calls.append(batch) or len(batch)
+            ),
+        )
+        worker._pending_batch = [_entry(f"E{i}") for i in range(3)]
+        worker._pending_index = 3
+
+        # When
+        dumped = worker.stop(timeout=0.01)
+
+        # Then
+        assert calls == []
+        assert dumped == 0
+
+    def test_pending_batch_precedes_the_ring_remainder_in_the_dump(
+        self, build_outbox, make_sync_writer, collected_writes
+    ):
+        """FIFO across the two halves: the popped entries were enqueued before
+        anything still on the ring."""
+        # Given
+        handed: list[list[dict]] = []
+        _, buffer, worker = _armed_worker(
+            build_outbox,
+            make_sync_writer(collected_writes),
+            on_emergency_dump=lambda batch, deadline=None: (
+                handed.append(batch) or len(batch)
+            ),
+        )
+        worker._pending_batch = [_entry("POPPED_0"), _entry("POPPED_1")]
+        worker._pending_index = 0
+        buffer.put(_entry("RING_0"))
+        buffer.put(_entry("RING_1"))
+
+        # When
+        worker.stop(timeout=0.01)
+
+        # Then
+        assert [e["failure_type"] for e in handed[0]] == [
+            "POPPED_0",
+            "POPPED_1",
+            "RING_0",
+            "RING_1",
+        ]
+
+    def test_the_entry_being_attempted_is_dumped_as_well_as_written(self, build_outbox):
+        """At-least-once, on purpose. The index advances only after an entry
+        resolves, so the entry the writer is inside is handed to the dump too —
+        a duplicate in the zero-loss fallback tier is cheaper than a hole."""
+        # Given — the writer is blocked inside the first entry of its batch
+        inside = threading.Event()
+        release = threading.Event()
+        handed: list[list[dict]] = []
+
+        def blocking_writer(kwargs):
+            inside.set()
+            release.wait(timeout=5.0)
+
+        _, _, worker = _armed_worker(
+            build_outbox,
+            blocking_writer,
+            on_emergency_dump=lambda batch, deadline=None: (
+                handed.append(batch) or len(batch)
+            ),
+        )
+        batch = [_entry("IN_FLIGHT")]
+        worker._pending_batch = batch
+        worker._pending_index = 0
+        flusher = threading.Thread(target=worker._flush_batch, args=(batch,))
+        flusher.start()
+        try:
+            assert inside.wait(timeout=5.0)
+
+            # When — the teardown lands while that write is still running
+            worker.stop(timeout=0.01)
+
+            # Then — the unresolved entry is in the dump
+            assert [e["failure_type"] for e in handed[0]] == ["IN_FLIGHT"]
+            assert worker.in_flight == 1
+        finally:
+            release.set()
+            flusher.join(timeout=5.0)
+
+        # And — once it resolves, the same entry is also counted written. Both
+        # buckets holding it is what the terminal report calls ``duplicated``.
+        assert worker.entries_written == 1
+        assert worker.entries_emergency_dumped == 1
+
+    def test_pop_publish_atomic_pop_does_not_happen_outside_the_batch_lock(
+        self, build_outbox, make_sync_writer, collected_writes
+    ):
+        """The window ``_batch_lock`` closes.
+
+        ``get_batch`` removes the entries and then returns, releasing the ring
+        lock — the publication would land only after the call re-enters Python.
+        A teardown falling in that window would see an empty ring AND the
+        previous, fully-resolved published batch, and rescue neither. Holding
+        the lock and observing that the ring is untouched is what pins the pop
+        and the publication into one scope.
+        """
+        # Given
+        _, buffer, worker = _armed_worker(
+            build_outbox, make_sync_writer(collected_writes), batch_size=5
+        )
+        for i in range(3):
+            buffer.put(_entry(f"E{i}"))
+        popped: list[list] = []
+
+        def _pop():
+            popped.append(worker._pop_and_publish(5))
+
+        # When — the lock is held while the writer tries to pop
+        worker._batch_lock.acquire()
+        popper = threading.Thread(target=_pop)
+        popper.start()
+        try:
+            popper.join(timeout=0.2)
+
+            # Then — still blocked, and the ring is intact: nothing was
+            # removed ahead of the publication
+            assert popper.is_alive()
+            assert buffer.size == 3
+            assert worker._pending_batch == []
+        finally:
+            worker._batch_lock.release()
+
+        popper.join(timeout=5.0)
+        assert not popper.is_alive()
+        assert len(popped[0]) == 3
+        assert worker._pending_batch is popped[0]
+        assert worker._pending_index == 0
+        assert buffer.size == 0
+
+    def test_pop_publish_atomic_teardown_waits_for_an_in_progress_publication(
+        self, build_outbox, make_sync_writer, collected_writes
+    ):
+        """The other side of the same lock: a teardown may not read the ring
+        while a pop is mid-flight."""
+        # Given
+        _, buffer, worker = _armed_worker(
+            build_outbox,
+            make_sync_writer(collected_writes),
+            on_emergency_dump=lambda batch, deadline=None: len(batch),
+        )
+        buffer.put(_entry("E0"))
+        done = threading.Event()
+
+        def _stop():
+            worker.stop(timeout=0.01)
+            done.set()
+
+        # When
+        worker._batch_lock.acquire()
+        stopper = threading.Thread(target=_stop)
+        stopper.start()
+        try:
+            stopper.join(timeout=0.2)
+
+            # Then — the teardown is blocked and the ring is untouched
+            assert stopper.is_alive()
+            assert buffer.size == 1
+        finally:
+            worker._batch_lock.release()
+
+        stopper.join(timeout=5.0)
+        assert done.is_set()
+        assert worker.entries_emergency_dumped == 1
+
+    def test_repair_after_fork_drops_the_parents_published_batch(
+        self, build_outbox, make_sync_writer, collected_writes
+    ):
+        """A child that kept the parent's publication would dump entries it
+        never owned, and whose parent drainer is still delivering them."""
+        # Given
+        _, _, worker = build_outbox(make_sync_writer(collected_writes))
+        worker._pending_batch = [_entry("PARENT")]
+        worker._pending_index = 0
+
+        # When
+        worker.repair_after_fork()
+
+        # Then
+        assert worker._pending_batch == []
+        assert worker._pending_index == 0
+
+
+class TestDLQOutboxWorkerWriterResultBucketBehavior:
+    """``_record_writer_result`` — a store outage returns, it does not raise.
+
+    ``store_failure`` absorbs every repository exception and answers with a
+    result describing what it did, so counting each non-raising call as a store
+    write is the lie the terminal shutdown report must not repeat.
+    """
+
+    @pytest.mark.parametrize(
+        ("result", "expected_written", "expected_soft_failed", "expected_failed"),
+        [
+            (DLQEntryResult.created("dlq-1"), 1, 0, 0),
+            (DLQEntryResult.fallback("db down", "/var/lib/baldur/dlq.jsonl"), 0, 1, 0),
+            (DLQEntryResult.failed("db down, disk down"), 0, 0, 1),
+            (None, 1, 0, 0),
+            ("an injected writer returning something else", 1, 0, 0),
+        ],
+        ids=["created", "fallback", "failed", "none", "unclassifiable"],
+    )
+    def test_writer_result_buckets_written_soft_failed_and_failed(
+        self,
+        build_outbox,
+        result,
+        expected_written,
+        expected_soft_failed,
+        expected_failed,
+    ):
+        # Given
+        _, _, worker = build_outbox(lambda kwargs: result)
+
+        # When
+        worker._flush_batch([_entry("PG_TIMEOUT")])
+
+        # Then
+        assert worker.entries_written == expected_written
+        assert worker.entries_soft_failed == expected_soft_failed
+        assert worker.entries_failed == expected_failed
+
+    def test_a_soft_failed_entry_is_not_counted_as_a_store_write(self, build_outbox):
+        """The negative that catches a truthiness-based classifier.
+
+        ``DLQEntryResult`` is a plain dataclass with neither ``__bool__`` nor
+        ``__len__``, so a failed instance is truthy exactly like a successful
+        one. An implementation branching on truthiness reports zero soft
+        failures forever while every soft failure hides inside ``written``.
+        """
+        # Given — three store outages, each preserved by the local fallback
+        _, _, worker = build_outbox(
+            lambda kwargs: DLQEntryResult.fallback(
+                "db down", "/var/lib/baldur/dlq.jsonl"
+            )
+        )
+
+        # When
+        worker._flush_batch([_entry(f"E{i}") for i in range(3)])
+
+        # Then
+        assert worker.entries_soft_failed == 3
+        assert worker.entries_written == 0
+
+    def test_a_raising_writer_still_lands_in_the_failed_bucket(self, build_outbox):
+        """The classifier only sees non-raising returns; the raise path is
+        unchanged and must not have moved into the soft bucket."""
+
+        # Given
+        def raising_writer(kwargs):
+            raise RuntimeError("connection reset")
+
+        _, _, worker = build_outbox(raising_writer)
+
+        # When
+        worker._flush_batch([_entry("PG_TIMEOUT")])
+
+        # Then
+        assert worker.entries_failed == 1
+        assert worker.entries_soft_failed == 0
+        assert worker.entries_written == 0
+
+    def test_soft_failed_entries_do_not_engage_the_writer_backoff(self, build_outbox):
+        """Deliberate: the un-backed-off path is the one achieving zero loss
+        here — every entry reaches the local fallback at full rate."""
+        # Given
+        _, _, worker = build_outbox(
+            lambda kwargs: DLQEntryResult.fallback(
+                "db down", "/var/lib/baldur/dlq.jsonl"
+            )
+        )
+
+        # When
+        worker._flush_batch([_entry(f"E{i}") for i in range(5)])
+
+        # Then
+        assert worker.consecutive_failures == 0
+        assert worker.is_backing_off is False
+
+
+class TestDLQOutboxWorkerBackoffStateContract:
+    """``is_backing_off`` — the predicate the teardown reads to skip a hopeless
+    flush. The threshold is 3 consecutive failing cycles."""
+
+    @pytest.mark.parametrize(
+        ("consecutive_failures", "expected"),
+        [(0, False), (2, False), (3, True), (4, True)],
+        ids=["idle", "below-threshold", "at-threshold", "above-threshold"],
+    )
+    def test_is_backing_off_at_the_failure_threshold(
+        self,
+        build_outbox,
+        make_sync_writer,
+        collected_writes,
+        consecutive_failures,
+        expected,
+    ):
+        # Given
+        _, _, worker = build_outbox(make_sync_writer(collected_writes))
+        worker._consecutive_failures = consecutive_failures
+
+        # Then
+        assert worker.is_backing_off is expected
+
+
+class TestDLQOutboxWorkerShutdownStatsContract:
+    """The two counters the terminal report is built from."""
+
+    def test_soft_failed_and_residual_start_at_zero_and_mirror_the_worker(
+        self, build_outbox, make_sync_writer, collected_writes
+    ):
+        # Given
+        outbox, _, worker = build_outbox(make_sync_writer(collected_writes))
+
+        # Then — fresh worker
+        assert worker.entries_soft_failed == 0
+        assert worker.entries_shutdown_residual == 0
+        assert outbox.get_stats().entries_soft_failed == 0
+
+        # And — the stats field is sourced from the worker counter. The
+        # residual is deliberately worker-only: the teardown reads it directly
+        # and it is terminal, not a steady-state gauge.
+        worker._entries_soft_failed = 4
+        assert outbox.get_stats().entries_soft_failed == 4
+        assert not hasattr(outbox.get_stats(), "entries_shutdown_residual")
+
+    def test_repair_after_fork_resets_both_shutdown_counters(
+        self, build_outbox, make_sync_writer, collected_writes
+    ):
+        """The parent's counts describe the parent's writes; kept, they leave
+        the conservation relation open in a child whose buffer restarts empty."""
+        # Given
+        _, _, worker = build_outbox(make_sync_writer(collected_writes))
+        worker._entries_soft_failed = 7
+        worker._entries_shutdown_residual = 3
+
+        # When
+        worker.repair_after_fork()
+
+        # Then
+        assert worker.entries_soft_failed == 0
+        assert worker.entries_shutdown_residual == 0

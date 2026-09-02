@@ -281,3 +281,290 @@ class TestMasterSideInvocationLeavesTheLifecycleUntouched:
         for stage, stub in _real_flush_with_stubbed_stages.items():
             assert stub.call_count == 0, f"{stage} ran in the master"
         assert _lifecycle_state().audit_shutdown_done is False
+
+
+# =============================================================================
+# The second two-writer shape on this lifecycle: the DLQ outbox teardown.
+#
+# ``worker_exit`` calls ``stop_outbox_for_shutdown()`` directly and the
+# coordinator's ``DLQOutboxShutdownHandler.on_drain_complete()`` calls it from
+# the drain thread. They share the once-gate and its cached result, so which
+# one runs first changes what the other reports — and neither component can
+# show that alone. The transaction boundary is the second property: the
+# outbox's final writes must land before ``graceful_shutdown_audit_system()``
+# closes the WAL, which is why the handler is registered ahead of
+# ``AuditShutdownHandler`` and why the hook calls the teardown ahead of the
+# flush.
+#
+# Real coordinator, real handlers, real outbox with a real drainer thread; only
+# the five audit teardown stages and the DLQ store are stubbed.
+# =============================================================================
+
+# Below the two floors the teardown carves out, so the budget is the floors:
+# a 0.5 s join of a wedged drainer, then the dump.
+_TEST_OUTBOX_BUDGET_SECONDS = 0.1
+
+
+@pytest.fixture
+def wedged_outbox(monkeypatch):
+    """A started outbox whose store never returns, published as the singleton.
+
+    The wedged writer is what makes the teardown observable: one entry is stuck
+    in flight, the rest stay on the ring, and the emergency dump is the only
+    thing that can rescue any of them. Yields ``(outbox, dumped, order)``.
+    """
+    import threading as _threading
+
+    from baldur.audit.ring_buffer import RingBuffer
+    from baldur.services.dlq_outbox import outbox as outbox_module
+    from baldur.services.dlq_outbox.outbox import Outbox
+    from baldur.services.dlq_outbox.worker import DLQOutboxWorker
+    from baldur.settings.backpressure import BackpressureStrategy
+    from baldur.settings.dlq_outbox import DLQOutboxSettings
+
+    forever = _threading.Event()
+    dumped: list[dict] = []
+    order: list[str] = []
+
+    def hanging_writer(kwargs):
+        forever.wait(timeout=_JOIN_TIMEOUT_SECONDS)
+
+    def recording_dump(batch, deadline=None):
+        order.append("outbox_dump")
+        dumped.extend(batch)
+        return len(batch)
+
+    buffer: RingBuffer = RingBuffer(
+        capacity=100, strategy=BackpressureStrategy.DROP_OLDEST
+    )
+    worker = DLQOutboxWorker(
+        buffer=buffer,
+        sync_writer=hanging_writer,
+        batch_size=1,
+        flush_interval_seconds=0.01,
+        on_emergency_dump=recording_dump,
+    )
+    outbox = Outbox(buffer=buffer, worker=worker)
+
+    short = DLQOutboxSettings(join_timeout_seconds=_TEST_OUTBOX_BUDGET_SECONDS)
+    with patch(
+        "baldur.settings.dlq_outbox.get_dlq_outbox_settings", return_value=short
+    ):
+        outbox.start()
+        outbox_module._outbox = outbox
+        for i in range(3):
+            outbox.put({"domain": "payment", "failure_type": f"PG_TIMEOUT_{i}"})
+        # The drainer pops the first entry into the hanging writer; the other
+        # two stay on the ring.
+        assert _wait_until(lambda: worker.in_flight == 1)
+        try:
+            yield outbox, dumped, order
+        finally:
+            forever.set()
+
+
+def _wait_until(predicate, timeout: float = _HANDOFF_TIMEOUT_SECONDS) -> bool:
+    """Poll a state transition the drainer thread performs."""
+    import time as _time
+
+    deadline = _time.monotonic() + timeout
+    while _time.monotonic() < deadline:
+        if predicate():
+            return True
+        _time.sleep(0.01)
+    return predicate()
+
+
+@pytest.fixture
+def outbox_and_audit_coordinator(_real_flush_with_stubbed_stages):
+    """A real coordinator carrying both handlers, in ``init()``'s order.
+
+    The order is the claim: the outbox handler's teardown runs before the audit
+    handler closes the WAL.
+    """
+    from baldur.audit.shutdown_handler import AuditShutdownHandler
+    from baldur.core.shutdown_coordinator import (
+        RequestTracker,
+        get_shutdown_coordinator,
+    )
+    from baldur.services.dlq_outbox.shutdown import DLQOutboxShutdownHandler
+
+    coordinator = get_shutdown_coordinator(request_tracker=RequestTracker())
+    coordinator.register_handler(DLQOutboxShutdownHandler())
+    coordinator.register_handler(AuditShutdownHandler())
+    return coordinator
+
+
+class TestOutboxTeardownAcrossBothWriters:
+    """One teardown, two callers, one terminal report."""
+
+    def test_the_recycle_path_is_the_only_teardown_the_outbox_gets(
+        self,
+        outbox_and_audit_coordinator,
+        wedged_outbox,
+        _real_flush_with_stubbed_stages,
+    ):
+        """No shutdown is initiated on a ``max_requests`` recycle, so the
+        coordinator's handler never runs — and without the hook's own call the
+        buffered entries would die with the daemon drain thread."""
+        from baldur.adapters.gunicorn.hooks import worker_exit
+        from baldur.core.shutdown_coordinator import ShutdownPhase
+
+        _, dumped, _ = wedged_outbox
+        assert outbox_and_audit_coordinator.phase == ShutdownPhase.RUNNING
+
+        worker_exit(_arbiter(), _exiting_worker())
+
+        assert len(dumped) == 3
+        assert {e["failure_type"] for e in dumped} == {
+            "PG_TIMEOUT_0",
+            "PG_TIMEOUT_1",
+            "PG_TIMEOUT_2",
+        }
+
+    def test_the_teardown_body_runs_exactly_once_across_both_writers(
+        self,
+        outbox_and_audit_coordinator,
+        wedged_outbox,
+        _real_flush_with_stubbed_stages,
+    ):
+        """Serialization must not become duplication: the drain's handler runs
+        the teardown, and the hook that follows finds the cached result and
+        re-dumps nothing."""
+        from baldur.adapters.gunicorn.hooks import worker_exit
+
+        _, dumped, _ = wedged_outbox
+
+        outbox_and_audit_coordinator.initiate_shutdown()
+        assert outbox_and_audit_coordinator.wait_for_shutdown(
+            timeout=_HANDOFF_TIMEOUT_SECONDS
+        )
+        first_pass = len(dumped)
+
+        worker_exit(_arbiter(), _exiting_worker())
+
+        assert first_pass == 3
+        assert len(dumped) == 3
+
+    def test_the_hooks_terminal_line_reports_the_drains_counts(
+        self,
+        outbox_and_audit_coordinator,
+        wedged_outbox,
+        _real_flush_with_stubbed_stages,
+    ):
+        """The cached result is the point of the gate: an exit hook that ran
+        second must log what actually happened to the entries, not the zeros a
+        "someone else did it" short-circuit would produce."""
+        from baldur.adapters.gunicorn.hooks import worker_exit
+
+        outbox_and_audit_coordinator.initiate_shutdown()
+        assert outbox_and_audit_coordinator.wait_for_shutdown(
+            timeout=_HANDOFF_TIMEOUT_SECONDS
+        )
+
+        with capture_logs() as cap_logs:
+            worker_exit(_arbiter(), _exiting_worker())
+
+        # The hook logs nothing of its own about the outbox; the teardown's
+        # report reaches the operator through the handler's line, which the
+        # drain already emitted. What the hook must not do is re-run the drain.
+        assert not [
+            e
+            for e in cap_logs
+            if e.get("event") == "dlq_outbox.shutdown_emergency_dump"
+        ]
+
+    def test_a_later_coordinator_drain_does_not_re_dump_after_a_recycle_exit(
+        self,
+        outbox_and_audit_coordinator,
+        wedged_outbox,
+        _real_flush_with_stubbed_stages,
+    ):
+        """The reverse order — the hook first. The gate has to hold from either
+        side, because a recycle exit and a signalled one are the same code."""
+        from baldur.adapters.gunicorn.hooks import worker_exit
+
+        _, dumped, _ = wedged_outbox
+
+        worker_exit(_arbiter(), _exiting_worker())
+        assert len(dumped) == 3
+
+        outbox_and_audit_coordinator.initiate_shutdown()
+        assert outbox_and_audit_coordinator.wait_for_shutdown(
+            timeout=_HANDOFF_TIMEOUT_SECONDS
+        )
+
+        assert len(dumped) == 3
+
+    def test_the_outbox_teardown_lands_before_the_wal_is_closed(
+        self,
+        outbox_and_audit_coordinator,
+        wedged_outbox,
+        _real_flush_with_stubbed_stages,
+    ):
+        """The transaction boundary, on the recycle path where the hook owns
+        both steps."""
+        from baldur.adapters.gunicorn.hooks import worker_exit
+
+        _, _, order = wedged_outbox
+        _real_flush_with_stubbed_stages["_shutdown_wal"].side_effect = lambda *a, **kw: (
+            order.append("wal_close")
+        )
+
+        worker_exit(_arbiter(), _exiting_worker())
+
+        assert order == ["outbox_dump", "wal_close"]
+
+    def test_the_drains_handler_order_puts_the_outbox_before_the_wal_too(
+        self,
+        outbox_and_audit_coordinator,
+        wedged_outbox,
+        _real_flush_with_stubbed_stages,
+    ):
+        """Same boundary on the signalled path, where the ordering comes from
+        the registration order rather than from one function's statements."""
+        _, _, order = wedged_outbox
+        _real_flush_with_stubbed_stages["_shutdown_wal"].side_effect = lambda *a, **kw: (
+            order.append("wal_close")
+        )
+
+        outbox_and_audit_coordinator.initiate_shutdown()
+        assert outbox_and_audit_coordinator.wait_for_shutdown(
+            timeout=_HANDOFF_TIMEOUT_SECONDS
+        )
+
+        assert order == ["outbox_dump", "wal_close"]
+
+    def test_producers_are_coerced_to_the_sync_writer_after_the_teardown(
+        self,
+        outbox_and_audit_coordinator,
+        wedged_outbox,
+        _real_flush_with_stubbed_stages,
+    ):
+        """The window the coercion flag closes.
+
+        A capture arriving after the drainer has been joined and the dump has
+        run would otherwise sit in a buffer nothing will ever read again. The
+        producer that reads the flag is the capture service, not the outbox, so
+        the two have to be composed to see it.
+        """
+        from baldur.adapters.gunicorn.hooks import worker_exit
+        from baldur.adapters.memory import InMemoryFailedOperationRepository
+        from baldur.services.dlq_capture import DLQCaptureService
+        from baldur.services.dlq_outbox import outbox as outbox_module
+
+        outbox, _, _ = wedged_outbox
+        repository = InMemoryFailedOperationRepository()
+        service = DLQCaptureService(repository=repository)
+
+        worker_exit(_arbiter(), _exiting_worker())
+
+        assert outbox_module.is_worker_dead() is True
+        result = service._dispatch_to_outbox(
+            domain="payment", failure_type="AFTER_TEARDOWN"
+        )
+
+        # Stored synchronously, and never enqueued into the drained buffer
+        assert repository.count_all() == 1
+        assert result.dlq_id is not None
+        assert outbox.buffer.size == 0
