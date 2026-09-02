@@ -25,13 +25,20 @@ import at call time, which is the seam the design nominates.
 
 from __future__ import annotations
 
+import os
 import sys
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
-from celery.signals import worker_init, worker_process_init
+from celery.signals import (
+    worker_init,
+    worker_process_init,
+    worker_process_shutdown,
+    worker_shutdown,
+)
 from celery.utils.dispatch import Signal
+from structlog.testing import capture_logs
 
 import baldur.bootstrap as bootstrap_module
 from baldur.adapters.celery import bootstrap_hooks
@@ -39,6 +46,8 @@ from baldur.adapters.celery.bootstrap_hooks import (
     _classify_pool,
     _on_worker_init,
     _on_worker_process_init,
+    _on_worker_process_shutdown,
+    _on_worker_shutdown,
     _PoolLane,
     connect_celery_bootstrap_receivers,
     disconnect_celery_bootstrap_receivers,
@@ -743,3 +752,594 @@ class TestCelerySignalDispatchContract:
             signal.disconnect(_exiting, dispatch_uid="baldur.test.system_exit")
 
         assert "abort the boot" in str(exc_info.value)
+
+
+# =============================================================================
+# Stop side — the two exit receivers
+#
+# A celery worker had no exit pipeline at all: `worker_init` /
+# `worker_process_init` landed the start half, and nothing connected a
+# stop-side receiver, so a worker never reached the coordinator drain, the
+# outbox teardown or the audit flush. These tests pin the two receivers'
+# step order, their per-step isolation and the one terminal marker each emits.
+# =============================================================================
+
+_TEARDOWN = "baldur.services.dlq_outbox.outbox.stop_outbox_for_shutdown"
+_AUDIT_FLUSH = "baldur.audit.async_audit_lifecycle.graceful_shutdown_audit_system"
+_COORDINATOR = "baldur.core.shutdown_coordinator.get_shutdown_coordinator"
+_RESERVE = "baldur.services.dlq_outbox.outbox.get_shutdown_reserve_seconds"
+_DRAIN_SETTINGS = "baldur.settings.recovery_shutdown.get_recovery_shutdown_settings"
+
+
+def _shutdown_result(**overrides):
+    """A terminal outbox report with every bucket addressable."""
+    from baldur.services.dlq_outbox.outbox import OutboxShutdownResult
+
+    fields = {
+        "pending_at_entry": 0,
+        "dispatched": 0,
+        "soft_failed": 0,
+        "failed": 0,
+        "emergency_dumped": 0,
+        "residual": 0,
+        "duplicated": 0,
+    }
+    fields.update(overrides)
+    return OutboxShutdownResult(**fields)
+
+
+def _coordinator_stub(*, drained: bool, phase):
+    """A shutdown coordinator double with the surface the receiver reads.
+
+    A real coordinator would start an actual drain thread; what the receiver
+    contributes is the call it makes and the branch it takes on the answer.
+    Spec-bound, so a renamed coordinator method fails here instead of silently
+    recording a call nothing makes any more.
+    """
+    from baldur.core.shutdown_coordinator import GracefulShutdownCoordinator
+
+    stub = MagicMock(spec=GracefulShutdownCoordinator)
+    stub.wait_for_shutdown.return_value = drained
+    stub.phase = phase
+    return stub
+
+
+def _terminal_markers(cap_logs) -> list[dict]:
+    return [e for e in cap_logs if e.get("event") == "shutdown.worker_exit_completed"]
+
+
+class TestCeleryWorkerShutdownBehavior:
+    """``worker_shutdown`` — the worker main process's gunicorn parity.
+
+    By the time celery sends this signal the pool has stopped and the blueprint
+    has joined, so no task is running and initiating the coordinator drain is
+    safe here. Steps 3 and 4 are unconditional: when the drain converged the
+    coordinator's own handlers already ran them and their once-guards make
+    these no-ops; when it did not, they are the only teardown this process
+    gets.
+    """
+
+    def test_worker_shutdown_initiates_and_waits_on_the_coordinator_drain(self):
+        # Given
+        from baldur.core.shutdown_coordinator import ShutdownPhase
+
+        coordinator = _coordinator_stub(drained=True, phase=ShutdownPhase.TERMINATED)
+
+        # When
+        with (
+            patch(_COORDINATOR, return_value=coordinator),
+            patch(_TEARDOWN, return_value=_shutdown_result()),
+            patch(_AUDIT_FLUSH),
+        ):
+            _on_worker_shutdown()
+
+        # Then
+        coordinator.initiate_shutdown.assert_called_once_with()
+        coordinator.wait_for_shutdown.assert_called_once()
+
+    @pytest.mark.parametrize(
+        ("drained", "phase_name", "expected_event"),
+        [
+            (True, "TERMINATED", "shutdown.worker_drained"),
+            (False, "DRAINING", "shutdown.worker_drain_incomplete"),
+            (False, "RUNNING", None),
+        ],
+        ids=["drained", "incomplete", "never-initiated"],
+    )
+    def test_worker_shutdown_terminal_log_reports_the_drain_outcome(
+        self, drained, phase_name, expected_event
+    ):
+        """A drain that never started must not be reported on — otherwise every
+        routine worker stop that initiated nothing would warn spuriously."""
+        # Given
+        from baldur.core.shutdown_coordinator import ShutdownPhase
+
+        coordinator = _coordinator_stub(
+            drained=drained, phase=getattr(ShutdownPhase, phase_name)
+        )
+
+        # When
+        with (
+            patch(_COORDINATOR, return_value=coordinator),
+            patch(_TEARDOWN, return_value=_shutdown_result()),
+            patch(_AUDIT_FLUSH),
+            capture_logs() as cap_logs,
+        ):
+            _on_worker_shutdown()
+
+        # Then
+        drain_events = [
+            e["event"]
+            for e in cap_logs
+            if e.get("event")
+            in ("shutdown.worker_drained", "shutdown.worker_drain_incomplete")
+        ]
+        assert drain_events == ([expected_event] if expected_event else [])
+
+    def test_worker_shutdown_terminal_log_is_emitted_once_with_the_process_role(self):
+        """One event name answers "did this process's exit pipeline run to the
+        end" on every adapter; the role says which pipeline ran."""
+        # Given
+        from baldur.core.shutdown_coordinator import ShutdownPhase
+
+        coordinator = _coordinator_stub(drained=True, phase=ShutdownPhase.TERMINATED)
+
+        # When
+        with (
+            patch(_COORDINATOR, return_value=coordinator),
+            patch(_TEARDOWN, return_value=_shutdown_result()),
+            patch(_AUDIT_FLUSH),
+            capture_logs() as cap_logs,
+        ):
+            _on_worker_shutdown()
+
+        # Then
+        markers = _terminal_markers(cap_logs)
+        assert len(markers) == 1
+        assert markers[0]["process_role"] == "celery_worker_main"
+        assert markers[0]["worker_id"] == os.getpid()
+
+    def test_worker_shutdown_terminal_log_carries_the_outbox_counts(self):
+        """The residual is the number an operator needs at exit time: those
+        entries existed and reached no destination."""
+        # Given
+        from baldur.core.shutdown_coordinator import ShutdownPhase
+
+        coordinator = _coordinator_stub(drained=True, phase=ShutdownPhase.TERMINATED)
+        result = _shutdown_result(
+            pending_at_entry=12, dispatched=7, emergency_dumped=4, residual=1
+        )
+
+        # When
+        with (
+            patch(_COORDINATOR, return_value=coordinator),
+            patch(_TEARDOWN, return_value=result),
+            patch(_AUDIT_FLUSH),
+            capture_logs() as cap_logs,
+        ):
+            _on_worker_shutdown()
+
+        # Then
+        marker = _terminal_markers(cap_logs)[0]
+        assert marker["outbox_pending_at_entry"] == 12
+        assert marker["outbox_dispatched"] == 7
+        assert marker["outbox_emergency_dumped"] == 4
+        assert marker["outbox_residual"] == 1
+
+    def test_worker_shutdown_reserves_the_outbox_teardown_budget(self):
+        """Step 2 waits on *other* subsystems and step 3 is queued behind it.
+        Unreserved, the teardown is the first thing an external stop timeout
+        cuts — and unlike gunicorn there is no in-process watcher here, so the
+        only bound is the platform's."""
+        # Given — a 30 s drain window and a 6 s teardown reserve
+        from baldur.core.shutdown_coordinator import ShutdownPhase
+        from baldur.settings.recovery_shutdown import RecoveryShutdownSettings
+
+        coordinator = _coordinator_stub(drained=True, phase=ShutdownPhase.TERMINATED)
+        settings = RecoveryShutdownSettings().model_copy(
+            update={"default_drain_timeout_seconds": 30.0}
+        )
+
+        # When
+        with (
+            patch(_DRAIN_SETTINGS, return_value=settings),
+            patch(_RESERVE, return_value=6.0),
+            patch(_COORDINATOR, return_value=coordinator),
+            patch(_TEARDOWN, return_value=_shutdown_result()),
+            patch(_AUDIT_FLUSH),
+        ):
+            _on_worker_shutdown()
+
+        # Then
+        coordinator.wait_for_shutdown.assert_called_once_with(timeout=24.0)
+
+    def test_worker_shutdown_reserve_never_makes_the_drain_wait_negative(self):
+        """Boundary: a reserve larger than the whole drain window leaves no
+        wait at all, not a negative timeout the coordinator would reject."""
+        # Given
+        from baldur.core.shutdown_coordinator import ShutdownPhase
+        from baldur.settings.recovery_shutdown import RecoveryShutdownSettings
+
+        coordinator = _coordinator_stub(drained=False, phase=ShutdownPhase.DRAINING)
+        settings = RecoveryShutdownSettings().model_copy(
+            update={"default_drain_timeout_seconds": 5.0}
+        )
+
+        # When
+        with (
+            patch(_DRAIN_SETTINGS, return_value=settings),
+            patch(_RESERVE, return_value=61.0),
+            patch(_COORDINATOR, return_value=coordinator),
+            patch(_TEARDOWN, return_value=_shutdown_result()),
+            patch(_AUDIT_FLUSH),
+        ):
+            _on_worker_shutdown()
+
+        # Then
+        coordinator.wait_for_shutdown.assert_called_once_with(timeout=0.0)
+
+    def test_worker_shutdown_tears_the_outbox_down_before_flushing_audit(self):
+        """The transaction boundary: the outbox's final writes have to land
+        while the audit WAL is still open."""
+        # Given
+        from baldur.core.shutdown_coordinator import ShutdownPhase
+
+        order: list[str] = []
+        coordinator = _coordinator_stub(drained=True, phase=ShutdownPhase.TERMINATED)
+
+        # When
+        with (
+            patch(_COORDINATOR, return_value=coordinator),
+            patch(
+                _TEARDOWN,
+                side_effect=lambda: order.append("outbox") or _shutdown_result(),
+            ),
+            patch(_AUDIT_FLUSH, side_effect=lambda: order.append("audit")),
+        ):
+            _on_worker_shutdown()
+
+        # Then
+        assert order == ["outbox", "audit"]
+
+    def test_worker_shutdown_isolates_a_coordinator_failure_from_the_teardown(self):
+        """Step 1 is load-bearing rather than defensive: resolving the
+        coordinator *lazily constructs* it and the constructor reads settings,
+        so a degenerate config raises there. Unchained, that one raise would
+        cost the worker both its outbox teardown and its audit flush."""
+        # When
+        with (
+            patch(_COORDINATOR, side_effect=RuntimeError("settings blew up")),
+            patch(_TEARDOWN, return_value=_shutdown_result()) as m_teardown,
+            patch(_AUDIT_FLUSH) as m_flush,
+            capture_logs() as cap_logs,
+        ):
+            _on_worker_shutdown()
+
+        # Then — both later steps still ran, and the marker still says the
+        # pipeline reached the end
+        m_teardown.assert_called_once_with()
+        m_flush.assert_called_once_with()
+        assert len(_terminal_markers(cap_logs)) == 1
+
+    def test_worker_shutdown_isolates_a_teardown_failure_from_the_audit_flush(self):
+        """An outbox-side failure must not cost the worker its WAL close."""
+        # Given
+        from baldur.core.shutdown_coordinator import ShutdownPhase
+
+        coordinator = _coordinator_stub(drained=True, phase=ShutdownPhase.TERMINATED)
+
+        # When
+        with (
+            patch(_COORDINATOR, return_value=coordinator),
+            patch(_TEARDOWN, side_effect=RuntimeError("teardown blew up")),
+            patch(_AUDIT_FLUSH) as m_flush,
+            capture_logs() as cap_logs,
+        ):
+            _on_worker_shutdown()
+
+        # Then
+        m_flush.assert_called_once_with()
+        markers = _terminal_markers(cap_logs)
+        assert len(markers) == 1
+        # The counts are absent rather than fabricated — the teardown never
+        # reported any.
+        assert "outbox_residual" not in markers[0]
+
+    def test_worker_shutdown_isolates_an_audit_failure_from_the_terminal_marker(self):
+        """The marker is the evidence the pipeline ran; losing it to the last
+        step would make a mostly-successful exit indistinguishable from one
+        that never started."""
+        # Given
+        from baldur.core.shutdown_coordinator import ShutdownPhase
+
+        coordinator = _coordinator_stub(drained=True, phase=ShutdownPhase.TERMINATED)
+
+        # When
+        with (
+            patch(_COORDINATOR, return_value=coordinator),
+            patch(_TEARDOWN, return_value=_shutdown_result()),
+            patch(_AUDIT_FLUSH, side_effect=RuntimeError("flush blew up")),
+            capture_logs() as cap_logs,
+        ):
+            _on_worker_shutdown()
+
+        # Then
+        assert len(_terminal_markers(cap_logs)) == 1
+
+    def test_worker_shutdown_falls_back_when_the_drain_timeout_cannot_be_read(self):
+        """A degenerate config still gets a bounded drain wait rather than
+        skipping the drain entirely."""
+        # Given
+        from baldur.core.shutdown_coordinator import ShutdownPhase
+
+        coordinator = _coordinator_stub(drained=True, phase=ShutdownPhase.TERMINATED)
+
+        # When
+        with (
+            patch(_DRAIN_SETTINGS, side_effect=RuntimeError("settings blew up")),
+            patch(_RESERVE, return_value=6.0),
+            patch(_COORDINATOR, return_value=coordinator),
+            patch(_TEARDOWN, return_value=_shutdown_result()),
+            patch(_AUDIT_FLUSH),
+        ):
+            _on_worker_shutdown()
+
+        # Then — the shipped 30 s fallback, minus the reserve
+        coordinator.wait_for_shutdown.assert_called_once_with(timeout=24.0)
+
+
+class TestCeleryPoolChildShutdownBehavior:
+    """``worker_process_shutdown`` — every process that runs tasks, including
+    the ones a ``maxtasksperchild`` recycle retires.
+
+    It runs in the child's last executable frame, immediately before
+    ``os._exit``, and it is the only exit pipeline the child ever gets.
+    """
+
+    def test_process_shutdown_tears_the_outbox_down_before_flushing_audit(self):
+        # Given
+        order: list[str] = []
+
+        # When
+        with (
+            patch(
+                _TEARDOWN,
+                side_effect=lambda: order.append("outbox") or _shutdown_result(),
+            ),
+            patch(_AUDIT_FLUSH, side_effect=lambda: order.append("audit")),
+        ):
+            _on_worker_process_shutdown()
+
+        # Then
+        assert order == ["outbox", "audit"]
+
+    def test_process_shutdown_never_touches_the_shutdown_coordinator(self):
+        """The negative that keeps a routine recycle cheap and safe.
+
+        The child inherited the parent's handler list — ``init()`` in a fork
+        child is an ``_init_done`` no-op, so the handlers were never
+        re-registered — and firing it would run leader-election release,
+        exporter teardown and the private service handlers against state this
+        process does not own.
+        """
+        # When
+        with (
+            patch(_COORDINATOR) as m_coordinator,
+            patch(_TEARDOWN, return_value=_shutdown_result()),
+            patch(_AUDIT_FLUSH),
+        ):
+            _on_worker_process_shutdown()
+
+        # Then
+        m_coordinator.assert_not_called()
+
+    def test_process_shutdown_terminal_log_carries_the_role_pid_and_counts(self):
+        # Given
+        result = _shutdown_result(
+            pending_at_entry=5, emergency_dumped=3, residual=2, soft_failed=1
+        )
+
+        # When
+        with (
+            patch(_TEARDOWN, return_value=result),
+            patch(_AUDIT_FLUSH),
+            capture_logs() as cap_logs,
+        ):
+            _on_worker_process_shutdown()
+
+        # Then
+        markers = _terminal_markers(cap_logs)
+        assert len(markers) == 1
+        assert markers[0]["process_role"] == "celery_pool_child"
+        assert markers[0]["worker_id"] == os.getpid()
+        assert markers[0]["outbox_pending_at_entry"] == 5
+        assert markers[0]["outbox_emergency_dumped"] == 3
+        assert markers[0]["outbox_residual"] == 2
+        assert markers[0]["outbox_soft_failed"] == 1
+
+    def test_process_shutdown_isolates_a_teardown_failure_from_the_audit_flush(self):
+        """A recycle runs this as routine operation, so one failing step may
+        not cost the child the rest of its only exit pipeline."""
+        with (
+            patch(_TEARDOWN, side_effect=RuntimeError("teardown blew up")),
+            patch(_AUDIT_FLUSH) as m_flush,
+            capture_logs() as cap_logs,
+        ):
+            _on_worker_process_shutdown()
+
+        m_flush.assert_called_once_with()
+        assert len(_terminal_markers(cap_logs)) == 1
+
+    def test_process_shutdown_isolates_an_audit_failure_from_the_terminal_marker(self):
+        with (
+            patch(_TEARDOWN, return_value=_shutdown_result()),
+            patch(_AUDIT_FLUSH, side_effect=RuntimeError("flush blew up")),
+            capture_logs() as cap_logs,
+        ):
+            _on_worker_process_shutdown()
+
+        assert len(_terminal_markers(cap_logs)) == 1
+
+    def test_process_shutdown_is_reached_by_the_signal_celery_actually_sends(
+        self, receivers_disconnected
+    ):
+        """Billiard sends ``worker_process_shutdown`` from inside the child.
+        A receiver connected to anything else would never run on a recycle."""
+        # Given
+        connect_celery_bootstrap_receivers()
+
+        # When
+        with (
+            patch(_TEARDOWN, return_value=_shutdown_result()),
+            patch(_AUDIT_FLUSH),
+            capture_logs() as cap_logs,
+        ):
+            worker_process_shutdown.send(sender=None, pid=os.getpid(), exitcode=0)
+
+        # Then
+        markers = _terminal_markers(cap_logs)
+        assert len(markers) == 1
+        assert markers[0]["process_role"] == "celery_pool_child"
+
+
+class TestCeleryColdShutdownBehavior:
+    """The marker is never emitted by a path that did not run the pipeline.
+
+    ``WorkController.terminate()`` does not send ``worker_shutdown``, so a cold
+    shutdown (SIGQUIT, a second Ctrl-C) reaches no Baldur seam in the main
+    process. That gap is recorded, not papered over — what must hold is that
+    nothing claims the exit pipeline ran.
+    """
+
+    def test_cold_shutdown_signal_reaches_no_baldur_receiver(
+        self, receivers_disconnected
+    ):
+        """``worker_shutting_down`` is the only seam a cold path reaches, and it
+        fires while tasks are still executing and from inside celery's signal
+        handler frame. Draining there would close the audit WAL and stop the
+        outbox underneath running tasks — a worse loss than the one the stop
+        side exists to prevent."""
+        # Given
+        from celery.signals import worker_shutting_down
+
+        connect_celery_bootstrap_receivers()
+
+        # When
+        with (
+            patch(_TEARDOWN, return_value=_shutdown_result()) as m_teardown,
+            patch(_AUDIT_FLUSH) as m_flush,
+            capture_logs() as cap_logs,
+        ):
+            worker_shutting_down.send(
+                sender=None, sig="SIGQUIT", how="Cold", exitcode=0
+            )
+
+        # Then — no teardown, no flush, and above all no terminal marker
+        m_teardown.assert_not_called()
+        m_flush.assert_not_called()
+        assert _terminal_markers(cap_logs) == []
+
+    def test_cold_shutdown_leaves_the_warm_receivers_armed(
+        self, receivers_disconnected
+    ):
+        """The negative must not be achieved by disarming the warm path."""
+        from celery.signals import worker_shutting_down
+
+        connect_celery_bootstrap_receivers()
+        worker_shutting_down.send(sender=None, sig="SIGQUIT", how="Cold", exitcode=0)
+
+        assert is_celery_bootstrap_receivers_connected() is True
+
+
+class TestCeleryBootstrapReceiverConnectionContract:
+    """Four receivers, one connect function, one registration each.
+
+    The stop side rides the same ``connect_celery_bootstrap_receivers()`` as
+    the start side, so there is no reachable state where a worker's start side
+    is armed and its stop side is not.
+    """
+
+    _SIGNALS = (
+        (worker_init, "_WORKER_INIT_DISPATCH_UID"),
+        (worker_process_init, "_WORKER_PROCESS_INIT_DISPATCH_UID"),
+        (worker_shutdown, "_WORKER_SHUTDOWN_DISPATCH_UID"),
+        (worker_process_shutdown, "_WORKER_PROCESS_SHUTDOWN_DISPATCH_UID"),
+    )
+
+    def test_connect_arms_all_four_receivers(self, receivers_disconnected):
+        connect_celery_bootstrap_receivers()
+
+        for signal, uid_attr in self._SIGNALS:
+            assert _receiver_count(signal, getattr(bootstrap_hooks, uid_attr)) == 1, (
+                f"{uid_attr} was not armed"
+            )
+
+    def test_is_connected_requires_all_four_not_just_the_start_side(
+        self, receivers_disconnected
+    ):
+        """The predicate ``init()``'s deferral warning reads: a worker whose
+        stop side is missing is exactly as unwired as one whose start side is."""
+        connect_celery_bootstrap_receivers()
+        assert is_celery_bootstrap_receivers_connected() is True
+
+        worker_shutdown.disconnect(
+            bootstrap_hooks._on_worker_shutdown,
+            dispatch_uid=bootstrap_hooks._WORKER_SHUTDOWN_DISPATCH_UID,
+        )
+
+        assert is_celery_bootstrap_receivers_connected() is False
+
+    def test_dedup_repeated_connects_leave_one_receiver_per_signal(
+        self, receivers_disconnected
+    ):
+        """Arming three times is what production does; it must register once."""
+        connect_celery_bootstrap_receivers()
+        connect_celery_bootstrap_receivers()
+        connect_celery_bootstrap_receivers()
+
+        for signal, uid_attr in self._SIGNALS:
+            assert _receiver_count(signal, getattr(bootstrap_hooks, uid_attr)) == 1
+
+    def test_dedup_across_all_three_arming_sites_covers_the_stop_side_too(
+        self, receivers_disconnected, celery_app_stub, clean_process_markers
+    ):
+        """The dedup claim, exercised against the sites production actually
+        uses — now with four signals rather than two."""
+        from baldur.adapters.celery.beat_schedule import (
+            _reset_celery_configured,
+            configure_baldur_celery,
+        )
+        from baldur.adapters.celery.signal_hooks import (
+            disconnect_baldur_signals,
+            setup_baldur_signals,
+        )
+
+        try:
+            # Given / When — all three sites arm, in one process
+            setup_baldur_signals()
+            with patch(
+                "baldur.adapters.celery.beat_schedule.register_all_tasks_with_celery",
+                autospec=True,
+            ):
+                configure_baldur_celery(celery_app_stub)
+            with patch(
+                "baldur.core.process_utils.is_celery_worker_process",
+                return_value=True,
+            ):
+                bootstrap_module._arm_celery_bootstrap_receivers()
+
+            # Then
+            for signal, uid_attr in self._SIGNALS:
+                assert _receiver_count(signal, getattr(bootstrap_hooks, uid_attr)) == 1
+        finally:
+            _reset_celery_configured()
+            disconnect_baldur_signals()
+
+    def test_disconnect_removes_all_four_receivers(self, receivers_disconnected):
+        connect_celery_bootstrap_receivers()
+
+        disconnect_celery_bootstrap_receivers()
+
+        assert is_celery_bootstrap_receivers_connected() is False
+        for signal, uid_attr in self._SIGNALS:
+            assert _receiver_count(signal, getattr(bootstrap_hooks, uid_attr)) == 0

@@ -918,3 +918,136 @@ class TestResetKafkaWithoutTheProducerPackageBehavior:
         ]
         assert len(matching) == 1
         assert matching[0]["log_level"] == "debug"
+
+
+class TestWorkerExitOutboxTeardownBehavior:
+    """``worker_exit`` tears the DLQ outbox down, on every exit lane.
+
+    A ``max_requests`` recycle initiates no shutdown at all, so the
+    coordinator's handler never runs and this hook is the only teardown the
+    outbox gets. Without it the buffered DLQ entries die with the daemon drain
+    thread, silently, on default config.
+    """
+
+    _TEARDOWN = "baldur.services.dlq_outbox.outbox.stop_outbox_for_shutdown"
+
+    def _result(self):
+        from baldur.services.dlq_outbox.outbox import OutboxShutdownResult
+
+        return OutboxShutdownResult(0, 0, 0, 0, 0, 0, 0)
+
+    def test_recycle_exit_tears_the_outbox_down(self):
+        """The lane with no drain window: nothing else in the process will do
+        this before the interpreter exits."""
+        from baldur.adapters.gunicorn.hooks import worker_exit
+        from baldur.core.shutdown_coordinator import (
+            ShutdownPhase,
+            get_shutdown_coordinator,
+        )
+
+        coordinator = get_shutdown_coordinator()  # fresh ⇒ phase RUNNING
+        assert coordinator.phase == ShutdownPhase.RUNNING
+
+        with (
+            patch.object(coordinator, "wait_for_shutdown", return_value=False),
+            patch(self._TEARDOWN, return_value=self._result()) as m_teardown,
+        ):
+            worker_exit(_arbiter(), _exiting_worker())
+
+        m_teardown.assert_called_once_with()
+
+    def test_recycle_exit_tears_the_outbox_down_before_flushing_audit(self):
+        """The outbox's final writes have to land while the audit WAL is still
+        open, which is an ordering claim and not a "both ran" claim."""
+        from baldur.adapters.gunicorn.hooks import worker_exit
+
+        order: list[str] = []
+
+        with (
+            patch(
+                self._TEARDOWN,
+                side_effect=lambda: order.append("outbox") or self._result(),
+            ),
+            patch(
+                "baldur.audit.async_audit_lifecycle.graceful_shutdown_audit_system",
+                side_effect=lambda: order.append("audit"),
+            ),
+        ):
+            worker_exit(_arbiter(), _exiting_worker())
+
+        assert order == ["outbox", "audit"]
+
+    def test_a_failing_teardown_does_not_cost_the_worker_its_audit_flush(self):
+        """Step isolation, same reasoning as the Django reset above it."""
+        from baldur.adapters.gunicorn.hooks import worker_exit
+
+        with (
+            patch(self._TEARDOWN, side_effect=RuntimeError("teardown blew up")),
+            patch(
+                "baldur.audit.async_audit_lifecycle.graceful_shutdown_audit_system"
+            ) as m_flush,
+            capture_logs() as cap_logs,
+        ):
+            worker_exit(_arbiter(), _exiting_worker())
+
+        m_flush.assert_called_once_with()
+        matching = [
+            e
+            for e in cap_logs
+            if e.get("event") == "dlq_outbox.worker_exit_teardown_failed"
+        ]
+        assert len(matching) == 1
+        assert matching[0]["log_level"] == "warning"
+
+    def test_the_master_side_invocation_does_not_tear_down_an_outbox(self):
+        """The teardown is process-global. Running it in the master would set
+        the producer-coercion flag in the supervising process, and every worker
+        forked afterwards would inherit an outbox it must not use."""
+        from baldur.adapters.gunicorn.hooks import worker_exit
+
+        with patch(self._TEARDOWN, return_value=self._result()) as m_teardown:
+            worker_exit(_arbiter(), _foreign_worker())
+
+        m_teardown.assert_not_called()
+
+    def test_recycle_exit_completed_marker_carries_the_process_role(self):
+        """One event name answers "did this worker's exit pipeline run to the
+        end" on any adapter; the role is what tells the adapters apart."""
+        from baldur.adapters.gunicorn.hooks import worker_exit
+
+        with (
+            patch(self._TEARDOWN, return_value=self._result()),
+            capture_logs() as cap_logs,
+        ):
+            worker_exit(_arbiter(), _exiting_worker())
+
+        matching = [
+            e for e in cap_logs if e.get("event") == "shutdown.worker_exit_completed"
+        ]
+        assert len(matching) == 1
+        assert matching[0]["process_role"] == "gunicorn_worker"
+
+    def test_recycle_exit_completed_is_still_the_only_shutdown_prefixed_event(self):
+        """**Negative** — this hook's ``shutdown.``-prefixed event list is an
+        operator-facing contract, and the teardown must not add to it. Every
+        line the outbox emits belongs in its own ``dlq_outbox.*`` namespace.
+        """
+        from baldur.adapters.gunicorn.hooks import worker_exit
+        from baldur.core.shutdown_coordinator import get_shutdown_coordinator
+
+        coordinator = get_shutdown_coordinator()  # fresh ⇒ phase RUNNING
+
+        with (
+            patch.object(coordinator, "wait_for_shutdown", return_value=False),
+            capture_logs() as cap_logs,
+        ):
+            # The REAL teardown runs here — a stubbed one could not surface a
+            # stray ``shutdown.*`` line from inside it.
+            worker_exit(_arbiter(), _exiting_worker())
+
+        shutdown_events = [
+            e["event"]
+            for e in cap_logs
+            if str(e.get("event", "")).startswith("shutdown.")
+        ]
+        assert shutdown_events == ["shutdown.worker_exit_completed"]
