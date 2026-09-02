@@ -252,17 +252,24 @@ def worker_exit(server: Any, worker: Any) -> None:
 
         # Terminal shutdown-complete signal, emitted last so it reports the
         # drain predicate the coordinator satisfies before handler teardown —
-        # the flush below may still be ahead of us. Whether an operator sees
-        # this line is a pure function of the configured level: init()
-        # configures logging as its first step, so every process that boots
-        # Baldur runs one pipeline from boot to exit, and an INFO marker is
-        # absent exactly when the configured level is above INFO. Absence is
-        # therefore never evidence that the drain did not run.
+        # the flush below may still be ahead of us. init() configures logging
+        # as its first step, so every process that boots Baldur runs one
+        # pipeline from boot to exit: the line can no longer go missing because
+        # of *when* the process first configured itself. It does still go
+        # missing whenever the configured level is above INFO, and on the
+        # recycle path below no drain branch runs at all — so a missing marker
+        # means "level, or nothing was ever initiated", never "the drain ran
+        # and failed".
         #
-        # ``aborted`` distinguishes the two drains that reach this branch: a
-        # clean drain reports 0, a drain the coordinator force-terminated
-        # reports the requests it abandoned (the forced path also reaches
-        # TERMINATED, so it satisfies the same predicate).
+        # ``aborted`` separates the two drains that reach this branch: a clean
+        # one reports 0, a force-terminated one reports what it abandoned (the
+        # forced path also reaches TERMINATED, so it satisfies the same
+        # predicate). The count is the request tracker's, so it separates them
+        # only where something feeds that tracker — without the Django
+        # request-tracking middleware, or when the force was caused by a
+        # handler that never drained rather than by pending requests, a forced
+        # drain reports 0 too and the coordinator's own drain-timeout WARNING
+        # is the discriminator.
         if drained:
             logger.info(
                 "shutdown.worker_drained",
