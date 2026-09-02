@@ -45,7 +45,7 @@ It deliberately does **not** run the shutdown coordinator's drain. A pool child 
 Runs when the worker itself stops, after the pool has stopped and the task blueprint has joined — so no task is running. This is the celery equivalent of the gunicorn `worker_exit` pipeline:
 
 1. **Initiate the coordinator drain** and wait for it, minus the reserve below.
-2. **`shutdown.worker_drained`** (INFO) or **`shutdown.worker_drain_incomplete`** (WARNING) — or neither, when nothing was ever initiated.
+2. **`shutdown.worker_drained`** (INFO) or **`shutdown.worker_drain_incomplete`** (WARNING) — or neither, when nothing was ever initiated. The drained line carries `aborted`, the count of tracked in-flight requests the drain gave up on. A celery worker tracks none — only the Django request-tracking middleware feeds that counter — so the field reads `0` on every celery drain and does not tell a converged one from a force-terminated one. What does is the coordinator's `shutdown.drain_timeout_reached` (WARNING), which survives the default log level that hides these INFO lines.
 3. **DLQ outbox teardown**, unconditionally.
 4. **Audit flush**, unconditionally.
 5. **`shutdown.worker_exit_completed`** (INFO) with `process_role="celery_worker_main"`.
