@@ -200,7 +200,15 @@ class TestAsyncCaptureFallbackComposition:
         # and the reason the fallback has to work from the worker thread.
         assert all(r.success for r in results)
         assert all(r.dlq_id is None for r in results)
-        assert drained == 3
+
+        # The drain is a barrier, not a completion count. ``flush_and_wait``
+        # returns the ``entries_written`` delta, and a store write that the
+        # local fallback rescued is a soft failure, not a write — so with the
+        # store down the barrier settles at zero and the soft-failed bucket is
+        # where the three entries are accounted. Reading the return value as
+        # "nothing was lost" is precisely the claim it cannot carry.
+        assert drained == 0
+        assert outbox_module.get_outbox().get_stats().entries_soft_failed == 3
 
         # Then: every entry is on disk in the fallback, none silently dropped.
         lines = fallback_path.read_text(encoding="utf-8").strip().splitlines()
