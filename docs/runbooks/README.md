@@ -29,6 +29,7 @@ audits that must be executable without reading the source code.
 | File | Purpose | Last verified |
 |------|---------|---------------|
 | [data-consistency-boundaries.md](data-consistency-boundaries.md) | DEGRADED-mode data trade-offs and per-data-kind placement decisions (which data belongs in Baldur vs an ACID DB), plus the request-path liveness axis — the fail-closed idempotency stall under total Redis loss and the `BALDUR_REDIS_RETRY_ON_TIMEOUT` stall-vs-fast-fail lever | 2026-05-01 |
+| [celery-graceful-shutdown.md](celery-graceful-shutdown.md) | What baldur runs when a celery worker or pool child stops, and how to size the platform stop window so it runs to the end (k8s default grants less than baldur needs) | 2026-09-02 |
 | [gunicorn-graceful-shutdown.md](gunicorn-graceful-shutdown.md) | Wire `GracefulShutdownCoordinator` into a gunicorn deployment — guarantees SIGTERM drain, WAL flush, lease release, and LB removal (pick one of two patterns) | 2026-05-03 |
 | [protect-hang-troubleshooting.md](protect-hang-troubleshooting.md) | Diagnose and resolve a suspected `protect()` zone hang (operator guide after the default timeout became None) | 2026-08-24 |
 | [dlq-two-layer-activation.md](dlq-two-layer-activation.md) | Two-layer activation to satisfy the "DLQ absorbs ALL failures" contract (view-level `@dlq_protect` + middleware-level `BALDUR_DLQ_ELIGIBLE_PATHS`). Enabling only one layer leaves a 10–22% gap under a failure storm | 2026-05-12 |

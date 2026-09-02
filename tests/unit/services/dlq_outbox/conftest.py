@@ -33,6 +33,10 @@ def _reset_outbox_module_state():
         outbox_module._outbox_origin_pid = None
         outbox_module._worker_dead = False
         outbox_module._worker_dead_coercions = 0
+        # The teardown caches its terminal result so repeat callers are
+        # no-ops; left behind, the next test's teardown returns this test's
+        # counts without draining anything.
+        outbox_module._shutdown_result = None
 
     _clear()
     yield

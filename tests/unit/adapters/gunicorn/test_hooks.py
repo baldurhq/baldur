@@ -85,6 +85,34 @@ def _worker_with_preload(preload_app: bool | None) -> SimpleNamespace:
 
 
 @pytest.fixture(autouse=True)
+def _reset_dlq_outbox_module_state():
+    """Undo the outbox teardown the real ``worker_exit`` hook performs.
+
+    The hook's teardown is process-global: it sets the producer-coercion flag
+    and caches its terminal result so repeat callers are no-ops. Left behind,
+    every later test in this worker dispatches DLQ captures synchronously and
+    any teardown they run returns this file's cached counts.
+    """
+    from baldur.services.dlq_outbox import outbox as outbox_module
+
+    def _clear() -> None:
+        if outbox_module._outbox is not None:
+            try:
+                outbox_module._outbox.stop(timeout=1.0)
+            except Exception:
+                pass
+            outbox_module._outbox = None
+        outbox_module._outbox_origin_pid = None
+        outbox_module._worker_dead = False
+        outbox_module._worker_dead_coercions = 0
+        outbox_module._shutdown_result = None
+
+    _clear()
+    yield
+    _clear()
+
+
+@pytest.fixture(autouse=True)
 def _isolated_gunicorn_env(monkeypatch):
     """Ensure ``GUNICORN_WORKER`` does not leak across tests."""
     monkeypatch.delenv("GUNICORN_WORKER", raising=False)

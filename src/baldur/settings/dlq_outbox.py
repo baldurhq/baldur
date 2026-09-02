@@ -73,7 +73,16 @@ class DLQOutboxSettings(BaseSettings):
         default=5.0,
         ge=0.1,
         le=60.0,
-        description="Worker thread join timeout during graceful shutdown / flush_and_wait.",
+        description=(
+            "Total teardown budget, in seconds, for the outbox shutdown "
+            "sequence: the optimistic flush, the writer-thread join, and the "
+            "emergency dump of whatever is left. Split with floors so the dump "
+            "is never starved by the phases ahead of it, and it is the only "
+            "bound on exit paths that have no drain window at all (a gunicorn "
+            "max_requests recycle, a celery maxtasksperchild recycle). Size it "
+            "below the process watchdog that will kill the worker anyway "
+            "(gunicorn --timeout, Kubernetes terminationGracePeriodSeconds)."
+        ),
     )
     durable: bool = Field(
         default=False,

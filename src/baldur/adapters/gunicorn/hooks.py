@@ -49,11 +49,14 @@ Hook responsibilities
     Waits for the coordinator drain thread to complete, emits a reliable
     shutdown-complete log from the worker's main process (the coordinator's
     own terminal logs run in a signal frame or a daemon thread and can be
-    dropped/killed), resets the Django background-thread start guards, and
-    flushes the audit system — unconditionally, so a non-signal exit
-    (``max_requests`` recycle, ``--reload``) still closes the WAL and saves
-    a checkpoint. ``shutdown.worker_exit_completed`` is the terminal marker:
-    it is emitted exactly when the pipeline ran to the end.
+    dropped/killed), resets the Django background-thread start guards, tears
+    the DLQ outbox down and flushes the audit system — the last two
+    unconditionally, so a non-signal exit (``max_requests`` recycle,
+    ``--reload``) still spills the buffered DLQ entries, closes the WAL and
+    saves a checkpoint. ``shutdown.worker_exit_completed`` is the terminal
+    marker: it is emitted exactly when the pipeline ran to the end, and
+    carries ``process_role`` so the same event name answers that question on
+    every adapter.
     The drain wait reads ``recovery_shutdown_settings``
     (``default_drain_timeout_seconds``, 30 s by default). Size gunicorn's
     ``--graceful-timeout`` ``>=`` that value (otherwise gunicorn SIGKILLs
@@ -290,6 +293,27 @@ def worker_exit(server: Any, worker: Any) -> None:
             error=exc,
         )
 
+    # Unconditional for the same reason as the audit flush below, and ahead
+    # of it so the outbox's final writes land while the WAL is still open. On
+    # the SIGTERM path the coordinator's handler already ran this and the
+    # once-guard makes it a no-op; on a max_requests / --reload recycle it is
+    # the only teardown the outbox gets, and the buffered DLQ entries would
+    # otherwise die with the daemon drain thread.
+    #
+    # Every log line it emits is in the module's own ``dlq_outbox.*``
+    # namespace, never ``shutdown.*``: this hook's shutdown-event list is an
+    # operator-facing contract.
+    try:
+        from baldur.services.dlq_outbox.outbox import stop_outbox_for_shutdown
+
+        stop_outbox_for_shutdown()
+    except Exception as exc:
+        logger.warning(
+            "dlq_outbox.worker_exit_teardown_failed",
+            worker_id=worker_id,
+            error=exc,
+        )
+
     # Unconditional: on the SIGTERM path the coordinator's handler already
     # ran this and the once-guard makes it a no-op, but on a recycle exit
     # this is the only WAL flush / checkpoint save the worker gets.
@@ -304,7 +328,14 @@ def worker_exit(server: Any, worker: Any) -> None:
             error=exc,
         )
 
-    logger.info("shutdown.worker_exit_completed", worker_id=worker_id)
+    # ``process_role`` distinguishes this from the celery receivers, which
+    # emit the same terminal marker: one event name answers "did this worker's
+    # exit pipeline run to the end" on any adapter.
+    logger.info(
+        "shutdown.worker_exit_completed",
+        worker_id=worker_id,
+        process_role="gunicorn_worker",
+    )
 
 
 def _log_worker_exit_skipped(worker_id: Any) -> None:

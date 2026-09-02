@@ -1069,6 +1069,27 @@ def _register_shutdown_handlers() -> None:  # noqa: C901, PLR0912, PLR0915
                     error=exc,
                 )
 
+        # DLQ outbox teardown. Registered directly rather than through the
+        # factory list above so its position is pinned: handlers' teardown hooks
+        # run in registration order, and this one must run after every other
+        # subsystem's (so nothing is still producing DLQ entries) and before the
+        # audit flush below (so the outbox's final writes land while the WAL is
+        # still open).
+        try:
+            from baldur.services.dlq_outbox.shutdown import (
+                integrate_with_shutdown_coordinator as dlq_outbox_integrate,
+            )
+
+            dlq_outbox_handler = dlq_outbox_integrate()
+            if dlq_outbox_handler:
+                coordinator.register_handler(dlq_outbox_handler)
+        except Exception as exc:
+            logger.debug(
+                "baldur.shutdown_handler_registration_failed",
+                handler="DLQOutboxShutdownHandler",
+                error=exc,
+            )
+
         # AuditShutdownHandler
         try:
             from baldur.audit.shutdown_handler import AuditShutdownHandler
