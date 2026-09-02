@@ -147,6 +147,66 @@ class TestCollectAllSingleSnapshot:
         collection_env.dlq.set_pending_count.assert_not_called()
         assert _heartbeats() == before
 
+    def test_armed_gauge_refresh_runs_after_the_heartbeat_decision(
+        self, collection_env, repository
+    ):
+        """Ordering, not just presence.
+
+        The arming probe pays a bounded broker round-trip, so it runs after the
+        heartbeat has been decided — otherwise a slow or wedged broker could
+        withhold a heartbeat this tick had already earned.
+        """
+        before = _heartbeats()
+        seen: list[float] = []
+
+        with patch(
+            "baldur.services.replay_service.arming.refresh_armed_gauge",
+            side_effect=lambda: seen.append(_heartbeats()),
+        ):
+            collect_all_metrics()
+
+        assert seen == [before + 1]
+
+    def test_armed_gauge_is_refreshed_on_a_snapshot_failed_tick_too(
+        self, collection_env, repository
+    ):
+        """The gauge tracks a configuration, not a backlog.
+
+        A tick that wrote no DLQ family at all still has to move the arming
+        verdict: a broker that died while the repository is also down must stop
+        the surface reading armed.
+        """
+        repository.get_statistics.side_effect = RuntimeError("backend down")
+        calls: list[int] = []
+
+        with patch(
+            "baldur.services.replay_service.arming.refresh_armed_gauge",
+            side_effect=lambda: calls.append(1),
+        ):
+            collect_all_metrics()
+
+        assert calls == [1]
+
+    def test_a_failing_arming_evaluation_does_not_withhold_the_heartbeat(
+        self, collection_env, repository
+    ):
+        """The refresh contains its own faults, so it cannot end the tick chain.
+
+        A failed evaluation publishes 0 rather than leaving a previous 1 in
+        place — a stale positive is the one claim this gauge must never make.
+        """
+        before = _heartbeats()
+
+        with patch(
+            "baldur.services.replay_service.arming._evaluate",
+            side_effect=RuntimeError("probe boom"),
+        ):
+            report = collect_all_metrics()
+
+        assert report["dlq_by_status"]["pending"] == 3
+        assert _heartbeats() == before + 1
+        collection_env.dlq.set_auto_replay_armed.assert_called_once_with(False)
+
 
 class TestCollectAllHeartbeatGate:
     """The dead-man's switch follows the paged family, not the diagnostic one."""
