@@ -84,6 +84,36 @@ def _worker_with_preload(preload_app: bool | None) -> SimpleNamespace:
     return SimpleNamespace(pid=os.getpid(), cfg=cfg)
 
 
+def _coordinator_after_a_real_drain(pending: int):
+    """Install a singleton coordinator that has already finished one drain.
+
+    ``pending`` requests are started and never completed, so a non-zero count
+    makes the drain run out its timeout and force-abort them. Both drains end
+    in TERMINATED — which is precisely why ``worker_exit`` cannot tell them
+    apart from the drain predicate alone, and why the terminal marker has to
+    carry the abandoned count itself.
+    """
+    from baldur.core.shutdown_coordinator import (
+        GracefulShutdownCoordinator,
+        RequestTracker,
+        configure_shutdown_coordinator,
+    )
+
+    tracker = RequestTracker()
+    for i in range(pending):
+        tracker.start_request(f"never_completes_{i}")
+
+    coordinator = GracefulShutdownCoordinator(
+        request_tracker=tracker,
+        drain_timeout=0.2,
+        check_interval=0.01,
+    )
+    coordinator.initiate_shutdown()
+    assert coordinator.wait_for_shutdown(timeout=5.0)
+    configure_shutdown_coordinator(coordinator)
+    return coordinator
+
+
 @pytest.fixture(autouse=True)
 def _reset_dlq_outbox_module_state():
     """Undo the outbox teardown the real ``worker_exit`` hook performs.
@@ -591,6 +621,74 @@ class TestWorkerExitPipelineBehavior:
         matching = [e for e in cap_logs if e.get("event") == "shutdown.worker_drained"]
         assert len(matching) == 1
         assert matching[0]["log_level"] == "info"
+
+    @pytest.mark.parametrize(
+        ("pending_at_drain", "expected_aborted"),
+        [(0, 0), (2, 2)],
+        ids=["clean_drain", "force_aborted_drain"],
+    )
+    def test_drained_marker_reports_the_requests_the_drain_abandoned(
+        self, pending_at_drain, expected_aborted
+    ):
+        """A drain the coordinator cut short at its timeout reaches TERMINATED
+        too, so it satisfies the same ``wait_for_shutdown()`` predicate and
+        emits the same event name as a drain that finished. Without the count
+        of what it abandoned the two lines are identical, and an operator
+        cannot answer "did anything get dropped" from the terminal marker."""
+        from baldur.adapters.gunicorn.hooks import worker_exit
+        from baldur.core.shutdown_coordinator import ShutdownPhase
+
+        # Given — one real drain of each kind, both ended in the same phase
+        coordinator = _coordinator_after_a_real_drain(pending_at_drain)
+        assert coordinator.phase is ShutdownPhase.TERMINATED
+
+        # When
+        with capture_logs() as cap_logs:
+            worker_exit(_arbiter(), _exiting_worker())
+
+        # Then
+        matching = [e for e in cap_logs if e.get("event") == "shutdown.worker_drained"]
+        assert len(matching) == 1
+        assert matching[0]["aborted"] == expected_aborted
+
+    def test_a_failing_stats_read_replaces_the_marker_with_its_warning(self):
+        """The abandoned-count read sits inside the drain try-block, so a
+        coordinator whose stats read raises loses the terminal INFO marker
+        rather than emitting it without the field.
+
+        Pinned rather than guarded: the line that replaces it is
+        ``shutdown.drain_wait_failed`` at WARNING, which survives the default
+        level floor the INFO marker does not, so the failure is loud rather
+        than silent — and the completion marker still reports that the exit
+        pipeline ran to its end."""
+        from baldur.adapters.gunicorn.hooks import worker_exit
+        from baldur.core.shutdown_coordinator import get_shutdown_coordinator
+
+        coordinator = get_shutdown_coordinator()
+        with (
+            patch.object(coordinator, "wait_for_shutdown", return_value=True),
+            patch.object(
+                coordinator,
+                "get_stats",
+                side_effect=RuntimeError("stats read blew up"),
+            ),
+            capture_logs() as cap_logs,
+        ):
+            worker_exit(_arbiter(), _exiting_worker())
+
+        shutdown_events = [
+            e["event"]
+            for e in cap_logs
+            if str(e.get("event", "")).startswith("shutdown.")
+        ]
+        assert "shutdown.worker_drained" not in shutdown_events
+        assert "shutdown.worker_exit_completed" in shutdown_events
+
+        failures = [
+            e for e in cap_logs if e.get("event") == "shutdown.drain_wait_failed"
+        ]
+        assert len(failures) == 1
+        assert failures[0]["log_level"] == "warning"
 
     def test_logs_drain_incomplete_when_initiated_but_not_terminated(self):
         """Shutdown initiated but drain did not reach TERMINATED within the

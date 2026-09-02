@@ -788,19 +788,32 @@ def _shutdown_result(**overrides):
     return OutboxShutdownResult(**fields)
 
 
-def _coordinator_stub(*, drained: bool, phase):
+def _coordinator_stub(*, drained: bool, phase, aborted: int = 0):
     """A shutdown coordinator double with the surface the receiver reads.
 
     A real coordinator would start an actual drain thread; what the receiver
     contributes is the call it makes and the branch it takes on the answer.
     Spec-bound, so a renamed coordinator method fails here instead of silently
-    recording a call nothing makes any more.
+    recording a call nothing makes any more — and the stats read answers with
+    a real ``ShutdownStats`` for the same reason.
     """
-    from baldur.core.shutdown_coordinator import GracefulShutdownCoordinator
+    from baldur.core.shutdown_coordinator import (
+        GracefulShutdownCoordinator,
+        ShutdownStats,
+    )
 
     stub = MagicMock(spec=GracefulShutdownCoordinator)
     stub.wait_for_shutdown.return_value = drained
     stub.phase = phase
+    stub.get_stats.return_value = ShutdownStats(
+        phase=phase,
+        shutdown_started_at=None,
+        in_flight_count=0,
+        completed_during_drain=0,
+        aborted_count=aborted,
+        drain_timeout_seconds=30.0,
+        remaining_drain_time=None,
+    )
     return stub
 
 
@@ -875,6 +888,38 @@ class TestCeleryWorkerShutdownBehavior:
             in ("shutdown.worker_drained", "shutdown.worker_drain_incomplete")
         ]
         assert drain_events == ([expected_event] if expected_event else [])
+
+    @pytest.mark.parametrize(
+        "aborted",
+        [0, 3],
+        ids=["clean_drain", "force_aborted_drain"],
+    )
+    def test_worker_shutdown_drained_marker_reports_the_abandoned_count(self, aborted):
+        """The forced path reaches TERMINATED here too, so both drains take
+        this same branch and emit this same event name. Carrying the abandoned
+        count is what keeps one schema behind that one name across adapters —
+        an operator reading ``shutdown.worker_drained`` gets the same answer
+        whether the worker was a celery one or a gunicorn one."""
+        # Given
+        from baldur.core.shutdown_coordinator import ShutdownPhase
+
+        coordinator = _coordinator_stub(
+            drained=True, phase=ShutdownPhase.TERMINATED, aborted=aborted
+        )
+
+        # When
+        with (
+            patch(_COORDINATOR, return_value=coordinator),
+            patch(_TEARDOWN, return_value=_shutdown_result()),
+            patch(_AUDIT_FLUSH),
+            capture_logs() as cap_logs,
+        ):
+            _on_worker_shutdown()
+
+        # Then
+        matching = [e for e in cap_logs if e.get("event") == "shutdown.worker_drained"]
+        assert len(matching) == 1
+        assert matching[0]["aborted"] == aborted
 
     def test_worker_shutdown_terminal_log_is_emitted_once_with_the_process_role(self):
         """One event name answers "did this process's exit pipeline run to the
