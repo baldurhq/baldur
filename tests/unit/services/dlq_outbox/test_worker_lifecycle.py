@@ -1125,9 +1125,15 @@ class TestDLQOutboxWorkerPendingBatchRescueBehavior:
         # When
         worker.repair_after_fork()
 
-        # Then
-        assert worker._pending_batch == []
-        assert worker._pending_index == 0
+        try:
+            # Then
+            assert worker._pending_batch == []
+            assert worker._pending_index == 0
+        finally:
+            # The repair spawns a live drainer. Left running, it outlives this
+            # test and a later global thread scan attributes it to whatever
+            # test is running then.
+            worker.stop(timeout=1.0)
 
 
 class TestDLQOutboxWorkerWriterResultBucketBehavior:
@@ -1285,6 +1291,10 @@ class TestDLQOutboxWorkerShutdownStatsContract:
         # When
         worker.repair_after_fork()
 
-        # Then
-        assert worker.entries_soft_failed == 0
-        assert worker.entries_shutdown_residual == 0
+        try:
+            # Then
+            assert worker.entries_soft_failed == 0
+            assert worker.entries_shutdown_residual == 0
+        finally:
+            # The repair spawns a live drainer; stop it rather than strand it.
+            worker.stop(timeout=1.0)

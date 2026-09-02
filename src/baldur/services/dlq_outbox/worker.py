@@ -258,6 +258,7 @@ class DLQOutboxWorker:
         buckets and a subtracted residual would go negative on exactly the
         path the terminal report has to survive.
         """
+        # verified-by: test_the_entry_being_attempted_is_dumped_as_well_as_written
         return self._entries_shutdown_residual
 
     @property

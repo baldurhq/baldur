@@ -75,6 +75,7 @@ class OutboxStats:
 
 
 @dataclass(frozen=True)
+# verified-by: test_conservation_reports_a_dumped_and_written_entry_as_duplicated
 class OutboxShutdownResult:
     """Terminal report of one ``stop_outbox_for_shutdown()`` call.
 
