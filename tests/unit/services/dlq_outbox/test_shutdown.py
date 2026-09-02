@@ -222,10 +222,25 @@ class TestDLQOutboxShutdownHandlerBehavior:
     def test_a_raising_teardown_does_not_escape_into_the_coordinator(self):
         """Handler hooks run inside the coordinator's drain thread; a raise
         here would be attributed to the shutdown chain, not to the outbox."""
-        with patch(_TEARDOWN, side_effect=RuntimeError("teardown blew up")):
+        from structlog.testing import capture_logs
+
+        with (
+            patch(_TEARDOWN, side_effect=RuntimeError("teardown blew up")),
+            capture_logs() as cap_logs,
+        ):
             # Contract is "does not raise" — the outbox is a side-effect
             # subsystem and may not take the shutdown down with it.
             DLQOutboxShutdownHandler().on_force_shutdown([])
+
+        # The fault fired and was handled, not skipped: the fail-open arm's
+        # own log line is the witness that distinguishes the two.
+        failed = [
+            e
+            for e in cap_logs
+            if e.get("event") == "dlq_outbox_shutdown.teardown_failed"
+        ]
+        assert len(failed) == 1
+        assert failed[0]["log_level"] == "warning"
 
     def test_integrate_returns_a_handler_for_the_bootstrap_to_register(self):
         handler = integrate_with_shutdown_coordinator()

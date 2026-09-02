@@ -46,7 +46,10 @@ and each has to be both started and stopped:
     routine operation that must not pay a full coordinator drain.
 
 No receiver is connected to ``worker_shutting_down`` and none installs an OS
-signal handler. ``worker_shutting_down`` fires while tasks are still executing
+signal handler of its own. (``baldur.init()``, which ``worker_init`` runs, does
+register the coordinator's SIGTERM/SIGINT handlers in the worker main; celery's
+``install_platform_tweaks`` overwrites them before the worker serves, so they
+never take part in a real stop.) ``worker_shutting_down`` fires while tasks are still executing
 and from inside celery's signal-handler frame; initiating the drain there would
 close the audit WAL and stop the outbox underneath running tasks — a worse loss
 than the one the stop side exists to prevent. Celery reaches ``worker_shutdown``

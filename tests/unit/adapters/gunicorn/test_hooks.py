@@ -106,6 +106,7 @@ def _reset_dlq_outbox_module_state():
         outbox_module._worker_dead = False
         outbox_module._worker_dead_coercions = 0
         outbox_module._shutdown_result = None
+        outbox_module._teardown_started = False
 
     _clear()
     yield

@@ -132,6 +132,13 @@ _worker_dead: bool = False
 _worker_dead_lock = threading.Lock()
 _worker_dead_coercions: int = 0
 _DLQ_OUTBOX_WORKER_NAME = "DLQOutboxWorker"
+# Set by the process teardown alongside ``_worker_dead`` and never cleared for
+# the life of the process. The RESPAWNED subscriber consults it: the probe can
+# respawn a drainer that died *during* the teardown's optimistic flush phase
+# (the stopping mark is only set later, inside ``worker.stop()``), and letting
+# that respawn clear the coercion would route later captures back into a ring
+# whose drainer is being joined and whose dump is about to run.
+_teardown_started: bool = False
 
 # Teardown once-guard. Deliberately NOT ``_outbox_lock``: that is the
 # singleton-construction lock, and holding it across a blocking teardown would
@@ -350,6 +357,7 @@ def _repair_if_forked() -> None:
     """
     global _outbox_lock, _outbox_origin_pid
     global _worker_dead, _worker_dead_lock, _worker_dead_coercions
+    global _teardown_started
 
     origin = _outbox_origin_pid
     if origin is None or origin == os.getpid():
@@ -364,6 +372,7 @@ def _repair_if_forked() -> None:
         _worker_dead_lock = threading.Lock()
         _worker_dead = False
         _worker_dead_coercions = 0
+        _teardown_started = False
 
         inherited = _outbox
         _outbox_origin_pid = os.getpid()
@@ -447,12 +456,20 @@ def _on_daemon_worker_died(event: Any) -> None:
 
 
 def _on_daemon_worker_respawned(event: Any) -> None:
-    """Clear the producer fail-open flag on successful DLQOutboxWorker respawn."""
+    """Clear the producer fail-open flag on successful DLQOutboxWorker respawn.
+
+    Not once the process teardown has begun: a drainer respawned into a
+    teardown is one the teardown is about to join and dump, and clearing the
+    coercion would hand later captures to a buffer nothing will read again.
+    """
     global _worker_dead
     data = getattr(event, "data", None) or {}
     if data.get("worker_name") != _DLQ_OUTBOX_WORKER_NAME:
         return
     with _worker_dead_lock:
+        if _teardown_started:
+            logger.debug("dlq_outbox.respawn_coercion_clear_skipped_teardown")
+            return
         _worker_dead = False
 
 
@@ -464,7 +481,7 @@ def reset_dlq_outbox() -> int:
     surface in the next test's worker.
     """
     global _outbox, _outbox_origin_pid, _worker_dead, _worker_dead_coercions
-    global _shutdown_result
+    global _shutdown_result, _teardown_started
 
     # The teardown's cached result describes an outbox this call is discarding.
     # Kept, the next process-lifetime teardown would return the previous one's
@@ -477,6 +494,7 @@ def reset_dlq_outbox() -> int:
             with _worker_dead_lock:
                 _worker_dead = False
                 _worker_dead_coercions = 0
+                _teardown_started = False
             return 0
         # Best-effort: give the worker a short window to drain before stop.
         try:
@@ -490,6 +508,7 @@ def reset_dlq_outbox() -> int:
     with _worker_dead_lock:
         _worker_dead = False
         _worker_dead_coercions = 0
+        _teardown_started = False
     return remaining
 
 
@@ -537,7 +556,7 @@ def stop_outbox_for_shutdown(timeout: float | None = None) -> OutboxShutdownResu
         delta that silently omits failed entries, and no completion claim may
         rest on it.
     """
-    global _shutdown_result, _worker_dead
+    global _shutdown_result, _worker_dead, _teardown_started
 
     with _shutdown_gate:
         if _shutdown_result is not None:
@@ -554,6 +573,7 @@ def stop_outbox_for_shutdown(timeout: float | None = None) -> OutboxShutdownResu
         #    buffer.
         with _worker_dead_lock:
             _worker_dead = True
+            _teardown_started = True
 
         outbox = _outbox
         if outbox is None:
@@ -602,6 +622,19 @@ def stop_outbox_for_shutdown(timeout: float | None = None) -> OutboxShutdownResu
 
         after = outbox.get_stats()
         pending_at_entry = before.size + before.in_flight
+        # A producer that passed the coercion check before the flag flipped can
+        # still ``put`` into a full ring during the teardown; DROP_OLDEST then
+        # evicts an entry that was pending at entry and is in no bucket below
+        # (the newcomer takes its slot, so the relation still balances). The
+        # drainer that would normally observe the drop window may be dead, so
+        # this is the only place the substitution can be reported.
+        dropped_during_teardown = max(0, after.total_dropped - before.total_dropped)
+        if dropped_during_teardown:
+            logger.warning(
+                "dlq_outbox.teardown_drops_observed",
+                dropped=dropped_during_teardown,
+                pending_at_entry=pending_at_entry,
+            )
         dispatched = max(0, after.entries_written - before.entries_written)
         soft_failed = max(0, after.entries_soft_failed - before.entries_soft_failed)
         failed = max(0, after.entries_failed - before.entries_failed)

@@ -250,7 +250,7 @@ class TestOutboxFromSettingsContract:
             captured_writer = lambda kwargs: None  # noqa: E731
             outbox = Outbox.from_settings(
                 sync_writer=captured_writer,
-                emergency_dump=lambda batch: None,
+                emergency_dump=lambda batch, deadline=None: 0,
             )
 
         try:
@@ -714,6 +714,144 @@ class TestStopOutboxForShutdownBehavior:
         # Then
         assert outbox_module._shutdown_result is None
         assert stop_outbox_for_shutdown().emergency_dumped == 0
+
+
+class TestStopOutboxForShutdownLateProducerBehavior:
+    """Two ways a producer can reach the ring after the teardown began.
+
+    The coercion flag closes the window for every producer that reads it after
+    step 1. These cover the two paths a producer (or the watchdog on its
+    behalf) can still get past it, surfaced by the adversarial pass at
+    ``/verify``.
+    """
+
+    def test_respawn_event_does_not_clear_the_coercion_once_the_teardown_began(
+        self, build_outbox, make_sync_writer, collected_writes
+    ):
+        """The probe can respawn a drainer that died during the optimistic
+        flush — the stopping mark is only set later, inside ``stop()`` — and
+        its RESPAWNED event used to flip the flag back. A capture after that
+        would be parked in a ring whose drainer is being joined."""
+        from types import SimpleNamespace
+
+        # Given — a teardown that has run
+        outbox, _, worker = build_outbox(make_sync_writer(collected_writes))
+        worker._is_running = True
+        _install_outbox(outbox)
+        with patch.object(outbox, "stop", return_value=0):
+            stop_outbox_for_shutdown()
+        assert outbox_module._worker_dead is True
+
+        # When — the watchdog reports a respawn of this worker
+        outbox_module._on_daemon_worker_respawned(
+            SimpleNamespace(data={"worker_name": "DLQOutboxWorker"})
+        )
+
+        # Then — the coercion holds for the rest of the process
+        assert outbox_module._worker_dead is True
+
+    def test_respawn_event_still_clears_the_coercion_before_any_teardown(
+        self, build_outbox, make_sync_writer, collected_writes
+    ):
+        """Negative control: the steady-state respawn path is unchanged."""
+        from types import SimpleNamespace
+
+        outbox_module._worker_dead = True
+
+        outbox_module._on_daemon_worker_respawned(
+            SimpleNamespace(data={"worker_name": "DLQOutboxWorker"})
+        )
+
+        assert outbox_module._worker_dead is False
+
+    def test_reset_re_arms_the_respawn_path_for_the_next_lifetime(
+        self, build_outbox, make_sync_writer, collected_writes
+    ):
+        """The teardown mark is process-lifetime state; the test-isolation
+        reset must clear it or every later test's respawn path is inert."""
+        from types import SimpleNamespace
+
+        stop_outbox_for_shutdown()
+        assert outbox_module._teardown_started is True
+
+        reset_dlq_outbox()
+        outbox_module._worker_dead = True
+        outbox_module._on_daemon_worker_respawned(
+            SimpleNamespace(data={"worker_name": "DLQOutboxWorker"})
+        )
+
+        assert outbox_module._teardown_started is False
+        assert outbox_module._worker_dead is False
+
+    def test_a_put_that_evicts_a_pending_entry_during_the_teardown_is_reported(
+        self, build_outbox, make_sync_writer, collected_writes
+    ):
+        """A producer that passed the coercion check before the flag flipped
+        can still land a ``put`` in a full ring. DROP_OLDEST then evicts an
+        entry that was pending at entry, the newcomer takes its slot, and the
+        seven buckets balance exactly as if nothing happened — so the only
+        honest witness is a line naming the drop."""
+        from structlog.testing import capture_logs
+
+        # Given — a full ring and a dead drainer
+        outbox, buffer, worker = build_outbox(
+            make_sync_writer(collected_writes),
+            capacity=3,
+            on_emergency_dump=lambda batch, deadline=None: len(batch),
+        )
+        worker._is_running = True
+        for i in range(3):
+            buffer.put(_entry(f"E{i}"))
+        _install_outbox(outbox)
+        original_stop = outbox.stop
+
+        def _racing_stop(timeout=5.0, dump_deadline=None):
+            # The late producer's put lands before the ring is drained.
+            buffer.put(_entry("LATE"))
+            return original_stop(timeout=timeout, dump_deadline=dump_deadline)
+
+        # When
+        with (
+            patch.object(outbox, "stop", side_effect=_racing_stop),
+            capture_logs() as cap_logs,
+        ):
+            result = stop_outbox_for_shutdown()
+
+        # Then — the buckets balance (E0 was substituted, not counted) and the
+        # substitution is named
+        assert result.pending_at_entry == 3
+        assert result.emergency_dumped == 3
+        drops = [
+            e
+            for e in cap_logs
+            if e.get("event") == "dlq_outbox.teardown_drops_observed"
+        ]
+        assert len(drops) == 1
+        assert drops[0]["log_level"] == "warning"
+        assert drops[0]["dropped"] == 1
+
+    def test_no_drop_line_when_nothing_was_evicted_during_the_teardown(
+        self, build_outbox, make_sync_writer, collected_writes
+    ):
+        """Negative control for the warning above."""
+        from structlog.testing import capture_logs
+
+        outbox, buffer, worker = build_outbox(
+            make_sync_writer(collected_writes),
+            on_emergency_dump=lambda batch, deadline=None: len(batch),
+        )
+        worker._is_running = True
+        buffer.put(_entry("E0"))
+        _install_outbox(outbox)
+
+        with capture_logs() as cap_logs:
+            stop_outbox_for_shutdown()
+
+        assert not [
+            e
+            for e in cap_logs
+            if e.get("event") == "dlq_outbox.teardown_drops_observed"
+        ]
 
 
 class TestStopOutboxForShutdownConservationBehavior:

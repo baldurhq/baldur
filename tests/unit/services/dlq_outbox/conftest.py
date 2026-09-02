@@ -37,6 +37,7 @@ def _reset_outbox_module_state():
         # no-ops; left behind, the next test's teardown returns this test's
         # counts without draining anything.
         outbox_module._shutdown_result = None
+        outbox_module._teardown_started = False
 
     _clear()
     yield
