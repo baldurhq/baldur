@@ -49,19 +49,69 @@ class OutboxStats:
     total_dropped: int
     drop_rate: float
     entries_written: int
+    # Entries the DLQ store rejected but the local fallback preserved. Neither
+    # written nor lost: ``store_failure`` absorbs the repository error and
+    # returns, so without this bucket a store outage reads as a clean write.
+    entries_soft_failed: int
     entries_failed: int
     consecutive_failures: int
     worker_alive: bool
     worker_dead_coercions: int
     # D6 — entries popped from the buffer but not yet written/failed.
     in_flight: int
-    # Entries removed via the shutdown emergency-dump path (stop() timeout).
-    # Together with in_flight this closes the conservation invariant
-    # continuously — across normal operation AND shutdown — so a monitor never
-    # sees a phantom shortfall after a graceful-shutdown dump:
-    # total_enqueued == entries_written + entries_failed + total_dropped
-    #                   + size + in_flight + entries_emergency_dumped
+    # Entries the shutdown emergency dump reported having written (stop()
+    # timeout). Together with in_flight this keeps the conservation relation
+    # closed across normal operation AND shutdown, so a monitor never sees a
+    # phantom shortfall after a graceful-shutdown dump. The relation is a
+    # BOUND, not an equality:
+    #   entries_written + entries_soft_failed + entries_failed + total_dropped
+    #       + size + in_flight + entries_emergency_dumped
+    #       == total_enqueued + <duplicated>
+    # The shutdown rescue is deliberately at-least-once — the entry the writer
+    # is attempting when the teardown lands is handed to the dump as well as
+    # written — so an entry can be enqueued once and counted twice. A strict
+    # equality is false by construction on exactly the path that matters.
     entries_emergency_dumped: int
+
+
+@dataclass(frozen=True)
+class OutboxShutdownResult:
+    """Terminal report of one ``stop_outbox_for_shutdown()`` call.
+
+    Every entry the outbox still owned when the teardown began ends up in
+    exactly one bucket, except where the rescue deliberately double-counts:
+
+        dispatched + soft_failed + failed + emergency_dumped + residual
+            == pending_at_entry + duplicated
+
+    ``duplicated`` is the overlap the design puts there on purpose. The dump is
+    at-least-once: the entry the writer is attempting when the teardown lands is
+    handed to the dump as well, so a write that then succeeds is counted twice.
+    Reporting the overlap is what keeps ``residual`` from going negative — and a
+    negative or unexplained residual is precisely the defect this bucket exists
+    to prevent.
+    """
+
+    #: ``size + in_flight`` at teardown entry. An entry the writer had already
+    #: popped is pending exactly as much as one still on the ring.
+    pending_at_entry: int
+    #: Handed to the DLQ store without raising. NOT "stored": the store path
+    #: absorbs repository errors and returns, which is what the two buckets
+    #: below separate out.
+    dispatched: int
+    #: Store write failed, local fallback preserved the entry. Degraded, kept.
+    soft_failed: int
+    #: Reached no store at all — a hard raise, or a local fallback that failed
+    #: too. This bucket means lost.
+    failed: int
+    #: Written by the shutdown emergency dump.
+    emergency_dumped: int
+    #: Handed to the dump and not written by it: a blown dump deadline, a
+    #: raising callback, an unresolvable backing. These die with the process.
+    #: The dump's own count, never a subtraction of the buckets above.
+    residual: int
+    #: Entries counted in two buckets by design (see the class docstring).
+    duplicated: int
 
 
 # Module-level singleton state. The lifecycle is owned by ``baldur.init()``
@@ -82,6 +132,27 @@ _worker_dead: bool = False
 _worker_dead_lock = threading.Lock()
 _worker_dead_coercions: int = 0
 _DLQ_OUTBOX_WORKER_NAME = "DLQOutboxWorker"
+
+# Teardown once-guard. Deliberately NOT ``_outbox_lock``: that is the
+# singleton-construction lock, and holding it across a blocking teardown would
+# put a first-time ``get_outbox()`` build, a ``setup_dlq_outbox()`` re-entry and
+# ``reset_dlq_outbox()`` behind the whole drain. A second caller blocks here and
+# receives the first caller's cached result, because that result is the terminal
+# report an exit hook logs — "ran nothing" would report zeros over a real drain.
+_shutdown_gate = threading.Lock()
+_shutdown_result: OutboxShutdownResult | None = None
+
+# Floors carved out of the teardown budget. The dump is the safety net — it is
+# what turns "lost" into "on disk" — so the optimistic flush phase ahead of it
+# may not spend its share. First-come would let a slow flush starve the net to
+# zero seconds, inverting the priority.
+_MIN_STOP_JOIN_SECONDS = 0.5
+_MIN_DUMP_SECONDS = 1.0
+
+# Used only when the settings read itself fails; mirrors the shipped
+# ``join_timeout_seconds`` default so a degenerate config still gets a bounded
+# teardown rather than an unbounded one.
+_FALLBACK_TEARDOWN_BUDGET_SECONDS = 5.0
 
 
 class Outbox:
@@ -104,7 +175,9 @@ class Outbox:
     def from_settings(
         cls,
         sync_writer: Callable[[dict[str, Any]], Any] | None = None,
-        emergency_dump: Callable[[list[dict[str, Any]]], None] | None = None,
+        emergency_dump: (
+            Callable[[list[dict[str, Any]], float | None], int] | None
+        ) = None,
     ) -> Outbox:
         """Build an Outbox from ``DLQOutboxSettings`` with default wiring.
 
@@ -172,8 +245,14 @@ class Outbox:
     def start(self) -> None:
         self._worker.start()
 
-    def stop(self, timeout: float = 5.0) -> int:
-        return self._worker.stop(timeout=timeout)
+    def stop(self, timeout: float = 5.0, dump_deadline: float | None = None) -> int:
+        """Stop the writer and rescue what it did not drain.
+
+        ``dump_deadline`` is an absolute ``time.monotonic()`` instant bounding
+        the emergency dump; ``None`` leaves it unbounded. Returns the count of
+        entries the dump reported having written.
+        """
+        return self._worker.stop(timeout=timeout, dump_deadline=dump_deadline)
 
     def repair_after_fork(self) -> None:
         """Re-own the buffer and the writer this process inherited across fork.
@@ -189,8 +268,12 @@ class Outbox:
     def flush_and_wait(self, timeout: float = 5.0) -> int:
         """Drain queued entries through the worker, blocking up to ``timeout``.
 
-        Returns the count of entries successfully drained. Pending entries
-        beyond the deadline are emergency-dumped (D11.3).
+        Returns the ``entries_written`` delta observed across the wait. This
+        method does NOT emergency-dump: entries still queued at the deadline
+        are simply left in the buffer for ``stop()``, which owns the dump. The
+        delta also omits entries the writer soft-failed or hard-failed, so it
+        may not back any "nothing was lost" claim on its own — the terminal
+        shutdown report is built from ``OutboxStats`` deltas instead.
         """
         deadline = time.monotonic() + timeout
         drained_before = self._worker.entries_written
@@ -219,6 +302,7 @@ class Outbox:
             total_dropped=bs.total_dropped,
             drop_rate=bs.drop_rate,
             entries_written=self._worker.entries_written,
+            entries_soft_failed=self._worker.entries_soft_failed,
             entries_failed=self._worker.entries_failed,
             consecutive_failures=self._worker.consecutive_failures,
             worker_alive=self._worker.is_alive,
@@ -380,6 +464,14 @@ def reset_dlq_outbox() -> int:
     surface in the next test's worker.
     """
     global _outbox, _outbox_origin_pid, _worker_dead, _worker_dead_coercions
+    global _shutdown_result
+
+    # The teardown's cached result describes an outbox this call is discarding.
+    # Kept, the next process-lifetime teardown would return the previous one's
+    # counts without draining anything.
+    with _shutdown_gate:
+        _shutdown_result = None
+
     with _outbox_lock:
         if _outbox is None:
             with _worker_dead_lock:
@@ -399,6 +491,138 @@ def reset_dlq_outbox() -> int:
         _worker_dead = False
         _worker_dead_coercions = 0
     return remaining
+
+
+def get_shutdown_reserve_seconds() -> float:
+    """Seconds an exit path must hold back for the outbox teardown.
+
+    A step that waits on other subsystems has to reserve the budget of the step
+    behind it, or the teardown is the first thing an external watcher cuts —
+    and it is the step that turns buffered entries into persisted ones. The
+    reserve is the configured teardown budget plus the dump's floor, which is
+    the teardown's worst case.
+
+    Exposed as a function rather than by publishing the floors, so the split
+    stays owned by this module.
+    """
+    try:
+        from baldur.settings.dlq_outbox import get_dlq_outbox_settings
+
+        budget = get_dlq_outbox_settings().join_timeout_seconds
+    except Exception as e:
+        logger.warning("dlq_outbox.teardown_budget_read_failed", error=e)
+        budget = _FALLBACK_TEARDOWN_BUDGET_SECONDS
+    return budget + _MIN_DUMP_SECONDS
+
+
+def stop_outbox_for_shutdown(timeout: float | None = None) -> OutboxShutdownResult:
+    """Tear the process outbox down once, and report what happened to its entries.
+
+    The single idempotent teardown every exit path calls unconditionally: the
+    shutdown coordinator's handler on a signalled exit, and each adapter's exit
+    hook on a recycle exit, which has no coordinator window at all. Repeat calls
+    block on the gate and return the first caller's cached result.
+
+    Args:
+        timeout: Total teardown budget in seconds. ``None`` reads
+            ``DLQOutboxSettings.join_timeout_seconds``. Split three ways with
+            floors, so the emergency dump cannot be starved by the phases ahead
+            of it: flush gets ``budget - join floor - dump floor``, the join
+            gets whatever is left above its floor, and the dump's deadline is
+            floored at ``_MIN_DUMP_SECONDS`` past the join.
+
+    Returns:
+        The terminal counts. Built from ``OutboxStats`` deltas rather than from
+        the primitives' return values — ``flush_and_wait`` returns a written
+        delta that silently omits failed entries, and no completion claim may
+        rest on it.
+    """
+    global _shutdown_result, _worker_dead
+
+    with _shutdown_gate:
+        if _shutdown_result is not None:
+            return _shutdown_result
+
+        # 1. Coerce producers to the synchronous writer FIRST, before anything
+        #    else and whether or not an outbox exists. Set last, there is a
+        #    window between the dump and the flag write in which a capture
+        #    lands in a buffer whose drainer has been joined and whose dump has
+        #    already run — that entry dies with the process, which is the exact
+        #    failure this teardown exists to remove. Ahead of the ``is None``
+        #    return for the same reason: a process that builds the outbox
+        #    lazily after the teardown began would otherwise get an undrained
+        #    buffer.
+        with _worker_dead_lock:
+            _worker_dead = True
+
+        outbox = _outbox
+        if outbox is None:
+            # Nothing was built in this process: nothing to drain, nothing to
+            # report. An all-zero result, not a fabricated drain.
+            _shutdown_result = OutboxShutdownResult(0, 0, 0, 0, 0, 0, 0)
+            return _shutdown_result
+
+        if timeout is None:
+            try:
+                from baldur.settings.dlq_outbox import get_dlq_outbox_settings
+
+                timeout = get_dlq_outbox_settings().join_timeout_seconds
+            except Exception as e:
+                logger.warning("dlq_outbox.teardown_budget_read_failed", error=e)
+                timeout = _FALLBACK_TEARDOWN_BUDGET_SECONDS
+
+        started = time.monotonic()
+        before = outbox.get_stats()
+        worker = outbox.worker
+
+        # Waiting cannot help when the drainer is not alive, or when it is in
+        # sustained backoff: both mean the buffer will not empty by waiting, and
+        # the remainder goes to the dump either way. Skipping is not a
+        # concession — a backing-off drainer is one whose writes are already
+        # failing, so waking it later fails the same writes.
+        if worker.is_alive and not worker.is_backing_off:
+            flush_share = max(0.0, timeout - _MIN_STOP_JOIN_SECONDS - _MIN_DUMP_SECONDS)
+            if flush_share > 0:
+                try:
+                    outbox.flush_and_wait(timeout=flush_share)
+                except Exception as e:
+                    logger.warning("dlq_outbox.teardown_flush_failed", error=e)
+
+        now = time.monotonic()
+        # The dump's floor is not spendable by the join either.
+        join_share = max(
+            started + timeout - now - _MIN_DUMP_SECONDS, _MIN_STOP_JOIN_SECONDS
+        )
+        dump_deadline = max(started + timeout, now + join_share + _MIN_DUMP_SECONDS)
+
+        try:
+            outbox.stop(timeout=join_share, dump_deadline=dump_deadline)
+        except Exception as e:
+            logger.warning("dlq_outbox.teardown_stop_failed", error=e)
+
+        after = outbox.get_stats()
+        pending_at_entry = before.size + before.in_flight
+        dispatched = max(0, after.entries_written - before.entries_written)
+        soft_failed = max(0, after.entries_soft_failed - before.entries_soft_failed)
+        failed = max(0, after.entries_failed - before.entries_failed)
+        emergency_dumped = max(
+            0, after.entries_emergency_dumped - before.entries_emergency_dumped
+        )
+        residual = worker.entries_shutdown_residual
+        accounted = dispatched + soft_failed + failed + emergency_dumped + residual
+        _shutdown_result = OutboxShutdownResult(
+            pending_at_entry=pending_at_entry,
+            dispatched=dispatched,
+            soft_failed=soft_failed,
+            failed=failed,
+            emergency_dumped=emergency_dumped,
+            residual=residual,
+            # The difference the conservation relation names. Reported rather
+            # than hidden, so an operator reading a bucket sum larger than the
+            # pending count sees why instead of filing a bug.
+            duplicated=max(0, accounted - pending_at_entry),
+        )
+        return _shutdown_result
 
 
 def flush_and_wait(timeout: float = 5.0) -> int:
@@ -456,12 +680,30 @@ def _default_sync_writer(kwargs: dict[str, Any]) -> Any:
     return resolve_dlq_backing().store_failure(mode="sync", **kwargs)
 
 
-def _default_emergency_dump(batch: list[dict[str, Any]]) -> None:
+def _default_emergency_dump(
+    batch: list[dict[str, Any]],
+    deadline: float | None = None,
+) -> int:
     """Dispatch each remaining entry through the backing's local fallback.
 
     Reuses the existing zero-loss disk fallback — no new dump format
     introduced. Called only on shutdown timeout when the worker cannot drain in
     time. Resolves the same backing chain as the sync writer.
+
+    Args:
+        batch: Remaining entry kwargs, in enqueue order.
+        deadline: Absolute ``time.monotonic()`` instant this loop may not run
+            past. ``None`` runs unbounded. Checked BEFORE each entry rather
+            than per batch: the fallback's file tier does an
+            open/write/flush/fsync per entry under a class-level lock, so at
+            network-storage fsync latencies a single entry is the granularity
+            that matters. A deadline can only be honoured at a yield point, so
+            a write already in progress still overshoots it by one write.
+
+    Returns:
+        The number of entries this call actually wrote. Never the batch size:
+        an unresolvable backing writes nothing, and the caller has to be able
+        to tell that apart from a completed dump.
     """
     try:
         from baldur.services.dlq_capture import resolve_dlq_backing
@@ -469,7 +711,7 @@ def _default_emergency_dump(batch: list[dict[str, Any]]) -> None:
         service = resolve_dlq_backing()
     except Exception as e:
         logger.warning("dlq_outbox.emergency_dump_unavailable", error=e)
-        return
+        return 0
 
     # ``_write_to_local_fallback`` is the zero-loss disk-fallback path; both the
     # OSS ``DLQCaptureService`` base and the PRO overlay expose it. getattr keeps
@@ -480,13 +722,21 @@ def _default_emergency_dump(batch: list[dict[str, Any]]) -> None:
             "dlq_outbox.emergency_dump_unsupported",
             reason="DLQService does not expose _write_to_local_fallback",
         )
-        return
+        return 0
 
+    written = 0
     for kwargs in batch:
+        if deadline is not None and time.monotonic() >= deadline:
+            break
         try:
-            fallback(kwargs, "shutdown_emergency_dump")
+            # The fallback returns the destination it stored to, or None when
+            # every tier failed. Counting the call rather than its answer would
+            # report a failed write as a rescue.
+            if fallback(kwargs, "shutdown_emergency_dump"):
+                written += 1
         except Exception as e:
             logger.exception("dlq_outbox.emergency_dump_entry_failed", error=e)
+    return written
 
 
 # =============================================================================

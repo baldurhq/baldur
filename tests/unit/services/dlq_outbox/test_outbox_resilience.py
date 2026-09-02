@@ -206,6 +206,11 @@ class TestOutboxResilienceShutdownBehavior:
             forever.wait(timeout=10.0)
 
         dumped: list[list[dict]] = []
+
+        def record_dump(batch, deadline=None):
+            dumped.append(batch)
+            return len(batch)
+
         buffer: RingBuffer = RingBuffer(
             capacity=100, strategy=BackpressureStrategy.DROP_OLDEST
         )
@@ -214,7 +219,7 @@ class TestOutboxResilienceShutdownBehavior:
             sync_writer=hanging_writer,
             batch_size=1,
             flush_interval_seconds=0.01,
-            on_emergency_dump=dumped.append,
+            on_emergency_dump=record_dump,
         )
         outbox = Outbox(buffer=buffer, worker=worker)
         outbox.start()
@@ -264,7 +269,7 @@ class TestOutboxResilienceShutdownBehavior:
         def hanging_writer(kwargs):
             forever.wait(timeout=10.0)
 
-        def failing_dump(batch):
+        def failing_dump(batch, deadline=None):
             raise RuntimeError("dump failed")
 
         buffer: RingBuffer = RingBuffer(
@@ -360,6 +365,11 @@ class TestOutboxResilienceShutdownBehavior:
             forever.wait(timeout=10.0)
 
         dumped: list[list[dict]] = []
+
+        def record_dump(batch, deadline=None):
+            dumped.append(batch)
+            return len(batch)
+
         buffer: RingBuffer = RingBuffer(
             capacity=100, strategy=BackpressureStrategy.DROP_OLDEST
         )
@@ -368,7 +378,7 @@ class TestOutboxResilienceShutdownBehavior:
             sync_writer=hanging_writer,
             batch_size=1,
             flush_interval_seconds=0.01,
-            on_emergency_dump=dumped.append,
+            on_emergency_dump=record_dump,
         )
         outbox = Outbox(buffer=buffer, worker=worker)
         outbox.start()
@@ -382,21 +392,27 @@ class TestOutboxResilienceShutdownBehavior:
             # hanging writer, the other 4 are still buffered and get dumped.
             remaining = outbox.stop(timeout=0.05)
 
-            # Then — the dumped count is surfaced and conservation holds with the
-            # in-flight (stuck write) + emergency_dumped (buffered remainder)
-            # terms both contributing.
+            # Then — the dumped count is surfaced and the conservation
+            # relation holds. It is a BOUND, not an equality: the rescue is
+            # at-least-once, so the entry stuck in the hanging writer is handed
+            # to the dump as well as counted in_flight, and shows up in both.
             assert remaining >= 1
             assert len(dumped) >= 1
             stats = outbox.get_stats()
             assert stats.entries_emergency_dumped == remaining
-            assert stats.total_enqueued == (
+            accounted = (
                 stats.entries_written
+                + stats.entries_soft_failed
                 + stats.entries_failed
                 + stats.total_dropped
                 + stats.size
                 + stats.in_flight
                 + stats.entries_emergency_dumped
             )
+            assert accounted >= stats.total_enqueued
+            # The overlap is exactly the entries the dump rescued out of the
+            # writer's un-resolved batch — never an unexplained surplus.
+            assert accounted - stats.total_enqueued <= stats.in_flight
         finally:
             forever.set()  # release the hanging writer for clean test exit
 

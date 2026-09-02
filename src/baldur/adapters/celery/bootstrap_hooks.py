@@ -7,7 +7,8 @@ deployment runs on pre-init defaults — ``BALDUR_REDIS_URL`` unread, so circuit
 breaker and idempotency state diverge per worker; no scheduler; no background
 maintenance — until the user writes the receiver themselves.
 
-Two receivers, because a Celery worker has two kinds of process:
+Four receivers, two per side, because a Celery worker has two kinds of process
+and each has to be both started and stopped:
 
 ``worker_init``
     The worker's main process, for every launcher shape. Celery sends it from
@@ -26,18 +27,49 @@ Two receivers, because a Celery worker has two kinds of process:
     handed it a completed ``init()`` — and starts the background workers the
     parent deferred.
 
-Both are connected with an explicit ``dispatch_uid``, so the three sites that
-arm them (the two adapter entry points and ``baldur.init()`` itself) register
-one receiver per signal between them.
+``worker_shutdown``
+    The worker main process's exit, sent by ``WorkController.stop()`` after the
+    pool has stopped and the blueprint has joined — so no task is running and it
+    is safe to initiate the coordinator drain here, and only here. It is also
+    the only stop-side seam a non-forking pool has, since ``process_destructor``
+    is never wired there. This is the gunicorn ``worker_exit`` parity: drain,
+    tear the outbox down, flush audit, emit the terminal marker.
+
+``worker_process_shutdown``
+    The exit of a process that runs tasks: every prefork child, including the
+    ones a ``maxtasksperchild`` recycle retires. Sent from billiard's
+    ``on_process_exit`` inside the child, immediately before ``os._exit`` — its
+    last executable frame, reached on every child-exit lane (the recycle return,
+    the pool-shutdown sentinel, an uncaught task-loop exception, a TERMSIG).
+    It deliberately does NOT touch the shutdown coordinator: the child inherited
+    the parent's handler list and does not own that state, and a recycle is
+    routine operation that must not pay a full coordinator drain.
+
+No receiver is connected to ``worker_shutting_down`` and none installs an OS
+signal handler. ``worker_shutting_down`` fires while tasks are still executing
+and from inside celery's signal-handler frame; initiating the drain there would
+close the audit WAL and stop the outbox underneath running tasks — a worse loss
+than the one the stop side exists to prevent. Celery reaches ``worker_shutdown``
+on its own through the warm-shutdown chain, so nothing needs chaining.
+
+All four are connected with an explicit ``dispatch_uid``, so the three sites
+that arm them (the two adapter entry points and ``baldur.init()`` itself)
+register one receiver per signal between them.
 """
 
 from __future__ import annotations
 
+import os
 from enum import Enum
 from typing import Any
 
 import structlog
-from celery.signals import worker_init, worker_process_init
+from celery.signals import (
+    worker_init,
+    worker_process_init,
+    worker_process_shutdown,
+    worker_shutdown,
+)
 
 from baldur.core.exceptions import ConfigurationError
 
@@ -51,6 +83,19 @@ __all__ = [
 
 _WORKER_INIT_DISPATCH_UID = "baldur.celery.bootstrap.worker_init"
 _WORKER_PROCESS_INIT_DISPATCH_UID = "baldur.celery.bootstrap.worker_process_init"
+_WORKER_SHUTDOWN_DISPATCH_UID = "baldur.celery.bootstrap.worker_shutdown"
+_WORKER_PROCESS_SHUTDOWN_DISPATCH_UID = (
+    "baldur.celery.bootstrap.worker_process_shutdown"
+)
+
+# ``process_role`` values on the shared terminal marker. One event name answers
+# "did this process's exit pipeline run to the end" on every adapter; the role
+# says which pipeline ran.
+_ROLE_WORKER_MAIN = "celery_worker_main"
+_ROLE_POOL_CHILD = "celery_pool_child"
+
+# Used only when the drain-timeout settings read itself fails.
+_FALLBACK_DRAIN_WAIT_SECONDS = 30.0
 
 # Pool aliases resolved without importing anything. Celery's own alias table
 # maps both of these to the prefork pool; the rest of the table is
@@ -270,28 +315,220 @@ def _on_worker_process_init(**kwargs: Any) -> None:
             pass
 
 
+def _tear_down_outbox(process_role: str) -> dict[str, int]:
+    """Run the idempotent outbox teardown and return its terminal counts.
+
+    Shared by both stop-side receivers. The counts ride the terminal marker so
+    one log line answers "how many buffered DLQ entries did this process still
+    hold, and where did they go" — including the residual, the entries that are
+    gone. Returns an empty mapping when the teardown itself failed, so the
+    marker still reports that the pipeline ran.
+    """
+    from baldur.services.dlq_outbox.outbox import stop_outbox_for_shutdown
+
+    result = stop_outbox_for_shutdown()
+    logger.info(
+        "dlq_outbox.shutdown_teardown_completed",
+        process_role=process_role,
+        pending_at_entry=result.pending_at_entry,
+        dispatched=result.dispatched,
+        soft_failed=result.soft_failed,
+        failed=result.failed,
+        emergency_dumped=result.emergency_dumped,
+        residual=result.residual,
+        duplicated=result.duplicated,
+    )
+    return {
+        "outbox_pending_at_entry": result.pending_at_entry,
+        "outbox_dispatched": result.dispatched,
+        "outbox_soft_failed": result.soft_failed,
+        "outbox_failed": result.failed,
+        "outbox_emergency_dumped": result.emergency_dumped,
+        "outbox_residual": result.residual,
+        "outbox_duplicated": result.duplicated,
+    }
+
+
+def _on_worker_process_shutdown(**kwargs: Any) -> None:
+    """``worker_process_shutdown`` receiver — a task-running process is exiting.
+
+    Runs in the pool child's last executable frame, before ``os._exit``. Order
+    is pinned: the outbox teardown first, so its final writes land while the
+    audit WAL is still open, then the audit flush, then the terminal marker.
+
+    Each step is isolated in its own ``try/except``. An audit-side failure must
+    not cost the child its outbox teardown, and vice versa — this is the only
+    exit pipeline the child ever gets, and a ``maxtasksperchild`` recycle runs
+    it as routine operation.
+
+    The shutdown coordinator is deliberately never touched here. The child
+    inherited the parent's handler list — ``init()`` in a fork child is an
+    ``_init_done`` no-op, so the handlers were never re-registered — and firing
+    it would run leader-election release, exporter teardown and the private
+    service handlers against state this process does not own. It would also cost
+    at least one drain check interval on every recycle, which is the wrong trade
+    for a routine operation.
+    """
+    pid = os.getpid()
+    counts: dict[str, int] = {}
+
+    try:
+        counts = _tear_down_outbox(_ROLE_POOL_CHILD)
+    except Exception as exc:
+        logger.warning(
+            "dlq_outbox.worker_process_shutdown_teardown_failed",
+            worker_id=pid,
+            error=exc,
+        )
+
+    try:
+        from baldur.audit.async_audit_lifecycle import graceful_shutdown_audit_system
+
+        graceful_shutdown_audit_system()
+    except Exception as exc:
+        logger.warning("shutdown.audit_flush_failed", worker_id=pid, error=exc)
+
+    logger.info(
+        "shutdown.worker_exit_completed",
+        worker_id=pid,
+        process_role=_ROLE_POOL_CHILD,
+        **counts,
+    )
+
+
+def _on_worker_shutdown(**kwargs: Any) -> None:
+    """``worker_shutdown`` receiver — the worker main process is exiting.
+
+    The gunicorn ``worker_exit`` parity, in the same order and with the same
+    per-step isolation. By the time celery sends this signal the pool has
+    stopped and the blueprint has joined, so no task is running and initiating
+    the coordinator drain is safe here — which is exactly why no receiver is
+    connected to ``worker_shutting_down``, which fires while tasks still run.
+
+    Steps 3 and 4 are unconditional. When the drain in step 2 converged, the
+    coordinator's own handlers already ran both and their once-guards make these
+    no-ops; when it did not — or when nothing initiated a shutdown at all — they
+    are the only teardown this process gets.
+
+    The drain wait subtracts the outbox teardown's own budget. Step 2 waits on
+    *other* subsystems and step 3 is queued behind it, so an unreserved wait
+    makes the teardown the first thing an external stop timeout cuts: unlike
+    gunicorn there is no in-process watcher here — billiard joins its children
+    with no timeout — so the only bound on a celery worker's stop is the
+    platform's (Kubernetes ``terminationGracePeriodSeconds``, systemd
+    ``TimeoutStopSec``). Subtracting costs a slow-but-progressing drain its last
+    few seconds and guarantees the teardown runs; a drain that needed them says
+    so in its own log line.
+
+    Step 1 is load-bearing rather than defensive: resolving the coordinator
+    *lazily constructs* it, and the constructor reads settings, so a degenerate
+    config raises there. Unchained, that one raise would cost the worker both
+    its outbox teardown and its audit flush.
+    """
+    pid = os.getpid()
+    counts: dict[str, int] = {}
+
+    try:
+        from baldur.core.shutdown_coordinator import (
+            ShutdownPhase,
+            get_shutdown_coordinator,
+        )
+        from baldur.services.dlq_outbox.outbox import get_shutdown_reserve_seconds
+        from baldur.settings.recovery_shutdown import get_recovery_shutdown_settings
+
+        try:
+            drain_timeout = (
+                get_recovery_shutdown_settings().default_drain_timeout_seconds
+            )
+        except Exception as exc:
+            logger.warning("shutdown.drain_timeout_read_failed", error=exc)
+            drain_timeout = _FALLBACK_DRAIN_WAIT_SECONDS
+
+        coordinator = get_shutdown_coordinator()
+        coordinator.initiate_shutdown()
+
+        drain_wait = max(0.0, drain_timeout - get_shutdown_reserve_seconds())
+        drained = coordinator.wait_for_shutdown(timeout=drain_wait)
+
+        if drained:
+            logger.info("shutdown.worker_drained", worker_id=pid)
+        elif coordinator.phase != ShutdownPhase.RUNNING:
+            logger.warning(
+                "shutdown.worker_drain_incomplete",
+                worker_id=pid,
+                phase=coordinator.phase.value,
+            )
+        # phase == RUNNING ⇒ nothing was ever initiated — nothing to report
+        # about a drain that never started.
+    except Exception as exc:
+        logger.warning("shutdown.drain_wait_failed", worker_id=pid, error=exc)
+
+    try:
+        counts = _tear_down_outbox(_ROLE_WORKER_MAIN)
+    except Exception as exc:
+        logger.warning(
+            "dlq_outbox.worker_shutdown_teardown_failed",
+            worker_id=pid,
+            error=exc,
+        )
+
+    try:
+        from baldur.audit.async_audit_lifecycle import graceful_shutdown_audit_system
+
+        graceful_shutdown_audit_system()
+    except Exception as exc:
+        logger.warning("shutdown.audit_flush_failed", worker_id=pid, error=exc)
+
+    logger.info(
+        "shutdown.worker_exit_completed",
+        worker_id=pid,
+        process_role=_ROLE_WORKER_MAIN,
+        **counts,
+    )
+
+
 def connect_celery_bootstrap_receivers() -> None:
-    """Connect both bootstrap receivers. Idempotent across all arming sites.
+    """Connect all four bootstrap receivers. Idempotent across arming sites.
 
     ``sender=None`` because the senders differ per signal and per worker
     (``worker_init`` sends the ``WorkController``, ``worker_process_init``
     sends nothing useful), so a sender-bound connect would simply never match.
     The ``dispatch_uid`` is what makes repeat arming a no-op: celery keys its
     receiver table on ``(dispatch_uid, sender_id)``.
+
+    The stop side rides this same function rather than a separate arming path,
+    so there is no reachable state where a worker's start side is armed and its
+    stop side is not.
     """
     worker_init.connect(_on_worker_init, dispatch_uid=_WORKER_INIT_DISPATCH_UID)
     worker_process_init.connect(
         _on_worker_process_init,
         dispatch_uid=_WORKER_PROCESS_INIT_DISPATCH_UID,
     )
+    worker_shutdown.connect(
+        _on_worker_shutdown,
+        dispatch_uid=_WORKER_SHUTDOWN_DISPATCH_UID,
+    )
+    worker_process_shutdown.connect(
+        _on_worker_process_shutdown,
+        dispatch_uid=_WORKER_PROCESS_SHUTDOWN_DISPATCH_UID,
+    )
 
 
 def disconnect_celery_bootstrap_receivers() -> None:
-    """Disconnect both bootstrap receivers (test isolation, adapter teardown)."""
+    """Disconnect all four bootstrap receivers (test isolation, teardown)."""
     worker_init.disconnect(_on_worker_init, dispatch_uid=_WORKER_INIT_DISPATCH_UID)
     worker_process_init.disconnect(
         _on_worker_process_init,
         dispatch_uid=_WORKER_PROCESS_INIT_DISPATCH_UID,
+    )
+    worker_shutdown.disconnect(
+        _on_worker_shutdown,
+        dispatch_uid=_WORKER_SHUTDOWN_DISPATCH_UID,
+    )
+    worker_process_shutdown.disconnect(
+        _on_worker_process_shutdown,
+        dispatch_uid=_WORKER_PROCESS_SHUTDOWN_DISPATCH_UID,
     )
 
 
@@ -301,7 +538,13 @@ def _is_connected(signal: Any, dispatch_uid: str) -> bool:
 
 
 def is_celery_bootstrap_receivers_connected() -> bool:
-    """True when both bootstrap receivers are registered on their signals."""
-    return _is_connected(worker_init, _WORKER_INIT_DISPATCH_UID) and _is_connected(
-        worker_process_init, _WORKER_PROCESS_INIT_DISPATCH_UID
+    """True when all four bootstrap receivers are registered on their signals."""
+    return all(
+        _is_connected(signal, dispatch_uid)
+        for signal, dispatch_uid in (
+            (worker_init, _WORKER_INIT_DISPATCH_UID),
+            (worker_process_init, _WORKER_PROCESS_INIT_DISPATCH_UID),
+            (worker_shutdown, _WORKER_SHUTDOWN_DISPATCH_UID),
+            (worker_process_shutdown, _WORKER_PROCESS_SHUTDOWN_DISPATCH_UID),
+        )
     )

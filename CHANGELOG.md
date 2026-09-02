@@ -18,6 +18,12 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ### Fixed
 
+- A worker that exits no longer silently loses the DLQ entries buffered in its outbox.
+- A Celery worker now runs a shutdown pipeline at all: drain, DLQ flush, audit flush, exit log.
+- A `maxtasksperchild` / `max_requests` recycle now flushes its DLQ buffer before exiting.
+- Entries the shutdown flush cannot persist in time are counted and logged, not dropped silently.
+- A DLQ write that fell through to the local fallback is no longer reported as a store write.
+- `BALDUR_DLQ_OUTBOX_JOIN_TIMEOUT_SECONDS` now does what it says; it was read by nothing.
 - `dlq_outbox_drops_total` now counts every dropped entry instead of once per alert.
 - A late burst of outbox drops now alerts; the drop rate is measured per drain cycle.
 - Outbox drop alerting no longer runs on the request thread that hit the backpressure.

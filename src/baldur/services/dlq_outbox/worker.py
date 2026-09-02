@@ -40,6 +40,7 @@ from baldur.metrics.recorders.daemon_worker import (
     register_daemon_worker,
     unregister_daemon_worker,
 )
+from baldur.models.dlq import DLQEntryResult
 
 if TYPE_CHECKING:
     from baldur.audit.ring_buffer import RingBuffer
@@ -89,7 +90,7 @@ class DLQOutboxWorker:
             ),
             batch_size=settings.batch_size,
             flush_interval_seconds=settings.flush_interval_seconds,
-            on_emergency_dump=lambda batch: ...,
+            on_emergency_dump=lambda batch, deadline: ...,
             on_processing_delay=lambda enqueue_time: ...,
             on_drops_observed=lambda count: ...,
             on_drop_alert=lambda window: ...,
@@ -110,7 +111,9 @@ class DLQOutboxWorker:
         sync_writer: Callable[[dict[str, Any]], Any],
         batch_size: int = 50,
         flush_interval_seconds: float = 0.1,
-        on_emergency_dump: Callable[[list[dict[str, Any]]], None] | None = None,
+        on_emergency_dump: (
+            Callable[[list[dict[str, Any]], float | None], int] | None
+        ) = None,
         on_processing_delay: Callable[[float, str], None] | None = None,
         on_drops_observed: Callable[[int], None] | None = None,
         on_drop_alert: Callable[[DropWindow], None] | None = None,
@@ -137,6 +140,15 @@ class DLQOutboxWorker:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._is_running = False
+        # Rescue publication for the teardown. ``get_batch`` removes entries
+        # from the ring and then returns, releasing the ring lock — a teardown
+        # landing in that window sees an empty ring and the previous,
+        # fully-resolved batch, and would dump neither. ``_batch_lock`` makes
+        # the pop and the publication one step against ``stop()``, which takes
+        # the same lock around its ring drain and its ``_pending_batch`` read.
+        self._batch_lock = threading.Lock()
+        self._pending_batch: list[tuple[float, dict[str, Any]]] = []
+        self._pending_index = 0
         # Mutual exclusion between the two spawn paths — the fork-repair
         # sequence and the ``DaemonWorkerProbe`` respawn coordinator, which
         # reaches ``_spawn_thread`` through the handle's ``restart_callback``.
@@ -165,7 +177,19 @@ class DLQOutboxWorker:
         # (stop() final-timeout): dumped to on_emergency_dump when wired, else
         # dropped after a WARNING. A terminal conservation bucket so the
         # invariant stays closed across shutdown too, not only normal operation.
+        # Counts what the dump callback reported having WRITTEN, not what was
+        # handed to it — the shortfall is the residual below.
         self._entries_emergency_dumped = 0
+        # Entries handed to the shutdown dump that it did not write: a blown
+        # dump deadline, a raising callback, an unresolvable backing, or no
+        # callback at all. These die with the process; the bucket exists so the
+        # teardown can report them instead of losing them silently.
+        self._entries_shutdown_residual = 0
+        # Soft store failures: the sync writer returned a DLQEntryResult whose
+        # write fell through to the local fallback. Not a hard failure (the
+        # entry is on disk) and not a store write either, so it is neither
+        # ``entries_written`` nor ``entries_failed``.
+        self._entries_soft_failed = 0
 
         # Cross-shape observability handle (impl 489 D4 / D9). Constructed
         # lazily on start() so callers can build the worker without
@@ -190,6 +214,19 @@ class DLQOutboxWorker:
         return self._consecutive_failures
 
     @property
+    def is_backing_off(self) -> bool:
+        """True when consecutive hard failures have engaged the backoff sleep.
+
+        Read by the shutdown teardown to decide whether waiting can still empty
+        the buffer: a writer that is already sleeping between failing writes
+        will not drain it, so the optimistic flush phase is skipped and the
+        remainder goes straight to the emergency dump. Exposed as a property
+        rather than by publishing the threshold constant, so the threshold
+        stays owned by this module.
+        """
+        return self._consecutive_failures >= _FAILURE_BACKOFF_THRESHOLD
+
+    @property
     def entries_written(self) -> int:
         return self._entries_written
 
@@ -203,9 +240,25 @@ class DLQOutboxWorker:
         return self._in_flight
 
     @property
+    def entries_soft_failed(self) -> int:
+        """Entries the store rejected but the local fallback preserved."""
+        return self._entries_soft_failed
+
+    @property
     def entries_emergency_dumped(self) -> int:
-        """Entries removed via the shutdown emergency-dump path (terminal)."""
+        """Entries the shutdown emergency dump reported having written."""
         return self._entries_emergency_dumped
+
+    @property
+    def entries_shutdown_residual(self) -> int:
+        """Entries handed to the shutdown dump that it did not write.
+
+        The dump's own count, never a subtraction of the other buckets: the
+        rescue is deliberately at-least-once, so an entry can appear in two
+        buckets and a subtracted residual would go negative on exactly the
+        path the terminal report has to survive.
+        """
+        return self._entries_shutdown_residual
 
     @property
     def handle(self) -> DaemonWorkerHandle | None:
@@ -306,8 +359,15 @@ class DLQOutboxWorker:
 
         self._spawn_lock = threading.Lock()
         self._stop_event = threading.Event()
+        self._batch_lock = threading.Lock()
         if live_thread is None:
             self._thread = None
+
+        # The parent's published batch describes the parent's entries, which
+        # the parent's own live drainer is still delivering. Kept, this
+        # process's teardown would dump entries it never owned.
+        self._pending_batch = []
+        self._pending_index = 0
 
         # The parent's counts describe the parent's writes. Kept, they would
         # leave the conservation invariant (total_enqueued == written + failed
@@ -315,7 +375,9 @@ class DLQOutboxWorker:
         # buffer counters restart at zero with its contents.
         self._entries_written = 0
         self._entries_failed = 0
+        self._entries_soft_failed = 0
         self._entries_emergency_dumped = 0
+        self._entries_shutdown_residual = 0
         self._in_flight = 0
         self._consecutive_failures = 0
         self._backoff.reset()
@@ -352,13 +414,23 @@ class DLQOutboxWorker:
                 self._handle.record_crash(e)
             raise
 
-    def stop(self, timeout: float = 5.0) -> int:
-        """Signal stop and wait up to ``timeout`` seconds for drain.
+    def stop(self, timeout: float = 5.0, dump_deadline: float | None = None) -> int:
+        """Signal stop, wait up to ``timeout`` for drain, then rescue the rest.
 
-        Returns the count of remaining entries that timed out and were
-        emergency-dumped via ``on_emergency_dump`` (D11.3). When
-        ``on_emergency_dump`` is None, remaining entries are dropped after a
-        WARNING log.
+        Args:
+            timeout: Seconds to wait for the writer thread to join.
+            dump_deadline: Absolute ``time.monotonic()`` instant the emergency
+                dump may not run past, handed to ``on_emergency_dump`` so the
+                bound is enforced where the per-entry loop actually is. ``None``
+                leaves the dump unbounded, which is what the test-isolation
+                reset path wants.
+
+        Returns the count of entries the emergency dump reported having
+        WRITTEN -- not the count handed to it. The shortfall is accounted in
+        ``entries_shutdown_residual`` and reported at CRITICAL: those entries
+        die with this process, and a teardown that cannot say so is the silent
+        loss this path exists to remove. When ``on_emergency_dump`` is None,
+        every remaining entry is residual.
         """
         if not self._is_running:
             return 0
@@ -383,37 +455,75 @@ class DLQOutboxWorker:
                 join_timeout_seconds=timeout,
             )
 
-        # Drain any entries still queued at deadline through the emergency
-        # path so no data is lost on shutdown timeout. ``drain_all`` copies and
-        # empties in one lock scope: a ``put`` landing between a read and a
-        # separate clear would otherwise be discarded without ever reaching the
-        # dump.
-        remaining = self._buffer.drain_all() if self._buffer is not None else []
-        if remaining:
+        # Rescue every entry this process still owns, in one lock scope with
+        # the writer's own pop. Two halves:
+        #  - the ring remainder, drained atomically (a put landing between a
+        #    read and a separate clear would be discarded unread);
+        #  - the tail of the batch the writer had already popped but not
+        #    resolved. Those entries are off the ring and live only in a local
+        #    list inside ``_flush_batch``; a join that times out mid-batch
+        #    would otherwise take them to the grave, counted by nothing but
+        #    ``in_flight``.
+        # The resolved prefix is skipped by index. The index advances only
+        # AFTER an entry resolves, so the entry the writer is attempting right
+        # now is handed to the dump too -- at-least-once into the
+        # zero-data-loss fallback tier, which is cheaper than a hole.
+        with self._batch_lock:
+            remaining = self._buffer.drain_all() if self._buffer is not None else []
+            pending_tail = self._pending_batch[self._pending_index :]
+
+        # Pending first: those entries were enqueued before anything still on
+        # the ring, so the dump keeps FIFO order.
+        handed = pending_tail + remaining
+        dumped_written = 0
+        if handed:
             logger.warning(
                 "dlq_outbox.shutdown_emergency_dump",
-                entries_dumped=len(remaining),
+                entries_handed=len(handed),
+                entries_from_pending_batch=len(pending_tail),
+                entries_from_buffer=len(remaining),
             )
             if self._on_emergency_dump is not None:
                 try:
-                    self._on_emergency_dump([item[1] for item in remaining])
+                    reported = self._on_emergency_dump(
+                        [item[1] for item in handed], dump_deadline
+                    )
+                    # The callback is typed to return its written count, but
+                    # ``on_emergency_dump`` is injectable: a callable that
+                    # returns something else must not be read as a count.
+                    if isinstance(reported, int) and not isinstance(reported, bool):
+                        dumped_written = max(0, min(reported, len(handed)))
                 except Exception as e:
                     logger.exception(
                         "dlq_outbox.emergency_dump_failed",
                         error=e,
                     )
-            # Account the dumped entries in the terminal bucket so the
-            # conservation invariant stays closed across shutdown (they left
-            # ``size`` via the emergency path, not the normal write path).
-            self._entries_emergency_dumped += len(remaining)
+
+            residual = len(handed) - dumped_written
+            if residual:
+                # The one line an operator needs: these entries existed, were
+                # not written anywhere, and are gone with this process.
+                logger.critical(
+                    "dlq_outbox.shutdown_dump_incomplete",
+                    entries_dumped=dumped_written,
+                    entries_residual=residual,
+                    entries_handed=len(handed),
+                    worker_name=_WORKER_NAME,
+                )
+                self._entries_shutdown_residual += residual
+            # Account what the dump actually wrote -- accounting what was
+            # handed over would report a wedged fallback as a rescue.
+            self._entries_emergency_dumped += dumped_written
 
         logger.info(
             "dlq_outbox.worker_stopped",
             entries_written=self._entries_written,
+            entries_soft_failed=self._entries_soft_failed,
             entries_failed=self._entries_failed,
-            remaining_dumped=len(remaining),
+            remaining_dumped=dumped_written,
+            remaining_residual=len(handed) - dumped_written,
         )
-        return len(remaining)
+        return dumped_written
 
     def _drain_once(self, last_flush: float) -> tuple[float, bool]:
         """One size-check->decide->flush cycle (D1). Returns ``(last_flush, flushed)``.
@@ -436,12 +546,34 @@ class DLQOutboxWorker:
         )
         if not should_flush:
             return last_flush, False
-        # ``get_batch``'s actual result is the sole source of truth for the
-        # flush: a front entry displaced by a DROP_OLDEST eviction between the
-        # size read and the pop was an observable backpressure drop (counted in
-        # total_dropped) — never a silent loss.
-        self._flush_batch(self._buffer.get_batch(max_size=self._batch_size))
+        # ``_pop_and_publish``'s actual result is the sole source of truth for
+        # the flush: a front entry displaced by a DROP_OLDEST eviction between
+        # the size read and the pop was an observable backpressure drop
+        # (counted in total_dropped) — never a silent loss.
+        self._flush_batch(self._pop_and_publish(self._batch_size))
         return time.monotonic(), True
+
+    def _pop_and_publish(self, max_size: int) -> list[tuple[float, dict[str, Any]]]:
+        """Pop a batch off the ring and publish it to the teardown, atomically.
+
+        ``get_batch`` removes the entries under the ring lock and then returns,
+        releasing it — the publication would land only after the call re-enters
+        Python. A teardown whose own ring drain fell in that window would see an
+        empty ring AND the previous, fully-resolved published batch, and rescue
+        neither: up to ``batch_size`` entries would die with the process,
+        invisible to both halves of the rescue. Holding ``_batch_lock`` across
+        the pop and the publication closes it; ``stop()`` takes the same lock
+        around its drain and its ``_pending_batch`` read.
+
+        The lock deliberately does NOT cover the writes. It is held for one pop
+        and two stores per cycle — the same order as the ring lock the pop
+        already takes — and never across ``sync_writer``.
+        """
+        with self._batch_lock:
+            batch = self._buffer.get_batch(max_size=max_size)
+            self._pending_batch = batch
+            self._pending_index = 0
+        return batch
 
     def _observe_drop_window(self, *, alert: bool = True) -> None:
         """Account this cycle's ring drops and evaluate the windowed drop rate.
@@ -543,9 +675,11 @@ class DLQOutboxWorker:
                 if self._stop_event.wait(timeout=self._flush_interval):
                     break
 
-        # Final drain on stop.
+        # Final drain on stop. Same publishing seam as the steady-state pop:
+        # this batch is up to four times the size of a normal one, so it is the
+        # bigger of the two things a timed-out join can strand.
         try:
-            tail = self._buffer.get_batch(max_size=self._batch_size * 4)
+            tail = self._pop_and_publish(self._batch_size * 4)
             if tail:
                 self._flush_batch(tail)
         except Exception as e:
@@ -556,6 +690,37 @@ class DLQOutboxWorker:
         # there is no further iteration to report it — without this the drops
         # that a shutdown-under-load produces never reach the counter at all.
         self._observe_drop_window(alert=False)
+
+    def _record_writer_result(self, result: Any) -> None:
+        """Bucket one non-raising ``sync_writer`` return.
+
+        The DLQ store path absorbs every repository exception and *returns* a
+        result describing what it did, so a store outage never raises here.
+        Counting every non-raising call as a store write is the lie the
+        shutdown report must not repeat:
+
+        - ``success=False`` with a fallback path — the store write failed and
+          the entry is on local disk. Degraded but kept: soft-failed.
+        - ``success=False`` with no fallback path — the local fallback failed
+          too, so the entry reached no store at all. That is the same outcome a
+          hard raise produces, and it shares that bucket.
+        - anything else, ``None`` included — ``sync_writer`` is typed to return
+          ``Any`` and most injected writers return nothing, so an
+          unclassifiable return is counted as written, exactly as before.
+
+        The discriminator is ``success is False``, never truthiness. The result
+        type is a plain dataclass with neither ``__bool__`` nor ``__len__``, so
+        every instance is truthy — a failed one included — and a truthiness
+        check would report zero soft failures forever while leaving every soft
+        failure inside the written bucket.
+        """
+        if isinstance(result, DLQEntryResult) and result.success is False:
+            if result.fallback_path is not None:
+                self._entries_soft_failed += 1
+            else:
+                self._entries_failed += 1
+            return
+        self._entries_written += 1
 
     def _flush_batch(self, batch: list[tuple[float, dict[str, Any]]]) -> None:
         """Dispatch a batch to ``sync_writer``, recording per-entry outcomes."""
@@ -575,8 +740,7 @@ class DLQOutboxWorker:
                         self._on_processing_delay(delay, domain)
                     except Exception:
                         pass
-                self._sync_writer(kwargs)
-                self._entries_written += 1
+                self._record_writer_result(self._sync_writer(kwargs))
             except Exception as e:
                 self._entries_failed += 1
                 any_failed = True
@@ -588,6 +752,13 @@ class DLQOutboxWorker:
             finally:
                 # One decrement per entry whether written or failed.
                 self._in_flight -= 1
+                # Publish resolution progress for the teardown's rescue read.
+                # A single int store, read once by ``stop()``: a stale-low read
+                # re-dumps an entry that was already written (at-least-once
+                # into the zero-loss fallback tier), never skips one. It
+                # advances AFTER the entry resolves, so the entry being
+                # attempted at a teardown is always included in the dump.
+                self._pending_index += 1
 
         if any_failed:
             self._consecutive_failures += 1

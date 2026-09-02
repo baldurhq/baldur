@@ -14,26 +14,42 @@ Public API:
 - ``setup_dlq_outbox()`` — eager-start hook called by ``baldur.init()``
   (also wires DAEMON_WORKER_DIED / RESPAWNED EventBus subscribers per
   impl 489 D8)
+- ``stop_outbox_for_shutdown()`` — the single idempotent process teardown,
+  returning an ``OutboxShutdownResult`` with the terminal entry counts
+- ``DLQOutboxShutdownHandler`` — the outbox's seat at the graceful-shutdown
+  table, registered by ``baldur.init()``
 """
 
 from __future__ import annotations
 
 from baldur.services.dlq_outbox.outbox import (
     Outbox,
+    OutboxShutdownResult,
     OutboxStats,
     flush_and_wait,
     get_outbox,
+    get_shutdown_reserve_seconds,
     reset_dlq_outbox,
     setup_dlq_outbox,
+    stop_outbox_for_shutdown,
+)
+from baldur.services.dlq_outbox.shutdown import (
+    DLQOutboxShutdownHandler,
+    integrate_with_shutdown_coordinator,
 )
 from baldur.services.dlq_outbox.worker import DLQOutboxWorker
 
 __all__ = [
     "Outbox",
+    "OutboxShutdownResult",
     "OutboxStats",
     "DLQOutboxWorker",
+    "DLQOutboxShutdownHandler",
     "get_outbox",
+    "get_shutdown_reserve_seconds",
+    "integrate_with_shutdown_coordinator",
     "reset_dlq_outbox",
     "flush_and_wait",
     "setup_dlq_outbox",
+    "stop_outbox_for_shutdown",
 ]
