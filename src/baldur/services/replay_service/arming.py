@@ -99,7 +99,9 @@ _WORKER_CACHE_KEY = "state"
 # dedicated daemon thread and its verdict is cached for
 # ``worker_status_cache_ttl_seconds`` so the console's periodic stats polling
 # does not pay a round-trip per request. One lock guards all of it, so
-# concurrent polls share a single broker call.
+# concurrent polls share a single broker call. The sequence advances only when
+# a waiter abandons an attempt at its deadline; a cache reset leaves a live
+# attempt joinable.
 _worker_cache_lock = threading.Lock()
 _worker_cache: dict[str, tuple[float, str]] = {}
 _probe_inflight: Future | None = None
@@ -332,6 +334,40 @@ def _probe_transport_options(budget: float) -> dict:
     }
 
 
+def _inspect_active_queues(connection, timeout: float) -> dict:
+    """Reply-collecting ``active_queues`` broadcast over ``connection`` only.
+
+    ``control.inspect(connection=...)`` binds only the reply side to the
+    supplied connection: the request itself is published through the app's
+    producer pool, on a pooled connection that carries no socket deadline and
+    republishes forever on a socket that went stale. A mailbox built without a
+    producer pool publishes on the very channel it was handed, so both legs of
+    the round-trip carry the probe connection's deadlines and a wedged probe
+    never holds a pooled connection the dispatch path needs.
+    """
+    from celery import current_app
+    from celery.app.control import flatten_reply
+
+    base = current_app.control.mailbox
+    mailbox = type(base)(
+        base.namespace,
+        type=base.type,
+        connection=connection,
+        clock=base.clock,
+        accept=base.accept,
+        serializer=base.serializer,
+        producer_pool=None,
+        queue_ttl=base.queue_ttl,
+        queue_expires=base.queue_expires,
+        queue_durable=base.queue_durable,
+        queue_exclusive=base.queue_exclusive,
+        reply_queue_ttl=base.reply_queue_ttl,
+        reply_queue_expires=base.reply_queue_expires,
+    )
+    replies = mailbox.multi_call("active_queues", timeout=timeout)
+    return flatten_reply(replies or [])
+
+
 def _probe_dlq_worker() -> str:
     """Broker I/O: does any worker consume the ``dlq_processing`` queue?
 
@@ -340,9 +376,9 @@ def _probe_dlq_worker() -> str:
     expensive I/O; callers read it through :func:`_cached_worker_state`, which
     runs it on a dedicated thread under a deadline.
 
-    Uses a connection of its own rather than the producer pool: a probe wedged
-    on an unreachable broker must never hold a pooled connection the dispatch
-    path needs to send the replay task.
+    Uses a connection of its own rather than the producer pool, for both the
+    request and the replies: a probe wedged on an unreachable broker must never
+    hold a pooled connection the dispatch path needs to send the replay task.
     """
     try:
         from celery import current_app
@@ -362,10 +398,7 @@ def _probe_dlq_worker() -> str:
             transport_options=_probe_transport_options(budget),
         )
         try:
-            inspect = current_app.control.inspect(
-                timeout=timeout, connection=connection
-            )
-            active = inspect.active_queues()
+            active = _inspect_active_queues(connection, timeout)
         finally:
             connection.close()
 
@@ -536,25 +569,28 @@ def _cached_worker_state() -> str:
 def get_worker_cache() -> dict[str, tuple[float, str]]:
     """Return a snapshot of the worker-presence TTL cache (read accessor)."""
     with _worker_cache_lock:
+        _adopt_process_locked()
         return dict(_worker_cache)
 
 
 def reset_worker_cache(*, log_state: bool = False) -> None:
-    """Invalidate the worker-presence cache and abandon any in-flight probe.
+    """Invalidate the worker-presence cache.
 
     Called on every dispatch attempt, so the next evaluation re-checks the
     broker instead of serving an entry that attempt just contradicted, and by
-    test fixtures. ``log_state`` additionally clears the transition memory that
-    keeps repeated probe failures at DEBUG — test isolation only, since
-    clearing it in production would re-warn once per circuit close.
+    test fixtures. A probe still in flight is left joinable on purpose: it is
+    itself the re-check the reset asks for, and dropping it would turn the
+    next evaluation into a non-observation for the rest of that round-trip.
+    Only a waiter's own deadline abandons an attempt. ``log_state``
+    additionally clears the transition memory that keeps repeated probe
+    failures at DEBUG — test isolation only, since clearing it in production
+    would re-warn once per circuit close.
     """
-    global _probe_inflight, _probe_seq, _last_logged_worker_state
+    global _last_logged_worker_state
 
     with _worker_cache_lock:
         _adopt_process_locked()
         _worker_cache.clear()
-        _probe_inflight = None
-        _probe_seq += 1
         if log_state:
             _last_logged_worker_state = None
 

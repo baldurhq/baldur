@@ -43,6 +43,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from structlog.testing import capture_logs
 
+from baldur.core import process_utils
 from baldur.metrics.recorders.dlq import DLQMetricRecorder
 from baldur.services.replay_service import arming
 from baldur.services.replay_service.arming import (
@@ -63,7 +64,7 @@ _MOD = "baldur.services.replay_service.arming"
 
 # Marks a process that serves Celery tasks — the probe reads it to tell an
 # unanswered broadcast it sent from inside a worker from one it sent outside.
-_CELERY_SERVING_ENV = "BALDUR_CELERY_WORKER_SERVING"
+_CELERY_SERVING_ENV = process_utils._CELERY_WORKER_SERVING_ENV_VAR
 
 # Ceiling on every fake's wait. A test that reaches it has already failed; the
 # bound only keeps a wedged session from hanging.
@@ -643,6 +644,20 @@ class TestWorkerCacheBehavior:
         assert second == "ok"
         assert probe.calls == 2
 
+    def test_cache_accessor_does_not_hand_out_a_parent_process_entry(self):
+        # A forked child inherits the parent's cache verbatim; the accessor
+        # must adopt the process like every other reader and answer empty.
+        probe = _open_probe("ok")
+        clock = _FakeClock()
+        with _probe_env(probe, clock):
+            arming._cached_worker_state()
+            assert get_worker_cache() != {}
+
+            with patch.object(arming, "_probe_state_pid", os.getpid() + 1):
+                inherited = get_worker_cache()
+
+        assert inherited == {}
+
     def test_reset_worker_cache_forces_fresh_probe(self):
         probe = _open_probe("ok")
         clock = _FakeClock()
@@ -797,38 +812,41 @@ class TestWorkerProbeSingleFlightBehavior:
             assert get_worker_cache()[arming._WORKER_CACHE_KEY][1] == "unknown"
             assert arming._cached_worker_state() == "unknown"
 
-    def test_reset_during_an_in_flight_round_trip_leaves_the_next_call_unblocked(
+    def test_reset_during_a_live_round_trip_hands_the_next_call_its_answer(
         self, gated_probe
     ):
-        # Given: a probe parked inside the round-trip with a caller on it.
+        # Given: a healthy probe parked inside the round-trip with a caller on
+        # it.
         probe = gated_probe("ok")
         clock = _FakeClock()
         results: list[str] = []
 
+        def call():
+            results.append(arming._cached_worker_state())
+
         with _probe_env(probe, clock, ttl=15, budget=2.0):
-            caller = threading.Thread(
-                target=lambda: results.append(arming._cached_worker_state())
-            )
-            caller.start()
+            first = threading.Thread(target=call)
+            first.start()
             assert probe.entered.wait(timeout=_GATE_TIMEOUT)
 
-            # When: a dispatch attempt (or a fixture) invalidates the cache
-            # while that probe is still in flight.
+            # When: a dispatch attempt invalidates the cache while that probe
+            # is still in flight, and a poll lands right after it.
             reset_worker_cache()
-            state = arming._cached_worker_state()
-            cache_after = get_worker_cache()
-
+            second = threading.Thread(target=call)
+            second.start()
             probe.release.set()
-            caller.join(timeout=_GATE_TIMEOUT)
+            first.join(timeout=_GATE_TIMEOUT)
+            second.join(timeout=_GATE_TIMEOUT)
+            cached = get_worker_cache()[arming._WORKER_CACHE_KEY][1]
 
-        # Then: the next evaluation answered from the live thread's existence
-        # rather than queueing behind it. It never reached the abandonment path,
-        # which is what an entry in the cache would prove, and it started no
-        # second round-trip; the parked caller still got its own answer.
-        assert state == "unknown"
-        assert cache_after == {}
+        # Then: the live round-trip is the re-check the reset asked for. The
+        # post-reset poll joined it and got the broker's real answer rather
+        # than a non-observation, no second round-trip started, and the
+        # answer was cached — a reset must not turn a healthy deployment into
+        # "unverified" for the rest of that round-trip.
+        assert sorted(results) == ["ok", "ok"]
         assert probe.calls == 1
-        assert results == ["ok"]
+        assert cached == "ok"
 
 
 # =============================================================================
@@ -846,16 +864,22 @@ class _FakeBrokerConnection:
         self.closes += 1
 
 
-class _FakeCeleryControl:
-    """``current_app.control`` stand-in recording how ``inspect`` was called."""
+class _FakeBroadcast:
+    """Stand-in for the reply-collecting broadcast, recording how it was asked.
 
-    def __init__(self, active_queues) -> None:
+    ``reply`` is what the broker answered; an exception instance is raised
+    instead, the way an unreachable broker fails the round-trip.
+    """
+
+    def __init__(self, reply) -> None:
         self.calls: list[tuple] = []
-        self._active_queues = active_queues
+        self._reply = reply
 
-    def inspect(self, *, timeout, connection):
-        self.calls.append((timeout, connection))
-        return SimpleNamespace(active_queues=self._active_queues)
+    def __call__(self, connection, timeout):
+        self.calls.append((connection, timeout))
+        if isinstance(self._reply, BaseException):
+            raise self._reply
+        return self._reply
 
 
 class _FakeCeleryApp:
@@ -866,33 +890,70 @@ class _FakeCeleryApp:
     whole job, and an auto-generated attribute would erase the difference.
     """
 
-    def __init__(self, *, active_queues, connect_timeout: float = 4.0) -> None:
+    def __init__(self, *, connect_timeout: float = 4.0) -> None:
         self.connection = _FakeBrokerConnection()
         self.connection_kwargs: dict = {}
         self.conf = SimpleNamespace(broker_connection_timeout=connect_timeout)
-        self.control = _FakeCeleryControl(active_queues)
 
     def connection_for_write(self, **kwargs) -> _FakeBrokerConnection:
         self.connection_kwargs = kwargs
         return self.connection
 
 
-def _broker_down():
-    """An ``active_queues()`` that fails the way an unreachable broker does."""
-    raise OSError("broker unreachable")
-
-
 @contextlib.contextmanager
-def _celery_app(app, *, inspect_timeout: int = 1):
-    """Stand the probe's ``current_app`` and its settings up as fakes."""
+def _celery_app(app, broadcast, *, inspect_timeout: int = 1):
+    """Stand the probe's ``current_app``, its settings and its broadcast up."""
     with (
         patch("celery.current_app", app),
         patch(
             "baldur.settings.celery_task.get_celery_task_settings",
             return_value=_celery_settings(inspect_timeout=inspect_timeout),
         ),
+        patch(f"{_MOD}._inspect_active_queues", broadcast),
     ):
         yield
+
+
+class _FakeMailbox:
+    """A control mailbox class: records how it was built, answers ``multi_call``.
+
+    The probe builds its own mailbox from the app's via ``type(base)(...)``,
+    so a fake class stands in for both the template and the copy.
+    """
+
+    instances: list[_FakeMailbox] = []
+
+    def __init__(self, namespace, **kwargs) -> None:
+        self.namespace = namespace
+        self.kwargs = kwargs
+        self.replies: list = []
+        self.multi_calls: list[tuple] = []
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+        _FakeMailbox.instances.append(self)
+
+    def multi_call(self, command, kwargs=None, timeout=1, **_):
+        self.multi_calls.append((command, timeout))
+        return self.replies
+
+
+def _control_mailbox_template() -> _FakeMailbox:
+    """The app's own mailbox — what the probe copies its settings from."""
+    return _FakeMailbox(
+        "celery",
+        type="fanout",
+        connection=None,
+        clock=object(),
+        accept=["json"],
+        serializer="json",
+        producer_pool=object(),  # the pool the probe must never draw from
+        queue_ttl=300.0,
+        queue_expires=10.0,
+        queue_durable=False,
+        queue_exclusive=False,
+        reply_queue_ttl=300.0,
+        reply_queue_expires=10.0,
+    )
 
 
 class TestWorkerProbeReplyFoldBehavior:
@@ -940,28 +1001,29 @@ class TestWorkerProbeReplyFoldBehavior:
             monkeypatch.setenv(_CELERY_SERVING_ENV, "1")
         else:
             monkeypatch.delenv(_CELERY_SERVING_ENV, raising=False)
-        app = _FakeCeleryApp(active_queues=lambda: reply)
+        app = _FakeCeleryApp()
 
-        with _celery_app(app):
+        with _celery_app(app, _FakeBroadcast(reply)):
             assert arming._probe_dlq_worker() == expected
 
-    def test_probe_inspects_over_its_own_connection_and_closes_it(self, monkeypatch):
+    def test_probe_broadcasts_over_its_own_connection_and_closes_it(self, monkeypatch):
         # A probe wedged on an unreachable broker must never hold a pooled
         # connection the dispatch path needs to send the replay task.
         monkeypatch.delenv(_CELERY_SERVING_ENV, raising=False)
-        app = _FakeCeleryApp(active_queues=lambda: {"w1": [{"name": "dlq_processing"}]})
+        app = _FakeCeleryApp()
+        broadcast = _FakeBroadcast({"w1": [{"name": "dlq_processing"}]})
 
-        with _celery_app(app, inspect_timeout=1):
+        with _celery_app(app, broadcast, inspect_timeout=1):
             assert arming._probe_dlq_worker() == "ok"
 
-        assert app.control.calls == [(1, app.connection)]
+        assert broadcast.calls == [(app.connection, 1)]
         assert app.connection.closes == 1
 
     def test_probe_closes_its_connection_when_the_broadcast_raises(self, monkeypatch):
         monkeypatch.delenv(_CELERY_SERVING_ENV, raising=False)
-        app = _FakeCeleryApp(active_queues=_broker_down)
+        app = _FakeCeleryApp()
 
-        with _celery_app(app):
+        with _celery_app(app, _FakeBroadcast(OSError("broker unreachable"))):
             # A broker error is unverified state, never a refutation.
             assert arming._probe_dlq_worker() == "unknown"
 
@@ -973,9 +1035,9 @@ class TestWorkerProbeReplyFoldBehavior:
         # Without socket deadlines a half-open socket has none at all, and the
         # probe thread would outlive the outage that produced it.
         monkeypatch.delenv(_CELERY_SERVING_ENV, raising=False)
-        app = _FakeCeleryApp(active_queues=lambda: {}, connect_timeout=4.0)
+        app = _FakeCeleryApp(connect_timeout=4.0)
 
-        with _celery_app(app, inspect_timeout=1):
+        with _celery_app(app, _FakeBroadcast({}), inspect_timeout=1):
             budget = arming._probe_budget_seconds()
             arming._probe_dlq_worker()
 
@@ -987,6 +1049,88 @@ class TestWorkerProbeReplyFoldBehavior:
             "read_timeout": budget,
             "write_timeout": budget,
         }
+
+
+class TestWorkerProbeBroadcastBehavior:
+    """``_inspect_active_queues`` publishes and collects on one connection.
+
+    ``control.inspect(connection=...)`` binds only the reply side to the
+    supplied connection; the request goes out through the app's producer pool
+    on a pooled connection with no socket deadline. The probe's own mailbox
+    has no pool, so a wedged probe can neither hold a pooled connection nor
+    republish forever on one.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _fresh_mailboxes(self):
+        _FakeMailbox.instances.clear()
+        yield
+        _FakeMailbox.instances.clear()
+
+    def test_broadcast_builds_a_pool_less_mailbox_bound_to_the_probe_connection(self):
+        # Given: the app's control mailbox, which carries a producer pool.
+        template = _control_mailbox_template()
+        app = SimpleNamespace(control=SimpleNamespace(mailbox=template))
+        connection = _FakeBrokerConnection()
+
+        # When
+        with patch("celery.current_app", app):
+            built_before = len(_FakeMailbox.instances)
+            active = arming._inspect_active_queues(connection, 3)
+
+        # Then: exactly one mailbox was built, on the probe connection, with
+        # the app's identity copied and the producer pool dropped.
+        built = _FakeMailbox.instances[built_before:]
+        assert len(built) == 1
+        box = built[0]
+        assert box.namespace == template.namespace
+        assert box.kwargs["type"] == template.type
+        assert box.kwargs["connection"] is connection
+        assert box.kwargs["producer_pool"] is None
+        assert box.kwargs["accept"] == template.accept
+        assert box.kwargs["serializer"] == template.serializer
+        assert box.kwargs["queue_ttl"] == template.queue_ttl
+        assert box.kwargs["reply_queue_expires"] == template.reply_queue_expires
+        assert box.multi_calls == [("active_queues", 3)]
+        assert active == {}
+
+    def test_broadcast_flattens_the_per_node_replies(self):
+        template = _control_mailbox_template()
+        app = SimpleNamespace(control=SimpleNamespace(mailbox=template))
+
+        with (
+            patch("celery.current_app", app),
+            patch.object(
+                _FakeMailbox,
+                "multi_call",
+                lambda self, command, kwargs=None, timeout=1, **_: [
+                    {"w1": [{"name": "other"}]},
+                    {"w2": [{"name": "dlq_processing"}]},
+                ],
+            ),
+        ):
+            active = arming._inspect_active_queues(_FakeBrokerConnection(), 1)
+
+        assert active == {
+            "w1": [{"name": "other"}],
+            "w2": [{"name": "dlq_processing"}],
+        }
+
+    def test_broadcast_with_no_replies_is_an_empty_map(self):
+        template = _control_mailbox_template()
+        app = SimpleNamespace(control=SimpleNamespace(mailbox=template))
+
+        with (
+            patch("celery.current_app", app),
+            patch.object(
+                _FakeMailbox,
+                "multi_call",
+                lambda self, command, kwargs=None, timeout=1, **_: None,
+            ),
+        ):
+            active = arming._inspect_active_queues(_FakeBrokerConnection(), 1)
+
+        assert active == {}
 
 
 class TestWorkerProbeLoggingBehavior:
@@ -1200,8 +1344,12 @@ class TestArmedGaugeBehavior:
         with patch(
             "baldur.metrics.prometheus.get_metrics",
             side_effect=RuntimeError("registry down"),
-        ):
+        ) as get_metrics:
             arming._set_gauge(True)
+
+        # The arm is a silent except, so the fault's own firing is the witness
+        # that it was entered rather than skipped.
+        assert get_metrics.called
 
     def test_refresh_publishes_the_verdict_the_evaluation_reached(self):
         with _links(), _dlq_recorder() as recorder:
