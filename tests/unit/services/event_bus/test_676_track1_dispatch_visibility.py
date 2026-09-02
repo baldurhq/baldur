@@ -26,17 +26,24 @@ safe, PRO-absent safe).
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 from structlog.testing import capture_logs
 
 from baldur.factory.registry import ProviderRegistry
+from baldur.metrics.recorders.dlq import DLQMetricRecorder
 from baldur.services.event_bus.bus._cb_handlers import (
     _get_replay_automation_config,
     _on_circuit_breaker_closed,
+    _record_dispatch_outcome,
     get_cb_replay_dispatch_state,
     reset_cb_replay_dispatch_state,
+)
+from baldur.services.replay_service.arming import (
+    get_dispatch_ledger,
+    reset_dispatch_ledger,
 )
 from baldur.settings.replay_automation import ReplayAutomationSettings
 
@@ -55,11 +62,14 @@ def _reset_dispatch_markers():
 
     The marker is process-global (``get_*/reset_*`` convention), so without
     this the first test's ``runtime_config_absent`` DEBUG would suppress a
-    later test's expectation (xdist-safe isolation).
+    later test's expectation (xdist-safe isolation). The arming ledger the
+    dispatch path writes into is process-global for the same reason.
     """
     reset_cb_replay_dispatch_state()
+    reset_dispatch_ledger()
     yield
     reset_cb_replay_dispatch_state()
+    reset_dispatch_ledger()
 
 
 def _make_event(service_name: str = "payment-api", trigger: str = "auto"):
@@ -244,6 +254,34 @@ class TestOnRecoveryDispatchVisibilityBehavior:
             _on_circuit_breaker_closed(event)
 
         assert _events(cap, "event_handler.celery_tasks_available_skipping") == []
+
+    def test_dispatch_outcome_is_handed_to_the_arming_ledger_verbatim(self):
+        # Every other test on this class patches this seam, so without one that
+        # exercises it a signature drift between the two sides would pass here
+        # and fail only in production.
+        with patch(
+            "baldur.services.replay_service.arming.record_dispatch_outcome"
+        ) as ledger:
+            _record_dispatch_outcome("error", service_name="orders-api", error="boom")
+
+        ledger.assert_called_once_with("error", service_name="orders-api", error="boom")
+
+    def test_dispatch_counts_the_outcome_but_never_writes_the_armed_gauge(self):
+        # One gauge writer, and it is the arming probe. A dispatch observes a
+        # single moment and would publish a claim the next poll contradicts —
+        # which is how a broker-down deployment used to read as armed.
+        recorder = MagicMock(spec=DLQMetricRecorder)
+
+        with patch(
+            "baldur.metrics.prometheus.get_metrics",
+            return_value=SimpleNamespace(dlq=recorder),
+        ):
+            _record_dispatch_outcome("dispatched", service_name="orders-api")
+
+        recorder.record_replay_dispatch.assert_called_once_with("dispatched")
+        recorder.set_auto_replay_armed.assert_not_called()
+        # What the path observed reaches the operator as last_dispatch instead.
+        assert get_dispatch_ledger().service_name == "orders-api"
 
 
 # =============================================================================

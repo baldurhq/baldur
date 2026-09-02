@@ -157,7 +157,11 @@ _MOCK_CREATION_BUDGETS: dict[str, int] = {
     # the cleanup audit suite collapsed into one fixture that fills the
     # ProviderRegistry slot the service actually resolves. They were three
     # copies of a stand-in the service never reached.
-    "oss": 4332,
+    # arming probe fakes: -4 — the worker-probe suite's MagicMock settings
+    # stub and its three MagicMock probes became a SimpleNamespace and an
+    # Event-gated fake, which is what lets those tests observe the probe
+    # thread's lifecycle at all.
+    "oss": 4328,
     "pro": 1800,
     "dormant": 401,
 }
