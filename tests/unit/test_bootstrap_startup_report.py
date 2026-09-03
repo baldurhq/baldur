@@ -9,6 +9,9 @@ the surviving WAL files as duplicate events.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from unittest.mock import patch
+
 import pytest
 from structlog.testing import capture_logs
 
@@ -19,6 +22,7 @@ from baldur.bootstrap import (
     ExtensionResult,
     _build_startup_report,
     _find_resolution,
+    _run_pro_extensions,
     _warn_on_audit_durability_split,
 )
 from baldur.utils.fs import get_writable_dir_resolutions, resolve_writable_dir
@@ -294,3 +298,55 @@ class TestStartupReportEffectiveRetryBackoffBehavior:
         report = _build_startup_report(ExtensionResult())
 
         assert report["effective_retry_backoff"] == {}
+
+
+class TestExtensionHookReportsBehavior:
+    """What a bootstrap hook says it did, carried to the operator's INFO line.
+
+    ``executed`` records only that the hook returned without raising. A hook
+    whose own steps are individually fail-soft — the PRO registration hook is
+    exactly that — is "executed" even when half of what it promised never
+    registered, so the hook's own verdict needs a place in the report.
+    """
+
+    def test_a_hook_returning_a_mapping_is_kept_under_its_name(self):
+        """The hook's self-report reaches ``extensions.reports[<name>]``."""
+        report = {"status": "degraded", "failed": ["module:pkg.services.bulkhead"]}
+        entry_point = SimpleNamespace(name="pro", load=lambda: lambda: report)
+
+        with patch("importlib.metadata.entry_points", return_value=[entry_point]):
+            result = _run_pro_extensions()
+
+        assert result.reports == {"pro": report}
+        assert _build_startup_report(result)["extensions"]["reports"] == {"pro": report}
+
+    def test_a_hook_returning_none_contributes_no_key(self):
+        """Every hook written before this seam existed stays supported.
+
+        Its ``None`` must leave the map empty rather than parking a null under
+        the hook's name, which a reader would have to tell apart from a hook
+        that reported nothing wrong.
+        """
+        entry_point = SimpleNamespace(name="pro", load=lambda: lambda: None)
+
+        with patch("importlib.metadata.entry_points", return_value=[entry_point]):
+            result = _run_pro_extensions()
+
+        assert result.reports == {}
+        assert _build_startup_report(result)["extensions"]["reports"] == {}
+        assert result.executed == ["pro"]
+
+    def test_a_failing_hook_reports_nothing_and_stays_in_failed(self):
+        """The report never claims an outcome for a hook that raised."""
+
+        def raising_hook():
+            raise RuntimeError("intentional")
+
+        entry_point = SimpleNamespace(name="pro", load=lambda: raising_hook)
+
+        with patch("importlib.metadata.entry_points", return_value=[entry_point]):
+            result = _run_pro_extensions()
+
+        assert result.failed == ["pro"]
+        assert result.executed == []
+        assert result.reports == {}

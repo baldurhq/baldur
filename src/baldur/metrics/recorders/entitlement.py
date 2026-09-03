@@ -1,9 +1,17 @@
 """
 Entitlement metric recorder — subscription status gauges for SRE dashboards.
 
-Two gauges (D8):
+Three gauges:
 - baldur_entitlement_status: 0=missing, 1=invalid, 2=active
 - baldur_entitlement_expiry_days: days until expiry (negative = past due)
+- baldur_entitlement_registration_failures: PRO registration steps that failed
+
+The third one is the steady-state half of an entitled boot. Registering the PRO
+tier is a sequence of individually fail-soft steps, so a paid install can run
+with one capability silently on its OSS default and nothing after boot says so.
+Alert on it paired with the status gauge —
+``baldur_entitlement_status == 2 and baldur_entitlement_registration_failures > 0``
+— because ``0`` alone cannot separate "registered cleanly" from "never ran".
 """
 
 from __future__ import annotations
@@ -19,13 +27,14 @@ __all__ = [
     "EntitlementMetricRecorder",
     "set_entitlement_status",
     "set_entitlement_expiry_days",
+    "set_entitlement_registration_failures",
 ]
 
 
 class EntitlementMetricRecorder(BaseMetricRecorder):
     """Entitlement metric definitions and recording.
 
-    D8: Two gauges for SRE dashboard visibility.
+    Three gauges for SRE dashboard visibility.
     """
 
     def __init__(self) -> None:
@@ -37,6 +46,11 @@ class EntitlementMetricRecorder(BaseMetricRecorder):
         self._expiry_days = get_or_create_gauge(
             f"{self.PREFIX}_entitlement_expiry_days",
             "Days until entitlement expiry (negative = past due)",
+            [],
+        )
+        self._registration_failures = get_or_create_gauge(
+            f"{self.PREFIX}_entitlement_registration_failures",
+            "PRO registration steps that failed in this process (0 = none)",
             [],
         )
 
@@ -53,6 +67,15 @@ class EntitlementMetricRecorder(BaseMetricRecorder):
             self._expiry_days.set(days)
         except Exception as e:
             logger.warning("metrics.set_entitlement_expiry_days_failed", error=e)
+
+    def set_registration_failures(self, count: int) -> None:
+        """Set the number of PRO registration steps that failed this process."""
+        try:
+            self._registration_failures.set(count)
+        except Exception as e:
+            logger.warning(
+                "metrics.set_entitlement_registration_failures_failed", error=e
+            )
 
 
 # --- Module-level convenience functions ---
@@ -79,3 +102,10 @@ def set_entitlement_expiry_days(days: int) -> None:
     rec = _lazy_recorder()
     if rec:
         rec.set_expiry_days(days)
+
+
+def set_entitlement_registration_failures(count: int) -> None:
+    """Set the number of PRO registration steps that failed this process."""
+    rec = _lazy_recorder()
+    if rec:
+        rec.set_registration_failures(count)

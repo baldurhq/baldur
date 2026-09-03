@@ -2386,6 +2386,10 @@ class ExtensionResult:
     found: list[str] = field(default_factory=list)
     executed: list[str] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
+    #: Per-hook self-report, keyed by hook name. A hook that returns a mapping
+    #: describes what it actually did; ``executed`` only says it did not raise,
+    #: which is a weaker statement for a hook whose own steps are fail-soft.
+    reports: dict[str, Any] = field(default_factory=dict)
 
 
 def _run_pro_extensions() -> ExtensionResult:
@@ -2400,6 +2404,11 @@ def _run_pro_extensions() -> ExtensionResult:
     and constructible.
 
     Hook failures are logged at WARNING and do NOT abort init().
+
+    A hook may return a mapping describing its own outcome; it is kept in
+    ``reports`` and surfaced by the startup report. Anything else — including
+    the ``None`` every hook returned before this seam existed — contributes
+    nothing, so an older PRO package stays supported unchanged.
     """
     result = ExtensionResult()
     try:
@@ -2416,8 +2425,10 @@ def _run_pro_extensions() -> ExtensionResult:
         result.found.append(hook.name)
         try:
             fn = hook.load()
-            fn()
+            hook_report = fn()
             result.executed.append(hook.name)
+            if isinstance(hook_report, dict):
+                result.reports[hook.name] = hook_report
             logger.debug("baldur.pro_extension_invoked", name=hook.name)
         except Exception as exc:
             result.failed.append(hook.name)
@@ -2587,6 +2598,10 @@ def _build_startup_report(ext_result: ExtensionResult) -> dict[str, Any]:
             "found": ext_result.found,
             "executed": ext_result.executed,
             "failed": ext_result.failed,
+            # What each hook says it did, as opposed to that it returned. A
+            # hook whose own steps are individually fail-soft is "executed"
+            # even when half of what it promised did not register.
+            "reports": ext_result.reports,
         },
         # Same derivation the posture line uses, so the short announcement
         # and the long report cannot disagree about the same process.
