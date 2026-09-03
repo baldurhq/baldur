@@ -16,6 +16,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - Those entries replay on their own when that circuit closes, if the domain has a replay handler.
 - `BALDUR_DLQ_OPEN_CIRCUIT_CAPTURE_ENABLED=false` keeps only the retry-exhaustion capture.
 - `auto_replay.lanes` and `auto_replay.last_dispatch` show which sweep can run and what it did.
+- `baldur_entitlement_registration_failures` counts the PRO registration steps that failed at boot.
+- The startup report's `extensions.reports` carries what each bootstrap hook says it registered.
 
 ### Changed
 

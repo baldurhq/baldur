@@ -73,3 +73,88 @@ class TestEntitlementRecorderBehavior:
 
         # Should not raise
         recorder.set_expiry_days(-5)
+
+
+class _RecordingGauge:
+    """Gauge stand-in that keeps every value written to it.
+
+    A real object rather than a mock: the assertions below are about the
+    sequence of values the setter writes, and an auto-generated attribute
+    would make "the setter did nothing" indistinguishable from a pass.
+    """
+
+    def __init__(self) -> None:
+        self.values: list[int] = []
+
+    def set(self, value: int) -> None:
+        self.values.append(value)
+
+
+class _RaisingGauge:
+    """Gauge stand-in whose every write fails, for the fail-open arm."""
+
+    def set(self, value: int) -> None:
+        raise RuntimeError("gauge error")
+
+
+class TestRegistrationFailuresGaugeContract:
+    """The third gauge — what an entitled boot actually registered.
+
+    The two subscription gauges describe the licence. PRO registration is a
+    sequence of individually fail-soft steps, so an entitled process can run
+    with a capability silently on its OSS default; without a steady-state
+    series that condition is visible only in one boot-time log line.
+    """
+
+    def test_registration_failures_gauge_name(self):
+        """Gauge name follows the baldur_entitlement_* convention."""
+        recorder = EntitlementMetricRecorder()
+        assert (
+            recorder._registration_failures._name
+            == "baldur_entitlement_registration_failures"
+        )
+
+
+class TestRegistrationFailuresGaugeBehavior:
+    """Set behavior, including the state (not counter) semantics."""
+
+    def test_set_registration_failures_calls_gauge(self):
+        """set_registration_failures delegates to Prometheus gauge.set()."""
+        recorder = EntitlementMetricRecorder()
+        gauge = _RecordingGauge()
+        recorder._registration_failures = gauge
+
+        recorder.set_registration_failures(2)
+
+        assert gauge.values == [2]
+
+    def test_a_clean_registration_clears_a_previous_count(self):
+        """It is a state, not a counter: a clean re-register writes 0.
+
+        Without the zero write, a process that recovered would keep alerting
+        on the count some earlier registration left behind.
+        """
+        recorder = EntitlementMetricRecorder()
+        gauge = _RecordingGauge()
+        recorder._registration_failures = gauge
+
+        recorder.set_registration_failures(3)
+        recorder.set_registration_failures(0)
+
+        assert gauge.values == [3, 0]
+
+    def test_set_registration_failures_swallows_exception(self):
+        """A gauge error never propagates into the boot path (fail-open)."""
+        recorder = EntitlementMetricRecorder()
+        recorder._registration_failures = _RaisingGauge()
+
+        # Should not raise
+        recorder.set_registration_failures(1)
+
+    def test_module_setter_is_silent_when_no_recorder_is_wired(self, monkeypatch):
+        """No metrics facade → the setter is a no-op, never a boot failure."""
+        from baldur.metrics.recorders import entitlement as module
+
+        monkeypatch.setattr(module, "_lazy_recorder", lambda: None)
+
+        module.set_entitlement_registration_failures(1)
