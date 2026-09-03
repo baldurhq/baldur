@@ -19,8 +19,9 @@ Test classes:
     - TestEntryIdentityContract: the value object's shape
     - TestForkIdentityRepairBehavior: re-owning, the no-op path, idempotency,
       the sequence restart, and the raising-log exit path
-    - TestForkRepairReachesEveryAccessor: every holder of the instance
-    - TestConcurrentFirstAllocation: two first allocations in one fresh child
+    - TestForkRepairReachesEveryAccessorBehavior: every holder of the instance
+    - TestConcurrentFirstAllocationBehavior: two first allocations in one
+      fresh child
     - TestEntryIdentitySingleReaderContract: the identity has one reader
 """
 
@@ -341,7 +342,7 @@ _ACCESSORS: dict[str, Any] = {
 }
 
 
-class TestForkRepairReachesEveryAccessor:
+class TestForkRepairReachesEveryAccessorBehavior:
     """Every holder of the instance hands back the object the repair re-owns."""
 
     @pytest.mark.parametrize("accessor_name", list(_ACCESSORS), ids=list(_ACCESSORS))
@@ -393,7 +394,7 @@ def _race_two_first_allocations(
     return allocated, [line["run_nonce"] for line in _repair_lines(logs)]
 
 
-class TestConcurrentFirstAllocation:
+class TestConcurrentFirstAllocationBehavior:
     """Two threads reaching the first allocation of a fresh child at once."""
 
     def test_concurrent_first_allocations_stay_distinct_under_any_interleaving(self):
@@ -444,9 +445,9 @@ class TestConcurrentFirstAllocation:
 _IDENTITY_ATTRIBUTE = "_entry_identity"
 _ALLOCATOR = "_allocate_id"
 _REPAIR = "_repair_if_forked"
-# The repair, plus the three read-only diagnostic views. Asserted to be exactly
-# this set below, so widening it is a visible failure rather than a silent
-# waiver.
+# The repair, plus the three read-only diagnostic views. The walk is asserted
+# to find exactly these four, spelled out, so widening this set to admit a new
+# reader is a visible failure rather than a silent waiver.
 _ALLOWED_READERS = frozenset({_REPAIR, "_pod_id", "_pid", "_run_nonce"})
 
 
@@ -582,22 +583,18 @@ class TestEntryIdentitySingleReaderContract:
     so any read it finds is a read of this identity.
     """
 
-    def test_allowed_reader_set_is_exactly_the_repair_and_its_three_views(self):
-        """A widening of the allowed set is a failure as well as a diff —
-        otherwise exempting a new reader would silently retire the rule."""
-        assert _ALLOWED_READERS == {
-            "_repair_if_forked",
-            "_pod_id",
-            "_pid",
-            "_run_nonce",
-        }
-
     def test_the_walk_reaches_the_package_and_finds_the_known_readers(self):
-        """A scan that reached nothing would pass every assertion below."""
+        """A scan that reached nothing would pass every assertion below. The
+        readers it finds are spelled out rather than compared to the allowed
+        set alone, so admitting a new reader by widening that set is a failure
+        here as well as a diff — otherwise exempting one would silently retire
+        the rule."""
         scan = _scan_package()
 
         assert scan.modules > 1
-        assert {load.member for load in scan.loads} == _ALLOWED_READERS
+        found = {load.member for load in scan.loads}
+        assert found == {"_repair_if_forked", "_pod_id", "_pid", "_run_nonce"}
+        assert found == _ALLOWED_READERS
 
     def test_only_the_repair_and_its_views_read_the_identity(self):
         """Any other reader is a second load that can straddle a concurrent
