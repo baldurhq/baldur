@@ -30,13 +30,13 @@ Test classes:
 
 from __future__ import annotations
 
-import itertools
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
 from structlog.testing import capture_logs
 
-from baldur.adapters.redis.dlq import RedisDLQRepository
+from baldur.adapters.redis.dlq import RedisDLQRepository, _EntryIdentity
 from baldur.adapters.redis.dlq_query import RedisDLQQuery
 
 _ALERT_EVENT = "redis_dlq.domain_cardinality_alert"
@@ -61,10 +61,11 @@ def _make_repo(backend: MagicMock | None = None) -> RedisDLQRepository:
     repo._all_key = "dlq:all"
     repo._domains_key = "dlq:domains"
     repo._known_domains = set()
-    repo._pod_id = "pod-a"
-    repo._pid = 100
-    repo._run_nonce = "nonce0"
-    repo._seq_counter = itertools.count()
+    # 782 D1: the identity is one immutable object, not four fields; the
+    # fixture supplies exactly what __init__ would have built.
+    repo._entry_identity = _EntryIdentity(
+        "pod-a", 100, "nonce0", origin_pid=os.getpid()
+    )
     repo._compression_enabled = MagicMock(return_value=False)
     repo.query = RedisDLQQuery(repo)
     return repo
