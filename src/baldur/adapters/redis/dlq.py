@@ -35,6 +35,7 @@ import os
 import secrets
 import time
 import zlib
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -80,6 +81,35 @@ _ENTRY_FIELD_DEFAULTS: dict[str, Any] = {
     "recommended_action": "",
     "expires_at": None,
 }
+
+# Width of a process's ``run_nonce`` in bytes. 64 bits is the entropy the
+# composite id's collision freedom rests on (538 D2); nothing parses the token.
+_RUN_NONCE_BYTES = 8
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class _EntryIdentity:
+    """One process's composite entry-id namespace, allocated from as a unit.
+
+    Immutable on purpose: a process that inherits this object across ``fork()``
+    replaces it wholesale instead of mutating fields, so an allocation never
+    observes a half-updated identity and the repair needs no lock (782 D1). The
+    ``seq`` counter is the one part that advances in place — ``next()`` on an
+    ``itertools.count`` is a single C call under the GIL — and it belongs to
+    the namespace ``run_nonce`` names, so a replaced identity takes its counter
+    with it.
+
+    ``origin_pid`` records the constructing process unconditionally and is what
+    the fork check compares against — never ``pid``, which is an injectable
+    test seam (538 D2) that a pid-keyed check would overwrite on the next
+    allocation.
+    """
+
+    pod_id: str
+    pid: int
+    run_nonce: str
+    origin_pid: int
+    seq: itertools.count[int] = field(default_factory=itertools.count)
 
 
 class RedisDLQRepository(
@@ -164,8 +194,9 @@ class RedisDLQRepository(
         # domain skips the post-ZADD ZCARD check on the hot path.
         self._known_domains: set[str] = set()
 
-        # Process-namespaced composite ID identity (538 D2). Captured once
-        # at construction so _allocate_id is a pure read of instance state.
+        # Process-namespaced composite ID identity (538 D2), held as one
+        # immutable object so a fork child re-owns the whole identity with a
+        # single store and no lock (782 D1) — see _repair_if_forked.
         # Injectable seams let a test simulate N worker processes in-process
         # by constructing N repos with distinct identities (no subprocess).
         from baldur.core.cluster_identity import get_cluster_identity
@@ -175,14 +206,21 @@ class RedisDLQRepository(
                 pod_id = get_cluster_identity().pod_id
             except Exception:
                 pod_id = "unknown"
-        self._pod_id = pod_id
-        self._pid = pid if pid is not None else os.getpid()
         # run_nonce makes the namespace unique per process *start* — a
         # container running the app as pid 1 with a persistent wal_dir would
         # otherwise re-allocate {pod}:1:0... after a restart, colliding with
-        # not-yet-recovered pre-restart entries (538 D2).
-        self._run_nonce = run_nonce if run_nonce is not None else secrets.token_hex(8)
-        self._seq_counter = itertools.count()
+        # not-yet-recovered pre-restart entries (538 D2). A fork child is a
+        # process start too, so it draws its own nonce on first allocation.
+        self._entry_identity = _EntryIdentity(
+            pod_id=pod_id,
+            pid=pid if pid is not None else os.getpid(),
+            run_nonce=(
+                run_nonce
+                if run_nonce is not None
+                else secrets.token_hex(_RUN_NONCE_BYTES)
+            ),
+            origin_pid=os.getpid(),
+        )
 
         # Composition: sub-modules
         from baldur.adapters.redis.dlq_compression import RedisDLQCompression
@@ -241,17 +279,88 @@ class RedisDLQRepository(
         """Relative key for the domain registry ZSET (``dlq:domains``)."""
         return self._domains_key
 
+    @property
+    def _pod_id(self) -> str:
+        """Diagnostic view of the current identity's pod id."""
+        return self._entry_identity.pod_id
+
+    @property
+    def _pid(self) -> int:
+        """Diagnostic view of the current identity's pid.
+
+        A fork child reports the *parent's* pid here until its own first
+        allocation: the repair is lazy (782 D1/D4). A diagnostic that needs
+        the child's own identity must read it after a capture, and read the
+        identity object once rather than these views one at a time — two
+        reads can straddle a concurrent swap.
+        """
+        return self._entry_identity.pid
+
+    @property
+    def _run_nonce(self) -> str:
+        """Diagnostic view of the current identity's run nonce."""
+        return self._entry_identity.run_nonce
+
+    def _repair_if_forked(self) -> _EntryIdentity:
+        """Return this process's own entry identity, re-owning it after a fork.
+
+        A ``fork()`` child inherits the parent's identity object, so without
+        this every sibling allocates the same ``{pod}:{pid}:{nonce}:{seq}``
+        tokens and each ``create()`` silently overwrites the previous
+        sibling's entry (782 D1). No-op in the constructing process: one
+        attribute load, one ``os.getpid()``.
+
+        Lock-free on purpose. A lock taken here would be held exactly by a
+        process whose pid mismatches — a child mid-repair — so a grandchild
+        forked in that window would inherit it held and block forever. The
+        whole identity is swapped instead: concurrent first allocations each
+        build and store their own object and allocate from the one they
+        installed, so distinct nonces keep the ids distinct whichever store
+        wins, while a thread that loaded another thread's object shares that
+        object's counter. Under every interleaving the inherited object is
+        never allocated from in a child.
+
+        Callers allocate from the returned object and must not re-read the
+        attribute: a second load could straddle a concurrent swap.
+        """
+        inherited = self._entry_identity
+        if inherited.origin_pid == os.getpid():
+            return inherited
+
+        # Stored before the log line: a raising log processor must leave the
+        # identity re-owned — the repair itself succeeded, only its report
+        # failed — so the next allocation takes the no-op path above instead
+        # of minting a second nonce.
+        fresh = _EntryIdentity(
+            pod_id=inherited.pod_id,
+            pid=os.getpid(),
+            run_nonce=secrets.token_hex(_RUN_NONCE_BYTES),
+            origin_pid=os.getpid(),
+        )
+        self._entry_identity = fresh
+        logger.info(
+            "redis_dlq.fork_state_repaired",
+            pid=fresh.pid,
+            inherited_pid=inherited.origin_pid,
+            inherited_run_nonce=inherited.run_nonce,
+            run_nonce=fresh.run_nonce,
+        )
+        return fresh
+
     def _allocate_id(self) -> str:
         """Allocate a process-namespaced composite entry ID (538 D2).
 
         Returns ``{pod_id}:{pid}:{run_nonce}:{seq}`` — collide-free across
         uncoordinated worker processes (including restart with pid reuse,
-        disambiguated by run_nonce) without a Redis/WAL round-trip. ZSET
-        index scores are ``time.time()`` so opaque composite members order
-        correctly; the id is never parsed numerically.
+        disambiguated by run_nonce) without a Redis/WAL round-trip. A
+        ``fork()`` child is one such process: it re-owns pid, nonce and
+        counter here, on its first allocation, rather than allocating from the
+        identity it inherited (782 D1). ZSET index scores are ``time.time()``
+        so opaque composite members order correctly; the id is never parsed
+        numerically.
         """
-        seq = next(self._seq_counter)
-        return f"{self._pod_id}:{self._pid}:{self._run_nonce}:{seq}"
+        ident = self._repair_if_forked()
+        return f"{ident.pod_id}:{ident.pid}:{ident.run_nonce}:{next(ident.seq)}"
 
     def _make_key(self, entry_id: str) -> str:
         """Generate storage key for entry under the ``dlq:entry:`` namespace."""

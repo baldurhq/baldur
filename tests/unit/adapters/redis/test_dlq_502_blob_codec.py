@@ -19,12 +19,16 @@ Test classes:
 from __future__ import annotations
 
 import base64
-import itertools
+import os
 import threading
 from collections import OrderedDict
 from unittest.mock import MagicMock, patch
 
-from baldur.adapters.redis.dlq import _ZLIB_MAGIC_BYTE, RedisDLQRepository
+from baldur.adapters.redis.dlq import (
+    _ZLIB_MAGIC_BYTE,
+    RedisDLQRepository,
+    _EntryIdentity,
+)
 from baldur.adapters.resilient.backend import ResilientStorageMode
 from baldur.interfaces.repositories import FailedOperationStatus
 from baldur.settings.resilient_storage import ResilientStorageSettings
@@ -56,10 +60,11 @@ def _make_repo(compression_enabled: bool = True) -> RedisDLQRepository:
     repo._domains_key = "dlq:domains"
     repo._known_domains = set()
     # 538 D2: composite-ID identity seam (fixed for deterministic test ids).
-    repo._pod_id = "testpod"
-    repo._pid = 1
-    repo._run_nonce = "testnonce"
-    repo._seq_counter = itertools.count()
+    # 782 D1: the identity is one immutable object, not four fields; the
+    # fixture supplies exactly what __init__ would have built.
+    repo._entry_identity = _EntryIdentity(
+        "testpod", 1, "testnonce", origin_pid=os.getpid()
+    )
     # Patch the compression toggle to bypass settings lookup during tests.
     repo._compression_enabled = MagicMock(return_value=compression_enabled)
     return repo

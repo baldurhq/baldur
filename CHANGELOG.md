@@ -25,6 +25,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ### Fixed
 
+- Pool children of a forking worker no longer overwrite each other's DLQ entries.
 - `shutdown.worker_drained` now carries `aborted`, the in-flight requests the drain abandoned.
 - Open-circuit auto-replay with no `service_failure_type_map` no longer reports the loop disarmed.
 - A console poll no longer hangs on a broker that died after the process connected.
