@@ -213,8 +213,15 @@ class _EntitlementValidator:
         if not self._verify_signature(payload, signature_b64):
             return EntitlementResult(status=EntitlementStatus.INVALID, claims=claims)
 
-        # Check expiry
-        if claims.is_expired:
+        # Check expiry. ``expires`` reaches here straight from the token payload,
+        # so a malformed date is attacker- (or typo-) controlled input, not an
+        # internal invariant: the strptime behind ``is_expired`` must not be the
+        # one call in this function that raises instead of returning a status.
+        try:
+            expired = claims.is_expired
+        except ValueError:
+            return EntitlementResult(status=EntitlementStatus.INVALID, claims=claims)
+        if expired:
             return EntitlementResult(status=EntitlementStatus.INVALID, claims=claims)
 
         return EntitlementResult(status=EntitlementStatus.ACTIVE, claims=claims)
@@ -227,7 +234,10 @@ class _EntitlementValidator:
         if license_file:
             try:
                 return Path(license_file).read_text(encoding="utf-8").strip()
-            except OSError as exc:
+            except (OSError, ValueError) as exc:
+                # ValueError covers UnicodeDecodeError: a licence file written in
+                # any non-UTF-8 encoding is unreadable, not a crash reason. Both
+                # branches degrade to MISSING, which is what an absent file does.
                 logger.warning(
                     "entitlement.file_read_failed",
                     path=license_file,

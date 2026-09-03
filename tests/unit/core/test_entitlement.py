@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import json
 from datetime import date, timedelta
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -252,6 +253,21 @@ class TestLoadTokenBehavior:
         result = self.validator._load_token("", "/nonexistent/path.key")
         assert result == ""
 
+    def test_non_utf8_file_returns_empty(self, tmp_path):
+        """A licence file that is not UTF-8 degrades to empty, never raises.
+
+        ``read_text(encoding="utf-8")`` raises ``UnicodeDecodeError`` (a
+        ``ValueError``, not an ``OSError``), so an unreadable encoding must be
+        caught alongside the missing-file case or it escapes the validator and
+        aborts the caller that decides whether the PRO tier registers.
+        """
+        token_file = tmp_path / "token.key"
+        token_file.write_bytes(bytes([0xFF, 0xFE, 0x00]) + b"not-utf-8")
+
+        result = self.validator._load_token("", str(token_file))
+
+        assert result == ""
+
     def test_both_empty_returns_empty(self):
         """Both key and file empty returns empty string."""
         result = self.validator._load_token("", "")
@@ -352,6 +368,32 @@ class TestDoValidateBehavior:
         assert result.status == EntitlementStatus.INVALID
         assert result.claims is not None
         assert result.claims.is_expired is True
+
+    def test_malformed_expires_returns_invalid(self):
+        """An ``expires`` claim that is not a date → INVALID, never raises.
+
+        ``is_expired`` parses the claim with ``strptime``; the claim comes
+        straight from the token payload, so a malformed value is input, not an
+        internal invariant, and must produce a status like every other
+        token-content defect.
+        """
+        token = _make_token_json(expires="not-a-date")
+
+        with (
+            patch(
+                "baldur.settings.license.get_entitlement_settings",
+                return_value=SimpleNamespace(key=token, file=""),
+            ),
+            patch.object(
+                _EntitlementValidator,
+                "_verify_signature",
+                return_value=True,
+            ),
+        ):
+            result = self.validator._do_validate()
+
+        assert result.status == EntitlementStatus.INVALID
+        assert result.claims is not None
 
     def test_valid_token_returns_active(self):
         """Valid, non-expired token with valid signature → ACTIVE."""
