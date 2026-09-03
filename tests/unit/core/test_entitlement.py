@@ -395,6 +395,43 @@ class TestDoValidateBehavior:
         assert result.status == EntitlementStatus.INVALID
         assert result.claims is not None
 
+    def test_non_string_expires_returns_invalid(self):
+        """An ``expires`` the issuer emitted as a number -> INVALID, never raises.
+
+        The claims dataclass annotates ``expires: str`` and does not enforce it,
+        so a JSON number (or ``null``) reaches ``strptime`` as a non-string and
+        raises ``TypeError`` rather than the ``ValueError`` a malformed *string*
+        date produces. Both are the same defect from a caller's side, and this
+        one escapes past the entitlement check that decides whether the PRO tier
+        registers.
+        """
+        token = _make_token_json(
+            payload={
+                "customer_id": "cust_test",
+                "org": "test-org",
+                "tier": "PRO",
+                "plan": "monthly",
+                "issued_at": "2026-01-01",
+                "expires": 20260501,
+            }
+        )
+
+        with (
+            patch(
+                "baldur.settings.license.get_entitlement_settings",
+                return_value=SimpleNamespace(key=token, file=""),
+            ),
+            patch.object(
+                _EntitlementValidator,
+                "_verify_signature",
+                return_value=True,
+            ),
+        ):
+            result = self.validator._do_validate()
+
+        assert result.status == EntitlementStatus.INVALID
+        assert result.claims is not None
+
     def test_valid_token_returns_active(self):
         """Valid, non-expired token with valid signature → ACTIVE."""
         future = (date.today() + timedelta(days=30)).isoformat()

@@ -219,7 +219,11 @@ class _EntitlementValidator:
         # one call in this function that raises instead of returning a status.
         try:
             expired = claims.is_expired
-        except ValueError:
+        except (TypeError, ValueError):
+            # TypeError as well as ValueError: the claims dataclass does not
+            # enforce its annotations, so an ``expires`` the issuer emitted as a
+            # JSON number or null reaches strptime as a non-string and raises
+            # TypeError, not ValueError. Both are the same defect to a caller.
             return EntitlementResult(status=EntitlementStatus.INVALID, claims=claims)
         if expired:
             return EntitlementResult(status=EntitlementStatus.INVALID, claims=claims)
