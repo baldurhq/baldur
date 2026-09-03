@@ -59,7 +59,6 @@ _NEIGHBOUR_STEPS = (
     "_start_dlq_outbox_if_enabled",
     "_configure_error_budget_if_enabled",
     "_register_metrics_provider_if_configured",
-    "_refresh_auto_replay_arming_gauge",
     "_record_env_snapshot",
     "_start_default_scheduler",
     "_register_sql_statistics_if_available",
