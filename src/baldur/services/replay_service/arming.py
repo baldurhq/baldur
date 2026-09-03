@@ -462,8 +462,8 @@ def _store_probe_result(state: str, seq: int, ttl: float) -> None:
     with _worker_cache_lock:
         _adopt_process_locked()
         if seq != _probe_seq:
-            # A timed-out waiter or a reset already replaced this attempt; a
-            # late result must never overwrite the newer answer.
+            # A timed-out waiter already abandoned this attempt; its late
+            # result must never overwrite the newer answer.
             return
         _worker_cache[_WORKER_CACHE_KEY] = (time.monotonic() + ttl, state)
         _probe_inflight = None
