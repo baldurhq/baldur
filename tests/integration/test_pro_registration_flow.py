@@ -148,6 +148,7 @@ class TestProRegistrationFlowIntegration:
               (the total import count is intentionally not asserted — see the
               module docstring's import-count caveat).
         """
+        import baldur_pro
         from baldur_pro import register_pro_services
 
         with (
@@ -159,7 +160,10 @@ class TestProRegistrationFlowIntegration:
             # hash-chain backend and creates its log directory. Stood in for
             # so the import loop under test does not depend on a writable
             # working tree.
-            patch("baldur_pro._activate_pro_audit"),
+            patch(
+                "baldur_pro._activate_pro_audit",
+                return_value=baldur_pro.RegistrationReport(),
+            ),
             patch("importlib.import_module") as mock_import,
         ):
             mock_import.return_value = MagicMock()
@@ -179,6 +183,7 @@ class TestProRegistrationFlowIntegration:
               still imported — proving the loop continued.
             - register_pro_services() does not propagate the ImportError.
         """
+        import baldur_pro
         from baldur_pro import register_pro_services
 
         failing_module = "baldur_pro.services.replay"
@@ -196,7 +201,10 @@ class TestProRegistrationFlowIntegration:
                 "baldur_pro._validate_and_log_entitlement",
                 return_value=EntitlementStatus.ACTIVE,
             ),
-            patch("baldur_pro._activate_pro_audit"),
+            patch(
+                "baldur_pro._activate_pro_audit",
+                return_value=baldur_pro.RegistrationReport(),
+            ),
             patch("importlib.import_module", side_effect=selective_fail),
         ):
             register_pro_services()  # must not raise
