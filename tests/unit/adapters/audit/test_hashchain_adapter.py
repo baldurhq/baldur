@@ -675,3 +675,71 @@ class TestHashChainLogReraise:
         rows = _read_rows(tmp_path)
         assert len(rows) == 1
         assert rows[0]["change"]["config_key"] == "healthy"
+
+
+# =============================================================================
+# Open-failure recovery
+# =============================================================================
+
+
+class TestOpenFailureRecoveryBehavior:
+    """A transient open failure must not silence the adapter permanently.
+
+    The rotation branch records the file it is switching to. Recording it
+    before the open succeeded made a failed open indistinguishable from an
+    open one: the next call saw the target already recorded, skipped the
+    branch, and reported success while holding no handle, so every later
+    write died on the handle assertion for the life of the process.
+    """
+
+    def _adapter(self, tmp_path):
+        return HashChainFileAuditLogAdapter(
+            log_dir=str(tmp_path), enable_hash_chain=False, use_file_lock=False
+        )
+
+    def test_a_failed_open_is_not_reported_as_an_open_file(self, tmp_path):
+        adapter = self._adapter(tmp_path)
+        try:
+            with patch("builtins.open", side_effect=OSError("no space left on device")):
+                assert adapter._ensure_file_open() is False
+                assert adapter._file_handle is None
+                # Still false on the retry: the failure is the condition, not a
+                # one-shot that flips the adapter into a phantom-open state.
+                assert adapter._ensure_file_open() is False
+        finally:
+            adapter.close()
+
+    def test_writes_resume_once_the_condition_clears(self, tmp_path):
+        adapter = self._adapter(tmp_path)
+        try:
+            with patch("builtins.open", side_effect=OSError("too many open files")):
+                try:
+                    adapter.log(_make_config_change_entry("during_outage"))
+                except Exception:
+                    pass
+            adapter.log(_make_config_change_entry("after_recovery"))
+        finally:
+            adapter.close()
+
+        rows = _read_rows(tmp_path)
+        assert len(rows) == 1, f"the post-recovery write must land; got {rows}"
+
+    def test_a_missing_log_directory_is_recreated_on_the_next_write(self, tmp_path):
+        log_dir = tmp_path / "audit"
+        adapter = HashChainFileAuditLogAdapter(
+            log_dir=str(log_dir), enable_hash_chain=False, use_file_lock=False
+        )
+        try:
+            adapter.log(_make_config_change_entry("before"))
+            adapter._close_file()
+            for f in log_dir.iterdir():
+                f.unlink()
+            log_dir.rmdir()
+            adapter._current_file = None
+
+            adapter.log(_make_config_change_entry("after"))
+        finally:
+            adapter.close()
+
+        assert log_dir.is_dir()
+        assert len(_read_rows(log_dir)) == 1
