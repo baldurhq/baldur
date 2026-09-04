@@ -377,10 +377,20 @@ class HashChainFileAuditLogAdapter(AuditLogAdapter):
         """Open the current log file, rotating if the date has changed."""
         try:
             target_file = self._get_current_log_file()
-            if self._current_file != target_file:
+            if self._current_file != target_file or self._file_handle is None:
                 self._close_file()
+                # The directory is created once at construction. Recreate it
+                # here too, so a rotation into a directory that has since gone
+                # away -- an ephemeral volume remounted, a cleanup job -- opens
+                # instead of failing for the rest of the process's life.
+                target_file.parent.mkdir(parents=True, exist_ok=True)
+                handle = open(target_file, "a", encoding="utf-8")  # noqa: SIM115
+                # Record the target only once the open has succeeded. Assigning
+                # it first makes a failed open look like the file already open:
+                # the next call skips this branch, returns True with no handle,
+                # and every later write dies on the handle assertion below.
+                self._file_handle = handle
                 self._current_file = target_file
-                self._file_handle = open(target_file, "a", encoding="utf-8")  # noqa: SIM115
             return True
         except Exception as e:
             logger.exception(
