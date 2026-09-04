@@ -117,17 +117,21 @@ Background daemon workers started by `baldur.init()` — the meta-watchdog (dete
 
 ## In-Flight HTTP Drain Semantics
 
-`RequestTrackingMiddleware` (auto-injected via `configure_baldur()`) wraps every request in `RequestLifecycleContext`, which calls `coordinator._tracker.start_request()` on entry and `end_request(success=...)` on exit. The drain loop (`shutdown_coordinator._drain_and_shutdown`) reads `tracker.get_pending_count()` each cycle and only declares HTTP drained when count reaches 0.
+Three producers feed the in-flight tracker, one per web adapter: Django's `RequestTrackingMiddleware` (auto-injected via `configure_baldur()`), the Flask request hooks `init_flask` installs, and `baldur.adapters.fastapi.BaldurMiddleware` on FastAPI / Starlette. Each calls `coordinator._tracker.start_request()` on entry and `end_request(success=...)` on exit. The drain loop (`shutdown_coordinator._drain_and_shutdown`) reads `tracker.get_pending_count()` each cycle and only declares HTTP drained when count reaches 0.
+
+What counts as **tracked** differs slightly by framework. On Flask and FastAPI a request is tracked once it is forwarded to the application — a rate-limit, backpressure, admission or circuit-breaker rejection the middleware itself generates never opens an entry. On Django every request that gets past `DrainAwareMiddleware` is tracked, its downstream rate-limit and IP-ban rejections included, because `RequestTrackingMiddleware` sits above them.
 
 This means the drain loop **actually waits for in-flight HTTP work** instead of declaring itself done immediately. A 25s POST during shutdown completes naturally — gunicorn's `worker_exit` blocks on `coordinator.wait_for_shutdown()` for `BALDUR_RECOVERY_SHUTDOWN_DEFAULT_DRAIN_TIMEOUT_SECONDS` (30.0 by default) until the drain loop finishes, the LB has already stopped routing new traffic (see "Retry-After Semantics" below), and the request returns its real response.
 
 If `BALDUR_REQUEST_TRACKING_MIDDLEWARE_ENABLED=False` (operator opt-out), the drain loop sees `pending_count=0` every cycle and exits as soon as registered handlers report drained — exactly the pre-471 behavior, plus the LB-eviction contract.
 
+That opt-out is Django-only. The Flask and FastAPI producers have no switch: they are part of the adapter entry point and always on. The host servers already wait for in-flight requests on their own, so turning the tracking off would only let the audit and DLQ subsystems close under a running request.
+
 ### Reading the drain outcome
 
 When the drain reaches `TERMINATED`, `worker_exit` emits `shutdown.worker_drained` (INFO) carrying **`aborted`** — the number of tracked in-flight requests the coordinator gave up on. A drain that converged reports `aborted=0`; one that ran out `BALDUR_RECOVERY_SHUTDOWN_DEFAULT_DRAIN_TIMEOUT_SECONDS` and force-terminated reports what it abandoned.
 
-`aborted` counts **tracked** requests, so it reads `0` whenever nothing feeds the tracker — the opt-out above, a hand-written `MIDDLEWARE` list that omits `RequestTrackingMiddleware`, or a non-Django app running under these hooks — and also when the force was caused by a registered shutdown handler that never reported drained rather than by pending requests. In each of those cases a forced drain and a clean one emit an identical line. The discriminator is the coordinator's own `shutdown.drain_timeout_reached` (WARNING), which survives the default WARNING log level that hides the INFO marker entirely — so on a default-configured deployment that WARNING is the drain-outcome signal, and `BALDUR_LOG_LEVEL=INFO` is what makes the terminal markers visible at all.
+`aborted` counts **tracked** requests, so it reads `0` whenever nothing feeds the tracker — the opt-out above, a hand-written `MIDDLEWARE` list that omits `RequestTrackingMiddleware`, or a Flask / FastAPI app that installs neither `init_flask`'s request hooks nor `baldur.adapters.fastapi.BaldurMiddleware` — and also when the force was caused by a registered shutdown handler that never reported drained rather than by pending requests. In each of those cases a forced drain and a clean one emit an identical line. The discriminator is the coordinator's own `shutdown.drain_timeout_reached` (WARNING), which survives the default WARNING log level that hides the INFO marker entirely — so on a default-configured deployment that WARNING is the drain-outcome signal, and `BALDUR_LOG_LEVEL=INFO` is what makes the terminal markers visible at all.
 
 ---
 
