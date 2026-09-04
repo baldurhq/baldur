@@ -97,7 +97,7 @@ stateDiagram-v2
     RECOVERING --> NORMAL: the gradual ramp reaches full limit
     NORMAL --> FROZEN: top-level emergency, or the kill switch is engaged
     THROTTLING --> FROZEN: top-level emergency, or the kill switch is engaged
-    FROZEN --> RECOVERING: the emergency clears or the switch is released (or break-glass is used)
+    FROZEN --> RECOVERING: the emergency clears or the switch is released (a hard stop holds until it is itself released, e.g. by break-glass)
 ```
 
 **Gradual recovery (dampening).** When the pressure source stands down (an emergency clears, a
@@ -133,9 +133,11 @@ the least important work.
 **It can be frozen, and that's deliberate.** A top-level emergency or an engaged kill switch
 **freezes** limit changes: the gradient keeps computing so the throttle is ready to resume the
 instant control returns, but it stops *applying* changes while the operator is in control. An
-audited break-glass override releases a hard stop and starts the dampened recovery above. Every
-SLA-driven limit change is written to the audit trail, so the record of "why did the limit move"
-is always there.
+audited break-glass override releases a hard stop and starts the dampened recovery above.
+Releasing the kill switch alone does not lift a hard stop: while one is in force the limit stays
+at zero, and recovery starts only when the hard stop itself is released (its trigger conditions
+clear, or break-glass overrides it). Every SLA-driven limit change is written to the audit trail,
+so the record of "why did the limit move" is always there.
 
 ### The Rate Limit Coordinator (self-DDoS prevention)
 
@@ -161,6 +163,7 @@ cooldown is active, make the call, and arm the next cooldown if it comes back `4
 | The admitted limit eases down (about 10%) | a response crosses the warning threshold, or the latency trend is rising |
 | The admitted limit creeps up one step | the latency trend is falling and the service has headroom |
 | The limit holds steady, still recomputing in the background | a top-level emergency or the kill switch has frozen application |
+| The limit stays at zero even after the kill switch is released | a hard stop is still in force; recovery starts only when the hard stop itself is released |
 | The limit ramps back in stages rather than jumping to full | a `429` cooldown ended or an emergency stood down; the dampened ramp avoids a thundering herd |
 | A request is rejected with the current limit, remaining count, and latest latency attached | the in-window count reached the current limit |
 | A rejected request runs successfully later | it was captured to the DLQ and auto-replayed once the throttle's limit recovered |
