@@ -17,6 +17,7 @@ pre-flight + observation. Without it, the CB helpers are no-ops.
 from __future__ import annotations
 
 import time
+from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -33,9 +34,11 @@ from baldur.api.middleware import (
     record_http_red,
     record_rtt_sample,
 )
+from baldur.core.request_context import RequestLifecycleContext
 from baldur.interfaces.web_framework import HttpMethod, RequestContext
 
 if TYPE_CHECKING:
+    from baldur.core.shutdown_coordinator import RequestTracker
     from baldur.interfaces.web_framework import ResponseContext
 
 logger = structlog.get_logger()
@@ -161,43 +164,72 @@ class BaldurMiddleware:
                     captured["started"] = True
                 await send(message)
 
-            try:
-                await self.app(scope, receive, send_wrapper)
-            except Exception as exc:
-                # D5: a truly-unhandled exception escapes here — this middleware
-                # sits outside ExceptionMiddleware, so non-HTTPException errors
-                # re-raise past it. Catch scope is `Exception` (not
-                # BaseException), so asyncio.CancelledError (client-disconnect
-                # task cancellation) propagates untouched with no spurious 500.
-                if _is_client_disconnect(exc):
-                    # Client vanished mid-request — not a server fault. Re-raise
-                    # without a RED record so a flaky-client disconnect cannot
-                    # inflate the 5xx error series or the 500-latency bucket.
-                    logger.debug("http_red.client_disconnect")
+            # In-flight tracking for the graceful-shutdown drain. The span
+            # opens only for requests forwarded to the application — every
+            # reject above returns first — and closes when `await self.app(...)`
+            # returns, which Starlette does only after the whole response has
+            # been sent, background tasks included. The tracker is resolved per
+            # request because Starlette builds this middleware stack on its
+            # first ASGI call (the lifespan startup event), which precedes
+            # `baldur.init()`. Without a tracker the nullcontext leg yields
+            # None and no tracker call is made.
+            tracker = _resolve_request_tracker()
+            lifecycle: RequestLifecycleContext | nullcontext[None] = (
+                RequestLifecycleContext(
+                    tracker,
+                    endpoint=request_ctx.path,
+                    method=request_ctx.method.value,
+                )
+                if tracker is not None
+                else nullcontext()
+            )
+            with lifecycle as tracked:
+                try:
+                    await self.app(scope, receive, send_wrapper)
+                except Exception as exc:
+                    # D5: a truly-unhandled exception escapes here — this
+                    # middleware sits outside ExceptionMiddleware, so
+                    # non-HTTPException errors re-raise past it. Catch scope is
+                    # `Exception` (not BaseException), so asyncio.CancelledError
+                    # (client-disconnect task cancellation) propagates untouched
+                    # with no spurious 500. Either way the lifecycle exit closes
+                    # the tracked span with success=False.
+                    if _is_client_disconnect(exc):
+                        # Client vanished mid-request — not a server fault.
+                        # Re-raise without a RED record so a flaky-client
+                        # disconnect cannot inflate the 5xx error series or the
+                        # 500-latency bucket.
+                        logger.debug("http_red.client_disconnect")
+                        raise
+                    # Record a 500 ONLY when the response never started —
+                    # mutually exclusive with the outer finally's D4 record
+                    # (which fires when started=True), so a raise *after*
+                    # http.response.start (e.g. a streaming generator failing
+                    # mid-stream) records exactly once: the already-sent status
+                    # via D4, never a spurious second 500.
+                    if not captured["started"]:
+                        duration_seconds = time.perf_counter() - start_time
+                        record_http_red(
+                            request_ctx.method.value,
+                            _extract_fastapi_endpoint(scope),
+                            500,
+                            duration_seconds,
+                            error_type=type(exc).__name__,
+                        )
+                    # Re-raise so ServerErrorMiddleware still emits its 500.
                     raise
-                # Record a 500 ONLY when the response never started — mutually
-                # exclusive with the outer finally's D4 record (which fires when
-                # started=True), so a raise *after* http.response.start (e.g. a
-                # streaming generator failing mid-stream) records exactly once:
-                # the already-sent status via D4, never a spurious second 500.
-                if not captured["started"]:
-                    duration_seconds = time.perf_counter() - start_time
-                    record_http_red(
-                        request_ctx.method.value,
-                        _extract_fastapi_endpoint(scope),
-                        500,
-                        duration_seconds,
-                        error_type=type(exc).__name__,
-                    )
-                # Re-raise so ServerErrorMiddleware still emits its 500 response.
-                raise
-            finally:
-                if captured["started"]:
-                    record_cb_observation(
-                        request_ctx,
-                        captured["status"],
-                        service_name=self.service_name,
-                    )
+                finally:
+                    if captured["started"]:
+                        record_cb_observation(
+                            request_ctx,
+                            captured["status"],
+                            service_name=self.service_name,
+                        )
+                # Django parity: a 5xx the application returned (rather than
+                # raised) closes the span as failed. __exit__ cannot inspect the
+                # response, so the flag is set here, before the span closes.
+                if tracked is not None and captured["status"] >= 500:
+                    tracked.mark_failed()
         finally:
             if release is not None:
                 try:
@@ -229,6 +261,21 @@ class BaldurMiddleware:
 # =============================================================================
 # Internal helpers
 # =============================================================================
+
+
+def _resolve_request_tracker() -> RequestTracker | None:
+    """Return the shutdown coordinator's in-flight request tracker, if wired.
+
+    Resolved per request rather than cached at middleware construction:
+    Starlette builds its middleware stack on the first ASGI call — the lifespan
+    startup event — which runs before the application's ``baldur.init()``, so a
+    constructor-time lookup would build the coordinator too early and cache one
+    whose tracker is never populated. ``None`` means nothing wired a tracker
+    (no ``init()`` in this process), and the caller tracks nothing.
+    """
+    from baldur.core.shutdown_coordinator import get_shutdown_coordinator
+
+    return get_shutdown_coordinator()._tracker
 
 
 def _clear_deadline_if_enabled() -> None:

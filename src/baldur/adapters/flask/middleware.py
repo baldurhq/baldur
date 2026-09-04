@@ -10,6 +10,7 @@ pure adapters around the framework-free helpers.
 from __future__ import annotations
 
 import time
+import uuid
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -35,6 +36,8 @@ from baldur.interfaces.web_framework import (
 if TYPE_CHECKING:
     from flask import Flask, Response
 
+    from baldur.core.shutdown_coordinator import RequestTracker
+
 
 logger = structlog.get_logger()
 
@@ -49,6 +52,13 @@ _FLASK_G_START_TIME = "_baldur_start_time"
 _FLASK_G_TIER_ID = "_baldur_tier_id"
 _FLASK_G_ENDPOINT = "_baldur_endpoint"
 _FLASK_G_RED_RECORDED = "_baldur_red_recorded"
+
+# Stashed on Flask's request object, not on `g`: a nested in-process request
+# against the same app reuses the outer app context, so a `g` key would be
+# shared between the outer and the inner request — the inner start would be
+# skipped and the inner teardown would close the outer entry mid-view.
+_FLASK_REQ_TRACKED = "_baldur_tracked_request"
+_FLASK_REQ_FAILED = "_baldur_request_failed"
 
 
 def install_baldur_request_hooks(  # noqa: C901, PLR0915
@@ -67,7 +77,7 @@ def install_baldur_request_hooks(  # noqa: C901, PLR0915
     ``RateLimitSettings.middleware_*``. ``None`` (the default) defers to
     the settings, which are ``0`` / disabled by default.
     """
-    from flask import g
+    from flask import g, request
 
     def _before_request() -> Response | None:
         # Stash the request-start timestamp at the head so RED duration is
@@ -125,12 +135,42 @@ def install_baldur_request_hooks(  # noqa: C901, PLR0915
         if cb_rejection is not None:
             setattr(g, _FLASK_G_REJECTED, True)
             return _to_flask_response(cb_rejection)
+
+        # Open the in-flight span for the graceful-shutdown drain. Last
+        # statement before the request reaches the application, so every reject
+        # above leaves no entry — the same "middleware rejects are not the
+        # app's work" line the _FLASK_G_REJECTED gate already draws for RED.
+        # The tracker is resolved per request (no caching) and the (tracker,
+        # id) pair is stashed so teardown ends the entry on the very tracker
+        # that opened it. The id is generated here: keying on the client's
+        # X-Request-ID would let two concurrent requests carrying the same
+        # header overwrite each other's entry and under-count the drain.
+        # Skipped when the request object already carries a pair — a second
+        # install_baldur_request_hooks call appends a second before_request
+        # closure, and the overwritten entry would never be closed.
+        from baldur.core.shutdown_coordinator import get_shutdown_coordinator
+
+        tracker: RequestTracker | None = get_shutdown_coordinator()._tracker
+        if tracker is not None and getattr(request, _FLASK_REQ_TRACKED, None) is None:
+            request_id = str(uuid.uuid4())
+            tracker.start_request(
+                request_id,
+                endpoint=request_ctx.path,
+                method=request_ctx.method.value,
+            )
+            setattr(request, _FLASK_REQ_TRACKED, (tracker, request_id))
         return None
 
     def _after_request(response: Response) -> Response:
         request_ctx: RequestContext | None = getattr(g, _FLASK_G_KEY, None)
         if request_ctx is None:
             return response
+
+        # Django parity: a 5xx the application returned (rather than raised)
+        # closes the tracked span as failed. Recorded on the request object here
+        # because teardown, which closes the span, never sees the response.
+        if response.status_code >= 500:
+            setattr(request, _FLASK_REQ_FAILED, True)
 
         # Skip header injection for Baldur-generated rejection responses
         # (their headers are already authoritative).
@@ -183,6 +223,21 @@ def install_baldur_request_hooks(  # noqa: C901, PLR0915
         return response
 
     def _teardown_request(exc: BaseException | None = None) -> None:
+        # Close the in-flight drain span FIRST — ahead of the admission release,
+        # the deadline clear and the RED-500 record — so nothing that can raise
+        # sits between the request's end and the tracker update. Flask runs
+        # teardown on every completion path, and a second run (a
+        # stream_with_context body re-entering the contexts per chunk pops them
+        # again at exhaustion) is a no-op because end_request pops the id.
+        tracked = getattr(request, _FLASK_REQ_TRACKED, None)
+        if tracked is not None:
+            tracked_tracker, tracked_id = tracked
+            failed = getattr(request, _FLASK_REQ_FAILED, False)
+            tracked_tracker.end_request(
+                tracked_id,
+                success=(exc is None and not failed),
+            )
+
         # Always runs at request completion (even on a before_request
         # short-circuit or a downstream exception). Releases any acquired
         # admission bulkhead slot (idempotent) and clears the request-scoped
