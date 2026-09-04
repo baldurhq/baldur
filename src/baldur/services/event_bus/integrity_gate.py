@@ -69,7 +69,19 @@ def on_circuit_breaker_closed_integrity_gate(event: Any) -> None:
             "strategy": result.get("strategy", "full_chain"),
         }
 
-        if not result["valid"]:
+        if result["valid"] is None:
+            # No verdict was reachable. This gate is an optional integration,
+            # whose standard fail behaviour is fail-open; an operator who set
+            # fail-secure gets the blocking half instead.
+            event.data[INTEGRITY_FAILED_KEY] = not fail_open
+            logger.warning(
+                "integrity_gate.verdict_unavailable",
+                service_name=service_name,
+                checked=result.get("checked", 0),
+                strategy=result.get("strategy"),
+                fail_open=fail_open,
+            )
+        elif not result["valid"]:
             event.data[INTEGRITY_FAILED_KEY] = True
             logger.critical(
                 "integrity_gate.integrity_violation_replay_blocked",
@@ -136,6 +148,21 @@ def _verify_recovery_window_integrity(
 
     if not wal_entries:
         return {"valid": True, "checked": 0, "errors": [], "strategy": "no_entries"}
+
+    # WAL records are written ahead of the chain: the integrity block is added
+    # later, when an entry reaches the ledger. A collection whose records carry
+    # no integrity block is therefore not a chain at all, and running the chain
+    # verifier over it reports every record as broken -- an artifact of the
+    # shape, never a tampering verdict. Report "no verdict" so the caller
+    # applies its fail-open / fail-secure policy instead of blocking on it,
+    # and skip the per-record hash recomputation the verdict cannot use.
+    if not all("integrity" in entry for entry in wal_entries):
+        return {
+            "valid": None,
+            "checked": len(wal_entries),
+            "errors": [],
+            "strategy": "unverifiable_unchained_records",
+        }
 
     # Verify the hash chain
     is_valid, error_msg = verifier.verify_chain(wal_entries)
@@ -212,6 +239,8 @@ def _update_health_score(result: dict, duration_ms: float) -> None:
         from baldur.audit.integrity import get_integrity_health_score
 
         health = get_integrity_health_score()
+        if result["valid"] is None:
+            return
         if result["valid"]:
             health.record_recovery(
                 event_type="post_recovery_gate_ok",
