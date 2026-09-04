@@ -37,6 +37,7 @@ from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field, replace
 from datetime import datetime
+from typing import cast
 
 import structlog
 
@@ -104,7 +105,7 @@ _WORKER_CACHE_KEY = "state"
 # attempt joinable.
 _worker_cache_lock = threading.Lock()
 _worker_cache: dict[str, tuple[float, str]] = {}
-_probe_inflight: Future | None = None
+_probe_inflight: Future[str] | None = None
 _probe_thread: threading.Thread | None = None
 _probe_seq = 0
 _last_logged_worker_state: str | None = None
@@ -365,7 +366,8 @@ def _inspect_active_queues(connection, timeout: float) -> dict:
         reply_queue_expires=base.reply_queue_expires,
     )
     replies = mailbox.multi_call("active_queues", timeout=timeout)
-    return flatten_reply(replies or [])
+    # celery ships no stubs, so flatten_reply is untyped: name its shape here.
+    return cast(dict, flatten_reply(replies or []))
 
 
 def _probe_dlq_worker() -> str:
@@ -512,11 +514,11 @@ def _run_worker_probe(future: Future, seq: int, ttl: float) -> None:
             future.set_result(_UNKNOWN)
 
 
-def _start_probe_locked(ttl: float) -> Future:
+def _start_probe_locked(ttl: float) -> Future[str]:
     """Spawn this process's one probe thread (caller holds the lock)."""
     global _probe_inflight, _probe_thread
 
-    future: Future = Future()
+    future: Future[str] = Future()
     thread = threading.Thread(
         target=_run_worker_probe,
         args=(future, _probe_seq, ttl),
