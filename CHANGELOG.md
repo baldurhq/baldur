@@ -10,6 +10,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-09-04
+
 ### Added
 
 - A call an open circuit rejects is now parked in the dead-letter queue, on every framework.
@@ -30,7 +32,6 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - A licence file that is not UTF-8, or whose expiry date is malformed, no longer crashes startup.
 - Pool children of a forking worker no longer overwrite each other's DLQ entries.
 - `shutdown.worker_drained` now carries `aborted`, the in-flight requests the drain abandoned.
-- Open-circuit auto-replay with no `service_failure_type_map` no longer reports the loop disarmed.
 - A console poll no longer hangs on a broker that died after the process connected.
 - A worker that exits no longer silently loses the DLQ entries buffered in its outbox.
 - A Celery worker now runs a shutdown pipeline at all: drain, DLQ flush, audit flush, exit log.
