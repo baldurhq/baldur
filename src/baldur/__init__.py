@@ -21,7 +21,7 @@ from __future__ import annotations
 import importlib
 from typing import TYPE_CHECKING
 
-__version__ = "1.9.0"
+__version__ = "1.10.0"
 __author__ = "Baldur Contributors"
 
 # === Core Types (Eager — lightweight, no heavy deps) ===
