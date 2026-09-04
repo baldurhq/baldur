@@ -14,6 +14,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 - Automatic replay after a circuit closes no longer stops when the audit trail is enabled.
 - The audit trail no longer stops for the rest of a process after one failed log-file open.
+- The audit trail no longer records a row per request when no tiering configuration is set.
 
 ## [1.10.0] - 2026-09-04
 
