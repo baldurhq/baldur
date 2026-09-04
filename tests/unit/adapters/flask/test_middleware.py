@@ -32,6 +32,12 @@ from baldur.adapters.flask.middleware import (
     install_baldur_request_hooks,
 )
 from baldur.api.middleware import AdmissionDecision
+from baldur.core.shutdown_coordinator import (
+    RequestState,
+    RequestTracker,
+    get_shutdown_coordinator,
+    reset_shutdown_coordinator,
+)
 from baldur.interfaces.web_framework import (
     ContentType,
     HttpMethod,
@@ -585,3 +591,224 @@ class TestFlaskRedMetrics:
         """A clean teardown (exc is None) records nothing — _after_request owns it."""
         m_red = self._invoke_teardown(None)
         m_red.assert_not_called()
+
+
+# =============================================================================
+# In-flight drain tracking (784) — Behavior
+# =============================================================================
+
+
+class TestFlaskInFlightTracking:
+    """The Flask hooks feed the graceful-shutdown drain's in-flight predicate.
+
+    DI shape: a real ``RequestTracker`` on the real coordinator singleton, so
+    every assertion reads the observable ``get_pending_count()`` rather than
+    mock call arguments. The per-test ``auto_reset_all_state`` fixture clears
+    the runtime singleton store, so the coordinator built here does not leak.
+    """
+
+    @pytest.fixture
+    def tracker(self):
+        """A real tracker wired onto the real coordinator singleton."""
+        reset_shutdown_coordinator()
+        request_tracker = RequestTracker()
+        get_shutdown_coordinator(request_tracker=request_tracker)
+        return request_tracker
+
+    @pytest.fixture
+    def tracked_app(self, tracker):
+        """Flask app whose views publish the tracker's live view of themselves."""
+        app = Flask(__name__)
+        state = SimpleNamespace(pending=None, span=None)
+
+        def _observe():
+            state.pending = tracker.get_pending_count()
+            in_flight = tracker.get_pending_requests()
+            state.span = in_flight[0] if in_flight else None
+
+        @app.route("/ping")
+        def _ping():
+            _observe()
+            return {"pending": state.pending}
+
+        @app.route("/borderline")
+        def _borderline():
+            _observe()
+            return {"pending": state.pending}, 499
+
+        @app.route("/err")
+        def _err():
+            _observe()
+            return {"pending": state.pending}, 500
+
+        @app.route("/boom")
+        def _boom():
+            _observe()
+            raise RuntimeError("downstream blew up")
+
+        install_baldur_request_hooks(app)
+        return SimpleNamespace(client=app.test_client(), app=app, state=state)
+
+    def test_span_is_open_inside_the_view_and_closed_after_the_response(
+        self, tracker, tracked_app
+    ):
+        """The drain predicate sees the request while the view runs, not after."""
+        response = tracked_app.client.get("/ping")
+
+        assert response.status_code == 200
+        assert response.get_json()["pending"] == 1
+        assert tracker.get_pending_count() == 0
+        assert tracker.completed_count == 1
+
+    @pytest.mark.parametrize(
+        ("path", "expected_status", "expected_state"),
+        [
+            ("/ping", 200, RequestState.COMPLETED),
+            ("/borderline", 499, RequestState.COMPLETED),
+            ("/err", 500, RequestState.ABORTED),
+            ("/boom", 500, RequestState.ABORTED),
+        ],
+        ids=["ok_200", "below_5xx_boundary_499", "returned_500", "raised"],
+    )
+    def test_span_closes_with_the_success_flag_of_its_exit_path(
+        self, tracker, tracked_app, path, expected_status, expected_state
+    ):
+        """Django parity: a returned 5xx and a raise both close the span as failed.
+
+        499 vs 500 pins the ``status_code >= 500`` boundary the after_request
+        hook flags on; the raising path closes through teardown's ``exc``
+        argument instead, so both halves of ``exc is None and not failed`` are
+        exercised.
+        """
+        response = tracked_app.client.get(path)
+
+        assert response.status_code == expected_status
+        assert tracked_app.state.span.state is expected_state
+        assert tracker.get_pending_count() == 0
+
+    @pytest.mark.parametrize(
+        "kind",
+        ["rate", "deadline", "admission", "backpressure", "cb"],
+        ids=["rate_limit", "deadline", "admission", "backpressure", "circuit_breaker"],
+    )
+    def test_middleware_reject_opens_no_span(self, tracker, tracked_app, kind):
+        """A Baldur-generated reject never reached the application: nothing to drain."""
+        # Given: the pipeline stage under test rejects with a 503
+        rejection = ResponseContext(status_code=503, body={"code": kind.upper()})
+        pipeline = {"admission": AdmissionDecision(active=True)}
+        deadline = None
+        if kind == "rate":
+            pipeline["rate"] = rejection
+        elif kind == "deadline":
+            deadline = rejection
+        elif kind == "admission":
+            pipeline["admission"] = AdmissionDecision(active=True, rejection=rejection)
+        elif kind == "backpressure":
+            pipeline["admission"] = AdmissionDecision(active=False)
+            pipeline["backpressure"] = rejection
+        else:
+            pipeline["cb"] = rejection
+
+        # When
+        with (
+            _patch_pipeline(**pipeline),
+            patch.object(flask_mw, "check_deadline", return_value=deadline),
+        ):
+            response = tracked_app.client.get("/ping")
+
+        # Then: no entry was ever opened (pending 0 AND nothing ever completed)
+        assert response.status_code == 503
+        assert tracker.get_pending_count() == 0
+        assert tracker.completed_count == 0
+
+    def test_user_before_request_short_circuit_opens_no_span(self, tracker):
+        """A user hook registered ahead of ours returns before the span opens."""
+        app = Flask(__name__)
+
+        @app.before_request
+        def _gate():
+            return {"blocked": True}, 403
+
+        @app.route("/ping")
+        def _ping():
+            return {"ok": True}
+
+        install_baldur_request_hooks(app)
+        response = app.test_client().get("/ping")
+
+        assert response.status_code == 403
+        assert tracker.get_pending_count() == 0
+        assert tracker.completed_count == 0
+
+    def test_hooks_make_no_tracker_call_when_no_tracker_is_wired(self):
+        """Hooks without an init(): the request completes and nothing is tracked."""
+        reset_shutdown_coordinator()
+        app = Flask(__name__)
+
+        @app.route("/ping")
+        def _ping():
+            return {"ok": True}
+
+        install_baldur_request_hooks(app)
+        response = app.test_client().get("/ping")
+
+        assert response.status_code == 200
+        assert get_shutdown_coordinator()._tracker is None
+
+    def test_double_install_leaves_no_leaked_span(self, tracker):
+        """Two hook installs open one span per request, not one per closure.
+
+        Negative: the unguarded shape overwrites the stash, so the second
+        before_request's entry is never closed and the count settles at 2.
+        """
+        app = Flask(__name__)
+
+        @app.route("/ping")
+        def _ping():
+            return {"pending": tracker.get_pending_count()}
+
+        install_baldur_request_hooks(app)
+        install_baldur_request_hooks(app)
+        client = app.test_client()
+
+        first = client.get("/ping")
+        second = client.get("/ping")
+
+        assert first.get_json()["pending"] == 1
+        assert second.get_json()["pending"] == 1
+        assert tracker.get_pending_count() == 0
+        assert tracker.completed_count == 2
+
+    def test_nested_duplicate_request_id_is_counted_as_a_second_span(self, tracker):
+        """Two live requests carrying one X-Request-ID are two drain entries.
+
+        The span id is server-generated, and the stash lives on Flask's request
+        object rather than on ``g`` — which a nested in-process request shares
+        with its parent. Negative: a ``g``-keyed stash reads 1 inside the inner
+        view and closes the outer entry when the inner one tears down.
+        """
+        app = Flask(__name__)
+        state = SimpleNamespace(outer=None, inner=None, outer_after_inner=None)
+        shared = {"X-Request-ID": "duplicate-id"}
+
+        @app.route("/outer")
+        def _outer():
+            state.outer = tracker.get_pending_count()
+            app.test_client().get("/inner", headers=shared)
+            state.outer_after_inner = tracker.get_pending_count()
+            return {"ok": True}
+
+        @app.route("/inner")
+        def _inner():
+            state.inner = tracker.get_pending_count()
+            return {"ok": True}
+
+        install_baldur_request_hooks(app)
+        response = app.test_client().get("/outer", headers=shared)
+
+        assert response.status_code == 200
+        assert state.outer == 1
+        assert state.inner == 2
+        assert state.outer_after_inner == 1
+        assert tracker.get_pending_count() == 0
+        assert tracker.completed_count == 2
