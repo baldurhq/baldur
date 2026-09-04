@@ -8,6 +8,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-09-04
+
+### Added
+
+- An entitled boot now says what it actually registered. Every step of PRO service registration is guarded on its own, so a licensed module that fails to import leaves its slot on the free-core default and startup carries on — an operator paying for thread-pool bulkhead isolation could be running semaphore isolation, with nothing to show for it but one warning that scrolled past at boot. Startup now ends on a single verdict: a `entitlement.pro_registration_failed` warning naming each step that did not land when anything failed, and the existing informational line when everything did. `baldur_entitlement_registration_failures` carries the count for the life of the process, so the condition reaches a dashboard rather than living only in a boot log nobody re-reads, and the startup report's `extensions.reports` block carries the same verdict for anything reading it programmatically. The verdict is derived from the steps that actually ran — no expected-slot list is written down anywhere — so it cannot drift from the registration path as services are added. A deployment without Celery is not reported degraded, because a task surface absent by design is not a failed step; a task module that is present and broken is one, and is named. This needs the free core at **1.10.0**, which ships the counter and keeps each startup hook's report: against an older core the report is discarded and there is no counter to write, so the minimum supported core moved up with this release.
+
+### Fixed
+
+- A kill switch flipped on one server now reaches the governance gate on every server. The gate's own enabled-check read a process-local mirror that nothing refreshed, so staleness across processes was unbounded: automation on a second node kept passing the pre-action gate indefinitely after someone pulled the switch, and the free core's newly published flip event had nothing to land on. The check now re-reads the shared state backend on a cache miss, so the delay is bounded by one cache window — or immediate wherever the event bus delivers the flip. **Both halves are required for that bound**: pair this release with free core 1.10.0, which publishes the flip and invalidates the gate's cache. Two related corrections ride along. A Full Stop is no longer lifted by the re-enable event that is now genuinely reachable — the throttle's deactivation handler used to start recovery dampening while a Full Stop was active, lifting the limit off zero with nothing able to re-apply it, and a Full Stop again ends only where it is meant to (its "recovery started" log line no longer fires when no recovery was started). And concurrent misses on one key now perform one backend read per process instead of one per racing thread, which matters most when the backend is slow — exactly when the read is serialized behind the lock every kill-switch reader takes. One limit worth knowing: the shipped state backends swallow read errors and return nothing, so a backend that has gone silently unreadable leaves the gate serving this process's last known value for a full cache window without raising; the bound above holds while the backend is readable.
+
+### Removed
+
+- `TTLCache` — withdrawn from the governance surface. The gate's result cache was a hand-rolled class re-exported from that package; it is now the framework's own shared TTL cache, which is what made the single-read-per-process behavior above possible. Nothing in the documented governance surface referenced the class.
+
 ## [1.2.0] - 2026-08-31
 
 ### Added
