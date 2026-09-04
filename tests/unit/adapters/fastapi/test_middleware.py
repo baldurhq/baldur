@@ -29,6 +29,12 @@ from baldur.adapters.fastapi.middleware import (
     _send_response,
 )
 from baldur.api.middleware import AdmissionDecision
+from baldur.core.shutdown_coordinator import (
+    RequestState,
+    RequestTracker,
+    get_shutdown_coordinator,
+    reset_shutdown_coordinator,
+)
 from baldur.interfaces.web_framework import (
     ContentType,
     HttpMethod,
@@ -42,6 +48,7 @@ from baldur.interfaces.web_framework import (
 
 def _scope(
     *,
+    type: str = "http",
     method: str = "GET",
     path: str = "/api/pay/",
     headers: list[tuple[bytes, bytes]] | None = None,
@@ -49,7 +56,7 @@ def _scope(
     client: tuple[str, int] | None = ("203.0.113.5", 54321),
 ) -> dict:
     return {
-        "type": "http",
+        "type": type,
         "method": method,
         "path": path,
         "headers": headers or [],
@@ -891,3 +898,194 @@ class TestFastapiRedMetricsNativeRoute:
         _, endpoint, status_code, _ = m_red.call_args.args
         assert endpoint == "UNMATCHED_ROUTE"
         assert status_code == 404
+
+
+# =============================================================================
+# In-flight drain tracking (784) — Behavior
+# =============================================================================
+
+
+class TestFastapiInFlightTracking:
+    """``BaldurMiddleware`` feeds the graceful-shutdown drain's in-flight predicate.
+
+    DI shape: a real ``RequestTracker`` on the real coordinator singleton, so
+    every assertion reads the observable ``get_pending_count()`` rather than
+    mock call arguments. The per-test ``auto_reset_all_state`` fixture clears
+    the runtime singleton store, so the coordinator built here does not leak.
+    """
+
+    @pytest.fixture
+    def tracker(self):
+        """A real tracker wired onto the real coordinator singleton."""
+        reset_shutdown_coordinator()
+        request_tracker = RequestTracker()
+        get_shutdown_coordinator(request_tracker=request_tracker)
+        return request_tracker
+
+    @staticmethod
+    def _observing(tracker, downstream):
+        """Wrap a downstream app so it publishes the tracker's view of itself.
+
+        Returns ``(app, state)``; ``state.pending`` is the count read from
+        inside the downstream call and ``state.span`` the ``TrackedRequest``
+        object, which ``end_request`` labels in place after the call returns.
+        """
+        state = SimpleNamespace(pending=None, span=None)
+
+        async def _app(scope, receive, send):
+            state.pending = tracker.get_pending_count()
+            in_flight = tracker.get_pending_requests()
+            state.span = in_flight[0] if in_flight else None
+            await downstream(scope, receive, send)
+
+        return _app, state
+
+    def test_span_is_open_during_the_downstream_call_and_closed_after(self, tracker):
+        """The drain predicate sees the request while the app runs, not after."""
+        app, state = self._observing(tracker, _ok_app)
+        recorder = _AsgiRecorder()
+
+        _run(BaldurMiddleware(app)(_scope(), _receive, recorder))
+
+        assert state.pending == 1
+        assert recorder.messages[0]["status"] == 200
+        assert tracker.get_pending_count() == 0
+        assert tracker.completed_count == 1
+
+    @pytest.mark.parametrize(
+        ("scenario", "expected_state"),
+        [
+            ("ok", RequestState.COMPLETED),
+            ("returned_500", RequestState.ABORTED),
+            ("raised", RequestState.ABORTED),
+            ("client_disconnect", RequestState.ABORTED),
+        ],
+    )
+    def test_span_closes_with_the_success_flag_of_its_exit_path(
+        self, tracker, scenario, expected_state
+    ):
+        """Django parity: a returned 5xx and every raise close the span as failed.
+
+        The returned-500 leg runs through the explicit ``mark_failed()`` after
+        the downstream await; the two raising legs close through the lifecycle
+        context's ``__exit__``, which sees the exception type.
+        """
+        # Given
+        downstream = {
+            "ok": _ok_app,
+            "returned_500": _err_app,
+            "raised": _raising_app,
+            "client_disconnect": _client_disconnect_app,
+        }[scenario]
+        expected_exc: type[BaseException] | None = None
+        if scenario == "raised":
+            expected_exc = RuntimeError
+        elif scenario == "client_disconnect":
+            from starlette.requests import ClientDisconnect
+
+            expected_exc = ClientDisconnect
+        app, state = self._observing(tracker, downstream)
+        recorder = _AsgiRecorder()
+
+        # When
+        if expected_exc is not None:
+            with pytest.raises(expected_exc):
+                _run(BaldurMiddleware(app)(_scope(), _receive, recorder))
+        else:
+            _run(BaldurMiddleware(app)(_scope(), _receive, recorder))
+
+        # Then
+        assert state.span.state is expected_state
+        assert tracker.get_pending_count() == 0
+
+    @pytest.mark.parametrize(
+        "kind",
+        ["rate", "deadline", "admission", "backpressure", "cb"],
+        ids=["rate_limit", "deadline", "admission", "backpressure", "circuit_breaker"],
+    )
+    def test_middleware_reject_opens_no_span(self, tracker, kind):
+        """A Baldur-generated reject never reached the application: nothing to drain."""
+        # Given: the pipeline stage under test rejects with a 503
+        rejection = ResponseContext(status_code=503, body={"code": kind.upper()})
+        pipeline = {"admission": AdmissionDecision(active=True)}
+        deadline = None
+        if kind == "rate":
+            pipeline["rate"] = rejection
+        elif kind == "deadline":
+            deadline = rejection
+        elif kind == "admission":
+            pipeline["admission"] = AdmissionDecision(active=True, rejection=rejection)
+        elif kind == "backpressure":
+            pipeline["admission"] = AdmissionDecision(active=False)
+            pipeline["backpressure"] = rejection
+        else:
+            pipeline["cb"] = rejection
+        spy = _SpyApp()
+        recorder = _AsgiRecorder()
+
+        # When
+        with (
+            _patch_pipeline(**pipeline),
+            patch.object(fastapi_mw, "check_deadline", return_value=deadline),
+        ):
+            _run(BaldurMiddleware(spy)(_scope(), _receive, recorder))
+
+        # Then: no entry was ever opened (pending 0 AND nothing ever completed)
+        assert recorder.messages[0]["status"] == 503
+        assert spy.called is False
+        assert tracker.get_pending_count() == 0
+        assert tracker.completed_count == 0
+
+    def test_websocket_scope_leaves_the_tracker_untouched(self, tracker):
+        """A non-HTTP scope is passed straight through — HTTP drain, HTTP spans."""
+        spy = _SpyApp()
+        recorder = _AsgiRecorder()
+
+        _run(BaldurMiddleware(spy)(_scope(type="websocket"), _receive, recorder))
+
+        assert spy.called is True
+        assert tracker.get_pending_count() == 0
+        assert tracker.completed_count == 0
+
+    def test_middleware_makes_no_tracker_call_when_no_tracker_is_wired(self):
+        """No init() in this process: the nullcontext leg yields None.
+
+        Driven through the 500 path, the one that reaches for ``mark_failed()``
+        on the yielded object.
+        """
+        reset_shutdown_coordinator()
+        recorder = _AsgiRecorder()
+
+        _run(BaldurMiddleware(_err_app)(_scope(), _receive, recorder))
+
+        assert recorder.messages[0]["status"] == 500
+        assert get_shutdown_coordinator()._tracker is None
+
+    def test_nested_duplicate_request_id_is_counted_as_a_second_span(self, tracker):
+        """Two live requests carrying one X-Request-ID are two drain entries.
+
+        The span id is server-generated, so the client header cannot make two
+        concurrent requests share (and overwrite) a single tracker entry.
+        """
+        state = SimpleNamespace(outer=None, inner=None)
+        shared = [(b"x-request-id", b"duplicate-id")]
+
+        async def _inner_app(scope, receive, send):
+            state.inner = tracker.get_pending_count()
+            await _ok_app(scope, receive, send)
+
+        async def _outer_app(scope, receive, send):
+            state.outer = tracker.get_pending_count()
+            await BaldurMiddleware(_inner_app)(
+                _scope(headers=shared), _receive, _AsgiRecorder()
+            )
+            await _ok_app(scope, receive, send)
+
+        recorder = _AsgiRecorder()
+        _run(BaldurMiddleware(_outer_app)(_scope(headers=shared), _receive, recorder))
+
+        assert state.outer == 1
+        assert state.inner == 2
+        assert recorder.messages[0]["status"] == 200
+        assert tracker.get_pending_count() == 0
+        assert tracker.completed_count == 2
