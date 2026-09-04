@@ -40,6 +40,9 @@ class TierRegistry:
 
     _instance: TierRegistry | None = None
     _lock = threading.Lock()
+    #: Set once the absent-configuration fallback has been reported, so a
+    #: static condition is stated once instead of on every request.
+    _config_missing_reported: bool = False
 
     def __new__(cls) -> TierRegistry:
         if cls._instance is None:
@@ -521,7 +524,7 @@ class TierRegistry:
                 TierFallbackReason.CONFIG_MISSING,
             )
             result.latency_ms = latency_ms
-            self._log_fallback_audit(path, result)
+            self._report_config_missing_once(result)
             return result
 
         except Exception as e:
@@ -534,6 +537,25 @@ class TierRegistry:
             result.latency_ms = (time.perf_counter() - start_time) * 1000
             self._log_fallback_audit(path, result, error=e)
             return result
+
+    def _report_config_missing_once(self, result: TierResult) -> None:
+        """State the absent tier configuration once per process.
+
+        An absent configuration is settled before the first request and no
+        request changes it, so every request carries the same one bit. The
+        audit trail records configuration *changes*; a lookup that changed
+        nothing does not belong in it, and writing one row per request buried
+        the trail it was meant to serve. The two anomaly branches -- an open
+        tiering circuit and an engine error -- still audit: those are events,
+        and the circuit breaker bounds how often they can be raised.
+        """
+        if self._config_missing_reported:
+            return
+        self._config_missing_reported = True
+        logger.warning(
+            "tier_registry.tier_config_missing",
+            fallback_tier=result.tier_id,
+        )
 
     def _log_fallback_audit(
         self,
