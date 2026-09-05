@@ -52,7 +52,13 @@ BALDUR_DLQ_OUTBOX_JOIN_TIMEOUT_SECONDS=5.0  # total teardown budget (s) per exit
 
 Automatic replay on circuit-breaker recovery. `ON_RECOVERY_ENABLED` is on by
 default; setting it to `false` disables the on-recovery dispatch and, with it,
-the per-recovery WARNING about a missing replay worker.
+the per-recovery WARNING about a missing replay worker. A recovery drains in
+passes: each pass replays up to `ON_RECOVERY_MAX_ITEMS` entries, and the sweep
+re-dispatches itself for the same service while work is still reachable, up to
+`ON_RECOVERY_MAX_CONTINUATIONS` passes, so one recovery clears up to the product
+of the two (10,000 entries on the defaults). A domain that parks more than that
+wants a higher continuation count, not a bigger pass: a pass also stops when it
+nears the replay task's own time limit, so a larger pass size buys little.
 `SERVICE_FAILURE_TYPE_MAP` maps each recovered service to the failure types
 whose captured entries it is responsible for — an empty mapping leaves the loop unable
 to select entries on recovery (surfaced as a blocked-with-signal event, not a silent
@@ -61,7 +67,8 @@ full set of prerequisites.
 
 ```bash
 BALDUR_REPLAY_AUTOMATION_ON_RECOVERY_ENABLED=true
-BALDUR_REPLAY_AUTOMATION_ON_RECOVERY_MAX_ITEMS=100
+BALDUR_REPLAY_AUTOMATION_ON_RECOVERY_MAX_ITEMS=100          # entries one pass replays; 1-1000
+BALDUR_REPLAY_AUTOMATION_ON_RECOVERY_MAX_CONTINUATIONS=100  # passes one recovery may chain while work is still reachable; 1-1000. Per-recovery bound = MAX_ITEMS x MAX_CONTINUATIONS
 # JSON object: {"service_name": ["FAILURE_TYPE", ...]}
 BALDUR_REPLAY_AUTOMATION_SERVICE_FAILURE_TYPE_MAP='{"payment_api": ["TIMEOUT", "CONNECTION_ERROR"]}'
 ```

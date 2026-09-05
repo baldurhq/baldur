@@ -375,21 +375,37 @@ whose editable fields split across two reach classes. Read the split before you 
 ### `replay_automation`
 
 **Takes effect**: on next read — each replay operation reads the block fresh; the
-scheduled replay lane re-reads on its next tick.
+scheduled replay lane re-reads on its next tick. The two on-recovery sizing fields
+(`on_recovery_max_items`, `on_recovery_max_continuations`) are read once, at the moment a
+breaker closes, and the drain that recovery starts runs to the values it started with — an
+edit made while a drain is running applies to the *next* recovery, not the current one.
 
 - **Risk tier**: behavior-changing.
 - **Blast radius**: gates adaptive/priority replay (`adaptive_enabled`,
   `priority_enabled`) and sizes replay batches (`traffic_aware_max_items`,
-  `adaptive_*_items`, `on_recovery_max_items`) — i.e. how aggressively recovery drains
-  the DLQ.
+  `adaptive_*_items`). For the on-recovery drain the two fields split one bound:
+  `on_recovery_max_items` sizes **one pass**, and `on_recovery_max_continuations` bounds
+  how many passes one recovery chains while work is still reachable — together, how
+  aggressively *and how far* a recovery drains the DLQ (100 × 100 = 10,000 entries on the
+  defaults). A drain ends on its own when the queue is empty, when any circuit for the
+  domain re-opens, or when the continuation bound is reached.
 - **Coupled**: batch/`domain_max_retries` interact with `dlq` drain size and
   `max_replay_attempts`; auto-replay-on-recovery is driven off this block when a
-  breaker closes.
+  breaker closes. A pass is also bounded by the replay task's own time limit, so raising
+  `on_recovery_max_items` past what one pass can replay in that window buys nothing —
+  raise the continuation count instead.
 - **Most common misapplication → cascade**: a large `traffic_aware_max_items` /
-  `adaptive_max_items` drains a big backlog in one burst → a thundering-herd replay
-  that re-loads the just-recovered dependency.
+  `adaptive_max_items` / `on_recovery_max_items` drains a big backlog in one burst → a
+  thundering-herd replay that re-loads the just-recovered dependency. Second, and quieter:
+  dropping `on_recovery_max_continuations` to `1` to calm a replay leaves the rest of the
+  backlog parked — nothing re-drives it until the breaker opens and closes again, or you
+  replay it yourself. The drain does announce the stop (below), so this one is visible.
 - **Watch**: **Panel: Dead Letter Queue** (backlog drain rate) and downstream health
-  during a replay window.
+  during a replay window. A drain that stops with work still queued emits
+  `DLQ_REPLAY_BLOCKED` (and a WARNING `replay_service.circuit_close_chain_stopped`) whose
+  `block_reason` names why: `continuation_bound_reached`, `circuit_reopened`,
+  `pass_made_no_progress`, or `pass_errored`. A `dlq_replay_batch_completed` event with
+  `capped: true` only says that *pass* filled its quota; it does not say the drain is over.
 
 ### `sla`
 
