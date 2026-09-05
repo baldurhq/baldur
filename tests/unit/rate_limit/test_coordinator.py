@@ -1564,3 +1564,168 @@ class TestBroadcastToClusterBehavior:
 
         mock_broadcast.assert_called_once()
         assert mock_broadcast.call_args[0][0] == "test_api"
+
+
+# =============================================================================
+# Announcer handoff — the coordinator brackets its own store write
+# =============================================================================
+
+
+class TestOnRateLimitedAnnouncerHandoffBehavior:
+    """The 429 path hands the announcer a marker, then the store's own answer.
+
+    The bracket spans the write, not just the record update: between the store
+    accepting a cooldown and the record carrying it, a verifying read would see
+    the pre-429 expiry it was armed for and announce into the cooldown this call
+    is installing.
+    """
+
+    def test_the_marker_is_set_before_the_store_write_lands(
+        self, mock_storage, announcer
+    ):
+        """Ordering is the whole point — a marker set afterwards shields nothing."""
+        # Given a store that reports the announcer's marker state as it writes
+        observed: list[list[str]] = []
+        real_extend = mock_storage.extend_cooldown
+
+        def _observing_extend(key, cooldown_until, ttl=None):
+            observed.append(list(announcer.begun))
+            return real_extend(key, cooldown_until, ttl)
+
+        mock_storage.extend_cooldown = _observing_extend
+        coordinator = _deterministic_coordinator(mock_storage)
+
+        # When a 429 is handled
+        coordinator.on_rate_limited("test_api", retry_after=5.0)
+
+        # Then the key was already in flight while the store was being written
+        assert observed == [["test_api"]]
+
+    def test_the_recorded_expiry_is_the_stores_effective_value(
+        self, mock_storage, announcer
+    ):
+        """Not this call's proposal: the store decides which cooldown wins.
+
+        Recording the candidate would put the record — and therefore the
+        all-clear — at an expiry the shared store discarded.
+        """
+        coordinator = _deterministic_coordinator(mock_storage)
+        coordinator.on_rate_limited("test_api", retry_after=600.0)
+
+        coordinator.on_rate_limited("test_api", retry_after=1.0)
+
+        effective = mock_storage.get_state("test_api").cooldown_until
+        assert announcer.tracked[-1] == ("test_api", effective)
+
+    def test_a_store_that_raises_releases_the_marker_without_recording(
+        self, mock_storage, announcer
+    ):
+        """The ``finally`` leg, on the path every caller wraps fail-open.
+
+        A recorded expiry the store never accepted would be an all-clear for a
+        cooldown that was never installed, and a marker left behind would shield
+        the key from every later verification pass in this process.
+        """
+        from baldur.interfaces.rate_limit_storage import (
+            RateLimitStorageUnavailableError,
+        )
+
+        coordinator = _deterministic_coordinator(mock_storage)
+
+        with patch.object(
+            mock_storage,
+            "extend_cooldown",
+            side_effect=RateLimitStorageUnavailableError("coordination store down"),
+        ):
+            with pytest.raises(RateLimitStorageUnavailableError):
+                coordinator.on_rate_limited("test_api")
+
+        assert announcer.begun == ["test_api"]
+        assert announcer.tracked == [("test_api", None)]
+        assert announcer.pending == {}
+
+    def test_every_429_is_bracketed_including_a_debounced_one(
+        self, mock_storage, announcer
+    ):
+        """A suppressed 429 extends the shared cooldown just the same.
+
+        The event debounce is about notification volume; leaving the announcer
+        out of a debounced call would leave the record at the pre-extension
+        expiry, which is the announce-into-a-live-cooldown bug in miniature.
+        """
+        from baldur.services.rate_limit_coordinator import (
+            RateLimitCoordinator,
+            RateLimitCoordinatorConfig,
+        )
+
+        coordinator = RateLimitCoordinator(
+            storage=mock_storage,
+            config=RateLimitCoordinatorConfig(
+                jitter_percent=0.0,
+                debounce_window_seconds=DEFAULT_DEBOUNCE_WINDOW,
+            ),
+        )
+
+        for _ in range(3):
+            coordinator.on_rate_limited("test_api", retry_after=5.0)
+
+        assert announcer.begun == ["test_api"] * 3
+        assert [key for key, _until in announcer.tracked] == ["test_api"] * 3
+
+
+class TestCoordinatorAnnouncerDelegationBehavior:
+    """The coordinator's other three announcer touch points."""
+
+    def test_clear_asks_for_an_immediate_re_verification(self, mock_storage, announcer):
+        """The operator escape produces its all-clear instead of leaving the
+        consumer waiting for the expiry that was just cleared."""
+        coordinator = _deterministic_coordinator(mock_storage)
+
+        coordinator.clear("test_api")
+
+        assert announcer.reverified == ["test_api"]
+
+    def test_wait_if_needed_revives_the_announcer_from_the_request_path(
+        self, mock_storage, announcer
+    ):
+        """A cooldown is precisely the window in which nothing else pokes it.
+
+        The announcer's own entry points run on a 429 or an operator clear, so a
+        thread that died — or a fork child that inherited records and no thread —
+        would hold its records until the next 429 the cooldown is preventing.
+        """
+        coordinator = _deterministic_coordinator(mock_storage)
+
+        coordinator.wait_if_needed("test_api")
+
+        assert announcer.ensure_running_calls == 1
+
+    def test_reset_instance_leaves_no_live_thread_and_no_registration(
+        self, mock_storage
+    ):
+        """Test isolation, and the same shape a second ``get_instance()`` needs.
+
+        Two live announcers over one key would emit the all-clear twice, and a
+        registration outliving its thread reports a dead worker forever.
+        """
+        from baldur.metrics.recorders.daemon_worker import (
+            get_registered_daemon_workers,
+        )
+        from baldur.services.rate_limit_coordinator import RateLimitCoordinator
+        from baldur.services.rate_limit_coordinator.announcer import DAEMON_WORKER_NAME
+
+        RateLimitCoordinator.reset_instance()
+        instance = _deterministic_coordinator(mock_storage)
+        RateLimitCoordinator._instance = instance
+        try:
+            instance.on_rate_limited("test_api", retry_after=600.0)
+            assert DAEMON_WORKER_NAME in get_registered_daemon_workers()
+
+            RateLimitCoordinator.reset_instance()
+
+            assert instance._announcer.is_alive is False
+            assert DAEMON_WORKER_NAME not in get_registered_daemon_workers()
+            assert RateLimitCoordinator._instance is None
+        finally:
+            instance._announcer.stop()
+            RateLimitCoordinator.reset_instance()
