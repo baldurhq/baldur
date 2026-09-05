@@ -45,6 +45,7 @@ from baldur.services.replay_service.service import (
     REASON_CIRCUIT_REOPENED,
     REASON_CONTINUATION_BOUND_REACHED,
     REASON_PASS_ERRORED,
+    REASON_PASS_MADE_NO_PROGRESS,
 )
 from baldur.utils.domain_validation import FALLBACK_DOMAIN
 
@@ -80,6 +81,21 @@ def _layered_repository(calls=None, *, sync_result=True):
         return sync_result
 
     repo.force_sync_from_l2.side_effect = _sync
+    repo.get_by_service_name.return_value = None
+    return repo
+
+
+def _unrefreshable_repository():
+    """A layered repository with an L2 configured whose restore failed.
+
+    ``force_sync_from_l2`` returns False for BOTH "no L2 configured" and "the
+    load failed", so the health probe is the only thing that separates them.
+    """
+    repo = MagicMock(
+        spec=["force_sync_from_l2", "get_by_service_name", "get_l2_health"]
+    )
+    repo.force_sync_from_l2.return_value = False
+    repo.get_l2_health.return_value = {"adapter_type": "redis"}
     repo.get_by_service_name.return_value = None
     return repo
 
@@ -134,6 +150,47 @@ class TestCircuitAffirmationBehavior:
             assert _affirm_circuit_closed(SERVICE) == (True, None)
 
         assert [e for e in logs if e["event"] == "dlq.circuit_affirmation_failed"]
+
+    def test_a_refresh_that_failed_proceeds_but_says_so(self):
+        """Proceeding is the decision (the CLOSED event is prior evidence),
+        but the pass is about to affirm against a copy the shared store has
+        moved past — swallowing that leaves it indistinguishable from a clean
+        read."""
+        with (
+            patch(
+                "baldur.services.circuit_breaker.get_circuit_breaker_service",
+                return_value=_cb_service(
+                    [{"service_name": SERVICE, "state": "closed"}],
+                    repository=_unrefreshable_repository(),
+                ),
+            ),
+            capture_logs() as logs,
+        ):
+            assert _affirm_circuit_closed(SERVICE) == (True, None)
+
+        assert [
+            e for e in logs if e["event"] == "dlq.circuit_affirmation_refresh_failed"
+        ]
+
+    def test_a_single_layer_store_is_not_reported_as_a_failed_refresh(self):
+        """False with no L2 configured is the in-memory store, where L1 IS the
+        store — warning on it would fire on every pass of the default topology."""
+        repo = MagicMock(spec=["force_sync_from_l2", "get_by_service_name"])
+        repo.force_sync_from_l2.return_value = False
+        with (
+            patch(
+                "baldur.services.circuit_breaker.get_circuit_breaker_service",
+                return_value=_cb_service(
+                    [{"service_name": SERVICE, "state": "closed"}], repository=repo
+                ),
+            ),
+            capture_logs() as logs,
+        ):
+            assert _affirm_circuit_closed(SERVICE) == (True, None)
+
+        assert not [
+            e for e in logs if e["event"] == "dlq.circuit_affirmation_refresh_failed"
+        ]
 
     def test_the_shared_store_is_refreshed_before_it_is_read(self):
         """A worker's L1 is whatever it hydrated at boot plus whatever it has
@@ -431,6 +488,34 @@ class TestCircuitCloseChainBehavior:
         assert [
             e for e in chain.logs if e["event"] == "dlq.circuit_recovery_bound_reached"
         ]
+
+    def test_a_pass_that_reached_work_but_moved_none_of_it_stops_out_loud(self):
+        """A pass that spends its whole deadline SELECTING replays nothing and
+        advances no cursor, so the chain must stop — a continuation would re-run
+        the identical page. Stopping quietly is the failure: `total == 0` makes
+        the completion event return early, so the drain would end over a queue
+        it never touched with nothing on any operator channel."""
+        chain = _Chain(_result(capped=True, total=0, exhausted=["TYPE_A|"]))
+
+        result = chain.run(continuation=0, max_continuations=10)
+
+        assert result["continued"] is False
+        chain.dispatched.delay.assert_not_called()
+        chain.service.emit_circuit_close_chain_stopped.assert_called_once_with(
+            service_name=SERVICE,
+            block_reason=REASON_PASS_MADE_NO_PROGRESS,
+            scan_exhausted_lanes=["TYPE_A|"],
+            lane_cursors={},
+        )
+
+    def test_a_finished_drain_stops_without_the_blocked_signal(self):
+        """Nothing was reachable, so there is nothing to act on — the signal
+        must stay reserved for stops that leave work behind."""
+        chain = _Chain(_result(capped=False, total=0))
+
+        chain.run(continuation=0, max_continuations=10)
+
+        chain.service.emit_circuit_close_chain_stopped.assert_not_called()
 
     def test_a_circuit_reopened_between_dispatch_and_body_runs_no_sweep(self):
         chain = _Chain(

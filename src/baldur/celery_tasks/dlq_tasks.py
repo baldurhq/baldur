@@ -72,8 +72,21 @@ def _affirm_circuit_closed(service_name: str) -> tuple[bool, str | None]:
         # re-opened in the shared store stays CLOSED here for the whole chain
         # unless the pass refreshes first.
         force_sync = getattr(repository, "force_sync_from_l2", None)
-        if callable(force_sync):
-            force_sync()
+        if callable(force_sync) and not force_sync():
+            # False covers two things: "no L2 is configured" — the
+            # single-layer store, where L1 IS the store — and "the load
+            # failed". Only the second means the affirmation below is about
+            # to read a copy the shared store has already moved past. The
+            # pass proceeds either way (the CLOSED event is prior evidence,
+            # and before this affirmation existed the sweep read no circuit
+            # state at all), but proceeding on a read that could not be
+            # refreshed is worth saying out loud rather than swallowing.
+            health = getattr(repository, "get_l2_health", None)
+            if callable(health) and (health() or {}).get("adapter_type") is not None:
+                logger.warning(
+                    "dlq.circuit_affirmation_refresh_failed",
+                    service_name=service_name,
+                )
 
         stored_domain = resolve_stored_domain(service_name)
         if stored_domain == FALLBACK_DOMAIN:
@@ -125,6 +138,19 @@ def _circuit_close_pass_deadline(task: Any) -> float | None:
     )
 
 
+def _chain_progress(result: Any, carried_cursors: dict) -> tuple[bool, bool]:
+    """``(work is still reachable, this pass moved toward it)``.
+
+    The two halves are separate because they route to different endings: a
+    pass that reached nothing is a finished drain, while a pass that left work
+    reachable and moved nothing toward it is a chain that has to stop AND say
+    so — continuing would re-dispatch forever over the same page.
+    """
+    reachable = bool(result.capped) or bool(getattr(result, "scan_exhausted", False))
+    advanced = result.total > 0 or dict(result.lane_cursors) != dict(carried_cursors)
+    return reachable, advanced
+
+
 def _should_continue_chain(result: Any, carried_cursors: dict) -> bool:
     """Did the pass leave work reachable, and did it make progress reaching it?
 
@@ -137,8 +163,7 @@ def _should_continue_chain(result: Any, carried_cursors: dict) -> bool:
     PENDING before any skip branch runs, so none of them is selectable again),
     or a lane's cursor advanced past members it examined and rejected.
     """
-    reachable = bool(result.capped) or bool(getattr(result, "scan_exhausted", False))
-    advanced = result.total > 0 or dict(result.lane_cursors) != dict(carried_cursors)
+    reachable, advanced = _chain_progress(result, carried_cursors)
     return reachable and advanced
 
 
@@ -331,13 +356,37 @@ def _dispatch_circuit_close_continuation(
     from baldur.adapters.celery.tasks import conditional_replay_on_circuit_close
     from baldur.services.replay_service.service import (
         REASON_CONTINUATION_BOUND_REACHED,
+        REASON_PASS_MADE_NO_PROGRESS,
     )
 
     if result.inflight_skipped:
         return False
 
     lane_cursors = dict(result.lane_cursors)
-    if _should_continue_chain(result, carried_cursors):
+    reachable, advanced = _chain_progress(result, carried_cursors)
+    if reachable and not advanced:
+        # A pass that spent its whole deadline selecting replays nothing and
+        # advances no cursor, so the chain has to stop — a continuation would
+        # re-run the identical page. It must not stop QUIETLY: `total == 0`
+        # makes the completion event return early, so without this the drain
+        # ends over a queue it never touched and the only trace is a debug
+        # line. This is a stop with work reachable, which is exactly what the
+        # blocked-family channel is for.
+        bound_logger.warning(
+            "dlq.circuit_recovery_stopped_without_progress",
+            service_name=service_name,
+            continuation=continuation,
+            capped=result.capped,
+        )
+        service.emit_circuit_close_chain_stopped(
+            service_name=service_name,
+            block_reason=REASON_PASS_MADE_NO_PROGRESS,
+            scan_exhausted_lanes=result.scan_exhausted_lanes,
+            lane_cursors=lane_cursors,
+        )
+        return False
+
+    if reachable and advanced:
         if continuation + 1 >= max_continuations:
             bound_logger.warning(
                 "dlq.circuit_recovery_bound_reached",

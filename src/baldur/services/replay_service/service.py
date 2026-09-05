@@ -80,6 +80,7 @@ REASON_CIRCUIT_CLOSE_INFLIGHT = "circuit_close_inflight"
 REASON_CONTINUATION_BOUND_REACHED = "continuation_bound_reached"
 REASON_CIRCUIT_REOPENED = "circuit_reopened"
 REASON_PASS_ERRORED = "pass_errored"
+REASON_PASS_MADE_NO_PROGRESS = "pass_made_no_progress"
 
 
 def _lane_key(failure_type: str, domain: str | None) -> str:
@@ -1532,10 +1533,22 @@ class ReplayService(EventEmitterMixin):
         A lane's selected entries ascend across both fill rounds, so its last
         *processed* entry is also its highest, and the cursor is exclusive —
         the entry immediately after it is exactly the oldest one left behind.
-        A lane that processed nothing keeps the cursor it came in with, which
-        is what the copy below starts from.
+        A lane that selected entries and processed none of them keeps the
+        cursor it came in with, which is what the copy below starts from.
+
+        A lane that selected NOTHING is the third case and keeps the position
+        its own walk reached. It has no unprocessed tail to protect, and its
+        walk is the expensive one: a lane crossing a long prefix of another
+        failure type can spend a whole pass examining members it rejects.
+        Rolling that back would make every deadline-stopped pass re-cross the
+        same prefix from the same place — the permanent starvation the cursor
+        exists to end.
         """
         rolled = dict(carried_cursors)
+        selected_lanes = {key for key, _ in selection.selected}
+        for key, cursor in selection.cursors.items():
+            if key not in selected_lanes:
+                rolled[key] = cursor
         for key, entry in selection.selected[:processed]:
             if entry.created_at is not None:
                 rolled[key] = encode_replay_cursor(entry.created_at, entry.id)

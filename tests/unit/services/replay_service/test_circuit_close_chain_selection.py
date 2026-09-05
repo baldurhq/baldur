@@ -350,6 +350,24 @@ class TestDeadlineCursorRollbackBehavior:
 
         assert rolled[lane_b] == "carried-b"
 
+    def test_a_lane_that_selected_nothing_keeps_the_position_its_walk_reached(self):
+        """The lane that spent the pass crossing another failure type's prefix
+        has no unprocessed tail to protect. Rolling ITS cursor back makes every
+        deadline-stopped pass re-cross the same prefix from the same place —
+        the permanent starvation the cursor exists to end."""
+        filled = _lane_key("TYPE_A", None)
+        crossed = _lane_key(OPEN_CIRCUIT_FAILURE_TYPE, SERVICE)
+        entries = _lane_pool("a", 2)
+        selection = _LaneSelection(
+            selected=[(filled, e) for e in entries],
+            cursors={filled: "9.000000|a-001", crossed: "9.000000|prefix-end"},
+            scan_exhausted_lanes=[crossed],
+        )
+
+        rolled = ReplayService._roll_back_lane_cursors(selection, 1, {})
+
+        assert rolled[crossed] == "9.000000|prefix-end"
+
     def test_rollback_does_not_mutate_the_carried_cursors(self):
         carried = {_lane_key("TYPE_A", None): "carried"}
         selection = _LaneSelection(
