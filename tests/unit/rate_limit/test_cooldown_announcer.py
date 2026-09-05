@@ -868,6 +868,60 @@ class TestStoreOutageHoldBehavior:
             if entry["event"] == "rate_limit_announcer.store_read_failed"
         ] == ["debug"]
 
+    def test_a_healthy_key_verified_first_does_not_re_arm_the_outage_edge(
+        self, announcer, store, clock, recorder
+    ):
+        """One WARNING per outage survives a pass that reads a good key first.
+
+        The hold is a property of the pass, not of the step: the rotation
+        guarantees that a healthy key eventually sorts ahead of the one the
+        store cannot answer, and clearing on that step alone re-armed the edge
+        for the key that is still broken — a fresh WARNING and a fresh retry
+        interval every hold interval, for the whole outage.
+        """
+        announcer.track(KEY, clock.now - 2.0)
+        announcer.track(OTHER_KEY, clock.now - 1.0)
+        store.values[KEY] = None
+        store.values[OTHER_KEY] = 0.0
+
+        with capture_logs() as first_pass:
+            announcer.run_once()
+        clock.now = announcer._state.held_until
+        with capture_logs() as second_pass:
+            announced = announcer.run_once()
+
+        # The rotation really did verify the healthy key ahead of the broken
+        # one, so the case is not green for want of reaching the step.
+        assert announced == [OTHER_KEY]
+        assert [
+            entry["log_level"]
+            for entry in first_pass + second_pass
+            if entry["event"] == "rate_limit_announcer.store_read_failed"
+        ] == ["warning", "debug"]
+        assert not [
+            entry
+            for entry in second_pass
+            if entry["event"] == "rate_limit_announcer.store_read_recovered"
+        ]
+
+    def test_a_pass_that_answers_every_due_key_clears_the_hold(
+        self, announcer, store, clock
+    ):
+        """Positive half: a whole pass the store answered still ends the outage."""
+        announcer.track(KEY, clock.now - 2.0)
+        announcer.track(OTHER_KEY, clock.now - 1.0)
+        store.failure = RuntimeError("backend unreachable")
+        announcer.run_once()
+        store.failure = None
+        store.values[KEY] = 0.0
+        store.values[OTHER_KEY] = 0.0
+        clock.now = announcer._state.held_until
+
+        announcer.run_once()
+
+        assert announcer._state.held_until is None
+        assert announcer._state.hold_delay is None
+
     def test_a_healthy_pass_does_not_log_a_recovery_it_did_not_make(
         self, announcer, store, clock
     ):
@@ -1315,6 +1369,32 @@ class TestAnnouncerLoopWaitBehavior:
 
         assert announcer._next_wait(announcer._state) == _TICK_INTERVAL_SECONDS
 
+    def test_an_expired_hold_with_nothing_due_waits_instead_of_spinning(
+        self, announcer, store, clock
+    ):
+        """An expired hold is not a deadline.
+
+        The hold is cleared by a pass that reads the store, and that pass needs
+        a due record to reach. A 429 arriving during the outage moves the only
+        record past the hold, so at the hold deadline nothing is due, nothing
+        clears it, and preferring it anyway returned a wait of zero — a pegged
+        core for as long as the new cooldown had left to run.
+        """
+        announcer.track(KEY, clock.now - 1.0)
+        store.failure = RuntimeError("backend unreachable")
+        announcer.run_once()
+        held_until = announcer._state.held_until
+        store.failure = None
+        announcer.begin(KEY)
+        announcer.track(KEY, held_until + COOLDOWN_SECONDS)
+        clock.now = held_until + 0.1
+
+        # Nothing is due, so no pass can clear the hold that is now in the past.
+        assert announcer.run_once() == []
+        assert store.reads == [KEY]
+        assert announcer._state.held_until == held_until
+        assert announcer._next_wait(announcer._state) == _TICK_INTERVAL_SECONDS
+
     def test_an_in_flight_key_does_not_set_the_deadline(self, announcer, clock):
         """Its record is stale by construction, so waking on it would spin.
 
@@ -1472,6 +1552,48 @@ class TestForkReownBehavior:
         assert handle.is_stopping is False
         assert handle.last_crash_reason is None
         assert get_registered_daemon_workers()[DAEMON_WORKER_NAME] is handle
+
+    def test_two_threads_repairing_one_fork_share_a_single_state(
+        self, spawning, clock, threadless, monkeypatch
+    ):
+        """Concurrent repairers must converge, because the spawn lock lives on
+        the state.
+
+        A plain store lets each racer publish its own object and then run the
+        spawn against its own lock, so "one loop per process" stops holding: the
+        loser's loop iterates a state no entry point can reach and no ``stop()``
+        can end. The record it took is lost with it.
+        """
+        from baldur.services.rate_limit_coordinator import (
+            announcer as announcer_module,
+        )
+
+        both_read = threading.Barrier(2, timeout=HANDOFF_TIMEOUT_SECONDS)
+        real_state = announcer_module._AnnouncerState
+
+        class _BarrieredState(real_state):
+            """Holds every racer until both have read the inherited state."""
+
+            __slots__ = ()
+
+            def __init__(self, records=None):
+                both_read.wait()
+                super().__init__(records=records)
+
+        monkeypatch.setattr(announcer_module, "_AnnouncerState", _BarrieredState)
+        spawning._state.origin_pid = os.getpid() + 1
+        expiry = clock.now + COOLDOWN_SECONDS
+
+        first = _RealThread(target=spawning.track, args=(KEY, expiry))
+        second = _RealThread(target=spawning.track, args=(OTHER_KEY, expiry))
+        first.start()
+        second.start()
+        first.join(HANDOFF_TIMEOUT_SECONDS)
+        second.join(HANDOFF_TIMEOUT_SECONDS)
+
+        assert spawning.pending == {KEY: expiry, OTHER_KEY: expiry}
+        assert len(threadless.instances) == 1
+        assert spawning._state.thread is threadless.instances[0]
 
     def test_a_repeated_repair_does_not_swap_the_state_twice(self, forked):
         """The second entry point in the child must find the repair already done."""
@@ -1663,6 +1785,39 @@ class TestAnnouncerStopBehavior:
         }
         assert not [entry for entry in logs if entry["event"] == "daemon_worker.died"]
         assert len(threadless.instances) == 1
+
+    def test_a_spawn_landing_during_stop_leaves_no_registration_behind(
+        self, spawning, clock, threadless
+    ):
+        """The teardown waits for a spawn that is already past its stop check.
+
+        ``stop()`` reads the handle before the spawn publishes one, so without
+        the teardown lock it unregisters nothing and the spawn then registers a
+        handle onto a thread that exits at its first loop check. The liveness
+        probe reports that worker dead on every tick from then on, and burns its
+        respawn budget on a process that shut down cleanly.
+        """
+        threadless.start_gate = threading.Event()
+        threadless.entered_start = threading.Event()
+
+        spawner = _RealThread(
+            target=spawning.track, args=(KEY, clock.now + COOLDOWN_SECONDS)
+        )
+        spawner.start()
+        assert threadless.entered_start.wait(HANDOFF_TIMEOUT_SECONDS)
+        stopper = _RealThread(target=spawning.stop)
+        stopper.start()
+        stopper.join(timeout=CONTENTION_SETTLE_SECONDS)
+        threadless.start_gate.set()
+        spawner.join(HANDOFF_TIMEOUT_SECONDS)
+        stopper.join(HANDOFF_TIMEOUT_SECONDS)
+
+        # The spawn really did land inside the stop, so the case is not green
+        # for want of a contender.
+        assert len(threadless.instances) == 1
+        assert DAEMON_WORKER_NAME not in get_registered_daemon_workers()
+        assert spawning._handle is None
+        assert spawning._state.thread is None
 
     def test_stopping_an_announcer_that_never_started_is_a_no_op(
         self, spawning, threadless

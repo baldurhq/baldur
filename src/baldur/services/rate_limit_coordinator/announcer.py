@@ -149,6 +149,13 @@ class CooldownAnnouncer:
         self._clock = clock
         self._handle: DaemonWorkerHandle | None = None
         self._state = _AnnouncerState()
+        # Fork-repair arbiter, empty in the constructing process because that
+        # one never repairs. Keyed by pid so every thread repairing the same
+        # fork converges on ONE state object (``_repair_if_forked``). The keys
+        # are the pids of this process's own ancestry, all of them alive while
+        # it is, so a repairing child never collides with an inherited entry;
+        # a child's dict is a copy, so the depth of the fork chain bounds it.
+        self._state_by_pid: dict[int, _AnnouncerState] = {}
 
     # =========================================================================
     # Fork re-ownership
@@ -160,8 +167,11 @@ class CooldownAnnouncer:
         Lock-free on purpose: a lock taken here would be held exactly by a
         process whose pid mismatches — a child mid-repair — so a grandchild
         forked in that window would inherit it held and block forever. The whole
-        state is swapped instead, so a thread that loaded another thread's fresh
-        object simply works from that one.
+        state is swapped instead, and the swap is arbitrated by one GIL-atomic
+        ``setdefault`` rather than a plain store: concurrent repairers must land
+        on the SAME object, because the spawn's mutual exclusion lives on it.
+        Two objects mean two locks, and two locks mean two loops — the second
+        holding a state no entry point can reach, so ``stop()`` never ends it.
 
         The records survive: a record is a wake hint that is verified against the
         store before anything is announced, so an inherited one is either
@@ -170,14 +180,18 @@ class CooldownAnnouncer:
         — the lock, the wake event, the thread, the hold and the in-flight
         markers — belongs to the parent and starts fresh.
         """
+        pid = os.getpid()
         inherited = self._state
-        if inherited.origin_pid == os.getpid():
+        if inherited.origin_pid == pid:
             return
 
-        self._state = _AnnouncerState(records=inherited.records)
-        handle = self._handle
-        if handle is not None:
-            handle.reset_after_fork()
+        fresh = _AnnouncerState(records=inherited.records)
+        owned = self._state_by_pid.setdefault(pid, fresh)
+        self._state = owned
+        if owned is fresh:
+            handle = self._handle
+            if handle is not None:
+                handle.reset_after_fork()
 
     # =========================================================================
     # Public entry points
@@ -266,6 +280,7 @@ class CooldownAnnouncer:
 
         due = self._due_records(current)
         announced: list[str] = []
+        held = False
         for expiry, key in due:
             try:
                 verified_until = self._verify(key, expiry, current)
@@ -275,13 +290,8 @@ class CooldownAnnouncer:
                 # comparison below cannot use (a NULL column, a value some other
                 # tool wrote) and that raises from the comparison, not the read.
                 self._enter_hold(key, e)
+                held = True
                 break
-            # Only here — after the comparison, not after the read. A store
-            # that answers with a value the comparison cannot use raises from
-            # inside the step, and clearing the hold on the read alone would
-            # redraw the interval and re-report the edge on every pass while
-            # announcing a recovery that never happened.
-            self._leave_hold()
             if verified_until is None:
                 continue
             # Emitted outside the announcer's lock: a subscriber may hold the
@@ -302,6 +312,15 @@ class CooldownAnnouncer:
                 rate_limit_key=key,
             )
             announced.append(key)
+
+        # Cleared by a whole pass the store answered, never by one step inside
+        # it. A pass that reaches a key it cannot read breaks above with the
+        # hold still armed, so the outage keeps its single WARNING. Clearing per
+        # step re-armed that edge every time a healthy key was verified ahead of
+        # the broken one — which the per-pass rotation guarantees will happen —
+        # turning "one WARNING per outage" into one per hold interval, forever.
+        if due and not held:
+            self._leave_hold()
         return announced
 
     @fork_repaired
@@ -335,13 +354,22 @@ class CooldownAnnouncer:
                     worker_name=DAEMON_WORKER_NAME,
                     join_timeout_seconds=_STOP_JOIN_TIMEOUT_SECONDS,
                 )
-        state.thread = None
+        # Taken for the teardown only, never across the join above: a spawn
+        # already past its ``stopped`` re-check sits inside this lock holding a
+        # thread it is about to publish, and tearing down before it lands leaves
+        # the registry pointing at a thread that exits one line later — reported
+        # from then on as a dead worker, with respawn attempts burned on it.
+        # Waiting here lets that spawn finish, then tears down what it left.
+        with state.spawn_lock:
+            state.thread = None
 
-        if handle is not None:
-            from baldur.metrics.recorders.daemon_worker import unregister_daemon_worker
+            if self._handle is not None:
+                from baldur.metrics.recorders.daemon_worker import (
+                    unregister_daemon_worker,
+                )
 
-            unregister_daemon_worker(DAEMON_WORKER_NAME)
-            self._handle = None
+                unregister_daemon_worker(DAEMON_WORKER_NAME)
+                self._handle = None
 
     @property
     @fork_repaired
@@ -636,13 +664,16 @@ class CooldownAnnouncer:
     def _next_wait(self, state: _AnnouncerState) -> float:
         """Seconds to sleep: to the nearest deadline, clamped into the tick.
 
-        Clamping at zero matters as much as clamping at the tick: a deadline
-        already in the past would otherwise turn the wait into a busy loop for
-        the length of an outage.
+        A hold sets the deadline only while it is still in the future. An
+        expired hold is not a deadline: it is cleared by the next pass that
+        reads the store, and that pass needs a due record to reach. With none
+        due the hold outlives every deadline the loop has, and preferring it
+        unconditionally made the wait zero — a pegged core for as long as the
+        nearest cooldown still had to run.
         """
         now = self._clock()
         with state.lock:
-            if state.held_until is not None:
+            if state.held_until is not None and state.held_until > now:
                 deadline: float | None = state.held_until
             else:
                 due = [
