@@ -473,3 +473,134 @@ class TestRuntimeConfigIntegration:
         assert hasattr(config, "traffic_aware_max_items")
         assert config.traffic_aware_enabled is False  # default
         assert config.traffic_aware_max_items == 30  # default
+
+
+def _governance_allowed():
+    """A real allow verdict — the governance leg reads two of its fields."""
+    from baldur.models.governance import GovernanceCheckResult
+
+    return GovernanceCheckResult(allowed=True)
+
+
+class TestCheckTrafficHealthBehavior:
+    """The circuit leg after the error-budget leg was removed.
+
+    The report now covers exactly what it checks: circuits projected into the
+    namespace DLQ entries are stored under, plus governance. The snapshot it
+    built rides back on the result so the pass that follows does not scan the
+    store a second time.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _require_pro(self):
+        # The governance leg is patched at its PRO implementation.
+        pytest.importorskip("baldur_pro")
+
+    def _health(self, states, *, domain, repository=None):
+        from baldur.services.circuit_breaker import CircuitBreakerService
+        from baldur.tasks.traffic_aware_replay import check_traffic_health
+
+        cb = MagicMock(spec=CircuitBreakerService)
+        cb.repository = repository if repository is not None else MagicMock(spec=[])
+        cb.get_all_states.return_value = states
+        with (
+            patch(
+                "baldur_pro.services.governance.checks.check_all_governance",
+                return_value=_governance_allowed(),
+            ),
+            patch(
+                "baldur.services.circuit_breaker.get_circuit_breaker_service",
+                return_value=cb,
+            ),
+        ):
+            return check_traffic_health(domain=domain)
+
+    @pytest.mark.parametrize(
+        ("states", "domain", "healthy", "reason_fragment"),
+        [
+            (
+                [{"service_name": "Payment-API", "state": "closed"}],
+                "payment_api",
+                True,
+                "",
+            ),
+            (
+                [{"service_name": "payment_api", "state": "open"}],
+                "payment_api",
+                False,
+                "circuit_open",
+            ),
+            ([], "payment_api", False, "no_circuit_projects"),
+            # No domain named: the caller fans out itself, so the check only
+            # has to prove the store is readable.
+            ([], None, True, ""),
+        ],
+    )
+    def test_domain_postures(self, states, domain, healthy, reason_fragment):
+        result = self._health(states, domain=domain)
+
+        assert result.is_healthy is healthy
+        if reason_fragment:
+            assert reason_fragment in result.reason
+
+    def test_an_unrefreshable_store_stops_the_pass_rather_than_guessing(self):
+        """Draining against a snapshot that may be stale is exactly the case
+        the whole-store restore exists to prevent."""
+        repository = MagicMock(spec=["force_sync_from_l2", "get_l2_health"])
+        repository.force_sync_from_l2.return_value = False
+        repository.get_l2_health.return_value = {"adapter_type": "redis"}
+
+        result = self._health([], domain=None, repository=repository)
+
+        assert result.is_healthy is False
+        assert result.checks["circuit_breaker"] is False
+        assert "refreshed" in result.reason
+
+    def test_a_raising_circuit_read_fails_open(self):
+        from baldur.tasks.traffic_aware_replay import check_traffic_health
+
+        with (
+            patch(
+                "baldur_pro.services.governance.checks.check_all_governance",
+                return_value=_governance_allowed(),
+            ),
+            patch(
+                "baldur.services.circuit_breaker.get_circuit_breaker_service",
+                side_effect=RuntimeError("store unreachable"),
+            ),
+        ):
+            result = check_traffic_health(domain="payment_api")
+
+        assert result.is_healthy is True
+        assert result.checks["circuit_breaker"] is True
+        assert result.circuits is None
+
+    @pytest.mark.parametrize("domain", [None, "payment_api"])
+    def test_the_report_never_carries_an_error_budget_check(self, domain):
+        result = self._health(
+            [{"service_name": "payment_api", "state": "closed"}], domain=domain
+        )
+
+        assert "error_budget" not in result.checks
+
+    def test_the_snapshot_rides_back_for_the_pass_to_reuse(self):
+        result = self._health(
+            [{"service_name": "payment_api", "state": "closed"}], domain=None
+        )
+
+        assert result.circuits is not None
+        assert result.circuits.drop_reason("payment_api") is None
+
+    def test_the_snapshot_is_returned_even_when_the_domain_is_blocked(self):
+        """The caller may still drain the domains that ARE closed."""
+        result = self._health(
+            [
+                {"service_name": "payment_api", "state": "open"},
+                {"service_name": "point_api", "state": "closed"},
+            ],
+            domain="payment_api",
+        )
+
+        assert result.is_healthy is False
+        assert result.circuits is not None
+        assert result.circuits.drop_reason("point_api") is None

@@ -156,3 +156,64 @@ class TestCompressedBackfillDefaultContract:
             "complete": True,
             "walked": 0,
         }
+
+
+class TestFindReplayablePageContract:
+    """The paged selector is the abstract one; the unpaged view delegates."""
+
+    def test_find_replayable_page_is_abstract(self):
+        """Every adapter has to implement the paged form — a store that only
+        inherited it would silently drop the cursor and re-walk its prefix."""
+        assert "find_replayable_page" in FailedOperationRepository.__abstractmethods__
+
+    def test_find_replayable_is_concrete_so_adapters_share_one_delegate(self):
+        assert "find_replayable" not in FailedOperationRepository.__abstractmethods__
+
+    def test_page_selector_arguments_are_keyword_only(self):
+        """A positional call site could not survive the cursor being appended
+        after the existing filters."""
+        params = inspect.signature(
+            FailedOperationRepository.find_replayable_page
+        ).parameters
+
+        for name in (
+            "max_retries",
+            "domain",
+            "failure_type",
+            "source",
+            "limit",
+            "cursor",
+        ):
+            assert params[name].kind is inspect.Parameter.KEYWORD_ONLY
+
+    def test_page_selector_defaults_match_the_unpaged_view(self):
+        params = inspect.signature(
+            FailedOperationRepository.find_replayable_page
+        ).parameters
+
+        assert params["domain"].default is None
+        assert params["failure_type"].default is None
+        assert params["source"].default is None
+        assert params["cursor"].default is None
+        assert params["limit"].default == 100
+
+    def test_unpaged_view_forwards_its_filters_and_drops_the_page_metadata(self):
+        """It must not narrow by capture source: the operator console reaches
+        the store through this method."""
+        from unittest.mock import MagicMock
+
+        from baldur.interfaces.repositories import ReplayablePage
+
+        repo = MagicMock(spec=FailedOperationRepository)
+        repo.find_replayable_page.return_value = ReplayablePage(
+            entries=["sentinel"], next_cursor="0.000000|9", scan_exhausted=True
+        )
+
+        found = FailedOperationRepository.find_replayable(
+            repo, 3, domain="payment_api", failure_type="TIMEOUT", limit=7
+        )
+
+        assert found == ["sentinel"]
+        repo.find_replayable_page.assert_called_once_with(
+            max_retries=3, domain="payment_api", failure_type="TIMEOUT", limit=7
+        )
