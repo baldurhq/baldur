@@ -992,6 +992,14 @@ def _register_shutdown_handlers() -> None:  # noqa: C901, PLR0912, PLR0915
         except ImportError:
             pass
         try:
+            from baldur.services.rate_limit_coordinator.shutdown import (
+                integrate_cooldown_announcer_with_shutdown_coordinator,
+            )
+
+            factories.append(integrate_cooldown_announcer_with_shutdown_coordinator)
+        except ImportError:
+            pass
+        try:
             from baldur.settings.meta_watchdog import get_meta_watchdog_settings
 
             if get_meta_watchdog_settings().enabled:

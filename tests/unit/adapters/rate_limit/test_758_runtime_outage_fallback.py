@@ -914,8 +914,12 @@ class TestVerifiedRecoveryBehavior:
 
 
 class TestGetStateStrictDegradedBehavior:
-    """``get_state_strict`` has no in-tree production caller, so this is the
-    only place its degraded-window contract is exercised."""
+    """The strict read's degraded-window contract, at the adapter.
+
+    Its production caller is the coordinator's cooldown-end announcer, which
+    decides whether a shared cooldown has really ended and holds every
+    announcement while this read raises. The announcer's own module test covers
+    that hold; these cases pin what the adapter does underneath it."""
 
     def test_the_strict_read_still_attempts_redis_while_degraded(self):
         """Serving the local store here would be exactly the fold this variant
@@ -1313,15 +1317,14 @@ class TestCoordinatorOverADegradedAdapterBehavior:
             ),
         )
 
-        # When: the upstream returns a 429 (the all-clear timer and the event
-        # emit are stubbed out — neither is what this case pins, and the timer
-        # would outlive the test)
-        with (
-            patch.object(coordinator, "_schedule_cooldown_end_event"),
-            patch(
-                "baldur.services.rate_limit_coordinator"
-                ".coordinator._emit_rate_limit_event"
-            ),
+        # The all-clear is not what this case pins, and its verifying read would
+        # keep failing against this dead backend for the life of the test — so
+        # the announcer is stopped before the 429 rather than left to spawn.
+        coordinator._announcer.stop()
+
+        # When: the upstream returns a 429 (the event emit is stubbed out)
+        with patch(
+            "baldur.services.rate_limit_coordinator.coordinator._emit_rate_limit_event"
         ):
             in_force = coordinator.on_rate_limited(key)
 
