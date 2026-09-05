@@ -84,7 +84,9 @@ You have three ways to replay the queued work:
   your own code can pace replay work through.
 - **Automatic on recovery.** When a dependency's circuit breaker closes again after an outage, Baldur
   sweeps that dependency's queued failures and replays them, so recovery and catch-up happen
-  together.
+  together. The sweep works in passes of a bounded size and keeps going, pass after pass, until the
+  backlog is drained or a bound stops it. How far one recovery goes, and how it tells you when it
+  stopped early, is covered under *Closing the loop* below.
 
 When a failure can't be replayed successfully (the dependency is still down, or the work itself is
 broken), Baldur retries it up to a configurable budget. An entry that exhausts that budget is neither
@@ -105,6 +107,7 @@ re-converges to needs-review, so a force-redrive can never turn a poison-pill in
 | You force-redrive an entry parked for review | an admin action over the REST API |
 | A whole failure type replays in one call | `batch_replay_by_failure_type` from code, or the console/REST batch replay (**PRO**) |
 | Queued work drains on its own | a dependency's circuit breaker recovers and an automatic replay sweep runs |
+| A drain stops with work still queued, and says why | the recovery's continuation bound was reached, a circuit for that domain re-opened, a pass made no progress, or a pass errored (a `DLQ_REPLAY_BLOCKED` event whose `block_reason` names which) |
 | A batch replay grows or shrinks batch by batch | adaptive batch sizing was opted in (`use_adaptive=True`) and the recent replay success rate changes |
 | An entry stops being retried and is parked in a needs-review state | its replay attempts are exhausted, or it failed once during an automatic on-recovery sweep |
 | Old entries age out — expiring, then archiving | **PRO** — scheduled archive/purge retention is active |
@@ -245,6 +248,8 @@ The knobs an operator sets most often. The full list lives in the API reference.
 | `BALDUR_DLQ_OUTBOX_ENABLED` | `true` | Capture failures through a non-blocking outbox so recording a failure stays off the request hot path |
 | `BALDUR_DLQ_OUTBOX_JOIN_TIMEOUT_SECONDS` | `5.0` | Total budget an exiting process spends flushing its outbox to the store and spilling the rest to the local fallback; size it below your process watchdog |
 | `BALDUR_REPLAY_AUTOMATION_ON_RECOVERY_ENABLED` | `true` | Automatic replay of queued failures when a circuit breaker recovers |
+| `BALDUR_REPLAY_AUTOMATION_ON_RECOVERY_MAX_ITEMS` | `100` | Entries one on-recovery pass replays |
+| `BALDUR_REPLAY_AUTOMATION_ON_RECOVERY_MAX_CONTINUATIONS` | `100` | Passes one recovery may chain while work is still reachable; multiplied by the pass size, the most one recovery drains |
 
 If you don't use automatic replay, turn it off rather than leaving it half-configured: with
 `BALDUR_REPLAY_AUTOMATION_ON_RECOVERY_ENABLED=false`, recovery events skip the replay dispatch
@@ -329,6 +334,35 @@ needs open-circuit capture on (`open_circuit_capture_disabled` when it is off). 
 
 4. **Keep on-recovery replay enabled.** `BALDUR_REPLAY_AUTOMATION_ON_RECOVERY_ENABLED` is `true` by default; the
    arming surface reports `disabled` when it is turned off.
+
+**How far one recovery drains.** A recovery does not replay everything in one go. The sweep runs in
+passes of `BALDUR_REPLAY_AUTOMATION_ON_RECOVERY_MAX_ITEMS` entries (100 by default), and after each
+pass it queues the next one for the same service as long as work is still reachable: the pass filled
+its quota, ran up against the replay task's time limit, or stopped scanning before it had looked at
+every candidate. The chain runs to at most `BALDUR_REPLAY_AUTOMATION_ON_RECOVERY_MAX_CONTINUATIONS`
+passes (100 by default), so one recovery clears up to 10,000 entries on the defaults; a domain that
+parks more than that wants a higher continuation count rather than a bigger pass. Both values are
+read once, when the breaker closes, so a change you make while a drain is running applies to the
+next recovery.
+
+Every pass starts by checking that the circuit is still closed. Live traffic can re-trip a breaker
+between passes, and replaying into a dependency that has just failed again would only park each
+entry for review, so the chain stops instead. It also stops when the continuation bound runs out,
+when a pass ends without moving forward, or when a pass raises. A drain that ends for any of these
+reasons with work still queued announces it: a WARNING log and a `DLQ_REPLAY_BLOCKED` event whose
+`block_reason` is `circuit_reopened`, `continuation_bound_reached`, `pass_made_no_progress` or
+`pass_errored`, on the same channel that reports a sweep with no failure-type mapping to select by.
+A drain that simply finds nothing left ends without an announcement.
+
+Read `capped` on the `dlq_replay_batch_completed` event as a per-pass fact. It says that pass filled
+its quota or hit its time limit, not that the drain as a whole is over, and the last pass of a fully
+drained queue can carry it too. Whether more is coming is answered by the absence of a
+`DLQ_REPLAY_BLOCKED` stop, not by `capped`.
+
+Nothing re-drives a chain that stopped early. Until that breaker opens and closes again, the rest of
+the backlog stays parked, so treat a stop announcement as the cue to replay the remainder yourself
+(the single-entry **Retry** action, batch replay from code, or the console/REST batch replay with
+PRO active).
 
 **Recommended alert:** the bundled rules file ships `DLQAutoReplayDisarmed`
 (`baldur_dlq_auto_replay_armed == 0` for 10 minutes) — the `for:` clause is what keeps a short
