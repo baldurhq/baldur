@@ -479,6 +479,109 @@ class RedisDLQQuery:
                 entries.append(entry)
         return entries
 
+    def _replayable_window_ids(
+        self,
+        index_key: str,
+        min_score: float,
+        window: int,
+        consumed_at_floor: set[str],
+    ) -> list[str]:
+        """One window of index members at or above ``min_score``, minus the read ones.
+
+        The floor is inclusive and its already-read members are dropped BY
+        NAME. Resuming with an ``OFFSET`` over the whole range would instead
+        count off whatever a concurrent drainer removed below the window, and
+        the member that slid into its place would never be examined.
+        """
+        return [
+            entry_id
+            for entry_id in self._backend.zrangebyscore(
+                index_key,
+                min_score,
+                float("inf"),
+                offset=0,
+                count=window + len(consumed_at_floor),
+            )
+            if entry_id not in consumed_at_floor
+        ][:window]
+
+    @staticmethod
+    def _advance_replayable_anchor(
+        window_entries: list[FailedOperationData],
+        entry_ids: list[str],
+        window_max: tuple[float, str] | None,
+        min_score: float,
+        consumed_at_floor: set[str],
+    ) -> tuple[float, set[str]]:
+        """Where the next window starts, given what this one read."""
+        if window_max is not None and window_max[0] > min_score:
+            # Re-anchor on the score this window ended at; from here only that
+            # score's own members have to be named off.
+            return window_max[0], {
+                entry.id
+                for entry in window_entries
+                if replay_cursor_position(entry.created_at, entry.id)[0]
+                == window_max[0]
+            }
+        # The whole window sat at one score — or carried no position at all,
+        # in which case none of it was selectable anyway.
+        return min_score, consumed_at_floor | set(entry_ids)
+
+    def _collect_replayable_window(
+        self,
+        entry_ids: list[str],
+        *,
+        floor: tuple[float, str] | None,
+        max_retries: int,
+        failure_type: str | None,
+        source: str | None,
+        require_pending: bool,
+        room: int,
+    ) -> tuple[
+        list[FailedOperationData],
+        list[FailedOperationData],
+        tuple[tuple[float, str], FailedOperationData] | None,
+        tuple[float, str] | None,
+    ]:
+        """Decode one window and pick what it contributes.
+
+        Returns ``(entries read, matches, boundary, highest position read)``.
+        ``boundary`` is how far a cursor built from this window may advance,
+        and it is the last RETURNED match whenever ``room`` truncated the
+        matches: entries above it were never consumed, so a cursor past them
+        would drop them.
+        """
+        window_entries = self._load_positioned_entries(entry_ids)
+        positions = [
+            replay_cursor_position(entry.created_at, entry.id)
+            for entry in window_entries
+        ]
+        fresh = [
+            (position, entry)
+            for position, entry in zip(positions, window_entries, strict=True)
+            if floor is None or position > floor
+        ]
+        eligible = [
+            (position, entry)
+            for position, entry in fresh
+            if _is_replayable_match(
+                entry,
+                max_retries=max_retries,
+                failure_type=failure_type,
+                source=source,
+                require_pending=require_pending,
+            )
+        ]
+        taken = eligible[:room]
+        truncated = len(eligible) > len(taken) and bool(taken)
+        boundary = taken[-1] if truncated else (max(fresh) if fresh else None)
+        return (
+            window_entries,
+            [entry for _position, entry in taken],
+            boundary,
+            max(positions, default=None),
+        )
+
     def find_replayable_page(
         self,
         *,
@@ -507,12 +610,18 @@ class RedisDLQQuery:
         index_key, needs_status_filter = self._replayable_index_key(domain)
         floor = decode_replay_cursor(cursor)
         min_score = floor[0] if floor is not None else float("-inf")
+        # Member ids already read at exactly ``min_score``. A score cannot
+        # carry the id half of a position, so the floor stays inclusive and
+        # the walk steps over its own score-mates by NAME. Counting them off
+        # with an OFFSET over the whole range instead would step over whatever
+        # a concurrent drainer removed below it — and every other process
+        # working this queue removes members while this walk is in progress.
+        consumed_at_floor: set[str] = {floor[1]} if floor is not None else set()
 
         matches: list[FailedOperationData] = []
         boundary: FailedOperationData | None = None
         boundary_position: tuple[float, str] | None = None
         examined = 0
-        offset = 0
         scan_exhausted = False
 
         while len(matches) < limit:
@@ -520,38 +629,36 @@ class RedisDLQQuery:
             if window <= 0:
                 scan_exhausted = True
                 break
-            entry_ids = self._backend.zrangebyscore(
-                index_key,
-                min_score,
-                float("inf"),
-                offset=offset,
-                count=window,
+            entry_ids = self._replayable_window_ids(
+                index_key, min_score, window, consumed_at_floor
             )
             if not entry_ids:
                 break
-            offset += len(entry_ids)
             examined += len(entry_ids)
 
-            for entry in self._load_positioned_entries(entry_ids):
-                position = replay_cursor_position(entry.created_at, entry.id)
-                if floor is not None and position <= floor:
-                    continue
-                if boundary_position is None or position > boundary_position:
-                    boundary_position = position
-                    boundary = entry
-                if not _is_replayable_match(
-                    entry,
+            window_entries, window_matches, window_boundary, window_max = (
+                self._collect_replayable_window(
+                    entry_ids,
+                    floor=floor,
                     max_retries=max_retries,
                     failure_type=failure_type,
                     source=source,
                     require_pending=needs_status_filter,
-                ):
-                    continue
-                matches.append(entry)
-                if len(matches) >= limit:
-                    break
+                    room=limit - len(matches),
+                )
+            )
+            matches.extend(window_matches)
+            if window_boundary is not None and (
+                boundary_position is None or window_boundary[0] > boundary_position
+            ):
+                boundary_position, boundary = window_boundary
+            if len(matches) >= limit:
+                break
             if len(entry_ids) < window:
                 break
+            min_score, consumed_at_floor = self._advance_replayable_anchor(
+                window_entries, entry_ids, window_max, min_score, consumed_at_floor
+            )
 
         return ReplayablePage(
             entries=matches,

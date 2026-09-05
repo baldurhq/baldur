@@ -23,7 +23,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from baldur.adapters.redis.dlq_query import RedisDLQQuery
+from baldur.adapters.redis.dlq_query import _REPLAY_SCAN_CHUNK, RedisDLQQuery
 from baldur.interfaces.repositories import (
     REPLAY_SELECTION_MAX_SCAN,
     FailedOperationStatus,
@@ -311,6 +311,51 @@ class TestRedisReplayablePageBehavior:
             cursor = page.next_cursor
 
         assert collected == [f"e{i}" for i in range(1, 8)]
+
+
+class TestRedisReplayableConcurrentDrainBehavior:
+    """Members leave this index while the walk is reading it — every sweep,
+    the traffic-aware lane, the console and the stale-release all zrem here."""
+
+    def test_a_member_removed_mid_walk_does_not_hide_the_match_behind_it(
+        self, warm_repo
+    ):
+        """The window boundary is the exposure: a walk that resumed by OFFSET
+        would restart the second window one member short, and the match it
+        stepped over sits BELOW the cursor it then hands back — unreachable for
+        the rest of the chain."""
+        for i in range(_REPLAY_SCAN_CHUNK):
+            _seed(warm_repo, f"mw-{i:04d}", offset_seconds=i, source="BaldurMiddleware")
+        wanted = [
+            _seed(warm_repo, f"pc-{i:04d}", offset_seconds=_REPLAY_SCAN_CHUNK + i)[0]
+            for i in range(100)
+        ]
+
+        backend = warm_repo._backend
+        real_get_blobs = backend.get_blobs
+        fetches = {"n": 0}
+
+        def another_drainer_acquires_an_entry(keys):
+            blobs = real_get_blobs(keys)
+            fetches["n"] += 1
+            if fetches["n"] == 1:
+                # One member below the window boundary leaves PENDING, as
+                # `try_acquire_for_replay` moves it on another worker.
+                backend.zsets[f"dlq:status_domain:pending:{DOMAIN}"].pop("mw-0000")
+            return blobs
+
+        backend.get_blobs = another_drainer_acquires_an_entry
+        try:
+            page = warm_repo.query.find_replayable_page(
+                max_retries=5,
+                domain=DOMAIN,
+                source=POLICY_CHAIN_CAPTURE_SOURCE,
+                limit=100,
+            )
+        finally:
+            backend.get_blobs = real_get_blobs
+
+        assert [e.id for e in page.entries] == wanted
 
 
 class TestRedisReplayableDomainReachBehavior:

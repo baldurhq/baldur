@@ -17,10 +17,12 @@ no match at all and the walk has to be able to stop and say so.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
 import pytest
 
 from baldur.adapters.sql.failed_operation import (
+    _REPLAY_PAGE_WINDOW,
     SQLFailedOperationRepository,
     _coerce_row_id,
 )
@@ -72,8 +74,17 @@ def _bulk_seed(dlq, conn, *, count, at, source, failure_type=OPEN_CIRCUIT):
     Going through ``create()`` for a scan-bound-sized population would spend
     the test's whole budget on inserts; the columns bound here are exactly the
     ones ``_row_to_data`` reads back.
+
+    ``created_at`` goes through ``_dt_to_db`` rather than as a bare string,
+    because that is the only form ``create()`` ever writes: sqlite renders the
+    bound datetime with a UTC offset, and a keyset seek binds its own bound the
+    same way. A fixture that wrote the offset-less form would seed rows the
+    store never holds and make the seek look broken at the tie boundary.
     """
     dlq._ensure_schema_ready()
+    stored_at = dlq._dt_to_db(
+        datetime.strptime(at, "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
+    )
     payload = json.dumps({"metadata": {} if source is None else {"source": source}})
     conn.executemany(
         "INSERT INTO baldur_dlq "
@@ -88,8 +99,8 @@ def _bulk_seed(dlq, conn, *, count, at, source, failure_type=OPEN_CIRCUIT):
                 0,
                 5,
                 "",
-                at,
-                at,
+                stored_at,
+                stored_at,
                 payload,
             )
         ]
@@ -284,6 +295,63 @@ class TestSQLReplayablePageBehavior:
             cursor = page.next_cursor
 
         assert collected == [e.id for e in seeded]
+
+
+class TestSQLReplayablePageConcurrentDrainBehavior:
+    """Every other process working this queue removes rows while a walk is in
+    progress, so the walk may never resume by counting them."""
+
+    def test_a_row_resolved_mid_walk_does_not_hide_the_match_behind_it(
+        self, dlq, sqlite_conn
+    ):
+        """The window boundary is the exposure: a walk that resumed at an
+        OFFSET would restart the second window one row short, and the match it
+        stepped over sits BELOW the cursor it then hands back — unreachable for
+        the rest of the chain."""
+        _bulk_seed(
+            dlq,
+            sqlite_conn,
+            count=_REPLAY_PAGE_WINDOW,
+            at="2026-09-05 10:00:01",
+            source="middleware",
+        )
+        _bulk_seed(
+            dlq,
+            sqlite_conn,
+            count=100,
+            at="2026-09-05 11:00:00",
+            source=POLICY_CHAIN_CAPTURE_SOURCE,
+        )
+
+        real_fetch = dlq._fetch_all
+        fetches = {"n": 0}
+
+        def another_drainer_acquires_an_entry(sql, params=None):
+            rows = real_fetch(sql, params)
+            fetches["n"] += 1
+            if fetches["n"] == 1:
+                # One entry below the window boundary leaves PENDING, exactly
+                # as `try_acquire_for_replay` moves it on another worker.
+                sqlite_conn.execute(
+                    "UPDATE baldur_dlq SET status = ? "
+                    "WHERE id = (SELECT MIN(id) FROM baldur_dlq)",
+                    (FailedOperationStatus.REPLAYING.value,),
+                )
+                sqlite_conn.commit()
+            return rows
+
+        dlq._fetch_all = another_drainer_acquires_an_entry
+        try:
+            page = dlq.find_replayable_page(
+                max_retries=5,
+                domain=DOMAIN,
+                source=POLICY_CHAIN_CAPTURE_SOURCE,
+                limit=100,
+            )
+        finally:
+            dlq._fetch_all = real_fetch
+
+        assert len(page.entries) == 100
 
 
 class TestSQLReplayablePageScanBoundBehavior:

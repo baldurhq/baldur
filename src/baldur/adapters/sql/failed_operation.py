@@ -40,6 +40,7 @@ from baldur.interfaces.repositories import (
     ReplayablePage,
     decode_replay_cursor,
     encode_replay_cursor,
+    replay_cursor_position,
 )
 from baldur.settings.sql import SQLDialect
 from baldur.utils.time import utc_now
@@ -543,14 +544,17 @@ class SQLFailedOperationRepository(GenericSQLRepository, FailedOperationReposito
         max_retries: int,
         domain: str | None,
         failure_type: str | None,
-        cursor: str | None,
+        floor: tuple[float, str] | None,
     ) -> tuple[str, list[Any]]:
         """Windowed keyset query for one replayable page, minus the JSON residual.
 
-        ``LIMIT``/``OFFSET`` placeholders are left trailing so the caller can
-        walk windows without rebuilding the statement.
+        Built per window, from the position the previous window ended at — an
+        ``OFFSET`` would count rows rather than name one, and the rows below it
+        are being removed by every other process that drains this queue, so a
+        concurrent resolve slides the remainder up and the next window steps
+        over a member. The trailing ``LIMIT`` placeholder is the only thing the
+        caller supplies.
         """
-        floor = decode_replay_cursor(cursor)
         sql = (
             f"SELECT {_SELECT_COLS} FROM {_TABLE} "
             f"WHERE status = %s AND retry_count < %s"
@@ -562,15 +566,24 @@ class SQLFailedOperationRepository(GenericSQLRepository, FailedOperationReposito
         if failure_type is not None:
             sql += " AND failure_type = %s"
             params.append(failure_type)
-        seek_id = _coerce_row_id(floor[1]) if floor is not None else None
-        if floor is not None and seek_id is not None:
-            # Row-value syntax is not portable across the three dialects, so
-            # the same keyset predicate is spelled out; the ORDER BY below is
-            # the identical tuple, which is what makes the seek safe.
-            sql += " AND (created_at > %s OR (created_at = %s AND id > %s))"
+        if floor is not None:
             bound_at = self._dt_to_db(datetime.fromtimestamp(floor[0], tz=UTC))
-            params.extend([bound_at, bound_at, seek_id])
-        sql += " ORDER BY created_at ASC, id ASC LIMIT %s OFFSET %s"
+            seek_id = _coerce_row_id(floor[1])
+            if seek_id is not None:
+                # Row-value syntax is not portable across the three dialects,
+                # so the same keyset predicate is spelled out; the ORDER BY
+                # below is the identical tuple, which is what makes the seek
+                # safe.
+                sql += " AND (created_at > %s OR (created_at = %s AND id > %s))"
+                params.extend([bound_at, bound_at, seek_id])
+            else:
+                # A cursor minted by another adapter carries an id this column
+                # cannot compare. Resume on the timestamp alone — inclusive, so
+                # nothing at that instant is stepped over — rather than raising
+                # on the driver or restarting the walk from the beginning.
+                sql += " AND created_at >= %s"
+                params.append(bound_at)
+        sql += " ORDER BY created_at ASC, id ASC LIMIT %s"
         return sql, params
 
     def find_replayable_page(
@@ -594,18 +607,14 @@ class SQLFailedOperationRepository(GenericSQLRepository, FailedOperationReposito
         ``source`` lives inside the JSON payload, so it is the one residual
         applied in Python; the loop keeps fetching windows until it has
         ``limit`` matches or has examined ``REPLAY_SELECTION_MAX_SCAN`` rows.
+        Each window re-seeks from the row the previous one ended on, so a row
+        another drainer resolves mid-walk cannot shift the members behind it
+        past the next window's start.
         """
-        sql, params = self._build_replayable_page_query(
-            max_retries=max_retries,
-            domain=domain,
-            failure_type=failure_type,
-            cursor=cursor,
-        )
-
+        floor = decode_replay_cursor(cursor)
         matches: list[FailedOperationData] = []
         boundary: FailedOperationData | None = None
         examined = 0
-        offset = 0
         scan_exhausted = False
 
         while len(matches) < limit:
@@ -613,10 +622,15 @@ class SQLFailedOperationRepository(GenericSQLRepository, FailedOperationReposito
             if window <= 0:
                 scan_exhausted = True
                 break
-            rows = self._fetch_all(sql, [*params, window, offset])
+            sql, params = self._build_replayable_page_query(
+                max_retries=max_retries,
+                domain=domain,
+                failure_type=failure_type,
+                floor=floor,
+            )
+            rows = self._fetch_all(sql, [*params, window])
             if not rows:
                 break
-            offset += len(rows)
             examined += len(rows)
             for row in rows:
                 entry = self._row_to_data(row)
@@ -629,6 +643,8 @@ class SQLFailedOperationRepository(GenericSQLRepository, FailedOperationReposito
                 matches.append(entry)
                 if len(matches) >= limit:
                     break
+            if boundary is not None and boundary.created_at is not None:
+                floor = replay_cursor_position(boundary.created_at, boundary.id)
             if len(rows) < window:
                 break
 

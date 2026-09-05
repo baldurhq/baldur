@@ -245,7 +245,10 @@ class TestVerifyRecoveryWindowBehavior:
         self, mock_verifier_cls, mock_get_entries
     ):
         """정상 체인에서 strategy='wal_chain_verify'를 반환한다."""
-        mock_get_entries.return_value = [{"seq": 1}, {"seq": 2}]
+        mock_get_entries.return_value = [
+            {"seq": 1, "integrity": {"hash": "h1"}},
+            {"seq": 2, "integrity": {"hash": "h2"}},
+        ]
         verifier_instance = MagicMock()
         verifier_instance.verify_chain.return_value = (True, None)
         mock_verifier_cls.return_value = verifier_instance
@@ -263,7 +266,7 @@ class TestVerifyRecoveryWindowBehavior:
         self, mock_verifier_cls, mock_get_entries
     ):
         """검증 실패 시 find_tampering()이 호출된다."""
-        mock_get_entries.return_value = [{"seq": 1}]
+        mock_get_entries.return_value = [{"seq": 1, "integrity": {"hash": "h1"}}]
         verifier_instance = MagicMock()
         verifier_instance.verify_chain.return_value = (False, "hash mismatch")
         verifier_instance.find_tampering.return_value = [
