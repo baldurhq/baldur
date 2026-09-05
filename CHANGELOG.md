@@ -37,6 +37,10 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - The audit trail no longer records a row per request when no tiering configuration is set.
 - Flask and FastAPI graceful shutdown now waits for in-flight requests before closing audit and DLQ.
 
+### Removed
+
+- Dead 429-throttle fields `recovery_dampening_steps`, `default_service`, `debounce_window_seconds`.
+
 ## [1.10.0] - 2026-09-04
 
 ### Added

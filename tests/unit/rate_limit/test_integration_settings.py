@@ -14,7 +14,6 @@ from __future__ import annotations
 import pytest
 
 from tests.unit.rate_limit.conftest import (
-    DEFAULT_DEBOUNCE_WINDOW,
     REDUCTION_RATIO_1ST,
     REDUCTION_RATIO_2ND,
     REDUCTION_RATIO_3RD,
@@ -37,7 +36,6 @@ class TestRateLimitThrottleIntegrationSettings:
         settings = RateLimitThrottleIntegrationSettings()
 
         assert settings.enabled is True
-        assert settings.debounce_window_seconds == DEFAULT_DEBOUNCE_WINDOW
         assert settings.recovery_strategy == "gradual"
 
     def test_reduction_ratios(self):
@@ -58,15 +56,13 @@ class TestRateLimitThrottleIntegrationSettings:
             RateLimitThrottleIntegrationSettings,
         )
 
-        custom_debounce = 10.0
-
         settings = RateLimitThrottleIntegrationSettings(
             enabled=False,
-            debounce_window_seconds=custom_debounce,
+            recovery_strategy="immediate",
         )
 
         assert settings.enabled is False
-        assert settings.debounce_window_seconds == custom_debounce
+        assert settings.recovery_strategy == "immediate"
 
     @pytest.mark.parametrize(
         ("consecutive", "expected_ratio"),
