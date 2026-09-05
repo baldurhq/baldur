@@ -198,13 +198,13 @@ class TestAdaptiveThrottleCooldownEndRecovery:
         assert adaptive_throttle._429_reduction_active is False
 
     def test_cooldown_end_starts_recovery_dampening(self, adaptive_throttle):
-        """COOLDOWN_END 시 start_recovery_dampening() 호출."""
+        """COOLDOWN_END 시 복구 램프 arm 호출 (핸들러 자신의 락 블록 안)."""
         adaptive_throttle._handle_rate_limit_429(
             make_429_event(key="test_api", consecutive_429s=2)
         )
 
         with patch.object(
-            adaptive_throttle, "start_recovery_dampening"
+            adaptive_throttle, "_arm_recovery_dampening_locked"
         ) as mock_recovery:
             adaptive_throttle._handle_cooldown_end(
                 make_cooldown_end_event(key="test_api")
@@ -219,7 +219,7 @@ class TestAdaptiveThrottleCooldownEndRecovery:
         event = MagicMock()
         event.data = make_cooldown_end_event(key="test_api")
 
-        with patch.object(adaptive_throttle, "start_recovery_dampening"):
+        with patch.object(adaptive_throttle, "_arm_recovery_dampening_locked"):
             adaptive_throttle._handle_cooldown_end(event)
 
         assert "test_api" not in adaptive_throttle._rate_limit_keys

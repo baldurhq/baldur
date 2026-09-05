@@ -1,20 +1,18 @@
 """
 Rate Limit Throttle Integration Settings - Pydantic v2.
 
-Defines how 429 responses feed back into AdaptiveThrottle.
+Defines how 429 responses feed back into the adaptive throttle, and how the
+limit they took is given back when the cooldown ends.
 
 Features:
     - Automatic throttle limit reduction on a 429
     - Reduction ratio per consecutive 429 count
-    - Key-service mapping (prevents interference between neighbours)
-    - Recovery strategy settings
-    - Escalation settings
+    - Recovery strategy once the cooldown expires
 
 Environment Variables:
     BALDUR_RATE_LIMIT_THROTTLE_INTEGRATION_ENABLED=true
-    BALDUR_RATE_LIMIT_THROTTLE_INTEGRATION_DEBOUNCE_WINDOW_SECONDS=5.0
-    BALDUR_RATE_LIMIT_THROTTLE_INTEGRATION_ESCALATION_ENABLED=true
-    ... etc
+    BALDUR_RATE_LIMIT_THROTTLE_INTEGRATION_REDUCTION_RATIO_1=0.8
+    BALDUR_RATE_LIMIT_THROTTLE_INTEGRATION_RECOVERY_STRATEGY=gradual
 """
 
 from __future__ import annotations
@@ -25,9 +23,6 @@ from pydantic import Field
 from pydantic_settings import BaseSettings
 
 from baldur.settings.base import make_settings_config
-from baldur.settings.field_types import (
-    TinyCount,
-)
 
 
 class RateLimitThrottleIntegrationSettings(BaseSettings):
@@ -75,33 +70,12 @@ class RateLimitThrottleIntegrationSettings(BaseSettings):
     # =========================================================================
     recovery_strategy: Literal["immediate", "gradual"] = Field(
         default="gradual",
-        description="Limit recovery strategy after cooldown expires",
+        description=(
+            "How the limit a 429 took is given back when the cooldown ends. "
+            "'gradual' walks it back over the recovery dampening steps; "
+            "'immediate' restores it in one step. Neither can lower the limit."
+        ),
     )
-    recovery_dampening_steps: TinyCount = Field(
-        default=3,
-        description="Number of steps for gradual recovery",
-    )
-
-    # =========================================================================
-    # EventBus debouncing
-    # =========================================================================
-    debounce_window_seconds: float = Field(
-        default=5.0,
-        ge=0.0,
-        le=60.0,
-        description="Event deduplication window for the same key (seconds)",
-    )
-
-    # =========================================================================
-    # Key-service mapping (prevents interference between neighbours)
-    # =========================================================================
-    default_service: str = Field(
-        default="default",
-        description="Default service for unmapped keys",
-    )
-
-    # Note: key_to_service_mapping is awkward to express as an env var, so set it
-    # directly in code or from a separate config file.
 
     def get_reduction_ratio(self, consecutive_429s: int) -> float:
         """
