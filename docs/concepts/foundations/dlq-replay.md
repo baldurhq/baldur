@@ -132,9 +132,9 @@ configured, else SQL when a database DSN is, else memory. An unrecognized value 
 falls back to that same probe order. Capture flows into the store through a non-blocking in-memory
 outbox that keeps it off the request hot path. The outbox watches its own pressure in every tier: it
 reports how many entries are waiting in its buffer and how long they wait before being written (the
-leading signs of a buffer under stress), and raises a warning, with a matching metric and event, when
-its drop rate crosses a threshold, so you learn the outbox is shedding instead of discovering it after
-the fact.
+leading signs of a buffer under stress), counts every entry it drops in a metric, and raises a warning
+and an event when its drop rate crosses a threshold, so you learn the outbox is shedding instead of
+discovering it after the fact.
 
 An in-memory buffer would normally die with its process. Baldur therefore tears the outbox down on
 every exit path (a signalled stop, a gunicorn or Celery worker recycle) under one time budget,
@@ -295,14 +295,16 @@ needs open-circuit capture on (`open_circuit_capture_disabled` when it is off). 
 
     Without a registered handler, every replay for that domain fails per-entry and the entry ends
     up parked for review once its replay budget is spent. The arming surface reports
-    `handler_missing`.
+    `handler_missing`. Registration is per process: the on-recovery sweep runs inside the Celery
+    worker, so the worker must register the handler too, and the arming surface can only vouch
+    for the process that answers it.
 
 2. **Map recovered services to their failure types.** When a circuit breaker closes, Baldur needs to
    know *which* captured entries the recovered dependency is responsible for. Configure that mapping
    with `BALDUR_REPLAY_AUTOMATION_SERVICE_FAILURE_TYPE_MAP` (see
-   [Environment Variables](../../reference/env-vars.md)). An empty mapping is surfaced as a
-   blocked-with-signal event on recovery, not a silent no-op; the arming surface reports
-   `map_unconfigured`.
+   [Environment Variables](../../reference/env-vars.md)). Unless the open-circuit lane below has
+   something to sweep, an empty mapping is surfaced as a blocked-with-signal event on recovery,
+   not a silent no-op; the arming surface reports `map_unconfigured` either way.
 
     Entries captured because the circuit was open are the one exception: the circuit that just closed
     is the very one that rejected them, so they need no map entry. On recovery they are swept for
@@ -325,12 +327,12 @@ needs open-circuit capture on (`open_circuit_capture_disabled` when it is off). 
     `worker_missing` (it asks the broker which queues the live workers consume). You can still drain
     the backlog manually with the single-entry **Retry** action.
 
-    If the broker cannot be reached at all, the surface answers `armed: null` — *unverified* — with
-    `unverified_link: "worker_missing"`, rather than claiming the loop is armed on a question it
-    could not ask. The `baldur_dlq_auto_replay_armed` gauge follows: it is `1` only when a sweep
-    verified everything it needs, and `0` both for a missing prerequisite and for an unverified one.
-    The gauge moves within the worker-probe cache TTL plus one metric-collection interval plus the
-    probe's own budget — roughly 80 seconds on the defaults.
+    If the broker cannot be reached at all and nothing else is missing, the surface answers
+    `armed: null` — *unverified* — with `unverified_link: "worker_missing"`, rather than claiming
+    the loop is armed on a question it could not ask. The `baldur_dlq_auto_replay_armed` gauge
+    follows: it is `1` only when a sweep verified everything it needs, and `0` both for a missing
+    prerequisite and for an unverified one. The gauge moves within the worker-probe cache TTL plus
+    one metric-collection interval plus the probe's own budget, roughly 80 seconds on the defaults.
 
 4. **Keep on-recovery replay enabled.** `BALDUR_REPLAY_AUTOMATION_ON_RECOVERY_ENABLED` is `true` by default; the
    arming surface reports `disabled` when it is turned off.
