@@ -38,6 +38,7 @@ from unittest.mock import patch
 import pytest
 from structlog.testing import capture_logs
 
+from baldur.core.process_utils import is_fork_source_process
 from baldur.interfaces.rate_limit_storage import RateLimitState
 from baldur.metrics.recorders.daemon_worker import (
     get_registered_daemon_workers,
@@ -62,6 +63,10 @@ COOLDOWN_SECONDS = 300.0
 #: the microseconds the handoff really takes, so it fails on a genuine block
 #: rather than on scheduler noise.
 HANDOFF_TIMEOUT_SECONDS = 5.0
+
+#: Long enough for a second thread to reach a contended spawn — a signalled
+#: start plus a handful of dict operations — without waiting on it forever.
+CONTENTION_SETTLE_SECONDS = 0.2
 
 
 # =============================================================================
@@ -130,6 +135,11 @@ class _ProgrammableStore:
         return RateLimitState(key=key, cooldown_until=self.values.get(key, 0.0))
 
 
+#: The real class, captured before ``threadless`` swaps the module attribute —
+#: the swap is global, so a case that wants two genuine threads has to say so.
+_RealThread = threading.Thread
+
+
 class _FakeThread:
     """A thread that is never scheduled, so lifecycle cases stay deterministic.
 
@@ -139,6 +149,11 @@ class _FakeThread:
     """
 
     instances: list[_FakeThread] = []
+
+    #: Set by the concurrency case only: the first spawn parks inside
+    #: ``start()`` until released, which is the window a contender has to lose.
+    start_gate: threading.Event | None = None
+    entered_start: threading.Event | None = None
 
     def __init__(self, target=None, name=None, daemon=False) -> None:
         self.target = target
@@ -151,6 +166,11 @@ class _FakeThread:
         _FakeThread.instances.append(self)
 
     def start(self) -> None:
+        gate = _FakeThread.start_gate
+        if gate is not None and _FakeThread.instances[0] is self:
+            if _FakeThread.entered_start is not None:
+                _FakeThread.entered_start.set()
+            gate.wait(HANDOFF_TIMEOUT_SECONDS)
         self.started = True
         self.alive = True
 
@@ -214,6 +234,8 @@ def threadless(monkeypatch) -> type[_FakeThread]:
     from baldur.services.rate_limit_coordinator import announcer as announcer_module
 
     _FakeThread.instances = []
+    _FakeThread.start_gate = None
+    _FakeThread.entered_start = None
     monkeypatch.setattr(announcer_module.threading, "Thread", _FakeThread)
     return _FakeThread
 
@@ -816,6 +838,36 @@ class TestStoreOutageHoldBehavior:
         ]
         assert [entry["log_level"] for entry in recovered] == ["info"]
 
+    def test_a_value_the_comparison_cannot_use_does_not_clear_the_hold(
+        self, announcer, store, clock
+    ):
+        """The read answered; the step still failed.
+
+        Leaving the hold on the read alone would redraw the retry interval and
+        re-report the edge on every pass — and announce a recovery from an
+        outage that never ended — for a key no read is ever going to fix.
+        """
+        announcer.track(KEY, clock.now - 1.0)
+        store.values[KEY] = None
+        announcer.run_once()
+        first_delay = announcer._state.hold_delay
+        clock.now = announcer._state.held_until
+
+        with capture_logs() as logs:
+            announcer.run_once()
+
+        assert announcer._state.hold_delay == first_delay
+        assert not [
+            entry
+            for entry in logs
+            if entry["event"] == "rate_limit_announcer.store_read_recovered"
+        ]
+        assert [
+            entry["log_level"]
+            for entry in logs
+            if entry["event"] == "rate_limit_announcer.store_read_failed"
+        ] == ["debug"]
+
     def test_a_healthy_pass_does_not_log_a_recovery_it_did_not_make(
         self, announcer, store, clock
     ):
@@ -1049,6 +1101,30 @@ class TestAnnouncerThreadLifecycleBehavior:
         assert thread.daemon is True
         assert thread.name == DAEMON_WORKER_NAME
 
+    def test_a_hookless_gunicorn_worker_still_starts_the_announcer(
+        self, spawning, clock, threadless, monkeypatch
+    ):
+        """The fork-source predicate must not gate this spawn.
+
+        ``is_fork_source_process()`` answers True in *every* worker of a
+        deployment whose operator never wired the pre-fork server's post-fork
+        hook: it reduces to "under gunicorn and not yet marked a worker", and
+        the marker is set by that hook alone. The startup starters tolerate the
+        false positive because the hook re-runs them; this spawn is demand-driven
+        and has no such re-entry, so skipping here would leave the process with
+        no announcer — and no all-clear — for its whole life, where the timer it
+        replaced armed unconditionally.
+        """
+        monkeypatch.setenv("SERVER_SOFTWARE", "gunicorn/21.2.0")
+        monkeypatch.delenv("GUNICORN_WORKER", raising=False)
+        assert is_fork_source_process() is True
+
+        spawning.track(KEY, clock.now + COOLDOWN_SECONDS)
+
+        assert len(threadless.instances) == 1
+        assert spawning.is_alive is True
+        assert DAEMON_WORKER_NAME in get_registered_daemon_workers()
+
     def test_ensure_running_leaves_a_live_thread_alone(
         self, spawning, clock, threadless
     ):
@@ -1131,6 +1207,44 @@ class TestAnnouncerThreadLifecycleBehavior:
 
         assert get_registered_daemon_workers()[DAEMON_WORKER_NAME] is handle
         assert handle.thread is threadless.instances[1]
+
+    def test_concurrent_first_429s_start_exactly_one_thread(
+        self, spawning, clock, threadless
+    ):
+        """One loop per process, not one per request thread that raced for it.
+
+        The aliveness test at each entry point and the assignment of the thread
+        slot sit on either side of ``Thread.start()``. A 429 storm is exactly
+        when several request threads reach ``track()`` together, and each one
+        that read the empty slot would start a loop of its own — permanently,
+        since a loop exits only on ``stop()``, and every one of them re-reads
+        the shared store for every due key on every tick.
+        """
+        threadless.start_gate = threading.Event()
+        threadless.entered_start = threading.Event()
+        contender_ready = threading.Event()
+        expiry = clock.now + COOLDOWN_SECONDS
+
+        def _contend() -> None:
+            contender_ready.set()
+            spawning.track(OTHER_KEY, expiry)
+
+        first = _RealThread(target=spawning.track, args=(KEY, expiry))
+        second = _RealThread(target=_contend)
+        try:
+            first.start()
+            assert threadless.entered_start.wait(HANDOFF_TIMEOUT_SECONDS)
+            second.start()
+            assert contender_ready.wait(HANDOFF_TIMEOUT_SECONDS)
+            second.join(timeout=CONTENTION_SETTLE_SECONDS)
+        finally:
+            threadless.start_gate.set()
+            first.join(HANDOFF_TIMEOUT_SECONDS)
+            second.join(HANDOFF_TIMEOUT_SECONDS)
+
+        assert len(threadless.instances) == 1
+        assert spawning._state.thread is threadless.instances[0]
+        assert spawning.pending == {KEY: expiry, OTHER_KEY: expiry}
 
     def test_the_registered_handle_declares_the_tick_and_the_restart_path(
         self, spawning, clock, threadless

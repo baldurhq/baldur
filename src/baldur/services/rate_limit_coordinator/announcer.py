@@ -93,6 +93,7 @@ class _AnnouncerState:
         "origin_pid",
         "records",
         "scan_offset",
+        "spawn_lock",
         "stopped",
         "thread",
         "wake",
@@ -100,6 +101,10 @@ class _AnnouncerState:
 
     def __init__(self, records: dict[str, float] | None = None) -> None:
         self.lock = threading.Lock()
+        # Separate from ``lock`` on purpose: the spawn registers a daemon worker
+        # and reads settings, and serializing that behind the lock every record
+        # write takes would put the registry's lock underneath this one.
+        self.spawn_lock = threading.Lock()
         self.wake = threading.Event()
         self.thread: threading.Thread | None = None
         self.records: dict[str, float] = dict(records) if records else {}
@@ -271,6 +276,12 @@ class CooldownAnnouncer:
                 # tool wrote) and that raises from the comparison, not the read.
                 self._enter_hold(key, e)
                 break
+            # Only here — after the comparison, not after the read. A store
+            # that answers with a value the comparison cannot use raises from
+            # inside the step, and clearing the hold on the read alone would
+            # redraw the interval and re-report the edge on every pass while
+            # announcing a recovery that never happened.
+            self._leave_hold()
             if verified_until is None:
                 continue
             # Emitted outside the announcer's lock: a subscriber may hold the
@@ -386,7 +397,6 @@ class CooldownAnnouncer:
         """
         state = self._state
         stored_until = self._storage.get_state_strict(key).cooldown_until
-        self._leave_hold()
 
         if stored_until > now:
             with state.lock:
@@ -510,14 +520,33 @@ class CooldownAnnouncer:
         self._repair_if_forked()
         state = self._state
 
-        thread = threading.Thread(
-            target=self._loop_with_crash_capture,
-            name=DAEMON_WORKER_NAME,
-            daemon=True,
-        )
-        thread.start()
-        state.thread = thread
+        # The aliveness test at every entry point is a check-then-act, and
+        # ``Thread.start()`` sits inside the window it leaves open: a 429 storm
+        # is exactly the moment several request threads reach ``track()``
+        # together, and each one that read the empty slot would start a loop of
+        # its own — permanently, since a loop exits only on ``stop()``. The
+        # re-check under this lock is what makes "one thread per process" true.
+        with state.spawn_lock:
+            if state.stopped:
+                return
+            running = state.thread
+            if running is not None and running.is_alive():
+                return
 
+            thread = threading.Thread(
+                target=self._loop_with_crash_capture,
+                name=DAEMON_WORKER_NAME,
+                daemon=True,
+            )
+            thread.start()
+            state.thread = thread
+
+            self._register_handle(thread)
+
+        logger.info("rate_limit_announcer.started")
+
+    def _register_handle(self, thread: threading.Thread) -> None:
+        """Register this process's handle, or rebind it onto a fresh thread."""
         handle = self._handle
         if handle is None:
             from baldur.meta.daemon_worker import DaemonWorkerHandle
@@ -536,8 +565,6 @@ class CooldownAnnouncer:
             # and the restart callback keep pointing at it — so only the thread
             # reference is rebound.
             handle.thread = thread
-
-        logger.info("rate_limit_announcer.started")
 
     def _staleness_threshold(self) -> float:
         """Seconds of heartbeat silence that mean this worker is really stuck.
