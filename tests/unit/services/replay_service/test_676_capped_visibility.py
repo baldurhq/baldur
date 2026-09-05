@@ -47,6 +47,20 @@ def _gov_allow() -> MagicMock:
     return gov
 
 
+def _page_selector(pages: list) -> MagicMock:
+    """Hand back ``pages`` in order, then empty pages forever.
+
+    Wrapped rather than bare so the stub answers to a keyword-only call shape:
+    the sweep selects by keyword, and a positional call would be a defect.
+    """
+    remaining = list(pages)
+
+    def _next(**_kwargs):
+        return remaining.pop(0) if remaining else _page()
+
+    return MagicMock(wraps=_next)
+
+
 def _capped_service() -> ReplayService:
     svc = ReplayService(repository=MagicMock(), cache=InMemoryCacheAdapter())
     svc._event_bus = MagicMock()
@@ -199,3 +213,75 @@ class TestCappedTaskSurfaceBehavior:
     def test_capped_false_returned(self):
         result, _ = self._run_task(capped=False)
         assert result["capped"] is False
+
+
+# =============================================================================
+# capped on the completion event — one meaning on both emitting lanes
+# =============================================================================
+
+
+class TestBatchCompletedCappedBehavior:
+    """``DLQ_REPLAY_BATCH_COMPLETED`` carries ``capped`` from both emitters.
+
+    The two lanes share one event. A field that is derived on one of them and
+    a constant on the other is worse than absent: a consumer reading it cannot
+    tell "this sweep drained everything" from "this lane never computes it".
+    """
+
+    def _completion_payloads(self, svc) -> list[dict]:
+        return [
+            call.kwargs["data"]
+            for call in svc._emit_event.call_args_list
+            if "data" in call.kwargs and "total" in call.kwargs["data"]
+        ]
+
+    def _batch_service(self) -> ReplayService:
+        svc = _capped_service()
+        svc._emit_event = MagicMock(wraps=lambda *_a, **_kw: None)
+        return svc
+
+    def test_circuit_close_sweep_reports_capped_when_a_lane_filled_its_quota(self):
+        svc = self._batch_service()
+        svc.repository.find_replayable_page = _page_selector(
+            [_page(_op("e1"), _op("e2")), _page()]
+        )
+
+        svc.replay_on_circuit_close(
+            service_name="svc",
+            max_items=2,
+            service_failure_type_map={"svc": ["TYPE_A"]},
+        )
+
+        assert self._completion_payloads(svc)[-1]["capped"] is True
+
+    def test_circuit_close_sweep_reports_uncapped_when_the_pool_ran_out(self):
+        svc = self._batch_service()
+        svc.repository.find_replayable_page = _page_selector([_page(_op("e1"))])
+
+        svc.replay_on_circuit_close(
+            service_name="svc",
+            max_items=5,
+            service_failure_type_map={"svc": ["TYPE_A"]},
+        )
+
+        assert self._completion_payloads(svc)[-1]["capped"] is False
+
+    def test_replay_batch_reports_capped_when_the_selection_filled_its_allotment(self):
+        svc = self._batch_service()
+        svc.repository.find_replayable = MagicMock(
+            wraps=lambda **_kwargs: [_op("e1"), _op("e2")]
+        )
+
+        result = svc.replay_batch(domain="payment", max_items=2, use_adaptive=False)
+
+        assert result.capped is True
+        assert self._completion_payloads(svc)[-1]["capped"] is True
+
+    def test_replay_batch_reports_uncapped_when_the_selection_fell_short(self):
+        svc = self._batch_service()
+        svc.repository.find_replayable = MagicMock(wraps=lambda **_kwargs: [_op("e1")])
+
+        result = svc.replay_batch(domain="payment", max_items=5, use_adaptive=False)
+
+        assert result.capped is False
+        assert self._completion_payloads(svc)[-1]["capped"] is False
