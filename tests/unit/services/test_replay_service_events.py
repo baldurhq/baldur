@@ -19,6 +19,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from baldur.interfaces.repositories import ReplayablePage
 from baldur.services.event_bus.bus.event_types import EventType
 from baldur.services.replay_service import (
     ReplayResult,
@@ -112,6 +113,7 @@ def mock_repository():
     repo.get_by_id.return_value = FakeFailedOperationData(id=1)
     repo.complete_replay.return_value = None
     repo.find_replayable.return_value = []
+    repo.find_replayable_page.return_value = ReplayablePage()
     return repo
 
 
@@ -539,9 +541,9 @@ class TestReplayOnCircuitCloseEventsBehavior:
         mock_governance.return_value = MagicMock(allowed=True)
         _register_handler(SuccessHandler())
 
-        mock_repository.find_replayable.return_value = [
-            FakeFailedOperationData(id=10),
-        ]
+        mock_repository.find_replayable_page.return_value = ReplayablePage(
+            entries=[FakeFailedOperationData(id=10)]
+        )
 
         replay_service.replay_on_circuit_close(
             service_name="payment_api",

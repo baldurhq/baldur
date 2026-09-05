@@ -378,41 +378,63 @@ class TestRedisDLQQueryBehavior:
 
         assert len(results) == 3
 
-    def test_find_replayable_filters_by_retry_count_below_max_retries(self):
-        """find_replayable returns PENDING entries with retry_count < max_retries."""
-        repo = _make_repo()
-        repo.query.find_by_status = MagicMock(
-            return_value=[
-                _make_failed_op_data(id=1, retry_count=0, max_retries=3),
-                _make_failed_op_data(id=2, retry_count=3, max_retries=3),
-                _make_failed_op_data(id=3, retry_count=1, max_retries=3),
+    def _stub_index(self, repo, entries):
+        """Serve one index window of ``entries`` through the backend primitives."""
+        by_id = {str(e.id): e for e in entries}
+        repo._backend.zrangebyscore = MagicMock(
+            side_effect=lambda *a, offset=0, count=None, **kw: list(by_id)[
+                offset : (offset + count) if count else None
             ]
         )
+        # The walk loads blobs by full key and decodes them; the stubs carry
+        # the id straight through both steps. Plain functions, not mocks — no
+        # assertion reads their call record.
+        repo._backend.get_blobs = lambda keys: [
+            k.removeprefix("dlq:entry:") for k in keys
+        ]
+        repo._decode_entry = lambda entry_id: {"id": entry_id}
+        repo._to_data = lambda data: by_id[data["id"]]
+        repo._make_key = lambda entry_id: f"dlq:entry:{entry_id}"
 
-        results = repo.query.find_replayable(max_retries=3)
-
-        assert len(results) == 2
-        assert results[0].id == 1
-        assert results[1].id == 3
-
-    def test_find_replayable_passes_filters_to_find_by_status(self):
-        """find_replayable passes domain and failure_type to find_by_status."""
+    def test_find_replayable_filters_by_retry_count_below_max_retries(self):
+        """The page selector returns PENDING entries with retry_count < max_retries."""
         repo = _make_repo()
-        repo.query.find_by_status = MagicMock(return_value=[])
+        repo._backend.is_degraded = False
+        stamp = datetime(2026, 9, 5, tzinfo=UTC)
+        self._stub_index(
+            repo,
+            [
+                _make_failed_op_data(id=1, retry_count=0, created_at=stamp),
+                _make_failed_op_data(id=2, retry_count=3, created_at=stamp),
+                _make_failed_op_data(id=3, retry_count=1, created_at=stamp),
+            ],
+        )
 
-        repo.query.find_replayable(
+        page = repo.query.find_replayable_page(max_retries=3)
+
+        assert [e.id for e in page.entries] == [1, 3]
+
+    def test_find_replayable_drives_off_the_domain_scoped_index(self):
+        """A domain-scoped selection walks the (pending, domain) composite.
+
+        The global pending index cannot serve it: a domain whose entries sit
+        below a window of another domain's is never reached, which is the
+        starvation this selector exists to remove.
+        """
+        repo = _make_repo()
+        repo._backend.is_degraded = False
+        repo.query._warm_composite_if_needed = MagicMock(return_value=True)
+        self._stub_index(repo, [])
+
+        repo.query.find_replayable_page(
             max_retries=3,
             domain="payment",
             failure_type="timeout",
             limit=50,
         )
 
-        repo.query.find_by_status.assert_called_once_with(
-            status=FailedOperationStatus.PENDING.value,
-            domain="payment",
-            failure_type="timeout",
-            limit=100,  # limit * 2
-        )
+        walked_key = repo._backend.zrangebyscore.call_args[0][0]
+        assert walked_key == "dlq:status_domain:pending:payment"
 
     def test_find_sla_breached_returns_entries_past_sla_deadline(self):
         """find_sla_breached returns entries created before SLA deadline."""

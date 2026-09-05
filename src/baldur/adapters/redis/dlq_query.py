@@ -15,8 +15,13 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from baldur.interfaces.repositories import (
+    REPLAY_SELECTION_MAX_SCAN,
     FailedOperationData,
     FailedOperationStatus,
+    ReplayablePage,
+    decode_replay_cursor,
+    encode_replay_cursor,
+    replay_cursor_position,
 )
 
 if TYPE_CHECKING:
@@ -25,6 +30,35 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 __all__ = ["RedisDLQQuery"]
+
+# Index members one replayable window pulls back, and the size of the MGET
+# that loads their blobs. The selector loops over windows until it has its
+# caller's limit or has spent the scan bound, so this only trades round trips
+# against members read per trip.
+_REPLAY_SCAN_CHUNK = 500
+
+
+def _is_replayable_match(
+    entry: FailedOperationData,
+    *,
+    max_retries: int,
+    failure_type: str | None,
+    source: str | None,
+    require_pending: bool,
+) -> bool:
+    """Does this decoded entry satisfy every predicate the index does not?
+
+    ``require_pending`` is set only on the degraded/cold-composite path, whose
+    driving index is the legacy by-domain ZSET and therefore carries entries of
+    every status.
+    """
+    if require_pending and entry.status != FailedOperationStatus.PENDING.value:
+        return False
+    if entry.retry_count >= max_retries:
+        return False
+    if failure_type and entry.failure_type != failure_type:
+        return False
+    return not (source is not None and (entry.metadata or {}).get("source") != source)
 
 
 class RedisDLQQuery:
@@ -397,29 +431,137 @@ class RedisDLQQuery:
             self._repo.ALL_KEY, start.timestamp(), end.timestamp()
         )
 
-    def find_replayable(
+    def _replayable_index_key(self, domain: str | None) -> tuple[str, bool]:
+        """Index a replayable walk drives off, and whether it still needs a status filter.
+
+        A domain-scoped walk goes through the warm ``(pending, domain)``
+        composite — the same warming accessor ``get_pending_by_domain`` uses,
+        never the raw key, because a cold pair reads empty. Degraded mode (or
+        a cold pair the raw client cannot materialize) keeps that method's
+        legacy fallback verbatim: the ``by_domain`` ZSET plus a Python status
+        filter. Without a domain the global pending index already is the
+        status scope.
+        """
+        if domain is None:
+            return self._repo.PENDING_KEY, False
+        if not self._backend.is_degraded and self._warm_composite_if_needed(
+            FailedOperationStatus.PENDING.value, domain
+        ):
+            return (
+                self._repo._status_domain_key(
+                    FailedOperationStatus.PENDING.value, domain
+                ),
+                False,
+            )
+        return f"{self._repo.BY_DOMAIN_PREFIX}{domain}", True
+
+    def _load_positioned_entries(
+        self, entry_ids: list[str]
+    ) -> list[FailedOperationData]:
+        """Decode one index window's blobs, dropping what cannot hold a position.
+
+        One ``MGET`` for the window rather than a ``GET`` per member: the walk
+        has to read every member's blob because neither ``failure_type`` nor
+        the capture source is indexed. An entry with no ``created_at`` is
+        skipped rather than returned — the cursor is built from that field, so
+        including it would advance the walk past a position it cannot encode.
+        """
+        blobs = self._backend.get_blobs(
+            [self._repo._make_key(entry_id) for entry_id in entry_ids]
+        )
+        entries = []
+        for blob in blobs:
+            data = self._repo._decode_entry(blob)
+            if not data:
+                continue
+            entry = self._repo._to_data(data)
+            if entry.created_at is not None:
+                entries.append(entry)
+        return entries
+
+    def find_replayable_page(
         self,
+        *,
         max_retries: int,
         domain: str | None = None,
         failure_type: str | None = None,
+        source: str | None = None,
         limit: int = 100,
-    ) -> list[FailedOperationData]:
-        """Find operations that can be replayed."""
-        pending = self.find_by_status(
-            status=FailedOperationStatus.PENDING.value,
-            domain=domain,
-            failure_type=failure_type,
-            limit=limit * 2,
-        )
+        cursor: str | None = None,
+    ) -> ReplayablePage:
+        """Score-anchored replayable selection over the index that owns the domain.
 
-        results = []
-        for entry in pending:
-            if entry.retry_count < max_retries:
-                results.append(entry)
-                if len(results) >= limit:
+        Every DLQ index scores its members by the created_at epoch, so the
+        cursor's timestamp half is a ``ZRANGEBYSCORE`` floor and the walk
+        resumes without re-reading the members it already passed. The floor is
+        inclusive because a score cannot express the id half of the position;
+        the exact ``(created_at, id)`` comparison then happens on the decoded
+        blob, which this path loads anyway.
+
+        ``failure_type`` is never indexed here and ``source`` lives inside the
+        blob's metadata, so one window can hold no match at all. The walk
+        therefore fetches windows — one ``MGET`` per window — until it has
+        ``limit`` matches or has examined ``REPLAY_SELECTION_MAX_SCAN``
+        members, and reports which of the two stopped it.
+        """
+        index_key, needs_status_filter = self._replayable_index_key(domain)
+        floor = decode_replay_cursor(cursor)
+        min_score = floor[0] if floor is not None else float("-inf")
+
+        matches: list[FailedOperationData] = []
+        boundary: FailedOperationData | None = None
+        boundary_position: tuple[float, str] | None = None
+        examined = 0
+        offset = 0
+        scan_exhausted = False
+
+        while len(matches) < limit:
+            window = min(_REPLAY_SCAN_CHUNK, REPLAY_SELECTION_MAX_SCAN - examined)
+            if window <= 0:
+                scan_exhausted = True
+                break
+            entry_ids = self._backend.zrangebyscore(
+                index_key,
+                min_score,
+                float("inf"),
+                offset=offset,
+                count=window,
+            )
+            if not entry_ids:
+                break
+            offset += len(entry_ids)
+            examined += len(entry_ids)
+
+            for entry in self._load_positioned_entries(entry_ids):
+                position = replay_cursor_position(entry.created_at, entry.id)
+                if floor is not None and position <= floor:
+                    continue
+                if boundary_position is None or position > boundary_position:
+                    boundary_position = position
+                    boundary = entry
+                if not _is_replayable_match(
+                    entry,
+                    max_retries=max_retries,
+                    failure_type=failure_type,
+                    source=source,
+                    require_pending=needs_status_filter,
+                ):
+                    continue
+                matches.append(entry)
+                if len(matches) >= limit:
                     break
+            if len(entry_ids) < window:
+                break
 
-        return results
+        return ReplayablePage(
+            entries=matches,
+            next_cursor=(
+                encode_replay_cursor(boundary.created_at, boundary.id)
+                if boundary is not None and boundary.created_at is not None
+                else None
+            ),
+            scan_exhausted=scan_exhausted,
+        )
 
     def find_sla_breached(
         self,

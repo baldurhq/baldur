@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from baldur.interfaces.repositories import ReplayablePage
 from baldur.services.replay_service import (
     BatchReplayResult,
     DefaultReplayHandler,
@@ -92,6 +93,7 @@ def mock_repository():
     repo.get_by_id.return_value = FakeFailedOperationData(id=1)
     repo.complete_replay.return_value = None
     repo.find_replayable.return_value = []
+    repo.find_replayable_page.return_value = ReplayablePage()
     return repo
 
 
@@ -411,7 +413,9 @@ class TestReplayServiceReplayOnCircuitClose:
         """
         mock_gov.return_value = MagicMock(allowed=True)
         entry = FakeFailedOperationData(id=10, domain="payment")
-        mock_repository.find_replayable.return_value = [entry]
+        mock_repository.find_replayable_page.return_value = ReplayablePage(
+            entries=[entry]
+        )
         mock_repository.try_acquire_for_replay.return_value = entry
 
         handler = FakeReplayHandler("payment", success=True)
@@ -477,7 +481,7 @@ class TestReplayOnCircuitCloseMultiTypeBehavior:
     ):
         """Single failure_type in map results in exactly one find_replayable() call."""
         mock_gov.return_value = MagicMock(allowed=True)
-        mock_repository.find_replayable.return_value = []
+        mock_repository.find_replayable_page.return_value = ReplayablePage()
 
         service = ReplayService(repository=mock_repository)
         service.replay_on_circuit_close(
@@ -485,9 +489,9 @@ class TestReplayOnCircuitCloseMultiTypeBehavior:
             service_failure_type_map={"pg": ["PG_TIMEOUT"]},
         )
 
-        mock_repository.find_replayable.assert_called_once()
+        mock_repository.find_replayable_page.assert_called_once()
         assert (
-            mock_repository.find_replayable.call_args.kwargs["failure_type"]
+            mock_repository.find_replayable_page.call_args.kwargs["failure_type"]
             == "PG_TIMEOUT"
         )
 
@@ -498,7 +502,7 @@ class TestReplayOnCircuitCloseMultiTypeBehavior:
     ):
         """Three failure_types produce three find_replayable() calls, one per type."""
         mock_gov.return_value = MagicMock(allowed=True)
-        mock_repository.find_replayable.return_value = []
+        mock_repository.find_replayable_page.return_value = ReplayablePage()
 
         service = ReplayService(repository=mock_repository)
         service.replay_on_circuit_close(
@@ -506,10 +510,10 @@ class TestReplayOnCircuitCloseMultiTypeBehavior:
             service_failure_type_map={"pg": ["TIMEOUT", "CONN_ERR", "DNS_FAIL"]},
         )
 
-        assert mock_repository.find_replayable.call_count == 3
+        assert mock_repository.find_replayable_page.call_count == 3
         called_types = [
             c.kwargs["failure_type"]
-            for c in mock_repository.find_replayable.call_args_list
+            for c in mock_repository.find_replayable_page.call_args_list
         ]
         assert called_types == ["TIMEOUT", "CONN_ERR", "DNS_FAIL"]
 
@@ -535,12 +539,17 @@ class TestReplayOnCircuitCloseMultiTypeBehavior:
                 FakeFailedOperationData(id=100 + i, domain="payment") for i in range(2)
             ],
         }
-        # side_effect honors the limit kwarg so quota enforcement is verifiable
-        mock_repository.find_replayable.side_effect = (
-            lambda max_retries, failure_type, limit, **kw: entries_by_type[
-                failure_type
-            ][:limit]
-        )
+
+        # The fake consumes forward, the way a cursor-fed selector does, so a
+        # lane asked twice in one pass returns the entries it has not handed
+        # out yet rather than the same page again.
+        def _consume(*, max_retries, failure_type, limit, **kw):
+            pool = entries_by_type[failure_type]
+            taken = pool[:limit]
+            del pool[:limit]
+            return ReplayablePage(entries=taken)
+
+        mock_repository.find_replayable_page.side_effect = _consume
         mock_repository.try_acquire_for_replay.side_effect = (
             lambda id, *args, **kwargs: FakeFailedOperationData(id=id)
         )
@@ -555,15 +564,19 @@ class TestReplayOnCircuitCloseMultiTypeBehavior:
             service_failure_type_map={"pg": ["TYPE_A", "TYPE_B"]},
         )
 
-        # Then: both types queried with limit=5 each (10 // 2 = 5, no remainder)
-        assert mock_repository.find_replayable.call_count == 2
+        # Then: both types are first offered limit=5 (10 // 2, no remainder),
+        # and the 3 TYPE_B did not use are re-offered to TYPE_A, which filled
+        # its share exactly. Fairness is about contention: a lane with an empty
+        # pool is not contending, and parking the remainder would leave work
+        # undrained for no gain.
+        assert mock_repository.find_replayable_page.call_count == 3
         limits = [
-            c.kwargs["limit"] for c in mock_repository.find_replayable.call_args_list
+            c.kwargs["limit"]
+            for c in mock_repository.find_replayable_page.call_args_list
         ]
-        assert limits == [5, 5]
-        # TYPE_A returns its quota of 5; TYPE_B returns only 2 (under-quota)
+        assert limits == [5, 5, 3]
         # Budget invariant: result.total never exceeds max_items
-        assert result.total == 7
+        assert result.total == 10
         assert result.total <= 10
 
     @pytest.mark.parametrize(
@@ -611,7 +624,8 @@ class TestReplayOnCircuitCloseMultiTypeBehavior:
         )
 
         actual_limits = [
-            c.kwargs["limit"] for c in mock_repository.find_replayable.call_args_list
+            c.kwargs["limit"]
+            for c in mock_repository.find_replayable_page.call_args_list
         ]
         assert actual_limits == expected_limits
 
@@ -626,7 +640,7 @@ class TestReplayOnCircuitCloseMultiTypeBehavior:
         diluting the budget by issuing repeated queries against the same ID pool.
         """
         mock_gov.return_value = MagicMock(allowed=True)
-        mock_repository.find_replayable.return_value = []
+        mock_repository.find_replayable_page.return_value = ReplayablePage()
 
         service = ReplayService(repository=mock_repository)
         service.replay_on_circuit_close(
@@ -635,10 +649,10 @@ class TestReplayOnCircuitCloseMultiTypeBehavior:
             service_failure_type_map={"pg": ["TIMEOUT", "TIMEOUT"]},
         )
 
-        assert mock_repository.find_replayable.call_count == 1
-        assert mock_repository.find_replayable.call_args.kwargs["limit"] == 10
+        assert mock_repository.find_replayable_page.call_count == 1
+        assert mock_repository.find_replayable_page.call_args.kwargs["limit"] == 10
         assert (
-            mock_repository.find_replayable.call_args.kwargs["failure_type"]
+            mock_repository.find_replayable_page.call_args.kwargs["failure_type"]
             == "TIMEOUT"
         )
 
@@ -650,10 +664,10 @@ class TestReplayOnCircuitCloseMultiTypeBehavior:
         """Empty find_replayable() for one type does not decrement remaining; loop continues."""
         mock_gov.return_value = MagicMock(allowed=True)
         entry_c = FakeFailedOperationData(id=99, domain="payment")
-        mock_repository.find_replayable.side_effect = [
-            [],  # TYPE_A: empty
-            [],  # TYPE_B: empty
-            [entry_c],  # TYPE_C: one entry
+        mock_repository.find_replayable_page.side_effect = [
+            ReplayablePage(),  # TYPE_A: empty
+            ReplayablePage(),  # TYPE_B: empty
+            ReplayablePage(entries=[entry_c]),  # TYPE_C: one entry
         ]
         mock_repository.try_acquire_for_replay.return_value = entry_c
 
@@ -668,7 +682,7 @@ class TestReplayOnCircuitCloseMultiTypeBehavior:
         )
 
         # Then: all 3 types queried, total reflects only TYPE_C's entry
-        assert mock_repository.find_replayable.call_count == 3
+        assert mock_repository.find_replayable_page.call_count == 3
         assert result.total == 1
 
     @patch("baldur_pro.services.governance.checks.check_all_governance")
@@ -684,7 +698,7 @@ class TestReplayOnCircuitCloseMultiTypeBehavior:
         )
 
         assert result.total == 0
-        mock_repository.find_replayable.assert_not_called()
+        mock_repository.find_replayable_page.assert_not_called()
 
 
 class TestReplayOnCircuitCloseEscalationBehavior:
@@ -699,7 +713,9 @@ class TestReplayOnCircuitCloseEscalationBehavior:
         mock_gov.return_value = MagicMock(allowed=True)
         # Given: one entry that fails replay
         entry = FakeFailedOperationData(id=42, domain="payment")
-        mock_repository.find_replayable.return_value = [entry]
+        mock_repository.find_replayable_page.return_value = ReplayablePage(
+            entries=[entry]
+        )
         mock_repository.get_by_id.return_value = FakeFailedOperationData(
             id=42, domain="payment", status="pending"
         )
@@ -731,7 +747,9 @@ class TestReplayOnCircuitCloseEscalationBehavior:
         """resolution_note includes service_name and error message."""
         mock_gov.return_value = MagicMock(allowed=True)
         entry = FakeFailedOperationData(id=7, domain="payment")
-        mock_repository.find_replayable.return_value = [entry]
+        mock_repository.find_replayable_page.return_value = ReplayablePage(
+            entries=[entry]
+        )
         mock_repository.get_by_id.return_value = FakeFailedOperationData(
             id=7, domain="payment", status="pending"
         )

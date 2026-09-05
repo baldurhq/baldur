@@ -21,6 +21,7 @@ from unittest.mock import MagicMock, patch
 from structlog.testing import capture_logs
 
 from baldur.adapters.cache.memory_adapter import InMemoryCacheAdapter
+from baldur.interfaces.repositories import ReplayablePage
 from baldur.models.governance import GovernanceCheckResult
 from baldur.services.replay_service import ReplayService
 from baldur.services.replay_service.models import BatchReplayResult, ReplayResult
@@ -28,8 +29,16 @@ from baldur.services.replay_service.models import BatchReplayResult, ReplayResul
 
 def _op(entry_id: str) -> SimpleNamespace:
     return SimpleNamespace(
-        id=entry_id, domain="payment", status="pending", failure_type="TYPE_A"
+        id=entry_id,
+        domain="payment",
+        status="pending",
+        failure_type="TYPE_A",
+        created_at=None,
     )
+
+
+def _page(*entries: SimpleNamespace) -> ReplayablePage:
+    return ReplayablePage(entries=list(entries))
 
 
 def _gov_allow() -> MagicMock:
@@ -75,8 +84,8 @@ class TestCappedVisibilityBehavior:
     def test_capped_true_when_fill_equals_quota(self):
         # 1 failure type, max_items=3 => quota 3; a full batch of 3 == quota.
         svc = _capped_service()
-        svc.repository.find_replayable = MagicMock(
-            return_value=[_op("e1"), _op("e2"), _op("e3")]
+        svc.repository.find_replayable_page = MagicMock(
+            side_effect=[_page(_op("e1"), _op("e2"), _op("e3")), _page()]
         )
 
         result = svc.replay_on_circuit_close(
@@ -91,7 +100,9 @@ class TestCappedVisibilityBehavior:
     def test_capped_false_when_fill_below_quota(self):
         # One short of the quota => the cap did not bind => not capped.
         svc = _capped_service()
-        svc.repository.find_replayable = MagicMock(return_value=[_op("e1"), _op("e2")])
+        svc.repository.find_replayable_page = MagicMock(
+            return_value=_page(_op("e1"), _op("e2"))
+        )
 
         result = svc.replay_on_circuit_close(
             service_name="svc",
@@ -106,8 +117,8 @@ class TestCappedVisibilityBehavior:
         # 2 types, max_items=4 => quota 2 each. Type A fills its quota (2);
         # type B does not (1). capped is True because A left entries behind.
         svc = _capped_service()
-        svc.repository.find_replayable = MagicMock(
-            side_effect=[[_op("a1"), _op("a2")], [_op("b1")]]
+        svc.repository.find_replayable_page = MagicMock(
+            side_effect=[_page(_op("a1"), _op("a2")), _page(_op("b1")), _page()]
         )
 
         result = svc.replay_on_circuit_close(
@@ -123,8 +134,8 @@ class TestCappedVisibilityBehavior:
         # No-loss: the sweep only ever fetches up to the quota, so entries
         # beyond it are never touched (stay PENDING for a later drain).
         svc = _capped_service()
-        svc.repository.find_replayable = MagicMock(
-            return_value=[_op("e1"), _op("e2"), _op("e3")]
+        svc.repository.find_replayable_page = MagicMock(
+            side_effect=[_page(_op("e1"), _op("e2"), _op("e3")), _page()]
         )
 
         svc.replay_on_circuit_close(
@@ -133,10 +144,9 @@ class TestCappedVisibilityBehavior:
             service_failure_type_map={"svc": ["TYPE_A"]},
         )
 
-        assert svc.repository.find_replayable.call_args.kwargs["limit"] == 3
-        assert svc.repository.find_replayable.call_args.kwargs["failure_type"] == (
-            "TYPE_A"
-        )
+        first_call = svc.repository.find_replayable_page.call_args_list[0]
+        assert first_call.kwargs["limit"] == 3
+        assert first_call.kwargs["failure_type"] == "TYPE_A"
 
 
 # =============================================================================
@@ -160,6 +170,10 @@ class TestCappedTaskSurfaceBehavior:
             success_count=3,
             failed_count=0,
             capped=capped,
+            inflight_skipped=False,
+            lane_cursors={},
+            scan_exhausted_lanes=[],
+            scan_exhausted=False,
         )
 
         with (

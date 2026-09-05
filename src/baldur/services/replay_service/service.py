@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import threading
 import time
+from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -28,7 +29,7 @@ import structlog
 
 from baldur.audit.helpers import log_dlq_replay_audit, log_dlq_replay_blocked_audit
 from baldur.audit.trace import extract_origin_trace
-from baldur.interfaces.repositories import ResolutionTrigger
+from baldur.interfaces.repositories import ResolutionTrigger, encode_replay_cursor
 from baldur.models.dlq import OPEN_CIRCUIT_FAILURE_TYPE, POLICY_CHAIN_CAPTURE_SOURCE
 from baldur.services.event_bus.emitter import EventEmitterMixin
 from baldur.settings import get_config
@@ -71,6 +72,29 @@ CONFIG_PATH_FAILURE_TYPE_MAP = "replay_automation.service_failure_type_map"
 # REASON_NO_FAILURE_TYPE_MAPPING because both flow through the same 4-channel
 # block surface (log / event / metric / audit) inside this function.
 REASON_CIRCUIT_CLOSE_INFLIGHT = "circuit_close_inflight"
+
+# Block reasons a *chain* of on-recovery passes reports when it stops with work
+# still reachable. Both are task-level: the service already emits its own
+# blocked-family signal for the governance and inflight stops, so re-emitting
+# either from the chain would double-count the metric.
+REASON_CONTINUATION_BOUND_REACHED = "continuation_bound_reached"
+REASON_CIRCUIT_REOPENED = "circuit_reopened"
+REASON_PASS_ERRORED = "pass_errored"
+
+
+def _lane_key(failure_type: str, domain: str | None) -> str:
+    """Stable key for one selection lane, safe to put on a broker message."""
+    return f"{failure_type}|{domain or ''}"
+
+
+@dataclass
+class _LaneSelection:
+    """What one pass's fill produced, and where each lane stopped."""
+
+    selected: list[tuple[str, FailedOperationData]] = field(default_factory=list)
+    cursors: dict[str, str] = field(default_factory=dict)
+    scan_exhausted_lanes: list[str] = field(default_factory=list)
+    capped: bool = False
 
 
 def _resolution_type_for(trigger: ResolutionTrigger | str) -> str:
@@ -677,6 +701,11 @@ class ReplayService(EventEmitterMixin):
             "total": batch_result.total,
             "success_count": batch_result.success_count,
             "failed_count": batch_result.failed_count,
+            # Separates "this sweep drained everything there was" from "this
+            # sweep filled its quota and stopped" — the same event otherwise.
+            # Both emitting lanes compute it, so the field has one meaning
+            # wherever it is read.
+            "capped": batch_result.capped,
         }
         if extra_event_data:
             data.update(extra_event_data)
@@ -897,6 +926,12 @@ class ReplayService(EventEmitterMixin):
         batch_result = BatchReplayResult(
             total=len(entries),
             results=[],
+            # Same meaning the circuit-close sweep gives the flag: the
+            # selection filled its allotment exactly, so eligible entries may
+            # remain. Computed here too, because the completion event both
+            # lanes share must not carry a field that is a constant lie on one
+            # of them.
+            capped=len(entries) == effective_max_items,
             priority_used=priority_used,
             domains_processed=domains_processed,
         )
@@ -1199,6 +1234,10 @@ class ReplayService(EventEmitterMixin):
         max_items: int = 50,
         escalate_failures: bool = True,
         service_failure_type_map: dict[str, list[str]] | None = None,
+        *,
+        deadline: float | None = None,
+        lane_cursors: dict[str, str] | None = None,
+        continuation: int = 0,
     ) -> BatchReplayResult:
         """
         Replay entries when circuit breaker closes.
@@ -1211,13 +1250,26 @@ class ReplayService(EventEmitterMixin):
         This is because operator-initiated recovery implies the operator
         intended to resolve these items, so failures need explicit attention.
 
+        One call is one pass. A caller that means to clear a whole backlog runs
+        passes in sequence, handing each one the previous result's
+        ``lane_cursors``; the three keyword arguments all default to today's
+        single-pass behaviour.
+
         Args:
             service_name: Name of the service that recovered
-            max_items: Maximum number of items to replay
+            max_items: Maximum number of items to replay in THIS pass
             escalate_failures: If True, mark failed replays as REQUIRES_REVIEW
             service_failure_type_map: Custom mapping of service names to failure types.
                                       If None, uses RuntimeConfig fallback.
                                       Example: {"my_service": ["TIMEOUT", "CONNECTION_ERROR"]}
+            deadline: ``time.monotonic()`` value past which the pass stops
+                selecting and replaying and returns what it has, ``capped``.
+                The caller derives it from whatever wall clock would otherwise
+                kill the pass mid-flight.
+            lane_cursors: Per-lane positions returned by the previous pass.
+            continuation: How many passes preceded this one. Rotates which lane
+                leads the fill, so a deadline landing mid-list cannot starve
+                the same tail on every pass.
 
         Returns:
             BatchReplayResult with summary. `inflight_skipped=True` indicates
@@ -1291,6 +1343,9 @@ class ReplayService(EventEmitterMixin):
                 max_items=max_items,
                 escalate_failures=escalate_failures,
                 service_failure_type_map=service_failure_type_map,
+                deadline=deadline,
+                lane_cursors=lane_cursors,
+                continuation=continuation,
             )
         finally:
             if lock is not None:
@@ -1302,6 +1357,189 @@ class ReplayService(EventEmitterMixin):
                         service_name=service_name,
                         error=str(exc),
                     )
+
+    def emit_circuit_close_chain_stopped(
+        self,
+        *,
+        service_name: str,
+        block_reason: str,
+        scan_exhausted_lanes: list[str] | None = None,
+        lane_cursors: dict[str, str] | None = None,
+        offending_circuit: str | None = None,
+    ) -> None:
+        """Announce that a chain of on-recovery passes stopped with work reachable.
+
+        `capped` on the completion event says a *pass* filled its quota; it
+        cannot say whether anything will come back for the rest, because the
+        pass that continues and the pass that gave up emit it identically. This
+        is the signal that can: WARNING log, ``DLQ_REPLAY_BLOCKED`` event,
+        metric and audit — the channel an operator already watches for "the
+        lane stopped and you should know".
+
+        The lane cursors ride along because they are already in the caller's
+        hand and cost no extra query. They are diagnostic: nothing accepts a
+        cursor back today, so they record how far a chain got rather than
+        offering a resume.
+
+        Called by the task that owns the chain. Governance and inflight stops
+        are NOT routed here — the service emits those itself, and a second
+        emission would double-count the metric.
+        """
+        details: dict[str, Any] = {
+            "scan_exhausted_lanes": list(scan_exhausted_lanes or []),
+            "lane_cursors": dict(lane_cursors or {}),
+        }
+        if offending_circuit is not None:
+            details["offending_circuit"] = offending_circuit
+        self._emit_replay_blocked(
+            log_event="replay_service.circuit_close_chain_stopped",
+            log_fields={
+                "service_name": service_name,
+                "block_reason": block_reason,
+                **details,
+            },
+            event_data={
+                "trigger": "circuit_close",
+                "service_name": service_name,
+                "block_reason": block_reason,
+                **details,
+            },
+            metric_subject=service_name,
+            metric_reason=block_reason,
+            audit={
+                "domain": "dlq",
+                "reason": block_reason,
+                "service_name": service_name,
+                "trigger": "circuit_close",
+                "details": details,
+            },
+        )
+
+    def _fill_circuit_close_lanes(
+        self,
+        *,
+        service_name: str,
+        ordered_lanes: list[tuple[str, str | None]],
+        max_items: int,
+        max_replays: int,
+        lane_cursors: dict[str, str],
+        deadline: float | None,
+    ) -> _LaneSelection:
+        """Select this pass's entries, lane by lane, from the carried cursors.
+
+        Two fill rounds. The first hands every lane its `divmod` share, which
+        is the per-type fairness rule: a lane with a deep backlog must not
+        crowd out the others. The second offers the share the under-filled
+        lanes did not use to the lanes that filled theirs exactly — fairness is
+        about contention, and a lane whose pool is empty is not contending, so
+        leaving the remainder unspent would just park work. With it, a pass
+        moves ``min(max_items, reachable)`` entries whatever the lane count.
+
+        The deadline is checked between lanes as well as between replays: four
+        lanes each walking their scan bound over a slow store can spend a whole
+        pass in selection, and a pass that reaches its wall clock inside a
+        selection call ends by being killed rather than by returning.
+        """
+        selection = _LaneSelection(cursors=dict(lane_cursors))
+        quota_base, extra = divmod(max_items, len(ordered_lanes))
+        logger.debug(
+            "replay_service.quota_allocated",
+            service_name=service_name,
+            max_items=max_items,
+            n_types=len(ordered_lanes),
+            quota_base=quota_base,
+            extra=extra,
+        )
+
+        filled_exactly: list[tuple[str, str | None]] = []
+        used = 0
+        for i, lane in enumerate(ordered_lanes):
+            if deadline is not None and time.monotonic() >= deadline:
+                selection.capped = True
+                break
+            quota = quota_base + (1 if i < extra else 0)
+            if quota <= 0:
+                break
+            taken = self._fill_one_lane(selection, lane, quota, max_replays)
+            used += taken
+            if taken == quota:
+                filled_exactly.append(lane)
+
+        leftover = max_items - used
+        for lane in filled_exactly:
+            if leftover <= 0:
+                break
+            if deadline is not None and time.monotonic() >= deadline:
+                selection.capped = True
+                break
+            leftover -= self._fill_one_lane(selection, lane, leftover, max_replays)
+
+        return selection
+
+    def _fill_one_lane(
+        self,
+        selection: _LaneSelection,
+        lane: tuple[str, str | None],
+        quota: int,
+        max_replays: int,
+    ) -> int:
+        """Take up to ``quota`` entries for one lane, recording where it stopped."""
+        failure_type, lane_domain = lane
+        key = _lane_key(failure_type, lane_domain)
+        page = self.repository.find_replayable_page(
+            max_retries=max_replays,
+            domain=lane_domain,
+            failure_type=failure_type,
+            # A domain+type match does not by itself prove the circuit that
+            # closed is the circuit that rejected: a request-boundary layer
+            # stores the same failure type under a path-inferred domain while
+            # the dead dependency was something else entirely. Replaying those
+            # here would drive them straight back into it and spend their
+            # budget. Only a policy-chain capture carries the rejecting
+            # breaker's own name as its domain — and the restriction is part of
+            # the selection, so a quota filled with entries this lane may not
+            # touch is no longer possible.
+            source=POLICY_CHAIN_CAPTURE_SOURCE if lane_domain is not None else None,
+            limit=quota,
+            cursor=selection.cursors.get(key),
+        )
+        if page.next_cursor:
+            selection.cursors[key] = page.next_cursor
+        if page.scan_exhausted and key not in selection.scan_exhausted_lanes:
+            selection.scan_exhausted_lanes.append(key)
+        if len(page.entries) == quota:
+            # A lane that returned exactly its allotment may have left eligible
+            # entries behind it. Derived from the fill itself at zero extra
+            # query (no eligible-count scan).
+            selection.capped = True
+        selection.selected.extend((key, entry) for entry in page.entries)
+        logger.debug(
+            "replay_service.quota_filled",
+            failure_type=failure_type,
+            quota=quota,
+            actual=len(page.entries),
+        )
+        return len(page.entries)
+
+    @staticmethod
+    def _roll_back_lane_cursors(
+        selection: _LaneSelection,
+        processed: int,
+        carried_cursors: dict[str, str],
+    ) -> dict[str, str]:
+        """Cursors that resume at the oldest entry this pass selected but skipped.
+
+        A lane's selected entries ascend across both fill rounds, so its last
+        *processed* entry is also its highest, and the cursor is exclusive —
+        the entry immediately after it is exactly the oldest one left behind.
+        A lane that processed nothing keeps the cursor it came in with, which
+        is what the copy below starts from.
+        """
+        rolled = dict(carried_cursors)
+        for key, entry in selection.selected[:processed]:
+            if entry.created_at is not None:
+                rolled[key] = encode_replay_cursor(entry.created_at, entry.id)
+        return rolled
 
     def _resolve_open_circuit_replay_domain(
         self, service_name: str, mapped_failure_types: list[str]
@@ -1349,13 +1587,16 @@ class ReplayService(EventEmitterMixin):
         max_items: int = 50,
         escalate_failures: bool = True,
         service_failure_type_map: dict[str, list[str]] | None = None,
+        *,
+        deadline: float | None = None,
+        lane_cursors: dict[str, str] | None = None,
+        continuation: int = 0,
     ) -> BatchReplayResult:
         """Inner sweep body for `replay_on_circuit_close`.
 
         Extracted so the outer method can wrap this in the setnx-based
         inflight guard via a single `try/finally` without indenting the
-        whole sweep. Keep this body strictly identical to the earlier
-        circuit-close behavior — the lock is the only thing the guard adds.
+        whole sweep. The lock is the only thing the guard adds.
         """
         # Explicit mapping takes precedence, RuntimeConfig as fallback
         if service_failure_type_map is not None:
@@ -1453,67 +1694,62 @@ class ReplayService(EventEmitterMixin):
             )
 
         max_replays = self.config["max_replay_attempts"]
-        entries: list[FailedOperationData] = []
         # One fill lane per selection. Operator-mapped types select by type
         # alone (unchanged); the open-circuit lane additionally scopes to the
         # closing service's own domain.
         lanes: list[tuple[str, str | None]] = [(ft, None) for ft in failure_types]
         if auto_domain is not None:
             lanes.append((OPEN_CIRCUIT_FAILURE_TYPE, auto_domain))
-        # Per-type fairness quota (D1): divmod proportional split prevents
-        # the first failure_type's backlog from starving the rest of the
-        # recovered service's mapped types on circuit-close replay.
-        quota_base, extra = divmod(max_items, len(lanes))
-        logger.debug(
-            "replay_service.quota_allocated",
-            service_name=service_name,
-            max_items=max_items,
-            n_types=len(lanes),
-            quota_base=quota_base,
-            extra=extra,
-        )
-        # D12: a per-type fill that returns exactly its allotted quota means the
-        # cap may have left eligible entries undrained. Derived from the
-        # existing fill loop at zero extra query (no eligible-count scan).
-        capped = False
-        for i, (ft, lane_domain) in enumerate(lanes):
-            quota = quota_base + (1 if i < extra else 0)
-            if quota <= 0:
-                break
-            batch = self.repository.find_replayable(
-                max_retries=max_replays,
-                domain=lane_domain,
-                failure_type=ft,
-                limit=quota,
-            )
-            if len(batch) == quota:
-                capped = True
-            if lane_domain is not None:
-                # A domain+type match does not by itself prove the circuit that
-                # closed is the circuit that rejected: a request-boundary layer
-                # stores the same failure type under a path-inferred domain
-                # while the dead dependency was something else entirely.
-                # Replaying those here would drive them straight back into it
-                # and spend their budget. Only a policy-chain capture carries
-                # the rejecting breaker's own name as its domain.
-                batch = [
-                    entry
-                    for entry in batch
-                    if (entry.metadata or {}).get("source")
-                    == POLICY_CHAIN_CAPTURE_SOURCE
-                ]
-            entries.extend(batch)
-            logger.debug(
-                "replay_service.quota_filled",
-                failure_type=ft,
-                quota=quota,
-                actual=len(batch),
-            )
+        # Lanes are filled into one list and replayed in that order, so a
+        # deadline landing mid-list always cuts from the tail — and the
+        # open-circuit lane is appended last. Rotating the starting index by
+        # the pass counter puts every lane at the head within `len(lanes)`
+        # passes, using state the caller already carries. The per-type quota
+        # split is untouched; only the order it is handed out in moves.
+        rotation = continuation % len(lanes)
+        ordered_lanes = lanes[rotation:] + lanes[:rotation]
 
-        batch_result = BatchReplayResult(total=len(entries), results=[], capped=capped)
+        selection = self._fill_circuit_close_lanes(
+            service_name=service_name,
+            ordered_lanes=ordered_lanes,
+            max_items=max_items,
+            max_replays=max_replays,
+            lane_cursors=lane_cursors or {},
+            deadline=deadline,
+        )
+        entries: list[FailedOperationData] = [entry for _, entry in selection.selected]
+
+        batch_result = BatchReplayResult(
+            total=len(entries),
+            results=[],
+            capped=selection.capped,
+            lane_cursors=selection.cursors,
+            scan_exhausted_lanes=selection.scan_exhausted_lanes,
+        )
         batch_start = time.monotonic()
 
-        for entry in entries:
+        for processed, (_lane_key, entry) in enumerate(selection.selected):
+            if deadline is not None and time.monotonic() >= deadline:
+                # Selection completed before any replay did, and acquisition
+                # happens per entry inside _execute_replay — so everything from
+                # here on is still PENDING at a position BELOW the page cursor
+                # this pass would otherwise carry forward. Roll each lane back
+                # to its last processed entry so the next pass re-selects the
+                # tail instead of stepping over it. `total` follows the same
+                # correction: the completion event and the daily report must
+                # not count entries the pass never touched.
+                batch_result.capped = True
+                batch_result.total = processed
+                batch_result.lane_cursors = self._roll_back_lane_cursors(
+                    selection, processed, lane_cursors or {}
+                )
+                logger.info(
+                    "replay_service.circuit_close_deadline_reached",
+                    service_name=service_name,
+                    processed=processed,
+                    selected=len(entries),
+                )
+                break
             result = self._execute_replay(
                 entry.id,
                 replay_type="conditional",

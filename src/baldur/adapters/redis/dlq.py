@@ -46,6 +46,7 @@ from baldur.interfaces.repositories import (
     FailedOperationData,
     FailedOperationRepository,
     FailedOperationStatus,
+    ReplayablePage,
 )
 from baldur.utils.time import utc_now
 
@@ -881,14 +882,24 @@ class RedisDLQRepository(
     def count_created_in_window(self, start: datetime, end: datetime) -> int:
         return self.query.count_created_in_window(start, end)
 
-    def find_replayable(
+    def find_replayable_page(
         self,
+        *,
         max_retries: int,
         domain: str | None = None,
         failure_type: str | None = None,
+        source: str | None = None,
         limit: int = 100,
-    ) -> list[FailedOperationData]:
-        return self.query.find_replayable(max_retries, domain, failure_type, limit)
+        cursor: str | None = None,
+    ) -> ReplayablePage:
+        return self.query.find_replayable_page(
+            max_retries=max_retries,
+            domain=domain,
+            failure_type=failure_type,
+            source=source,
+            limit=limit,
+            cursor=cursor,
+        )
 
     def find_sla_breached(
         self, current_time: datetime, sla_thresholds: dict[str, timedelta]

@@ -4,6 +4,7 @@ DLQ Celery Tasks
 Tasks for replaying failed operations from the Dead Letter Queue.
 """
 
+import time
 from typing import Any
 
 import structlog
@@ -19,6 +20,127 @@ logger = structlog.get_logger(__name__)
 _COMPRESSED_DRAIN_PAGE_SIZE = 500
 _COMPRESSED_DRAIN_MAX_ITERATIONS = 200
 
+# How far below its own soft time limit an on-recovery pass stops selecting and
+# replaying. The pass must end by RETURNING, not by having SoftTimeLimitExceeded
+# raised through it: that exception is an ordinary Exception, the task's blanket
+# handler swallows it into an error dict, and the continuation — dispatched
+# after the service call returns — would never run. The margin covers the
+# in-flight replay the deadline check cannot interrupt plus the completion
+# event, audit and daily-report writes that follow the loop.
+_CIRCUIT_CLOSE_DEADLINE_MARGIN_SECONDS = 30
+
+
+def _affirm_circuit_closed(service_name: str) -> tuple[bool, str | None]:
+    """Is every circuit that could have parked this domain's work now CLOSED?
+
+    Returns ``(proceed, offending_circuit_name)``.
+
+    The sweep selects by the *stored* domain, and the projection from a
+    ``protect()`` name onto that domain is many-to-one — ``Payment-API``,
+    ``payment-api`` and ``payment_api`` all land in one bucket. Affirming the
+    one raw name that closed would therefore let a chain walk a peer circuit's
+    whole backlog into a dependency that is still down, one entry at a time,
+    escalating each on its first failure. So the affirmation asks the same
+    question the drain does: project every circuit forward into stored-domain
+    space and require all of them to be CLOSED.
+
+    Three outcomes, and the two permissive ones are deliberate:
+
+    - Nothing projects onto the domain: proceed. On an in-memory circuit store
+      the worker is a different process from the one whose circuit closed and
+      holds none of its rows, so treating an empty projection as "not affirmed"
+      would stop every sweep on such a deployment before its first pass. The
+      CLOSED event that dispatched this task is the evidence for that case.
+    - The read failed: proceed. The sweep performed no circuit read at all
+      before this affirmation existed, so a failed read reproduces the previous
+      behaviour rather than inventing a stop.
+
+    ``get_state`` is never used: it is get-or-create and would fabricate a
+    CLOSED row inside the worker for a name it has never seen.
+    """
+    from baldur.services.circuit_breaker import (
+        CircuitState,
+        get_circuit_breaker_service,
+    )
+    from baldur.utils.domain_validation import FALLBACK_DOMAIN, resolve_stored_domain
+
+    try:
+        cb_service = get_circuit_breaker_service()
+        repository = cb_service.repository
+        # A worker's L1 is whatever it hydrated at boot plus whatever it has
+        # touched, and there is no periodic pull — so a circuit a web pod
+        # re-opened in the shared store stays CLOSED here for the whole chain
+        # unless the pass refreshes first.
+        force_sync = getattr(repository, "force_sync_from_l2", None)
+        if callable(force_sync):
+            force_sync()
+
+        stored_domain = resolve_stored_domain(service_name)
+        if stored_domain == FALLBACK_DOMAIN:
+            # The unclassifiable bucket pools unrelated names, so "every
+            # circuit projecting onto it" would range over strangers. It is
+            # also the case in which no open-circuit lane exists at all, so
+            # only operator-mapped lanes run — affirm the raw name alone.
+            row = repository.get_by_service_name(service_name)
+            if row is not None and row.state != CircuitState.CLOSED.value:
+                return False, service_name
+            return True, None
+
+        projecting = [
+            row
+            for row in cb_service.get_all_states()
+            if resolve_stored_domain(row.get("service_name", "")) == stored_domain
+        ]
+        for row in projecting:
+            if row.get("state") != CircuitState.CLOSED.value:
+                return False, row.get("service_name")
+        if not projecting:
+            logger.debug(
+                "dlq.circuit_state_unknown",
+                service_name=service_name,
+                healing_domain=stored_domain,
+            )
+        return True, None
+    except Exception as e:
+        logger.warning(
+            "dlq.circuit_affirmation_failed",
+            service_name=service_name,
+            error=str(e),
+        )
+        return True, None
+
+
+def _circuit_close_pass_deadline(task: Any) -> float | None:
+    """``time.monotonic()`` value a pass must return by, or None if unbounded.
+
+    Celery's per-call override wins over the decorator value, matching the
+    limit that would actually kill this pass.
+    """
+    timelimit = getattr(task.request, "timelimit", None) or (None, None)
+    soft_limit = timelimit[1] or getattr(task, "soft_time_limit", None)
+    if not soft_limit:
+        return None
+    return time.monotonic() + max(
+        1.0, soft_limit - _CIRCUIT_CLOSE_DEADLINE_MARGIN_SECONDS
+    )
+
+
+def _should_continue_chain(result: Any, carried_cursors: dict) -> bool:
+    """Did the pass leave work reachable, and did it make progress reaching it?
+
+    Reachability is ``capped`` (a lane filled its quota or the deadline cut the
+    pass short) or ``scan_exhausted`` (a selector stopped on its scan bound
+    rather than on an empty pool) — an empty page means neither on its own.
+
+    Progress is the guard against a chain that re-dispatches forever without
+    moving: either the pass acquired entries (every selected entry leaves
+    PENDING before any skip branch runs, so none of them is selectable again),
+    or a lane's cursor advanced past members it examined and rejected.
+    """
+    reachable = bool(result.capped) or bool(getattr(result, "scan_exhausted", False))
+    advanced = result.total > 0 or dict(result.lane_cursors) != dict(carried_cursors)
+    return reachable and advanced
+
 
 @shared_task(
     bind=True,
@@ -29,40 +151,90 @@ _COMPRESSED_DRAIN_MAX_ITERATIONS = 200
     soft_time_limit=290,
     acks_late=True,
 )
-def conditional_replay_on_circuit_close(
-    self, service_name: str, max_items: int = 50
+def conditional_replay_on_circuit_close(  # noqa: C901, PLR0911
+    self,
+    service_name: str,
+    max_items: int = 50,
+    max_continuations: int = 1,
+    continuation: int = 0,
+    cursors: dict | None = None,
 ) -> dict:
     """
     Trigger conditional replay when a circuit breaker closes.
 
     This task is called by CircuitBreakerService.force_close() when
-    trigger_replay=True is specified.
+    trigger_replay=True is specified, and by itself: one run is one pass over
+    the recovered service's backlog, and the task re-dispatches itself while
+    the pass it just ran left work reachable. The chain is what makes the
+    on-recovery guarantee about a *backlog* rather than about one budget of it.
 
-    Replays DLQ entries that failed due to the recovered service.
+    The re-dispatch lives here rather than in the service because the service
+    releases its per-service inflight lock in a ``finally``: a continuation
+    queued from inside would meet its own predecessor's lock and end the drain
+    silently.
 
     Args:
         service_name: Name of the service that recovered
-        max_items: Maximum number of items to replay
+        max_items: Maximum number of items to replay per pass
+        max_continuations: Maximum passes to chain after this one. Resolved
+            once by the dispatching handler and carried unchanged, so a chain
+            runs to the budget it started with.
+        continuation: How many passes preceded this one.
+        cursors: Per-lane selection positions the previous pass stopped at.
 
     Returns:
         Dictionary with replay result summary
     """
     from baldur.services import get_replay_service
+    from baldur.services.replay_service.service import (
+        REASON_CIRCUIT_REOPENED,
+        REASON_PASS_ERRORED,
+    )
 
     task_id = self.request.id or "unknown"
     bound_logger = logger.bind(task_id=task_id)
+    carried_cursors: dict = dict(cursors or {})
 
     bound_logger.info(
         "dlq.circuit_recovery_started",
         service_name=service_name,
         max_items=max_items,
+        continuation=continuation,
     )
 
+    service = get_replay_service()
+
+    # Affirmed at the start of EVERY pass, not once before dispatch: a
+    # continuation queued while the circuit was CLOSED is picked up seconds
+    # later, and the sweep itself reads no circuit state anywhere.
+    affirmed, offending = _affirm_circuit_closed(service_name)
+    if not affirmed:
+        bound_logger.warning(
+            "dlq.circuit_recovery_stopped_reopened",
+            service_name=service_name,
+            offending_circuit=offending,
+        )
+        service.emit_circuit_close_chain_stopped(
+            service_name=service_name,
+            block_reason=REASON_CIRCUIT_REOPENED,
+            lane_cursors=carried_cursors,
+            offending_circuit=offending,
+        )
+        return {
+            "success": False,
+            "service_name": service_name,
+            "error": REASON_CIRCUIT_REOPENED,
+            "block_reason": REASON_CIRCUIT_REOPENED,
+            "total": 0,
+        }
+
     try:
-        service = get_replay_service()
         result = service.replay_on_circuit_close(
             service_name=service_name,
             max_items=max_items,
+            deadline=_circuit_close_pass_deadline(self),
+            lane_cursors=carried_cursors,
+            continuation=continuation,
         )
 
         # Check governance blocking before success
@@ -87,6 +259,18 @@ def conditional_replay_on_circuit_close(
             success_count=result.success_count,
             failed_count=result.failed_count,
             capped=result.capped,
+            continuation=continuation,
+        )
+
+        continued = _dispatch_circuit_close_continuation(
+            service=service,
+            bound_logger=bound_logger,
+            result=result,
+            service_name=service_name,
+            max_items=max_items,
+            max_continuations=max_continuations,
+            continuation=continuation,
+            carried_cursors=carried_cursors,
         )
 
         return {
@@ -96,6 +280,7 @@ def conditional_replay_on_circuit_close(
             "success_count": result.success_count,
             "failed_count": result.failed_count,
             "capped": result.capped,
+            "continued": continued,
         }
 
     except Exception as e:
@@ -104,11 +289,88 @@ def conditional_replay_on_circuit_close(
             service_name=service_name,
             error=str(e),
         )
+        # The chain had reachable work by construction — it was still running —
+        # and an ERROR log reaches no event, metric or audit consumer, so a
+        # chain that dies here would be indistinguishable from one that
+        # finished.
+        try:
+            service.emit_circuit_close_chain_stopped(
+                service_name=service_name,
+                block_reason=REASON_PASS_ERRORED,
+                lane_cursors=carried_cursors,
+            )
+        except Exception:
+            bound_logger.exception("dlq.circuit_recovery_stop_signal_failed")
         return {
             "success": False,
             "service_name": service_name,
             "error": str(e),
         }
+
+
+def _dispatch_circuit_close_continuation(
+    *,
+    service: Any,
+    bound_logger: Any,
+    result: Any,
+    service_name: str,
+    max_items: int,
+    max_continuations: int,
+    continuation: int,
+    carried_cursors: dict,
+) -> bool:
+    """Queue the next pass of this chain, or announce why the chain stopped.
+
+    One extra pass is run with the cursors cleared before a chain concludes
+    "nothing left": the stale-replay release returns abandoned entries to
+    PENDING at their ORIGINAL created_at — behind every cursor a running chain
+    holds — so a chain that has walked past them would otherwise finish over a
+    queue that is not empty. Handing the successor no cursors is also what
+    bounds the retry: its own carried set is empty, so it cannot ask again.
+    """
+    from baldur.adapters.celery.tasks import conditional_replay_on_circuit_close
+    from baldur.services.replay_service.service import (
+        REASON_CONTINUATION_BOUND_REACHED,
+    )
+
+    if result.inflight_skipped:
+        return False
+
+    lane_cursors = dict(result.lane_cursors)
+    if _should_continue_chain(result, carried_cursors):
+        if continuation + 1 >= max_continuations:
+            bound_logger.warning(
+                "dlq.circuit_recovery_bound_reached",
+                service_name=service_name,
+                continuation=continuation,
+            )
+            service.emit_circuit_close_chain_stopped(
+                service_name=service_name,
+                block_reason=REASON_CONTINUATION_BOUND_REACHED,
+                scan_exhausted_lanes=result.scan_exhausted_lanes,
+                lane_cursors=lane_cursors,
+            )
+            return False
+        conditional_replay_on_circuit_close.delay(
+            service_name=service_name,
+            max_items=max_items,
+            max_continuations=max_continuations,
+            continuation=continuation + 1,
+            cursors=lane_cursors,
+        )
+        return True
+
+    if carried_cursors and continuation + 1 < max_continuations:
+        conditional_replay_on_circuit_close.delay(
+            service_name=service_name,
+            max_items=max_items,
+            max_continuations=max_continuations,
+            continuation=continuation + 1,
+            cursors=None,
+        )
+        return True
+
+    return False
 
 
 @shared_task(

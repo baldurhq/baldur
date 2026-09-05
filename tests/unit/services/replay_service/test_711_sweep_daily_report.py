@@ -35,6 +35,7 @@ from baldur.interfaces.governance import NoOpGovernanceChecker
 from baldur.interfaces.repositories import (
     FailedOperationData,
     FailedOperationRepository,
+    ReplayablePage,
 )
 from baldur.models.governance import GovernanceCheckResult
 from baldur.services.daily_report import DailyReportCollector
@@ -61,6 +62,9 @@ def _make_service(cache=None, entries: list | None = None) -> ReplayService:
     """
     repo = MagicMock(spec=FailedOperationRepository)
     repo.find_replayable.return_value = entries if entries else []
+    repo.find_replayable_page.return_value = ReplayablePage(
+        entries=entries if entries else []
+    )
     svc = ReplayService(repository=repo, cache=cache)
     svc._event_bus = MagicMock(spec=BaldurEventBus)
     # See module docstring — pin OSS governance, never resolve the registry.

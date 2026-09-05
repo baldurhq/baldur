@@ -4,22 +4,29 @@
 Traffic-state-aware DLQ Replay
 
 Performs DLQ Replay only when traffic has normalized.
-Runs every minute via a Beat Schedule, and replays only when all of the following conditions are met:
+Runs every minute via a Beat Schedule, and replays only when all of the
+following conditions are met:
 
 Health Checks:
-1. Circuit Breaker State == CLOSED
-2. Error Budget > critical_threshold
-3. Governance checks pass (Kill Switch, Emergency Mode)
+1. Every circuit projecting onto the entry's own stored domain is CLOSED,
+   read from a freshly refreshed snapshot of the shared circuit store
+2. Governance checks pass (Kill Switch, Emergency Mode)
+
+The lane picks the domains it may drain before it selects any entry, because
+the check is per entry-domain: replaying "everything pending" while gating on
+one task argument gates nothing.
 """
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
 import structlog
 
 from baldur.audit.helpers import log_traffic_aware_replay_audit
+from baldur.services.replay_service.handlers import has_replay_handler
 from baldur.tasks.base import BaseNotifyingTask
 from baldur.tasks.notification_policy import (
     NotificationPolicy,
@@ -34,6 +41,83 @@ logger = structlog.get_logger()
 # =============================================================================
 
 
+_CLOSED_STATE = "closed"
+
+# Why a pending domain was left out of a pass. Logged by name, because a
+# domain this lane will never drain otherwise looks exactly like a domain with
+# no pending work — and "no circuit projects onto it" is the permanent one.
+DROP_REASON_CIRCUIT_OPEN = "circuit_open"
+DROP_REASON_NO_CIRCUIT_PROJECTS = "no_circuit_projects"
+DROP_REASON_NO_REPLAY_HANDLER = "no_replay_handler_registered"
+
+
+@dataclass
+class CircuitProjection:
+    """Every known circuit, grouped by the stored domain its name projects onto.
+
+    Circuits are keyed by the raw ``protect()`` name while DLQ entries are
+    stored under the normalized domain, and that projection is many-to-one —
+    it has no inverse. So the map is built in the one direction that is
+    well-defined: project each circuit name forward and group. A stored domain
+    is drainable only when every circuit projecting onto it is CLOSED; a domain
+    no circuit projects onto is *unknown*, therefore not drainable.
+    """
+
+    by_domain: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
+    store_refreshed: bool = True
+
+    def drop_reason(self, domain: str) -> str | None:
+        """Why this domain may not be drained, or None when it may."""
+        circuits = self.by_domain.get(domain)
+        if not circuits:
+            return DROP_REASON_NO_CIRCUIT_PROJECTS
+        for _name, state in circuits:
+            if state != _CLOSED_STATE:
+                return DROP_REASON_CIRCUIT_OPEN
+        return None
+
+
+def build_circuit_projection() -> CircuitProjection:
+    """Snapshot the shared circuit store, projected into stored-domain space.
+
+    The read is preceded by a whole-store L2 restore where the repository has
+    one: ``get_all_states()`` on the layered repository returns L1 only, and a
+    worker's L1 holds what it hydrated at boot plus what that process itself
+    touched — so a circuit the web process created afterwards (every
+    middleware circuit, for a worker that never served HTTP) is simply absent.
+
+    Nothing on this path raises: the restore reports failure by returning
+    False, and both the layered and the plain Redis reads swallow their own
+    errors into a partial answer. ``store_refreshed`` therefore carries the
+    distinction the caller needs — False means an L2 is configured and could
+    not be read, which is a reason to replay nothing this pass rather than to
+    drain against state that may be stale.
+    """
+    from baldur.services.circuit_breaker import get_circuit_breaker_service
+    from baldur.utils.domain_validation import resolve_stored_domain
+
+    cb_service = get_circuit_breaker_service()
+    repository = cb_service.repository
+
+    store_refreshed = True
+    force_sync = getattr(repository, "force_sync_from_l2", None)
+    if callable(force_sync) and not force_sync():
+        # False means either "no L2 configured" — the single-layer in-memory
+        # store, where L1 IS the store — or "the load failed". Only the second
+        # is a reason to stop.
+        health = getattr(repository, "get_l2_health", None)
+        if callable(health) and (health() or {}).get("adapter_type") is not None:
+            store_refreshed = False
+
+    by_domain: dict[str, list[tuple[str, str]]] = {}
+    for row in cb_service.get_all_states():
+        raw_name = row.get("service_name", "")
+        by_domain.setdefault(resolve_stored_domain(raw_name), []).append(
+            (raw_name, row.get("state", ""))
+        )
+    return CircuitProjection(by_domain=by_domain, store_refreshed=store_refreshed)
+
+
 @dataclass
 class TrafficHealthStatus:
     """Traffic health status result."""
@@ -41,16 +125,33 @@ class TrafficHealthStatus:
     is_healthy: bool
     reason: str
     checks: dict[str, bool] = field(default_factory=dict)
+    # The circuit snapshot the check built, so the pass that follows reuses it
+    # instead of scanning the store a second time.
+    circuits: CircuitProjection | None = None
 
     @classmethod
-    def healthy(cls, checks: dict[str, bool]) -> TrafficHealthStatus:
+    def healthy(
+        cls,
+        checks: dict[str, bool],
+        circuits: CircuitProjection | None = None,
+    ) -> TrafficHealthStatus:
         """Healthy-status factory."""
-        return cls(is_healthy=True, reason="All checks passed", checks=checks)
+        return cls(
+            is_healthy=True,
+            reason="All checks passed",
+            checks=checks,
+            circuits=circuits,
+        )
 
     @classmethod
-    def unhealthy(cls, reason: str, checks: dict[str, bool]) -> TrafficHealthStatus:
+    def unhealthy(
+        cls,
+        reason: str,
+        checks: dict[str, bool],
+        circuits: CircuitProjection | None = None,
+    ) -> TrafficHealthStatus:
         """Unhealthy-status factory."""
-        return cls(is_healthy=False, reason=reason, checks=checks)
+        return cls(is_healthy=False, reason=reason, checks=checks, circuits=circuits)
 
 
 def check_traffic_health(domain: str | None = None) -> TrafficHealthStatus:  # noqa: C901
@@ -58,70 +159,57 @@ def check_traffic_health(domain: str | None = None) -> TrafficHealthStatus:  # n
     Check the traffic health status.
 
     Checks:
-    1. Circuit Breaker State (when a domain is specified)
-    2. Error Budget Gate
-    3. Governance (Kill Switch, Emergency Mode)
+    1. Circuit Breaker state, read from a fresh snapshot of the shared store
+       and projected into the namespace DLQ entries are stored under
+    2. Governance (Kill Switch, Emergency Mode)
+
+    There is no Error Budget leg. The gate it consulted resolves to nothing on
+    every install, and the ``RuntimeError`` that raised landed in the generic
+    handler and fail-opened — so the check reported a pass it had never made.
+    Removing it makes this report's coverage what it actually is.
 
     Args:
-        domain: check the CB state of a specific domain (optional)
+        domain: additionally require this domain's circuits to be affirmed
+            CLOSED (optional). Without it the snapshot is still built, because
+            the caller fans out over domains and needs both the snapshot and
+            the store's readability.
 
     Returns:
-        TrafficHealthStatus with is_healthy flag and check results
+        TrafficHealthStatus with is_healthy flag, check results and the
+        circuit snapshot the caller reuses.
     """
     checks: dict[str, bool] = {}
+    circuits: CircuitProjection | None = None
 
-    # Check 1: Circuit Breaker State (only when a domain is specified)
-    if domain:
-        try:
-            from baldur.services.circuit_breaker import (
-                CircuitState,
-                get_circuit_breaker_service,
-            )
-
-            cb_service = get_circuit_breaker_service()
-            cb_state = cb_service.get_state(domain)
-            checks["circuit_breaker"] = cb_state == CircuitState.CLOSED
-
-            if not checks["circuit_breaker"]:
-                return TrafficHealthStatus.unhealthy(
-                    reason=f"Circuit breaker is {cb_state} for domain '{domain}'",
-                    checks=checks,
-                )
-        except ImportError:
-            logger.debug("traffic_health.circuitbreakerservice_available_skipping_cb")
-            checks["circuit_breaker"] = True  # pass if unavailable
-        except Exception as e:
-            logger.warning(
-                "traffic_health.cb_check_failed",
-                error=e,
-            )
-            checks["circuit_breaker"] = True  # fail-open on exception
-
-    # Check 2: Error Budget Gate
+    # Check 1: Circuit Breaker state
     try:
-        from baldur.factory.registry import ProviderRegistry
-
-        gate = ProviderRegistry.error_budget_gate.safe_get()
-        if gate is None:
-            raise RuntimeError("baldur_pro ErrorBudgetGate not registered")
-        checks["error_budget"] = gate.is_replay_allowed()
-
-        if not checks["error_budget"]:
+        circuits = build_circuit_projection()
+        if not circuits.store_refreshed:
+            checks["circuit_breaker"] = False
             return TrafficHealthStatus.unhealthy(
-                reason="Error budget insufficient for replay",
+                reason="Circuit store could not be refreshed from L2",
                 checks=checks,
+                circuits=circuits,
+            )
+        drop_reason = circuits.drop_reason(domain) if domain else None
+        checks["circuit_breaker"] = drop_reason is None
+        if drop_reason is not None:
+            return TrafficHealthStatus.unhealthy(
+                reason=f"Domain '{domain}' is not drainable: {drop_reason}",
+                checks=checks,
+                circuits=circuits,
             )
     except ImportError:
-        logger.debug("traffic_health.errorbudgetgate_available_skipping")
-        checks["error_budget"] = True  # pass if unavailable
+        logger.debug("traffic_health.circuitbreakerservice_available_skipping_cb")
+        checks["circuit_breaker"] = True  # pass if unavailable
     except Exception as e:
         logger.warning(
-            "traffic_health.error_budget_check_failed",
+            "traffic_health.cb_check_failed",
             error=e,
         )
-        checks["error_budget"] = True  # fail-open on exception
+        checks["circuit_breaker"] = True  # fail-open on exception
 
-    # Check 3: Governance (Kill Switch, Emergency Mode)
+    # Check 2: Governance (Kill Switch, Emergency Mode)
     try:
         from baldur.factory.registry import ProviderRegistry
         from baldur.settings.governance import get_governance_settings
@@ -131,7 +219,9 @@ def check_traffic_health(domain: str | None = None) -> TrafficHealthStatus:  # n
             check_kill_switch=True,
             check_emergency=True,
             emergency_min_level=governance_settings.emergency_min_level,
-            check_error_budget=False,  # already checked above
+            # Governance's own error-budget gate, distinct from the removed
+            # health leg — left off, as it has been on this lane throughout.
+            check_error_budget=False,
             operation_name="traffic_aware_replay",
             service_name="TrafficAwareReplayTask",
             domain=domain or "dlq",
@@ -143,6 +233,7 @@ def check_traffic_health(domain: str | None = None) -> TrafficHealthStatus:  # n
             return TrafficHealthStatus.unhealthy(
                 reason=governance.block_message,
                 checks=checks,
+                circuits=circuits,
             )
     except ImportError:
         logger.debug("traffic_health.governancechecks_available_skipping")
@@ -154,7 +245,7 @@ def check_traffic_health(domain: str | None = None) -> TrafficHealthStatus:  # n
         )
         checks["governance"] = True  # fail-open on exception
 
-    return TrafficHealthStatus.healthy(checks)
+    return TrafficHealthStatus.healthy(checks, circuits=circuits)
 
 
 # =============================================================================
@@ -288,7 +379,9 @@ class TrafficAwareReplayTask(BaseNotifyingTask):
 
         try:
             replay_result: dict[str, Any] = dict(
-                self._execute_replay(domain, effective_max_items)
+                self._execute_replay(
+                    domain, effective_max_items, health_status.circuits
+                )
             )
             result = replay_result
 
@@ -373,27 +466,129 @@ class TrafficAwareReplayTask(BaseNotifyingTask):
             )
             return {}
 
-    def _execute_replay(self, domain: str | None, max_items: int) -> dict[str, int]:
-        """Perform the actual replay via ReplayService."""
+    def _execute_replay(
+        self,
+        domain: str | None,
+        max_items: int,
+        circuits: CircuitProjection | None = None,
+    ) -> dict[str, int]:
+        """Perform the actual replay via ReplayService.
+
+        With a domain named, this is one scoped batch — the health check has
+        already affirmed that domain's circuits.
+
+        Without one, the lane chooses its domains before it selects entries.
+        The alternative — one ``replay_batch(domain=None)``, which is what the
+        shipped Beat entry produces — selects across every domain with the
+        circuit check skipped entirely. Pushing the filter into ``replay_batch``
+        is not available either: that method also serves the operator console,
+        and a manual replay must not be silently narrowed by circuit state.
+        """
         try:
             from baldur.interfaces.repositories import ResolutionTrigger
             from baldur.services.replay_service import ReplayService
 
             service = ReplayService()
-            batch_result = service.replay_batch(
-                domain=domain,
-                max_items=max_items,
-                trigger=ResolutionTrigger.TRAFFIC_AWARE,
-            )
+            if domain is not None:
+                return self._replay_one_domain(
+                    service, domain, max_items, ResolutionTrigger.TRAFFIC_AWARE
+                )
 
-            return {
-                "total": batch_result.total,
-                "success": batch_result.success_count,
-                "failed": batch_result.failed_count,
-            }
+            drainable = self._select_drainable_domains(service, circuits)
+            if not drainable:
+                return {"total": 0, "success": 0, "failed": 0}
+
+            totals = {"total": 0, "success": 0, "failed": 0}
+            for target, quota in self._split_across_domains(drainable, max_items):
+                counts = self._replay_one_domain(
+                    service, target, quota, ResolutionTrigger.TRAFFIC_AWARE
+                )
+                for key in totals:
+                    totals[key] += counts[key]
+            return totals
         except ImportError as err:
             logger.exception("traffic_aware_replay.replayservice_available")
             raise RuntimeError("ReplayService not available") from err
+
+    @staticmethod
+    def _replay_one_domain(
+        service: Any,
+        domain: str | None,
+        max_items: int,
+        trigger: Any,
+    ) -> dict[str, int]:
+        """One scoped batch replay, reduced to the three counts this task reports."""
+        batch_result = service.replay_batch(
+            domain=domain,
+            max_items=max_items,
+            trigger=trigger,
+        )
+        return {
+            "total": batch_result.total,
+            "success": batch_result.success_count,
+            "failed": batch_result.failed_count,
+        }
+
+    @staticmethod
+    def _select_drainable_domains(
+        service: Any,
+        circuits: CircuitProjection | None,
+    ) -> list[str]:
+        """Domains with pending work whose circuits are affirmed CLOSED.
+
+        The enumeration is a fail-open partial primitive by documentation — a
+        Redis below 7.0 falls back to a bounded scan, and degraded mode buckets
+        in memory — so this claims only "the pending domains it can see", never
+        "everything pending". A domain it misses is drained on a later pass.
+
+        Every drop is logged with its domain and its reason. Without that, a
+        domain no circuit projects onto — the permanent exclusion — is
+        indistinguishable from a domain with nothing to drain.
+        """
+        if circuits is None:
+            return []
+        facets = service.repository.get_facet_counts(status="pending")
+        drainable: list[str] = []
+        for candidate in sorted((facets or {}).get("by_domain", {})):
+            drop_reason = circuits.drop_reason(candidate)
+            if drop_reason is None and not has_replay_handler(candidate):
+                # An unregistered domain still gets a handler — one whose
+                # replay always fails — so replaying it would burn a retry per
+                # entry every minute and walk the domain to requires_review.
+                drop_reason = DROP_REASON_NO_REPLAY_HANDLER
+            if drop_reason is not None:
+                logger.debug(
+                    "traffic_aware_replay.domain_skipped",
+                    healing_domain=candidate,
+                    reason=drop_reason,
+                )
+                continue
+            drainable.append(candidate)
+        return drainable
+
+    @staticmethod
+    def _split_across_domains(
+        domains: list[str], max_items: int
+    ) -> list[tuple[str, int]]:
+        """Share the pass budget across domains, rotating which one leads.
+
+        The same divmod fairness rule the circuit-close sweep uses for its
+        lanes. When there are more domains than items the base share is 0 and
+        the tail gets nothing — which, on a lane that runs every minute, would
+        starve the same tail forever. Rotating the starting index by the
+        wall-clock minute gives every domain the head within ``len(domains)``
+        passes. Keyed on the clock rather than on a counter because the lane
+        runs on whichever worker picks the message up, so process-local state
+        would restart per worker and re-create the starvation it removes.
+        """
+        base, extra = divmod(max_items, len(domains))
+        start = int(time.time() // 60) % len(domains)
+        rotated = domains[start:] + domains[:start]
+        return [
+            (name, base + (1 if i < extra else 0))
+            for i, name in enumerate(rotated)
+            if base + (1 if i < extra else 0) > 0
+        ]
 
     def _get_severity(self, result: dict[str, Any]) -> str:
         """Determine the severity based on the result."""
@@ -473,7 +668,9 @@ def get_traffic_aware_beat_schedule() -> dict[str, Any]:
 
 
 __all__ = [
+    "CircuitProjection",
     "TrafficHealthStatus",
+    "build_circuit_projection",
     "check_traffic_health",
     "TrafficAwareReplayTask",
     "TRAFFIC_AWARE_TASKS",

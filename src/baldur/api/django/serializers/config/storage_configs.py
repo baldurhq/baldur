@@ -155,7 +155,13 @@ class ReplayAutomationConfigSerializer(ApplyStrategyMixin):
         required=False,
         min_value=1,
         max_value=500,
-        help_text="Maximum items to replay on CB recovery",
+        help_text="Maximum items to replay per on-recovery pass",
+    )
+    on_recovery_max_continuations = serializers.IntegerField(
+        required=False,
+        min_value=1,
+        max_value=1000,
+        help_text="Maximum self-continuations of one on-recovery sweep",
     )
 
     # Traffic-Aware Replay
