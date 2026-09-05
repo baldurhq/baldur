@@ -56,6 +56,7 @@ from baldur.interfaces.rate_limit_storage import (
 )
 from baldur.utils.retry_after import parse_retry_after
 
+from .announcer import CooldownAnnouncer
 from .helpers import (
     _default_get_retry_after,
     _default_is_429,
@@ -78,13 +79,6 @@ T = TypeVar("T")
 # Minimum cooldown floor (seconds) applied after backoff+jitter so a 429 always
 # yields a non-trivial wait even when jitter drives the computed delay toward zero.
 _MIN_COOLDOWN_SECONDS: float = 0.1
-
-# Smallest delay a cooldown-end timer is armed for. A cooldown already at or past
-# its expiry still owes exactly one all-clear, so the delay is clamped up to this
-# rather than skipped; it also keeps a re-armed timer strictly later than any
-# expiry a callback has already fired for, which is what makes the ownership
-# match below decidable.
-_MIN_COOLDOWN_END_DELAY_SECONDS: float = 0.001
 
 
 class RateLimitCoordinator:
@@ -147,6 +141,7 @@ class RateLimitCoordinator:
         self,
         storage: RateLimitStorageInterface | None = None,
         config: RateLimitCoordinatorConfig | None = None,
+        announcer: CooldownAnnouncer | None = None,
     ) -> None:
         """
         Initialize rate limit coordinator.
@@ -154,6 +149,9 @@ class RateLimitCoordinator:
         Args:
             storage: Rate limit storage backend (auto-detected if None)
             config: Rate limit configuration
+            announcer: Cooldown-end announcer (built over ``storage`` if None).
+                Injectable so a test can drive the verification pass
+                synchronously instead of through the announcer's own thread.
         """
         self._storage = storage or get_rate_limit_storage()
         self._config = config or RateLimitCoordinatorConfig.from_settings()
@@ -167,12 +165,12 @@ class RateLimitCoordinator:
         self._canary_in_progress: dict[str, bool] = {}
         self._canary_lock = threading.Lock()
 
-        # Cooldown-end event timer tracking, per key: the armed Timer and the
-        # expiry it was armed for. The expiry doubles as the ownership token —
-        # a callback removes its own registration only, so a cancelled-and-
-        # replaced timer that already fired cannot unregister its successor.
-        self._cooldown_timers: dict[str, tuple[threading.Timer, float]] = {}
-        self._timer_lock = threading.Lock()
+        # Cooldown-end announcement. The announcer holds one record per key —
+        # the effective expiry this process last learned — and verifies it
+        # against the shared store before announcing, so a peer's extension this
+        # process never observed cannot be announced away. Its thread starts on
+        # the first tracked key, so a process that takes no 429 runs none.
+        self._announcer = announcer or CooldownAnnouncer(storage=self._storage)
 
     @classmethod
     def get_instance(cls) -> RateLimitCoordinator:
@@ -187,15 +185,13 @@ class RateLimitCoordinator:
     def reset_instance(cls) -> None:
         """Reset singleton instance for test isolation.
 
-        Cancels all pending cooldown Timer threads before clearing instance.
+        Stops the announcer thread before clearing the instance, so a later
+        ``get_instance()`` does not leave two live emitters for one key.
         """
         with cls._instance_lock:
             instance = cls._instance
             if instance is not None:
-                with instance._timer_lock:
-                    for timer, _armed_expiry in instance._cooldown_timers.values():
-                        timer.cancel()
-                    instance._cooldown_timers.clear()
+                instance._announcer.stop()
             cls._instance = None
 
     @property
@@ -230,84 +226,6 @@ class RateLimitCoordinator:
                 rate_limit_key=key,
             )
         return emitted
-
-    # =========================================================================
-    # Cooldown End Event Scheduling
-    # =========================================================================
-
-    def _schedule_cooldown_end_event(self, key: str, cooldown_until: float) -> None:
-        """
-        Ensure a RATE_LIMIT_COOLDOWN_END event is armed for ``cooldown_until``.
-
-        Called for **every** 429 this process observes, including one the event
-        debounce suppresses: a suppressed 429 still extends the shared cooldown,
-        and an all-clear left armed at the pre-extension time announces recovery
-        into a live cooldown.
-
-        An expiry equal to the armed one is a no-op, so a storm re-arms once per
-        real extension rather than once per 429. Any different expiry — later
-        through a peer's cooldown, earlier through the operator's ``clear()`` —
-        cancels the armed timer and replaces it.
-
-        A cooldown already at or past its expiry is armed at a small positive
-        delay rather than skipped, so it still yields exactly one all-clear.
-
-        Args:
-            key: Rate limit key
-            cooldown_until: Effective cooldown end time (Unix timestamp)
-        """
-        now = time.time()
-        armed_expiry = max(cooldown_until, now + _MIN_COOLDOWN_END_DELAY_SECONDS)
-        delay = armed_expiry - now
-
-        def emit_cooldown_end() -> None:
-            # Remove this timer's own registration only. A cancelled timer that
-            # had already fired would otherwise unregister the live successor
-            # that replaced it, leaving the key monitored by nothing.
-            with self._timer_lock:
-                registered = self._cooldown_timers.get(key)
-                if registered is None or registered[1] != armed_expiry:
-                    return
-                del self._cooldown_timers[key]
-
-            _emit_rate_limit_event(
-                "RATE_LIMIT_COOLDOWN_END",
-                {
-                    "key": key,
-                    "cooldown_ended_at": time.time(),
-                    "cooldown_until": armed_expiry,
-                },
-                priority_name="NORMAL",
-            )
-            logger.info(
-                "rate_limit_coordinator.cooldown_ended",
-                rate_limit_key=key,
-            )
-
-        with self._timer_lock:
-            existing = self._cooldown_timers.get(key)
-            if existing is not None:
-                if existing[1] == armed_expiry:
-                    return
-                existing[0].cancel()
-
-            timer = threading.Timer(delay, emit_cooldown_end)
-            timer.daemon = True
-            try:
-                timer.start()
-            except RuntimeError as e:
-                # Refused at interpreter shutdown, and at a live process's
-                # thread ceiling. Leave no registry entry — the key re-arms on
-                # its next 429 — and say so: a rising rate of this line is the
-                # signal that thread pressure is disarming the all-clear.
-                self._cooldown_timers.pop(key, None)
-                logger.warning(
-                    "rate_limit_coordinator.cooldown_timer_arm_failed",
-                    rate_limit_key=key,
-                    error=str(e),
-                )
-                return
-            self._cooldown_timers[key] = (timer, armed_expiry)
 
     # =========================================================================
     # Canary Request Methods
@@ -379,6 +297,12 @@ class RateLimitCoordinator:
             RateLimitResult with wait information, canary mode flag, and — on a
             deferral — ``not_before`` (the cooldown's expiry timestamp).
         """
+        # The announcer's own entry points only run on a 429 or an operator
+        # clear, and a cooldown is exactly the window in which this process makes
+        # neither call — so a thread that died (or a fork child that inherited
+        # records and no thread) is revived from the request path instead.
+        self._announcer.ensure_running()
+
         state = self._storage.get_state(key)
 
         if state.is_in_cooldown:
@@ -484,8 +408,20 @@ class RateLimitCoordinator:
 
         # Monotonic merge: the store decides which cooldown wins, and everything
         # downstream reports the winner rather than this call's proposal.
+        #
+        # The announcer's in-flight bracket spans the write, not just the record
+        # update: between the store accepting this cooldown and the record
+        # carrying it, a verifying read would still see the pre-429 expiry it was
+        # armed for and announce into the cooldown this call is installing. A
+        # store that raises releases the marker without recording anything.
         candidate_until = time.time() + delay
-        cooldown_until = self._storage.extend_cooldown(key, candidate_until)
+        recorded_until: float | None = None
+        self._announcer.begin(key)
+        try:
+            recorded_until = self._storage.extend_cooldown(key, candidate_until)
+        finally:
+            self._announcer.track(key, recorded_until)
+        cooldown_until = recorded_until
         in_force = max(0.0, cooldown_until - time.time())
 
         # Recorded after the store, because the in-force value does not exist
@@ -501,11 +437,6 @@ class RateLimitCoordinator:
             cooldown_seconds=in_force,
             consecutive_429s=consecutive,
         )
-
-        # Arm the all-clear for every 429, outside the event debounce below: a
-        # suppressed 429 extends the cooldown just the same, and an all-clear
-        # left at the pre-extension time announces recovery into a live cooldown.
-        self._schedule_cooldown_end_event(key, cooldown_until)
 
         # EventBus integration (debouncing applied — metrics above are not
         # debounced: a flattened counter is indistinguishable from a storm
@@ -659,8 +590,16 @@ class RateLimitCoordinator:
             )
 
     def clear(self, key: str) -> None:
-        """Clear all rate limit state for a key."""
+        """Clear all rate limit state for a key.
+
+        A key this process holds a cooldown record for is re-verified at once, so
+        the operator escape produces its all-clear instead of leaving the
+        consumer waiting for the expiry that was just cleared. A key this process
+        never observed announces nothing — releasing there would be an all-clear
+        for a cooldown that never cooled here.
+        """
         self._storage.clear(key)
+        self._announcer.reverify(key)
         logger.info(
             "rate_limit_coordinator.cleared_state",
             key=key,

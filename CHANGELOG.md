@@ -10,8 +10,14 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+### Changed
+
+- `RATE_LIMIT_COOLDOWN_END` carries the store's expiry at announce time, `0` for a cleared key.
+
 ### Fixed
 
+- A worker that missed a peer's 429 no longer announces an all-clear while the cooldown is live.
+- One cooldown announcer thread per process replaces one timer thread per rate-limit key.
 - Automatic replay after a circuit closes no longer stops when the audit trail is enabled.
 - The audit trail no longer stops for the rest of a process after one failed log-file open.
 - The audit trail no longer records a row per request when no tiering configuration is set.

@@ -37,6 +37,7 @@ Rule registry:
 from __future__ import annotations
 
 import ast
+import textwrap
 from pathlib import Path
 
 from tests.architecture._helpers import PROJECT_ROOT, oss_src_root, repo_relative
@@ -201,7 +202,16 @@ def _scan(path: Path) -> list[tuple[Path, int, str, str]]:
     tree = parse_ast(path)
     if tree is None:
         return []
+    return _scan_tree(tree, path)
 
+
+def _scan_tree(tree: ast.Module, path: Path) -> list[tuple[Path, int, str, str]]:
+    """The rule itself, over an already-parsed module.
+
+    Split from ``_scan`` so the reach check below can run the real detection
+    over source it authors, rather than over whichever file happens to arm a
+    timer in the tuple form today.
+    """
     violations: list[tuple[Path, int, str, str]] = []
     for func in ast.walk(tree):
         if not isinstance(func, ast.FunctionDef | ast.AsyncFunctionDef):
@@ -285,27 +295,58 @@ class TestTimerRearmCancelsArchitecture:
     def test_a_timer_stored_beside_its_bookkeeping_is_in_scope(self):
         """The tuple-wrapped arming form is reached, not just the bare one.
 
-        The rate-limit coordinator stores ``(timer, armed_expiry)`` per key so a
-        fired callback can recognise its own registration. Read as a bare store
-        only, that value is not a timer construction and not a name bound to
-        one, so the whole arming site sat outside this rule while looking
-        perfectly covered.
+        Read as a bare store only, ``self._timers[key] = (timer, token)`` is
+        neither a timer construction nor a name bound to one, so a whole arming
+        site could sit outside this rule while looking perfectly covered.
+
+        Driven from source this test authors rather than from a tree file: the
+        rate-limit coordinator was the tree's only tuple-form arming site and it
+        now announces from a verified daemon loop instead of a per-key timer, and
+        every remaining site stores the bare timer. Anchoring on one of those
+        would check the bare form twice and leave the tuple form unchecked — a
+        rule that reaches nothing reports no violations either.
         """
-        path = oss_src_root() / "services" / "rate_limit_coordinator" / "coordinator.py"
-        assert path.is_file(), f"arming site moved or renamed: {path}"
-        tree = parse_ast(path)
-        assert tree is not None
-        armed = [
-            node
-            for func in ast.walk(tree)
-            if isinstance(func, ast.FunctionDef | ast.AsyncFunctionDef)
-            for node in ast.walk(func)
-            if isinstance(node, ast.Assign)
-            and _holds_timer(node.value, _locally_armed_names(func))
-            and any(_slot_of(target) is not None for target in node.targets)
-        ]
-        assert armed, (
-            f"{repo_relative(path)} no longer stores a timer on self in a form "
-            "this rule recognises. If the arming moved, follow it here — a rule "
-            "that reaches nothing reports no violations either."
+        source = textwrap.dedent(
+            """
+            import threading
+
+
+            class Sample:
+                def arm(self, key, delay):
+                    timer = threading.Timer(delay, self._fire)
+                    timer.start()
+                    self._timers[key] = (timer, delay)
+            """
         )
+        violations = _scan_tree(ast.parse(source), Path("synthetic_arming_site.py"))
+
+        assert violations, (
+            "the tuple-wrapped arming form is no longer reported. A slot that "
+            "keeps bookkeeping beside its timer holds one just as live as a "
+            "bare store — restore that leg of the rule."
+        )
+        assert "_timers" in violations[0][3]
+
+    def test_a_cancelled_tuple_form_arming_is_not_reported(self):
+        """Negative half: the same shape, cancelled first, is clean.
+
+        Without this the case above would pass on a rule that reports every
+        tuple store, which would be a different (and useless) rule.
+        """
+        source = textwrap.dedent(
+            """
+            import threading
+
+
+            class Sample:
+                def arm(self, key, delay):
+                    existing = self._timers.get(key)
+                    if existing is not None:
+                        existing[0].cancel()
+                    timer = threading.Timer(delay, self._fire)
+                    timer.start()
+                    self._timers[key] = (timer, delay)
+            """
+        )
+
+        assert not _scan_tree(ast.parse(source), Path("synthetic_arming_site.py"))

@@ -11,14 +11,13 @@ Covers:
 - Fail-open behavior
 - Metric recording (429 counter, cooldown values, wait/deferral decision)
 - rate_limit_aware decorator
-- on_success, _schedule_cooldown_end scheduling
+- on_success, cooldown-record handoff to the announcer
 """
 
 from __future__ import annotations
 
 import itertools
 import math
-import threading
 import time
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
@@ -263,12 +262,9 @@ class TestRateLimitCoordinatorDebouncing:
         coordinator = RateLimitCoordinator(storage=mock_storage, config=config)
         mock_bus, emitted_events = make_mock_event_bus()
 
-        # When the burst arrives (cooldown-end scheduling stubbed out so the
-        # emit path leaves no live Timer thread behind)
-        with (
-            patch("baldur.services.event_bus.get_event_bus", return_value=mock_bus),
-            patch.object(coordinator, "_schedule_cooldown_end_event"),
-        ):
+        # When the burst arrives (the recording announcer keeps the emit path
+        # free of a live daemon thread)
+        with patch("baldur.services.event_bus.get_event_bus", return_value=mock_bus):
             for _ in range(burst_size):
                 coordinator.on_rate_limited(key)
 
@@ -1135,57 +1131,62 @@ class TestRateLimitCoordinatorOnSuccess:
 
 
 # =============================================================================
-# Cooldown-end arming — the all-clear tracks the cooldown it belongs to
+# Shared seams for the store-facing cases below
 # =============================================================================
 
 
-class _RecordingTimer:
-    """``threading.Timer`` stand-in that arms without starting a thread.
+class _RecordingAnnouncer:
+    """``CooldownAnnouncer`` stand-in that records instead of running a thread.
 
-    Deferred rather than synchronous: every assertion below turns on *when* a
-    callback runs relative to a re-arm or a cancel, which is exactly the
-    ordering the ownership match exists to survive.
+    The coordinator's own cases assert on the *store* and on the 429 event, not
+    on when the all-clear lands; a real announcer would spawn a daemon thread per
+    coordinator built here. The verified-announcement contract lives in the
+    announcer's own module test, where two coordinators share one store.
     """
 
-    def __init__(self, interval, function, start_error=None):
-        self.interval = interval
-        self.function = function
-        self.daemon = False
-        self.started = False
-        self.cancelled = False
-        self._start_error = start_error
-
-    def start(self):
-        if self._start_error is not None:
-            raise self._start_error
-        self.started = True
-
-    def cancel(self):
-        self.cancelled = True
-
-    def fire(self):
-        """Run the callback the way the timer thread would."""
-        self.function()
-
-
-class _TimerRecorder:
-    """Collects every arming, and can make ``start()`` refuse like a real one."""
-
     def __init__(self):
-        self.armed: list[_RecordingTimer] = []
-        self.start_error: Exception | None = None
+        self.begun: list[str] = []
+        self.tracked: list[tuple[str, float | None]] = []
+        self.reverified: list[str] = []
+        self.ensure_running_calls = 0
+        self.stopped = False
 
-    def __call__(self, interval, function, args=None, kwargs=None):
-        timer = _RecordingTimer(interval, function, self.start_error)
-        self.armed.append(timer)
-        return timer
+    def begin(self, key):
+        self.begun.append(key)
+
+    def track(self, key, cooldown_until=None):
+        self.tracked.append((key, cooldown_until))
+
+    def reverify(self, key):
+        self.reverified.append(key)
+
+    def ensure_running(self):
+        self.ensure_running_calls += 1
+
+    def run_once(self, now=None):
+        return []
+
+    def stop(self):
+        self.stopped = True
+
+    @property
+    def pending(self):
+        return {key: until for key, until in self.tracked if until is not None}
+
+    @property
+    def is_alive(self):
+        return False
 
 
 @pytest.fixture
-def timers(monkeypatch):
-    """Replace ``threading.Timer`` with a recorder, and hand back the recorder."""
-    recorder = _TimerRecorder()
-    monkeypatch.setattr(threading, "Timer", recorder)
+def announcer(monkeypatch) -> _RecordingAnnouncer:
+    """Give every coordinator built in the test the recording announcer."""
+    from baldur.services.rate_limit_coordinator import coordinator as coordinator_module
+
+    recorder = _RecordingAnnouncer()
+    monkeypatch.setattr(
+        coordinator_module, "CooldownAnnouncer", lambda **kwargs: recorder
+    )
     return recorder
 
 
@@ -1199,312 +1200,8 @@ def _silent_event_bus():
     return bus
 
 
-def _cooldown_end_events(emitted):
-    return [e for e in emitted if "RATE_LIMIT_COOLDOWN_END" in e["event_type"]]
-
-
 def _429_events(emitted):
     return [e for e in emitted if "RATE_LIMIT_429" in e["event_type"]]
-
-
-class TestScheduleCooldownEndBehavior:
-    """The all-clear is armed for every 429, and exactly one fires per episode.
-
-    Scheduling used to sit inside the 429 event-debounce gate, so a 429 the
-    debounce suppressed extended the shared cooldown while the all-clear stayed
-    armed at the pre-extension time. The PRO adaptive throttle consumes that
-    event and starts restoring outbound throughput — into a cooldown that is
-    still live, which is the self-DDoS the coordinator exists to prevent.
-    """
-
-    @staticmethod
-    def _storm_coordinator(mock_storage):
-        """A coordinator whose debounce window swallows a whole burst's events."""
-        from baldur.services.rate_limit_coordinator import (
-            RateLimitCoordinator,
-            RateLimitCoordinatorConfig,
-        )
-
-        config = RateLimitCoordinatorConfig(
-            default_retry_after=1.0,
-            backoff_multiplier=1.0,
-            jitter_percent=0.0,
-            debounce_window_seconds=DEFAULT_DEBOUNCE_WINDOW,
-        )
-        return RateLimitCoordinator(storage=mock_storage, config=config)
-
-    def test_a_storm_arms_the_all_clear_for_its_final_expiry(
-        self, mock_storage, timers
-    ):
-        """Each 429 of a burst moves the all-clear, including the suppressed ones."""
-        # Given three 429s inside one debounce window, each extending further
-        key = _unique_key("storm")
-        coordinator = self._storm_coordinator(mock_storage)
-        mock_bus, emitted = make_mock_event_bus()
-
-        # When the burst arrives
-        with patch("baldur.services.event_bus.get_event_bus", return_value=mock_bus):
-            for header in (60, 120, 180):
-                coordinator.on_rate_limited(key, retry_after=header)
-
-        # Then every 429 re-armed, and the live arming is the final expiry
-        final_expiry = mock_storage.get_state(key).cooldown_until
-        assert len(timers.armed) == 3
-        assert coordinator._cooldown_timers[key][1] == final_expiry
-        assert coordinator._cooldown_timers[key][0] is timers.armed[-1]
-        assert timers.armed[-1].interval == pytest.approx(180, abs=2)
-        assert [t.cancelled for t in timers.armed] == [True, True, False]
-
-    def test_a_storm_emits_exactly_one_all_clear_at_its_final_expiry(
-        self, mock_storage, timers
-    ):
-        """Negative: the burst produces one END, and it carries the final expiry."""
-        key = _unique_key("storm_end")
-        coordinator = self._storm_coordinator(mock_storage)
-        mock_bus, emitted = make_mock_event_bus()
-
-        with patch("baldur.services.event_bus.get_event_bus", return_value=mock_bus):
-            for header in (60, 120, 180):
-                coordinator.on_rate_limited(key, retry_after=header)
-            for timer in timers.armed:
-                timer.fire()
-
-        ends = _cooldown_end_events(emitted)
-        assert len(ends) == 1
-        assert ends[0]["data"]["cooldown_until"] == (
-            mock_storage.get_state(key).cooldown_until
-        )
-        assert ends[0]["data"]["key"] == key
-
-    def test_de_gating_the_arming_did_not_de_gate_the_429_event(
-        self, mock_storage, timers
-    ):
-        """Negative: the same burst still emits exactly one RATE_LIMIT_429.
-
-        Only the scheduling side-effect left the debounce gate. The event itself
-        stays debounced — it is a notification, and one per window is the point.
-        """
-        key = _unique_key("storm_debounce")
-        coordinator = self._storm_coordinator(mock_storage)
-        mock_bus, emitted = make_mock_event_bus()
-
-        with patch("baldur.services.event_bus.get_event_bus", return_value=mock_bus):
-            for header in (60, 120, 180):
-                coordinator.on_rate_limited(key, retry_after=header)
-
-        assert len(_429_events(emitted)) == 1
-        assert len(timers.armed) == 3
-
-    def test_a_429_that_does_not_move_the_expiry_leaves_the_timer_alone(
-        self, mock_storage, timers
-    ):
-        """Re-arm once per real extension, not once per 429.
-
-        A shorter candidate loses the monotonic merge, so the effective expiry
-        is unchanged and there is nothing to re-arm. Cancelling and rebuilding a
-        timer per 429 would put a storm's worth of thread churn on the path.
-        """
-        key = _unique_key("no_extension")
-        coordinator = self._storm_coordinator(mock_storage)
-
-        with patch(
-            "baldur.services.event_bus.get_event_bus", return_value=_silent_event_bus()
-        ):
-            coordinator.on_rate_limited(key, retry_after=300)
-            coordinator.on_rate_limited(key, retry_after=5)
-
-        assert len(timers.armed) == 1
-        assert timers.armed[0].cancelled is False
-        assert coordinator._cooldown_timers[key][0] is timers.armed[0]
-
-    def test_an_expiry_already_past_still_yields_one_all_clear(
-        self, mock_storage, timers
-    ):
-        """The silent skip is gone: a lapsed cooldown still owes its all-clear.
-
-        The old scheduler returned on a non-positive delay, so a cooldown that
-        had already expired by arming time armed nothing and announced nothing —
-        leaving the PRO throttle reduced until the next 429 cycle.
-        """
-        from baldur.services.rate_limit_coordinator import (
-            RateLimitCoordinator,
-            RateLimitCoordinatorConfig,
-        )
-        from baldur.services.rate_limit_coordinator.coordinator import (
-            _MIN_COOLDOWN_END_DELAY_SECONDS,
-        )
-
-        key = _unique_key("past_expiry")
-        coordinator = RateLimitCoordinator(
-            storage=mock_storage, config=RateLimitCoordinatorConfig()
-        )
-        mock_bus, emitted = make_mock_event_bus()
-
-        with patch("baldur.services.event_bus.get_event_bus", return_value=mock_bus):
-            coordinator._schedule_cooldown_end_event(key, time.time() - 5)
-            assert timers.armed[0].interval == pytest.approx(
-                _MIN_COOLDOWN_END_DELAY_SECONDS, abs=1e-6
-            )
-            timers.armed[0].fire()
-
-        assert len(_cooldown_end_events(emitted)) == 1
-        assert key not in coordinator._cooldown_timers
-
-    def test_a_re_arm_at_a_fired_expiry_arms_strictly_later_than_it(
-        self, mock_storage, timers
-    ):
-        """The positive clamp is what makes the ownership match decidable.
-
-        ``armed_expiry`` doubles as the ownership token and is no longer
-        monotonically increasing per key (``clear()`` can move it earlier), so
-        the guarantee that a successor never collides with a fired predecessor
-        rests on this clamp rather than on ordering.
-        """
-        from baldur.services.rate_limit_coordinator import (
-            RateLimitCoordinator,
-            RateLimitCoordinatorConfig,
-        )
-
-        key = _unique_key("clamp")
-        coordinator = RateLimitCoordinator(
-            storage=mock_storage, config=RateLimitCoordinatorConfig()
-        )
-        fired_expiry = time.time()
-
-        with patch(
-            "baldur.services.event_bus.get_event_bus", return_value=_silent_event_bus()
-        ):
-            coordinator._schedule_cooldown_end_event(key, fired_expiry)
-
-        assert coordinator._cooldown_timers[key][1] > fired_expiry
-
-    def test_a_stale_callback_announces_nothing_and_keeps_the_successor(
-        self, mock_storage, timers
-    ):
-        """Negative: a cancelled-but-already-fired timer must not speak or unregister.
-
-        ``Timer.cancel()`` cannot stop a callback that has already entered, so a
-        re-arm racing a firing timer leaves two callbacks live. Without the owner
-        match the stale one both announces recovery into the extended cooldown
-        and pops the live successor's registration, leaving the key monitored by
-        nothing at all.
-        """
-        from baldur.services.rate_limit_coordinator import (
-            RateLimitCoordinator,
-            RateLimitCoordinatorConfig,
-        )
-
-        key = _unique_key("stale_callback")
-        coordinator = RateLimitCoordinator(
-            storage=mock_storage, config=RateLimitCoordinatorConfig()
-        )
-        mock_bus, emitted = make_mock_event_bus()
-        now = time.time()
-
-        with patch("baldur.services.event_bus.get_event_bus", return_value=mock_bus):
-            coordinator._schedule_cooldown_end_event(key, now + 60)
-            coordinator._schedule_cooldown_end_event(key, now + 120)
-            stale, live = timers.armed
-
-            # The stale callback runs after its timer was cancelled and replaced
-            stale.fire()
-            assert _cooldown_end_events(emitted) == []
-            assert coordinator._cooldown_timers[key][0] is live
-
-            live.fire()
-
-        assert len(_cooldown_end_events(emitted)) == 1
-        assert key not in coordinator._cooldown_timers
-
-    def test_clear_then_a_shorter_429_re_arms_at_the_new_expiry(
-        self, mock_storage, timers
-    ):
-        """``clear()`` is the operator escape, and it must not strand the all-clear.
-
-        ``clear()`` drops the storage key without touching the timer registry, so
-        a re-arm rule of "only when the expiry moved later" would find the stale
-        far arming already covering the fresh short cooldown and skip it — the
-        operator escapes a bogus hour-long ``Retry-After`` and the throttle stays
-        dampened for that hour anyway.
-        """
-        key = _unique_key("clear_escape")
-        coordinator = self._storm_coordinator(mock_storage)
-        mock_bus, emitted = make_mock_event_bus()
-
-        with patch("baldur.services.event_bus.get_event_bus", return_value=mock_bus):
-            coordinator.on_rate_limited(key, retry_after=3600)
-            coordinator.clear(key)
-            coordinator.on_rate_limited(key, retry_after=30)
-
-            stale, live = timers.armed
-            assert live.interval == pytest.approx(30, abs=2)
-            assert coordinator._cooldown_timers[key][1] == (
-                mock_storage.get_state(key).cooldown_until
-            )
-            assert stale.cancelled is True
-
-            live.fire()
-
-        assert len(_cooldown_end_events(emitted)) == 1
-
-    def test_a_refused_arm_is_logged_and_leaves_no_registry_entry(
-        self, mock_storage, timers
-    ):
-        """A refused ``Timer.start`` must not leave a dead entry behind.
-
-        ``start()`` raises at interpreter shutdown and at a live process's thread
-        ceiling. A registry entry left behind after a refusal is a key no later
-        429 can ever re-arm, because every re-arm compares against the entry that
-        no timer backs.
-        """
-        from baldur.services.rate_limit_coordinator import (
-            RateLimitCoordinator,
-            RateLimitCoordinatorConfig,
-        )
-
-        key = _unique_key("arm_refused")
-        coordinator = RateLimitCoordinator(
-            storage=mock_storage, config=RateLimitCoordinatorConfig()
-        )
-        timers.start_error = RuntimeError("can't start new thread")
-
-        with capture_logs() as logs:
-            coordinator._schedule_cooldown_end_event(key, time.time() + 60)
-
-        assert key not in coordinator._cooldown_timers
-        record = next(
-            log
-            for log in logs
-            if log["event"] == "rate_limit_coordinator.cooldown_timer_arm_failed"
-        )
-        assert record["log_level"] == "warning"
-        assert record["rate_limit_key"] == key
-
-    def test_reset_instance_cancels_every_armed_timer(self, mock_storage, timers):
-        """The registry holds a pair now, and teardown still has to reach the timer."""
-        from baldur.services.rate_limit_coordinator import (
-            RateLimitCoordinator,
-            RateLimitCoordinatorConfig,
-        )
-
-        coordinator = RateLimitCoordinator(
-            storage=mock_storage, config=RateLimitCoordinatorConfig()
-        )
-        RateLimitCoordinator._instance = coordinator
-        try:
-            with patch(
-                "baldur.services.event_bus.get_event_bus",
-                return_value=_silent_event_bus(),
-            ):
-                coordinator._schedule_cooldown_end_event(
-                    _unique_key("reset"), time.time() + 60
-                )
-            RateLimitCoordinator.reset_instance()
-        finally:
-            RateLimitCoordinator._instance = None
-
-        assert timers.armed[0].cancelled is True
-        assert coordinator._cooldown_timers == {}
 
 
 # =============================================================================
@@ -1540,7 +1237,7 @@ class TestOnRateLimitedMonotonicBehavior:
         return RateLimitCoordinator(storage=mock_storage, config=config)
 
     def test_a_headerless_429_does_not_shorten_an_honored_retry_after(
-        self, mock_storage, timers
+        self, mock_storage, announcer
     ):
         """The stored expiry after both 429s is still the honored one."""
         key = _unique_key("monotonic")
@@ -1555,7 +1252,9 @@ class TestOnRateLimitedMonotonicBehavior:
 
         assert mock_storage.get_state(key).cooldown_until == honored_until
 
-    def test_on_rate_limited_returns_the_cooldown_in_force(self, mock_storage, timers):
+    def test_on_rate_limited_returns_the_cooldown_in_force(
+        self, mock_storage, announcer
+    ):
         """The return value is the wait that applies, not the proposal that lost.
 
         Two callers log this number and the operator-facing escalation payload
@@ -1575,7 +1274,7 @@ class TestOnRateLimitedMonotonicBehavior:
         assert in_force == pytest.approx(300, abs=2)
 
     def test_the_cooldown_histogram_observes_the_in_force_value(
-        self, mock_storage, timers
+        self, mock_storage, announcer
     ):
         """Negative: the discarded ~1s candidate is never observed."""
         key = _unique_key("in_force_metric")
@@ -1598,7 +1297,7 @@ class TestOnRateLimitedMonotonicBehavior:
         )
 
     def test_the_429_event_payload_carries_the_effective_expiry(
-        self, mock_storage, timers
+        self, mock_storage, announcer
     ):
         """The event's ``cooldown_until`` is the winner, so the PRO handler's
         per-key copy is right without any change on its side."""
@@ -1616,7 +1315,7 @@ class TestOnRateLimitedMonotonicBehavior:
         assert second["calculated_delay"] == pytest.approx(1.0, abs=0.5)
 
     def test_a_raw_header_string_installs_its_cooldown_instead_of_raising(
-        self, mock_storage, timers
+        self, mock_storage, announcer
     ):
         """The documented direct-drive form passes the header through verbatim.
 
@@ -1638,7 +1337,7 @@ class TestOnRateLimitedMonotonicBehavior:
         assert stored - before == pytest.approx(120, abs=2)
 
     def test_an_http_date_header_installs_a_cooldown_derived_from_that_date(
-        self, mock_storage, timers
+        self, mock_storage, announcer
     ):
         """The HTTP-date form is honored rather than dropped to the ladder.
 
@@ -1666,7 +1365,7 @@ class TestOnRateLimitedMonotonicBehavior:
         ids=["nan", "unparseable", "past-date"],
     )
     def test_an_unusable_header_falls_back_to_the_ladder(
-        self, mock_storage, timers, header
+        self, mock_storage, announcer, header
     ):
         """Every unusable form yields the headerless cooldown, and a real number.
 
@@ -1688,7 +1387,7 @@ class TestOnRateLimitedMonotonicBehavior:
         assert stored - before == pytest.approx(1.0, abs=1)
 
     def test_a_sustained_storm_past_the_backoff_overflow_still_installs_a_cooldown(
-        self, mock_storage, timers
+        self, mock_storage, announcer
     ):
         """The consecutive counter is unbounded, and the ladder must survive it.
 

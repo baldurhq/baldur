@@ -8,6 +8,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- The Adaptive Throttle no longer ramps back up while another worker's 429 cooldown is still in force. `RATE_LIMIT_COOLDOWN_END` used to be a prediction: each worker armed a timer for the expiry *it* had learned, and a peer's later 429 — the ordinary shape of a storm, not an edge — extended the shared cooldown through the store, reaching that worker through no event at all. Its timer then fired on time, the throttle dropped its 429 reduction, recovery dampening started, and outbound throughput climbed back into a provider that was still rate-limiting the fleet; on the Redis event bus one early announcer released every worker's throttle at once. The all-clear is now read from the shared store before it is published, so a worker that missed the extending 429 learns the new expiry and stays reduced instead. While the store cannot be read at all, every announcement in that process is held rather than guessed — the throttle keeps its reduction through the outage and releases at most one probe interval late, never early. **This needs the free core version that ships the verified announcer**; against an older core the timer behaviour is unchanged. Two consequences worth knowing: on the Redis event bus each throttle now receives one all-clear per worker that observed the key's 429 — the state after each is identical, but the audit trail records a recovery start per copy — and an operator `clear()` releases the inbound reduction only where the cleared key's 429 was observed, so on a multi-worker deployment the reduced limit can stand until the observing worker's original expiry.
+
 ## [1.3.0] - 2026-09-04
 
 ### Added

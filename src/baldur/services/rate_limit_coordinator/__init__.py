@@ -24,6 +24,7 @@ import sys
 from typing import Any
 
 # Re-export all public symbols from sub-modules
+from .announcer import CooldownAnnouncer
 from .coordinator import (
     RateLimitCoordinator,
     T,
@@ -59,6 +60,7 @@ __all__ = [
     "_default_is_429",
     "_default_get_retry_after",
     # Coordinator
+    "CooldownAnnouncer",
     "RateLimitCoordinator",
     "get_rate_limit_coordinator",
     "T",
@@ -70,6 +72,7 @@ __all__ = [
 # =============================================================================
 # Sub-module list for dynamic attribute forwarding
 _SUBMODULES = {
+    "announcer": "baldur.services.rate_limit_coordinator.announcer",
     "models": "baldur.services.rate_limit_coordinator.models",
     "helpers": "baldur.services.rate_limit_coordinator.helpers",
     "coordinator": "baldur.services.rate_limit_coordinator.coordinator",
