@@ -6,6 +6,7 @@ Thread-safe in-memory storage for DLQ (Dead Letter Queue) entries.
 
 from __future__ import annotations
 
+import heapq
 import threading
 from datetime import datetime, timedelta
 from typing import Any
@@ -18,6 +19,10 @@ from baldur.interfaces.repositories import (
     FailedOperationData,
     FailedOperationRepository,
     FailedOperationStatus,
+    ReplayablePage,
+    decode_replay_cursor,
+    encode_replay_cursor,
+    replay_cursor_position,
 )
 
 # An entry in one of these statuses is finished — it no longer occupies the
@@ -414,14 +419,30 @@ class InMemoryFailedOperationRepository(FailedOperationRepository):
                 if entry.created_at and start <= entry.created_at <= end
             )
 
-    def find_replayable(
+    def find_replayable_page(
         self,
+        *,
         max_retries: int,
         domain: str | None = None,
         failure_type: str | None = None,
+        source: str | None = None,
         limit: int = 100,
-    ) -> list[FailedOperationData]:
-        """Find operations that can be replayed."""
+        cursor: str | None = None,
+    ) -> ReplayablePage:
+        """Select replayable entries from ``cursor`` onward, oldest first.
+
+        One O(n) pass over the status (or status+domain) index, keeping the
+        ``limit`` smallest by ``(created_at, id)`` with ``heapq.nsmallest`` —
+        O(n log limit) and no materialized sort. This backing is the
+        zero-config default and the pass runs under the same lock ``create()``
+        takes, so sorting a full domain on every call would block capture for
+        the length of each sort.
+
+        The pass has no scan bound: the index is a Python set with no useful
+        iteration order, so stopping partway through would leave the walk
+        unable to say what it had examined, and ``next_cursor`` would skip the
+        members it never looked at.
+        """
         with self._lock:
             pending_status = FailedOperationStatus.PENDING.value
             if domain:
@@ -430,19 +451,54 @@ class InMemoryFailedOperationRepository(FailedOperationRepository):
             else:
                 entry_ids = self._index_by_status.get(pending_status, set())
 
-            results = []
+            floor = decode_replay_cursor(cursor)
+            matches: list[tuple[tuple[float, str], FailedOperationData]] = []
+            highest_examined: FailedOperationData | None = None
+            highest_position: tuple[float, str] | None = None
+
             for entry_id in entry_ids:
-                if len(results) >= limit:
-                    break
                 entry = self._storage.get(entry_id)
-                if entry is None:
+                if entry is None or entry.created_at is None:
                     continue
+                position = replay_cursor_position(entry.created_at, entry.id)
+                if floor is not None and position <= floor:
+                    continue
+                if highest_position is None or position > highest_position:
+                    highest_position = position
+                    highest_examined = entry
                 if entry.retry_count >= max_retries:
                     continue
                 if failure_type and entry.failure_type != failure_type:
                     continue
-                results.append(entry)
-            return results
+                if (
+                    source is not None
+                    and (entry.metadata or {}).get("source") != source
+                ):
+                    continue
+                matches.append((position, entry))
+
+            selected = heapq.nsmallest(limit, matches, key=lambda pair: pair[0])
+            entries = [entry for _, entry in selected]
+
+            # Truncating at ``limit`` leaves matches above the last returned
+            # one, so the cursor may only advance to that entry. Only a pass
+            # that returned every match it found may advance to the highest
+            # position it examined.
+            if len(matches) > len(selected) and selected:
+                boundary = selected[-1][1]
+            else:
+                boundary = highest_examined
+
+            next_cursor = (
+                encode_replay_cursor(boundary.created_at, boundary.id)
+                if boundary is not None and boundary.created_at is not None
+                else None
+            )
+            return ReplayablePage(
+                entries=entries,
+                next_cursor=next_cursor,
+                scan_exhausted=False,
+            )
 
     def find_sla_breached(
         self,

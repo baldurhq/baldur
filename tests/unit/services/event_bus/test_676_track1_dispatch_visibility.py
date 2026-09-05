@@ -185,7 +185,9 @@ class TestOnRecoveryDispatchVisibilityBehavior:
             _on_circuit_breaker_closed(event)
 
         # Then: exactly-once dispatch with the resolved kwargs, counter=dispatched.
-        task_mock.delay.assert_called_once_with(service_name="orders-api", max_items=42)
+        task_mock.delay.assert_called_once_with(
+            service_name="orders-api", max_items=42, max_continuations=100
+        )
         assert len(_events(cap, "event_handler.circuit_breaker_closed_triggered")) == 1
         record.assert_called_once_with("dispatched", service_name="orders-api")
 
@@ -322,7 +324,7 @@ class TestOnRecoveryDispatchSettingsFallbackBehavior:
         # Then: the dispatch used the env-derived settings value, proving the
         # fallback reads settings rather than the old hardcoded 50/100.
         task_mock.delay.assert_called_once_with(
-            service_name="payment-api", max_items=77
+            service_name="payment-api", max_items=77, max_continuations=100
         )
 
 

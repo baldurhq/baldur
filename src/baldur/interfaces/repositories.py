@@ -206,6 +206,76 @@ class FailedOperationData:
         return self.retry_count < self.max_retries
 
 
+# Members a single ``find_replayable_page`` call may examine before it gives
+# up and reports where it stopped. Bounds work per call rather than expressing
+# an operator policy, so it is a constant rather than a settings field; the
+# cursor, not this bound, is what guarantees a caller eventually reaches every
+# matching entry. Deliberately below the per-domain entry ceiling.
+REPLAY_SELECTION_MAX_SCAN = 10_000
+
+# Separator between the two halves of an encoded selection cursor.
+_CURSOR_SEPARATOR = "|"
+
+
+def encode_replay_cursor(created_at: datetime, entry_id: str) -> str:
+    """Encode a ``(created_at, id)`` selection position as a portable string.
+
+    The epoch-float basis is the one every backing store can compare without
+    dialect-specific text handling: it is already the score the Redis indexes
+    carry, and the SQL adapters rebuild a ``datetime`` from it rather than
+    comparing a rendered timestamp (whose separator differs per dialect and
+    sorts below the ISO form). Callers put the encoded form on a task message,
+    so it must stay JSON-serializable.
+    """
+    return f"{created_at.timestamp():.6f}{_CURSOR_SEPARATOR}{entry_id}"
+
+
+def replay_cursor_position(created_at: datetime, entry_id: str) -> tuple[float, str]:
+    """The comparable ``(epoch, id)`` position an encoded cursor round-trips to.
+
+    Rounded to the same microsecond the encoding renders, so a position derived
+    from a live entry and one decoded from that entry's own cursor compare
+    equal. Without the rounding the two differ by up to one float ulp, and an
+    entry whose cursor sorts one ulp low is selected again on every pass.
+    """
+    return round(created_at.timestamp(), 6), entry_id
+
+
+def decode_replay_cursor(cursor: str | None) -> tuple[float, str] | None:
+    """Decode an encoded cursor to ``(epoch_seconds, id)``, or None if unusable.
+
+    A malformed cursor reads as "no cursor" rather than raising: the value
+    arrives over a broker message, and refusing to select at all would strand
+    the queue it was meant to resume.
+    """
+    if not cursor:
+        return None
+    head, separator, entry_id = cursor.partition(_CURSOR_SEPARATOR)
+    if not separator:
+        return None
+    try:
+        return round(float(head), 6), entry_id
+    except ValueError:
+        return None
+
+
+@dataclass
+class ReplayablePage:
+    """One page of replayable entries, plus where the walk stopped.
+
+    ``next_cursor`` is the position a follow-up call resumes strictly after —
+    None when the call examined nothing, in which case the caller keeps the
+    cursor it already had. ``scan_exhausted`` separates "the pool is empty"
+    from "the walk stopped on its own bound": an empty ``entries`` list means
+    neither on its own, because a page can spend its whole budget rejecting
+    members of a failure type it was not asked for.
+    """
+
+    entries: list[FailedOperationData] = field(default_factory=list)
+    next_cursor: str | None = None
+    scan_exhausted: bool = False
+
+
 class DLQCompressedStatus(str, Enum):
     """Lifecycle state machine for compressed DLQ entries."""
 
@@ -648,6 +718,36 @@ class FailedOperationRepository(ABC):
         ...
 
     @abstractmethod
+    def find_replayable_page(
+        self,
+        *,
+        max_retries: int,
+        domain: str | None = None,
+        failure_type: str | None = None,
+        source: str | None = None,
+        limit: int = 100,
+        cursor: str | None = None,
+    ) -> ReplayablePage:
+        """Select replayable entries from ``cursor`` onward, reporting where it stopped.
+
+        Same eligibility as :meth:`find_replayable` — PENDING with
+        ``retry_count < max_retries`` — plus an optional ``source`` match
+        against ``metadata["source"]``, which is how a caller restricts a
+        selection to one capture layer.
+
+        Entries come back ordered by ``(created_at, id)`` ascending, and
+        ``cursor`` resumes strictly after the position it encodes. The pair,
+        not ``created_at`` alone, is both the ordering key and the cursor key:
+        a walk that ordered on the timestamp alone could advance past
+        same-timestamp entries it never returned.
+
+        Implementations loop internally until they have ``limit`` matches or
+        have examined ``REPLAY_SELECTION_MAX_SCAN`` members, because the
+        ``source`` predicate lives inside a JSON payload and one index window
+        can legitimately hold no match at all.
+        """
+        ...
+
     def find_replayable(
         self,
         max_retries: int,
@@ -655,8 +755,19 @@ class FailedOperationRepository(ABC):
         failure_type: str | None = None,
         limit: int = 100,
     ) -> list[FailedOperationData]:
-        """Find operations that can be replayed (pending and retry_count < max_retries)"""
-        ...
+        """Find operations that can be replayed (pending and retry_count < max_retries).
+
+        The unpaged view of :meth:`find_replayable_page`: it starts from the
+        oldest eligible entry and discards the page metadata. Callers that need
+        to resume a walk, or to restrict it to one capture source, use the page
+        selector directly.
+        """
+        return self.find_replayable_page(
+            max_retries=max_retries,
+            domain=domain,
+            failure_type=failure_type,
+            limit=limit,
+        ).entries
 
     @abstractmethod
     def find_sla_breached(

@@ -400,6 +400,13 @@ def _on_circuit_breaker_closed(event: BaldurEvent):
         return
 
     max_items = config.get("on_recovery_max_items", settings.on_recovery_max_items)
+    # Resolved here, next to its sibling, because this is the one resolution
+    # point: continuations carry the bound they were dispatched with, so a
+    # chain runs to the budget it started with and a console edit takes effect
+    # at the next recovery rather than mid-drain.
+    max_continuations = config.get(
+        "on_recovery_max_continuations", settings.on_recovery_max_continuations
+    )
 
     # Trigger the Celery task
     try:
@@ -410,11 +417,13 @@ def _on_circuit_breaker_closed(event: BaldurEvent):
         conditional_replay_on_circuit_close.delay(
             service_name=service_name,
             max_items=max_items,
+            max_continuations=max_continuations,
         )
         logger.info(
             "event_handler.circuit_breaker_closed_triggered",
             service_name=service_name,
             max_items=max_items,
+            max_continuations=max_continuations,
         )
         _record_dispatch_outcome("dispatched", service_name=service_name)
     except ImportError:

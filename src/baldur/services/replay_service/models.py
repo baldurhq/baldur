@@ -92,6 +92,21 @@ class BatchReplayResult:
     # on the next CB close or a manual/scheduled replay. Answers "why weren't all
     # recovered" without inferring it from queue depth.
     capped: bool = False
+    # Where each selection lane of an on-recovery sweep stopped, keyed
+    # `"{failure_type}|{domain or ''}"`. A follow-up pass hands these straight
+    # back so it resumes instead of re-walking the prefix it already crossed;
+    # they are strings because the follow-up arrives over a broker message.
+    lane_cursors: dict[str, str] = field(default_factory=dict)
+    # Lanes whose selector stopped on its scan bound rather than on an empty
+    # pool. Keeps "there is nothing left" distinguishable from "there is more
+    # behind a prefix of another failure type", which an empty result alone
+    # cannot say.
+    scan_exhausted_lanes: list[str] = field(default_factory=list)
     # Domain-priority-based replay info
     priority_used: bool = False
     domains_processed: list[str] | None = None
+
+    @property
+    def scan_exhausted(self) -> bool:
+        """True when any lane stopped on its scan bound."""
+        return bool(self.scan_exhausted_lanes)

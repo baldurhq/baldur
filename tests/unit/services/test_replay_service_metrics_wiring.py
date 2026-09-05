@@ -21,6 +21,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from baldur.interfaces.repositories import ReplayablePage
 from baldur.services.replay_service import (
     ReplayResult,
     ReplayService,
@@ -85,6 +86,7 @@ def mock_repository():
     repo.get_by_id.return_value = FakeFailedOperationData(id=1)
     repo.complete_replay.return_value = None
     repo.find_replayable.return_value = []
+    repo.find_replayable_page.return_value = ReplayablePage()
     return repo
 
 

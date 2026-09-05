@@ -96,12 +96,14 @@ class TestCheckTrafficHealth:
     def test_circuit_breaker_open_blocks(
         self, mock_cb_getter, mock_gate_getter, mock_governance
     ):
-        """Blocked when the circuit breaker is open."""
+        """Blocked when a circuit projecting onto the domain is open."""
         from baldur.tasks.traffic_aware_replay import check_traffic_health
 
-        # CB mock - OPEN state
         mock_cb = MagicMock()
-        mock_cb.get_state.return_value = "open"
+        mock_cb.repository = MagicMock(spec=[])
+        mock_cb.get_all_states.return_value = [
+            {"service_name": "payment", "state": "open"}
+        ]
         mock_cb_getter.return_value = mock_cb
 
         result = check_traffic_health(domain="payment")
@@ -109,25 +111,33 @@ class TestCheckTrafficHealth:
         assert result.is_healthy is False
         assert "circuit_breaker" in result.checks
         assert result.checks["circuit_breaker"] is False
-        assert "open" in result.reason.lower()
+        assert "circuit_open" in result.reason
+        # get_state is get-or-create — reading it would fabricate a CLOSED row
+        # for a name this process has never seen and report it healthy.
+        mock_cb.get_state.assert_not_called()
 
     @patch("baldur_pro.services.governance.checks.check_all_governance")
-    @patch("baldur_pro.services.error_budget_gate.get_error_budget_gate")
-    def test_error_budget_insufficient_blocks(self, mock_gate_getter, mock_governance):
-        """Blocked when the error budget is insufficient."""
+    @patch("baldur.services.circuit_breaker.get_circuit_breaker_service")
+    def test_no_error_budget_leg_is_reported(self, mock_cb_getter, mock_governance):
+        """The report carries no error-budget check.
+
+        The leg it replaced consulted a gate that resolves to nothing on every
+        install; the RuntimeError that raised landed in the generic handler and
+        fail-opened, so the check reported a pass it had never made.
+        """
+        from baldur.services.circuit_breaker import CircuitBreakerService
         from baldur.tasks.traffic_aware_replay import check_traffic_health
 
-        # Error Budget mock - insufficient
-        mock_gate = MagicMock()
-        mock_gate.is_replay_allowed.return_value = False
-        mock_gate_getter.return_value = mock_gate
+        mock_cb = MagicMock(spec=CircuitBreakerService)
+        mock_cb.repository = MagicMock(spec=[])
+        mock_cb.get_all_states.return_value = []
+        mock_cb_getter.return_value = mock_cb
+        mock_governance.return_value = MagicMock(allowed=True, block_message="")
 
         result = check_traffic_health(domain=None)
 
-        assert result.is_healthy is False
-        assert "error_budget" in result.checks
-        assert result.checks["error_budget"] is False
-        assert "budget" in result.reason.lower()
+        assert "error_budget" not in result.checks
+        assert result.is_healthy is True
 
     @patch("baldur_pro.services.governance.checks.check_all_governance")
     @patch("baldur_pro.services.error_budget_gate.get_error_budget_gate")
@@ -214,6 +224,7 @@ class TestTrafficAwareReplayTask:
     def test_healthy_traffic_executes_replay(self):
         """Runs replay when traffic is healthy."""
         from baldur.tasks.traffic_aware_replay import (
+            CircuitProjection,
             TrafficAwareReplayTask,
             TrafficHealthStatus,
         )
@@ -229,18 +240,16 @@ class TestTrafficAwareReplayTask:
             with patch(
                 "baldur.tasks.traffic_aware_replay.check_traffic_health"
             ) as mock_health:
+                projection = CircuitProjection()
                 mock_health.return_value = TrafficHealthStatus.healthy(
-                    checks={
-                        "circuit_breaker": True,
-                        "error_budget": True,
-                        "governance": True,
-                    }
+                    checks={"circuit_breaker": True, "governance": True},
+                    circuits=projection,
                 )
 
                 with patch.object(task, "_execute_replay") as mock_replay:
                     mock_replay.return_value = {"total": 10, "success": 8, "failed": 2}
                     result = task.run()
-                    mock_replay.assert_called_once_with(None, 25)
+                    mock_replay.assert_called_once_with(None, 25, projection)
 
         assert result["status"] == "completed"
         assert result["total"] == 10

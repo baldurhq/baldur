@@ -164,6 +164,7 @@ class TestCBClosedDispatchSingleFireBehavior:
         delay_mock.assert_called_once_with(
             service_name="payment-api",
             max_items=50,
+            max_continuations=100,
         )
 
     @pytest.mark.parametrize("trigger", ["auto", "manual"])
@@ -190,6 +191,7 @@ class TestCBClosedDispatchSingleFireBehavior:
         delay_mock.assert_called_once_with(
             service_name="orders-api",
             max_items=17,
+            max_continuations=100,
         )
 
 
@@ -345,6 +347,7 @@ class TestCBClosedTriggerReplayGateBehavior:
         delay_mock.assert_called_once_with(
             service_name="payment-api",
             max_items=50,
+            max_continuations=100,
         )
 
     @pytest.mark.parametrize("trigger", ["auto", "manual", "manual_reset"])
@@ -394,6 +397,7 @@ class TestCBClosedTriggerReplayGateBehavior:
         delay_mock.assert_called_once_with(
             service_name="payment-api",
             max_items=50,
+            max_continuations=100,
         )
 
 

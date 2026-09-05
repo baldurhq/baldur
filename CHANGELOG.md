@@ -10,12 +10,26 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+### Added
+
+- Automatic replay after a circuit closes now drains the whole backlog, not one batch of it.
+- `BALDUR_REPLAY_AUTOMATION_ON_RECOVERY_MAX_CONTINUATIONS` bounds how far one recovery drains.
+- `dlq_replay_batch_completed` carries `capped`, so "drained everything" and "hit the cap" differ.
+- A drain that stops with work left emits `DLQ_REPLAY_BLOCKED` naming why, not just an error log.
+
 ### Changed
 
 - `RATE_LIMIT_COOLDOWN_END` carries the store's expiry at announce time, `0` for a cleared key.
+- `BALDUR_REPLAY_AUTOMATION_ON_RECOVERY_MAX_ITEMS` now bounds one pass, not one whole recovery.
+- Traffic-aware replay checks each entry domain's own circuits instead of the task argument's.
+- The traffic-aware health report drops its error-budget check, which never checked anything.
 
 ### Fixed
 
+- Automatic replay no longer stalls when a domain's queue is mostly other failure types.
+- Automatic replay no longer drains nothing on Redis when one domain's entries sit behind another's.
+- A recovered circuit no longer replays entries a differently-spelled circuit still holds open.
+- A slow replay handler no longer silently ends the drain when a sweep runs past its time limit.
 - A worker that missed a peer's 429 no longer announces an all-clear while the cooldown is live.
 - One cooldown announcer thread per process replaces one timer thread per rate-limit key.
 - Automatic replay after a circuit closes no longer stops when the audit trail is enabled.

@@ -17,7 +17,7 @@ was not eligible or was already claimed by another worker.
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import structlog
@@ -31,11 +31,15 @@ from baldur.adapters.sql.base import (
     sql_transaction,
 )
 from baldur.interfaces.repositories import (
+    REPLAY_SELECTION_MAX_SCAN,
     DLQCompressedEntry,
     DLQCompressedStatus,
     FailedOperationData,
     FailedOperationRepository,
     FailedOperationStatus,
+    ReplayablePage,
+    decode_replay_cursor,
+    encode_replay_cursor,
 )
 from baldur.settings.sql import SQLDialect
 from baldur.utils.time import utc_now
@@ -46,6 +50,10 @@ logger = structlog.get_logger()
 
 
 _TABLE = "baldur_dlq"
+# Rows one keyset window pulls back before the JSON-residual filter runs. The
+# selector loops over windows until it has its caller's limit or has spent the
+# scan bound, so this only trades round trips against rows read per trip.
+_REPLAY_PAGE_WINDOW = 500
 # v2 adds the compressed-entry (status, compressed_at) index. Every statement
 # in _ddl is IF NOT EXISTS, so an existing install re-runs the set harmlessly
 # and picks up only what it is missing.
@@ -139,6 +147,20 @@ _EVICTION_PROTECTED_STATUSES = (
 # is entirely in flight". Eviction still re-checks protection when it
 # deletes; this only stops protected rows from crowding out the candidates.
 _NON_EVICTABLE_STATUSES = _TERMINAL_STATUSES + _EVICTION_PROTECTED_STATUSES
+
+
+def _coerce_row_id(entry_id: str) -> int | None:
+    """Bind a DTO id back to the integer PK column, or None if it is not one.
+
+    The DTO carries the opaque string form; the keyset seek compares against
+    the dense integer column, and a cursor whose id half is not an integer
+    (a hand-built value, or one minted by another adapter) must degrade to a
+    timestamp-only resume rather than raise on the driver.
+    """
+    try:
+        return int(entry_id)
+    except (TypeError, ValueError):
+        return None
 
 
 class SQLFailedOperationRepository(GenericSQLRepository, FailedOperationRepository):
@@ -515,13 +537,20 @@ class SQLFailedOperationRepository(GenericSQLRepository, FailedOperationReposito
         )
         return int(row[0]) if row else 0
 
-    def find_replayable(
+    def _build_replayable_page_query(
         self,
+        *,
         max_retries: int,
-        domain: str | None = None,
-        failure_type: str | None = None,
-        limit: int = 100,
-    ) -> list[FailedOperationData]:
+        domain: str | None,
+        failure_type: str | None,
+        cursor: str | None,
+    ) -> tuple[str, list[Any]]:
+        """Windowed keyset query for one replayable page, minus the JSON residual.
+
+        ``LIMIT``/``OFFSET`` placeholders are left trailing so the caller can
+        walk windows without rebuilding the statement.
+        """
+        floor = decode_replay_cursor(cursor)
         sql = (
             f"SELECT {_SELECT_COLS} FROM {_TABLE} "
             f"WHERE status = %s AND retry_count < %s"
@@ -533,10 +562,85 @@ class SQLFailedOperationRepository(GenericSQLRepository, FailedOperationReposito
         if failure_type is not None:
             sql += " AND failure_type = %s"
             params.append(failure_type)
-        sql += " ORDER BY created_at ASC LIMIT %s"
-        params.append(limit)
-        rows = self._fetch_all(sql, params)
-        return [self._row_to_data(r) for r in rows]
+        seek_id = _coerce_row_id(floor[1]) if floor is not None else None
+        if floor is not None and seek_id is not None:
+            # Row-value syntax is not portable across the three dialects, so
+            # the same keyset predicate is spelled out; the ORDER BY below is
+            # the identical tuple, which is what makes the seek safe.
+            sql += " AND (created_at > %s OR (created_at = %s AND id > %s))"
+            bound_at = self._dt_to_db(datetime.fromtimestamp(floor[0], tz=UTC))
+            params.extend([bound_at, bound_at, seek_id])
+        sql += " ORDER BY created_at ASC, id ASC LIMIT %s OFFSET %s"
+        return sql, params
+
+    def find_replayable_page(
+        self,
+        *,
+        max_retries: int,
+        domain: str | None = None,
+        failure_type: str | None = None,
+        source: str | None = None,
+        limit: int = 100,
+        cursor: str | None = None,
+    ) -> ReplayablePage:
+        """Keyset-paged replayable selection over ``idx_baldur_dlq_status_domain``.
+
+        The seek binds a rebuilt ``datetime`` through ``_dt_to_db``, never a
+        rendered timestamp: sqlite stores ``created_at`` as TEXT in the
+        driver's own space-separated form, which sorts below the ISO ``T``
+        form, so a string comparison silently matches nothing — and an empty
+        page is exactly how a caller learns the queue is drained.
+
+        ``source`` lives inside the JSON payload, so it is the one residual
+        applied in Python; the loop keeps fetching windows until it has
+        ``limit`` matches or has examined ``REPLAY_SELECTION_MAX_SCAN`` rows.
+        """
+        sql, params = self._build_replayable_page_query(
+            max_retries=max_retries,
+            domain=domain,
+            failure_type=failure_type,
+            cursor=cursor,
+        )
+
+        matches: list[FailedOperationData] = []
+        boundary: FailedOperationData | None = None
+        examined = 0
+        offset = 0
+        scan_exhausted = False
+
+        while len(matches) < limit:
+            window = min(_REPLAY_PAGE_WINDOW, REPLAY_SELECTION_MAX_SCAN - examined)
+            if window <= 0:
+                scan_exhausted = True
+                break
+            rows = self._fetch_all(sql, [*params, window, offset])
+            if not rows:
+                break
+            offset += len(rows)
+            examined += len(rows)
+            for row in rows:
+                entry = self._row_to_data(row)
+                boundary = entry
+                if (
+                    source is not None
+                    and (entry.metadata or {}).get("source") != source
+                ):
+                    continue
+                matches.append(entry)
+                if len(matches) >= limit:
+                    break
+            if len(rows) < window:
+                break
+
+        return ReplayablePage(
+            entries=matches,
+            next_cursor=(
+                encode_replay_cursor(boundary.created_at, boundary.id)
+                if boundary is not None and boundary.created_at is not None
+                else None
+            ),
+            scan_exhausted=scan_exhausted,
+        )
 
     def find_sla_breached(
         self,

@@ -49,6 +49,7 @@ from baldur.interfaces.governance import NoOpGovernanceChecker
 from baldur.interfaces.repositories import (
     FailedOperationData,
     FailedOperationRepository,
+    ReplayablePage,
     ResolutionTrigger,
 )
 from baldur.metrics.event_handlers import DLQMetricEventHandler
@@ -125,6 +126,7 @@ def repository():
     repo.try_acquire_for_replay.return_value = _entry()
     repo.get_by_id.return_value = _entry()
     repo.find_replayable.return_value = []
+    repo.find_replayable_page.return_value = ReplayablePage()
     return repo
 
 
@@ -445,6 +447,7 @@ class TestReplayResolutionRecordingBehavior:
         # Given
         entries = [_entry(id=f"dlq-{i}") for i in range(2)]
         repository.find_replayable.return_value = entries
+        repository.find_replayable_page.return_value = ReplayablePage(entries=entries)
         repository.try_acquire_for_replay.side_effect = entries
         _register(ReplayResult.succeeded(DLQ_ID, "OK"))
 

@@ -47,7 +47,11 @@ class ReplayAutomationSettings(BaseSettings):
     )
     on_recovery_max_items: LargeCount = Field(
         default=100,
-        description="Maximum replay items on CB recovery",
+        description="Maximum replay items per on-recovery pass",
+    )
+    on_recovery_max_continuations: LargeCount = Field(
+        default=100,
+        description="Maximum self-continuations of one on-recovery sweep",
     )
 
     # =========================================================================

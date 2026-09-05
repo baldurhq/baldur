@@ -31,6 +31,7 @@ from baldur.interfaces.governance import GovernanceChecker
 from baldur.interfaces.repositories import (
     FailedOperationData,
     FailedOperationRepository,
+    ReplayablePage,
 )
 from baldur.models.governance import GovernanceCheckResult
 from baldur.services.event_bus.bus.event_bus import BaldurEventBus
@@ -116,22 +117,33 @@ def _service(entries: list[FailedOperationData] | None = None) -> ReplayService:
     thing with the private tier present or absent.
     """
     pool = {entry.id: entry for entry in (entries or [])}
+    # A lane may be asked twice in one pass (quota redistribution), and a real
+    # cursor-fed selector never hands the same entry back — model that.
+    handed_out: set[str] = set()
     repo = MagicMock(spec=FailedOperationRepository)
 
-    def _find(
+    def _find_page(
+        *,
         max_retries: int,
         domain: str | None = None,
         failure_type: str | None = None,
+        source: str | None = None,
         limit: int = 100,
-    ) -> list[FailedOperationData]:
-        return [
+        cursor: str | None = None,
+    ) -> ReplayablePage:
+        matches = [
             entry
             for entry in pool.values()
             if entry.status == "pending"
             and entry.retry_count < max_retries
             and (domain is None or entry.domain == domain)
             and (failure_type is None or entry.failure_type == failure_type)
-        ][:limit]
+            and (source is None or (entry.metadata or {}).get("source") == source)
+            and entry.id not in handed_out
+        ]
+        taken = matches[:limit]
+        handed_out.update(entry.id for entry in taken)
+        return ReplayablePage(entries=taken)
 
     def _acquire(dlq_id: str, max_retries: int) -> FailedOperationData | None:
         entry = pool.get(dlq_id)
@@ -142,7 +154,7 @@ def _service(entries: list[FailedOperationData] | None = None) -> ReplayService:
         entry.retry_count += 1
         return entry
 
-    repo.find_replayable.side_effect = _find
+    repo.find_replayable_page.side_effect = _find_page
     repo.try_acquire_for_replay.side_effect = _acquire
     repo.get_by_id.side_effect = pool.get
 
@@ -295,7 +307,7 @@ class TestCircuitCloseSweepBehavior:
 
         open_circuit_calls = [
             call.kwargs
-            for call in svc.repository.find_replayable.call_args_list
+            for call in svc.repository.find_replayable_page.call_args_list
             if call.kwargs.get("failure_type") == OPEN_CIRCUIT
         ]
         assert len(open_circuit_calls) == 1
@@ -392,7 +404,7 @@ class TestCircuitCloseSweepBehavior:
 
         open_circuit_calls = [
             call.kwargs
-            for call in svc.repository.find_replayable.call_args_list
+            for call in svc.repository.find_replayable_page.call_args_list
             if call.kwargs.get("failure_type") == OPEN_CIRCUIT
         ]
         assert len(open_circuit_calls) == 1
