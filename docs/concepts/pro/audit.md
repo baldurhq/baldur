@@ -55,7 +55,7 @@ The knobs an operator sets most often. The full list lives in the API reference.
 
 | Env Var | Default | What it controls |
 |---------|---------|------------------|
-| `BALDUR_AUDIT_ENABLED` | `false` | Master switch for the audit subsystem. You rarely set it on PRO: an active entitlement switches audit on at startup while this variable is unset. Setting it yourself always wins — `false` keeps audit off on an entitled install, `true` switches it on without one |
+| `BALDUR_AUDIT_ENABLED` | `false` | Master switch for the audit subsystem. You rarely set it on PRO: an active entitlement switches audit on at startup while this variable is unset. Setting it yourself always wins — `false` keeps audit off on an entitled install; `true` turns the subsystem on without one, but selects no backend, so records are accepted and discarded until you select one |
 | `BALDUR_LICENSE_KEY` |  | PRO entitlement (unset in OSS mode); the Audit Trail ships with the PRO tier |
 | `BALDUR_SECRETS_AUDIT_SIGNING_KEY` |  | Keys the HMAC-SHA256 hash chain; a CRITICAL secret — in production, boot aborts if it is missing |
 | `BALDUR_AUDIT_DISTRIBUTED_HASH_CHAIN` | `false` | Redis-backed hash chain — required for multi-host deployments (≥2 pods) |

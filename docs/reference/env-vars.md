@@ -89,7 +89,11 @@ BALDUR_AUDIT_BUFFER_REDIS_ENABLED=true     # set-to-enable: Redis staging buffer
 An active PRO entitlement switches the audit subsystem on at startup and selects
 the hash-chain backend, so a PRO install needs neither variable. Setting
 `BALDUR_AUDIT_ENABLED` yourself always wins — `false` keeps audit off on an
-entitled install, `true` switches it on without one.
+entitled install, and `true` turns the subsystem on without one — but with no
+entitlement **no backend is selected**, so records are accepted and discarded
+until you select one. Startup says so: an `audit.backend_unwired` warning plus
+`audit_backend_wired=0`. The activation steps are in
+`docs/runbooks/audit-trail-activation.md`.
 
 `BALDUR_AUDIT_DISTRIBUTED_HASH_CHAIN` (default `false`) moves hash-chain
 sequencing from a per-host file lock to Redis. A deployment where two or more
