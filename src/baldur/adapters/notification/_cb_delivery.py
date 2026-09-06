@@ -36,6 +36,7 @@ def _send_cb_notification_oss(
     event_type: str,
     timestamp: str,
     extra_metadata: dict | None = None,
+    fallback_webhook_url: str = "",
 ) -> dict:
     """Deliver a CB notification on an OSS-only install, outside the seam.
 
@@ -50,6 +51,13 @@ def _send_cb_notification_oss(
     the single sanctioned out-of-seam external-push exception. Best-effort and
     fail-open — ``adapter.send()`` never raises, so a delivery failure returns
     ``notification_sent=False`` without raising into the caller.
+
+    ``fallback_webhook_url`` is consulted only when the meta-watchdog home
+    is unset. It exists for the one caller that reaches this floor on a PRO
+    *install* — a deployment whose entitlement verdict went non-ACTIVE —
+    which will typically have configured the PRO hub's webhook home and not
+    the OSS one. Callers on a genuinely OSS-only install pass nothing, so
+    their resolution is unchanged.
     """
     from baldur.interfaces.notification import (
         LoggingNotificationAdapter,
@@ -81,7 +89,7 @@ def _send_cb_notification_oss(
         metadata=metadata,
     )
 
-    webhook_url = get_meta_watchdog_settings().slack_webhook_url
+    webhook_url = get_meta_watchdog_settings().slack_webhook_url or fallback_webhook_url
     if webhook_url:
         adapter: NotificationAdapter = SlackWebhookNotificationAdapter(
             webhook_url=webhook_url
@@ -108,12 +116,15 @@ def _send_cb_open_notification_oss(
     *,
     service_name: str,
     timestamp: str,
+    fallback_webhook_url: str = "",
 ) -> dict:
     """Build + deliver the OSS CB OPEN push (single home of the OPEN payload).
 
     Owns the OPEN title / message / priority / event-type literals; forwards to
     :func:`_send_cb_notification_oss`. Called by both the Celery task and the
-    EventBus handler ``ImportError`` branches so the OPEN payload exists once.
+    EventBus handler ``ImportError`` branches so the OPEN payload exists once,
+    and by the task's unentitled branch, which supplies
+    ``fallback_webhook_url``.
     """
     return _send_cb_notification_oss(
         service_name=service_name,
@@ -122,6 +133,7 @@ def _send_cb_open_notification_oss(
         priority_name="high",
         event_type="circuit_breaker_opened",
         timestamp=timestamp,
+        fallback_webhook_url=fallback_webhook_url,
     )
 
 
@@ -131,12 +143,14 @@ def _send_cb_close_notification_oss(
     timestamp: str,
     previous_state: str,
     trigger: str,
+    fallback_webhook_url: str = "",
 ) -> dict:
     """Build + deliver the OSS CB CLOSED (recovery stand-down) push.
 
     Single home of the CLOSED payload literals (title / message / priority /
     event-type / ``previous_state`` + ``trigger`` metadata); forwards to
-    :func:`_send_cb_notification_oss`. Low-urgency parity with the OPEN wrapper.
+    :func:`_send_cb_notification_oss`. Low-urgency parity with the OPEN
+    wrapper, ``fallback_webhook_url`` included.
     """
     return _send_cb_notification_oss(
         service_name=service_name,
@@ -152,4 +166,5 @@ def _send_cb_close_notification_oss(
             "previous_state": previous_state,
             "trigger": trigger,
         },
+        fallback_webhook_url=fallback_webhook_url,
     )

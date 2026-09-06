@@ -59,6 +59,16 @@ def apply_pending_config_changes(self):
 
     task_id = self.request.id
 
+    # The lane gate and its in-process twin each read the verdict once, in the
+    # process that composes the schedule. A worker that starts later, or a
+    # licence that lapses after composition, leaves this task firing on cadence
+    # against a verdict that is no longer ACTIVE. Checked here, ahead of the
+    # audit write, so a lapsed deployment stops writing a WARNING and a blocked
+    # audit row every 30s for as long as it stays lapsed.
+    if _entitlement_refuses_config_apply():
+        logger.debug("config_task.skipped_not_entitled")
+        return {"status": "skipped", "reason": "not_entitled"}
+
     try:
         service = get_config_apply_service()
         result = service.apply_pending_changes()
@@ -252,6 +262,21 @@ def cleanup_expired_config_changes(max_age_hours: int | None = None):
             "status": "error",
             "error": str(e),
         }
+
+
+def _entitlement_refuses_config_apply() -> bool:
+    """Whether this worker must refuse the config-apply task for lack of a licence.
+
+    Presence first, and presence alone answers it on an OSS-only install: there
+    the service's own "manager unavailable" answer is the accurate one, and
+    telling such a deployment its licence is the problem would be wrong.
+
+    Fails closed, matching the lane gate below.
+    """
+    from baldur.core.entitlement import is_entitlement_active
+    from baldur.utils.tier import is_pro_installed
+
+    return is_pro_installed() and not is_entitlement_active()
 
 
 def _config_apply_lane_enabled() -> bool:

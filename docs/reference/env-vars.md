@@ -112,6 +112,25 @@ BALDUR_LICENSE_KEY=<base64>
 BALDUR_LICENSE_FILE=/etc/baldur/license
 ```
 
+Set one of the two. The verdict is validated at startup and re-checked at most
+once every 24 hours, so a licence that expires or is removed takes effect
+within a day without a restart.
+
+Without an active entitlement the PRO tier does not register, and PRO behaviour
+reached by direct import is withheld as well: notifications are suppressed
+rather than delivered (the suppression reason is `not_entitled`), scheduled and
+graceful config changes are skipped, postmortem capture and auto-sealing stop,
+and background DLQ overflow eviction does not run.
+
+Three things keep working on purpose. Circuit-breaker OPEN and CLOSED alerts
+fall back to the OSS push instead of going silent — set
+`BALDUR_META_WATCHDOG_SLACK_WEBHOOK_URL` for it, though
+`BALDUR_CHANNEL_TARGET_SLACK_WEBHOOK_URL` is used as a fallback if only that one
+is set; the OSS push carries no deduplication, so a breaker that flaps can
+produce repeat messages. Already-captured postmortems stay readable. An
+emergency mode that was activated while entitled still expires and restores on
+its own — otherwise a lapse would strand the deployment in it.
+
 ## Secrets (production boot gate)
 
 ```bash

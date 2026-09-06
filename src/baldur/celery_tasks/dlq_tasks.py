@@ -662,11 +662,29 @@ def evict_overflow_dlq_entries(self) -> dict:
 
     Distributed lock prevents concurrent compression across workers
     when compress_oldest strategy is active.
-    """
-    from baldur_pro.services.dlq.overflow import run_background_eviction
 
+    PRO behaviour, so it needs an ACTIVE entitlement verdict. Refusing defers
+    nothing: without one the DLQ store backing resolves to the OSS capture
+    service, which enforces its overflow bound synchronously at store time, so
+    this lazy sweep has no backlog to work on.
+    """
     task_id = self.request.id or "unknown"
     bound_logger = logger.bind(task_id=task_id)
+
+    from baldur.core.entitlement import is_entitlement_active
+    from baldur.utils.tier import is_pro_installed
+
+    if is_pro_installed() and not is_entitlement_active():
+        bound_logger.debug("dlq.overflow_eviction_skipped_not_entitled")
+        return {"status": "skipped", "reason": "not_entitled"}
+
+    try:
+        from baldur_pro.services.dlq.overflow import run_background_eviction
+    except ImportError:
+        # OSS-only worker: the OSS capture service already bounds the queue at
+        # store time, so there is nothing for this lane to do.
+        bound_logger.debug("dlq.overflow_eviction_skipped_pro_absent")
+        return {"status": "skipped", "reason": "pro_not_installed"}
 
     # Distributed lock: prevent concurrent compression across workers
     lock = None

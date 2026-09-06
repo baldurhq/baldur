@@ -73,6 +73,7 @@ if TYPE_CHECKING:
         EntitlementResult,
         EntitlementStatus,
         get_entitlement_status,
+        is_entitlement_active,
         reset_entitlement_status,
     )
     from baldur.core.exceptions import (
@@ -271,6 +272,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "EntitlementResult": ("baldur.core.entitlement", "EntitlementResult"),
     "EntitlementStatus": ("baldur.core.entitlement", "EntitlementStatus"),
     "get_entitlement_status": ("baldur.core.entitlement", "get_entitlement_status"),
+    "is_entitlement_active": ("baldur.core.entitlement", "is_entitlement_active"),
     "reset_entitlement_status": ("baldur.core.entitlement", "reset_entitlement_status"),
     "CompensationError": ("baldur.core.exceptions", "CompensationError"),
     "ConcurrencyConflictError": ("baldur.core.exceptions", "ConcurrencyConflictError"),
@@ -420,6 +422,7 @@ __all__ = [
     "EntitlementError",
     "EntitlementResult",
     "get_entitlement_status",
+    "is_entitlement_active",
     "reset_entitlement_status",
     # Types
     "CircuitState",

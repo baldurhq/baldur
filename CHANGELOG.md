@@ -23,6 +23,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `BALDUR_REPLAY_AUTOMATION_ON_RECOVERY_MAX_ITEMS` now bounds one pass, not one whole recovery.
 - Traffic-aware replay checks each entry domain's own circuits instead of the task argument's.
 - The traffic-aware health report drops its error-budget check, which never checked anything.
+- An inactive PRO entitlement now stops PRO notifications, config apply and DLQ eviction.
+- Circuit-breaker alerts fall back to the OSS push when the PRO entitlement is not active.
 
 ### Fixed
 
@@ -36,6 +38,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - The audit trail no longer stops for the rest of a process after one failed log-file open.
 - The audit trail no longer records a row per request when no tiering configuration is set.
 - Flask and FastAPI graceful shutdown now waits for in-flight requests before closing audit and DLQ.
+- A briefly unreadable licence file no longer pins "not entitled" for the next 24 hours.
+- Suppressed notifications are no longer logged as sent.
 
 ### Removed
 

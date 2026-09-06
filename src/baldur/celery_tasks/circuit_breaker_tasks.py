@@ -268,6 +268,44 @@ def force_close_circuit_breaker(
         }
 
 
+def _cb_notification_falls_back_to_oss_floor() -> bool:
+    """Whether this CB push must take the OSS floor instead of the PRO hub.
+
+    True only on a PRO **install** whose entitlement verdict is not ACTIVE.
+    An OSS-only install answers False and reaches the floor the way it always
+    has, through the ``ImportError`` branch, so its behaviour and its logs are
+    unchanged.
+
+    An unentitled PRO install takes the OSS floor rather than refusing: a
+    circuit-breaker alert that no longer arrives is worse than the OSS tier's
+    own behaviour, and this push is the sanctioned out-of-seam OSS exception
+    precisely so the floor exists. The verdict is read before the PRO import,
+    so the PRO manager is never constructed on that branch.
+    """
+    from baldur.core.entitlement import is_entitlement_active
+    from baldur.utils.tier import is_pro_installed
+
+    return is_pro_installed() and not is_entitlement_active()
+
+
+def _oss_floor_fallback_webhook_url() -> str:
+    """Webhook home to fall back on when the OSS floor's own home is unset.
+
+    A PRO deployment configures the notification hub's Slack target, which is a
+    different setting from the one the OSS circuit-breaker push reads. Without
+    this fallback a lapsed PRO install would reach a "floor" that delivers
+    nothing. Best-effort: a settings fault degrades to the floor's own
+    resolution rather than failing the task.
+    """
+    try:
+        from baldur.settings.channel_target import get_channel_target_settings
+
+        return get_channel_target_settings().slack_webhook_url
+    except Exception as e:
+        logger.debug("send_cb_notification.fallback_webhook_unavailable", error=e)
+        return ""
+
+
 @shared_task(
     bind=True,
     name="baldur.celery_tasks.send_cb_open_notification",
@@ -302,6 +340,19 @@ def send_cb_open_notification(
         service_name=service_name,
         retry_attempt=self.request.retries + 1,
     )
+
+    if _cb_notification_falls_back_to_oss_floor():
+        logger.debug(
+            "send_cb_open_notification.skipped_not_entitled",
+            service_name=service_name,
+        )
+        from baldur.adapters.notification import _send_cb_open_notification_oss
+
+        return _send_cb_open_notification_oss(
+            service_name=service_name,
+            timestamp=timestamp,
+            fallback_webhook_url=_oss_floor_fallback_webhook_url(),
+        )
 
     try:
         from baldur_pro.services.unified_notification import (
@@ -425,6 +476,21 @@ def send_cb_close_notification(
         service_name=service_name,
         retry_attempt=self.request.retries + 1,
     )
+
+    if _cb_notification_falls_back_to_oss_floor():
+        logger.debug(
+            "send_cb_close_notification.skipped_not_entitled",
+            service_name=service_name,
+        )
+        from baldur.adapters.notification import _send_cb_close_notification_oss
+
+        return _send_cb_close_notification_oss(
+            service_name=service_name,
+            timestamp=timestamp,
+            previous_state=previous_state,
+            trigger=trigger,
+            fallback_webhook_url=_oss_floor_fallback_webhook_url(),
+        )
 
     try:
         from baldur_pro.services.unified_notification import (
