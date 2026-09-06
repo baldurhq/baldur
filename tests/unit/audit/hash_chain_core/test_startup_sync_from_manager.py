@@ -36,7 +36,11 @@ import pytest
 
 from baldur.audit.integrity import RedisHashChainManager, StartupHashChainSync
 from baldur.audit.integrity import sync as sync_module
-from baldur.audit.integrity.sync import PENDING_SCAN_BATCH, PENDING_SCAN_MAX_KEYS
+from baldur.audit.integrity.sync import (
+    PENDING_SCAN_BATCH,
+    PENDING_SCAN_MAX_KEYS,
+    PENDING_SCAN_MAX_SECONDS,
+)
 from baldur.settings.audit_integrity import (
     get_audit_integrity_settings,
     reset_audit_integrity_settings,
@@ -168,22 +172,65 @@ class TestStartupSyncPendingScanContract:
         their own short TTL and expire unaided."""
         assert PENDING_SCAN_MAX_KEYS == 10_000
 
+    def test_the_sweep_carries_a_wall_clock_ceiling(self):
+        """The key cap counts matches, so it cannot bound a walk over a
+        keyspace that holds none. Elapsed time is the bound that binds."""
+        assert PENDING_SCAN_MAX_SECONDS == 2.0
+
 
 class TestStartupSyncPendingScan:
     """The sweep's Redis interaction, its cap, and where orphans land."""
 
-    def test_the_sweep_uses_scan_iter_with_the_batch_hint(
+    def test_the_sweep_drives_scan_with_the_batch_hint(
         self, manager, redis_client, tmp_path
     ):
         redis_client.set(_pending_key(1), "expected-hash")
         sync = StartupHashChainSync.from_manager(manager, tmp_path, _ROOT_PREFIX)
 
-        with patch.object(
-            redis_client, "scan_iter", wraps=redis_client.scan_iter
-        ) as spy:
+        with patch.object(redis_client, "scan", wraps=redis_client.scan) as spy:
             sync.sync()
 
-        spy.assert_called_once_with(match=_PENDING_PATTERN, count=PENDING_SCAN_BATCH)
+        assert spy.call_args_list[0].kwargs["match"] == _PENDING_PATTERN
+        assert spy.call_args_list[0].kwargs["count"] == PENDING_SCAN_BATCH
+
+    def test_a_keyspace_with_no_matches_is_still_bounded_by_the_deadline(
+        self, manager, redis_client, tmp_path, monkeypatch
+    ):
+        """The bound has to hold on the keyspace it exists for.
+
+        PENDING keys carry a short TTL, so the normal state of a Redis shared
+        with an application cache is millions of keys and zero matches. An
+        iterator-driven sweep hands control back only per *match*, so a budget
+        checked in the loop body never runs at all there and the walk is
+        bounded only by the size of the server's keyspace — inside ``init()``,
+        under the init lock, in every worker. Driving the cursor is what makes
+        the deadline reachable.
+        """
+        for i in range(2_000):
+            redis_client.set(f"app:cache:{i}", "unrelated")
+        # Negative, not 0.0: the platform monotonic clock has ~16 ms
+        # granularity, so a zero budget can still read as "not yet elapsed"
+        # across ten fast round trips and the arm would pass vacuously.
+        monkeypatch.setattr(sync_module, "PENDING_SCAN_MAX_SECONDS", -1.0)
+        sync = StartupHashChainSync.from_manager(manager, tmp_path, _ROOT_PREFIX)
+
+        with (
+            patch.object(sync_module, "logger") as mock_logger,
+            patch.object(redis_client, "scan", wraps=redis_client.scan) as spy,
+        ):
+            sync.sync()
+
+        assert spy.call_count == 1, (
+            "an expired deadline must stop the walk after one round trip; "
+            f"took {spy.call_count}"
+        )
+        capped = [
+            call
+            for call in mock_logger.warning.call_args_list
+            if call.args and call.args[0] == "startup_sync.pending_scan_capped"
+        ]
+        assert len(capped) == 1
+        assert capped[0].kwargs["limit"] == "max_seconds"
 
     def test_the_sweep_never_calls_keys(self, manager, redis_client, tmp_path):
         """``KEYS`` blocks the whole server for the length of the scan, and
@@ -283,6 +330,7 @@ class TestStartupSyncPendingScan:
             if call.args and call.args[0] == "startup_sync.pending_scan_capped"
         ]
         assert len(capped) == 1
+        assert capped[0].kwargs["limit"] == "max_keys"
         assert capped[0].kwargs["examined"] == 3
         assert capped[0].kwargs["cleaned"] == 3
 

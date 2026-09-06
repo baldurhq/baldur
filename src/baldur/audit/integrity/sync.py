@@ -8,6 +8,7 @@ Contains:
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -24,11 +25,19 @@ logger = structlog.get_logger()
 # the batch the event journal's own scan already uses.
 PENDING_SCAN_BATCH = 200
 
-# Upper bound on keys examined by one boot sweep. The cleanup is best-effort
-# by contract — PENDING keys carry their own short TTL and expire unaided — so
-# a capped sweep loses nothing a crash-recovery path depends on, while an
-# uncapped one lets one oversized keyspace hold up every process start.
+# Upper bound on PENDING keys *processed* by one boot sweep. The cleanup is
+# best-effort by contract — PENDING keys carry their own short TTL and expire
+# unaided — so a capped sweep loses nothing a crash-recovery path depends on.
 PENDING_SCAN_MAX_KEYS = 10_000
+
+# Wall-clock ceiling on the same sweep, and the bound that actually protects
+# boot time. ``SCAN`` with a ``MATCH`` filters server-side and returns only
+# matches, so a key-count cap cannot bound the walk: a Redis shared with an
+# application cache can hold millions of keys and zero live PENDING ones, and
+# the loop body — where the count is taken — never runs. This sweep executes
+# inside ``init()`` under the init lock, so an unbounded walk is start-up time
+# in every worker. Only elapsed time bounds it.
+PENDING_SCAN_MAX_SECONDS = 2.0
 
 
 class StartupHashChainSync:
@@ -345,6 +354,94 @@ class StartupHashChainSync:
             )
             raise
 
+    def _orphan_pending_key(self, key: Any, orphan_ttl: int) -> bool:
+        """Move one PENDING reservation to ORPHANED.
+
+        The ORPHANED key follows the PENDING prefix, not the chain prefix:
+        orphans are the pending namespace's other half, and the only reader of
+        them scans the bare form. An orphan written under the chain prefix is a
+        record nothing will ever find.
+
+        Args:
+            key: The PENDING key, as the client returned it.
+            orphan_ttl: Retention for the ORPHANED marker, in seconds.
+
+        Returns:
+            ``True`` when the key was moved. A key whose trailing segment is
+            not an integer is skipped rather than raised on — one hand-written
+            key must not cost the rest of the crash recovery.
+        """
+        try:
+            key_str = key.decode("utf-8") if isinstance(key, bytes) else key
+            seq = int(key_str.split(":")[-1])
+        except (ValueError, IndexError):
+            return False
+
+        orphan_key = f"{self._pending_key_prefix}audit:hash_chain:orphaned:{seq}"
+        expected_hash = self._redis.get(key)
+
+        pipe = self._redis.pipeline()
+        pipe.delete(key)
+        pipe.set(orphan_key, expected_hash or "startup_cleanup", ex=orphan_ttl)
+        pipe.execute()
+        return True
+
+    def _sweep_pending_keys(self, orphan_ttl: int) -> tuple[int, int, str]:
+        """Walk the PENDING namespace once, within both of its bounds.
+
+        Drives the cursor rather than using ``scan_iter``. The iterator helper
+        yields only *matching* keys, so with a MATCH filter it returns control
+        once per match — and this pattern normally matches nothing, since
+        PENDING keys carry a short TTL and expire on their own. A budget
+        checked inside that loop therefore never executes on the one keyspace
+        it exists to protect against: a Redis shared with an application cache,
+        holding millions of keys and no live reservations. This sweep runs
+        inside ``init()`` under the init lock, so an unbounded walk is start-up
+        time in every worker. One explicit ``SCAN`` per round trip is what lets
+        the deadline bind.
+
+        Args:
+            orphan_ttl: Retention for each ORPHANED marker, in seconds.
+
+        Returns:
+            ``(cleaned, examined, capped)``. ``capped`` names the bound that
+            stopped the walk — ``"max_keys"``, ``"max_seconds"`` — or is empty
+            when the walk finished on its own.
+        """
+        cleaned = 0
+        examined = 0
+        capped = ""
+        deadline = time.monotonic() + PENDING_SCAN_MAX_SECONDS
+        pending_pattern = f"{self._pending_key_prefix}audit:hash_chain:pending:*"
+
+        cursor: Any = 0
+        while True:
+            cursor, batch = self._redis.scan(
+                cursor=cursor,
+                match=pending_pattern,
+                count=PENDING_SCAN_BATCH,
+            )
+
+            for key in batch:
+                if examined >= PENDING_SCAN_MAX_KEYS:
+                    capped = "max_keys"
+                    break
+                examined += 1
+                if self._orphan_pending_key(key, orphan_ttl):
+                    cleaned += 1
+
+            if capped:
+                break
+            if time.monotonic() > deadline:
+                capped = "max_seconds"
+                break
+            # Cursor 0 (or "0" from a client that echoes strings) ends the
+            # walk; anything else is another round trip.
+            if not cursor or cursor == "0":
+                break
+
+        return cleaned, examined, capped
+
     def _cleanup_pending_sequences(self) -> int:
         """
         Clean up stale PENDING sequences from previous crashes.
@@ -360,51 +457,13 @@ class StartupHashChainSync:
             )
 
             orphan_ttl = get_audit_integrity_settings().orphan_ttl_seconds
-            pending_pattern = f"{self._pending_key_prefix}audit:hash_chain:pending:*"
-
-            cleaned = 0
-            examined = 0
-            capped = False
-            for key in self._redis.scan_iter(
-                match=pending_pattern,
-                count=PENDING_SCAN_BATCH,
-            ):
-                examined += 1
-                if examined > PENDING_SCAN_MAX_KEYS:
-                    capped = True
-                    break
-
-                try:
-                    key_str = key.decode("utf-8") if isinstance(key, bytes) else key
-                    seq_str = key_str.split(":")[-1]
-                    seq = int(seq_str)
-
-                    # Move to ORPHANED. Follows the PENDING prefix, not the
-                    # chain prefix: orphans are the pending namespace's other
-                    # half and the only reader of them scans the bare form.
-                    orphan_key = (
-                        f"{self._pending_key_prefix}audit:hash_chain:orphaned:{seq}"
-                    )
-                    expected_hash = self._redis.get(key)
-
-                    pipe = self._redis.pipeline()
-                    pipe.delete(key)
-                    pipe.set(
-                        orphan_key,
-                        expected_hash or "startup_cleanup",
-                        ex=orphan_ttl,
-                    )
-                    pipe.execute()
-
-                    cleaned += 1
-
-                except (ValueError, IndexError):
-                    continue
+            cleaned, examined, capped = self._sweep_pending_keys(orphan_ttl)
 
             if capped:
                 logger.warning(
                     "startup_sync.pending_scan_capped",
-                    examined=PENDING_SCAN_MAX_KEYS,
+                    limit=capped,
+                    examined=examined,
                     cleaned=cleaned,
                 )
 
@@ -428,4 +487,5 @@ __all__ = [
     "StartupHashChainSync",
     "PENDING_SCAN_BATCH",
     "PENDING_SCAN_MAX_KEYS",
+    "PENDING_SCAN_MAX_SECONDS",
 ]
