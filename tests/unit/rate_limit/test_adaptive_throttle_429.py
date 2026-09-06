@@ -211,6 +211,23 @@ class TestAdaptiveThrottleCooldownEndRecovery:
             )
             mock_recovery.assert_called_once()
 
+    def test_cooldown_end_without_a_reduction_arms_no_recovery_ramp(
+        self, adaptive_throttle
+    ):
+        """감축이 없었으면 COOLDOWN_END는 램프를 무장하지 않는다 (negative twin).
+
+        Nothing was taken, so moving the limit here would be a reduction
+        dressed as a recovery.
+        """
+        assert adaptive_throttle._429_reduction_active is False
+        initial = adaptive_throttle.current_limit
+
+        adaptive_throttle._handle_cooldown_end(make_cooldown_end_event(key="test_api"))
+
+        assert adaptive_throttle.current_limit == initial
+        assert adaptive_throttle.is_recovery_dampening_active() is False
+        assert adaptive_throttle._recovery_dampening_last_time == 0.0
+
     def test_cooldown_end_handles_event_object(self, adaptive_throttle):
         """COOLDOWN_END에서 BaldurEvent 객체 처리."""
         adaptive_throttle._rate_limit_keys["test_api"] = time.time() + 10
