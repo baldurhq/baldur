@@ -39,12 +39,17 @@ the context needed to replay it, size limits plus the overflow strategy bound
 the queue, and the non-blocking outbox keeps capture off the request hot path.
 On every exit path — a signalled stop or a worker recycle — the outbox is torn
 down under one budget so buffered entries reach the store or the local fallback
-instead of dying with the process.
+instead of dying with the process. On the `protect(dlq=True)` / `@dlq_protect`
+chain, capture has two triggers: the final failure after retries are exhausted,
+and a call an already-open circuit rejected, so that work is replayed on recovery
+instead of dropped. The second trigger is on by default and has its own switch;
+the Django middleware's preemptive store and the Celery terminal capture keep theirs.
 
 ```bash
 BALDUR_DLQ_ENABLED=true
 BALDUR_DLQ_MAX_SIZE=100000
 BALDUR_DLQ_OUTBOX_ENABLED=true
+BALDUR_DLQ_OPEN_CIRCUIT_CAPTURE_ENABLED=true  # park a call an OPEN circuit rejected for replay on recovery; false keeps only the retry-exhaustion capture. protect(dlq=True) / @dlq_protect chain only
 BALDUR_DLQ_OUTBOX_JOIN_TIMEOUT_SECONDS=5.0  # total teardown budget (s) per exiting process: flush buffered entries, join the writer, then spill the rest to the local fallback; 0.1-60. Keep it below the process watchdog (gunicorn --timeout, Kubernetes terminationGracePeriodSeconds); a non-zero remainder at the deadline is reported as dlq_outbox.shutdown_dump_incomplete
 ```
 

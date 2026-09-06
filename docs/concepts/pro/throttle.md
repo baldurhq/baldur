@@ -71,8 +71,9 @@ its trend). After the work returns, you hand the throttle the **response time**,
 evidence it uses to steer the limit.
 
 The limit itself always lives between a **floor** and a **ceiling** you configure, starting from an
-initial value. It never drops below the floor (so the service never throttles itself to a
+initial value. On its own it never drops below the floor (so the service never throttles itself to a
 standstill) and never rises above the ceiling (so it can't admit more than you've decided is safe).
+The one thing that overrides the floor is a hard stop (described below), which pins the limit at zero.
 Between those bounds it moves on its own, re-evaluated at most once per sampling interval so it
 adjusts smoothly rather than thrashing on every request.
 
@@ -104,8 +105,10 @@ stateDiagram-v2
 `429` cooldown against an upstream ends, the error budget recovers, or a hard stop is released),
 the throttle does **not** snap the limit straight back to full. It ramps in stages (roughly
 80% → 90% → 100%, about 30 seconds apart). The gradient keeps running while the ramp is in
-progress, but each scheduled stage re-asserts its own target when it lands, so the ramp's
-schedule — not the gradient — is what sets the pace at which the floodgates reopen.
+progress, but each scheduled stage brings the limit to its own target when it lands (after a
+`429` cooldown a stage only ever raises the limit; it never takes back ground the gradient has
+already regained), so the ramp's schedule, not the gradient, is what sets the pace at which the
+floodgates reopen.
 
 **Rejected requests are preserved.** A request the throttle turns away can be captured — together
 with the context needed to run it again — into Baldur's dead-letter queue (critical-tier
@@ -127,12 +130,13 @@ each other instead of pulling in opposite directions.
 **It degrades the right traffic first.** Each check can carry a tier — `critical`, `standard`, or
 `non_essential`. When the limit has been pulled down because an upstream is answering `429`,
 critical-tier traffic is still checked against the limit that stood before that reduction, and
-when the error budget is in trouble, non-essential traffic is rejected outright. The cuts land on
+once the error budget has run critically low, non-essential traffic is rejected outright. The cuts land on
 the least important work.
 
-**It can be frozen, and that's deliberate.** A top-level emergency or an engaged kill switch
-**freezes** limit changes: the gradient keeps computing so the throttle is ready to resume the
-instant control returns, but it stops *applying* changes while the operator is in control. An
+**It can be frozen, and that's deliberate.** A top-level emergency pins the limit at its floor and
+**freezes** it there; an engaged kill switch freezes it wherever it stands. In both cases the
+gradient keeps computing so the throttle is ready to resume the instant control returns, but it
+stops *applying* changes while the operator is in control. An
 audited break-glass override releases a hard stop and starts the dampened recovery above.
 Releasing the kill switch alone does not lift a hard stop: while one is in force the limit stays
 at zero, and recovery starts only when the hard stop itself is released (its trigger conditions
@@ -150,8 +154,10 @@ schedule — which means dozens of workers hammering an already-overwhelmed depe
 moment, a self-inflicted denial of service. The coordinator replaces that with one shared decision:
 a single global **cooldown** that every worker observes, using exponential backoff with random
 jitter so the retries, when they do come, are spread out rather than synchronized. The first
-request sent after a cooldown ends is treated as a **canary** — a single scout that checks whether
-the dependency has actually recovered before the rest of the fleet resumes. Wrapping an outbound
+request each worker sends after a cooldown ends is flagged as a **canary** on the result the
+coordinator hands back: a scout whose outcome settles the question. A success clears the shared
+backoff ladder; another `429` re-arms a longer cooldown for the whole fleet. Nothing holds the
+other workers back while the scout is out, so read the flag as a signal, not a gate. Wrapping an outbound
 call with the coordinator's rate-limit-aware decorator applies all of this automatically: wait if a
 cooldown is active, make the call, and arm the next cooldown if it comes back `429`.
 
@@ -162,13 +168,13 @@ cooldown is active, make the call, and arm the next cooldown if it comes back `4
 | The admitted limit drops sharply (about 30%) | a response time crosses the critical SLA threshold |
 | The admitted limit eases down (about 10%) | a response crosses the warning threshold, or the latency trend is rising |
 | The admitted limit creeps up one step | the latency trend is falling and the service has headroom |
-| The limit holds steady, still recomputing in the background | a top-level emergency or the kill switch has frozen application |
+| The limit holds steady (at the floor under a top-level emergency, wherever it stood under the kill switch), still recomputing in the background | a top-level emergency or the kill switch has frozen application |
 | The limit stays at zero even after the kill switch is released | a hard stop is still in force; recovery starts only when the hard stop itself is released |
 | The limit ramps back in stages rather than jumping to full | a `429` cooldown ended or an emergency stood down; the dampened ramp avoids a thundering herd |
 | A request is rejected with the current limit, remaining count, and latest latency attached | the in-window count reached the current limit |
 | A rejected request runs successfully later | it was captured to the DLQ and auto-replayed once the throttle's limit recovered |
 | Critical-tier requests keep getting through while others are shed | a `429`-driven reduction is holding critical traffic to its earlier limit, or the error budget is rejecting non-essential work |
-| Outbound calls to a rate-limited dependency all pause, then resume with one scout request first | the Rate Limit Coordinator set a shared cooldown and sent a canary on recovery |
+| Outbound calls to a rate-limited dependency all pause, then resume, each worker's first call flagged as a canary | the Rate Limit Coordinator set a shared cooldown; the canary's outcome clears the backoff ladder or re-arms a longer cooldown |
 | A limit change appears in the audit trail with the latency and reason behind it | every SLA-driven adjustment is recorded |
 
 The live state — current limit, latest response time and its trend, which regime the throttle is
@@ -195,7 +201,7 @@ not part of the public operator-tunable environment-variable allowlist yet.
 
 - [Circuit Breaker](../oss/circuit-breaker.md) — stops calling a dependency that keeps failing; Adaptive Throttle shares its latency data and moves its limit in step with the breaker's state
 - [DLQ + Replay](../foundations/dlq-replay.md) — where throttle-rejected requests are parked and from which they are auto-replayed on recovery
-- [Emergency Mode](emergency-mode.md) — the severity levels that freeze the throttle's limit changes during an incident
+- [Emergency Mode](emergency-mode.md) — the severity levels that scale the throttle's limit down during an incident and, at the top level, freeze it at the floor
 - [Adaptive Throttle API Reference](../../reference/pro/throttle.md) — full options and signatures
 - [Admin REST API](../../reference/api-admin.md) — the read-only status surface
 - [Getting Started](../../getting-started/index.md) — set Baldur up
