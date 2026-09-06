@@ -291,24 +291,48 @@ class MockRedisClient:
         ]
         return matching
 
-    def scan_iter(
-        self, match: str | None = None, count: int | None = None
-    ) -> Iterator[bytes]:
-        """SCAN cursor iteration.
+    def scan(
+        self,
+        cursor: int = 0,
+        match: str | None = None,
+        count: int | None = None,
+    ) -> tuple[int, list[bytes]]:
+        """SCAN — one round trip, returning ``(next_cursor, matching keys)``.
 
-        Yields the same keys ``keys()`` matches. ``count`` is accepted and
-        ignored: it is a server-side batching hint, so honouring it would not
-        change what a caller observes. Snapshots the key list first so a
-        caller that deletes while iterating does not mutate the source dict.
+        Walks a snapshot of the key list in ``count``-sized slices so a caller
+        driving the cursor itself sees the real shape: several round trips,
+        each returning only the keys that match. The snapshot is taken per
+        call, so deleting while walking does not mutate the source dict.
         """
         self._check_failure()
         pattern = match or "*"
-        snapshot = [
+        snapshot = list(self._data.keys())
+        batch = count or len(snapshot)
+        start = int(cursor)
+        window = snapshot[start : start + batch]
+        next_cursor = start + batch
+        if next_cursor >= len(snapshot):
+            next_cursor = 0
+        return next_cursor, [
             k.encode() if isinstance(k, str) else k
-            for k in list(self._data.keys())
+            for k in window
             if fnmatch.fnmatch(k, pattern)
         ]
-        yield from snapshot
+
+    def scan_iter(
+        self, match: str | None = None, count: int | None = None
+    ) -> Iterator[bytes]:
+        """SCAN cursor iteration, driven through :meth:`scan`.
+
+        Yields the same keys ``keys()`` matches — and, like the real client,
+        yields nothing at all between round trips whose window holds no match.
+        """
+        cursor: int = 0
+        while True:
+            cursor, batch = self.scan(cursor=cursor, match=match, count=count)
+            yield from batch
+            if not cursor:
+                return
 
     def incr(self, key: str) -> int:
         """INCR 명령."""

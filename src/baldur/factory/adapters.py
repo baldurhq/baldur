@@ -35,9 +35,17 @@ _AUDIT_LOG_DIR_ENV = "BALDUR_AUDIT_LOG_DIR"
 # resolution — and the audit adapter is resolved once per audit event across
 # more than a dozen call sites. A construction failure that happens *after* a
 # successful probe (an operator-set log directory on a read-only mount, say)
-# would therefore pay a fresh connect per event with a latch that only
-# remembers failures. Memoizing the verdict itself keeps the cost at one
-# connect per process per URL either way.
+# would therefore pay a fresh probe per event with a latch that only
+# remembers failures. Memoizing the verdict itself keeps the probe at one per
+# process per URL either way.
+#
+# What this bounds is the *probe*. ``create_hash_chain_redis_client()`` still
+# runs on every entry below, and for the standalone and Sentinel URLs the PRO
+# tier targets it builds a client without dialling. ``redis+cluster://`` is
+# the exception — redis-py's ``RedisCluster`` constructor initialises its node
+# map eagerly — so on that scheme a refusing factory re-dials the startup
+# nodes once per audit event. Out of the tier's topology; recorded here rather
+# than claimed away.
 _distributed_chain_probe_verdicts: dict[str, bool] = {}
 
 # One announcement per unreachable chain URL, not one per resolution. The

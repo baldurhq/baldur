@@ -151,6 +151,12 @@ class TestRedisHashChainManagerFallback:
         assert entry["integrity"]["sequence"] > 0
         # Fallback should mark as degraded
         assert entry["integrity"].get("degraded") is True
+        # ...and say WHICH chain wrote it. This label is what makes the
+        # substitution an announced one rather than a silent one: an auditor
+        # reading the ledger can separate the entries Redis sequenced from the
+        # ones the local fallback did, which is why an unreachable server
+        # keeps writing instead of refusing.
+        assert entry["integrity"]["fallback_source"] == "local"
 
     def test_fallback_without_manager(self, failing_redis):
         """Fallback 매니저 없이 Redis 장애 시 최소 무결성 정보 추가."""

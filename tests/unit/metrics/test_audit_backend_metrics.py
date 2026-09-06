@@ -48,6 +48,21 @@ def _run_poisoned(snippet: str) -> subprocess.CompletedProcess:
     )
 
 
+def _run_clean(snippet: str) -> subprocess.CompletedProcess:
+    """Run a Python snippet in a pristine subprocess.
+
+    Absence is a per-process fact and every other test in this file publishes
+    the series, so it can only be observed from a process that has done
+    nothing else.
+    """
+    return subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(snippet)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
 class TestAuditBackendMetricsContract:
     """The gauge exports under the design name with no labels."""
 
@@ -140,6 +155,43 @@ class TestAuditDistributedChainDegradedContract:
         )
 
         assert audit_distributed_chain_degraded._labelnames == ()
+
+    def test_a_process_that_never_asked_publishes_no_sample(self):
+        """The third state, and the one the other two are read against.
+
+        Creating this gauge beside ``audit_backend_wired`` in the module body
+        would export it from every audit-enabled process, because a
+        label-less prometheus gauge registers a sample the moment it is
+        constructed. ``0`` would then mean both "asked, and Redis answered"
+        and "never asked", which is the two-state collapse this series exists
+        to avoid. Run in a clean process: the module is imported and the
+        *other* gauge is published, exactly as ``init()`` does on a boot with
+        no distributed chain.
+        """
+        result = _run_clean(
+            """
+            from prometheus_client import REGISTRY
+
+            from baldur.metrics.audit_backend_metrics import (
+                set_audit_backend_wired,
+            )
+
+            set_audit_backend_wired(True)
+
+            print(
+                REGISTRY.get_sample_value("audit_backend_wired", {}),
+                REGISTRY.get_sample_value("audit_distributed_chain_degraded", {}),
+            )
+            """
+        )
+
+        assert result.returncode == 0, result.stderr
+        wired, degraded = result.stdout.split()
+        assert wired == "1.0", "the sibling gauge must still publish"
+        assert degraded == "None", (
+            "a process that never asked for a distributed chain must publish "
+            f"no sample at all; got {degraded}"
+        )
 
     def test_healthy_verdict_publishes_zero(self):
         from prometheus_client import REGISTRY

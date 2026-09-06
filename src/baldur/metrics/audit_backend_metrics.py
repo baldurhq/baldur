@@ -51,14 +51,6 @@ try:
         [],
     )
 
-    audit_distributed_chain_degraded = get_or_create_gauge(
-        "audit_distributed_chain_degraded",
-        "1 when a distributed audit hash chain was asked for but its Redis "
-        "did not answer the admission probe, 0 when it did; absent when no "
-        "distributed chain was asked for",
-        [],
-    )
-
     METRICS_AVAILABLE = True
 
 except ImportError:
@@ -80,7 +72,49 @@ except ImportError:
             pass
 
     audit_backend_wired = _DummyMetric()
-    audit_distributed_chain_degraded = _DummyMetric()
+
+
+# Built on first publication, never at import. A label-less prometheus gauge
+# registers a sample the moment it is constructed, so creating this one beside
+# ``audit_backend_wired`` would export ``audit_distributed_chain_degraded 0``
+# from every audit-enabled process — including the overwhelming majority that
+# never asked for a distributed chain. That reads identically to "asked for,
+# and Redis answered", which collapses the three states this series exists to
+# separate back into two.
+_distributed_chain_degraded_gauge: GaugeMetric | None = None
+
+
+def _get_distributed_chain_degraded_gauge() -> GaugeMetric:
+    """Return the degraded-chain gauge, creating it on first use."""
+    global _distributed_chain_degraded_gauge
+
+    if _distributed_chain_degraded_gauge is None:
+        if METRICS_AVAILABLE:
+            from baldur.metrics.registry import get_or_create_gauge
+
+            _distributed_chain_degraded_gauge = get_or_create_gauge(
+                "audit_distributed_chain_degraded",
+                "1 when a distributed audit hash chain was asked for but its "
+                "Redis did not answer the admission probe, 0 when it did; "
+                "absent when no distributed chain was asked for",
+                [],
+            )
+        else:
+            _distributed_chain_degraded_gauge = _DummyMetric()
+
+    return _distributed_chain_degraded_gauge
+
+
+def __getattr__(name: str) -> Any:
+    """Serve ``audit_distributed_chain_degraded`` from the lazy builder.
+
+    The name stays importable and stays in ``__all__``; what changes is that
+    reaching for it is what brings the series into existence, rather than the
+    module body doing so for every importer.
+    """
+    if name == "audit_distributed_chain_degraded":
+        return _get_distributed_chain_degraded_gauge()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def set_audit_backend_wired(wired: bool) -> None:
@@ -100,11 +134,13 @@ def set_audit_distributed_chain_degraded(degraded: bool) -> None:
     Called on both outcomes of the admission probe so a healthy process
     publishes ``0`` rather than leaving the series absent — absence is
     reserved for "this process never asked for a distributed chain", which is
-    a third state an alert has to be able to tell apart.
+    a third state an alert has to be able to tell apart. That absence is what
+    the lazy construction above buys: the gauge comes into existence here, on
+    the first publication, not when the module is imported.
 
     Args:
         degraded: ``True`` when the probe failed and the chain is writing
             through its labelled local fallback, ``False`` when Redis
             answered and the chain is genuinely distributed.
     """
-    audit_distributed_chain_degraded.set(1 if degraded else 0)
+    _get_distributed_chain_degraded_gauge().set(1 if degraded else 0)
