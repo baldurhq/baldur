@@ -5,8 +5,10 @@ Tests for Config Apply Tasks.
 from unittest.mock import MagicMock, patch
 
 import pytest
+from structlog.testing import capture_logs
 
 from baldur.core.entitlement import EntitlementResult, EntitlementStatus
+from baldur.services.execution_services.config_apply_service import ConfigApplyService
 from baldur.tasks.config_apply import (
     apply_pending_config_changes,
     get_config_apply_beat_schedule,
@@ -306,3 +308,105 @@ class TestConfigApplyBeatGateBehavior:
 
         assert schedule == {}
         mock_verdict.assert_not_called()
+
+
+class TestConfigApplyTaskEntitlementBehavior:
+    """The beat task carries its own verdict check, ahead of the audit write.
+
+    The lane gate and its in-process twin each read the verdict once, in the
+    process that composes the schedule. A worker that starts later, or a licence
+    that lapses after composition, leaves this task firing on cadence against a
+    verdict that is no longer ACTIVE — which, before the check, meant a WARNING
+    and a blocked audit row every 30s for as long as the lapse lasted.
+
+    Presence is answered first: on an OSS-only install the service's own
+    "manager unavailable" answer is the accurate one, and telling such a
+    deployment its licence is the problem would be wrong.
+    """
+
+    _SERVICE_GETTER = "baldur.services.execution_services.get_config_apply_service"
+    _AUDIT = "baldur.tasks.config_apply.log_config_apply_audit"
+
+    @staticmethod
+    def _run_task():
+        """Run the task eagerly with a stubbed service that answers ``blocked``.
+
+        ``blocked`` is the answer that would produce both side effects the gate
+        exists to stop, so a gate that failed to fire is loud rather than
+        silent.
+        """
+        with (
+            patch(TestConfigApplyTaskEntitlementBehavior._SERVICE_GETTER) as mock_get,
+            patch(TestConfigApplyTaskEntitlementBehavior._AUDIT) as mock_audit,
+        ):
+            mock_service = MagicMock(spec=ConfigApplyService)
+            mock_service.apply_pending_changes.return_value = {
+                "status": "blocked",
+                "reason": "runtime_config_manager_unavailable",
+            }
+            mock_get.return_value = mock_service
+            with capture_logs() as logs:
+                outcome = apply_pending_config_changes.apply()
+        return outcome.result, mock_get, mock_audit, logs
+
+    def test_lapsed_worker_returns_skipped_without_resolving_the_service(
+        self, mock_pro_tier
+    ):
+        """status=skipped, reason=not_entitled, and the service is never built."""
+        with patch(
+            "baldur.core.entitlement.get_entitlement_status",
+            return_value=EntitlementResult(status=EntitlementStatus.MISSING),
+        ):
+            result, mock_get, _, _ = self._run_task()
+
+        assert result == {"status": "skipped", "reason": "not_entitled"}
+        mock_get.assert_not_called()
+
+    def test_lapsed_worker_writes_no_audit_row(self, mock_pro_tier):
+        """The check sits ahead of the audit write, so nothing is recorded.
+
+        A negative assertion: this is the cost the gate exists to remove — one
+        audit row per tick, forever, on a deployment that can apply nothing.
+        """
+        with patch(
+            "baldur.core.entitlement.get_entitlement_status",
+            return_value=EntitlementResult(status=EntitlementStatus.MISSING),
+        ):
+            _, _, mock_audit, _ = self._run_task()
+
+        mock_audit.assert_not_called()
+
+    def test_lapsed_worker_logs_no_blocked_warning(self, mock_pro_tier):
+        """The ``config_task.blocked`` WARNING belongs to governance, not this."""
+        with patch(
+            "baldur.core.entitlement.get_entitlement_status",
+            return_value=EntitlementResult(status=EntitlementStatus.MISSING),
+        ):
+            _, _, _, logs = self._run_task()
+
+        events = [entry.get("event") for entry in logs]
+        # The skip line proves the capture is live, so the absence below is a
+        # real absence rather than an empty capture.
+        assert "config_task.skipped_not_entitled" in events
+        assert "config_task.blocked" not in events
+
+    def test_oss_only_install_still_reaches_the_service(self, mock_oss_tier):
+        """Presence answers first — the OSS lane keeps its own diagnostic."""
+        with patch("baldur.core.entitlement.get_entitlement_status") as mock_verdict:
+            result, mock_get, mock_audit, _ = self._run_task()
+
+        mock_get.return_value.apply_pending_changes.assert_called_once()
+        assert result["status"] == "blocked"
+        mock_audit.assert_called_once()
+        mock_verdict.assert_not_called()
+
+    def test_entitled_worker_still_reaches_the_service(self, mock_pro_tier):
+        """An ACTIVE verdict is a pass-through, not a rewrite of the tick."""
+        with patch(
+            "baldur.core.entitlement.get_entitlement_status",
+            return_value=EntitlementResult(status=EntitlementStatus.ACTIVE),
+        ):
+            result, mock_get, _, _ = self._run_task()
+
+        mock_get.return_value.apply_pending_changes.assert_called_once()
+        assert result["status"] == "blocked"

@@ -20,6 +20,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from baldur.core import entitlement as entitlement_module
 from baldur.core.entitlement import (
     _RECHECK_TTL_SECONDS,
     EntitlementClaims,
@@ -28,6 +29,7 @@ from baldur.core.entitlement import (
     EntitlementStatus,
     _EntitlementValidator,
     get_entitlement_status,
+    is_entitlement_active,
     reset_entitlement_status,
 )
 from baldur.core.exceptions import BaldurError
@@ -735,3 +737,191 @@ class TestMetricsUpdateBehavior:
 
         mock_status.assert_called_once_with(1)
         mock_days.assert_called_once_with(-1)
+
+
+class TestValidateTransientReadBehavior:
+    """A momentarily unreadable licence source never becomes a cached verdict.
+
+    ``_do_validate()`` answers ``None`` for that case, distinct from the real
+    MISSING verdict an absent source produces. ``validate()`` must neither
+    cache it nor refresh the TTL clock: a projected-volume re-link swaps the
+    licence file atomically under the reader, and caching the read it loses
+    would pin "not entitled" on a fully licensed deployment for a whole TTL.
+    """
+
+    def test_unreadable_source_without_a_previous_verdict_answers_missing(self):
+        """Nothing to fall back on, so the answer is MISSING (fail closed)."""
+        validator = _EntitlementValidator()
+
+        with patch.object(validator, "_do_validate", return_value=None):
+            result = validator.validate()
+
+        assert result.status == EntitlementStatus.MISSING
+
+    def test_unreadable_source_leaves_the_cache_and_the_ttl_clock_untouched(self):
+        """The MISSING answer is returned, not stored: no cache, no clock."""
+        validator = _EntitlementValidator()
+
+        with patch.object(validator, "_do_validate", return_value=None):
+            validator.validate()
+
+        assert validator._cached_result is None
+        assert validator._last_checked == 0.0
+
+    def test_unreadable_source_keeps_the_previous_verdict(self):
+        """An established ACTIVE verdict survives a read that answers nothing."""
+        # Given: an ACTIVE verdict already cached
+        validator = _EntitlementValidator()
+        active = EntitlementResult(status=EntitlementStatus.ACTIVE)
+        with (
+            patch.object(validator, "_do_validate", return_value=active),
+            patch.object(validator, "_log_result"),
+            patch.object(validator, "_update_metrics"),
+        ):
+            validator.validate()
+        cached_at = validator._last_checked
+
+        # When: the TTL has expired and the source is unreadable at that instant
+        with (
+            patch.object(validator, "_do_validate", return_value=None),
+            patch(
+                "baldur.core.entitlement.time.monotonic",
+                return_value=cached_at + _RECHECK_TTL_SECONDS + 1,
+            ),
+        ):
+            result = validator.validate()
+
+        # Then: the previous verdict stands and the clock did not move
+        assert result is active
+        assert validator._last_checked == cached_at
+
+    def test_unreadable_source_is_retried_on_the_very_next_call(self):
+        """No cache write means the next call re-reads instead of waiting a TTL."""
+        validator = _EntitlementValidator()
+        active = EntitlementResult(status=EntitlementStatus.ACTIVE)
+
+        with (
+            patch.object(
+                validator, "_do_validate", side_effect=[None, active]
+            ) as mock_validate,
+            patch.object(validator, "_log_result"),
+            patch.object(validator, "_update_metrics"),
+        ):
+            first = validator.validate()
+            second = validator.validate()
+
+        assert mock_validate.call_count == 2
+        assert first.status == EntitlementStatus.MISSING
+        assert second is active
+
+    def test_unreadable_source_writes_no_log_and_no_gauge(self):
+        """A non-verdict is not an observation, so nothing is logged or gauged."""
+        validator = _EntitlementValidator()
+
+        with (
+            patch.object(validator, "_do_validate", return_value=None),
+            patch.object(validator, "_log_result") as mock_log,
+            patch.object(validator, "_update_metrics") as mock_metrics,
+        ):
+            validator.validate()
+
+        mock_log.assert_not_called()
+        mock_metrics.assert_not_called()
+
+
+class TestIsEntitlementActiveBehavior:
+    """``is_entitlement_active()``, the predicate every body-level gate reads.
+
+    Presence is resolved first so an OSS-only install pays nothing; the verdict
+    decides the rest; an indeterminate read fails closed; and the read is never
+    forced, so the cached verdict's TTL stays the single lapse granularity.
+    """
+
+    @pytest.mark.parametrize(
+        ("status", "expected"),
+        [
+            (EntitlementStatus.ACTIVE, True),
+            (EntitlementStatus.INVALID, False),
+            (EntitlementStatus.MISSING, False),
+        ],
+        ids=["active", "invalid", "missing"],
+    )
+    def test_verdict_decides_the_predicate_on_a_pro_install(
+        self, mock_pro_tier, status, expected
+    ):
+        """Only ACTIVE admits licensed behaviour; every other verdict withholds it."""
+        with patch(
+            "baldur.core.entitlement.get_entitlement_status",
+            return_value=EntitlementResult(status=status),
+        ):
+            assert is_entitlement_active() is expected
+
+    def test_unreadable_verdict_fails_closed(self, mock_pro_tier):
+        """A raising verdict read is not an admission: the tier boundary holds."""
+        with patch(
+            "baldur.core.entitlement.get_entitlement_status",
+            side_effect=RuntimeError("licence store down"),
+        ):
+            assert is_entitlement_active() is False
+
+    def test_pro_absent_answers_false_without_reading_the_verdict(self, mock_oss_tier):
+        """Presence answers the whole question on an OSS-only install.
+
+        Without the PRO distribution the verdict can only be non-ACTIVE, so
+        reading it would add a settings construction, a licence-file read, an
+        INFO line and two gauge writes to a tier no gate can serve.
+        """
+        with patch("baldur.core.entitlement.get_entitlement_status") as mock_verdict:
+            result = is_entitlement_active()
+
+        assert result is False
+        mock_verdict.assert_not_called()
+
+    def test_the_verdict_is_read_without_forcing_a_revalidation(self, mock_pro_tier):
+        """Read-only: no ``force``, so the TTL stays the single lapse granularity."""
+        with patch(
+            "baldur.core.entitlement.get_entitlement_status",
+            return_value=EntitlementResult(status=EntitlementStatus.ACTIVE),
+        ) as mock_verdict:
+            is_entitlement_active()
+
+        mock_verdict.assert_called_once_with()
+
+
+class TestEntitlementFixtureContract:
+    """The autouse ``entitlement_verdict_active`` conftest fixture's contract.
+
+    Body-level gates read the verdict at call time, so without an ambient
+    ACTIVE verdict every existing test that means "PRO installed" would
+    silently start meaning "PRO installed but unlicensed".
+    """
+
+    def test_fixture_supplies_an_active_verdict(self, entitlement_verdict_active):
+        """The ambient verdict is ACTIVE and is what the getter answers."""
+        assert entitlement_verdict_active.status == EntitlementStatus.ACTIVE
+        assert entitlement_verdict_active.is_active is True
+        assert entitlement_module.get_entitlement_status() is entitlement_verdict_active
+
+    def test_local_patch_of_the_same_name_overrides_the_fixture(self):
+        """A test wanting a lapsed verdict patches the same getter: the inner
+        patch wins for its duration and the ambient one resumes after."""
+        with patch(
+            "baldur.core.entitlement.get_entitlement_status",
+            return_value=EntitlementResult(status=EntitlementStatus.MISSING),
+        ):
+            assert (
+                entitlement_module.get_entitlement_status().status
+                == EntitlementStatus.MISSING
+            )
+
+        assert (
+            entitlement_module.get_entitlement_status().status
+            == EntitlementStatus.ACTIVE
+        )
+
+    def test_fixture_patches_the_getter_so_import_time_bindings_stay_real(self):
+        """The patch is installed on the module attribute, not on the function
+        object, so a module that bound the name at import time (this one
+        included) keeps calling the real implementation and the validator's
+        own tests are unaffected."""
+        assert get_entitlement_status is not entitlement_module.get_entitlement_status
