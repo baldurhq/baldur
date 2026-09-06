@@ -100,13 +100,13 @@ def _affirm_circuit_closed(service_name: str) -> tuple[bool, str | None]:
             return True, None
 
         projecting = [
-            row
-            for row in cb_service.get_all_states()
-            if resolve_stored_domain(row.get("service_name", "")) == stored_domain
+            state
+            for state in cb_service.get_all_states()
+            if resolve_stored_domain(state.get("service_name", "")) == stored_domain
         ]
-        for row in projecting:
-            if row.get("state") != CircuitState.CLOSED.value:
-                return False, row.get("service_name")
+        for state in projecting:
+            if state.get("state") != CircuitState.CLOSED.value:
+                return False, state.get("service_name")
         if not projecting:
             logger.debug(
                 "dlq.circuit_state_unknown",
