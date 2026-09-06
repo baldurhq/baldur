@@ -520,7 +520,8 @@ class RedisDLQQuery:
             return window_max[0], {
                 entry.id
                 for entry in window_entries
-                if replay_cursor_position(entry.created_at, entry.id)[0]
+                if entry.created_at is not None
+                and replay_cursor_position(entry.created_at, entry.id)[0]
                 == window_max[0]
             }
         # The whole window sat at one score — or carried no position at all,
@@ -552,13 +553,19 @@ class RedisDLQQuery:
         would drop them.
         """
         window_entries = self._load_positioned_entries(entry_ids)
-        positions = [
-            replay_cursor_position(entry.created_at, entry.id)
+        # The loader drops every entry with no ``created_at``, which is the
+        # precondition the position needs; restating it here is what carries
+        # that guarantee into the list's own construction, and pairing the
+        # position with its entry keeps the two aligned by construction rather
+        # than by a parallel-list zip.
+        positioned = [
+            (replay_cursor_position(entry.created_at, entry.id), entry)
             for entry in window_entries
+            if entry.created_at is not None
         ]
         fresh = [
             (position, entry)
-            for position, entry in zip(positions, window_entries, strict=True)
+            for position, entry in positioned
             if floor is None or position > floor
         ]
         eligible = [
@@ -579,7 +586,7 @@ class RedisDLQQuery:
             window_entries,
             [entry for _position, entry in taken],
             boundary,
-            max(positions, default=None),
+            max((position for position, _entry in positioned), default=None),
         )
 
     def find_replayable_page(

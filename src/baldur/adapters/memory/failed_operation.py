@@ -484,6 +484,7 @@ class InMemoryFailedOperationRepository(FailedOperationRepository):
             # one, so the cursor may only advance to that entry. Only a pass
             # that returned every match it found may advance to the highest
             # position it examined.
+            boundary: FailedOperationData | None
             if len(matches) > len(selected) and selected:
                 boundary = selected[-1][1]
             else:
