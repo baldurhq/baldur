@@ -21,8 +21,11 @@ In Baldur, a canary **rollout** is a first-class object: one configuration chang
 a circuit breaker's failure threshold) plus an ordered list of **stages**, each naming the
 clusters it watches and how long to observe them before advancing. Applying it is a
 configuration write through the same runtime-config surface a console edit uses, so it takes
-effect in-process, without a redeploy — and on a single deployment that write reaches the whole
-deployment at once. What the stages ration is not traffic but *supervision*: each stage is a
+effect without a redeploy in the process that applied it — and on a single deployment that write
+reaches the whole deployment at once, not one cluster at a time. Whether *other* already-running
+worker processes pick the value up live depends on the configuration domain: circuit-breaker
+settings converge on every process by poll, while most other domains reach a sibling process
+only when it restarts. What the stages ration is not traffic but *supervision*: each stage is a
 time-boxed observation window with pass criteria and gates that decide whether the rollout may
 advance, stay put, or be taken back. The *recovery* half of the name is the other direction: at
 creation time Baldur snapshots the configuration being replaced, and rolling back (manually; in
@@ -65,9 +68,10 @@ hits it. Canary Recovery turns that one-shot gamble into a supervised, reversibl
   back — without waiting for an operator to remember the canary among everything else on fire.
 - **One emergency lever for the worst day.** A single panic action rolls back *every* active
   rollout at once, when the situation is too murky to triage them one by one.
-- **Every step is attributable.** Creation, every promotion, every pause and rollback is recorded
-  with who did it and why — including (especially) the cases where someone bypassed a safety
-  gate.
+- **Every step is attributable.** Creation, every promotion, every pause and rollback lands in
+  the audit trail as its own entry, naming the rollout, its creator, its stated reason and the
+  stage it was at; a pause records what triggered it, a rollback records why. Bypassing a
+  safety gate is recorded separately, with the requester's identity and written reason.
 
 ## How it works in Baldur
 
@@ -121,9 +125,8 @@ Starting, promoting, and resuming a rollout each pass a **governance gate** firs
 is *fail-closed*: if the governance check itself cannot run, the operation is blocked rather
 than waved through. For start and promote the gate refuses while the global kill switch is
 engaged, while Emergency Mode is at or above its configured severity (level 2 of 3 by default),
-or — when the error-budget gate is turned on (`BALDUR_ERROR_BUDGET_GATE_ENABLED=true`, off by
-default) — while the error budget is exhausted (judged more strictly for higher-tier
-services). Pushing a config change deeper into a fleet that is already in trouble is exactly the
+or — when the error-budget gate is turned on (it ships off) — while the error budget is
+exhausted. Pushing a config change deeper into a fleet that is already in trouble is exactly the
 wrong move. Resume and rollback are deliberately gated more
 lightly: both re-check only Emergency Mode, skipping the kill-switch and error-budget checks —
 rollback is the recovery path, and the way back must stay open on a bad day.
@@ -135,9 +138,10 @@ for post-incident review. There is no quiet override.
 A **chaos guard** protects the rollout's measurements: a cluster that is currently running a
 chaos experiment cannot give the canary a readable signal (was that latency spike the new
 config, or the injected fault?). By default the guard blocks creation and start only when
-*every* target cluster is under an experiment; a partial overlap proceeds with a warning, and
-the audit record of the start names which clusters were in conflict. A strict policy that
-blocks on any overlap, and an explicit force flag for emergencies, are both available.
+*every* target cluster is under an experiment; a partial overlap proceeds with a warning, the
+creation's audit record names which clusters were in conflict, and the start's names the policy
+applied and the clusters it applied to. A strict policy that blocks on any overlap, and an
+explicit force flag for emergencies, are both available.
 
 ### Health validation and promotion
 
@@ -147,8 +151,8 @@ above the baseline, p95 latency within +50 ms, and p99 within +20%, measured ove
 window with at least 100 requests — too little traffic means "not enough evidence", not "pass",
 so a quiet canary blocks promotion instead of waving the change through.
 
-The criteria can also watch the **error budget**, but that check ships OFF by default
-(`BALDUR_ERROR_BUDGET_ENABLED`): out of the box it honestly skips — and logs that it did —
+The criteria can also watch the **error budget**, but that check ships OFF by default, with
+the Error Budget feature itself: out of the box it honestly skips — and logs that it did —
 rather than reading empty data as a healthy pass. Turned on, it blocks promotion while the
 canary is burning error budget faster than 1.2× its sustainable rate or has less than 10% of the
 budget left. It is deliberately fail-open — an unavailable budget signal skips the check rather
@@ -157,7 +161,7 @@ governance gate above still enforces its own (separately enabled) budget stop.
 
 Criteria tighten by **service tier**, and the tier is resolved automatically: each config type
 maps to a service tier through configuration, an unmapped config type defaults to `standard`,
-and an explicit tier on the promote call overrides both. The tier's floors then clamp the
+and an explicit tier passed to the promote call from code overrides both. The tier's floors then clamp the
 stage's criteria — a 3% error-rate ceiling for a `critical` service versus 5% for `standard`
 and 10% for `non_essential`, and a `critical` canary may drain budget no faster than 0.8×
 sustainable, keeping at least 15% in reserve. The floor always wins over a looser per-stage
@@ -168,8 +172,10 @@ Metric-gated promotion compares the canary clusters against the stable fleet ove
 window and blocks promotion when the criteria fail. It is an opt-in gate: it comes online once a
 time-series metrics source is connected — point `BALDUR_PROMETHEUS_URL` at your Prometheus (or any
 PromQL-compatible backend) and switch live evaluation on — until then,
-promotion is governed by stage duration, the governance gate, and — when Error Budget is enabled —
-the error-budget drain check above (the per-rollout metrics view fills in from the same source).
+promotion is governed by the governance gate, by the error-budget drain check above when Error
+Budget is enabled, and (for automatic promotion only) by the stage's observation window; a
+manual promote is not held to the window at all. The per-rollout metrics view fills in from
+the same source.
 A blocked or unhealthy rollout does not advance, which is where the watchdog below picks it up.
 
 ### The watchdog
@@ -185,8 +191,8 @@ it keeps the rollout machinery honest without touching any rollout's state.
   self-clearing behavior described above). A renewal that finds the lock in a *different*
   rollout's hands raises a lock-conflict alert instead of silently absorbing it.
 - **Stall alerting.** A rollout is judged stalled when it sits in the canary state past twice
-  its stage's observation time, paused past 30 minutes (unless governance or the error budget
-  paused it — a legitimate wait, not a stall), or stuck mid-promotion past five minutes. A
+  its stage's observation time, or paused past 30 minutes (unless governance or the error budget
+  paused it — a legitimate wait, not a stall). A
   stalled rollout produces a delivered Slack alert, routed through Baldur's notification
   channels, naming the rollout, its config type, and how long it has been stuck; the alert is
   deduplicated per rollout inside a cooldown window, so a stall alerts once rather than on
@@ -207,9 +213,11 @@ The watchdog's two *mutating* actions ship off by default, as separate opt-ins, 
 the watchdog changes nothing on its own:
 
 - **Automatic promotion** (`BALDUR_CANARY_WATCHDOG_ENABLE_AUTO_PROMOTE`). Opting in is a
-  two-key action: the flag enables the machinery, and only stages created with auto-promotion
-  marked participate. Once such a stage's observation window has elapsed (counted from stage
-  entry), the watchdog promotes through exactly the gates a manual promote passes: the
+  two-key action: the flag enables the machinery, and only stages carrying the auto-promotion
+  mark participate. Mind the default: a stage created through the API carries that mark unless
+  you turn it off (`auto_promote: false`), so with the flag on, every API-created stage that did
+  not opt out advances on its own; the Web Console's create form leaves the mark off. Once such
+  a stage's observation window has elapsed (counted from stage entry), the watchdog promotes through exactly the gates a manual promote passes: the
   fail-closed governance gate and the health validation above. While governance blocks, the
   watchdog stands down for that sweep, and the block is counted in Prometheus with its reason,
   alongside a gauge of the rollouts waiting behind it. Racing supervisors cannot double-advance
@@ -236,8 +244,8 @@ The governance gate stops *new* operations during an emergency — but a rollout
 flight has its new configuration applied to live clusters, and it should not keep sitting
 there while the fleet burns. A background safety watch re-reads the Emergency Mode level
 continuously — reacting within seconds of a level change in the common case, and never later
-than its polling interval (30 seconds by default) — and applies an escalation ladder to every
-in-flight rollout:
+than its polling interval plus a few seconds of jitter (30 seconds and up to 5 by default) — and
+applies an escalation ladder to every in-flight rollout:
 
 - **Level 1:** a warning is logged; rollouts keep running.
 - **Level 2:** every in-flight rollout is **paused** automatically, recorded as paused by the
@@ -252,14 +260,15 @@ counting: an emergency pause that lingers past 30 minutes is reported as stuck, 
 prolonged emergency pause is surfaced rather than forgotten.
 
 If the emergency state itself cannot be read, new starts and promotions are already blocked —
-the gate is fail-closed — and for in-flight rollouts the watch raises a critical alert after
-three consecutive failed reads (configurable) and keeps trying. Deployments that prefer the
+the gate is fail-closed — and for in-flight rollouts the watch logs a critical-level failure
+after three consecutive failed reads (configurable) and keeps trying. Deployments that prefer the
 pessimistic posture can instead configure sustained blindness to be treated as the worst case
 and roll back.
 
 ### The emergency lever
 
-`POST /canary/panic-rollback` rolls back **all** active rollouts in one call, reporting
+`POST /canary/panic-rollback` rolls back **all** active rollouts in one call (a rollout that was
+created but never started is cancelled instead, since it applied nothing), reporting
 per-rollout success so a partial failure is visible immediately. It exists for the day when
 something is clearly wrong fleet-wide and detangling which of three in-flight rollouts caused it
 is a luxury you don't have.
@@ -269,9 +278,9 @@ is a luxury you don't have.
 | What you observe | When it happens |
 |------------------|-----------------|
 | Creating a second rollout for a config type is rejected, naming the current holder | one active rollout per config type, enforced by lock |
-| Start or promote is refused with a governance message | kill switch engaged, Emergency Mode at level 2+, or the error budget exhausted (only with the error-budget gate enabled) — or the check itself failed (fail-closed) |
-| Start is refused because of running chaos experiments | experiments cover every target cluster; a partial overlap proceeds instead, with the conflicted clusters recorded in the audit trail |
-| A stall alert arrives naming the rollout, and self-monitoring reports it as stuck | it sat in the canary state past twice its stage's observation time, paused past 30 minutes (a governance or error-budget pause is a legitimate wait, not a stall), or stuck mid-promotion past five minutes |
+| Start or promote is refused, and the log and audit trail carry the governance block reason (the API reply is a plain refusal) | kill switch engaged, Emergency Mode at level 2+, or the error budget exhausted (only with the error-budget gate enabled) — or the check itself failed (fail-closed) |
+| Start is refused because of running chaos experiments | experiments cover every target cluster; a partial overlap proceeds instead, with the clusters in conflict named in the creation's audit record |
+| A stall alert arrives naming the rollout, and self-monitoring reports it as stuck | it sat in the canary state past twice its stage's observation time, or paused past 30 minutes (a governance or error-budget pause is a legitimate wait, not a stall) |
 | A lock-conflict alert names a rollout whose config-type lock is now held elsewhere | the watchdog's five-minute renewal found a different owner on the lock |
 | A stage advances with no operator action | automatic promotion is opted in, the stage was created marked for it, its observation window elapsed, and the gates passed |
 | A stalled rollout rolls back on its own, audited as the system's flagged bypass | automatic rollback is opted in and the rollout stayed stuck past the rollback timer |
@@ -280,8 +289,8 @@ is a luxury you don't have.
 | Every in-flight rollout pauses at once, marked paused by the safety interlock | Emergency Mode escalated to level 2 |
 | Every in-flight rollout rolls back, audited under the system's own identity as a flagged bypass | Emergency Mode escalated to level 3 |
 | The previous configuration is back in effect | manual rollback, panic rollback, the emergency brake at Level 3, or the watchdog's opt-in automatic rollback |
-| An action fails with a version conflict | a concurrent actor changed the rollout first — no state corruption |
-| A bypass appears in the audit trail with reason and requester | someone bypassed a governance gate; a forced start during chaos is likewise recorded, with the clusters involved |
+| An action fails, logged as a version conflict | a concurrent actor changed the rollout first — no state corruption |
+| A bypass appears in the audit trail with reason and requester | someone bypassed a governance gate; a forced start during chaos is likewise recorded, as a loose-policy start naming the clusters it applied to |
 | Completed and rolled-back rollouts appear in the daily report | both finishing outcomes — completion and rollback — are pushed to the ops summary |
 
 The full rollout state — stage list, current stage, progress percentage, affected clusters,
@@ -293,7 +302,7 @@ transitions are published on Baldur's event bus and counted in Prometheus (start
 advances, completions, rollbacks, every governance bypass, and — with automatic promotion
 opted in — promotions blocked by governance, labeled with the block reason, plus a gauge of
 rollouts pending behind the block), and every lifecycle
-action lands in the audit trail with actor and reason. Finished rollouts are retained for 7 days for review.
+action lands in the audit trail naming the rollout, its creator, its stage and its reason. Finished rollouts are retained for 7 days for review.
 
 ## Configuration
 
@@ -308,11 +317,13 @@ action lands in the audit trail with actor and reason. Finished rollouts are ret
 | `BALDUR_CANARY_WATCHDOG_AUTO_ROLLBACK_AFTER_MINUTES` | `60` | how long a stalled rollout stays stuck before the opt-in automatic rollback fires |
 
 Everything that shapes an individual rollout — stages, clusters, observation times,
-pass criteria — is part of the rollout you create, in the API call, not an
-environment variable. The framework-level tuning behind the defaults (the stall thresholds
+pass criteria — is part of the rollout you create, not an environment variable. Stages,
+clusters, observation times and the auto-promotion mark are set in the create call; per-stage
+pass criteria can be set when you create the rollout from code, and a REST-created rollout
+uses the defaults above. The framework-level tuning behind the defaults (the stall thresholds
 themselves, the emergency brake's polling interval and failure posture, the config-type→service-tier
-mapping, governance severity levels, retention) is advanced / internal: it is not part of the
-public operator-tunable environment-variable allowlist yet.
+mapping, governance severity levels, the error-budget switches, retention) is advanced / internal:
+it is not part of the public operator-tunable environment-variable allowlist yet.
 
 ## See also
 
