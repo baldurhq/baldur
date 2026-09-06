@@ -101,7 +101,7 @@ to hold, leave both of those off.**
 A force takes effect in the process that receives it, and a process that starts afterwards picks it up
 when it loads shared state. A worker that was already running when you pressed the button keeps
 deciding from its own view of the breaker until something makes it consult the shared record. A trip
-is one such moment: when your workers share a store (Redis or SQL) and a running worker's failures
+is one such moment: when your workers share a Redis store and a running worker's failures
 cross the threshold, the store refuses to let that trip overwrite your force. The worker adopts the
 force instead, enforces it from its next request, and logs a warning (`circuit_breaker.trip_blocked`)
 so the failure burst your force just swallowed still shows up in the logs. Baldur's routine background
