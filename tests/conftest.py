@@ -1625,6 +1625,53 @@ def reset_dlq_helpers():
     reset_dlq_capture_service()
 
 
+@pytest.fixture(autouse=True)
+def entitlement_verdict_active():
+    """Supply an ACTIVE entitlement verdict to every test by default.
+
+    Body-level PRO gates read the verdict at call time, so without this the
+    existing suite would exercise the refusal branch everywhere: a PRO-installed
+    test environment carries no licence token, and the real validator answers
+    MISSING. Tests that mean "PRO installed" would silently start meaning "PRO
+    installed but unlicensed".
+
+    Patched at the getter every gate resolves through, so a test that wants a
+    non-ACTIVE verdict overrides it locally by patching the same name — the
+    inner patch wins for the duration of that test. Test modules that bound the
+    getter at import time keep calling the real function, so the validator's own
+    tests are unaffected. ``reset_entitlement_status`` runs on the way out so no
+    fabricated verdict is left in the real validator's cache.
+    """
+    from unittest.mock import patch
+
+    from baldur.core.entitlement import (
+        EntitlementClaims,
+        EntitlementResult,
+        EntitlementStatus,
+        reset_entitlement_status,
+    )
+
+    active = EntitlementResult(
+        status=EntitlementStatus.ACTIVE,
+        claims=EntitlementClaims(
+            customer_id="cust_test",
+            org="test-org",
+            tier="PRO",
+            plan="monthly",
+            issued_at="2020-01-01",
+            expires="2999-12-31",
+        ),
+    )
+
+    with patch(
+        "baldur.core.entitlement.get_entitlement_status",
+        return_value=active,
+    ):
+        yield active
+
+    reset_entitlement_status()
+
+
 # =============================================================================
 # DB Test Auto-Skip
 # =============================================================================

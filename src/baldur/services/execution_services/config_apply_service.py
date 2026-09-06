@@ -16,6 +16,36 @@ from baldur.factory.registry import ProviderRegistry
 logger = structlog.get_logger()
 
 
+def _config_apply_refused_for_entitlement(operation: str) -> bool:
+    """Whether applying a config change must be refused for lack of a licence.
+
+    Applying a scheduled or graceful change is PRO behaviour: the manager that
+    performs it is a PRO service, and the change *creation* surface is already
+    unavailable without an ACTIVE verdict because it resolves through the
+    provider registry. This restores the same boundary on the applier, which
+    reaches its manager by direct import and so never passed through it.
+
+    Presence is answered first and is not folded into the refusal: an OSS-only
+    install has no licence to be the problem, and must keep receiving the
+    "manager unavailable" answer it receives today.
+
+    Fails closed, matching the beat lane that composes this service's task.
+    """
+    from baldur.core.entitlement import is_entitlement_active
+    from baldur.utils.tier import is_pro_installed
+
+    if not is_pro_installed():
+        return False
+    if is_entitlement_active():
+        return False
+
+    logger.debug(
+        "config_apply_service.skipped_not_entitled",
+        operation=operation,
+    )
+    return True
+
+
 # =============================================================================
 # ConfigApplyService
 # =============================================================================
@@ -65,6 +95,18 @@ class ConfigApplyService:
         Returns:
             Application result dictionary
         """
+        # Entitlement resolves ahead of governance: without an ACTIVE verdict
+        # the PRO governance provider never registers, so the check below would
+        # run against the permissive OSS no-op default and report nothing
+        # useful. The refusal status is "skipped", not "blocked" — "blocked" is
+        # the governance vocabulary, and the beat task raises a WARNING on it.
+        if _config_apply_refused_for_entitlement("apply_pending_changes"):
+            return {
+                "status": "skipped",
+                "reason": "not_entitled",
+                "message": "Config apply requires an active PRO entitlement",
+            }
+
         # Emergency Mode check: block config apply at LEVEL_2+. Kill Switch
         # intentionally skipped to preserve a recovery path.
         governance = ProviderRegistry.governance.get()
@@ -197,6 +239,14 @@ class ConfigApplyService:
         Returns:
             Application result dictionary
         """
+        # Same boundary as the scheduled applier, on the lane the beat gate
+        # never covered: this entry has no gated lane in front of it at all.
+        if _config_apply_refused_for_entitlement("apply_graceful_change"):
+            return {
+                "status": "skipped",
+                "reason": "not_entitled",
+            }
+
         governance = ProviderRegistry.governance.get()
         governance_result = governance.check_all_governance(
             check_kill_switch=False,

@@ -45,6 +45,7 @@ __all__ = [
     "EntitlementError",
     "EntitlementResult",
     "get_entitlement_status",
+    "is_entitlement_active",
     "reset_entitlement_status",
 ]
 
@@ -162,20 +163,42 @@ class _EntitlementValidator:
             reset_entitlement_settings()
 
         result = self._do_validate()
+        if result is None:
+            # The configured licence source exists but could not be read this
+            # instant. Caching the MISSING that a naive read would produce
+            # pins "not entitled" for the whole TTL on a fully licensed
+            # deployment — a projected-volume re-link, which relinks
+            # atomically under the reader, is exactly such an instant. Keep
+            # the previous verdict when there is one, answer MISSING when
+            # there is not, and in neither case write the cache or refresh
+            # ``_last_checked``, so the very next call retries the read.
+            if self._cached_result is not None:
+                return self._cached_result
+            return EntitlementResult(status=EntitlementStatus.MISSING)
+
         self._cached_result = result
         self._last_checked = now
         self._log_result(result)
         self._update_metrics(result)
         return result
 
-    def _do_validate(self) -> EntitlementResult:
-        """Perform actual Ed25519 validation."""
+    def _do_validate(self) -> EntitlementResult | None:
+        """Perform actual Ed25519 validation.
+
+        Returns ``None`` — rather than a verdict — when the configured licence
+        source was momentarily unreadable, which is not the same fact as "no
+        licence is configured" and must not be cached as one. Every other
+        outcome, absence included, is a real verdict.
+        """
         from baldur.settings.license import get_entitlement_settings
 
         settings = get_entitlement_settings()
 
         # Load token from key or file
         token_str = self._load_token(settings.key, settings.file)
+        if token_str is None:
+            # Source configured but unreadable right now — no verdict.
+            return None
         if not token_str:
             return EntitlementResult(status=EntitlementStatus.MISSING)
 
@@ -230,8 +253,14 @@ class _EntitlementValidator:
 
         return EntitlementResult(status=EntitlementStatus.ACTIVE, claims=claims)
 
-    def _load_token(self, license_key: str, license_file: str) -> str:
-        """Load entitlement token from key or file."""
+    def _load_token(self, license_key: str, license_file: str) -> str | None:
+        """Load entitlement token from key or file.
+
+        Returns the token, ``""`` when no licence source is configured, or
+        ``None`` when a source **is** configured and could not be read. The
+        caller must not turn that third case into a cached verdict: an
+        unreadable source is a transient condition, an absent one is not.
+        """
         if license_key:
             return license_key
 
@@ -240,14 +269,13 @@ class _EntitlementValidator:
                 return Path(license_file).read_text(encoding="utf-8").strip()
             except (OSError, ValueError) as exc:
                 # ValueError covers UnicodeDecodeError: a licence file written in
-                # any non-UTF-8 encoding is unreadable, not a crash reason. Both
-                # branches degrade to MISSING, which is what an absent file does.
+                # any non-UTF-8 encoding is unreadable, not a crash reason.
                 logger.warning(
                     "entitlement.file_read_failed",
                     path=license_file,
                     error=str(exc),
                 )
-                return ""
+                return None
 
         return ""
 
@@ -377,6 +405,39 @@ def get_entitlement_status(*, force: bool = False) -> EntitlementResult:
     if _validator is None:
         _validator = _EntitlementValidator()
     return _validator.validate(force=force)
+
+
+def is_entitlement_active() -> bool:
+    """Whether this process may run licensed PRO behaviour right now.
+
+    The single predicate behind every body-level PRO gate, so the fail
+    direction is decided once instead of being re-typed per gate.
+
+    Presence is resolved first, and on an OSS-only install it answers the
+    whole question: without the PRO distribution the verdict can only be
+    non-ACTIVE, so reading it would add a settings construction, a licence
+    file read, an INFO line and two gauge writes to a tier no gate can serve.
+    Same ordering, for the same reason, as the beat-lane and scheduler
+    composition filters.
+
+    Read-only — it never forces a re-validation, so the cached verdict's TTL
+    stays the single granularity at which a lapse takes effect.
+
+    Fails closed: an indeterminate read counts as not entitled, matching the
+    lane-level gates. Note what this predicate does **not** answer — it is not
+    ``is_pro_installed()`` (whether the distribution is importable) and not the
+    registration report (what this process actually managed to register).
+    """
+    from baldur.utils.tier import is_pro_installed
+
+    if not is_pro_installed():
+        return False
+
+    try:
+        return get_entitlement_status().is_active
+    except Exception as e:
+        logger.debug("entitlement.verdict_unavailable", error=e)
+        return False
 
 
 def reset_entitlement_status() -> None:

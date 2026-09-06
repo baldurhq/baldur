@@ -248,13 +248,19 @@ class TestLoadTokenBehavior:
         result = self.validator._load_token("", str(token_file))
         assert result == "file-token"
 
-    def test_nonexistent_file_returns_empty(self):
-        """Non-existent file returns empty string (graceful degradation)."""
-        result = self.validator._load_token("", "/nonexistent/path.key")
-        assert result == ""
+    def test_nonexistent_file_reports_unreadable(self):
+        """A configured file that cannot be opened reports unreadable, not absent.
 
-    def test_non_utf8_file_returns_empty(self, tmp_path):
-        """A licence file that is not UTF-8 degrades to empty, never raises.
+        ``None`` is not the same answer as ``""``: an absent licence source is
+        a settled fact worth caching for the full TTL, while a source that is
+        configured and momentarily unreadable is not. Caching the latter would
+        pin "not entitled" on a licensed deployment until the TTL expires.
+        """
+        result = self.validator._load_token("", "/nonexistent/path.key")
+        assert result is None
+
+    def test_non_utf8_file_reports_unreadable(self, tmp_path):
+        """A licence file that is not UTF-8 reports unreadable, never raises.
 
         ``read_text(encoding="utf-8")`` raises ``UnicodeDecodeError`` (a
         ``ValueError``, not an ``OSError``), so an unreadable encoding must be
@@ -266,7 +272,7 @@ class TestLoadTokenBehavior:
 
         result = self.validator._load_token("", str(token_file))
 
-        assert result == ""
+        assert result is None
 
     def test_both_empty_returns_empty(self):
         """Both key and file empty returns empty string."""
