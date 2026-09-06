@@ -100,7 +100,10 @@ _ROOT_BUDGETS: dict[str, int] = {
     # when the per-flag override chain moved into _apply_config_overrides.
     # SQL circuit-breaker removal: -2 — the deleted adapter carried two
     # complexity noqas (breaker state never lands in a relational database).
-    "baldur": 108,
+    # on-recovery drain: +1 — conditional_replay_on_circuit_close gained
+    # C901/PLR0911 when the single-batch replay became a chain of passes with a
+    # per-pass exit reason.
+    "baldur": 109,
     # 666: -1 — _update_config_with_meta refactored into _versioned_write +
     # _merge_changes + _post_write helpers, dropping its complexity noqa.
     "baldur_pro": 32,
