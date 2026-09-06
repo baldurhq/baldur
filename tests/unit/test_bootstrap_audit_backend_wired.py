@@ -3,12 +3,17 @@
 Source: ``src/baldur/bootstrap.py`` — ``_apply_audit_default_provider`` and
 ``_set_audit_backend_wired_gauge``.
 
-Audit enabled while the resolved default provider is still the no-op adapter
-is the one combination that silently voids the trail: records are written,
-accepted, and reach nothing. Step 5 reports it twice — a WARNING naming the
-condition, and the ``audit_backend_wired`` gauge, which is the channel an
-alert can watch. A boot log line is the weakest possible signal for the state
-that voids the compliance product.
+Audit enabled while the trail does not actually reach a backend is the one
+combination that silently voids it: records are written, accepted, and reach
+nothing. Step 5 reports it twice — a WARNING naming the condition, and the
+``audit_backend_wired`` gauge, which is the channel an alert can watch. A boot
+log line is the weakest possible signal for the state that voids the
+compliance product.
+
+"Reaches a backend" is decided by **building** one, not by reading the
+provider name: a host application that selected a backend whose construction
+then fails would otherwise publish 1 while every resolution raises — the exact
+false-green the gauge exists to eliminate.
 
 Companion files: ``tests/unit/test_bootstrap.py::TestApplyAuditDefaultProvider``
 covers the disabled-path re-assert this function has always performed;
@@ -33,6 +38,11 @@ from baldur.settings.audit import override_audit_settings
 
 # The event name an alert or log filter matches on.
 _UNWIRED_EVENT = "audit.backend_unwired"
+
+# The two reasons the WARNING distinguishes. Hardcoded: an operator's next
+# action differs — "select a backend" versus "fix the one you selected".
+_NOOP_REASON = "audit_enabled_but_default_provider_is_noop"
+_UNCONSTRUCTIBLE_REASON = "audit_enabled_but_default_provider_does_not_construct"
 
 
 @pytest.fixture
@@ -73,9 +83,7 @@ class TestAuditBackendUnwiredSignalBehavior:
         warnings = _unwired_warnings(mock_logger)
         assert len(warnings) == 1
         assert warnings[0].kwargs["provider"] == "null"
-        assert (
-            warnings[0].kwargs["reason"] == "audit_enabled_but_default_provider_is_noop"
-        )
+        assert warnings[0].kwargs["reason"] == _NOOP_REASON
 
     def test_enabled_with_real_default_does_not_warn(self, audit_default):
         """The control arm — a wired process must stay quiet, or the WARNING
@@ -205,3 +213,127 @@ class TestAuditBackendWiredGaugeBehavior:
             call.args and call.args[0] == "audit.backend_wired_gauge_skipped"
             for call in mock_logger.debug.call_args_list
         )
+
+
+class TestAuditBackendWiredBehavior:
+    """The verdict itself: a name is not a backend.
+
+    ``_audit_backend_is_wired`` used to be ``current != "null"``. A provider
+    registered under a real name whose factory raises published 1 on the gauge
+    while every audit resolution raised — precisely the deployment the gauge
+    was added to catch. It now resolves one adapter and reports what happened.
+    """
+
+    @pytest.mark.parametrize(
+        "provider",
+        [None, "null"],
+        ids=["unset", "explicit_null"],
+    )
+    def test_the_no_op_provider_is_unwired_without_constructing_anything(
+        self, provider
+    ):
+        """The no-op verdict is decided from the name alone — resolving the
+        null adapter would be work done to learn what is already known."""
+        with patch("baldur.factory.ProviderRegistry.get_audit_adapter") as mock_get:
+            wired, reason = bootstrap._audit_backend_is_wired(provider)
+
+        assert (wired, reason) == (False, _NOOP_REASON)
+        mock_get.assert_not_called()
+
+    def test_a_constructible_backend_is_wired(self):
+        with patch("baldur.factory.ProviderRegistry.get_audit_adapter"):
+            wired, reason = bootstrap._audit_backend_is_wired("file_hashchain")
+
+        assert (wired, reason) == (True, "")
+
+    def test_a_backend_that_does_not_construct_is_unwired(self):
+        """The false-green this replaced: a real provider name whose
+        construction raises — an unwritable compliance directory, a refused
+        distributed chain — reported the trail as wired."""
+        with patch(
+            "baldur.factory.ProviderRegistry.get_audit_adapter",
+            side_effect=OSError("read-only file system"),
+        ):
+            wired, reason = bootstrap._audit_backend_is_wired("file_hashchain")
+
+        assert (wired, reason) == (False, _UNCONSTRUCTIBLE_REASON)
+
+    def test_the_verdict_builds_exactly_one_adapter(self):
+        """Step 5 runs on every boot; on the PRO path the activation hook has
+        already cached one, so this must be a single resolve either way."""
+        with patch("baldur.factory.ProviderRegistry.get_audit_adapter") as mock_get:
+            bootstrap._audit_backend_is_wired("file_hashchain")
+
+        assert mock_get.call_count == 1
+
+    def test_an_unconstructible_backend_warns_with_the_construction_reason(
+        self, audit_default
+    ):
+        """The two failures need different remedies, so they must not share
+        one reason string."""
+        audit_default("file_hashchain")
+
+        with (
+            override_audit_settings(enabled=True),
+            patch(
+                "baldur.factory.ProviderRegistry.get_audit_adapter",
+                side_effect=OSError("read-only file system"),
+            ),
+            patch.object(bootstrap, "logger") as mock_logger,
+        ):
+            bootstrap._apply_audit_default_provider()
+
+        warnings = _unwired_warnings(mock_logger)
+        assert len(warnings) == 1
+        assert warnings[0].kwargs["provider"] == "file_hashchain"
+        assert warnings[0].kwargs["reason"] == _UNCONSTRUCTIBLE_REASON
+
+    def test_an_unconstructible_backend_publishes_zero_on_the_gauge(
+        self, audit_default
+    ):
+        audit_default("file_hashchain")
+
+        with (
+            override_audit_settings(enabled=True),
+            patch(
+                "baldur.factory.ProviderRegistry.get_audit_adapter",
+                side_effect=OSError("read-only file system"),
+            ),
+            patch.object(bootstrap, "_set_audit_backend_wired_gauge") as mock_gauge,
+        ):
+            bootstrap._apply_audit_default_provider()
+
+        mock_gauge.assert_called_once_with(False)
+
+    def test_a_construction_failure_does_not_abort_step_five(self, audit_default):
+        """A refused distributed chain makes every resolution raise. Step 5 has
+        to report that, not propagate it out of ``init()``."""
+        audit_default("file_hashchain")
+
+        with (
+            override_audit_settings(enabled=True),
+            patch(
+                "baldur.factory.ProviderRegistry.get_audit_adapter",
+                side_effect=OSError("read-only file system"),
+            ),
+            patch.object(bootstrap, "logger") as mock_logger,
+        ):
+            bootstrap._apply_audit_default_provider()
+
+        assert any(
+            call.args and call.args[0] == "audit.default_provider_set"
+            for call in mock_logger.debug.call_args_list
+        )
+
+    def test_a_disabled_run_never_builds_an_adapter(self, audit_default):
+        """Audit off must not pay a construction — that is a directory
+        creation and, on the distributed path, a Redis connect."""
+        audit_default("file_hashchain")
+
+        with (
+            override_audit_settings(enabled=False),
+            patch("baldur.factory.ProviderRegistry.get_audit_adapter") as mock_get,
+        ):
+            bootstrap._apply_audit_default_provider()
+
+        mock_get.assert_not_called()

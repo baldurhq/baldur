@@ -16,11 +16,13 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from baldur.adapters.audit.hashchain_adapter import HashChainFileAuditLogAdapter
 from baldur.audit.integrity import (
     HashChainManager,
     HashChainManagerProtocol,
     HashChainVerifier,
     RedisHashChainManager,
+    chain_namespace_prefix,
     create_hash_chain_manager,
 )
 
@@ -463,3 +465,47 @@ class TestEdgeCases:
 
         assert "integrity" in result
         assert len(result["data"]) == 100000
+
+
+class TestChainNamespacePrefixContract:
+    """One derivation of the key form the distributed chain writes under.
+
+    The prefix is composed in the adapter and read back by the boot-time
+    reconciliation. A second derivation of the same expression is how that
+    reconciliation ended up reading a key the writer never writes, so the
+    exact key form is pinned here with hardcoded values rather than
+    recomposed from the source expression.
+    """
+
+    def test_partitioned_prefix_carries_the_partition_segment(self):
+        assert (
+            chain_namespace_prefix("baldur:", "eu-west") == "baldur:hashchain:eu-west:"
+        )
+
+    def test_empty_partition_resolves_to_the_default_namespace(self):
+        """An un-partitioned deployment is the zero-config majority — it has
+        to land on a stable named namespace, not on an empty segment that
+        collapses two colons together."""
+        assert chain_namespace_prefix("baldur:", "") == "baldur:hashchain:default:"
+
+    def test_a_non_default_root_prefix_is_carried_through(self):
+        """An installation that renamed its Redis key root must not have the
+        chain silently written under the shipped one."""
+        assert chain_namespace_prefix("acme:", "") == "acme:hashchain:default:"
+
+    def test_the_adapter_builds_its_manager_with_exactly_this_prefix(self, tmp_path):
+        """The pin that matters: the composed value and the writer agree,
+        because the writer calls this helper rather than re-spelling it."""
+        adapter = HashChainFileAuditLogAdapter(
+            log_dir=str(tmp_path / "audit"),
+            distributed_hash_chain=True,
+            redis_client=MockRedisClient(),
+            redis_key_prefix="acme:",
+            partition="eu-west",
+            enable_pending_manager=False,
+            enable_anchor_backup=False,
+        )
+
+        assert adapter._hash_chain._key_prefix == chain_namespace_prefix(
+            "acme:", "eu-west"
+        )

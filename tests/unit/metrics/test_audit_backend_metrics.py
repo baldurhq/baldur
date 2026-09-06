@@ -104,6 +104,87 @@ class TestAuditBackendMetricsContract:
         assert REGISTRY.get_sample_value("audit_backend_wired", {}) == 0.0
 
 
+class TestAuditDistributedChainDegradedContract:
+    """``audit_distributed_chain_degraded`` is a three-state answer.
+
+    Records still land and ``audit_backend_wired`` still reads 1 — this is a
+    different axis: the chain sequencing those records is not the cross-host
+    one the deployment asked for. Only a process that wanted a distributed
+    chain publishes the series at all, so absence means "nobody asked" and
+    never "everything is fine".
+    """
+
+    @pytest.fixture(autouse=True)
+    def _require_prometheus(self):
+        from baldur.metrics.audit_backend_metrics import METRICS_AVAILABLE
+
+        if not METRICS_AVAILABLE:
+            pytest.skip("prometheus_client not installed")
+
+    def test_gauge_exports_under_the_design_name(self):
+        from prometheus_client import REGISTRY
+
+        from baldur.metrics.audit_backend_metrics import (
+            set_audit_distributed_chain_degraded,
+        )
+
+        set_audit_distributed_chain_degraded(True)
+
+        assert REGISTRY.get_sample_value("audit_distributed_chain_degraded", {}) == 1.0
+
+    def test_labelnames_is_empty(self):
+        """A process-level posture — any label would fragment the series the
+        alert has to watch."""
+        from baldur.metrics.audit_backend_metrics import (
+            audit_distributed_chain_degraded,
+        )
+
+        assert audit_distributed_chain_degraded._labelnames == ()
+
+    def test_healthy_verdict_publishes_zero(self):
+        from prometheus_client import REGISTRY
+
+        from baldur.metrics.audit_backend_metrics import (
+            set_audit_distributed_chain_degraded,
+        )
+
+        set_audit_distributed_chain_degraded(False)
+
+        assert REGISTRY.get_sample_value("audit_distributed_chain_degraded", {}) == 0.0
+
+    def test_series_follows_the_latest_verdict_in_both_directions(self):
+        """Both values on one series. Written only with 1, the healthy state
+        would be indistinguishable from the never-asked one, and the third
+        state the docstring promises would not exist."""
+        from prometheus_client import REGISTRY
+
+        from baldur.metrics.audit_backend_metrics import (
+            set_audit_distributed_chain_degraded,
+        )
+
+        set_audit_distributed_chain_degraded(True)
+        assert REGISTRY.get_sample_value("audit_distributed_chain_degraded", {}) == 1.0
+
+        set_audit_distributed_chain_degraded(False)
+        assert REGISTRY.get_sample_value("audit_distributed_chain_degraded", {}) == 0.0
+
+    def test_the_two_audit_gauges_are_independent_series(self):
+        """A degraded chain is not an unwired backend: records land, so
+        ``audit_backend_wired`` must stay 1 while the chain gauge reads 1."""
+        from prometheus_client import REGISTRY
+
+        from baldur.metrics.audit_backend_metrics import (
+            set_audit_backend_wired,
+            set_audit_distributed_chain_degraded,
+        )
+
+        set_audit_backend_wired(True)
+        set_audit_distributed_chain_degraded(True)
+
+        assert REGISTRY.get_sample_value("audit_backend_wired", {}) == 1.0
+        assert REGISTRY.get_sample_value("audit_distributed_chain_degraded", {}) == 1.0
+
+
 class TestAuditBackendMetricsNoPrometheusContract:
     """Without prometheus_client the module degrades to a no-raise dummy."""
 
@@ -127,9 +208,12 @@ class TestAuditBackendMetricsNoPrometheusContract:
             """
             from baldur.metrics.audit_backend_metrics import (
                 set_audit_backend_wired,
+                set_audit_distributed_chain_degraded,
             )
             set_audit_backend_wired(True)
             set_audit_backend_wired(False)
+            set_audit_distributed_chain_degraded(True)
+            set_audit_distributed_chain_degraded(False)
             print('OK')
             """
         )
@@ -146,12 +230,14 @@ class TestAuditBackendMetricsNoPrometheusContract:
         result = _run_poisoned(
             """
             from baldur.metrics._metric_protocol import GaugeMetric
-            from baldur.metrics.audit_backend_metrics import audit_backend_wired
-
-            assert isinstance(audit_backend_wired, GaugeMetric), type(
-                audit_backend_wired
+            from baldur.metrics.audit_backend_metrics import (
+                audit_backend_wired,
+                audit_distributed_chain_degraded,
             )
-            audit_backend_wired.labels().inc()
+
+            for gauge in (audit_backend_wired, audit_distributed_chain_degraded):
+                assert isinstance(gauge, GaugeMetric), type(gauge)
+                gauge.labels().inc()
             print('OK')
             """
         )

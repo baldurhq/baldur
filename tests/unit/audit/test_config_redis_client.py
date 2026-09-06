@@ -22,8 +22,18 @@ import pytest
 import redis
 
 from baldur.adapters.redis.connection_factory import RedisConnectionFactory
-from baldur.audit.config import AuditConfig, create_hash_chain_redis_client
-from baldur.settings.redis import reset_redis_settings
+from baldur.audit.config import (
+    HASH_CHAIN_REDIS_URL_ENV,
+    AuditConfig,
+    create_hash_chain_redis_client,
+    hash_chain_redis_url_is_named,
+    resolve_hash_chain_redis_url,
+)
+from baldur.settings.redis import (
+    DEFAULT_REDIS_URL,
+    get_redis_settings,
+    reset_redis_settings,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -259,3 +269,115 @@ class TestAuditConfigDelegatesToHelperBehavior:
 
         assert client is sentinel
         mock_helper.assert_called_once_with("redis://override-host:6379/9")
+
+
+class TestHashChainRedisUrlGate:
+    """``resolve_hash_chain_redis_url`` and its companion "was one named" gate.
+
+    The two live in one module because a gate that answers a different
+    question than the resolver is how a promotion lands on the localhost
+    default: the entitlement hook infers a distributed chain only when
+    somebody named the URL that chain will actually dial, so the gate has to
+    read exactly the channels the resolver reads and no others.
+
+    Verification techniques (per UNIT_TEST_GUIDELINES §8):
+    - §8.1 Boundary (whitespace-only override, defaulted canonical URL).
+    - §8.5 Dependency interaction (the gate does not delegate to the wider
+      Redis-intent predicate).
+    """
+
+    def test_argument_wins_over_every_environment_channel(self, monkeypatch):
+        monkeypatch.setenv("AUDIT_HASH_CHAIN_REDIS_URL", "redis://feature:6379/0")
+        monkeypatch.setenv("BALDUR_REDIS_URL", "redis://canonical:6379/0")
+        reset_redis_settings()
+
+        resolved = resolve_hash_chain_redis_url("redis://explicit:6379/0")
+
+        assert resolved == "redis://explicit:6379/0"
+
+    def test_feature_override_wins_over_the_canonical_url(self, monkeypatch):
+        monkeypatch.setenv("AUDIT_HASH_CHAIN_REDIS_URL", "redis://feature:6379/0")
+        monkeypatch.setenv("BALDUR_REDIS_URL", "redis://canonical:6379/0")
+        reset_redis_settings()
+
+        assert resolve_hash_chain_redis_url() == "redis://feature:6379/0"
+
+    def test_canonical_url_is_the_last_named_source(self, monkeypatch):
+        monkeypatch.setenv("BALDUR_REDIS_URL", "redis://canonical:6379/0")
+        reset_redis_settings()
+
+        assert resolve_hash_chain_redis_url() == "redis://canonical:6379/0"
+
+    def test_unconfigured_resolution_falls_back_to_the_settings_default(self):
+        """The resolver hardcodes no URL of its own — what a zero-config
+        process dials is the canonical setting's own default, which is why
+        promoting onto it would be the framework talking to itself."""
+        assert resolve_hash_chain_redis_url() == get_redis_settings().url
+
+    def test_a_named_feature_override_counts_as_named(self, monkeypatch):
+        monkeypatch.setenv("AUDIT_HASH_CHAIN_REDIS_URL", "redis://feature:6379/0")
+
+        assert hash_chain_redis_url_is_named() is True
+
+    def test_a_stated_canonical_url_counts_as_named(self, monkeypatch):
+        monkeypatch.setenv("BALDUR_REDIS_URL", "redis://canonical:6379/0")
+        reset_redis_settings()
+
+        assert hash_chain_redis_url_is_named() is True
+
+    def test_a_defaulted_canonical_url_is_not_named(self):
+        """The field's default is an un-named localhost address. Counting it
+        would promote a distributed chain on every entitled single-host
+        install, pointed at a Redis nobody deployed."""
+        assert get_redis_settings().url == DEFAULT_REDIS_URL
+        assert hash_chain_redis_url_is_named() is False
+
+    @pytest.mark.parametrize(
+        "value",
+        ["", "   ", "	"],
+        ids=["empty", "spaces", "tab"],
+    )
+    def test_a_blank_feature_override_is_not_named(self, monkeypatch, value):
+        """An exported-but-empty variable is a deployment template that did
+        not get filled in, not an operator naming a server."""
+        monkeypatch.setenv("AUDIT_HASH_CHAIN_REDIS_URL", value)
+        reset_redis_settings()
+
+        assert hash_chain_redis_url_is_named() is False
+
+    def test_the_bare_redis_url_variable_does_not_count_as_named(self, monkeypatch):
+        """``REDIS_URL`` is real Redis intent and the wider predicate counts
+        it — but it is not a channel this resolver reads, so gating on it
+        would promote the chain onto the localhost default."""
+        from baldur.settings.redis import redis_explicitly_configured
+
+        monkeypatch.setenv("REDIS_URL", "redis://bare:6379/0")
+        reset_redis_settings()
+
+        assert redis_explicitly_configured() is True
+        assert resolve_hash_chain_redis_url() == DEFAULT_REDIS_URL
+        assert hash_chain_redis_url_is_named() is False
+
+    def test_the_gate_does_not_delegate_to_the_wider_intent_predicate(self):
+        """A Django ``CACHES``-only deployment is the other widening case the
+        gate has to stay narrower than: real Redis intent, on a channel the
+        chain client cannot dial."""
+        with patch(
+            "baldur.settings.redis.redis_explicitly_configured",
+            return_value=True,
+        ):
+            assert hash_chain_redis_url_is_named() is False
+
+    def test_unreadable_settings_report_not_named_rather_than_raising(self):
+        """This gate runs inside the entitlement hook. Failing closed here
+        costs a promotion; raising would cost audit activation."""
+        with patch(
+            "baldur.settings.redis.get_redis_settings",
+            side_effect=RuntimeError("settings blew up"),
+        ):
+            assert hash_chain_redis_url_is_named() is False
+
+    def test_env_var_name_is_the_published_one(self):
+        """Hardcoded so a rename shows up here rather than as a silently
+        ignored operator override."""
+        assert HASH_CHAIN_REDIS_URL_ENV == "AUDIT_HASH_CHAIN_REDIS_URL"

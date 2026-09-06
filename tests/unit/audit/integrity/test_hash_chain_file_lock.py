@@ -21,8 +21,14 @@ Covers:
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
+import textwrap
 import threading
+from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 from baldur.audit.integrity.local_manager import HashChainManager
 
@@ -206,3 +212,98 @@ class TestHashChainManagerFileLockSideEffects:
         assert not state_file.exists()
         assert mgr._sequence == 0
         assert mgr._previous_hash == HashChainManager.GENESIS_HASH
+
+
+# =============================================================================
+# Concurrency — the cross-process half of the guarantee
+# =============================================================================
+
+# One writer process: append ``entries`` chain entries against a shared state
+# file and report the sequences it was handed. Run out of process on purpose —
+# the thread-based case above passes with the file lock removed, because
+# ``HashChainManager`` also holds an in-process ``RLock``. Only separate
+# processes can fail when the file lock is gone, which is the deployment the
+# feature is sold for: Gunicorn workers, a Celery worker and cron sharing one
+# audit volume.
+_WRITER_SOURCE = textwrap.dedent(
+    """
+    import json
+    import sys
+    from pathlib import Path
+
+    from baldur.audit.integrity.local_manager import HashChainManager
+
+    state_file, entries, use_file_lock, out_path = sys.argv[1:5]
+    manager = HashChainManager(
+        state_file=Path(state_file),
+        use_file_lock=use_file_lock == "1",
+    )
+    sequences = [
+        manager.add_integrity({"event": "e"})["integrity"]["sequence"]
+        for _ in range(int(entries))
+    ]
+    Path(out_path).write_text(json.dumps(sequences))
+    """
+)
+
+# Enough writes per process that the unlocked arm's overlap is unmistakable,
+# few enough that the whole case stays well inside the suite's timeout.
+_ENTRIES_PER_PROCESS = 15
+
+
+def _run_writers(tmp_path: Path, processes: int, *, use_file_lock: bool) -> list[int]:
+    """Drive one shared state file from ``processes`` OS processes."""
+    script = tmp_path / "writer.py"
+    script.write_text(_WRITER_SOURCE, encoding="utf-8")
+    state_file = tmp_path / ".hash_chain_state.json"
+
+    outputs = [tmp_path / f"sequences_{i}.json" for i in range(processes)]
+    running = [
+        subprocess.Popen(
+            [
+                sys.executable,
+                str(script),
+                str(state_file),
+                str(_ENTRIES_PER_PROCESS),
+                "1" if use_file_lock else "0",
+                str(out),
+            ],
+        )
+        for out in outputs
+    ]
+    for proc in running:
+        assert proc.wait(timeout=90) == 0, "writer process failed"
+
+    sequences: list[int] = []
+    for out in outputs:
+        sequences.extend(json.loads(out.read_text()))
+    return sequences
+
+
+class TestHashChainFileLockMultiprocess:
+    """Unique sequences across processes — and duplicates without the lock.
+
+    The negative arm is what makes the positive one mean something: a chain
+    whose sequences collide has two entries claiming the same position, so the
+    verifier cannot tell a reordering from a deletion.
+    """
+
+    @pytest.mark.parametrize("processes", [2, 4])
+    def test_sequences_are_unique_across_processes_under_the_lock(
+        self, tmp_path, processes
+    ):
+        sequences = _run_writers(tmp_path, processes, use_file_lock=True)
+
+        expected_total = processes * _ENTRIES_PER_PROCESS
+        assert len(sequences) == expected_total
+        assert sorted(sequences) == list(range(1, expected_total + 1))
+
+    def test_the_same_writers_collide_without_the_lock(self, tmp_path):
+        """The control arm. Each unlocked process keeps its own in-memory
+        counter from an empty state file and flushes only every tenth write,
+        so both hand out sequence 1 — the exact multi-writer corruption the
+        lock exists to prevent."""
+        sequences = _run_writers(tmp_path, 2, use_file_lock=False)
+
+        assert len(sequences) == 2 * _ENTRIES_PER_PROCESS
+        assert len(set(sequences)) < len(sequences), "expected duplicate sequences"
