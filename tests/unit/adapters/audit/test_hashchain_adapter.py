@@ -743,3 +743,83 @@ class TestOpenFailureRecoveryBehavior:
 
         assert log_dir.is_dir()
         assert len(_read_rows(log_dir)) == 1
+
+
+class TestHashChainAdapterPropertiesContract:
+    """The construction facts the boot-time reconciliation reads back.
+
+    A startup step that reconciles the Redis chain against the files needs
+    three things the adapter alone knows: the directory it *resolved* to (the
+    factory routes the requested one through the writable-directory resolver,
+    so settings can name a different path), the chain manager it actually
+    built (a settings flag can read ``True`` on a process that fell back), and
+    the bare Redis key root its ``PendingSequenceManager`` was built with (the
+    chain manager's own prefix adds a partition segment the pending namespace
+    does not). Re-deriving any of the three is how a reconciliation ends up
+    reading a key the writer never writes.
+    """
+
+    def test_log_dir_reports_the_directory_actually_written_to(self, tmp_path):
+        resolved = tmp_path / "resolved-elsewhere"
+        adapter = HashChainFileAuditLogAdapter(
+            log_dir=str(resolved),
+            enable_anchor_backup=False,
+        )
+
+        assert adapter.log_dir == resolved
+
+    def test_hash_chain_manager_is_the_local_one_when_nothing_is_distributed(
+        self, tmp_path
+    ):
+        adapter = HashChainFileAuditLogAdapter(
+            log_dir=str(tmp_path / "audit"),
+            enable_anchor_backup=False,
+        )
+
+        assert isinstance(adapter.hash_chain_manager, HashChainManager)
+
+    def test_hash_chain_manager_is_none_when_the_chain_is_disabled(self, tmp_path):
+        """``None`` is a third state the reconciliation gate has to absorb —
+        not every audit adapter carries a chain."""
+        adapter = HashChainFileAuditLogAdapter(
+            log_dir=str(tmp_path / "audit"),
+            enable_hash_chain=False,
+            enable_anchor_backup=False,
+        )
+
+        assert adapter.hash_chain_manager is None
+
+    def test_redis_key_prefix_returns_the_constructor_argument(self, tmp_path):
+        """A non-default root: an installation that renamed its Redis
+        namespace must not have the reconciliation guess the shipped one."""
+        adapter = HashChainFileAuditLogAdapter(
+            log_dir=str(tmp_path / "audit"),
+            redis_key_prefix="acme:",
+            enable_anchor_backup=False,
+        )
+
+        assert adapter.redis_key_prefix == "acme:"
+
+    def test_redis_key_prefix_defaults_to_the_shipped_root(self, tmp_path):
+        adapter = HashChainFileAuditLogAdapter(
+            log_dir=str(tmp_path / "audit"),
+            enable_anchor_backup=False,
+        )
+
+        assert adapter.redis_key_prefix == "baldur:"
+
+    @pytest.mark.parametrize(
+        "name",
+        ["log_dir", "hash_chain_manager", "redis_key_prefix"],
+    )
+    def test_the_construction_facts_are_read_only(self, tmp_path, name):
+        """They describe what was built, not what is wanted — a writable
+        attribute would let a caller move the reconciliation off the objects
+        that actually wrote the keys."""
+        adapter = HashChainFileAuditLogAdapter(
+            log_dir=str(tmp_path / "audit"),
+            enable_anchor_backup=False,
+        )
+
+        with pytest.raises(AttributeError):
+            setattr(adapter, name, "anything")

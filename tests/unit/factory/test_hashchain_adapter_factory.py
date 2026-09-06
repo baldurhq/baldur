@@ -37,8 +37,8 @@ from baldur.adapters.redis.connection_factory import RedisConnectionFactory
 from baldur.audit.integrity import HashChainManager, RedisHashChainManager
 from baldur.factory.adapters import (
     _AUDIT_LOG_DIR_ENV,
+    clear_distributed_chain_probe_cache,
     discover_audit_adapters,
-    reset_distributed_chain_probe_cache,
 )
 from baldur.factory.registry import ProviderRegistry
 from baldur.settings.audit import override_audit_settings
@@ -54,12 +54,12 @@ def _isolate_hashchain_factory(monkeypatch, tmp_path):
     """Registry registration + a private resolver registry are both global."""
     monkeypatch.setenv(_LOG_DIR_ENV, str(tmp_path / "audit"))
     reset_writable_dir_resolutions()
-    reset_distributed_chain_probe_cache()
+    clear_distributed_chain_probe_cache()
     with ProviderRegistry.audit.snapshot():
         discover_audit_adapters()
         yield
     reset_writable_dir_resolutions()
-    reset_distributed_chain_probe_cache()
+    clear_distributed_chain_probe_cache()
 
 
 def _resolved(path) -> ResolvedDir:

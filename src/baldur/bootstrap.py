@@ -423,9 +423,9 @@ def _reset_audit_provider_state() -> None:
         logger.warning("baldur.audit_settings_reset_failed", error=str(e))
 
     try:
-        from baldur.factory.adapters import reset_distributed_chain_probe_cache
+        from baldur.factory.adapters import clear_distributed_chain_probe_cache
 
-        reset_distributed_chain_probe_cache()
+        clear_distributed_chain_probe_cache()
     except Exception as e:
         logger.warning("baldur.chain_probe_cache_reset_failed", error=str(e))
 

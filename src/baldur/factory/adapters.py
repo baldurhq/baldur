@@ -47,7 +47,7 @@ _distributed_chain_probe_verdicts: dict[str, bool] = {}
 _distributed_chain_failures_announced: set[str] = set()
 
 __all__ = [
-    "reset_distributed_chain_probe_cache",
+    "clear_distributed_chain_probe_cache",
     "discover_cache_adapters",
     "discover_queue_adapters",
     "discover_async_queue_adapters",
@@ -231,13 +231,17 @@ def discover_audit_adapters() -> None:  # noqa: C901
         pass
 
 
-def reset_distributed_chain_probe_cache() -> None:
+def clear_distributed_chain_probe_cache() -> None:
     """Forget every distributed-chain admission verdict and announcement.
 
     Called from ``reset_init_state()`` and from test fixtures. Module-level
-    state with no callable reset is a cross-test leak, and monkeypatching the
+    state with no callable clear is a cross-test leak, and monkeypatching the
     attribute by name would couple every test file to the spelling of a
     private global.
+
+    Named ``clear_`` rather than ``reset_``: these are memoized verdicts, not
+    a lazily-constructed singleton, so there is no companion getter to pair
+    with and no held object to restore.
     """
     _distributed_chain_probe_verdicts.clear()
     _distributed_chain_failures_announced.clear()

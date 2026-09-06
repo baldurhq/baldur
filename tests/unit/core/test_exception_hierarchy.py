@@ -975,3 +975,63 @@ class TestNonRetryableExceptionsContract:
 
         nre = non_retryable_exceptions()
         assert isinstance(CircuitBreakerTransitionError(), nre)
+
+
+class TestDistributedHashChainUnavailableErrorContract:
+    """The refusal a stated distributed audit chain raises when it cannot be
+    built at all.
+
+    It is an ``AuditError``, so the audit subsystem's existing catch-all still
+    sees it, and it carries the address it could not dial — the only channel
+    naming that address on the raising path. The default message has to say
+    *why* the fallback was refused, because the operator's next question is
+    "the local chain works, why did you not use it".
+    """
+
+    def test_inherits_the_audit_error_family(self):
+        from baldur.core.exceptions import (
+            AuditError,
+            DistributedHashChainUnavailableError,
+        )
+
+        assert issubclass(DistributedHashChainUnavailableError, AuditError)
+        assert issubclass(DistributedHashChainUnavailableError, BaldurError)
+
+    def test_is_exported_in_module_all(self):
+        from baldur.core import exceptions
+
+        assert "DistributedHashChainUnavailableError" in exceptions.__all__
+
+    def test_extra_context_carries_the_redis_url(self):
+        """The URL is bound into the structlog record by the generic handler,
+        so it must ride on ``extra_context()`` rather than only on the
+        attribute."""
+        from baldur.core.exceptions import DistributedHashChainUnavailableError
+
+        exc = DistributedHashChainUnavailableError(
+            redis_url="redis://chain.example:6379/0"
+        )
+
+        assert exc.extra_context()["redis_url"] == "redis://chain.example:6379/0"
+
+    def test_omitted_url_reports_as_empty_rather_than_missing(self):
+        """A handler binding the key unconditionally would raise on a KeyError
+        for the argument-less construction."""
+        from baldur.core.exceptions import DistributedHashChainUnavailableError
+
+        assert DistributedHashChainUnavailableError().extra_context()["redis_url"] == ""
+
+    def test_default_message_names_the_refused_substitution(self):
+        """The operator's next question is why the local chain was not used;
+        the default message answers it without needing the docs."""
+        from baldur.core.exceptions import DistributedHashChainUnavailableError
+
+        message = str(DistributedHashChainUnavailableError())
+
+        assert "distributed_hash_chain" in message
+        assert "refusing to substitute" in message
+
+    def test_explicit_message_is_not_overwritten_by_the_default(self):
+        from baldur.core.exceptions import DistributedHashChainUnavailableError
+
+        assert str(DistributedHashChainUnavailableError("custom")) == "custom"
