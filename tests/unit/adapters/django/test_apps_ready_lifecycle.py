@@ -85,10 +85,6 @@ def silent_inputs(monkeypatch):
         "baldur.adapters.django.startup.RBACInitializer.connect_post_migrate",
         staticmethod(lambda *args, **kwargs: None),
     )
-    monkeypatch.setattr(
-        "baldur.adapters.django.startup.EnvironmentAuditor.sync_hash_chain_on_startup",
-        staticmethod(lambda *args, **kwargs: None),
-    )
     monkeypatch.setattr("baldur.init", lambda **kwargs: None, raising=False)
     monkeypatch.setattr(
         BaldurConfig,

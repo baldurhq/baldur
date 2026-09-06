@@ -16,6 +16,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `BALDUR_REPLAY_AUTOMATION_ON_RECOVERY_MAX_CONTINUATIONS` bounds how far one recovery drains.
 - `dlq_replay_batch_completed` carries `capped`, so "drained everything" and "hit the cap" differ.
 - A drain that stops with work left emits `DLQ_REPLAY_BLOCKED` naming why, not just an error log.
+- `audit_distributed_chain_degraded` tells "the chain I asked for" from "the chain I have".
 
 ### Changed
 
@@ -25,6 +26,9 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - The traffic-aware health report drops its error-budget check, which never checked anything.
 - An inactive PRO entitlement now stops PRO notifications, config apply and DLQ eviction.
 - Circuit-breaker alerts fall back to the OSS push when the PRO entitlement is not active.
+- An entitled install that names a Redis URL now gets the distributed audit hash chain unasked.
+- `BALDUR_AUDIT_DISTRIBUTED_HASH_CHAIN=true` with no Redis client buildable now fails startup.
+- `audit_backend_wired` now reports 0 when the selected audit backend cannot be built at all.
 
 ### Fixed
 
@@ -40,10 +44,12 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - Flask and FastAPI graceful shutdown now waits for in-flight requests before closing audit and DLQ.
 - A briefly unreadable licence file no longer pins "not entitled" for the next 24 hours.
 - Suppressed notifications are no longer logged as sent.
+- The audit chain's startup reconciliation now runs, on every framework, against the right keys.
 
 ### Removed
 
 - Dead 429-throttle fields `recovery_dampening_steps`, `default_service`, `debounce_window_seconds`.
+- `EnvironmentAuditor` and the `BALDUR_DISTRIBUTED_HASH_CHAIN` Django setting it alone read.
 
 ## [1.10.0] - 2026-09-04
 

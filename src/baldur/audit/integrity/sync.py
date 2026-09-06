@@ -17,6 +17,19 @@ from baldur.utils.time import utc_now
 
 logger = structlog.get_logger()
 
+# ``SCAN`` batch size for the boot-time PENDING sweep. redis-py's default
+# COUNT of 10 turns one command into a round trip per ten keys examined, and
+# this sweep runs inside ``init()`` under the init lock — on a shared Redis
+# holding millions of keys that is boot time measured in round trips. Matches
+# the batch the event journal's own scan already uses.
+PENDING_SCAN_BATCH = 200
+
+# Upper bound on keys examined by one boot sweep. The cleanup is best-effort
+# by contract — PENDING keys carry their own short TTL and expire unaided — so
+# a capped sweep loses nothing a crash-recovery path depends on, while an
+# uncapped one lets one oversized keyspace hold up every process start.
+PENDING_SCAN_MAX_KEYS = 10_000
+
 
 class StartupHashChainSync:
     """
@@ -50,19 +63,68 @@ class StartupHashChainSync:
         redis_client: Any,
         log_dir: Path,
         key_prefix: str = "baldur:",
+        pending_key_prefix: str | None = None,
     ):
         """
         Initialize StartupHashChainSync.
 
+        The chain's sequence/state keys and its PENDING/ORPHANED keys hang off
+        two different roots in production: the chain manager is built with a
+        partition-namespaced prefix while ``PendingSequenceManager`` receives
+        the bare one. One prefix for both would reconcile a key nothing writes.
+
         Args:
             redis_client: Redis client instance
             log_dir: Directory containing audit log files
-            key_prefix: Key prefix for Redis keys
+            key_prefix: Prefix for the chain's sequence and state keys — the
+                same value the chain manager writes under
+            pending_key_prefix: Prefix for the PENDING/ORPHANED keys. Defaults
+                to ``key_prefix``, which is correct whenever one prefix governs
+                both (every test that injects its own fake Redis).
         """
         self._redis = redis_client
         self._log_dir = Path(log_dir)
         self._key_prefix = key_prefix
+        self._pending_key_prefix = (
+            key_prefix if pending_key_prefix is None else pending_key_prefix
+        )
         self._sync_completed = False
+
+    @classmethod
+    def from_manager(
+        cls,
+        manager: Any,
+        log_dir: Path,
+        pending_key_prefix: str,
+    ) -> StartupHashChainSync:
+        """Build a sync that reconciles exactly the keys ``manager`` writes.
+
+        Reads the client and the chain prefix off the manager itself rather
+        than re-deriving them from settings — a second derivation of one key
+        form is how the reconciliation drifted away from the writer in the
+        first place.
+
+        ``pending_key_prefix`` has no default on purpose. The manager cannot
+        supply it (it stores only its own composed prefix), and inheriting
+        ``__init__``'s fallback here would let a caller silently reconcile the
+        wrong namespace. It comes from the adapter that constructed the
+        ``PendingSequenceManager``.
+
+        Args:
+            manager: A ``RedisHashChainManager``.
+            log_dir: Directory containing the audit log files.
+            pending_key_prefix: The bare Redis root the adapter's
+                ``PendingSequenceManager`` was built with.
+
+        Returns:
+            A sync pinned to that manager's client and key namespaces.
+        """
+        return cls(
+            redis_client=manager._redis,
+            log_dir=log_dir,
+            key_prefix=manager._key_prefix,
+            pending_key_prefix=pending_key_prefix,
+        )
 
     def sync(self) -> dict[str, Any]:
         """
@@ -293,32 +355,58 @@ class StartupHashChainSync:
             Number of sequences cleaned up
         """
         try:
-            pending_pattern = f"{self._key_prefix}audit:hash_chain:pending:*"
-            keys = self._redis.keys(pending_pattern)
+            from baldur.settings.audit_integrity import (
+                get_audit_integrity_settings,
+            )
 
-            if not keys:
-                return 0
+            orphan_ttl = get_audit_integrity_settings().orphan_ttl_seconds
+            pending_pattern = f"{self._pending_key_prefix}audit:hash_chain:pending:*"
 
             cleaned = 0
-            for key in keys:
+            examined = 0
+            capped = False
+            for key in self._redis.scan_iter(
+                match=pending_pattern,
+                count=PENDING_SCAN_BATCH,
+            ):
+                examined += 1
+                if examined > PENDING_SCAN_MAX_KEYS:
+                    capped = True
+                    break
+
                 try:
                     key_str = key.decode("utf-8") if isinstance(key, bytes) else key
                     seq_str = key_str.split(":")[-1]
                     seq = int(seq_str)
 
-                    # Move to ORPHANED
-                    orphan_key = f"{self._key_prefix}audit:hash_chain:orphaned:{seq}"
+                    # Move to ORPHANED. Follows the PENDING prefix, not the
+                    # chain prefix: orphans are the pending namespace's other
+                    # half and the only reader of them scans the bare form.
+                    orphan_key = (
+                        f"{self._pending_key_prefix}audit:hash_chain:orphaned:{seq}"
+                    )
                     expected_hash = self._redis.get(key)
 
                     pipe = self._redis.pipeline()
                     pipe.delete(key)
-                    pipe.set(orphan_key, expected_hash or "startup_cleanup", ex=86400)
+                    pipe.set(
+                        orphan_key,
+                        expected_hash or "startup_cleanup",
+                        ex=orphan_ttl,
+                    )
                     pipe.execute()
 
                     cleaned += 1
 
                 except (ValueError, IndexError):
                     continue
+
+            if capped:
+                logger.warning(
+                    "startup_sync.pending_scan_capped",
+                    examined=PENDING_SCAN_MAX_KEYS,
+                    cleaned=cleaned,
+                )
 
             if cleaned:
                 logger.info(
@@ -336,4 +424,8 @@ class StartupHashChainSync:
             return 0
 
 
-__all__ = ["StartupHashChainSync"]
+__all__ = [
+    "StartupHashChainSync",
+    "PENDING_SCAN_BATCH",
+    "PENDING_SCAN_MAX_KEYS",
+]

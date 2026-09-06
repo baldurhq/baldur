@@ -29,12 +29,10 @@ Note:
     As of v2.0.0, Redis is the default storage backend.
     This app config still provides:
     - RBAC group auto-creation
-    - Environment variable audit
     - Pre-computed cache worker
 
 Startup responsibilities are delegated to the ``startup`` sub-package:
     - RBACInitializer: RBAC group creation via post_migrate signal
-    - EnvironmentAuditor: Environment variable snapshot + hash chain sync
 """
 
 from __future__ import annotations
@@ -48,7 +46,6 @@ from django.apps import AppConfig
 
 from baldur.adapters.django.startup import (
     BALDUR_GROUPS,
-    EnvironmentAuditor,
     RBACInitializer,
     create_baldur_groups,
 )
@@ -101,11 +98,6 @@ class BaldurConfig(AppConfig):
 
         # Celery autodiscover: baldur.celery_tasks registration (223 Host App Decoupling)
         self._autodiscover_celery_tasks()
-
-        # Sync hash chain state (Redis <-> Local file).
-        # Stays in apps.py because it depends on Django settings — Wave 5.5C
-        # will migrate this to a framework-agnostic settings adapter.
-        EnvironmentAuditor.sync_hash_chain_on_startup()
 
         # 416: framework-agnostic init() — handles config validation, default
         # event handlers, shutdown handlers, PRO entry-point hooks, audit

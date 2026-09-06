@@ -34,6 +34,7 @@ from baldur.audit.integrity import (
     HashChainManagerProtocol,
     PendingSequenceManager,
     RedisHashChainManager,
+    chain_namespace_prefix,
 )
 from baldur.audit.masking import (
     mask_ip,
@@ -133,6 +134,7 @@ class HashChainFileAuditLogAdapter(AuditLogAdapter):
         """
         self._log_dir = Path(log_dir or self.DEFAULT_LOG_DIR)
         self._partition = partition
+        self._redis_key_prefix = redis_key_prefix
         self._rotate_daily = rotate_daily
         self._enable_hash_chain = enable_hash_chain
         self._enable_anchor_backup = enable_anchor_backup
@@ -174,8 +176,8 @@ class HashChainFileAuditLogAdapter(AuditLogAdapter):
                 )
                 self._hash_chain = RedisHashChainManager(
                     redis_client=redis_client,
-                    key_prefix=(
-                        f"{redis_key_prefix}hashchain:{self._partition or 'default'}:"
+                    key_prefix=chain_namespace_prefix(
+                        redis_key_prefix, self._partition
                     ),
                     fallback_manager=local_fallback,
                 )
@@ -215,6 +217,43 @@ class HashChainFileAuditLogAdapter(AuditLogAdapter):
 
         # Ensure directory exists.
         self._log_dir.mkdir(parents=True, exist_ok=True)
+
+    # =========================================================================
+    # Construction facts other startup steps need
+    # =========================================================================
+
+    @property
+    def log_dir(self) -> Path:
+        """The directory this adapter actually writes its ledger into.
+
+        The resolved directory, not the requested one — the factory routes it
+        through the writable-directory resolver, so a step that reconciles the
+        files against Redis must read it off the adapter rather than off
+        settings.
+        """
+        return self._log_dir
+
+    @property
+    def hash_chain_manager(self) -> HashChainManagerProtocol | None:
+        """The chain manager backing this adapter, or ``None`` when disabled.
+
+        Its concrete type is what says whether this process sequences through
+        Redis or locally — the only honest gate for a Redis-side startup
+        reconciliation, since a settings flag can read ``True`` on a process
+        that fell back.
+        """
+        return self._hash_chain
+
+    @property
+    def redis_key_prefix(self) -> str:
+        """The bare Redis key root this adapter's collaborators were built with.
+
+        The ``PendingSequenceManager`` and ``DailyHashAnchor`` namespaces hang
+        off this value un-partitioned, while the chain manager's own prefix
+        adds the partition segment. A reconciliation reads it here instead of
+        re-deriving it, which is how the two stay pinned together.
+        """
+        return self._redis_key_prefix
 
     # =========================================================================
     # Public AuditLogAdapter contract

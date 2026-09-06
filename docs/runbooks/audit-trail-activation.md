@@ -22,7 +22,7 @@ An explicit `BALDUR_AUDIT_ENABLED` value is **sovereign in both directions**: `f
 | `BALDUR_AUDIT_ENABLED` | `false` — **raised to `true` by the PRO hook when unset** | Master switch. When off, `bootstrap.init()` wires the `null` audit provider — no WAL, no files, no sync worker, no directories created. When on, it starts `AuditSyncWorker`; under PRO the hook has already promoted `file_hashchain`. |
 | `BALDUR_SECRETS_AUDIT_SIGNING_KEY` | _(unset)_ | Keys the HMAC-SHA256 hash chain. A **CRITICAL** secret — production boot aborts if it is missing. |
 | `BALDUR_AUDIT_LOG_DIR` | `logs/audit` | Where `audit_{date}.jsonl` + `.hash_chain_state.json` are written. |
-| `BALDUR_AUDIT_DISTRIBUTED_HASH_CHAIN` | `false` | Redis-backed hash chain. **Multi-host (K8s ≥2 pods) MUST set `true`** — file locks do not span hosts. |
+| `BALDUR_AUDIT_DISTRIBUTED_HASH_CHAIN` | `false` — **raised to `true` by the PRO hook when a chain Redis URL is named** | Redis-backed hash chain — file locks do not span hosts. Set it yourself only to override; an explicit `true` also makes an unbuildable Redis client a startup error. |
 
 Audit does real I/O (WAL writes, hash-chain files, a background sync worker), so Baldur never creates audit artifacts an operator did not ask for — but under PRO the **entitlement is the request**, which is why the trail is on with nothing set. Either way it is **startup-wired, not a runtime toggle**: changing the switch takes a restart. Single-host file mode needs no external infrastructure.
 
@@ -141,13 +141,14 @@ Audit records persist through a **pluggable backend** (`ProviderRegistry.audit`)
 
 > Setting `BALDUR_REDIS_URL` or `BALDUR_SQL_DSN` **alone** does not switch the audit backend — those are shared connection inputs (the Redis flush still needs `BALDUR_AUDIT_BUFFER_REDIS_ENABLED`; the SQL backend still needs the Django adapter wired programmatically). With no extra activation, records persist to the file hash-chain.
 
-### Multi-host (K8s ≥2 pods) — required
+### Multi-host (K8s ≥2 pods) — name a Redis
 
 ```bash
-BALDUR_AUDIT_DISTRIBUTED_HASH_CHAIN=true   # requires BALDUR_REDIS_URL
+BALDUR_REDIS_URL=redis://...               # this is the whole step
+BALDUR_AUDIT_DISTRIBUTED_HASH_CHAIN=true   # override only — normally inferred
 ```
 
-File locks (`BALDUR_AUDIT_USE_FILE_LOCK`, default `true`) protect a single host's chain state but **do not span hosts**. With ≥2 pods writing local file chains, the chains fork and cross-pod integrity verification fails. The Redis-backed distributed hash chain is mandatory above one writer.
+File locks (`BALDUR_AUDIT_USE_FILE_LOCK`, default `true`) protect a single host's chain state but **do not span hosts**. With ≥2 pods writing local file chains, the chains fork and cross-pod integrity verification fails. On an entitled install the distributed chain is switched on for you as soon as a chain Redis URL is named, so naming one is the step — the flag is there to override the inference in either direction.
 
 ---
 
@@ -203,7 +204,7 @@ If `BALDUR_AUDIT_LOG_DIR` points inside the container's writable layer, every re
 
 ### Mistake 3 — Multi-host without the distributed hash chain
 
-Two or more pods each writing a local file chain produces forked chains that fail cross-pod integrity verification. Above one writer, set `BALDUR_AUDIT_DISTRIBUTED_HASH_CHAIN=true` with `BALDUR_REDIS_URL`.
+Two or more pods each writing a local file chain produces forked chains that fail cross-pod integrity verification. Above one writer, name a `BALDUR_REDIS_URL` — an entitled install switches the distributed chain on from there. Check it landed: `audit_distributed_chain_degraded` should read `0`, and its absence means no distributed chain was asked for at all.
 
 ### Mistake 4 — Expecting a live toggle from the admin console
 

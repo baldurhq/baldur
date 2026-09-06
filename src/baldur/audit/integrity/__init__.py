@@ -60,6 +60,7 @@ from baldur.audit.integrity.reconciler import (
 # Redis Manager
 from baldur.audit.integrity.redis_manager import (
     RedisHashChainManager,
+    chain_namespace_prefix,
 )
 
 # Pending Sequence Manager
@@ -93,6 +94,7 @@ __all__ = [
     "get_hash_chain_manager",
     "reset_hash_chain_manager",
     "RedisHashChainManager",
+    "chain_namespace_prefix",
     # Factory
     "create_hash_chain_manager",
     # Pending Sequence

@@ -19,7 +19,8 @@ Internal / nested-only (``baldur.core.exceptions``):
     ``AdapterInitializationError``, ``AdapterConnectionError``,
     ``RecoveryAdapterError``, ``StoreError``, ``UnconfiguredStoreError``,
     ``CircuitBreakerTransitionError``, ``InvalidStateTransitionError``,
-    ``DLQEntryNotFoundError``, ``AuditError``, ``RunbookError``,
+    ``DLQEntryNotFoundError``, ``AuditError``,
+    ``DistributedHashChainUnavailableError``, ``RunbookError``,
     ``SettingsValidationError``, ``StepExecutionError``, ``StepTimeoutError``,
     ``CompensationError``, ``ConcurrencyConflictError``.
 """
@@ -62,6 +63,7 @@ __all__ = [
     "DomainValidationError",
     # Audit
     "AuditError",
+    "DistributedHashChainUnavailableError",
     # Runbook
     "RunbookError",
     # Configuration
@@ -501,6 +503,36 @@ class AuditError(BaldurError):
     """Base exception for audit-related errors (cascade, WAL, mmap buffer)."""
 
     pass
+
+
+class DistributedHashChainUnavailableError(AuditError):
+    """Raised when a stated distributed audit hash chain cannot be built.
+
+    The operator asked for the cross-host chain and no Redis client could be
+    constructed at all. Falling back to the local file-locked chain here would
+    write entries indistinguishable from a chain nobody asked to be
+    distributed — a cross-host guarantee silently served by a mechanism that
+    cannot span hosts.
+
+    Only the *unlabelled* substitution refuses. A client that builds but whose
+    server is unreachable keeps writing, because every entry its fallback
+    produces is stamped ``degraded`` and an auditor can tell those apart.
+    """
+
+    def __init__(self, message: str = "", *, redis_url: str = ""):
+        if not message:
+            message = (
+                "distributed_hash_chain is set but no Redis client could be "
+                "built; refusing to substitute the local file-locked chain, "
+                "which cannot span hosts"
+            )
+        super().__init__(message)
+        self.redis_url = redis_url
+
+    def extra_context(self) -> dict[str, Any]:
+        ctx = super().extra_context()
+        ctx["redis_url"] = self.redis_url
+        return ctx
 
 
 # ── Runbook errors ───────────────────────────────────────────

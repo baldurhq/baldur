@@ -8,7 +8,7 @@ Verifies fix(356) semantic inversion corrections:
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 
 class TestDjangoAppsEventNameContract:
@@ -86,65 +86,3 @@ class TestCacheWorkerEventNameContract:
         mock_logger.debug.assert_called()
         event_names = [c[0][0] for c in mock_logger.debug.call_args_list]
         assert "baldur.precomputed_cache_module_not_available" in event_names
-
-
-class TestEnvAuditorEventNameContract:
-    """EnvironmentAuditor event names: semantic inversion fixes.
-
-    Note:
-        env_snapshot_unavailable test was removed in 416 D21 — env_var snapshot
-        logging was relocated from EnvironmentAuditor.audit() (deleted) to
-        baldur.bootstrap.init(). Coverage now lives in
-        tests/unit/audit/test_env_snapshot.py.
-    """
-
-    def test_distributed_hash_chain_disabled_event_name(self) -> None:
-        """Logs 'baldur.distributed_hash_chain_disabled' (not _enabled)."""
-        from baldur.adapters.django.startup.env_auditor import (
-            EnvironmentAuditor,
-        )
-
-        with (
-            patch(
-                "baldur.adapters.django.startup.env_auditor.logger",
-            ) as mock_logger,
-            patch(
-                "baldur.adapters.django.startup.env_auditor.settings",
-                BALDUR_DISTRIBUTED_HASH_CHAIN=False,
-            ),
-        ):
-            EnvironmentAuditor.sync_hash_chain_on_startup()
-
-        mock_logger.debug.assert_called()
-        event_names = [c[0][0] for c in mock_logger.debug.call_args_list]
-        assert "baldur.distributed_hash_chain_disabled" in event_names
-
-    def test_integrity_module_unavailable_event_name(self) -> None:
-        """Logs 'baldur.integrity_module_unavailable' (not integrity_module_available_hash)."""
-        from baldur.adapters.django.startup.env_auditor import (
-            EnvironmentAuditor,
-        )
-
-        mock_settings = MagicMock()
-        mock_settings.BALDUR_DISTRIBUTED_HASH_CHAIN = True
-
-        with (
-            patch(
-                "baldur.adapters.django.startup.env_auditor.logger",
-            ) as mock_logger,
-            patch(
-                "baldur.adapters.django.startup.env_auditor.settings",
-                mock_settings,
-            ),
-            patch.object(
-                EnvironmentAuditor,
-                "_get_redis_client_for_hash_chain",
-                return_value=MagicMock(),
-            ),
-            patch.dict("sys.modules", {"baldur.audit.integrity": None}),
-        ):
-            EnvironmentAuditor.sync_hash_chain_on_startup()
-
-        mock_logger.debug.assert_called()
-        event_names = [c[0][0] for c in mock_logger.debug.call_args_list]
-        assert "baldur.integrity_module_unavailable" in event_names

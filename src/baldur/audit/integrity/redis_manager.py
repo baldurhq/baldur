@@ -24,6 +24,26 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 
+def chain_namespace_prefix(root_prefix: str, partition: str) -> str:
+    """Build the Redis key prefix a distributed chain writes under.
+
+    The chain's keys are namespaced by partition so two services sharing one
+    Redis keep independent counters. Every reader of those keys derives the
+    prefix here rather than re-spelling the expression, because a second
+    derivation is how a reconciliation ends up reading a key the writer never
+    writes.
+
+    Args:
+        root_prefix: The installation-wide Redis key root (e.g. ``"baldur:"``).
+        partition: The per-service partition identifier. Empty selects the
+            ``default`` namespace, matching the un-partitioned deployment.
+
+    Returns:
+        The prefix to hand :class:`RedisHashChainManager` as ``key_prefix``.
+    """
+    return f"{root_prefix}hashchain:{partition or 'default'}:"
+
+
 class RedisHashChainManager:
     """
     Redis-based distributed hash chain manager for multi-pod environments.
