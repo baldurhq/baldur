@@ -530,10 +530,16 @@ def _send_aggregated_notification(summary, settings) -> None:
         manager = get_unified_notification_manager()
         result = manager.notify(payload)
 
-        if result.success:
+        if result.success and not result.suppressed:
             logger.info(
                 "flush_notifications.summary_notification_sent_incidents",
                 summary=summary.total_incidents,
+            )
+        elif result.suppressed:
+            logger.debug(
+                "flush_notifications.summary_notification_suppressed",
+                summary=summary.total_incidents,
+                suppression_reason=result.suppression_reason,
             )
         else:
             logger.warning(
