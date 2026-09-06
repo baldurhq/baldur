@@ -188,15 +188,74 @@ class AuditConfig(SerializableMixin):
         return create_hash_chain_redis_client(self.hash_chain_redis_url)
 
 
+# The per-feature URL override for the audit hash chain. Named once so the
+# resolver, the "was one named" gate and the admission probe all read the same
+# channel — this set is deliberately narrower than
+# ``settings.redis.redis_explicitly_configured``, which counts every documented
+# Redis-intent channel including two the chain client cannot dial.
+HASH_CHAIN_REDIS_URL_ENV = "AUDIT_HASH_CHAIN_REDIS_URL"
+
+
+def resolve_hash_chain_redis_url(redis_url: str | None = None) -> str:
+    """Resolve the URL the distributed audit hash chain will dial.
+
+    Resolution order: the ``redis_url`` argument, then the
+    ``AUDIT_HASH_CHAIN_REDIS_URL`` per-feature override, then the canonical
+    ``BALDUR_REDIS_URL`` (``RedisSettings.url``). Hardcodes no URL of its own;
+    when nothing is configured anywhere this returns that canonical setting's
+    own default, which is a localhost address.
+
+    Args:
+        redis_url: Explicit per-feature URL override.
+
+    Returns:
+        The resolved connection URL.
+    """
+    from baldur.settings.redis import get_redis_settings
+
+    return (
+        redis_url
+        or os.environ.get(HASH_CHAIN_REDIS_URL_ENV)
+        or get_redis_settings().url
+    )
+
+
+def hash_chain_redis_url_is_named() -> bool:
+    """Report whether anyone named the URL this chain will actually dial.
+
+    A companion to :func:`resolve_hash_chain_redis_url`, kept in the same
+    module so the gate and the resolver cannot drift into answering different
+    questions. It is true when the per-feature override is set, or when the
+    canonical ``RedisSettings.url`` was stated rather than defaulted — the
+    field's default is an un-named localhost address, so a defaulted value is
+    the framework talking to itself, not an operator naming a server.
+
+    Deliberately narrower than
+    :func:`baldur.settings.redis.redis_explicitly_configured`, which also
+    counts a Django ``BALDUR_REDIS_URL`` attribute and a ``django_redis``
+    CACHES backend. Those are real Redis intent, but they are channels this
+    resolver does not read, so a caller gating on them would promote a
+    distributed chain onto the localhost default.
+
+    Returns:
+        ``True`` when a URL was named for the chain, ``False`` otherwise.
+    """
+    from baldur.settings.redis import get_redis_settings
+
+    if os.environ.get(HASH_CHAIN_REDIS_URL_ENV, "").strip():
+        return True
+
+    try:
+        return "url" in get_redis_settings().model_fields_set
+    except Exception:
+        return False
+
+
 def create_hash_chain_redis_client(redis_url: str | None = None) -> Any | None:
     """Build the Redis client backing the distributed audit hash chain.
 
-    Resolution order: the ``redis_url`` argument (or its
-    ``AUDIT_HASH_CHAIN_REDIS_URL`` per-feature override when the argument
-    is omitted), then the canonical ``BALDUR_REDIS_URL``
-    (``RedisSettings.url``). This helper hardcodes no URL of its own; when
-    nothing is configured anywhere, what it builds against is that
-    canonical setting's own default, which is a localhost URL.
+    The URL comes from :func:`resolve_hash_chain_redis_url`; this helper
+    hardcodes none of its own.
 
     Callers decide *whether* a distributed chain is wanted; this helper
     only answers *which client*. It is a sentinel-returning primitive: any
@@ -214,13 +273,8 @@ def create_hash_chain_redis_client(redis_url: str | None = None) -> Any | None:
         from baldur.adapters.redis.connection_factory import (
             get_redis_connection_factory,
         )
-        from baldur.settings.redis import get_redis_settings
 
-        resolved_url = (
-            redis_url
-            or os.environ.get("AUDIT_HASH_CHAIN_REDIS_URL")
-            or get_redis_settings().url
-        )
+        resolved_url = resolve_hash_chain_redis_url(redis_url)
         return get_redis_connection_factory().create(resolved_url)
     except ImportError:
         logger.warning("audit_config.redis_factory_unavailable")

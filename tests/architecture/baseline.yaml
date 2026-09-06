@@ -143,7 +143,6 @@ optional_imports:
   - {file: "src/baldur/adapters/django/security_incident.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
   - {file: "src/baldur/adapters/django/session_adapter.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
   - {file: "src/baldur/adapters/django/signal_hooks.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
-  - {file: "src/baldur/adapters/django/startup/env_auditor.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
   - {file: "src/baldur/adapters/django/startup/rbac_initializer.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
   - {file: "src/baldur/adapters/django/statistics.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
   - {file: "src/baldur/adapters/flask/middleware.py", reason: "pre-existing unguarded import - pending guard or extras isolation", ticket: "506"}
@@ -345,7 +344,7 @@ dormant_import_boundary_count: 7
 # reclaimed. Give a new entry an ISO `YYYY-MM-DD` target_remove_by instead of
 # raising this number. Per-repo value: the two baselines are independently
 # scrubbed copies with no auto-sync (G41/G67 precedent).
-dateless_baseline_budget: 259
+dateless_baseline_budget: 258
 
 # G19 — tests/ may not module-level-import baldur_pro / baldur_dormant
 # without a `pytest.importorskip("baldur_pro")` (or "baldur_dormant") call

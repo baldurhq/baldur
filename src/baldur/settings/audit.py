@@ -96,10 +96,16 @@ class AuditSettings(BaseSettings):
     distributed_hash_chain: bool = Field(
         default=False,
         description=(
-            "Enable Redis-based distributed hash chain (D22). When True, "
+            "Enable the Redis-based distributed hash chain. When True, "
             "HashChainFileAuditLogAdapter instantiates RedisHashChainManager "
-            "instead of local HashChainManager. PRO multi-host deployments "
-            "(K8s ≥2 pods) MUST set True — file locks do not span hosts."
+            "instead of the local HashChainManager, so entries from every "
+            "host share one ordered sequence — file locks do not span hosts. "
+            "Normally inferred, not set: an active PRO entitlement whose "
+            "chain Redis URL was named promotes this automatically. An "
+            "explicit value of either polarity wins over that inference, and "
+            "an explicit True also hardens the failure mode — when no Redis "
+            "client can be built at all, the adapter refuses rather than "
+            "silently substituting the local chain."
         ),
     )
 

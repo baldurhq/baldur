@@ -7,6 +7,12 @@ resolved default provider is the no-op adapter — the one condition that
 silently voids the audit trail: records are written, accepted, and reach
 nothing.
 
+``audit_distributed_chain_degraded`` answers a different question on a
+different axis: records do land and the backend is wired, but the chain
+sequencing them is not the cross-host one the deployment asked for. Only a
+process that wanted a distributed chain publishes it, so an absent series
+means "nobody asked", never "everything is fine".
+
 A boot WARNING alone is the weakest channel for that condition, since the
 operators this feature is sold to alert on series rather than on log greps.
 The gauge is primed from ``init()`` so a deployment can alert on
@@ -26,11 +32,14 @@ from baldur.metrics._metric_protocol import GaugeMetric
 
 __all__ = [
     "audit_backend_wired",
+    "audit_distributed_chain_degraded",
     "set_audit_backend_wired",
+    "set_audit_distributed_chain_degraded",
     "METRICS_AVAILABLE",
 ]
 
 audit_backend_wired: GaugeMetric
+audit_distributed_chain_degraded: GaugeMetric
 
 try:
     from baldur.metrics.registry import get_or_create_gauge
@@ -39,6 +48,14 @@ try:
         "audit_backend_wired",
         "1 when the audit subsystem resolves to a real backend, "
         "0 when it is enabled but resolves to the no-op adapter",
+        [],
+    )
+
+    audit_distributed_chain_degraded = get_or_create_gauge(
+        "audit_distributed_chain_degraded",
+        "1 when a distributed audit hash chain was asked for but its Redis "
+        "did not answer the admission probe, 0 when it did; absent when no "
+        "distributed chain was asked for",
         [],
     )
 
@@ -63,6 +80,7 @@ except ImportError:
             pass
 
     audit_backend_wired = _DummyMetric()
+    audit_distributed_chain_degraded = _DummyMetric()
 
 
 def set_audit_backend_wired(wired: bool) -> None:
@@ -74,3 +92,19 @@ def set_audit_backend_wired(wired: bool) -> None:
             default is the no-op adapter.
     """
     audit_backend_wired.set(1 if wired else 0)
+
+
+def set_audit_distributed_chain_degraded(degraded: bool) -> None:
+    """Publish whether the distributed chain this process asked for answered.
+
+    Called on both outcomes of the admission probe so a healthy process
+    publishes ``0`` rather than leaving the series absent — absence is
+    reserved for "this process never asked for a distributed chain", which is
+    a third state an alert has to be able to tell apart.
+
+    Args:
+        degraded: ``True`` when the probe failed and the chain is writing
+            through its labelled local fallback, ``False`` when Redis
+            answered and the chain is genuinely distributed.
+    """
+    audit_distributed_chain_degraded.set(1 if degraded else 0)

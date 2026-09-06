@@ -27,7 +27,27 @@ _rate_limit_redis_probe_failure_reported = False
 # factory and the writable-directory resolver report the same remedy.
 _AUDIT_LOG_DIR_ENV = "BALDUR_AUDIT_LOG_DIR"
 
+# Admission-probe verdicts for the distributed audit hash chain, keyed by the
+# resolved URL and memoized on BOTH outcomes.
+#
+# A failure-only latch is not enough here. ``ProviderRegistry`` caches
+# successful instances only, so a factory that raises re-runs on every
+# resolution — and the audit adapter is resolved once per audit event across
+# more than a dozen call sites. A construction failure that happens *after* a
+# successful probe (an operator-set log directory on a read-only mount, say)
+# would therefore pay a fresh connect per event with a latch that only
+# remembers failures. Memoizing the verdict itself keeps the cost at one
+# connect per process per URL either way.
+_distributed_chain_probe_verdicts: dict[str, bool] = {}
+
+# One announcement per unreachable chain URL, not one per resolution. The
+# stated-intent branch keeps returning an adapter, so the registry caches it
+# and the factory normally runs once — but a cache clear must not re-announce
+# an outage that was already reported.
+_distributed_chain_failures_announced: set[str] = set()
+
 __all__ = [
+    "reset_distributed_chain_probe_cache",
     "discover_cache_adapters",
     "discover_queue_adapters",
     "discover_async_queue_adapters",
@@ -172,15 +192,22 @@ def discover_audit_adapters() -> None:  # noqa: C901
             disk buffer already use — so the zero-config relative default
             falls back instead of raising on a read-only root filesystem,
             while an operator-chosen directory still fails loudly.
+
+            When a distributed chain is wanted, this is also where the Redis
+            admission decision is made — once per process, in the one place
+            that already owns the "which client" question.
             """
-            from baldur.audit.config import create_hash_chain_redis_client
             from baldur.settings.audit import get_audit_settings
             from baldur.utils.fs import resolve_writable_dir
 
             settings = get_audit_settings()
             redis_client: Any | None = None
             if settings.distributed_hash_chain:
-                redis_client = create_hash_chain_redis_client()
+                redis_client = _admit_distributed_chain_client(
+                    operator_stated=(
+                        "distributed_hash_chain" in settings.model_fields_set
+                    ),
+                )
 
             operator_log_dir = os.getenv(_AUDIT_LOG_DIR_ENV)
             resolved_dir = resolve_writable_dir(
@@ -202,6 +229,164 @@ def discover_audit_adapters() -> None:  # noqa: C901
             reg.register("file_hashchain", _create_hashchain_adapter)
     except ImportError:
         pass
+
+
+def reset_distributed_chain_probe_cache() -> None:
+    """Forget every distributed-chain admission verdict and announcement.
+
+    Called from ``reset_init_state()`` and from test fixtures. Module-level
+    state with no callable reset is a cross-test leak, and monkeypatching the
+    attribute by name would couple every test file to the spelling of a
+    private global.
+    """
+    _distributed_chain_probe_verdicts.clear()
+    _distributed_chain_failures_announced.clear()
+
+
+def _distributed_chain_redis_reachable(url: str) -> tuple[bool, bool]:
+    """Answer whether ``url`` accepts a connection, once per process.
+
+    A client that *builds* proves nothing: a typo'd host builds fine and
+    fails on first use. ``probe()`` is the established admission check and
+    the only affirmative reachability answer available, on its own bounded
+    connect budget.
+
+    Logs nothing — the caller owns the level and the metrics, which is the
+    same division ``probe()`` itself documents.
+
+    Args:
+        url: The resolved chain Redis URL.
+
+    Returns:
+        ``(reachable, verdict_is_new)``. The second element is ``True`` only
+        on the resolution that actually ran the probe, so a caller can
+        announce an outage once rather than once per resolution.
+    """
+    cached = _distributed_chain_probe_verdicts.get(url)
+    if cached is not None:
+        return cached, False
+
+    from baldur.adapters.redis.connection_factory import (
+        get_redis_connection_factory,
+    )
+
+    try:
+        get_redis_connection_factory().probe(url)
+    except Exception as e:
+        _distributed_chain_probe_verdicts[url] = False
+        logger.debug("audit.distributed_chain_probe_failed", error=str(e))
+        return False, True
+
+    _distributed_chain_probe_verdicts[url] = True
+    return True, True
+
+
+def _announce_distributed_chain_failure_once(url: str) -> bool:
+    """Claim the one announcement slot for ``url``.
+
+    Args:
+        url: The resolved chain Redis URL.
+
+    Returns:
+        ``True`` on the first call per URL, ``False`` afterwards.
+    """
+    if url in _distributed_chain_failures_announced:
+        return False
+    _distributed_chain_failures_announced.add(url)
+    return True
+
+
+def _set_distributed_chain_degraded_gauge(degraded: bool) -> None:
+    """Publish the distributed-chain posture as a series. Fail-open."""
+    try:
+        from baldur.metrics.audit_backend_metrics import (
+            set_audit_distributed_chain_degraded,
+        )
+
+        set_audit_distributed_chain_degraded(degraded)
+    except Exception as e:
+        logger.debug("audit.distributed_chain_gauge_skipped", error=str(e))
+
+
+def _admit_distributed_chain_client(operator_stated: bool) -> Any | None:
+    """Decide which Redis client, if any, backs this process's audit chain.
+
+    Two failures wear the same settings flag and are not the same defect.
+
+    *No client can be built at all.* The adapter's only remaining option is a
+    plain local chain, indistinguishable in the files from one nobody asked to
+    be distributed. When the operator **stated** the intent this refuses
+    rather than substituting a mechanism that cannot span hosts; when the
+    product **inferred** it, falling back is the status quo the deployment
+    would have had anyway, so it takes the existing path and the existing
+    WARNING.
+
+    *The client builds but its server does not answer.* Nothing is refused:
+    ``RedisHashChainManager``'s fallback stamps every entry it writes
+    ``degraded`` with ``fallback_source="local"``, so the records survive and
+    an auditor can tell which of them are not Redis-sequenced. Raising here
+    would delete audit records that today are written and self-describing.
+    The substitution stops being silent through the boot ERROR and the
+    degraded gauge instead.
+
+    The gauge is published on every outcome where a distributed chain was
+    wanted, so a healthy process publishes ``0`` rather than leaving the
+    series absent; a process that never asked publishes nothing at all.
+
+    Args:
+        operator_stated: Whether ``distributed_hash_chain`` was set by the
+            environment or an explicit constructor argument, as opposed to
+            inferred by the entitlement hook.
+
+    Returns:
+        The Redis client to hand the adapter, or ``None`` to let it build the
+        local file-locked chain.
+
+    Raises:
+        DistributedHashChainUnavailableError: Stated intent with no client
+            buildable.
+    """
+    from baldur.adapters.redis.connection_factory import mask_redis_url
+    from baldur.audit.config import (
+        create_hash_chain_redis_client,
+        resolve_hash_chain_redis_url,
+    )
+    from baldur.core.exceptions import DistributedHashChainUnavailableError
+
+    resolved_url = resolve_hash_chain_redis_url()
+    masked_url = mask_redis_url(resolved_url)
+    redis_client = create_hash_chain_redis_client()
+
+    if redis_client is None:
+        _set_distributed_chain_degraded_gauge(True)
+        if not operator_stated:
+            return None
+        # The raise is the per-resolution signal; the line is the per-outage
+        # one. Unlatched it would be one ERROR per audited event, because a
+        # raising factory is never cached and every audit call site re-enters.
+        if _announce_distributed_chain_failure_once(resolved_url):
+            logger.error(
+                "audit.distributed_chain_resolution_failed",
+                redis_url=masked_url,
+                reason="no_client_buildable",
+            )
+        raise DistributedHashChainUnavailableError(redis_url=masked_url)
+
+    reachable, verdict_is_new = _distributed_chain_redis_reachable(resolved_url)
+    _set_distributed_chain_degraded_gauge(not reachable)
+    if reachable:
+        return redis_client
+
+    if not operator_stated:
+        return None
+
+    if _announce_distributed_chain_failure_once(resolved_url):
+        logger.error(
+            "audit.distributed_chain_unreachable",
+            redis_url=masked_url,
+            reason="admission_probe_failed",
+        )
+    return redis_client
 
 
 def discover_traffic_routing_adapters() -> None:

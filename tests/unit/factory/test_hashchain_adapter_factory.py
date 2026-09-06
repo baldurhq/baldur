@@ -33,8 +33,13 @@ import pytest
 import redis
 
 from baldur.adapters.audit.hashchain_adapter import HashChainFileAuditLogAdapter
+from baldur.adapters.redis.connection_factory import RedisConnectionFactory
 from baldur.audit.integrity import HashChainManager, RedisHashChainManager
-from baldur.factory.adapters import _AUDIT_LOG_DIR_ENV, discover_audit_adapters
+from baldur.factory.adapters import (
+    _AUDIT_LOG_DIR_ENV,
+    discover_audit_adapters,
+    reset_distributed_chain_probe_cache,
+)
 from baldur.factory.registry import ProviderRegistry
 from baldur.settings.audit import override_audit_settings
 from baldur.utils.fs import ResolvedDir, reset_writable_dir_resolutions
@@ -49,10 +54,12 @@ def _isolate_hashchain_factory(monkeypatch, tmp_path):
     """Registry registration + a private resolver registry are both global."""
     monkeypatch.setenv(_LOG_DIR_ENV, str(tmp_path / "audit"))
     reset_writable_dir_resolutions()
+    reset_distributed_chain_probe_cache()
     with ProviderRegistry.audit.snapshot():
         discover_audit_adapters()
         yield
     reset_writable_dir_resolutions()
+    reset_distributed_chain_probe_cache()
 
 
 def _resolved(path) -> ResolvedDir:
@@ -82,8 +89,15 @@ class TestHashChainAdapterDistributedWiringBehavior:
     """``distributed_hash_chain`` reaches the chain manager, or is refused."""
 
     def test_distributed_setting_routes_the_resolved_client_into_the_adapter(self):
-        # Given: distributed on and a client available
+        """A buildable AND reachable Redis is what routes the distributed chain.
+
+        The admission probe is stubbed to succeed: a client that merely builds
+        proves nothing, so the factory now requires an affirmative reachability
+        answer before it hands the client to the adapter.
+        """
+        # Given: distributed on, a client available, and its server answering
         mock_client = MagicMock(spec=redis.Redis)
+        reachable_factory = MagicMock(spec=RedisConnectionFactory)
 
         # When
         with (
@@ -92,11 +106,16 @@ class TestHashChainAdapterDistributedWiringBehavior:
                 "baldur.audit.config.create_hash_chain_redis_client",
                 return_value=mock_client,
             ) as mock_create,
+            patch(
+                "baldur.adapters.redis.connection_factory.get_redis_connection_factory",
+                return_value=reachable_factory,
+            ),
         ):
             adapter = _build_adapter()
 
         # Then: a Redis-backed chain manager, built from that exact client
         mock_create.assert_called_once_with()
+        reachable_factory.probe.assert_called_once()
         assert isinstance(adapter._hash_chain, RedisHashChainManager)
 
     def test_distributed_setting_off_never_resolves_a_client(self):

@@ -3,10 +3,10 @@
 Tests RBACInitializer startup behaviors.
 
 Note:
-    EnvironmentAuditor.audit() tests were removed in 416 D21 — env_var snapshot
-    logging was relocated from EnvironmentAuditor to baldur.bootstrap.init().
-    Coverage now lives in tests/unit/audit/test_env_snapshot.py and
-    tests/unit/test_bootstrap.py.
+    The env-var snapshot tests moved with the code: snapshot logging lives in
+    baldur.bootstrap.init(), covered by tests/unit/audit/test_env_snapshot.py
+    and tests/unit/test_bootstrap.py. The Django-coupled hash-chain startup
+    sync moved there too, covered by the bootstrap reconciliation tests.
 """
 
 from __future__ import annotations

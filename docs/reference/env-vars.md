@@ -82,7 +82,7 @@ BALDUR_REPLAY_AUTOMATION_SERVICE_FAILURE_TYPE_MAP='{"payment_api": ["TIMEOUT", "
 
 ```bash
 BALDUR_AUDIT_ENABLED=true
-BALDUR_AUDIT_DISTRIBUTED_HASH_CHAIN=true   # set true on every pod of a multi-host deployment
+BALDUR_AUDIT_DISTRIBUTED_HASH_CHAIN=true   # override only: inferred on an entitled install that names a Redis
 BALDUR_AUDIT_BUFFER_REDIS_ENABLED=true     # set-to-enable: Redis staging buffer for audit records
 ```
 
@@ -95,11 +95,16 @@ until you select one. Startup says so: an `audit.backend_unwired` warning plus
 `audit_backend_wired=0`. The activation steps are in
 `docs/runbooks/audit-trail-activation.md`.
 
-`BALDUR_AUDIT_DISTRIBUTED_HASH_CHAIN` (default `false`) moves hash-chain
-sequencing from a per-host file lock to Redis. A deployment where two or more
-hosts write one trail (K8s with 2+ pods) must set it `true` on every pod: file
-locks do not span hosts, so without it each host chains its entries
-independently. `BALDUR_AUDIT_BUFFER_REDIS_ENABLED` (default `false`) stages
+`BALDUR_AUDIT_DISTRIBUTED_HASH_CHAIN` moves hash-chain sequencing from a
+per-host file lock to Redis, because file locks do not span hosts and without
+it each host chains its entries independently. You normally do not set it: an
+active PRO entitlement turns it on when a chain Redis URL was named, and leaves
+it off otherwise. Set it yourself only to override that — an explicit value of
+either polarity wins, and an explicit `true` additionally makes a Redis that
+cannot be reached at all a startup error rather than a quiet fall back to the
+per-host chain. A Redis that is named but unreachable keeps writing either way,
+with every affected entry marked degraded and the
+`audit_distributed_chain_degraded` gauge at `1`. `BALDUR_AUDIT_BUFFER_REDIS_ENABLED` (default `false`) stages
 audit records in Redis and drains them to the terminal store in batches; it is
 subordinate to the master switch, so it only takes effect while audit is
 enabled. Both resolve their Redis connection through `BALDUR_REDIS_URL` (see

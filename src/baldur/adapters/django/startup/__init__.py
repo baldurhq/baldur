@@ -7,7 +7,6 @@ focused, single-responsibility classes.
 
 from __future__ import annotations
 
-from baldur.adapters.django.startup.env_auditor import EnvironmentAuditor
 from baldur.adapters.django.startup.rbac_initializer import (
     BALDUR_GROUPS,
     RBACInitializer,
@@ -15,7 +14,6 @@ from baldur.adapters.django.startup.rbac_initializer import (
 )
 
 __all__ = [
-    "EnvironmentAuditor",
     "RBACInitializer",
     "BALDUR_GROUPS",
     "create_baldur_groups",

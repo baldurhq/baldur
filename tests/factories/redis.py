@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import fnmatch
 import threading
+from collections.abc import Iterator
 from typing import Any
 
 
@@ -289,6 +290,25 @@ class MockRedisClient:
             if fnmatch.fnmatch(k, pattern)
         ]
         return matching
+
+    def scan_iter(
+        self, match: str | None = None, count: int | None = None
+    ) -> Iterator[bytes]:
+        """SCAN cursor iteration.
+
+        Yields the same keys ``keys()`` matches. ``count`` is accepted and
+        ignored: it is a server-side batching hint, so honouring it would not
+        change what a caller observes. Snapshots the key list first so a
+        caller that deletes while iterating does not mutate the source dict.
+        """
+        self._check_failure()
+        pattern = match or "*"
+        snapshot = [
+            k.encode() if isinstance(k, str) else k
+            for k in list(self._data.keys())
+            if fnmatch.fnmatch(k, pattern)
+        ]
+        yield from snapshot
 
     def incr(self, key: str) -> int:
         """INCR 명령."""

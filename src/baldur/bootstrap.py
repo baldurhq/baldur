@@ -250,6 +250,7 @@ def init(
             _seed_circuit_breaker_config()
             _warn_unknown_env_vars()
             _apply_audit_default_provider()
+            _reconcile_distributed_hash_chain()
             _start_audit_pipeline_if_enabled()
             _start_dlq_outbox_if_enabled()
             _configure_error_budget_if_enabled()
@@ -420,6 +421,13 @@ def _reset_audit_provider_state() -> None:
         reset_audit_settings()
     except Exception as e:
         logger.warning("baldur.audit_settings_reset_failed", error=str(e))
+
+    try:
+        from baldur.factory.adapters import reset_distributed_chain_probe_cache
+
+        reset_distributed_chain_probe_cache()
+    except Exception as e:
+        logger.warning("baldur.chain_probe_cache_reset_failed", error=str(e))
 
 
 def _drop_seeded_circuit_breaker_config() -> None:
@@ -2768,12 +2776,20 @@ def _apply_audit_default_provider() -> None:
     have promoted the hash-chain backend; a host application may have
     selected its own; neither is second-guessed here.
 
-    Enabled while the resolved default is still the no-op adapter is the
-    one combination that silently voids the trail — every record is
-    accepted and discarded — so it is reported twice: a WARNING naming the
-    condition, and the ``audit_backend_wired`` gauge, which is the channel
-    an alert can watch. The gauge is set on both outcomes, so a wired
-    process publishes 1 rather than leaving the series absent.
+    Enabled while the trail does not actually reach a backend is the one
+    combination that silently voids it — every record is accepted and
+    discarded — so it is reported twice: a WARNING naming the condition, and
+    the ``audit_backend_wired`` gauge, which is the channel an alert can
+    watch. The gauge is set on both outcomes, so a wired process publishes 1
+    rather than leaving the series absent.
+
+    "Reaches a backend" is decided by **building** one, not by reading the
+    provider name. A host application that selected a backend whose
+    construction then fails would otherwise publish ``1`` while every
+    resolution raises — the exact false-green the gauge exists to eliminate.
+    On the PRO path the adapter is already cached by the activation hook's own
+    resolve, so this is a cache hit; on every other path it constructs once,
+    immediately before the audit pipeline would have.
     """
     try:
         from baldur.factory import ProviderRegistry
@@ -2787,17 +2803,108 @@ def _apply_audit_default_provider() -> None:
             current = "null"
 
         if settings.enabled:
-            wired = current != "null"
+            wired, reason = _audit_backend_is_wired(current)
             if not wired:
                 logger.warning(
                     "audit.backend_unwired",
                     provider=current,
-                    reason="audit_enabled_but_default_provider_is_noop",
+                    reason=reason,
                 )
             _set_audit_backend_wired_gauge(wired)
         logger.debug("audit.default_provider_set", provider=current)
     except Exception as e:
         logger.debug("audit.default_provider_set_failed", error=e)
+
+
+def _audit_backend_is_wired(provider: str | None) -> tuple[bool, str]:
+    """Decide whether the audit trail actually reaches a backend.
+
+    Args:
+        provider: The resolved default provider name.
+
+    Returns:
+        ``(wired, reason)``. ``reason`` names the failure for the WARNING and
+        is unused when wired.
+    """
+    if provider is None or provider == "null":
+        return False, "audit_enabled_but_default_provider_is_noop"
+
+    from baldur.factory import ProviderRegistry
+
+    try:
+        ProviderRegistry.get_audit_adapter()
+    except Exception as e:
+        logger.debug("audit.backend_construction_failed", error=str(e))
+        return False, "audit_enabled_but_default_provider_does_not_construct"
+
+    return True, ""
+
+
+def _reconcile_distributed_hash_chain(adapter: Any | None = None) -> None:
+    """Reconcile a distributed audit chain against its files, before first write.
+
+    After a restart Redis and the local files can disagree: Redis lost its
+    data and the files are ahead, or a process died mid-write and Redis is
+    ahead. Reconciling raises the Redis counter to match the files and sweeps
+    PENDING reservations left by the crash, so the first entry this process
+    writes continues the chain instead of re-using a sequence.
+
+    Runs here rather than in a framework adapter for two reasons: every
+    framework gets it, and it must sit **after** the audit backend is settled
+    — a PRO entitlement hook can promote the chain, so a step that ran earlier
+    would read a pre-promotion state — and **before** the first chain write.
+
+    The gate is the constructed chain manager, not a settings name. A process
+    whose promotion fell back to the local chain holds a local manager and
+    does no Redis work here, which is automatically right on all three paths
+    (stated, inferred, and inferred-then-fell-back) and needs no flag of its
+    own.
+
+    Best-effort throughout: a stated-intent misconfiguration makes every
+    adapter resolution raise, and this step must not turn that into a broken
+    ``init()``.
+
+    Args:
+        adapter: The audit adapter to reconcile. Defaults to the resolved
+            default, which is what ``init()`` passes.
+    """
+    try:
+        from baldur.audit.integrity import (
+            RedisHashChainManager,
+            StartupHashChainSync,
+        )
+
+        if adapter is None:
+            from baldur.factory import ProviderRegistry
+
+            adapter = ProviderRegistry.get_audit_adapter()
+
+        manager = getattr(adapter, "hash_chain_manager", None)
+        if not isinstance(manager, RedisHashChainManager):
+            logger.debug("audit.chain_reconciliation_skipped", reason="not_distributed")
+            return
+
+        sync = StartupHashChainSync.from_manager(
+            manager,
+            adapter.log_dir,
+            adapter.redis_key_prefix,
+        )
+        result = sync.sync()
+        # sync() catches internally and reports through its return value, so
+        # this logs what it returned and claims nothing beyond it.
+        if result.get("status") == "success":
+            logger.info(
+                "audit.chain_reconciled",
+                sync_action=result.get("action"),
+                pending_cleaned=result.get("pending_cleaned"),
+            )
+        else:
+            logger.warning(
+                "audit.chain_reconciliation_failed",
+                sync_error=result.get("error", "unknown"),
+            )
+    except Exception as e:
+        logger.warning("audit.chain_reconciliation_failed", error=str(e))
 
 
 def _set_audit_backend_wired_gauge(wired: bool) -> None:

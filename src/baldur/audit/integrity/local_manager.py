@@ -39,13 +39,20 @@ class HashChainManager:
     - Previous hash for chaining
     - Periodic checkpoints
 
-    Multi-writer safety (D22):
+    Multi-writer safety:
         When ``use_file_lock=True`` and ``state_file`` is set, every
         ``add_integrity()`` call acquires an exclusive cross-process lock
         on a sibling ``.lock`` file before reading the latest state from
         disk and incrementing the sequence. This guarantees unique
         sequence numbers across multiple processes (Gunicorn workers,
         Celery worker, cron, etc.) sharing the same audit volume.
+
+        The cross-process half of that guarantee is pinned by the
+        multiprocess contention case in
+        ``tests/unit/audit/integrity/test_hash_chain_file_lock.py``, which
+        drives one shared state file from separate processes and fails when
+        the lock is off. The thread-based case in the same file covers the
+        in-process lock only — that one passes with the file lock removed.
     """
 
     GENESIS_HASH = "GENESIS"

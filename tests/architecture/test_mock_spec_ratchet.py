@@ -161,7 +161,10 @@ _MOCK_CREATION_BUDGETS: dict[str, int] = {
     # stub and its three MagicMock probes became a SimpleNamespace and an
     # Event-gated fake, which is what lets those tests observe the probe
     # thread's lifecycle at all.
-    "oss": 4328,
+    # env-auditor retirement: -3 — the Django hash-chain startup sync moved into
+    # init() and the class was deleted; its two event-name cases and the
+    # Strategy-3 factory-routing case went with it.
+    "oss": 4325,
     "pro": 1800,
     "dormant": 401,
 }

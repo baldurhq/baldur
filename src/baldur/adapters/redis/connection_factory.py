@@ -31,10 +31,30 @@ _PROBE_CONNECT_ATTEMPTS = 2
 
 __all__ = [
     "RedisConnectionFactory",
+    "mask_redis_url",
     "get_redis_connection_factory",
     "configure_redis_connection_factory",
     "reset_redis_connection_factory",
 ]
+
+
+def mask_redis_url(url: str) -> str:
+    """Mask the password in a Redis URL so it is safe to log or raise.
+
+    Module-level so call sites outside this factory — an exception carrying
+    the URL it could not dial, for instance — reach one spelling instead of
+    growing a second one.
+
+    Args:
+        url: A Redis connection URL, with or without credentials.
+
+    Returns:
+        The same URL with any password replaced by ``***``.
+    """
+    parsed = urlparse(url)
+    if parsed.password:
+        return url.replace(parsed.password, "***")
+    return url
 
 
 class RedisConnectionFactory:
@@ -375,10 +395,7 @@ class RedisConnectionFactory:
     @staticmethod
     def _mask_url(url: str) -> str:
         """Mask password in URL for safe logging."""
-        parsed = urlparse(url)
-        if parsed.password:
-            return url.replace(parsed.password, "***")
-        return url
+        return mask_redis_url(url)
 
 
 # ---------------------------------------------------------------------------

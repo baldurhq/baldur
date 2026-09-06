@@ -2,18 +2,16 @@
 Unit tests for #422 Factory Bypass Cleanup — caller-side routing verification.
 
 Complements `test_connection_factory.py` (URL-scheme dispatch tests) by
-verifying the **9 refactored callsites** route Redis client creation
+verifying the refactored callsites route Redis client creation
 through ``get_redis_connection_factory().create()`` rather than
 ``redis.from_url()`` directly.
 
 Sites covered here (callsite verification — Sentinel URL passes through Factory):
   1. ``audit/config.py::AuditConfig.get_redis_client``
   2. ``core/state_backend.py::RedisStateBackend._initialize_client``
-  3. ``adapters/django/startup/env_auditor.py::
-        EnvironmentAuditor._get_redis_client_for_hash_chain`` (Strategy 3)
-  4. ``adapters/audit/redis_buffer.py::create_redis_audit_buffer``
-  5. ``adapters/airgap/factory.py::_create_redis_adapter``
-  6. ``adapters/redis/__init__.py::_try_acquire_redis_client``
+  3. ``adapters/audit/redis_buffer.py::create_redis_audit_buffer``
+  4. ``adapters/airgap/factory.py::_create_redis_adapter``
+  5. ``adapters/redis/__init__.py::_try_acquire_redis_client``
         (Strategies 3 + 4)
 
 Sites covered elsewhere (kept as cross-reference):
@@ -125,33 +123,6 @@ class TestCallsiteFactoryRoutingContract:
 
         factory_spy.create.assert_called_once_with(SENTINEL_URL)
         assert adapter is not None
-
-    def test_env_auditor_strategy_3_routes_sentinel_url(self, factory_spy):
-        """env_auditor.py Strategy 3: Django BALDUR_REDIS_URL → Factory.create(url).
-
-        Strategies 1 (ResilientStorageBackend) and 2 (django_redis) must fail
-        for Strategy 3 to fire. We bypass Strategy 1 by raising and Strategy
-        2 by raising on import.
-        """
-        from baldur.adapters.django.startup.env_auditor import EnvironmentAuditor
-
-        django_settings_stub = MagicMock()
-        django_settings_stub.BALDUR_REDIS_URL = SENTINEL_URL
-
-        with (
-            patch(
-                "baldur.adapters.resilient.backend.ResilientStorageBackend",
-                side_effect=RuntimeError("force strategy 1 to fail"),
-            ),
-            patch.dict("sys.modules", {"django_redis": None}),
-            patch(
-                "baldur.adapters.django.startup.env_auditor.settings",
-                django_settings_stub,
-            ),
-        ):
-            EnvironmentAuditor._get_redis_client_for_hash_chain()
-
-        factory_spy.create.assert_called_once_with(SENTINEL_URL)
 
     def test_acquire_strategy_3_routes_sentinel_url(self, factory_spy):
         """adapters/redis/__init__.py Strategy 3: Django settings → Factory.create(url).
