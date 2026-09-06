@@ -7,11 +7,15 @@ Test targets:
 Test Categories:
     A. Contract: Task decorator metadata (name, queue, time_limit, etc.)
     B. Behavior: Execution flow (success, exception handling)
+    C. Behavior: Entitlement gate (refusal vocabulary, ordering before the lock)
 """
 
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+from baldur.core.entitlement import EntitlementResult, EntitlementStatus
 
 # =============================================================================
 # A. Contract Tests — Task metadata
@@ -123,4 +127,119 @@ class TestEvictOverflowTaskBehavior:
 
             evict_overflow_dlq_entries()
 
+        mock_eviction.assert_called_once()
+
+
+# =============================================================================
+# C. Behavior Tests — Entitlement gate
+# =============================================================================
+
+
+class _AlwaysAcquiredLock:
+    """Distributed-recovery-lock double that always grants the lock.
+
+    A real double rather than a spec-less mock: the task only ever calls
+    ``acquire`` and ``release`` on it, and neither needs recording here.
+    """
+
+    def acquire(self, **kwargs) -> bool:
+        return True
+
+    def release(self, **kwargs) -> None:
+        return None
+
+
+class TestDlqOverflowEvictionEntitlementBehavior:
+    """The lazy overflow sweep is PRO behaviour and needs an ACTIVE verdict.
+
+    Refusing defers nothing: without a licence the DLQ store backing resolves
+    to the OSS capture service, which enforces its overflow bound synchronously
+    at store time, so this lane has no backlog to work on.
+
+    The two refusals are deliberately distinct answers. ``not_entitled`` names
+    a licensing condition an operator can fix; ``pro_not_installed`` names a
+    tier that never had the lane. Collapsing them would tell an OSS-only
+    deployment its licence is the problem.
+    """
+
+    _EVICTION = "baldur_pro.services.dlq.overflow.run_background_eviction"
+    _LOCK = (
+        "baldur_pro.services.coordination.distributed_recovery_lock."
+        "DistributedRecoveryLock"
+    )
+    _OVERFLOW_MODULE = "baldur_pro.services.dlq.overflow"
+
+    @staticmethod
+    def _verdict(status):
+        return patch(
+            "baldur.core.entitlement.get_entitlement_status",
+            return_value=EntitlementResult(status=status),
+        )
+
+    @pytest.mark.parametrize(
+        "status",
+        [EntitlementStatus.INVALID, EntitlementStatus.MISSING],
+        ids=["invalid_licence", "no_licence"],
+    )
+    def test_lapsed_worker_returns_the_not_entitled_refusal(
+        self, mock_pro_tier, status
+    ):
+        """A PRO install without an ACTIVE verdict refuses by name."""
+        from baldur.celery_tasks.dlq_tasks import evict_overflow_dlq_entries
+
+        with self._verdict(status):
+            result = evict_overflow_dlq_entries()
+
+        assert result == {"status": "skipped", "reason": "not_entitled"}
+
+    def test_lapsed_worker_refuses_before_touching_the_lock_or_the_sweep(
+        self, mock_pro_tier
+    ):
+        """The verdict is read ahead of the distributed lock, so no worker
+        coordination happens for a sweep that will not run."""
+        pytest.importorskip("baldur_pro")
+        from baldur.celery_tasks.dlq_tasks import evict_overflow_dlq_entries
+
+        with (
+            self._verdict(EntitlementStatus.MISSING),
+            patch(self._LOCK) as mock_lock,
+            patch(self._EVICTION) as mock_eviction,
+        ):
+            evict_overflow_dlq_entries()
+
+        mock_lock.assert_not_called()
+        mock_eviction.assert_not_called()
+
+    def test_oss_only_worker_returns_the_pro_absent_refusal(self, mock_oss_tier):
+        """Presence is answered first and by its own name.
+
+        The PRO import is failed by pinning ``None`` into ``sys.modules`` — the
+        import system's own "halted" marker — so the arm is the same in a
+        PRO-present and a PRO-absent checkout.
+        """
+        from baldur.celery_tasks.dlq_tasks import evict_overflow_dlq_entries
+
+        with (
+            patch("baldur.core.entitlement.get_entitlement_status") as mock_verdict,
+            patch.dict(sys.modules, {self._OVERFLOW_MODULE: None}),
+        ):
+            result = evict_overflow_dlq_entries()
+
+        assert result == {"status": "skipped", "reason": "pro_not_installed"}
+        mock_verdict.assert_not_called()
+
+    def test_entitled_worker_runs_the_sweep(self, mock_pro_tier):
+        """The gate is a refusal, not a rewrite: an entitled worker still sweeps."""
+        pytest.importorskip("baldur_pro")
+        from baldur.celery_tasks.dlq_tasks import evict_overflow_dlq_entries
+
+        eviction_result = {"evicted": 7, "reason": "above_target"}
+        with (
+            self._verdict(EntitlementStatus.ACTIVE),
+            patch(self._LOCK, return_value=_AlwaysAcquiredLock()),
+            patch(self._EVICTION, return_value=eviction_result) as mock_eviction,
+        ):
+            result = evict_overflow_dlq_entries()
+
+        assert result == eviction_result
         mock_eviction.assert_called_once()
