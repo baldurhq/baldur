@@ -33,6 +33,7 @@ from baldur.interfaces.governance import NoOpGovernanceChecker
 from baldur.interfaces.repositories import (
     FailedOperationData,
     FailedOperationRepository,
+    ReplayablePage,
 )
 from baldur.services.cleanup_service import CleanupResult, CleanupService
 from baldur.services.daily_report import (
@@ -117,7 +118,23 @@ def _sweep_service(entries: list[FailedOperationData]):
 
     repo = MagicMock(spec=FailedOperationRepository)
     repo.find_replayable.return_value = entries
-    repo.try_acquire_for_replay.side_effect = list(entries)
+
+    # The sweep selects through the paged API, and the drain calls it again
+    # per continuation pass, so the double has to answer more than once: one
+    # full page, then an exhausted empty one. A bare MagicMock page reads as
+    # zero entries on a lane that claims exhaustion, which is how a sweep of
+    # three entries reported a batch of none.
+    remaining = [ReplayablePage(entries=list(entries), scan_exhausted=True)]
+
+    def _next_page(**_kwargs) -> ReplayablePage:
+        return remaining.pop(0) if remaining else ReplayablePage(scan_exhausted=True)
+
+    repo.find_replayable_page.side_effect = _next_page
+
+    by_id = {entry.id: entry for entry in entries}
+    repo.try_acquire_for_replay.side_effect = lambda entry_id, *_a, **_kw: by_id.get(
+        entry_id
+    )
     repo.get_by_id.return_value = None
     svc = ReplayService(repository=repo)
     svc._event_bus = MagicMock(spec=BaldurEventBus)
