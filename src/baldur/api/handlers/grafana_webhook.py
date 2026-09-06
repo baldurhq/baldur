@@ -127,7 +127,7 @@ def _process_single_alert(alert: dict[str, Any], notification_manager) -> None:
 
     result = notification_manager.notify(payload)
 
-    if result.success:
+    if result.success and not result.suppressed:
         logger.info(
             "grafana_webhook.alert_notification_sent",
             alertname=alertname,
