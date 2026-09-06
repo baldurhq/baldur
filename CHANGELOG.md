@@ -37,6 +37,9 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - A recovered circuit no longer replays entries a differently-spelled circuit still holds open.
 - A slow replay handler no longer silently ends the drain when a sweep runs past its time limit.
 - A worker that missed a peer's 429 no longer announces an all-clear while the cooldown is live.
+- The admin console no longer scrolls sideways on a phone: the top bar wraps below 720px.
+- Console ages, counts and captions now clear the 4.5:1 contrast floor instead of 2.5:1.
+- Shift+Tab in the console no longer parks the focused control under the sticky top bar.
 - One cooldown announcer thread per process replaces one timer thread per rate-limit key.
 - Automatic replay after a circuit closes no longer stops when the audit trail is enabled.
 - The audit trail no longer stops for the rest of a process after one failed log-file open.

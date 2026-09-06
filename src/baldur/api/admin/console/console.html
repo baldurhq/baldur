@@ -37,7 +37,13 @@
          attention-tier mark for a degraded-but-absorbing domain; it never
          appears on the landing and is never a chart series. */
       --ink: #0a0b0d; --ink2: #0f1013; --ink3: #121317; --line: #1e2026;
-      --bone: #d8dce3; --ash: #7e8695; --ash2: #4c525e;
+      --bone: #d8dce3; --ash: #7e8695;
+      /* --ash2 is the tertiary TEXT tier (ages, counts, captions, axis
+         labels): it sits at the WCAG AA floor (4.5:1) on the darkest ground
+         text is set on (--ink3). Non-text marks that want a fainter grey —
+         the neutral state dots, the open-row border, the plot's truncation
+         and crosshair strokes — use --ash-mark, which has no contrast duty. */
+      --ash2: #767e8c; --ash-mark: #4c525e;
       --mark: #f0f2f5;
       --ember: #e05561; --moss: #6fb5a0; --amber: #fbad37; --open: #778092;
       --ember-tint: rgba(224,85,97,.10); --moss-tint: rgba(111,181,160,.08);
@@ -52,6 +58,11 @@
               Consolas, monospace;
     }
     * { box-sizing: border-box; }
+    /* The topbar is sticky, so anything the browser scrolls into view — a
+       control reached with Shift+Tab from below — lands under it unless the
+       scrollport is padded by the bar's height (59px desktop; the wrapped
+       two-line bar on a phone is taller). */
+    html { scroll-padding-top: 72px; }
     body {
       margin: 0; background: var(--ink); color: var(--bone);
       font: 14px/1.5 var(--display);
@@ -80,6 +91,12 @@
        auto-refresh toggle ships OFF, so "live" would be false on a default
        console. The per-surface age tokens state the real thing instead. */
     .clock { font: 12.5px/1 var(--mono); color: var(--ash2); }
+    /* The label is the pointer target, not the 13px native box: 24px tall
+       so it clears the WCAG minimum target size. */
+    .autorefresh {
+      display: inline-flex; align-items: center; gap: 6px; min-height: 24px;
+      cursor: pointer; white-space: nowrap;
+    }
     .key-entry { display: flex; align-items: center; gap: 6px; }
     .key-entry input {
       background: var(--ink); border: 1px solid var(--line); color: var(--bone);
@@ -115,7 +132,7 @@
        and a dot floating between two lines reads as belonging to neither. */
     .triage .dot {
       width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0;
-      align-self: flex-start; margin-top: 10px; background: var(--ash2);
+      align-self: flex-start; margin-top: 10px; background: var(--ash-mark);
     }
     .triage.state-ok     .dot { background: var(--moss); }
     .triage.state-warn   .dot {
@@ -170,7 +187,7 @@
       background: var(--ink2);
     }
     .sys-table .row:last-child { border-bottom: none; }
-    .row.open { border-color: var(--ash2); background: var(--ink3); }
+    .row.open { border-color: var(--ash-mark); background: var(--ink3); }
     .row-head {
       display: flex; align-items: center; gap: 14px; padding: 14px 18px;
       cursor: pointer;
@@ -180,7 +197,7 @@
        severity survives colourblindness on a 8px dot. */
     .row-head .st {
       width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
-      background: var(--ash2);
+      background: var(--ash-mark);
     }
     .row[data-sev="ok"]     .st { background: var(--moss); }
     .row[data-sev="warn"]   .st {
@@ -190,7 +207,7 @@
       background: transparent; box-shadow: inset 0 0 0 2px var(--ember);
     }
     .row[data-sev="none"]   .st {
-      background: transparent; box-shadow: inset 0 0 0 1px var(--ash2);
+      background: transparent; box-shadow: inset 0 0 0 1px var(--ash-mark);
     }
     .row-head .name { font-weight: 600; font-size: 15px; color: var(--mark); }
     .sys-table .row-head .name { font-weight: 500; min-width: 150px; font-size: 14px; }
@@ -467,6 +484,16 @@
 
     @media (max-width: 719px) {
       .wrap { padding: 0 16px; }
+      /* The topbar's right cluster (clock, toggle, key entry) is wider than a
+         phone; unwrapped it pushed the document to 637px and the whole page
+         scrolled sideways. The cluster drops to its own line and the key
+         entry takes the full width, with the input shrinking instead of the
+         fixed 220px. */
+      html { scroll-padding-top: 112px; }
+      .topbar-inner { flex-wrap: wrap; gap: 8px 16px; }
+      .topbar-right { flex: 1 1 100%; flex-wrap: wrap; gap: 8px 16px; }
+      .key-entry { flex: 1 1 100%; }
+      .key-entry input { flex: 1 1 120px; min-width: 0; width: auto; }
       .row-head { flex-wrap: wrap; gap: 8px; }
       .row-head .when { margin-left: 0; }
     }
@@ -4023,7 +4050,7 @@
     if (state.truncated) {
       svg.appendChild(svgEl("line", {
         x1: LG.left, y1: LG.openTop - 6, x2: LG.left, y2: LG.axisY,
-        stroke: "var(--ash2)", "stroke-width": 2, "stroke-dasharray": "2 4"
+        stroke: "var(--ash-mark)", "stroke-width": 2, "stroke-dasharray": "2 4"
       }));
       svg.appendChild(svgText(LG.left + 5, LG.openTop - 10, "sample", "lg-axis"));
     }
@@ -4044,7 +4071,7 @@
     // construction rather than a synchronization protocol.
     var cross = svgEl("line", {
       x1: 0, y1: LG.openTop - 6, x2: 0, y2: LG.axisY,
-      stroke: "var(--ash2)", "stroke-width": 1, "stroke-dasharray": "3 3",
+      stroke: "var(--ash-mark)", "stroke-width": 1, "stroke-dasharray": "3 3",
       opacity: 0
     });
     svg.appendChild(cross);
