@@ -32,8 +32,6 @@ from .coordinator import (
     logger,
 )
 from .helpers import (
-    _default_get_retry_after,
-    _default_is_429,
     _emit_rate_limit_event,
     _record_rate_limit_429,
     _record_rate_limit_cooldown,
@@ -57,8 +55,6 @@ __all__ = [
     "_record_rate_limit_cooldown",
     "_record_rate_limit_deferral",
     "_record_rate_limit_wait",
-    "_default_is_429",
-    "_default_get_retry_after",
     # Coordinator
     "CooldownAnnouncer",
     "RateLimitCoordinator",

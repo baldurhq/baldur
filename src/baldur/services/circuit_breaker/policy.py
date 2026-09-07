@@ -10,8 +10,12 @@ through automatic counting (record_failure/record_success).
 
 Three circuit-control paths coexist independently:
 - CircuitBreakerPolicy (record_failure): automatic counting based on generic Exceptions
-- ProtectionMixin (record_rate_limit_response): force_open based on 429 traffic
+- ProtectionMixin (record_rate_limit_response): cascade trip based on 429 traffic
 - ManualControlMixin (force_open/force_close): manual operator control
+
+This policy is also the tree's outbound 429 observation site. It opens a
+per-call observation scope around the business function, so a 429 the retry
+ladder saw per attempt and a 429 only this stage sees are both counted once.
 """
 
 from __future__ import annotations
@@ -30,15 +34,37 @@ from baldur.interfaces.resilience_policy import (
     PolicyResult,
     ResiliencePolicy,
 )
+from baldur.services.retry_handler.rate_limit_detection import (
+    detect_rate_limit,
+    failure_status_codes,
+    response_status,
+)
 
 from .config import CircuitBreakerConfig, CircuitState
 from .exceptions import CircuitBreakerOpenError
+from .rate_limit_observation import (
+    OutboundObservationScope,
+    close_scope,
+    observe_429,
+    open_scope,
+)
 from .service import CircuitBreakerService
 from .time_outcome_window import record_call_outcome, resolve_outcome_key
 
 logger = structlog.get_logger()
 
 T = TypeVar("T")
+
+
+def _is_rate_limit_deferral(error: BaseException) -> bool:
+    """Whether ``error`` is Baldur's own "the call was never made" refusal.
+
+    Lazy import, mirroring how the 429 classifier defers the same symbol: it
+    keeps the coordinator package out of this module's import-time graph.
+    """
+    from baldur.services.rate_limit_coordinator.models import RateLimitDeferredError
+
+    return isinstance(error, RateLimitDeferredError)
 
 
 class CircuitBreakerPolicy(ResiliencePolicy[T]):
@@ -130,9 +156,19 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
         """
         Decide whether an exception should be counted as a failure.
 
+        Baldur's own outbound-cooldown deferral is never one, ahead of both
+        operator dials: it means the dependency was never contacted, so it
+        carries no evidence about the dependency's health. Counting it let a
+        fleet-wide cooldown that deferred N calls trip the breaker on a
+        healthy dependency. That is a domain invariant rather than a dial, so
+        it must survive a caller-supplied ``ignore_exceptions=`` and must not
+        hide inside a default tuple.
+
         If it matches ignore_exceptions, it is not counted as a failure.
         If it matches failure_exceptions, it is counted as a failure.
         """
+        if _is_rate_limit_deferral(error):
+            return False
         if isinstance(error, self._ignore_exceptions):
             return False
         return isinstance(error, self._failure_exceptions)
@@ -233,13 +269,90 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
             executed_policies=["circuit_breaker"],
         )
 
-    def _on_success(self, value: T, hint_state: Any) -> PolicyResult[T]:
-        """Record a success and fire the success hook, returning the SUCCESS result."""
-        self._cb_service.record_success(
-            self._service_name,
-            hint_state=hint_state,
-        )
-        record_call_outcome(self._outcome_key, failure=False)
+    def _count_call_request(
+        self, scope: OutboundObservationScope | None, made_a_call: bool
+    ) -> None:
+        """Write the one request this call made, if no inner stage counted it.
+
+        ``scope.attempts == 0`` means nothing below this stage counted an
+        attempt, so the denominator of the cascade rate is this stage's to
+        write. A non-zero count means an inner stage counted every attempt it
+        made, and a second write here would inflate the denominator.
+        """
+        if scope is not None and scope.attempts == 0 and made_a_call:
+            scope.note_attempt()
+
+    def _observe_rate_limit(
+        self,
+        outcome: Any,
+        retry_after: float | None,
+        scope: OutboundObservationScope | None,
+    ) -> None:
+        """Fan a 429 out to the cascade and the coordinator, each once.
+
+        Two independent marks decide the two halves. The cascade half is owed
+        only for an outcome no inner stage classified (compared by identity, so
+        a wrapped or re-raised object is still recognised). The coordinator half
+        is owed only when no inner stage claimed coordination for this call — a
+        retry stage that never ran its loop still owns the decision, which is
+        what keeps ``rate_limit_aware=False`` meaning what it says.
+        """
+        if scope is None:
+            observe_429(self._service_name, retry_after, notify_coordinator=True)
+            return
+
+        if not scope.was_classified(outcome):
+            scope.note_429(retry_after)
+        if not scope.coordination_claimed:
+            observe_429(
+                self._service_name,
+                retry_after,
+                record_cascade=False,
+                notify_coordinator=True,
+            )
+
+    def _on_success(
+        self,
+        value: T,
+        hint_state: Any,
+        scope: OutboundObservationScope | None = None,
+    ) -> PolicyResult[T]:
+        """Record the returned outcome and fire the success hook.
+
+        "Returned" is not "succeeded": a client that hands its HTTP answer back
+        instead of raising reports a 429 or a 5xx as an ordinary return value.
+        Such a response is recorded as a breaker failure (and a 429 additionally
+        feeds the cascade), while the pipeline outcome stays SUCCESS and the
+        value is returned untouched — a returned response never triggers a
+        fallback and never raises. This is the same tri-state the middlewares
+        already apply to inbound responses.
+        """
+        self._count_call_request(scope, made_a_call=True)
+
+        is_rate_limited, retry_after = detect_rate_limit(value)
+        status = response_status(value)
+        is_failure_status = status is not None and status in failure_status_codes()
+
+        if is_failure_status or is_rate_limited:
+            self._cb_service.record_failure(
+                self._service_name,
+                error_context={
+                    "error": f"HTTP {status}",
+                    "type": "response_status",
+                },
+                hint_state=hint_state,
+            )
+            record_call_outcome(self._outcome_key, failure=True)
+        else:
+            self._cb_service.record_success(
+                self._service_name,
+                hint_state=hint_state,
+            )
+            record_call_outcome(self._outcome_key, failure=False)
+
+        if is_rate_limited:
+            self._observe_rate_limit(value, retry_after, scope)
+
         success_result = PolicyResult(
             value=value,
             outcome=PolicyOutcome.SUCCESS,
@@ -249,7 +362,12 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
         self._invoke_hooks("on_success", self._service_name, success_result)
         return success_result
 
-    def _on_failure(self, error: Exception, hint_state: Any) -> None:
+    def _on_failure(
+        self,
+        error: Exception,
+        hint_state: Any,
+        scope: OutboundObservationScope | None = None,
+    ) -> None:
         """Record a failure (after the ``_is_failure`` gate) and fire the failure hook.
 
         The caller re-raises ``error`` so an upper Policy (Retry, etc.) can
@@ -258,7 +376,12 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
         escape untouched (no ``record_failure``) and a cancelled call cannot
         corrupt the breaker's failure count. Do NOT widen the caller's boundary
         to ``except BaseException``.
+
+        A cooldown deferral is not a dependency call: no request is counted for
+        it either, so it changes neither side of the cascade rate.
         """
+        self._count_call_request(scope, made_a_call=not _is_rate_limit_deferral(error))
+
         if self._is_failure(error):
             self._cb_service.record_failure(
                 self._service_name,
@@ -269,6 +392,12 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
             # whose exception the breaker was configured to ignore is in
             # neither the numerator nor the denominator of the rate.
             record_call_outcome(self._outcome_key, failure=True)
+
+            # Same gate for the cascade: a caller who ignores their client's
+            # rate-limit exception type ignores it everywhere.
+            is_rate_limited, retry_after = detect_rate_limit(error)
+            if is_rate_limited:
+                self._observe_rate_limit(error, retry_after, scope)
         # Hook: execution failure (Audit + EventBus)
         self._invoke_hooks("on_failure", self._service_name, error, 1)
 
@@ -299,12 +428,17 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
 
         # verdict == "run": execute + record. ``except Exception`` (never
         # BaseException) keeps KeyboardInterrupt/SystemExit propagating uncounted.
+        # The observation scope is opened only here: a rejected or observe-only
+        # verdict runs no dependency call this stage owns, so it counts nothing.
+        token, scope = open_scope(self._service_name)
         try:
             value = func(*args, **kwargs)
-            return self._on_success(value, hint_state)
+            return self._on_success(value, hint_state, scope)
         except Exception as e:
-            self._on_failure(e, hint_state)
+            self._on_failure(e, hint_state, scope)
             raise  # propagate so an upper Policy (Retry, etc.) can handle it
+        finally:
+            close_scope(token)
 
 
 class AsyncCircuitBreakerPolicy:
@@ -374,12 +508,15 @@ class AsyncCircuitBreakerPolicy:
         if verdict == "direct":
             return inner._direct_result(await func(*args, **kwargs))
 
+        token, scope = open_scope(inner.service_name)
         try:
             value = await func(*args, **kwargs)
-            return inner._on_success(value, hint_state)
+            return inner._on_success(value, hint_state, scope)
         except Exception as e:
-            inner._on_failure(e, hint_state)
+            inner._on_failure(e, hint_state, scope)
             raise  # propagate so an upper Policy (Retry, etc.) can handle it
+        finally:
+            close_scope(token)
 
 
 def circuit_breaker(

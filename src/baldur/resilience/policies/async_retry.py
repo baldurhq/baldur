@@ -92,6 +92,7 @@ class AsyncRetryPolicy:
         retry_on_result: Callable[[Any], bool] | None = None,
         max_elapsed: float | None = None,
         backoff_factory: Callable[[], BackoffStrategy] | None = None,
+        rate_limit_aware: bool = True,
     ):
         if max_retries < 0:
             raise ValueError(f"max_retries must be >= 0, got {max_retries}")
@@ -144,6 +145,11 @@ class AsyncRetryPolicy:
         self._domain = domain
         self._retry_on_result = retry_on_result
         self._max_elapsed = max_elapsed
+        # Carried for the opt-out half only: this stage installs no cooldowns,
+        # so a True value changes nothing here. A False value is a caller's
+        # explicit "no 429 coordination for this call", which the breaker stage
+        # above would otherwise honour nowhere.
+        self._rate_limit_aware = rate_limit_aware
 
     @classmethod
     def from_policy_config(
@@ -169,11 +175,13 @@ class AsyncRetryPolicy:
         - ``retry_on_result`` / ``max_elapsed`` carry the result-predicate and
           cooperative wall-clock budget so async matches sync off the same config.
 
-        Not carried, so the parity above does not extend to them:
-        ``rate_limit_aware`` and ``rate_limit_key`` are deliberately **not**
-        mapped. Outbound 429 coordination is implemented on the synchronous
-        retry stage only, so both fields are inert on every async path that
-        reads this config. Async callers who need 429 coordination use the
+        Half-carried: ``rate_limit_aware`` is mapped for its **opt-out** only.
+        This stage installs no cooldowns of its own — outbound 429 coordination
+        is implemented on the synchronous retry stage — so a True value is
+        inert here; a False value is claimed on the observation scope so the
+        breaker stage above does not install the cooldown the caller opted out
+        of. ``rate_limit_key`` is not mapped at all: with nothing to key, it has
+        no reader. Async callers who need per-attempt 429 coordination use the
         tenacity bridge with an explicit ``rate_limit_key``.
         """
         # Local import: the retry_handler package is deliberately kept out of
@@ -191,7 +199,21 @@ class AsyncRetryPolicy:
             domain=cfg.domain,
             retry_on_result=cfg.retry_on_result,
             max_elapsed=cfg.max_elapsed,
+            rate_limit_aware=cfg.rate_limit_aware,
         )
+
+    @staticmethod
+    def _observation_scope() -> Any:
+        """The breaker stage's per-call observation scope, or ``None``.
+
+        Lazy import: the breaker package stays out of this module's
+        import-time graph.
+        """
+        from baldur.services.circuit_breaker.rate_limit_observation import (
+            current_scope,
+        )
+
+        return current_scope()
 
     @property
     def name(self) -> str:
@@ -217,6 +239,16 @@ class AsyncRetryPolicy:
         Returns:
             PolicyResult with value or error.
         """
+        # A caller who turned 429 coordination off keeps it off for the whole
+        # call: claim the breaker stage's observation scope so it installs no
+        # cooldown on this stage's behalf. Claimed only for the opt-out — this
+        # stage coordinates nothing of its own, so leaving the scope unclaimed
+        # is what lets the breaker stage cover the async path at all.
+        if not self._rate_limit_aware:
+            scope = self._observation_scope()
+            if scope is not None:
+                scope.claim_coordination()
+
         _unwrapped = func
         while isinstance(_unwrapped, functools.partial):
             _unwrapped = _unwrapped.func

@@ -558,13 +558,13 @@ class TestRetryRateLimitNotifyBehavior:
 
         assert coordinator.on_rate_limited.call_args.kwargs["retry_after"] == 30.0
 
-    def test_a_result_borne_429_is_not_detected(self, singleton_coordinator):
-        """Boundary: detection is exception-borne, and the docstrings say so.
+    def test_a_result_borne_429_installs_a_cooldown(self, singleton_coordinator):
+        """A returned 429 is a 429: the client's calling convention is not evidence.
 
-        A client that returns the 429 response instead of raising installs no
-        cooldown — even when a result predicate retries on it. Asserted so the
-        limit is a recorded contract rather than a surprise, since the shape it
-        excludes (``requests`` without ``raise_for_status``) is a common one.
+        The ``requests``-without-``raise_for_status`` shape is a common one, and
+        while detection was exception-borne it installed no cooldown at all —
+        even when a result predicate retried on it, so the loop hammered a
+        throttled provider with the coordination it was built to prevent.
         """
         coordinator, _ = singleton_coordinator
 
@@ -577,7 +577,27 @@ class TestRetryRateLimitNotifyBehavior:
             retry_on_result=lambda r: r.status_code == 429,
         ).execute(Response)
 
-        coordinator.on_rate_limited.assert_not_called()
+        assert coordinator.on_rate_limited.call_count == 2
+        assert coordinator.on_rate_limited.call_args.kwargs["key"] == "payment"
+
+    def test_an_accepted_429_result_is_never_read_as_a_reset(
+        self, singleton_coordinator
+    ):
+        """A 429 the predicate accepts must not reset the consecutive counter.
+
+        The accepted-result branch owes ``on_success`` only for an outcome that
+        actually succeeded. Resetting on a 429 would drop the ladder back to
+        the base delay in the middle of the storm that built it.
+        """
+        coordinator, _ = singleton_coordinator
+
+        class Response:
+            status_code = 429
+
+        _policy(max_attempts=1, domain="payment").execute(Response)
+
+        coordinator.on_rate_limited.assert_called_once()
+        coordinator.on_success.assert_not_called()
 
     def test_a_string_retry_after_is_coerced_before_it_leaves(self):
         """Regression: a raw header string reached the coordinator uncoerced.

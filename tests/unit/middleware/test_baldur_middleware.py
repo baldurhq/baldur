@@ -69,17 +69,18 @@ class FakeRequest:
 def _make_middleware(
     cb_service=None,
     retry_after_max: int = 300,
-    cb_status_codes=None,
-    rate_limit_codes=None,
 ) -> BaldurMiddleware:
-    """Factory: pre-initialized middleware with injected dependencies."""
+    """Factory: pre-initialized middleware with injected dependencies.
+
+    No status sets are pinned on the instance: the two vocabularies are read
+    per response from the shared classifier, so a test that wants a different
+    one patches ``failure_status_codes`` / ``rate_limit_status_codes``.
+    """
     mw = BaldurMiddleware(get_response=lambda r: None)
     mw._initialized = True
     mw._audit_logger = None
     mw._cb_service = cb_service
     mw._retry_after_max = retry_after_max
-    mw._cb_status_codes = frozenset(cb_status_codes or {500, 502, 503, 504})
-    mw._rate_limit_codes = frozenset(rate_limit_codes or {429})
     return mw
 
 
@@ -158,8 +159,7 @@ class TestBaldurMiddlewareSettingsContract:
     def test_rate_limit_codes_overridable_via_env(self, monkeypatch):
         """BALDUR_MIDDLEWARE_RATE_LIMIT_CODES env var로 오버라이드 가능해야 한다."""
         monkeypatch.setenv("BALDUR_MIDDLEWARE_RATE_LIMIT_CODES", "[429,503]")
-        with pytest.warns(UserWarning, match="overlap"):
-            s = BaldurMiddlewareSettings()
+        s = BaldurMiddlewareSettings()
         assert set(s.rate_limit_codes) == {429, 503}
 
     def test_retry_after_max_overridable_via_env(self, monkeypatch):
@@ -168,28 +168,25 @@ class TestBaldurMiddlewareSettingsContract:
         s = BaldurMiddlewareSettings()
         assert s.retry_after_max == 120
 
-    def test_no_overlap_does_not_warn(self):
-        """Default config (no overlap) must not emit UserWarning."""
+    def test_overlapping_sets_are_accepted_without_a_warning(self):
+        """Overlap is a legal configuration, not a misconfiguration.
+
+        Classification is non-exclusive: a status listed in both sets records a
+        CB failure AND feeds the rate-limit cascade. The warning that used to
+        fire here described an if/elif dispatch that no longer exists, so
+        keeping it would tell an operator their working config is broken.
+        """
         import warnings as _w
 
         with _w.catch_warnings(record=True) as caught:
             _w.simplefilter("always")
-            BaldurMiddlewareSettings()
-        user_warnings = [w for w in caught if issubclass(w.category, UserWarning)]
-        assert len(user_warnings) == 0
-
-    def test_overlap_emits_user_warning(self):
-        """Overlapping status codes in cb_status_codes and rate_limit_codes must warn."""
-        import warnings as _w
-
-        with _w.catch_warnings(record=True) as caught:
-            _w.simplefilter("always")
-            BaldurMiddlewareSettings(
+            s = BaldurMiddlewareSettings(
                 cb_status_codes=[429, 500, 502], rate_limit_codes=[429]
             )
         user_warnings = [w for w in caught if issubclass(w.category, UserWarning)]
-        assert len(user_warnings) == 1
-        assert "429" in str(user_warnings[0].message)
+        assert user_warnings == []
+        assert 429 in s.cb_status_codes
+        assert 429 in s.rate_limit_codes
 
 
 # =============================================================================
@@ -370,8 +367,6 @@ class TestBaldurMiddlewareCallRoutingBehavior:
         mw._initialized = True
         mw._audit_logger = None
         mw._cb_service = None
-        mw._cb_status_codes = frozenset({500, 502, 503, 504})
-        mw._rate_limit_codes = frozenset({429})
         mw._retry_after_max = 300
         return mw
 
@@ -455,18 +450,61 @@ class TestBaldurMiddlewareCallRoutingBehavior:
         mw._record_cb_failure.assert_not_called()
 
     def test_cb_status_codes_from_settings_used_not_hardcoded(self):
-        """cb_status_codes가 설정값에서 로드된 인스턴스 변수를 사용해야 한다."""
+        """cb_status_codes는 설정에서 읽어야 하며 하드코딩이면 안 된다."""
         # Override to include 503 only
         response = FakeResponse(500)
         mw = self._mw_returning(response)
-        mw._cb_status_codes = frozenset({503})  # 500 NOT in override
         mw._record_cb_failure = Mock()
         mw._record_cb_success = Mock()
 
-        mw(FakeRequest())
+        with patch(
+            "baldur.api.django.middleware.baldur.failure_status_codes",
+            return_value=frozenset({503}),  # 500 NOT in override
+        ):
+            mw(FakeRequest())
 
         # 500 is not in {503} — should NOT trigger CB failure
         mw._record_cb_failure.assert_not_called()
+
+    def test_a_relayed_429_records_a_cb_failure_too(self):
+        """A throttled upstream is a counted failure, not only a cascade entry.
+
+        Without this the route breaker never reacts to a relayed 429 below the
+        cascade's minimum sample, while the same 429 observed outbound does.
+        """
+        response = FakeResponse(429)
+        mw = self._mw_returning(response)
+        mw._record_cb_failure = Mock(spec=mw._record_cb_failure)
+        mw._record_cb_success = Mock(spec=mw._record_cb_success)
+        mw._handle_external_429 = Mock(spec=mw._handle_external_429)
+
+        mw(FakeRequest())
+
+        mw._record_cb_failure.assert_called_once()
+        mw._record_cb_success.assert_not_called()
+        mw._handle_external_429.assert_called_once()
+
+    def test_a_status_in_both_sets_records_a_failure_and_the_cascade(self):
+        """Non-exclusive dispatch: both branches run for one response."""
+        response = FakeResponse(503)
+        mw = self._mw_returning(response)
+        mw._record_cb_failure = Mock(spec=mw._record_cb_failure)
+        mw._handle_external_429 = Mock(spec=mw._handle_external_429)
+
+        with (
+            patch(
+                "baldur.api.django.middleware.baldur.failure_status_codes",
+                return_value=frozenset({503}),
+            ),
+            patch(
+                "baldur.api.django.middleware.baldur.rate_limit_status_codes",
+                return_value=frozenset({503}),
+            ),
+        ):
+            mw(FakeRequest())
+
+        mw._record_cb_failure.assert_called_once()
+        mw._handle_external_429.assert_called_once()
 
 
 # =============================================================================
@@ -564,8 +602,15 @@ class TestBaldurMiddlewareHandleExternal429Behavior:
         assert "path" in audit_data
         assert "domain" in audit_data
 
-    def test_emit_rate_limit_event_called_with_rate_limit_429(self):
-        """RATE_LIMIT_429 이벤트가 EventBus 헬퍼를 통해 발행되어야 한다."""
+    def test_no_rate_limit_event_is_emitted_from_the_middleware(self):
+        """The middleware emits no RATE_LIMIT_429 of its own.
+
+        It could only ever produce a dict no subscriber reads — no ``key``, no
+        ``consecutive_429s`` — which the escalation handler and the PRO
+        throttle subscribers resolve to key "unknown" and count 0, below every
+        threshold. The coordinator is the canonical emitter and its payload is
+        the one they read.
+        """
         mw = _make_middleware()
         mw._log_audit_event = Mock()
 
@@ -574,23 +619,7 @@ class TestBaldurMiddlewareHandleExternal429Behavior:
         ) as mock_emit:
             mw._handle_external_429(FakeRequest(path="/api/test/"), FakeResponse(429))
 
-        mock_emit.assert_called_once()
-        event_type_arg = mock_emit.call_args[0][0]
-        assert event_type_arg == "RATE_LIMIT_429"
-
-    def test_emit_rate_limit_event_data_includes_service_name_and_path(self):
-        """발행 데이터에 service_name과 path 키가 포함되어야 한다."""
-        mw = _make_middleware()
-        mw._log_audit_event = Mock()
-
-        with patch(
-            "baldur.services.rate_limit_coordinator.helpers._emit_rate_limit_event",
-        ) as mock_emit:
-            mw._handle_external_429(FakeRequest(path="/api/test/"), FakeResponse(429))
-
-        event_data = mock_emit.call_args[0][1]
-        assert "service_name" in event_data
-        assert "path" in event_data
+        mock_emit.assert_not_called()
 
 
 # =============================================================================
@@ -621,10 +650,12 @@ class TestBaldurMiddlewareLazyInitFallbackBehavior:
                 ):
                     mw._lazy_init()
 
-        # Then — __init__ safe defaults are intact
-        assert 500 in mw._cb_status_codes
-        assert 429 in mw._rate_limit_codes
+        # Then — __init__ safe defaults are intact. The two status sets are no
+        # longer cached here: they are read per response from the shared
+        # classifier, which falls back to the model's own field defaults.
         assert mw._retry_after_max == 300
+        assert not hasattr(mw, "_cb_status_codes")
+        assert not hasattr(mw, "_rate_limit_codes")
 
     def test_initialized_flag_set_even_when_settings_fail(self):
         """설정 로드 실패 후에도 _initialized=True로 설정되어 재초기화를 방지해야 한다."""
@@ -939,8 +970,6 @@ class TestBaldurMiddlewareCallCbDomainRoutingBehavior:
         mw._initialized = True
         mw._audit_logger = None
         mw._cb_service = None
-        mw._cb_status_codes = frozenset({500, 502, 503, 504})
-        mw._rate_limit_codes = frozenset({429})
         mw._retry_after_max = 300
         return mw
 
@@ -986,8 +1015,6 @@ class TestBaldurMiddlewareCallCbDomainRoutingBehavior:
         mw._initialized = True
         mw._audit_logger = None
         mw._cb_service = None
-        mw._cb_status_codes = frozenset({500, 502, 503, 504})
-        mw._rate_limit_codes = frozenset({429})
         mw._retry_after_max = 300
         mw._record_cb_failure = Mock()
 
@@ -1067,8 +1094,6 @@ class TestBaldurMiddlewareObserveOnlyBehavior:
         mw._initialized = True
         mw._audit_logger = None
         mw._cb_service = None
-        mw._cb_status_codes = frozenset({500, 502, 503, 504})
-        mw._rate_limit_codes = frozenset({429})
         mw._retry_after_max = 300
         mw._is_cb_open = Mock(spec=BaldurMiddleware._is_cb_open, return_value=True)
         mw._is_dlq_eligible = Mock(

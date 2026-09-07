@@ -29,6 +29,7 @@ from baldur.adapters.memory.circuit_breaker import (
 from baldur.core.decision_logger import DecisionBoundaryEventType, ReasonCode
 from baldur.services.circuit_breaker.config import CircuitBreakerConfig
 from baldur.services.circuit_breaker.rate_limit_tracker import (
+    get_rate_limit_tracker,
     reset_rate_limit_tracker,
 )
 from baldur.services.circuit_breaker.service import CircuitBreakerService
@@ -79,11 +80,18 @@ def _pin(repo, state: str) -> None:
 
 
 def _drive_cascade(service) -> list:
-    """Report enough 429s to cross the threshold; return every result."""
-    return [
-        service.record_rate_limit_response(SERVICE)
-        for _ in range(CASCADE_THRESHOLD + 1)
-    ]
+    """Report enough 429s to cross the threshold; return every result.
+
+    The request each 429 answered is written here, the way every observation
+    site writes it: the cascade method itself counts only the numerator, so a
+    driver that writes no requests leaves the minimum-sample term unsatisfied.
+    """
+    tracker = get_rate_limit_tracker()
+    results = []
+    for _ in range(CASCADE_THRESHOLD + 1):
+        tracker.record_request(SERVICE)
+        results.append(service.record_rate_limit_response(SERVICE))
+    return results
 
 
 def _decision_records(logs: list[dict]) -> list[dict]:
@@ -130,17 +138,16 @@ class TestCascadeRespectsManualPinBehavior:
         assert after.manually_controlled is True
         assert after.manual_override_expires_at == before.manual_override_expires_at
 
-    def test_cascade_respects_manual_pin_and_never_calls_force_open(
-        self, service, repo
-    ):
+    def test_cascade_respects_manual_pin_and_never_trips(self, service, repo):
         """Interaction assertion — the suppression is upstream of the write.
 
-        The gate sits at this call site and not inside ``force_open``, so the
-        manual force path stays live; this pins that placement.
+        The gate sits at this call site and not inside the trip primitive the
+        failure triggers share, so those keep their own gate; this pins that
+        placement.
         """
         _pin(repo, "closed")
         calls: list[str] = []
-        service.force_open = lambda *args, **kwargs: calls.append("force_open")
+        service._trip_circuit_open = lambda *args, **kwargs: calls.append("trip")
 
         _drive_cascade(service)
 
@@ -149,16 +156,18 @@ class TestCascadeRespectsManualPinBehavior:
     def test_cascade_respects_manual_pin_with_no_open_state_write(self, service, repo):
         """Negative assertion at the repository boundary, not the service one.
 
-        Both write shapes are watched. The force path writes OPEN through
-        ``atomic_force_open``, so a test that only recorded ``update_state``
-        would pass against the unguarded cascade — the assertion has to cover
-        every way an OPEN can be written, not the one that came to mind.
+        Every write shape is watched. The automatic trip writes OPEN through
+        ``trip_to_open`` and the manual force through ``atomic_force_open``, so
+        a test that only recorded ``update_state`` would pass against the
+        unguarded cascade — the assertion has to cover every way an OPEN can be
+        written, not the one that came to mind.
         """
         _pin(repo, "closed")
         writes: list[str] = []
 
         original_update = repo.update_state
         original_force = repo.atomic_force_open
+        original_trip = repo.trip_to_open
 
         def _recording_update_state(service_name, state, **kwargs):
             writes.append(str(state))
@@ -168,8 +177,13 @@ class TestCascadeRespectsManualPinBehavior:
             writes.append("open")
             return original_force(*args, **kwargs)
 
+        def _recording_trip_to_open(*args, **kwargs):
+            writes.append("open")
+            return original_trip(*args, **kwargs)
+
         repo.update_state = _recording_update_state
         repo.atomic_force_open = _recording_force_open
+        repo.trip_to_open = _recording_trip_to_open
 
         _drive_cascade(service)
 

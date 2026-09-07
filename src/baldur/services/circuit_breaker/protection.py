@@ -13,14 +13,17 @@ import structlog
 from baldur.core.decision_logger import ReasonCode, log_intervention_evaluated
 from baldur.core.execution_mode import intervention_suppressed
 
+from .config import CircuitBreakerResult
 from .manual_control import is_manual_pin_active
 from .rate_limit_tracker import get_rate_limit_tracker
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from baldur.interfaces.repositories import CircuitBreakerStateData
-    from baldur.services.circuit_breaker import CircuitBreakerResult
+    from baldur.interfaces.repositories import (
+        CircuitBreakerOpenAttempt,
+        CircuitBreakerStateData,
+    )
 
     from .config import CircuitBreakerConfig
 
@@ -30,6 +33,10 @@ logger = structlog.get_logger()
 # delay = base x (1 - jitter_factor) = 0.75s), but preserves the historical
 # 0.1s lower bound if an operator sets base/jitter to near-zero values.
 _MIN_BACKOFF_SECONDS = 0.1
+
+# Label carried by the OPEN event and the audit reason when a 429 storm, rather
+# than a failure burst, is what tripped the breaker.
+RATE_LIMIT_CASCADE_TRIGGER = "rate_limit_cascade"
 
 
 class ProtectionMixin:
@@ -45,15 +52,17 @@ class ProtectionMixin:
     if TYPE_CHECKING:
         # Host contract — supplied by CircuitBreakerService (the composing
         # class). is_enabled is a property on the host; should_allow/
-        # get_state/force_open are methods. Declared here so type checkers
-        # see Mixin self.X access; runtime resolution flows through MRO.
+        # get_state/_trip_circuit_open are methods. Declared here so type
+        # checkers see Mixin self.X access; runtime resolution flows through MRO.
         config: CircuitBreakerConfig
         is_enabled: bool
         should_allow: Callable[..., bool]
         get_state: Callable[..., str]
         get_or_create_state: Callable[..., CircuitBreakerStateData]
-        force_open: Callable[..., CircuitBreakerResult]
+        get_effective_config: Callable[..., CircuitBreakerConfig]
+        get_window_evidence: Callable[..., tuple[int, int]]
         _auto_transition_allowed: Callable[..., bool]
+        _trip_circuit_open: Callable[..., CircuitBreakerOpenAttempt]
 
     # =========================================================================
     # Rate Limit Cascade Detection
@@ -69,6 +78,15 @@ class ProtectionMixin:
         If a rate limit cascade is detected (too many 429s in a short window),
         the circuit breaker will automatically open to prevent self-DDoS.
 
+        This is the single writer of the tracker's 429 counter: every
+        observation site reaches it through here, so no downstream answer is
+        counted twice by two writers disagreeing about who owns it. The
+        matching *request* — the cascade rate's denominator — is written by the
+        observation site, not here: a site that already counted the call it
+        made would otherwise have it counted twice, capping the rate at 50%
+        in a pure storm and putting the top half of the setting's range out of
+        reach.
+
         Args:
             service_name: Name of the external service
 
@@ -79,23 +97,27 @@ class ProtectionMixin:
             return None
 
         # Resolve the shared config once — every threshold this decision uses
-        # must come from the same snapshot as the window it is measured over.
-        cfg = self.config
+        # must come from the same snapshot as the window it is measured over,
+        # and the same snapshot is what the trip primitive records the decision
+        # against. The effective config overrides only the failure-threshold
+        # fields, so every cascade field on it equals the base config's.
+        cfg = self.get_effective_config(service_name)
 
         tracker = get_rate_limit_tracker()
         tracker.record_rate_limit(service_name)
-        # A 429 implies a request was made — record it so the hybrid cascade
-        # rate calculation works even when self-DDoS protection is disabled.
-        tracker.record_request(service_name)
 
         # Hybrid cascade condition: absolute floor AND minimum sample AND rate threshold
         window = cfg.rate_limit_cascade_window_seconds
         rate_limit_count = tracker.get_rate_limit_count(service_name, window)
         total_requests = tracker.get_request_count(service_name, window)
 
+        # ``total_requests > 0`` guards the division, which the minimum-sample
+        # term no longer implies: the denominator is the observation site's to
+        # write, so a caller that reports a 429 without one leaves it at zero.
         cascade_detected = (
             rate_limit_count >= cfg.rate_limit_cascade_threshold
             and total_requests >= cfg.rate_limit_cascade_minimum_calls
+            and total_requests > 0
             and (rate_limit_count / total_requests)
             >= (cfg.rate_limit_cascade_rate / 100)
         )
@@ -118,11 +140,13 @@ class ProtectionMixin:
             # on it, recovery transitions filter it out, and the expiry sweep
             # leaves a due lift to admission — so this was an asymmetry, not a
             # design. Like the observe-only gate below, it sits at this call
-            # site and not inside force_open, so the manual force path stays
-            # live. Accepted consequence: while an Allow is pinned, traffic
+            # site and not inside the trip primitive, which the failure
+            # triggers share. Accepted consequence: while an Allow is pinned,
+            # traffic
             # keeps flowing to a 429-ing dependency for the pin's lifetime —
             # bounded by its TTL and by the operator's explicit instruction.
             state = self.get_or_create_state(service_name)
+            window_failures, window_total = self.get_window_evidence(service_name)
             if is_manual_pin_active(state):
                 log_intervention_evaluated(
                     service_name=service_name,
@@ -140,9 +164,9 @@ class ProtectionMixin:
                 return None
 
             # Observe-only (dry-run / shadow / evaluation): suppress the
-            # automatic 429 force-open. The gate sits at this call site, NOT
-            # inside force_open, so the manual force path stays live. The 429
-            # tracking above is observation and still runs.
+            # automatic 429 trip. The gate sits at this call site, NOT inside
+            # the shared trip primitive, so the failure triggers keep their own
+            # gate. The 429 tracking above is observation and still runs.
             if intervention_suppressed(
                 service_name=service_name,
                 action="rate_limit_force_open",
@@ -151,12 +175,10 @@ class ProtectionMixin:
             ):
                 return None
 
-            # Site F (766 D2): this is an *automatic* verdict that borrows
-            # the manual primitive, so the freeze gate sits at this call site
-            # for the same reason the pin and observe-only gates above do —
-            # force_open itself stays ungated so the operator's own force
-            # keeps working during a freeze. The 429 tracking above is
-            # observation and still runs.
+            # Site F (766 D2): the freeze gate sits at this call site for the
+            # same reason the pin and observe-only gates above do — an operator
+            # force stays live during a freeze, and only this automatic verdict
+            # is withheld. The 429 tracking above is observation and still runs.
             if not self._auto_transition_allowed(service_name, "open"):
                 logger.debug(
                     "circuit_breaker.auto_transition_skipped",
@@ -166,21 +188,48 @@ class ProtectionMixin:
                 )
                 return None
 
-            # Auto-open circuit breaker
-            result = self.force_open(
-                service_name=service_name,
-                reason=f"Rate limit cascade detected ({rate_limit_count}/{total_requests} "
-                f"= {rate_percent:.1f}% in {window}s)",
+            # Auto-open circuit breaker. The cascade is an *automatic* verdict,
+            # so it takes the automatic trip primitive every other automatic
+            # trigger takes: the row stays operator-free and recovers through
+            # recovery_timeout and HALF_OPEN probing, instead of borrowing the
+            # manual pin's expiry (which admitted nothing until the TTL was due
+            # and ignored recovery entirely).
+            attempt = self._trip_circuit_open(
+                service_name,
+                state,
+                {
+                    "error_type": RATE_LIMIT_CASCADE_TRIGGER,
+                    "rate_limit_count": rate_limit_count,
+                    "total_requests": total_requests,
+                    "rate_percent": round(rate_percent, 2),
+                    "window_seconds": window,
+                },
+                effective_config=cfg,
+                window_failures=window_failures,
+                window_total=window_total,
+                trigger=RATE_LIMIT_CASCADE_TRIGGER,
             )
 
-            if result.success:
-                tracker.increment_backoff(service_name)
-                logger.warning(
-                    "circuit_breaker.auto_opened_circuit_due",
-                    service_name=service_name,
-                )
+            if not attempt.did_open:
+                # Already OPEN, HALF_OPEN, or pinned by a racing operator — the
+                # 429 stays recorded, but this call performed no transition, so
+                # it owes neither the backoff step nor a result.
+                return None
 
-            return result
+            tracker.increment_backoff(service_name)
+            logger.warning(
+                "circuit_breaker.auto_opened_circuit_due",
+                service_name=service_name,
+            )
+            return CircuitBreakerResult.succeeded(
+                service_name=service_name,
+                previous_state="closed",
+                new_state="open",
+                message=(
+                    f"Rate limit cascade detected ({rate_limit_count}/{total_requests} "
+                    f"= {rate_percent:.1f}% in {window}s)"
+                ),
+            )
 
         return None
 

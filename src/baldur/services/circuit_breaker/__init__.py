@@ -36,6 +36,7 @@ Structure (main modules):
 - protection.py: Protection mixin
 - manual_control.py: Manual control mixin
 - rate_limit_tracker.py: Rate limit tracking
+- rate_limit_observation.py: Outbound 429 observation scope and fan-out
 - convenience.py: Module-level functions
 - models.py: Advanced protection data models
 - freeze_mode.py: LOCKDOWN Freeze Mode
@@ -96,6 +97,13 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "RedisRateLimitBackend": (".rate_limit_lua", "RedisRateLimitBackend"),
     # protection
     "ProtectionMixin": (".protection", "ProtectionMixin"),
+    # rate_limit_observation
+    "OutboundObservationScope": (
+        ".rate_limit_observation",
+        "OutboundObservationScope",
+    ),
+    "current_scope": (".rate_limit_observation", "current_scope"),
+    "observe_429": (".rate_limit_observation", "observe_429"),
     # manual_control
     "ManualControlMixin": (".manual_control", "ManualControlMixin"),
     # convenience (additional functions)

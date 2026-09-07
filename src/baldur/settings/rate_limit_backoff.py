@@ -53,11 +53,13 @@ class RateLimitBackoffSettings(BaseSettings):
     coordination_enabled: bool = Field(
         default=True,
         description=(
-            "Deployment kill switch for the default outbound 429 coordination "
-            "on Baldur's synchronous retry stage. Governs the *default* "
-            "coordinator resolution only: an explicitly injected coordinator, "
-            "the tenacity bridge's rate_limit_key, and the rate_limit_aware "
-            "decorator are code-level opt-ins this switch does not touch."
+            "Deployment kill switch for every default-ON outbound 429 "
+            "coordination site: Baldur's synchronous retry stage and the "
+            "circuit-breaker stage that observes retry-less calls. Governs the "
+            "*default* coordinator resolution only: an explicitly injected "
+            "coordinator, the tenacity bridge's rate_limit_key, and the "
+            "rate_limit_aware decorator are code-level opt-ins this switch "
+            "does not touch."
         ),
     )
     base_delay: ShortDuration = Field(

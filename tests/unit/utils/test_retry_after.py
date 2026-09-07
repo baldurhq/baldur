@@ -192,22 +192,22 @@ class TestRetryAfterCallSiteAdoptionBehavior:
         assert is_rate_limited is True
         assert retry_after == pytest.approx(120.0)
 
-    def test_default_get_retry_after_reads_an_http_date(self):
-        """The decorator path's default header extractor."""
-        from baldur.services.rate_limit_coordinator.helpers import (
-            _default_get_retry_after,
+    def test_response_retry_after_reads_an_http_date(self):
+        """The response-subject extractor the decorator path now defaults to."""
+        from baldur.services.retry_handler.rate_limit_detection import (
+            response_retry_after,
         )
 
         class _Response:
             headers = {"Retry-After": _DATE_IN_120S}
 
         with _pinned_clock():
-            assert _default_get_retry_after(_Response()) == pytest.approx(120.0)
+            assert response_retry_after(_Response()) == pytest.approx(120.0)
 
-    def test_default_get_retry_after_returns_none_without_headers(self):
+    def test_response_retry_after_returns_none_without_headers(self):
         """A response object with no headers attribute is simply headerless."""
-        from baldur.services.rate_limit_coordinator.helpers import (
-            _default_get_retry_after,
+        from baldur.services.retry_handler.rate_limit_detection import (
+            response_retry_after,
         )
 
-        assert _default_get_retry_after(object()) is None
+        assert response_retry_after(object()) is None

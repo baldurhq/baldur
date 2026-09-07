@@ -164,7 +164,10 @@ _MOCK_CREATION_BUDGETS: dict[str, int] = {
     # env-auditor retirement: -3 — the Django hash-chain startup sync moved into
     # init() and the class was deleted; its two event-name cases and the
     # Strategy-3 factory-routing case went with it.
-    "oss": 4325,
+    # middleware 429 dispatch: -1 - the two orphan-emit cases collapsed into one
+    # negative assertion, and the new non-exclusive-dispatch cases spec their
+    # middleware method mocks off the real bound methods.
+    "oss": 4324,
     "pro": 1800,
     "dormant": 401,
 }

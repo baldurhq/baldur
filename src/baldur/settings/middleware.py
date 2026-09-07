@@ -1,8 +1,11 @@
 """
-BaldurMiddleware Settings - Pydantic v2.
+Baldur HTTP status-code vocabulary - Pydantic v2.
 
-Configures CB trigger status codes and rate limit handling
-for BaldurMiddleware.
+Configures which response statuses count as a circuit-breaker failure and
+which count as a rate-limit answer. Read by BaldurMiddleware and the
+framework-free middleware helpers on inbound responses, and by the outbound
+circuit-breaker stage when a protected call *returns* a response instead of
+raising - one operator answer covers both directions.
 
 Environment Variables:
     BALDUR_MIDDLEWARE_CB_STATUS_CODES=[500,502,503,504]
@@ -12,9 +15,7 @@ Environment Variables:
 
 from __future__ import annotations
 
-import warnings
-
-from pydantic import Field, model_validator
+from pydantic import Field
 from pydantic_settings import BaseSettings
 
 from baldur.settings.base import make_settings_config
@@ -28,22 +29,32 @@ __all__ = [
 
 class BaldurMiddlewareSettings(BaseSettings):
     """
-    Settings for BaldurMiddleware CB trigger behavior.
+    Settings for Baldur's HTTP status-code classification.
 
     Controls which HTTP status codes trigger CB failure recording,
     rate limit cascade detection, and Retry-After header clamping.
+
+    The two status sets are read on both sides of a call: inbound by
+    BaldurMiddleware and the framework-free helpers, outbound by the circuit
+    breaker stage classifying a returned response. Membership is
+    non-exclusive - a status listed in both sets records a failure *and* feeds
+    the rate-limit cascade.
     """
 
     model_config = make_settings_config("BALDUR_MIDDLEWARE_")
 
     cb_status_codes: list[int] = Field(
         default=[500, 502, 503, 504],
-        description="HTTP status codes to record as CB failures",
+        description=(
+            "HTTP status codes to record as CB failures, inbound and outbound"
+        ),
     )
 
     rate_limit_codes: list[int] = Field(
         default=[429],
-        description="HTTP status codes to treat as rate limit responses",
+        description=(
+            "HTTP status codes to treat as rate limit responses, inbound and outbound"
+        ),
     )
 
     retry_after_max: int = Field(
@@ -52,24 +63,6 @@ class BaldurMiddlewareSettings(BaseSettings):
         le=3600,
         description="Maximum Retry-After wait time in seconds",
     )
-
-    @model_validator(mode="after")
-    def _warn_status_code_overlap(self) -> BaldurMiddlewareSettings:
-        """Warn if cb_status_codes and rate_limit_codes overlap.
-
-        Overlapping codes are dispatched to the CB failure branch (if/elif
-        priority), silently bypassing rate limit cascade detection.
-        """
-        overlap = set(self.cb_status_codes) & set(self.rate_limit_codes)
-        if overlap:
-            warnings.warn(
-                f"cb_status_codes and rate_limit_codes overlap on {overlap}. "
-                f"Overlapping codes will only trigger CB failure recording; "
-                f"rate limit cascade detection will be bypassed for those codes.",
-                UserWarning,
-                stacklevel=2,
-            )
-        return self
 
 
 def get_middleware_settings() -> BaldurMiddlewareSettings:

@@ -6,11 +6,7 @@ EventBus integration and utility functions for rate limit coordination.
 
 from __future__ import annotations
 
-from typing import Any
-
 import structlog
-
-from baldur.utils.retry_after import parse_retry_after
 
 logger = structlog.get_logger()
 
@@ -177,17 +173,3 @@ def _record_rate_limit_deferral(key: str) -> None:
             "rate_limit_coordinator.metrics_failed",
             error=e,
         )
-
-
-def _default_is_429(response: Any) -> bool:
-    """Default 429 detection."""
-    if hasattr(response, "status_code"):
-        return response.status_code == 429
-    return False
-
-
-def _default_get_retry_after(response: Any) -> float | None:
-    """Default Retry-After extraction (both RFC 9110 forms, via the canonical parser)."""
-    if hasattr(response, "headers"):
-        return parse_retry_after(response.headers.get("Retry-After"))
-    return None

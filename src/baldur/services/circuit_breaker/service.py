@@ -45,10 +45,11 @@ from .manual_control import (
     is_pin_lift_due,
 )
 from .outcome_window import OutcomeWindow, evaluate_trip
-from .protection import ProtectionMixin
+from .protection import RATE_LIMIT_CASCADE_TRIGGER, ProtectionMixin
 
 if TYPE_CHECKING:
     from baldur.interfaces.repositories import (
+        CircuitBreakerOpenAttempt,
         CircuitBreakerStateData,
         CircuitBreakerStateRepository,
     )
@@ -969,7 +970,8 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
         effective_config: CircuitBreakerConfig,
         window_failures: int,
         window_total: int,
-    ) -> None:
+        trigger: str = "auto",
+    ) -> CircuitBreakerOpenAttempt:
         """Perform the CLOSED -> OPEN trip this worker decided on.
 
         The decision is the caller's; this owns the write and everything that
@@ -982,6 +984,27 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
         rather than by whichever mirror of this failure burst finished last.
         ``did_open`` then gates the cluster-logical side effects, exactly as the
         shipped HALF_OPEN->OPEN path gates its own.
+
+        Every automatic OPEN goes through here, whatever decided it: the
+        failure-count and failure-rate triggers and the rate-limit cascade
+        alike, so a cascade-opened breaker recovers through ``recovery_timeout``
+        and HALF_OPEN probing like any other automatic OPEN instead of sitting
+        behind an operator-shaped pin nobody typed.
+
+        Args:
+            service_name: Name of the service.
+            updated_state: The state this worker decided against.
+            error_context: Evidence carried into the snapshot and audit row.
+            effective_config: The config the decision was taken against.
+            window_failures: Failures recorded in the outcome window.
+            window_total: Total calls recorded in the outcome window.
+            trigger: What decided the trip - ``"auto"`` for the failure
+                triggers, the cascade's own label for a 429 storm. Labels the
+                event and the audit reason.
+
+        Returns:
+            The attempt, so a caller can gate its own follow-up work on
+            ``did_open`` exactly as the side effects here are gated.
         """
         # Collect snapshot before opening
         snapshot = self._collect_failure_snapshot(
@@ -1017,10 +1040,10 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
                     else None
                 ),
             )
-            return
+            return attempt
 
         if not attempt.did_open:
-            return
+            return attempt
 
         # Log with snapshot
         logger.warning(
@@ -1029,10 +1052,11 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
             updated_state=updated_state.failure_count,
             window_failure_count=window_failures,
             window_total_calls=window_total,
+            trigger=trigger,
         )
 
         # Save audit log with snapshot
-        self._log_circuit_open_audit(service_name, snapshot)
+        self._log_circuit_open_audit(service_name, snapshot, trigger=trigger)
 
         # Apply burn rate multiplier to Error Budget. Gated with the rest: the
         # budget it consumes is shared cluster-wide, so ungated it was charged
@@ -1063,7 +1087,7 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
                 "service_name": service_name,
                 "previous_state": "closed",
                 "timestamp": utc_now().isoformat(),
-                "trigger": "auto",
+                "trigger": trigger,
                 # Denominators the config-shadow evaluator replays the trip
                 # decision from. The journal subscriber stores event data
                 # verbatim, so these persist without further wiring.
@@ -1072,6 +1096,8 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
                 "consecutive_failure_count": updated_state.failure_count,
             },
         )
+
+        return attempt
 
     def _should_open_circuit(
         self,
@@ -1223,8 +1249,40 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
 
         return snapshot
 
+    @staticmethod
+    def _compose_open_audit_reason(snapshot: dict[str, Any], trigger: str) -> str:
+        """Build the pipe-delimited audit reason for an automatic OPEN.
+
+        The failure-trigger shape is unchanged; the cascade names itself and
+        carries the rate evidence its own decision was taken on, which the
+        failure fields (a consecutive count, a threshold) cannot express.
+        """
+        if trigger == RATE_LIMIT_CASCADE_TRIGGER:
+            evidence = snapshot.get("error_context") or {}
+            return (
+                f"{trigger}"
+                f"|rate_limits={evidence.get('rate_limit_count', 'N/A')}"
+                f"|total={evidence.get('total_requests', 'N/A')}"
+                f"|rate={evidence.get('rate_percent', 'N/A')}"
+            )
+
+        # Read values from the snapshot (supports both flat and nested structures)
+        cb_data = snapshot.get("circuit_breaker", {})
+        failure_count = cb_data.get("failure_count") or snapshot.get(
+            "failure_count", "N/A"
+        )
+        threshold_data = cb_data.get("threshold_config", {})
+        threshold_value = threshold_data.get("failure_threshold") or snapshot.get(
+            "threshold", "N/A"
+        )
+        return f"auto_trigger|failures={failure_count}|threshold={threshold_value}"
+
     def _log_circuit_open_audit(
-        self, service_name: str, snapshot: dict[str, Any]
+        self,
+        service_name: str,
+        snapshot: dict[str, Any],
+        *,
+        trigger: str = "auto",
     ) -> None:
         """
         Log circuit open event to audit log with snapshot.
@@ -1237,20 +1295,12 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
         Args:
             service_name: Name of the service
             snapshot: Failure snapshot data
+            trigger: What decided the trip. The reason line names it and then
+                carries that trigger's own evidence, so a reader tells a 429
+                storm from a failure burst without opening the snapshot.
         """
         try:
-            # Read values from the snapshot (supports both flat and nested structures)
-            cb_data = snapshot.get("circuit_breaker", {})
-            failure_count = cb_data.get("failure_count") or snapshot.get(
-                "failure_count", "N/A"
-            )
-            threshold_data = cb_data.get("threshold_config", {})
-            threshold_value = threshold_data.get("failure_threshold") or snapshot.get(
-                "threshold", "N/A"
-            )
-            reason = (
-                f"auto_trigger|failures={failure_count}|threshold={threshold_value}"
-            )
+            reason = self._compose_open_audit_reason(snapshot, trigger)
 
             log_cb_state_change_audit(
                 cb_name=service_name,

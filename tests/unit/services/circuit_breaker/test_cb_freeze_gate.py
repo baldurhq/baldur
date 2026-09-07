@@ -539,26 +539,26 @@ class TestCBFreezeGateRequestPathBehavior:
         )
 
     def test_rate_limit_cascade_auto_open_is_withheld_while_frozen(self):
-        """Site F: the 429 verdict borrows ``force_open``, so it is gated here."""
+        """Site F: the 429 verdict is an automatic trip, so it is gated here."""
         service, _ = _service_over_mock_repo(_state())
-        service.force_open = MagicMock(spec=service.force_open)
+        service._trip_circuit_open = MagicMock(spec=service._trip_circuit_open)
 
         with _frozen(False):
             result = self._drive_cascade(service)
 
         assert result is None
-        service.force_open.assert_not_called()
+        service._trip_circuit_open.assert_not_called()
 
     def test_rate_limit_cascade_auto_open_is_taken_when_not_frozen(self):
         """Site F, the other side: the cascade still auto-opens."""
         service, _ = _service_over_mock_repo(_state())
-        service.force_open = MagicMock(spec=service.force_open)
-        service.force_open.return_value = SimpleNamespace(success=False)
+        service._trip_circuit_open = MagicMock(spec=service._trip_circuit_open)
+        service._trip_circuit_open.return_value = SimpleNamespace(did_open=False)
 
         with _frozen(True):
             self._drive_cascade(service)
 
-        service.force_open.assert_called_once()
+        service._trip_circuit_open.assert_called_once()
 
     def test_frozen_request_path_writes_no_warning_record(self):
         """The request-path sites log at DEBUG: a freeze is not per-call news.
@@ -590,20 +590,25 @@ class TestCBFreezeGateRequestPathBehavior:
     def _drive_cascade(service: CircuitBreakerService):
         """Feed the tracker enough 429s to satisfy the cascade condition."""
         from baldur.services.circuit_breaker.rate_limit_tracker import (
+            get_rate_limit_tracker,
             reset_rate_limit_tracker,
         )
 
         cfg = service.config
-        # Each call records both a 429 and the request it answered, so one
-        # loop satisfies the absolute floor and the minimum-sample term.
+        # The 429 and the request it answered are recorded by different
+        # writers: the cascade method counts the numerator, the observation
+        # site the denominator. Both are driven here so one loop satisfies the
+        # absolute floor and the minimum-sample term.
         calls = max(
             cfg.rate_limit_cascade_threshold, cfg.rate_limit_cascade_minimum_calls
         )
 
         reset_rate_limit_tracker()
         try:
+            tracker = get_rate_limit_tracker()
             result = None
             for _ in range(calls):
+                tracker.record_request(SERVICE)
                 result = service.record_rate_limit_response(SERVICE)
             return result
         finally:

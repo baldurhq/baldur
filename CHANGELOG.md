@@ -10,12 +10,24 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+### Added
+
+- A dependency's 429 storm now trips the breaker on every framework, not only Django.
+- A protected call that *returns* a 429 or 5xx response records it, instead of counting a success.
+- Every outbound 429 installs the cross-worker cooldown, including on retry-less calls.
+- A 429 the retry ladder overcomes is still counted, so a storm it survives is not invisible.
+- `BALDUR_MIDDLEWARE_CB_STATUS_CODES` / `_RATE_LIMIT_CODES` now classify outbound responses too.
+
 ### Changed
 
 - A half-open breaker admits no trial call while Emergency Level 3 holds.
 - `audit_distributed_chain_degraded` now tracks the live posture, not just the boot probe.
 - A degraded audit entry no longer logs a Redis reservation failure per write.
 - `verify_integrity()` and `query()` now read exactly this adapter's own audit files.
+- A breaker opened by a 429 storm recovers through `recovery_timeout` instead of a 90-minute block.
+- A relayed 429 counts as a breaker failure, so five in a row trip the route's breaker.
+- `BaldurMiddleware` no longer emits `RATE_LIMIT_429`; the coordinator is the sole emitter.
+- A status listed in both middleware status sets now records a failure AND feeds the cascade.
 
 ### Fixed
 
@@ -26,6 +38,9 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - An audit chain that cannot read its own ledger refuses the write instead of restarting at 1.
 - The audit chain state file is now replaced atomically, so a kill cannot truncate it.
 - Closing the audit adapter no longer writes a stale sequence over a sibling worker's state.
+- A deferred call no longer counts as a breaker failure, so a cooldown cannot trip a healthy breaker.
+- A tenacity-bridge deferral now reports the real last error instead of a rejection for a call never made.
+- A client that returns 429 without raising now installs a cooldown, even under `retry_on_result`.
 
 ## [1.11.0] - 2026-09-07
 

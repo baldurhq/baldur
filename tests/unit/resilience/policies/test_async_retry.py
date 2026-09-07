@@ -996,17 +996,18 @@ class TestAsyncRetryFromPolicyConfigContract:
 
         assert policy._backoff.multiplier == 3.0
 
-    def test_rate_limit_fields_are_not_carried_onto_the_async_policy(self):
-        """The two 429-coordination fields stop at the sync stage — deliberately.
+    def test_only_the_opt_out_half_of_the_rate_limit_fields_is_carried(self):
+        """``rate_limit_aware`` carries its opt-out; ``rate_limit_key`` does not.
 
-        ``RetryPolicyConfig`` is the config class for *both* retry stages, so a
-        caller can set these on an ``aprotect()`` or async ``@retry`` path and
-        have them silently do nothing. That is a documented boundary, not an
-        oversight: the coordinator's wait is synchronous and would block the
-        event loop.
+        ``RetryPolicyConfig`` is the config class for *both* retry stages. This
+        stage installs no cooldowns — the coordinator's wait is synchronous and
+        would block the event loop — so a True value stays inert here and
+        ``rate_limit_key`` has no reader at all. A **False** value is different:
+        it is a caller's explicit "no 429 coordination for this call", and the
+        breaker stage above it would otherwise honour that nowhere.
 
-        Asserted rather than left implicit because the failure mode is invisible.
-        If this mapping ever grew the fields without an async wait behind them,
+        Asserted rather than left implicit because the failure mode is
+        invisible. If this mapping ever grew a *wait* behind the positive half,
         every async caller would get a blocking sleep under the loop.
         """
         from baldur.services.retry_handler.models import RetryPolicyConfig
@@ -1019,11 +1020,16 @@ class TestAsyncRetryFromPolicyConfigContract:
         )
         policy = AsyncRetryPolicy.from_policy_config(cfg)
 
-        assert not hasattr(policy, "_rate_limit_aware")
+        assert policy._rate_limit_aware is True
         assert not hasattr(policy, "_rate_limit_key")
         assert not hasattr(policy, "_rate_limit_coordinator")
 
-    def test_the_non_carry_is_disclosed_on_the_mapping_docstring(self):
+        opted_out = AsyncRetryPolicy.from_policy_config(
+            RetryPolicyConfig(max_attempts=3, domain="payment", rate_limit_aware=False)
+        )
+        assert opted_out._rate_limit_aware is False
+
+    def test_the_partial_carry_is_disclosed_on_the_mapping_docstring(self):
         """The disclosure is part of the contract, so it is asserted like one.
 
         This docstring otherwise claims the async and sync stages "behave
@@ -1035,7 +1041,8 @@ class TestAsyncRetryFromPolicyConfigContract:
 
         assert "rate_limit_aware" in doc
         assert "rate_limit_key" in doc
-        assert "not carried" in doc.lower()
+        assert "opt-out" in doc.lower()
+        assert "not mapped" in doc.lower()
 
 
 # =============================================================================

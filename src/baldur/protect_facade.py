@@ -1083,6 +1083,15 @@ def protect(  # verified-by: test_concurrent_duplicates_run_side_effect_exactly_
     original exception is re-raised; final failures optionally flow through
     ``DLQSink``.
 
+    Returned responses are classified, not assumed successful: a value exposing
+    an integer ``status_code`` (or ``status``) is read as an HTTP response, so a
+    client that hands back a 429 or a 5xx instead of raising still records a
+    breaker failure — and a 429 additionally feeds the rate-limit cascade and
+    the cross-worker cooldown. The value itself is returned untouched; a
+    returned response never triggers the fallback and never raises. Which
+    statuses count is ``BALDUR_MIDDLEWARE_CB_STATUS_CODES`` /
+    ``BALDUR_MIDDLEWARE_RATE_LIMIT_CODES``.
+
     Args:
         name: Service identifier. Used as the Circuit Breaker key, Retry
             domain, and Prometheus label — keep it stable per downstream.
@@ -1320,9 +1329,13 @@ async def aprotect(  # verified-by: test_concurrent_duplicates_run_side_effect_e
     ``NotImplementedError`` (it cannot be safely awaited).
 
     Parity gap — outbound 429 coordination. ``protect()``'s retry stage shares
-    a cooldown across workers when a downstream returns 429; the async retry
-    stage does not, so ``rate_limit_aware`` / ``rate_limit_key`` on a
-    ``RetryPolicyConfig`` are inert here. To coordinate on the async path, pass
+    a cooldown across workers per *attempt* when a downstream returns 429; the
+    async retry stage does not, so ``rate_limit_key`` on a ``RetryPolicyConfig``
+    is inert here and ``rate_limit_aware`` carries only its opt-out half. The
+    breaker stage still observes the async call's final outcome, so a 429 storm
+    trips the breaker and installs a cooldown at *per-sequence* granularity:
+    N per-attempt 429s the ladder eventually overcomes count as the one outcome
+    the sequence produced. For per-attempt coordination on the async path, pass
     a tenacity bridge carrying a ``rate_limit_key`` as ``retry=`` — noting that
     its wait blocks the event loop.
 

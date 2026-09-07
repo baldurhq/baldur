@@ -28,6 +28,7 @@ from baldur.bridges.tenacity.callbacks import (
     make_before_callback,
     make_before_sleep_callback,
     make_retry_error_callback,
+    observe_bridge_outcome,
 )
 from baldur.interfaces.resilience_policy import (
     PolicyContext,
@@ -263,12 +264,23 @@ class TenacityBridgePolicy(ResiliencePolicy[T]):
         Does NOT set the ``_BRIDGE_EXPLICIT_MARKER`` kwarg; that is the sync
         path's Level-1-instrument concern (the async path never injects it).
         """
+        # Outbound 429 observation scope, resolved once per call and carried on
+        # the context so the per-attempt callbacks read it without re-resolving.
+        # A bridge that carries a coordinator also carries its own coordination
+        # decision (an explicit ``rate_limit_key`` or an injected coordinator is
+        # a code-level opt-in), so it claims the call: the breaker stage above
+        # must not install a second cooldown for the same 429.
+        scope = self._observation_scope()
+        if scope is not None and self._rate_limit_coordinator is not None:
+            scope.claim_coordination()
+
         ctx = BridgeCallbackContext(
             domain=self._domain,
             rate_limit_key=self._rate_limit_key,
             rate_limit_coordinator=self._rate_limit_coordinator,
             rate_limit_max_wait=self._rate_limit_max_wait,
             retry_budget=self._retry_budget,
+            scope=scope,
         )
 
         before_cb = chain(self._user_before, make_before_callback(ctx))
@@ -294,6 +306,40 @@ class TenacityBridgePolicy(ResiliencePolicy[T]):
         retrying_kwargs["before_sleep"] = before_sleep_cb
         retrying_kwargs["retry_error_callback"] = retry_error_cb
         return ctx, retrying_kwargs
+
+    @staticmethod
+    def _observation_scope() -> Any:
+        """The breaker stage's per-call observation scope, or ``None``.
+
+        Lazy import: the breaker package stays out of this module's
+        import-time graph, matching how the coordinator is deferred here.
+        """
+        from baldur.services.circuit_breaker.rate_limit_observation import (
+            current_scope,
+        )
+
+        return current_scope()
+
+    def _classify_unseen_final_outcome(
+        self, outcome: Any, ctx: BridgeCallbackContext, retrying: Any
+    ) -> None:
+        """Observe the final outcome when ``after`` never ran for it.
+
+        tenacity returns an accepted value, and re-raises an exception its
+        retry predicate declines, without invoking ``after`` — so for those two
+        exits the per-attempt callback observed nothing. Without this, a keyed
+        bridge whose predicate declines a 429 would install no cooldown at all,
+        and the breaker stage would be withheld by this bridge's own claim.
+
+        The comparison errs toward "not yet seen": a missing statistics entry or
+        an unset ``last_attempt`` classifies here, and the scope's identity mark
+        makes a redundant classification a no-op rather than a double count.
+        """
+        if ctx.last_attempt is not None and ctx.last_attempt == (
+            self._statistics_attempts(retrying)
+        ):
+            return
+        observe_bridge_outcome(ctx, outcome)
 
     def _budget_abort_result(
         self, ctx: BridgeCallbackContext, start: float
@@ -324,14 +370,27 @@ class TenacityBridgePolicy(ResiliencePolicy[T]):
         so a requeue-capable caller can reschedule rather than treat this as a
         failed attempt — the deferred attempt never called ``func``.
         """
+        from baldur.services.rate_limit_coordinator.models import (
+            RateLimitDeferredError,
+        )
+
         duration_ms = (time.perf_counter() - start) * 1000.0
-        snapshot = ctx.snapshot
-        attempts = snapshot.attempt_number if snapshot else 1
-        last_error = snapshot.last_error if snapshot else None
+        # ``ctx.snapshot`` is written only by the exhaustion callback, which a
+        # ``before``-raised abort never reaches — reading it here reported
+        # ``error=None`` for *every* deferral, which the composer then turned
+        # into a rejection the breaker counted as a real failure for a call that
+        # was never made. Mirror the native loop's synthesis rule instead: the
+        # real last error propagates when one exists, and the deferral class is
+        # synthesised only when none does.
+        last_error: Exception = (
+            ctx.last_error
+            if isinstance(ctx.last_error, Exception)
+            else RateLimitDeferredError(key=abort.key, not_before=abort.not_before)
+        )
         return PolicyResult(
             outcome=PolicyOutcome.FAILURE,
-            error=last_error if isinstance(last_error, Exception) else None,
-            total_attempts=attempts,
+            error=last_error,
+            total_attempts=ctx.last_attempt or 1,
             total_duration_ms=duration_ms,
             executed_policies=[self.name],
             metadata={
@@ -368,6 +427,7 @@ class TenacityBridgePolicy(ResiliencePolicy[T]):
         start: float,
     ) -> PolicyResult[T]:
         """Translate a propagated (reraise/non-retryable) exception into FAILURE."""
+        self._classify_unseen_final_outcome(exc, ctx, retrying)
         duration_ms = (time.perf_counter() - start) * 1000.0
         snapshot = ctx.snapshot
         attempts = (
@@ -390,6 +450,7 @@ class TenacityBridgePolicy(ResiliencePolicy[T]):
         start: float,
     ) -> PolicyResult[T]:
         """Translate a completed tenacity loop into SUCCESS (or user-fallback FAILURE)."""
+        self._classify_unseen_final_outcome(value, ctx, retrying)
         duration_ms = (time.perf_counter() - start) * 1000.0
         snapshot = ctx.snapshot
 

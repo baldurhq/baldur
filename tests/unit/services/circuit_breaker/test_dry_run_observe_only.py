@@ -5,7 +5,7 @@ predicate (D5) plus the manual-override WARNING (D6):
 
 - ``CircuitBreakerPolicy.execute`` — no reject on OPEN, no record_* transition,
   the business fn runs once, outcome is never REJECTED.
-- ``ProtectionMixin.record_rate_limit_response`` — the 429 auto force-open is
+- ``ProtectionMixin.record_rate_limit_response`` — the 429 auto trip is
   skipped (returns None); the 429 tracking (observation) still runs.
 - ``ManualControlMixin.force_open`` / ``force_close`` — stay LIVE by design
   (manual intent), but emit an in-band WARNING under observe-only.
@@ -212,7 +212,7 @@ class TestProtectionDryRun:
             config=config, repository=InMemoryCircuitBreakerRepository()
         )
 
-    def test_force_open_skipped_and_returns_none_under_dry_run(self):
+    def test_trip_skipped_and_returns_none_under_dry_run(self):
         tracker = self._cascade_tracker()
         service = self._service()
         with (
@@ -220,16 +220,18 @@ class TestProtectionDryRun:
                 "baldur.services.circuit_breaker.protection.get_rate_limit_tracker",
                 return_value=tracker,
             ),
-            patch.object(service, "force_open") as mock_force,
+            patch.object(service, "_trip_circuit_open") as mock_trip,
             dry_run_active(),
         ):
             result = service.record_rate_limit_response("payment-api")
         assert result is None
-        mock_force.assert_not_called()
+        mock_trip.assert_not_called()
 
     def test_429_tracking_still_runs_under_dry_run(self):
-        # Observation is kept: the 429 + request are recorded even though the
-        # force-open intervention is suppressed.
+        # Observation is kept: the 429 is recorded even though the trip
+        # intervention is suppressed. The *request* is the observation site's
+        # to write, never this method's — writing it here would count every
+        # 429 as two requests and cap the cascade rate at 50%.
         tracker = self._cascade_tracker()
         service = self._service()
         with (
@@ -237,15 +239,15 @@ class TestProtectionDryRun:
                 "baldur.services.circuit_breaker.protection.get_rate_limit_tracker",
                 return_value=tracker,
             ),
-            patch.object(service, "force_open"),
+            patch.object(service, "_trip_circuit_open"),
             dry_run_active(),
         ):
             service.record_rate_limit_response("payment-api")
         tracker.record_rate_limit.assert_called_once_with("payment-api")
-        tracker.record_request.assert_called_once_with("payment-api")
+        tracker.record_request.assert_not_called()
 
-    def test_force_open_invoked_when_not_dry_run(self):
-        # Control: same cascade without dry-run DOES force-open.
+    def test_trip_invoked_when_not_dry_run(self):
+        # Control: same cascade without dry-run DOES trip the breaker.
         tracker = self._cascade_tracker()
         service = self._service()
         with (
@@ -255,12 +257,13 @@ class TestProtectionDryRun:
             ),
             patch.object(
                 service,
-                "force_open",
-                return_value=SimpleNamespace(success=True),
-            ) as mock_force,
+                "_trip_circuit_open",
+                return_value=SimpleNamespace(did_open=True),
+            ) as mock_trip,
         ):
             result = service.record_rate_limit_response("payment-api")
-        mock_force.assert_called_once()
+        mock_trip.assert_called_once()
+        assert mock_trip.call_args.kwargs["trigger"] == "rate_limit_cascade"
         assert result is not None
 
 

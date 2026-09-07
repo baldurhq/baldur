@@ -137,12 +137,22 @@ def record_rate_limit(service_name: str) -> CircuitBreakerResult | None:
     Call this when receiving a 429 response from an external service.
     If a rate limit cascade is detected, the circuit breaker will auto-open.
 
+    Records the request the 429 implies as well as the 429 itself, so a caller
+    with no request counter of its own still produces a usable cascade rate.
+    Callers that already count their own calls - the middlewares and the
+    outbound breaker stage - reach the cascade directly instead.
+
     Args:
         service_name: Name of the external service
 
     Returns:
         CircuitBreakerResult if circuit was opened, None otherwise
     """
+    from baldur.services.circuit_breaker.rate_limit_tracker import (
+        get_rate_limit_tracker,
+    )
+
+    get_rate_limit_tracker().record_request(service_name)
     return get_circuit_breaker_service().record_rate_limit_response(service_name)
 
 

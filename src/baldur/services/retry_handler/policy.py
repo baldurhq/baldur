@@ -32,13 +32,12 @@ import structlog
 # to defer waiting to an external scheduler such as Celery.
 _DEFAULT_SLEEPER: Callable[[float], None] = time.sleep
 
-# Placeholder domain meaning "the caller did not identify a downstream".
-# It is the default of RetryPolicyConfig.domain, of the @retry decorator, and
-# of both pipeline presets, so every caller who did not choose a name shares it.
-# Outbound 429 coordination therefore refuses to key on it: the storage key
-# carries no per-service namespace, so one shared placeholder record would let a
-# 429 from one provider stall calls to an unrelated one.
-_UNIDENTIFIED_DOMAIN = "default"
+# Placeholder domain meaning "the caller did not identify a downstream" — the
+# same rule the breaker stage's coordinator notify gates on, so it is read from
+# the shared 429 vocabulary rather than restated here.
+from .rate_limit_detection import (  # noqa: E402
+    UNIDENTIFIED_COORDINATION_KEY as _UNIDENTIFIED_DOMAIN,
+)
 
 # Coordination keys already warned about, so the unidentified-domain diagnostic
 # costs one WARNING line per key per process rather than one per call.
@@ -62,6 +61,9 @@ from .models import (
 
 if TYPE_CHECKING:
     from baldur.services.backoff_calculator import AdaptiveRetryBudget
+    from baldur.services.circuit_breaker.rate_limit_observation import (
+        OutboundObservationScope,
+    )
     from baldur.services.rate_limit_coordinator import RateLimitCoordinator
     from baldur.services.rate_limit_coordinator.models import RateLimitResult
 
@@ -255,6 +257,16 @@ class RetryPolicy(ResiliencePolicy[T]):
         Kill Switch, ErrorBudgetGate, Audit, and DLQ are handled by
         PolicyComposer via Guard/Hook/Sink.
         """
+        # Outbound 429 observation scope, claimed as the very first statement.
+        # This stage carries its own decision about fleet-wide cooldowns in
+        # *every* mode — retry disabled, observe-only, and the loop — so the
+        # breaker stage above must not install one on its behalf. Without the
+        # claim, a call that never ran its loop would still get the cooldown a
+        # ``rate_limit_aware=False`` caller opted out of.
+        scope = self._observation_scope()
+        if scope is not None:
+            scope.claim_coordination()
+
         if not self._globally_enabled:
             return self._single_attempt(func, *args, **kwargs)
 
@@ -374,6 +386,8 @@ class RetryPolicy(ResiliencePolicy[T]):
             try:
                 result = func(*args, **kwargs)
             except Exception as e:
+                if scope is not None:
+                    scope.note_attempt()
                 last_error = e
                 last_result = None
                 result_rejected = False
@@ -385,21 +399,11 @@ class RetryPolicy(ResiliencePolicy[T]):
                     }
                 )
 
-                # 429 detected → request a cooldown from RateLimitCoordinator.
-                # Fail-open: a coordinator fault here must never replace the
-                # business error that is being classified below.
-                if coordinator:
-                    try:
-                        if self._notify_rate_limit_cooldown(
-                            coordinator, rate_limit_key, e
-                        ):
-                            rate_limit_signal = True
-                    except Exception as coordinator_error:
-                        logger.warning(
-                            "retry.rate_limit_cooldown_notify_failed",
-                            error=str(coordinator_error),
-                            domain=self._config.domain,
-                        )
+                # 429 detected → feed the cascade and request a cooldown from
+                # RateLimitCoordinator. Fail-open: a fault here must never
+                # replace the business error that is being classified below.
+                if self._observe_attempt_outcome(coordinator, rate_limit_key, e, scope):
+                    rate_limit_signal = True
 
                 # Pure exception classification. The attempts bound is hoisted to
                 # the shared tail below so an out-of-attempts stop is attributed
@@ -408,11 +412,20 @@ class RetryPolicy(ResiliencePolicy[T]):
                     reason = "non_retryable"
                     break
             else:
+                if scope is not None:
+                    scope.note_attempt()
                 # Function returned — evaluate the result predicate (fail-open).
                 if not self._evaluate_result_rejected(result):
+                    # A client that hands its 429 back instead of raising is
+                    # still rate-limited: classify the accepted value too, and
+                    # never treat it as the reset a real success would be.
+                    if self._observe_attempt_outcome(
+                        coordinator, rate_limit_key, result, scope
+                    ):
+                        rate_limit_signal = True
                     # Fail-open: a coordinator fault must never destroy a
                     # successful business result.
-                    if coordinator and rate_limit_signal:
+                    elif coordinator and rate_limit_signal:
                         try:
                             coordinator.on_success(rate_limit_key)
                         except Exception as coordinator_error:
@@ -431,6 +444,10 @@ class RetryPolicy(ResiliencePolicy[T]):
                 # Soft failure: treat the rejected value exactly like a retryable
                 # exception, but no exception is raised — track it so exhaustion
                 # can synthesize a MaxRetriesExceededError (last_error stays None).
+                if self._observe_attempt_outcome(
+                    coordinator, rate_limit_key, result, scope
+                ):
+                    rate_limit_signal = True
                 last_result = result
                 last_error = None
                 result_rejected = True
@@ -501,6 +518,13 @@ class RetryPolicy(ResiliencePolicy[T]):
                 last_result=last_result,
                 result_rejected=True,
             )
+            if scope is not None:
+                # This loop synthesised the object it is about to propagate, and
+                # already classified the value behind it. Marking it keeps the
+                # breaker stage from classifying it a second time — its message
+                # carries the domain name, so a name containing "throttle" or
+                # "429" would otherwise read as a fresh rate-limit answer.
+                scope.mark_classified(last_error)
 
         elapsed = time.monotonic() - start
         self._emit_exhausted_event(
@@ -707,36 +731,95 @@ class RetryPolicy(ResiliencePolicy[T]):
             logger.warning("retry.result_predicate_failed", error=str(e))
             return False
 
+    @staticmethod
+    def _observation_scope() -> OutboundObservationScope | None:
+        """The breaker stage's per-call observation scope, or ``None``.
+
+        Lazy import: the breaker package must stay out of this module's
+        import-time graph — the breaker's own policy imports this package's 429
+        classifier, and the two edges together would be a cycle.
+
+        ``None`` means no breaker opened a scope for this call (a bare
+        ``@retry``, or a loop the caller runs on a thread pool without copying
+        the context). Nothing is counted then: there is no breaker to trip, so
+        no record would have an owner.
+        """
+        from baldur.services.circuit_breaker.rate_limit_observation import (
+            current_scope,
+        )
+
+        return current_scope()
+
+    def _observe_attempt_outcome(
+        self,
+        coordinator: RateLimitCoordinator | None,
+        key: str,
+        outcome: Any,
+        scope: OutboundObservationScope | None = None,
+    ) -> bool:
+        """Classify one attempt's outcome once and fan a 429 out; report if it was one.
+
+        Every attempt outcome passes through here exactly once — a raised
+        exception, an accepted value, a rejected value — and is marked on the
+        scope, so the breaker stage above never classifies an object an attempt
+        already answered for. Fail-open around the whole fan-out: neither the
+        classifier reading caller-supplied attributes nor a coordinator fault
+        may replace the business outcome.
+        """
+        if coordinator is None and scope is None:
+            return False
+        try:
+            return self._notify_rate_limit_cooldown(coordinator, key, outcome, scope)
+        except Exception as coordinator_error:
+            logger.warning(
+                "retry.rate_limit_cooldown_notify_failed",
+                error=str(coordinator_error),
+                domain=self._config.domain,
+            )
+            return False
+
     def _notify_rate_limit_cooldown(
         self,
-        coordinator: RateLimitCoordinator,
+        coordinator: RateLimitCoordinator | None,
         key: str,
-        exception: Exception,
+        subject: Any,
+        scope: OutboundObservationScope | None = None,
     ) -> bool:
-        """Set a cooldown when ``exception`` is a 429; report whether it was one.
+        """Set a cooldown when ``subject`` is a 429; report whether it was one.
 
-        The coordinator is a parameter rather than an attribute read because the
-        effective coordinator is resolved per call and may not be the injected
-        one. The returned flag is also what tells the loop a rate-limit signal
-        was observed, which is the condition for owing an ``on_success`` reset.
+        ``subject`` is whatever the attempt produced — the raised exception, or
+        the value a client returned instead of raising. The coordinator is a
+        parameter rather than an attribute read because the effective
+        coordinator is resolved per call and may not be the injected one, and
+        it may be ``None`` when only the cascade half is owed. The returned
+        flag is also what tells the loop a rate-limit signal was observed,
+        which is the condition for owing an ``on_success`` reset.
         """
-        is_rate_limited, retry_after = self._detect_rate_limit(exception)
+        if scope is not None:
+            scope.mark_classified(subject)
+
+        is_rate_limited, retry_after = self._detect_rate_limit(subject)
         if not is_rate_limited:
             return False
 
-        cooldown = coordinator.on_rate_limited(key=key, retry_after=retry_after)
-        logger.info(
-            "retry.rate_limit_cooldown_set",
-            cooldown=cooldown,
-        )
+        if scope is not None:
+            scope.note_429(retry_after)
+
+        if coordinator is not None:
+            cooldown = coordinator.on_rate_limited(key=key, retry_after=retry_after)
+            logger.info(
+                "retry.rate_limit_cooldown_set",
+                cooldown=cooldown,
+            )
         return True
 
     @staticmethod
-    def _detect_rate_limit(exception: Exception) -> tuple[bool, float | None]:
-        """Detect 429 rate limit error and extract Retry-After value.
+    def _detect_rate_limit(subject: Any) -> tuple[bool, float | None]:
+        """Detect a 429 answer and extract its Retry-After value.
 
-        Delegates to the shared rate_limit_detection utility.
+        Delegates to the shared rate_limit_detection utility, which classifies
+        a raised exception and a returned response alike.
         """
         from .rate_limit_detection import detect_rate_limit
 
-        return detect_rate_limit(exception)
+        return detect_rate_limit(subject)

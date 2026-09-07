@@ -54,12 +54,14 @@ from baldur.interfaces.rate_limit_storage import (
     RateLimitState,
     RateLimitStorageInterface,
 )
+from baldur.services.retry_handler.rate_limit_detection import (
+    detect_rate_limit,
+    response_retry_after,
+)
 from baldur.utils.retry_after import parse_retry_after
 
 from .announcer import CooldownAnnouncer
 from .helpers import (
-    _default_get_retry_after,
-    _default_is_429,
     _emit_rate_limit_event,
     _record_rate_limit_429,
     _record_rate_limit_cooldown,
@@ -73,6 +75,48 @@ from .models import (
 )
 
 logger = structlog.get_logger()
+
+
+def _classify_decorated_result(
+    result: Any,
+    is_429: Callable[[Any], bool] | None,
+    get_retry_after: Callable[[Any], float | None] | None,
+) -> tuple[bool, float | None]:
+    """Classify a decorated call's return value as a 429 answer, plus its wait.
+
+    Each override replaces exactly its own default, and neither composes with
+    it: a caller who supplied ``is_429`` owns the verdict, a caller who supplied
+    ``get_retry_after`` owns the wait, and the shared classifier answers
+    whichever half was left alone.
+
+    Deliberately un-wrapped: the caller-supplied predicates raise the caller's
+    own exceptions, which must keep propagating rather than degrade into a
+    missed cooldown.
+    """
+    if is_429 is None:
+        rate_limited, retry_after = detect_rate_limit(result)
+    else:
+        rate_limited, retry_after = is_429(result), None
+
+    if not rate_limited:
+        return False, None
+    if get_retry_after is not None:
+        return True, get_retry_after(result)
+    if is_429 is not None:
+        return True, response_retry_after(result)
+    return True, retry_after
+
+
+def _current_observation_scope() -> Any:
+    """The breaker stage's per-call observation scope, or ``None``.
+
+    Lazy import: the breaker package stays out of this module's import-time
+    graph, matching how every other cross-service symbol is deferred here.
+    """
+    from baldur.services.circuit_breaker.rate_limit_observation import current_scope
+
+    return current_scope()
+
 
 T = TypeVar("T")
 
@@ -617,7 +661,10 @@ class RateLimitCoordinator:
 
         Args:
             key: Rate limit key
-            is_429: Function to detect if response is 429 (default: check status_code)
+            is_429: Function to detect if the response is a 429. The default is
+                Baldur's shared 429 classifier, so a decorated call agrees with
+                every other observation site about what a rate-limit answer is,
+                including which status codes count as one.
             get_retry_after: Function to extract Retry-After from response. The
                 default reads the response's ``Retry-After`` header in both
                 RFC 9110 forms (delta-seconds and HTTP-date) and returns ``None``
@@ -653,6 +700,15 @@ class RateLimitCoordinator:
 
         def decorator(func: Callable[..., T]) -> Callable[..., T]:
             def wrapper(*args: Any, **kwargs: Any) -> T:
+                # A code-level opt-in that makes its own coordinator calls, so
+                # it claims the breaker stage's observation scope for this call.
+                # Without the claim both would notify for one 429 and the
+                # consecutive counter would advance twice. The cascade half
+                # stays with the breaker stage, which sees the same value.
+                scope = _current_observation_scope()
+                if scope is not None:
+                    scope.claim_coordination()
+
                 # Wait if in cooldown. Fail-open on a coordinator fault (proceed
                 # without waiting) — but a *deferral* is a deliberate refusal, so
                 # it is decided from the returned result, outside the wrap.
@@ -679,13 +735,14 @@ class RateLimitCoordinator:
                 # Check if rate limited. Both notifications are fail-open: the
                 # wrapped call has already committed its side effect, so a
                 # coordinator fault must not surface as if the call never ran.
-                _is_429 = is_429 or _default_is_429
-                _get_retry_after = get_retry_after or _default_get_retry_after
-
+                #
                 # The user-supplied predicates stay OUTSIDE the wrap: their
                 # exceptions are the caller's own and must keep propagating.
-                rate_limited = _is_429(result)
-                retry_after = _get_retry_after(result) if rate_limited else None
+                # Each override replaces exactly its own default; the shared
+                # classifier answers whichever half was not overridden.
+                rate_limited, retry_after = _classify_decorated_result(
+                    result, is_429, get_retry_after
+                )
 
                 try:
                     if rate_limited:

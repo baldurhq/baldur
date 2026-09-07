@@ -38,6 +38,10 @@ import structlog
 
 from baldur.core.execution_mode import intervention_suppressed
 from baldur.dlq.helpers import store_to_dlq
+from baldur.services.retry_handler.rate_limit_detection import (
+    failure_status_codes,
+    rate_limit_status_codes,
+)
 from baldur.utils.retry_after import parse_retry_after
 from baldur.utils.time import utc_now
 
@@ -88,9 +92,11 @@ class BaldurMiddleware:
         self._audit_logger: AuditLogger | None = None
         self._cb_service: CircuitBreakerService | None = None
         self._initialized = False
-        # Safe defaults overridden by _lazy_init() from BaldurMiddlewareSettings
-        self._cb_status_codes: frozenset[int] = frozenset({500, 502, 503, 504})
-        self._rate_limit_codes: frozenset[int] = frozenset({429})
+        # The two status vocabularies are read per response from the shared
+        # classifier, which is also what the outbound breaker stage reads - so
+        # an operator's answer cannot mean two different things on the two
+        # sides of a call, and a runtime edit takes effect without a restart.
+        # Safe default overridden by _lazy_init() from BaldurMiddlewareSettings.
         self._retry_after_max: int = 300
         self._rate_limit_tracker: RateLimitTracker | None = None
 
@@ -128,8 +134,6 @@ class BaldurMiddleware:
             from baldur.settings.middleware import get_middleware_settings
 
             mw = get_middleware_settings()
-            self._cb_status_codes = frozenset(mw.cb_status_codes)
-            self._rate_limit_codes = frozenset(mw.rate_limit_codes)
             self._retry_after_max = mw.retry_after_max
         except Exception as e:
             logger.warning(
@@ -308,8 +312,17 @@ class BaldurMiddleware:
 
             raise
 
-        # HTTP 5xx CB failure recording
-        if response.status_code in self._cb_status_codes:
+        # Status classification. The two vocabularies are NOT exclusive: a
+        # status an operator lists in both records a failure *and* feeds the
+        # rate-limit cascade. A relayed 429 is a counted failure like any other
+        # error response - what it additionally means is that the upstream is
+        # throttling, which is the cascade's business.
+        is_failure = response.status_code in failure_status_codes()
+        is_rate_limited = response.status_code in rate_limit_status_codes() and (
+            not self._is_internal_429(response)
+        )
+
+        if is_failure or is_rate_limited:
             is_infra_failure_path = self._is_infrastructure_failure_path(request)
             # Record against the inferred domain, not the hardcoded "database" (D1)
             domain = self._infer_domain(request.path)
@@ -324,24 +337,24 @@ class BaldurMiddleware:
 
             self._record_cb_failure(domain, error_context, request=request)
 
-            if is_infra_failure_path:
-                logger.warning(
-                    "baldur_middleware.infra_failure_detected",
-                    request_path=request.path,
-                    response=response.status_code,
-                )
+            # Infrastructure and DLQ are the 5xx vocabulary's own concerns: a
+            # throttled upstream is not an infrastructure failure, and replaying
+            # a request the upstream refused for rate would only re-throttle it.
+            if is_failure:
+                if is_infra_failure_path:
+                    logger.warning(
+                        "baldur_middleware.infra_failure_detected",
+                        request_path=request.path,
+                        response=response.status_code,
+                    )
 
-            if self._is_dlq_eligible(request):
-                self._store_to_dlq(request_data, error_context, request=request)
+                if self._is_dlq_eligible(request):
+                    self._store_to_dlq(request_data, error_context, request=request)
 
-        # HTTP 429 rate limit cascade detection
-        elif response.status_code in self._rate_limit_codes:
-            if not self._is_internal_429(response):
-                self._handle_external_429(request, response)
-
-        else:
-            if response.status_code < 400:
-                self._record_cb_success(self._infer_domain(request.path))
+        if is_rate_limited:
+            self._handle_external_429(request, response)
+        elif response.status_code < 400:
+            self._record_cb_success(self._infer_domain(request.path))
 
         return response
 
@@ -373,7 +386,19 @@ class BaldurMiddleware:
         return min(seconds, self._retry_after_max)
 
     def _handle_external_429(self, request: Any, response: Any) -> None:
-        """Handle an external 429 response: cascade detection + EventBus + audit."""
+        """Handle an external 429 response: cascade detection + Retry-After + audit.
+
+        Emits no ``RATE_LIMIT_429`` event of its own. The coordinator is the
+        canonical emitter and its payload is the one every subscriber reads
+        (``key``, ``consecutive_429s``, ``cooldown_until``); this site could
+        only ever produce a differently-shaped dict, which subscribers read as
+        key ``unknown`` and count ``0``.
+
+        Installs no coordinator cooldown either: a relayed 429 is indirect
+        evidence about *someone else's* upstream, and a fleet-wide cooldown
+        drawn from it would stall every outbound retry stage under that name on
+        the strength of one view's response code.
+        """
         retry_after = self._parse_retry_after(response)
         domain = self._infer_domain(request.path)
 
@@ -386,22 +411,6 @@ class BaldurMiddleware:
                     "baldur_middleware.rate_limit_cb_record_failed",
                     error=e,
                 )
-
-        try:
-            from baldur.services.rate_limit_coordinator.helpers import (
-                _emit_rate_limit_event,
-            )
-
-            _emit_rate_limit_event(
-                "RATE_LIMIT_429",
-                {
-                    "service_name": domain,
-                    "path": request.path,
-                    "retry_after": retry_after,
-                },
-            )
-        except ImportError:
-            pass
 
         if retry_after is not None:
             response["Retry-After"] = str(int(retry_after))

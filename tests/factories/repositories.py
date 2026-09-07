@@ -220,6 +220,48 @@ class InMemoryCircuitBreakerRepository:
         state.last_success_at = datetime.now(UTC)
         return state.success_count
 
+    def trip_to_open(
+        self,
+        service_name: str,
+        failure_count: int,
+    ) -> Any:
+        """Mirror of the repository's single-winner CLOSED->OPEN trip.
+
+        Both automatic triggers — the failure count/rate and the rate-limit
+        cascade — write the OPEN row through this primitive, so a double that
+        omits it raises inside the code under test instead of answering the
+        question. Branches follow the interface contract: an active pin
+        declines the write, a CLOSED (or absent) row opens, anything else is a
+        race-loser reporting the row it found.
+        """
+        from baldur.interfaces.repositories import (
+            CIRCUIT_BREAKER_PINNED_TOKEN,
+            CircuitBreakerOpenAttempt,
+        )
+
+        state = self.get_or_create(service_name)
+
+        if state.is_pin_active():
+            pinned = MockCircuitBreakerStateData(
+                service_name=service_name,
+                state=CIRCUIT_BREAKER_PINNED_TOKEN,
+                manually_controlled=state.manually_controlled,
+                manual_override_expires_at=state.manual_override_expires_at,
+            )
+            return CircuitBreakerOpenAttempt(state=pinned, did_open=False)
+
+        if state.state != DefaultValues.CB_STATE_CLOSED:
+            return CircuitBreakerOpenAttempt(state=state, did_open=False)
+
+        state.state = DefaultValues.CB_STATE_OPEN
+        state.failure_count = failure_count
+        state.success_count = 0
+        state.opened_at = datetime.now(UTC)
+        state.half_open_request_count = 0
+        state.manually_controlled = False
+        state.manual_override_expires_at = None
+        return CircuitBreakerOpenAttempt(state=state, did_open=True)
+
     def list_all(self) -> list[MockCircuitBreakerStateData]:
         """List every CB state."""
         return list(self._states.values())

@@ -5,12 +5,18 @@ Verifies that repeated external 429 responses flowing through BaldurMiddleware
 trigger the cascade detection logic in CircuitBreakerService and auto-open the CB
 for the rate-limited domain. Uses InMemoryCircuitBreakerStateRepository — no Docker.
 
-Interaction chain under test:
-  BaldurMiddleware._handle_external_429(request, response)
+Interaction chain under test, driven through the production entry point:
+  BaldurMiddleware.__call__(request)                  [writes the denominator]
+  → BaldurMiddleware._handle_external_429(request, response)
   → CircuitBreakerService.record_rate_limit_response(domain)
   → RateLimitTracker.record_rate_limit(domain)        [shared singleton state]
-  → (when count >= threshold) CircuitBreakerService.force_open(domain)
-  → InMemoryCircuitBreakerStateRepository.atomic_force_open(domain)
+  → (when the hybrid condition holds) CircuitBreakerService._trip_circuit_open
+  → InMemoryCircuitBreakerStateRepository.trip_to_open(domain)
+
+``__call__`` rather than ``_handle_external_429`` alone: the cascade rate has
+two writers now, and only the entry point writes the request counter that is
+its denominator. A harness that called the handler directly would exercise a
+cascade whose sample never grows.
 
 Test Categories:
     A. Cascade threshold workflow:
@@ -42,6 +48,7 @@ from baldur.services.circuit_breaker import (
     rate_limit_tracker as _rl_tracker_module,
 )
 from baldur.services.circuit_breaker.config import CircuitBreakerConfig
+from baldur.services.circuit_breaker.rate_limit_tracker import get_rate_limit_tracker
 from baldur.services.circuit_breaker.service import CircuitBreakerService
 
 # Low threshold keeps tests fast (default is 10)
@@ -129,16 +136,35 @@ def cb_service(
     return CircuitBreakerService(config=cb_config, repository=cb_repo)
 
 
+class _ResponseQueue:
+    """The view's answer, settable per delivery — the middleware's get_response."""
+
+    def __init__(self) -> None:
+        self.response = _FakeResponse(200, {})
+
+    def __call__(self, request) -> _FakeResponse:
+        return self.response
+
+
 @pytest.fixture
-def middleware(cb_service: CircuitBreakerService) -> BaldurMiddleware:
+def responses() -> _ResponseQueue:
+    return _ResponseQueue()
+
+
+@pytest.fixture
+def middleware(
+    cb_service: CircuitBreakerService, responses: _ResponseQueue
+) -> BaldurMiddleware:
     """Pre-initialized middleware with the isolated CB service injected."""
-    mw = BaldurMiddleware(get_response=lambda r: None)
+    mw = BaldurMiddleware(get_response=responses)
     mw._initialized = True
     mw._audit_logger = None
     mw._cb_service = cb_service
-    mw._cb_status_codes = frozenset({500, 502, 503, 504})
-    mw._rate_limit_codes = frozenset({429})
     mw._retry_after_max = 300
+    # The per-request denominator writer, which ``_lazy_init`` would have
+    # resolved. The fixture bypasses that, so it is wired explicitly — without
+    # it every cascade rate here would read as an unsampled 100%.
+    mw._rate_limit_tracker = get_rate_limit_tracker()
     mw.DOMAIN_MAPPING = {
         "/payments/": _PAYMENT_DOMAIN,
         "/orders/": _ORDER_DOMAIN,
@@ -147,13 +173,34 @@ def middleware(cb_service: CircuitBreakerService) -> BaldurMiddleware:
     return mw
 
 
+def _deliver(
+    mw: BaldurMiddleware,
+    responses: _ResponseQueue,
+    response: _FakeResponse,
+    path: str,
+) -> None:
+    """Drive one response through the production ``__call__`` path."""
+    responses.response = response
+    mw(_FakeRequest(path=path))
+
+
 def _deliver_external_429(
     mw: BaldurMiddleware,
+    responses: _ResponseQueue,
     path: str = "/api/payments/1/",
 ) -> None:
-    """Simulate one external 429 response flowing through _handle_external_429."""
-    response = _FakeResponse(429, {})  # No X-RateLimit-Mode → external
-    mw._handle_external_429(_FakeRequest(path=path), response)
+    """Simulate one external 429 response flowing through the middleware."""
+    _deliver(mw, responses, _FakeResponse(429, {}), path)  # No mode header
+
+
+def _deliver_internal_429(
+    mw: BaldurMiddleware,
+    responses: _ResponseQueue,
+    path: str = "/api/payments/1/",
+    mode: str = "normal",
+) -> None:
+    """Simulate one of Baldur's own throttle rejections flowing through."""
+    _deliver(mw, responses, _FakeResponse(429, {"X-RateLimit-Mode": mode}), path)
 
 
 # =============================================================================
@@ -173,6 +220,7 @@ class TestMiddlewareCascadeThresholdWorkflow:
     def test_below_threshold_cb_remains_closed(
         self,
         middleware: BaldurMiddleware,
+        responses: _ResponseQueue,
         cb_service: CircuitBreakerService,
     ):
         """
@@ -183,7 +231,7 @@ class TestMiddlewareCascadeThresholdWorkflow:
         """
         # Given / When
         for _ in range(_CASCADE_THRESHOLD - 1):
-            _deliver_external_429(middleware)
+            _deliver_external_429(middleware, responses)
 
         # Then — CB must still be closed
         state = cb_service.get_state(_PAYMENT_DOMAIN)
@@ -194,6 +242,7 @@ class TestMiddlewareCascadeThresholdWorkflow:
     def test_at_threshold_cb_auto_opens_for_domain(
         self,
         middleware: BaldurMiddleware,
+        responses: _ResponseQueue,
         cb_service: CircuitBreakerService,
     ):
         """
@@ -204,7 +253,7 @@ class TestMiddlewareCascadeThresholdWorkflow:
         """
         # Given / When
         for _ in range(_CASCADE_THRESHOLD):
-            _deliver_external_429(middleware)
+            _deliver_external_429(middleware, responses)
 
         # Then — CB must be open
         state = cb_service.get_state(_PAYMENT_DOMAIN)
@@ -215,6 +264,7 @@ class TestMiddlewareCascadeThresholdWorkflow:
     def test_above_threshold_cb_stays_open(
         self,
         middleware: BaldurMiddleware,
+        responses: _ResponseQueue,
         cb_service: CircuitBreakerService,
     ):
         """
@@ -224,7 +274,7 @@ class TestMiddlewareCascadeThresholdWorkflow:
             - threshold * 3 개의 429 후에도 CB가 open 상태 유지
         """
         for _ in range(_CASCADE_THRESHOLD * 3):
-            _deliver_external_429(middleware)
+            _deliver_external_429(middleware, responses)
 
         state = cb_service.get_state(_PAYMENT_DOMAIN)
         assert state.lower() == "open"
@@ -241,6 +291,7 @@ class TestMiddlewareCascadeDomainIsolationWorkflow:
     def test_cascade_opens_only_targeted_domain_cb(
         self,
         middleware: BaldurMiddleware,
+        responses: _ResponseQueue,
         cb_service: CircuitBreakerService,
     ):
         """
@@ -252,7 +303,7 @@ class TestMiddlewareCascadeDomainIsolationWorkflow:
         """
         # Given / When — cascade on payment path only
         for _ in range(_CASCADE_THRESHOLD):
-            _deliver_external_429(middleware, path="/api/payments/1/")
+            _deliver_external_429(middleware, responses, path="/api/payments/1/")
 
         # Then — payment CB opened
         payment_state = cb_service.get_state(_PAYMENT_DOMAIN)
@@ -267,6 +318,7 @@ class TestMiddlewareCascadeDomainIsolationWorkflow:
     def test_separate_cascades_open_separate_domain_cbs(
         self,
         middleware: BaldurMiddleware,
+        responses: _ResponseQueue,
         cb_service: CircuitBreakerService,
     ):
         """
@@ -278,9 +330,9 @@ class TestMiddlewareCascadeDomainIsolationWorkflow:
         """
         # Given / When — cascade on both domains independently
         for _ in range(_CASCADE_THRESHOLD):
-            _deliver_external_429(middleware, path="/api/payments/1/")
+            _deliver_external_429(middleware, responses, path="/api/payments/1/")
         for _ in range(_CASCADE_THRESHOLD):
-            _deliver_external_429(middleware, path="/api/orders/99/")
+            _deliver_external_429(middleware, responses, path="/api/orders/99/")
 
         # Then — both CBs open
         assert cb_service.get_state(_PAYMENT_DOMAIN).lower() == "open"
@@ -296,6 +348,7 @@ class TestMiddlewareInternalVsExternalFilteringWorkflow:
     def test_internal_429_does_not_contribute_to_cascade_count(
         self,
         middleware: BaldurMiddleware,
+        responses: _ResponseQueue,
         cb_service: CircuitBreakerService,
     ):
         """
@@ -305,19 +358,16 @@ class TestMiddlewareInternalVsExternalFilteringWorkflow:
             - _is_internal_429이 True를 반환하여 _handle_external_429을 건너뜀
             - threshold 개의 내부 429 후에도 CB가 closed 유지
         """
-        # Given — simulate __call__ seeing internal 429 (X-RateLimit-Mode header present)
-        # We verify via _is_internal_429() gate, then confirm CB stays closed
-        internal_response = _FakeResponse(429, {"X-RateLimit-Mode": "normal"})
-        request = _FakeRequest(path="/api/payments/1/")
+        # Given — the gate runs inside __call__, so the deliveries below reach
+        # it the way production does rather than through a restated condition.
+        assert (
+            middleware._is_internal_429(_FakeResponse(429, {"X-RateLimit-Mode": "x"}))
+            is True
+        )
 
-        # _is_internal_429 must classify this as internal — gate fires
-        assert middleware._is_internal_429(internal_response) is True
-
-        # Simulate threshold-many "calls" that would have triggered cascade IF external
+        # When — threshold-many self-imposed 429s, which would cascade if external
         for _ in range(_CASCADE_THRESHOLD):
-            # _is_internal_429 is True, so _handle_external_429 is NOT called
-            if not middleware._is_internal_429(internal_response):
-                middleware._handle_external_429(request, internal_response)
+            _deliver_internal_429(middleware, responses)
 
         # CB must remain closed — none of the 429s reached the tracker
         state = cb_service.get_state(_PAYMENT_DOMAIN)
@@ -328,6 +378,7 @@ class TestMiddlewareInternalVsExternalFilteringWorkflow:
     def test_mixed_internal_and_external_only_external_counts(
         self,
         middleware: BaldurMiddleware,
+        responses: _ResponseQueue,
         cb_service: CircuitBreakerService,
     ):
         """
@@ -337,18 +388,19 @@ class TestMiddlewareInternalVsExternalFilteringWorkflow:
             - 내부 429 N개는 무시
             - 외부 429 threshold개 도달 시 CB가 open
         """
-        # Given — send some internal 429s first (should not count)
-        internal = _FakeResponse(429, {"X-RateLimit-Mode": "emergency"})
-        for _ in range(_CASCADE_THRESHOLD * 2):
-            if not middleware._is_internal_429(internal):
-                middleware._handle_external_429(_FakeRequest(), internal)
-
-        # When — now send real external 429s up to the threshold
+        # Given — send some internal 429s first. They count as requests (the
+        # denominator counts every response that reached upstream) but never as
+        # rate-limit evidence, so they can only ever *delay* a cascade.
         for _ in range(_CASCADE_THRESHOLD):
-            _deliver_external_429(middleware, path="/api/payments/1/")
+            _deliver_internal_429(middleware, responses, mode="emergency")
+
+        # When — now send real external 429s, enough for the hybrid condition
+        # to hold over the widened sample.
+        for _ in range(_CASCADE_THRESHOLD * 2):
+            _deliver_external_429(middleware, responses, path="/api/payments/1/")
 
         # Then — CB opened based on external 429s only
         state = cb_service.get_state(_PAYMENT_DOMAIN)
         assert state.lower() == "open", (
-            f"CB should open after {_CASCADE_THRESHOLD} external 429s, got: {state!r}"
+            f"CB should open on external 429s only, got: {state!r}"
         )

@@ -29,6 +29,11 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from baldur.interfaces.web_framework import ResponseContext
+from baldur.services.circuit_breaker.rate_limit_tracker import get_rate_limit_tracker
+from baldur.services.retry_handler.rate_limit_detection import (
+    failure_status_codes,
+    rate_limit_status_codes,
+)
 from baldur.utils.time import utc_now
 
 if TYPE_CHECKING:
@@ -42,10 +47,6 @@ __all__ = [
     "record_cb_observation",
 ]
 
-
-# Status codes that count as upstream/server failures (matches the default
-# in ``baldur.settings.middleware.MiddlewareSettings.cb_status_codes``).
-_DEFAULT_CB_FAILURE_CODES = frozenset({500, 502, 503, 504})
 
 # Minimum Retry-After advertised on a CB rejection — a smaller value would
 # invite clients to hammer a dependency the breaker just judged unhealthy.
@@ -94,21 +95,6 @@ def _try_get_cb_service():
         logger.warning("middleware.cb_service_init_failed", error=exc)
         return None
     return service
-
-
-def _failure_status_codes() -> frozenset[int]:
-    """Read the configured CB-failure status set.
-
-    Falls back to the conservative default (5xx server errors) when the
-    settings layer is unavailable so an isolated import does not break the
-    helper.
-    """
-    try:
-        from baldur.settings.middleware import get_middleware_settings
-
-        return frozenset(get_middleware_settings().cb_status_codes)
-    except Exception:
-        return _DEFAULT_CB_FAILURE_CODES
 
 
 def check_cb_open(
@@ -171,13 +157,20 @@ def record_cb_observation(
     status_code: int,
     service_name: str | None = None,
 ) -> None:
-    """Record the response as a CB success or failure observation.
+    """Record the response as a CB success, failure, or rate-limit observation.
 
     No-op when ``service_name`` is not supplied so callers without a known
     upstream identity cannot accidentally pollute a CB bucket. The observed
-    status is bucketed via the configured ``cb_status_codes`` set so an
-    operator who whitelists 502 only (for example) gets consistent behavior
-    across frameworks.
+    status is bucketed via the configured ``cb_status_codes`` and
+    ``rate_limit_codes`` sets, which the Django middleware and the outbound
+    breaker stage read too, so an operator who whitelists 502 only (for
+    example) gets consistent behavior across frameworks and directions.
+
+    The two sets are not exclusive: a relayed 429 records a counted failure
+    *and* feeds the rate-limit cascade, and a status listed in both does both.
+    Every observed response also writes one request to the cascade rate's
+    denominator - without it the rate would read 100% on any framework whose
+    only writer is this helper.
     """
     if service_name is None:
         return
@@ -189,7 +182,15 @@ def record_cb_observation(
     try:
         if not service.is_enabled:
             return
-        if status_code in _failure_status_codes():
+
+        # After the guards above: an unnamed or disabled observation records
+        # nothing at all, denominator included.
+        get_rate_limit_tracker().record_request(service_name)
+
+        is_failure = status_code in failure_status_codes()
+        is_rate_limited = status_code in rate_limit_status_codes()
+
+        if is_failure or is_rate_limited:
             service.record_failure(
                 service_name,
                 error_context={
@@ -204,6 +205,9 @@ def record_cb_observation(
             )
         elif 200 <= status_code < 400:
             service.record_success(service_name)
+
+        if is_rate_limited:
+            service.record_rate_limit_response(service_name)
     except Exception as exc:
         logger.warning(
             "middleware.cb_observation_failed",

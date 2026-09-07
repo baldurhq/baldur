@@ -29,6 +29,9 @@ from baldur.services.retry_handler.rate_limit_detection import detect_rate_limit
 
 if TYPE_CHECKING:
     from baldur.services.backoff_calculator.budget import AdaptiveRetryBudget
+    from baldur.services.circuit_breaker.rate_limit_observation import (
+        OutboundObservationScope,
+    )
     from baldur.services.rate_limit_coordinator.coordinator import (
         RateLimitCoordinator,
     )
@@ -43,6 +46,7 @@ __all__ = [
     "make_after_callback",
     "make_before_sleep_callback",
     "make_retry_error_callback",
+    "observe_bridge_outcome",
     "RetryExhaustedSnapshot",
 ]
 
@@ -114,10 +118,13 @@ class BridgeCallbackContext:
 
     __slots__ = (
         "domain",
+        "last_attempt",
+        "last_error",
         "rate_limit_key",
         "rate_limit_coordinator",
         "rate_limit_max_wait",
         "retry_budget",
+        "scope",
         "snapshot",
     )
 
@@ -129,13 +136,77 @@ class BridgeCallbackContext:
         rate_limit_coordinator: RateLimitCoordinator | None,
         retry_budget: AdaptiveRetryBudget | None,
         rate_limit_max_wait: float | None = None,
+        scope: OutboundObservationScope | None = None,
     ) -> None:
         self.domain = domain
         self.rate_limit_key = rate_limit_key
         self.rate_limit_coordinator = rate_limit_coordinator
         self.rate_limit_max_wait = rate_limit_max_wait
         self.retry_budget = retry_budget
+        self.scope = scope
         self.snapshot: RetryExhaustedSnapshot | None = None
+        # What ``after`` last saw. tenacity runs ``after`` only for an attempt
+        # its retry predicate retries or ``stop`` exhausts, so both stay None
+        # on a loop whose first attempt was accepted or declined — which is
+        # exactly how the execute-level translation tells "already classified"
+        # from "never seen", and how a cooldown deferral recovers the real last
+        # error instead of reporting a failure for a call that never ran.
+        self.last_error: Exception | None = None
+        self.last_attempt: int | None = None
+
+
+# =============================================================================
+# Shared 429 observation — one outcome, classified exactly once
+# =============================================================================
+
+
+def observe_bridge_outcome(ctx: BridgeCallbackContext, outcome: Any) -> None:
+    """Classify one attempt outcome once, then fan a 429 out. Fail-open.
+
+    Marking the outcome on the observation scope is what keeps the breaker
+    stage above from classifying the same object a second time — the composer
+    re-raises and returns by identity, so the object this bridge saw is the one
+    that reaches the breaker.
+
+    Detection is INSIDE the wrap, matching the retry loop: it reads attributes
+    off a caller-supplied exception or response — ``retry_after`` and
+    ``headers`` may be properties that raise — so it is part of this site's
+    fault surface, not a safe prelude to it.
+    """
+    if ctx.scope is None and ctx.rate_limit_coordinator is None:
+        return
+
+    if ctx.scope is not None:
+        ctx.scope.mark_classified(outcome)
+
+    try:
+        is_rate_limited, retry_after = detect_rate_limit(outcome)
+        if not is_rate_limited:
+            return
+
+        if ctx.scope is not None:
+            ctx.scope.note_429(retry_after)
+
+        if ctx.rate_limit_coordinator is None or ctx.rate_limit_key is None:
+            return
+
+        cooldown = ctx.rate_limit_coordinator.on_rate_limited(
+            key=ctx.rate_limit_key,
+            retry_after=retry_after,
+        )
+    except Exception as e:
+        logger.warning(
+            "bridge.tenacity_rate_limit_cooldown_notify_failed",
+            error=str(e),
+            key=ctx.rate_limit_key,
+        )
+        return
+
+    logger.info(
+        "bridge.tenacity_rate_limit_cooldown_set",
+        cooldown=cooldown,
+        key=ctx.rate_limit_key,
+    )
 
 
 # =============================================================================
@@ -171,36 +242,43 @@ def make_before_callback(
         # Retry-After must already be counted.
         record_retry_attempt_started(ctx.domain, attempt_number)
 
-        if ctx.rate_limit_coordinator is None or ctx.rate_limit_key is None:
-            return
+        if ctx.rate_limit_coordinator is not None and ctx.rate_limit_key is not None:
+            # Fail-open on a coordinator fault — a coordinator that is down must
+            # not break the user's tenacity loop. The deferral below is NOT a
+            # fault: it is read off the returned result, outside this wrap.
+            try:
+                result = ctx.rate_limit_coordinator.wait_if_needed(
+                    ctx.rate_limit_key, max_wait=ctx.rate_limit_max_wait
+                )
+            except Exception as e:
+                logger.warning(
+                    "bridge.tenacity_rate_limit_wait_failed",
+                    error=str(e),
+                    key=ctx.rate_limit_key,
+                )
+                result = None
 
-        # Fail-open on a coordinator fault — a coordinator that is down must not
-        # break the user's tenacity loop. The deferral below is NOT a fault: it
-        # is read off the returned result, outside this wrap.
-        try:
-            result = ctx.rate_limit_coordinator.wait_if_needed(
-                ctx.rate_limit_key, max_wait=ctx.rate_limit_max_wait
-            )
-        except Exception as e:
-            logger.warning(
-                "bridge.tenacity_rate_limit_wait_failed",
-                error=str(e),
-                key=ctx.rate_limit_key,
-            )
-            return
+            if result is not None:
+                if result.deferred:
+                    raise _CooldownDeferredAbort(
+                        key=ctx.rate_limit_key,
+                        not_before=result.not_before,
+                    )
 
-        if result.deferred:
-            raise _CooldownDeferredAbort(
-                key=ctx.rate_limit_key,
-                not_before=result.not_before,
-            )
+                if result.waited:
+                    logger.debug(
+                        "bridge.tenacity_rate_limit_cooldown_waited",
+                        wait_time=result.wait_time,
+                        key=ctx.rate_limit_key,
+                    )
 
-        if result.waited:
-            logger.debug(
-                "bridge.tenacity_rate_limit_cooldown_waited",
-                wait_time=result.wait_time,
-                key=ctx.rate_limit_key,
-            )
+        # Counted last, after the deferral above has had its chance to abort:
+        # a deferred attempt never called the dependency, so it belongs in
+        # neither side of the cascade rate. tenacity runs ``before`` outside the
+        # attempt's own try, so raising there leaves the loop with no further
+        # callback — which is why this line cannot be moved above it.
+        if ctx.scope is not None:
+            ctx.scope.note_attempt()
 
     return _before
 
@@ -208,11 +286,16 @@ def make_before_callback(
 def make_after_callback(
     ctx: BridgeCallbackContext,
 ) -> Callable[[Any], None]:
-    """``after(retry_state)`` — runs after each attempt regardless of outcome.
+    """``after(retry_state)`` — runs after an attempt tenacity retries or exhausts.
+
+    NOT after every attempt: tenacity skips it for an accepted value and for an
+    exception the retry predicate declines, both of which leave the loop at
+    once. The outcomes it never sees are classified by the bridge's own
+    execute-level translation instead.
 
     On success: notifies ``RateLimitCoordinator.on_success(key)``.
-    On failure with a 429-like exception: requests ``on_rate_limited``
-    cooldown so subsequent workers wait.
+    On failure with a 429-like exception: records the cascade observation and
+    requests an ``on_rate_limited`` cooldown so subsequent workers wait.
 
     Both notifications are fail-open. tenacity invokes ``after`` un-guarded and
     ``Retrying.__call__`` has no try/except, so an escaping coordinator fault
@@ -222,15 +305,20 @@ def make_after_callback(
     """
 
     def _after(retry_state: Any) -> None:
-        if ctx.rate_limit_coordinator is None or ctx.rate_limit_key is None:
-            return
-
         outcome = getattr(retry_state, "outcome", None)
         if outcome is None:
             return
 
+        # Stashed for the execute-level translation: which attempt this was,
+        # and the exception it carried. A cooldown deferral reports the real
+        # last error from here rather than a failure for a call never made.
+        ctx.last_attempt = getattr(retry_state, "attempt_number", None)
+
         # tenacity's outcome is a Future-like: .failed bool + .exception()
         if not getattr(outcome, "failed", False):
+            ctx.last_error = None
+            if ctx.rate_limit_coordinator is None or ctx.rate_limit_key is None:
+                return
             try:
                 ctx.rate_limit_coordinator.on_success(ctx.rate_limit_key)
             except Exception as e:
@@ -248,34 +336,8 @@ def make_after_callback(
         if exc is None or not isinstance(exc, BaseException):
             return
 
-        # Detection is INSIDE the wrap, matching the retry loop, whose equivalent
-        # wrap covers ``_notify_rate_limit_cooldown`` (detection included). It
-        # reads attributes off a caller-supplied exception — ``retry_after`` and
-        # ``response.headers`` may be properties that raise, or objects without
-        # the expected shape — so it is part of this site's fault surface, not a
-        # safe prelude to it.
-        try:
-            is_rate_limited, retry_after = detect_rate_limit(exc)  # type: ignore[arg-type]
-            if not is_rate_limited:
-                return
-
-            cooldown = ctx.rate_limit_coordinator.on_rate_limited(
-                key=ctx.rate_limit_key,
-                retry_after=retry_after,
-            )
-        except Exception as e:
-            logger.warning(
-                "bridge.tenacity_rate_limit_cooldown_notify_failed",
-                error=str(e),
-                key=ctx.rate_limit_key,
-            )
-            return
-
-        logger.info(
-            "bridge.tenacity_rate_limit_cooldown_set",
-            cooldown=cooldown,
-            key=ctx.rate_limit_key,
-        )
+        ctx.last_error = exc if isinstance(exc, Exception) else None
+        observe_bridge_outcome(ctx, exc)
 
     return _after
 
