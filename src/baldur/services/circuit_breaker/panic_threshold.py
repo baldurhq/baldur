@@ -277,12 +277,22 @@ class PanicThresholdMonitor:
                 set when an escalation was confirmed
         """
         settings = _advanced_settings()
-        if settings is not None:
-            if not settings.enabled:
-                return PanicThresholdResult(
-                    triggered=False, reason="advanced protection disabled"
-                )
-            self._refresh_config(settings)
+        if settings is None:
+            # Fail-closed: an unreadable flag is not permission to run. The
+            # lane declares a fleet-wide emergency, and the config defaults it
+            # would fall back to say "freeze" -- so an install that never
+            # enabled the lane would escalate on the strength of a settings
+            # error alone.
+            return PanicThresholdResult(
+                triggered=False, reason="advanced protection unreadable"
+            )
+        if not settings.enabled:
+            return PanicThresholdResult(
+                triggered=False, reason="advanced protection disabled"
+            )
+        self._refresh_config(settings)
+
+        state = self._observe_emergency_level()
 
         try:
             result = self.evaluate()
@@ -319,7 +329,7 @@ class PanicThresholdMonitor:
             result.action_taken = "alert_only"
             return result
 
-        self._escalate(result)
+        self._escalate(result, state)
         return result
 
     def _refresh_config(self, settings: Any) -> None:
@@ -336,18 +346,44 @@ class PanicThresholdMonitor:
             min_registered_services=self.config.min_registered_services,
         )
 
-    def _escalate(self, result: PanicThresholdResult) -> None:
+    def _observe_emergency_level(self) -> Any | None:
+        """Read the emergency state once per tick, stamping an observed freeze.
+
+        The cooldown is measured from the last freeze *this monitor* saw, so
+        the observation belongs on every tick -- not only on the ticks that
+        reach an escalation attempt. A freeze another subsystem or an operator
+        declared holds the breakers just the same, and the cooldown it earns
+        them has to survive a tick whose ratio dipped below the threshold.
+        """
+        manager = self.emergency_manager
+        if manager is None:
+            logger.debug("panic_threshold.escalation_unavailable")
+            return None
+
+        state = self._emergency_state(manager)
+        if state is not None:
+            self._stamp_observed_freeze(state)
+        return state
+
+    def _escalate(self, result: PanicThresholdResult, state: Any | None) -> None:
         """Declare Emergency Level 3, when the escalation policy allows it."""
         manager = self.emergency_manager
         if manager is None:
             logger.debug("panic_threshold.escalation_unavailable")
             return
 
-        state = self._emergency_state(manager)
-        if state is not None:
-            self._stamp_observed_freeze(state)
-            if not self._escalation_allowed(state):
-                return
+        if state is None:
+            # The policy below is what keeps this lane from fighting a
+            # gradual recovery or re-freezing a fleet whose breakers have not
+            # moved yet. None of it can be evaluated against a state that
+            # could not be read, so the safe direction is to declare nothing.
+            logger.warning(
+                "panic_threshold.escalation_skipped", reason="state_unreadable"
+            )
+            return
+
+        if not self._escalation_allowed(state):
+            return
 
         new_state = manager.activate_auto(
             level=ESCALATION_LEVEL,

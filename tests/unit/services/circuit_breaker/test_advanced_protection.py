@@ -105,7 +105,7 @@ class TestSheddingLevel:
     """SheddingLevel data model."""
 
     def test_valid_shedding_level(self):
-        """정상적인 Shedding 레벨 생성."""
+        """A well-formed shedding level is accepted as given."""
         level = SheddingLevel(
             error_rate=30.0,
             shed_criticality=["low"],
@@ -195,7 +195,7 @@ class TestLoadSheddingPolicy:
         assert policy.levels[2].traffic_limit == 0.0
 
     def test_custom_policy(self):
-        """커스텀 Load Shedding 정책."""
+        """A custom policy keeps the levels it was built with."""
         custom_levels = [
             SheddingLevel(
                 error_rate=40.0, shed_criticality=["low"], traffic_limit=60.0
@@ -228,7 +228,7 @@ class TestPanicThresholdConfig:
         assert config.min_registered_services == 3
 
     def test_alert_only_action(self):
-        """alert_only 액션."""
+        """The alert_only action is accepted by the validator."""
         config = PanicThresholdConfig(action="alert_only")
         assert config.action == "alert_only"
 

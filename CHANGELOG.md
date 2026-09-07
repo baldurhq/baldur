@@ -10,6 +10,15 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+### Changed
+
+- A half-open breaker admits no trial call while Emergency Level 3 holds.
+
+### Fixed
+
+- A worker whose cached breaker row was stale could still half-open it during Level 3.
+- An unreadable `BALDUR_CB_ADVANCED_*` value no longer lets the panic lane declare Level 3.
+
 ## [1.11.0] - 2026-09-07
 
 ### Added

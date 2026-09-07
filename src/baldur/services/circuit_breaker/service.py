@@ -379,12 +379,12 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
         if state.state == CircuitState.CLOSED:
             return CircuitBreakerDecision(allowed=True, state=state)
 
-        # OPEN and not yet eligible for a trial call: short-circuit reject.
-        if state.state == CircuitState.OPEN:
-            reason = self._open_rejection_reason(service_name, state, effective_config)
-            if reason is not None:
-                self._record_blocked_metric(service_name, reason)
-                return CircuitBreakerDecision(allowed=False, state=state)
+        # Not CLOSED and not yet eligible for a trial call: short-circuit
+        # reject.
+        reason = self._admission_refusal_reason(service_name, state, effective_config)
+        if reason is not None:
+            self._record_blocked_metric(service_name, reason)
+            return CircuitBreakerDecision(allowed=False, state=state)
 
         # OPEN with elapsed timeout, OR already HALF_OPEN — atomic acquire.
         # The repository's Lua / RLock primitive owns the state-machine
@@ -452,46 +452,52 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
                 state = replace(state, state=new_state)
         return CircuitBreakerDecision(allowed=allowed, state=state)
 
-    def _open_rejection_reason(
+    def _admission_refusal_reason(
         self,
         service_name: str,
         state: CircuitBreakerStateData,
         effective_config: CircuitBreakerConfig,
     ) -> str | None:
-        """Why an OPEN circuit refuses a request before the trial path, if it does.
+        """Why a non-CLOSED circuit refuses a request before the trial path.
 
         Returns the ``reason`` label for the blocked-request counter, or
         ``None`` when the request may proceed to the atomic trial-slot
         acquire. Takes the config the caller resolved; it never resolves one.
         """
-        # A manual block admits nothing while it holds. Without this the
-        # pinned circuit would fall through to the trial path once
-        # recovery_timeout elapsed and keep leaking half_open_max_calls
-        # requests per window for as long as the block stayed in place.
-        if state.manually_controlled and is_manual_pin_active(state):
-            return "open"
-
-        # The recovery gate is skipped for exactly one row shape: the
-        # operator's own block whose promised lift instant has arrived.
-        # opened_at is the moment they blocked, so re-applying the gate
-        # there would hold a 5-minute block for the whole of a long
-        # recovery_timeout. A row that merely carries a stale flag (an
-        # automatic OPEN written after the expiry) takes the normal gate —
-        # otherwise every later OPEN would skip its recovery wait and admit
-        # one request per request against a dependency that is still down.
-        if not is_pin_lift_due(state):
-            if state.opened_at is None:
-                return "open"
-            elapsed = (utc_now() - state.opened_at).total_seconds()
-            if elapsed < effective_config.recovery_timeout:
+        if state.state == CircuitState.OPEN:
+            # A manual block admits nothing while it holds. Without this the
+            # pinned circuit would fall through to the trial path once
+            # recovery_timeout elapsed and keep leaking half_open_max_calls
+            # requests per window for as long as the block stayed in place.
+            if state.manually_controlled and is_manual_pin_active(state):
                 return "open"
 
-        # The OPEN→HALF_OPEN combo below is an automatic transition, so a
-        # frozen circuit rejects here instead. Counted under its own reason so
-        # an operator can name the breakers the freeze is holding — with a
-        # shared ``open`` label a held breaker is indistinguishable from one
-        # still inside its recovery timeout. An already-HALF_OPEN circuit
-        # still acquires trial slots: slot acquisition is not a transition.
+            # The recovery gate is skipped for exactly one row shape: the
+            # operator's own block whose promised lift instant has arrived.
+            # opened_at is the moment they blocked, so re-applying the gate
+            # there would hold a 5-minute block for the whole of a long
+            # recovery_timeout. A row that merely carries a stale flag (an
+            # automatic OPEN written after the expiry) takes the normal gate —
+            # otherwise every later OPEN would skip its recovery wait and admit
+            # one request per request against a dependency that is still down.
+            if not is_pin_lift_due(state):
+                if state.opened_at is None:
+                    return "open"
+                elapsed = (utc_now() - state.opened_at).total_seconds()
+                if elapsed < effective_config.recovery_timeout:
+                    return "open"
+
+        # The trial acquire below can perform the OPEN→HALF_OPEN combo, which
+        # is an automatic transition, so a frozen circuit rejects here instead.
+        # The check covers every non-CLOSED row rather than only the locally
+        # OPEN one: the primitive is authoritative-store-first, and a local row
+        # reading HALF_OPEN is not evidence that the shared row does — the
+        # layered L1 is never refreshed for rows another worker changed, so
+        # from a stale HALF_OPEN row the primitive would write the very
+        # transition the freeze exists to withhold. Counted under its own
+        # reason so an operator can name the breakers the freeze is holding:
+        # with a shared ``open`` label a held breaker is indistinguishable
+        # from one still inside its recovery timeout.
         if not self._auto_transition_allowed(
             service_name, CircuitState.HALF_OPEN.value
         ):

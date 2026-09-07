@@ -80,7 +80,7 @@ def repo(mock_l2_repo):
     return r
 
 
-class TestLayeredClusterStates:
+class TestLayeredClusterStatesBehavior:
     """Every answer comes from L2, or the caller is told it could not."""
 
     def test_cluster_states_answers_from_l2(self, repo, mock_l2_repo):

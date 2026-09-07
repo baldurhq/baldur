@@ -8,11 +8,16 @@ automatic transition is decided.
 Freeze Mode behavior:
 - Automatic OPEN   -> forbidden
 - Automatic CLOSE  -> forbidden
-- Canary Recovery  -> forbidden
+- Canary Recovery  -> forbidden (a non-CLOSED circuit admits no trial call)
 - Manual OPEN      -> allowed (explicit operator intervention)
 - Manual CLOSE     -> allowed (explicit operator intervention)
 - Currently OPEN   -> stays OPEN
 - Currently CLOSED -> stays CLOSED
+
+The last two hold of the *cluster* row, which is what an operator observes.
+The guarantee is that no automatic transition is decided while the level
+holds; a worker whose local mirror has drifted may still converge that mirror
+to the cluster row, since copying an already-taken decision is not a new one.
 
 Design decisions:
 - Full disable: no (if it never CLOSEs, blocking is permanent)

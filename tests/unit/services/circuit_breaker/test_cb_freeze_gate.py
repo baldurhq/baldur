@@ -158,7 +158,7 @@ def _emitted_types(service: CircuitBreakerService) -> list[Any]:
 # =============================================================================
 
 
-class TestFreezeModeLockdownDetection:
+class TestFreezeModeLockdownDetectionBehavior:
     """What counts as a lockdown, read through the enum's own ordering.
 
     The level is a ``(str, Enum)`` whose value is ``"level_3"``. Any numeric
@@ -218,7 +218,7 @@ class TestFreezeModeLockdownDetection:
 # =============================================================================
 
 
-class TestFreezeModeGateCost:
+class TestFreezeModeGateCostBehavior:
     """The gate runs on the request path, so its short-circuits are contractual.
 
     Both of them exist to keep a per-request cost off installs that can never
@@ -320,7 +320,7 @@ class TestFreezeModeGateCost:
 # =============================================================================
 
 
-class TestFreezeModeDerivedState:
+class TestFreezeModeDerivedStateBehavior:
     """``get_state()`` composes its answer from the emergency state."""
 
     def test_derived_state_reports_the_emergency_activation_stamp(self):
@@ -372,7 +372,7 @@ class TestFreezeModeDerivedState:
 # =============================================================================
 
 
-class TestFreezeModeGate:
+class TestFreezeModeGateBehavior:
     """``should_allow_state_change()`` -- the verdict every site consults."""
 
     def test_gate_blocks_an_automatic_change_and_names_the_target(self):
@@ -418,7 +418,7 @@ class TestFreezeModeGate:
 # =============================================================================
 
 
-class TestAutoTransitionGate:
+class TestAutoTransitionGateBehavior:
     """``_auto_transition_allowed()`` -- fail-open, and audible when it does."""
 
     def test_auto_transition_gate_forwards_the_freeze_verdict(self):
@@ -462,7 +462,7 @@ class TestAutoTransitionGate:
 # =============================================================================
 
 
-class TestCBFreezeGateRequestPath:
+class TestCBFreezeGateRequestPathBehavior:
     """Four automatic writes on the request path, each with its void half.
 
     Every test asserts the *write that did not happen*: the gate's whole
@@ -615,7 +615,7 @@ class TestCBFreezeGateRequestPath:
 # =============================================================================
 
 
-class TestCBFreezeGateAdmission:
+class TestCBFreezeGateAdmissionBehavior:
     """The OPEN->HALF_OPEN combo is a transition, so admission rejects instead.
 
     The reason label is the discriminator an operator reads: with a shared
@@ -681,8 +681,14 @@ class TestCBFreezeGateAdmission:
         assert decision.allowed is False
         assert reasons == ["open"]
 
-    def test_admission_lets_a_half_open_circuit_acquire_a_slot_while_frozen(self):
-        """Slot acquisition is not a transition, so the freeze does not gate it."""
+    def test_admission_rejects_a_half_open_row_while_frozen(self):
+        """A local HALF_OPEN row is not evidence that the shared row is.
+
+        The acquire is L2-authoritative and the layered L1 is never refreshed
+        for rows another worker changed, so from a stale HALF_OPEN row the
+        primitive performs the very OPEN->HALF_OPEN write the freeze exists to
+        withhold. The gate therefore covers every non-CLOSED entry to it.
+        """
         service, repo = _service_over_mock_repo(
             _state(CircuitBreakerStateEnum.HALF_OPEN.value),
             try_acquire_half_open_slot=(
@@ -693,6 +699,50 @@ class TestCBFreezeGateAdmission:
         )
 
         with _frozen(False):
+            decision, reasons = self._decide(service)
+
+        assert decision.allowed is False
+        assert reasons == ["frozen"]
+        repo.try_acquire_half_open_slot.assert_not_called()
+
+    def test_admission_withholds_the_transition_a_stale_half_open_row_hides(self):
+        """The regression: L1 says HALF_OPEN, the shared store still says OPEN.
+
+        The primitive would report the OPEN->HALF_OPEN combo it just wrote --
+        an automatic transition performed during LOCKDOWN, with its audit
+        record, its ``CIRCUIT_BREAKER_HALF_OPENED`` event and an admitted
+        trial call. Nothing about the local row distinguishes this from a
+        circuit that really is HALF_OPEN, which is why the gate cannot key on
+        the local state.
+        """
+        service, repo = _service_over_mock_repo(
+            _state(CircuitBreakerStateEnum.HALF_OPEN.value),
+            try_acquire_half_open_slot=(
+                True,
+                CircuitBreakerStateEnum.OPEN.value,
+                CircuitBreakerStateEnum.HALF_OPEN.value,
+            ),
+        )
+
+        with _frozen(False):
+            decision, reasons = self._decide(service)
+
+        assert decision.allowed is False
+        assert reasons == ["frozen"]
+        repo.try_acquire_half_open_slot.assert_not_called()
+
+    def test_admission_lets_a_half_open_circuit_acquire_a_slot_when_not_frozen(self):
+        """Without a freeze the trial acquire is reached exactly as before."""
+        service, repo = _service_over_mock_repo(
+            _state(CircuitBreakerStateEnum.HALF_OPEN.value),
+            try_acquire_half_open_slot=(
+                True,
+                CircuitBreakerStateEnum.HALF_OPEN.value,
+                CircuitBreakerStateEnum.HALF_OPEN.value,
+            ),
+        )
+
+        with _frozen(True):
             decision, reasons = self._decide(service)
 
         assert decision.allowed is True
@@ -721,7 +771,7 @@ class TestCBFreezeGateAdmission:
 # =============================================================================
 
 
-class TestCBFreezeGateSweep:
+class TestCBFreezeGateSweepBehavior:
     """One gate check per sweep, and one operator-facing line when it holds."""
 
     @staticmethod
@@ -805,7 +855,7 @@ class TestCBFreezeGateSweep:
 # =============================================================================
 
 
-class TestCBFreezeGateManualPaths:
+class TestCBFreezeGateManualPathsBehavior:
     """Operator intent outranks the freeze, by design.
 
     Each of these would be a support incident if it were gated: the freeze

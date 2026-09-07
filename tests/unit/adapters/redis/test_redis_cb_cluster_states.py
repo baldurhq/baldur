@@ -129,7 +129,7 @@ def _plain_namespace(monkeypatch):
     reset_namespace_settings()
 
 
-class TestRedisClusterStates:
+class TestRedisClusterStatesBehavior:
     """The cluster-verdict read, one refusal at a time."""
 
     def test_cluster_states_returns_every_row_the_repository_wrote(self):
@@ -282,7 +282,7 @@ class TestRedisClusterStates:
         assert excinfo.value.operation == "get_cluster_states"
 
 
-class TestRedisClusterScanBounds:
+class TestRedisClusterScanBoundsContract:
     """The walk's bounds are the sibling read's, with the opposite verdict."""
 
     @pytest.mark.parametrize(

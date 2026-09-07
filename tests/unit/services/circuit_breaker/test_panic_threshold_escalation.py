@@ -148,7 +148,7 @@ def _emergency(level: Any, **state_fields: Any) -> Mock:
 # =============================================================================
 
 
-class TestPanicThresholdProbe:
+class TestPanicThresholdProbeBehavior:
     """``evaluate()`` -- the instantaneous verdict, with no side effects."""
 
     @pytest.mark.parametrize(
@@ -280,7 +280,7 @@ class TestPanicThresholdProbe:
 # =============================================================================
 
 
-class TestPanicThresholdTick:
+class TestPanicThresholdTickBehavior:
     """Consecutive triggers, and the flag that gates the whole lane."""
 
     def test_tick_short_circuits_when_advanced_protection_is_disabled(self):
@@ -294,6 +294,31 @@ class TestPanicThresholdTick:
         assert result.triggered is False
         assert result.reason == "advanced protection disabled"
         service.repository.get_cluster_states.assert_not_called()
+
+    def test_tick_short_circuits_when_the_enable_flag_is_unreadable(self):
+        """An unreadable flag is not permission to run.
+
+        The regression: a settings object that cannot be built (an invalid
+        ``BALDUR_CB_ADVANCED_*`` value is enough) used to skip the gate
+        entirely, and the config defaults the lane then fell back to say
+        ``action="freeze"`` -- so an install that never enabled the lane
+        escalated on the strength of a settings error.
+        """
+        manager = _emergency(EmergencyLevel.NORMAL)
+        monitor = _tripping_monitor(
+            emergency_manager=manager, consecutive_triggers_required=1
+        )
+
+        with patch(
+            "baldur.services.circuit_breaker.panic_threshold._advanced_settings",
+            return_value=None,
+        ):
+            result = monitor.tick()
+
+        assert result.triggered is False
+        assert result.reason == "advanced protection unreadable"
+        manager.activate_auto.assert_not_called()
+        assert monitor._consecutive_triggers == 0
 
     def test_tick_waits_for_the_required_consecutive_triggers(self):
         """One trigger is not a collapse: the first tick reports and waits."""
@@ -363,7 +388,7 @@ class TestPanicThresholdTick:
 # =============================================================================
 
 
-class TestPanicThresholdEscalationPolicy:
+class TestPanicThresholdEscalationPolicyBehavior:
     """When a confirmed collapse may declare Level 3, and when it may not."""
 
     @staticmethod
@@ -514,6 +539,68 @@ class TestPanicThresholdEscalationPolicy:
         manager.activate_auto.assert_not_called()
         assert result.action_taken is None
 
+    def test_escalation_is_skipped_when_the_emergency_state_cannot_be_read(self):
+        """The policy cannot be evaluated against a state that did not arrive.
+
+        Recovery-in-progress and the cooldown are both read off that state, so
+        escalating anyway would declare LEVEL_3 with none of its guards.
+        """
+        manager = _emergency(EmergencyLevel.NORMAL)
+        manager.get_state.side_effect = RuntimeError("state backend unreachable")
+        monitor = _tripping_monitor(
+            emergency_manager=manager, consecutive_triggers_required=1
+        )
+
+        with _with_settings(_settings()), _with_stabilization(), capture_logs() as logs:
+            result = monitor.tick()
+
+        manager.activate_auto.assert_not_called()
+        assert result.action_taken is None
+        skipped = [
+            entry
+            for entry in logs
+            if entry["event"] == "panic_threshold.escalation_skipped"
+        ]
+        assert [entry["reason"] for entry in skipped] == ["state_unreadable"]
+
+    def test_the_cooldown_stamp_is_taken_on_a_tick_that_did_not_escalate(self):
+        """A freeze observed while the ratio was low still earns its cooldown.
+
+        The regression: the stamp used to be written only inside the
+        escalation step, so a tick whose ratio had dipped below the threshold
+        observed the freeze and recorded nothing -- and a fleet that collapsed
+        again just after the freeze lifted was re-declared immediately,
+        before the sweep could move a single breaker out of OPEN.
+        """
+        manager = _emergency(EmergencyLevel.LEVEL_3)
+        service = _cb_service([], ["s1", "s2", "s3", "s4", "s5"])
+        monitor = PanicThresholdMonitor(
+            config=PanicThresholdConfig(consecutive_triggers_required=1),
+            circuit_breaker_service=service,
+            emergency_manager=manager,
+        )
+
+        with _with_settings(_settings()), _with_stabilization():
+            # Frozen, but nothing is OPEN: the tick reports untriggered.
+            first = monitor.tick()
+            assert first.triggered is False
+            assert monitor._last_seen_level3_at is not None
+
+            # The freeze lifts and the fleet collapses inside the window.
+            manager.get_state.return_value = SimpleNamespace(
+                level=EmergencyLevel.NORMAL,
+                is_recovering=False,
+                deactivated_at=None,
+            )
+            service.repository.get_cluster_states.return_value = _rows(
+                ["s1", "s2", "s3", "s4"], ["s1", "s2", "s3", "s4", "s5"]
+            )
+            second = monitor.tick()
+
+        assert second.triggered is True
+        manager.activate_auto.assert_not_called()
+        assert second.action_taken is None
+
     def test_escalation_is_skipped_when_no_emergency_manager_is_registered(self):
         """Without a manager there is nothing to declare through."""
         monitor = _tripping_monitor(consecutive_triggers_required=1)
@@ -536,7 +623,7 @@ class TestPanicThresholdEscalationPolicy:
 # =============================================================================
 
 
-class TestPanicThresholdEscalationConfirmed:
+class TestPanicThresholdEscalationConfirmedBehavior:
     """The audit record follows the level that actually moved."""
 
     @staticmethod
@@ -611,7 +698,7 @@ class TestPanicThresholdEscalationConfirmed:
 # =============================================================================
 
 
-class TestPanicThresholdClusterUnavailable:
+class TestPanicThresholdClusterUnavailableBehavior:
     """A store outage must not make the scheduler log a traceback per tick."""
 
     @staticmethod
@@ -662,7 +749,7 @@ class TestPanicThresholdClusterUnavailable:
 # =============================================================================
 
 
-class TestPanicThresholdConfigRefresh:
+class TestPanicThresholdConfigRefreshBehavior:
     """A settings change reaches a long-lived monitor without a new monitor.
 
     ``enabled`` is read per tick, so the threshold and the action judged
