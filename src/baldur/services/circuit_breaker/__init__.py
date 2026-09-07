@@ -25,9 +25,8 @@ Features:
 - Conditional replay trigger when the circuit breaker closes
 - Rate limit cascade detection (auto-open CB on 429 storm)
 - Self-DDoS protection (prevent retry amplification)
-- Adaptive Threshold (Emergency Level integration)
-- Freeze Mode (freeze state on LOCKDOWN)
-- Panic Threshold (declare Emergency Level 3 when widespread OPEN is detected)
+- Freeze Mode (breakers hold their state at Emergency Level 3)
+- Panic Threshold (Emergency Level 3 declared when >=70% of breakers are OPEN - PRO)
 
 Structure (main modules):
 - config.py: Configuration, admission clamp, decision and result types
@@ -39,7 +38,6 @@ Structure (main modules):
 - rate_limit_tracker.py: Rate limit tracking
 - convenience.py: Module-level functions
 - models.py: Advanced protection data models
-- adaptive_threshold.py: Emergency Level integrated threshold adjustment
 - freeze_mode.py: LOCKDOWN Freeze Mode
 - panic_threshold.py: prevent system-wide self-destruction
 
@@ -54,7 +52,7 @@ Usage:
     )
 
     # Extended features are lazily loaded:
-    from baldur.services.circuit_breaker import AdaptiveThresholdManager
+    from baldur.services.circuit_breaker import FreezeModeManager
 """
 
 from __future__ import annotations
@@ -77,7 +75,7 @@ from .policy import AsyncCircuitBreakerPolicy, CircuitBreakerPolicy, circuit_bre
 from .service import CircuitBreakerService
 
 # =============================================================================
-# LAZY IMPORTS - 119 symbols
+# LAZY IMPORTS - 70 symbols
 # =============================================================================
 _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     # config (additional types)
@@ -109,31 +107,23 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "ServiceConfig": (".models", "ServiceConfig"),
     "SheddingLevel": (".models", "SheddingLevel"),
     "LoadSheddingPolicy": (".models", "LoadSheddingPolicy"),
-    "ThresholdMultiplier": (".models", "ThresholdMultiplier"),
-    "AdaptiveThresholdPolicy": (".models", "AdaptiveThresholdPolicy"),
-    "OpenStrategy": (".models", "OpenStrategy"),
-    "CircuitBreakerAdvancedConfig": (".models", "CircuitBreakerAdvancedConfig"),
     "PanicThresholdConfig": (".models", "PanicThresholdConfig"),
     "FreezeModeState": (".models", "FreezeModeState"),
-    # adaptive_threshold
-    "AdaptiveThresholdManager": (".adaptive_threshold", "AdaptiveThresholdManager"),
-    "AdjustedThreshold": (".adaptive_threshold", "AdjustedThreshold"),
-    "get_adaptive_threshold_manager": (
-        ".adaptive_threshold",
-        "get_adaptive_threshold_manager",
-    ),
-    "get_adjusted_cb_threshold": (".adaptive_threshold", "get_adjusted_cb_threshold"),
-    "should_allow_cb_auto_open": (".adaptive_threshold", "should_allow_cb_auto_open"),
     # freeze_mode
     "FreezeModeManager": (".freeze_mode", "FreezeModeManager"),
     "FreezeReason": (".freeze_mode", "FreezeReason"),
     "get_freeze_mode_manager": (".freeze_mode", "get_freeze_mode_manager"),
+    "reset_freeze_mode_manager": (".freeze_mode", "reset_freeze_mode_manager"),
     "is_freeze_mode_active": (".freeze_mode", "is_freeze_mode_active"),
     "should_allow_cb_state_change": (".freeze_mode", "should_allow_cb_state_change"),
     # panic_threshold
     "PanicThresholdMonitor": (".panic_threshold", "PanicThresholdMonitor"),
     "PanicThresholdResult": (".panic_threshold", "PanicThresholdResult"),
     "get_panic_threshold_monitor": (".panic_threshold", "get_panic_threshold_monitor"),
+    "reset_panic_threshold_monitor": (
+        ".panic_threshold",
+        "reset_panic_threshold_monitor",
+    ),
     "check_panic_threshold": (".panic_threshold", "check_panic_threshold"),
     "is_panic_threshold_triggered": (
         ".panic_threshold",
@@ -236,13 +226,6 @@ if TYPE_CHECKING:
         ServiceDependencyNode,
     )
 
-    from .adaptive_threshold import (
-        AdaptiveThresholdManager,
-        AdjustedThreshold,
-        get_adaptive_threshold_manager,
-        get_adjusted_cb_threshold,
-        should_allow_cb_auto_open,
-    )
     from .blast_radius_integration import (
         BlastRadiusAssessment,
         BlastRadiusConfig,
@@ -273,6 +256,7 @@ if TYPE_CHECKING:
         FreezeReason,
         get_freeze_mode_manager,
         is_freeze_mode_active,
+        reset_freeze_mode_manager,
         should_allow_cb_state_change,
     )
     from .load_shedding import (
@@ -298,15 +282,11 @@ if TYPE_CHECKING:
     )
     from .manual_control import ManualControlMixin
     from .models import (
-        AdaptiveThresholdPolicy,
-        CircuitBreakerAdvancedConfig,
         FreezeModeState,
         LoadSheddingPolicy,
-        OpenStrategy,
         PanicThresholdConfig,
         ServiceConfig,
         SheddingLevel,
-        ThresholdMultiplier,
     )
     from .panic_threshold import (
         PanicThresholdMonitor,
@@ -314,6 +294,7 @@ if TYPE_CHECKING:
         check_panic_threshold,
         get_panic_threshold_monitor,
         is_panic_threshold_triggered,
+        reset_panic_threshold_monitor,
     )
     from .protection import ProtectionMixin
     from .rate_limit_lua import RedisRateLimitBackend
@@ -372,28 +353,20 @@ __all__ = [
     "ServiceConfig",
     "SheddingLevel",
     "LoadSheddingPolicy",
-    "ThresholdMultiplier",
-    "AdaptiveThresholdPolicy",
-    "OpenStrategy",
-    "CircuitBreakerAdvancedConfig",
     "PanicThresholdConfig",
     "FreezeModeState",
-    # Adaptive Threshold
-    "AdaptiveThresholdManager",
-    "AdjustedThreshold",
-    "get_adaptive_threshold_manager",
-    "get_adjusted_cb_threshold",
-    "should_allow_cb_auto_open",
     # Freeze Mode
     "FreezeModeManager",
     "FreezeReason",
     "get_freeze_mode_manager",
+    "reset_freeze_mode_manager",
     "is_freeze_mode_active",
     "should_allow_cb_state_change",
     # Panic Threshold
     "PanicThresholdMonitor",
     "PanicThresholdResult",
     "get_panic_threshold_monitor",
+    "reset_panic_threshold_monitor",
     "check_panic_threshold",
     "is_panic_threshold_triggered",
     # Service Config Manager

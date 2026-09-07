@@ -46,3 +46,30 @@ class CircuitBreakerOpenError(PolicyRejectedException, CircuitBreakerError):
 
     def extra_context(self) -> dict:
         return {"service_name": self.service_name}
+
+
+class CircuitBreakerStateUnavailableError(CircuitBreakerError):
+    """Raised when a cluster-wide circuit-breaker state read cannot be trusted.
+
+    ``get_cluster_states()`` answers a fleet-wide question, so a partial or
+    process-local answer is worse than no answer: a substituted memory view
+    reads as "few circuits are OPEN", which is the direction that lets a
+    system-wide collapse go undetected. Every adapter override therefore
+    raises this instead of falling back, and each consumer picks its own safe
+    direction from the failure.
+
+    Attributes:
+        operation: The read that could not be served.
+        reason: Machine-readable cause (degraded backend, quarantined L2,
+            timeout, partial scan, ...).
+    """
+
+    def __init__(self, operation: str, reason: str, message: str | None = None):
+        self.operation = operation
+        self.reason = reason
+        super().__init__(
+            message or f"Cluster state read '{operation}' unavailable: {reason}"
+        )
+
+    def extra_context(self) -> dict:
+        return {"operation": self.operation, "reason": self.reason}

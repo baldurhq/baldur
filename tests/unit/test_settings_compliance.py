@@ -10,7 +10,6 @@ from pathlib import Path
 # 313 범위 외 사전 존재 하드코딩 — 별도 이슈로 처리 예정
 _KNOWN_EXCEPTIONS: set[str] = {
     "canary/cross_cluster.py",
-    "circuit_breaker/adaptive_threshold.py",
     "circuit_breaker/models.py",
     "correlation_engine/wildcard_observer.py",
     "event_bus/redis_bus.py",

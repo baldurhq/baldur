@@ -23,6 +23,9 @@ from baldur.interfaces.repositories import (
     CircuitBreakerStateData,
     pinned_trip_attempt,
 )
+from baldur.services.circuit_breaker.exceptions import (
+    CircuitBreakerStateUnavailableError,
+)
 
 if TYPE_CHECKING:
     from concurrent.futures import Future, ThreadPoolExecutor
@@ -1160,6 +1163,40 @@ class RepositoryOperationsMixin:
     ) -> list[CircuitBreakerStateData]:
         """Look up OPEN states in L1."""
         return self._l1.get_open_states(limit)
+
+    def get_cluster_states(self) -> list[CircuitBreakerStateData]:
+        """Read every state from L2, or raise (766 D4).
+
+        L1 is deliberately not a fallback here. It is hydrated wholesale once
+        and then per service on first touch, so rows another worker changed
+        drift — and a fleet-wide verdict answered from one worker's drifted
+        rows is exactly the defect this method exists to close. When L2 cannot
+        answer, the caller is told so.
+
+        The L2 health bookkeeping is also deliberately skipped: quarantine
+        counters belong to the request path, and a periodic probe failing on
+        its own cadence must not push the admission decisions of this process
+        onto the L1-only lane. ``_l2_healthy`` is still *read*, so the probe
+        never dials a store this process has already given up on.
+        """
+        operation = "get_cluster_states"
+
+        if self._l2 is None:
+            raise CircuitBreakerStateUnavailableError(operation, "l2_absent")
+        if not self._l2_healthy:
+            raise CircuitBreakerStateUnavailableError(operation, "l2_quarantined")
+
+        try:
+            future = self._get_executor().submit(self._l2.get_cluster_states)
+            return future.result(timeout=self._get_timeout_seconds())
+        except FuturesTimeoutError as e:
+            raise CircuitBreakerStateUnavailableError(operation, "l2_timeout") from e
+        except CircuitBreakerStateUnavailableError:
+            raise
+        except Exception as e:
+            raise CircuitBreakerStateUnavailableError(
+                operation, f"l2_error: {e}"
+            ) from e
 
     def reset(self, service_name: str) -> bool:
         """Reset in L1, then synchronize to L2."""

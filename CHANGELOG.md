@@ -17,6 +17,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - `dlq_replay_batch_completed` carries `capped`, so "drained everything" and "hit the cap" differ.
 - A drain that stops with work left emits `DLQ_REPLAY_BLOCKED` naming why, not just an error log.
 - `audit_distributed_chain_degraded` tells "the chain I asked for" from "the chain I have".
+- A PRO install can now declare Emergency Level 3 itself when 70% of breakers are OPEN.
+- `get_cluster_states()` reads breaker state from the shared store, or says it cannot.
 
 ### Changed
 
@@ -29,6 +31,9 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - An entitled install that names a Redis URL now gets the distributed audit hash chain unasked.
 - `BALDUR_AUDIT_DISTRIBUTED_HASH_CHAIN=true` with no Redis client buildable now fails startup.
 - `audit_backend_wired` now reports 0 when the selected audit backend cannot be built at all.
+- Breakers now hold their state at Emergency Level 3: no automatic open, half-open or close.
+- The panic-threshold check is now side-effect free, so reading it no longer advances it.
+- A blocked request during a freeze is counted as `frozen`, not as a plain `open` reject.
 
 ### Fixed
 
@@ -48,11 +53,22 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - A briefly unreadable licence file no longer pins "not entitled" for the next 24 hours.
 - Suppressed notifications are no longer logged as sent.
 - The audit chain's startup reconciliation now runs, on every framework, against the right keys.
+- Emergency Level 3 is now detected at all; the check compared a level name against a number.
+- The chaos safety guard's "70% of breakers are OPEN" block can now actually fire.
 
 ### Removed
 
 - Dead 429-throttle fields `recovery_dampening_steps`, `default_service`, `debounce_window_seconds`.
 - `EnvironmentAuditor` and the `BALDUR_DISTRIBUTED_HASH_CHAIN` Django setting it alone read.
+- **Breaking**: `BALDUR_CB_ADVANCED_FREEZE_ON_LOCKDOWN`; Level 3 always holds the breakers.
+- **Breaking**: `BALDUR_CB_ADVANCED_ALLOW_MANUAL_OVERRIDE_IN_LOCKDOWN`; overrides always work.
+- **Breaking**: the six unread `BALDUR_CB_ADVANCED_{BLAST_RADIUS,ADAPTIVE,*_OPEN_*}` variables.
+- **Breaking**: the `adaptive_threshold` module and its four exported symbols.
+- **Breaking**: `should_allow_cb_auto_open`; the blast-radius one is `..._blast`.
+- **Breaking**: `AdaptiveThresholdPolicy`, `ThresholdMultiplier` and `OpenStrategy`.
+- **Breaking**: the `CircuitBreakerAdvancedConfig` dataclass and `configure_from_advanced_config`.
+- **Breaking**: `FreezeModeManager.activate()` / `.deactivate()`; the level is the only writer.
+- **Breaking**: `PanicThresholdConfig.enabled`; the scheduler's `disabled_jobs` is the switch.
 
 ## [1.10.0] - 2026-09-04
 

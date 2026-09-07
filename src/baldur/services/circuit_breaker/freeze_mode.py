@@ -1,34 +1,56 @@
 """
 Freeze Mode for Circuit Breaker
 
-Freezes the current CB states as-is in the LOCKDOWN state.
+Freeze Mode is the circuit breaker's own view of Emergency Level 3: while the
+system is in LOCKDOWN, breakers hold whatever state they are in and no
+automatic transition is decided.
 
 Freeze Mode behavior:
-- Automatic OPEN   → ❌ forbidden
-- Automatic CLOSE  → ❌ forbidden
-- Canary Recovery → ❌ forbidden
-- Manual OPEN   → ✅ allowed (explicit operator intervention)
-- Manual CLOSE  → ✅ allowed (explicit operator intervention)
-- Currently OPEN   → stays OPEN
-- Currently CLOSED → stays CLOSED
+- Automatic OPEN   -> forbidden
+- Automatic CLOSE  -> forbidden
+- Canary Recovery  -> forbidden
+- Manual OPEN      -> allowed (explicit operator intervention)
+- Manual CLOSE     -> allowed (explicit operator intervention)
+- Currently OPEN   -> stays OPEN
+- Currently CLOSED -> stays CLOSED
 
 Design decisions:
-- Full disable: ❌ (if it never CLOSEs, blocking is permanent)
-- Forbid OPEN only: ❌ (automatic recovery may induce load)
-- Freeze Mode: ✅ (keep current state, maximum stability)
+- Full disable: no (if it never CLOSEs, blocking is permanent)
+- Forbid OPEN only: no (automatic recovery may induce load)
+- Freeze Mode: yes (keep current state, maximum stability)
+
+It holds no state of its own. There is nothing to activate or deactivate: the
+emergency level is the single writer, it is shared across processes through
+the state backend, and every worker derives the same verdict from it. A
+process-local flag would have frozen exactly one worker.
 """
 
 from __future__ import annotations
 
 import threading
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from baldur.audit.helpers import log_freeze_mode_audit
+from baldur.models.emergency import EmergencyLevel
 from baldur.services.circuit_breaker.models import FreezeModeState
-from baldur.utils.time import utc_now
+
+if TYPE_CHECKING:
+    from baldur.interfaces.emergency import EmergencyManager
 
 logger = structlog.get_logger()
+
+__all__ = [
+    "FreezeModeManager",
+    "FreezeReason",
+    "get_freeze_mode_manager",
+    "reset_freeze_mode_manager",
+    "is_freeze_mode_active",
+    "should_allow_cb_state_change",
+]
+
+# The level at and above which breakers hold their state.
+FREEZE_LEVEL = EmergencyLevel.LEVEL_3
 
 
 # =============================================================================
@@ -37,14 +59,35 @@ logger = structlog.get_logger()
 
 
 class FreezeReason:
-    """Freeze Mode activation/deactivation reason constants."""
+    """Freeze Mode reason constants."""
 
     LOCKDOWN_ENTRY = "Freeze Mode activated due to LOCKDOWN entry"
-    LOCKDOWN_EXIT = "Freeze Mode deactivated due to LOCKDOWN exit"
-    PANIC_THRESHOLD = "Freeze Mode activated due to Panic Threshold trigger"
-    MANUAL_ACTIVATION = "Manual activation by operator"
-    MANUAL_DEACTIVATION = "Manual deactivation by operator"
-    EMERGENCY_LEVEL_3 = "Freeze Mode activated due to Emergency Level 3 entry"
+
+
+# =============================================================================
+# PRO presence probe - resolved once per process
+# =============================================================================
+
+_pro_installed: bool | None = None
+_pro_installed_lock = threading.Lock()
+
+
+def _pro_distribution_present() -> bool:
+    """Whether the PRO distribution is importable, answered from a cache.
+
+    The gate is consulted on the request path at every automatic transition
+    site, and the underlying probe is an ``importlib.util.find_spec`` call --
+    boot-only everywhere else in the tree. Packaging cannot change under a
+    running process, so the verdict is resolved once and reused.
+    """
+    global _pro_installed
+    if _pro_installed is None:
+        with _pro_installed_lock:
+            if _pro_installed is None:
+                from baldur.utils.tier import is_pro_installed
+
+                _pro_installed = is_pro_installed()
+    return _pro_installed
 
 
 # =============================================================================
@@ -56,58 +99,55 @@ class FreezeModeManager:
     """
     Circuit Breaker Freeze Mode manager.
 
-    Forbids all automatic CB state changes in the LOCKDOWN state and
-    freezes the current state as-is.
+    A derived view, not a store: Freeze Mode is active exactly while the
+    registered emergency manager reports a level at or above LEVEL_3.
 
     Usage:
-        manager = FreezeModeManager()
+        manager = get_freeze_mode_manager()
 
-        # Check Freeze Mode state
         if manager.is_active():
             return  # automatic state change forbidden
 
-        # Activate Freeze Mode (on LOCKDOWN entry)
-        manager.activate(reason="LOCKDOWN entry")
-
-        # Check whether a state change is allowed
         allowed, reason = manager.should_allow_state_change(
             service_id="payment-api",
             new_state="OPEN",
-            is_manual=False
         )
     """
 
-    _instance: FreezeModeManager | None = None
+    def __init__(self, emergency_manager: EmergencyManager | None = None):
+        """
+        Initialize FreezeModeManager.
 
-    def __new__(cls):
-        """Singleton pattern."""
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._initialized = False
-        return cls._instance
-
-    @classmethod
-    def reset_instance(cls) -> None:
-        """Reset singleton instance for test isolation."""
-        cls._instance = None
-
-    def __init__(self):
-        if getattr(self, "_initialized", False):
-            return
-
-        self._state = FreezeModeState()
-        self._emergency_manager = None
-        self._initialized = True
+        Args:
+            emergency_manager: Emergency manager (resolved from the provider
+                registry when not injected)
+        """
+        self._emergency_manager: EmergencyManager | None = emergency_manager
 
     @property
-    def emergency_manager(self):
-        """Lazy-load the Emergency Manager."""
-        if self._emergency_manager is None:
-            from baldur.factory.registry import ProviderRegistry
+    def emergency_manager(self) -> EmergencyManager | None:
+        """Resolve the Emergency Manager, caching the first success.
 
-            self._emergency_manager = ProviderRegistry.emergency_manager.safe_get()
-            if self._emergency_manager is None:
-                logger.debug("freeze_mode.emergencymodemanager_available")
+        Two short-circuits sit in front of the registry lookup because this
+        runs on the request path. An OSS-only install can never have the slot
+        filled, and on a PRO install whose services have not registered
+        ``safe_get()`` constructs and catches an exception per call -- the
+        empty-slot listing answers the same question from a dict-keys copy.
+        """
+        if self._emergency_manager is not None:
+            return self._emergency_manager
+
+        if not _pro_distribution_present():
+            return None
+
+        from baldur.factory.registry import ProviderRegistry
+
+        if not ProviderRegistry.emergency_manager.list_providers():
+            return None
+
+        self._emergency_manager = ProviderRegistry.emergency_manager.safe_get()
+        if self._emergency_manager is None:
+            logger.debug("freeze_mode.emergency_manager_unavailable")
         return self._emergency_manager
 
     def is_active(self) -> bool:
@@ -117,154 +157,80 @@ class FreezeModeManager:
         Returns:
             bool: Freeze Mode active state
         """
-        # Automatically active when at Emergency Level 3 (LOCKDOWN)
-        if self._is_lockdown():
-            return True
-        return self._state.active
+        return self._is_lockdown()
 
     def _is_lockdown(self) -> bool:
-        """Check whether the current Emergency Level is LOCKDOWN (Level 3)."""
-        if self.emergency_manager is None:
+        """Whether the current Emergency Level is LOCKDOWN (Level 3).
+
+        Compares by the enum's own severity ordering. The level is a
+        ``(str, Enum)`` whose value is ``"level_3"``, so any numeric reading
+        of it is a bug, not a fallback.
+
+        Every failure resolves to "not frozen", which is the safe direction
+        for the circuit breaker: an unavailable breaker lets requests through.
+        """
+        manager = self.emergency_manager
+        if manager is None:
             return False
 
         try:
-            level = self.emergency_manager.get_current_level()
-            level_value = level.value if hasattr(level, "value") else int(level)
-            return level_value >= 3  # LEVEL_3 = LOCKDOWN
-        except Exception:
+            level = manager.get_current_level()
+        except Exception as e:
+            logger.warning("freeze_mode.lockdown_check_failed", error=str(e))
             return False
+
+        # The Protocol types the return as Any; anything that is not the
+        # ordered enum cannot be compared and is not evidence of a lockdown.
+        return isinstance(level, EmergencyLevel) and level >= FREEZE_LEVEL
 
     def get_state(self) -> FreezeModeState:
         """
         Return the current Freeze Mode state.
 
         Returns:
-            FreezeModeState: current state
+            FreezeModeState: current state, derived from the emergency level
         """
+        if not self._is_lockdown():
+            return FreezeModeState()
+
         return FreezeModeState(
-            active=self.is_active(),
-            activated_at=self._state.activated_at,
-            reason=self._state.reason
-            or (FreezeReason.LOCKDOWN_ENTRY if self._is_lockdown() else ""),
-            activated_by=self._state.activated_by
-            or ("system" if self._is_lockdown() else ""),
-        )
-
-    def activate(
-        self,
-        reason: str = FreezeReason.MANUAL_ACTIVATION,
-        activated_by: str = "system",
-    ) -> bool:
-        """
-        Activate Freeze Mode.
-
-        Args:
-            reason: Activation reason
-            activated_by: Who activates it ("system" or "operator:<username>")
-
-        Returns:
-            bool: Whether activation succeeded
-        """
-        previous_state = self._state.active
-
-        self._state = FreezeModeState(
             active=True,
-            activated_at=utc_now().isoformat(),
-            reason=reason,
-            activated_by=activated_by,
+            activated_at=self._emergency_activated_at(),
+            reason=FreezeReason.LOCKDOWN_ENTRY,
+            activated_by="system",
         )
 
-        logger.warning(
-            "freeze_mode.activated",
-            activated_by=activated_by,
-            reason=reason,
-        )
-
-        # Audit
-        log_freeze_mode_audit(
-            active=True,
-            reason=reason,
-            activated_by=activated_by,
-            previous_state=previous_state,
-            emergency_level=self._get_emergency_level_str(),
-        )
-
-        return True
-
-    def deactivate(
-        self,
-        reason: str = FreezeReason.MANUAL_DEACTIVATION,
-        deactivated_by: str = "system",
-    ) -> bool:
-        """
-        Deactivate Freeze Mode.
-
-        Note: Manual deactivation is not possible in the LOCKDOWN state.
-              The Emergency Level must be lowered first.
-
-        Args:
-            reason: Deactivation reason
-            deactivated_by: Who deactivates it
-
-        Returns:
-            bool: Whether deactivation succeeded
-        """
-        # Manual deactivation is not possible in the LOCKDOWN state
-        if self._is_lockdown():
-            logger.warning("freeze_mode.cannot_deactivate_during_lockdown")
-            return False
-
-        previous_state = self._state.active
-
-        self._state = FreezeModeState(
-            active=False,
-            activated_at=None,
-            reason="",
-            activated_by="",
-        )
-
-        logger.info(
-            "freeze_mode.deactivated",
-            deactivated_by=deactivated_by,
-            reason=reason,
-        )
-
-        # Audit
-        log_freeze_mode_audit(
-            active=False,
-            reason=reason,
-            activated_by=deactivated_by,
-            previous_state=previous_state,
-            emergency_level=self._get_emergency_level_str(),
-        )
-
-        return True
-
-    def _get_emergency_level_str(self) -> str | None:
-        """Return the current Emergency Level string."""
-        if self.emergency_manager is None:
+    def _emergency_activated_at(self) -> str | None:
+        """Return the emergency state's activation timestamp, if it exposes one."""
+        manager = self.emergency_manager
+        if manager is None:
             return None
         try:
-            level = self.emergency_manager.get_current_level()
-            return level.value if hasattr(level, "value") else str(level)
-        except Exception:
+            state: Any = manager.get_state()
+        except Exception as e:
+            logger.warning("freeze_mode.lockdown_check_failed", error=str(e))
             return None
+        return getattr(state, "activated_at", None)
 
     def should_allow_state_change(
         self,
         service_id: str,
         new_state: str,
-        is_manual: bool = False,
     ) -> tuple[bool, str]:
         """
-        Decide whether a CB state change is allowed.
+        Decide whether an automatic CB state change is allowed.
 
-        Only manual operations are allowed in Freeze Mode.
+        Only automatic transitions consult this gate -- the manual paths
+        (force open/close, manual control, reset) never reach it, because
+        operator intent outranks the freeze by design.
+
+        Nothing is logged on a block: one gate site re-consults on every
+        request to a frozen OPEN circuit past its recovery timeout, so the
+        caller owns the log level.
 
         Args:
             service_id: Target service ID
             new_state: New state (OPEN, CLOSED, HALF_OPEN)
-            is_manual: Whether this is a manual operation
 
         Returns:
             Tuple[bool, str]: (whether allowed, reason if denied)
@@ -272,57 +238,9 @@ class FreezeModeManager:
         if not self.is_active():
             return True, ""
 
-        # Manual operations are allowed in Freeze Mode
-        if is_manual:
-            logger.info(
-                "freeze_mode.manual_override_allowed",
-                service_id=service_id,
-                new_state=new_state,
-            )
-            return True, ""
-
-        # Automatic operations are forbidden
-        reason = (
+        return False, (
             f"LOCKDOWN: Freeze Mode active - automatic state change to {new_state} "
             f"blocked for {service_id}. Use manual override."
-        )
-        logger.warning(
-            "freeze_mode.event",
-            reason=reason,
-        )
-
-        return False, reason
-
-    def should_allow_auto_open(self, service_id: str) -> tuple[bool, str]:
-        """
-        Whether automatic OPEN is allowed.
-
-        Args:
-            service_id: Target service ID
-
-        Returns:
-            Tuple[bool, str]: (whether allowed, reason if denied)
-        """
-        return self.should_allow_state_change(
-            service_id=service_id,
-            new_state="OPEN",
-            is_manual=False,
-        )
-
-    def should_allow_auto_close(self, service_id: str) -> tuple[bool, str]:
-        """
-        Whether automatic CLOSE is allowed.
-
-        Args:
-            service_id: Target service ID
-
-        Returns:
-            Tuple[bool, str]: (whether allowed, reason if denied)
-        """
-        return self.should_allow_state_change(
-            service_id=service_id,
-            new_state="CLOSED",
-            is_manual=False,
         )
 
 
@@ -351,7 +269,6 @@ def reset_freeze_mode_manager() -> None:
     """Reset singleton instance for test isolation."""
     global _manager_instance
     _manager_instance = None
-    FreezeModeManager._instance = None
 
 
 def is_freeze_mode_active() -> bool:
@@ -367,15 +284,13 @@ def is_freeze_mode_active() -> bool:
 def should_allow_cb_state_change(
     service_id: str,
     new_state: str,
-    is_manual: bool = False,
 ) -> bool:
     """
-    Convenience check for whether a CB state change is allowed.
+    Convenience check for whether an automatic CB state change is allowed.
 
     Args:
         service_id: Target service ID
         new_state: New state
-        is_manual: Whether this is a manual operation
 
     Returns:
         bool: Whether allowed
@@ -383,6 +298,5 @@ def should_allow_cb_state_change(
     allowed, _ = get_freeze_mode_manager().should_allow_state_change(
         service_id=service_id,
         new_state=new_state,
-        is_manual=is_manual,
     )
     return allowed

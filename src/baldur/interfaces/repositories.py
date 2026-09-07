@@ -1447,6 +1447,27 @@ class CircuitBreakerStateRepository(ABC):
         """
         ...
 
+    def get_cluster_states(self) -> list[CircuitBreakerStateData]:
+        """Get every circuit breaker state in the cluster, or raise.
+
+        Same result shape as ``get_all_states()``, different contract: this
+        one answers a *fleet-wide* question, so it never substitutes a
+        process-local or partial view for the shared one. An adapter that
+        cannot reach the shared store raises
+        ``CircuitBreakerStateUnavailableError`` instead of falling back — a
+        substituted view reads as "few circuits are OPEN", which is the
+        direction that hides a system-wide collapse from its detector.
+
+        The default implementation delegates to ``get_all_states()``, which is
+        correct wherever this process's view *is* the cluster view (the
+        in-memory adapter: one process is the cluster; the SQL adapter: the
+        database is). Adapters holding a local view in front of a shared store
+        (Redis, layered) MUST override.
+
+        Scale bound: as ``get_all_states()``.
+        """
+        return self.get_all_states()
+
     def get_open_states(
         self, limit: int | None = None
     ) -> list[CircuitBreakerStateData]:

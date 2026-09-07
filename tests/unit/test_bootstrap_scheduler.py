@@ -63,7 +63,7 @@ class TestDefaultScheduledJobsContract:
     with exactly these names and intervals."""
 
     def test_default_jobs_contract(self):
-        """Exactly ten jobs, keyed by name, with known intervals."""
+        """Exactly eleven jobs, keyed by name, with known intervals."""
         by_name = {
             name: interval for name, _mod, _attr, interval in _DEFAULT_SCHEDULED_JOBS
         }
@@ -79,6 +79,7 @@ class TestDefaultScheduledJobsContract:
             "scan_zombie_rollouts",
             "auto_promote_eligible",
             "collect_canary_metrics",
+            "panic_threshold",
         }
         # Daily cadence — 24h in seconds
         assert by_name["daily_report"] == 24 * 60 * 60.0
@@ -97,6 +98,29 @@ class TestDefaultScheduledJobsContract:
         assert by_name["scan_zombie_rollouts"] == 300.0
         assert by_name["auto_promote_eligible"] == 60.0
         assert by_name["collect_canary_metrics"] == 120.0
+        # 766 D3 — two consecutive ticks declare Level 3, so the interval is
+        # also half the detection latency.
+        assert by_name["panic_threshold"] == 10.0
+
+    def test_panic_threshold_job_is_pro_and_entitlement_gated(self):
+        """Automatic Level 3 escalation is a licensed PRO capability.
+
+        Its only action resolves the PRO emergency manager, and that manager
+        registers on the same entitlement verdict — so an import probe alone
+        would let an unentitled process stand ready to declare a lockdown.
+        """
+        assert "panic_threshold" in _PRO_GATED_JOBS
+        assert "panic_threshold" in _ENTITLEMENT_GATED_JOBS
+
+    def test_panic_threshold_job_resolves_to_a_callable(self):
+        """The synthetic branch builds the tick without importing Celery."""
+        assert callable(
+            _resolve_job_callable("baldur.services", "_synthetic_panic_threshold_tick")
+        )
+
+    def test_panic_threshold_job_has_no_celery_twin(self):
+        """One runner per host suffices; a celery install runs it inline."""
+        assert "panic_threshold" not in _CELERY_TASK_NAMES
 
     def test_override_expiry_job_is_not_pro_gated(self):
         """It ships on every install — Celery-less deployments are the point."""

@@ -15,13 +15,14 @@ import time
 
 import pytest
 
-# Adaptive Threshold
 # Blast Radius
 from baldur.services.circuit_breaker.blast_radius_integration import (
     reset_blast_radius_integration,
 )
 
 # Freeze Mode
+from baldur.services.circuit_breaker.freeze_mode import reset_freeze_mode_manager
+
 # Load Shedding
 from baldur.services.circuit_breaker.load_shedding import (
     get_load_shedding_manager,
@@ -32,6 +33,11 @@ from baldur.services.circuit_breaker.load_shedding import (
 # Models
 from baldur.services.circuit_breaker.models import (
     ServiceConfig,
+)
+
+# Panic Threshold
+from baldur.services.circuit_breaker.panic_threshold import (
+    reset_panic_threshold_monitor,
 )
 
 # Service Config
@@ -61,36 +67,8 @@ def _reset_all():
     reset_load_shedding_manager()
     reset_service_config_manager()
     reset_blast_radius_integration()
-
-    # Adaptive Threshold reset
-    try:
-        from baldur.services.circuit_breaker.adaptive_threshold import (
-            reset_adaptive_threshold_manager,
-        )
-
-        reset_adaptive_threshold_manager()
-    except ImportError:
-        pass
-
-    # Freeze Mode reset
-    try:
-        from baldur.services.circuit_breaker.freeze_mode import (
-            reset_freeze_mode_manager,
-        )
-
-        reset_freeze_mode_manager()
-    except ImportError:
-        pass
-
-    # Panic Threshold reset
-    try:
-        from baldur.services.circuit_breaker.panic_threshold import (
-            reset_panic_threshold_monitor,
-        )
-
-        reset_panic_threshold_monitor()
-    except ImportError:
-        pass
+    reset_freeze_mode_manager()
+    reset_panic_threshold_monitor()
 
 
 @pytest.fixture
