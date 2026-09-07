@@ -78,12 +78,6 @@ rows:
   verdict: real-producer
   evidence: src/baldur/services/circuit_breaker/load_shedding/manager.py:274,286
   ticket: ''
-- unit: src/baldur/services/circuit_breaker/panic_threshold.py::PanicThresholdMonitor.check_panic_threshold::open_rate
-  shape: kwarg
-  occurrences: 1
-  verdict: out-of-surface
-  evidence: src/baldur/services/circuit_breaker/panic_threshold.py:163
-  ticket: ''
 - unit: src/baldur/services/config_shadow/evaluators/error_budget.py::ErrorBudgetEvaluator._simulate::budget_remaining_percent
   shape: get-fallback
   occurrences: 1

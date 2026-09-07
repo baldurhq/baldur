@@ -38,6 +38,7 @@ from .config import (
     CircuitState,
     current_circuit_breaker_config,
 )
+from .freeze_mode import should_allow_cb_state_change
 from .manual_control import (
     ManualControlMixin,
     is_manual_pin_active,
@@ -378,36 +379,12 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
         if state.state == CircuitState.CLOSED:
             return CircuitBreakerDecision(allowed=True, state=state)
 
-        # OPEN with recovery_timeout NOT yet elapsed: short-circuit reject.
+        # OPEN and not yet eligible for a trial call: short-circuit reject.
         if state.state == CircuitState.OPEN:
-            # A manual block admits nothing while it holds. Without this the
-            # pinned circuit would fall through to the trial path once
-            # recovery_timeout elapsed and keep leaking half_open_max_calls
-            # requests per window for as long as the block stayed in place.
-            if state.manually_controlled and is_manual_pin_active(state):
-                self._record_blocked_metric(service_name, "open")
+            reason = self._open_rejection_reason(service_name, state, effective_config)
+            if reason is not None:
+                self._record_blocked_metric(service_name, reason)
                 return CircuitBreakerDecision(allowed=False, state=state)
-
-            # The recovery gate is skipped for exactly one row shape: the
-            # operator's own block whose promised lift instant has arrived.
-            # opened_at is the moment they blocked, so re-applying the gate
-            # there would hold a 5-minute block for the whole of a long
-            # recovery_timeout. A row that merely carries a stale flag (an
-            # automatic OPEN written after the expiry) takes the normal gate —
-            # otherwise every later OPEN would skip its recovery wait and admit
-            # one request per request against a dependency that is still down.
-            if not is_pin_lift_due(state):
-                elapsed = (
-                    (utc_now() - state.opened_at).total_seconds()
-                    if state.opened_at is not None
-                    else 0.0
-                )
-                if (
-                    state.opened_at is None
-                    or elapsed < effective_config.recovery_timeout
-                ):
-                    self._record_blocked_metric(service_name, "open")
-                    return CircuitBreakerDecision(allowed=False, state=state)
 
         # OPEN with elapsed timeout, OR already HALF_OPEN — atomic acquire.
         # The repository's Lua / RLock primitive owns the state-machine
@@ -474,6 +451,84 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
             if is_dataclass(state) and not isinstance(state, type):
                 state = replace(state, state=new_state)
         return CircuitBreakerDecision(allowed=allowed, state=state)
+
+    def _open_rejection_reason(
+        self,
+        service_name: str,
+        state: CircuitBreakerStateData,
+        effective_config: CircuitBreakerConfig,
+    ) -> str | None:
+        """Why an OPEN circuit refuses a request before the trial path, if it does.
+
+        Returns the ``reason`` label for the blocked-request counter, or
+        ``None`` when the request may proceed to the atomic trial-slot
+        acquire. Takes the config the caller resolved; it never resolves one.
+        """
+        # A manual block admits nothing while it holds. Without this the
+        # pinned circuit would fall through to the trial path once
+        # recovery_timeout elapsed and keep leaking half_open_max_calls
+        # requests per window for as long as the block stayed in place.
+        if state.manually_controlled and is_manual_pin_active(state):
+            return "open"
+
+        # The recovery gate is skipped for exactly one row shape: the
+        # operator's own block whose promised lift instant has arrived.
+        # opened_at is the moment they blocked, so re-applying the gate
+        # there would hold a 5-minute block for the whole of a long
+        # recovery_timeout. A row that merely carries a stale flag (an
+        # automatic OPEN written after the expiry) takes the normal gate —
+        # otherwise every later OPEN would skip its recovery wait and admit
+        # one request per request against a dependency that is still down.
+        if not is_pin_lift_due(state):
+            if state.opened_at is None:
+                return "open"
+            elapsed = (utc_now() - state.opened_at).total_seconds()
+            if elapsed < effective_config.recovery_timeout:
+                return "open"
+
+        # The OPEN→HALF_OPEN combo below is an automatic transition, so a
+        # frozen circuit rejects here instead. Counted under its own reason so
+        # an operator can name the breakers the freeze is holding — with a
+        # shared ``open`` label a held breaker is indistinguishable from one
+        # still inside its recovery timeout. An already-HALF_OPEN circuit
+        # still acquires trial slots: slot acquisition is not a transition.
+        if not self._auto_transition_allowed(
+            service_name, CircuitState.HALF_OPEN.value
+        ):
+            logger.debug(
+                "circuit_breaker.auto_transition_skipped",
+                site="evaluate_admission",
+                service_name=service_name,
+                new_state=CircuitState.HALF_OPEN.value,
+            )
+            return "frozen"
+
+        return None
+
+    @staticmethod
+    def _auto_transition_allowed(service_name: str, new_state: str) -> bool:
+        """Whether an automatic transition may be written right now.
+
+        Consulted immediately before each automatic state write, after the
+        decision to transition has been taken -- never on an admitted
+        request's fast path. Fail-open: a gate that cannot answer must not
+        stop the breaker from protecting the caller.
+
+        Manual paths do not call this. Operator intent outranks the freeze,
+        which is the module's documented design.
+        """
+        try:
+            return should_allow_cb_state_change(
+                service_id=service_name,
+                new_state=new_state,
+            )
+        except Exception as e:
+            logger.warning(
+                "circuit_breaker.freeze_check_failed",
+                service_name=service_name,
+                error=str(e),
+            )
+            return True
 
     @staticmethod
     def _record_blocked_metric(service_name: str, reason: str) -> None:
@@ -792,6 +847,18 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
 
         # HALF_OPEN failure → atomically revert to OPEN (656 D7).
         if state.state == CircuitState.HALF_OPEN:
+            # Site B (766 D2): the freeze withholds the HALF_OPEN→OPEN
+            # decision. The admission slot counter already advanced and the
+            # primitive's stuck-recovery reset covers it.
+            if not self._auto_transition_allowed(service_name, CircuitState.OPEN.value):
+                logger.debug(
+                    "circuit_breaker.auto_transition_skipped",
+                    site="record_failure_half_open",
+                    service_name=service_name,
+                    new_state=CircuitState.OPEN.value,
+                )
+                return
+
             # The atomic primitive performs the OPEN state write under the
             # repository's cluster-single-winner guarantee (InMemory RLock /
             # Redis Lua / SQL row-lock / Layered L2-authoritative routing).
@@ -868,6 +935,16 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
         )
 
         if should_open and updated_state.state == "closed":
+            # Site A (766 D2): the failure and the window evidence stay
+            # recorded above; only the trip is withheld.
+            if not self._auto_transition_allowed(service_name, CircuitState.OPEN.value):
+                logger.debug(
+                    "circuit_breaker.auto_transition_skipped",
+                    site="record_failure_trip",
+                    service_name=service_name,
+                    new_state=CircuitState.OPEN.value,
+                )
+                return
             self._trip_circuit_open(
                 service_name,
                 updated_state,
@@ -1301,6 +1378,19 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
         circuit_closed = False
 
         if state.state == "half_open":
+            # Site D (766 D2): the freeze withholds the HALF_OPEN→CLOSED
+            # decision, so the success is not counted toward success_threshold.
+            if not self._auto_transition_allowed(
+                service_name, CircuitState.CLOSED.value
+            ):
+                logger.debug(
+                    "circuit_breaker.auto_transition_skipped",
+                    site="record_success_half_open",
+                    service_name=service_name,
+                    new_state=CircuitState.CLOSED.value,
+                )
+                return
+
             # 497 D1/D2: atomic record-success + threshold-check + close in
             # one repository call. The `did_close` flag is the single-fire
             # emit gate — only the caller that crossed the threshold under
@@ -1415,26 +1505,44 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
                 if s.state == CircuitState.OPEN and not s.manually_controlled
             ]
 
+            # The due set is selected before any write so the freeze gate
+            # below can report how many rows it is holding without resolving
+            # the shared configuration a second time.
+            due: list[tuple[CircuitBreakerStateData, float]] = []
             for state in open_states:
                 if state.opened_at is None:
                     continue
-
                 elapsed = (utc_now() - state.opened_at).total_seconds()
+                if (
+                    elapsed
+                    >= self.get_effective_config(state.service_name).recovery_timeout
+                ):
+                    due.append((state, elapsed))
 
-                effective_cfg = self.get_effective_config(state.service_name)
-                if elapsed >= effective_cfg.recovery_timeout:
-                    # Transition to half-open
-                    self.repository.update_state(
-                        service_name=state.service_name,
-                        state=CircuitState.HALF_OPEN,
-                        success_count=0,
-                    )
-                    transitioned.append(state.service_name)
-                    logger.info(
-                        "circuit_breaker.transitioned_open_after",
-                        target_service_name=state.service_name,
-                        elapsed=elapsed,
-                    )
+            # Site E (766 D2): one check per sweep, not per row. WARNING here
+            # rather than DEBUG because it fires once a minute at most, and
+            # ``held_count`` is what an operator needs to see: how many
+            # breakers the freeze is keeping OPEN.
+            if not self._auto_transition_allowed("*", CircuitState.HALF_OPEN.value):
+                logger.warning(
+                    "circuit_breaker.recovery_sweep_blocked",
+                    held_count=len(due),
+                )
+                return {"success": True, "message": "frozen", "count": 0}
+
+            for state, elapsed in due:
+                # Transition to half-open
+                self.repository.update_state(
+                    service_name=state.service_name,
+                    state=CircuitState.HALF_OPEN,
+                    success_count=0,
+                )
+                transitioned.append(state.service_name)
+                logger.info(
+                    "circuit_breaker.transitioned_open_after",
+                    target_service_name=state.service_name,
+                    elapsed=elapsed,
+                )
 
             return {
                 "success": True,

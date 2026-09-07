@@ -53,6 +53,7 @@ class ProtectionMixin:
         get_state: Callable[..., str]
         get_or_create_state: Callable[..., CircuitBreakerStateData]
         force_open: Callable[..., CircuitBreakerResult]
+        _auto_transition_allowed: Callable[..., bool]
 
     # =========================================================================
     # Rate Limit Cascade Detection
@@ -148,6 +149,21 @@ class ProtectionMixin:
                 rate_limit_count=rate_limit_count,
                 total_requests=total_requests,
             ):
+                return None
+
+            # Site F (766 D2): this is an *automatic* verdict that borrows
+            # the manual primitive, so the freeze gate sits at this call site
+            # for the same reason the pin and observe-only gates above do —
+            # force_open itself stays ungated so the operator's own force
+            # keeps working during a freeze. The 429 tracking above is
+            # observation and still runs.
+            if not self._auto_transition_allowed(service_name, "open"):
+                logger.debug(
+                    "circuit_breaker.auto_transition_skipped",
+                    site="rate_limit_cascade",
+                    service_name=service_name,
+                    new_state="open",
+                )
                 return None
 
             # Auto-open circuit breaker

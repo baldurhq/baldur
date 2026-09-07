@@ -228,6 +228,8 @@ class CBMetricRecorder(BaseMetricRecorder):
         ``reason`` values:
         - ``open``: state == OPEN
         - ``half_open_full``: HALF_OPEN window already at limit
+        - ``frozen``: the OPEN->HALF_OPEN recovery transition is withheld
+          while the system is at Emergency Level 3
         """
         try:
             self._blocked_total.labels(service=service, reason=reason).inc()

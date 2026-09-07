@@ -157,235 +157,20 @@ class LoadSheddingPolicy:
 
 
 # =============================================================================
-# Adaptive Threshold
-# =============================================================================
-
-
-@dataclass
-class ThresholdMultiplier:
-    """
-    Threshold multiplier.
-
-    Attributes:
-        failure: Failure-count multiplier
-        window: Observation-window multiplier
-        description: multiplier description
-    """
-
-    failure: float  # Failure-count multiplier
-    window: float  # Observation-window multiplier
-    description: str = ""
-
-    def __post_init__(self) -> None:
-        """Validate multiplier values."""
-        if self.failure < 0:
-            raise ValueError(
-                f"failure multiplier must be non-negative, got {self.failure}"
-            )
-        if self.window < 0:
-            raise ValueError(
-                f"window multiplier must be non-negative, got {self.window}"
-            )
-
-
-@dataclass
-class AdaptiveThresholdPolicy:
-    """
-    Automatic CB threshold adjustment by Emergency Level.
-
-    Adjusts CB thresholds automatically according to the system Emergency Level.
-    The more severe the situation, the more conservative (looser) the setting,
-    to prevent a self-induced blackout.
-
-    Attributes:
-        enabled: Whether Adaptive Threshold is enabled
-        base_failure_threshold: Base failure-count threshold
-        base_window_seconds: Base observation window
-        level_multipliers: Per-Emergency-Level multipliers
-    """
-
-    enabled: bool = True
-
-    # Defaults
-    base_failure_threshold: int = 5  # Base failure-count threshold
-    base_window_seconds: int = 60  # Base observation window
-
-    # Per-Emergency-Level multipliers
-    level_multipliers: dict[str, ThresholdMultiplier] = field(
-        default_factory=lambda: {
-            "NORMAL": ThresholdMultiplier(
-                failure=1.0, window=1.0, description="Normal: 5 failures / 60s"
-            ),
-            "ELEVATED": ThresholdMultiplier(
-                failure=1.5, window=1.5, description="Elevated: 7.5 failures / 90s"
-            ),
-            "HIGH": ThresholdMultiplier(
-                failure=2.0, window=2.0, description="Warning: 10 failures / 120s"
-            ),
-            "CRITICAL": ThresholdMultiplier(
-                failure=3.0, window=3.0, description="Critical: 15 failures / 180s"
-            ),
-            "LOCKDOWN": ThresholdMultiplier(
-                failure=float("inf"),  # effectively forbids OPEN
-                window=float("inf"),
-                description="Lockdown: auto-OPEN forbidden",
-            ),
-        }
-    )
-
-    def get_adjusted_threshold(self, emergency_level: str) -> tuple[float, float]:
-        """
-        Return the adjusted thresholds for the given Emergency Level.
-
-        Args:
-            emergency_level: Current Emergency Level
-
-        Returns:
-            tuple[float, float]: (adjusted failure threshold, adjusted window seconds)
-        """
-        multiplier = self.level_multipliers.get(
-            emergency_level, self.level_multipliers["NORMAL"]
-        )
-        return (
-            self.base_failure_threshold * multiplier.failure,
-            self.base_window_seconds * multiplier.window,
-        )
-
-
-# =============================================================================
-# Open Strategy
-# =============================================================================
-
-
-@dataclass
-class OpenStrategy:
-    """
-    CB OPEN strategy.
-
-    Attributes:
-        type: Strategy type ("immediate" | "graceful")
-        drain_timeout_seconds: Max wait for in-flight requests (Graceful only)
-        force_after_timeout: Force OPEN after timeout (Graceful only)
-
-    Note:
-        The Delayed strategy (block after N seconds) is an anti-pattern and is not supported.
-        - Keeps sending requests to a failing server for N seconds → thread occupation, connection-pool exhaustion
-        - A primary cause of Cascading Failure
-    """
-
-    type: str = "immediate"  # "immediate" | "graceful"
-
-    # Graceful-only settings
-    drain_timeout_seconds: int = 30  # Max wait for in-flight requests
-
-    # Fallback when Graceful fails
-    force_after_timeout: bool = True  # Force OPEN after timeout
-
-    def __post_init__(self) -> None:
-        """Validate open strategy values."""
-        valid_types = {"immediate", "graceful"}
-        if self.type not in valid_types:
-            raise ValueError(f"Invalid type: {self.type}. Valid values: {valid_types}")
-        if self.drain_timeout_seconds < 0:
-            raise ValueError(
-                f"drain_timeout_seconds must be non-negative, "
-                f"got {self.drain_timeout_seconds}"
-            )
-
-
-# =============================================================================
-# Integrated Configuration
-# =============================================================================
-
-
-@dataclass
-class CircuitBreakerAdvancedConfig:
-    """
-    Circuit Breaker advanced protection configuration.
-
-    Manages the integrated configuration of all advanced protection features.
-
-    Attributes:
-        services: Registered service list (required user setting)
-        load_shedding: Load Shedding policy
-        adaptive_threshold: Adaptive Threshold policy
-        default_open_strategy: Default Open strategy
-        blast_radius_integration: Enable Blast Radius integration
-        blast_radius_block_on_critical: Block auto-OPEN on CRITICAL
-        freeze_on_lockdown: Activate Freeze Mode on LOCKDOWN
-        allow_manual_override_in_lockdown: Allow manual operations during LOCKDOWN
-    """
-
-    # Service registration (required user setting)
-    services: list[ServiceConfig] = field(default_factory=list)
-
-    # Load Shedding policy
-    load_shedding: LoadSheddingPolicy = field(default_factory=LoadSheddingPolicy)
-
-    # Adaptive Threshold policy
-    adaptive_threshold: AdaptiveThresholdPolicy = field(
-        default_factory=AdaptiveThresholdPolicy
-    )
-
-    # Default Open strategy
-    default_open_strategy: OpenStrategy = field(default_factory=OpenStrategy)
-
-    # Blast Radius integration
-    blast_radius_integration: bool = True
-    blast_radius_block_on_critical: bool = True
-
-    # Freeze Mode settings
-    freeze_on_lockdown: bool = True
-    allow_manual_override_in_lockdown: bool = True
-
-    def get_service_config(self, service_id: str) -> ServiceConfig | None:
-        """
-        Look up configuration by service ID.
-
-        Args:
-            service_id: Service ID
-
-        Returns:
-            ServiceConfig or None if not found
-        """
-        for service in self.services:
-            if service.service_id == service_id:
-                return service
-        return None
-
-    def get_services_by_criticality(self, criticality: str) -> list[ServiceConfig]:
-        """
-        Look up the service list by criticality.
-
-        Args:
-            criticality: Importance level
-
-        Returns:
-            Services with the given criticality
-        """
-        return [s for s in self.services if s.criticality == criticality]
-
-    def get_shedding_targets(self, shed_criticality: list[str]) -> list[ServiceConfig]:
-        """
-        Look up the list of Load Shedding target services.
-
-        Args:
-            shed_criticality: list of criticality levels to shed
-
-        Returns:
-            Target services to shed (sorted by shed_priority)
-        """
-        targets = [
-            s
-            for s in self.services
-            if s.criticality in shed_criticality and s.shed_priority > 0
-        ]
-        return sorted(targets, key=lambda s: s.shed_priority, reverse=True)
-
-
-# =============================================================================
 # Panic Threshold Configuration
 # =============================================================================
+
+
+# Consecutive triggered ticks required before the monitor escalates. Two
+# ticks of hysteresis keep a single sampling artefact from declaring a
+# fleet-wide collapse; the periodic lane's interval sets what that costs in
+# detection latency.
+DEFAULT_CONSECUTIVE_TRIGGERS_REQUIRED = 2
+
+# Smallest fleet whose OPEN ratio is meaningful. Below it a single OPEN
+# breaker clears any percentage threshold, so the ratio says nothing about
+# the system.
+DEFAULT_MIN_REGISTERED_SERVICES = 3
 
 
 @dataclass
@@ -394,17 +179,21 @@ class PanicThresholdConfig:
     Panic Threshold configuration.
 
     When 70% or more of all CBs are OPEN, the system is considered to be in
-    total collapse and auto-OPEN is forbidden.
+    total collapse and Emergency Level 3 is declared.
 
     Attributes:
-        enabled: Whether Panic Threshold is enabled
         threshold_percent: OPEN-CB ratio threshold (default 70%)
         action: Action when threshold is exceeded ("freeze" | "alert_only")
+        consecutive_triggers_required: Triggered ticks the escalation lane
+            waits for before declaring; the instantaneous probe ignores it
+        min_registered_services: Fleet size below which the ratio is not
+            judged at all
     """
 
-    enabled: bool = True
     threshold_percent: float = 70.0  # Panic when 70% or more are OPEN
     action: str = "freeze"  # "freeze" | "alert_only"
+    consecutive_triggers_required: int = DEFAULT_CONSECUTIVE_TRIGGERS_REQUIRED
+    min_registered_services: int = DEFAULT_MIN_REGISTERED_SERVICES
 
     def __post_init__(self) -> None:
         """Validate panic threshold values."""
@@ -417,6 +206,16 @@ class PanicThresholdConfig:
         if self.action not in valid_actions:
             raise ValueError(
                 f"Invalid action: {self.action}. Valid values: {valid_actions}"
+            )
+        if self.consecutive_triggers_required < 1:
+            raise ValueError(
+                f"consecutive_triggers_required must be >= 1, "
+                f"got {self.consecutive_triggers_required}"
+            )
+        if self.min_registered_services < 1:
+            raise ValueError(
+                f"min_registered_services must be >= 1, "
+                f"got {self.min_registered_services}"
             )
 
 

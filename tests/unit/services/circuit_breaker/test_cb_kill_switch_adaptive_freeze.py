@@ -1,13 +1,13 @@
 """
-Circuit Breaker Kill Switch and Adaptive Freeze Tests
+Circuit Breaker Kill Switch and Freeze Tests
 
-테스트 대상:
-1. Kill Switch Override (manual_control.py 수정)
-2. Adaptive Threshold (adaptive_threshold.py)
-3. Freeze Mode (freeze_mode.py)
-4. Panic Threshold (panic_threshold.py)
+Subjects under test:
+1. Kill Switch Override (manual_control.py)
+2. Freeze Mode (freeze_mode.py)
+3. Panic Threshold (panic_threshold.py)
 """
 
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
@@ -18,10 +18,10 @@ import pytest
 
 
 class TestKillSwitchOverride:
-    """Kill Switch Override 기능 테스트 (manual_control.py)."""
+    """Kill Switch Override behaviour (manual_control.py)."""
 
     def test_force_open_blocked_when_kill_switch_active_without_override(self):
-        """Kill Switch 활성 시 override 없으면 force_open 차단."""
+        """force_open is blocked by an active kill switch without an override."""
         from baldur.services.circuit_breaker.config import (
             CircuitBreakerConfig,
         )
@@ -51,7 +51,7 @@ class TestKillSwitchOverride:
         assert "override_kill_switch=True" in result.error
 
     def test_force_open_allowed_with_override(self):
-        """Kill Switch 활성 시 override=True면 force_open 허용."""
+        """force_open is allowed past an active kill switch with override=True."""
         from baldur.services.circuit_breaker.config import (
             CircuitBreakerConfig,
         )
@@ -87,7 +87,7 @@ class TestKillSwitchOverride:
         mock_repo.atomic_force_open.assert_called_once()
 
     def test_force_close_blocked_when_kill_switch_active_without_override(self):
-        """Kill Switch 활성 시 override 없으면 force_close 차단."""
+        """force_close is blocked by an active kill switch without an override."""
         from baldur.services.circuit_breaker.config import CircuitBreakerConfig
         from baldur.services.circuit_breaker.manual_control import (
             ManualControlMixin,
@@ -111,7 +111,7 @@ class TestKillSwitchOverride:
         assert "Kill Switch" in result.error
 
     def test_force_close_allowed_with_override(self):
-        """Kill Switch 활성 시 override=True면 force_close 허용."""
+        """force_close is allowed past an active kill switch with override=True."""
         from baldur.services.circuit_breaker.config import CircuitBreakerConfig
         from baldur.services.circuit_breaker.manual_control import (
             ManualControlMixin,
@@ -144,273 +144,101 @@ class TestKillSwitchOverride:
 
 
 # =============================================================================
-# Adaptive Threshold Tests
-# =============================================================================
-
-
-class TestAdaptiveThreshold:
-    """Adaptive Threshold 기능 테스트 (adaptive_threshold.py)."""
-
-    def test_get_adjusted_threshold_normal(self):
-        """NORMAL 레벨에서 기본 임계값 반환."""
-        from baldur.services.circuit_breaker.adaptive_threshold import (
-            AdaptiveThresholdManager,
-            AdaptiveThresholdPolicy,
-        )
-
-        manager = AdaptiveThresholdManager(
-            policy=AdaptiveThresholdPolicy(
-                base_failure_threshold=5,
-                base_window_seconds=60,
-            )
-        )
-
-        threshold = manager.get_adjusted_threshold(emergency_level="NORMAL")
-
-        assert threshold.failure_threshold == 5.0
-        assert threshold.window_seconds == 60.0
-        assert threshold.emergency_level == "NORMAL"
-        assert threshold.is_lockdown is False
-
-    def test_get_adjusted_threshold_elevated(self):
-        """ELEVATED 레벨에서 1.5배 보수적 임계값."""
-        from baldur.services.circuit_breaker.adaptive_threshold import (
-            AdaptiveThresholdManager,
-        )
-
-        manager = AdaptiveThresholdManager()
-        threshold = manager.get_adjusted_threshold(emergency_level="ELEVATED")
-
-        assert threshold.failure_threshold == 7.5  # 5 * 1.5
-        assert threshold.window_seconds == 90.0  # 60 * 1.5
-        assert threshold.is_lockdown is False
-
-    def test_get_adjusted_threshold_high(self):
-        """HIGH 레벨에서 2배 보수적 임계값."""
-        from baldur.services.circuit_breaker.adaptive_threshold import (
-            AdaptiveThresholdManager,
-        )
-
-        manager = AdaptiveThresholdManager()
-        threshold = manager.get_adjusted_threshold(emergency_level="HIGH")
-
-        assert threshold.failure_threshold == 10.0  # 5 * 2.0
-        assert threshold.window_seconds == 120.0  # 60 * 2.0
-        assert threshold.is_lockdown is False
-
-    def test_get_adjusted_threshold_critical(self):
-        """CRITICAL 레벨에서 3배 보수적 임계값."""
-        from baldur.services.circuit_breaker.adaptive_threshold import (
-            AdaptiveThresholdManager,
-        )
-
-        manager = AdaptiveThresholdManager()
-        threshold = manager.get_adjusted_threshold(emergency_level="CRITICAL")
-
-        assert threshold.failure_threshold == 15.0  # 5 * 3.0
-        assert threshold.window_seconds == 180.0  # 60 * 3.0
-        assert threshold.is_lockdown is False
-
-    def test_get_adjusted_threshold_lockdown(self):
-        """LOCKDOWN 레벨에서 무한대 임계값 (자동 OPEN 금지)."""
-        from baldur.services.circuit_breaker.adaptive_threshold import (
-            AdaptiveThresholdManager,
-        )
-
-        manager = AdaptiveThresholdManager()
-        threshold = manager.get_adjusted_threshold(emergency_level="LOCKDOWN")
-
-        assert threshold.failure_threshold == float("inf")
-        assert threshold.window_seconds == float("inf")
-        assert threshold.is_lockdown is True
-
-    def test_should_allow_auto_open_normal(self):
-        """NORMAL 레벨에서 자동 OPEN 허용."""
-        from baldur.services.circuit_breaker.adaptive_threshold import (
-            AdaptiveThresholdManager,
-        )
-
-        manager = AdaptiveThresholdManager()
-
-        with patch.object(
-            manager, "get_current_emergency_level", return_value="NORMAL"
-        ):
-            allowed, reason = manager.should_allow_auto_open()
-
-        assert allowed is True
-        assert reason == ""
-
-    def test_should_allow_auto_open_lockdown(self):
-        """LOCKDOWN 레벨에서 자동 OPEN 금지."""
-        from baldur.services.circuit_breaker.adaptive_threshold import (
-            AdaptiveThresholdManager,
-        )
-
-        manager = AdaptiveThresholdManager()
-
-        with patch.object(
-            manager, "get_current_emergency_level", return_value="LOCKDOWN"
-        ):
-            allowed, reason = manager.should_allow_auto_open()
-
-        assert allowed is False
-        assert "LOCKDOWN" in reason
-
-    def test_check_threshold_exceeded_normal(self):
-        """임계값 초과 확인 - 초과 케이스."""
-        import time
-
-        from baldur.services.circuit_breaker.adaptive_threshold import (
-            AdaptiveThresholdManager,
-        )
-
-        manager = AdaptiveThresholdManager()
-        current_time = time.time()
-
-        with patch.object(
-            manager, "get_current_emergency_level", return_value="NORMAL"
-        ):
-            exceeded, threshold = manager.check_threshold_exceeded(
-                failure_count=6,  # 5 이상이면 초과
-                window_start_time=current_time - 30,  # 30초 전
-                current_time=current_time,
-            )
-
-        assert exceeded is True
-        assert threshold.failure_threshold == 5.0
-
-    def test_check_threshold_exceeded_lockdown_never_exceeds(self):
-        """LOCKDOWN에서는 절대 초과하지 않음."""
-        import time
-
-        from baldur.services.circuit_breaker.adaptive_threshold import (
-            AdaptiveThresholdManager,
-        )
-
-        manager = AdaptiveThresholdManager()
-        current_time = time.time()
-
-        with patch.object(
-            manager, "get_current_emergency_level", return_value="LOCKDOWN"
-        ):
-            exceeded, threshold = manager.check_threshold_exceeded(
-                failure_count=1000,  # 아무리 많아도
-                window_start_time=current_time - 30,
-                current_time=current_time,
-            )
-
-        assert exceeded is False
-        assert threshold.is_lockdown is True
-
-    def test_disabled_policy_returns_base_values(self):
-        """비활성화된 정책은 기본값 반환."""
-        from baldur.services.circuit_breaker.adaptive_threshold import (
-            AdaptiveThresholdManager,
-            AdaptiveThresholdPolicy,
-        )
-
-        policy = AdaptiveThresholdPolicy(enabled=False)
-        manager = AdaptiveThresholdManager(policy=policy)
-
-        threshold = manager.get_adjusted_threshold(emergency_level="LOCKDOWN")
-
-        # 비활성화면 LOCKDOWN이어도 기본값
-        assert threshold.emergency_level == "DISABLED"
-        assert threshold.is_lockdown is False
-
-
-# =============================================================================
 # Freeze Mode Tests
 # =============================================================================
 
 
 class TestFreezeMode:
-    """Freeze Mode 기능 테스트 (freeze_mode.py)."""
+    """Freeze Mode behaviour (freeze_mode.py)."""
 
-    def test_freeze_mode_inactive_by_default(self):
-        """기본 상태는 비활성화."""
+    @staticmethod
+    def _manager(level):
+        """Build a manager over a stub emergency manager reporting ``level``."""
+        from baldur.interfaces.emergency import EmergencyManager
         from baldur.services.circuit_breaker.freeze_mode import FreezeModeManager
 
-        # 싱글톤 리셋을 위해 새 인스턴스 생성
-        FreezeModeManager._instance = None
-        manager = FreezeModeManager()
-        manager._state.active = False  # 명시적 비활성화
+        emergency = Mock(spec=EmergencyManager)
+        emergency.get_current_level.return_value = level
+        emergency.get_state.return_value = SimpleNamespace(
+            activated_at="2026-01-01T00:00:00+00:00"
+        )
+        return FreezeModeManager(emergency_manager=emergency)
 
-        with patch.object(manager, "_is_lockdown", return_value=False):
+    def test_freeze_mode_inactive_without_emergency_manager(self):
+        """No registered emergency manager means nothing is frozen."""
+        from baldur.services.circuit_breaker.freeze_mode import FreezeModeManager
+
+        manager = FreezeModeManager()
+
+        with patch(
+            "baldur.services.circuit_breaker.freeze_mode._pro_distribution_present",
+            return_value=False,
+        ):
             assert manager.is_active() is False
 
-    def test_freeze_mode_activate(self):
-        """수동 활성화 테스트."""
-        from baldur.services.circuit_breaker.freeze_mode import FreezeModeManager
+    def test_freeze_mode_active_on_level_3(self):
+        """LEVEL_3 is read through the enum's own ordering, not its value."""
+        from baldur.models.emergency import EmergencyLevel
 
-        FreezeModeManager._instance = None
-        manager = FreezeModeManager()
+        manager = self._manager(EmergencyLevel.LEVEL_3)
 
-        result = manager.activate(reason="Test activation", activated_by="test-user")
+        assert manager.is_active() is True
 
-        assert result is True
-        assert manager._state.active is True
-        assert manager._state.reason == "Test activation"
-        assert manager._state.activated_by == "test-user"
+    def test_freeze_mode_inactive_below_level_3(self):
+        """LEVEL_2 does not freeze the breakers."""
+        from baldur.models.emergency import EmergencyLevel
 
-    def test_freeze_mode_auto_active_on_lockdown(self):
-        """LOCKDOWN 상태에서 자동 활성화."""
-        from baldur.services.circuit_breaker.freeze_mode import FreezeModeManager
+        manager = self._manager(EmergencyLevel.LEVEL_2)
 
-        FreezeModeManager._instance = None
-        manager = FreezeModeManager()
-        manager._state.active = False  # 수동으로는 비활성화
+        assert manager.is_active() is False
 
-        with patch.object(manager, "_is_lockdown", return_value=True):
-            assert manager.is_active() is True
+    def test_freeze_mode_inactive_for_non_enum_level(self):
+        """A level that is not the ordered enum is not evidence of a lockdown."""
+        manager = self._manager("level_3")
 
-    def test_should_allow_state_change_manual_allowed_in_freeze(self):
-        """Freeze Mode에서 수동 조작은 허용."""
-        from baldur.services.circuit_breaker.freeze_mode import FreezeModeManager
-
-        FreezeModeManager._instance = None
-        manager = FreezeModeManager()
-        manager._state.active = True
-
-        with patch.object(manager, "_is_lockdown", return_value=False):
-            allowed, reason = manager.should_allow_state_change(
-                service_id="payment-api",
-                new_state="OPEN",
-                is_manual=True,
-            )
-
-        assert allowed is True
+        assert manager.is_active() is False
 
     def test_should_allow_state_change_auto_blocked_in_freeze(self):
-        """Freeze Mode에서 자동 조작은 금지."""
-        from baldur.services.circuit_breaker.freeze_mode import FreezeModeManager
+        """Automatic transitions are refused while frozen."""
+        from baldur.models.emergency import EmergencyLevel
 
-        FreezeModeManager._instance = None
-        manager = FreezeModeManager()
-        manager._state.active = True
+        manager = self._manager(EmergencyLevel.LEVEL_3)
 
         allowed, reason = manager.should_allow_state_change(
             service_id="payment-api",
             new_state="OPEN",
-            is_manual=False,
         )
 
         assert allowed is False
         assert "Freeze Mode" in reason
 
-    def test_deactivate_blocked_during_lockdown(self):
-        """LOCKDOWN 중에는 수동 비활성화 불가."""
-        from baldur.services.circuit_breaker.freeze_mode import FreezeModeManager
+    def test_should_allow_state_change_allowed_when_not_frozen(self):
+        """Automatic transitions pass when no lockdown holds."""
+        from baldur.models.emergency import EmergencyLevel
 
-        FreezeModeManager._instance = None
-        manager = FreezeModeManager()
-        manager._state.active = True
+        manager = self._manager(EmergencyLevel.NORMAL)
 
-        with patch.object(manager, "_is_lockdown", return_value=True):
-            result = manager.deactivate(reason="try to deactivate")
+        allowed, reason = manager.should_allow_state_change(
+            service_id="payment-api",
+            new_state="OPEN",
+        )
 
-        assert result is False
-        assert manager._state.active is True
+        assert allowed is True
+        assert reason == ""
+
+    def test_get_state_derives_from_the_emergency_state(self):
+        """The reported state is derived, never stored."""
+        from baldur.models.emergency import EmergencyLevel
+        from baldur.services.circuit_breaker.freeze_mode import FreezeReason
+
+        manager = self._manager(EmergencyLevel.LEVEL_3)
+
+        state = manager.get_state()
+
+        assert state.active is True
+        assert state.reason == FreezeReason.LOCKDOWN_ENTRY
+        assert state.activated_by == "system"
+        assert state.activated_at == "2026-01-01T00:00:00+00:00"
 
 
 # =============================================================================
@@ -419,127 +247,81 @@ class TestFreezeMode:
 
 
 class TestPanicThreshold:
-    """Panic Threshold 기능 테스트 (panic_threshold.py)."""
+    """Panic Threshold behaviour (panic_threshold.py)."""
 
-    def test_panic_threshold_disabled(self):
-        """비활성화 시 발동하지 않음."""
+    @staticmethod
+    def _monitor(open_names, all_names, **config_kwargs):
+        """Build a monitor whose cluster read returns the given rows."""
+        from baldur.services.circuit_breaker import CircuitBreakerService
         from baldur.services.circuit_breaker.panic_threshold import (
             PanicThresholdConfig,
             PanicThresholdMonitor,
         )
 
-        config = PanicThresholdConfig(enabled=False)
-        monitor = PanicThresholdMonitor(config=config)
-
-        result = monitor.check_panic_threshold()
-
-        assert result.triggered is False
-        assert "disabled" in result.reason.lower()
-
-    def test_panic_threshold_below_threshold(self):
-        """임계값 미만이면 발동하지 않음."""
-        from baldur.services.circuit_breaker.panic_threshold import (
-            PanicThresholdConfig,
-            PanicThresholdMonitor,
+        rows = [
+            SimpleNamespace(
+                service_name=name, state="open" if name in open_names else "closed"
+            )
+            for name in all_names
+        ]
+        service = Mock(spec=CircuitBreakerService)
+        service.repository.get_cluster_states.return_value = rows
+        return PanicThresholdMonitor(
+            config=PanicThresholdConfig(**config_kwargs),
+            circuit_breaker_service=service,
         )
 
-        config = PanicThresholdConfig(enabled=True, threshold_percent=70.0)
-        monitor = PanicThresholdMonitor(config=config)
+    def test_probe_below_threshold(self):
+        """An OPEN ratio under the threshold does not trigger."""
+        monitor = self._monitor(
+            ["svc1", "svc2", "svc3"],
+            ["svc1", "svc2", "svc3", "svc4", "svc5", "svc6"],
+            threshold_percent=70.0,
+        )
 
-        # 50% OPEN (70% 미만)
-        with patch.object(
-            monitor,
-            "_get_circuit_stats",
-            return_value=(
-                ["svc1", "svc2", "svc3"],  # 3 OPEN
-                ["svc1", "svc2", "svc3", "svc4", "svc5", "svc6"],  # 6 total
-            ),
-        ):
-            result = monitor.check_panic_threshold()
+        result = monitor.evaluate()
 
         assert result.triggered is False
         assert result.open_rate == 50.0
 
-    def test_panic_threshold_insufficient_services(self):
-        """최소 서비스 수 미만이면 발동하지 않음."""
-        from baldur.services.circuit_breaker.panic_threshold import (
-            PanicThresholdConfig,
-            PanicThresholdMonitor,
-        )
+    def test_probe_insufficient_services(self):
+        """A fleet below the minimum size is not judged at all."""
+        monitor = self._monitor(["svc1", "svc2"], ["svc1", "svc2"])
 
-        config = PanicThresholdConfig(enabled=True)
-        monitor = PanicThresholdMonitor(config=config)
-
-        # 2개 서비스만 (최소 3개 필요)
-        with patch.object(
-            monitor,
-            "_get_circuit_stats",
-            return_value=(
-                ["svc1", "svc2"],  # 2 OPEN
-                ["svc1", "svc2"],  # 2 total (100% OPEN이지만 서비스 수 부족)
-            ),
-        ):
-            result = monitor.check_panic_threshold()
+        result = monitor.evaluate()
 
         assert result.triggered is False
         assert "Insufficient services" in result.reason
 
-    def test_panic_threshold_triggers_on_threshold_exceeded(self):
-        """임계값 초과 시 발동."""
-        from baldur.services.circuit_breaker.panic_threshold import (
-            PanicThresholdConfig,
-            PanicThresholdMonitor,
+    def test_probe_triggers_on_threshold_exceeded(self):
+        """The probe reports the condition instantaneously, with no hysteresis."""
+        monitor = self._monitor(
+            ["svc1", "svc2", "svc3", "svc4"],
+            ["svc1", "svc2", "svc3", "svc4", "svc5"],
+            threshold_percent=70.0,
         )
 
-        config = PanicThresholdConfig(
-            enabled=True, threshold_percent=70.0, action="alert_only"
-        )
-        monitor = PanicThresholdMonitor(config=config)
-        monitor._consecutive_triggers = 1  # 연속 감지 1회 충족
-
-        # 80% OPEN (70% 초과)
-        with patch.object(
-            monitor,
-            "_get_circuit_stats",
-            return_value=(
-                ["svc1", "svc2", "svc3", "svc4"],  # 4 OPEN
-                ["svc1", "svc2", "svc3", "svc4", "svc5"],  # 5 total = 80%
-            ),
-        ):
-            with patch.object(monitor, "_log_panic_audit"):
-                with patch.object(monitor, "_notify_critical"):
-                    result = monitor.check_panic_threshold()
+        result = monitor.evaluate()
 
         assert result.triggered is True
         assert result.open_rate == 80.0
         assert len(result.open_circuits) == 4
 
-    def test_panic_threshold_requires_consecutive_triggers(self):
-        """연속 감지 횟수 미충족 시 발동하지 않음."""
-        from baldur.services.circuit_breaker.panic_threshold import (
-            PanicThresholdConfig,
-            PanicThresholdMonitor,
+    def test_probe_leaves_the_consecutive_counter_untouched(self):
+        """The probe never advances the escalation lane's hysteresis."""
+        monitor = self._monitor(
+            ["svc1", "svc2", "svc3", "svc4"],
+            ["svc1", "svc2", "svc3", "svc4", "svc5"],
+            threshold_percent=70.0,
         )
 
-        config = PanicThresholdConfig(enabled=True, threshold_percent=70.0)
-        monitor = PanicThresholdMonitor(config=config)
-        monitor._consecutive_triggers = 0  # 첫 번째 감지
+        monitor.evaluate()
+        monitor.evaluate()
 
-        with patch.object(
-            monitor,
-            "_get_circuit_stats",
-            return_value=(
-                ["svc1", "svc2", "svc3", "svc4"],
-                ["svc1", "svc2", "svc3", "svc4", "svc5"],
-            ),
-        ):
-            result = monitor.check_panic_threshold()
-
-        assert result.triggered is False
-        assert "waiting for consecutive triggers" in result.reason.lower()
+        assert monitor._consecutive_triggers == 0
 
     def test_panic_threshold_result_fields(self):
-        """PanicThresholdResult 필드 검증."""
+        """PanicThresholdResult carries the observation, not a fabricated action."""
         from baldur.services.circuit_breaker.panic_threshold import (
             PanicThresholdResult,
         )
@@ -551,13 +333,12 @@ class TestPanicThreshold:
             total_count=4,
             open_circuits=["a", "b", "c"],
             action_taken="emergency_level_3_escalation",
-            halted_systems=["replay", "auto_open", "auto_close"],
         )
 
         assert result.triggered is True
         assert result.open_rate == 75.0
         assert result.open_count == 3
-        assert "replay" in result.halted_systems
+        assert result.action_taken == "emergency_level_3_escalation"
 
 
 # =============================================================================
@@ -565,46 +346,22 @@ class TestPanicThreshold:
 # =============================================================================
 
 
-class TestKillSwitchAdaptiveFreezeIntegration:
-    """Kill Switch 및 Adaptive Freeze 기능 통합 테스트."""
-
-    def test_adaptive_threshold_with_freeze_mode(self):
-        """Adaptive Threshold와 Freeze Mode 연동."""
-        from baldur.services.circuit_breaker.adaptive_threshold import (
-            AdaptiveThresholdManager,
-        )
-        from baldur.services.circuit_breaker.freeze_mode import FreezeModeManager
-
-        # Freeze Mode 활성화
-        FreezeModeManager._instance = None
-        freeze_manager = FreezeModeManager()
-        freeze_manager.activate(reason="test")
-
-        # Adaptive Threshold 확인
-        threshold_manager = AdaptiveThresholdManager()
-
-        with patch.object(
-            threshold_manager, "get_current_emergency_level", return_value="LOCKDOWN"
-        ):
-            threshold = threshold_manager.get_adjusted_threshold()
-            allowed, _ = threshold_manager.should_allow_auto_open()
-
-        assert threshold.is_lockdown is True
-        assert allowed is False
+class TestKillSwitchFreezeIntegration:
+    """Cross-module wiring checks."""
 
     def test_imports_work(self):
-        """모든 모듈 import 확인."""
+        """The package exposes the surviving advanced-protection symbols."""
         from baldur.services.circuit_breaker import (
-            # Adaptive Threshold
-            AdaptiveThresholdManager,
             FreezeModeManager,
             PanicThresholdMonitor,
+            reset_freeze_mode_manager,
+            reset_panic_threshold_monitor,
         )
 
-        # 모든 import 성공
-        assert AdaptiveThresholdManager is not None
         assert FreezeModeManager is not None
         assert PanicThresholdMonitor is not None
+        assert reset_freeze_mode_manager is not None
+        assert reset_panic_threshold_monitor is not None
 
 
 # =============================================================================
@@ -613,17 +370,17 @@ class TestKillSwitchAdaptiveFreezeIntegration:
 
 
 class TestAuditHelpers:
-    """Audit Helper 함수 테스트."""
+    """Audit helper delegation."""
 
     @pytest.fixture(autouse=True)
     def _require_pro(self):
         pytest.importorskip("baldur_pro")
 
     def test_log_kill_switch_override_audit(self):
-        """Kill Switch Override Audit 기록."""
+        """Kill Switch Override audit is recorded."""
         from baldur_pro.services.audit import log_kill_switch_override_audit
 
-        # WAL 기록 성공 확인
+        # Confirms the WAL write succeeded
         result = log_kill_switch_override_audit(
             service_name="payment-api",
             action="force_open",
@@ -631,11 +388,11 @@ class TestAuditHelpers:
             controlled_by_id=123,
         )
 
-        # WAL 시퀀스 또는 None 반환
+        # Returns a WAL sequence number, or None
         assert result is None or isinstance(result, int)
 
     def test_log_panic_threshold_audit(self):
-        """Panic Threshold Audit 기록."""
+        """Panic Threshold audit is recorded."""
         from baldur_pro.services.audit import log_panic_threshold_audit
 
         result = log_panic_threshold_audit(
@@ -650,7 +407,7 @@ class TestAuditHelpers:
         assert result is None or isinstance(result, int)
 
     def test_log_freeze_mode_audit(self):
-        """Freeze Mode Audit 기록."""
+        """Freeze Mode audit is recorded."""
         from baldur_pro.services.audit import log_freeze_mode_audit
 
         result = log_freeze_mode_audit(

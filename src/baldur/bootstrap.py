@@ -3228,6 +3228,16 @@ _DEFAULT_SCHEDULED_JOBS: tuple[tuple[str, str, str, float], ...] = (
         "collect_canary_metrics",
         120.0,
     ),
+    # 766 D3 - the panic-threshold escalation lane. One cluster-scoped read
+    # per tick; two consecutive triggered ticks declare Emergency Level 3, so
+    # the interval is also the detection latency (20s against a
+    # recovery_timeout measured in minutes).
+    (
+        "panic_threshold",
+        "baldur.services",
+        "_synthetic_panic_threshold_tick",
+        10.0,
+    ),
 )
 
 
@@ -3244,6 +3254,7 @@ _PRO_GATED_JOBS: tuple[str, ...] = (
     "scan_zombie_rollouts",
     "auto_promote_eligible",
     "collect_canary_metrics",
+    "panic_threshold",
 )
 
 # Default jobs that additionally require an ACTIVE entitlement verdict, not
@@ -3258,6 +3269,7 @@ _ENTITLEMENT_GATED_JOBS: tuple[str, ...] = (
     "scan_zombie_rollouts",
     "auto_promote_eligible",
     "collect_canary_metrics",
+    "panic_threshold",
 )
 
 
@@ -3385,6 +3397,8 @@ def _resolve_job_callable(module_path: str, attr: str) -> Callable[[], Any] | No
         return _build_sla_drift_callable()
     if attr == "_synthetic_config_apply":
         return _build_config_apply_callable()
+    if attr == "_synthetic_panic_threshold_tick":
+        return _build_panic_threshold_callable()
 
     try:
         mod = importlib.import_module(module_path)
@@ -3412,6 +3426,25 @@ def _build_cb_recovery_callable() -> Callable[[], Any]:
         return service.check_recovery_transitions()
 
     _tick.__name__ = "cb_recovery_tick"
+    return _tick
+
+
+def _build_panic_threshold_callable() -> Callable[[], Any]:
+    """Return a zero-arg callable that advances the panic-threshold lane.
+
+    Same shape as the cb_recovery synthetic: composed from the monitor's own
+    accessor so the inline scheduler needs no Celery ``self``. The tick reads
+    its own enable flag, so registration does not imply the lane is live.
+    """
+
+    def _tick() -> Any:
+        from baldur.services.circuit_breaker.panic_threshold import (
+            get_panic_threshold_monitor,
+        )
+
+        return get_panic_threshold_monitor().tick()
+
+    _tick.__name__ = "panic_threshold_tick"
     return _tick
 
 

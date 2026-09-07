@@ -21,6 +21,9 @@ from baldur.interfaces.repositories import (
     CircuitBreakerStateRepository,
     resolve_manual_override_expiry,
 )
+from baldur.services.circuit_breaker.exceptions import (
+    CircuitBreakerStateUnavailableError,
+)
 from baldur.utils.serialization import fast_loads
 from baldur.utils.time import utc_now
 
@@ -28,6 +31,14 @@ if TYPE_CHECKING:
     from baldur.adapters.resilient.backend import ResilientStorageBackend
 
 logger = structlog.get_logger()
+
+# Cursor-SCAN bounds for the cluster-verdict read, mirroring the guards
+# ``get_open_states()`` uses. There they cap a best-effort walk that returns
+# what it found; here exceeding either bound means the keyspace was not fully
+# enumerated, which the cluster contract reports as unavailable.
+_CLUSTER_SCAN_PAGE_SIZE = 100
+_CLUSTER_SCAN_MAX_ITERATIONS = 1000
+_CLUSTER_SCAN_DEADLINE_SECONDS = 2.0
 
 
 # 476 D2/C2/C4: atomic HALF_OPEN slot acquisition.
@@ -834,6 +845,95 @@ class RedisCircuitBreakerStateRepository(
                 error=e,
             )
             return self._get_all_from_memory()
+
+    def get_cluster_states(self) -> list[CircuitBreakerStateData]:
+        """Get every state from Redis itself, or raise.
+
+        The cluster-verdict read (766 D4). Same cursor SCAN as
+        ``get_open_states()``, with none of its silent substitutions: this
+        method never answers from ``_get_all_from_memory()``, never returns a
+        partially scanned keyspace, and never lets a mid-scan Redis blip pass
+        a mixed list off as the shared view. Every one of those failures
+        raises ``CircuitBreakerStateUnavailableError`` and leaves the caller
+        to pick its own safe direction.
+
+        The per-key read is the fallback that makes the last case necessary:
+        ``hgetall`` switches the backend to degraded and answers from this
+        process's memory on error, so a blip during the walk would otherwise
+        yield store rows and fallback rows in one list. Sampling
+        ``degrade_count`` before the SCAN and after the last key decides the
+        question — an unchanged sample across a walk that started available
+        means every row came from Redis. A sample-after ``is_degraded`` check
+        does not suffice: the backend's own recovery can flip the mode back
+        inside this loop's deadline.
+
+        ``get_all_states()`` keeps its fallback semantics for every existing
+        caller.
+        """
+        operation = "get_cluster_states"
+
+        if self._declining_unreached_default():
+            raise CircuitBreakerStateUnavailableError(
+                operation, "unreached_default_store"
+            )
+
+        if self._backend.is_degraded and not self._backend.ensure_redis():
+            raise CircuitBreakerStateUnavailableError(operation, "backend_degraded")
+
+        degrade_count_before = self._backend.degrade_count
+
+        try:
+            results = self._scan_every_state()
+        except CircuitBreakerStateUnavailableError:
+            raise
+        except Exception as e:
+            raise CircuitBreakerStateUnavailableError(
+                operation, f"scan_failed: {e}"
+            ) from e
+
+        if self._backend.degrade_count != degrade_count_before:
+            raise CircuitBreakerStateUnavailableError(operation, "degraded_during_scan")
+
+        return results
+
+    def _scan_every_state(self) -> list[CircuitBreakerStateData]:
+        """Walk the whole CB keyspace by cursor SCAN, or raise.
+
+        Raises ``CircuitBreakerStateUnavailableError`` when the walk hits its
+        iteration or deadline guard: a partially enumerated keyspace is not a
+        cluster answer.
+        """
+        import time
+
+        prefix = self._scan_prefix()
+        pattern = f"{prefix}*"
+        cursor: int = 0
+        results: list[CircuitBreakerStateData] = []
+        iterations = 0
+        deadline = time.monotonic() + _CLUSTER_SCAN_DEADLINE_SECONDS
+
+        while True:
+            cursor, keys = self._backend.raw_redis_client.scan(
+                cursor=cursor,
+                match=pattern,
+                count=_CLUSTER_SCAN_PAGE_SIZE,
+            )
+            for key in keys:
+                name = key.decode() if isinstance(key, bytes) else key
+                data = self.get_state(name[len(prefix) :])
+                if data:
+                    results.append(data)
+
+            iterations += 1
+            if cursor == 0:
+                return results
+            if (
+                iterations >= _CLUSTER_SCAN_MAX_ITERATIONS
+                or time.monotonic() > deadline
+            ):
+                raise CircuitBreakerStateUnavailableError(
+                    "get_cluster_states", "scan_incomplete"
+                )
 
     def get_open_states(
         self, limit: int | None = None

@@ -28,10 +28,7 @@ from typing import Any
 
 import structlog
 
-from baldur.services.circuit_breaker.models import (
-    CircuitBreakerAdvancedConfig,
-    ServiceConfig,
-)
+from baldur.services.circuit_breaker.models import ServiceConfig
 from baldur.utils.time import utc_now
 
 logger = structlog.get_logger()
@@ -387,36 +384,6 @@ class ServiceConfigManager:
         if config is not None and config.window_seconds is not None:
             return config.window_seconds
         return default
-
-    # =========================================================================
-    # Bulk Configuration
-    # =========================================================================
-
-    def configure_from_advanced_config(
-        self,
-        config: CircuitBreakerAdvancedConfig,
-    ) -> int:
-        """
-        Load service configuration from CircuitBreakerAdvancedConfig.
-
-        Args:
-            config: Advanced configuration
-
-        Returns:
-            int: Number of services registered
-        """
-        # Clear existing services
-        self.clear_services()
-
-        # Register services
-        count = self.register_services(config.services)
-
-        logger.info(
-            "service_config_manager.configured_advanced_config_services",
-            registered_services_count=count,
-        )
-
-        return count
 
     # =========================================================================
     # Status

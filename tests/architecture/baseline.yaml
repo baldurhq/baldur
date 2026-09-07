@@ -298,8 +298,7 @@ pro_import_boundary:
   #   - meta/shutdown.py:18 — SelfHealerWatchdog → baldur.interfaces.meta_watchdog.SelfhealerWatchdog
   #   - resilience/policies/__init__.py:84 — BulkheadPolicy → PEP 562 __getattr__ (C-d1 rule 4)
   #   - resilience/policies/__init__.py:95 — ThrottlePolicy TYPE_CHECKING removed (PEP 562 lazy already present)
-  #   - services/circuit_breaker/adaptive_threshold.py:35 — EmergencyModeManager TYPE_CHECKING → baldur.interfaces.emergency.EmergencyManager
-  #   - services/circuit_breaker/panic_threshold.py:40 — same
+  #   - services/circuit_breaker/panic_threshold.py:40 — EmergencyModeManager TYPE_CHECKING → baldur.interfaces.emergency.EmergencyManager
   #   - services/config_shadow/evaluators/live_canary.py:21 — PassCriteria → baldur.models.canary (D-d2 relocate)
   #   - services/correlation_engine/emergency_decision.py:44 — EmergencyLevel → baldur.models.emergency (D-d1 already OSS)
   #   - services/regional_emergency/__init__.py:69 — ScopedEmergencyState → baldur.models.emergency (D-d2 relocate)
@@ -344,7 +343,7 @@ dormant_import_boundary_count: 7
 # reclaimed. Give a new entry an ISO `YYYY-MM-DD` target_remove_by instead of
 # raising this number. Per-repo value: the two baselines are independently
 # scrubbed copies with no auto-sync (G41/G67 precedent).
-dateless_baseline_budget: 258
+dateless_baseline_budget: 249
 
 # G19 — tests/ may not module-level-import baldur_pro / baldur_dormant
 # without a `pytest.importorskip("baldur_pro")` (or "baldur_dormant") call
@@ -438,19 +437,10 @@ flag_consumer_reachability: []
 dead_boolean_config_fields:
   - {file: src/baldur/core/tls.py, symbol: TLSConfig.verify_ssl, reason: dead flag - zero production read (probe-verified 2026-07-20), ticket: '722'}
   - {file: src/baldur/models/recovery.py, symbol: RecoveryGateConfig.gradual_recovery, reason: serialized-live - round-trips through the emergency config API via to_dict/from_dict, no behavioral read (verified 2026-07-22), ticket: '722'}
-  - {file: src/baldur/services/circuit_breaker/models.py, symbol: CircuitBreakerAdvancedConfig.allow_manual_override_in_lockdown, reason: dead flag - zero production read (probe-verified 2026-07-20), ticket: '722'}
-  - {file: src/baldur/services/circuit_breaker/models.py, symbol: CircuitBreakerAdvancedConfig.blast_radius_block_on_critical, reason: dead flag - zero production read (probe-verified 2026-07-20), ticket: '722'}
-  - {file: src/baldur/services/circuit_breaker/models.py, symbol: CircuitBreakerAdvancedConfig.blast_radius_integration, reason: dead flag - zero production read (probe-verified 2026-07-20), ticket: '722'}
-  - {file: src/baldur/services/circuit_breaker/models.py, symbol: CircuitBreakerAdvancedConfig.freeze_on_lockdown, reason: dead flag - zero production read (probe-verified 2026-07-20), ticket: '722'}
-  - {file: src/baldur/services/circuit_breaker/models.py, symbol: OpenStrategy.force_after_timeout, reason: dead flag - zero production read (probe-verified 2026-07-20), ticket: '722'}
   - {file: src/baldur/settings/arq_task.py, symbol: ArqTaskSettings.redis_ssl, reason: dead flag - zero production read; the queue adapter builds its connection without it (verified 2026-07-22), ticket: '722'}
   - {file: src/baldur/settings/bridge.py, symbol: BridgeSettings.tenacity_metrics, reason: dead flag - zero production read (probe-verified 2026-07-20), ticket: '722'}
   - {file: src/baldur/settings/chaos.py, symbol: ChaosSettings.dry_run_default, reason: dead flag - zero production read (probe-verified 2026-07-20), ticket: '722'}
   - {file: src/baldur/settings/chaos.py, symbol: ChaosSettings.require_approval, reason: dead flag - zero production read (probe-verified 2026-07-20), ticket: '722'}
-  - {file: src/baldur/settings/circuit_breaker_advanced.py, symbol: CircuitBreakerAdvancedSettings.allow_manual_override_in_lockdown, reason: dead flag - zero production read (probe-verified 2026-07-20), ticket: '722'}
-  - {file: src/baldur/settings/circuit_breaker_advanced.py, symbol: CircuitBreakerAdvancedSettings.blast_radius_block_on_critical, reason: dead flag - zero production read (probe-verified 2026-07-20), ticket: '722'}
-  - {file: src/baldur/settings/circuit_breaker_advanced.py, symbol: CircuitBreakerAdvancedSettings.blast_radius_integration, reason: dead flag - zero production read (probe-verified 2026-07-20), ticket: '722'}
-  - {file: src/baldur/settings/circuit_breaker_advanced.py, symbol: CircuitBreakerAdvancedSettings.freeze_on_lockdown, reason: dead flag - zero production read (probe-verified 2026-07-20), ticket: '722'}
   - {file: src/baldur/settings/forensic.py, symbol: ForensicSettings.collect_request_body, reason: dead flag - zero production read (probe-verified 2026-07-20), ticket: '722'}
   - {file: src/baldur/settings/forensic.py, symbol: ForensicSettings.collect_response_body, reason: dead flag - zero production read (probe-verified 2026-07-20), ticket: '722'}
   - {file: src/baldur/settings/forensic.py, symbol: ForensicSettings.include_local_variables, reason: dead control surface - no behavioral read; value only echoed via wholesale settings serialization (verified 2026-07-22), ticket: '722'}
