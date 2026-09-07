@@ -1,17 +1,18 @@
 """
-StartupHashChainSync 통합 테스트.
+Integration tests for ``StartupHashChainSync``.
 
-시스템 시작 시 해시 체인 동기화 전체 워크플로우 테스트:
-- Redis/파일 상태 비교 및 동기화 결정 로직
-- Redis 앞선 상태, 파일 앞선 상태, 동기화된 상태 처리
-- 크래시 후 PENDING 시퀀스 정리
-- 멱등성(idempotent) 동기화 동작
+The whole boot-time reconciliation workflow between Redis and the ledger:
 
-테스트 시나리오는 크래시나 네트워크 문제로 인해
-Redis와 파일 상태가 불일치할 수 있는 실제 재시작 상황을 시뮬레이션합니다.
+- comparing Redis and file state and deciding what to sync
+- Redis ahead, file ahead, and already-in-sync postures
+- cleaning up PENDING sequences left by a crash
+- idempotency of a second ``sync()``
+
+The scenarios simulate real restarts, where a crash or a network problem can
+leave Redis and the ledger disagreeing about where the chain was.
 
 Related code:
-    baldur/audit/integrity.py#StartupHashChainSync
+    ``baldur.audit.integrity.sync``
 """
 
 from __future__ import annotations
@@ -66,7 +67,19 @@ class IntegrationMockRedis:
         value = self._data.get(key)
         return str(value).encode() if value is not None else None
 
-    def set(self, key: str, value: Any, nx: bool = False, ex: int = None) -> bool:
+    def set(
+        self,
+        key: str,
+        value: Any,
+        nx: bool = False,
+        ex: int = None,
+        px: int = None,
+    ) -> bool:
+        """SET, including the ``NX PX`` form the chain's distributed lock uses.
+
+        The expiry is accepted and not simulated: it is the lock's deadlock
+        escape hatch, and no test here holds a lock long enough to reach it.
+        """
         if self._failure_mode:
             raise ConnectionError("Redis unavailable")
         with self._lock:
@@ -74,6 +87,46 @@ class IntegrationMockRedis:
                 return False
             self._data[key] = value
             return True
+
+    def eval(self, script: str, numkeys: int, *args: Any) -> int:
+        """The one Lua script this suite reaches: the lock's check-and-delete.
+
+        ``RedisDistributedLock.release`` deletes the key only when it still
+        holds this owner's id, so the reconciliation cannot release a lock a
+        peer took over after an expiry.
+        """
+        if self._failure_mode:
+            raise ConnectionError("Redis unavailable")
+        if numkeys != 1 or len(args) < 2:
+            return 0
+        key, expected_owner = args[0], args[1]
+        with self._lock:
+            if self._data.get(key) == expected_owner:
+                del self._data[key]
+                return 1
+        return 0
+
+    def scan(
+        self,
+        cursor: int = 0,
+        match: str = None,
+        count: int = None,
+    ) -> tuple[int, list[bytes]]:
+        """One SCAN round trip: every match, then cursor 0.
+
+        The PENDING sweep drives the cursor itself rather than using
+        ``scan_iter``, so a double that only answers ``keys()`` leaves the
+        sweep raising into its own ``except`` and cleaning nothing.
+        """
+        if self._failure_mode:
+            raise ConnectionError("Redis unavailable")
+        import fnmatch
+
+        all_keys = list(self._data.keys()) + list(self._hashes.keys())
+        matching = [
+            k.encode() for k in all_keys if match is None or fnmatch.fnmatch(k, match)
+        ]
+        return 0, matching
 
     def delete(self, *keys: str) -> int:
         if self._failure_mode:
@@ -143,7 +196,8 @@ class MockPipeline:
         self._redis = redis
         self._commands: list[tuple] = []
 
-    def set(self, key: str, value: Any) -> MockPipeline:
+    def set(self, key: str, value: Any, ex: int = None) -> MockPipeline:
+        """``ex`` is accepted and ignored — the ORPHANED marker's retention."""
         self._commands.append(("set", key, value))
         return self
 
@@ -198,13 +252,16 @@ def create_audit_log_file(
     Args:
         log_dir: Directory to create file in
         entries: List of log entries
-        date: Date string for filename (default: today)
+        date: Date string for filename, in the ``%Y-%m-%d`` shape the
+            adapter itself substitutes (default: today). The reader selects
+            files by the writing adapter's exact pattern, so a name no
+            adapter produces is correctly invisible to it.
 
     Returns:
         Path to created file
     """
     if date is None:
-        date = datetime.now(UTC).strftime("%Y%m%d")
+        date = datetime.now(UTC).strftime("%Y-%m-%d")
 
     log_file = log_dir / f"audit_{date}.jsonl"
 
@@ -587,13 +644,24 @@ class TestStartupSyncIdempotent:
 class TestStartupSyncErrorHandling:
     """Tests for error handling during sync."""
 
-    def test_redis_failure_graceful_handling(self, mock_redis, temp_log_dir):
+    def test_redis_failure_reports_error_without_raising(
+        self, mock_redis, temp_log_dir
+    ):
         """
-        Redis failure during sync should be handled gracefully.
+        Purpose:
+            A Redis that cannot answer at boot leaves the chain unreconciled,
+            and ``sync()`` has to say so rather than report the reconciliation
+            it did not perform. It still must not raise: ``init()`` treats
+            this step as best-effort and only logs what the result says.
 
-        Actual behavior: The sync process uses try-except and returns
-        success even when Redis operations fail, logging errors internally.
-        This is graceful degradation - the system continues to function.
+        Expected:
+            - ``sync()`` returns instead of raising.
+            - ``status`` is ``"error"``, not the ``"success"`` that used to be
+              reported for a boot where nothing was compared. A caller that
+              believed ``success`` had no way to distinguish "in sync" from
+              "never looked".
+            - the result still carries ``action``, so the caller's logging is
+              unconditional.
         """
         mock_redis.enable_failure_mode()
 
@@ -605,9 +673,7 @@ class TestStartupSyncErrorHandling:
 
         result = sync.sync()
 
-        # Graceful degradation - system continues despite Redis failure
-        assert result["status"] == "success"
-        # Actions are minimal or zero due to Redis unavailability
+        assert result["status"] == "error"
         assert "action" in result  # action field is always present
 
     def test_corrupted_log_file_handled(self, mock_redis, temp_log_dir):
@@ -615,7 +681,7 @@ class TestStartupSyncErrorHandling:
         Corrupted log file should not crash sync.
         """
         # Create corrupted log file
-        log_file = temp_log_dir / "audit_20260118.jsonl"
+        log_file = temp_log_dir / "audit_2026-01-18.jsonl"
         with open(log_file, "w") as f:
             f.write("invalid json\n")
             f.write("{malformed")
@@ -646,7 +712,7 @@ class TestStartupSyncMultipleFiles:
         """
         # Create older file
         old_entries = build_hash_chain_entries(5, start_seq=1)
-        create_audit_log_file(temp_log_dir, old_entries, date="20260115")
+        create_audit_log_file(temp_log_dir, old_entries, date="2026-01-15")
 
         # Create newer file with higher sequences
         new_entries = build_hash_chain_entries(5, start_seq=6)
@@ -664,7 +730,7 @@ class TestStartupSyncMultipleFiles:
             entry["integrity"]["current_hash"] = current_hash
             prev_hash = current_hash
 
-        create_audit_log_file(temp_log_dir, new_entries, date="20260118")
+        create_audit_log_file(temp_log_dir, new_entries, date="2026-01-18")
 
         sync = StartupHashChainSync(
             redis_client=mock_redis,

@@ -1,16 +1,18 @@
 """
-크래시 복구 시나리오 Chaos 테스트.
+Chaos tests for crash-recovery scenarios.
 
-프로세스 크래시 복구 능력 검증:
-- WAL 기반 미커밋 쓰기 복구
-- 크래시 후 PENDING 시퀀스 정리
-- 파일에서 해시 체인 상태 복원
-- 크래시 복구 후 데이터 무결성
+What a process is expected to recover after a crash:
 
-실제 크래시 시나리오 시뮬레이션:
-- 쓰기 중간 프로세스 크래시
-- 미처리 데이터가 있는 서버 재시작
-- WAL 엔트리에서 복구
+- uncommitted writes held in the WAL
+- PENDING sequences left behind by the crashed process
+- hash chain state restored from the ledger files
+- data integrity across the whole recovery
+
+Simulated crash shapes:
+
+- a process dying mid-write
+- a server restart with unprocessed data still queued
+- recovery from WAL entries
 
 Related code:
     baldur/audit/graceful_degradation.py#HashChainWALRecovery
@@ -76,12 +78,59 @@ class CrashTestRedis:
         value = self._data.get(key)
         return str(value).encode() if value is not None else None
 
-    def set(self, key: str, value: Any, nx: bool = False, ex: int = None) -> bool:
+    def set(
+        self,
+        key: str,
+        value: Any,
+        nx: bool = False,
+        ex: int = None,
+        px: int = None,
+    ) -> bool:
+        """SET, including the ``NX PX`` form the chain's distributed lock uses.
+
+        The expiry is accepted and not simulated: it is the lock's deadlock
+        escape hatch, and no test here holds a lock long enough to reach it.
+        """
         with self._lock:
             if nx and key in self._data:
                 return False
             self._data[key] = value
             return True
+
+    def eval(self, script: str, numkeys: int, *args: Any) -> int:
+        """The one Lua script this suite reaches: the lock's check-and-delete.
+
+        ``RedisDistributedLock.release`` deletes the key only when it still
+        holds this owner's id, so the reconciliation cannot release a lock a
+        peer took over after an expiry.
+        """
+        if numkeys != 1 or len(args) < 2:
+            return 0
+        key, expected_owner = args[0], args[1]
+        with self._lock:
+            if self._data.get(key) == expected_owner:
+                del self._data[key]
+                return 1
+        return 0
+
+    def scan(
+        self,
+        cursor: int = 0,
+        match: str = None,
+        count: int = None,
+    ) -> tuple[int, list[bytes]]:
+        """One SCAN round trip: every match, then cursor 0.
+
+        The PENDING sweep drives the cursor itself rather than using
+        ``scan_iter``, so a double that only answers ``keys()`` leaves the
+        sweep raising into its own ``except`` and cleaning nothing.
+        """
+        import fnmatch
+
+        all_keys = list(self._data.keys()) + list(self._hashes.keys())
+        return 0, [
+            k.encode() for k in all_keys if match is None or fnmatch.fnmatch(k, match)
+        ]
 
     def delete(self, *keys: str) -> int:
         count = 0
@@ -242,8 +291,13 @@ def create_audit_entry(sequence: int, previous_hash: str = "GENESIS") -> dict[st
 
 
 def write_audit_file(log_dir: Path, entries: list[dict[str, Any]]) -> Path:
-    """Write audit entries to file."""
-    date = datetime.now(UTC).strftime("%Y%m%d")
+    """Write audit entries to file.
+
+    The date shape is the adapter's own (``%Y-%m-%d``): the ledger reader
+    selects files by the writing adapter's exact pattern, so a name no adapter
+    produces is correctly invisible to it.
+    """
+    date = datetime.now(UTC).strftime("%Y-%m-%d")
     log_file = log_dir / f"audit_{date}.jsonl"
 
     with open(log_file, "w", encoding="utf-8") as f:
