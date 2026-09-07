@@ -30,6 +30,7 @@ Verification techniques (per UNIT_TEST_GUIDELINES §8):
 
 from __future__ import annotations
 
+import json
 from unittest.mock import patch
 
 import pytest
@@ -389,3 +390,223 @@ class TestStartupSyncPendingScan:
             for call in mock_logger.warning.call_args_list
             if call.args and call.args[0] == "startup_sync.pending_scan_capped"
         ]
+
+
+# =============================================================================
+# The rewind runs under the chain's own lock, and reports what it could not do
+# =============================================================================
+
+_CHAIN_LOCK_KEY = f"{_CHAIN_PREFIX}audit:hash_chain:lock"
+_STATE_KEY = "acme:hashchain:eu-west:audit:hash_chain:state"
+
+
+def _write_ledger_tail(log_dir, sequence: int, current_hash: str) -> None:
+    """Put one chained row on disk, under the default reader's filename."""
+    row = {
+        "event_type": "test.event",
+        "integrity": {
+            "sequence": sequence,
+            "previous_hash": "p" * 64,
+            "current_hash": current_hash,
+        },
+    }
+    (log_dir / "audit_2026-09-07.jsonl").write_text(
+        json.dumps(row) + "\n", encoding="utf-8"
+    )
+
+
+@pytest.fixture
+def impatient_chain_lock():
+    """Build the chain's real lock on its real key, but stop waiting fast.
+
+    The shipped blocking budget is ten seconds; a contended case that actually
+    waits it out is ten seconds of boot time inside a unit test. The key, the
+    client and the SET NX semantics stay real — only the patience changes.
+    """
+    real_build = sync_module.build_chain_lock
+
+    def _fast(redis_client, key_prefix, **kwargs):
+        return real_build(redis_client, key_prefix, blocking_timeout=0.05)
+
+    with patch.object(sync_module, "build_chain_lock", side_effect=_fast):
+        yield
+
+
+class TestStartupSyncLockAndErrorBehavior:
+    """Steps 1-3 hold the chain's distributed lock; step 4 does not need it.
+
+    Unlocked, a peer's in-flight mint plus this rewind is a duplicate factory:
+    the peer repairs and mints ``T+1`` inside its own lock, and before its
+    append lands the rewind rolls the counter back to ``T`` — so the next
+    write mints ``T+1`` a second time and no guard can see it.
+    """
+
+    def test_a_lock_held_by_another_owner_skips_the_rewind_and_says_so(
+        self, manager, redis_client, tmp_path, impatient_chain_lock
+    ):
+        redis_client.set(_CHAIN_LOCK_KEY, "another-boots-owner-id")
+        _write_ledger_tail(tmp_path, 12, "f" * 64)
+        sync = StartupHashChainSync.from_manager(
+            manager, LedgerTailReader(tmp_path), _ROOT_PREFIX
+        )
+
+        result = sync.sync()
+
+        assert result["action"] == "lock_unavailable"
+        assert result["status"] == "error"
+
+    def test_a_lock_held_by_another_owner_writes_no_chain_key(
+        self, manager, redis_client, tmp_path, impatient_chain_lock
+    ):
+        """The write-time guard repairs the source on the first write, so a
+        missed boot rewind is latency — but a rewind made without the lock is
+        a duplicate."""
+        redis_client.set(_CHAIN_LOCK_KEY, "another-boots-owner-id")
+        _write_ledger_tail(tmp_path, 12, "f" * 64)
+        sync = StartupHashChainSync.from_manager(
+            manager, LedgerTailReader(tmp_path), _ROOT_PREFIX
+        )
+
+        sync.sync()
+
+        assert redis_client.get(_SEQUENCE_KEY) is None
+        assert redis_client.hgetall(_STATE_KEY) == {}
+
+    def test_the_pending_sweep_still_runs_when_the_lock_is_unavailable(
+        self, manager, redis_client, tmp_path, impatient_chain_lock
+    ):
+        """Crash recovery needs nothing from the chain lock, and a boot that
+        skipped it would leave every stale reservation in place."""
+        redis_client.set(_CHAIN_LOCK_KEY, "another-boots-owner-id")
+        redis_client.set(_pending_key(3), "expected-hash")
+        sync = StartupHashChainSync.from_manager(
+            manager, LedgerTailReader(tmp_path), _ROOT_PREFIX
+        )
+
+        result = sync.sync()
+
+        assert result["pending_cleaned"] == 1
+        assert redis_client.get(_orphan_key(3)) is not None
+
+    def test_an_unreadable_ledger_is_reported_as_an_error_not_a_rewind_to_zero(
+        self, manager, redis_client, tmp_path
+    ):
+        """``(0, "")`` from an unreadable ledger would rewind Redis to 0 and
+        re-use every number the files hold."""
+        redis_client.set(_SEQUENCE_KEY, 40)
+        ledger = LedgerTailReader(tmp_path)
+        sync = StartupHashChainSync.from_manager(manager, ledger, _ROOT_PREFIX)
+
+        with patch.object(ledger, "read", side_effect=OSError("disk gone")):
+            result = sync.sync()
+
+        assert result["status"] == "error"
+        assert "disk gone" in result["error"]
+        assert int(redis_client.get(_SEQUENCE_KEY)) == 40
+
+    def test_the_pending_sweep_still_runs_when_the_ledger_cannot_be_read(
+        self, manager, redis_client, tmp_path
+    ):
+        """The two halves fail apart on purpose: a ledger this step cannot
+        read must not cost the crash-recovery sweep."""
+        redis_client.set(_pending_key(4), "expected-hash")
+        ledger = LedgerTailReader(tmp_path)
+        sync = StartupHashChainSync.from_manager(manager, ledger, _ROOT_PREFIX)
+
+        with patch.object(ledger, "read", side_effect=OSError("disk gone")):
+            result = sync.sync()
+
+        assert result["pending_cleaned"] == 1
+
+    def test_an_errored_sync_is_not_marked_completed(
+        self, manager, redis_client, tmp_path
+    ):
+        """Idempotency must not swallow the retry: a boot that failed to
+        reconcile has not reconciled."""
+        ledger = LedgerTailReader(tmp_path)
+        sync = StartupHashChainSync.from_manager(manager, ledger, _ROOT_PREFIX)
+
+        with patch.object(ledger, "read", side_effect=OSError("disk gone")):
+            sync.sync()
+
+        assert sync._sync_completed is False
+
+    def test_a_peers_completed_mint_above_the_tail_is_read_as_redis_ahead(
+        self, manager, redis_client, tmp_path
+    ):
+        """The ledger tail lags the last mint by the entries still between
+        their mint and their append. Rewinding to it re-mints them."""
+        _write_ledger_tail(tmp_path, 12, "f" * 64)
+        redis_client.set(_SEQUENCE_KEY, 13)
+        sync = StartupHashChainSync.from_manager(
+            manager, LedgerTailReader(tmp_path), _ROOT_PREFIX
+        )
+
+        result = sync.sync()
+
+        assert result["action"] == "redis_ahead_ok"
+        assert result["file_sequence"] == 12
+        assert int(redis_client.get(_SEQUENCE_KEY)) == 13
+
+    def test_a_redis_behind_the_ledger_is_rewound_to_the_tail(
+        self, manager, redis_client, tmp_path
+    ):
+        """The positive half: the rewind still happens when it is safe."""
+        _write_ledger_tail(tmp_path, 12, "f" * 64)
+        redis_client.set(_SEQUENCE_KEY, 3)
+        sync = StartupHashChainSync.from_manager(
+            manager, LedgerTailReader(tmp_path), _ROOT_PREFIX
+        )
+
+        result = sync.sync()
+
+        assert result["action"] == "synced_redis_to_file"
+        assert int(redis_client.get(_SEQUENCE_KEY)) == 12
+        assert redis_client.hgetall(_STATE_KEY)[b"synced_from"] == b"file_recovery"
+
+
+class TestStartupSyncFromManagerContract:
+    """The reader comes from the adapter, not from a directory path.
+
+    Only the adapter knows which files it writes; a sync that rebuilt the
+    selection from ``log_dir`` alone would reconcile a partitioned sibling's
+    tail against this chain's counter.
+    """
+
+    def test_the_ledger_reader_is_carried_through_unchanged(self, manager, tmp_path):
+        reader = LedgerTailReader(tmp_path, "audit_{date}_worker.jsonl", False)
+
+        sync = StartupHashChainSync.from_manager(manager, reader, _ROOT_PREFIX)
+
+        assert sync._ledger is reader
+
+    def test_the_log_dir_is_taken_off_the_reader(self, manager, tmp_path):
+        reader = LedgerTailReader(tmp_path)
+
+        sync = StartupHashChainSync.from_manager(manager, reader, _ROOT_PREFIX)
+
+        assert sync._log_dir == tmp_path
+
+    def test_the_tail_read_goes_through_that_reader(self, manager, tmp_path):
+        reader = LedgerTailReader(tmp_path)
+        sync = StartupHashChainSync.from_manager(manager, reader, _ROOT_PREFIX)
+
+        with patch.object(reader, "read", return_value=None) as read_spy:
+            sync.sync()
+
+        read_spy.assert_called_once_with()
+
+    def test_the_direct_constructor_builds_a_reader_from_its_own_arguments(
+        self, redis_client, tmp_path
+    ):
+        """The non-``from_manager`` path still has to select exact files."""
+        sync = StartupHashChainSync(
+            redis_client,
+            tmp_path,
+            key_prefix=_CHAIN_PREFIX,
+            filename_pattern="audit_{date}_worker.jsonl",
+            rotate_daily=False,
+        )
+
+        assert sync._ledger.filename_pattern == "audit_{date}_worker.jsonl"
+        assert sync._ledger.rotate_daily is False

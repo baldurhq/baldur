@@ -296,3 +296,172 @@ class TestAuditBackendMetricsNoPrometheusContract:
         # Then
         assert result.returncode == 0, f"stderr={result.stderr}"
         assert "OK" in result.stdout
+
+
+class TestAuditHashChainCountersContract:
+    """The two counters that make a repair visible without a verification pass.
+
+    Both are labelled or label-less by design: a healthy chain exports nothing
+    at all, so a sample's existence is itself the signal. An operator alerting
+    on ``increase(...[5m]) > 0`` cannot do that against a series that is
+    always present reading zero.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _require_prometheus(self):
+        from baldur.metrics.audit_backend_metrics import METRICS_AVAILABLE
+
+        if not METRICS_AVAILABLE:
+            pytest.skip("prometheus_client not installed")
+
+    def test_the_source_reset_counter_exports_under_the_design_name(self):
+        from prometheus_client import REGISTRY
+
+        from baldur.metrics.audit_backend_metrics import (
+            increment_audit_hash_chain_source_reset,
+        )
+
+        increment_audit_hash_chain_source_reset(manager="redis", reason="counter_reset")
+
+        assert (
+            REGISTRY.get_sample_value(
+                "baldur_audit_hash_chain_source_resets_total",
+                {"manager": "redis", "reason": "counter_reset"},
+            )
+            is not None
+        )
+
+    def test_the_source_reset_counter_is_sliced_by_manager_and_reason(self):
+        """An incident review needs to tell "Redis was wiped" from "the local
+        state file was truncated" without reading the ledger."""
+        from baldur.metrics.audit_backend_metrics import (
+            audit_hash_chain_source_resets_total,
+        )
+
+        assert audit_hash_chain_source_resets_total._labelnames == (
+            "manager",
+            "reason",
+        )
+
+    def test_each_manager_reason_pair_is_its_own_child(self):
+        from prometheus_client import REGISTRY
+
+        from baldur.metrics.audit_backend_metrics import (
+            increment_audit_hash_chain_source_reset,
+        )
+
+        def sample(manager: str, reason: str) -> float:
+            return (
+                REGISTRY.get_sample_value(
+                    "baldur_audit_hash_chain_source_resets_total",
+                    {"manager": manager, "reason": reason},
+                )
+                or 0.0
+            )
+
+        before_target = sample("local", "state_unreadable")
+        before_sibling = sample("local", "state_hash_stale")
+
+        increment_audit_hash_chain_source_reset(
+            manager="local", reason="state_unreadable"
+        )
+
+        assert sample("local", "state_unreadable") == before_target + 1
+        assert sample("local", "state_hash_stale") == before_sibling
+
+    def test_the_fallback_write_counter_exports_under_the_design_name(self):
+        from prometheus_client import REGISTRY
+
+        from baldur.metrics.audit_backend_metrics import (
+            increment_audit_hash_chain_fallback_write,
+        )
+
+        before = (
+            REGISTRY.get_sample_value(
+                "baldur_audit_hash_chain_fallback_writes_total", {}
+            )
+            or 0.0
+        )
+        increment_audit_hash_chain_fallback_write()
+
+        assert (
+            REGISTRY.get_sample_value(
+                "baldur_audit_hash_chain_fallback_writes_total", {}
+            )
+            == before + 1
+        )
+
+    def test_the_fallback_write_counter_carries_no_labels(self):
+        """A process-level count of entries Redis did not sequence — no
+        dimension to slice it by, and any label would fragment the series an
+        alert has to watch."""
+        from baldur.metrics.audit_backend_metrics import (
+            audit_hash_chain_fallback_writes_total,
+        )
+
+        assert audit_hash_chain_fallback_writes_total._labelnames == ()
+
+    def test_a_chain_that_never_repaired_exports_no_sample(self):
+        """Absence is a per-process fact, so it can only be observed from a
+        process that has published nothing else."""
+        result = _run_clean(
+            """
+            from prometheus_client import REGISTRY
+
+            import baldur.metrics.audit_backend_metrics  # noqa: F401
+
+            print(
+                REGISTRY.get_sample_value(
+                    "baldur_audit_hash_chain_source_resets_total",
+                    {"manager": "redis", "reason": "counter_reset"},
+                ),
+                REGISTRY.get_sample_value(
+                    "baldur_audit_hash_chain_fallback_writes_total", {}
+                ),
+            )
+            """
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "None 0.0"
+
+    def test_the_degraded_gauge_help_text_describes_the_live_posture(self):
+        """It is primed by the admission probe and then re-published by the
+        manager on every posture change, so the old "did not answer the
+        admission probe" wording described a series that no longer exists."""
+        from prometheus_client import REGISTRY
+
+        from baldur.metrics.audit_backend_metrics import (
+            set_audit_distributed_chain_degraded,
+        )
+
+        set_audit_distributed_chain_degraded(False)
+        gauge = REGISTRY._names_to_collectors["audit_distributed_chain_degraded"]
+
+        assert "right now" in gauge._documentation
+        assert "admission probe" not in gauge._documentation
+
+
+class TestAuditHashChainCountersNoPrometheusContract:
+    """Without prometheus_client the counters are inert, never absent."""
+
+    def test_incrementing_either_counter_never_raises_without_prometheus(self):
+        result = _run_poisoned(
+            """
+            from baldur.metrics.audit_backend_metrics import (
+                METRICS_AVAILABLE,
+                increment_audit_hash_chain_fallback_write,
+                increment_audit_hash_chain_source_reset,
+            )
+
+            assert METRICS_AVAILABLE is False
+            increment_audit_hash_chain_source_reset(
+                manager="local", reason="state_unreadable"
+            )
+            increment_audit_hash_chain_fallback_write()
+            print("ok")
+            """
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "ok" in result.stdout

@@ -28,6 +28,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from structlog.testing import capture_logs
 
 from baldur.adapters.audit.hashchain_adapter import (
     HashChainFileAuditLogAdapter,
@@ -38,6 +39,8 @@ from baldur.interfaces.audit_adapter import (
     AuditEntry,
     AuditLogAdapter,
 )
+from tests.factories import MockRedisClient
+from tests.factories.writable_dir import log_events
 
 # =============================================================================
 # Helpers
@@ -823,3 +826,315 @@ class TestHashChainAdapterPropertiesContract:
 
         with pytest.raises(AttributeError):
             setattr(adapter, name, "anything")
+
+
+# =============================================================================
+# The ledger the adapter owns — who reads it, and exactly which files
+# =============================================================================
+
+
+def _ledger_line(tmp_path: Path, target_id: str) -> str:
+    """Produce one genuine adapter row, for placing under a chosen filename."""
+    scratch = tmp_path / f"seed-{target_id}"
+    seed = HashChainFileAuditLogAdapter(
+        log_dir=str(scratch), enable_anchor_backup=False
+    )
+    seed.log(_make_config_change_entry(target_id))
+    seed.close()
+    lines = [
+        line
+        for path in sorted(scratch.glob("audit_*.jsonl"))
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    return lines[0]
+
+
+def _place_ledger(log_dir: Path, filename: str, line: str) -> Path:
+    log_dir.mkdir(parents=True, exist_ok=True)
+    path = log_dir / filename
+    path.write_text(line + "\n", encoding="utf-8")
+    return path
+
+
+class TestAdapterLedgerWiringContract:
+    """Only the adapter knows which files it writes, so every manager it
+    builds holds the adapter's own reader.
+
+    A chain manager that cannot see the ledger mints from a source that may
+    have lost its state — which is the whole condition this wiring closes.
+    """
+
+    def test_the_local_manager_holds_the_adapters_reader(self, tmp_path):
+        adapter = HashChainFileAuditLogAdapter(log_dir=str(tmp_path))
+
+        assert adapter.hash_chain_manager._ledger is adapter.ledger_tail_reader
+
+    def test_the_distributed_manager_holds_the_adapters_reader(self, tmp_path):
+        adapter = HashChainFileAuditLogAdapter(
+            log_dir=str(tmp_path),
+            distributed_hash_chain=True,
+            redis_client=MockRedisClient(),
+        )
+
+        assert adapter.hash_chain_manager._ledger is adapter.ledger_tail_reader
+
+    def test_the_distributed_fallback_holds_the_same_reader(self, tmp_path):
+        """The fallback appends to the same ledger — that is what makes a
+        fallback entry continue the chain instead of carrying a local-only
+        number that collides with the Redis-minted ones."""
+        adapter = HashChainFileAuditLogAdapter(
+            log_dir=str(tmp_path),
+            distributed_hash_chain=True,
+            redis_client=MockRedisClient(),
+        )
+
+        fallback = adapter.hash_chain_manager._fallback
+
+        assert fallback is not None
+        assert fallback._ledger is adapter.ledger_tail_reader
+
+    def test_the_reader_is_built_from_this_adapters_own_construction_facts(
+        self, tmp_path
+    ):
+        adapter = HashChainFileAuditLogAdapter(
+            log_dir=str(tmp_path), partition="worker", rotate_daily=False
+        )
+
+        reader = adapter.ledger_tail_reader
+
+        assert reader.log_dir == adapter.log_dir
+        assert reader.filename_pattern == "audit_{date}_worker.jsonl"
+        assert reader.rotate_daily is False
+        assert reader.filename_regex.fullmatch("audit_all_worker.jsonl")
+
+    def test_the_exposed_filename_shape_is_the_readers_own(self, tmp_path):
+        adapter = HashChainFileAuditLogAdapter(log_dir=str(tmp_path))
+
+        assert (
+            adapter.ledger_filename_regex is adapter.ledger_tail_reader.filename_regex
+        )
+
+
+class TestAdapterExactFileSelectionBehavior:
+    """``query()`` and ``verify_integrity()`` walk the adapter's exact files.
+
+    A glob over ``audit_*.jsonl`` also matches every partitioned sibling, and
+    a partition ``worker`` also matches ``celery_worker`` — so a default
+    adapter used to answer with another writer's rows and verify another
+    writer's chain.
+    """
+
+    def test_the_default_partition_ignores_partitioned_siblings(self, tmp_path):
+        log_dir = tmp_path / "audit"
+        _place_ledger(log_dir, "audit_2026-09-07.jsonl", _ledger_line(tmp_path, "mine"))
+        _place_ledger(
+            log_dir, "audit_2026-09-07_worker.jsonl", _ledger_line(tmp_path, "theirs")
+        )
+        adapter = HashChainFileAuditLogAdapter(log_dir=str(log_dir))
+
+        results = adapter.query()
+
+        assert [entry.target_id for entry in results] == ["mine"]
+
+    def test_a_partition_named_worker_ignores_celery_worker(self, tmp_path):
+        """Substring matching is what made these two the same partition."""
+        log_dir = tmp_path / "audit"
+        _place_ledger(
+            log_dir, "audit_2026-09-07_worker.jsonl", _ledger_line(tmp_path, "mine")
+        )
+        _place_ledger(
+            log_dir,
+            "audit_2026-09-07_celery_worker.jsonl",
+            _ledger_line(tmp_path, "theirs"),
+        )
+        adapter = HashChainFileAuditLogAdapter(log_dir=str(log_dir), partition="worker")
+
+        results = adapter.query()
+
+        assert [entry.target_id for entry in results] == ["mine"]
+
+    def test_an_operator_filename_pattern_override_is_honored(self, tmp_path):
+        """The override used to be ignored entirely: the walk was hardcoded to
+        the default glob, so an operator's own naming read as an empty ledger
+        and the source had nothing to compare against."""
+        log_dir = tmp_path / "audit"
+        _place_ledger(
+            log_dir, "ledger_2026-09-07.ndjson", _ledger_line(tmp_path, "mine")
+        )
+        _place_ledger(
+            log_dir, "audit_2026-09-07.jsonl", _ledger_line(tmp_path, "theirs")
+        )
+        adapter = HashChainFileAuditLogAdapter(
+            log_dir=str(log_dir), filename_pattern="ledger_{date}.ndjson"
+        )
+
+        results = adapter.query()
+
+        assert [entry.target_id for entry in results] == ["mine"]
+
+    def test_an_unreadable_dir_yields_no_rows_and_says_so(self, tmp_path):
+        """An empty answer with no record is indistinguishable from an empty
+        ledger, which is what a swallowed directory error produced."""
+        adapter = HashChainFileAuditLogAdapter(log_dir=str(tmp_path))
+        adapter.log(_make_config_change_entry())
+
+        with (
+            patch.object(
+                Path, "iterdir", autospec=True, side_effect=PermissionError("denied")
+            ),
+            capture_logs() as logs,
+        ):
+            results = adapter.query()
+
+        assert results == []
+        assert len(log_events(logs, "hash_chain_file_audit.query_failed")) == 1
+
+    def test_an_unreadable_dir_never_verifies_as_a_clean_chain(self, tmp_path):
+        """``(True, [])`` on a directory nobody could read is the shape that
+        lets an integrity dashboard stay green through a permissions fault."""
+        adapter = HashChainFileAuditLogAdapter(log_dir=str(tmp_path))
+        adapter.log(_make_config_change_entry())
+
+        with patch.object(
+            Path, "iterdir", autospec=True, side_effect=PermissionError("denied")
+        ):
+            is_valid, issues = adapter.verify_integrity()
+
+        assert is_valid is False
+        assert [issue["type"] for issue in issues] == ["verify_error"]
+
+    def test_verify_integrity_ignores_a_partitioned_siblings_chain(self, tmp_path):
+        """A sibling's file is a separate chain; reading it as this adapter's
+        reports tampering that never happened."""
+        log_dir = tmp_path / "audit"
+        adapter = HashChainFileAuditLogAdapter(log_dir=str(log_dir))
+        adapter.log(_make_config_change_entry())
+        adapter.close()
+        tampered = json.loads(_ledger_line(tmp_path, "theirs"))
+        tampered["actor"]["actor_id"] = "mallory"
+        _place_ledger(log_dir, "audit_2026-09-07_worker.jsonl", json.dumps(tampered))
+
+        assert adapter.verify_integrity() == (True, [])
+
+
+class TestAdapterPendingReservationSkipBehavior:
+    """A degraded entry was sequenced by the local fallback, so the Redis-side
+    reservation has nothing to protect — and every leg of it would log its own
+    ERROR against the same dead client, once per entry."""
+
+    def _degraded_adapter(self, tmp_path, redis_client):
+        return HashChainFileAuditLogAdapter(
+            log_dir=str(tmp_path),
+            distributed_hash_chain=True,
+            redis_client=redis_client,
+            enable_anchor_backup=False,
+        )
+
+    def test_all_three_reservation_legs_are_pending_skipped_for_a_degraded_entry(
+        self, tmp_path
+    ):
+        redis_client = MockRedisClient()
+        adapter = self._degraded_adapter(tmp_path, redis_client)
+        redis_client.set_should_fail(True)
+
+        with (
+            patch.object(adapter._pending_manager, "reserve_sequence") as reserve,
+            patch.object(adapter._pending_manager, "commit_sequence") as commit,
+            patch.object(adapter._pending_manager, "abort_sequence") as abort,
+        ):
+            adapter.log(_make_config_change_entry())
+
+        reserve.assert_not_called()
+        commit.assert_not_called()
+        abort.assert_not_called()
+
+    def test_a_healthy_entry_still_reserves_and_commits(self, tmp_path):
+        """The positive half — without it the skip could be an always-off
+        reservation and every case above would still pass."""
+        redis_client = MockRedisClient()
+        adapter = self._degraded_adapter(tmp_path, redis_client)
+
+        with (
+            patch.object(
+                adapter._pending_manager, "reserve_sequence", return_value=True
+            ) as reserve,
+            patch.object(
+                adapter._pending_manager, "commit_sequence", return_value=True
+            ) as commit,
+        ):
+            adapter.log(_make_config_change_entry())
+
+        reserve.assert_called_once()
+        assert reserve.call_args[0][0] == 1
+        commit.assert_called_once_with(1)
+
+    def test_the_degraded_sentinel_entry_is_pending_skipped_too(self, tmp_path):
+        """Without a fallback manager the entry carries ``sequence: -1``,
+        which is truthy — only the ``degraded`` stamp keeps it out of the
+        reservation."""
+        redis_client = MockRedisClient()
+        adapter = self._degraded_adapter(tmp_path, redis_client)
+        # The no-fallback shape: reachable through the factory when no state
+        # file is available to the distributed manager.
+        adapter.hash_chain_manager._fallback = None
+        redis_client.set_should_fail(True)
+
+        with patch.object(adapter._pending_manager, "reserve_sequence") as reserve:
+            adapter.log(_make_config_change_entry())
+
+        reserve.assert_not_called()
+        rows = _read_rows(tmp_path)
+        assert rows[-1]["integrity"]["sequence"] == -1
+
+    def test_a_sustained_outage_logs_no_reservation_failure_per_entry(self, tmp_path):
+        """Log volume used to scale with the audit rate exactly while the
+        operator most needs to read the log — one ERROR per entry per leg."""
+        redis_client = MockRedisClient()
+        adapter = self._degraded_adapter(tmp_path, redis_client)
+        redis_client.set_should_fail(True)
+
+        with capture_logs() as logs:
+            for index in range(50):
+                adapter.log(_make_config_change_entry(f"target-{index}"))
+
+        failures = [
+            record["event"]
+            for record in logs
+            if record["event"].startswith("pending_seq.")
+            and record["event"].endswith("_failed")
+        ]
+        assert failures == []
+        assert len(_read_rows(tmp_path)) == 50
+
+
+class TestAdapterCloseBehavior:
+    """Shutdown persists through the manager's own entry point."""
+
+    def test_close_does_not_roll_back_a_state_file_a_sibling_advanced(self, tmp_path):
+        """Worker A's in-process counter is stale the moment worker B writes.
+        Writing it over the shared file on close hands the next boot a source
+        below the ledger — the exact condition the write-time guard repairs."""
+        adapter = HashChainFileAuditLogAdapter(log_dir=str(tmp_path))
+        adapter.log(_make_config_change_entry())
+        state_file = tmp_path / ".hash_chain_state.json"
+        sibling_advanced = {"sequence": 150, "previous_hash": "sibling-hash"}
+        state_file.write_text(json.dumps(sibling_advanced), encoding="utf-8")
+        adapter.hash_chain_manager._sequence = 100
+
+        adapter.close()
+
+        assert json.loads(state_file.read_text()) == sibling_advanced
+
+    def test_close_persists_the_in_process_counter_when_single_writer(self, tmp_path):
+        adapter = HashChainFileAuditLogAdapter(
+            log_dir=str(tmp_path), use_file_lock=False
+        )
+        adapter.log(_make_config_change_entry())
+        adapter.hash_chain_manager._sequence = 100
+        adapter.hash_chain_manager._previous_hash = "hash-100"
+
+        adapter.close()
+
+        state_file = tmp_path / ".hash_chain_state.json"
+        assert json.loads(state_file.read_text())["sequence"] == 100
