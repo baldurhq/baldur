@@ -2874,20 +2874,25 @@ def _reconcile_distributed_hash_chain(adapter: Any | None = None) -> None:
             StartupHashChainSync,
         )
 
-        if adapter is None:
+        # Held as Any on purpose: the gate below is the constructed manager,
+        # not the adapter class, so the three attributes read here are reached
+        # by duck typing rather than through the AuditLogAdapter contract,
+        # which declares none of them.
+        chain_adapter: Any = adapter
+        if chain_adapter is None:
             from baldur.factory import ProviderRegistry
 
-            adapter = ProviderRegistry.get_audit_adapter()
+            chain_adapter = ProviderRegistry.get_audit_adapter()
 
-        manager = getattr(adapter, "hash_chain_manager", None)
+        manager = getattr(chain_adapter, "hash_chain_manager", None)
         if not isinstance(manager, RedisHashChainManager):
             logger.debug("audit.chain_reconciliation_skipped", reason="not_distributed")
             return
 
         sync = StartupHashChainSync.from_manager(
             manager,
-            adapter.log_dir,
-            adapter.redis_key_prefix,
+            chain_adapter.log_dir,
+            chain_adapter.redis_key_prefix,
         )
         result = sync.sync()
         # sync() catches internally and reports through its return value, so
