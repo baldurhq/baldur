@@ -20,7 +20,8 @@ Internal / nested-only (``baldur.core.exceptions``):
     ``RecoveryAdapterError``, ``StoreError``, ``UnconfiguredStoreError``,
     ``CircuitBreakerTransitionError``, ``InvalidStateTransitionError``,
     ``DLQEntryNotFoundError``, ``AuditError``,
-    ``DistributedHashChainUnavailableError``, ``RunbookError``,
+    ``DistributedHashChainUnavailableError``,
+    ``HashChainSequenceRefusedError``, ``RunbookError``,
     ``SettingsValidationError``, ``StepExecutionError``, ``StepTimeoutError``,
     ``CompensationError``, ``ConcurrencyConflictError``.
 """
@@ -64,6 +65,7 @@ __all__ = [
     # Audit
     "AuditError",
     "DistributedHashChainUnavailableError",
+    "HashChainSequenceRefusedError",
     # Runbook
     "RunbookError",
     # Configuration
@@ -532,6 +534,51 @@ class DistributedHashChainUnavailableError(AuditError):
     def extra_context(self) -> dict[str, Any]:
         ctx = super().extra_context()
         ctx["redis_url"] = self.redis_url
+        return ctx
+
+
+class HashChainSequenceRefusedError(AuditError):
+    """Raised when the chain cannot read the ledger it is about to append to.
+
+    The sequence a chain mints is only safe against re-use if the entries
+    already on disk can be seen. When the ledger cannot be read at all — the
+    directory is unreadable, a file read fails, a single row is larger than
+    the tail window, or the walk budget ran out — minting anyway would place a
+    number the ledger may already hold, and returning "fresh ledger" would
+    place ``1`` inside a live one.
+
+    Raised before any mutation of the sequence source, so a refusal consumes
+    no number and leaves nothing to abort. The caller's write fails the same
+    way a failed file open already does: logged, re-raised, and held by the
+    recovery-replay sync worker rather than silently dropped.
+    """
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        manager: str = "",
+        log_dir: str = "",
+        filename_pattern: str = "",
+        error: str = "",
+    ):
+        if not message:
+            message = (
+                "refusing to mint an audit hash chain sequence: the ledger "
+                "tail could not be read"
+            )
+        super().__init__(message)
+        self.manager = manager
+        self.log_dir = log_dir
+        self.filename_pattern = filename_pattern
+        self.error = error
+
+    def extra_context(self) -> dict[str, Any]:
+        ctx = super().extra_context()
+        ctx["manager"] = self.manager
+        ctx["log_dir"] = self.log_dir
+        ctx["filename_pattern"] = self.filename_pattern
+        ctx["error"] = self.error
         return ctx
 
 

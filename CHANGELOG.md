@@ -13,11 +13,19 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 ### Changed
 
 - A half-open breaker admits no trial call while Emergency Level 3 holds.
+- `audit_distributed_chain_degraded` now tracks the live posture, not just the boot probe.
+- A degraded audit entry no longer logs a Redis reservation failure per write.
+- `verify_integrity()` and `query()` now read exactly this adapter's own audit files.
 
 ### Fixed
 
 - A worker whose cached breaker row was stale could still half-open it during Level 3.
 - An unreadable `BALDUR_CB_ADVANCED_*` value no longer lets the panic lane declare Level 3.
+- An audit chain whose sequence source lost its state re-anchors instead of re-using numbers.
+- Entries written while the chain's Redis was unreachable now continue the chain and verify.
+- An audit chain that cannot read its own ledger refuses the write instead of restarting at 1.
+- The audit chain state file is now replaced atomically, so a kill cannot truncate it.
+- Closing the audit adapter no longer writes a stale sequence over a sibling worker's state.
 
 ## [1.11.0] - 2026-09-07
 

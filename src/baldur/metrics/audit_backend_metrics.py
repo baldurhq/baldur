@@ -11,7 +11,10 @@ nothing.
 different axis: records do land and the backend is wired, but the chain
 sequencing them is not the cross-host one the deployment asked for. Only a
 process that wanted a distributed chain publishes it, so an absent series
-means "nobody asked", never "everything is fine".
+means "nobody asked", never "everything is fine". It is primed by the
+admission probe and then re-published by the chain manager on every posture
+change, so it tracks the live posture rather than freezing at what the probe
+saw at construction.
 
 A boot WARNING alone is the weakest channel for that condition, since the
 operators this feature is sold to alert on series rather than on log greps.
@@ -28,26 +31,49 @@ from __future__ import annotations
 
 from typing import Any
 
-from baldur.metrics._metric_protocol import GaugeMetric
+from baldur.metrics._metric_protocol import CounterMetric, GaugeMetric
 
 __all__ = [
+    "METRICS_AVAILABLE",
     "audit_backend_wired",
     "audit_distributed_chain_degraded",
+    "audit_hash_chain_fallback_writes_total",
+    "audit_hash_chain_source_resets_total",
+    "increment_audit_hash_chain_fallback_write",
+    "increment_audit_hash_chain_source_reset",
     "set_audit_backend_wired",
     "set_audit_distributed_chain_degraded",
-    "METRICS_AVAILABLE",
 ]
 
 audit_backend_wired: GaugeMetric
 audit_distributed_chain_degraded: GaugeMetric
+audit_hash_chain_source_resets_total: CounterMetric
+audit_hash_chain_fallback_writes_total: CounterMetric
 
 try:
-    from baldur.metrics.registry import get_or_create_gauge
+    from baldur.metrics.registry import get_or_create_counter, get_or_create_gauge
 
     audit_backend_wired = get_or_create_gauge(
         "audit_backend_wired",
         "1 when the audit subsystem resolves to a real backend, "
         "0 when it is enabled but resolves to the no-op adapter",
+        [],
+    )
+
+    # Labelled, so no sample exists until the first repair: a healthy chain
+    # exports nothing here and a chain that re-anchored exports exactly the
+    # (manager, reason) child that fired.
+    audit_hash_chain_source_resets_total = get_or_create_counter(
+        "baldur_audit_hash_chain_source_resets_total",
+        "Audit hash chain re-anchors to its own ledger after the sequence "
+        "source lost or rolled back its state",
+        ["manager", "reason"],
+    )
+
+    audit_hash_chain_fallback_writes_total = get_or_create_counter(
+        "baldur_audit_hash_chain_fallback_writes_total",
+        "Audit hash chain entries sequenced by the local fallback because "
+        "Redis did not answer",
         [],
     )
 
@@ -72,6 +98,8 @@ except ImportError:
             pass
 
     audit_backend_wired = _DummyMetric()
+    audit_hash_chain_source_resets_total = _DummyMetric()
+    audit_hash_chain_fallback_writes_total = _DummyMetric()
 
 
 # Built on first publication, never at import. A label-less prometheus gauge
@@ -94,8 +122,8 @@ def _get_distributed_chain_degraded_gauge() -> GaugeMetric:
 
             _distributed_chain_degraded_gauge = get_or_create_gauge(
                 "audit_distributed_chain_degraded",
-                "1 when a distributed audit hash chain was asked for but its "
-                "Redis did not answer the admission probe, 0 when it did; "
+                "1 when a distributed audit hash chain was asked for but is "
+                "not sequencing through Redis right now, 0 when it is; "
                 "absent when no distributed chain was asked for",
                 [],
             )
@@ -144,3 +172,20 @@ def set_audit_distributed_chain_degraded(degraded: bool) -> None:
             answered and the chain is genuinely distributed.
     """
     _get_distributed_chain_degraded_gauge().set(1 if degraded else 0)
+
+
+def increment_audit_hash_chain_source_reset(*, manager: str, reason: str) -> None:
+    """Count one re-anchor of the audit hash chain to its own ledger.
+
+    Args:
+        manager: ``"redis"`` or ``"local"`` — which sequence source lost state.
+        reason: Why the re-anchor fired (``counter_reset``,
+            ``source_behind_ledger``, ``state_hash_lost``, ``state_hash_stale``,
+            ``state_unreadable``).
+    """
+    audit_hash_chain_source_resets_total.labels(manager=manager, reason=reason).inc()
+
+
+def increment_audit_hash_chain_fallback_write() -> None:
+    """Count one audit entry sequenced by the chain's local fallback."""
+    audit_hash_chain_fallback_writes_total.inc()

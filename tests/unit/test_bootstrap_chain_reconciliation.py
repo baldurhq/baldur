@@ -41,7 +41,11 @@ import pytest
 
 from baldur import bootstrap
 from baldur.adapters.audit.hashchain_adapter import HashChainFileAuditLogAdapter
-from baldur.audit.integrity import RedisHashChainManager, StartupHashChainSync
+from baldur.audit.integrity import (
+    LedgerTailReader,
+    RedisHashChainManager,
+    StartupHashChainSync,
+)
 from tests.factories import MockRedisClient
 
 # The installation-wide Redis root, deliberately not the shipped ``baldur:``
@@ -139,7 +143,7 @@ class TestChainReconciliationStep:
 
         args = mock_from_manager.call_args.args
         assert args[0] is adapter.hash_chain_manager
-        assert args[1] == adapter.log_dir
+        assert args[1] is adapter.ledger_tail_reader
         assert args[2] == _ROOT_PREFIX
 
     def test_a_failed_sync_is_reported_as_a_warning_not_a_success(self, tmp_path):
@@ -216,25 +220,38 @@ class TestChainReconciliationStep:
         assert len(failures) == 1
         assert "distributed chain refused" in failures[0].kwargs["error"]
 
+    @pytest.mark.parametrize(
+        ("present", "missing"),
+        [
+            (["hash_chain_manager", "log_dir"], "ledger_tail_reader"),
+            (
+                ["hash_chain_manager", "log_dir", "ledger_tail_reader"],
+                "redis_key_prefix",
+            ),
+        ],
+    )
     def test_an_adapter_without_the_prefix_property_fails_loudly_at_the_call(
-        self, tmp_path
+        self, tmp_path, present, missing
     ):
         """A third-party audit adapter can carry a Redis chain manager without
-        the two construction facts this step reads. It has to fail into the
-        WARNING rather than reconcile a guessed namespace."""
-        stub = MagicMock(spec=["hash_chain_manager", "log_dir"])
+        the construction facts this step reads. It has to fail into the
+        WARNING rather than reconcile a guessed namespace, whichever fact is
+        the one it lacks."""
+        stub = MagicMock(spec=present)
         stub.hash_chain_manager = RedisHashChainManager(
             redis_client=MockRedisClient(),
             key_prefix=f"{_ROOT_PREFIX}hashchain:{_PARTITION}:",
         )
         stub.log_dir = tmp_path / "audit"
+        if "ledger_tail_reader" in present:
+            stub.ledger_tail_reader = LedgerTailReader(tmp_path / "audit")
 
         with patch.object(bootstrap, "logger") as mock_logger:
             bootstrap._reconcile_distributed_hash_chain(stub)
 
         failures = _events(mock_logger, "warning", _FAILED_EVENT)
         assert len(failures) == 1
-        assert "redis_key_prefix" in failures[0].kwargs["error"]
+        assert missing in failures[0].kwargs["error"]
 
 
 class TestChainReconciliationStepOrderContract:

@@ -12,6 +12,7 @@ from typing import Any
 
 import structlog
 
+from baldur.audit.integrity.ledger_tail import LedgerTailReader
 from baldur.audit.integrity.local_manager import HashChainManager
 from baldur.audit.integrity.protocol import HashChainManagerProtocol
 from baldur.audit.integrity.redis_manager import RedisHashChainManager
@@ -24,6 +25,7 @@ def create_hash_chain_manager(
     redis_client: Any | None = None,
     key_prefix: str = "baldur:",
     state_file: Path | None = None,
+    ledger: LedgerTailReader | None = None,
 ) -> HashChainManagerProtocol:
     """
     Factory function to create appropriate hash chain manager.
@@ -33,11 +35,14 @@ def create_hash_chain_manager(
         redis_client: Redis client (required if distributed=True)
         key_prefix: Redis key prefix
         state_file: Local state file path (for fallback or standalone)
+        ledger: Reader for the ledger the resulting chain's entries land in.
+            Threaded into both managers — a distributed chain's fallback
+            appends to the same files, so it needs the same reader.
 
     Returns:
         HashChainManager or RedisHashChainManager instance
     """
-    local_manager = HashChainManager(state_file=state_file)
+    local_manager = HashChainManager(state_file=state_file, ledger=ledger)
 
     if distributed:
         if redis_client is None:
@@ -51,6 +56,7 @@ def create_hash_chain_manager(
             redis_client=redis_client,
             key_prefix=key_prefix,
             fallback_manager=local_manager,
+            ledger=ledger,
         )
 
     return local_manager

@@ -33,6 +33,12 @@ from baldur.audit.integrity.health_score import (
     reset_integrity_health_score,
 )
 
+# Ledger tail reader
+from baldur.audit.integrity.ledger_tail import (
+    LedgerTail,
+    LedgerTailReader,
+)
+
 # Local Manager
 from baldur.audit.integrity.local_manager import (
     HashChainManager,
@@ -89,6 +95,9 @@ __all__ = [
     # Verifier
     "HashChainVerifier",
     "verify_audit_log_integrity",
+    # Ledger tail
+    "LedgerTail",
+    "LedgerTailReader",
     # Managers
     "HashChainManager",
     "get_hash_chain_manager",

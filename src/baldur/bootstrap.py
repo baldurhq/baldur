@@ -2891,7 +2891,7 @@ def _reconcile_distributed_hash_chain(adapter: Any | None = None) -> None:
 
         sync = StartupHashChainSync.from_manager(
             manager,
-            chain_adapter.log_dir,
+            chain_adapter.ledger_tail_reader,
             chain_adapter.redis_key_prefix,
         )
         result = sync.sync()

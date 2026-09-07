@@ -34,7 +34,11 @@ from unittest.mock import patch
 
 import pytest
 
-from baldur.audit.integrity import RedisHashChainManager, StartupHashChainSync
+from baldur.audit.integrity import (
+    LedgerTailReader,
+    RedisHashChainManager,
+    StartupHashChainSync,
+)
 from baldur.audit.integrity import sync as sync_module
 from baldur.audit.integrity.sync import (
     PENDING_SCAN_BATCH,
@@ -90,24 +94,30 @@ class TestStartupSyncFromManager:
         argument would silently reconcile the chain namespace's PENDING keys,
         which nothing writes."""
         with pytest.raises(TypeError):
-            StartupHashChainSync.from_manager(manager, tmp_path)
+            StartupHashChainSync.from_manager(manager, LedgerTailReader(tmp_path))
 
     def test_the_client_comes_off_the_manager(self, manager, redis_client, tmp_path):
-        sync = StartupHashChainSync.from_manager(manager, tmp_path, _ROOT_PREFIX)
+        sync = StartupHashChainSync.from_manager(
+            manager, LedgerTailReader(tmp_path), _ROOT_PREFIX
+        )
 
         assert sync._redis is redis_client
 
     def test_the_chain_prefix_comes_off_the_manager(self, manager, tmp_path):
         """Not re-derived from settings — the manager is the writer, so its
         own prefix is the only value guaranteed to match what it wrote."""
-        sync = StartupHashChainSync.from_manager(manager, tmp_path, _ROOT_PREFIX)
+        sync = StartupHashChainSync.from_manager(
+            manager, LedgerTailReader(tmp_path), _ROOT_PREFIX
+        )
 
         assert sync._key_prefix == _CHAIN_PREFIX
 
     def test_the_pending_prefix_is_the_bare_root_not_the_chain_one(
         self, manager, tmp_path
     ):
-        sync = StartupHashChainSync.from_manager(manager, tmp_path, _ROOT_PREFIX)
+        sync = StartupHashChainSync.from_manager(
+            manager, LedgerTailReader(tmp_path), _ROOT_PREFIX
+        )
 
         assert sync._pending_key_prefix == _ROOT_PREFIX
 
@@ -117,7 +127,9 @@ class TestStartupSyncFromManager:
         """The end-to-end pin: the sequence the sync reads is the key the
         chain writer increments."""
         redis_client.set(_SEQUENCE_KEY, 7)
-        sync = StartupHashChainSync.from_manager(manager, tmp_path, _ROOT_PREFIX)
+        sync = StartupHashChainSync.from_manager(
+            manager, LedgerTailReader(tmp_path), _ROOT_PREFIX
+        )
 
         result = sync.sync()
 
@@ -130,7 +142,9 @@ class TestStartupSyncFromManager:
         used the chain prefix would examine zero keys and report a clean
         crash recovery on a Redis full of orphans."""
         redis_client.set(_pending_key(3), "expected-hash")
-        sync = StartupHashChainSync.from_manager(manager, tmp_path, _ROOT_PREFIX)
+        sync = StartupHashChainSync.from_manager(
+            manager, LedgerTailReader(tmp_path), _ROOT_PREFIX
+        )
 
         result = sync.sync()
 
@@ -142,7 +156,9 @@ class TestStartupSyncFromManager:
         """A PENDING key written under the chain prefix is not this sweep's —
         the negative half, which a single-prefix implementation would fail."""
         redis_client.set(f"{_CHAIN_PREFIX}audit:hash_chain:pending:9", "x")
-        sync = StartupHashChainSync.from_manager(manager, tmp_path, _ROOT_PREFIX)
+        sync = StartupHashChainSync.from_manager(
+            manager, LedgerTailReader(tmp_path), _ROOT_PREFIX
+        )
 
         result = sync.sync()
 
@@ -185,7 +201,9 @@ class TestStartupSyncPendingScan:
         self, manager, redis_client, tmp_path
     ):
         redis_client.set(_pending_key(1), "expected-hash")
-        sync = StartupHashChainSync.from_manager(manager, tmp_path, _ROOT_PREFIX)
+        sync = StartupHashChainSync.from_manager(
+            manager, LedgerTailReader(tmp_path), _ROOT_PREFIX
+        )
 
         with patch.object(redis_client, "scan", wraps=redis_client.scan) as spy:
             sync.sync()
@@ -212,7 +230,9 @@ class TestStartupSyncPendingScan:
         # granularity, so a zero budget can still read as "not yet elapsed"
         # across ten fast round trips and the arm would pass vacuously.
         monkeypatch.setattr(sync_module, "PENDING_SCAN_MAX_SECONDS", -1.0)
-        sync = StartupHashChainSync.from_manager(manager, tmp_path, _ROOT_PREFIX)
+        sync = StartupHashChainSync.from_manager(
+            manager, LedgerTailReader(tmp_path), _ROOT_PREFIX
+        )
 
         with (
             patch.object(sync_module, "logger") as mock_logger,
@@ -236,7 +256,9 @@ class TestStartupSyncPendingScan:
         """``KEYS`` blocks the whole server for the length of the scan, and
         this runs inside ``init()`` while the init lock is held."""
         redis_client.set(_pending_key(1), "expected-hash")
-        sync = StartupHashChainSync.from_manager(manager, tmp_path, _ROOT_PREFIX)
+        sync = StartupHashChainSync.from_manager(
+            manager, LedgerTailReader(tmp_path), _ROOT_PREFIX
+        )
 
         with patch.object(redis_client, "keys", wraps=redis_client.keys) as spy:
             sync.sync()
@@ -244,7 +266,9 @@ class TestStartupSyncPendingScan:
         spy.assert_not_called()
 
     def test_a_swept_pending_key_is_deleted(self, manager, redis_client, tmp_path):
-        sync = StartupHashChainSync.from_manager(manager, tmp_path, _ROOT_PREFIX)
+        sync = StartupHashChainSync.from_manager(
+            manager, LedgerTailReader(tmp_path), _ROOT_PREFIX
+        )
         redis_client.set(_pending_key(4), "expected-hash")
 
         sync.sync()
@@ -257,7 +281,9 @@ class TestStartupSyncPendingScan:
         """Orphans are the pending namespace's other half, and the only reader
         of them scans the bare form — an orphan written under the chain prefix
         is a record nothing will ever find."""
-        sync = StartupHashChainSync.from_manager(manager, tmp_path, _ROOT_PREFIX)
+        sync = StartupHashChainSync.from_manager(
+            manager, LedgerTailReader(tmp_path), _ROOT_PREFIX
+        )
         redis_client.set(_pending_key(5), "expected-hash")
 
         sync.sync()
@@ -273,7 +299,9 @@ class TestStartupSyncPendingScan:
         monkeypatch.setenv("BALDUR_AUDIT_INTEGRITY_ORPHAN_TTL_SECONDS", "7200")
         reset_audit_integrity_settings()
         redis_client.set(_pending_key(6), "expected-hash")
-        sync = StartupHashChainSync.from_manager(manager, tmp_path, _ROOT_PREFIX)
+        sync = StartupHashChainSync.from_manager(
+            manager, LedgerTailReader(tmp_path), _ROOT_PREFIX
+        )
 
         try:
             assert get_audit_integrity_settings().orphan_ttl_seconds == 7200
@@ -291,7 +319,9 @@ class TestStartupSyncPendingScan:
         not cost the rest of the crash recovery."""
         redis_client.set(f"{_ROOT_PREFIX}audit:hash_chain:pending:notanint", "x")
         redis_client.set(_pending_key(8), "expected-hash")
-        sync = StartupHashChainSync.from_manager(manager, tmp_path, _ROOT_PREFIX)
+        sync = StartupHashChainSync.from_manager(
+            manager, LedgerTailReader(tmp_path), _ROOT_PREFIX
+        )
 
         result = sync.sync()
 
@@ -305,7 +335,9 @@ class TestStartupSyncPendingScan:
         monkeypatch.setattr(sync_module, "PENDING_SCAN_MAX_KEYS", 3)
         for seq in range(5):
             redis_client.set(_pending_key(seq), "expected-hash")
-        sync = StartupHashChainSync.from_manager(manager, tmp_path, _ROOT_PREFIX)
+        sync = StartupHashChainSync.from_manager(
+            manager, LedgerTailReader(tmp_path), _ROOT_PREFIX
+        )
 
         result = sync.sync()
 
@@ -319,7 +351,9 @@ class TestStartupSyncPendingScan:
         monkeypatch.setattr(sync_module, "PENDING_SCAN_MAX_KEYS", 3)
         for seq in range(5):
             redis_client.set(_pending_key(seq), "expected-hash")
-        sync = StartupHashChainSync.from_manager(manager, tmp_path, _ROOT_PREFIX)
+        sync = StartupHashChainSync.from_manager(
+            manager, LedgerTailReader(tmp_path), _ROOT_PREFIX
+        )
 
         with patch.object(sync_module, "logger") as mock_logger:
             sync.sync()
@@ -342,7 +376,9 @@ class TestStartupSyncPendingScan:
         monkeypatch.setattr(sync_module, "PENDING_SCAN_MAX_KEYS", 10)
         for seq in range(5):
             redis_client.set(_pending_key(seq), "expected-hash")
-        sync = StartupHashChainSync.from_manager(manager, tmp_path, _ROOT_PREFIX)
+        sync = StartupHashChainSync.from_manager(
+            manager, LedgerTailReader(tmp_path), _ROOT_PREFIX
+        )
 
         with patch.object(sync_module, "logger") as mock_logger:
             result = sync.sync()

@@ -4,16 +4,31 @@ Integrity Models and Core Functions.
 Contains:
 - IntegrityInfo: Dataclass for integrity information
 - compute_hash: keyed-or-keyless chain hash for dictionaries
+- sanitize_integrity_annotations / record_source_reset: the shared shape of
+  the extra keys a manager writes into an entry's ``integrity`` block
 """
 
 from __future__ import annotations
 
 import hashlib
 import hmac
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+import structlog
+
 from baldur.utils.serialization import fast_canonical_dumps
+
+logger = structlog.get_logger()
+
+# Keys the chain itself owns inside an entry's ``integrity`` block. An
+# annotation may never carry one: ``current_hash`` in particular is assigned
+# *after* the hash is computed, so an annotation under that key would be hashed
+# in and then overwritten, and the entry would verify as tampered.
+INTEGRITY_RESERVED_KEYS = frozenset(
+    {"sequence", "previous_hash", "timestamp", "pod_id", "current_hash"}
+)
 
 
 @dataclass
@@ -88,4 +103,82 @@ def canonical_json_bytes(data: dict[str, Any]) -> bytes:
     return fast_canonical_dumps(data, default=str)
 
 
-__all__ = ["IntegrityInfo", "compute_hash", "canonical_json_bytes"]
+def sanitize_integrity_annotations(
+    annotations: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Drop the keys the chain owns, so an annotation cannot shadow one.
+
+    Args:
+        annotations: Caller-supplied extra keys for the ``integrity`` block.
+
+    Returns:
+        A plain dict safe to merge underneath the chain's own fields.
+    """
+    if not annotations:
+        return {}
+    return {
+        key: value
+        for key, value in annotations.items()
+        if key not in INTEGRITY_RESERVED_KEYS
+    }
+
+
+def record_source_reset(
+    *,
+    manager: str,
+    reason: str,
+    observed: int | None,
+    adopted: int,
+    ledger_path: str,
+) -> dict[str, Any]:
+    """Announce that a chain re-anchored to its ledger, and stamp the entry.
+
+    One call site per manager, so the log record, the counter and the stamp
+    that rides under the entry's hash cannot describe the repair differently.
+
+    Args:
+        manager: ``"redis"`` or ``"local"`` — which source lost its state.
+        reason: Why the re-anchor fired.
+        observed: The sequence the source offered, or ``None`` when it minted
+            nothing.
+        adopted: The ledger tail sequence the chain re-anchored to.
+        ledger_path: The file the tail was read from.
+
+    Returns:
+        The annotation to merge into the entry's ``integrity`` block.
+    """
+    logger.warning(
+        "hash_chain.sequence_source_reset",
+        manager=manager,
+        reason=reason,
+        observed=observed,
+        adopted=adopted,
+        ledger_path=ledger_path,
+    )
+    try:
+        from baldur.metrics.audit_backend_metrics import (
+            increment_audit_hash_chain_source_reset,
+        )
+
+        increment_audit_hash_chain_source_reset(manager=manager, reason=reason)
+    except Exception as e:
+        logger.debug("hash_chain.source_reset_metric_skipped", error=str(e))
+
+    return {
+        "source_reset": {
+            "manager": manager,
+            "reason": reason,
+            "observed": observed,
+            "adopted": adopted,
+        }
+    }
+
+
+__all__ = [
+    "INTEGRITY_RESERVED_KEYS",
+    "IntegrityInfo",
+    "canonical_json_bytes",
+    "compute_hash",
+    "record_source_reset",
+    "sanitize_integrity_annotations",
+]

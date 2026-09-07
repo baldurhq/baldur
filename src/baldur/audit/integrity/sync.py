@@ -7,13 +7,19 @@ Contains:
 
 from __future__ import annotations
 
-import json
 import time
 from pathlib import Path
 from typing import Any
 
 import structlog
 
+from baldur.audit.integrity.ledger_tail import LedgerTailReader
+from baldur.audit.integrity.redis_manager import (
+    CHAIN_SEQUENCE_KEY,
+    CHAIN_STATE_KEY,
+    build_chain_lock,
+    write_chain_state,
+)
 from baldur.utils.time import utc_now
 
 logger = structlog.get_logger()
@@ -64,8 +70,8 @@ class StartupHashChainSync:
         subsequent calls return immediately without re-syncing.
     """
 
-    SEQUENCE_KEY = "audit:hash_chain:seq"
-    STATE_KEY = "audit:hash_chain:state"
+    SEQUENCE_KEY = CHAIN_SEQUENCE_KEY
+    STATE_KEY = CHAIN_STATE_KEY
 
     def __init__(
         self,
@@ -73,6 +79,9 @@ class StartupHashChainSync:
         log_dir: Path,
         key_prefix: str = "baldur:",
         pending_key_prefix: str | None = None,
+        filename_pattern: str = "audit_{date}.jsonl",
+        rotate_daily: bool = True,
+        ledger: LedgerTailReader | None = None,
     ):
         """
         Initialize StartupHashChainSync.
@@ -90,6 +99,15 @@ class StartupHashChainSync:
             pending_key_prefix: Prefix for the PENDING/ORPHANED keys. Defaults
                 to ``key_prefix``, which is correct whenever one prefix governs
                 both (every test that injects its own fake Redis).
+            filename_pattern: The writing adapter's filename pattern, so this
+                step reads exactly the files that adapter produces rather than
+                a glob that also matches a partitioned sibling's.
+            rotate_daily: The writing adapter's rotation mode. The pattern
+                string alone cannot say whether ``{date}`` becomes a date or
+                the literal ``all``.
+            ledger: A ready-built reader, which :meth:`from_manager` supplies
+                straight from the adapter. When ``None`` one is built from
+                ``log_dir`` and the two arguments above.
         """
         self._redis = redis_client
         self._log_dir = Path(log_dir)
@@ -97,13 +115,16 @@ class StartupHashChainSync:
         self._pending_key_prefix = (
             key_prefix if pending_key_prefix is None else pending_key_prefix
         )
+        self._ledger = ledger or LedgerTailReader(
+            self._log_dir, filename_pattern, rotate_daily
+        )
         self._sync_completed = False
 
     @classmethod
     def from_manager(
         cls,
         manager: Any,
-        log_dir: Path,
+        ledger: LedgerTailReader,
         pending_key_prefix: str,
     ) -> StartupHashChainSync:
         """Build a sync that reconciles exactly the keys ``manager`` writes.
@@ -111,7 +132,9 @@ class StartupHashChainSync:
         Reads the client and the chain prefix off the manager itself rather
         than re-deriving them from settings — a second derivation of one key
         form is how the reconciliation drifted away from the writer in the
-        first place.
+        first place. The ledger reader comes from the adapter for the same
+        reason: it selects the exact files that adapter writes, which a glob
+        over ``audit_*.jsonl`` does not.
 
         ``pending_key_prefix`` has no default on purpose. The manager cannot
         supply it (it stores only its own composed prefix), and inheriting
@@ -121,7 +144,7 @@ class StartupHashChainSync:
 
         Args:
             manager: A ``RedisHashChainManager``.
-            log_dir: Directory containing the audit log files.
+            ledger: The writing adapter's own ledger tail reader.
             pending_key_prefix: The bare Redis root the adapter's
                 ``PendingSequenceManager`` was built with.
 
@@ -130,14 +153,19 @@ class StartupHashChainSync:
         """
         return cls(
             redis_client=manager._redis,
-            log_dir=log_dir,
+            log_dir=ledger.log_dir,
             key_prefix=manager._key_prefix,
             pending_key_prefix=pending_key_prefix,
+            ledger=ledger,
         )
 
     def sync(self) -> dict[str, Any]:
         """
         Perform startup synchronization.
+
+        The chain reconciliation and the PENDING sweep are reported together
+        but fail apart: a ledger this step cannot read must not cost the
+        crash-recovery sweep, which needs nothing from the files.
 
         Returns:
             Sync result dictionary with action taken and state info
@@ -145,7 +173,7 @@ class StartupHashChainSync:
         if self._sync_completed:
             return {"status": "already_synced", "action": "none"}
 
-        result = {
+        result: dict[str, Any] = {
             "status": "success",
             "file_sequence": 0,
             "file_hash": None,
@@ -155,6 +183,54 @@ class StartupHashChainSync:
             "pending_cleaned": 0,
             "synced_at": utc_now().isoformat(),
         }
+
+        try:
+            self._reconcile_chain_state(result)
+        except Exception as e:
+            # An unreadable ledger reports the error rather than re-anchoring
+            # Redis to 0 — a rewind to 0 re-uses every number the files hold.
+            logger.exception(
+                "startup_sync.failed",
+                error=e,
+            )
+            result["status"] = "error"
+            result["error"] = str(e)
+
+        # Step 4: Cleanup stale PENDING sequences — runs whatever step 1-3 did.
+        result["pending_cleaned"] = self._cleanup_pending_sequences()
+
+        if result["status"] == "success":
+            self._sync_completed = True
+            logger.info(
+                "startup_sync.completed",
+                sync_action=result["action"],
+            )
+
+        return result
+
+    def _reconcile_chain_state(self, result: dict[str, Any]) -> None:
+        """Compare the ledger's tail with Redis and rewind Redis when behind.
+
+        Runs under the chain's own distributed lock. Unlocked, a peer's
+        in-flight mint plus this rewind is a duplicate factory: the peer
+        repairs and mints ``T+1`` inside its lock, and before its append lands
+        this rewind rolls the counter back to ``T``, so the next write mints
+        ``T+1`` a second time and no guard can see it.
+
+        Args:
+            result: The sync result dict, filled in place.
+        """
+        lock = build_chain_lock(self._redis, self._key_prefix)
+        if not lock.acquire(blocking=True):
+            # The write-time guard repairs the source on the first write, so a
+            # missed boot rewind is latency, not safety.
+            result["action"] = "lock_unavailable"
+            result["status"] = "error"
+            logger.warning(
+                "startup_sync.chain_lock_unavailable",
+                key_prefix=self._key_prefix,
+            )
+            return
 
         try:
             # Step 1: Get last state from local files
@@ -194,95 +270,28 @@ class StartupHashChainSync:
             else:
                 # Sequences match
                 result["action"] = "in_sync"
-
-            # Step 4: Cleanup stale PENDING sequences
-            pending_cleaned = self._cleanup_pending_sequences()
-            result["pending_cleaned"] = pending_cleaned
-
-            self._sync_completed = True
-            logger.info(
-                "startup_sync.completed",
-                sync_action=result["action"],
-            )
-
-            return result
-
-        except Exception as e:
-            logger.exception(
-                "startup_sync.failed",
-                error=e,
-            )
-            result["status"] = "error"
-            result["error"] = str(e)
-            return result
+        finally:
+            try:
+                lock.release()
+            except Exception as e:
+                logger.debug(
+                    "startup_sync.chain_lock_release_failed",
+                    error=e,
+                )
 
     def _get_last_file_state(self) -> tuple[int, str]:
         """
         Get the last sequence and hash from local log files.
 
-        Reads from the end of the most recent file for efficiency.
-
         Returns:
-            Tuple of (last_sequence, last_hash)
+            Tuple of (last_sequence, last_hash). ``(0, "")`` means there is no
+            ledger at all — never that one could not be read, which the reader
+            raises for and the caller reports as an error.
         """
-        last_seq = 0
-        last_hash = ""
-
-        if not self._log_dir.exists():
-            return last_seq, last_hash
-
-        # Find log files, sorted newest first
-        log_files = sorted(self._log_dir.glob("audit_*.jsonl"), reverse=True)
-
-        for log_file in log_files:
-            try:
-                # Read from end of file for efficiency
-                with open(log_file, "rb") as f:
-                    # Seek to end
-                    f.seek(0, 2)
-                    file_size = f.tell()
-
-                    if file_size == 0:
-                        continue
-
-                    # Read last 10KB (should contain last entry)
-                    read_size = min(file_size, 10240)
-                    f.seek(max(0, file_size - read_size))
-                    content = f.read().decode("utf-8", errors="ignore")
-
-                # Parse lines from end
-                lines = content.strip().split("\n")
-                for line in reversed(lines):
-                    line = line.strip()
-                    if not line:
-                        continue
-
-                    try:
-                        entry = json.loads(line)
-                        integrity = entry.get("integrity", {})
-                        seq = integrity.get("sequence", 0)
-                        hash_val = integrity.get("current_hash", "")
-
-                        if seq > last_seq:
-                            last_seq = seq
-                            last_hash = hash_val
-
-                        # Found the last entry
-                        if last_seq > 0:
-                            return last_seq, last_hash
-
-                    except json.JSONDecodeError:
-                        continue
-
-            except Exception as e:
-                logger.debug(
-                    "startup_sync.error_reading",
-                    log_file=log_file,
-                    error=e,
-                )
-                continue
-
-        return last_seq, last_hash
+        tail = self._ledger.read()
+        if tail is None:
+            return 0, ""
+        return tail.sequence, tail.current_hash
 
     def _get_redis_state(self) -> tuple[int, str]:
         """
@@ -325,22 +334,13 @@ class StartupHashChainSync:
             file_hash: Hash from file
         """
         try:
-            seq_key = f"{self._key_prefix}{self.SEQUENCE_KEY}"
-            state_key = f"{self._key_prefix}{self.STATE_KEY}"
-
-            # Atomic update using pipeline
-            pipe = self._redis.pipeline()
-            pipe.set(seq_key, file_seq)
-            pipe.hset(
-                state_key,
-                mapping={
-                    "previous_hash": file_hash,
-                    "sequence": str(file_seq),
-                    "updated_at": utc_now().isoformat(),
-                    "synced_from": "file_recovery",
-                },
+            write_chain_state(
+                self._redis,
+                self._key_prefix,
+                file_seq,
+                file_hash,
+                synced_from="file_recovery",
             )
-            pipe.execute()
 
             logger.info(
                 "startup_sync.redis_synced_file",

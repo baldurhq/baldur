@@ -21,6 +21,7 @@ Reference: 416
 
 from __future__ import annotations
 
+import re
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -32,10 +33,12 @@ from baldur.audit.integrity import (
     DailyHashAnchor,
     HashChainManager,
     HashChainManagerProtocol,
+    LedgerTailReader,
     PendingSequenceManager,
     RedisHashChainManager,
     chain_namespace_prefix,
 )
+from baldur.audit.integrity.ledger_tail import list_ledger_files
 from baldur.audit.masking import (
     mask_ip,
     mask_sensitive_fields,
@@ -167,12 +170,24 @@ class HashChainFileAuditLogAdapter(AuditLogAdapter):
         )
         state_file = self._log_dir / state_filename
 
+        # Reader for this adapter's own ledger. Only the adapter knows which
+        # files it writes, and a chain manager that cannot see them mints from
+        # a source that may have lost its state.
+        self._ledger_tail_reader = LedgerTailReader(
+            self._log_dir, self._filename_pattern, self._rotate_daily
+        )
+
         # Hash chain manager — distributed (Redis) or local (file-locked).
         self._hash_chain: HashChainManagerProtocol | None
         if enable_hash_chain:
             if distributed_hash_chain and redis_client is not None:
+                # The fallback appends to the same ledger, so it gets the same
+                # reader — that is what makes a fallback entry continue the
+                # chain instead of carrying a local-only number.
                 local_fallback = HashChainManager(
-                    state_file, use_file_lock=use_file_lock
+                    state_file,
+                    use_file_lock=use_file_lock,
+                    ledger=self._ledger_tail_reader,
                 )
                 self._hash_chain = RedisHashChainManager(
                     redis_client=redis_client,
@@ -180,13 +195,16 @@ class HashChainFileAuditLogAdapter(AuditLogAdapter):
                         redis_key_prefix, self._partition
                     ),
                     fallback_manager=local_fallback,
+                    ledger=self._ledger_tail_reader,
                 )
                 logger.info("hash_chain.distributed_mode_enabled")
             else:
                 if distributed_hash_chain:
                     logger.warning("hash_chain.distributed_mode_unavailable")
                 self._hash_chain = HashChainManager(
-                    state_file, use_file_lock=use_file_lock
+                    state_file,
+                    use_file_lock=use_file_lock,
+                    ledger=self._ledger_tail_reader,
                 )
         else:
             self._hash_chain = None
@@ -243,6 +261,21 @@ class HashChainFileAuditLogAdapter(AuditLogAdapter):
         that fell back.
         """
         return self._hash_chain
+
+    @property
+    def ledger_tail_reader(self) -> LedgerTailReader:
+        """The reader over the exact ledger files this adapter writes.
+
+        The boot reconciliation compares Redis against the ledger and must
+        read the same files the write path does — a glob that also matches a
+        partitioned sibling reconciles the wrong chain.
+        """
+        return self._ledger_tail_reader
+
+    @property
+    def ledger_filename_regex(self) -> re.Pattern[str]:
+        """The exact filename shape this adapter's pattern produces."""
+        return self._ledger_tail_reader.filename_regex
 
     @property
     def redis_key_prefix(self) -> str:
@@ -303,7 +336,7 @@ class HashChainFileAuditLogAdapter(AuditLogAdapter):
         """
         results: list[AuditEntry] = []
         try:
-            log_files = sorted(self._log_dir.glob(self._glob_pattern()), reverse=True)
+            log_files = list_ledger_files(self._log_dir, self.ledger_filename_regex)
             for log_file in log_files:
                 if len(results) >= limit:
                     break
@@ -338,7 +371,9 @@ class HashChainFileAuditLogAdapter(AuditLogAdapter):
 
         issues: list[dict[str, Any]] = []
         try:
-            for log_file in self._log_dir.glob(self._glob_pattern()):
+            for log_file in list_ledger_files(
+                self._log_dir, self.ledger_filename_regex
+            ):
                 is_valid, file_issues = verify_audit_log_integrity(log_file)
                 if not is_valid:
                     issues.append(
@@ -356,11 +391,17 @@ class HashChainFileAuditLogAdapter(AuditLogAdapter):
         return len(issues) == 0, issues
 
     def close(self) -> None:
-        """Close any open file handles and persist hash chain state."""
+        """Close any open file handles and persist hash chain state.
+
+        Persisting goes through the manager's own shutdown entry point, which
+        declines in file-lock mode: every write there already saved under the
+        cross-process lock, and writing this worker's in-process counter over a
+        state file a sibling has since advanced rolls the shared source back.
+        """
         with self._lock:
             self._close_file()
             if isinstance(self._hash_chain, HashChainManager):
-                self._hash_chain._save_state()
+                self._hash_chain.persist_state()
 
     # =========================================================================
     # Internal write path (relocated from LocalFileBackend.write)
@@ -370,15 +411,23 @@ class HashChainFileAuditLogAdapter(AuditLogAdapter):
         """Write a pre-built dict via the WAC pattern (D6)."""
         sequence = None
         expected_hash = None
+        # A degraded entry was sequenced by the local fallback because Redis
+        # did not answer, so every leg of the Redis-side reservation would log
+        # its own ERROR against the same dead client — one per entry, exactly
+        # while the operator most needs to read the log. The reservation
+        # protects Redis-sequenced entries; a fallback entry is not one.
+        pending_manager = self._pending_manager
         try:
             if self._hash_chain:
                 entry_dict = self._hash_chain.add_integrity(entry_dict)
                 integrity = entry_dict.get("integrity", {})
                 sequence = integrity.get("sequence")
                 expected_hash = integrity.get("current_hash")
+                if integrity.get("degraded"):
+                    pending_manager = None
 
-            if sequence and expected_hash and self._pending_manager:
-                self._pending_manager.reserve_sequence(sequence, expected_hash)
+            if sequence and expected_hash and pending_manager:
+                pending_manager.reserve_sequence(sequence, expected_hash)
 
             self._check_anchor_backup()
 
@@ -401,15 +450,15 @@ class HashChainFileAuditLogAdapter(AuditLogAdapter):
             self._file_handle.write(json_line + "\n")
             self._file_handle.flush()
 
-            if sequence and self._pending_manager:
-                self._pending_manager.commit_sequence(sequence)
+            if sequence and pending_manager:
+                pending_manager.commit_sequence(sequence)
         except Exception as e:
             logger.exception(
                 "hash_chain_file_audit.write_failed",
                 error=e,
             )
-            if sequence and self._pending_manager:
-                self._pending_manager.abort_sequence(sequence)
+            if sequence and pending_manager:
+                pending_manager.abort_sequence(sequence)
             raise
 
     def _ensure_file_open(self) -> bool:
@@ -451,16 +500,6 @@ class HashChainFileAuditLogAdapter(AuditLogAdapter):
         date_str = utc_now().strftime("%Y-%m-%d") if self._rotate_daily else "all"
         filename = self._filename_pattern.format(date=date_str)
         return self._log_dir / filename
-
-    def _glob_pattern(self) -> str:
-        """Glob pattern for files this adapter manages.
-
-        For empty partition: ``audit_*.jsonl`` (matches legacy files).
-        For partitioned: ``audit_*_{partition}.jsonl``.
-        """
-        if self._partition:
-            return f"audit_*_{self._partition}.jsonl"
-        return "audit_*.jsonl"
 
     def _check_anchor_backup(self) -> None:
         """Create anchor backup at day boundary."""
