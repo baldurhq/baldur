@@ -16,6 +16,7 @@ import pytest
 import tenacity
 
 from baldur.adapters.rate_limit.memory_adapter import InMemoryRateLimitStorage
+from baldur.bridges.tenacity.callbacks import BridgeCallbackContext
 from baldur.bridges.tenacity.policy import (
     _BRIDGE_EXPLICIT_MARKER,
     AsyncTenacityBridgePolicy,
@@ -23,6 +24,8 @@ from baldur.bridges.tenacity.policy import (
 )
 from baldur.interfaces.resilience_policy import PolicyOutcome
 from baldur.services.backoff_calculator.budget import AdaptiveRetryBudget
+from baldur.services.circuit_breaker.rate_limit_tracker import RateLimitTracker
+from baldur.services.circuit_breaker.service import CircuitBreakerService
 from baldur.services.rate_limit_coordinator import RateLimitCoordinator
 from baldur.services.rate_limit_coordinator.models import RateLimitResult
 
@@ -783,3 +786,219 @@ class TestTenacityBridgeCoordinatorFailOpenBehavior:
 
         assert result.outcome == PolicyOutcome.SUCCESS
         assert result.value == "good"
+
+
+# =============================================================================
+# Behavior — the outcomes ``after`` never sees, and the deferral translation
+# =============================================================================
+
+_POLICY_CB_SERVICE = (
+    "baldur.services.circuit_breaker.convenience.get_circuit_breaker_service"
+)
+_POLICY_TRACKER = (
+    "baldur.services.circuit_breaker.rate_limit_tracker.get_rate_limit_tracker"
+)
+
+
+class _Throttled(Exception):
+    """A 429 the shared classifier recognises."""
+
+    def __init__(self):
+        super().__init__("429 too many requests")
+
+
+def _throttled_response():
+    """A 429 a client hands back as a value instead of raising."""
+    return type("FakeResponse", (), {"status_code": 429})()
+
+
+@pytest.fixture
+def policy_scope():
+    """An open observation scope with its cascade sink stubbed."""
+    from baldur.services.circuit_breaker.rate_limit_observation import (
+        close_scope,
+        open_scope,
+    )
+
+    cascade_service = MagicMock(spec=CircuitBreakerService)
+    token, scope = open_scope("payment")
+    try:
+        with (
+            patch(_POLICY_CB_SERVICE, return_value=cascade_service),
+            patch(_POLICY_TRACKER, return_value=MagicMock(spec=RateLimitTracker)),
+        ):
+            yield scope, cascade_service
+    finally:
+        close_scope(token)
+
+
+class TestBridgeFinalOutcomeBehavior:
+    """tenacity skips ``after`` for two exits; the bridge classifies them itself."""
+
+    def test_an_accepted_value_is_classified_at_the_execute_level(self, policy_scope):
+        """A first-attempt success leaves the loop without ``after`` ever running.
+
+        A keyed bridge whose predicate accepts a returned 429 would otherwise
+        install no cooldown at all — and the breaker stage above is withheld by
+        this bridge's own coordination claim, so nobody would observe it.
+        """
+        scope, cascade_service = policy_scope
+        policy: TenacityBridgePolicy = TenacityBridgePolicy(
+            stop=tenacity.stop_after_attempt(3),
+            wait=tenacity.wait_fixed(0),
+            domain="payment",
+        )
+
+        result = policy.execute(_throttled_response)
+
+        assert result.outcome == PolicyOutcome.SUCCESS
+        assert scope.rate_limited == 1
+        cascade_service.record_rate_limit_response.assert_called_once_with("payment")
+
+    def test_a_declined_exception_is_classified_at_the_execute_level(
+        self, policy_scope
+    ):
+        """tenacity re-raises an exception its predicate declines, skipping ``after``."""
+        scope, _cascade = policy_scope
+        policy: TenacityBridgePolicy = TenacityBridgePolicy(
+            stop=tenacity.stop_after_attempt(3),
+            wait=tenacity.wait_fixed(0),
+            retry=tenacity.retry_if_exception_type(ValueError),
+            domain="payment",
+        )
+
+        def _fail_429():
+            raise _Throttled()
+
+        result = policy.execute(_fail_429)
+
+        assert result.outcome == PolicyOutcome.FAILURE
+        assert scope.rate_limited == 1
+
+    def test_an_exhausted_attempt_is_not_classified_a_second_time(self, policy_scope):
+        """``after`` already saw the last attempt, so the translation must not re-add.
+
+        Three throttled attempts are three observations. A fourth would put a
+        429 in the cascade that the dependency never sent.
+        """
+        scope, cascade_service = policy_scope
+        policy: TenacityBridgePolicy = TenacityBridgePolicy(
+            stop=tenacity.stop_after_attempt(3),
+            wait=tenacity.wait_fixed(0),
+            domain="payment",
+            retrying_kwargs={"reraise": True},
+        )
+
+        def _fail_429():
+            raise _Throttled()
+
+        policy.execute(_fail_429)
+
+        assert scope.rate_limited == 3
+        assert cascade_service.record_rate_limit_response.call_count == 3
+
+    def test_an_unset_last_attempt_errs_toward_classifying(self, policy_scope):
+        """The comparison defaults to "not yet seen", never to silently dropping it.
+
+        The scope's identity mark makes a redundant classification a no-op, so
+        erring this way costs nothing while erring the other way loses a 429.
+        """
+        scope, _cascade = policy_scope
+        policy: TenacityBridgePolicy = TenacityBridgePolicy(domain="payment")
+        ctx = BridgeCallbackContext(
+            domain="payment",
+            rate_limit_key=None,
+            rate_limit_coordinator=None,
+            retry_budget=None,
+            scope=scope,
+        )
+
+        policy._classify_unseen_final_outcome(_Throttled(), ctx, object())
+
+        assert scope.rate_limited == 1
+
+
+class TestBridgeCooldownDeferralBehavior:
+    """A deferral reports the call that never ran, not a failure for one that did."""
+
+    def test_a_deferral_before_the_first_attempt_synthesises_its_own_error(self):
+        """No attempt ran, so there is no real error to report — synthesise one.
+
+        The snapshot this used to read is written only by the exhaustion
+        callback, which a ``before``-raised abort never reaches: every deferral
+        reported ``error=None``, which the composer then mapped to a rejection
+        the breaker counted as a real failure for a call never made.
+        """
+        from baldur.services.rate_limit_coordinator.models import RateLimitDeferredError
+
+        coordinator = MagicMock(spec=RateLimitCoordinator)
+        coordinator.wait_if_needed.return_value = RateLimitResult(
+            deferred=True, not_before=123.0
+        )
+        fn, counter = _make_counting_fn(0)
+        policy: TenacityBridgePolicy[str] = TenacityBridgePolicy(
+            stop=tenacity.stop_after_attempt(3),
+            wait=tenacity.wait_fixed(0),
+            domain="payment",
+            rate_limit_coordinator=coordinator,
+            rate_limit_key="payment",
+        )
+
+        result = policy.execute(fn)
+
+        assert counter["calls"] == 0
+        assert result.outcome == PolicyOutcome.FAILURE
+        assert isinstance(result.error, RateLimitDeferredError)
+        assert result.total_attempts == 1
+
+    def test_a_deferral_after_a_real_429_propagates_that_429(self):
+        """The attempt that did run owns the error the caller is told about.
+
+        Replacing it with a deferral class would hide the provider's own answer
+        behind Baldur's decision not to ask again.
+        """
+        coordinator = MagicMock(spec=RateLimitCoordinator)
+        coordinator.wait_if_needed.side_effect = [
+            RateLimitResult(waited=False),
+            RateLimitResult(deferred=True, not_before=123.0),
+        ]
+        raised = _Throttled()
+        policy: TenacityBridgePolicy[str] = TenacityBridgePolicy(
+            stop=tenacity.stop_after_attempt(3),
+            wait=tenacity.wait_fixed(0),
+            domain="payment",
+            rate_limit_coordinator=coordinator,
+            rate_limit_key="payment",
+        )
+
+        def _fail_429():
+            raise raised
+
+        result = policy.execute(_fail_429)
+
+        assert result.outcome == PolicyOutcome.FAILURE
+        assert result.error is raised
+        assert result.total_attempts == 1
+
+    def test_a_deferral_never_reports_a_null_error(self):
+        """A FAILURE with no error is what the composer turns into a rejection.
+
+        The breaker stage counts a rejection as a real failure, so the old shape
+        let a fleet-wide cooldown trip a breaker on a healthy dependency.
+        """
+        coordinator = MagicMock(spec=RateLimitCoordinator)
+        coordinator.wait_if_needed.return_value = RateLimitResult(
+            deferred=True, not_before=123.0
+        )
+        fn, _counter = _make_counting_fn(0)
+        policy: TenacityBridgePolicy[str] = TenacityBridgePolicy(
+            stop=tenacity.stop_after_attempt(3),
+            domain="payment",
+            rate_limit_coordinator=coordinator,
+            rate_limit_key="payment",
+        )
+
+        result = policy.execute(fn)
+
+        assert result.error is not None
+        assert result.metadata["rate_limit_deferred"] is True

@@ -1148,3 +1148,62 @@ class TestAsyncRetryObserveOnlyBehavior:
         assert mock_suppressed.call_args.kwargs["max_attempts"] == 4
         assert calls["n"] == 1  # suppressed → single attempt
         assert result.total_attempts == 1
+
+
+# =============================================================================
+# Behavior — the opt-out half reaches the breaker stage's observation scope
+# =============================================================================
+
+
+class TestAsyncRetryObservationClaimBehavior:
+    """``rate_limit_aware=False`` is claimed on the scope, and nothing else is."""
+
+    @staticmethod
+    def _run_under_a_scope(policy):
+        """Execute a trivial call under an open observation scope; return the scope."""
+        from baldur.services.circuit_breaker.rate_limit_observation import (
+            close_scope,
+            open_scope,
+        )
+
+        async def _ok():
+            return "ok"
+
+        token, scope = open_scope("payment")
+        try:
+            asyncio.run(policy.execute(_ok))
+        finally:
+            close_scope(token)
+        return scope
+
+    def test_an_opted_out_caller_claims_the_scope(self):
+        """This stage coordinates nothing, so the claim is purely the opt-out.
+
+        The breaker stage above would otherwise install the fleet-wide cooldown
+        the caller explicitly turned off — the only place a False value on an
+        async path can be honoured at all.
+        """
+        scope = self._run_under_a_scope(AsyncRetryPolicy(rate_limit_aware=False))
+
+        assert scope.coordination_claimed is True
+
+    def test_the_default_caller_leaves_the_scope_unclaimed(self):
+        """Leaving it unclaimed is what lets the breaker stage cover the async path.
+
+        A blanket claim here would make async 429 coordination dead everywhere,
+        which is the state this stage's half-carry exists to end.
+        """
+        scope = self._run_under_a_scope(AsyncRetryPolicy(rate_limit_aware=True))
+
+        assert scope.coordination_claimed is False
+
+    def test_an_opted_out_call_with_no_scope_open_does_not_raise(self):
+        """A bare async retry has no breaker above it; the claim is skipped."""
+        policy = AsyncRetryPolicy(rate_limit_aware=False)
+
+        async def _ok():
+            return "ok"
+
+        result = asyncio.run(policy.execute(_ok))
+
+        assert result.value == "ok"

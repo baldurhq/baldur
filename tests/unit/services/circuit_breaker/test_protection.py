@@ -152,6 +152,172 @@ class TestRateLimitCascadeDetection:
 
         assert is_cascade is False
 
+    def test_the_cascade_writes_no_request_of_its_own(self):
+        """The rate's denominator belongs to the observation site, not to this.
+
+        Writing it here as well counted the same call twice: in a pure storm the
+        observed rate could never exceed 50%, putting the top half of the
+        setting's range out of reach.
+        """
+        from baldur.services.circuit_breaker.config import CircuitBreakerConfig
+        from baldur.services.circuit_breaker.service import CircuitBreakerService
+
+        config = CircuitBreakerConfig(enabled=True, rate_limit_cascade_threshold=100)
+        service = CircuitBreakerService(
+            config=config, repository=InMemoryCircuitBreakerRepository()
+        )
+        mock_tracker = InMemoryRateLimitTracker()
+        mock_tracker._requests["test_service"] = 7
+
+        with patch(
+            "baldur.services.circuit_breaker.protection.get_rate_limit_tracker",
+            return_value=mock_tracker,
+        ):
+            service.record_rate_limit_response("test_service")
+
+        assert mock_tracker._requests["test_service"] == 7
+        assert mock_tracker._rate_limits["test_service"] == 1
+
+    def test_a_zero_denominator_is_guarded_rather_than_divided_by(self):
+        """A caller that reports a 429 without a request must not raise.
+
+        The minimum-sample term no longer implies a non-zero denominator now
+        that the request write moved out, so the division needs its own guard.
+        """
+        from baldur.services.circuit_breaker.config import CircuitBreakerConfig
+        from baldur.services.circuit_breaker.service import CircuitBreakerService
+
+        config = CircuitBreakerConfig(
+            enabled=True,
+            rate_limit_cascade_threshold=1,
+            rate_limit_cascade_rate=10.0,
+            rate_limit_cascade_minimum_calls=0,
+        )
+        service = CircuitBreakerService(
+            config=config, repository=InMemoryCircuitBreakerRepository()
+        )
+        mock_tracker = InMemoryRateLimitTracker()
+
+        with patch(
+            "baldur.services.circuit_breaker.protection.get_rate_limit_tracker",
+            return_value=mock_tracker,
+        ):
+            result = service.record_rate_limit_response("test_service")
+
+        assert result is None
+
+    def test_the_opening_call_steps_the_backoff_and_returns_a_result(self):
+        """``did_open`` gates the cluster-logical side effects of the trip."""
+        from baldur.services.circuit_breaker.config import CircuitBreakerConfig
+        from baldur.services.circuit_breaker.service import CircuitBreakerService
+
+        config = CircuitBreakerConfig(
+            enabled=True,
+            rate_limit_cascade_threshold=10,
+            rate_limit_cascade_rate=10.0,
+            rate_limit_cascade_minimum_calls=20,
+        )
+        service = CircuitBreakerService(
+            config=config, repository=InMemoryCircuitBreakerRepository()
+        )
+        mock_tracker = InMemoryRateLimitTracker()
+        mock_tracker._rate_limits["test_service"] = 15
+        mock_tracker._requests["test_service"] = 100
+
+        with (
+            patch(
+                "baldur.services.circuit_breaker.protection.get_rate_limit_tracker",
+                return_value=mock_tracker,
+            ),
+            patch(
+                "baldur.services.circuit_breaker.manual_control._is_system_enabled",
+                return_value=True,
+            ),
+        ):
+            result = service.record_rate_limit_response("test_service")
+
+        assert result is not None
+        assert mock_tracker.get_backoff_level("test_service") == 1
+
+    def test_a_race_loser_owes_neither_the_backoff_step_nor_a_result(self):
+        """An already-OPEN breaker performed no transition on this call.
+
+        The backoff ladder is a cluster-logical side effect of the trip, so
+        charging it per worker would multiply the delay by the fleet size.
+        """
+        from baldur.services.circuit_breaker.config import CircuitBreakerConfig
+        from baldur.services.circuit_breaker.service import CircuitBreakerService
+
+        config = CircuitBreakerConfig(
+            enabled=True,
+            rate_limit_cascade_threshold=10,
+            rate_limit_cascade_rate=10.0,
+            rate_limit_cascade_minimum_calls=20,
+        )
+        mock_repo = InMemoryCircuitBreakerRepository()
+        service = CircuitBreakerService(config=config, repository=mock_repo)
+        mock_repo.get_or_create("test_service").state = "open"
+
+        mock_tracker = InMemoryRateLimitTracker()
+        mock_tracker._rate_limits["test_service"] = 15
+        mock_tracker._requests["test_service"] = 100
+
+        with (
+            patch(
+                "baldur.services.circuit_breaker.protection.get_rate_limit_tracker",
+                return_value=mock_tracker,
+            ),
+            patch(
+                "baldur.services.circuit_breaker.manual_control._is_system_enabled",
+                return_value=True,
+            ),
+        ):
+            result = service.record_rate_limit_response("test_service")
+
+        assert result is None
+        assert mock_tracker.get_backoff_level("test_service") == 0
+        assert mock_tracker._rate_limits["test_service"] == 16
+
+    def test_the_cascade_opens_an_automatic_row_not_an_operator_pin(self):
+        """A cascade trip recovers through recovery_timeout like any automatic OPEN.
+
+        It used to borrow the manual pin's expiry, so it admitted nothing until
+        the TTL was due and ignored recovery entirely — a 90-minute outage from
+        a storm that may have passed in seconds.
+        """
+        from baldur.services.circuit_breaker.config import CircuitBreakerConfig
+        from baldur.services.circuit_breaker.service import CircuitBreakerService
+
+        config = CircuitBreakerConfig(
+            enabled=True,
+            rate_limit_cascade_threshold=10,
+            rate_limit_cascade_rate=10.0,
+            rate_limit_cascade_minimum_calls=20,
+        )
+        mock_repo = InMemoryCircuitBreakerRepository()
+        service = CircuitBreakerService(config=config, repository=mock_repo)
+
+        mock_tracker = InMemoryRateLimitTracker()
+        mock_tracker._rate_limits["test_service"] = 15
+        mock_tracker._requests["test_service"] = 100
+
+        with (
+            patch(
+                "baldur.services.circuit_breaker.protection.get_rate_limit_tracker",
+                return_value=mock_tracker,
+            ),
+            patch(
+                "baldur.services.circuit_breaker.manual_control._is_system_enabled",
+                return_value=True,
+            ),
+        ):
+            service.record_rate_limit_response("test_service")
+
+        state = mock_repo.get_or_create("test_service")
+        assert state.state == "open"
+        assert state.manually_controlled is False
+        assert state.manual_override_expires_at is None
+
 
 class TestSelfDDoSProtection:
     """Tests for self-DDoS protection."""
@@ -773,3 +939,83 @@ class TestProtectionStatusBehavior:
             status = service.get_protection_status("svc")
 
         assert status["rate_limit_cascade"]["rate_percent"] == 0.0
+
+
+class TestProtectionDenominatorBehavior:
+    """Who writes the cascade rate's denominator decides what the rate means."""
+
+    def _service(self):
+        from baldur.services.circuit_breaker.config import CircuitBreakerConfig
+        from baldur.services.circuit_breaker.service import CircuitBreakerService
+
+        config = CircuitBreakerConfig(
+            enabled=True,
+            rate_limit_cascade_threshold=100,
+            rate_limit_cascade_rate=10.0,
+            rate_limit_cascade_minimum_calls=1000,
+        )
+        return CircuitBreakerService(
+            config=config, repository=InMemoryCircuitBreakerRepository()
+        )
+
+    def test_the_convenience_function_supplies_its_own_denominator(self):
+        """A caller with no request counter still produces a usable rate.
+
+        ``record_rate_limit()`` is the hand-wired entry point an application
+        calls from its own client code. With the request write moved out of the
+        cascade, a convenience that did not write one would leave every such
+        caller reading a rate of 0/0.
+        """
+        from baldur.services.circuit_breaker.convenience import record_rate_limit
+
+        service = self._service()
+        mock_tracker = InMemoryRateLimitTracker()
+
+        with (
+            patch(
+                "baldur.services.circuit_breaker.rate_limit_tracker.get_rate_limit_tracker",
+                return_value=mock_tracker,
+            ),
+            patch(
+                "baldur.services.circuit_breaker.protection.get_rate_limit_tracker",
+                return_value=mock_tracker,
+            ),
+            patch(
+                "baldur.services.circuit_breaker.convenience.get_circuit_breaker_service",
+                return_value=service,
+            ),
+        ):
+            for _ in range(10):
+                record_rate_limit("test_service")
+
+            status = service.get_protection_status("test_service")
+
+        cascade = status["rate_limit_cascade"]
+        assert cascade["count_in_window"] == 10
+        assert cascade["total_requests_in_window"] == 10
+        assert cascade["rate_percent"] == 100.0
+
+    def test_a_caller_that_counts_its_own_calls_keeps_its_own_rate(self):
+        """The observation sites reach the cascade directly, denominator in hand.
+
+        Twenty calls of which ten were throttled must read 50%, not 100% — the
+        rate is only meaningful when one writer owns the denominator.
+        """
+        service = self._service()
+        mock_tracker = InMemoryRateLimitTracker()
+        for _ in range(20):
+            mock_tracker.record_request("test_service")
+
+        with patch(
+            "baldur.services.circuit_breaker.protection.get_rate_limit_tracker",
+            return_value=mock_tracker,
+        ):
+            for _ in range(10):
+                service.record_rate_limit_response("test_service")
+
+            status = service.get_protection_status("test_service")
+
+        cascade = status["rate_limit_cascade"]
+        assert cascade["count_in_window"] == 10
+        assert cascade["total_requests_in_window"] == 20
+        assert cascade["rate_percent"] == 50.0

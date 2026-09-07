@@ -448,3 +448,126 @@ class TestRateLimitAwareDecoratorBehavior:
             with pytest.raises(RateLimitDeferredError):
                 protected()
         assert calls == []
+
+    def test_the_decorator_claims_the_scope_so_one_429_counts_once(self, mock_storage):
+        """A code-level opt-in makes its own coordinator calls, so it claims the call.
+
+        Without the claim the breaker stage above would notify for the same 429,
+        and the consecutive counter would advance twice per throttled call —
+        doubling the cooldown ladder's climb rate for every decorated client.
+        """
+        from baldur.services.circuit_breaker.rate_limit_observation import (
+            close_scope,
+            open_scope,
+        )
+
+        coord = _make_coordinator(mock_storage)
+
+        @coord.rate_limit_aware("k")
+        def protected():
+            return _Response(429)
+
+        token, scope = open_scope("k")
+        try:
+            protected()
+        finally:
+            close_scope(token)
+
+        assert scope.coordination_claimed is True
+        assert mock_storage.get_state("k").consecutive_429s == 1
+
+    def test_a_call_with_no_scope_open_still_coordinates(self, mock_storage):
+        """The decorator does not depend on a breaker stage being above it."""
+        coord = _make_coordinator(mock_storage)
+
+        @coord.rate_limit_aware("k")
+        def protected():
+            return _Response(429)
+
+        protected()
+
+        assert mock_storage.get_state("k").consecutive_429s == 1
+
+    def test_the_default_verdict_is_the_shared_classifier(self, mock_storage):
+        """Neither override supplied: one vocabulary answers both halves.
+
+        A decorated call that disagreed with the breaker stage about what a 429
+        is would install a cooldown the cascade never counted, or the reverse.
+        """
+        coord = _make_coordinator(mock_storage)
+        response = _Response(429)
+        response.headers["Retry-After"] = "45"
+
+        @coord.rate_limit_aware("k")
+        def protected():
+            return response
+
+        protected()
+
+        assert mock_storage.get_state("k").consecutive_429s == 1
+        assert mock_storage.get_state("k").cooldown_until is not None
+
+    def test_an_is_429_override_replaces_only_the_verdict(self, mock_storage):
+        """The wait still comes from the shared header reader.
+
+        Each override replaces exactly its own default and neither composes with
+        it, so a caller who only wants a different verdict does not silently
+        lose the provider's stated wait.
+        """
+        coord = _make_coordinator(mock_storage)
+        response = _Response(200)
+        response.headers["Retry-After"] = "45"
+
+        @coord.rate_limit_aware("k", is_429=lambda r: True)
+        def protected():
+            return response
+
+        protected()
+
+        state = mock_storage.get_state("k")
+        assert state.consecutive_429s == 1
+        assert state.cooldown_until == pytest.approx(time.time() + 45.0, abs=5.0)
+
+    def test_a_get_retry_after_override_replaces_only_the_wait(self, mock_storage):
+        """The verdict still comes from the shared classifier."""
+        coord = _make_coordinator(mock_storage)
+
+        @coord.rate_limit_aware("k", get_retry_after=lambda r: 90.0)
+        def protected():
+            return _Response(429)
+
+        protected()
+
+        state = mock_storage.get_state("k")
+        assert state.consecutive_429s == 1
+        assert state.cooldown_until == pytest.approx(time.time() + 90.0, abs=5.0)
+
+    def test_a_get_retry_after_override_is_not_consulted_for_a_non_429(
+        self, mock_storage
+    ):
+        """The wait override never turns a success into a rate-limit answer."""
+        coord = _make_coordinator(mock_storage)
+
+        @coord.rate_limit_aware("k", get_retry_after=lambda r: 90.0)
+        def protected():
+            return _Response(200)
+
+        protected()
+
+        assert mock_storage.get_state("k").consecutive_429s == 0
+
+    def test_both_overrides_leave_the_shared_classifier_unconsulted(self, mock_storage):
+        """A caller who supplied both owns the whole classification."""
+        coord = _make_coordinator(mock_storage)
+
+        @coord.rate_limit_aware(
+            "k", is_429=lambda r: True, get_retry_after=lambda r: 30.0
+        )
+        def protected():
+            return _Response(200)
+
+        protected()
+
+        state = mock_storage.get_state("k")
+        assert state.consecutive_429s == 1
+        assert state.cooldown_until == pytest.approx(time.time() + 30.0, abs=5.0)

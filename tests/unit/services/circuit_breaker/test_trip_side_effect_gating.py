@@ -361,3 +361,204 @@ class TestTripCallSiteBehavior:
         service.record_failure(SERVICE)
 
         repo.trip_to_open.assert_not_called()
+
+
+# =============================================================================
+# Behavior — the trigger label travels with the trip
+# =============================================================================
+
+
+def _closed_state_at_threshold() -> CircuitBreakerStateData:
+    return CircuitBreakerStateData(
+        service_name=SERVICE,
+        state=CircuitBreakerStateEnum.CLOSED.value,
+        failure_count=FAILURE_THRESHOLD,
+    )
+
+
+_CASCADE_EVIDENCE = {
+    "error_type": "rate_limit_cascade",
+    "rate_limit_count": 15,
+    "total_requests": 100,
+    "rate_percent": 15.0,
+}
+
+
+def _trip(service, *, trigger: str, error_context=None):
+    """Drive the shared trip primitive directly with a given trigger label."""
+    return service._trip_circuit_open(
+        SERVICE,
+        _closed_state_at_threshold(),
+        error_context,
+        effective_config=_config(),
+        window_failures=FAILURE_THRESHOLD,
+        window_total=FAILURE_THRESHOLD,
+        trigger=trigger,
+    )
+
+
+class TestTripTriggerLabelBehavior:
+    """Every automatic OPEN names what decided it, on every surface it reports to.
+
+    The cascade and the failure triggers now share one trip primitive, so
+    without the label a reader could not tell a 429 storm from a failure burst
+    on any of the three surfaces the trip writes to.
+    """
+
+    def test_the_trigger_reaches_the_open_warning(self):
+        service, _repo = _service_over_stubbed_repo(_attempt("open", did_open=True))
+
+        with (
+            patch.object(service, "_log_circuit_open_audit"),
+            patch.object(service, "_apply_burn_rate_multiplier"),
+            capture_logs() as logs,
+        ):
+            _trip(
+                service, trigger="rate_limit_cascade", error_context=_CASCADE_EVIDENCE
+            )
+
+        opened = [
+            entry
+            for entry in logs
+            if entry.get("event") == "circuit_breaker.circuit_auto_opened_failures"
+        ]
+        assert len(opened) == 1
+        assert opened[0]["trigger"] == "rate_limit_cascade"
+
+    def test_the_trigger_reaches_the_audit_row(self):
+        service, _repo = _service_over_stubbed_repo(_attempt("open", did_open=True))
+
+        with (
+            patch.object(service, "_log_circuit_open_audit") as mock_audit,
+            patch.object(service, "_apply_burn_rate_multiplier"),
+        ):
+            _trip(
+                service, trigger="rate_limit_cascade", error_context=_CASCADE_EVIDENCE
+            )
+
+        assert mock_audit.call_args.kwargs["trigger"] == "rate_limit_cascade"
+
+    def test_the_trigger_reaches_the_opened_event_payload(self):
+        service, _repo = _service_over_stubbed_repo(_attempt("open", did_open=True))
+
+        with (
+            patch.object(service, "_log_circuit_open_audit"),
+            patch.object(service, "_apply_burn_rate_multiplier"),
+        ):
+            _trip(
+                service, trigger="rate_limit_cascade", error_context=_CASCADE_EVIDENCE
+            )
+
+        emit = _opened_emits(service)[0]
+        assert emit.kwargs["data"]["trigger"] == "rate_limit_cascade"
+
+    def test_the_failure_triggers_keep_their_own_label(self):
+        """The default is unchanged, so an existing reader keeps reading "auto"."""
+        service, _repo = _service_over_stubbed_repo(_attempt("open", did_open=True))
+
+        with (
+            patch.object(service, "_log_circuit_open_audit") as mock_audit,
+            patch.object(service, "_apply_burn_rate_multiplier"),
+        ):
+            service.record_failure(SERVICE)
+
+        assert mock_audit.call_args.kwargs["trigger"] == "auto"
+        assert _opened_emits(service)[0].kwargs["data"]["trigger"] == "auto"
+
+    def test_the_attempt_is_returned_when_this_worker_opened(self):
+        """The caller gates its own follow-up work on ``did_open``."""
+        service, _repo = _service_over_stubbed_repo(_attempt("open", did_open=True))
+
+        with (
+            patch.object(service, "_log_circuit_open_audit"),
+            patch.object(service, "_apply_burn_rate_multiplier"),
+        ):
+            attempt = _trip(service, trigger="rate_limit_cascade")
+
+        assert attempt.did_open is True
+
+    def test_the_attempt_is_returned_to_a_race_loser(self):
+        """A caller that opened nothing must still receive the verdict, not None.
+
+        The cascade reads ``did_open`` to decide whether it owes the backoff
+        step; a ``None`` here would raise on the very path a busy fleet takes.
+        """
+        service, _repo = _service_over_stubbed_repo(_attempt("open", did_open=False))
+
+        attempt = _trip(service, trigger="rate_limit_cascade")
+
+        assert attempt.did_open is False
+
+    def test_the_attempt_is_returned_when_an_operator_pin_declined_the_write(self):
+        """The pinned exit returns early — and still returns the attempt."""
+        service, repo = _service_over_stubbed_repo(_attempt("open", did_open=False))
+        repo.trip_to_open.return_value = pinned_trip_attempt(
+            SERVICE, expires_at=utc_now() + timedelta(minutes=30)
+        )
+
+        attempt = _trip(service, trigger="rate_limit_cascade")
+
+        assert attempt.did_open is False
+        assert _opened_emits(service) == []
+
+
+# =============================================================================
+# Contract — the audit reason line each trigger writes
+# =============================================================================
+
+
+class TestOpenAuditReasonContract:
+    """The reason line names the trigger, then carries that trigger's evidence."""
+
+    def test_a_cascade_reason_carries_the_rate_evidence(self):
+        """The failure fields cannot express a rate, so the cascade names its own."""
+        snapshot = {"error_context": _CASCADE_EVIDENCE}
+
+        reason = CircuitBreakerService._compose_open_audit_reason(
+            snapshot, "rate_limit_cascade"
+        )
+
+        assert reason == "rate_limit_cascade|rate_limits=15|total=100|rate=15.0"
+
+    def test_a_cascade_reason_without_evidence_reads_not_available(self):
+        """A missing snapshot must degrade, never raise inside the audit path."""
+        reason = CircuitBreakerService._compose_open_audit_reason(
+            {}, "rate_limit_cascade"
+        )
+
+        assert reason == "rate_limit_cascade|rate_limits=N/A|total=N/A|rate=N/A"
+
+    def test_a_cascade_reason_with_a_null_error_context_reads_not_available(self):
+        """``error_context`` is optional on the trip primitive's own signature."""
+        reason = CircuitBreakerService._compose_open_audit_reason(
+            {"error_context": None}, "rate_limit_cascade"
+        )
+
+        assert reason == "rate_limit_cascade|rate_limits=N/A|total=N/A|rate=N/A"
+
+    def test_the_failure_trigger_reason_is_byte_for_byte_unchanged(self):
+        """Existing audit readers parse this line; its shape is a contract."""
+        snapshot = {
+            "circuit_breaker": {
+                "failure_count": 5,
+                "threshold_config": {"failure_threshold": 5},
+            }
+        }
+
+        reason = CircuitBreakerService._compose_open_audit_reason(snapshot, "auto")
+
+        assert reason == "auto_trigger|failures=5|threshold=5"
+
+    def test_the_failure_trigger_reason_reads_a_flat_snapshot_too(self):
+        """Both snapshot shapes were already supported and still are."""
+        snapshot = {"failure_count": 3, "threshold": 7}
+
+        reason = CircuitBreakerService._compose_open_audit_reason(snapshot, "auto")
+
+        assert reason == "auto_trigger|failures=3|threshold=7"
+
+    def test_the_failure_trigger_reason_without_evidence_reads_not_available(self):
+        """The pre-existing degraded shape, unchanged."""
+        reason = CircuitBreakerService._compose_open_audit_reason({}, "auto")
+
+        assert reason == "auto_trigger|failures=N/A|threshold=N/A"

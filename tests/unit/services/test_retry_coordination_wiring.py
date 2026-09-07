@@ -32,6 +32,10 @@ from baldur.core.execution_mode import (
     set_execution_mode,
 )
 from baldur.interfaces.resilience_policy import PolicyOutcome
+from baldur.services.circuit_breaker.rate_limit_observation import (
+    close_scope,
+    open_scope,
+)
 from baldur.services.rate_limit_coordinator import RateLimitCoordinator
 from baldur.services.rate_limit_coordinator.models import (
     RateLimitCoordinatorConfig,
@@ -557,6 +561,81 @@ class TestRetryRateLimitNotifyBehavior:
         )
 
         assert coordinator.on_rate_limited.call_args.kwargs["retry_after"] == 30.0
+
+    def test_a_returned_429_reaches_the_same_verdict_as_a_raised_one(self):
+        """The subject is whatever the attempt produced, not only an exception.
+
+        A client that hands its 429 back as a value used to reach no
+        coordination site at all, so a fleet of such callers shared no cooldown
+        however hard the provider throttled them.
+        """
+
+        class Response:
+            status_code = 429
+
+        coordinator = MagicMock(spec=RateLimitCoordinator)
+        coordinator.on_rate_limited.return_value = 12.0
+        policy = _policy(domain="payment")
+
+        detected = policy._notify_rate_limit_cooldown(
+            coordinator, "payment", Response()
+        )
+
+        assert detected is True
+        coordinator.on_rate_limited.assert_called_once()
+
+    def test_a_coordinator_less_call_still_records_the_cascade_observation(self):
+        """The cascade half is owed even when only the breaker stage is above.
+
+        The coordinator is now optional here: a call whose coordination was
+        turned off by the kill switch still has a breaker to inform.
+        """
+        token, scope = open_scope("payment")
+        try:
+            detected = _policy(domain="payment")._notify_rate_limit_cooldown(
+                None, "payment", Exception(_RATE_LIMIT_MESSAGE), scope
+            )
+        finally:
+            close_scope(token)
+
+        assert detected is True
+        assert scope.rate_limited == 1
+
+    def test_the_scope_mark_precedes_the_coordinator_call(self):
+        """A coordinator fault must not lose the "already classified" mark.
+
+        Marking after the call would let a coordinator outage hand the same
+        outcome to the breaker stage as if no inner stage had seen it — the 429
+        would then be counted twice.
+        """
+        coordinator = MagicMock(spec=RateLimitCoordinator)
+        coordinator.on_rate_limited.side_effect = RuntimeError("coordinator down")
+        error = Exception(_RATE_LIMIT_MESSAGE)
+
+        token, scope = open_scope("payment")
+        try:
+            with pytest.raises(RuntimeError):
+                _policy(domain="payment")._notify_rate_limit_cooldown(
+                    coordinator, "payment", error, scope
+                )
+        finally:
+            close_scope(token)
+
+        assert scope.was_classified(error) is True
+
+    def test_an_unclassifiable_subject_marks_the_scope_without_observing_a_429(self):
+        """Every attempt outcome is marked; only a 429 is counted as one."""
+        token, scope = open_scope("payment")
+        try:
+            detected = _policy(domain="payment")._notify_rate_limit_cooldown(
+                None, "payment", ConnectionError("connection reset"), scope
+            )
+        finally:
+            close_scope(token)
+
+        assert detected is False
+        assert scope.rate_limited == 0
+        assert len(scope.classified) == 1
 
     def test_a_result_borne_429_installs_a_cooldown(self, singleton_coordinator):
         """A returned 429 is a 429: the client's calling convention is not evidence.

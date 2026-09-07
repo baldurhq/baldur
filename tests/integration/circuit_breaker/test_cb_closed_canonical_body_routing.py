@@ -140,6 +140,11 @@ class TestCBClosedRoutesToCanonicalBody:
         _config = {
             "on_recovery_enabled": True,
             "on_recovery_max_items": 11,
+            # The continuation budget is resolved beside max_items and carried
+            # into the chain, so a runtime-config value must reach the task the
+            # same way. Set explicitly: a settings-default assertion would pass
+            # even if the handler stopped reading the config at all.
+            "on_recovery_max_continuations": 7,
         }
         runtime_manager.get_config.return_value = _config
         runtime_manager._get_config.return_value = _config
@@ -177,9 +182,21 @@ class TestCBClosedRoutesToCanonicalBody:
                 "delay",
                 side_effect=run_body_inline,
             ):
-                with patch(
-                    "baldur.services.get_replay_service",
-                    return_value=mock_replay_service,
+                with (
+                    patch(
+                        "baldur.services.get_replay_service",
+                        return_value=mock_replay_service,
+                    ),
+                    # Every pass re-affirms the circuit before draining, and
+                    # that read reaches the real state backend — on a host with
+                    # no Redis it spends seconds probing, which outlives the
+                    # bus's 0.1s handler budget and makes the assertions below
+                    # race the body. Affirmation is a different unit's subject;
+                    # this one is about the routing.
+                    patch(
+                        "baldur.celery_tasks.dlq_tasks._affirm_circuit_closed",
+                        return_value=(True, None),
+                    ),
                 ):
                     fresh_event_bus.publish(event)
 
@@ -188,11 +205,12 @@ class TestCBClosedRoutesToCanonicalBody:
         assert invoked_body_kwargs == {
             "service_name": "payment-api",
             "max_items": 11,
+            "max_continuations": 7,
         }
-        mock_replay_service.replay_on_circuit_close.assert_called_once_with(
-            service_name="payment-api",
-            max_items=11,
-        )
+        replay_kwargs = mock_replay_service.replay_on_circuit_close.call_args.kwargs
+        assert replay_kwargs["service_name"] == "payment-api"
+        assert replay_kwargs["max_items"] == 11
+        assert replay_kwargs["continuation"] == 0
 
     def test_publish_with_no_subscribers_is_noop(
         self, fresh_event_bus, make_cb_closed_event

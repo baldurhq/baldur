@@ -27,6 +27,7 @@ from baldur.interfaces.web_framework import (
     RequestContext,
     ResponseContext,
 )
+from baldur.services.circuit_breaker.rate_limit_tracker import RateLimitTracker
 from baldur.services.circuit_breaker.service import CircuitBreakerService
 from baldur.utils.time import utc_now
 
@@ -256,6 +257,139 @@ class TestRecordCbObservationBehavior:
             # Must not raise — observation is fire-and-forget
             record_cb_observation(
                 _make_request(), status_code=500, service_name="payment"
+            )
+
+    def test_a_relayed_429_records_a_failure_and_the_cascade(self):
+        """A throttled upstream is a counted failure, not only a cascade entry.
+
+        The framework-free helper is the whole inbound path on Flask and
+        FastAPI. While it dispatched on 5xx alone, a 429 storm reached neither
+        the failure count nor the cascade on those frameworks.
+        """
+        service = _mock_cb()
+        with (
+            patch.object(cb_module, "_try_get_cb_service", return_value=service),
+            patch.object(cb_module, "get_rate_limit_tracker"),
+        ):
+            record_cb_observation(
+                _make_request(), status_code=429, service_name="payment"
+            )
+
+        service.record_failure.assert_called_once()
+        service.record_rate_limit_response.assert_called_once_with("payment")
+        service.record_success.assert_not_called()
+
+    def test_a_status_in_both_sets_records_a_failure_and_the_cascade(self):
+        """Membership is non-exclusive; the dispatch is no longer if/elif.
+
+        An operator who listed 429 as a failure code used to lose cascade
+        detection for it silently.
+        """
+        service = _mock_cb()
+        with (
+            patch.object(cb_module, "_try_get_cb_service", return_value=service),
+            patch.object(cb_module, "get_rate_limit_tracker"),
+            patch.object(
+                cb_module, "failure_status_codes", return_value=frozenset({429, 503})
+            ),
+            patch.object(
+                cb_module, "rate_limit_status_codes", return_value=frozenset({429})
+            ),
+        ):
+            record_cb_observation(
+                _make_request(), status_code=429, service_name="payment"
+            )
+
+        service.record_failure.assert_called_once()
+        service.record_rate_limit_response.assert_called_once_with("payment")
+
+    def test_a_server_error_feeds_no_cascade(self):
+        """Discriminator: the two sets are read independently, not as one."""
+        service = _mock_cb()
+        with (
+            patch.object(cb_module, "_try_get_cb_service", return_value=service),
+            patch.object(cb_module, "get_rate_limit_tracker"),
+        ):
+            record_cb_observation(
+                _make_request(), status_code=503, service_name="payment"
+            )
+
+        service.record_rate_limit_response.assert_not_called()
+
+    def test_every_observed_response_writes_one_request(self):
+        """This helper is the only denominator writer on the frameworks it serves.
+
+        Without the write the cascade rate would read 100% on Flask and FastAPI
+        whatever the real traffic mix was, so the rate threshold could never
+        discriminate.
+        """
+        service = _mock_cb()
+        tracker = MagicMock(spec=RateLimitTracker)
+        with (
+            patch.object(cb_module, "_try_get_cb_service", return_value=service),
+            patch.object(cb_module, "get_rate_limit_tracker", return_value=tracker),
+        ):
+            record_cb_observation(
+                _make_request(), status_code=200, service_name="payment"
+            )
+
+        tracker.record_request.assert_called_once_with("payment")
+
+    def test_an_unnamed_observation_writes_no_request(self):
+        """The denominator write sits after the guards, not before them.
+
+        A write above them would file every unnamed or disabled observation
+        under a bucket no reader owns.
+        """
+        tracker = MagicMock(spec=RateLimitTracker)
+        with (
+            patch.object(cb_module, "_try_get_cb_service", return_value=_mock_cb()),
+            patch.object(cb_module, "get_rate_limit_tracker", return_value=tracker),
+        ):
+            record_cb_observation(_make_request(), status_code=429)
+
+        tracker.record_request.assert_not_called()
+
+    def test_a_disabled_service_writes_no_request(self):
+        """The same ordering, for the second guard."""
+        tracker = MagicMock(spec=RateLimitTracker)
+        with (
+            patch.object(
+                cb_module,
+                "_try_get_cb_service",
+                return_value=_mock_cb(is_enabled=False),
+            ),
+            patch.object(cb_module, "get_rate_limit_tracker", return_value=tracker),
+        ):
+            record_cb_observation(
+                _make_request(), status_code=429, service_name="payment"
+            )
+
+        tracker.record_request.assert_not_called()
+
+    def test_an_unavailable_cb_service_writes_no_request(self):
+        """And for the third."""
+        tracker = MagicMock(spec=RateLimitTracker)
+        with (
+            patch.object(cb_module, "_try_get_cb_service", return_value=None),
+            patch.object(cb_module, "get_rate_limit_tracker", return_value=tracker),
+        ):
+            record_cb_observation(
+                _make_request(), status_code=429, service_name="payment"
+            )
+
+        tracker.record_request.assert_not_called()
+
+    def test_a_cascade_fault_is_swallowed(self):
+        """Observation stays fire-and-forget on its newest half too."""
+        service = _mock_cb()
+        service.record_rate_limit_response.side_effect = RuntimeError("backend down")
+        with (
+            patch.object(cb_module, "_try_get_cb_service", return_value=service),
+            patch.object(cb_module, "get_rate_limit_tracker"),
+        ):
+            record_cb_observation(
+                _make_request(), status_code=429, service_name="payment"
             )
 
 

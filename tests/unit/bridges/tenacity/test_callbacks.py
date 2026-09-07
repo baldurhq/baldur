@@ -22,7 +22,10 @@ from baldur.bridges.tenacity.callbacks import (
     make_before_callback,
     make_before_sleep_callback,
     make_retry_error_callback,
+    observe_bridge_outcome,
 )
+from baldur.services.circuit_breaker.rate_limit_tracker import RateLimitTracker
+from baldur.services.circuit_breaker.service import CircuitBreakerService
 from baldur.services.rate_limit_coordinator import RateLimitCoordinator
 from baldur.services.rate_limit_coordinator.models import RateLimitResult
 
@@ -394,3 +397,273 @@ class TestMakeAfterCallbackBehavior:
         cb = make_after_callback(ctx)
         cb(make_retry_state(attempt_number=1, failed=False, exception=None))
         # No assertion target — purely no-raise check.
+
+
+# =============================================================================
+# Behavior — the bridge's share of the outbound 429 observation
+# =============================================================================
+
+_BRIDGE_CB_SERVICE = (
+    "baldur.services.circuit_breaker.convenience.get_circuit_breaker_service"
+)
+_BRIDGE_TRACKER = (
+    "baldur.services.circuit_breaker.rate_limit_tracker.get_rate_limit_tracker"
+)
+
+
+@pytest.fixture
+def bridge_scope():
+    """An open observation scope with its two sinks stubbed.
+
+    Yields ``(scope, cascade_service, tracker)``.
+    """
+    from baldur.services.circuit_breaker.rate_limit_observation import (
+        close_scope,
+        open_scope,
+    )
+
+    cascade_service = MagicMock(spec=CircuitBreakerService)
+    tracker = MagicMock(spec=RateLimitTracker)
+    token, scope = open_scope("payment")
+    try:
+        with (
+            patch(_BRIDGE_CB_SERVICE, return_value=cascade_service),
+            patch(_BRIDGE_TRACKER, return_value=tracker),
+        ):
+            yield scope, cascade_service, tracker
+    finally:
+        close_scope(token)
+
+
+def _ctx(*, scope=None, coordinator=None, key="payment"):
+    """A bridge callback context carrying the given collaborators."""
+    return BridgeCallbackContext(
+        domain="d",
+        rate_limit_key=key,
+        rate_limit_coordinator=coordinator,
+        retry_budget=None,
+        scope=scope,
+    )
+
+
+class TestBridgeBeforeCallbackBehavior:
+    """``before`` counts the attempt last, after the deferral could abort it."""
+
+    def test_a_deferred_attempt_is_never_counted(self, make_retry_state, bridge_scope):
+        """The deferral aborts before the dependency is called.
+
+        tenacity runs ``before`` outside the attempt's own try, so the abort
+        leaves the loop with no further callback — which is exactly why the
+        count cannot be moved above it. A counted deferral would put calls the
+        cooldown prevented into the cascade rate's denominator.
+        """
+        scope, _cascade, tracker = bridge_scope
+        coordinator = MagicMock(spec=RateLimitCoordinator)
+        coordinator.wait_if_needed.return_value = RateLimitResult(
+            deferred=True, not_before=123.0
+        )
+
+        with pytest.raises(_CooldownDeferredAbort):
+            make_before_callback(_ctx(scope=scope, coordinator=coordinator))(
+                make_retry_state(attempt_number=1)
+            )
+
+        assert scope.attempts == 0
+        tracker.record_request.assert_not_called()
+
+    def test_a_served_attempt_is_counted(self, make_retry_state, bridge_scope):
+        """Discriminator: the skip above is the deferral, not a blanket no-count."""
+        scope, _cascade, tracker = bridge_scope
+        coordinator = MagicMock(spec=RateLimitCoordinator)
+        coordinator.wait_if_needed.return_value = RateLimitResult(
+            waited=True, wait_time=0.5
+        )
+
+        make_before_callback(_ctx(scope=scope, coordinator=coordinator))(
+            make_retry_state(attempt_number=1)
+        )
+
+        assert scope.attempts == 1
+        tracker.record_request.assert_called_once_with("payment")
+
+    def test_a_coordinator_less_bridge_still_counts_its_attempt(
+        self, make_retry_state, bridge_scope
+    ):
+        """The count belongs to the breaker above, not to the coordinator.
+
+        A bridge with no key coordinates nothing, but the calls it makes are
+        still the denominator of the breaker's cascade rate.
+        """
+        scope, _cascade, _tracker = bridge_scope
+
+        make_before_callback(_ctx(scope=scope, coordinator=None, key=None))(
+            make_retry_state(attempt_number=1)
+        )
+
+        assert scope.attempts == 1
+
+    def test_a_coordinator_fault_does_not_lose_the_attempt_count(
+        self, make_retry_state, bridge_scope
+    ):
+        """Fail-open on the wait must not take the bookkeeping with it."""
+        scope, _cascade, _tracker = bridge_scope
+        coordinator = MagicMock(spec=RateLimitCoordinator)
+        coordinator.wait_if_needed.side_effect = RuntimeError("coordinator down")
+
+        make_before_callback(_ctx(scope=scope, coordinator=coordinator))(
+            make_retry_state(attempt_number=1)
+        )
+
+        assert scope.attempts == 1
+
+
+class TestBridgeAfterCallbackBehavior:
+    """``after`` stashes what the execute-level translation needs, then observes."""
+
+    def test_a_failed_attempt_stashes_its_error_and_number(self, make_retry_state):
+        """The deferral translation reports this error instead of a phantom one."""
+        error = ValueError("boom")
+        ctx = _ctx()
+
+        make_after_callback(ctx)(
+            make_retry_state(attempt_number=3, failed=True, exception=error)
+        )
+
+        assert ctx.last_error is error
+        assert ctx.last_attempt == 3
+
+    def test_a_non_failed_outcome_clears_the_stashed_error(self, make_retry_state):
+        """A later success must not leave an earlier attempt's error standing.
+
+        The deferral translation synthesises its own error only when none is
+        stashed, so a stale one would report a failure for a call never made.
+        """
+        ctx = _ctx()
+        make_after_callback(ctx)(
+            make_retry_state(attempt_number=1, failed=True, exception=ValueError("x"))
+        )
+
+        make_after_callback(ctx)(
+            make_retry_state(attempt_number=2, failed=False, exception=None)
+        )
+
+        assert ctx.last_error is None
+        assert ctx.last_attempt == 2
+
+    def test_a_429_is_classified_even_when_no_key_was_given(
+        self, bridge_scope, make_retry_state
+    ):
+        """Classification precedes the coordinator/key guard.
+
+        The guard used to sit first, so a bridge without a ``rate_limit_key``
+        fed the breaker's cascade nothing at all — which is the configuration
+        every non-coordinating tenacity user has.
+        """
+        scope, cascade_service, _tracker = bridge_scope
+        error = Exception("429 too many requests")
+
+        make_after_callback(_ctx(scope=scope, coordinator=None, key=None))(
+            make_retry_state(attempt_number=1, failed=True, exception=error)
+        )
+
+        assert scope.rate_limited == 1
+        cascade_service.record_rate_limit_response.assert_called_once_with("payment")
+
+    def test_an_ordinary_failure_is_marked_but_counts_no_429(
+        self, bridge_scope, make_retry_state
+    ):
+        """Every outcome is marked; only a 429 is observed as one."""
+        scope, cascade_service, _tracker = bridge_scope
+        error = ConnectionError("connection reset")
+
+        make_after_callback(_ctx(scope=scope))(
+            make_retry_state(attempt_number=1, failed=True, exception=error)
+        )
+
+        assert scope.was_classified(error) is True
+        assert scope.rate_limited == 0
+        cascade_service.record_rate_limit_response.assert_not_called()
+
+    def test_an_outcome_less_state_is_a_noop(self, make_retry_state):
+        """tenacity can hand over a state with no outcome; nothing is stashed."""
+        ctx = _ctx()
+
+        make_after_callback(ctx)(make_retry_state(attempt_number=2))
+
+        assert ctx.last_attempt is None
+        assert ctx.last_error is None
+
+
+class TestBridgeOutcomeObservationBehavior:
+    """``observe_bridge_outcome`` — one classification, wrapped fail-open."""
+
+    def test_neither_scope_nor_coordinator_is_a_noop(self):
+        """Nothing to inform, so nothing is read off the caller's object."""
+
+        class Exploding:
+            @property
+            def status_code(self):
+                raise AssertionError("classification must not run")
+
+        observe_bridge_outcome(_ctx(), Exploding())
+
+    def test_a_scope_only_context_records_the_cascade_without_a_cooldown(
+        self, bridge_scope
+    ):
+        """A bridge with no coordinator still feeds the breaker above it."""
+        scope, cascade_service, _tracker = bridge_scope
+
+        observe_bridge_outcome(
+            _ctx(scope=scope, coordinator=None, key=None),
+            Exception("429 too many requests"),
+        )
+
+        assert scope.rate_limited == 1
+        cascade_service.record_rate_limit_response.assert_called_once_with("payment")
+
+    def test_the_mark_is_applied_before_detection_can_fail(self, bridge_scope):
+        """Detection reads caller-supplied attributes, so it can raise.
+
+        Marking after it would let a caller's exploding property hand the same
+        outcome to the breaker stage as unseen, and it would be counted twice.
+        """
+        scope, _cascade, _tracker = bridge_scope
+        outcome = Exception("429 too many requests")
+
+        with patch(
+            "baldur.bridges.tenacity.callbacks.detect_rate_limit",
+            side_effect=RuntimeError("classifier fault"),
+        ):
+            observe_bridge_outcome(_ctx(scope=scope), outcome)
+
+        assert scope.was_classified(outcome) is True
+
+    def test_a_coordinator_fault_does_not_break_the_users_loop(self, bridge_scope):
+        """tenacity invokes ``after`` un-guarded, so an escape aborts the retry."""
+        scope, cascade_service, _tracker = bridge_scope
+        coordinator = MagicMock(spec=RateLimitCoordinator)
+        coordinator.on_rate_limited.side_effect = RuntimeError("coordinator down")
+
+        observe_bridge_outcome(
+            _ctx(scope=scope, coordinator=coordinator),
+            Exception("429 too many requests"),
+        )
+
+        cascade_service.record_rate_limit_response.assert_called_once()
+
+    def test_the_retry_after_reaches_the_coordinator(self, bridge_scope):
+        """A provider's stated wait survives the hop into the cooldown."""
+        scope, _cascade, _tracker = bridge_scope
+        coordinator = MagicMock(spec=RateLimitCoordinator)
+
+        class ThrottledError(Exception):
+            retry_after = 30.0
+
+        observe_bridge_outcome(
+            _ctx(scope=scope, coordinator=coordinator),
+            ThrottledError("429 too many requests"),
+        )
+
+        coordinator.on_rate_limited.assert_called_once_with(
+            key="payment", retry_after=30.0
+        )
