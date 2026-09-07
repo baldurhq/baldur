@@ -10,6 +10,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-09-07
+
 ### Added
 
 - Automatic replay after a circuit closes now drains the whole backlog, not one batch of it.
