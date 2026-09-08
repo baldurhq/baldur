@@ -33,6 +33,9 @@ _CONTENT_POSITIVES = [
     "see " + "scenario-test" + "-plan-2026-04-12.md",
     "per " + "scenario-" + "results/7C/foo.md",
     "memory/" + "scenario-results/7B/bar.md",
+    # Authoring-session links: the commit trailer and the URL it carries.
+    "Claude-" + "Session: https://claude.ai/code/" + "session_01ABCdef",
+    "written in https://claude.ai/code/" + "session_01ABCdef",
 ]
 
 # Each MUST NOT be flagged by the content scan (public-repo norms).
@@ -49,6 +52,8 @@ _CONTENT_NEGATIVES = [
     "baldur.adapters."
     + "memory.circuit_breaker",  # OSS memory module, not memory/scenario
     "src/baldur/adapters/" + "memory/failed_operation.py",  # adapters/memory, disjoint
+    "https://claude.ai/" + "chat/abc",  # ordinary site link, not a session link
+    "built with the Claude " + "Code CLI",  # bare product mention
 ]
 
 # The commit-message scan adds the private source-tree paths to the content set.

@@ -100,6 +100,16 @@ CONTENT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("private scenario plan reference", re.compile(r"scenario-test-plan")),
     ("private scenario results path", re.compile(r"scenario-results/")),
     ("private memory-tree scenario path", re.compile(r"memory/scenario")),
+    # Authoring-session links. A coding-assistant commit trailer carries a URL
+    # that identifies the session a change was written in; 90 commits naming 31
+    # sessions reached this repository's published history that way before the
+    # trailer was switched off at the client, and nothing here noticed. Only the
+    # session-link form is matched, so ordinary links to the assistant's site
+    # stay allowed.
+    (
+        "authoring-session link",
+        re.compile(r"Claude-Session:|claude\.ai/code/session_"),
+    ),
 )
 
 # Commit messages additionally must not spell a private source-tree path.
