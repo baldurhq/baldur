@@ -38,6 +38,7 @@ from baldur.core.shutdown_coordinator import (
 from baldur.interfaces.web_framework import (
     ContentType,
     HttpMethod,
+    RequestContext,
     ResponseContext,
 )
 
@@ -347,9 +348,12 @@ class _SpyApp:
 
 
 @contextmanager
-def _patch_pipeline(*, admission, rate=None, cb=None, backpressure=None):
-    """Patch the four reject helpers the ASGI middleware composes."""
+def _patch_pipeline(*, admission, rate=None, cb=None, backpressure=None, shed=None):
+    """Patch the five reject helpers the ASGI middleware composes."""
     with (
+        patch.object(
+            fastapi_mw, "check_emergency_shedding", return_value=shed
+        ) as m_shed,
         patch.object(fastapi_mw, "check_rate_limit", return_value=rate) as m_rate,
         patch.object(fastapi_mw, "check_admission", return_value=admission) as m_adm,
         patch.object(fastapi_mw, "check_cb_open", return_value=cb) as m_cb,
@@ -357,7 +361,9 @@ def _patch_pipeline(*, admission, rate=None, cb=None, backpressure=None):
             fastapi_mw, "check_backpressure", return_value=backpressure
         ) as m_bp,
     ):
-        yield SimpleNamespace(rate=m_rate, admission=m_adm, cb=m_cb, backpressure=m_bp)
+        yield SimpleNamespace(
+            shed=m_shed, rate=m_rate, admission=m_adm, cb=m_cb, backpressure=m_bp
+        )
 
 
 class TestFastapiAdmissionPipeline:
@@ -453,6 +459,102 @@ class TestFastapiAdmissionPipeline:
                 _run(BaldurMiddleware(app)(_scope(), _receive, recorder))
 
         mock_clear.assert_called_once_with()
+
+
+# =============================================================================
+# Emergency shedding pipeline (767) — Behavior
+# =============================================================================
+
+
+class TestFastAPISheddingPipelineBehavior:
+    """Per-tier emergency shedding leads the ASGI reject pipeline.
+
+    Head position is the contract: a shed request must consume no rate-limit
+    token and acquire no admission slot, matching Django's early
+    ``TieringMiddleware`` placement.
+    """
+
+    @staticmethod
+    def _shed_rejection() -> ResponseContext:
+        return ResponseContext(
+            status_code=503,
+            body={"code": "LOAD_SHEDDING", "tier": "non_essential"},
+            headers={"Retry-After": "30"},
+        )
+
+    @staticmethod
+    def _header(message: dict, name: str) -> str | None:
+        for key, value in message["headers"]:
+            if key.decode().lower() == name.lower():
+                return value.decode()
+        return None
+
+    def test_shed_returns_503_with_retry_after_header(self):
+        recorder = _AsgiRecorder()
+        with _patch_pipeline(
+            admission=AdmissionDecision(active=False), shed=self._shed_rejection()
+        ):
+            _run(BaldurMiddleware(_ok_app)(_scope(), _receive, recorder))
+
+        start = recorder.messages[0]
+        assert start["status"] == 503
+        assert self._header(start, "Retry-After") == "30"
+        assert json.loads(recorder.messages[1]["body"])["code"] == "LOAD_SHEDDING"
+
+    def test_shed_consumes_no_rate_limit_token_and_no_admission_slot(self):
+        """Head position: neither downstream gate is consulted on a shed."""
+        spy = _SpyApp()
+        recorder = _AsgiRecorder()
+        with _patch_pipeline(
+            admission=AdmissionDecision(active=False), shed=self._shed_rejection()
+        ) as mocks:
+            _run(BaldurMiddleware(spy)(_scope(), _receive, recorder))
+
+        mocks.shed.assert_called_once()
+        mocks.rate.assert_not_called()
+        mocks.admission.assert_not_called()
+        mocks.cb.assert_not_called()
+        assert spy.called is False
+
+    def test_shed_is_excluded_from_red_metrics(self):
+        """The early return happens before the observation scope exists."""
+        recorder = _AsgiRecorder()
+        with (
+            _patch_pipeline(
+                admission=AdmissionDecision(active=False), shed=self._shed_rejection()
+            ),
+            patch.object(fastapi_mw, "record_http_red") as m_red,
+        ):
+            _run(BaldurMiddleware(_ok_app)(_scope(), _receive, recorder))
+
+        m_red.assert_not_called()
+
+    def test_allow_runs_the_rest_of_the_pipeline(self):
+        """``None`` from the helper is a pure no-op on the request path."""
+        spy = _SpyApp()
+        recorder = _AsgiRecorder()
+        with _patch_pipeline(admission=AdmissionDecision(active=True)) as mocks:
+            _run(BaldurMiddleware(spy)(_scope(), _receive, recorder))
+
+        assert recorder.messages[0]["status"] == 200
+        mocks.shed.assert_called_once()
+        mocks.rate.assert_called_once()
+        assert spy.called is True
+
+    def test_helper_receives_the_adapter_request_context(self):
+        """The shed decision sees the same RequestContext the pipeline built."""
+        recorder = _AsgiRecorder()
+        with _patch_pipeline(admission=AdmissionDecision(active=False)) as mocks:
+            _run(
+                BaldurMiddleware(_ok_app)(
+                    _scope(method="POST", path="/api/pay/"), _receive, recorder
+                )
+            )
+
+        ctx = mocks.shed.call_args.args[0]
+        assert isinstance(ctx, RequestContext)
+        assert ctx.path == "/api/pay/"
+        assert ctx.method == HttpMethod.POST
 
 
 # =============================================================================

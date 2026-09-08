@@ -182,20 +182,23 @@ class TestToFlaskResponseContract:
 
 
 @contextmanager
-def _patch_pipeline(*, admission, rate=None, cb=None, backpressure=None):
-    """Patch the four reject helpers the Flask hooks compose.
+def _patch_pipeline(*, admission, rate=None, cb=None, backpressure=None, shed=None):
+    """Patch the five reject helpers the Flask hooks compose.
 
     Returns the patched ``check_*`` mocks so tests can assert call counts.
     ``admission`` is the :class:`AdmissionDecision` ``check_admission`` returns;
     the others default to ``None`` (allow).
     """
     with (
+        patch.object(flask_mw, "check_emergency_shedding", return_value=shed) as m_shed,
         patch.object(flask_mw, "check_rate_limit", return_value=rate) as m_rate,
         patch.object(flask_mw, "check_admission", return_value=admission) as m_adm,
         patch.object(flask_mw, "check_cb_open", return_value=cb) as m_cb,
         patch.object(flask_mw, "check_backpressure", return_value=backpressure) as m_bp,
     ):
-        yield SimpleNamespace(rate=m_rate, admission=m_adm, cb=m_cb, backpressure=m_bp)
+        yield SimpleNamespace(
+            shed=m_shed, rate=m_rate, admission=m_adm, cb=m_cb, backpressure=m_bp
+        )
 
 
 class TestFlaskAdmissionPipeline:
@@ -320,6 +323,96 @@ class TestFlaskAdmissionPipeline:
             client_app.client.get("/ping")
 
         assert get_remaining_ms() is None
+
+
+# =============================================================================
+# Emergency shedding pipeline (767) — Behavior
+# =============================================================================
+
+
+class TestFlaskSheddingPipelineBehavior:
+    """Per-tier emergency shedding leads the Flask reject pipeline.
+
+    Head position is the contract: a shed request must consume no rate-limit
+    token and acquire no admission slot, matching Django's early
+    ``TieringMiddleware`` placement.
+    """
+
+    @pytest.fixture
+    def client_app(self):
+        app = Flask(__name__)
+        state = SimpleNamespace(view_calls=0)
+
+        @app.route("/ping")
+        def _ping():
+            state.view_calls += 1
+            return {"ok": True}
+
+        install_baldur_request_hooks(app)
+        return SimpleNamespace(client=app.test_client(), state=state)
+
+    @staticmethod
+    def _shed_rejection() -> ResponseContext:
+        return ResponseContext(
+            status_code=503,
+            body={"code": "LOAD_SHEDDING", "tier": "non_essential"},
+            headers={"Retry-After": "30"},
+        )
+
+    def test_shed_returns_503_with_retry_after_header(self, client_app):
+        with _patch_pipeline(
+            admission=AdmissionDecision(active=False), shed=self._shed_rejection()
+        ):
+            response = client_app.client.get("/ping")
+
+        assert response.status_code == 503
+        assert response.headers["Retry-After"] == "30"
+        assert response.get_json()["code"] == "LOAD_SHEDDING"
+
+    def test_shed_consumes_no_rate_limit_token_and_no_admission_slot(self, client_app):
+        """Head position: neither downstream gate is consulted on a shed."""
+        with _patch_pipeline(
+            admission=AdmissionDecision(active=False), shed=self._shed_rejection()
+        ) as mocks:
+            client_app.client.get("/ping")
+
+        mocks.shed.assert_called_once()
+        mocks.rate.assert_not_called()
+        mocks.admission.assert_not_called()
+        mocks.cb.assert_not_called()
+        assert client_app.state.view_calls == 0
+
+    def test_shed_is_excluded_from_red_metrics(self, client_app):
+        """The reject flag is set, so the shed is not attributed to the app's work."""
+        with (
+            _patch_pipeline(
+                admission=AdmissionDecision(active=False), shed=self._shed_rejection()
+            ),
+            patch.object(flask_mw, "record_http_red") as m_red,
+        ):
+            client_app.client.get("/ping")
+
+        m_red.assert_not_called()
+
+    def test_allow_runs_the_rest_of_the_pipeline(self, client_app):
+        """``None`` from the helper is a pure no-op on the request path."""
+        with _patch_pipeline(admission=AdmissionDecision(active=True)) as mocks:
+            response = client_app.client.get("/ping")
+
+        assert response.status_code == 200
+        mocks.shed.assert_called_once()
+        mocks.rate.assert_called_once()
+        assert client_app.state.view_calls == 1
+
+    def test_helper_receives_the_adapter_request_context(self, client_app):
+        """The shed decision sees the same RequestContext the pipeline built."""
+        with _patch_pipeline(admission=AdmissionDecision(active=False)) as mocks:
+            client_app.client.get("/ping")
+
+        ctx = mocks.shed.call_args.args[0]
+        assert isinstance(ctx, RequestContext)
+        assert ctx.path == "/ping"
+        assert ctx.method == HttpMethod.GET
 
 
 # =============================================================================

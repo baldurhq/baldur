@@ -468,6 +468,97 @@ class TestEmergencyModeSettingsBehavior:
             with pytest.raises(ValidationError):
                 EmergencyModeSettings()
 
+    # === HTTP shedding (api/middleware/emergency_shedding.py) ===
+
+    def test_shedding_enabled_default(self):
+        """Default shedding_enabled is True (the decision still needs PRO)."""
+        from baldur.settings.emergency_mode import (
+            EmergencyModeSettings,
+            reset_emergency_mode_settings,
+        )
+
+        reset_emergency_mode_settings()
+        with mock.patch.dict(os.environ, {}, clear=True):
+            settings = EmergencyModeSettings()
+            assert settings.shedding_enabled is True
+
+    def test_shedding_enabled_env_override_disables(self):
+        """BALDUR_EMERGENCY_MODE_SHEDDING_ENABLED=false turns the decision off."""
+        from baldur.settings.emergency_mode import (
+            EmergencyModeSettings,
+            reset_emergency_mode_settings,
+        )
+
+        reset_emergency_mode_settings()
+        with mock.patch.dict(
+            os.environ,
+            {"BALDUR_EMERGENCY_MODE_SHEDDING_ENABLED": "false"},
+            clear=True,
+        ):
+            assert EmergencyModeSettings().shedding_enabled is False
+
+    def test_shed_retry_after_seconds_default(self):
+        """Default shed_retry_after_seconds is 30 (the value Django hardcoded)."""
+        from baldur.settings.emergency_mode import (
+            EmergencyModeSettings,
+            reset_emergency_mode_settings,
+        )
+
+        reset_emergency_mode_settings()
+        with mock.patch.dict(os.environ, {}, clear=True):
+            settings = EmergencyModeSettings()
+            assert settings.shed_retry_after_seconds == 30
+
+    def test_shed_retry_after_seconds_env_override(self):
+        """The operator-visible Retry-After is env-tunable on every framework."""
+        from baldur.settings.emergency_mode import (
+            EmergencyModeSettings,
+            reset_emergency_mode_settings,
+        )
+
+        reset_emergency_mode_settings()
+        with mock.patch.dict(
+            os.environ,
+            {"BALDUR_EMERGENCY_MODE_SHED_RETRY_AFTER_SECONDS": "10"},
+            clear=True,
+        ):
+            assert EmergencyModeSettings().shed_retry_after_seconds == 10
+
+    # === Boundary: shed_retry_after_seconds ge=1 le=3600 ===
+
+    @pytest.mark.parametrize("value", ["1", "3600"])
+    def test_shed_retry_after_seconds_accepts_the_bounds(self, value):
+        """Both ends of the declared range are inside it."""
+        from baldur.settings.emergency_mode import (
+            EmergencyModeSettings,
+            reset_emergency_mode_settings,
+        )
+
+        reset_emergency_mode_settings()
+        with mock.patch.dict(
+            os.environ,
+            {"BALDUR_EMERGENCY_MODE_SHED_RETRY_AFTER_SECONDS": value},
+            clear=True,
+        ):
+            assert EmergencyModeSettings().shed_retry_after_seconds == int(value)
+
+    @pytest.mark.parametrize("value", ["0", "3601"])
+    def test_shed_retry_after_seconds_outside_the_bounds_raises(self, value):
+        """0 advertises 'retry immediately' during a shed; over an hour is a typo."""
+        from baldur.settings.emergency_mode import (
+            EmergencyModeSettings,
+            reset_emergency_mode_settings,
+        )
+
+        reset_emergency_mode_settings()
+        with mock.patch.dict(
+            os.environ,
+            {"BALDUR_EMERGENCY_MODE_SHED_RETRY_AFTER_SECONDS": value},
+            clear=True,
+        ):
+            with pytest.raises(ValidationError):
+                EmergencyModeSettings()
+
     # === JSON Validation: level_rules_json ===
 
     def test_level_rules_json_valid_structure_accepted(self):
