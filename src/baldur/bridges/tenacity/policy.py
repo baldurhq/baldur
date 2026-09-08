@@ -331,10 +331,14 @@ class TenacityBridgePolicy(ResiliencePolicy[T]):
         bridge whose predicate declines a 429 would install no cooldown at all,
         and the breaker stage would be withheld by this bridge's own claim.
 
-        The comparison errs toward "not yet seen": a missing statistics entry or
-        an unset ``last_attempt`` classifies here, and the scope's identity mark
-        makes a redundant classification a no-op rather than a double count.
+        The attempt comparison errs toward "not yet seen": a missing statistics
+        entry or an unset ``last_attempt`` classifies here. The scope's identity
+        mark is what makes erring that way safe, so it is consulted first — an
+        outcome ``after`` really did classify is a no-op here rather than a
+        second 429 in the cascade.
         """
+        if ctx.scope is not None and ctx.scope.was_classified(outcome):
+            return
         if ctx.last_attempt is not None and ctx.last_attempt == (
             self._statistics_attempts(retrying)
         ):

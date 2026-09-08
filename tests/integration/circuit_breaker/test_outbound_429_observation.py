@@ -43,6 +43,7 @@ from baldur.services.circuit_breaker.rate_limit_tracker import (
     reset_rate_limit_tracker,
 )
 from baldur.services.circuit_breaker.service import CircuitBreakerService
+from baldur.services.event_bus import EventType
 from baldur.services.rate_limit_coordinator import RateLimitCoordinator
 from baldur.services.rate_limit_coordinator.models import (
     RateLimitDeferredError,
@@ -367,3 +368,86 @@ class TestComposedChainCascadeLifecycleBehavior:
 
         assert isinstance(get_rate_limit_tracker(), RateLimitTracker)
         assert chain.cascade_counts() == (0, 5)
+
+
+# =============================================================================
+# Which of the three OPEN triggers fires, with nothing tuned
+# =============================================================================
+
+
+def _breaker_only_chain(config: CircuitBreakerConfig) -> _Chain:
+    """The chain with no retry stage below it: the breaker owns both counts."""
+    chain = _Chain(config, max_attempts=1)
+    chain.composer = PolicyComposer().add(chain.breaker)
+    return chain
+
+
+def _opened_triggers(chain: _Chain) -> list[str]:
+    """The ``trigger`` label of every OPEN this chain emitted, in order."""
+    return [
+        data.get("trigger")
+        for event_type, data in chain.events
+        if event_type == EventType.CIRCUIT_BREAKER_OPENED
+    ]
+
+
+class TestShippedDefaultTriggerBandBehavior:
+    """Every threshold left at its shipped value, so the band is the real one."""
+
+    def test_an_interleaved_storm_trips_through_the_cascade(self):
+        """The cascade's own band: under five in a row AND under the failure rate.
+
+        Three triggers watch one breaker and the first to fire owns the trip, so
+        "the cascade opens breakers" is only proven inside the band the other two
+        leave open. A pure storm reaches ``failure_threshold`` at call five, long
+        before the cascade's twenty-call minimum sample exists; anything at or
+        above ``failure_rate_threshold`` reaches that at call ten. One 429 in
+        every four sits below both, and reaches the cascade's floor at call 40.
+        """
+        chain = _breaker_only_chain(CircuitBreakerConfig(enabled=True))
+
+        def one_in_four(n: int) -> str:
+            if n % 4 == 0:
+                raise _Throttled()
+            return "ok"
+
+        for n in range(1, 11):
+            chain.execute(lambda n=n: one_in_four(n))
+
+        # Negative: the failure-rate trigger evaluates from ``minimum_calls`` on.
+        assert chain.state() == "closed"
+
+        for n in range(11, 41):
+            chain.execute(lambda n=n: one_in_four(n))
+
+        assert chain.cascade_counts() == (10, 40)
+        assert chain.state() == "open"
+        assert _opened_triggers(chain) == ["rate_limit_cascade"]
+
+        row = chain.repository.get_or_create(SERVICE)
+        assert row.manually_controlled is False
+        assert row.manual_override_expires_at is None
+
+    def test_a_pure_storm_trips_on_the_failure_count_first(self):
+        """Five consecutive 429s are five ordinary failures before they are a storm.
+
+        The 429s are still observed on the way — the tracker holds one request
+        and one rate-limit entry per call — but the trip itself is the ordinary
+        automatic one, and the calls the OPEN then rejects observe nothing.
+        """
+        chain = _breaker_only_chain(CircuitBreakerConfig(enabled=True))
+
+        def always_throttled():
+            raise _Throttled()
+
+        for _ in range(5):
+            chain.execute(always_throttled)
+
+        assert chain.state() == "open"
+        assert _opened_triggers(chain) == ["auto"]
+        assert chain.cascade_counts() == (5, 5)
+
+        result = chain.execute(always_throttled)
+
+        assert result.outcome == PolicyOutcome.REJECTED
+        assert chain.cascade_counts() == (5, 5)
