@@ -36,6 +36,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 ### Fixed
 
 - A worker whose cached breaker row was stale could still half-open it during Level 3.
+- A crashed scheduler-failover retry thread now says so, instead of leaving the host a permanent follower in silence.
 - An unreadable `BALDUR_CB_ADVANCED_*` value no longer lets the panic lane declare Level 3.
 - An audit chain whose sequence source lost its state re-anchors instead of re-using numbers.
 - Entries written while the chain's Redis was unreachable now continue the chain and verify.

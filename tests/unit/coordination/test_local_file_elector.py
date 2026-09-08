@@ -311,3 +311,92 @@ class TestLocalFileLeaderElectorNamespace:
     def test_sanitize_strips_unsafe_characters(self):
         """_sanitize keeps alnum/-/_ and replaces the rest."""
         assert _sanitize("a/b c:d") == "a_b_c_d"
+
+
+# =============================================================================
+# Failover retry-thread crash visibility
+# =============================================================================
+
+
+class TestLocalFileLeaderElectorRetryCrashVisibility:
+    """A crash of the failover retry thread is logged before the thread dies."""
+
+    def test_retry_thread_target_is_the_crash_capturing_wrapper(
+        self, tmp_path, elector_factory
+    ):
+        """The spawned thread runs the wrapper, not the bare loop.
+
+        Spawning the bare loop is what made a crash invisible: the exception
+        would reach threading's default hook with no elector context.
+        """
+        holder = elector_factory(lock_path=tmp_path / "shared.lock")
+        holder.start()
+        assert holder.is_leader() is True
+
+        follower = elector_factory(lock_path=tmp_path / "shared.lock")
+        with patch.object(follower, "_retry_loop_with_crash_capture") as wrapper:
+            follower.start()
+            assert follower._retry_thread is not None
+            follower._retry_thread.join(timeout=2.0)
+
+        wrapper.assert_called_once_with()
+
+    def test_crash_is_logged_with_resource_and_lock_path(self, elector_factory):
+        """An exception escaping the loop is logged at ERROR, then re-raised."""
+        elector = elector_factory(resource_name="sched-a")
+        boom = RuntimeError("lock backend exploded")
+
+        with (
+            patch.object(elector, "_retry_loop", side_effect=boom),
+            patch(
+                "baldur.coordination.local_file_elector.logger.exception"
+            ) as log_exception,
+            pytest.raises(RuntimeError, match="lock backend exploded"),
+        ):
+            elector._retry_loop_with_crash_capture()
+
+        log_exception.assert_called_once()
+        event, kwargs = log_exception.call_args[0][0], log_exception.call_args[1]
+        assert event == "local_file_elector.retry_loop_error"
+        assert kwargs["resource"] == "sched-a"
+        assert kwargs["error"] is boom
+        assert "lock_path" in kwargs
+
+    @pytest.mark.parametrize("exc_type", [KeyboardInterrupt, SystemExit])
+    def test_interpreter_shutdown_signals_are_not_logged_as_crashes(
+        self, exc_type, elector_factory
+    ):
+        """KeyboardInterrupt / SystemExit propagate untouched.
+
+        They mean the interpreter is going down, not that failover broke.
+        """
+        elector = elector_factory()
+
+        with (
+            patch.object(elector, "_retry_loop", side_effect=exc_type()),
+            patch(
+                "baldur.coordination.local_file_elector.logger.exception"
+            ) as log_exception,
+            pytest.raises(exc_type),
+        ):
+            elector._retry_loop_with_crash_capture()
+
+        log_exception.assert_not_called()
+
+    def test_clean_completion_logs_nothing(self, elector_factory):
+        """Winning the lock ends the loop normally — no crash record.
+
+        The loop terminating is the success path here, unlike every registered
+        daemon worker, which is why this thread is not in the worker registry.
+        """
+        elector = elector_factory()
+
+        with (
+            patch.object(elector, "_retry_loop", return_value=None),
+            patch(
+                "baldur.coordination.local_file_elector.logger.exception"
+            ) as log_exception,
+        ):
+            elector._retry_loop_with_crash_capture()
+
+        log_exception.assert_not_called()

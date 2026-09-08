@@ -286,11 +286,36 @@ class LocalFileLeaderElector(LeaderElector):
         if self._retry_thread is not None and self._retry_thread.is_alive():
             return
         self._retry_thread = threading.Thread(
-            target=self._retry_loop,
+            target=self._retry_loop_with_crash_capture,
             name=f"LocalFileElector-{self._resource_name}",
             daemon=True,
         )
         self._retry_thread.start()
+
+    def _retry_loop_with_crash_capture(self) -> None:
+        """Make a crash of the failover retry thread visible before it dies.
+
+        Without this the thread dies silently and the process stays a follower
+        for the rest of its life: no takeover when the current leader exits, and
+        nothing in the logs saying why. The crash is recorded by logging rather
+        than through the daemon-worker registry because this loop *terminates by
+        design* once it wins the lock — an OS file lock needs no renewal — and
+        the registry's liveness probe reads a thread that has exited as a dead
+        worker, so registering it would emit a CRITICAL and a died-event on
+        every successful failover promotion.
+        """
+        try:
+            self._retry_loop()
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as e:
+            logger.exception(
+                "local_file_elector.retry_loop_error",
+                resource=self._resource_name,
+                lock_path=str(self._lock_path),
+                error=e,
+            )
+            raise
 
     def _retry_loop(self) -> None:
         """Periodically re-attempt acquisition until it succeeds or stop()."""
