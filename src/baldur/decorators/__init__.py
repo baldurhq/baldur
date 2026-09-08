@@ -4,6 +4,7 @@ Baldur Decorators Package.
 Public decorator API for Baldur self-healing primitives.
 
 Decorators:
+- @retry: Standalone retry stage with backoff (sync/async dual-dispatch)
 - @domain_tag: Auto-tag domain on errors raised inside the wrapped scope
 - DomainContext: with-statement domain context
 - @dlq_protect: PRO-aliased preset of @protected (dlq+retry+CB pinned on)
@@ -34,8 +35,10 @@ from baldur.decorators.domain_tag import (
 )
 from baldur.decorators.idempotent import idempotent
 from baldur.decorators.rate_limit import rate_limit
+from baldur.resilience.policies.async_retry import retry
 
 __all__ = [
+    "retry",
     "domain_tag",
     "DomainContext",
     "get_current_domain",

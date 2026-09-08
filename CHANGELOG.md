@@ -12,6 +12,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ### Added
 
+- The standalone `@retry` decorator is now importable from `baldur.decorators`.
 - A dependency's 429 storm now trips the breaker on every framework, not only Django.
 - A protected call that *returns* a 429 or 5xx response records it, instead of counting a success.
 - Every outbound 429 installs the cross-worker cooldown, including on retry-less calls.
