@@ -3,7 +3,7 @@
 # pypa/gh-action-pypi-publish's bundled twine rejects as invalid. Keep the
 # backend below 1.32 until the publish action understands metadata 2.5, then
 # drop this ceiling together with the action bump.
-requires = ["hatchling<1.32"]
+requires = ["hatchling<1.33"]
 build-backend = "hatchling.build"
 
 [project]
