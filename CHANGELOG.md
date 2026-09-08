@@ -42,11 +42,14 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - An audit chain that cannot read its own ledger refuses the write instead of restarting at 1.
 - The audit chain state file is now replaced atomically, so a kill cannot truncate it.
 - Closing the audit adapter no longer writes a stale sequence over a sibling worker's state.
-- A deferred call no longer counts as a breaker failure, so a cooldown cannot trip a healthy breaker.
-- A tenacity-bridge deferral now reports the real last error instead of a rejection for a call never made.
+- A deferred call is no longer a breaker failure, so a cooldown cannot trip a healthy breaker.
+- A tenacity-bridge deferral reports the real last error, not a rejection for a call never made.
 - A client that returns 429 without raising now installs a cooldown, even under `retry_on_result`.
 - Shed requests are now counted by an exported metric; the old counter reached no exporter.
 - An install without the emergency service no longer logs an error for every request it serves.
+- A 429 your own DRF adaptive throttle raised no longer counts against the upstream breaker.
+- Flask and FastAPI no longer refuse traffic on an open breaker while dry-run is on.
+- `ignore_exceptions` now covers every 429 a retry ladder sees, not only the final outcome.
 
 ## [1.11.0] - 2026-09-07
 

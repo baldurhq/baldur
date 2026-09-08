@@ -2,7 +2,8 @@
 Outbound 429 observation — the per-call scope and the fan-out.
 
 Test target: services/circuit_breaker/rate_limit_observation.py
-- OutboundObservationScope bookkeeping (attempts, 429s, identity marks, claim)
+- OutboundObservationScope bookkeeping (attempts, 429s, identity marks,
+  claim, and the opening breaker's ignore-list filter)
 - open_scope / close_scope / current_scope lifecycle and context visibility
 - observe_429() fan-out: two independent, independently fail-open halves
 """
@@ -427,3 +428,76 @@ class TestObserve429FanOutBehavior:
             observe_429("payment", None, notify_coordinator=True)
 
         assert coordinator.on_rate_limited.call_args.kwargs["retry_after"] is None
+
+
+# =============================================================================
+# Behavior - the opening breaker's ignore list
+# =============================================================================
+
+
+class _IgnoredClientError(Exception):
+    """A client's rate-limit exception the caller told the breaker to ignore."""
+
+
+def _ignores_client_error(error: Exception) -> bool:
+    """A breaker failure predicate that drops one exception type."""
+    return not isinstance(error, _IgnoredClientError)
+
+
+class TestObservationScopeIgnoreListBehavior:
+    """The cascade counter belongs to the breaker, so its dial decides here.
+
+    Without this the ignore list would hold only at the frame that catches the
+    exception: an inner stage that sees every attempt would keep feeding the
+    breaker's own 429 counter with a type the caller excluded from it.
+    """
+
+    def test_an_ignored_exception_records_no_cascade(self, cb_service):
+        scope = OutboundObservationScope("payment", _ignores_client_error)
+
+        scope.note_429(30.0, _IgnoredClientError("429 too many requests"))
+
+        cb_service.record_rate_limit_response.assert_not_called()
+        assert scope.rate_limited == 0
+
+    def test_a_counted_exception_records_the_cascade(self, cb_service):
+        """Negative half: the predicate, not the call, is what withholds it."""
+        scope = OutboundObservationScope("payment", _ignores_client_error)
+
+        scope.note_429(30.0, RuntimeError("429 too many requests"))
+
+        cb_service.record_rate_limit_response.assert_called_once_with("payment")
+        assert scope.rate_limited == 1
+
+    def test_a_returned_response_is_never_filtered(self, cb_service):
+        """ignore_exceptions is an exception-type dial; a returned 429 is not one."""
+        scope = OutboundObservationScope("payment", lambda _: False)
+
+        scope.note_429(None, type("FakeResponse", (), {"status_code": 429})())
+
+        cb_service.record_rate_limit_response.assert_called_once_with("payment")
+
+    def test_a_subjectless_note_is_never_filtered(self, cb_service):
+        """A caller without the outcome in hand keeps the pre-filter behaviour."""
+        scope = OutboundObservationScope("payment", lambda _: False)
+
+        scope.note_429(None)
+
+        cb_service.record_rate_limit_response.assert_called_once_with("payment")
+
+    def test_a_scope_without_a_predicate_counts_every_exception(self, cb_service):
+        scope = OutboundObservationScope("payment")
+
+        scope.note_429(None, _IgnoredClientError("429 too many requests"))
+
+        cb_service.record_rate_limit_response.assert_called_once_with("payment")
+
+    def test_open_scope_publishes_the_predicate_to_the_inner_stages(self):
+        """The predicate reaches the stages that read the scope off the ContextVar."""
+        token, _ = open_scope("payment", _ignores_client_error)
+        try:
+            published = current_scope()
+            assert published.counts(_IgnoredClientError("429")) is False
+            assert published.counts(RuntimeError("429")) is True
+        finally:
+            close_scope(token)

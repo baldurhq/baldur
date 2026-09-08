@@ -3,6 +3,7 @@
 Target: services/retry_handler/policy.py
 - ``execute()``: the observation-scope claim, the per-attempt count, and the
   per-attempt 429 observation the breaker stage above cannot see
+- the enclosing breaker's ``ignore_exceptions`` reaching those attempts
 - the four result branches, including a 429 a client *returned*
 - the synthesised exhaustion error, marked so it is classified exactly once
 
@@ -15,6 +16,7 @@ exists to prevent.
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -25,6 +27,7 @@ from baldur.core.execution_mode import (
     clear_execution_mode_override,
     set_execution_mode,
 )
+from baldur.services.circuit_breaker.policy import CircuitBreakerPolicy
 from baldur.services.circuit_breaker.rate_limit_observation import (
     close_scope,
     open_scope,
@@ -369,3 +372,73 @@ class TestRetryExhaustionMarkBehavior:
 
         assert scope.rate_limited == 2
         assert cascade_service.record_rate_limit_response.call_count == 2
+
+
+# =============================================================================
+# Behavior - the enclosing breaker's ignore list
+# =============================================================================
+
+
+class _IgnoredRateLimitError(Exception):
+    """A client's 429 exception the caller told the breaker not to count."""
+
+
+def _admitting_breaker(**policy_kwargs) -> CircuitBreakerPolicy:
+    """A breaker stage that admits every call, wrapping a stubbed service."""
+    cb = MagicMock(spec=CircuitBreakerService)
+    cb.is_enabled = True
+    cb.should_allow_with_state.return_value = SimpleNamespace(
+        allowed=True, state=SimpleNamespace(state="closed")
+    )
+    return CircuitBreakerPolicy(service_name="payment", cb_service=cb, **policy_kwargs)
+
+
+class TestRetryObservationIgnoreListBehavior:
+    """A 429 type the breaker ignores is ignored at every depth that sees it.
+
+    The breaker frame already gated its own cascade record on ``_is_failure``,
+    but the retry ladder is where a storm is actually seen: every attempt it
+    overcomes is one this stage reports and the frame above never will. Reading
+    the dial only at the outer frame therefore left the ignore list bypassable
+    by composing a retry stage under it.
+    """
+
+    def test_an_ignored_429_exception_feeds_no_cascade(self, observation):
+        _, cascade = observation
+        breaker = _admitting_breaker(ignore_exceptions=(_IgnoredRateLimitError,))
+        retry = _policy(max_attempts=2)
+
+        def raise_429():
+            raise _IgnoredRateLimitError(_RATE_LIMIT_MESSAGE)
+
+        breaker.execute(lambda: retry.execute(raise_429))
+
+        cascade.record_rate_limit_response.assert_not_called()
+
+    def test_the_same_storm_feeds_the_cascade_without_the_ignore_list(
+        self, observation
+    ):
+        """Negative half: the dial is what withholds it, not the composition."""
+        _, cascade = observation
+        breaker = _admitting_breaker()
+        retry = _policy(max_attempts=2)
+
+        def raise_429():
+            raise _IgnoredRateLimitError(_RATE_LIMIT_MESSAGE)
+
+        breaker.execute(lambda: retry.execute(raise_429))
+
+        assert cascade.record_rate_limit_response.call_count == 2
+
+    def test_the_ignored_attempts_still_count_as_requests(self, observation):
+        """The denominator is unfiltered: the breaker frame counts them too."""
+        tracker, _ = observation
+        breaker = _admitting_breaker(ignore_exceptions=(_IgnoredRateLimitError,))
+        retry = _policy(max_attempts=2)
+
+        def raise_429():
+            raise _IgnoredRateLimitError(_RATE_LIMIT_MESSAGE)
+
+        breaker.execute(lambda: retry.execute(raise_429))
+
+        assert tracker.record_request.call_count == 2

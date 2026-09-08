@@ -28,6 +28,15 @@ from baldur.utils.network import extract_client_ip
 logger = structlog.get_logger()
 
 
+# Written on the underlying Django request when this process's own adaptive
+# throttle refuses it. An inbound middleware owns the 429 it writes and labels
+# it with the rate-limit response headers; a DRF throttle only votes, and the
+# 429 is built from the raised ``Throttled`` by whichever exception handler the
+# project wired — so the request, which both sides still hold, is the only
+# object it can label.
+LOCAL_THROTTLE_REQUEST_ATTR = "_baldur_local_throttle"
+
+
 class AdaptiveDRFThrottle:
     """
     DRF-compatible Adaptive Throttle using Netflix Gradient algorithm.
@@ -97,6 +106,7 @@ class AdaptiveDRFThrottle:
         result = self.throttle.allow_request(ident)
 
         if not result.allowed:
+            self._mark_locally_throttled(request)
             logger.info(
                 "adaptive_drf_throttle.request_throttled",
                 result=result.allowed,
@@ -105,6 +115,19 @@ class AdaptiveDRFThrottle:
             )
 
         return bool(result.allowed)
+
+    @staticmethod
+    def _mark_locally_throttled(request: Any) -> None:
+        """Label the request as refused by this process's own throttle.
+
+        Read by the Django middleware to keep a self-imposed 429 out of the
+        breaker's upstream rate-limit cascade: a limit this process chose is
+        no evidence about the dependency's health. DRF wraps the Django
+        request and discards the wrapper once the view returns, so the mark is
+        written through to the object the middleware still holds.
+        """
+        underlying = getattr(request, "_request", request)
+        setattr(underlying, LOCAL_THROTTLE_REQUEST_ATTR, True)
 
     def get_ident(self, request: Any) -> str:
         """

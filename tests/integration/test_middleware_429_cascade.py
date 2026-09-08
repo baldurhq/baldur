@@ -361,7 +361,9 @@ class TestMiddlewareInternalVsExternalFilteringWorkflow:
         # Given — the gate runs inside __call__, so the deliveries below reach
         # it the way production does rather than through a restated condition.
         assert (
-            middleware._is_internal_429(_FakeResponse(429, {"X-RateLimit-Mode": "x"}))
+            middleware._is_internal_429(
+                _FakeRequest(), _FakeResponse(429, {"X-RateLimit-Mode": "x"})
+            )
             is True
         )
 

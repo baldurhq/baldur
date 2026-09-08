@@ -24,6 +24,7 @@ nothing: there is no breaker to trip, so no phantom record is created.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from contextvars import ContextVar, Token
 from typing import Any
 
@@ -64,6 +65,10 @@ class OutboundObservationScope:
             than a single slot: concurrent siblings sharing a copied context
             would overwrite one slot, and the first sibling's exception is
             re-raised by identity into the breaker frame.
+        counts_exception: The opening breaker's own "does this exception count"
+            predicate, so an exception type the caller told the breaker to
+            ignore is ignored at every depth that sees it — not only at the
+            frame that catches it. ``None`` means every outcome counts.
     """
 
     __slots__ = (
@@ -71,15 +76,21 @@ class OutboundObservationScope:
         "breaker_key",
         "classified",
         "coordination_claimed",
+        "counts_exception",
         "rate_limited",
     )
 
-    def __init__(self, breaker_key: str) -> None:
+    def __init__(
+        self,
+        breaker_key: str,
+        counts_exception: Callable[[Exception], bool] | None = None,
+    ) -> None:
         self.breaker_key = breaker_key
         self.attempts = 0
         self.rate_limited = 0
         self.coordination_claimed = False
         self.classified: list[Any] = []
+        self.counts_exception = counts_exception
 
     def note_attempt(self) -> None:
         """Count one dependency call and write its request to the tracker.
@@ -91,14 +102,32 @@ class OutboundObservationScope:
         self.attempts += 1
         _record_request(self.breaker_key)
 
-    def note_429(self, retry_after: float | None = None) -> None:
+    def note_429(self, retry_after: float | None = None, subject: Any = None) -> None:
         """Record one observed 429 against the cascade (no coordinator notify).
 
         The stage calling this carries its own coordinator decision — it is
         the cascade half of :func:`observe_429` under another name.
+
+        ``subject`` is the outcome that carried the 429, when the caller holds
+        it. A raised exception the opening breaker does not count is dropped
+        here rather than at each call site: the cascade counter belongs to that
+        breaker, so its ignore list decides membership wherever the 429 is seen.
         """
+        if not self.counts(subject):
+            return
         self.rate_limited += 1
         observe_429(self.breaker_key, retry_after, notify_coordinator=False)
+
+    def counts(self, subject: Any) -> bool:
+        """Whether the opening breaker counts ``subject`` against itself.
+
+        Only raised exceptions are filtered: ``ignore_exceptions`` is an
+        exception-type dial, so a response a client returned instead of raising
+        is always counted, as is a caller that supplied no subject at all.
+        """
+        if self.counts_exception is None or not isinstance(subject, Exception):
+            return True
+        return self.counts_exception(subject)
 
     def mark_classified(self, outcome: Any) -> None:
         """Record that this stage classified (or propagates) ``outcome``."""
@@ -113,13 +142,17 @@ class OutboundObservationScope:
         self.coordination_claimed = True
 
 
-def open_scope(breaker_key: str) -> tuple[Token, OutboundObservationScope]:
+def open_scope(
+    breaker_key: str,
+    counts_exception: Callable[[Exception], bool] | None = None,
+) -> tuple[Token, OutboundObservationScope]:
     """Publish a fresh scope for ``breaker_key`` and return its reset token.
 
     A nested protected call gets its own scope; resetting the token restores
-    the outer one untouched.
+    the outer one untouched. ``counts_exception`` is the opening breaker's
+    failure predicate, carried so inner stages apply the same ignore list.
     """
-    scope = OutboundObservationScope(breaker_key)
+    scope = OutboundObservationScope(breaker_key, counts_exception)
     return _current_scope.set(scope), scope
 
 

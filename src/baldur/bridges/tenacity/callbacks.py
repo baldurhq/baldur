@@ -172,6 +172,10 @@ def observe_bridge_outcome(ctx: BridgeCallbackContext, outcome: Any) -> None:
     off a caller-supplied exception or response — ``retry_after`` and
     ``headers`` may be properties that raise — so it is part of this site's
     fault surface, not a safe prelude to it.
+
+    The outcome travels with the cascade record so the enclosing breaker's
+    ``ignore_exceptions`` filters it here too; the cooldown below is this
+    bridge's own backoff and stays outside that dial.
     """
     if ctx.scope is None and ctx.rate_limit_coordinator is None:
         return
@@ -185,7 +189,7 @@ def observe_bridge_outcome(ctx: BridgeCallbackContext, outcome: Any) -> None:
             return
 
         if ctx.scope is not None:
-            ctx.scope.note_429(retry_after)
+            ctx.scope.note_429(retry_after, outcome)
 
         if ctx.rate_limit_coordinator is None or ctx.rate_limit_key is None:
             return

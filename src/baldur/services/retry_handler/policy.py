@@ -794,6 +794,13 @@ class RetryPolicy(ResiliencePolicy[T]):
         it may be ``None`` when only the cascade half is owed. The returned
         flag is also what tells the loop a rate-limit signal was observed,
         which is the condition for owing an ``on_success`` reset.
+
+        The subject is handed to the cascade half so the enclosing breaker's
+        ``ignore_exceptions`` filters it there too — a caller who ignores their
+        client's rate-limit exception type ignores it at every depth, not only
+        at the frame that catches it. Only that half: the cooldown and the
+        returned signal are this stage's own backoff, which a breaker dial does
+        not configure.
         """
         if scope is not None:
             scope.mark_classified(subject)
@@ -803,7 +810,7 @@ class RetryPolicy(ResiliencePolicy[T]):
             return False
 
         if scope is not None:
-            scope.note_429(retry_after)
+            scope.note_429(retry_after, subject)
 
         if coordinator is not None:
             cooldown = coordinator.on_rate_limited(key=key, retry_after=retry_after)

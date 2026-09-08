@@ -296,13 +296,18 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
         is owed only when no inner stage claimed coordination for this call — a
         retry stage that never ran its loop still owns the decision, which is
         what keeps ``rate_limit_aware=False`` meaning what it says.
+
+        The outcome travels with the cascade half so the scope can apply this
+        breaker's ignore list; at this frame the ``_is_failure`` gate above has
+        already answered for a raised exception, so the check is a no-op here
+        and load-bearing only for the inner stages that share the scope.
         """
         if scope is None:
             observe_429(self._service_name, retry_after, notify_coordinator=True)
             return
 
         if not scope.was_classified(outcome):
-            scope.note_429(retry_after)
+            scope.note_429(retry_after, outcome)
         if not scope.coordination_claimed:
             observe_429(
                 self._service_name,
@@ -430,7 +435,7 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
         # BaseException) keeps KeyboardInterrupt/SystemExit propagating uncounted.
         # The observation scope is opened only here: a rejected or observe-only
         # verdict runs no dependency call this stage owns, so it counts nothing.
-        token, scope = open_scope(self._service_name)
+        token, scope = open_scope(self._service_name, self._is_failure)
         try:
             value = func(*args, **kwargs)
             return self._on_success(value, hint_state, scope)
@@ -508,7 +513,7 @@ class AsyncCircuitBreakerPolicy:
         if verdict == "direct":
             return inner._direct_result(await func(*args, **kwargs))
 
-        token, scope = open_scope(inner.service_name)
+        token, scope = open_scope(inner.service_name, inner._is_failure)
         try:
             value = await func(*args, **kwargs)
             return inner._on_success(value, hint_state, scope)

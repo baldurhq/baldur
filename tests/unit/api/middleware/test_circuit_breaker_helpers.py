@@ -3,7 +3,7 @@
 Scope:
     - ``check_cb_open``: preemptive rejection decision across
       ``service_name=None``, CB closed, CB open, CB half-open, CB service
-      unavailable (fail-open), and disabled CB service.
+      unavailable (fail-open), disabled CB service, and observe-only mode.
     - ``record_cb_observation``: status-code-driven CB success/failure
       recording; 4xx is neither; ``service_name=None`` is a no-op.
 
@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
+
+from structlog.testing import capture_logs
 
 from baldur.api.middleware import circuit_breaker as cb_module
 from baldur.api.middleware.circuit_breaker import (
@@ -30,6 +32,7 @@ from baldur.interfaces.web_framework import (
 from baldur.services.circuit_breaker.rate_limit_tracker import RateLimitTracker
 from baldur.services.circuit_breaker.service import CircuitBreakerService
 from baldur.utils.time import utc_now
+from tests.factories import dry_run_active
 
 
 def _make_request(path: str = "/api/pay/") -> RequestContext:
@@ -413,3 +416,56 @@ class TestRecordCbObservationContract:
         assert ec["error_type"] == "HTTP_502"
         assert ec["path"] == "/api/pay/"
         assert ec["method"] == "POST"
+
+
+# =============================================================================
+# check_cb_open - Behavior (observe-only)
+# =============================================================================
+
+
+class TestCheckCbOpenObserveOnlyBehavior:
+    """Dry-run reports the rejection this seam would send, and sends none.
+
+    The 503 is the only intervention ``check_cb_open`` makes, so observe-only
+    has to reach it here - the Django middleware gates its own preemptive
+    branch and the breaker policy gates the outbound one, and a Flask/FastAPI
+    deployment that kept rejecting would be the one surface where switching to
+    shadow mode still refuses live traffic.
+    """
+
+    def test_an_open_cb_does_not_reject_under_dry_run(self):
+        service = _mock_cb(state="open", opened_at=utc_now())
+        with (
+            patch.object(cb_module, "_try_get_cb_service", return_value=service),
+            dry_run_active(),
+        ):
+            assert check_cb_open(_make_request(), service_name="payment") is None
+
+    def test_a_half_open_cb_does_not_reject_under_dry_run(self):
+        service = _mock_cb(state="half_open")
+        with (
+            patch.object(cb_module, "_try_get_cb_service", return_value=service),
+            dry_run_active(),
+        ):
+            assert check_cb_open(_make_request(), service_name="payment") is None
+
+    def test_the_same_open_cb_rejects_in_the_executing_mode(self):
+        """Negative half: the mode is what changes the verdict, not the state."""
+        service = _mock_cb(state="open", opened_at=utc_now())
+        with patch.object(cb_module, "_try_get_cb_service", return_value=service):
+            rejection = check_cb_open(_make_request(), service_name="payment")
+        assert isinstance(rejection, ResponseContext)
+        assert rejection.status_code == 503
+
+    def test_the_suppressed_reject_is_logged_as_a_would_have(self):
+        """The would-have record replaces the blocked-request WARNING."""
+        service = _mock_cb(state="open", opened_at=utc_now())
+        with capture_logs() as logs:
+            with (
+                patch.object(cb_module, "_try_get_cb_service", return_value=service),
+                dry_run_active(),
+            ):
+                check_cb_open(_make_request(), service_name="payment")
+        events = [entry["event"] for entry in logs]
+        assert "execution_mode.intervention_suppressed" in events
+        assert "middleware.request_blocked_cb_open" not in events

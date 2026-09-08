@@ -3,7 +3,7 @@ BaldurMiddleware unit tests.
 
 Covers:
 - BaldurMiddlewareSettings defaults, boundaries, env var override, singleton lifecycle
-- _is_internal_429(): decision table (4 header combinations)
+- _is_internal_429(): decision table (response headers + the DRF throttle's request mark)
 - _parse_retry_after(): seconds / HTTP-date / clamp / fail-open contracts
 - __call__(): status code routing (500/502/external-429/internal-429/2xx/4xx)
 - _handle_external_429(): CB + EventBus + Retry-After + audit side effects
@@ -18,13 +18,14 @@ Covers:
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import MagicMock, Mock, create_autospec, patch
 
 import pytest
 from pydantic import ValidationError
 from structlog.testing import capture_logs
 
 from baldur.api.django.middleware.baldur import BaldurMiddleware
+from baldur.api.django.throttle_adapter import LOCAL_THROTTLE_REQUEST_ATTR
 from baldur.models.dlq import DLQEntryResult
 from baldur.services.circuit_breaker.service import CircuitBreakerService
 from baldur.settings.middleware import (
@@ -228,7 +229,7 @@ class TestBaldurMiddlewareSettingsSingletonBehavior:
 
 
 class TestBaldurMiddlewareIsInternal429Contract:
-    """_is_internal_429() 헤더 기반 내부/외부 판별 계약 검증."""
+    """_is_internal_429() 헤더/요청 마크 기반 내부/외부 판별 계약 검증."""
 
     def setup_method(self):
         self.mw = _make_middleware()
@@ -236,29 +237,46 @@ class TestBaldurMiddlewareIsInternal429Contract:
     def test_x_ratelimit_mode_header_present_identifies_internal(self):
         """X-RateLimit-Mode 헤더가 있으면 내부 429로 판별해야 한다 (HybridRateLimitMiddleware)."""
         response = FakeResponse(429, {"X-RateLimit-Mode": "normal"})
-        assert self.mw._is_internal_429(response) is True
+        assert self.mw._is_internal_429(FakeRequest(), response) is True
 
     def test_x_ratelimit_limit_header_present_identifies_internal(self):
         """X-RateLimit-Limit 헤더가 있으면 내부 429로 판별해야 한다."""
         response = FakeResponse(429, {"X-RateLimit-Limit": "100"})
-        assert self.mw._is_internal_429(response) is True
+        assert self.mw._is_internal_429(FakeRequest(), response) is True
 
     def test_no_ratelimit_headers_identifies_external(self):
         """RateLimit 관련 헤더가 없으면 외부 429로 판별해야 한다."""
         response = FakeResponse(429, {})
-        assert self.mw._is_internal_429(response) is False
+        assert self.mw._is_internal_429(FakeRequest(), response) is False
 
     def test_empty_x_ratelimit_mode_value_identifies_external(self):
         """X-RateLimit-Mode가 빈 문자열이면 falsy이므로 외부 429로 판별해야 한다."""
         response = FakeResponse(429, {"X-RateLimit-Mode": ""})
-        assert self.mw._is_internal_429(response) is False
+        assert self.mw._is_internal_429(FakeRequest(), response) is False
 
     def test_unrelated_headers_do_not_influence_result(self):
         """Content-Type, Retry-After 등 무관 헤더는 판별에 영향을 주지 않아야 한다."""
         response = FakeResponse(
             429, {"Content-Type": "application/json", "Retry-After": "60"}
         )
-        assert self.mw._is_internal_429(response) is False
+        assert self.mw._is_internal_429(FakeRequest(), response) is False
+
+    def test_the_drf_throttle_request_mark_identifies_internal(self):
+        """A DRF throttle labels the request: its 429 carries no header of ours.
+
+        DRF renders the 429 from the raised ``Throttled``, so the throttle class
+        never touches the response. Reading headers alone therefore reports this
+        process's own limit as an upstream one.
+        """
+        request = FakeRequest()
+        setattr(request, LOCAL_THROTTLE_REQUEST_ATTR, True)
+        response = FakeResponse(429, {"Retry-After": "5"})
+        assert self.mw._is_internal_429(request, response) is True
+
+    def test_retry_after_alone_on_an_unmarked_request_stays_external(self):
+        """Retry-After is no discriminator — an upstream 429 carries it too."""
+        response = FakeResponse(429, {"Retry-After": "5"})
+        assert self.mw._is_internal_429(FakeRequest(), response) is False
 
 
 # =============================================================================
@@ -426,6 +444,32 @@ class TestBaldurMiddlewareCallRoutingBehavior:
         mw(FakeRequest())
 
         mw._handle_external_429.assert_not_called()
+
+    def test_drf_throttled_429_skips_cascade_detection(self):
+        """A 429 this process's own DRF throttle caused feeds no cascade.
+
+        The response carries only DRF's Retry-After, so the whole decision rests
+        on the mark the throttle left on the request.
+        """
+        response = FakeResponse(429, {"Retry-After": "5"})
+        mw = self._mw_returning(response)
+        mw._handle_external_429 = create_autospec(mw._handle_external_429)
+        request = FakeRequest()
+        setattr(request, LOCAL_THROTTLE_REQUEST_ATTR, True)
+
+        mw(request)
+
+        mw._handle_external_429.assert_not_called()
+
+    def test_an_unmarked_429_with_the_same_headers_still_cascades(self):
+        """Negative half: the mark is what changes the verdict, not Retry-After."""
+        response = FakeResponse(429, {"Retry-After": "5"})
+        mw = self._mw_returning(response)
+        mw._handle_external_429 = create_autospec(mw._handle_external_429)
+
+        mw(FakeRequest())
+
+        mw._handle_external_429.assert_called_once()
 
     def test_200_response_records_cb_success(self):
         """200 응답은 _record_cb_success를 호출해야 한다."""

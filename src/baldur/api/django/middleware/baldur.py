@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from baldur.api.django.throttle_adapter import LOCAL_THROTTLE_REQUEST_ATTR
 from baldur.core.execution_mode import intervention_suppressed
 from baldur.dlq.helpers import store_to_dlq
 from baldur.services.retry_handler.rate_limit_detection import (
@@ -319,7 +320,7 @@ class BaldurMiddleware:
         # throttling, which is the cascade's business.
         is_failure = response.status_code in failure_status_codes()
         is_rate_limited = response.status_code in rate_limit_status_codes() and (
-            not self._is_internal_429(response)
+            not self._is_internal_429(request, response)
         )
 
         if is_failure or is_rate_limited:
@@ -358,12 +359,23 @@ class BaldurMiddleware:
 
         return response
 
-    def _is_internal_429(self, response: Any) -> bool:
+    def _is_internal_429(self, request: HttpRequest, response: Any) -> bool:
         """Check if 429 was generated internally (not from an upstream service).
 
         Internal 429s from HybridRateLimitMiddleware or DRF AdaptiveDRFThrottle
         must not trigger CB cascade detection — they are self-imposed limits.
+
+        Two marks, because the two producers can label different objects. A
+        middleware writes its own 429 and labels the response with the
+        rate-limit headers. A DRF throttle only votes: the 429 is rendered from
+        the raised ``Throttled`` by an exception handler the throttle does not
+        control, and the only header DRF puts on it is ``Retry-After`` — which
+        an upstream 429 carries just as often. So the throttle labels the
+        request instead, and this reads both.
         """
+        # AdaptiveDRFThrottle marks the request it refused
+        if getattr(request, LOCAL_THROTTLE_REQUEST_ATTR, False):
+            return True
         # HybridRateLimitMiddleware sets X-RateLimit-Mode on its 429 responses
         if response.get("X-RateLimit-Mode"):
             return True

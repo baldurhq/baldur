@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from baldur.core.execution_mode import intervention_suppressed
 from baldur.interfaces.web_framework import ResponseContext
 from baldur.services.circuit_breaker.rate_limit_tracker import get_rate_limit_tracker
 from baldur.services.retry_handler.rate_limit_detection import (
@@ -106,6 +107,13 @@ def check_cb_open(
     Returns ``None`` when the CB is closed, the service name was not
     supplied, or the CB infrastructure is unavailable (fail-open — a broken
     health check should never block legitimate traffic).
+
+    Observe-only (dry-run / shadow / evaluation) also returns ``None``: the
+    rejection is this seam's only intervention, so a mode that promises to
+    decide without intervening must report the 503 rather than send it. The
+    Django middleware gates its own preemptive branch the same way, and the
+    breaker policy gates the outbound one — this is the third seam of the same
+    decision, not a new posture.
     """
     if service_name is None:
         return None
@@ -128,6 +136,17 @@ def check_cb_open(
         return None
 
     if not state or state.lower() not in ("open", "half_open"):
+        return None
+
+    # Resolved before the reject is built, not after: the ResponseContext IS
+    # the intervention, and the WARNING below announces a block that observe-only
+    # never performs.
+    if intervention_suppressed(
+        service_name=service_name,
+        action="circuit_breaker_reject",
+        would_reject=True,
+        path=request.path,
+    ):
         return None
 
     logger.warning(
