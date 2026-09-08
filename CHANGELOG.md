@@ -17,6 +17,9 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - Every outbound 429 installs the cross-worker cooldown, including on retry-less calls.
 - A 429 the retry ladder overcomes is still counted, so a storm it survives is not invisible.
 - `BALDUR_MIDDLEWARE_CB_STATUS_CODES` / `_RATE_LIMIT_CODES` now classify outbound responses too.
+- Emergency Mode now sheds HTTP requests on Flask and FastAPI too, not only Django.
+- `BALDUR_EMERGENCY_MODE_SHEDDING_ENABLED` turns that shedding off without disabling the level.
+- `BALDUR_EMERGENCY_MODE_SHED_RETRY_AFTER_SECONDS` sets the Retry-After a shed response advertises.
 
 ### Changed
 
@@ -28,6 +31,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - A relayed 429 counts as a breaker failure, so five in a row trip the route's breaker.
 - `BaldurMiddleware` no longer emits `RATE_LIMIT_429`; the coordinator is the sole emitter.
 - A status listed in both middleware status sets now records a failure AND feeds the cascade.
+- A shed request is now logged once at INFO instead of WARNING; the new counter carries the volume.
 
 ### Fixed
 
@@ -41,6 +45,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - A deferred call no longer counts as a breaker failure, so a cooldown cannot trip a healthy breaker.
 - A tenacity-bridge deferral now reports the real last error instead of a rejection for a call never made.
 - A client that returns 429 without raising now installs a cooldown, even under `retry_on_result`.
+- Shed requests are now counted by an exported metric; the old counter reached no exporter.
+- An install without the emergency service no longer logs an error for every request it serves.
 
 ## [1.11.0] - 2026-09-07
 

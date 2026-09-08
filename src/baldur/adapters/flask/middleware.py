@@ -22,6 +22,7 @@ from baldur.api.middleware import (
     check_backpressure,
     check_cb_open,
     check_deadline,
+    check_emergency_shedding,
     check_rate_limit,
     record_cb_observation,
     record_http_red,
@@ -91,6 +92,15 @@ def install_baldur_request_hooks(  # noqa: C901, PLR0915
         # so both _after_request and _teardown_request reuse the same bounded
         # endpoint label without re-reading the request proxy.
         setattr(g, _FLASK_G_ENDPOINT, _extract_flask_endpoint())
+
+        # Emergency-mode per-tier shedding runs at the head of the pipeline:
+        # a shed request consumes no rate-limit token and acquires no admission
+        # slot, and Django's TieringMiddleware sits equally early. The helper
+        # acquires nothing, so there is nothing to release on this path.
+        shed_rejection = check_emergency_shedding(request_ctx)
+        if shed_rejection is not None:
+            setattr(g, _FLASK_G_REJECTED, True)
+            return _to_flask_response(shed_rejection)
 
         rate_rejection = check_rate_limit(
             request_ctx,

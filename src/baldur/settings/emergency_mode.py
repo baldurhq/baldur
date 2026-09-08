@@ -12,6 +12,7 @@ Source:
 - services/throttle/adaptive/__init__.py (throttle multipliers)
 - services/regional_emergency/health_penalty.py (penalty constants)
 - services/emergency_mode/enums.py (level rules)
+- api/middleware/emergency_shedding.py (HTTP shedding gate, retry-after)
 
 Environment Variables:
     BALDUR_EMERGENCY_MODE_STABILIZATION_PERIOD_SECONDS=300
@@ -37,6 +38,8 @@ Environment Variables:
     BALDUR_EMERGENCY_MODE_PENALTY_LEVEL_1=5.0
     BALDUR_EMERGENCY_MODE_PENALTY_LEVEL_2=10.0
     BALDUR_EMERGENCY_MODE_LEVEL_RULES_JSON=null
+    BALDUR_EMERGENCY_MODE_SHEDDING_ENABLED=true
+    BALDUR_EMERGENCY_MODE_SHED_RETRY_AFTER_SECONDS=30
 """
 
 from __future__ import annotations
@@ -223,6 +226,24 @@ class EmergencyModeSettings(BaseSettings):
             "Format: {level_int: {tier: multiplier}}. "
             "None uses built-in defaults from enums.py."
         ),
+    )
+
+    # =========================================================================
+    # HTTP request shedding (api/middleware/emergency_shedding.py)
+    # =========================================================================
+    shedding_enabled: bool = Field(
+        default=True,
+        description=(
+            "Enable per-tier HTTP request shedding while emergency mode is "
+            "active. The decision itself additionally requires the PRO "
+            "emergency manager, so this flag is inert without baldur_pro."
+        ),
+    )
+    shed_retry_after_seconds: int = Field(
+        default=30,
+        ge=1,
+        le=3600,
+        description="Retry-After advertised on a shed (503) HTTP response.",
     )
 
     # =========================================================================

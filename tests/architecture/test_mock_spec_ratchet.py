@@ -167,7 +167,12 @@ _MOCK_CREATION_BUDGETS: dict[str, int] = {
     # middleware 429 dispatch: -1 - the two orphan-emit cases collapsed into one
     # negative assertion, and the new non-exclusive-dispatch cases spec their
     # middleware method mocks off the real bound methods.
-    "oss": 4324,
+    # emergency shedding delegation: -7 — the Django tiering suites lost the
+    # middleware-construction doubles the decision core no longer needs: the
+    # three probability cases now call the framework-free predicate directly,
+    # and the two method-propagation cases patch the helper's level seams
+    # instead of building a RateController state chain by hand.
+    "oss": 4317,
     "pro": 1800,
     "dormant": 401,
 }

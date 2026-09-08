@@ -49,6 +49,9 @@ from baldur.api.middleware.deadline import (
     check_deadline,
     record_rtt_sample,
 )
+from baldur.api.middleware.emergency_shedding import (
+    check_emergency_shedding,
+)
 from baldur.api.middleware.http_metrics import (
     record_http_red,
 )
@@ -69,4 +72,5 @@ __all__ = [
     "record_http_red",
     "check_admission",
     "AdmissionDecision",
+    "check_emergency_shedding",
 ]

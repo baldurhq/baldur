@@ -701,7 +701,7 @@ class TestTieringMiddlewareOptionsBypassBehavior:
         get_response = MagicMock(return_value=mock_response)
 
         with patch(
-            "baldur.api.django.tiering.middleware.get_tier_registry",
+            "baldur.api.middleware.emergency_shedding._tier_registry",
         ) as mock_get_registry:
             mock_registry = MagicMock()
             mock_get_registry.return_value = mock_registry
@@ -733,9 +733,11 @@ class TestTieringMiddlewareMethodPropagationBehavior:
     def _require_pro(self):
         pytest.importorskip("baldur_pro")
 
-    def test_method_passed_to_resolve_tier_with_fallback(self):
-        """request.method가 resolve_tier_with_fallback에 전달된다."""
+    def test_normal_level_skips_classification(self):
+        """NORMAL + NONE이면 tier 분류 없이 early return한다."""
         from baldur.api.django.tiering.middleware import TieringMiddleware
+        from baldur.scaling.config import BackpressureLevel
+        from baldur_pro.services.emergency_mode.enums import EmergencyLevel
 
         mock_response = MagicMock()
         get_response = MagicMock(return_value=mock_response)
@@ -744,13 +746,8 @@ class TestTieringMiddlewareMethodPropagationBehavior:
         tier_result.tier_id = "standard"
         mock_registry.resolve_tier_with_fallback.return_value = tier_result
 
-        with patch(
-            "baldur.api.django.tiering.middleware.get_tier_registry",
-            return_value=mock_registry,
-        ):
-            middleware = TieringMiddleware(get_response)
-            middleware._enabled = True
-            middleware._registry = mock_registry
+        middleware = TieringMiddleware(get_response)
+        middleware._enabled = True
 
         request = MagicMock()
         request.method = "POST"
@@ -758,36 +755,28 @@ class TestTieringMiddlewareMethodPropagationBehavior:
         request.META = {"REMOTE_ADDR": "127.0.0.1"}
         request.user.is_authenticated = False
 
-        # Emergency/Backpressure 모듈을 모킹하여 실제 __call__ 실행
         mock_manager = MagicMock()
         mock_manager.is_active.return_value = False
-
-        mock_controller = MagicMock()
-        mock_state = MagicMock()
+        mock_manager.get_current_level.return_value = EmergencyLevel.NORMAL
 
         with (
             patch(
-                "baldur_pro.services.emergency_mode.get_emergency_manager",
+                "baldur.api.middleware.emergency_shedding._emergency_manager",
                 return_value=mock_manager,
             ),
             patch(
-                "baldur.scaling.rate_controller.get_rate_controller",
-                return_value=mock_controller,
+                "baldur.api.middleware.emergency_shedding._tier_registry",
+                return_value=mock_registry,
+            ),
+            patch(
+                "baldur.api.middleware.emergency_shedding._backpressure_level",
+                return_value=BackpressureLevel.NONE,
             ),
         ):
-            from baldur.scaling.config import BackpressureLevel
-            from baldur_pro.services.emergency_mode.enums import EmergencyLevel
+            response = middleware(request)
 
-            mock_manager.get_current_level.return_value = EmergencyLevel.NORMAL
-            mock_state.level = BackpressureLevel.NONE
-            mock_controller.get_state.return_value = mock_state
-
-            middleware(request)
-
-        # method가 전달되었는지 확인 (NORMAL/NONE이면 early return이므로, 호출 안 될 수 있음)
-        # NORMAL + NONE 조합은 early return하므로 resolve_tier_with_fallback 호출 안 됨
-        # 대신 비정상 상태에서 테스트
-        # → 이 테스트 대상은 method 전파이므로 별도 접근 필요
+        assert response == mock_response
+        mock_registry.resolve_tier_with_fallback.assert_not_called()
 
     def test_method_propagation_during_emergency(self):
         """비상 모드에서 method가 resolve_tier_with_fallback에 전달된다."""
@@ -802,13 +791,8 @@ class TestTieringMiddlewareMethodPropagationBehavior:
         tier_result.tier_id = "critical"
         mock_registry.resolve_tier_with_fallback.return_value = tier_result
 
-        with patch(
-            "baldur.api.django.tiering.middleware.get_tier_registry",
-            return_value=mock_registry,
-        ):
-            middleware = TieringMiddleware(get_response)
-            middleware._enabled = True
-            middleware._registry = mock_registry
+        middleware = TieringMiddleware(get_response)
+        middleware._enabled = True
 
         request = MagicMock()
         request.method = "POST"
@@ -820,19 +804,18 @@ class TestTieringMiddlewareMethodPropagationBehavior:
         mock_manager.is_active.return_value = True
         mock_manager.get_current_level.return_value = EmergencyLevel.LEVEL_1
 
-        mock_controller = MagicMock()
-        mock_state = MagicMock()
-        mock_state.level = BackpressureLevel.LOW
-        mock_controller.get_state.return_value = mock_state
-
         with (
             patch(
-                "baldur_pro.services.emergency_mode.get_emergency_manager",
+                "baldur.api.middleware.emergency_shedding._emergency_manager",
                 return_value=mock_manager,
             ),
             patch(
-                "baldur.scaling.rate_controller.get_rate_controller",
-                return_value=mock_controller,
+                "baldur.api.middleware.emergency_shedding._tier_registry",
+                return_value=mock_registry,
+            ),
+            patch(
+                "baldur.api.middleware.emergency_shedding._backpressure_level",
+                return_value=BackpressureLevel.LOW,
             ),
         ):
             middleware(request)

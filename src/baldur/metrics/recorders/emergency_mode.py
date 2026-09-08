@@ -31,6 +31,7 @@ __all__ = [
     "set_em_recovery_active",
     "record_em_recovery_step",
     "record_em_recovery_rollback",
+    "record_em_shed",
 ]
 
 _LEVEL_MAP = {"normal": 0, "level_1": 1, "level_2": 2, "level_3": 3}
@@ -78,6 +79,11 @@ class EmergencyModeMetricRecorder(BaseMetricRecorder):
             f"{self.PREFIX}_emergency_mode_recovery_rollbacks_total",
             "Gradual recovery rollbacks (metrics check failed)",
             [],
+        )
+        self._shed_requests_total = get_or_create_counter(
+            f"{self.PREFIX}_emergency_mode_shed_requests_total",
+            "HTTP requests shed by per-tier emergency load shedding",
+            ["tier", "emergency_level", "backpressure_level"],
         )
 
     def set_level(self, level: str) -> None:
@@ -166,6 +172,29 @@ class EmergencyModeMetricRecorder(BaseMetricRecorder):
         except Exception as e:
             logger.warning("metrics.record_recovery_rollback_failed", error=e)
 
+    def record_shed(
+        self,
+        tier: str,
+        emergency_level: str,
+        backpressure_level: str,
+    ) -> None:
+        """Record one HTTP request shed by per-tier load shedding.
+
+        ``backpressure_level`` makes a pure-backpressure shed (emergency level
+        ``normal``) attributable to the half that caused it.
+        """
+        try:
+            # Enum-to-value normalization; see record_activation.
+            self._shed_requests_total.labels(
+                tier=tier,
+                emergency_level=getattr(emergency_level, "value", emergency_level),
+                backpressure_level=getattr(
+                    backpressure_level, "value", backpressure_level
+                ),
+            ).inc()
+        except Exception as e:
+            logger.warning("metrics.record_emergency_shed_failed", error=e)
+
 
 # --- Module-level convenience functions (DD-7) ---
 
@@ -219,3 +248,13 @@ def record_em_recovery_rollback() -> None:
     rec = _lazy_recorder()
     if rec:
         rec.record_recovery_rollback()
+
+
+def record_em_shed(
+    tier: str,
+    emergency_level: str,
+    backpressure_level: str,
+) -> None:
+    rec = _lazy_recorder()
+    if rec:
+        rec.record_shed(tier, emergency_level, backpressure_level)

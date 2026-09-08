@@ -1,19 +1,27 @@
 """
 Tiering Middleware.
 
-Django Middleware for Emergency Mode Traffic Control.
-Controls traffic based on API tier during emergency mode.
+Thin Django wrapper around the framework-free ``check_emergency_shedding``
+helper (``api/middleware/emergency_shedding.py``). It classifies the request
+path into a tier and sheds it with 503 according to the merged emergency /
+backpressure per-tier multiplier.
+
+The shared core — the PRO gate, the two level reads, tier classification, the
+Most Restrictive Wins merge, the probabilistic decision and the 503 body —
+lives in the helper so Django / Flask / FastAPI share one implementation (no
+drift).
+
+Capability ladder: the emergency level requires ``baldur_pro``. With it absent
+(or unentitled) the helper is a clean no-op and this middleware passes the
+request straight through. No self-disable, no per-request log record.
 """
 
 from __future__ import annotations
 
-import random
-
 import structlog
 
-from baldur.scaling.tiering.defaults import BACKPRESSURE_TIER_RULES
-from baldur.scaling.tiering.registry import get_tier_registry
-from baldur.settings.backpressure import BackpressureLevel
+from baldur.api.middleware import check_emergency_shedding
+from baldur.interfaces.web_framework import HttpMethod, RequestContext
 from baldur.utils.network import extract_client_ip
 
 logger = structlog.get_logger()
@@ -45,8 +53,11 @@ class TieringMiddleware:
             ...
         ]
 
-        # Optional: Disable middleware
+        # Optional: Disable the middleware install (Django-only switch)
         BALDUR_TIERING_MIDDLEWARE_ENABLED = True
+
+        # Optional: disable the decision on every framework
+        BALDUR_EMERGENCY_MODE_SHEDDING_ENABLED=false
 
     Tier rules and multipliers:
         BACKPRESSURE_TIER_RULES (baldur.scaling.tiering.defaults),
@@ -65,8 +76,6 @@ class TieringMiddleware:
             get_response: Django's get_response callable
         """
         self.get_response = get_response
-        self._registry = get_tier_registry()
-        self._random = random.Random()
 
         self._enabled = self._check_enabled()
 
@@ -88,9 +97,6 @@ class TieringMiddleware:
         """
         Process the request.
 
-        Most Restrictive Wins merge strategy that applies the lower of the
-        per-tier multipliers from Emergency Mode and Backpressure Level.
-
         Args:
             request: Django HttpRequest
 
@@ -100,166 +106,63 @@ class TieringMiddleware:
         if not self._enabled:
             return self.get_response(request)
 
-        # CORS Preflight Bypass — OPTIONS is excluded from Load Shedding
+        # CORS Preflight Bypass — OPTIONS is excluded from Load Shedding.
+        # The helper repeats this check; keeping it here avoids the context
+        # build for a preflight.
         if request.method == "OPTIONS":
             return self.get_response(request)
 
         try:
-            from baldur.factory.registry import ProviderRegistry
-            from baldur.scaling.rate_controller import get_rate_controller
-
-            try:
-                from baldur_pro.services.emergency_mode.enums import (
-                    EMERGENCY_LEVEL_RULES,
-                    EmergencyLevel,
-                )
-            except ImportError:
-                EMERGENCY_LEVEL_RULES = None  # type: ignore[assignment,misc]
-                EmergencyLevel = None  # type: ignore[assignment,misc]
-
-            manager = ProviderRegistry.emergency_manager.safe_get()
-            if manager is None:
-                raise RuntimeError("baldur_pro EmergencyManager not registered")
-            controller = get_rate_controller()
-
-            emergency_active = manager.is_active()
-            emergency_level = (
-                manager.get_current_level()
-                if emergency_active
-                else EmergencyLevel.NORMAL
-            )
-            bp_level = controller.get_state().level
-
-            # Pass if both Emergency and Backpressure are normal
-            if (
-                emergency_level == EmergencyLevel.NORMAL
-                and bp_level == BackpressureLevel.NONE
-            ):
-                return self.get_response(request)
-
-            path = request.path
-            client_ip = self._get_client_ip(request)
-            user_id = self._get_user_id(request)
-            method = request.method
-
-            tier_result = self._registry.resolve_tier_with_fallback(
-                path=path,
-                client_ip=client_ip,
-                user_id=str(user_id) if user_id else None,
-                method=method,
-            )
-
-            # Most Restrictive Wins: apply the lower multiplier of the two rules
-            emergency_multiplier = EMERGENCY_LEVEL_RULES.get(
-                emergency_level,
-                {},
-            ).get(tier_result.tier_id, 1.0)
-
-            backpressure_multiplier = BACKPRESSURE_TIER_RULES.get(
-                bp_level,
-                {},
-            ).get(tier_result.tier_id, 1.0)
-
-            final_multiplier = min(emergency_multiplier, backpressure_multiplier)
-
-            if not self._should_allow_request(final_multiplier):
-                return self._create_load_shedding_response(
-                    request=request,
-                    tier_id=tier_result.tier_id,
-                    multiplier=final_multiplier,
-                    emergency_level=emergency_level,
-                )
-
-            return self.get_response(request)
-
+            ctx = self._build_request_context(request)
+            rejection = check_emergency_shedding(ctx)
         except Exception as e:
+            # Guards the context build and the conversion only — the decision
+            # itself is fail-open inside the helper.
             logger.exception(
                 "tiering_middleware.error_allowing_request",
                 error=e,
             )
             return self.get_response(request)
 
+        if rejection is not None:
+            return self._to_django_response(rejection)
+
+        return self.get_response(request)
+
+    # =========================================================================
+    # Django-only wrappers
+    # =========================================================================
+
+    def _build_request_context(self, request) -> RequestContext:
+        """Snapshot Django's HttpRequest into Baldur's ``RequestContext``."""
+        try:
+            method = HttpMethod(request.method)
+        except ValueError:
+            method = HttpMethod.GET
+        user = getattr(request, "user", None)
+        is_authenticated = bool(getattr(user, "is_authenticated", False))
+        return RequestContext(
+            method=method,
+            path=request.path,
+            headers=dict(request.headers.items()),
+            client_ip=self._get_client_ip(request),
+            user=user if is_authenticated else None,
+            is_authenticated=is_authenticated,
+        )
+
     def _get_client_ip(self, request) -> str | None:
         """Extract client IP (canonical resolution: XFF -> X-Real-IP -> REMOTE_ADDR)."""
         return extract_client_ip(request)
 
-    def _get_user_id(self, request) -> int | None:
-        """Extract user ID from request."""
-        if hasattr(request, "user") and request.user.is_authenticated:
-            return int(request.user.id)
-        return None
-
-    def _should_allow_request(self, multiplier: float) -> bool:
-        """
-        Determine if request should be allowed based on multiplier.
-
-        Args:
-            multiplier: Traffic multiplier (0.0 = block all, 1.0 = allow all)
-
-        Returns:
-            True if request should be allowed
-        """
-        if multiplier >= 1.0:
-            return True
-        if multiplier <= 0.0:
-            return False
-
-        return bool(self._random.random() < multiplier)
-
-    def _create_load_shedding_response(
-        self,
-        request,
-        tier_id: str,
-        multiplier: float,
-        emergency_level,
-    ):
-        """
-        Create a 503 Load Shedding response.
-        """
+    def _to_django_response(self, response_ctx):
+        """Convert a framework-free ``ResponseContext`` to a Django response."""
         from django.http import JsonResponse
 
-        logger.warning(
-            "tiering_middleware.load_shedding",
-            request_path=request.path,
-            tier_id=tier_id,
-            multiplier=multiplier,
-            emergency_level=emergency_level.value,
-        )
-
-        self._record_load_shedding_metrics(tier_id, emergency_level)
-
         response = JsonResponse(
-            {
-                "error": "Service Temporarily Unavailable",
-                "code": "LOAD_SHEDDING",
-                "message": (
-                    "The request was temporarily throttled for system load management. "
-                    "Please try again shortly."
-                ),
-                "tier": tier_id,
-                "emergency_level": emergency_level.value,
-                "retry_after": 30,
-            },
-            status=503,
+            response_ctx.body,
+            status=response_ctx.status_code,
+            safe=False,
         )
-        response["Retry-After"] = "30"
-
+        for key, value in response_ctx.headers.items():
+            response[key] = value
         return response
-
-    def _record_load_shedding_metrics(self, tier_id: str, emergency_level):
-        """Record load shedding metrics to Prometheus."""
-        try:
-            from prometheus_client import Counter
-
-            counter = Counter(
-                "baldur_tiering_load_shedding_total",
-                "Total load shedding events by tier and level",
-                ["tier_id", "emergency_level"],
-                registry=None,
-            )
-            counter.labels(
-                tier_id=tier_id,
-                emergency_level=emergency_level.value,
-            ).inc()
-        except Exception:
-            pass  # Best-effort metrics

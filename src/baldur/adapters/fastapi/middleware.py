@@ -29,6 +29,7 @@ from baldur.api.middleware import (
     check_backpressure,
     check_cb_open,
     check_deadline,
+    check_emergency_shedding,
     check_rate_limit,
     record_cb_observation,
     record_http_red,
@@ -87,8 +88,16 @@ class BaldurMiddleware:
         request_ctx = _build_request_context(scope)
         start_time = time.perf_counter()
 
-        # Reject-decision pipeline. Rate limit runs first (acquires no resource,
-        # sets no deadline), so it stays outside the release try/finally.
+        # Reject-decision pipeline. Emergency-mode per-tier shedding runs first
+        # and the rate limiter second — both acquire no resource and set no
+        # deadline, so they stay outside the release try/finally. Shedding leads
+        # so a shed request consumes no rate-limit token and acquires no
+        # admission slot, matching Django's early TieringMiddleware position.
+        shed_rejection = check_emergency_shedding(request_ctx)
+        if shed_rejection is not None:
+            await _send_response(send, shed_rejection)
+            return
+
         rate_rejection = check_rate_limit(
             request_ctx,
             rate_limit=self.rate_limit,

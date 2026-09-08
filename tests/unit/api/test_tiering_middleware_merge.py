@@ -142,7 +142,7 @@ class TestTieringMiddlewareMergeBehavior:
 
         with (
             patch(
-                "baldur.api.django.tiering.middleware.get_tier_registry",
+                "baldur.api.middleware.emergency_shedding._tier_registry",
                 return_value=mock_registry,
             ),
         ):
@@ -150,7 +150,6 @@ class TestTieringMiddlewareMergeBehavior:
 
             middleware = TieringMiddleware(get_response)
             middleware._enabled = True
-            middleware._registry = mock_registry
 
         return middleware, get_response, mock_response, mock_manager, mock_controller
 
@@ -229,41 +228,23 @@ class TestTieringMiddlewareMergeBehavior:
 
         assert final == 0.0
 
-    def test_should_allow_request_multiplier_1_always_true(self):
-        """multiplier=1.0이면 _should_allow_request()는 항상 True."""
-        from baldur.api.django.tiering.middleware import TieringMiddleware
+    def test_should_allow_multiplier_1_always_true(self):
+        """multiplier=1.0이면 _should_allow()는 항상 True."""
+        from baldur.api.middleware.emergency_shedding import _should_allow
 
-        get_response = MagicMock()
-        with patch(
-            "baldur.api.django.tiering.middleware.get_tier_registry",
-        ):
-            middleware = TieringMiddleware(get_response)
+        assert _should_allow(1.0) is True
 
-        assert middleware._should_allow_request(1.0) is True
+    def test_should_allow_multiplier_0_always_false(self):
+        """multiplier=0.0이면 _should_allow()는 항상 False."""
+        from baldur.api.middleware.emergency_shedding import _should_allow
 
-    def test_should_allow_request_multiplier_0_always_false(self):
-        """multiplier=0.0이면 _should_allow_request()는 항상 False."""
-        from baldur.api.django.tiering.middleware import TieringMiddleware
+        assert _should_allow(0.0) is False
 
-        get_response = MagicMock()
-        with patch(
-            "baldur.api.django.tiering.middleware.get_tier_registry",
-        ):
-            middleware = TieringMiddleware(get_response)
-
-        assert middleware._should_allow_request(0.0) is False
-
-    def test_should_allow_request_multiplier_between_0_1_probabilistic(self):
+    def test_should_allow_multiplier_between_0_1_probabilistic(self):
         """0 < multiplier < 1에서 확률적 허용/거부 동작."""
-        from baldur.api.django.tiering.middleware import TieringMiddleware
+        from baldur.api.middleware.emergency_shedding import _should_allow
 
-        get_response = MagicMock()
-        with patch(
-            "baldur.api.django.tiering.middleware.get_tier_registry",
-        ):
-            middleware = TieringMiddleware(get_response)
-
-        results = [middleware._should_allow_request(0.5) for _ in range(200)]
+        results = [_should_allow(0.5) for _ in range(200)]
 
         # 확률적이므로 모두 True/False가 아님 (200회 시행)
         assert True in results
@@ -303,16 +284,16 @@ class TestTierBoundaryImportPathContract:
 
         assert FromDefaults is FromSettings
 
-    def test_tiering_middleware_module_level_backpressure_level(self):
-        """tiering/middleware.py의 module-level BackpressureLevel은 shared tier 원본."""
-        from baldur.api.django.tiering import middleware as mw_mod
+    def test_shedding_helper_module_level_backpressure_level(self):
+        """emergency_shedding.py의 module-level BackpressureLevel은 shared tier 원본."""
+        from baldur.api.middleware import emergency_shedding as helper_mod
         from baldur.settings.backpressure import BackpressureLevel as FromSettings
 
-        assert mw_mod.BackpressureLevel is FromSettings
+        assert helper_mod.BackpressureLevel is FromSettings
 
-    def test_tiering_middleware_module_level_backpressure_tier_rules(self):
-        """tiering/middleware.py의 module-level BACKPRESSURE_TIER_RULES은 defaults에서 import."""
-        from baldur.api.django.tiering import middleware as mw_mod
+    def test_shedding_helper_resolves_backpressure_tier_rules_from_defaults(self):
+        """emergency_shedding.py가 쓰는 BACKPRESSURE_TIER_RULES은 defaults의 원본."""
+        from baldur.api.middleware.emergency_shedding import _backpressure_tier_rules
         from baldur.scaling.tiering.defaults import BACKPRESSURE_TIER_RULES
 
-        assert mw_mod.BACKPRESSURE_TIER_RULES is BACKPRESSURE_TIER_RULES
+        assert _backpressure_tier_rules() is BACKPRESSURE_TIER_RULES

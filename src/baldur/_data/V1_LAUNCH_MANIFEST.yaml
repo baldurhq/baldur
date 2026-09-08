@@ -113,6 +113,7 @@ entries:
 
   # ── v1.0 (PRO launch-set Revision 5, retained True per D3) ──
   - {module: "admission_control.py", class: "AdmissionControlSettings", field: "enabled", default: true, tier: "v1.0", env_var: "BALDUR_ADMISSION_CONTROL_ENABLED"}
+  - {module: "emergency_mode.py", class: "EmergencyModeSettings", field: "shedding_enabled", default: true, tier: "v1.0", env_var: "BALDUR_EMERGENCY_MODE_SHEDDING_ENABLED"}
   - {module: "event_journal.py", class: "EventJournalSettings", field: "enabled", default: true, tier: "v1.0", env_var: "BALDUR_EVENT_JOURNAL_ENABLED"}
   - {module: "forensic.py", class: "ForensicSettings", field: "audit_enabled", default: true, tier: "v1.0", env_var: "BALDUR_FORENSIC_AUDIT_ENABLED"}
   - {module: "meta_watchdog.py", class: "MetaWatchdogSettings", field: "enabled", default: true, tier: "v1.0", env_var: "BALDUR_META_WATCHDOG_ENABLED"}

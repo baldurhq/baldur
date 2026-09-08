@@ -27,10 +27,10 @@ class TestEmergencyModeSettingsContract:
     """
 
     def test_field_count(self):
-        """EmergencyModeSettings has exactly 24 fields."""
+        """EmergencyModeSettings has exactly 27 fields."""
         from baldur.settings.emergency_mode import EmergencyModeSettings
 
-        assert len(EmergencyModeSettings.model_fields) == 25
+        assert len(EmergencyModeSettings.model_fields) == 27
 
     def test_stabilization_period_seconds_default(self):
         """Default stabilization_period_seconds is 300."""
