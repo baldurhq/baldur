@@ -378,6 +378,15 @@ host to the allowed origins. For a destructive action, unlock the server with
 `BALDUR_ADMIN_UNLOCK=1` and type the `CONFIRM` prompt — the unlock is a second gate so a
 console left open in a browser tab can't force production.
 
+**The console does not answer at all — the connection is refused.**
+*Cause:* the port was already taken when the process booted. Baldur does not take a port
+another process is serving; it logs `admin.autostart_failed` and the app keeps running
+without the console. A second app on the same host is the usual culprit, since every
+Baldur process wants the same default port.
+*Fix:* find the warning in the startup log to confirm, then give one of the two processes
+a different admin port. Nothing else degrades — the console is an operator surface, not a
+request path.
+
 **Nothing Baldur does has any effect — all self-healing is inert.**
 *Cause:* the **kill switch** is in its DISABLED state. Someone flipped it (an incident, a
 test) and it persists across restarts on purpose — Baldur won't silently re-arm automation

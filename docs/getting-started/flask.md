@@ -50,6 +50,19 @@ curl http://127.0.0.1:5000/demo
 
 That's it. The response just travelled through a circuit breaker.
 
+### Open the console
+
+`baldur.init()` also started Baldur's admin server on loopback, so the built-in
+[Web Console](../concepts/foundations/web-console.md) is already serving — no
+extra step, and nothing to configure:
+
+```bash
+open http://127.0.0.1:9090/   # any browser; the page is served on loopback only
+```
+
+If another process already holds that port, Baldur does not take it over: it
+logs `admin.autostart_failed` and your app keeps serving without the console.
+
 ### See Baldur's events
 
 Baldur logs to stdout automatically. Raise the log level to watch circuit

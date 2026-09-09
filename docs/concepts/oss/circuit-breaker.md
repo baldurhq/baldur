@@ -55,7 +55,11 @@ stateDiagram-v2
 - **CLOSED** is the normal state: calls flow straight through.
 - **OPEN** is the tripped state: calls are rejected instantly, without reaching the dependency.
 - **HALF_OPEN** is the probing state: after the cool-down, a few trial calls are allowed through to
-  test the waters.
+  test the waters. When your workers share a Redis store, that allowance is the *fleet's*, not each
+  worker's: the whole deployment sends `BALDUR_CB_HALF_OPEN_MAX_CALLS` probes at the recovering
+  dependency, however many workers you run. On the in-memory fallback there is no shared store to
+  budget against: each worker keeps its own breaker and probes on its own, so a recovering
+  dependency sees that allowance once per worker.
 
 | What you observe | When it happens |
 |------------------|-----------------|
@@ -289,7 +293,7 @@ The most common knobs an operator sets. The full list lives in the API reference
 | `BALDUR_CB_SLIDING_WINDOW_SIZE` | `100` | How many recent calls the failure rate is measured over, per worker process |
 | `BALDUR_CB_MINIMUM_CALLS` | `10` | Calls the window needs before the rate is trusted. Gates the rate trigger only — the consecutive-failure trigger always applies |
 | `BALDUR_CB_RECOVERY_TIMEOUT` | `60` | Seconds the breaker stays OPEN before letting trial calls through |
-| `BALDUR_CB_HALF_OPEN_MAX_CALLS` | `3` | How many trial calls are allowed through while probing for recovery |
+| `BALDUR_CB_HALF_OPEN_MAX_CALLS` | `3` | How many trial calls are allowed through while probing for recovery — shared across every worker that shares a Redis store, per worker without one |
 | `BALDUR_MIDDLEWARE_CB_STATUS_CODES` | `[500,502,503,504]` | Response statuses recorded as a breaker failure, both by the inbound middleware and when a protected call *returns* a response instead of raising |
 | `BALDUR_MIDDLEWARE_RATE_LIMIT_CODES` | `[429]` | Response statuses read as a rate-limit answer: a failure that also feeds the cascade. Not exclusive with the list above |
 | `BALDUR_CB_MANUAL_OVERRIDE_TTL_MINUTES` | `90` | How long a force lasts when you do not give it a lifetime of its own, up to `1440` (24 h). Every force expires, so one you forget lapses instead of pinning the breaker |

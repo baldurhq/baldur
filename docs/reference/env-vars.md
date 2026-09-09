@@ -388,7 +388,16 @@ BALDUR_EMERGENCY_MODE_SHED_RETRY_AFTER_SECONDS=30  # advertised on the 503, in t
 
 On Django the middleware also has its own install switch,
 `BALDUR_TIERING_MIDDLEWARE_ENABLED`, which decides whether the middleware runs
-at all; `SHEDDING_ENABLED` is the cross-framework decision switch.
+at all. It is the one name on this page that is **not** an environment
+variable — it is read from your Django settings module, so exporting it does
+nothing and Baldur reports it at startup as an unknown variable. Set it in
+`settings.py` instead:
+
+```python
+BALDUR_TIERING_MIDDLEWARE_ENABLED = False
+```
+
+`SHEDDING_ENABLED` is the cross-framework decision switch.
 
 ## Runtime config delivery (PRO)
 
