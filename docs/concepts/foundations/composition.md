@@ -99,7 +99,7 @@ for:
 | Circuit breaker | **Yes** | `circuit_breaker=False` to turn it off |
 | Retry with backoff | No | `retry=True` |
 | Fallback | No | pass `fallback=<callable>` |
-| Dead-letter queue | No | `dlq=True` |
+| Dead-letter queue | No | `dlq=True`, together with `retry=` |
 | Timeout (wall-clock bound) | No | pass `timeout=<seconds>` |
 | Idempotency (dedup) | No | pass `idempotency_key=...` |
 
@@ -130,9 +130,10 @@ result = baldur.protect(
 )
 ```
 
-Both share the same keywords. If you need to inspect the outcome (was the fallback used? how many
-attempts?) without catching an exception, `protect_with_meta()` (and its async counterpart
-`aprotect_with_meta()`) returns a `ProtectResult` instead of raising.
+Both take the same protection keywords. If you need to inspect the outcome (was the fallback used?
+how many attempts?) without catching an exception, reach one level down for
+`from baldur.protect_facade import protect_with_meta, aprotect_with_meta`: they return a
+`ProtectResult` instead of raising.
 
 ### Composed, honestly
 
@@ -140,11 +141,14 @@ attempts?) without catching an exception, `protect_with_meta()` (and its async c
   and all, so a retried charge can charge twice. Pass `idempotency_key=` (or make the function
   idempotent yourself) when the work is not naturally safe to repeat. Baldur will not silently
   assume it is. See [Idempotency](../oss/idempotency.md).
-- **`dlq=True` captures the failure, on either tier.** A final failure is recorded with the context
-  needed to run it again, the backlog is browsable in the web console, and entries can be retried
-  once the dependency recovers — no PRO required. PRO adds the operate-at-scale surface: one-click
-  batch replay, adaptive pacing, and archive/purge retention.
-  See [DLQ + Replay](dlq-replay.md).
+- **`dlq=True` captures the failure on either tier, but pair it with `retry=`.** On the ordinary
+  failure path it is the retry stage that arms the capture, so `dlq=True` by itself preserves
+  nothing when a call simply fails. (A call that an open breaker rejected is captured either way.)
+  The `@dlq_protect` preset pins both on, which is the setting you want when losing the work is not
+  an option. What does land is recorded with the context needed to run it again, the backlog is
+  browsable in the web console, and entries can be retried once the dependency recovers, with no PRO
+  required. PRO adds the operate-at-scale surface: one-click batch replay, adaptive pacing, and
+  archive/purge retention. See [what reaches the queue and how a replay re-runs it](dlq-replay.md).
 - **The fallback runs *outside* the timeout clock, so keep it cheap and local.** The timeout bounds
   the inner call; when it fires, the fallback is what runs *next*, so it cannot be bounded by the
   same clock. Serve something fast — a cached value, a static default — not a second network call.
@@ -159,8 +163,8 @@ attempts?) without catching an exception, `protect_with_meta()` (and its async c
   ```
 
   A zero-argument `fallback()` still works unchanged. (For outcome-level conditions beyond the error
-  type, the lower-level `baldur.compose()` builder exposes a `predicate=` on its `FallbackPolicy`;
-  the facade covers the common case through the error-aware callable above.)
+  type, the lower-level builder in `baldur.resilience.policies` exposes a `predicate=` on its
+  `FallbackPolicy`; the facade covers the common case through the error-aware callable above.)
 - **On `async def` functions**, the whole pipeline composes with the same guarantees as sync —
   circuit breaker, retry, fallback, dead-letter, idempotency, and timeout — in the same order (the
   fallback outermost, then the breaker, then timeout, then retry). A given `name` shares one breaker
@@ -175,8 +179,8 @@ attempts?) without catching an exception, `protect_with_meta()` (and its async c
 ## Configuration
 
 You configure the facade **per call**, through the keyword arguments shown above. A per-call keyword
-always takes precedence, and keeping the switches at the call site means the protection a function
-has is visible right where it is defined.
+takes precedence over the framework-wide default, and keeping the switches at the call site means
+the protection a function has is visible right where it is defined.
 
 The patterns the facade composes each carry their own settings — the circuit breaker's thresholds,
 retry's backoff, idempotency's storage — documented in their own guides and listed in the
