@@ -59,9 +59,12 @@ def charge(order_id: str) -> dict:
     return payment_gateway.charge(order_id)
 ```
 
-Two of these arguments are safety rails for a money path. Retry re-executes the call, so
-`idempotency_key` gives the charge a dedup guard: a duplicate attempt (a retry, a double-submit)
-[runs the side effect only once](../oss/idempotency.md). And `dlq=True` is an explicit opt-in:
+Two of these arguments are safety rails for a money path. `idempotency_key` gives the charge a
+dedup guard, so a duplicate *arrival* of the same order (a double-submit, a redelivered webhook, a
+second worker) [runs the side effect only once](../oss/idempotency.md). It does not collapse
+Baldur's own retries. `retry=True` re-executes the function, so the work still has to be safe to
+repeat, and it is your payment provider's idempotency key, derived from the same order ID, that
+covers a retry whose first attempt may already have charged. And `dlq=True` is an explicit opt-in:
 Baldur never captures request snapshots without it, and a replayed entry executes the work again,
 so grant it only to calls that are [safe to run a second time](dlq-replay.md).
 
@@ -70,7 +73,7 @@ user-facing charge the honest answer is that nothing happened and the caller sho
 Promising a queue would commit you to charging a customer who may have already walked away, which
 is exactly the case [replay is not for](dlq-replay.md). Setting a fallback also has a structural
 consequence: a served fallback counts as a handled call, so the failure is not captured for
-replay — here `dlq=True` matters only if the fallback itself ever fails. For a user-facing
+replay. Here `dlq=True` matters only if the fallback itself ever fails. For a user-facing
 charge that is the honest pairing: the caller gets a final answer, and no queued copy of the
 charge survives to run behind their back.
 
@@ -96,8 +99,10 @@ flowchart LR
 Adoption stays cheap because there is nothing to stand up and nothing new to learn:
 
 - **Zero infrastructure to start.** With no configuration, Baldur runs on an in-memory fallback:
-  no external services and no environment variables required. Add Redis only when you scale to
-  multiple processes. It is a library, not a sidecar or a separate service.
+  no external services and no environment variables required. Add Redis when state has to be
+  shared across processes; declaring the environment production makes it mandatory, since Baldur
+  refuses to boot on per-worker memory rather than quietly degrade a shared guarantee. It is a
+  library, not a sidecar or a separate service.
 - **One API across frameworks.** The same `@baldur.protected` works on Django, FastAPI, and Flask.
 
 **Where the automation stops.** Baldur automates the failure responses it is designed for. It does

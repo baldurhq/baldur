@@ -142,12 +142,20 @@ the workers:
 ```bash
 pip install baldur-framework[celery,redis]
 export BALDUR_REDIS_URL=redis://localhost:6379/0
+export BALDUR_ENVIRONMENT=production
 ```
 
-Reading that variable is `baldur.init()`'s job, and steps 3 and 4 each run it in
-every worker for you. If you use neither and rely on `@baldur.protected` alone,
-the [FAQ](../faq.md#what-frameworks-does-it-support) has the one line that does
-it — without it Baldur keeps protecting calls, on per-process state.
+Reading those variables is `baldur.init()`'s job, and steps 3 and 4 each run it
+in every worker for you. If you use neither and rely on `@baldur.protected`
+alone, the [FAQ](../faq.md#what-frameworks-does-it-support) has the one line that
+does it — without it Baldur keeps protecting calls, on per-process state.
+
+Declaring the environment is what turns the hazard above into a rule Baldur
+enforces: with `BALDUR_ENVIRONMENT=production` set and `BALDUR_REDIS_URL`
+missing, `baldur.init()` refuses to start rather than let a shared guarantee
+degrade to per-worker memory. For a deliberate single-worker deployment on
+in-memory state, `BALDUR_TEST_MODE=true` opts out of that check, and of Baldur's
+other production configuration checks with it.
 
 ## See also
 

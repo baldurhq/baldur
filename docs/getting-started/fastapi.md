@@ -90,6 +90,13 @@ environment variable before starting the server:
 ```bash
 pip install baldur-framework[fastapi,redis]
 export BALDUR_REDIS_URL=redis://localhost:6379/0
+export BALDUR_ENVIRONMENT=production
 ```
 
-That is the only addition the production path needs over the quickstart path.
+Those two variables are the only addition the production path needs over the
+quickstart path. Declaring the environment is what turns the hazard above into a
+rule Baldur enforces: with `BALDUR_ENVIRONMENT=production` set and
+`BALDUR_REDIS_URL` missing, `baldur.init()` refuses to start rather than let a
+shared guarantee degrade to per-worker memory. For a deliberate single-process
+deployment on in-memory state, `BALDUR_TEST_MODE=true` opts out of that check,
+and of Baldur's other production configuration checks with it.

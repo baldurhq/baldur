@@ -30,7 +30,21 @@ BALDUR_IDEMPOTENCY_ENABLED=true
 BALDUR_IDEMPOTENCY_DEFAULT_CACHE_TTL=60
 BALDUR_IDEMPOTENCY_GATE_MEMORY_TTL_SECONDS=1800
 BALDUR_PROTECT_DEFAULT_TIMEOUT_SECONDS=30  # unset (default) = no Baldur-level wall-clock bound on protect(); set to restore a global outer net. Per-call timeout= always wins
+BALDUR_MIDDLEWARE_CB_STATUS_CODES=[500,502,503,504]  # statuses recorded as a breaker failure
+BALDUR_MIDDLEWARE_RATE_LIMIT_CODES=[429]             # statuses treated as a rate-limit answer
 ```
+
+The two `BALDUR_MIDDLEWARE_*` status lists are read on **both** sides of a call:
+inbound by `BaldurMiddleware` and the framework-free middleware helpers, and
+outbound by the circuit-breaker stage when a protected call *returns* an HTTP
+response instead of raising. One answer therefore covers both directions — and
+changing either list changes breaker behaviour on the outbound path too. The
+`MIDDLEWARE_` prefix is a naming debt from the first reader; the variable names
+are a public contract and are not being renamed.
+
+The two lists are **not** exclusive. A status in both records a breaker failure
+*and* feeds the rate-limit cascade — which is what you want for an upstream that
+answers `503` under load shedding.
 
 ## DLQ
 
@@ -173,6 +187,15 @@ BALDUR_SQL_DSN=postgresql://user:pass@host:5432/db
 BALDUR_DLQ_BACKEND=sql                    # memory | redis | sql — where captured failures are stored
 ```
 
+`BALDUR_REDIS_URL` sits behind the same production boot gate as the secrets
+above: with `BALDUR_ENVIRONMENT=production` set, boot aborts (a
+`ConfigurationError` out of `baldur.init()`) when it is missing, because the
+framework will not fall back to per-worker memory for state that is meant to be
+shared. Outside production that same absence is an INFO-level fallback, which is
+the zero-config development boot. `BALDUR_TEST_MODE=true` accepts a memory-only
+process deliberately, skipping this check along with the other production
+configuration checks.
+
 `BALDUR_DLQ_BACKEND` selects the dead-letter store explicitly. Left unset,
 Baldur picks the first one the environment offers: `redis` when
 `BALDUR_REDIS_URL` is set, else `sql` when a DSN is configured, else `memory`.
@@ -298,8 +321,8 @@ Comma-separated names of the default scheduled jobs to skip at registration —
 the targeted form of `BALDUR_SCHEDULER_AUTOSTART=0`, which stops all of them.
 Valid names: `daily_report`, `sla_drift`, `cb_recovery`, `cb_override_expiry`,
 `archive_old_dlq_entries`, `cleanup_expired_config`, `config_apply`,
-`scan_zombie_rollouts`, `auto_promote_eligible`, `collect_canary_metrics`. An
-unrecognised name logs a warning and is otherwise ignored.
+`scan_zombie_rollouts`, `auto_promote_eligible`, `collect_canary_metrics`,
+`panic_threshold`. An unrecognised name logs a warning and is otherwise ignored.
 
 Scope: the **in-process scheduler** only. On a Celery deployment the same jobs
 also run off beat lanes this variable does not reach, controlled by
@@ -342,6 +365,30 @@ meta-watchdog's `canary_rollout` probe lists them under `rollout_ids`, as does
 `get_active_rollouts()` — and resolve them. The first scan after activation
 alerts once per still-stalled rollout, and those alerts draw on the same
 notification budget as everything else.
+
+## Emergency Mode HTTP shedding (PRO)
+
+While emergency mode is active, inbound HTTP requests are classified into a
+tier and shed with `503 Service Temporarily Unavailable` according to the
+level's per-tier multiplier — `non_essential` first, then `standard`, and at
+the highest level a fraction of `critical` too. The gate runs on Django, Flask
+and FastAPI alike, and it is the PRO emergency manager that arms it: without
+`baldur_pro` the flag is a no-op and no request is ever shed.
+
+Routes your application has not mapped into the tier registry classify as
+`non_essential`, so they are the first traffic dropped once a level is active.
+Map the routes you want protected before you rely on the lane, or set the
+flag to `false` to keep the level steering only the non-HTTP consumers
+(replay pause, notification escalation, throttle multipliers).
+
+```bash
+BALDUR_EMERGENCY_MODE_SHEDDING_ENABLED=true
+BALDUR_EMERGENCY_MODE_SHED_RETRY_AFTER_SECONDS=30  # advertised on the 503, in the Retry-After header and the body; 1-3600
+```
+
+On Django the middleware also has its own install switch,
+`BALDUR_TIERING_MIDDLEWARE_ENABLED`, which decides whether the middleware runs
+at all; `SHEDDING_ENABLED` is the cross-framework decision switch.
 
 ## Runtime config delivery (PRO)
 

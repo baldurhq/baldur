@@ -40,7 +40,7 @@ into a fast, contained one:
 
 You wrap a call with the `@baldur.protected` facade (which combines the breaker with retry and
 fallback) or the `circuit_breaker` decorator directly — both work the same on synchronous and
-`async` calls, since the facade detects the call style and dispatches automatically. From then on,
+`async` calls, since each detects the call style and dispatches automatically. From then on,
 Baldur tracks that call's health and moves the breaker through three observable states:
 
 ```mermaid
@@ -64,15 +64,78 @@ stateDiagram-v2
 | A handful of trial calls are let through | **HALF_OPEN** — the recovery timeout elapsed and Baldur is probing whether the dependency recovered |
 | Normal traffic resumes | a trial call succeeds enough times → back to **CLOSED** |
 | The breaker snaps back to rejecting | a single trial call fails → straight back to **OPEN** |
+| Nothing changes state on its own, while your forces still take effect | **Emergency Level 3** is active (PRO): every breaker holds where it is, see [below](#when-the-whole-system-is-in-lockdown-pro) |
 
 How the breaker decides to trip comes with a couple of wrinkles:
 
 - **Low-traffic services won't trip on rate alone.** The failure-rate trigger waits until the window
   holds a minimum number of calls, so one bad response on a barely-used endpoint can't flip it. The
   consecutive-failure count is traffic-independent and applies whatever the volume.
-- **Rate-limit storms trip it too.** A burst of HTTP 429 (Too Many Requests) responses from a
-  dependency is treated as a failure signal and can open the breaker, so your app stops amplifying the
-  overload.
+- **A rate-limit answer is a failure too.** A dependency answering HTTP 429 (Too Many Requests) is
+  refusing the call, so Baldur records it as a failure like any other, and a run of them trips the
+  breaker through the same two triggers. Storms that arrive interleaved with successes have a trigger
+  of their own, and how Baldur spots a 429 in the first place is
+  [its own section](#when-a-dependency-answers-429).
+
+### When a dependency answers 429
+
+Baldur watches for a 429 at the point where the protected call is made, on every framework and in
+both call styles: `@baldur.protected` and `@baldur.aprotected`, `protect()` and `aprotect()`, and
+the `circuit_breaker` decorator on a `def` or an `async def`. Nothing has to be wired by hand. Both
+shapes a client can deliver a 429 in are recognised: an exception whose message or type names the
+rate limit, and a returned response object whose integer status code is on the rate-limit list, so a
+`requests` call that hands the 429 back without raising is caught as well.
+
+Each sighting does three things. It records a breaker failure, so the consecutive count and the
+failure rate move as they would for any exception. It feeds the **rate-limit cascade**, the trigger
+for storms interleaved with successes: with the defaults, ten 429s inside a minute open the breaker
+once they make up at least a tenth of the calls made in that minute and the minute holds at least
+twenty of them, counted per worker process. And it starts the cooldown that Baldur's retry stage
+waits out before its next attempt, sized from the provider's `Retry-After` when the answer carried
+one, so a retry does not land while the dependency is still asking for room.
+
+Composed with retry, the breaker sits outside the retry ladder and would ordinarily see only the
+sequence's final outcome. Baldur counts each attempt instead, so a storm the retries eventually
+overcome still reaches the breaker as the run of 429s it was, not as one success. The async retry
+stage is the exception: under `aprotect(retry=True)` the breaker sees only the sequence's final
+outcome, so an async storm the ladder survives never reaches it as a 429 at all, and one the ladder
+gives up on reaches it as a single 429. That ladder does not wait out the cooldown either; only the
+synchronous retry stage does.
+
+A breaker the cascade opens is an ordinary automatic OPEN. It recovers through the recovery timeout
+and HALF_OPEN probing exactly like a breaker tripped by failures. Three warnings mark the event: one
+names the storm with the 429 count and rate it fired on, the one logged when the breaker opens
+names the cascade as its trigger, and a third confirms the auto-open for that service.
+
+Returned error responses get the same treatment on the failure side. A protected call that returns
+a response with a status on the failure list (the 5xx codes by default) records a breaker failure
+rather than a success. The value is still handed back to your code unchanged: a returned response
+never raises and never triggers the fallback.
+
+Two things deliberately do not count. A call Baldur itself declined to make, because the retry stage
+was waiting out a cooldown, is never a breaker failure and never enters the rate: the dependency was
+not contacted. And an exception type you told the breaker to ignore (`ignore_exceptions`) is ignored
+for the cascade as well, with one limit: the synchronous retry stage classifies each attempt on its
+own and does not read that list, so a `circuit_breaker` decorator wrapping a retried call still sees
+the retried 429s counted.
+
+Which statuses count is set by two lists, `BALDUR_MIDDLEWARE_CB_STATUS_CODES` (failures,
+`500,502,503,504` by default) and `BALDUR_MIDDLEWARE_RATE_LIMIT_CODES` (`429` by default). The prefix
+is historical: the same two lists govern this outbound path and the inbound middleware. They are not
+exclusive either. List `503` in both and an upstream that sheds load with 503s records a failure and
+feeds the cascade at once.
+
+The inbound side is watched too. In a Django app the middleware classifies every response a view
+returns against the same two lists and files it against a breaker named for the request path's
+domain: the path-substring mapping in the `BALDUR_DOMAIN_MAPPING` Django setting, with every unmapped
+path sharing one breaker. A 429 relayed from upstream records a failure and feeds the cascade, so
+five relayed 429s in a row trip that breaker like any other run of failures. A 429 that carries
+`X-RateLimit-*` headers is left out, since it came from a limiter in your own app; Baldur's own
+rate-limit middleware labels its 429s that way, while the 429 its DRF throttle bridge raises carries
+no such header and is recorded like a relayed one. The Flask and FastAPI middlewares do the same once you give them a service
+name, leaving out only the 429s Baldur itself rejected with; without a service name they record
+nothing. A 429 that reaches your code outside any protected call can still be reported by hand with
+`record_rate_limit(service_name)`.
 
 ### Taking manual control
 
@@ -113,9 +176,63 @@ the point of a maintenance window, run a single web worker.**
 
 !!! warning "Dry-run mode accepts a force but never rejects traffic"
     Under [dry-run (observe-only) mode](system-control.md) Baldur reports what it *would* have done
-    and rejects nothing, a forced-open breaker included. The force is applied and logged, so the
-    console shows the breaker held open while requests carry on reaching the dependency. Turn dry-run
-    off before you rely on a force to actually cut traffic.
+    and lets every protected call through, a forced-open breaker included. The force is applied and
+    logged, so the console shows the breaker held open while requests carry on reaching the
+    dependency. Turn dry-run off before you rely on a force to actually cut traffic.
+
+### When the whole system is in lockdown (PRO)
+
+One more thing outranks a breaker's automatic judgement, and unlike a force it applies to every
+breaker at once. PRO's [Emergency Mode](../pro/emergency-mode.md) has four levels; at the most
+severe, **Level 3**, Baldur treats the incident as system-wide and every circuit breaker holds
+whatever state it is in. Nothing trips, nothing probes, nothing closes on its own. A CLOSED breaker
+keeps passing calls even as its failure count crosses the threshold, an OPEN breaker keeps
+rejecting after its recovery timeout has run out, a HALF_OPEN breaker lets no trial call through,
+and a rate-limit storm is still noted but no longer opens anything. The reasoning matches Emergency
+Mode's own recovery gate: in the middle of a fleet-wide incident, dozens of breakers probing and
+flipping on their own add load and noise at exactly the moment you want the system to stand still.
+
+The hold is on Baldur's *automatic* decisions only. Your forces work unchanged during Level 3: force
+a breaker closed once you know its dependency is back, or open to take it out of rotation, and the
+change lands as it would at any other time. **Force-close is your exit for one dependency while the
+lockdown lasts.** One interaction with force lifetimes is worth knowing: a forced-open breaker whose
+lifetime lapses during Level 3 stays open until the level drops, because lifting the force is itself
+an automatic step toward HALF_OPEN. Force it closed if that dependency needs traffic before then.
+
+While the hold is on, this is what you can see:
+
+- a request that an OPEN breaker rejects because the freeze is holding it is counted under a
+  `frozen` reason on the circuit-breaker blocked-requests metric, beside the usual open and
+  half-open-full reasons, so you can tell a held breaker from one still inside its recovery timeout;
+- each recovery sweep logs one warning (`circuit_breaker.recovery_sweep_blocked`) with the number of
+  OPEN breakers it would otherwise have moved to HALF_OPEN;
+- on a CLOSED breaker, failures are still recorded; only the transition is withheld. Once the level drops, the next
+  failure trips a breaker whose count is already over the threshold, and a success in between resets
+  that count as it always does.
+
+The level lives in the shared state Emergency Mode writes. On the default file backend that state is
+per host; with the Redis backend it spans the cluster. Each process re-reads it on a short cache,
+thirty seconds by default, so a worker can still decide a transition in the seconds before it learns
+of Level 3, and its peers then mirror that decision. What the hold guarantees is that no *new*
+automatic decision is taken while Level 3 holds; a worker catching its local copy up to a decision
+already taken elsewhere is not one. A worker whose read of the shared state fails logs a warning and
+carries on with the last level it read; one that has never managed to read a level runs unfrozen,
+and a Level 3 it is still holding expires on its own schedule. An unreadable emergency state must not
+stop a breaker from protecting its caller.
+
+Without PRO there is no Emergency Mode, so none of this applies: the breakers never hold, and
+everything above this section describes them completely.
+
+A PRO install can also declare Level 3 by itself when the fleet is collapsing. Turned on, a scheduled
+check reads breaker state from the shared store every ten seconds, and when the store holds at least
+three registered breakers and at least 70% of them are OPEN on two consecutive checks, Baldur
+activates Emergency Level 3 for the automatic-activation duration, thirty minutes by default, and the
+hold above takes effect. After a freeze ends it keeps judging the ratio but declares nothing again
+until Emergency Mode's stabilization period has passed, which gives the breakers time to leave OPEN.
+This lane is **off by
+default**, is switched on through an advanced setting that is not on the public tunable list yet, and
+judges the fleet from the shared breaker store, Redis in any deployment with more than one worker: a
+store it cannot read declares nothing and logs a warning instead.
 
 ### Get notified when it trips
 
@@ -138,7 +255,7 @@ model](../foundations/tier-model.md) lays out the full split.
 
 By default each worker (or pod) keeps its own breaker. If a dependency starts
 failing, every worker has to independently rack up failures before its breaker
-trips — so the struggling dependency keeps taking doomed traffic from each worker
+trips, so the struggling dependency keeps taking doomed traffic from each worker
 that hasn't caught up yet, and the cluster protects itself unevenly.
 
 On PRO, with the event bus running on its Redis backend, the moment one worker's
@@ -148,8 +265,8 @@ way on recovery. Peers flip without crossing their own failure threshold, so the
 whole cluster stops hammering the dependency together instead of one worker at a
 time. What propagation shares is the *decision*, not the failure counts: the first
 worker still has to reach its own threshold before anything trips, and only then
-does that OPEN fan out — so it makes the cluster react together once a breaker
-trips, it does not make that first trip arrive any sooner. It is opt-in — set
+does that OPEN fan out, so it makes the cluster react together once a breaker
+trips, it does not make that first trip arrive any sooner. It is opt-in: set
 `BALDUR_CB_CLUSTER_STATE_PROPAGATION_ENABLED=true` on each worker. One thing to
 weigh before you do: a peer's CLOSED is applied without checking whether this
 worker is holding an operator's force, so
@@ -158,7 +275,7 @@ That makes propagation the one automatic path that does not defer to a force. A
 peer's *trip* is the contrast case: it meets your force in the shared store, is
 declined, and that peer adopts the force instead.
 This coordinates the *same* breaker across workers; coordinating
-*different* breakers — so an open downstream breaker tightens the upstream ones —
+*different* breakers (so an open downstream breaker tightens the upstream ones)
 is outside the scope of the OSS circuit breaker.
 
 ## Configuration
@@ -173,12 +290,15 @@ The most common knobs an operator sets. The full list lives in the API reference
 | `BALDUR_CB_MINIMUM_CALLS` | `10` | Calls the window needs before the rate is trusted. Gates the rate trigger only — the consecutive-failure trigger always applies |
 | `BALDUR_CB_RECOVERY_TIMEOUT` | `60` | Seconds the breaker stays OPEN before letting trial calls through |
 | `BALDUR_CB_HALF_OPEN_MAX_CALLS` | `3` | How many trial calls are allowed through while probing for recovery |
+| `BALDUR_MIDDLEWARE_CB_STATUS_CODES` | `[500,502,503,504]` | Response statuses recorded as a breaker failure, both by the inbound middleware and when a protected call *returns* a response instead of raising |
+| `BALDUR_MIDDLEWARE_RATE_LIMIT_CODES` | `[429]` | Response statuses read as a rate-limit answer: a failure that also feeds the cascade. Not exclusive with the list above |
 | `BALDUR_CB_MANUAL_OVERRIDE_TTL_MINUTES` | `90` | How long a force lasts when you do not give it a lifetime of its own, up to `1440` (24 h). Every force expires, so one you forget lapses instead of pinning the breaker |
-| `BALDUR_EVENT_LOGGING_CB_LOG_LEVEL` | `WARNING` | Log level for circuit state-change events |
+| `BALDUR_EVENT_LOGGING_CB_LOG_LEVEL` | `WARNING` | Log level for the circuit open, close, and manual-force events; the automatic step to HALF_OPEN logs at a fixed level |
 | `BALDUR_META_WATCHDOG_SLACK_WEBHOOK_URL` | _(unset)_ | Slack incoming-webhook URL for the open/close push; unset means the events are logged, not posted |
 
 ## See also
 
 - [Getting Started](../../getting-started/index.md) — set it up
+- [Emergency Mode](../pro/emergency-mode.md) — the PRO incident levels; at Level 3 every breaker holds its state
 - [Circuit Breaker API Reference](../../reference/services/circuit_breaker.md) — full options and signatures
 - [Environment Variables](../../reference/env-vars.md) — the complete operator-tunable list

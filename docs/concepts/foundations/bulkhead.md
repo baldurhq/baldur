@@ -83,8 +83,11 @@ that thread until it returns. On a **thread pool** compartment (PRO), the timeou
 *execution*: the caller is freed with a timeout error when it expires, and the runaway task
 stays contained inside the pool worker instead of the request thread. On an OSS install a
 compartment that asks for `thread_pool` isolation is created as a semaphore compartment of the
-same capacity — a correct, bounded compartment, with a startup warning naming exactly this
-fallback — so requesting thread-pool isolation never fails, it just isolates less strongly.
+same capacity — a correct, bounded compartment, and the first time that compartment is created
+a warning names exactly this fallback — so requesting thread-pool isolation never fails, it just
+isolates less strongly. The built-in `external_api` compartment is the exception: nothing in your
+code asked for a worker pool there, so its semaphore shape on OSS is a tier fact rather than a
+substitution, and it is recorded at debug level instead of warned.
 
 In the two semaphore strategies, admission is all-or-nothing. By default a call to a full
 compartment **fails fast** — rejected on the spot rather than queued. Give the call a wait

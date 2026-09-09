@@ -1,15 +1,18 @@
 # baldur.decorators — Resilience Decorators
 
-Opinionated `@protected` presets and orthogonal gates. The primitive
-`@protected` / `@aprotected` lives at the top level; this module hosts
-preset compositions (`@dlq_protect`) and orthogonal call-site gates
-(`@idempotent`, `@rate_limit`, `@domain_tag`).
+Single-stage decorators, `@protected` presets, and orthogonal gates. The
+composed primitive `@protected` / `@aprotected` lives at the top level; this
+module hosts the standalone retry stage (`@retry`), preset compositions
+(`@dlq_protect`) and orthogonal call-site gates (`@idempotent`, `@rate_limit`,
+`@domain_tag`).
 
 !!! note "See also"
     [Django quickstart](../getting-started/django.md) — end-to-end decorator
     wiring on a real example app.
 
 ## Decorators
+
+::: baldur.decorators.retry
 
 ::: baldur.decorators.dlq_protect.dlq_protect
 
