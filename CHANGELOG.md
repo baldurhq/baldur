@@ -10,13 +10,18 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+## [1.12.0] - 2026-09-09
+
 ### Added
 
 - The standalone `@retry` decorator is now importable from `baldur.decorators`.
 - A dependency's 429 storm now trips the breaker on every framework, not only Django.
 - A protected call that *returns* a 429 or 5xx response records it, instead of counting a success.
 - Every outbound 429 installs the cross-worker cooldown, including on retry-less calls.
+- A client that returns 429 without raising installs one too, including under `retry_on_result`.
 - A 429 the retry ladder overcomes is still counted, so a storm it survives is not invisible.
+- Only the dependency's 429s count: a self-imposed 429 or a deferred call is excluded.
+- `ignore_exceptions` covers every 429 a retry ladder sees, not only the final outcome.
 - `BALDUR_MIDDLEWARE_CB_STATUS_CODES` / `_RATE_LIMIT_CODES` now classify outbound responses too.
 - Emergency Mode now sheds HTTP requests on Flask and FastAPI too, not only Django.
 - `BALDUR_EMERGENCY_MODE_SHEDDING_ENABLED` turns that shedding off without disabling the level.
@@ -44,14 +49,9 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - An audit chain that cannot read its own ledger refuses the write instead of restarting at 1.
 - The audit chain state file is now replaced atomically, so a kill cannot truncate it.
 - Closing the audit adapter no longer writes a stale sequence over a sibling worker's state.
-- A deferred call is no longer a breaker failure, so a cooldown cannot trip a healthy breaker.
 - A tenacity-bridge deferral reports the real last error, not a rejection for a call never made.
-- A client that returns 429 without raising now installs a cooldown, even under `retry_on_result`.
 - Shed requests are now counted by an exported metric; the old counter reached no exporter.
-- An install without the emergency service no longer logs an error for every request it serves.
-- A 429 your own DRF adaptive throttle raised no longer counts against the upstream breaker.
 - Flask and FastAPI no longer refuse traffic on an open breaker while dry-run is on.
-- `ignore_exceptions` now covers every 429 a retry ladder sees, not only the final outcome.
 - An install without the PRO audit log no longer warns on every circuit breaker recovery.
 
 ## [1.11.0] - 2026-09-07
