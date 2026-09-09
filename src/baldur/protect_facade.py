@@ -1114,10 +1114,18 @@ def protect(  # verified-by: test_concurrent_duplicates_run_side_effect_exactly_
             ``ProtectSettings.default_retry``).
         circuit_breaker: When True, wraps ``fn`` in ``CircuitBreakerPolicy``.
             ``None`` uses ``ProtectSettings.default_circuit_breaker``.
-        idempotency_key: Opt into composed dedup so a retried (or re-submitted)
-            operation runs its side effect once, and a concurrent in-flight
-            duplicate (double-submit, duplicate webhook) is blocked rather than
-            executed in parallel. A ``str`` is read as a ``PolicyContext`` field
+        idempotency_key: Opt into composed dedup so a re-submitted operation
+            runs its side effect once, and a concurrent in-flight duplicate
+            (double-submit, duplicate webhook, redelivered queue message) is
+            blocked rather than executed in parallel. The gate is a composer
+            guard evaluated once per call, ahead of the policy chain, so it
+            deduplicates *callers* rather than attempts: it does NOT make
+            ``retry=True`` safe on a side effect that cannot repeat, because
+            the retry stage re-invokes ``fn`` inside the chain the guard has
+            already cleared. Work that must never run twice has to be
+            repeat-safe on its own (a downstream idempotency key, or a write
+            made conditional on state read first).
+            A ``str`` is read as a ``PolicyContext`` field
             name (e.g. ``"order_id"``) and namespaced as ``f"{name}:{value}"``;
             a ``Callable[[PolicyContext], str]`` builds a composite/custom key
             verbatim. Requires a ``context`` (raises ``ValueError`` otherwise);
