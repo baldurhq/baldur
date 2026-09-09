@@ -132,13 +132,20 @@ def build_prefix_index() -> dict[str, set[str]]:
     return index
 
 
-def _longest_prefix(var_upper: str, prefixes: Iterable[str]) -> str | None:
-    """Return the longest registered prefix that ``var_upper`` starts with, or None."""
-    best: str | None = None
-    for prefix in prefixes:
-        if var_upper.startswith(prefix) and (best is None or len(prefix) > len(best)):
-            best = prefix
-    return best
+def _matching_prefixes(var_upper: str, prefixes: Iterable[str]) -> list[str]:
+    """Every registered prefix ``var_upper`` starts with, longest first.
+
+    All of them, not just the longest: Pydantic gives each settings class its
+    own prefix and lets each one claim the var independently, so two classes
+    whose prefixes nest both get a look. A field name that spans the boundary
+    between them belongs to the shorter prefix's class and is invisible to the
+    longer one.
+    """
+    return sorted(
+        (prefix for prefix in prefixes if var_upper.startswith(prefix)),
+        key=len,
+        reverse=True,
+    )
 
 
 def resolve_env_var(var: str, index: dict[str, set[str]]) -> bool:
@@ -150,8 +157,13 @@ def resolve_env_var(var: str, index: dict[str, set[str]]) -> bool:
       ``case_sensitive=False``, so ``BALDUR_Dlq_Max_Size`` is consumed
       identically to ``BALDUR_DLQ_MAX_SIZE``; the var is upper-cased before
       prefix/field matching;
-    * **longest-prefix** — ``BALDUR_DLQ_OUTBOX_`` must beat ``BALDUR_DLQ_`` for
-      ``BALDUR_DLQ_OUTBOX_ENABLED``;
+    * **every matching prefix, longest first** — ``BALDUR_DLQ_OUTBOX_`` answers
+      for ``BALDUR_DLQ_OUTBOX_ENABLED``, but a var the longest prefix does not
+      claim falls through to the shorter ones, because a field name may span
+      the boundary where two prefixes nest (a ``BALDUR_CHAOS_`` field called
+      ``experiment_lock_ttl`` is a real var that ``BALDUR_CHAOS_EXPERIMENT_``
+      never had). Stopping at the longest prefix reported such a var unknown
+      while Pydantic was consuming it;
     * **nested delimiter** — with ``env_nested_delimiter="__"`` a var such as
       ``BALDUR_X_SUB__FIELD`` resolves on its first ``__`` segment (the
       sub-config attribute name).
@@ -161,16 +173,16 @@ def resolve_env_var(var: str, index: dict[str, set[str]]) -> bool:
     ``False`` without raising.
     """
     var_upper = var.upper()
-    prefix = _longest_prefix(var_upper, index)
-    if prefix is None:
-        return False
-    remainder = var_upper[len(prefix) :].lower()
-    if not remainder:
-        return False
-    field = remainder.split("__", 1)[0] if "__" in remainder else remainder
-    if not field:
-        return False
-    return field in index[prefix]
+    for prefix in _matching_prefixes(var_upper, index):
+        remainder = var_upper[len(prefix) :].lower()
+        if not remainder:
+            continue
+        field = remainder.split("__", 1)[0] if "__" in remainder else remainder
+        if not field:
+            continue
+        if field in index[prefix]:
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------

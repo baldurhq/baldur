@@ -50,7 +50,7 @@ from baldur.settings.introspection import (
 # the live settings tree. ``BALDUR_DLQ_OUTBOX_`` deliberately shadows the
 # shorter ``BALDUR_DLQ_`` so longest-prefix selection is observable.
 SYNTHETIC_INDEX: dict[str, set[str]] = {
-    "BALDUR_DLQ_": {"max_size", "enabled"},
+    "BALDUR_DLQ_": {"max_size", "enabled", "outbox_spill_dir"},
     "BALDUR_DLQ_OUTBOX_": {"enabled", "batch_size"},
     "BALDUR_NESTED_": {"sub"},
 }
@@ -100,14 +100,24 @@ class TestResolveEnvVarBehavior:
     def test_resolve_picks_longest_prefix_for_shadowed_field(self):
         # ``outbox_enabled`` is NOT a field of ``BALDUR_DLQ_``; ``enabled`` IS a
         # field of the longer ``BALDUR_DLQ_OUTBOX_``. A True result proves the
-        # resolver selected the longest matching prefix.
+        # resolver tries the longest matching prefix first.
         assert resolve_env_var("BALDUR_DLQ_OUTBOX_ENABLED", SYNTHETIC_INDEX) is True
 
-    def test_resolve_does_not_fall_back_to_shorter_prefix(self):
-        # ``bogus`` is not a field of the longest prefix ``BALDUR_DLQ_OUTBOX_``.
-        # The resolver must NOT then retry against the shorter ``BALDUR_DLQ_`` —
-        # longest-prefix is authoritative, so this is unknown.
+    def test_resolve_unknown_under_every_matching_prefix_is_false(self):
+        # ``bogus`` is not a field of ``BALDUR_DLQ_OUTBOX_``, and the fallback
+        # to ``BALDUR_DLQ_`` asks for ``outbox_bogus``, which is absent too.
+        # Each prefix recomputes its own remainder, so falling through cannot
+        # invent a match out of the longer prefix's leftovers.
         assert resolve_env_var("BALDUR_DLQ_OUTBOX_BOGUS", SYNTHETIC_INDEX) is False
+
+    def test_resolve_field_spanning_the_nested_boundary_is_true(self):
+        # ``outbox_spill_dir`` is a ``BALDUR_DLQ_`` field, so
+        # BALDUR_DLQ_OUTBOX_SPILL_DIR is real. The longer
+        # ``BALDUR_DLQ_OUTBOX_`` matches the string but has no ``spill_dir``;
+        # stopping at it called the var unknown while
+        # Pydantic was consuming it, and the startup scan warned about a name
+        # whose nearest known match was itself.
+        assert resolve_env_var("BALDUR_DLQ_OUTBOX_SPILL_DIR", SYNTHETIC_INDEX) is True
 
     def test_resolve_nested_delimiter_checks_first_segment(self):
         # With env_nested_delimiter="__" a var resolves on its first ``__``

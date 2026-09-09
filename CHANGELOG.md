@@ -10,6 +10,10 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+### Fixed
+
+- Two real chaos settings are no longer reported as unknown environment variables at startup.
+
 ## [1.12.1] - 2026-09-09
 
 ### Fixed

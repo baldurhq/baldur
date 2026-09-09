@@ -111,27 +111,37 @@ def _build_prefix_index() -> dict[str, dict[str, Any]]:
     return index
 
 
-def _longest_prefix(var: str, prefixes: Iterable[str]) -> str | None:
-    """Return the longest registered prefix that ``var`` starts with, or None."""
-    best: str | None = None
-    for prefix in prefixes:
-        if var.startswith(prefix) and (best is None or len(prefix) > len(best)):
-            best = prefix
-    return best
+def _matching_prefixes(var: str, prefixes: Iterable[str]) -> list[str]:
+    """Every registered prefix ``var`` starts with, longest first.
+
+    All of them: each settings class claims its own prefix independently, so a
+    field name that spans the boundary where two prefixes nest belongs to the
+    shorter one and is invisible to the longer. Taking only the longest called
+    such a var unresolvable and read the wrong class's default for it.
+    """
+    return sorted(
+        (prefix for prefix in prefixes if var.startswith(prefix)),
+        key=len,
+        reverse=True,
+    )
+
+
+def _claiming_prefix(var: str, index: dict[str, dict[str, Any]]) -> str | None:
+    """The prefix whose class actually has the field, or None."""
+    for prefix in _matching_prefixes(var, index):
+        if var[len(prefix) :].lower() in index[prefix]:
+            return prefix
+    return None
 
 
 def _resolve(var: str, index: dict[str, dict[str, Any]]) -> bool:
-    """True iff ``var`` maps to a real ``(env_prefix, field)`` (longest-prefix)."""
-    prefix = _longest_prefix(var, index)
-    if prefix is None:
-        return False
-    field = var[len(prefix) :].lower()
-    return field in index[prefix]
+    """True iff ``var`` maps to a real ``(env_prefix, field)`` under any prefix."""
+    return _claiming_prefix(var, index) is not None
 
 
 def _field_default(var: str, index: dict[str, dict[str, Any]]) -> Any:
     """Return the resolved field default for ``var`` (caller pre-checks resolve)."""
-    prefix = _longest_prefix(var, index)
+    prefix = _claiming_prefix(var, index)
     assert prefix is not None
     return index[prefix][var[len(prefix) :].lower()]
 
@@ -388,30 +398,45 @@ class TestEnvVarsAllowlistResolves:
 _SYNTHETIC_INDEX: dict[str, dict[str, Any]] = {
     "BALDUR_DLQ_": {"max_size": 100_000, "enabled": True},
     "BALDUR_DLQ_OUTBOX_": {"enabled": True},
-    "BALDUR_AUDIT_": {"enabled": False},
+    "BALDUR_AUDIT_": {"enabled": False, "sync_ledger_dir": "/var/log"},
     "BALDUR_AUDIT_SYNC_": {"batch_size": 100},
 }
 
 
 class TestEnvVarResolution:
-    """``_longest_prefix`` / ``_resolve`` — nested-prefix resolution is exact."""
+    """``_claiming_prefix`` / ``_resolve`` — nested-prefix resolution is exact."""
 
-    def test_longest_prefix_wins_over_shorter_overlapping_prefix(self):
-        # BALDUR_DLQ_OUTBOX_ shares the BALDUR_DLQ_ stem; the longer must win.
+    def test_longer_prefix_is_preferred_when_both_could_claim(self):
+        # BALDUR_DLQ_OUTBOX_ shares the BALDUR_DLQ_ stem; the longer answers.
         assert (
-            _longest_prefix("BALDUR_DLQ_OUTBOX_ENABLED", _SYNTHETIC_INDEX)
+            _claiming_prefix("BALDUR_DLQ_OUTBOX_ENABLED", _SYNTHETIC_INDEX)
             == "BALDUR_DLQ_OUTBOX_"
         )
         assert (
-            _longest_prefix("BALDUR_AUDIT_SYNC_BATCH_SIZE", _SYNTHETIC_INDEX)
+            _claiming_prefix("BALDUR_AUDIT_SYNC_BATCH_SIZE", _SYNTHETIC_INDEX)
             == "BALDUR_AUDIT_SYNC_"
         )
 
-    def test_longest_prefix_unregistered_var_returns_none(self):
-        assert _longest_prefix("BALDUR_UNKNOWN_FOO", _SYNTHETIC_INDEX) is None
+    def test_field_spanning_the_nested_boundary_is_claimed_by_the_shorter(self):
+        # `sync_ledger_dir` is a BALDUR_AUDIT_ field, so the real var is
+        # BALDUR_AUDIT_SYNC_LEDGER_DIR. The longer BALDUR_AUDIT_SYNC_
+        # matches the string but has no `ledger_dir`, and stopping there
+        # called a settable var unknown and read the wrong class's default.
+        assert (
+            _claiming_prefix("BALDUR_AUDIT_SYNC_LEDGER_DIR", _SYNTHETIC_INDEX)
+            == "BALDUR_AUDIT_"
+        )
+        assert _resolve("BALDUR_AUDIT_SYNC_LEDGER_DIR", _SYNTHETIC_INDEX) is True
+        assert (
+            _field_default("BALDUR_AUDIT_SYNC_LEDGER_DIR", _SYNTHETIC_INDEX)
+            == "/var/log"
+        )
 
-    def test_longest_prefix_empty_index_returns_none(self):
-        assert _longest_prefix("BALDUR_DLQ_MAX_SIZE", {}) is None
+    def test_claiming_prefix_unregistered_var_returns_none(self):
+        assert _claiming_prefix("BALDUR_UNKNOWN_FOO", _SYNTHETIC_INDEX) is None
+
+    def test_claiming_prefix_empty_index_returns_none(self):
+        assert _claiming_prefix("BALDUR_DLQ_MAX_SIZE", {}) is None
 
     def test_resolve_field_under_longest_prefix_is_true(self):
         # Resolves ONLY because longest-prefix selects BALDUR_DLQ_OUTBOX_; the
