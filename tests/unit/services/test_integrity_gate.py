@@ -9,9 +9,12 @@ PostRecoveryIntegrityGate 단위 테스트.
     - Fail-Open / Fail-Secure 정책 분기
 """
 
+import sys
+import types
 from unittest.mock import MagicMock, patch
 
 import pytest
+from structlog.testing import capture_logs
 
 from baldur.services.event_bus.integrity_gate import (
     INTEGRITY_FAILED_KEY,
@@ -37,7 +40,8 @@ _PATCH_VERIFIER_CLS = "baldur.audit.integrity.HashChainVerifier"
 _PATCH_GET_ENTRIES = (
     "baldur.services.event_bus.integrity_gate._get_unsynced_wal_entries"
 )
-_PATCH_GET_WAL = "baldur_pro.services.audit.base._get_wal"
+_PRO_WAL_MODULE = "baldur_pro.services.audit.base"
+_PATCH_GET_WAL = f"{_PRO_WAL_MODULE}._get_wal"
 _PATCH_HEALTH_SCORE = "baldur.audit.integrity.get_integrity_health_score"
 
 
@@ -326,6 +330,53 @@ class TestGetUnsyncedWalEntriesBehavior:
         result = _get_unsynced_wal_entries("test_service")
 
         assert result == []
+
+
+# =============================================================================
+# PRO absence is a tier fact, not a fault (OSS install)
+# =============================================================================
+
+
+class TestWalUnavailableWithoutPro:
+    """An OSS install has no write-ahead log to read.
+
+    Every other test in this file needs PRO installed to patch the WAL. That
+    left the OSS path — the shipped default — untested, and its ImportError
+    was reported as a WARNING naming an internal module on every circuit
+    breaker recovery. These tests pin the tier split: absence is DEBUG, a
+    genuine read failure stays WARNING.
+    """
+
+    @staticmethod
+    def _without_pro_wal():
+        """Force the WAL import to fail whether or not PRO is installed."""
+        return patch.dict(sys.modules, {_PRO_WAL_MODULE: None})
+
+    def test_absence_returns_empty_list(self):
+        with self._without_pro_wal():
+            assert _get_unsynced_wal_entries("test_service") == []
+
+    def test_absence_is_debug_not_warning(self):
+        with self._without_pro_wal(), capture_logs() as logs:
+            _get_unsynced_wal_entries("test_service")
+
+        levels = {entry["event"]: entry["log_level"] for entry in logs}
+        assert levels.get("integrity_gate.wal_unavailable") == "debug"
+        assert "integrity_gate.wal_read_failed" not in levels
+
+    def test_genuine_read_failure_is_still_warning(self):
+        def _raise_on_read():
+            raise RuntimeError("WAL unavailable")
+
+        stub = types.ModuleType(_PRO_WAL_MODULE)
+        stub._get_wal = _raise_on_read
+
+        with patch.dict(sys.modules, {_PRO_WAL_MODULE: stub}), capture_logs() as logs:
+            assert _get_unsynced_wal_entries("test_service") == []
+
+        levels = {entry["event"]: entry["log_level"] for entry in logs}
+        assert levels.get("integrity_gate.wal_read_failed") == "warning"
+        assert "integrity_gate.wal_unavailable" not in levels
 
 
 # =============================================================================

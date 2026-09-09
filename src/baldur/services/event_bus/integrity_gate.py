@@ -184,6 +184,10 @@ def _get_unsynced_wal_entries(service_name: str) -> list[dict]:
 
     Uses wal.recover_unprocessed() to collect unprocessed entries and returns
     their WALEntry.data fields (dicts).
+
+    The write-ahead log is a PRO surface. On an install without it there is
+    nothing to verify and no fault to report, so its absence is DEBUG and only
+    a genuine read failure is a WARNING.
     """
     try:
         from baldur_pro.services.audit.base import _get_wal
@@ -197,6 +201,9 @@ def _get_unsynced_wal_entries(service_name: str) -> list[dict]:
         # Extract the WALEntry.data field (dict[str, Any])
         return [e.data for e in wal_entries if hasattr(e, "data")]
 
+    except ImportError:
+        logger.debug("integrity_gate.wal_unavailable")
+        return []
     except Exception as e:
         logger.warning(
             "integrity_gate.wal_read_failed",
@@ -226,6 +233,9 @@ def _send_integrity_violation_alert(
             success=False,
             error_message="Hash chain integrity violation detected during post-recovery check",
         )
+    except ImportError:
+        # No PRO write-ahead log to record into: nothing to do, not a fault.
+        logger.debug("integrity_gate.audit_wal_unavailable")
     except Exception as e:
         logger.exception(
             "integrity_gate.audit_write_failed",

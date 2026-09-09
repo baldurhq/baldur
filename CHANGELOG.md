@@ -52,6 +52,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - A 429 your own DRF adaptive throttle raised no longer counts against the upstream breaker.
 - Flask and FastAPI no longer refuse traffic on an open breaker while dry-run is on.
 - `ignore_exceptions` now covers every 429 a retry ladder sees, not only the final outcome.
+- An install without the PRO audit log no longer warns on every circuit breaker recovery.
 
 ## [1.11.0] - 2026-09-07
 
