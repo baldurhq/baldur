@@ -308,12 +308,21 @@ Destructive admin operations (reset a breaker, purge the queue, flip the kill
 switch) are refused with `403` until the server is explicitly unlocked — a
 second gate on top of authentication, fail-closed by default. The unlock is
 deliberate friction: a console left open in a browser tab cannot force
-production. The admin server itself binds to localhost out of the box; its
-other knobs stay advanced/internal for now.
+production. The server binds to localhost out of the box; moving it off
+loopback additionally requires an operator key, which the secure-deployment
+runbook covers together with the rest of the key model.
 
 ```bash
-BALDUR_ADMIN_UNLOCK=1   # set-to-enable: allow ADMIN-level (destructive) operations
+BALDUR_ADMIN_UNLOCK=1       # set-to-enable: allow ADMIN-level (destructive) operations
+BALDUR_ADMIN_PORT=9090      # where the console and the /prometheus exposition listen
+BALDUR_ADMIN_ENABLED=false  # set-to-disable: no admin server, no console
 ```
+
+The default port is worth a look before you deploy: `9090` is also
+Prometheus's own default, so a host running both has a collision. Baldur does
+not take a port another process is already serving — it logs
+`admin.autostart_failed` and the app keeps running without the console — so on
+such a host, move one of the two.
 
 ## Scheduled jobs
 
