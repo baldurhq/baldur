@@ -13,6 +13,7 @@ Design constraints (from 429 Essential Trade-offs #1, #2):
 from __future__ import annotations
 
 import json
+import os
 import threading
 import uuid
 from collections.abc import Mapping
@@ -454,6 +455,21 @@ class _AdminHTTPHandler(BaseHTTPRequestHandler):
             logger.debug("admin.client_disconnected", path=self.path)
 
 
+class _AdminHTTPServer(ThreadingHTTPServer):
+    """Admin listener that refuses a port another process is already serving.
+
+    ``HTTPServer`` turns on address reuse so a restart is not blocked by a
+    lingering socket. On Windows that same option additionally lets a second
+    process bind a port another process is actively listening on: both report
+    a started admin server, and requests are then answered by whichever one
+    the OS picks. Windows does not need the option to rebind a listening port
+    after a clean stop, so it is dropped there and the collision surfaces as
+    the bind error the autostart path already degrades on.
+    """
+
+    allow_reuse_address = os.name != "nt"
+
+
 class AdminServer:
     """Daemon-thread admin HTTP server.
 
@@ -473,7 +489,7 @@ class AdminServer:
     ) -> None:
         self.settings = settings or get_admin_server_settings()
         self.registry = registry or get_admin_registry()
-        self._httpd: ThreadingHTTPServer | None = None
+        self._httpd: _AdminHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._started = False
@@ -509,7 +525,7 @@ class AdminServer:
             # bound serve_forever connections and caused RemoteDisconnected
             # under load in early testing.
             _AdminHTTPHandler.timeout = self.settings.request_timeout_seconds
-            httpd = ThreadingHTTPServer(
+            httpd = _AdminHTTPServer(
                 (self.settings.bind, self.settings.port), _AdminHTTPHandler
             )
             httpd.daemon_threads = True

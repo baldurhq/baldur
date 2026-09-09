@@ -10,6 +10,11 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+### Fixed
+
+- On Windows a second process no longer takes over an admin port another one is serving.
+- Audit enabled without the PRO package no longer warns about a missing internal module.
+
 ## [1.12.0] - 2026-09-09
 
 ### Added

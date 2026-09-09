@@ -348,6 +348,18 @@ class AuditSyncWorker:
             from baldur_pro.services.audit import _get_wal
 
             return _get_wal()
+        except ImportError as e:
+            # No write-ahead log ships with the core distribution, so an
+            # install without the PRO package reaches this on every sync tick.
+            # That is the documented posture for audit enabled without an
+            # entitlement (records accepted, no backend selected), not a
+            # fault, and the adapter lookup below already treats its own
+            # absence the same way.
+            logger.debug(
+                "audit_sync_worker.wal_unavailable",
+                error=e,
+            )
+            return None
         except Exception as e:
             logger.warning(
                 "audit_sync_worker.get_wal_failed",

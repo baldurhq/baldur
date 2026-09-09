@@ -604,3 +604,53 @@ class TestAdminServerConcurrencyBehavior:
 
         assert errors == []
         assert results == [200] * 8
+
+
+class TestAdminServerPortExclusivityBehavior:
+    """A port another server is already serving must not be taken over.
+
+    The stdlib server turns address reuse on so a restart is not blocked by a
+    lingering socket. On Windows that same option also lets a second process
+    bind a port that is already being listened on, which leaves two admin
+    servers answering the same address at random. Both tests below pin the
+    resulting contract on every platform: a live port is refused, a released
+    one is immediately reusable.
+    """
+
+    def test_second_server_refuses_a_port_the_first_is_serving(self, registry):
+        first = AdminServer(
+            settings=AdminServerSettings(bind="127.0.0.1", port=0), registry=registry
+        )
+        first.start()
+        try:
+            port = first.bound_port
+            assert port is not None
+
+            second = AdminServer(
+                settings=AdminServerSettings(bind="127.0.0.1", port=port),
+                registry=registry,
+            )
+            with pytest.raises(OSError):
+                second.start()
+            assert second.is_running is False
+        finally:
+            first.stop(timeout=2.0)
+
+    def test_a_stopped_server_frees_its_port_for_the_next_start(self, registry):
+        settings = AdminServerSettings(bind="127.0.0.1", port=0)
+        first = AdminServer(settings=settings, registry=registry)
+        first.start()
+        port = first.bound_port
+        assert port is not None
+        first.stop(timeout=2.0)
+
+        second = AdminServer(
+            settings=AdminServerSettings(bind="127.0.0.1", port=port),
+            registry=registry,
+        )
+        second.start()
+        try:
+            assert second.bound_port == port
+            assert second.is_running is True
+        finally:
+            second.stop(timeout=2.0)
