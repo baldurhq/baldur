@@ -10,6 +10,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+## [1.12.1] - 2026-09-09
+
 ### Fixed
 
 - On Windows a second process no longer takes over an admin port another one is serving.
