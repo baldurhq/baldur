@@ -239,6 +239,15 @@ class InMemoryCircuitBreakerRepository:
             CircuitBreakerOpenAttempt,
         )
 
+        def _attempt(row: Any, *, did_open: bool) -> Any:
+            """Wrap a row double in the attempt DTO.
+
+            The DTO names the concrete state dataclass, and this double is a
+            structural stand-in rather than a subclass of it, so the row is
+            handed over untyped here instead of at each of the three exits.
+            """
+            return CircuitBreakerOpenAttempt(state=row, did_open=did_open)
+
         state = self.get_or_create(service_name)
 
         if state.is_pin_active():
@@ -248,10 +257,10 @@ class InMemoryCircuitBreakerRepository:
                 manually_controlled=state.manually_controlled,
                 manual_override_expires_at=state.manual_override_expires_at,
             )
-            return CircuitBreakerOpenAttempt(state=pinned, did_open=False)
+            return _attempt(pinned, did_open=False)
 
         if state.state != DefaultValues.CB_STATE_CLOSED:
-            return CircuitBreakerOpenAttempt(state=state, did_open=False)
+            return _attempt(state, did_open=False)
 
         state.state = DefaultValues.CB_STATE_OPEN
         state.failure_count = failure_count
@@ -260,7 +269,7 @@ class InMemoryCircuitBreakerRepository:
         state.half_open_request_count = 0
         state.manually_controlled = False
         state.manual_override_expires_at = None
-        return CircuitBreakerOpenAttempt(state=state, did_open=True)
+        return _attempt(state, did_open=True)
 
     def list_all(self) -> list[MockCircuitBreakerStateData]:
         """List every CB state."""

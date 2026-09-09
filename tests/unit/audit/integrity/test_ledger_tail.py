@@ -523,7 +523,14 @@ class TestLedgerTailTerminalBehavior:
         older = tmp_path / "audit_2026-09-06.jsonl"
         _write_ledger(older, [_row(5, current_hash=_HASH_B)])
         newest = tmp_path / "audit_2026-09-07.jsonl"
-        chain_less_rows = (1024 * 1024) // _REAL_ROW_BYTES
+        # Derive the row count from the bound the assertion below checks, and
+        # round up: a count sized against a literal that merely happens to
+        # equal that bound lands one row short of it, and only a CRLF platform
+        # pads the file back over the line.
+        oversize_bytes = 16 * (
+            LEDGER_TAIL_INITIAL_WINDOW_BYTES + LEDGER_TAIL_HEAD_PROBE_BYTES
+        )
+        chain_less_rows = oversize_bytes // _REAL_ROW_BYTES + 1
         _write_ledger(
             newest,
             [
@@ -531,9 +538,7 @@ class TestLedgerTailTerminalBehavior:
                 for _ in range(chain_less_rows)
             ],
         )
-        assert newest.stat().st_size > 16 * (
-            LEDGER_TAIL_INITIAL_WINDOW_BYTES + LEDGER_TAIL_HEAD_PROBE_BYTES
-        )
+        assert newest.stat().st_size > oversize_bytes
         reader = LedgerTailReader(tmp_path)
 
         with capture_logs() as logs:
