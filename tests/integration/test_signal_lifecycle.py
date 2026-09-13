@@ -118,7 +118,12 @@ def _free_port() -> int:
 
 # Plain-Python child: default-config init() with one tracked in-flight
 # request that completes shortly after the drain starts. Readiness is
-# signalled by writing sys.argv[1]. The main loop differs per scenario.
+# signalled by writing sys.argv[1] — from INSIDE the scenario's main loop,
+# because the chained default_int_handler raises KeyboardInterrupt at
+# whatever bytecode the main thread is on when SIGINT lands, and the
+# parent sees the marker the instant open() creates it. A marker written
+# before the SIGINT scenario's ``try:`` let the interrupt escape the
+# protected region on a preempted child (exit 1 instead of 0).
 _PLAIN_CHILD_TEMPLATE = """
 import sys
 import threading
@@ -145,14 +150,17 @@ def _finish_in_flight_after_drain_starts():
 
 threading.Thread(target=_finish_in_flight_after_drain_starts, daemon=True).start()
 
-with open(sys.argv[1], "w") as fh:
-    fh.write("ready")
+
+def _signal_ready():
+    with open(sys.argv[1], "w") as fh:
+        fh.write("ready")
 
 {main_loop}
 """
 
 # SIGTERM scenario: park forever — only the trampoline can end the process.
 _PARK_FOREVER = """
+_signal_ready()
 while True:
     time.sleep(0.5)
 """
@@ -162,6 +170,7 @@ while True:
 # verdict via its exit code (0 = drain reached TERMINATED).
 _PARK_UNTIL_KEYBOARD_INTERRUPT = """
 try:
+    _signal_ready()
     while True:
         time.sleep(0.5)
 except KeyboardInterrupt:
