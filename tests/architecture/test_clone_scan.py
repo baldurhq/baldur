@@ -9,11 +9,11 @@ counting rules are pinned here instead, each on a synthetic pair of bodies
 that differ in exactly one place, so every test fails for its own reason.
 
 Contract classes assert the design's literal values: the token-stream shape
-(one token per node plus one closer), the floor and threshold, the reference
-token counts the floor was placed between, and the family / verdict text.
-Behavior classes drive the alpha-renaming, the constant collapse, the
-docstring skip, the fail-closed walk and the per-root scan against the source
-constants.
+(one token per node, one per populated child field, one closer per node), the
+floor and threshold, the reference token counts the floor was placed between,
+and the family / verdict text. Behavior classes drive the alpha-renaming, the
+constant collapse, the field-boundary tokens, the docstring skip, the
+fail-closed walk and the per-root scan against the source constants.
 """
 
 from __future__ import annotations
@@ -354,41 +354,127 @@ class TestNormalizedBodyTokensBehavior:
     def test_normalized_body_tokens_docstring_only_body_is_empty_stream(self):
         assert _stream(_body_of('"""Only a docstring."""')) == ()
 
+    @pytest.mark.parametrize(
+        ("left", "right"),
+        [
+            (
+                _body_of("if c:", "    a()", "    b()"),
+                _body_of("if c:", "    a()", "else:", "    b()"),
+            ),
+            (
+                _body_of("try:", "    a()", "except E:", "    b()", "else:", "    x()"),
+                _body_of(
+                    "try:", "    a()", "except E:", "    b()", "finally:", "    x()"
+                ),
+            ),
+            (_body_of("return x[1:]"), _body_of("return x[:1]")),
+            (_body_of("return x[:1]"), _body_of("return x[::1]")),
+            (_body_of('return {**a, "k": b}'), _body_of('return {"k": b, **a}')),
+            (
+                _body_of("def g(*, p=1, q):", "    pass"),
+                _body_of("def g(*, p, q=1):", "    pass"),
+            ),
+            (
+                _body_of("def g(p, /, q):", "    pass"),
+                _body_of("def g(p, q):", "    pass"),
+            ),
+            (
+                _body_of("@d", "def g():", "    pass"),
+                _body_of("def g() -> d:", "    pass"),
+            ),
+            (
+                _body_of("return [x for x in a]"),
+                _body_of("return [x async for x in a]"),
+            ),
+        ],
+        ids=[
+            "if_body_vs_orelse",
+            "try_orelse_vs_finalbody",
+            "slice_lower_vs_upper",
+            "slice_upper_vs_step",
+            "dict_unpack_position",
+            "kw_default_hole_position",
+            "posonly_vs_regular_args",
+            "decorator_vs_returns",
+            "sync_vs_async_comprehension",
+        ],
+    )
+    def test_normalized_body_tokens_keeps_sibling_field_boundaries(
+        self, left: str, right: str
+    ):
+        """A statement moving across a field boundary is a different body.
+
+        Regression: with one token per node and no field tokens, ``body`` and
+        ``orelse`` ran together, ``x[1:]`` and ``x[:1]`` were one stream, and
+        the ``**`` key of a dict display left no trace (791 /verify, refuted C3).
+        """
+        assert _stream(left) != _stream(right)
+
+    @pytest.mark.parametrize(
+        ("left", "right"),
+        [
+            (_body_of('return f"{x!r}"'), _body_of('return f"{x}"')),
+            (_body_of("from .m import n"), _body_of("from ..m import n")),
+        ],
+        ids=["fstring_conversion", "relative_import_level"],
+    )
+    def test_normalized_body_tokens_drops_structureless_scalar_flags(
+        self, left: str, right: str
+    ):
+        """A formatting flag on a collapsed string, or an import level on a
+        renamed module, is not a difference."""
+        assert _stream(left) == _stream(right)
+
+    def test_normalized_body_tokens_renames_match_capture_and_keeps_singleton(self):
+        """``case`` captures are identifiers; ``case None`` and ``case True`` differ."""
+        capture = _body_of("match x:", "    case [alpha]:", "        return alpha")
+        assert _stream(capture) == _stream(
+            _body_of("match x:", "    case [beta]:", "        return beta")
+        )
+        assert _stream(capture) != _stream(
+            _body_of("match x:", "    case [alpha]:", "        return beta")
+        )
+        assert _stream(
+            _body_of("match x:", "    case None:", "        return 1")
+        ) != _stream(_body_of("match x:", "    case True:", "        return 1"))
+
 
 class TestNormalizedBodyTokensContract:
     """The stream shape and the design's measured reference points."""
 
     def test_floor_and_threshold_design_values(self):
-        """Floor 40 normalized tokens; the rule of three."""
-        assert CLONE_TOKEN_FLOOR == 40
+        """Floor 56 normalized tokens; the rule of three."""
+        assert CLONE_TOKEN_FLOOR == 56
         assert RECURRENCE_THRESHOLD == 3
 
-    def test_normalized_body_tokens_emits_one_token_per_node_plus_closer(self):
-        """``return x`` is three nodes (Return, Name, Load) — six tokens."""
+    def test_normalized_body_tokens_emits_node_field_and_closer_tokens(self):
+        """``return x`` is three nodes with two populated fields — eight tokens."""
         assert _stream(_body_of("return x")) == (
             "Return",
+            "value",
             "Name:v0",
+            "ctx",
             "Load",
             ")",
             ")",
             ")",
         )
 
-    def test_normalized_body_tokens_crash_capture_body_is_74_tokens(self):
-        """The founding shape: 37 AST nodes, 74 tokens (the unit is tokens)."""
+    def test_normalized_body_tokens_crash_capture_body_is_107_tokens(self):
+        """The founding shape: 37 AST nodes, 107 tokens (the unit is tokens)."""
         func = _function(_CRASH_CAPTURE.format(name="update", handle="handle"))
         nodes = sum(1 for statement in func.body for _ in ast.walk(statement))
 
         assert nodes == 37
-        assert len(normalized_body_tokens(func)) == 74
+        assert len(normalized_body_tokens(func)) == 107
 
-    def test_normalized_body_tokens_service_getter_is_52_tokens(self):
+    def test_normalized_body_tokens_service_getter_is_75_tokens(self):
         """The mandated singleton getter sits above the floor — it is counted."""
-        assert len(_stream(_SERVICE_GETTER.format(name="alpha"))) == 52
+        assert len(_stream(_SERVICE_GETTER.format(name="alpha"))) == 75
 
-    def test_normalized_body_tokens_settings_getter_is_22_tokens(self):
+    def test_normalized_body_tokens_settings_getter_is_31_tokens(self):
         """A settings getter sits below the floor — it stays out."""
-        assert len(_stream(_SETTINGS_GETTER.format(name="alpha"))) == 22
+        assert len(_stream(_SETTINGS_GETTER.format(name="alpha"))) == 31
 
 
 # -- walk_python_files -----------------------------------------------------------
@@ -581,7 +667,7 @@ class TestScanRootsBehavior:
     def test_scan_roots_default_floor_excludes_the_body_just_under_it(
         self, tmp_path, pass_count: int, expected_members: int
     ):
-        """Streams are always even-length, so the step below the floor is two tokens."""
+        """A ``pass`` body steps by two tokens, so one fewer ``pass`` is the body just under the floor."""
         pkg = _write_tree(tmp_path / "pkg", {"a.py": _body_of(*["pass"] * pass_count)})
 
         scan = scan_roots({"pkg": pkg}, relative_to=tmp_path, threshold=1)

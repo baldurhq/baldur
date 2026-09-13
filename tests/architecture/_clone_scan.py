@@ -9,24 +9,32 @@ copy to be "this service's worker", not "a utility". This module is the
 counter.
 
 **Normalization.** A function body is rendered as a token stream from a
-read-only walk of its AST: one token per node plus one closer per node, in
-field order, the leading docstring skipped at emission. Identifiers (names,
-attributes, arguments, keywords, nested def/class names, import targets) are
-alpha-renamed in first-seen order per function, so the method name, the
-delegated call, and the handle attribute all collapse. String and bytes
-constants collapse to their type — the copies of a shape differ on a log event
-name, a metric name, or a thread ``name=`` far more often than on structure,
-and a scan that keeps those literals is blind to the second real family in the
-tree. Numbers, booleans and ``None`` are kept: ``daemon=True`` and
-``daemon=False`` are different code.
+read-only walk of its AST: one token per node, one token naming each child
+field that holds anything (so the ``body`` / ``orelse`` boundary of an ``if``
+and the ``lower`` / ``upper`` of a slice are in the stream — two bodies that
+differ only in where a statement sits relative to an ``else:`` are different
+code), a placeholder for a positional hole inside a list (the ``**`` key of a
+dict display, a keyword-only parameter without a default), and one closer per
+node; the leading docstring is skipped at emission. Identifiers (names,
+attributes, arguments, keywords, nested def/class names, import targets,
+match captures, type parameters) are alpha-renamed in first-seen order per
+function, so the method name, the delegated call, and the handle attribute all
+collapse. String and bytes constants collapse to their type — the copies of a
+shape differ on a log event name, a metric name, or a thread ``name=`` far
+more often than on structure, and a scan that keeps those literals is blind to
+the second real family in the tree. Numbers, booleans and ``None`` are kept:
+``daemon=True`` and ``daemon=False`` are different code. Scalar flags that
+carry no structure — a string's ``u`` prefix, an f-string conversion, a
+relative-import level, a type comment — are dropped; ``async for`` inside a
+comprehension is kept.
 
 **Floor and threshold.** Bodies under ``CLONE_TOKEN_FLOOR`` normalized tokens
 are ignored — below it every getter and every ``return self._x`` looks alike.
-The unit is the *normalized token count* (one token per node plus a closer, so
-roughly twice the ``ast.walk`` node count); a floor stated in nodes does not
-reproduce. A cluster with at least ``RECURRENCE_THRESHOLD`` members is an
-*at-threshold family*; the gate's budget unit is the total member count across
-those families, per source root.
+The unit is the *normalized token count* (roughly three times the ``ast.walk``
+node count under this encoding); a floor stated in nodes does not reproduce. A
+cluster with at least ``RECURRENCE_THRESHOLD`` members is an *at-threshold
+family*; the gate's budget unit is the total member count across those
+families, per source root.
 
 **Read-only contract.** ``parse_ast`` is ``lru_cache``d and every architecture
 gate in the process reads the same tree objects. Nothing here assigns to a
@@ -75,9 +83,9 @@ __all__ = [
 ]
 
 # Minimum normalized-token count for a body to take part in clustering. Measured
-# reference points (tokens): crash-capture wrapper 74, service-singleton getter
-# 52, thread spawner 92; a settings-singleton getter is 22 and stays out.
-CLONE_TOKEN_FLOOR = 40
+# reference points (tokens): crash-capture wrapper 107, service-singleton getter
+# 75, thread spawner 133; a settings-singleton getter is 31 and stays out.
+CLONE_TOKEN_FLOOR = 56
 
 # The rule of three: a cluster of this many members is an at-threshold family.
 RECURRENCE_THRESHOLD = 3
@@ -97,6 +105,19 @@ _IDENT_ATTR: dict[type[ast.AST], str] = {
     ast.ClassDef: "name",
     ast.ExceptHandler: "name",
     ast.ImportFrom: "module",
+    ast.MatchAs: "name",
+    ast.MatchStar: "name",
+    ast.MatchMapping: "rest",
+}
+# PEP 695 type parameters carry their name as a plain string (3.12+).
+for _type_param in ("TypeVar", "ParamSpec", "TypeVarTuple"):
+    _type_param_cls = getattr(ast, _type_param, None)
+    if _type_param_cls is not None:
+        _IDENT_ATTR[_type_param_cls] = "name"
+# Node type -> a scalar attribute that IS structure and is kept by repr.
+_SCALAR_TOKEN_ATTR: dict[type[ast.AST], str] = {
+    ast.MatchSingleton: "value",
+    ast.comprehension: "is_async",
 }
 # Scalar fields that never hold a child node and carry no clone signal.
 _SCALAR_FIELDS = frozenset(
@@ -105,6 +126,10 @@ _SCALAR_FIELDS = frozenset(
 # Per-type child-bearing field tuples, resolved lazily on first sight.
 _CHILD_FIELDS: dict[type[ast.AST], tuple[str, ...]] = {}
 _CLOSER = ")"
+# A positional hole inside a list field: ``{**a, "k": b}`` has keys
+# ``[None, Constant]``; without the placeholder it is the same stream as
+# ``{"k": b, **a}``, which merges in the opposite order.
+_HOLE = "None"
 
 
 class CloneMember(NamedTuple):
@@ -140,6 +165,9 @@ def _child_fields(cls: type[ast.AST]) -> tuple[str, ...]:
         ident = _IDENT_ATTR.get(cls)
         if ident is not None:
             skip.add(ident)
+        scalar = _SCALAR_TOKEN_ATTR.get(cls)
+        if scalar is not None:
+            skip.add(scalar)
         if cls is ast.alias:
             skip.update(("name", "asname"))
         if cls is ast.Global or cls is ast.Nonlocal:
@@ -166,9 +194,10 @@ def normalized_body_tokens(
     """Render ``func``'s body as an alpha-renamed, string-collapsed token stream.
 
     Pure over the tree: reads node fields, assigns nothing, caches nothing on
-    a node. One token per node followed by one closer per node; the leading
-    docstring of the body (and of any nested def / class body) is skipped at
-    emission rather than removed from the tree.
+    a node. One token per node, one token naming each child field that holds
+    anything, a placeholder for a ``None`` item inside a list field, and one
+    closer per node; the leading docstring of the body (and of any nested def
+    / class body) is skipped at emission rather than removed from the tree.
     """
     names: dict[str, str] = {}
     out: list[str] = []
@@ -202,7 +231,11 @@ def normalized_body_tokens(
         elif cls is ast.Global or cls is ast.Nonlocal:
             append(":".join([tname, *(rename(v) for v in node.names)]))  # type: ignore[attr-defined]
         else:
-            append(tname)
+            scalar_attr = _SCALAR_TOKEN_ATTR.get(cls)
+            if scalar_attr is None:
+                append(tname)
+            else:
+                append(f"{tname}:{getattr(node, scalar_attr)!r}")
         fields = node.__dict__
         for field in _child_fields(cls):
             value = fields.get(field)
@@ -212,10 +245,17 @@ def normalized_body_tokens(
                 start = 0
                 if field == "body" and isinstance(node, _DOCSTRING_SCOPE_TYPES):
                     start = _docstring_offset(value)
-                for item in value[start:]:
-                    if isinstance(item, ast.AST):
+                items = value[start:]
+                if not items:
+                    continue
+                append(field)
+                for item in items:
+                    if item is None:
+                        append(_HOLE)
+                    elif isinstance(item, ast.AST):
                         emit(item)
             elif isinstance(value, ast.AST):
+                append(field)
                 emit(value)
         append(_CLOSER)
 

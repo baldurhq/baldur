@@ -56,6 +56,9 @@ checkout holds.
 - *Keyword order.* ``Thread(name=..., daemon=True)`` and
   ``Thread(daemon=True, name=...)`` are different streams; the thread-spawner
   family therefore shows as two clusters, not one.
+- *Symlinked directories.* The walk does not follow a directory symlink (a
+  cycle guard), and ``os.walk`` reports nothing for one; files below it are
+  neither counted nor named. No source tree holds one.
 
 Rule registry:
 ``ARCHITECTURE.md#g87-clone-recurrence-ratchet``
@@ -88,7 +91,10 @@ _RULE_ANCHOR = "#g87-clone-recurrence-ratchet"
 _ROOT_BUDGETS: dict[str, int] = {
     # Landing measurement: 106 families, floor 40 tokens; the two largest are
     # the 33-member service-singleton getter and the crash-capture wrapper.
-    "baldur": 578,
+    # Re-measured when the encoding gained field-boundary tokens (floor 56):
+    # 105 families — the one 3-member ``__str__`` family that sat at exactly
+    # the old floor fell below the new one; no family split.
+    "baldur": 575,
 }
 
 # The budget half needs the OSS source on disk; the fixture half below is pure
@@ -186,7 +192,7 @@ class TestCloneRecurrenceRatchet:
 
 # -- Non-vacuity fixtures ---------------------------------------------------------
 #
-# The crash-capture wrapper that founded the rule (74 normalized tokens). Each
+# The crash-capture wrapper that founded the rule (107 normalized tokens). Each
 # copy renames the method, the delegated call and the handle attribute — the
 # differences alpha-renaming must absorb.
 _CRASH_CAPTURE = """\
@@ -202,8 +208,8 @@ class Worker:
             raise
 """
 
-# The mandated service-singleton pair (getter 52 tokens; the reset body sits
-# below the floor). Counted like every other cluster — no exemption.
+# The mandated service-singleton pair (getter 75 tokens; the 13-token reset
+# body sits below the floor). Counted like every other cluster — no exemption.
 _SINGLETON_PAIR = """\
 import threading
 
