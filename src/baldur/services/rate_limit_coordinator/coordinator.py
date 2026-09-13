@@ -30,7 +30,8 @@ Coverage:
 
     The asynchronous stage leaves the event loop free: it waits through
     :meth:`RateLimitCoordinator.await_if_needed` (an ``asyncio.sleep``), and
-    every store write or event publish it triggers runs on a worker thread.
+    every cooldown write, 429 publish and cascade 429 note it triggers runs on
+    a worker thread.
     The tenacity bridge (sync and async) and the ``rate_limit_aware``
     decorator (on a ``def`` or an ``async def``) are the direct-drive surfaces
     for a retry engine Baldur does not own.
@@ -1022,7 +1023,7 @@ class RateLimitCoordinator:
         rate_limited, retry_after = _classify_decorated_result(
             result, is_429, get_retry_after
         )
-        self._record_decorated_verdict(scope, result, rate_limited, retry_after)
+        await self._arecord_decorated_verdict(scope, result, rate_limited, retry_after)
         try:
             if rate_limited:
                 await self.aon_rate_limited(key, retry_after)
@@ -1066,6 +1067,22 @@ class RateLimitCoordinator:
         scope.mark_classified(subject)
         if rate_limited:
             scope.note_429(retry_after, subject)
+
+    @staticmethod
+    async def _arecord_decorated_verdict(
+        scope: Any, subject: Any, rate_limited: bool, retry_after: float | None
+    ) -> None:
+        """Awaitable twin of :meth:`_record_decorated_verdict`.
+
+        The identity mark is a list append and stays inline; the cascade note
+        reaches the breaker's tracker and can trip the breaker (a repository
+        write plus an event publish), so it leaves the event loop.
+        """
+        if scope is None:
+            return
+        scope.mark_classified(subject)
+        if rate_limited:
+            await asyncio.to_thread(scope.note_429, retry_after, subject)
 
     @staticmethod
     def _raise_if_deferred(key: str, wait_result: RateLimitResult | None) -> None:
@@ -1128,13 +1145,20 @@ class RateLimitCoordinator:
     async def _aobserve_decorated_exception(
         self, key: str, error: Exception, scope: Any
     ) -> None:
-        """Awaitable twin of :meth:`_observe_decorated_exception`."""
+        """Awaitable twin of :meth:`_observe_decorated_exception`.
+
+        The classifier runs inline (pure); the cascade note and the cooldown
+        write both leave the event loop.
+        """
         try:
-            is_rate_limited, retry_after = self._classify_decorated_exception(
-                error, scope
+            is_rate_limited, retry_after = detect_rate_limit(error)
+            await self._arecord_decorated_verdict(
+                scope, error, is_rate_limited, retry_after
             )
             if is_rate_limited:
                 await self.aon_rate_limited(key, retry_after)
+        except asyncio.CancelledError:
+            raise
         except Exception as coordinator_error:
             self._log_decorator_notify_failed(key, coordinator_error)
 

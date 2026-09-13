@@ -870,16 +870,22 @@ class TestCooldownWaitExtensionBehavior:
         assert result.wait_time == pytest.approx(sleeps[0])
 
     @_WAIT_SURFACES
-    def test_the_idle_and_entry_deferral_exits_sleep_nothing(self, storage, is_async):
-        """The first two exits are byte-for-byte the pre-change behaviour."""
+    def test_the_idle_exit_sleeps_nothing(self, storage, is_async):
+        """The idle exit is byte-for-byte the pre-change behaviour."""
         coord = _make_coordinator(storage)
 
         idle, idle_sleeps = _wait(coord, "idle", max_wait=1.0, is_async=is_async)
 
+        assert (idle.waited, idle.deferred, idle_sleeps) == (False, False, [])
+
+    @_WAIT_SURFACES
+    def test_the_entry_deferral_exit_sleeps_nothing(self, storage, is_async):
+        """The entry-deferral exit is byte-for-byte the pre-change behaviour."""
+        coord = _make_coordinator(storage)
         storage.set_cooldown("far", time.time() + _LONG_COOLDOWN_SECONDS)
+
         deferred, deferred_sleeps = _wait(coord, "far", max_wait=1.0, is_async=is_async)
 
-        assert (idle.waited, idle.deferred, idle_sleeps) == (False, False, [])
         assert deferred.deferred is True
         assert deferred.waited is False
         assert deferred.wait_time == 0.0

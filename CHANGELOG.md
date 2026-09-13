@@ -30,7 +30,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - A worker waiting out a 429 cooldown no longer resumes early when a peer extends it.
 - The tenacity bridge's cooldown wait no longer blocks the event loop under `aprotect()`.
 - The tenacity bridge resets the consecutive-429 ladder after the success that ends its loop.
-- A 429 seen by both a `rate_limit_aware` client and its retry loop installs one cooldown, not two.
+- A 429 seen by both a `rate_limit_aware` client and the retry loop or tenacity bridge around it installs one cooldown, not two.
 - `RateLimitDeferredError` is now importable from `baldur.core.exceptions` as well.
 
 ## [1.12.2] - 2026-09-09

@@ -12,10 +12,10 @@ both stages resolve the shared ``RateLimitCoordinator`` by default under one
 identity rule (``rate_limit_key`` or ``domain``) and the same two opt-out
 levers, wait on the shared cooldown before every attempt, record each observed
 429 (raised or returned) once, and reset the ladder after a success that
-followed a rate-limit signal. On this stage every wait is an ``asyncio.sleep``
-and every store write or event publish runs on a worker thread, so a cooldown
-costs the request its latency and never stalls the event loop. The one
-collaborator not carried is ``AdaptiveRetryBudget`` (sync only).
+followed a rate-limit signal. On this stage every wait is an ``asyncio.sleep``,
+and every cooldown write, 429 publish and cascade 429 note runs on a worker
+thread, so a cooldown costs the request its latency and never stalls the event
+loop. The one collaborator not carried is ``AdaptiveRetryBudget`` (sync only).
 
 Not changed:
 - Circuit Breaker — nanosecond-level in-memory lookups, so async is unnecessary
@@ -351,12 +351,15 @@ class AsyncRetryPolicy:
     ) -> bool:
         """Set a cooldown when ``subject`` is a 429; report whether it was one.
 
-        The classification is pure and runs inline; the cooldown write is
-        awaited through the coordinator's worker-thread twin because it also
-        publishes to the event bus. Whoever classified the outcome first owns
-        its cooldown: an outcome an inner surface already marked on the scope
-        is detected for the signal only — no second cascade note, no second
-        cooldown.
+        The classification is pure and runs inline. Both halves of a 429's
+        fan-out leave the loop: the cascade note reaches the breaker's tracker
+        (a network write when distributed tracking is on) and can trip the
+        breaker — a repository write plus an event publish — so it is hopped
+        to a worker thread, and the cooldown write is awaited through the
+        coordinator's worker-thread twin because it also publishes to the
+        event bus. Whoever classified the outcome first owns its cooldown: an
+        outcome an inner surface already marked on the scope is detected for
+        the signal only — no second cascade note, no second cooldown.
         """
         from baldur.services.retry_handler.rate_limit_detection import (
             detect_rate_limit,
@@ -373,7 +376,7 @@ class AsyncRetryPolicy:
             return True
 
         if scope is not None:
-            scope.note_429(retry_after, subject)
+            await asyncio.to_thread(scope.note_429, retry_after, subject)
 
         if coordinator is not None:
             cooldown = await coordinator.aon_rate_limited(

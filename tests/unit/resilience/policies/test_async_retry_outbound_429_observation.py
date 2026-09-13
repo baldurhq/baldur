@@ -19,6 +19,7 @@ a single success — or counted twice.
 from __future__ import annotations
 
 import asyncio
+import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -688,3 +689,47 @@ class TestAsyncRetryObservationIgnoreListBehavior:
         asyncio.run(breaker.execute(inner))
 
         assert cascade.record_rate_limit_response.call_count == 2
+
+
+# =============================================================================
+# _anotify_rate_limit_cooldown() — the cascade note leaves the event loop
+# =============================================================================
+
+
+class TestAsyncRetryCascadeNoteLeavesTheLoopBehavior:
+    """The 429 cascade note is not pure: it reaches the breaker's tracker and
+    can trip the breaker (a repository write plus an event publish), so on this
+    stage it runs on a worker thread like the cooldown write beside it.
+
+    Regression: the note ran inline on the loop while only the cooldown write
+    was hopped (792 /verify, refuted claim).
+    """
+
+    @pytest.mark.parametrize(
+        "shape", ["raised", "returned"], ids=["raised_429", "returned_429"]
+    )
+    def test_the_cascade_note_runs_off_the_loop_thread(self, observation, shape):
+        """``record_rate_limit_response`` is reached from a thread that is not the loop's."""
+        _tracker, cascade_service = observation
+        seen_threads: list[threading.Thread] = []
+        cascade_service.record_rate_limit_response.side_effect = lambda *_a, **_k: (
+            seen_threads.append(threading.current_thread())
+        )
+        coordinator = _injected_coordinator()
+        policy = _injected_policy(coordinator)
+
+        async def throttled():
+            if shape == "raised":
+                raise Exception(_RATE_LIMIT_MESSAGE)
+            return _response(429)
+
+        token, scope = open_scope("payment")
+        try:
+            loop_thread = threading.current_thread()
+            _run(policy, throttled)
+        finally:
+            close_scope(token)
+
+        assert scope.rate_limited == 1
+        assert seen_threads != []
+        assert all(thread is not loop_thread for thread in seen_threads)

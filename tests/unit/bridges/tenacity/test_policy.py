@@ -1342,3 +1342,81 @@ class TestTenacityBridgePolicyEmptyKeyContract:
 
         assert result.outcome == PolicyOutcome.SUCCESS
         coordinator.wait_if_needed.assert_not_called()
+
+
+class TestBridgeClassifyOnceBehavior:
+    """The bridge honours the classify-once mark like the native loops.
+
+    A ``rate_limit_aware`` client inside a keyed bridge marks the 429 it raised
+    before tenacity hands the same object to ``after``; the bridge then detects
+    it for the signal only — one cascade note, one cooldown. Regression: the
+    bridge marked and notified unconditionally, so one 429 advanced
+    ``consecutive_429s`` and the cascade by two (792 /verify, refuted claim).
+    """
+
+    def test_a_decorated_client_inside_the_bridge_installs_one_cooldown_per_429(
+        self, policy_scope
+    ):
+        """One raised 429 under decorator + bridge on one key -> one of everything."""
+        from baldur.services.rate_limit_coordinator.models import (
+            RateLimitCoordinatorConfig,
+        )
+
+        scope, _cascade = policy_scope
+        storage = InMemoryRateLimitStorage()
+        coordinator = RateLimitCoordinator(
+            storage=storage,
+            config=RateLimitCoordinatorConfig(
+                jitter_percent=0.0, debounce_window_seconds=0.0, default_retry_after=0.0
+            ),
+        )
+
+        @coordinator.rate_limit_aware("payment")
+        def client():
+            raise _Throttled()
+
+        policy: TenacityBridgePolicy = TenacityBridgePolicy(
+            stop=tenacity.stop_after_attempt(1),
+            wait=tenacity.wait_fixed(0),
+            retry=tenacity.retry_if_exception_type(_Throttled),
+            domain="payment",
+            rate_limit_coordinator=coordinator,
+            rate_limit_key="payment",
+        )
+
+        with patch.object(RateLimitCoordinator, "_broadcast_to_cluster", autospec=True):
+            result = policy.execute(client)
+
+        assert result.outcome == PolicyOutcome.FAILURE
+        assert storage.get_state("payment").consecutive_429s == 1
+        assert storage.get_state("payment").consecutive_429s != 2
+        # The cascade half is counted exactly once too — by the decorator, the
+        # surface that classified the exception.
+        assert scope.rate_limited == 1
+
+    def test_an_already_classified_429_is_a_signal_without_a_second_cooldown(
+        self, policy_scope
+    ):
+        """``observe_bridge_outcome`` on a marked 429: ``True``, signal set, no notify."""
+        from baldur.bridges.tenacity.callbacks import observe_bridge_outcome
+
+        scope, _cascade = policy_scope
+        coordinator = _admitting_coordinator()
+        error = _Throttled()
+        scope.mark_classified(error)
+        ctx = BridgeCallbackContext(
+            domain="payment",
+            retry_budget=None,
+            rate_limit_coordinator=coordinator,
+            rate_limit_key="payment",
+            rate_limit_max_wait=None,
+            scope=scope,
+        )
+
+        detected = observe_bridge_outcome(ctx, error)
+
+        assert detected is True
+        assert ctx.rate_limit_signal is True
+        assert scope.rate_limited == 0
+        coordinator.on_rate_limited.assert_not_called()
+        assert scope.classified.count(error) == 1

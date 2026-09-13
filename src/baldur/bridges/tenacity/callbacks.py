@@ -238,7 +238,13 @@ def observe_bridge_outcome(ctx: BridgeCallbackContext, outcome: Any) -> bool:
     if ctx.scope is None and ctx.rate_limit_coordinator is None:
         return False
 
-    if ctx.scope is not None:
+    # Whoever classified the outcome first owns its cooldown — the rule the
+    # native loops apply. A ``rate_limit_aware`` client inside this bridge
+    # marks the 429 it raised or returned before tenacity hands it to
+    # ``after``; that outcome is detected for the signal only, so one 429
+    # never advances the cascade or the consecutive counter twice.
+    already_classified = ctx.scope is not None and ctx.scope.was_classified(outcome)
+    if ctx.scope is not None and not already_classified:
         ctx.scope.mark_classified(outcome)
 
     try:
@@ -246,6 +252,8 @@ def observe_bridge_outcome(ctx: BridgeCallbackContext, outcome: Any) -> bool:
         if not is_rate_limited:
             return False
         ctx.rate_limit_signal = True
+        if already_classified:
+            return True
 
         if ctx.scope is not None:
             ctx.scope.note_429(retry_after, outcome)

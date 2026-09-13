@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import math
+import threading
 import time
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
@@ -2229,3 +2230,70 @@ class TestRateLimitAwareDecoratorRaised429Behavior:
         assert seen["scope"].rate_limited == 1
         assert seen["scope"].rate_limited != 0
         cascade_service.record_rate_limit_response.assert_called_once_with("k")
+
+
+class TestRateLimitAwareAsyncDecoratorCascadeNoteBehavior:
+    """On an ``async def`` the decorator's 429 cascade note leaves the event loop.
+
+    The identity mark is a list append and stays inline; the note reaches the
+    breaker's tracker and can trip the breaker, so it is hopped like the
+    cooldown write. Regression: it ran inline on the loop (792 /verify).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_cluster_broadcast(self):
+        """Neutralise the Dormant-tier cluster broadcast a real 429 would fire."""
+        from baldur.services.rate_limit_coordinator import RateLimitCoordinator
+
+        with patch.object(RateLimitCoordinator, "_broadcast_to_cluster", autospec=True):
+            yield
+
+    @pytest.mark.parametrize(
+        "shape", ["raised", "returned"], ids=["raised_429", "returned_429"]
+    )
+    def test_the_cascade_note_runs_off_the_loop_thread(
+        self, coordinator_no_jitter_no_debounce, shape
+    ):
+        """``record_rate_limit_response`` is reached from a thread that is not the loop's."""
+        from baldur.services.circuit_breaker.rate_limit_observation import (
+            close_scope,
+            open_scope,
+        )
+        from baldur.services.circuit_breaker.rate_limit_tracker import RateLimitTracker
+        from baldur.services.circuit_breaker.service import CircuitBreakerService
+
+        cascade_service = MagicMock(spec=CircuitBreakerService)
+        seen_threads: list[threading.Thread] = []
+        cascade_service.record_rate_limit_response.side_effect = lambda *_a, **_k: (
+            seen_threads.append(threading.current_thread())
+        )
+        error = Exception("429 too many requests")
+        response = type("Response", (), {"status_code": 429})()
+
+        def body():
+            if shape == "raised":
+                raise error
+            return response
+
+        protected = _decorated(
+            coordinator_no_jitter_no_debounce, "k", body, is_async=True
+        )
+
+        token, scope = open_scope("k")
+        try:
+            with (
+                patch(_OBS_CB_SERVICE, return_value=cascade_service),
+                patch(_OBS_TRACKER, return_value=MagicMock(spec=RateLimitTracker)),
+            ):
+                loop_thread = threading.current_thread()
+                if shape == "raised":
+                    with pytest.raises(Exception):
+                        _call(protected, is_async=True)
+                else:
+                    _call(protected, is_async=True)
+        finally:
+            close_scope(token)
+
+        assert scope.rate_limited == 1
+        assert seen_threads != []
+        assert all(thread is not loop_thread for thread in seen_threads)

@@ -1347,9 +1347,11 @@ async def aprotect(  # verified-by: test_concurrent_duplicates_run_side_effect_e
     cooldown longer than the remaining budget ends the call with
     ``reason="rate_limit_deferred"`` and ``not_before`` in the metadata. A
     tenacity bridge passed as ``retry=`` coordinates the same way through its
-    coroutine callbacks. With retry off, the breaker stage observes the call's
-    final outcome and installs a cooldown at per-sequence granularity, on a
-    worker thread.
+    coroutine callbacks. With no retry stage composed (``retry=False``), the
+    breaker stage observes the call's final outcome and installs a cooldown at
+    per-sequence granularity, on a worker thread; a retry stage that is present
+    but disabled or observe-only owns the decision and installs none, as on
+    ``protect()``.
 
     Idempotency (``idempotency_key`` / ``idempotency_fail_open`` /
     ``idempotency_ttl`` / ``idempotency_execution_ttl``) behaves as in

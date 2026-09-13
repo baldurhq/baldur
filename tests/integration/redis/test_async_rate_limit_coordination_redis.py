@@ -2,8 +2,9 @@
 
 The mock-based composition (``tests/integration/test_async_outbound_429_coordination.py``)
 shares one in-process store *object*. Three claims only exist against a
-network-backed store:
+network-backed store.
 
+Test Categories:
 A. Every store call the awaitable surface makes leaves the event loop — the
    coordinator hops them to a worker thread because the client is synchronous.
 B. A cooldown written by one worker on one event loop governs another worker
