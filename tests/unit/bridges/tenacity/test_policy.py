@@ -10,6 +10,8 @@ Scope:
 
 from __future__ import annotations
 
+import asyncio
+from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
 import pytest
@@ -1063,3 +1065,280 @@ class TestBridgeCooldownDeferralBehavior:
 
         assert result.error is not None
         assert result.metadata["rate_limit_deferred"] is True
+
+
+# =============================================================================
+# Behavior — the execute-level ladder reset, gated on a signal
+# =============================================================================
+
+
+def _admitting_coordinator():
+    """A spec'd coordinator whose wait admits every attempt."""
+    coordinator = MagicMock(spec=RateLimitCoordinator)
+    coordinator.wait_if_needed.return_value = RateLimitResult(waited=False)
+    coordinator.on_rate_limited.return_value = 0.0
+    return coordinator
+
+
+def _keyed_bridge(coordinator, **kwargs) -> TenacityBridgePolicy:
+    kwargs.setdefault("stop", tenacity.stop_after_attempt(3))
+    kwargs.setdefault("wait", tenacity.wait_fixed(0))
+    return TenacityBridgePolicy(
+        domain="payment",
+        rate_limit_coordinator=coordinator,
+        rate_limit_key="payment",
+        **kwargs,
+    )
+
+
+class TestBridgeSuccessResetBehavior:
+    """The ladder is reset from the accepted outcome, only after a signal.
+
+    tenacity runs ``after`` only for an attempt it retries or exhausts, so a
+    reset living there never fired for the success that ends a loop — a
+    bridge-only key ratcheted upward permanently — and fired, inverted, on a
+    result-rejection retry. The execute-level translation knows the accepted
+    outcome and owes the reset only when this call saw a rate-limit signal.
+    """
+
+    def test_a_429_then_success_resets_once(self):
+        coordinator = _admitting_coordinator()
+        calls = {"n": 0}
+
+        def flaky():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise _Throttled()
+            return "ok"
+
+        result = _keyed_bridge(coordinator).execute(flaky)
+
+        assert result.outcome == PolicyOutcome.SUCCESS
+        coordinator.on_success.assert_called_once_with("payment")
+        assert coordinator.on_rate_limited.call_count == 1
+
+    def test_an_honoured_wait_then_success_resets_once(self):
+        """The signal may come from the wait, not only from a detected 429."""
+        coordinator = _admitting_coordinator()
+        coordinator.wait_if_needed.return_value = RateLimitResult(
+            waited=True, wait_time=0.1, was_rate_limited=True
+        )
+
+        result = _keyed_bridge(coordinator).execute(lambda: "ok")
+
+        assert result.outcome == PolicyOutcome.SUCCESS
+        coordinator.on_success.assert_called_once_with("payment")
+
+    def test_a_success_with_no_signal_never_resets(self):
+        """The reset costs a storage read; an unsignalled call owes none."""
+        coordinator = _admitting_coordinator()
+
+        _keyed_bridge(coordinator).execute(lambda: "ok")
+
+        coordinator.on_success.assert_not_called()
+
+    def test_a_result_rejection_retry_never_resets_inside_the_loop(self):
+        """``after`` sees a value tenacity is about to retry, not a success.
+
+        The one reset is the execute-level one, after the accepted value —
+        it runs once the last attempt has been made, never between attempts.
+        """
+        coordinator = _admitting_coordinator()
+        calls = {"n": 0}
+        reset_seen_at: list[int] = []
+        coordinator.on_success.side_effect = lambda _key: reset_seen_at.append(
+            calls["n"]
+        )
+
+        def throttled_then_ok():
+            calls["n"] += 1
+            return _throttled_response() if calls["n"] == 1 else "ok"
+
+        result = _keyed_bridge(
+            coordinator,
+            retry=tenacity.retry_if_result(lambda v: v != "ok"),
+        ).execute(throttled_then_ok)
+
+        assert result.outcome == PolicyOutcome.SUCCESS
+        assert reset_seen_at == [2]
+        assert coordinator.on_rate_limited.call_count == 1
+
+    def test_a_result_rejection_exhaustion_reports_failure_and_resets_nothing(self):
+        """An exhaustion on a rejected result is FAILURE, never ``SUCCESS(None)``."""
+        from baldur.services.retry_handler.models import MaxRetriesExceededError
+
+        coordinator = _admitting_coordinator()
+
+        result = _keyed_bridge(
+            coordinator,
+            retry=tenacity.retry_if_result(lambda v: True),
+        ).execute(_throttled_response)
+
+        assert result.outcome == PolicyOutcome.FAILURE
+        assert result.outcome != PolicyOutcome.SUCCESS
+        assert isinstance(result.error, MaxRetriesExceededError)
+        assert result.error.result_rejected is True
+        coordinator.on_success.assert_not_called()
+
+    def test_a_user_fallback_after_a_result_rejection_exhaustion_is_a_failure(self):
+        """A fallback is not a success: FAILURE with the fallback marker, no reset."""
+        coordinator = _admitting_coordinator()
+
+        result = _keyed_bridge(
+            coordinator,
+            retry=tenacity.retry_if_result(lambda v: True),
+            retry_error_callback=lambda _state: "user-default",
+        ).execute(_throttled_response)
+
+        assert result.outcome == PolicyOutcome.FAILURE
+        assert result.outcome != PolicyOutcome.SUCCESS
+        assert result.value == "user-default"
+        assert result.metadata.get("user_callback_fallback") is True
+        coordinator.on_success.assert_not_called()
+
+    def test_an_accepted_429_value_installs_a_cooldown_and_resets_nothing(self):
+        """A final accepted value that is itself a 429 earns no reset."""
+        coordinator = _admitting_coordinator()
+
+        result = _keyed_bridge(coordinator).execute(_throttled_response)
+
+        assert result.outcome == PolicyOutcome.SUCCESS
+        coordinator.on_rate_limited.assert_called_once()
+        coordinator.on_success.assert_not_called()
+
+    def test_returned_429s_under_retry_if_result_install_one_cooldown_each(self):
+        """Three returned 429s are three cooldowns — and the last is not counted twice."""
+        coordinator = _admitting_coordinator()
+
+        result = _keyed_bridge(
+            coordinator,
+            retry=tenacity.retry_if_result(lambda v: True),
+        ).execute(_throttled_response)
+
+        assert result.outcome == PolicyOutcome.FAILURE
+        assert coordinator.on_rate_limited.call_count == 3
+        coordinator.on_success.assert_not_called()
+
+    def test_an_on_success_fault_is_fail_open(self):
+        coordinator = _admitting_coordinator()
+        coordinator.on_success.side_effect = RuntimeError("coordinator down")
+        calls = {"n": 0}
+
+        def flaky():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise _Throttled()
+            return "ok"
+
+        result = _keyed_bridge(coordinator).execute(flaky)
+
+        assert result.outcome == PolicyOutcome.SUCCESS
+        assert result.value == "ok"
+        coordinator.on_success.assert_called_once()
+
+
+# =============================================================================
+# Behavior — the claim gate and the async callback pair
+# =============================================================================
+
+
+class TestBridgeClaimGateBehavior:
+    """The bridge claims the scope only when it will actually drive the coordinator."""
+
+    def test_an_injected_coordinator_without_a_key_claims_nothing(self, policy_scope):
+        """A claim withholds the breaker stage's cooldown; a keyless bridge installs none.
+
+        Claiming on the coordinator alone left such a call with no cooldown
+        from anybody.
+        """
+        scope, _cascade = policy_scope
+        policy: TenacityBridgePolicy = TenacityBridgePolicy(
+            domain="payment",
+            rate_limit_coordinator=_admitting_coordinator(),
+            rate_limit_key=None,
+        )
+
+        policy._build_ctx_and_kwargs()
+
+        assert scope.coordination_claimed is False
+
+    def test_a_coordinator_with_a_key_claims_the_scope(self, policy_scope):
+        scope, _cascade = policy_scope
+
+        _keyed_bridge(_admitting_coordinator())._build_ctx_and_kwargs()
+
+        assert scope.coordination_claimed is True
+
+    def test_the_default_build_installs_the_synchronous_pair(self):
+        _ctx, kwargs = _keyed_bridge(_admitting_coordinator())._build_ctx_and_kwargs()
+
+        assert not asyncio.iscoroutinefunction(kwargs["before"])
+        assert not asyncio.iscoroutinefunction(kwargs["after"])
+
+    def test_the_async_build_installs_the_coroutine_pair(self):
+        _ctx, kwargs = _keyed_bridge(_admitting_coordinator())._build_ctx_and_kwargs(
+            use_async_callbacks=True
+        )
+
+        assert asyncio.iscoroutinefunction(kwargs["before"])
+        assert asyncio.iscoroutinefunction(kwargs["after"])
+
+    def test_the_async_pair_is_chained_behind_a_sync_user_callback(self):
+        """A user's synchronous ``before`` survives the coroutine chaining and runs first."""
+        order: list[str] = []
+
+        def user_before(_state):
+            order.append("user")
+
+        coordinator = _admitting_coordinator()
+        coordinator.await_if_needed.side_effect = lambda *_a, **_k: (
+            order.append("baldur") or RateLimitResult(waited=False)
+        )
+        _ctx, kwargs = _keyed_bridge(
+            coordinator, before=user_before
+        )._build_ctx_and_kwargs(use_async_callbacks=True)
+
+        asyncio.run(kwargs["before"](SimpleNamespace(attempt_number=1, outcome=None)))
+
+        assert order == ["user", "baldur"]
+
+
+class TestTenacityBridgePolicyEmptyKeyContract:
+    """``rate_limit_key=""`` is not an identity: no coordinator, no claim."""
+
+    def test_an_empty_key_resolves_no_coordinator(self):
+        policy: TenacityBridgePolicy = TenacityBridgePolicy(rate_limit_key="")
+
+        assert policy._rate_limit_coordinator is None
+
+    def test_a_none_key_resolves_no_coordinator(self):
+        policy: TenacityBridgePolicy = TenacityBridgePolicy(rate_limit_key=None)
+
+        assert policy._rate_limit_coordinator is None
+
+    def test_an_empty_key_with_an_injected_coordinator_claims_no_scope(
+        self, policy_scope
+    ):
+        scope, _cascade = policy_scope
+        policy: TenacityBridgePolicy = TenacityBridgePolicy(
+            domain="payment",
+            rate_limit_coordinator=_admitting_coordinator(),
+            rate_limit_key="",
+        )
+
+        policy._build_ctx_and_kwargs()
+
+        assert scope.coordination_claimed is False
+
+    def test_an_empty_key_with_an_injected_coordinator_waits_on_nothing(self):
+        coordinator = _admitting_coordinator()
+        policy: TenacityBridgePolicy = TenacityBridgePolicy(
+            stop=tenacity.stop_after_attempt(1),
+            rate_limit_coordinator=coordinator,
+            rate_limit_key="",
+        )
+
+        result = policy.execute(lambda: "ok")
+
+        assert result.outcome == PolicyOutcome.SUCCESS
+        coordinator.wait_if_needed.assert_not_called()

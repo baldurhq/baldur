@@ -561,6 +561,174 @@ class TestCircuitBreakerPolicyScopeBehavior:
         )
 
 
+# =============================================================================
+# Behavior — AsyncCircuitBreakerPolicy.execute(): the rate-limited offload
+# =============================================================================
+
+_BREAKER_TO_THREAD = "baldur.services.circuit_breaker.policy.asyncio.to_thread"
+
+
+class _RaisingHeaders:
+    """A caller-owned headers object whose read raises."""
+
+    def get(self, _name):
+        raise RuntimeError("headers unavailable")
+
+
+class _HTTPError(Exception):
+    """A client's 429 carrying a response whose headers raise on read."""
+
+    def __init__(self):
+        super().__init__("HTTP 429 Too Many Requests")
+        self.response = type("Response", (), {"headers": _RaisingHeaders()})()
+
+
+class TestAsyncBreakerRateLimitedOffloadBehavior:
+    """A rate-limited final outcome is recorded on a worker thread; nothing else is.
+
+    Recording a 429 that no inner stage claimed writes the shared cooldown
+    store and publishes on the event bus, neither of which may run on the
+    loop. Every other outcome keeps the inline in-memory path, so the success
+    hot path pays no executor hop. The scope is passed explicitly and mutated
+    in place, so the thread writes the record this frame opened.
+    """
+
+    def _run(self, policy, func):
+        from tests.factories.rate_limit_doubles import ToThreadSpy
+
+        spy = ToThreadSpy()
+        with patch(_BREAKER_TO_THREAD, new=spy):
+            try:
+                asyncio.run(AsyncCircuitBreakerPolicy(policy).execute(func))
+            except Exception as error:  # noqa: BLE001 — the caller's own error
+                return spy, error
+        return spy, None
+
+    def test_a_raised_429_is_recorded_on_a_worker_thread(
+        self, policy, cb_service, observation
+    ):
+        _, cascade_service, coordinator = observation
+
+        async def throttled():
+            raise ThrottledError()
+
+        spy, error = self._run(policy, throttled)
+
+        assert isinstance(error, ThrottledError)
+        assert spy.count("_on_failure") == 1
+        cb_service.record_failure.assert_called_once()
+        cascade_service.record_rate_limit_response.assert_called_once_with(
+            "payment_api"
+        )
+        coordinator.on_rate_limited.assert_called_once()
+
+    def test_a_returned_429_is_recorded_on_a_worker_thread(
+        self, policy, cb_service, observation
+    ):
+        _, cascade_service, _ = observation
+
+        async def throttled():
+            return _response(status_code=429)
+
+        spy, error = self._run(policy, throttled)
+
+        assert error is None
+        assert spy.count("_on_success") == 1
+        cb_service.record_failure.assert_called_once()
+        cascade_service.record_rate_limit_response.assert_called_once_with(
+            "payment_api"
+        )
+
+    def test_a_plain_failure_is_recorded_inline(self, policy, cb_service, observation):
+        """No hop for an outcome that installs no cooldown."""
+
+        async def failing():
+            raise ConnectionError("connection reset")
+
+        spy, error = self._run(policy, failing)
+
+        assert isinstance(error, ConnectionError)
+        assert spy.calls == []
+        cb_service.record_failure.assert_called_once()
+
+    def test_a_plain_success_is_recorded_inline(self, policy, cb_service, observation):
+        """The success hot path pays no executor hop."""
+
+        async def ok():
+            return "ok"
+
+        spy, error = self._run(policy, ok)
+
+        assert error is None
+        assert spy.calls == []
+        cb_service.record_success.assert_called_once()
+
+    def test_the_hop_carries_the_scope_this_frame_opened(self, policy, observation):
+        """The thread writes the same record the loop frame published."""
+        seen = {}
+
+        async def throttled():
+            seen["scope"] = current_scope()
+            raise ThrottledError()
+
+        spy, _error = self._run(policy, throttled)
+
+        assert spy.count("_on_failure") == 1
+        hopped_scope = spy.call_args[0][2]
+        assert hopped_scope is seen["scope"]
+        assert hopped_scope.attempts == 1
+        assert hopped_scope.rate_limited == 1
+
+    def test_a_client_whose_headers_raise_is_still_recorded_on_both_frames(
+        self, policy, cb_service, observation
+    ):
+        """The caller sees the client's exception, never the classifier's.
+
+        A ``headers.get`` that raises used to escape the exception-side
+        Retry-After read and replace the business exception at every frame
+        that classifies it — the breaker then recorded the classifier's
+        ``RuntimeError`` instead of the 429.
+        """
+        _, cascade_service, coordinator = observation
+
+        async def athrottled():
+            raise _HTTPError()
+
+        def throttled():
+            raise _HTTPError()
+
+        _spy, async_error = self._run(policy, athrottled)
+        with pytest.raises(_HTTPError):
+            policy.execute(throttled)
+
+        assert isinstance(async_error, _HTTPError)
+        assert not isinstance(async_error, RuntimeError)
+        assert cb_service.record_failure.call_count == 2
+        assert cascade_service.record_rate_limit_response.call_count == 2
+        # Both frames reached the coordinator with the header degraded to None.
+        assert coordinator.on_rate_limited.call_count == 2
+        for recorded in coordinator.on_rate_limited.call_args_list:
+            assert recorded.kwargs["retry_after"] is None
+
+    def test_a_classifier_fault_answers_not_rate_limited(self):
+        """The pre-check is fail-open: a fault takes the inline path, never skips recording."""
+        from baldur.services.circuit_breaker.policy import _looks_rate_limited
+
+        with patch(
+            "baldur.services.circuit_breaker.policy.detect_rate_limit",
+            autospec=True,
+            side_effect=RuntimeError("classifier fault"),
+        ):
+            assert _looks_rate_limited(ThrottledError()) is False
+
+    def test_the_pre_check_reads_a_429_without_a_fault(self):
+        """Discriminator for the row above."""
+        from baldur.services.circuit_breaker.policy import _looks_rate_limited
+
+        assert _looks_rate_limited(ThrottledError()) is True
+        assert _looks_rate_limited(ConnectionError("connection reset")) is False
+
+
 def _raise(error):
     """A callable that raises ``error`` when the policy runs it."""
 

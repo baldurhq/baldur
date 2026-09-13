@@ -2,9 +2,12 @@
 
 Covers the coordinator surface of the bounded serve-or-defer contract:
 - ``RateLimitResult`` / ``RateLimitDeferredError`` shape (Contract)
+- ``_plan_wait`` / ``_extended_past`` — the pure serve-or-defer step (Contract)
 - ``RateLimitCoordinator._compute_cooldown`` honor-with-ceiling formula (Behavior)
 - ``RateLimitCoordinator.wait_if_needed(key, max_wait=...)`` serve-vs-defer (Behavior)
-- ``@rate_limit_aware`` decorator deferral + fail-open (Behavior)
+- the re-check after each served segment, on both waits (Behavior)
+- ``RateLimitCoordinator.await_if_needed`` — the awaitable twin's own rules (Behavior)
+- ``@rate_limit_aware`` decorator deferral + fail-open, on ``def`` and ``async def`` (Behavior)
 
 Retry-loop and tenacity-bridge surfaces are covered in
 ``services/test_retry_policy.py`` and ``bridges/tenacity/test_policy.py``.
@@ -12,54 +15,52 @@ Retry-loop and tenacity-bridge surfaces are covered in
 
 from __future__ import annotations
 
+import asyncio
 import time
+from unittest.mock import patch
 
 import pytest
 
+from baldur.adapters.rate_limit.memory_adapter import InMemoryRateLimitStorage
 from baldur.core.exceptions import BaldurError, ResilienceError
+from baldur.interfaces.rate_limit_storage import RateLimitState
 from baldur.services.rate_limit_coordinator import (
     RateLimitCoordinator,
     RateLimitDeferredError,
+)
+from baldur.services.rate_limit_coordinator.coordinator import (
+    _extended_past,
+    _plan_wait,
+    _WaitKind,
 )
 from baldur.services.rate_limit_coordinator.models import (
     RateLimitCoordinatorConfig,
     RateLimitResult,
 )
-from tests.factories.time_helpers import mock_sleep
+from tests.factories.rate_limit_doubles import (
+    NetworkBackedRateLimitStorage,
+    RaisingRateLimitStorage,
+    ToThreadSpy,
+)
+from tests.factories.time_helpers import freeze_time, mock_sleep
 
 # A cooldown far longer than any bound used below — its exact size is irrelevant
 # because the served path's sleep is mocked, so it never actually waits.
 _LONG_COOLDOWN_SECONDS = 300.0
+
+# The awaitable wait's sleep primitive and its worker-thread hop, as the
+# coordinator module resolves them.
+_ASYNC_SLEEP = "baldur.services.rate_limit_coordinator.coordinator.asyncio.sleep"
+_TO_THREAD = "baldur.services.rate_limit_coordinator.coordinator.asyncio.to_thread"
+_RECORD_WAIT = (
+    "baldur.services.rate_limit_coordinator.coordinator._record_rate_limit_wait"
+)
 
 
 def _make_coordinator(storage, **config_overrides) -> RateLimitCoordinator:
     """Coordinator over a given storage, debounce disabled for deterministic events."""
     config = RateLimitCoordinatorConfig(debounce_window_seconds=0.0, **config_overrides)
     return RateLimitCoordinator(storage=storage, config=config)
-
-
-class _RaisingStorage:
-    """Storage double that raises on ONE named method, delegating the rest.
-
-    Models a backend fault (Redis down / thread exhaustion) at a single call
-    site so each coordinator fail-open wrap can be exercised in isolation. A
-    spec-less dynamic wrapper by design — it forwards every real method except
-    the one under fault — so the delegation cannot silently drift from the inner
-    double's surface.
-    """
-
-    def __init__(self, inner, fail_on: str):
-        self._inner = inner
-        self._fail_on = fail_on
-
-    def __getattr__(self, name):
-        if name == self._fail_on:
-
-            def _raise(*args, **kwargs):
-                raise RuntimeError(f"storage down: {name}")
-
-            return _raise
-        return getattr(self._inner, name)
 
 
 class _Response:
@@ -111,6 +112,16 @@ class TestRateLimitDeferredErrorContract:
     def test_message_includes_key(self):
         err = RateLimitDeferredError(key="payment_api")
         assert "payment_api" in str(err)
+
+    def test_the_package_export_is_the_core_exceptions_class(self):
+        """One object under every import path, so ``except`` clauses keep matching."""
+        from baldur.core.exceptions import RateLimitDeferredError as from_core
+        from baldur.services.rate_limit_coordinator.models import (
+            RateLimitDeferredError as from_models,
+        )
+
+        assert RateLimitDeferredError is from_core
+        assert from_models is from_core
 
 
 # =============================================================================
@@ -358,7 +369,7 @@ class TestRateLimitAwareDecoratorBehavior:
 
     def test_wait_fault_is_fail_open(self, mock_storage):
         """A coordinator fault at the wait site proceeds to the call (result preserved)."""
-        storage = _RaisingStorage(mock_storage, fail_on="get_state")
+        storage = RaisingRateLimitStorage(mock_storage, fail_on="get_state")
         coord = _make_coordinator(storage)
 
         @coord.rate_limit_aware("k")
@@ -371,7 +382,9 @@ class TestRateLimitAwareDecoratorBehavior:
 
     def test_on_rate_limited_fault_is_fail_open(self, mock_storage):
         """A fault while recording a 429 cooldown does not replace the business result."""
-        storage = _RaisingStorage(mock_storage, fail_on="increment_consecutive_429s")
+        storage = RaisingRateLimitStorage(
+            mock_storage, fail_on="increment_consecutive_429s"
+        )
         coord = _make_coordinator(storage)
 
         @coord.rate_limit_aware("k")
@@ -385,7 +398,9 @@ class TestRateLimitAwareDecoratorBehavior:
         """A fault while resetting the counter after success preserves the result."""
         # Seed a prior 429 so on_success reaches reset_consecutive_429s.
         mock_storage.increment_consecutive_429s("k")
-        storage = _RaisingStorage(mock_storage, fail_on="reset_consecutive_429s")
+        storage = RaisingRateLimitStorage(
+            mock_storage, fail_on="reset_consecutive_429s"
+        )
         coord = _make_coordinator(storage)
 
         @coord.rate_limit_aware("k")
@@ -571,3 +586,713 @@ class TestRateLimitAwareDecoratorBehavior:
         state = mock_storage.get_state("k")
         assert state.consecutive_429s == 1
         assert state.cooldown_until == pytest.approx(time.time() + 30.0, abs=5.0)
+
+
+# =============================================================================
+# The pure serve-or-defer step (Contract)
+# =============================================================================
+
+
+def _state_with_remaining(seconds: float) -> RateLimitState:
+    """A state whose cooldown ends exactly ``seconds`` from the (frozen) clock."""
+    return RateLimitState(key="k", cooldown_until=time.time() + seconds)
+
+
+class TestWaitPlannerContract:
+    """``_plan_wait`` is the one step both waits take; its edges are the contract.
+
+    A remaining cooldown that *equals* the bound is served — only a remaining
+    strictly greater than the bound is refused — and a zero remaining is idle.
+    The step is pure: it neither sleeps nor writes, so the two waits cannot
+    disagree about serve-or-defer whichever sleep primitive they use.
+    """
+
+    @pytest.mark.parametrize(
+        ("remaining", "bound", "expected_kind"),
+        [
+            (10.0, 10.0, _WaitKind.SERVE),
+            (10.01, 10.0, _WaitKind.DEFER),
+            (9.99, 10.0, _WaitKind.SERVE),
+            (0.0, 10.0, _WaitKind.IDLE),
+        ],
+        ids=["at_bound_serves", "over_bound_defers", "under_bound_serves", "zero_idle"],
+    )
+    def test_plan_wait_boundary_at_the_bound(self, remaining, bound, expected_kind):
+        """The comparison is ``remaining > bound``: equality still serves."""
+        with freeze_time("2026-01-01 00:00:00"):
+            plan = _plan_wait(_state_with_remaining(remaining), bound)
+
+        assert plan.kind is expected_kind
+
+    def test_a_served_plan_carries_the_full_remaining_cooldown(self):
+        """A fitting cooldown is slept in full — never a slice of it."""
+        with freeze_time("2026-01-01 00:00:00"):
+            plan = _plan_wait(_state_with_remaining(7.5), 60.0)
+
+        assert plan.kind is _WaitKind.SERVE
+        assert plan.seconds == pytest.approx(7.5)
+        assert plan.not_before is None
+
+    def test_a_deferred_plan_carries_the_expiry_it_refused_to_wait_for(self):
+        """The refusal names ``not_before`` so the caller can requeue on it."""
+        with freeze_time("2026-01-01 00:00:00"):
+            state = _state_with_remaining(120.0)
+            plan = _plan_wait(state, 10.0)
+
+        assert plan.kind is _WaitKind.DEFER
+        assert plan.not_before == state.cooldown_until
+        assert plan.seconds == 0.0
+
+    def test_plan_wait_has_no_side_effect_on_the_state(self):
+        """Purity: two reads of one state plan the same step and change nothing."""
+        with freeze_time("2026-01-01 00:00:00"):
+            state = _state_with_remaining(5.0)
+            before = (state.cooldown_until, state.consecutive_429s)
+
+            first = _plan_wait(state, 10.0)
+            second = _plan_wait(state, 10.0)
+
+        assert first == second
+        assert (state.cooldown_until, state.consecutive_429s) == before
+
+    @pytest.mark.parametrize(
+        ("stored_until", "target_until", "expected"),
+        [
+            (100.0, 90.0, True),
+            (90.0, 90.0, False),
+            (80.0, 90.0, False),
+        ],
+        ids=["later_is_an_extension", "same_is_not", "earlier_is_not"],
+    )
+    def test_extended_past_reads_only_a_later_expiry_as_an_extension(
+        self, stored_until, target_until, expected
+    ):
+        """The re-check continues only past the expiry this waiter slept toward.
+
+        The stored cooldown is monotonic, so a peer's extension is always a
+        strictly later expiry; an equal one is the segment just slept, and the
+        clock's own granularity must never cost a phantom second sleep.
+        """
+        state = RateLimitState(key="k", cooldown_until=stored_until)
+
+        assert _extended_past(state, target_until) is expected
+
+
+class TestDeferredResultContract:
+    """The deferral the coordinator builds after a served segment.
+
+    ``deferred=True`` and ``waited=True`` coexist on the fourth exit — a peer's
+    extension outgrew what was left of the bound after this call already
+    slept — and ``wait_time`` carries the slept amount so the caller's budget
+    accounting stays exact. Read ``deferred`` before ``waited``.
+    """
+
+    def test_a_deferral_after_a_served_segment_reports_both_flags(self):
+        state = RateLimitState(key="k", cooldown_until=time.time() + 60.0)
+
+        result = RateLimitCoordinator._deferred_result("k", state, 15.0, 10.0)
+
+        assert result.deferred is True
+        assert result.waited is True
+        assert result.wait_time == 10.0
+        assert result.not_before == state.cooldown_until
+        assert result.was_rate_limited is True
+        assert result.is_canary is False
+
+    def test_a_deferral_at_entry_reports_nothing_slept(self):
+        """First-iteration semantics are unchanged: ``waited=False``, ``wait_time=0``."""
+        state = RateLimitState(key="k", cooldown_until=time.time() + 60.0)
+
+        result = RateLimitCoordinator._deferred_result("k", state, 15.0, 0.0)
+
+        assert result.deferred is True
+        assert result.waited is False
+        assert result.wait_time == 0.0
+
+
+# =============================================================================
+# The re-check after each served segment — both waits (Behavior)
+# =============================================================================
+
+
+class _RecordingSleep:
+    """A sleep stand-in that records each imposed segment and can act as a peer.
+
+    ``on_first`` runs once, inside the first sleep — the moment a peer's 429
+    lands while this waiter is asleep. The clock does not advance, so a
+    re-read after a segment with no peer write shows the very expiry that was
+    slept toward, which is what the expiry-based re-check reads as "served".
+    """
+
+    def __init__(self, on_first=None):
+        self.calls: list[float] = []
+        self._on_first = on_first
+
+    def __call__(self, seconds: float) -> None:
+        self.calls.append(seconds)
+        if len(self.calls) == 1 and self._on_first is not None:
+            self._on_first()
+
+
+class _RecordingAsyncSleep(_RecordingSleep):
+    """The awaitable twin of :class:`_RecordingSleep`."""
+
+    async def __call__(self, seconds: float) -> None:  # type: ignore[override]
+        super().__call__(seconds)
+
+
+_WAIT_SURFACES = pytest.mark.parametrize(
+    "is_async", [False, True], ids=["sync_wait", "awaitable_wait"]
+)
+
+
+def _wait(coord, key, *, max_wait, is_async, on_first_sleep=None):
+    """Drive one wait through either surface with its sleep primitive faked.
+
+    Returns ``(result, sleeps)`` — the segments the wait imposed, in order.
+    """
+    if is_async:
+        async_sleep = _RecordingAsyncSleep(on_first_sleep)
+        with patch(_ASYNC_SLEEP, new=async_sleep):
+            result = asyncio.run(coord.await_if_needed(key, max_wait=max_wait))
+        return result, async_sleep.calls
+
+    sleep = _RecordingSleep(on_first_sleep)
+    with patch("time.sleep", new=sleep):
+        result = coord.wait_if_needed(key, max_wait=max_wait)
+    return result, sleep.calls
+
+
+class TestCooldownWaitExtensionBehavior:
+    """A peer that extends the cooldown mid-sleep is served or deferred, never resumed into.
+
+    The stale-sleep defect: the remaining cooldown was computed once at entry
+    and slept, so a worker honouring ``Retry-After: 10`` woke at t=10 and called
+    into a cooldown a peer had meanwhile extended to t=60 — the self-DDoS the
+    coordinator exists to prevent. Both waits now re-read after every served
+    segment. Each row runs on the synchronous and the awaitable wait.
+    """
+
+    @pytest.fixture
+    def storage(self):
+        """The real in-process adapter: ``get_state`` returns a snapshot.
+
+        A double that hands back its live record would show the peer's
+        extension on the object read *before* the sleep, which is not what any
+        shipped adapter does — every one builds a fresh state per read.
+        """
+        return InMemoryRateLimitStorage()
+
+    _INITIAL_SECONDS = 10.0
+    _EXTENDED_SECONDS = 60.0
+
+    def _seed(self, storage, key: str = "k") -> None:
+        storage.set_cooldown(key, time.time() + self._INITIAL_SECONDS)
+
+    def _peer_extension(self, storage, key: str = "k"):
+        """The peer's 429 landing while this waiter sleeps."""
+
+        def extend():
+            storage.extend_cooldown(key, time.time() + self._EXTENDED_SECONDS)
+
+        return extend
+
+    @_WAIT_SURFACES
+    def test_an_extension_that_fits_the_bound_is_served_as_a_second_segment(
+        self, storage, is_async
+    ):
+        """Served exit after an extension: two sleeps, the sum in ``wait_time``."""
+        coord = _make_coordinator(storage)
+        self._seed(storage)
+
+        result, sleeps = _wait(
+            coord,
+            "k",
+            max_wait=100.0,
+            is_async=is_async,
+            on_first_sleep=self._peer_extension(storage),
+        )
+
+        assert result.waited is True
+        assert result.deferred is False
+        assert len(sleeps) == 2
+        assert sleeps[0] == pytest.approx(self._INITIAL_SECONDS, abs=0.5)
+        assert sleeps[1] == pytest.approx(self._EXTENDED_SECONDS, abs=0.5)
+        assert result.wait_time == pytest.approx(sum(sleeps))
+
+    @_WAIT_SURFACES
+    def test_an_extension_past_the_bound_is_deferred_after_the_slept_segment(
+        self, storage, is_async
+    ):
+        """Deferred-after-extension exit: ``deferred`` and ``waited`` both set.
+
+        The extension does not fit what is left of the bound, so the wait
+        sleeps nothing further and reports the segment it already slept.
+        """
+        coord = _make_coordinator(storage)
+        self._seed(storage)
+
+        result, sleeps = _wait(
+            coord,
+            "k",
+            max_wait=15.0,
+            is_async=is_async,
+            on_first_sleep=self._peer_extension(storage),
+        )
+
+        assert result.deferred is True
+        assert result.waited is True
+        assert len(sleeps) == 1
+        assert result.wait_time == pytest.approx(sleeps[0])
+        assert result.wait_time == pytest.approx(self._INITIAL_SECONDS, abs=0.5)
+        # The fresh expiry, not the one this call entered with.
+        assert result.not_before == storage.get_state("k").cooldown_until
+        assert result.not_before > time.time() + self._INITIAL_SECONDS + 1.0
+
+    @_WAIT_SURFACES
+    def test_a_segment_with_no_extension_is_served_after_one_sleep(
+        self, storage, is_async
+    ):
+        """Served exit with no peer: the re-read sees the slept-toward expiry and stops.
+
+        Negative half of the re-check: without a later expiry there is no
+        second segment, so a re-check that keyed on "still in cooldown" (the
+        clock never advanced under the faked sleep) would sleep a phantom one.
+        """
+        coord = _make_coordinator(storage)
+        self._seed(storage)
+
+        result, sleeps = _wait(coord, "k", max_wait=100.0, is_async=is_async)
+
+        assert result.waited is True
+        assert result.deferred is False
+        assert len(sleeps) == 1
+        assert result.wait_time == pytest.approx(sleeps[0])
+
+    @_WAIT_SURFACES
+    def test_the_idle_and_entry_deferral_exits_sleep_nothing(self, storage, is_async):
+        """The first two exits are byte-for-byte the pre-change behaviour."""
+        coord = _make_coordinator(storage)
+
+        idle, idle_sleeps = _wait(coord, "idle", max_wait=1.0, is_async=is_async)
+
+        storage.set_cooldown("far", time.time() + _LONG_COOLDOWN_SECONDS)
+        deferred, deferred_sleeps = _wait(coord, "far", max_wait=1.0, is_async=is_async)
+
+        assert (idle.waited, idle.deferred, idle_sleeps) == (False, False, [])
+        assert deferred.deferred is True
+        assert deferred.waited is False
+        assert deferred.wait_time == 0.0
+        assert deferred_sleeps == []
+
+    @_WAIT_SURFACES
+    def test_each_served_segment_is_observed_once_before_it_is_slept(
+        self, storage, is_async
+    ):
+        """One imposed-wait observation per segment, and each precedes its sleep.
+
+        The histogram's help text says *imposed*: a peer's extension served
+        after a re-read is a second imposed wait, observed as one — and a
+        caller killed inside either sleep still had that segment imposed.
+        """
+        coord = _make_coordinator(storage)
+        self._seed(storage)
+        observed: list[float] = []
+        order: list[str] = []
+
+        def record(*, key, wait_seconds):
+            observed.append(wait_seconds)
+            order.append("observe")
+
+        def extend_and_mark():
+            order.append("sleep")
+            self._peer_extension(storage)()
+
+        with patch(_RECORD_WAIT, autospec=True, side_effect=record):
+            _result, sleeps = _wait(
+                coord,
+                "k",
+                max_wait=100.0,
+                is_async=is_async,
+                on_first_sleep=extend_and_mark,
+            )
+
+        assert len(observed) == 2
+        assert observed == pytest.approx(sleeps)
+        assert order[:2] == ["observe", "sleep"]
+
+    @_WAIT_SURFACES
+    def test_the_total_sleep_never_exceeds_the_bound(self, storage, is_async):
+        """Each segment is bounded by what is left, so the sum stays under the bound."""
+        coord = _make_coordinator(storage)
+        self._seed(storage)
+        bound = 40.0
+
+        result, sleeps = _wait(
+            coord,
+            "k",
+            max_wait=bound,
+            is_async=is_async,
+            on_first_sleep=self._peer_extension(storage),
+        )
+
+        # The 60 s extension does not fit 30 s of remaining bound: deferred.
+        assert result.deferred is True
+        assert sum(sleeps) <= bound
+        assert result.wait_time <= bound
+
+    @_WAIT_SURFACES
+    def test_the_function_is_not_called_before_the_extension_elapses(
+        self, storage, is_async
+    ):
+        """The negative the fix exists for: no call at t=10 when the peer extended to t=60.
+
+        Read at the decorator, the nearest caller: the wrapped function must
+        see both segments slept before it runs, never just the first.
+        """
+        coord = _make_coordinator(storage)
+        self._seed(storage)
+        seen: dict[str, int] = {}
+
+        if is_async:
+            async_sleep = _RecordingAsyncSleep(self._peer_extension(storage))
+
+            @coord.rate_limit_aware("k", max_wait=100.0)
+            async def protected():
+                seen["segments_slept"] = len(async_sleep.calls)
+                return _Response(200)
+
+            with patch(_ASYNC_SLEEP, new=async_sleep):
+                asyncio.run(protected())
+        else:
+            sleep = _RecordingSleep(self._peer_extension(storage))
+
+            @coord.rate_limit_aware("k", max_wait=100.0)
+            def protected():
+                seen["segments_slept"] = len(sleep.calls)
+                return _Response(200)
+
+            with patch("time.sleep", new=sleep):
+                protected()
+
+        assert seen["segments_slept"] == 2
+        assert seen["segments_slept"] != 1
+
+
+# =============================================================================
+# The awaitable wait's own rules (Behavior)
+# =============================================================================
+
+
+class TestAwaitIfNeededBehavior:
+    """``await_if_needed`` — same decision as the sync wait, off-loop reads, on-loop sleep."""
+
+    def test_the_idle_read_decides_the_canary_like_the_sync_wait(self, mock_storage):
+        """The first idle reader after a storm is the canary on this surface too."""
+        coord = _make_coordinator(mock_storage)
+        mock_storage.increment_consecutive_429s("k")
+
+        result = asyncio.run(coord.await_if_needed("k", max_wait=1.0))
+
+        assert result.waited is False
+        assert result.was_rate_limited is True
+        assert result.is_canary is True
+
+    def test_a_memory_store_is_read_inline_with_no_thread_hop(self):
+        """The in-process store is a dict read under a lock: a hop would cost more."""
+        coord = _make_coordinator(InMemoryRateLimitStorage())
+        spy = ToThreadSpy()
+
+        with patch(_TO_THREAD, new=spy):
+            asyncio.run(coord.await_if_needed("k", max_wait=1.0))
+
+        assert spy.calls == []
+
+    def test_a_network_backed_store_is_read_on_a_worker_thread(self):
+        """Every store read for a network client leaves the event loop."""
+        coord = _make_coordinator(NetworkBackedRateLimitStorage())
+        spy = ToThreadSpy()
+
+        with patch(_TO_THREAD, new=spy):
+            asyncio.run(coord.await_if_needed("k", max_wait=1.0))
+
+        assert spy.hopped("get_state") is True
+        assert spy.hopped("ensure_running") is True
+
+    def test_a_served_segment_re_reads_on_a_worker_thread_too(self):
+        """The re-check after a sleep is a store read and follows the same rule."""
+        storage = NetworkBackedRateLimitStorage()
+        storage.set_cooldown("k", time.time() + 2.0)
+        coord = _make_coordinator(storage)
+        spy = ToThreadSpy()
+
+        with (
+            patch(_TO_THREAD, new=spy),
+            patch(_ASYNC_SLEEP, new=_RecordingAsyncSleep()),
+        ):
+            result = asyncio.run(coord.await_if_needed("k", max_wait=10.0))
+
+        assert result.waited is True
+        reads = [fn for fn in spy.calls if getattr(fn, "__name__", "") == "get_state"]
+        assert len(reads) == 2
+
+    def test_cancellation_during_the_sleep_propagates(self):
+        """A cancelled waiter is cancelled — the sleep is an ordinary ``await``."""
+        storage = InMemoryRateLimitStorage()
+        storage.set_cooldown("k", time.time() + _LONG_COOLDOWN_SECONDS)
+        coord = _make_coordinator(storage)
+
+        async def scenario():
+            task = asyncio.create_task(
+                coord.await_if_needed("k", max_wait=float("inf"))
+            )
+            await asyncio.sleep(0.01)
+            task.cancel()
+            await task
+
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(scenario())
+
+    def test_a_deferral_is_a_result_not_an_exception(self, mock_storage):
+        """The caller reads ``deferred`` off the result; nothing is raised."""
+        coord = _make_coordinator(mock_storage)
+        mock_storage.set_cooldown("k", time.time() + _LONG_COOLDOWN_SECONDS)
+
+        result = asyncio.run(coord.await_if_needed("k", max_wait=1.0))
+
+        assert result.deferred is True
+        assert result.not_before == mock_storage.get_state("k").cooldown_until
+
+    def test_a_store_fault_raises_to_the_caller(self, mock_storage):
+        """The coordinator does not wrap its store: each caller owns its fail-open."""
+        coord = _make_coordinator(
+            RaisingRateLimitStorage(mock_storage, fail_on="get_state")
+        )
+
+        with pytest.raises(RuntimeError, match="storage down"):
+            asyncio.run(coord.await_if_needed("k", max_wait=1.0))
+
+
+# =============================================================================
+# Decorator surface on an ``async def`` (Behavior)
+# =============================================================================
+
+
+class TestRateLimitAwareAsyncDecoratorBehavior:
+    """``@rate_limit_aware`` on an ``async def`` mirrors the ``def`` rows, loop-free.
+
+    The wrapper is itself a coroutine function; its wait is ``await_if_needed``
+    and its notifications are the awaitable twins, so a cooldown never blocks
+    the event loop and every fail-open rule of the synchronous wrapper holds.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_cluster_broadcast(self):
+        """Neutralise the Dormant-tier cluster broadcast a real 429 would fire.
+
+        ``on_rate_limited`` reaches ``_broadcast_to_cluster``, which eagerly
+        attempts a broker connection where the Kafka adapter is installed — an
+        explicit NON-GOAL of this surface, and ~2 s of connect timeout per 429.
+        """
+        from baldur.services.rate_limit_coordinator import RateLimitCoordinator
+
+        with patch.object(RateLimitCoordinator, "_broadcast_to_cluster", autospec=True):
+            yield
+
+    def test_the_wrapper_is_a_coroutine_function(self, mock_storage):
+        """Dual dispatch: decorating an ``async def`` yields an ``async def``."""
+        coord = _make_coordinator(mock_storage)
+
+        @coord.rate_limit_aware("k")
+        async def protected():
+            return _Response(200)
+
+        assert asyncio.iscoroutinefunction(protected)
+
+    def test_deferral_raises_and_skips_the_wrapped_coroutine(self, mock_storage):
+        """Over-bound cooldown -> RateLimitDeferredError, the coroutine never runs."""
+        coord = _make_coordinator(mock_storage)
+        cooldown_until = time.time() + _LONG_COOLDOWN_SECONDS
+        mock_storage.set_cooldown("k", cooldown_until)
+        calls = []
+
+        @coord.rate_limit_aware("k", max_wait=1.0)
+        async def protected():
+            calls.append(1)
+            return _Response(200)
+
+        with pytest.raises(RateLimitDeferredError) as exc_info:
+            asyncio.run(protected())
+
+        assert exc_info.value.not_before == cooldown_until
+        assert exc_info.value.key == "k"
+        assert calls == []
+
+    def test_a_fitting_cooldown_is_awaited_not_slept(self, mock_storage):
+        """The wait is an ``asyncio.sleep`` of the remaining cooldown."""
+        coord = _make_coordinator(mock_storage)
+        mock_storage.set_cooldown("k", time.time() + 2.0)
+        async_sleep = _RecordingAsyncSleep()
+
+        @coord.rate_limit_aware("k", max_wait=10.0)
+        async def protected():
+            return _Response(200)
+
+        with patch(_ASYNC_SLEEP, new=async_sleep), mock_sleep() as blocking_sleep:
+            result = asyncio.run(protected())
+
+        assert result.status_code == 200
+        assert len(async_sleep.calls) == 1
+        assert async_sleep.calls[0] == pytest.approx(2.0, abs=0.5)
+        assert blocking_sleep.call_count == 0
+
+    def test_wait_fault_is_fail_open(self, mock_storage):
+        """A coordinator fault at the wait site proceeds to the call."""
+        coord = _make_coordinator(
+            RaisingRateLimitStorage(mock_storage, fail_on="get_state")
+        )
+
+        @coord.rate_limit_aware("k")
+        async def protected():
+            return _Response(200)
+
+        result = asyncio.run(protected())
+
+        assert result.status_code == 200
+
+    def test_on_rate_limited_fault_is_fail_open(self, mock_storage):
+        """A fault while recording a returned 429 does not replace the result."""
+        coord = _make_coordinator(
+            RaisingRateLimitStorage(mock_storage, fail_on="increment_consecutive_429s")
+        )
+
+        @coord.rate_limit_aware("k")
+        async def protected():
+            return _Response(429)
+
+        result = asyncio.run(protected())
+
+        assert result.status_code == 429
+
+    def test_on_success_fault_is_fail_open(self, mock_storage):
+        """A fault while resetting the counter after success preserves the result."""
+        mock_storage.increment_consecutive_429s("k")
+        coord = _make_coordinator(
+            RaisingRateLimitStorage(mock_storage, fail_on="reset_consecutive_429s")
+        )
+
+        @coord.rate_limit_aware("k")
+        async def protected():
+            return _Response(200)
+
+        result = asyncio.run(protected())
+
+        assert result.status_code == 200
+
+    def test_user_predicate_exception_still_propagates(self, mock_storage):
+        """The user's predicates stay OUTSIDE the fail-open wrap on this path too."""
+        coord = _make_coordinator(mock_storage)
+
+        def broken_is_429(_response):
+            raise ValueError("user predicate bug")
+
+        @coord.rate_limit_aware("k", is_429=broken_is_429)
+        async def protected():
+            return _Response(200)
+
+        with pytest.raises(ValueError, match="user predicate bug"):
+            asyncio.run(protected())
+
+    def test_a_returned_429_installs_one_cooldown_through_the_thread_hop(
+        self, mock_storage
+    ):
+        """The write is ``aon_rate_limited``: always a hop, because it publishes."""
+        coord = _make_coordinator(mock_storage)
+        spy = ToThreadSpy()
+
+        @coord.rate_limit_aware("k")
+        async def protected():
+            return _Response(429)
+
+        with patch(_TO_THREAD, new=spy):
+            asyncio.run(protected())
+
+        assert mock_storage.get_state("k").consecutive_429s == 1
+        assert spy.hopped("on_rate_limited") is True
+
+    def test_a_non_429_return_resets_the_counter(self, mock_storage):
+        """The success side is ``aon_success``: the counter goes back to zero."""
+        coord = _make_coordinator(mock_storage)
+        mock_storage.increment_consecutive_429s("k")
+
+        @coord.rate_limit_aware("k")
+        async def protected():
+            return _Response(200)
+
+        asyncio.run(protected())
+
+        assert mock_storage.get_state("k").consecutive_429s == 0
+
+    def test_the_decorator_claims_the_scope_and_marks_what_it_classified(
+        self, mock_storage
+    ):
+        """Claim so the breaker stage installs no second cooldown; mark for the loop.
+
+        The mark is what an enclosing retry loop reads to detect the value for
+        its success gating only — one returned 429, one cooldown.
+        """
+        from baldur.services.circuit_breaker.rate_limit_observation import (
+            close_scope,
+            open_scope,
+        )
+
+        coord = _make_coordinator(mock_storage)
+        response = _Response(429)
+
+        @coord.rate_limit_aware("k")
+        async def protected():
+            return response
+
+        token, scope = open_scope("k")
+        try:
+            asyncio.run(protected())
+        finally:
+            close_scope(token)
+
+        assert scope.coordination_claimed is True
+        assert scope.was_classified(response) is True
+        assert mock_storage.get_state("k").consecutive_429s == 1
+
+    def test_a_call_with_no_scope_open_still_coordinates(self, mock_storage):
+        """The decorator does not depend on a breaker stage being above it."""
+        coord = _make_coordinator(mock_storage)
+
+        @coord.rate_limit_aware("k")
+        async def protected():
+            return _Response(429)
+
+        asyncio.run(protected())
+
+        assert mock_storage.get_state("k").consecutive_429s == 1
+
+    def test_the_sync_wrapper_also_marks_what_it_classified(self, mock_storage):
+        """The classify-once ownership mark lands on the ``def`` wrapper too."""
+        from baldur.services.circuit_breaker.rate_limit_observation import (
+            close_scope,
+            open_scope,
+        )
+
+        coord = _make_coordinator(mock_storage)
+        response = _Response(429)
+
+        @coord.rate_limit_aware("k")
+        def protected():
+            return response
+
+        token, scope = open_scope("k")
+        try:
+            protected()
+        finally:
+            close_scope(token)
+
+        assert scope.was_classified(response) is True

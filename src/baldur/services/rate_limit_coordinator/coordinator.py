@@ -973,11 +973,7 @@ class RateLimitCoordinator:
         rate_limited, retry_after = _classify_decorated_result(
             result, is_429, get_retry_after
         )
-        # Marked after classification: an enclosing retry loop reads this mark
-        # and then detects the value for its own success gating only, so one
-        # returned 429 installs one cooldown.
-        if scope is not None:
-            scope.mark_classified(result)
+        self._record_decorated_verdict(scope, result, rate_limited, retry_after)
 
         try:
             if rate_limited:
@@ -1026,8 +1022,7 @@ class RateLimitCoordinator:
         rate_limited, retry_after = _classify_decorated_result(
             result, is_429, get_retry_after
         )
-        if scope is not None:
-            scope.mark_classified(result)
+        self._record_decorated_verdict(scope, result, rate_limited, retry_after)
         try:
             if rate_limited:
                 await self.aon_rate_limited(key, retry_after)
@@ -1045,15 +1040,32 @@ class RateLimitCoordinator:
 
         A code-level opt-in that makes its own coordinator calls claims the
         scope so the breaker stage does not notify for the same 429 a second
-        time — the consecutive counter would otherwise advance twice. The
-        cascade half stays with the breaker stage, which sees the same value.
-        Returns the scope (or ``None``) so the wrapper can mark what it
-        classified.
+        time — the consecutive counter would otherwise advance twice. Returns
+        the scope (or ``None``) so the wrapper can record what it classified.
         """
         scope = _current_observation_scope()
         if scope is not None:
             scope.claim_coordination()
         return scope
+
+    @staticmethod
+    def _record_decorated_verdict(
+        scope: Any, subject: Any, rate_limited: bool, retry_after: float | None
+    ) -> None:
+        """Record the wrapper's own classification on the breaker's per-call scope.
+
+        The outcome is marked so an enclosing retry loop and the breaker frame
+        classify the same object no second time — the loop then detects it for
+        its success gating only, so one 429 installs one cooldown. A 429 is
+        also noted against the cascade here, because that mark is exactly what
+        stops every outer frame from noting it: the surface that classifies a
+        429 is the one that counts it, on every observation site alike.
+        """
+        if scope is None:
+            return
+        scope.mark_classified(subject)
+        if rate_limited:
+            scope.note_429(retry_after, subject)
 
     @staticmethod
     def _raise_if_deferred(key: str, wait_result: RateLimitResult | None) -> None:
@@ -1086,13 +1098,15 @@ class RateLimitCoordinator:
         The shared classifier only — the user's ``is_429`` / ``get_retry_after``
         predicates are a response-object contract and never see an exception.
         A cooldown deferral raised by an inner surface is never a 429 to the
-        classifier and propagates as-is. Marked on the scope before the verdict
+        classifier and propagates as-is. The verdict is recorded on the scope
         so an enclosing loop, which catches the same object, detects it for its
         success gating only and installs no second cooldown.
         """
-        if scope is not None:
-            scope.mark_classified(error)
-        return detect_rate_limit(error)
+        is_rate_limited, retry_after = detect_rate_limit(error)
+        RateLimitCoordinator._record_decorated_verdict(
+            scope, error, is_rate_limited, retry_after
+        )
+        return is_rate_limited, retry_after
 
     def _observe_decorated_exception(
         self, key: str, error: Exception, scope: Any

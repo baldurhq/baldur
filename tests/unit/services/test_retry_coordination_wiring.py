@@ -1244,3 +1244,216 @@ class TestRetryWiredCooldownDeferralBehavior:
 
         assert type(result.error) is RateLimitDeferredError
         assert result.error.key == "stripe_v2"
+
+
+# =============================================================================
+# _notify_rate_limit_cooldown — classify-once ownership
+# =============================================================================
+
+
+class TestRetryClassifyOnceBehavior:
+    """Whoever classified the outcome first owns its cooldown.
+
+    A ``rate_limit_aware`` client inside this loop marks the 429 it returned
+    on the scope and installs the cooldown itself. The loop then reads the
+    mark before marking: the outcome is detected for the *signal* only, so the
+    gated success reset still fires later, but no second cascade note and no
+    second cooldown — one 429 never advances the consecutive counter twice.
+    """
+
+    def test_an_already_classified_429_is_a_signal_without_a_second_cooldown(self):
+        """``True`` for the signal; ``note_429`` and ``on_rate_limited`` both skipped."""
+        coordinator = MagicMock(spec=RateLimitCoordinator)
+        response = type("Response", (), {"status_code": 429})()
+
+        token, scope = open_scope("payment")
+        try:
+            scope.mark_classified(response)
+            detected = _policy(domain="payment")._notify_rate_limit_cooldown(
+                coordinator, "payment", response, scope
+            )
+        finally:
+            close_scope(token)
+
+        assert detected is True
+        assert scope.rate_limited == 0
+        coordinator.on_rate_limited.assert_not_called()
+        assert scope.classified.count(response) == 1
+
+    def test_an_unclassified_429_is_marked_noted_and_installs_one_cooldown(self):
+        """Discriminator: the same subject unmarked takes the full path."""
+        coordinator = MagicMock(spec=RateLimitCoordinator)
+        coordinator.on_rate_limited.return_value = 5.0
+        response = type("Response", (), {"status_code": 429})()
+
+        token, scope = open_scope("payment")
+        try:
+            detected = _policy(domain="payment")._notify_rate_limit_cooldown(
+                coordinator, "payment", response, scope
+            )
+        finally:
+            close_scope(token)
+
+        assert detected is True
+        assert scope.rate_limited == 1
+        coordinator.on_rate_limited.assert_called_once()
+        assert scope.was_classified(response) is True
+
+    def test_an_already_classified_non_429_is_not_a_signal(self):
+        """The mark does not turn an ordinary outcome into a rate-limit signal."""
+        coordinator = MagicMock(spec=RateLimitCoordinator)
+        error = ConnectionError("connection reset")
+
+        token, scope = open_scope("payment")
+        try:
+            scope.mark_classified(error)
+            detected = _policy(domain="payment")._notify_rate_limit_cooldown(
+                coordinator, "payment", error, scope
+            )
+        finally:
+            close_scope(token)
+
+        assert detected is False
+        coordinator.on_rate_limited.assert_not_called()
+
+    def test_a_decorated_client_inside_the_loop_installs_one_cooldown_per_429(
+        self, no_cluster_broadcast
+    ):
+        """The reproduction: decorator and loop on one key, one returned 429.
+
+        Before the ownership rule both surfaces notified, so ``consecutive_429s``
+        advanced by two per answer and every cooldown ran one ladder rung
+        longer than configured.
+        """
+        storage = InMemoryRateLimitStorage()
+        coordinator = _real_coordinator(storage, default_retry_after=0.0)
+        response = type("Response", (), {"status_code": 429})()
+
+        @coordinator.rate_limit_aware("payment")
+        def client():
+            return response
+
+        policy = RetryPolicy(
+            config=RetryPolicyConfig(max_attempts=1, domain="payment"),
+            backoff=ConstantBackoff(delay=0.0),
+            sleeper=lambda _: None,
+            rate_limit_coordinator=coordinator,
+        )
+
+        token, scope = open_scope("payment")
+        try:
+            with mock_sleep():
+                result = policy.execute(client)
+        finally:
+            close_scope(token)
+
+        assert result.value is response
+        assert storage.get_state("payment").consecutive_429s == 1
+        assert storage.get_state("payment").consecutive_429s != 2
+        # The cascade half is counted exactly once too — by the decorator, the
+        # surface that classified the value.
+        assert scope.rate_limited == 1
+
+
+# =============================================================================
+# execute() — an inner surface's cooldown deferral
+# =============================================================================
+
+
+class TestRetryInnerDeferralBehavior:
+    """A deferral raised *inside* the call stops the loop with the defer vocabulary.
+
+    The call was never made: the breaker counts no request for it, so this
+    loop counts no attempt either, and the exit carries ``rate_limit_deferred``
+    plus the error's ``not_before`` — never ``non_retryable``, never
+    ``max_attempts`` — because a requeue-capable caller acts on that word.
+    """
+
+    @pytest.fixture
+    def deferral(self):
+        from baldur.core.exceptions import RateLimitDeferredError
+
+        return RateLimitDeferredError(key="inner-provider", not_before=1_700_000_000.0)
+
+    def test_an_inner_deferral_counts_no_attempt_on_the_scope(
+        self, singleton_coordinator, deferral
+    ):
+        token, scope = open_scope("payment")
+        try:
+            _policy(max_attempts=3, domain="payment").execute(
+                lambda: (_ for _ in ()).throw(deferral)
+            )
+        finally:
+            close_scope(token)
+
+        assert scope.attempts == 0
+
+    def test_an_inner_deferral_exits_with_the_defer_vocabulary(
+        self, singleton_coordinator, deferral
+    ):
+        calls = {"n": 0}
+
+        def func():
+            calls["n"] += 1
+            raise deferral
+
+        result = _policy(max_attempts=3, domain="payment").execute(func)
+
+        assert result.outcome == PolicyOutcome.FAILURE
+        assert result.metadata["reason"] == "rate_limit_deferred"
+        assert result.metadata["reason"] != "non_retryable"
+        assert result.metadata["reason"] != "max_attempts"
+        assert result.metadata["not_before"] == deferral.not_before
+        assert result.metadata["rate_limit_key"] == "payment"
+        assert calls["n"] == 1
+
+    def test_the_inner_error_is_the_reported_error_not_a_synthesised_one(
+        self, singleton_coordinator, deferral
+    ):
+        """The tail's synthesis is for the loop's own deferral, which left no error."""
+        result = _policy(max_attempts=3, domain="payment").execute(
+            lambda: (_ for _ in ()).throw(deferral)
+        )
+
+        assert result.error is deferral
+
+    def test_an_inner_deferral_is_never_read_as_a_provider_429(
+        self, singleton_coordinator, deferral
+    ):
+        coordinator, _ = singleton_coordinator
+
+        _policy(max_attempts=3, domain="payment").execute(
+            lambda: (_ for _ in ()).throw(deferral)
+        )
+
+        coordinator.on_rate_limited.assert_not_called()
+
+    def test_an_ordinary_non_retryable_keeps_its_own_vocabulary(
+        self, singleton_coordinator
+    ):
+        """Discriminator: the defer exit is keyed on the type, not on the branch."""
+        from baldur.core.exceptions import CircuitBreakerError
+
+        result = _policy(max_attempts=3, domain="payment").execute(
+            lambda: (_ for _ in ()).throw(CircuitBreakerError("open"))
+        )
+
+        assert result.metadata["reason"] == "non_retryable"
+        assert "not_before" not in result.metadata
+
+    def test_the_loops_own_deferral_carries_the_key_in_its_metadata(
+        self, singleton_coordinator
+    ):
+        """A decorator synthesises the deferral error from these two fields."""
+        coordinator, _ = singleton_coordinator
+        coordinator.wait_if_needed.return_value = RateLimitResult(
+            deferred=True, not_before=1_700_000_000.0
+        )
+
+        result = _policy(
+            max_attempts=2, domain="payment", rate_limit_key="stripe-api"
+        ).execute(lambda: "ok")
+
+        assert result.metadata["reason"] == "rate_limit_deferred"
+        assert result.metadata["rate_limit_key"] == "stripe-api"
+        assert result.metadata["not_before"] == 1_700_000_000.0

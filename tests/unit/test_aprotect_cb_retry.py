@@ -46,6 +46,7 @@ from baldur.services.circuit_breaker.config import (
 )
 from baldur.services.circuit_breaker.exceptions import CircuitBreakerOpenError
 from baldur.services.circuit_breaker.policy import CircuitBreakerPolicy
+from baldur.services.circuit_breaker.rate_limit_tracker import RateLimitTracker
 from baldur.services.circuit_breaker.service import CircuitBreakerService
 from baldur.services.retry_handler.models import RetryPolicyConfig
 
@@ -642,3 +643,285 @@ class TestAprotectFallbackAppliedLog:
         assert events[0].levelname == "WARNING"
         assert events[0].msg["error_type"] == "RuntimeError"
         assert events[0].msg["fallback_source"] == "fallback_fn"
+
+
+# =============================================================================
+# Behavior — outbound 429 coordination parity with protect()
+# =============================================================================
+
+_RATE_LIMIT_MESSAGE = "429 too many requests"
+_BREAKER_TO_THREAD = "baldur.services.circuit_breaker.policy.asyncio.to_thread"
+_TRACKER = "baldur.services.circuit_breaker.rate_limit_tracker.get_rate_limit_tracker"
+_CB_SERVICE = "baldur.services.circuit_breaker.convenience.get_circuit_breaker_service"
+
+
+def _seed_admitting_breaker(name: str) -> MagicMock:
+    """Inject a breaker over a stubbed service that admits every call.
+
+    A stub rather than the low-threshold real service: the parity rows read
+    which error the breaker was asked to count, which only a spec'd
+    ``record_failure`` can answer.
+    """
+    from baldur.interfaces.repositories import CircuitBreakerStateData
+    from baldur.services.circuit_breaker.config import CircuitBreakerDecision
+
+    cb_service = MagicMock(spec=CircuitBreakerService)
+    cb_service.is_enabled = True
+    cb_service.should_allow_with_state.return_value = CircuitBreakerDecision(
+        allowed=True,
+        state=CircuitBreakerStateData(service_name=name, state="closed"),
+    )
+    protect_facade._cb_policy_cache[name] = CircuitBreakerPolicy(
+        service_name=name, cb_service=cb_service, hooks=[]
+    )
+    return cb_service
+
+
+class TestAprotectCoordinationParityBehavior:
+    """``aprotect`` coordinates outbound 429s exactly as ``protect`` does.
+
+    With the retry stage on, the loop owns the cooldown per attempt and the
+    breaker stage installs none of its own; with it off, the breaker frame
+    installs one at sequence granularity — on a worker thread. A key on the
+    ``RetryPolicyConfig`` keys the async cooldown, and a deferral after a real
+    429 keeps that 429 as the error the breaker counts.
+    """
+
+    @pytest.fixture
+    def singleton_coordinator(self):
+        """The process-wide coordinator both stages resolve, spec'd."""
+        from baldur.services.rate_limit_coordinator import RateLimitCoordinator
+        from baldur.services.rate_limit_coordinator.models import RateLimitResult
+
+        coordinator = MagicMock(spec=RateLimitCoordinator)
+        coordinator.wait_if_needed.return_value = RateLimitResult(waited=False)
+        coordinator.await_if_needed.return_value = RateLimitResult(waited=False)
+        coordinator.on_rate_limited.return_value = 0.0
+        coordinator.aon_rate_limited.return_value = 0.0
+        with (
+            patch.object(
+                RateLimitCoordinator,
+                "get_instance",
+                autospec=True,
+                return_value=coordinator,
+            ),
+            patch(_TRACKER, return_value=MagicMock(spec=RateLimitTracker)),
+            patch(_CB_SERVICE, return_value=MagicMock(spec=CircuitBreakerService)),
+        ):
+            yield coordinator
+
+    def test_with_retry_on_the_breaker_stage_installs_no_cooldown_of_its_own(
+        self, clean_caches, singleton_coordinator
+    ):
+        """One cooldown per attempt from the loop — never ``attempts + 1``."""
+        name = "async.parity_retry_on"
+        _seed_admitting_breaker(name)
+        calls = {"n": 0}
+
+        async def throttled():
+            calls["n"] += 1
+            raise Exception(_RATE_LIMIT_MESSAGE)
+
+        with (
+            patch(_ASYNC_SLEEP, new_callable=AsyncMock),
+            pytest.raises(Exception, match=_RATE_LIMIT_MESSAGE),
+        ):
+            asyncio.run(
+                aprotect(
+                    name=name,
+                    fn=throttled,
+                    retry=RetryPolicyConfig(max_attempts=3, domain=name),
+                    circuit_breaker=True,
+                    dlq=False,
+                    timeout=None,
+                )
+            )
+
+        assert calls["n"] == 3
+        assert singleton_coordinator.aon_rate_limited.await_count == 3
+        assert singleton_coordinator.aon_rate_limited.await_count != 4
+        singleton_coordinator.on_rate_limited.assert_not_called()
+
+    def test_with_retry_off_the_breaker_stage_installs_one_cooldown_through_the_hop(
+        self, clean_caches, singleton_coordinator
+    ):
+        """The breaker frame's notify runs once, on a worker thread."""
+        from tests.factories.rate_limit_doubles import ToThreadSpy
+
+        name = "async.parity_retry_off"
+        _seed_admitting_breaker(name)
+
+        async def throttled():
+            raise Exception(_RATE_LIMIT_MESSAGE)
+
+        spy = ToThreadSpy()
+        with (
+            patch(_BREAKER_TO_THREAD, new=spy),
+            pytest.raises(Exception, match=_RATE_LIMIT_MESSAGE),
+        ):
+            asyncio.run(
+                aprotect(
+                    name=name,
+                    fn=throttled,
+                    retry=False,
+                    circuit_breaker=True,
+                    dlq=False,
+                    timeout=None,
+                )
+            )
+
+        assert singleton_coordinator.on_rate_limited.call_count == 1
+        assert singleton_coordinator.on_rate_limited.call_args.kwargs["key"] == name
+        assert spy.count("_on_failure") == 1
+        singleton_coordinator.aon_rate_limited.assert_not_called()
+
+    def test_a_globally_disabled_retry_stage_claims_the_scope_and_coordinates_nothing(
+        self, clean_caches, singleton_coordinator, monkeypatch
+    ):
+        """The recorded regression: a disabled async loop no longer gets the breaker's cooldown.
+
+        Sync parity by the existing coverage statement — the retry stage
+        carries the coordination decision in every mode, so with it disabled
+        neither stage installs a cooldown.
+        """
+        from baldur.services.circuit_breaker.rate_limit_observation import (
+            current_scope,
+        )
+        from baldur.settings.retry import reset_retry_settings
+
+        name = "async.parity_retry_disabled"
+        _seed_admitting_breaker(name)
+        seen = {}
+
+        async def throttled():
+            seen["scope"] = current_scope()
+            raise Exception(_RATE_LIMIT_MESSAGE)
+
+        monkeypatch.setenv("BALDUR_RETRY_ENABLED", "false")
+        reset_retry_settings()
+        try:
+            with pytest.raises(Exception, match=_RATE_LIMIT_MESSAGE):
+                asyncio.run(
+                    aprotect(
+                        name=name,
+                        fn=throttled,
+                        retry=True,
+                        circuit_breaker=True,
+                        dlq=False,
+                        timeout=None,
+                    )
+                )
+        finally:
+            reset_retry_settings()
+
+        assert seen["scope"].coordination_claimed is True
+        singleton_coordinator.on_rate_limited.assert_not_called()
+        singleton_coordinator.aon_rate_limited.assert_not_called()
+
+    def test_rate_limit_key_on_the_config_keys_the_async_cooldown(
+        self, clean_caches, singleton_coordinator
+    ):
+        """The field is no longer inert on this path: wait and notify use it."""
+        name = "async.parity_keyed"
+        _seed_admitting_breaker(name)
+
+        async def throttled():
+            raise Exception(_RATE_LIMIT_MESSAGE)
+
+        with (
+            patch(_ASYNC_SLEEP, new_callable=AsyncMock),
+            pytest.raises(Exception, match=_RATE_LIMIT_MESSAGE),
+        ):
+            asyncio.run(
+                aprotect(
+                    name=name,
+                    fn=throttled,
+                    retry=RetryPolicyConfig(
+                        max_attempts=2, domain=name, rate_limit_key="stripe-api"
+                    ),
+                    circuit_breaker=True,
+                    dlq=False,
+                    timeout=None,
+                )
+            )
+
+        assert singleton_coordinator.await_if_needed.call_args.args[0] == "stripe-api"
+        assert (
+            singleton_coordinator.aon_rate_limited.call_args.kwargs["key"]
+            == "stripe-api"
+        )
+
+    def test_a_deferral_after_a_real_429_keeps_the_429_as_the_breaker_counted_error(
+        self, clean_caches, singleton_coordinator
+    ):
+        """Attempt 1's 429 is what the breaker counts, on the async path."""
+        from baldur.services.rate_limit_coordinator.models import RateLimitResult
+
+        name = "async.parity_deferral_after_429"
+        cb_service = _seed_admitting_breaker(name)
+        singleton_coordinator.await_if_needed.side_effect = [
+            RateLimitResult(waited=False),
+            RateLimitResult(deferred=True, not_before=1_700_000_000.0),
+        ]
+
+        class ProviderThrottled(Exception):
+            pass
+
+        async def throttled():
+            raise ProviderThrottled(_RATE_LIMIT_MESSAGE)
+
+        with (
+            patch(_ASYNC_SLEEP, new_callable=AsyncMock),
+            pytest.raises(ProviderThrottled),
+        ):
+            asyncio.run(
+                aprotect(
+                    name=name,
+                    fn=throttled,
+                    retry=RetryPolicyConfig(max_attempts=3, domain=name),
+                    circuit_breaker=True,
+                    dlq=False,
+                    timeout=None,
+                )
+            )
+
+        cb_service.record_failure.assert_called_once()
+        recorded = cb_service.record_failure.call_args.kwargs["error_context"]
+        assert recorded["type"] == "ProviderThrottled"
+
+    def test_the_sync_facade_keeps_the_429_as_the_breaker_counted_error_too(
+        self, clean_caches, singleton_coordinator
+    ):
+        """Parity row on ``protect()``: the same sequence, the same counted error."""
+        from baldur.protect_facade import protect
+        from baldur.services.rate_limit_coordinator.models import RateLimitResult
+
+        name = "sync.parity_deferral_after_429"
+        cb_service = _seed_admitting_breaker(name)
+        singleton_coordinator.wait_if_needed.side_effect = [
+            RateLimitResult(waited=False),
+            RateLimitResult(deferred=True, not_before=1_700_000_000.0),
+        ]
+
+        class ProviderThrottled(Exception):
+            pass
+
+        def throttled():
+            raise ProviderThrottled(_RATE_LIMIT_MESSAGE)
+
+        with (
+            patch("baldur.services.retry_handler.policy._DEFAULT_SLEEPER"),
+            pytest.raises(ProviderThrottled),
+        ):
+            protect(
+                name=name,
+                fn=throttled,
+                retry=RetryPolicyConfig(max_attempts=3, domain=name),
+                circuit_breaker=True,
+                dlq=False,
+                timeout=None,
+            )
+
+        cb_service.record_failure.assert_called_once()
+        recorded = cb_service.record_failure.call_args.kwargs["error_context"]
+        assert recorded["type"] == "ProviderThrottled"

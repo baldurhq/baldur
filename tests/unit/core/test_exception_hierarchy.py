@@ -976,6 +976,76 @@ class TestNonRetryableExceptionsContract:
         nre = non_retryable_exceptions()
         assert isinstance(CircuitBreakerTransitionError(), nre)
 
+    def test_the_default_set_is_the_breaker_error_and_the_cooldown_deferral(self):
+        """Both mean "the dependency was not contacted; re-calling now cannot help".
+
+        A cooldown deferral was retried like a transient failure before: a
+        loop enclosing a ``rate_limit_aware`` client burned ``max_attempts``
+        sleeping between attempts that could not succeed before ``not_before``.
+        """
+        from baldur.core.exceptions import (
+            RateLimitDeferredError,
+            non_retryable_exceptions,
+        )
+
+        assert non_retryable_exceptions() == (
+            CircuitBreakerError,
+            RateLimitDeferredError,
+        )
+
+    def test_a_cooldown_deferral_is_non_retryable_via_isinstance(self):
+        from baldur.core.exceptions import (
+            RateLimitDeferredError,
+            non_retryable_exceptions,
+        )
+
+        assert isinstance(
+            RateLimitDeferredError(key="k", not_before=1.0),
+            non_retryable_exceptions(),
+        )
+
+
+class TestRateLimitDeferredErrorLocationContract:
+    """The deferral class lives in ``core.exceptions`` and is one object everywhere.
+
+    It moved here because the retry loops' default non-retryable set names it,
+    and that set must not import the coordinator package (each config
+    construction would pull in the adapter chain). Every earlier import path
+    keeps resolving to the same class, so ``except`` clauses and ``isinstance``
+    checks written against either path keep matching.
+    """
+
+    def test_is_exported_in_module_all(self):
+        from baldur.core import exceptions
+
+        assert "RateLimitDeferredError" in exceptions.__all__
+
+    def test_the_three_import_paths_resolve_to_one_class(self):
+        from baldur.core.exceptions import RateLimitDeferredError as from_core
+        from baldur.services.rate_limit_coordinator import (
+            RateLimitDeferredError as from_package,
+        )
+        from baldur.services.rate_limit_coordinator.models import (
+            RateLimitDeferredError as from_models,
+        )
+
+        assert from_core is from_package
+        assert from_core is from_models
+        assert from_core.__module__ == "baldur.core.exceptions"
+
+    def test_inherits_resilience_error(self):
+        from baldur.core.exceptions import RateLimitDeferredError, ResilienceError
+
+        assert issubclass(RateLimitDeferredError, ResilienceError)
+        assert issubclass(RateLimitDeferredError, BaldurError)
+
+    def test_extra_context_carries_key_and_not_before(self):
+        from baldur.core.exceptions import RateLimitDeferredError
+
+        err = RateLimitDeferredError(key="payment_api", not_before=123.0)
+
+        assert err.extra_context() == {"key": "payment_api", "not_before": 123.0}
+
 
 class TestDistributedHashChainUnavailableErrorContract:
     """The refusal a stated distributed audit chain raises when it cannot be

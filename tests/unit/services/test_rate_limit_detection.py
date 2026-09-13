@@ -199,6 +199,33 @@ class TestDetectRateLimitRetryAfterBehavior:
         _, retry_after = detect_rate_limit(exc)
         assert retry_after is None
 
+    def test_a_headers_read_that_raises_degrades_to_no_retry_after(self):
+        """A caller-owned ``headers.get`` that raises is a fault, not a header.
+
+        Unguarded, the classifier's own error escaped at every frame that
+        classifies the exception — the breaker then recorded the classifier's
+        ``RuntimeError`` in place of the client's 429. The verdict stays a 429;
+        only the wait degrades to ``None``, like the value-side read.
+        """
+
+        class RaisingHeaders:
+            def get(self, _name):
+                raise RuntimeError("headers unavailable")
+
+        exc = Exception("429 too many requests")
+        exc.response = type("Response", (), {"headers": RaisingHeaders()})()  # type: ignore[attr-defined]
+
+        is_rate_limited, retry_after = detect_rate_limit(exc)
+
+        assert (is_rate_limited, retry_after) == (True, None)
+
+    def test_a_readable_header_beside_the_guard_still_parses(self):
+        """Discriminator: the guard degrades faults only, not readable headers."""
+        exc = Exception("429 too many requests")
+        exc.response = type("Response", (), {"headers": {"Retry-After": "12"}})()  # type: ignore[attr-defined]
+
+        assert detect_rate_limit(exc) == (True, 12.0)
+
 
 # =============================================================================
 # Response doubles — the two calling conventions a client may use

@@ -56,11 +56,23 @@ class MockRateLimitState:
 
 
 class MockInMemoryRateLimitStorage:
-    """InMemory Rate Limit Storage mock for unit tests."""
+    """InMemory Rate Limit Storage mock for unit tests.
+
+    Reports the ``MEMORY`` storage type like the real in-process adapter, so
+    the coordinator's awaitable surface reads it inline rather than hopping to
+    a worker thread — the branch a network-backed double drives the other way.
+    """
 
     def __init__(self):
         self._states: dict[str, MockRateLimitState] = {}
         self._lock = threading.Lock()
+
+    @property
+    def storage_type(self):
+        """The in-process type — the coordinator reads this store inline."""
+        from baldur.interfaces.rate_limit_storage import RateLimitStorageType
+
+        return RateLimitStorageType.MEMORY
 
     def get_state(self, key: str) -> MockRateLimitState:
         """Read the current state."""

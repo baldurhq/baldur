@@ -16,6 +16,7 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
 import itertools
 import math
 import time
@@ -27,6 +28,11 @@ import pytest
 from freezegun import freeze_time
 from structlog.testing import capture_logs
 
+from tests.factories.rate_limit_doubles import (
+    NetworkBackedRateLimitStorage,
+    RaisingRateLimitStorage,
+    ToThreadSpy,
+)
 from tests.factories.time_helpers import mock_sleep
 from tests.unit.rate_limit.conftest import (
     DEFAULT_BACKOFF_MULTIPLIER,
@@ -1729,3 +1735,497 @@ class TestCoordinatorAnnouncerDelegationBehavior:
         finally:
             instance._announcer.stop()
             RateLimitCoordinator.reset_instance()
+
+
+# =============================================================================
+# The awaitable twins — thread-hop rule and parity with their sync originals
+# =============================================================================
+
+_TO_THREAD = "baldur.services.rate_limit_coordinator.coordinator.asyncio.to_thread"
+
+
+class TestCoordinatorAsyncTwinsBehavior:
+    """``aon_rate_limited`` / ``aon_success`` / ``aget_instance`` leave the loop free.
+
+    The report twin always hops — ``on_rate_limited`` publishes on the event
+    bus, which waits on every subscriber that asked for its result — while the
+    success twin and the instance read hop only when the work is a network
+    call. Each twin leaves the store exactly as its synchronous original does.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_cluster_broadcast(self):
+        """Neutralise the Dormant-tier cluster broadcast a real 429 would fire.
+
+        ``on_rate_limited`` reaches ``_broadcast_to_cluster``, which eagerly
+        attempts a broker connection where the Kafka adapter is installed — an
+        explicit NON-GOAL of this surface, and ~2 s of connect timeout per 429.
+        """
+        from baldur.services.rate_limit_coordinator import RateLimitCoordinator
+
+        with patch.object(RateLimitCoordinator, "_broadcast_to_cluster", autospec=True):
+            yield
+
+    def test_aon_rate_limited_always_hops_even_on_a_memory_store(self, mock_storage):
+        """The publish inside makes this a hop whatever the store type."""
+        from baldur.services.rate_limit_coordinator import RateLimitCoordinator
+
+        coordinator = _deterministic_coordinator(mock_storage)
+        spy = ToThreadSpy()
+
+        with patch(_TO_THREAD, new=spy):
+            in_force = asyncio.run(coordinator.aon_rate_limited("k"))
+
+        assert spy.hopped("on_rate_limited") is True
+        assert in_force > 0.0
+        assert mock_storage.get_state("k").consecutive_429s == 1
+        assert isinstance(coordinator, RateLimitCoordinator)
+
+    def test_aon_rate_limited_forwards_every_argument_and_the_return(
+        self, mock_storage
+    ):
+        """Key, Retry-After and status reach the original; its answer comes back."""
+        coordinator = _deterministic_coordinator(mock_storage)
+
+        with patch.object(
+            coordinator, "on_rate_limited", autospec=True, return_value=12.5
+        ) as original:
+            in_force = asyncio.run(coordinator.aon_rate_limited("k", 30.0, 503))
+
+        original.assert_called_once_with("k", 30.0, 503)
+        assert in_force == 12.5
+
+    def test_aon_success_runs_inline_on_a_memory_store(self, mock_storage):
+        """A dict read under a lock is cheaper than an executor hop."""
+        coordinator = _deterministic_coordinator(mock_storage)
+        mock_storage.increment_consecutive_429s("k")
+        mock_storage.increment_consecutive_429s("k")
+        spy = ToThreadSpy()
+
+        with patch(_TO_THREAD, new=spy):
+            asyncio.run(coordinator.aon_success("k"))
+
+        assert spy.calls == []
+        assert mock_storage.get_state("k").consecutive_429s == 0
+
+    def test_aon_success_hops_for_a_network_backed_store(self):
+        """A network client's read plus conditional write leaves the loop."""
+        storage = NetworkBackedRateLimitStorage()
+        storage.increment_consecutive_429s("k")
+        coordinator = _deterministic_coordinator(storage)
+        spy = ToThreadSpy()
+
+        with patch(_TO_THREAD, new=spy):
+            asyncio.run(coordinator.aon_success("k"))
+
+        assert spy.hopped("on_success") is True
+        assert storage.get_state("k").consecutive_429s == 0
+
+    def test_aget_instance_returns_the_set_slot_without_a_hop(self):
+        """Steady state is a slot read: the same instance, no executor."""
+        from baldur.services.rate_limit_coordinator import RateLimitCoordinator
+
+        RateLimitCoordinator.reset_instance()
+        try:
+            first = RateLimitCoordinator.get_instance()
+            spy = ToThreadSpy()
+
+            with patch(_TO_THREAD, new=spy):
+                got = asyncio.run(RateLimitCoordinator.aget_instance())
+
+            assert got is first
+            assert spy.calls == []
+        finally:
+            RateLimitCoordinator.reset_instance()
+
+    def test_aget_instance_constructs_an_empty_slot_on_a_worker_thread(self):
+        """First construction runs storage auto-detect, so it is hopped once.
+
+        A second call finds the slot set and hops no more — the construction
+        is idempotent across the two surfaces.
+        """
+        from baldur.services.rate_limit_coordinator import RateLimitCoordinator
+
+        RateLimitCoordinator.reset_instance()
+        try:
+            spy = ToThreadSpy()
+
+            with patch(_TO_THREAD, new=spy):
+                first = asyncio.run(RateLimitCoordinator.aget_instance())
+                second = asyncio.run(RateLimitCoordinator.aget_instance())
+
+            assert spy.hopped("get_instance") is True
+            assert len(spy.calls) == 1
+            assert first is second
+            assert first is RateLimitCoordinator.get_instance()
+        finally:
+            RateLimitCoordinator.reset_instance()
+
+    def test_the_twins_leave_the_store_as_their_sync_originals_do(self):
+        """Parity: the same 429 and the same success produce the same state.
+
+        Two identical stores, one driven through the synchronous pair and one
+        through the awaitable pair, end in the same counter and — jitter off —
+        the same cooldown expiry within the clock's drift between the two calls.
+        """
+        sync_storage = MockInMemoryRateLimitStorage()
+        async_storage = MockInMemoryRateLimitStorage()
+        sync_coordinator = _deterministic_coordinator(sync_storage)
+        async_coordinator = _deterministic_coordinator(async_storage)
+
+        sync_coordinator.on_rate_limited("k", 30.0)
+        asyncio.run(async_coordinator.aon_rate_limited("k", 30.0))
+
+        sync_after_429 = sync_storage.get_state("k")
+        async_after_429 = async_storage.get_state("k")
+        assert async_after_429.consecutive_429s == sync_after_429.consecutive_429s == 1
+        assert async_after_429.cooldown_until == pytest.approx(
+            sync_after_429.cooldown_until, abs=0.5
+        )
+
+        sync_coordinator.on_success("k")
+        asyncio.run(async_coordinator.aon_success("k"))
+
+        assert sync_storage.get_state("k").consecutive_429s == 0
+        assert async_storage.get_state("k").consecutive_429s == 0
+
+
+# =============================================================================
+# rate_limit_aware — a 429 the decorated function *raises*
+# =============================================================================
+
+_DECORATED_SURFACES = pytest.mark.parametrize(
+    "is_async", [False, True], ids=["def", "async_def"]
+)
+
+_OBS_TRACKER = (
+    "baldur.services.circuit_breaker.rate_limit_tracker.get_rate_limit_tracker"
+)
+_OBS_CB_SERVICE = (
+    "baldur.services.circuit_breaker.convenience.get_circuit_breaker_service"
+)
+
+
+def _current_scope():
+    from baldur.services.circuit_breaker.rate_limit_observation import current_scope
+
+    return current_scope()
+
+
+def _decorated(coordinator, key: str, body, *, is_async: bool):
+    """Wrap ``body`` (returns or raises) under ``rate_limit_aware`` on either surface."""
+    if is_async:
+
+        @coordinator.rate_limit_aware(key)
+        async def protected():
+            return body()
+
+        return protected
+
+    @coordinator.rate_limit_aware(key)
+    def protected():
+        return body()
+
+    return protected
+
+
+def _call(decorated, *, is_async: bool):
+    """Invoke the decorated function, driving the coroutine to completion."""
+    if is_async:
+        return asyncio.run(decorated())
+    return decorated()
+
+
+def _raising(error):
+    def body():
+        raise error
+
+    return body
+
+
+class TestRateLimitAwareDecoratorRaised429Behavior:
+    """A 429 the wrapped function raises installs a cooldown, then re-raises unchanged.
+
+    The wrapper claims the observation scope, which withholds the breaker
+    stage's own notify — so before this branch existed, a decorated client
+    that *raised* its 429 (``httpx.HTTPStatusError``, ``openai.RateLimitError``)
+    under ``protect(name, retry=False)`` was recorded by nobody. The user's
+    ``is_429`` / ``get_retry_after`` predicates are a response-object contract
+    and never see an exception; the shared classifier answers.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_cluster_broadcast(self):
+        """Neutralise the Dormant-tier cluster broadcast a real 429 would fire.
+
+        ``on_rate_limited`` reaches ``_broadcast_to_cluster``, which eagerly
+        attempts a broker connection where the Kafka adapter is installed — an
+        explicit NON-GOAL of this surface, and ~2 s of connect timeout per 429.
+        """
+        from baldur.services.rate_limit_coordinator import RateLimitCoordinator
+
+        with patch.object(RateLimitCoordinator, "_broadcast_to_cluster", autospec=True):
+            yield
+
+    @_DECORATED_SURFACES
+    def test_a_client_that_raises_429_installs_one_cooldown_and_reraises(
+        self, coordinator_no_jitter_no_debounce, mock_storage, is_async
+    ):
+        """Exactly one cooldown, and the caller sees the client's own object."""
+        error = Exception("429 too many requests")
+        protected = _decorated(
+            coordinator_no_jitter_no_debounce, "k", _raising(error), is_async=is_async
+        )
+
+        with pytest.raises(Exception) as exc_info:
+            _call(protected, is_async=is_async)
+
+        assert exc_info.value is error
+        state = mock_storage.get_state("k")
+        assert state.consecutive_429s == 1
+        assert state.consecutive_429s != 0
+        assert state.cooldown_until > time.time()
+
+    @_DECORATED_SURFACES
+    def test_a_client_that_raises_429_with_retry_after_honours_the_header(
+        self, coordinator_no_jitter_no_debounce, mock_storage, is_async
+    ):
+        """The provider's stated wait reaches the cooldown through the exception."""
+
+        class ThrottledError(Exception):
+            retry_after = 45.0
+
+        protected = _decorated(
+            coordinator_no_jitter_no_debounce,
+            "k",
+            _raising(ThrottledError("429 too many requests")),
+            is_async=is_async,
+        )
+
+        with pytest.raises(ThrottledError):
+            _call(protected, is_async=is_async)
+
+        assert mock_storage.get_state("k").cooldown_until == pytest.approx(
+            time.time() + 45.0, abs=5.0
+        )
+
+    @_DECORATED_SURFACES
+    def test_a_client_that_raises_a_non_429_neither_notifies_nor_resets(
+        self, coordinator_no_jitter_no_debounce, mock_storage, is_async
+    ):
+        """An ordinary failure is not a 429 and not a success: the store is untouched.
+
+        The reset is owed to an accepted value only (the retry loops' rule), so
+        a standing counter survives a transport error.
+        """
+        mock_storage.increment_consecutive_429s("k")
+        mock_storage.increment_consecutive_429s("k")
+        protected = _decorated(
+            coordinator_no_jitter_no_debounce,
+            "k",
+            _raising(ConnectionError("connection reset")),
+            is_async=is_async,
+        )
+
+        with pytest.raises(ConnectionError):
+            _call(protected, is_async=is_async)
+
+        state = mock_storage.get_state("k")
+        assert state.consecutive_429s == 2
+        assert state.cooldown_until == 0.0
+
+    @_DECORATED_SURFACES
+    def test_an_inner_deferral_propagates_as_is_and_raises_429_nothing(
+        self, coordinator_no_jitter_no_debounce, mock_storage, is_async
+    ):
+        """Baldur's own refusal is never read as evidence of a provider 429."""
+        from baldur.services.rate_limit_coordinator import RateLimitDeferredError
+
+        deferral = RateLimitDeferredError(key="inner", not_before=time.time() + 300)
+        protected = _decorated(
+            coordinator_no_jitter_no_debounce,
+            "k",
+            _raising(deferral),
+            is_async=is_async,
+        )
+
+        with pytest.raises(RateLimitDeferredError) as exc_info:
+            _call(protected, is_async=is_async)
+
+        assert exc_info.value is deferral
+        state = mock_storage.get_state("k")
+        assert state.consecutive_429s == 0
+        assert state.cooldown_until == 0.0
+
+    @_DECORATED_SURFACES
+    def test_the_raised_outcome_is_marked_on_the_scope_before_the_verdict(
+        self, coordinator_no_jitter_no_debounce, is_async
+    ):
+        """An enclosing loop catches the same object and must find it already seen."""
+        from baldur.services.circuit_breaker.rate_limit_observation import (
+            close_scope,
+            open_scope,
+        )
+
+        error = Exception("429 too many requests")
+        protected = _decorated(
+            coordinator_no_jitter_no_debounce, "k", _raising(error), is_async=is_async
+        )
+
+        token, scope = open_scope("k")
+        try:
+            with pytest.raises(Exception):
+                _call(protected, is_async=is_async)
+        finally:
+            close_scope(token)
+
+        assert scope.was_classified(error) is True
+        assert scope.coordination_claimed is True
+
+    @_DECORATED_SURFACES
+    def test_a_notify_fault_on_a_raised_429_still_raises_the_clients_error(
+        self, mock_storage, is_async
+    ):
+        """Fail-open: the coordinator's fault never replaces the business exception."""
+        from baldur.services.rate_limit_coordinator import (
+            RateLimitCoordinator,
+            RateLimitCoordinatorConfig,
+        )
+
+        coordinator = RateLimitCoordinator(
+            storage=RaisingRateLimitStorage(
+                mock_storage, fail_on="increment_consecutive_429s"
+            ),
+            config=RateLimitCoordinatorConfig(),
+        )
+        error = Exception("429 too many requests")
+        protected = _decorated(coordinator, "k", _raising(error), is_async=is_async)
+
+        with pytest.raises(Exception) as exc_info:
+            _call(protected, is_async=is_async)
+
+        assert exc_info.value is error
+
+    @_DECORATED_SURFACES
+    def test_a_raising_client_under_a_breaker_frame_with_no_retry_stage_raises_429_once(
+        self, coordinator_no_jitter_no_debounce, mock_storage, is_async
+    ):
+        """The composition the gap was found on: breaker on, retry off, client raises.
+
+        The decorator's claim withholds the breaker frame's notify, so the
+        decorator itself must record the 429 — exactly once (never zero, the
+        pre-fix reading), and the process-wide singleton is never asked.
+        """
+        from baldur.interfaces.repositories import CircuitBreakerStateData
+        from baldur.services.circuit_breaker.config import CircuitBreakerDecision
+        from baldur.services.circuit_breaker.policy import (
+            AsyncCircuitBreakerPolicy,
+            CircuitBreakerPolicy,
+        )
+        from baldur.services.circuit_breaker.rate_limit_tracker import (
+            RateLimitTracker,
+        )
+        from baldur.services.circuit_breaker.service import CircuitBreakerService
+        from baldur.services.rate_limit_coordinator import RateLimitCoordinator
+
+        cb_service = MagicMock(spec=CircuitBreakerService)
+        cb_service.is_enabled = True
+        cb_service.should_allow_with_state.return_value = CircuitBreakerDecision(
+            allowed=True,
+            state=CircuitBreakerStateData(service_name="k", state="closed"),
+        )
+        breaker = CircuitBreakerPolicy(service_name="k", cb_service=cb_service)
+        error = Exception("429 too many requests")
+        seen: dict = {}
+
+        def body():
+            seen["scope"] = _current_scope()
+            raise error
+
+        protected = _decorated(
+            coordinator_no_jitter_no_debounce, "k", body, is_async=is_async
+        )
+        cascade_service = MagicMock(spec=CircuitBreakerService)
+
+        with (
+            patch(_OBS_TRACKER, return_value=MagicMock(spec=RateLimitTracker)),
+            patch(_OBS_CB_SERVICE, return_value=cascade_service),
+            patch.object(
+                RateLimitCoordinator, "get_instance", autospec=True
+            ) as singleton,
+            pytest.raises(Exception) as exc_info,
+        ):
+            if is_async:
+                asyncio.run(AsyncCircuitBreakerPolicy(breaker).execute(protected))
+            else:
+                breaker.execute(protected)
+
+        assert exc_info.value is error
+        assert mock_storage.get_state("k").consecutive_429s == 1
+        assert mock_storage.get_state("k").consecutive_429s != 0
+        singleton.assert_not_called()
+        cb_service.record_failure.assert_called_once()
+        # The cascade half is the decorator's too: the mark it leaves stops the
+        # breaker frame noting the 429, so nobody else can count it.
+        assert seen["scope"].rate_limited == 1
+        cascade_service.record_rate_limit_response.assert_called_once_with("k")
+
+    @_DECORATED_SURFACES
+    def test_a_returning_client_under_a_breaker_frame_feeds_the_cascade_once(
+        self, coordinator_no_jitter_no_debounce, mock_storage, is_async
+    ):
+        """The returned-429 twin of the row above: one cooldown, one cascade note.
+
+        Regression: the ownership mark alone suppressed the breaker frame's
+        cascade note without the decorator noting the 429 itself, so a
+        decorated client under ``protect(name, retry=False)`` fed the breaker's
+        429 detector nothing at all.
+        """
+        from baldur.interfaces.repositories import CircuitBreakerStateData
+        from baldur.services.circuit_breaker.config import CircuitBreakerDecision
+        from baldur.services.circuit_breaker.policy import (
+            AsyncCircuitBreakerPolicy,
+            CircuitBreakerPolicy,
+        )
+        from baldur.services.circuit_breaker.rate_limit_tracker import (
+            RateLimitTracker,
+        )
+        from baldur.services.circuit_breaker.service import CircuitBreakerService
+        from baldur.services.rate_limit_coordinator import RateLimitCoordinator
+
+        cb_service = MagicMock(spec=CircuitBreakerService)
+        cb_service.is_enabled = True
+        cb_service.should_allow_with_state.return_value = CircuitBreakerDecision(
+            allowed=True,
+            state=CircuitBreakerStateData(service_name="k", state="closed"),
+        )
+        breaker = CircuitBreakerPolicy(service_name="k", cb_service=cb_service)
+        response = type("Response", (), {"status_code": 429, "headers": {}})()
+        seen: dict = {}
+
+        def body():
+            seen["scope"] = _current_scope()
+            return response
+
+        protected = _decorated(
+            coordinator_no_jitter_no_debounce, "k", body, is_async=is_async
+        )
+        cascade_service = MagicMock(spec=CircuitBreakerService)
+
+        with (
+            patch(_OBS_TRACKER, return_value=MagicMock(spec=RateLimitTracker)),
+            patch(_OBS_CB_SERVICE, return_value=cascade_service),
+            patch.object(
+                RateLimitCoordinator, "get_instance", autospec=True
+            ) as singleton,
+        ):
+            if is_async:
+                asyncio.run(AsyncCircuitBreakerPolicy(breaker).execute(protected))
+            else:
+                breaker.execute(protected)
+
+        assert mock_storage.get_state("k").consecutive_429s == 1
+        singleton.assert_not_called()
+        assert seen["scope"].rate_limited == 1
+        assert seen["scope"].rate_limited != 0
+        cascade_service.record_rate_limit_response.assert_called_once_with("k")
