@@ -15,6 +15,7 @@ Reference:
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -25,11 +26,14 @@ from baldur.bridges.tenacity.callbacks import (
     BridgeCallbackContext,
     chain,
     make_after_callback,
+    make_async_after_callback,
+    make_async_before_callback,
     make_before_callback,
     make_before_sleep_callback,
     make_retry_error_callback,
     observe_bridge_outcome,
 )
+from baldur.core.exceptions import RateLimitDeferredError
 from baldur.interfaces.resilience_policy import (
     PolicyContext,
     PolicyOutcome,
@@ -60,6 +64,23 @@ __all__ = ["TenacityBridgePolicy", "AsyncTenacityBridgePolicy"]
 _BRIDGE_EXPLICIT_MARKER = "__baldur_bridge_explicit__"
 
 
+def _pure_rate_limit_verdict(outcome: Any) -> bool:
+    """Whether ``outcome`` reads as a 429, with no side effect. Fail-open.
+
+    Used where the bridge needs the verdict without observing the outcome
+    again (it was already marked on the scope), and by the async path to
+    decide whether a classification must leave the event loop.
+    """
+    from baldur.services.retry_handler.rate_limit_detection import (
+        detect_rate_limit,
+    )
+
+    try:
+        return detect_rate_limit(outcome)[0]
+    except Exception:
+        return False
+
+
 class TenacityBridgePolicy(ResiliencePolicy[T]):
     """Wrap a user-supplied tenacity retry config into ``ResiliencePolicy[T]``.
 
@@ -71,8 +92,9 @@ class TenacityBridgePolicy(ResiliencePolicy[T]):
         stop: tenacity stop strategy (e.g. ``stop_after_attempt(3)``).
         wait: tenacity wait strategy (e.g. ``wait_exponential()``).
         retry: tenacity predicate (e.g. ``retry_if_exception_type(IOError)``).
-        domain: Logical domain name (used as event metadata and as the
-            default ``rate_limit_key`` source if no explicit key is given).
+        domain: Logical domain name (event metadata and the retry-pressure
+            series label). It is never a coordination key: the bridge
+            coordinates only under an explicit ``rate_limit_key``.
         retry_budget: ``AdaptiveRetryBudget`` instance shared with native
             ``RetryPolicy`` for global retry-ratio enforcement. ``None``
             disables the budget guard (vanilla tenacity behavior).
@@ -80,7 +102,9 @@ class TenacityBridgePolicy(ResiliencePolicy[T]):
             ``None`` and ``rate_limit_key`` is provided, the policy resolves
             the singleton via ``RateLimitCoordinator.get_instance()``.
         rate_limit_key: Key passed to ``wait_if_needed`` / ``on_rate_limited``.
-            ``None`` disables rate-limit integration.
+            ``None`` or an empty string disables rate-limit integration — an
+            empty override is not an identity, and coordinating on it would
+            share one cooldown record across unrelated downstreams.
         rate_limit_max_wait: Maximum seconds an attempt may block on an active
             429 cooldown. ``None`` uses the coordinator's configured
             ``max_delay``. A cooldown longer than the bound stops the loop and
@@ -94,6 +118,11 @@ class TenacityBridgePolicy(ResiliencePolicy[T]):
             attempts have failed. May return a fallback value.
         retrying_kwargs: Extra kwargs forwarded to ``tenacity.Retrying``
             (e.g. ``reraise=True``). Reserved for advanced uses.
+
+    A ``RateLimitDeferredError`` raised *inside* the wrapped function (by an
+    inner ``rate_limit_aware`` client) is an ordinary exception to the user's
+    ``retry`` predicate — the bridge does not govern that predicate. The
+    bridge's own deferral is decided before an attempt and never enters it.
     """
 
     def __init__(
@@ -133,12 +162,12 @@ class TenacityBridgePolicy(ResiliencePolicy[T]):
         self._user_retry_error_callback = retry_error_callback
         self._retrying_kwargs = dict(retrying_kwargs) if retrying_kwargs else {}
 
-        # Resolve coordinator lazily — only if a key is provided.
+        # Resolve coordinator lazily — only if a (non-empty) key is provided.
         if rate_limit_coordinator is not None:
             self._rate_limit_coordinator: RateLimitCoordinator | None = (
                 rate_limit_coordinator
             )
-        elif rate_limit_key is not None:
+        elif rate_limit_key:
             from baldur.services.rate_limit_coordinator.coordinator import (
                 RateLimitCoordinator,
             )
@@ -256,22 +285,31 @@ class TenacityBridgePolicy(ResiliencePolicy[T]):
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _build_ctx_and_kwargs(self) -> tuple[BridgeCallbackContext, dict[str, Any]]:
+    def _build_ctx_and_kwargs(
+        self, *, use_async_callbacks: bool = False
+    ) -> tuple[BridgeCallbackContext, dict[str, Any]]:
         """Build the per-call ``BridgeCallbackContext`` + ``Retrying`` kwargs.
 
         Shared by the sync and async execute paths — stop/wait/retry strategies
         plus Baldur's chained before/after/before_sleep/retry_error callbacks.
-        Does NOT set the ``_BRIDGE_EXPLICIT_MARKER`` kwarg; that is the sync
-        path's Level-1-instrument concern (the async path never injects it).
+        The async path installs the coroutine ``before`` / ``after`` pair, which
+        ``tenacity.AsyncRetrying`` awaits natively. Does NOT set the
+        ``_BRIDGE_EXPLICIT_MARKER`` kwarg; that is the sync path's
+        Level-1-instrument concern (the async path never injects it).
         """
         # Outbound 429 observation scope, resolved once per call and carried on
         # the context so the per-attempt callbacks read it without re-resolving.
-        # A bridge that carries a coordinator also carries its own coordination
-        # decision (an explicit ``rate_limit_key`` or an injected coordinator is
-        # a code-level opt-in), so it claims the call: the breaker stage above
-        # must not install a second cooldown for the same 429.
+        # A bridge that will drive the coordinator — a coordinator AND a real
+        # key — carries its own coordination decision, so it claims the call:
+        # the breaker stage above must not install a second cooldown for the
+        # same 429. An injected coordinator with no key coordinates nothing
+        # and leaves the claim to the breaker stage.
         scope = self._observation_scope()
-        if scope is not None and self._rate_limit_coordinator is not None:
+        if (
+            scope is not None
+            and self._rate_limit_coordinator is not None
+            and self._rate_limit_key
+        ):
             scope.claim_coordination()
 
         ctx = BridgeCallbackContext(
@@ -283,8 +321,12 @@ class TenacityBridgePolicy(ResiliencePolicy[T]):
             scope=scope,
         )
 
-        before_cb = chain(self._user_before, make_before_callback(ctx))
-        after_cb = chain(self._user_after, make_after_callback(ctx))
+        if use_async_callbacks:
+            before_cb = chain(self._user_before, make_async_before_callback(ctx))
+            after_cb = chain(self._user_after, make_async_after_callback(ctx))
+        else:
+            before_cb = chain(self._user_before, make_before_callback(ctx))
+            after_cb = chain(self._user_after, make_after_callback(ctx))
         before_sleep_cb = chain(
             self._user_before_sleep, make_before_sleep_callback(ctx)
         )
@@ -322,8 +364,8 @@ class TenacityBridgePolicy(ResiliencePolicy[T]):
 
     def _classify_unseen_final_outcome(
         self, outcome: Any, ctx: BridgeCallbackContext, retrying: Any
-    ) -> None:
-        """Observe the final outcome when ``after`` never ran for it.
+    ) -> bool:
+        """Observe the final outcome when ``after`` never ran for it; report a 429.
 
         tenacity returns an accepted value, and re-raises an exception its
         retry predicate declines, without invoking ``after`` — so for those two
@@ -335,15 +377,46 @@ class TenacityBridgePolicy(ResiliencePolicy[T]):
         entry or an unset ``last_attempt`` classifies here. The scope's identity
         mark is what makes erring that way safe, so it is consulted first — an
         outcome ``after`` really did classify is a no-op here rather than a
-        second 429 in the cascade.
+        second 429 in the cascade. The returned verdict is what gates the
+        success reset: an accepted value that is itself a 429 earns none.
         """
         if ctx.scope is not None and ctx.scope.was_classified(outcome):
-            return
+            return _pure_rate_limit_verdict(outcome)
         if ctx.last_attempt is not None and ctx.last_attempt == (
             self._statistics_attempts(retrying)
         ):
-            return
-        observe_bridge_outcome(ctx, outcome)
+            return _pure_rate_limit_verdict(outcome)
+        return observe_bridge_outcome(ctx, outcome)
+
+    @staticmethod
+    def _owes_success_reset(ctx: BridgeCallbackContext, final_is_429: bool) -> bool:
+        """Whether the accepted outcome earns the coordinator a ladder reset.
+
+        Only for a loop that ended in an accepted success — never one the
+        exhaustion callback saw (a user fallback is not a success), never
+        without a rate-limit signal on this call (the reset costs a storage
+        read), never when the accepted value is itself a 429, and only when
+        this bridge drives a coordinator under a real key.
+        """
+        return (
+            ctx.snapshot is None
+            and ctx.rate_limit_signal
+            and not final_is_429
+            and ctx.rate_limit_coordinator is not None
+            and bool(ctx.rate_limit_key)
+        )
+
+    @staticmethod
+    def _notify_success(ctx: BridgeCallbackContext) -> None:
+        """Reset the consecutive-429 ladder after an accepted success. Fail-open."""
+        try:
+            ctx.rate_limit_coordinator.on_success(ctx.rate_limit_key)  # type: ignore[union-attr, arg-type]
+        except Exception as e:
+            logger.warning(
+                "bridge.tenacity_rate_limit_success_notify_failed",
+                error=str(e),
+                key=ctx.rate_limit_key,
+            )
 
     def _budget_abort_result(
         self, ctx: BridgeCallbackContext, start: float
@@ -374,10 +447,6 @@ class TenacityBridgePolicy(ResiliencePolicy[T]):
         so a requeue-capable caller can reschedule rather than treat this as a
         failed attempt — the deferred attempt never called ``func``.
         """
-        from baldur.services.rate_limit_coordinator.models import (
-            RateLimitDeferredError,
-        )
-
         duration_ms = (time.perf_counter() - start) * 1000.0
         # ``ctx.snapshot`` is written only by the exhaustion callback, which a
         # ``before``-raised abort never reaches — reading it here reported
@@ -432,6 +501,16 @@ class TenacityBridgePolicy(ResiliencePolicy[T]):
     ) -> PolicyResult[T]:
         """Translate a propagated (reraise/non-retryable) exception into FAILURE."""
         self._classify_unseen_final_outcome(exc, ctx, retrying)
+        return self._translate_propagated_exception(exc, ctx, retrying, start)
+
+    def _translate_propagated_exception(
+        self,
+        exc: Exception,
+        ctx: BridgeCallbackContext,
+        retrying: Any,
+        start: float,
+    ) -> PolicyResult[T]:
+        """The pure half of :meth:`_generic_exception_result` (no I/O)."""
         duration_ms = (time.perf_counter() - start) * 1000.0
         snapshot = ctx.snapshot
         attempts = (
@@ -453,15 +532,38 @@ class TenacityBridgePolicy(ResiliencePolicy[T]):
         retrying: Any,
         start: float,
     ) -> PolicyResult[T]:
-        """Translate a completed tenacity loop into SUCCESS (or user-fallback FAILURE)."""
-        self._classify_unseen_final_outcome(value, ctx, retrying)
+        """Translate a completed tenacity loop into SUCCESS (or user-fallback FAILURE).
+
+        The accepted outcome is classified here (tenacity runs no ``after``
+        for it), and — when this call observed a rate-limit signal and the
+        accepted value is not itself a 429 — the coordinator's consecutive-429
+        ladder is reset, the way the native loops reset it on the success
+        that ends theirs. The reset never fires for a user fallback: the
+        exhaustion callback ran, so the loop did not end in a success.
+        """
+        final_is_429 = self._classify_unseen_final_outcome(value, ctx, retrying)
+        if self._owes_success_reset(ctx, final_is_429):
+            self._notify_success(ctx)
+        return self._translate_completed_loop(value, ctx, retrying, start)
+
+    def _translate_completed_loop(
+        self,
+        value: Any,
+        ctx: BridgeCallbackContext,
+        retrying: Any,
+        start: float,
+    ) -> PolicyResult[T]:
+        """The pure half of :meth:`_success_or_fallback_result` (no I/O)."""
         duration_ms = (time.perf_counter() - start) * 1000.0
         snapshot = ctx.snapshot
 
         # Successful tenacity loop, but the user's retry_error_callback may
         # have produced a fallback value (i.e. all attempts failed but
-        # tenacity returned the user's fallback). Detect via snapshot.
-        if snapshot is not None and snapshot.last_error is not None:
+        # tenacity returned the user's fallback). Detect via the snapshot,
+        # which the exhaustion callback writes on every exhaustion — a
+        # rejected-result exhaustion has no exception behind it, so keying on
+        # ``last_error`` would read that fallback as a success.
+        if snapshot is not None:
             return PolicyResult(
                 value=value,
                 outcome=PolicyOutcome.FAILURE,
@@ -535,9 +637,13 @@ class AsyncTenacityBridgePolicy(TenacityBridgePolicy[T]):
 
     Runs ``func`` under ``tenacity.AsyncRetrying`` — ``AsyncRetrying.__call__``
     is a coroutine, so the loop is driven with ``await``. Reuses the sync
-    bridge's constructor, collaborators (budget / rate-limit), the sync
-    before/after/before_sleep/retry_error callbacks (tenacity calls them
-    synchronously within the async loop), and the result-translation helpers.
+    bridge's constructor, collaborators (budget / rate-limit) and the
+    result-translation helpers, but installs the **coroutine** ``before`` /
+    ``after`` pair: the cooldown wait is an ``asyncio.sleep`` and every
+    cooldown write runs on a worker thread, so a shared cooldown costs this
+    call its latency and never stalls the event loop. ``AsyncRetrying`` awaits
+    a coroutine action natively (tenacity 8.3+, the ``tenacity`` extra's
+    floor).
 
     Marker handling differs from the sync bridge: ``AsyncRetrying`` is NOT a
     subclass of ``Retrying`` (MRO ``[AsyncRetrying, BaseRetrying, ABC]``) and
@@ -597,7 +703,7 @@ class AsyncTenacityBridgePolicy(TenacityBridgePolicy[T]):
             _CooldownDeferredAbort,
         )
 
-        ctx, retrying_kwargs = self._build_ctx_and_kwargs()
+        ctx, retrying_kwargs = self._build_ctx_and_kwargs(use_async_callbacks=True)
 
         # AsyncRetrying is never Level-1-instrumented and vanilla __init__
         # rejects the marker kwarg — set ONLY the instance attribute.
@@ -614,6 +720,50 @@ class AsyncTenacityBridgePolicy(TenacityBridgePolicy[T]):
         except _t.RetryError as exc:
             return self._retry_error_result(exc, ctx, start)
         except Exception as exc:  # propagated by reraise=True or non-retryable
-            return self._generic_exception_result(exc, ctx, retrying, start)
+            return await self._ageneric_exception_result(exc, ctx, retrying, start)
 
-        return self._success_or_fallback_result(value, ctx, retrying, start)
+        return await self._asuccess_or_fallback_result(value, ctx, retrying, start)
+
+    async def _ageneric_exception_result(
+        self,
+        exc: Exception,
+        ctx: BridgeCallbackContext,
+        retrying: Any,
+        start: float,
+    ) -> PolicyResult[T]:
+        """Async twin of :meth:`_generic_exception_result`.
+
+        The final-outcome classification installs a cooldown for an unseen
+        429, which writes the shared store and publishes on the event bus, so
+        it runs on a worker thread when the outcome looks rate-limited; every
+        other outcome classifies inline (a pure attribute scan).
+        """
+        if _pure_rate_limit_verdict(exc):
+            await asyncio.to_thread(
+                self._classify_unseen_final_outcome, exc, ctx, retrying
+            )
+        else:
+            self._classify_unseen_final_outcome(exc, ctx, retrying)
+        return self._translate_propagated_exception(exc, ctx, retrying, start)
+
+    async def _asuccess_or_fallback_result(
+        self,
+        value: Any,
+        ctx: BridgeCallbackContext,
+        retrying: Any,
+        start: float,
+    ) -> PolicyResult[T]:
+        """Async twin of :meth:`_success_or_fallback_result`.
+
+        Same hop rule as the exception twin for the classification; the
+        success reset is a store read plus a conditional write, hopped too.
+        """
+        if _pure_rate_limit_verdict(value):
+            final_is_429 = await asyncio.to_thread(
+                self._classify_unseen_final_outcome, value, ctx, retrying
+            )
+        else:
+            final_is_429 = self._classify_unseen_final_outcome(value, ctx, retrying)
+        if self._owes_success_reset(ctx, final_is_429):
+            await asyncio.to_thread(self._notify_success, ctx)
+        return self._translate_completed_loop(value, ctx, retrying, start)

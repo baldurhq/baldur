@@ -10,6 +10,29 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+### Added
+
+- `aprotect()` and the async `@retry` branch now share the outbound 429 cooldown across workers.
+- `rate_limit_key` on a `RetryPolicyConfig` now keys the cooldown on the async path too.
+- `@coordinator.rate_limit_aware` now works on an `async def` without blocking the event loop.
+- A `rate_limit_aware`-decorated function that *raises* its 429 installs the shared cooldown too.
+
+### Changed
+
+- `@retry` raises `RateLimitDeferredError` on a cooldown deferral, not `MaxRetriesExceededError`.
+- A cooldown deferral raised inside a retry loop is no longer retried by default.
+- The `tenacity` extra now requires tenacity 8.3.0 or newer.
+- A tenacity bridge driven by `retry_if_result` installs one cooldown per returned 429 response.
+- A tenacity bridge whose result predicate never accepts now reports a failure, not `None`.
+
+### Fixed
+
+- A worker waiting out a 429 cooldown no longer resumes early when a peer extends it.
+- The tenacity bridge's cooldown wait no longer blocks the event loop under `aprotect()`.
+- The tenacity bridge resets the consecutive-429 ladder after the success that ends its loop.
+- A 429 seen by both a `rate_limit_aware` client and its retry loop installs one cooldown, not two.
+- `RateLimitDeferredError` is now importable from `baldur.core.exceptions` as well.
+
 ## [1.12.2] - 2026-09-09
 
 ### Fixed

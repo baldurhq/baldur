@@ -139,7 +139,7 @@ class RetryPolicyConfig:
     retry_on_result: Callable[[Any], bool] | None = None
     max_elapsed: float | None = None
 
-    # --- Outbound 429 coordination (Baldur's *synchronous* retry stage only) ---
+    # --- Outbound 429 coordination (both retry stages, sync and async) ---
     # rate_limit_aware: opt out of the default RateLimitCoordinator resolution
     # for this policy. Default-True, but inert unless the call carries a domain
     # identity: with no rate_limit_key and the placeholder domain ("default"),
@@ -147,10 +147,10 @@ class RetryPolicyConfig:
     # unrelated downstreams into a single cooldown record.
     # rate_limit_key: override the coordination key; unset falls back to domain.
     #
-    # Neither field reaches the asynchronous retry stage. AsyncRetryPolicy
-    # consumes this same config class and its from_policy_config mapping does
-    # not carry them, so on aprotect() and the async @retry branch both are
-    # silently inert. Async 429 coordination is opt-in via the tenacity bridge.
+    # Both fields reach both retry stages: AsyncRetryPolicy.from_policy_config
+    # maps them, so aprotect() and the async @retry branch coordinate under the
+    # same identity rule and levers as protect() — the shared resolver in
+    # services/retry_handler/coordination.py is the single source for both.
     rate_limit_aware: bool = True
     rate_limit_key: str | None = None
 

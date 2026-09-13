@@ -1033,9 +1033,9 @@ def _reset_rate_limit_coordinator():
         except (AttributeError, TypeError):
             pass
 
-    policy_mod = sys.modules.get("baldur.services.retry_handler.policy")
-    if policy_mod is not None:
-        warned = getattr(policy_mod, "_unidentified_key_warned", None)
+    coordination_mod = sys.modules.get("baldur.services.retry_handler.coordination")
+    if coordination_mod is not None:
+        warned = getattr(coordination_mod, "_unidentified_key_warned", None)
         if warned is not None:
             warned.clear()
 

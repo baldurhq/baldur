@@ -27,6 +27,7 @@ from typing import Any, TypeVar
 
 import structlog
 
+from baldur.core.exceptions import RateLimitDeferredError
 from baldur.core.execution_mode import get_execution_mode, intervention_suppressed
 from baldur.interfaces.resilience_policy import (
     PolicyContext,
@@ -57,14 +58,24 @@ T = TypeVar("T")
 
 
 def _is_rate_limit_deferral(error: BaseException) -> bool:
-    """Whether ``error`` is Baldur's own "the call was never made" refusal.
-
-    Lazy import, mirroring how the 429 classifier defers the same symbol: it
-    keeps the coordinator package out of this module's import-time graph.
-    """
-    from baldur.services.rate_limit_coordinator.models import RateLimitDeferredError
-
+    """Whether ``error`` is Baldur's own "the call was never made" refusal."""
     return isinstance(error, RateLimitDeferredError)
+
+
+def _looks_rate_limited(outcome: Any) -> bool:
+    """Pre-classify an outcome for the async frame's offload decision. Fail-open.
+
+    A rate-limited outcome makes the recording path write the shared cooldown
+    store and publish on the event bus, which must not run on the event loop;
+    every other outcome keeps the inline in-memory path. A classifier fault
+    (a caller-owned ``headers`` that raises on read) answers ``False`` so the
+    breaker's own recording — which classifies again, guarded — is never
+    skipped.
+    """
+    try:
+        return detect_rate_limit(outcome)[0]
+    except Exception:
+        return False
 
 
 class CircuitBreakerPolicy(ResiliencePolicy[T]):
@@ -505,6 +516,14 @@ class AsyncCircuitBreakerPolicy:
         ``BaseException`` — which escapes the ``except Exception`` boundary
         untouched, so a client-disconnect cancellation records no failure and
         cannot trip the breaker. Never widen this to ``except BaseException``.
+
+        A rate-limited final outcome is recorded on a worker thread: when no
+        inner stage claimed the call, recording it installs the fleet-wide
+        cooldown, which writes the shared store and publishes on the event
+        bus — neither may run on the loop. Every other outcome keeps the
+        inline in-memory path, so the success hot path pays no hop. The scope
+        is passed explicitly and mutated in place, so the thread writes the
+        same record this frame opened.
         """
         inner = self._inner
         verdict, reject_result, hint_state = inner._admit()
@@ -516,9 +535,16 @@ class AsyncCircuitBreakerPolicy:
         token, scope = open_scope(inner.service_name, inner._is_failure)
         try:
             value = await func(*args, **kwargs)
+            if _looks_rate_limited(value):
+                return await asyncio.to_thread(
+                    inner._on_success, value, hint_state, scope
+                )
             return inner._on_success(value, hint_state, scope)
         except Exception as e:
-            inner._on_failure(e, hint_state, scope)
+            if _looks_rate_limited(e):
+                await asyncio.to_thread(inner._on_failure, e, hint_state, scope)
+            else:
+                inner._on_failure(e, hint_state, scope)
             raise  # propagate so an upper Policy (Retry, etc.) can handle it
         finally:
             close_scope(token)

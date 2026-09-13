@@ -42,9 +42,9 @@ from baldur.services.rate_limit_coordinator.models import (
     RateLimitResult,
 )
 from baldur.services.retry_handler.models import RetryPolicyConfig
-from baldur.services.retry_handler.policy import (
-    _UNIDENTIFIED_DOMAIN,
-    RetryPolicy,
+from baldur.services.retry_handler.policy import RetryPolicy
+from baldur.services.retry_handler.rate_limit_detection import (
+    UNIDENTIFIED_COORDINATION_KEY as _UNIDENTIFIED_DOMAIN,
 )
 from baldur.settings.rate_limit_backoff import reset_rate_limit_backoff_settings
 from baldur.settings.retry import reset_retry_settings

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from baldur.core.exceptions import RateLimitDeferredError
 from baldur.utils.retry_after import parse_retry_after
 
 __all__ = [
@@ -150,10 +151,6 @@ def response_retry_after(value: Any) -> float | None:
 
 def _detect_from_exception(exception: BaseException) -> tuple[bool, float | None]:
     """Classify a raised outcome by its message and type name."""
-    # Local import: keeps the coordinator package out of this module's import
-    # graph, matching how the retry policy defers the same symbol.
-    from baldur.services.rate_limit_coordinator.models import RateLimitDeferredError
-
     if isinstance(exception, RateLimitDeferredError):
         return False, None
 
@@ -174,9 +171,12 @@ def _detect_from_exception(exception: BaseException) -> tuple[bool, float | None
         # no cooldown while the consecutive counter still advances.
         retry_after = parse_retry_after(exception.retry_after)  # type: ignore[attr-defined]
     elif hasattr(exception, "response"):
-        response = exception.response  # type: ignore[attr-defined]
-        if hasattr(response, "headers"):
-            retry_after = parse_retry_after(response.headers.get("Retry-After"))
+        # Guarded like the value-side read: a headers object that raises on
+        # ``.get`` is a caller-owned fault, and letting it escape here would
+        # replace the client's own exception at every frame that classifies
+        # it — the breaker would then record the classifier's error instead of
+        # the business one.
+        retry_after = response_retry_after(exception.response)  # type: ignore[attr-defined]
 
     return is_rate_limited, retry_after
 

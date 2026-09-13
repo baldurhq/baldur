@@ -12,22 +12,28 @@ Key Features:
     - Distributed state via pluggable storage
 
 Coverage:
-    Baldur's own *synchronous* retry stage consults this coordinator by
-    default, provided the call carries a domain identity — the coordination key
-    is ``rate_limit_key`` or, failing that, ``domain``. A call that never named
-    a domain is not coordinated, because the placeholder is shared by every
-    such caller and one cooldown record cannot stand for unrelated downstreams.
-    Two levers turn the default off: ``rate_limit_aware`` on the retry config
-    and ``BALDUR_RATE_LIMIT_BACKOFF_COORDINATION_ENABLED``. Passing a
-    coordinator explicitly overrides both.
+    Both of Baldur's retry stages — the synchronous ``RetryPolicy`` and the
+    asynchronous ``AsyncRetryPolicy`` behind ``aprotect()`` and the async
+    ``@retry`` branch — consult this coordinator by default, provided the call
+    carries a domain identity: the coordination key is ``rate_limit_key`` or,
+    failing that, ``domain``. A call that never named a domain is not
+    coordinated, because the placeholder is shared by every such caller and
+    one cooldown record cannot stand for unrelated downstreams. Two levers
+    turn the default off: ``rate_limit_aware`` on the retry config and
+    ``BALDUR_RATE_LIMIT_BACKOFF_COORDINATION_ENABLED``. Passing a coordinator
+    explicitly overrides both. The same identity rule and lever order apply on
+    both stages, from one shared resolver.
 
-    Detection is exception-borne: the retry stage classifies a 429 from the
-    exception a call raises. A client that reports the 429 as a returned value
-    instead installs no cooldown, even when a result predicate retries on it.
+    Detection covers both shapes: a 429 raised as an exception and a 429 a
+    client hands back as a returned value are classified alike, per attempt,
+    and each installs a cooldown once.
 
-    Asynchronous surfaces do not participate in the default. Async callers who
-    want outbound 429 coordination opt in through the tenacity bridge with a
-    ``rate_limit_key``; a bring-your-own retry engine owns its own coordination.
+    The asynchronous stage leaves the event loop free: it waits through
+    :meth:`RateLimitCoordinator.await_if_needed` (an ``asyncio.sleep``), and
+    every store write or event publish it triggers runs on a worker thread.
+    The tenacity bridge (sync and async) and the ``rate_limit_aware``
+    decorator (on a ``def`` or an ``async def``) are the direct-drive surfaces
+    for a retry engine Baldur does not own.
 
     The cooldown is shared per key, so two call sites hitting the same provider
     under different domains do not share one — the key is the unit of
@@ -40,9 +46,13 @@ Storage:
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
+from enum import Enum
 from typing import Any, TypeVar
 
 import structlog
@@ -53,6 +63,7 @@ from baldur.core.rate_limiting import CooldownGate
 from baldur.interfaces.rate_limit_storage import (
     RateLimitState,
     RateLimitStorageInterface,
+    RateLimitStorageType,
 )
 from baldur.services.retry_handler.rate_limit_detection import (
     detect_rate_limit,
@@ -123,6 +134,57 @@ T = TypeVar("T")
 # Minimum cooldown floor (seconds) applied after backoff+jitter so a 429 always
 # yields a non-trivial wait even when jitter drives the computed delay toward zero.
 _MIN_COOLDOWN_SECONDS: float = 0.1
+
+
+class _WaitKind(str, Enum):
+    """What one read of the shared state tells a waiter to do."""
+
+    IDLE = "idle"
+    SERVE = "serve"
+    DEFER = "defer"
+
+
+@dataclass(frozen=True)
+class _WaitPlan:
+    """One step of the serve-or-defer decision, computed from a single state read.
+
+    ``seconds`` is the sleep a ``SERVE`` step imposes; ``not_before`` is the
+    expiry a ``DEFER`` step refuses to wait for.
+    """
+
+    kind: _WaitKind
+    seconds: float = 0.0
+    not_before: float | None = None
+
+
+def _plan_wait(state: RateLimitState, bound: float) -> _WaitPlan:
+    """Decide serve, defer or idle from one state read and the remaining bound.
+
+    Pure: the synchronous and the awaitable wait both step through this
+    planner, so the two cannot disagree on serve-or-defer — only the sleep
+    primitive and the thread hop differ between them. A remaining cooldown
+    that fits within ``bound`` is served in full; one that does not is
+    deferred, because a slice shorter than the remaining cooldown cannot make
+    the request legal any sooner and would only burn the caller's budget.
+    """
+    remaining = state.remaining_cooldown
+    if remaining <= 0.0:
+        return _WaitPlan(_WaitKind.IDLE)
+    if remaining > bound:
+        return _WaitPlan(_WaitKind.DEFER, not_before=state.cooldown_until)
+    return _WaitPlan(_WaitKind.SERVE, seconds=remaining)
+
+
+def _extended_past(state: RateLimitState, target_until: float) -> bool:
+    """Whether a peer moved the stored expiry later than the one slept toward.
+
+    The stored cooldown is monotonic (``extend_cooldown`` max-merges), so any
+    extension a peer landed while this waiter slept is visible as a later
+    ``cooldown_until``. A re-read that shows no later expiry means the segment
+    just slept was the whole cooldown — the clock's own granularity is not an
+    extension and never costs a second sleep.
+    """
+    return state.cooldown_until > target_until
 
 
 class RateLimitCoordinator:
@@ -226,6 +288,21 @@ class RateLimitCoordinator:
         return cls._instance
 
     @classmethod
+    async def aget_instance(cls) -> RateLimitCoordinator:
+        """Awaitable twin of :meth:`get_instance` for callers on an event loop.
+
+        Steady state is a slot read with no thread hop. The first construction
+        runs storage auto-detect — for a configured Redis that is a bounded
+        connect probe, the one blocking step ``baldur.init()`` does not
+        pre-warm — so it is moved to a worker thread rather than paid on the
+        loop. The unlocked slot read mirrors ``get_instance``'s own first check.
+        """
+        instance = cls._instance
+        if instance is not None:
+            return instance
+        return await asyncio.to_thread(cls.get_instance)
+
+    @classmethod
     def reset_instance(cls) -> None:
         """Reset singleton instance for test isolation.
 
@@ -314,6 +391,20 @@ class RateLimitCoordinator:
         """Get current rate limit state for a key."""
         return self._storage.get_state(key)
 
+    async def _store_call(self, fn: Callable[..., T], *args: Any) -> T:
+        """Run one storage-bound call without blocking the event loop.
+
+        The in-process store is a dict read under a lock — an executor hop
+        would cost more than the work it defers, so it runs inline. Every other
+        backend is a synchronous network client and is hopped to a worker
+        thread. The Redis adapter reports ``REDIS`` while serving its
+        in-process fallback too, so it keeps the hop (that call may run the
+        recovery probe).
+        """
+        if self._storage.storage_type is RateLimitStorageType.MEMORY:
+            return fn(*args)
+        return await asyncio.to_thread(fn, *args)
+
     def wait_if_needed(
         self, key: str, max_wait: float | None = None
     ) -> RateLimitResult:
@@ -331,6 +422,13 @@ class RateLimitCoordinator:
         caller decides what to do next (requeue, fail, drop); the shared
         cooldown is left untouched either way.
 
+        After each served segment the shared state is read again: a peer that
+        extended the cooldown while this call slept moves the expiry later, and
+        the extension is served too when it still fits the bound. When it does
+        not, the call returns ``deferred=True`` with ``waited=True`` and the
+        time already slept in ``wait_time`` — it sleeps nothing *further*. The
+        total sleep never exceeds the bound.
+
         Args:
             key: Rate limit key (e.g., "payment_api", "external_service")
             max_wait: Maximum seconds this call may sleep. ``None`` uses the
@@ -347,59 +445,133 @@ class RateLimitCoordinator:
         # records and no thread) is revived from the request path instead.
         self._announcer.ensure_running()
 
-        state = self._storage.get_state(key)
+        bound = self._config.max_delay if max_wait is None else max_wait
+        slept = 0.0
+        target_until = 0.0
+        while True:
+            state = self._storage.get_state(key)
+            if slept > 0.0 and not _extended_past(state, target_until):
+                return self._served_result(state, slept)
 
-        if state.is_in_cooldown:
-            wait_time = state.remaining_cooldown
-            bound = self._config.max_delay if max_wait is None else max_wait
+            plan = _plan_wait(state, bound - slept)
+            if plan.kind is _WaitKind.IDLE:
+                if slept > 0.0:
+                    return self._served_result(state, slept)
+                return self._idle_result(key, state)
+            if plan.kind is _WaitKind.DEFER:
+                return self._deferred_result(key, state, bound, slept)
 
-            if wait_time > bound:
-                logger.warning(
-                    "rate_limit_coordinator.wait_deferred",
-                    wait_time=wait_time,
-                    max_wait=bound,
-                    key=key,
-                    state=state.consecutive_429s,
-                )
-                _record_rate_limit_deferral(key=key)
-                return RateLimitResult(
-                    waited=False,
-                    wait_time=0.0,
-                    was_rate_limited=True,
-                    consecutive_429s=state.consecutive_429s,
-                    is_canary=False,
-                    deferred=True,
-                    not_before=state.cooldown_until,
-                )
+            self._record_wait_segment(key, state, plan.seconds)
+            time.sleep(plan.seconds)
+            slept += plan.seconds
+            target_until = state.cooldown_until
 
-            logger.info(
-                "rate_limit_coordinator.waiting",
-                wait_time=wait_time,
-                key=key,
-                state=state.consecutive_429s,
-            )
+    async def await_if_needed(
+        self, key: str, max_wait: float | None = None
+    ) -> RateLimitResult:
+        """Awaitable twin of :meth:`wait_if_needed` — same contract, no loop block.
 
-            _record_rate_limit_wait(key=key, wait_seconds=wait_time)
+        The serve-or-defer decision, the re-check after each served segment,
+        the canary mark and the wait / deferral series are the ones
+        :meth:`wait_if_needed` produces; only the sleep is an ``asyncio.sleep``
+        and each state read is hopped to a worker thread for a network-backed
+        store (the in-process store is read inline). Cancellation of the
+        awaiting task cancels the sleep like any other ``await``.
+        """
+        await self._store_call(self._announcer.ensure_running)
 
-            time.sleep(wait_time)
+        bound = self._config.max_delay if max_wait is None else max_wait
+        slept = 0.0
+        target_until = 0.0
+        while True:
+            state = await self._store_call(self._storage.get_state, key)
+            if slept > 0.0 and not _extended_past(state, target_until):
+                return self._served_result(state, slept)
 
-            return RateLimitResult(
-                waited=True,
-                wait_time=wait_time,
-                was_rate_limited=True,
-                consecutive_429s=state.consecutive_429s,
-                is_canary=False,
-            )
+            plan = _plan_wait(state, bound - slept)
+            if plan.kind is _WaitKind.IDLE:
+                if slept > 0.0:
+                    return self._served_result(state, slept)
+                return self._idle_result(key, state)
+            if plan.kind is _WaitKind.DEFER:
+                return self._deferred_result(key, state, bound, slept)
 
-        # Right after cooldown ends - check canary mode
-        is_canary = self._check_canary_mode(key, state)
+            self._record_wait_segment(key, state, plan.seconds)
+            await asyncio.sleep(plan.seconds)
+            slept += plan.seconds
+            target_until = state.cooldown_until
 
+    def _record_wait_segment(
+        self, key: str, state: RateLimitState, seconds: float
+    ) -> None:
+        """Log and observe one imposed wait segment, before it is slept.
+
+        Observed before the sleep on purpose: a caller killed mid-sleep still
+        had the full segment imposed on it. One observation per segment — a
+        peer's extension that is served after a re-read is a second imposed
+        wait and is observed as one.
+        """
+        logger.info(
+            "rate_limit_coordinator.waiting",
+            wait_time=seconds,
+            key=key,
+            state=state.consecutive_429s,
+        )
+        _record_rate_limit_wait(key=key, wait_seconds=seconds)
+
+    def _idle_result(self, key: str, state: RateLimitState) -> RateLimitResult:
+        """The result for a key outside cooldown — the canary decision lives here."""
         return RateLimitResult(
             waited=False,
             wait_time=0.0,
             was_rate_limited=state.consecutive_429s > 0,
             consecutive_429s=state.consecutive_429s,
-            is_canary=is_canary,
+            is_canary=self._check_canary_mode(key, state),
+        )
+
+    @staticmethod
+    def _served_result(state: RateLimitState, slept: float) -> RateLimitResult:
+        """The result after the cooldown — and every extension that fit — was slept.
+
+        A served waiter is never the canary: the canary is the first idle
+        reader after the cooldown, and concurrent waiters resuming together
+        are not scouts.
+        """
+        return RateLimitResult(
+            waited=True,
+            wait_time=slept,
+            was_rate_limited=True,
+            consecutive_429s=state.consecutive_429s,
+            is_canary=False,
+        )
+
+    @staticmethod
+    def _deferred_result(
+        key: str, state: RateLimitState, bound: float, slept: float
+    ) -> RateLimitResult:
+        """The refusal for a cooldown that outgrows what is left of the bound.
+
+        At entry this sleeps nothing; after a served segment a peer's
+        extension outgrew the remainder, and the time already slept is
+        reported so the caller's budget accounting stays exact.
+        """
+        logger.warning(
+            "rate_limit_coordinator.wait_deferred",
+            wait_time=state.remaining_cooldown,
+            max_wait=bound,
+            already_waited=slept,
+            key=key,
+            state=state.consecutive_429s,
+        )
+        _record_rate_limit_deferral(key=key)
+        return RateLimitResult(
+            waited=slept > 0.0,
+            wait_time=slept,
+            was_rate_limited=True,
+            consecutive_429s=state.consecutive_429s,
+            is_canary=False,
+            deferred=True,
+            not_before=state.cooldown_until,
         )
 
     def on_rate_limited(
@@ -514,6 +686,23 @@ class RateLimitCoordinator:
         )
 
         return in_force
+
+    async def aon_rate_limited(
+        self,
+        key: str,
+        retry_after: float | str | None = None,
+        status_code: int = 429,
+    ) -> float:
+        """Awaitable twin of :meth:`on_rate_limited` — always a worker-thread hop.
+
+        Unconditional, whatever the store: besides the store writes this call
+        publishes ``RATE_LIMIT_429`` on the event bus, which waits on every
+        subscriber that asked for its result, and broadcasts to the cluster
+        channel. None of that may run on the event loop.
+        """
+        return await asyncio.to_thread(
+            self.on_rate_limited, key, retry_after, status_code
+        )
 
     def _compute_cooldown(
         self,
@@ -633,6 +822,15 @@ class RateLimitCoordinator:
                 key=key,
             )
 
+    async def aon_success(self, key: str) -> None:
+        """Awaitable twin of :meth:`on_success`.
+
+        The store read and the conditional reset are hopped to a worker
+        thread for a network-backed store and run inline on the in-process
+        one, like every other read this coordinator makes under the loop.
+        """
+        await self._store_call(self.on_success, key)
+
     def clear(self, key: str) -> None:
         """Clear all rate limit state for a key.
 
@@ -658,6 +856,10 @@ class RateLimitCoordinator:
     ) -> Callable[[Callable[..., T]], Callable[..., T]]:
         """
         Decorator to make a function rate-limit aware.
+
+        Dual-dispatches on the decorated function: a ``def`` waits with
+        :meth:`wait_if_needed`, an ``async def`` awaits
+        :meth:`await_if_needed` and leaves the event loop free.
 
         Args:
             key: Rate limit key
@@ -685,10 +887,20 @@ class RateLimitCoordinator:
             RateLimitDeferredError: Cooldown outlasts ``max_wait``; the wrapped
                 function was not called and is safe to retry at ``not_before``.
 
+        A 429 the function **raises** (``httpx.HTTPStatusError``,
+        ``openai.RateLimitError``) is classified by the shared classifier and
+        installs a cooldown too; the exception is then re-raised unchanged. The
+        ``is_429`` / ``get_retry_after`` predicates are a response-object
+        contract and apply to returned values only.
+
         Example:
             @coordinator.rate_limit_aware("payment_api")
             def call_payment_api():
                 return requests.post(...)
+
+            @coordinator.rate_limit_aware("payment_api")
+            async def call_payment_api_async():
+                return await client.post(...)
 
             @coordinator.rate_limit_aware(
                 "external_api",
@@ -699,68 +911,218 @@ class RateLimitCoordinator:
         """
 
         def decorator(func: Callable[..., T]) -> Callable[..., T]:
+            if asyncio.iscoroutinefunction(func):
+
+                @functools.wraps(func)
+                async def async_wrapper(*args: Any, **kwargs: Any) -> T:
+                    return await self._arun_decorated(
+                        func, key, is_429, get_retry_after, max_wait, args, kwargs
+                    )
+
+                return async_wrapper
+
+            @functools.wraps(func)
             def wrapper(*args: Any, **kwargs: Any) -> T:
-                # A code-level opt-in that makes its own coordinator calls, so
-                # it claims the breaker stage's observation scope for this call.
-                # Without the claim both would notify for one 429 and the
-                # consecutive counter would advance twice. The cascade half
-                # stays with the breaker stage, which sees the same value.
-                scope = _current_observation_scope()
-                if scope is not None:
-                    scope.claim_coordination()
-
-                # Wait if in cooldown. Fail-open on a coordinator fault (proceed
-                # without waiting) — but a *deferral* is a deliberate refusal, so
-                # it is decided from the returned result, outside the wrap.
-                try:
-                    wait_result: RateLimitResult | None = self.wait_if_needed(
-                        key, max_wait=max_wait
-                    )
-                except Exception as coordinator_error:
-                    logger.warning(
-                        "rate_limit_coordinator.decorator_wait_failed",
-                        key=key,
-                        error=str(coordinator_error),
-                    )
-                    wait_result = None
-
-                if wait_result is not None and wait_result.deferred:
-                    raise RateLimitDeferredError(
-                        key=key,
-                        not_before=wait_result.not_before,
-                    )
-
-                result = func(*args, **kwargs)
-
-                # Check if rate limited. Both notifications are fail-open: the
-                # wrapped call has already committed its side effect, so a
-                # coordinator fault must not surface as if the call never ran.
-                #
-                # The user-supplied predicates stay OUTSIDE the wrap: their
-                # exceptions are the caller's own and must keep propagating.
-                # Each override replaces exactly its own default; the shared
-                # classifier answers whichever half was not overridden.
-                rate_limited, retry_after = _classify_decorated_result(
-                    result, is_429, get_retry_after
+                return self._run_decorated(
+                    func, key, is_429, get_retry_after, max_wait, args, kwargs
                 )
-
-                try:
-                    if rate_limited:
-                        self.on_rate_limited(key, retry_after)
-                    else:
-                        self.on_success(key)
-                except Exception as coordinator_error:
-                    logger.warning(
-                        "rate_limit_coordinator.decorator_notify_failed",
-                        key=key,
-                        error=str(coordinator_error),
-                    )
-
-                return result
 
             return wrapper
 
         return decorator
+
+    def _run_decorated(
+        self,
+        func: Callable[..., T],
+        key: str,
+        is_429: Callable[[Any], bool] | None,
+        get_retry_after: Callable[[Any], float | None] | None,
+        max_wait: float | None,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> T:
+        """One decorated call on a ``def``: wait, call, classify, notify."""
+        scope = self._claim_decorated_call()
+
+        # Wait if in cooldown. Fail-open on a coordinator fault (proceed
+        # without waiting) — but a *deferral* is a deliberate refusal, so it
+        # is decided from the returned result, outside the wrap.
+        try:
+            wait_result: RateLimitResult | None = self.wait_if_needed(
+                key, max_wait=max_wait
+            )
+        except Exception as coordinator_error:
+            self._log_decorator_wait_failed(key, coordinator_error)
+            wait_result = None
+        self._raise_if_deferred(key, wait_result)
+
+        try:
+            result = func(*args, **kwargs)
+        except Exception as error:
+            self._observe_decorated_exception(key, error, scope)
+            raise
+
+        # Check if rate limited. Both notifications are fail-open: the wrapped
+        # call has already committed its side effect, so a coordinator fault
+        # must not surface as if the call never ran.
+        #
+        # The user-supplied predicates stay OUTSIDE the wrap: their exceptions
+        # are the caller's own and must keep propagating. Each override
+        # replaces exactly its own default; the shared classifier answers
+        # whichever half was not overridden.
+        rate_limited, retry_after = _classify_decorated_result(
+            result, is_429, get_retry_after
+        )
+        # Marked after classification: an enclosing retry loop reads this mark
+        # and then detects the value for its own success gating only, so one
+        # returned 429 installs one cooldown.
+        if scope is not None:
+            scope.mark_classified(result)
+
+        try:
+            if rate_limited:
+                self.on_rate_limited(key, retry_after)
+            else:
+                self.on_success(key)
+        except Exception as coordinator_error:
+            self._log_decorator_notify_failed(key, coordinator_error)
+
+        return result
+
+    async def _arun_decorated(
+        self,
+        func: Callable[..., Any],
+        key: str,
+        is_429: Callable[[Any], bool] | None,
+        get_retry_after: Callable[[Any], float | None] | None,
+        max_wait: float | None,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> Any:
+        """One decorated call on an ``async def`` — the awaitable twin of
+        :meth:`_run_decorated`: the wait is an ``asyncio.sleep`` and every
+        coordinator write runs on a worker thread."""
+        scope = self._claim_decorated_call()
+
+        try:
+            wait_result: RateLimitResult | None = await self.await_if_needed(
+                key, max_wait=max_wait
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as coordinator_error:
+            self._log_decorator_wait_failed(key, coordinator_error)
+            wait_result = None
+        self._raise_if_deferred(key, wait_result)
+
+        try:
+            result = await func(*args, **kwargs)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            await self._aobserve_decorated_exception(key, error, scope)
+            raise
+
+        rate_limited, retry_after = _classify_decorated_result(
+            result, is_429, get_retry_after
+        )
+        if scope is not None:
+            scope.mark_classified(result)
+        try:
+            if rate_limited:
+                await self.aon_rate_limited(key, retry_after)
+            else:
+                await self.aon_success(key)
+        except asyncio.CancelledError:
+            raise
+        except Exception as coordinator_error:
+            self._log_decorator_notify_failed(key, coordinator_error)
+        return result
+
+    @staticmethod
+    def _claim_decorated_call() -> Any:
+        """Claim the breaker stage's observation scope for a decorated call.
+
+        A code-level opt-in that makes its own coordinator calls claims the
+        scope so the breaker stage does not notify for the same 429 a second
+        time — the consecutive counter would otherwise advance twice. The
+        cascade half stays with the breaker stage, which sees the same value.
+        Returns the scope (or ``None``) so the wrapper can mark what it
+        classified.
+        """
+        scope = _current_observation_scope()
+        if scope is not None:
+            scope.claim_coordination()
+        return scope
+
+    @staticmethod
+    def _raise_if_deferred(key: str, wait_result: RateLimitResult | None) -> None:
+        """Turn a deferral result into the decorator's only correct refusal."""
+        if wait_result is not None and wait_result.deferred:
+            raise RateLimitDeferredError(key=key, not_before=wait_result.not_before)
+
+    @staticmethod
+    def _log_decorator_wait_failed(key: str, error: Exception) -> None:
+        logger.warning(
+            "rate_limit_coordinator.decorator_wait_failed",
+            key=key,
+            error=str(error),
+        )
+
+    @staticmethod
+    def _log_decorator_notify_failed(key: str, error: Exception) -> None:
+        logger.warning(
+            "rate_limit_coordinator.decorator_notify_failed",
+            key=key,
+            error=str(error),
+        )
+
+    @staticmethod
+    def _classify_decorated_exception(
+        error: Exception, scope: Any
+    ) -> tuple[bool, float | None]:
+        """Classify a raised outcome once and mark it on the scope.
+
+        The shared classifier only — the user's ``is_429`` / ``get_retry_after``
+        predicates are a response-object contract and never see an exception.
+        A cooldown deferral raised by an inner surface is never a 429 to the
+        classifier and propagates as-is. Marked on the scope before the verdict
+        so an enclosing loop, which catches the same object, detects it for its
+        success gating only and installs no second cooldown.
+        """
+        if scope is not None:
+            scope.mark_classified(error)
+        return detect_rate_limit(error)
+
+    def _observe_decorated_exception(
+        self, key: str, error: Exception, scope: Any
+    ) -> None:
+        """Install a cooldown for a raised 429; fail-open, the error is re-raised by the caller.
+
+        A non-429 exception resets nothing: like the retry loops, the counter
+        is reset only by an accepted value.
+        """
+        try:
+            is_rate_limited, retry_after = self._classify_decorated_exception(
+                error, scope
+            )
+            if is_rate_limited:
+                self.on_rate_limited(key, retry_after)
+        except Exception as coordinator_error:
+            self._log_decorator_notify_failed(key, coordinator_error)
+
+    async def _aobserve_decorated_exception(
+        self, key: str, error: Exception, scope: Any
+    ) -> None:
+        """Awaitable twin of :meth:`_observe_decorated_exception`."""
+        try:
+            is_rate_limited, retry_after = self._classify_decorated_exception(
+                error, scope
+            )
+            if is_rate_limited:
+                await self.aon_rate_limited(key, retry_after)
+        except Exception as coordinator_error:
+            self._log_decorator_notify_failed(key, coordinator_error)
 
 
 # Convenience function

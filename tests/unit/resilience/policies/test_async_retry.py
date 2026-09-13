@@ -996,19 +996,20 @@ class TestAsyncRetryFromPolicyConfigContract:
 
         assert policy._backoff.multiplier == 3.0
 
-    def test_only_the_opt_out_half_of_the_rate_limit_fields_is_carried(self):
-        """``rate_limit_aware`` carries its opt-out; ``rate_limit_key`` does not.
+    def test_both_halves_of_the_rate_limit_fields_are_carried(self):
+        """``rate_limit_aware`` and ``rate_limit_key`` both reach this stage.
 
-        ``RetryPolicyConfig`` is the config class for *both* retry stages. This
-        stage installs no cooldowns — the coordinator's wait is synchronous and
-        would block the event loop — so a True value stays inert here and
-        ``rate_limit_key`` has no reader at all. A **False** value is different:
-        it is a caller's explicit "no 429 coordination for this call", and the
-        breaker stage above it would otherwise honour that nowhere.
+        ``RetryPolicyConfig`` is the config class for *both* retry stages, and
+        this stage coordinates outbound 429s exactly as the synchronous one
+        does: the key override is mapped so the shared cooldown is keyed on
+        the provider the caller named, and a **False** ``rate_limit_aware`` is
+        the caller's explicit "no 429 coordination for this call". A
+        coordinator is also injectable, and an injected one wins over both
+        opt-out levers (sync parity).
 
         Asserted rather than left implicit because the failure mode is
-        invisible. If this mapping ever grew a *wait* behind the positive half,
-        every async caller would get a blocking sleep under the loop.
+        invisible: an unmapped key coordinates under the domain instead,
+        silently sharing one cooldown record across two providers.
         """
         from baldur.services.retry_handler.models import RetryPolicyConfig
 
@@ -1021,28 +1022,37 @@ class TestAsyncRetryFromPolicyConfigContract:
         policy = AsyncRetryPolicy.from_policy_config(cfg)
 
         assert policy._rate_limit_aware is True
-        assert not hasattr(policy, "_rate_limit_key")
-        assert not hasattr(policy, "_rate_limit_coordinator")
+        assert policy._rate_limit_key == "stripe-api"
+        assert policy._coordination_key() == "stripe-api"
+        # Resolution is per call, never cached on the instance.
+        assert policy._rate_limit_coordinator is None
 
         opted_out = AsyncRetryPolicy.from_policy_config(
             RetryPolicyConfig(max_attempts=3, domain="payment", rate_limit_aware=False)
         )
         assert opted_out._rate_limit_aware is False
+        assert opted_out._coordination_key() == "payment"
 
-    def test_the_partial_carry_is_disclosed_on_the_mapping_docstring(self):
+        injected = object()
+        assert (
+            AsyncRetryPolicy(rate_limit_coordinator=injected)._rate_limit_coordinator
+            is injected
+        )
+
+    def test_the_full_carry_is_disclosed_on_the_mapping_docstring(self):
         """The disclosure is part of the contract, so it is asserted like one.
 
-        This docstring otherwise claims the async and sync stages "behave
-        identically off the same config" — a claim these two fields falsify the
-        moment they exist. Undisclosed, the config surface would recreate the
-        exact dead-flag shape this feature removed from the legacy class.
+        This docstring claims the async and sync stages "behave identically
+        off the same config"; the two coordination fields must be named in it
+        so a reader can see that claim covers them, and nothing on it may
+        still describe the earlier half-carry.
         """
         doc = AsyncRetryPolicy.from_policy_config.__doc__ or ""
 
         assert "rate_limit_aware" in doc
         assert "rate_limit_key" in doc
-        assert "opt-out" in doc.lower()
-        assert "not mapped" in doc.lower()
+        assert "not mapped" not in doc.lower()
+        assert "half-carried" not in doc.lower()
 
 
 # =============================================================================
@@ -1156,7 +1166,7 @@ class TestAsyncRetryObserveOnlyBehavior:
 
 
 class TestAsyncRetryObservationClaimBehavior:
-    """``rate_limit_aware=False`` is claimed on the scope, and nothing else is."""
+    """This stage claims the breaker stage's scope in every mode (sync parity)."""
 
     @staticmethod
     def _run_under_a_scope(policy):
@@ -1177,25 +1187,28 @@ class TestAsyncRetryObservationClaimBehavior:
         return scope
 
     def test_an_opted_out_caller_claims_the_scope(self):
-        """This stage coordinates nothing, so the claim is purely the opt-out.
+        """The breaker stage must not install the cooldown the caller turned off.
 
-        The breaker stage above would otherwise install the fleet-wide cooldown
-        the caller explicitly turned off — the only place a False value on an
-        async path can be honoured at all.
+        The claim is what makes ``rate_limit_aware=False`` mean what it says
+        on the async path: without it the breaker stage above would install a
+        per-sequence cooldown on this stage's behalf.
         """
         scope = self._run_under_a_scope(AsyncRetryPolicy(rate_limit_aware=False))
 
         assert scope.coordination_claimed is True
 
-    def test_the_default_caller_leaves_the_scope_unclaimed(self):
-        """Leaving it unclaimed is what lets the breaker stage cover the async path.
+    def test_the_default_caller_claims_the_scope_too(self):
+        """This stage carries its own cooldown decision in every mode.
 
-        A blanket claim here would make async 429 coordination dead everywhere,
-        which is the state this stage's half-carry exists to end.
+        The claim is unconditional (sync parity): a call whose resolution
+        yields no coordinator — the placeholder domain here, or the kill
+        switch — coordinates nothing, exactly as the synchronous stage's
+        coverage statement says, rather than falling back to the breaker's
+        per-sequence cooldown.
         """
         scope = self._run_under_a_scope(AsyncRetryPolicy(rate_limit_aware=True))
 
-        assert scope.coordination_claimed is False
+        assert scope.coordination_claimed is True
 
     def test_an_opted_out_call_with_no_scope_open_does_not_raise(self):
         """A bare async retry has no breaker above it; the claim is skipped."""

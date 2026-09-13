@@ -20,7 +20,6 @@ Internal collaborators are injected via the constructor:
 from __future__ import annotations
 
 import asyncio
-import threading
 import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -32,19 +31,8 @@ import structlog
 # to defer waiting to an external scheduler such as Celery.
 _DEFAULT_SLEEPER: Callable[[float], None] = time.sleep
 
-# Placeholder domain meaning "the caller did not identify a downstream" — the
-# same rule the breaker stage's coordinator notify gates on, so it is read from
-# the shared 429 vocabulary rather than restated here.
-from .rate_limit_detection import (  # noqa: E402
-    UNIDENTIFIED_COORDINATION_KEY as _UNIDENTIFIED_DOMAIN,
-)
-
-# Coordination keys already warned about, so the unidentified-domain diagnostic
-# costs one WARNING line per key per process rather than one per call.
-_unidentified_key_warned: set[str] = set()
-_unidentified_key_warned_lock = threading.Lock()
-
 from baldur.core.backoff import BackoffStrategy
+from baldur.core.exceptions import RateLimitDeferredError
 from baldur.core.execution_mode import intervention_suppressed
 from baldur.interfaces.resilience_policy import (
     PolicyContext,
@@ -53,6 +41,7 @@ from baldur.interfaces.resilience_policy import (
     ResiliencePolicy,
 )
 
+from .coordination import coordination_key, resolve_coordinator_sync
 from .models import (
     STATEFUL_BACKOFF_STRATEGY,
     MaxRetriesExceededError,
@@ -161,87 +150,26 @@ class RetryPolicy(ResiliencePolicy[T]):
     def _coordination_key(self) -> str:
         """The key this policy's outbound 429 cooldowns are shared under.
 
-        Single expression for the identity gate, the three coordinator calls,
-        and the deferral error alike, so no two of them can disagree about what
-        counts as an override. ``or`` rather than ``is not None``: an override
-        set to the empty string is not an identity, and treating it as one
-        would let the gate pass while the key fell back to the placeholder —
-        coordinating unrelated downstreams on one record, silently.
+        Delegates to the identity rule both retry stages share, so the sync
+        and async loops cannot disagree about what counts as an override.
         """
-        return self._config.rate_limit_key or self._config.domain
+        return coordination_key(self._config.rate_limit_key, self._config.domain)
 
     def _resolve_rate_limit_coordinator(self) -> RateLimitCoordinator | None:
         """Resolve the coordinator that this call should coordinate 429s through.
 
-        An explicitly injected coordinator always wins — it bypasses both
-        opt-out levers, because a caller who constructed one asked for it.
-        Otherwise the process-wide singleton is resolved when all three hold:
-
-        1. ``config.rate_limit_aware`` (per-policy / per-domain opt-out), then
-        2. ``coordination_enabled`` (deployment kill switch), then
-        3. the coordination key is *identified* (not the placeholder domain).
-
-        The order is load-bearing rather than incidental. Both levers are
-        checked before the identity gate because the identity gate is the only
-        conjunct that logs: an operator who deliberately turned coordination off
-        must not be told to configure the thing they just disabled.
-
-        Fail-open: any resolution fault (settings read, storage auto-detect,
-        Redis connect) degrades to ``None`` — no coordination — never to a
-        failed business call.
+        Delegates to the resolution both retry stages share: an injected
+        coordinator wins over every lever, otherwise the per-policy opt-out,
+        the deployment kill switch and the identity gate decide, in that
+        order, whether the process-wide singleton is resolved. Fail-open —
+        any resolution fault degrades to ``None`` (no coordination), never to
+        a failed business call.
         """
-        if self._rate_limit_coordinator is not None:
-            return self._rate_limit_coordinator
-
-        try:
-            if not self._config.rate_limit_aware:
-                return None
-
-            from baldur.settings.rate_limit_backoff import (
-                get_rate_limit_backoff_settings,
-            )
-
-            if not get_rate_limit_backoff_settings().coordination_enabled:
-                return None
-
-            if self._coordination_key() == _UNIDENTIFIED_DOMAIN:
-                self._warn_unidentified_coordination_key()
-                return None
-
-            from baldur.services.rate_limit_coordinator import RateLimitCoordinator
-
-            return RateLimitCoordinator.get_instance()
-        except Exception as resolution_error:
-            logger.warning(
-                "retry.rate_limit_coordinator_resolution_failed",
-                error=str(resolution_error),
-                domain=self._config.domain,
-            )
-            return None
-
-    def _warn_unidentified_coordination_key(self) -> None:
-        """Warn once per key that outbound 429 coordination is inert here.
-
-        WARNING rather than DEBUG on purpose: this is the only runtime signal
-        that a default-on protection is not actually protecting this call site,
-        and DEBUG is off under any production log configuration — the operator
-        who most needs the line would never see it. The once-per-key dedup is
-        what makes that level affordable.
-        """
-        key = self._coordination_key()
-        with _unidentified_key_warned_lock:
-            if key in _unidentified_key_warned:
-                return
-            _unidentified_key_warned.add(key)
-
-        logger.warning(
-            "retry.rate_limit_coordination_skipped",
-            reason="unidentified_domain",
-            domain=key,
-            remedy=(
-                "pass an explicit domain (or a RetryPolicyConfig.rate_limit_key) "
-                "so outbound 429 cooldowns are shared per downstream"
-            ),
+        return resolve_coordinator_sync(
+            injected=self._rate_limit_coordinator,
+            rate_limit_aware=self._config.rate_limit_aware,
+            rate_limit_key=self._config.rate_limit_key,
+            domain=self._config.domain,
         )
 
     def execute(  # noqa: C901, PLR0912, PLR0915
@@ -386,7 +314,12 @@ class RetryPolicy(ResiliencePolicy[T]):
             try:
                 result = func(*args, **kwargs)
             except Exception as e:
-                if scope is not None:
+                # A cooldown deferral raised by an inner surface (a
+                # ``rate_limit_aware`` client, a nested loop) is not a
+                # dependency call: the breaker counts no request for it, and
+                # counting one here would inflate the cascade denominator.
+                inner_deferral = isinstance(e, RateLimitDeferredError)
+                if scope is not None and not inner_deferral:
                     scope.note_attempt()
                 last_error = e
                 last_result = None
@@ -409,7 +342,15 @@ class RetryPolicy(ResiliencePolicy[T]):
                 # the shared tail below so an out-of-attempts stop is attributed
                 # to ``max_attempts``, not ``non_retryable`` (polymorphic-break).
                 if not self._should_retry(e):
-                    reason = "non_retryable"
+                    # An inner deferral exits with the defer vocabulary, not
+                    # as a generic non-retryable stop: the call was never
+                    # made, and ``not_before`` is what a requeue-capable
+                    # caller acts on.
+                    if inner_deferral:
+                        reason = "rate_limit_deferred"
+                        not_before = e.not_before
+                    else:
+                        reason = "non_retryable"
                     break
             else:
                 if scope is not None:
@@ -488,13 +429,6 @@ class RetryPolicy(ResiliencePolicy[T]):
         # exhausted and the deferred attempt never called ``func``. Nothing is
         # lost: the rejected value still rides out in ``PolicyResult.value``.
         if reason == "rate_limit_deferred" and last_error is None:
-            # Lazy import: keeps the coordinator package (and its adapter chain)
-            # out of this module's import graph, matching the TYPE_CHECKING-only
-            # deferral of ``RateLimitCoordinator`` above.
-            from baldur.services.rate_limit_coordinator.models import (
-                RateLimitDeferredError,
-            )
-
             # The coordination key, not the domain: they diverge whenever
             # ``rate_limit_key`` overrides, and the deferral was computed
             # against the former. ``extra_context()`` carries this key into
@@ -553,8 +487,14 @@ class RetryPolicy(ResiliencePolicy[T]):
                 "retry_history": retry_history,
                 "reason": reason,
                 # Defer vocabulary for requeue-capable callers (Celery/DLQ):
-                # present only on a cooldown deferral.
-                **({"not_before": not_before} if not_before is not None else {}),
+                # present only on a cooldown deferral. The key rides along so
+                # a decorator can synthesise the deferral error when the loop
+                # kept a real last error in its place.
+                **(
+                    {"not_before": not_before, "rate_limit_key": rate_limit_key}
+                    if reason == "rate_limit_deferred"
+                    else {}
+                ),
             },
         )
 
@@ -801,13 +741,22 @@ class RetryPolicy(ResiliencePolicy[T]):
         at the frame that catches it. Only that half: the cooldown and the
         returned signal are this stage's own backoff, which a breaker dial does
         not configure.
+
+        Whoever classified the outcome first owns its cooldown: an outcome an
+        inner surface (a ``rate_limit_aware`` client, a bridge) already marked
+        on the scope is detected for the *signal* only — no second cascade
+        note, no second cooldown — so one 429 never advances the consecutive
+        counter twice.
         """
-        if scope is not None:
+        already_classified = scope is not None and scope.was_classified(subject)
+        if scope is not None and not already_classified:
             scope.mark_classified(subject)
 
         is_rate_limited, retry_after = self._detect_rate_limit(subject)
         if not is_rate_limited:
             return False
+        if already_classified:
+            return True
 
         if scope is not None:
             scope.note_429(retry_after, subject)

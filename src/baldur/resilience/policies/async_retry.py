@@ -6,9 +6,16 @@ async policy chain, and hosts the unified ``@retry`` decorator (sync + async
 dual-dispatch).
 
 Coexists as a separate class from the synchronous RetryPolicy
-(services/retry_handler/policy.py). RetryPolicy carries infra collaborators
-(RateLimitCoordinator, AdaptiveRetryBudget); AsyncRetryPolicy handles pure
-async retry logic only.
+(services/retry_handler/policy.py) and mirrors its loop: the same cooperative
+budget, the same result predicate, and the same outbound 429 coordination —
+both stages resolve the shared ``RateLimitCoordinator`` by default under one
+identity rule (``rate_limit_key`` or ``domain``) and the same two opt-out
+levers, wait on the shared cooldown before every attempt, record each observed
+429 (raised or returned) once, and reset the ladder after a success that
+followed a rate-limit signal. On this stage every wait is an ``asyncio.sleep``
+and every store write or event publish runs on a worker thread, so a cooldown
+costs the request its latency and never stalls the event loop. The one
+collaborator not carried is ``AdaptiveRetryBudget`` (sync only).
 
 Not changed:
 - Circuit Breaker — nanosecond-level in-memory lookups, so async is unnecessary
@@ -33,6 +40,7 @@ from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar
 import structlog
 
 from baldur.core.backoff import BackoffStrategy, ExponentialBackoff
+from baldur.core.exceptions import RateLimitDeferredError
 from baldur.core.execution_mode import intervention_suppressed
 from baldur.interfaces.resilience_policy import (
     PolicyContext,
@@ -41,6 +49,11 @@ from baldur.interfaces.resilience_policy import (
 )
 
 if TYPE_CHECKING:
+    from baldur.services.circuit_breaker.rate_limit_observation import (
+        OutboundObservationScope,
+    )
+    from baldur.services.rate_limit_coordinator import RateLimitCoordinator
+    from baldur.services.rate_limit_coordinator.models import RateLimitResult
     from baldur.services.retry_handler.models import RetryPolicyConfig
 
 logger = structlog.get_logger()
@@ -79,6 +92,16 @@ class AsyncRetryPolicy:
         ``metadata["should_dlq"]=True`` so a composed DLQ sink stores the final
         failure — mirroring the synchronous RetryPolicy. A bare
         ``AsyncRetryPolicy(...)`` defaults ``enable_dlq=False`` (no DLQ arming).
+
+    Outbound 429 coordination:
+        Like the synchronous policy, this stage resolves the shared
+        ``RateLimitCoordinator`` at use time when none is injected, provided
+        ``rate_limit_aware`` is on, the deployment switch is on, and the call
+        carries an identified domain (``rate_limit_key`` or a non-placeholder
+        ``domain``). An injected coordinator wins over both levers. The wait
+        before each attempt is an ``asyncio.sleep`` bounded by the remaining
+        budget; a cooldown that outlasts it ends the call with
+        ``reason="rate_limit_deferred"`` and ``not_before`` in the metadata.
     """
 
     def __init__(
@@ -93,6 +116,8 @@ class AsyncRetryPolicy:
         max_elapsed: float | None = None,
         backoff_factory: Callable[[], BackoffStrategy] | None = None,
         rate_limit_aware: bool = True,
+        rate_limit_key: str | None = None,
+        rate_limit_coordinator: RateLimitCoordinator | None = None,
     ):
         if max_retries < 0:
             raise ValueError(f"max_retries must be >= 0, got {max_retries}")
@@ -145,11 +170,12 @@ class AsyncRetryPolicy:
         self._domain = domain
         self._retry_on_result = retry_on_result
         self._max_elapsed = max_elapsed
-        # Carried for the opt-out half only: this stage installs no cooldowns,
-        # so a True value changes nothing here. A False value is a caller's
-        # explicit "no 429 coordination for this call", which the breaker stage
-        # above would otherwise honour nowhere.
+        # Outbound 429 coordination, mirroring the synchronous policy: the
+        # opt-out lever, the key override, and an injected coordinator that
+        # wins over both levers. Resolution happens per call, never cached here.
         self._rate_limit_aware = rate_limit_aware
+        self._rate_limit_key = rate_limit_key
+        self._rate_limit_coordinator = rate_limit_coordinator
 
     @classmethod
     def from_policy_config(
@@ -174,15 +200,10 @@ class AsyncRetryPolicy:
           a composed DLQ sink fires on async exhaustion.
         - ``retry_on_result`` / ``max_elapsed`` carry the result-predicate and
           cooperative wall-clock budget so async matches sync off the same config.
-
-        Half-carried: ``rate_limit_aware`` is mapped for its **opt-out** only.
-        This stage installs no cooldowns of its own — outbound 429 coordination
-        is implemented on the synchronous retry stage — so a True value is
-        inert here; a False value is claimed on the observation scope so the
-        breaker stage above does not install the cooldown the caller opted out
-        of. ``rate_limit_key`` is not mapped at all: with nothing to key, it has
-        no reader. Async callers who need per-attempt 429 coordination use the
-        tenacity bridge with an explicit ``rate_limit_key``.
+        - ``rate_limit_aware`` / ``rate_limit_key`` carry the outbound 429
+          coordination fields in full: the same opt-out and the same key
+          override the synchronous stage reads, resolved through the shared
+          identity rule and lever order.
         """
         # Local import: the retry_handler package is deliberately kept out of
         # this module's import-time graph (see the TYPE_CHECKING block above).
@@ -200,10 +221,11 @@ class AsyncRetryPolicy:
             retry_on_result=cfg.retry_on_result,
             max_elapsed=cfg.max_elapsed,
             rate_limit_aware=cfg.rate_limit_aware,
+            rate_limit_key=cfg.rate_limit_key,
         )
 
     @staticmethod
-    def _observation_scope() -> Any:
+    def _observation_scope() -> OutboundObservationScope | None:
         """The breaker stage's per-call observation scope, or ``None``.
 
         Lazy import: the breaker package stays out of this module's
@@ -214,6 +236,154 @@ class AsyncRetryPolicy:
         )
 
         return current_scope()
+
+    def _coordination_key(self) -> str:
+        """The key this policy's outbound 429 cooldowns are shared under.
+
+        The identity rule both retry stages share (``rate_limit_key`` or,
+        failing that, ``domain``); def-body import keeps the retry_handler
+        package out of this module's import-time graph.
+        """
+        from baldur.services.retry_handler.coordination import coordination_key
+
+        return coordination_key(self._rate_limit_key, self._domain)
+
+    async def _resolve_rate_limit_coordinator(self) -> RateLimitCoordinator | None:
+        """Resolve the coordinator this call coordinates 429s through, or ``None``.
+
+        An injected coordinator wins over both opt-out levers (sync parity).
+        Otherwise the shared admission rule — per-policy opt-out, deployment
+        kill switch, identity gate, in that order — decides whether the
+        process-wide singleton is resolved; the first resolution of the
+        singleton (storage auto-detect, a bounded Redis probe) runs on a
+        worker thread. Fail-open: any fault degrades to no coordination.
+        """
+        if self._rate_limit_coordinator is not None:
+            return self._rate_limit_coordinator
+
+        try:
+            from baldur.services.retry_handler.coordination import (
+                coordination_admitted,
+            )
+
+            if not coordination_admitted(
+                rate_limit_aware=self._rate_limit_aware,
+                rate_limit_key=self._rate_limit_key,
+                domain=self._domain,
+            ):
+                return None
+
+            from baldur.services.rate_limit_coordinator import RateLimitCoordinator
+
+            return await RateLimitCoordinator.aget_instance()
+        except Exception as resolution_error:
+            logger.warning(
+                "retry.rate_limit_coordinator_resolution_failed",
+                error=str(resolution_error),
+                domain=self._domain,
+            )
+            return None
+
+    async def _await_rate_limit_cooldown(
+        self,
+        coordinator: RateLimitCoordinator,
+        key: str,
+        max_wait: float | None,
+    ) -> RateLimitResult | None:
+        """Await out an active 429 cooldown, bounded by ``max_wait``. Fail-open.
+
+        Returns the coordinator's result, or ``None`` when the coordinator
+        itself failed — a coordinator that is down degrades to inert (proceed
+        without waiting) rather than failing the business call. A *deferral*
+        is not a fault: it is returned as a normal result for the loop to act
+        on. Cancellation propagates untouched.
+        """
+        try:
+            return await coordinator.await_if_needed(key, max_wait=max_wait)
+        except asyncio.CancelledError:
+            raise
+        except Exception as coordinator_error:
+            logger.warning(
+                "retry.rate_limit_wait_failed",
+                error=str(coordinator_error),
+                domain=self._domain,
+            )
+            return None
+
+    async def _aobserve_attempt_outcome(
+        self,
+        coordinator: RateLimitCoordinator | None,
+        key: str,
+        outcome: Any,
+        scope: OutboundObservationScope | None,
+    ) -> bool:
+        """Classify one attempt's outcome once and fan a 429 out; report if it was one.
+
+        Every attempt outcome passes through here exactly once — a raised
+        exception, an accepted value, a rejected value — and is marked on the
+        scope, so the breaker stage above never classifies an object an
+        attempt already answered for. Fail-open around the whole fan-out:
+        neither the classifier reading caller-supplied attributes nor a
+        coordinator fault may replace the business outcome.
+        """
+        if coordinator is None and scope is None:
+            return False
+        try:
+            return await self._anotify_rate_limit_cooldown(
+                coordinator, key, outcome, scope
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as coordinator_error:
+            logger.warning(
+                "retry.rate_limit_cooldown_notify_failed",
+                error=str(coordinator_error),
+                domain=self._domain,
+            )
+            return False
+
+    @staticmethod
+    async def _anotify_rate_limit_cooldown(
+        coordinator: RateLimitCoordinator | None,
+        key: str,
+        subject: Any,
+        scope: OutboundObservationScope | None,
+    ) -> bool:
+        """Set a cooldown when ``subject`` is a 429; report whether it was one.
+
+        The classification is pure and runs inline; the cooldown write is
+        awaited through the coordinator's worker-thread twin because it also
+        publishes to the event bus. Whoever classified the outcome first owns
+        its cooldown: an outcome an inner surface already marked on the scope
+        is detected for the signal only — no second cascade note, no second
+        cooldown.
+        """
+        from baldur.services.retry_handler.rate_limit_detection import (
+            detect_rate_limit,
+        )
+
+        already_classified = scope is not None and scope.was_classified(subject)
+        if scope is not None and not already_classified:
+            scope.mark_classified(subject)
+
+        is_rate_limited, retry_after = detect_rate_limit(subject)
+        if not is_rate_limited:
+            return False
+        if already_classified:
+            return True
+
+        if scope is not None:
+            scope.note_429(retry_after, subject)
+
+        if coordinator is not None:
+            cooldown = await coordinator.aon_rate_limited(
+                key=key, retry_after=retry_after
+            )
+            logger.info(
+                "retry.rate_limit_cooldown_set",
+                cooldown=cooldown,
+            )
+        return True
 
     @property
     def name(self) -> str:
@@ -239,15 +409,13 @@ class AsyncRetryPolicy:
         Returns:
             PolicyResult with value or error.
         """
-        # A caller who turned 429 coordination off keeps it off for the whole
-        # call: claim the breaker stage's observation scope so it installs no
-        # cooldown on this stage's behalf. Claimed only for the opt-out — this
-        # stage coordinates nothing of its own, so leaving the scope unclaimed
-        # is what lets the breaker stage cover the async path at all.
-        if not self._rate_limit_aware:
-            scope = self._observation_scope()
-            if scope is not None:
-                scope.claim_coordination()
+        # Outbound 429 observation scope, claimed as the very first statement.
+        # This stage carries its own decision about fleet-wide cooldowns in
+        # *every* mode — retry disabled, observe-only, and the loop — so the
+        # breaker stage above must not install one on its behalf (sync parity).
+        scope = self._observation_scope()
+        if scope is not None:
+            scope.claim_coordination()
 
         _unwrapped = func
         while isinstance(_unwrapped, functools.partial):
@@ -286,6 +454,19 @@ class AsyncRetryPolicy:
             record_retry_outcome,
         )
 
+        # Outbound 429 coordination, resolved once per call and, like the sync
+        # stage, only past the two suppression returns above: both take the
+        # single-attempt path, which uses no coordinator, so resolving earlier
+        # would build the coordinator singleton on paths that never use it.
+        coordinator = await self._resolve_rate_limit_coordinator()
+        rate_limit_key = self._coordination_key()
+        # on_success costs a storage read (plus a reset write when a counter is
+        # standing), so it is owed only once this call has actually observed a
+        # rate-limit signal — a detected 429, an honored cooldown wait, or a
+        # coordinator that reported one.
+        rate_limit_signal = False
+        not_before: float | None = None
+
         last_error: Exception | None = None
         last_result: Any = None
         result_rejected = False
@@ -322,6 +503,34 @@ class AsyncRetryPolicy:
             # 0-indexed on this surface; the helper's contract is 1-based.
             record_retry_attempt_started(self._domain, attempt + 1)
 
+            # Rate limit wait (optional), bounded by whatever budget is left.
+            # A cooldown longer than the remaining budget is deferred rather
+            # than slept: sleeping it would blow the budget and the attempt
+            # would be aborted afterwards anyway. The wait is an asyncio.sleep,
+            # so it costs this request its latency and the loop nothing.
+            if coordinator:
+                rl_bound = (
+                    None
+                    if budget is None
+                    else max(0.0, budget - (time.monotonic() - start))
+                )
+                rl_result = await self._await_rate_limit_cooldown(
+                    coordinator, rate_limit_key, rl_bound
+                )
+                if rl_result is not None and rl_result.deferred:
+                    reason = "rate_limit_deferred"
+                    not_before = rl_result.not_before
+                    break
+                if rl_result is not None and (
+                    rl_result.waited or rl_result.was_rate_limited
+                ):
+                    rate_limit_signal = True
+                if rl_result is not None and rl_result.waited:
+                    logger.debug(
+                        "retry.rate_limit_cooldown_waited",
+                        wait_time=rl_result.wait_time,
+                    )
+
             try:
                 if is_async:
                     result = await func(*args, **kwargs)  # type: ignore[misc]
@@ -330,6 +539,12 @@ class AsyncRetryPolicy:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
+                # A cooldown deferral raised by an inner surface is not a
+                # dependency call: the breaker counts no request for it, and
+                # counting one here would inflate the cascade denominator.
+                inner_deferral = isinstance(e, RateLimitDeferredError)
+                if scope is not None and not inner_deferral:
+                    scope.note_attempt()
                 last_error = e
                 last_result = None
                 result_rejected = False
@@ -341,11 +556,26 @@ class AsyncRetryPolicy:
                     }
                 )
 
+                # 429 detected → feed the cascade and request a cooldown from
+                # the coordinator. Fail-open: a fault here must never replace
+                # the business error that is being classified below.
+                if await self._aobserve_attempt_outcome(
+                    coordinator, rate_limit_key, e, scope
+                ):
+                    rate_limit_signal = True
+
                 # Non-retryable check first (CB-open, etc.). The attempts bound
                 # is hoisted to the shared tail so an out-of-attempts stop is
-                # attributed to ``max_attempts``, not ``non_retryable``.
+                # attributed to ``max_attempts``, not ``non_retryable``. An
+                # inner deferral exits with the defer vocabulary instead: the
+                # call was never made, and ``not_before`` is what a
+                # requeue-capable caller acts on.
                 if isinstance(e, self._non_retryable):
-                    reason = "non_retryable"
+                    if inner_deferral:
+                        reason = "rate_limit_deferred"
+                        not_before = e.not_before
+                    else:
+                        reason = "non_retryable"
                     break
                 if not isinstance(e, self._retryable_exceptions):
                     reason = "non_retryable"
@@ -360,8 +590,30 @@ class AsyncRetryPolicy:
                         }
                     )
             else:
+                if scope is not None:
+                    scope.note_attempt()
                 # Function returned — evaluate the result predicate (fail-open).
                 if not self._evaluate_result_rejected(result):
+                    # A client that hands its 429 back instead of raising is
+                    # still rate-limited: classify the accepted value too, and
+                    # never treat it as the reset a real success would be.
+                    if await self._aobserve_attempt_outcome(
+                        coordinator, rate_limit_key, result, scope
+                    ):
+                        rate_limit_signal = True
+                    # Fail-open: a coordinator fault must never destroy a
+                    # successful business result.
+                    elif coordinator and rate_limit_signal:
+                        try:
+                            await coordinator.aon_success(rate_limit_key)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as coordinator_error:
+                            logger.warning(
+                                "retry.rate_limit_success_notify_failed",
+                                error=str(coordinator_error),
+                                domain=self._domain,
+                            )
                     record_retry_outcome(self._domain, attempt + 1, "success")
                     return PolicyResult(
                         value=result,
@@ -372,6 +624,10 @@ class AsyncRetryPolicy:
                 # Soft failure: treat the rejected value like a retryable
                 # exception; no exception is raised, so last_error stays None and
                 # exhaustion synthesizes a MaxRetriesExceededError.
+                if await self._aobserve_attempt_outcome(
+                    coordinator, rate_limit_key, result, scope
+                ):
+                    rate_limit_signal = True
                 last_result = result
                 last_error = None
                 result_rejected = True
@@ -410,10 +666,23 @@ class AsyncRetryPolicy:
 
             await asyncio.sleep(delay)
 
+        # Cooldown-deferral exits are synthesized FIRST, ahead of the
+        # result-rejection branch below (sync parity): ``last_error is None``
+        # does not imply "attempt 1" — a rejected result sets it to None on
+        # every attempt, and the deferral is the actual exit cause.
+        if reason == "rate_limit_deferred" and last_error is None:
+            # The coordination key, not the domain: they diverge whenever
+            # ``rate_limit_key`` overrides, and the deferral was computed
+            # against the former.
+            last_error = RateLimitDeferredError(
+                key=rate_limit_key,
+                not_before=not_before,
+            )
+
         # Result-rejection exits leave last_error=None; synthesize a first-class
         # exhaustion error so DLQ / @retry have a real exception and the composer
         # does not misclassify FAILURE(error=None) as REJECTED.
-        if last_error is None and result_rejected:
+        elif last_error is None and result_rejected:
             from baldur.services.retry_handler.models import MaxRetriesExceededError
 
             last_error = MaxRetriesExceededError(
@@ -425,6 +694,14 @@ class AsyncRetryPolicy:
                 last_result=last_result,
                 result_rejected=True,
             )
+            if scope is not None:
+                # This loop synthesised the object it is about to propagate,
+                # and already classified the value behind it. Marking it keeps
+                # the breaker stage from classifying it a second time — its
+                # message carries the domain name, so a name containing
+                # "throttle" or "429" would otherwise read as a fresh
+                # rate-limit answer.
+                scope.mark_classified(last_error)
 
         logger.warning(
             "retry.async_exhausted",
@@ -471,6 +748,15 @@ class AsyncRetryPolicy:
                 "max_attempts": self._max_retries + 1,
                 "retry_history": retry_history,
                 "reason": reason,
+                # Defer vocabulary for requeue-capable callers (Celery/DLQ):
+                # present only on a cooldown deferral. The key rides along so
+                # a decorator can synthesise the deferral error when the loop
+                # kept a real last error in its place.
+                **(
+                    {"not_before": not_before, "rate_limit_key": rate_limit_key}
+                    if reason == "rate_limit_deferred"
+                    else {}
+                ),
             },
         )
 
@@ -587,7 +873,19 @@ def async_retry_policy(
 
 
 def _unwrap_or_raise(result: PolicyResult, func_name: str, max_attempts: int) -> Any:
-    """Return the success value, or raise ``MaxRetriesExceededError`` on failure.
+    """Return the success value, or raise the failure as the caller should see it.
+
+    A cooldown deferral is raised as ``RateLimitDeferredError`` — never wrapped
+    as an exhaustion, which would read "max retries exceeded" for a call that
+    made zero attempts and bury ``not_before`` one level down. Two shapes reach
+    here: the loop's own deferral (or an inner surface's, passed through as a
+    non-retryable exit) already *is* the error, and is re-raised as-is by type
+    — independent of metadata, because the retry-disabled and observe-only
+    single-attempt paths return a FAILURE with no metadata at all; and a
+    deferral that followed a real failure on an earlier attempt keeps that
+    failure as ``result.error`` (the breaker must keep counting it), so the
+    deferral is synthesised from the metadata with the earlier error as its
+    ``__cause__``.
 
     Double-wrap guard: result-predicate exhaustion already synthesized a
     ``MaxRetriesExceededError`` (carrying ``last_result`` / ``result_rejected``)
@@ -598,13 +896,22 @@ def _unwrap_or_raise(result: PolicyResult, func_name: str, max_attempts: int) ->
 
     if result.success:
         return result.value
-    if isinstance(result.error, MaxRetriesExceededError):
-        raise result.error
+    error = result.error
+    if isinstance(error, RateLimitDeferredError):
+        raise error
+    metadata = result.metadata or {}
+    if metadata.get("reason") == "rate_limit_deferred":
+        raise RateLimitDeferredError(
+            key=metadata.get("rate_limit_key", ""),
+            not_before=metadata.get("not_before"),
+        ) from error
+    if isinstance(error, MaxRetriesExceededError):
+        raise error
     raise MaxRetriesExceededError(
         f"Max retries exceeded for {func_name}",
         retry_count=result.total_attempts,
         max_retries=max_attempts,
-        last_error=result.error,
+        last_error=error,
     )
 
 
@@ -619,8 +926,8 @@ def retry(
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """Unified retry decorator — dual-dispatches on sync vs async functions.
 
-    Replaces the previous split retry decorators (a sync-only one and an
-    async-only one) with a single call-style-safe surface. Both branches derive
+    Replaces the previous split retry decorators (one for ``def``, one for
+    ``async def``) with a single call-style-safe surface. Both branches derive
     their configuration from ``RetryPolicyConfig.from_settings(domain)`` with
     the passed overrides applied:
 
@@ -628,18 +935,21 @@ def retry(
     - A plain ``def`` is wrapped by the synchronous ``RetryPolicy``.
 
     On exhaustion, both branches raise ``MaxRetriesExceededError`` (carrying
-    ``last_error``); success returns the unwrapped value. ``functools.wraps``
-    preserves the wrapped signature, so framework dependency injection (e.g.
-    FastAPI ``Depends``) resolves against the original parameters.
+    ``last_error``); success returns the unwrapped value. A call refused by a
+    shared 429 cooldown that outlasts the wait budget raises
+    ``RateLimitDeferredError`` instead — the function was never called, and
+    ``not_before`` says when it may be. ``functools.wraps`` preserves the
+    wrapped signature, so framework dependency injection (e.g. FastAPI
+    ``Depends``) resolves against the original parameters.
 
-    Outbound 429 coordination applies to the **sync** branch only, and only
-    when ``domain`` is set. A sync function with a named domain shares a
-    cooldown with every other caller on that domain, so a 429 backs the fleet
-    off together instead of each worker retrying on its own ladder. Leaving
-    ``domain`` unset opts out — the placeholder is shared by every unnamed
-    caller, and one cooldown record cannot stand for unrelated downstreams.
-    An ``async def`` never participates regardless of ``domain``; async callers
-    who want it use the tenacity bridge with a ``rate_limit_key``.
+    Outbound 429 coordination applies to **both** branches, and only when
+    ``domain`` is set. A function with a named domain shares a cooldown with
+    every other caller on that domain, so a 429 backs the fleet off together
+    instead of each worker retrying on its own ladder. Leaving ``domain``
+    unset opts out — the placeholder is shared by every unnamed caller, and
+    one cooldown record cannot stand for unrelated downstreams. On an
+    ``async def`` the cooldown wait is an ``asyncio.sleep``: it costs the
+    call its latency and never stalls the event loop.
 
     Args:
         domain: Configuration domain (also the retry / DLQ / metric key, and

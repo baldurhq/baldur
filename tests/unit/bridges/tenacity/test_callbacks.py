@@ -8,6 +8,7 @@ Scope:
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
 import pytest
@@ -369,10 +370,21 @@ class TestMakeRetryErrorCallbackBehavior:
 
 
 class TestMakeAfterCallbackBehavior:
-    """``after(retry_state)`` routes to on_success / on_rate_limited as appropriate."""
+    """``after(retry_state)`` classifies what tenacity is about to retry, and never resets."""
 
-    def test_success_invokes_on_success(self, make_retry_state):
-        """failed=False → on_success(key)."""
+    def test_a_retried_value_is_classified_and_never_resets_the_ladder(
+        self, make_retry_state
+    ):
+        """failed=False here means a result predicate is retrying the value.
+
+        tenacity runs ``after`` only for an attempt it retries or exhausts,
+        so a non-failed outcome seen here is a value about to be retried —
+        not the accepted success that earns a ladder reset. Resetting on it
+        (the earlier behaviour) inverted the reset's meaning; the reset now
+        lives with the execute-level translation, which knows the accepted
+        outcome. A retried value that is itself a 429 response is a
+        rate-limit answer and installs a cooldown, once.
+        """
         coord = MagicMock()
         ctx = BridgeCallbackContext(
             domain="d",
@@ -381,10 +393,20 @@ class TestMakeAfterCallbackBehavior:
             retry_budget=None,
         )
         cb = make_after_callback(ctx)
-        cb(make_retry_state(attempt_number=1, failed=False, exception=None))
 
-        coord.on_success.assert_called_once_with("payment")
+        plain = SimpleNamespace(status_code=500, headers={})
+        cb(make_retry_state(attempt_number=1, failed=False, result=plain))
+        coord.on_success.assert_not_called()
         coord.on_rate_limited.assert_not_called()
+        assert ctx.rate_limit_signal is False
+
+        throttled = SimpleNamespace(status_code=429, headers={"Retry-After": "7"})
+        cb(make_retry_state(attempt_number=2, failed=False, result=throttled))
+        coord.on_rate_limited.assert_called_once_with(key="payment", retry_after=7.0)
+        coord.on_success.assert_not_called()
+        assert ctx.rate_limit_signal is True
+        assert ctx.last_error is None
+        assert ctx.last_attempt == 2
 
     def test_skips_when_no_coordinator(self, make_retry_state):
         """coordinator=None → no-op even with key."""

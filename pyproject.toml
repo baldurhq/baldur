@@ -118,7 +118,7 @@ caching = [
     "pymemcache>=4.0",
 ]
 tenacity = [
-    "tenacity>=8.0.0",
+    "tenacity>=8.3.0",
 ]
 disk-buffer = [
     "lmdb>=1.4.0",

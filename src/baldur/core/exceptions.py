@@ -23,7 +23,9 @@ Internal / nested-only (``baldur.core.exceptions``):
     ``DistributedHashChainUnavailableError``,
     ``HashChainSequenceRefusedError``, ``RunbookError``,
     ``SettingsValidationError``, ``StepExecutionError``, ``StepTimeoutError``,
-    ``CompensationError``, ``ConcurrencyConflictError``.
+    ``CompensationError``, ``ConcurrencyConflictError``,
+    ``RateLimitDeferredError`` (re-exported by
+    ``baldur.services.rate_limit_coordinator``).
 """
 
 from __future__ import annotations
@@ -57,6 +59,7 @@ __all__ = [
     "RetryExhaustedError",
     "TimeoutPolicyError",
     "RateLimitExceeded",
+    "RateLimitDeferredError",
     # Idempotency
     "IdempotencyDuplicateError",
     "IdempotencyUnavailableError",
@@ -249,8 +252,14 @@ def non_retryable_exceptions() -> tuple[type[Exception], ...]:
     CircuitBreakerError: CB OPEN means 'stop sending traffic'.
     Retrying defeats circuit breaker semantics.
     Industry standard (Hystrix, Resilience4j, Polly).
+
+    RateLimitDeferredError: the call was never attempted because a shared
+    429 cooldown outlasts the caller's wait budget. A loop that retries it
+    can only sleep through attempts that cannot succeed before
+    ``not_before`` — the refusal is a scheduling signal, not a transient
+    failure.
     """
-    return (CircuitBreakerError,)
+    return (CircuitBreakerError, RateLimitDeferredError)
 
 
 # ── State Transition errors ─────────────────────────────────
@@ -386,6 +395,40 @@ class RateLimitExceeded(ResilienceError):
             ctx["window_seconds"] = self.window_seconds
             ctx["reset_at"] = self.reset_at
         return ctx
+
+
+class RateLimitDeferredError(ResilienceError):
+    """Raised when an outbound 429 cooldown outlasts the caller's wait budget.
+
+    Outbound cooldown deferral signal — distinct from ``RateLimitExceeded``
+    (inbound limiter rejection) and ``RateLimitStorageError`` (storage-backend
+    failure).
+
+    The call was never attempted: retrying it at or after ``not_before`` is
+    safe, which makes this signal suitable for a DLQ/scheduler requeue. It is
+    in the default non-retryable set for the same reason — a retry loop that
+    re-called before ``not_before`` would only be refused again.
+    """
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        key: str = "",
+        not_before: float | None = None,
+    ):
+        if not message:
+            message = f"Rate limit cooldown deferred: key={key!r}"
+            if not_before is not None:
+                import time
+
+                message += f", retry in {max(0.0, not_before - time.time()):.1f}s"
+        super().__init__(message)
+        self.key = key
+        self.not_before = not_before
+
+    def extra_context(self) -> dict[str, Any]:
+        return {"key": self.key, "not_before": self.not_before}
 
 
 # ── Idempotency errors ───────────────────────────────────────

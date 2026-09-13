@@ -54,8 +54,8 @@ class RateLimitBackoffSettings(BaseSettings):
         default=True,
         description=(
             "Deployment kill switch for every default-ON outbound 429 "
-            "coordination site: Baldur's synchronous retry stage and the "
-            "circuit-breaker stage that observes retry-less calls. Governs the "
+            "coordination site: both of Baldur's retry stages (sync and async) "
+            "and the circuit-breaker stage that observes retry-less calls. Governs the "
             "*default* coordinator resolution only: an explicitly injected "
             "coordinator, the tenacity bridge's rate_limit_key, and the "
             "rate_limit_aware decorator are code-level opt-ins this switch "

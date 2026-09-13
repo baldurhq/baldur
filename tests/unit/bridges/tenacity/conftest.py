@@ -37,6 +37,7 @@ def make_retry_state():
         attempt_number: int = 1,
         failed: bool | None = None,
         exception: BaseException | None = None,
+        result: object = None,
     ):
         if failed is None:
             outcome = None
@@ -44,6 +45,7 @@ def make_retry_state():
             outcome = SimpleNamespace(
                 failed=failed,
                 exception=lambda: exception,
+                result=lambda: result,
             )
         return SimpleNamespace(attempt_number=attempt_number, outcome=outcome)
 

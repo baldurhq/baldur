@@ -1336,16 +1336,20 @@ async def aprotect(  # verified-by: test_concurrent_duplicates_run_side_effect_e
     Any OTHER sync ``ResiliencePolicy`` passed as ``retry=`` raises
     ``NotImplementedError`` (it cannot be safely awaited).
 
-    Parity gap — outbound 429 coordination. ``protect()``'s retry stage shares
-    a cooldown across workers per *attempt* when a downstream returns 429; the
-    async retry stage does not, so ``rate_limit_key`` on a ``RetryPolicyConfig``
-    is inert here and ``rate_limit_aware`` carries only its opt-out half. The
-    breaker stage still observes the async call's final outcome, so a 429 storm
-    trips the breaker and installs a cooldown at *per-sequence* granularity:
-    N per-attempt 429s the ladder eventually overcomes count as the one outcome
-    the sequence produced. For per-attempt coordination on the async path, pass
-    a tenacity bridge carrying a ``rate_limit_key`` as ``retry=`` — noting that
-    its wait blocks the event loop.
+    Outbound 429 coordination has full parity with ``protect()``: the async
+    retry stage shares a cooldown across workers per *attempt* when a
+    downstream returns 429 — raised or returned — under the same identity
+    rule (``rate_limit_key`` on the ``RetryPolicyConfig``, else the call's
+    domain) and the same two opt-out levers, and resets the ladder after a
+    success that followed a 429. The wait is an ``asyncio.sleep`` bounded by
+    the remaining budget, and every cooldown write runs on a worker thread, so
+    a cooldown costs this call its latency and never stalls the event loop; a
+    cooldown longer than the remaining budget ends the call with
+    ``reason="rate_limit_deferred"`` and ``not_before`` in the metadata. A
+    tenacity bridge passed as ``retry=`` coordinates the same way through its
+    coroutine callbacks. With retry off, the breaker stage observes the call's
+    final outcome and installs a cooldown at per-sequence granularity, on a
+    worker thread.
 
     Idempotency (``idempotency_key`` / ``idempotency_fail_open`` /
     ``idempotency_ttl`` / ``idempotency_execution_ttl``) behaves as in
@@ -1699,7 +1703,7 @@ def aprotected(
     idempotency_execution_ttl: timedelta | None = None,
     context_from: Callable[..., PolicyContext] | None | Literal[False] = None,
 ) -> Callable[[Callable[..., Awaitable[T]]], Callable[..., Awaitable[T]]]:
-    """Async-only decorator. Use ``@protected`` for mixed sync/async callsites;
+    """Decorator for ``async def`` only. Use ``@protected`` for mixed sync/async callsites;
     prefer ``@aprotected`` when you want a type-checker error on misuse
     against a sync function.
 
