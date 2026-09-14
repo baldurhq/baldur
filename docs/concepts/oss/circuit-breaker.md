@@ -90,38 +90,45 @@ shapes a client can deliver a 429 in are recognised: an exception whose message 
 rate limit, and a returned response object whose integer status code is on the rate-limit list, so a
 `requests` call that hands the 429 back without raising is caught as well.
 
-Each sighting does three things. It records a breaker failure, so the consecutive count and the
-failure rate move as they would for any exception. It feeds the **rate-limit cascade**, the trigger
+Each sighting does three things. Seen by the breaker stage, it records a breaker failure, so the
+consecutive count and the failure rate move as they would for any exception. It feeds the
+**rate-limit cascade**, the trigger
 for storms interleaved with successes: with the defaults, ten 429s inside a minute open the breaker
 once they make up at least a tenth of the calls made in that minute and the minute holds at least
 twenty of them, counted per worker process. And it starts the cooldown that Baldur's retry stage
 waits out before its next attempt, sized from the provider's `Retry-After` when the answer carried
 one, so a retry does not land while the dependency is still asking for room.
 
-Composed with retry, the breaker sits outside the retry ladder and would ordinarily see only the
-sequence's final outcome. Baldur counts each attempt instead, so a storm the retries eventually
-overcome still reaches the breaker as the run of 429s it was, not as one success. The async retry
-stage is the exception: under `aprotect(retry=True)` the breaker sees only the sequence's final
-outcome, so an async storm the ladder survives never reaches it as a 429 at all, and one the ladder
-gives up on reaches it as a single 429. That ladder does not wait out the cooldown either; only the
-synchronous retry stage does.
+Composed with retry, the breaker sits outside the retry ladder, and its own failure count and
+failure rate see only the sequence's final outcome: a storm the retries eventually overcome ends as
+one success on those counters. The rate-limit cascade is counted per attempt instead, so that same
+storm still reaches the breaker as the run of 429s it was, through the cascade trigger. The async
+retry stage is no exception: under `aprotect(retry=True)` it notes every attempt and every 429 the
+way the synchronous stage does, and it waits out the same shared cooldown before each attempt. That
+wait is an `asyncio.sleep`, so it costs the waiting request its latency and nothing more; the other
+coroutines on that worker keep being served while it sleeps. A cooldown longer than what the stage
+may wait is not slept at all, in either call style: the time the call has left in its retry budget
+when one is set, otherwise the longest single cooldown wait Baldur allows, a minute by default. The
+attempt is refused instead, and the dependency is never contacted.
 
 A breaker the cascade opens is an ordinary automatic OPEN. It recovers through the recovery timeout
-and HALF_OPEN probing exactly like a breaker tripped by failures. Three warnings mark the event: one
-names the storm with the 429 count and rate it fired on, the one logged when the breaker opens
-names the cascade as its trigger, and a third confirms the auto-open for that service.
+and HALF_OPEN probing exactly like a breaker tripped by failures. The breaker logs three warnings
+of its own for the event: one names the storm with the 429 count and rate it fired on, the one
+logged when the breaker opens names the cascade as its trigger, and a third confirms the auto-open
+for that service, on top of the state-change line every open writes at the configurable
+circuit-breaker log level.
 
 Returned error responses get the same treatment on the failure side. A protected call that returns
 a response with a status on the failure list (the 5xx codes by default) records a breaker failure
 rather than a success. The value is still handed back to your code unchanged: a returned response
 never raises and never triggers the fallback.
 
-Two things deliberately do not count. A call Baldur itself declined to make, because the retry stage
-was waiting out a cooldown, is never a breaker failure and never enters the rate: the dependency was
-not contacted. And an exception type you told the breaker to ignore (`ignore_exceptions`) is ignored
-for the cascade as well, with one limit: the synchronous retry stage classifies each attempt on its
-own and does not read that list, so a `circuit_breaker` decorator wrapping a retried call still sees
-the retried 429s counted.
+Two things deliberately do not count. A call Baldur itself declined to make, because a cooldown
+outlasted what the retry stage could wait, is never a breaker failure and never enters the
+rate: the dependency was not contacted. And an exception type you told the breaker to ignore
+(`ignore_exceptions`) is ignored for the cascade as well, at every depth: a 429 the retry stage
+classifies on its own, in either call style, is dropped by the same list. The list names exception
+types, so a 429 a client hands back as a returned response is always counted.
 
 Which statuses count is set by two lists, `BALDUR_MIDDLEWARE_CB_STATUS_CODES` (failures,
 `500,502,503,504` by default) and `BALDUR_MIDDLEWARE_RATE_LIMIT_CODES` (`429` by default). The prefix
@@ -133,12 +140,13 @@ The inbound side is watched too. In a Django app the middleware classifies every
 returns against the same two lists and files it against a breaker named for the request path's
 domain: the path-substring mapping in the `BALDUR_DOMAIN_MAPPING` Django setting, with every unmapped
 path sharing one breaker. A 429 relayed from upstream records a failure and feeds the cascade, so
-five relayed 429s in a row trip that breaker like any other run of failures. A 429 that carries
-`X-RateLimit-*` headers is left out, since it came from a limiter in your own app; Baldur's own
-rate-limit middleware labels its 429s that way, while the 429 its DRF throttle bridge raises carries
-no such header and is recorded like a relayed one. The Flask and FastAPI middlewares do the same once you give them a service
-name, leaving out only the 429s Baldur itself rejected with; without a service name they record
-nothing. A 429 that reaches your code outside any protected call can still be reported by hand with
+five relayed 429s in a row trip that breaker like any other run of failures. A 429 that carries an
+`X-RateLimit-Mode` or `X-RateLimit-Limit` header is left out, since it came from a limiter in your
+own app. Baldur's own rate-limit middleware labels its 429s that way; the DRF throttle bridge never
+builds the response it refuses with, so it marks the request instead, and the middleware reads both
+marks. Either way a limit your own app imposed never counts. The Flask and FastAPI middlewares do
+the same once you give them a service name, leaving out only the 429s Baldur itself rejected with;
+without a service name they record nothing. A 429 that reaches your code outside any protected call can still be reported by hand with
 `record_rate_limit(service_name)`.
 
 ### Taking manual control
@@ -297,7 +305,7 @@ The most common knobs an operator sets. The full list lives in the API reference
 | `BALDUR_MIDDLEWARE_CB_STATUS_CODES` | `[500,502,503,504]` | Response statuses recorded as a breaker failure, both by the inbound middleware and when a protected call *returns* a response instead of raising |
 | `BALDUR_MIDDLEWARE_RATE_LIMIT_CODES` | `[429]` | Response statuses read as a rate-limit answer: a failure that also feeds the cascade. Not exclusive with the list above |
 | `BALDUR_CB_MANUAL_OVERRIDE_TTL_MINUTES` | `90` | How long a force lasts when you do not give it a lifetime of its own, up to `1440` (24 h). Every force expires, so one you forget lapses instead of pinning the breaker |
-| `BALDUR_EVENT_LOGGING_CB_LOG_LEVEL` | `WARNING` | Log level for the circuit open, close, and manual-force events; the automatic step to HALF_OPEN logs at a fixed level |
+| `BALDUR_EVENT_LOGGING_CB_LOG_LEVEL` | `WARNING` | Log level for the circuit open, close, and manual-force events. The automatic step to HALF_OPEN writes no log line of its own; it reaches the event bus (and, on PRO, the audit trail) instead |
 | `BALDUR_META_WATCHDOG_SLACK_WEBHOOK_URL` | _(unset)_ | Slack incoming-webhook URL for the open/close push; unset means the events are logged, not posted |
 
 ## See also

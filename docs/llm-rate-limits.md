@@ -80,51 +80,77 @@ def ask(prompt: str) -> str:
 cooldown is written to shared storage; every other worker that reaches this
 call waits on that same deadline rather than discovering the limit on its own.
 The retry stage resolves the shared coordinator itself, so there is nothing
-else to wire. It is on by default, and
-`BALDUR_RATE_LIMIT_BACKOFF_COORDINATION_ENABLED=false` turns it off for a whole
-deployment if you want the per-process behavior back.
+else to wire. It is on by default; a deployment-wide switch turns it off if
+you want the per-process behavior back.
 
-Three details worth knowing before you rely on it:
+The same line works on an `async def` — an `AsyncOpenAI` client under FastAPI,
+or an agent loop:
+
+```python
+@baldur.protected("openai_chat", retry=True)
+async def ask(prompt: str) -> str:
+    return await client.chat.completions.create(...)
+```
+
+The cooldown wait is an `asyncio.sleep`, so it costs that request its latency
+and nothing else on the worker keeps waiting; the cooldown write itself runs on
+a worker thread. A cooldown longer than the call's remaining budget is not
+slept at all — the call is refused instead, and the refusal carries
+`not_before` (the cooldown's expiry) so a queue-backed caller can reschedule
+it rather than burn the budget waiting.
+
+Whether that holds for your deployment comes down to storage, detection, and
+the provider's own header.
 
 **Shared means shared storage.** Out of the box Baldur runs on an in-memory
 backend, and an in-memory cooldown is shared with nobody — it is still one
-process learning alone. Point it at Redis (or a database) and the same code
-starts coordinating across the fleet. See [storage
+process learning alone. Point it at Redis and the same code starts
+coordinating across the fleet. See [storage
 backends](concepts/foundations/storage-backends.md) for the trade-offs.
 
-**Detection reads the exception, not a status literal.** Baldur classifies a
-raised error as a rate limit by checking both its message and its *type name*
-for `429`, `rate limit`, `ratelimit`, `too many requests`, `throttle`, or
-`quota exceeded`. A client that raises something called `RateLimitError` —
-which is what the OpenAI Python SDK raises on a 429 — matches on the type name
-alone, with no configuration.
+**Detection reads the exception's words, not only a status code.** Baldur
+classifies a raised error as a rate limit by checking both its message and its
+*type name* for `429`, `rate limit`, `ratelimit`, `too many requests`,
+`throttle`, or `quota exceeded`. A client that raises something called
+`RateLimitError` — which is what the OpenAI Python SDK raises on a 429 —
+matches on the type name alone, with no configuration.
 
 **`Retry-After` is honored when the provider sends one.** Baldur reads it from
 the exception's `retry_after` attribute or from its response headers, in both
-forms the HTTP spec allows: a number of seconds, or a date. The provider's own
-number beats a computed backoff, because the provider is the one who knows.
+forms the HTTP spec allows: a number of seconds, or a date. The provider's
+number is a floor under the cooldown, not a replacement for it: Baldur never
+waits less than the provider asked, and its own escalating cooldown can still
+be the longer of the two. The provider knows the earliest legal time; it knows
+nothing about how many of you are still colliding.
 
-## The hole to know about before you rely on it
+## What a returned 429 gets, and what it does not
 
-The 429 has to arrive as a **raised exception**.
+A 429 reaches Baldur in one of two shapes: an exception the client raises
+(`RateLimitError` from the OpenAI SDK, `httpx.HTTPStatusError` after
+`raise_for_status()`), or a response object the client hands back with
+`status_code == 429` — `requests` or `httpx` without `raise_for_status()`.
 
-If your HTTP client hands back a response object with `status_code == 429`
-instead of raising — `requests` or `httpx` without `raise_for_status()` — then
-as far as the retry stage is concerned the call succeeded. It does not retry,
-and it does not coordinate. You get the per-process behavior you had before,
-silently, which is the worst way to get it.
+Both shapes install the shared cooldown. Where a raised exception is classified
+by its message and type, a returned response is classified by its status code
+(`429` by default; `BALDUR_MIDDLEWARE_RATE_LIMIT_CODES` is the list). Either
+way the cooldown is written, and the rest of the fleet waits on it.
 
-Two ways to close it today. Either make the client raise:
+The difference is the retry. A raised 429 is a failure, so the retry ladder
+runs and the call is tried again once the cooldown has passed. A returned 429
+is a value, so the retry stage hands it back to your code as the result:
+coordinated, but not retried. If you want the retry as well, make the client
+raise:
 
 ```python
 @baldur.protected("openai_chat", retry=True)
 def ask(prompt: str) -> str:
     response = httpx.post(...)
-    response.raise_for_status()   # now the 429 is visible
+    response.raise_for_status()   # now the 429 is a failure the ladder retries
     return response.json()
 ```
 
-Or drive the coordinator directly on a call it does not wrap:
+For a call you do not want under `@baldur.protected` at all, the coordinator
+can be driven directly:
 
 ```python
 from baldur.services.rate_limit_coordinator import RateLimitCoordinator
@@ -137,9 +163,10 @@ def ask(prompt: str):
 ```
 
 That decorator waits out an active cooldown before calling, reads the returned
-response for a 429, and reports it. If the remaining cooldown is longer than it
-is willing to sleep, it raises instead of calling — a decorator cannot return
-"nothing," so refusing is its only honest option.
+response (or the raised error) for a 429, and reports it. It does not retry
+either. If the remaining cooldown is longer than it is willing to sleep, it
+raises instead of calling — a decorator cannot return "nothing," so refusing is
+its only honest option.
 
 ## What this is not
 
