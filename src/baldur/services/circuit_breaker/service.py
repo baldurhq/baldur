@@ -791,12 +791,20 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
         the mean. That makes it suited to a system-wide stability gate, where
         each individual service is still protected by its own circuit breaker.
 
-        Evidence comes from **this service object's** outcome windows, so the
-        fraction covers the traffic admitted through this instance. A process
-        that also protects calls through ``protect()`` or ``@circuit_breaker``
-        gives those policies their own service instances, whose outcomes this
-        method does not see — read the aggregate from the same instance that
-        recorded the traffic.
+        Evidence comes from **this service object's** outcome windows. The
+        process-shared instance — the runtime singleton
+        ``get_circuit_breaker_service()`` returns — holds the process-wide
+        evidence: every breaker built without ``cb_service`` or ``config``
+        (``protect()``, ``@circuit_breaker``, the preset pipelines, the
+        inbound middlewares) records on it. A breaker built on a pinned
+        config or an explicitly injected service keeps its own instance, and
+        its outcomes are read from that instance alone.
+
+        ``0.0`` is also what an empty window reads: a process that has
+        admitted no CLOSED call since its breakers' last transitions (every
+        transition clears the transitioned name's window). The per-service
+        read ``get_window_evidence()`` keeps that case distinguishable — its
+        ``(0, 0)`` means no evidence, not a 0% rate.
 
         Returns:
             Failure fraction in the range 0.0-1.0.

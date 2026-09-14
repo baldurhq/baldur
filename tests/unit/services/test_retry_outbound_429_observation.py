@@ -404,7 +404,6 @@ class TestRetryObservationIgnoreListBehavior:
     """
 
     def test_an_ignored_429_exception_feeds_no_cascade(self, observation):
-        _, cascade = observation
         breaker = _admitting_breaker(ignore_exceptions=(_IgnoredRateLimitError,))
         retry = _policy(max_attempts=2)
 
@@ -413,13 +412,17 @@ class TestRetryObservationIgnoreListBehavior:
 
         breaker.execute(lambda: retry.execute(raise_429))
 
-        cascade.record_rate_limit_response.assert_not_called()
+        breaker.cb_service.record_rate_limit_response.assert_not_called()
 
     def test_the_same_storm_feeds_the_cascade_without_the_ignore_list(
         self, observation
     ):
-        """Negative half: the dial is what withholds it, not the composition."""
-        _, cascade = observation
+        """Negative half: the dial is what withholds it, not the composition.
+
+        The cascade lands on the breaker's own service — the scope carries
+        it — so the shared service the singleton getter returns stays clean.
+        """
+        _, shared_service = observation
         breaker = _admitting_breaker()
         retry = _policy(max_attempts=2)
 
@@ -428,7 +431,8 @@ class TestRetryObservationIgnoreListBehavior:
 
         breaker.execute(lambda: retry.execute(raise_429))
 
-        assert cascade.record_rate_limit_response.call_count == 2
+        assert breaker.cb_service.record_rate_limit_response.call_count == 2
+        shared_service.record_rate_limit_response.assert_not_called()
 
     def test_the_ignored_attempts_still_count_as_requests(self, observation):
         """The denominator is unfiltered: the breaker frame counts them too."""

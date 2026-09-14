@@ -2115,7 +2115,8 @@ class TestRateLimitAwareDecoratorRaised429Behavior:
 
         The decorator's claim withholds the breaker frame's notify, so the
         decorator itself must record the 429 — exactly once (never zero, the
-        pre-fix reading), and the process-wide singleton is never asked.
+        pre-fix reading) — on the breaker's own service, and neither
+        process-wide singleton is asked.
         """
         from baldur.interfaces.repositories import CircuitBreakerStateData
         from baldur.services.circuit_breaker.config import CircuitBreakerDecision
@@ -2146,11 +2147,11 @@ class TestRateLimitAwareDecoratorRaised429Behavior:
         protected = _decorated(
             coordinator_no_jitter_no_debounce, "k", body, is_async=is_async
         )
-        cascade_service = MagicMock(spec=CircuitBreakerService)
+        shared_service = MagicMock(spec=CircuitBreakerService)
 
         with (
             patch(_OBS_TRACKER, return_value=MagicMock(spec=RateLimitTracker)),
-            patch(_OBS_CB_SERVICE, return_value=cascade_service),
+            patch(_OBS_CB_SERVICE, return_value=shared_service),
             patch.object(
                 RateLimitCoordinator, "get_instance", autospec=True
             ) as singleton,
@@ -2167,9 +2168,11 @@ class TestRateLimitAwareDecoratorRaised429Behavior:
         singleton.assert_not_called()
         cb_service.record_failure.assert_called_once()
         # The cascade half is the decorator's too: the mark it leaves stops the
-        # breaker frame noting the 429, so nobody else can count it.
+        # breaker frame noting the 429, so nobody else can count it. It lands
+        # on the breaker's own service, which the scope carries.
         assert seen["scope"].rate_limited == 1
-        cascade_service.record_rate_limit_response.assert_called_once_with("k")
+        cb_service.record_rate_limit_response.assert_called_once_with("k")
+        shared_service.record_rate_limit_response.assert_not_called()
 
     @_DECORATED_SURFACES
     def test_a_returning_client_under_a_breaker_frame_feeds_the_cascade_once(
@@ -2211,11 +2214,11 @@ class TestRateLimitAwareDecoratorRaised429Behavior:
         protected = _decorated(
             coordinator_no_jitter_no_debounce, "k", body, is_async=is_async
         )
-        cascade_service = MagicMock(spec=CircuitBreakerService)
+        shared_service = MagicMock(spec=CircuitBreakerService)
 
         with (
             patch(_OBS_TRACKER, return_value=MagicMock(spec=RateLimitTracker)),
-            patch(_OBS_CB_SERVICE, return_value=cascade_service),
+            patch(_OBS_CB_SERVICE, return_value=shared_service),
             patch.object(
                 RateLimitCoordinator, "get_instance", autospec=True
             ) as singleton,
@@ -2229,7 +2232,8 @@ class TestRateLimitAwareDecoratorRaised429Behavior:
         singleton.assert_not_called()
         assert seen["scope"].rate_limited == 1
         assert seen["scope"].rate_limited != 0
-        cascade_service.record_rate_limit_response.assert_called_once_with("k")
+        cb_service.record_rate_limit_response.assert_called_once_with("k")
+        shared_service.record_rate_limit_response.assert_not_called()
 
 
 class TestRateLimitAwareAsyncDecoratorCascadeNoteBehavior:

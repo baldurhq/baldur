@@ -27,6 +27,12 @@ from typing import Any, TypeVar
 
 import structlog
 
+# The singleton getter is read through the module attribute at call time, so a
+# swap or a test patch of ``convenience.get_circuit_breaker_service`` reaches
+# every default-built policy. Bound as a dotted ``import`` rather than
+# ``from . import``: the latter is also an import-time edge to this package's
+# ``__init__``, which imports this module back.
+import baldur.services.circuit_breaker.convenience as convenience
 from baldur.core.exceptions import RateLimitDeferredError
 from baldur.core.execution_mode import get_execution_mode, intervention_suppressed
 from baldur.interfaces.resilience_policy import (
@@ -99,10 +105,23 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
     instrumentation.
     Ref: 494
 
+    Evidence ownership: a policy built with neither ``cb_service`` nor
+    ``config`` records on the process-shared ``CircuitBreakerService`` — the
+    runtime singleton ``get_circuit_breaker_service()`` returns — resolved
+    once per protected call, so every reader of that service's rate evidence
+    (the aggregate failure rate, the 429-cascade trip's window counts) sees
+    the traffic this policy admitted. A ``cb_service`` or a ``config`` opts
+    out: the policy then keeps a private service, and its evidence stays
+    with it.
+
     Args:
         service_name: Identifier of the external service protected by the Circuit Breaker
-        cb_service: Existing CircuitBreakerService instance (auto-created if None)
-        config: CircuitBreakerConfig (used when cb_service is None)
+        cb_service: Existing CircuitBreakerService instance to record on. ``None``
+            binds the process-shared service (or a private one when ``config``
+            is given)
+        config: CircuitBreakerConfig pinned to this policy. Given without
+            ``cb_service``, it builds a private CircuitBreakerService whose
+            evidence is not shared with the process-wide one
         failure_exceptions: Tuple of exception types counted as failures
         ignore_exceptions: Tuple of exception types NOT counted as failures
         hooks: List of PolicyHooks (None means an empty list (transition-only); cycle-level
@@ -121,7 +140,15 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
         hooks: list | None = None,
     ):
         self._service_name = service_name
-        self._cb_service = cb_service or self._create_default_service(config)
+        # ``None`` means "the process-shared service, resolved per call": a
+        # held reference would outlive a runtime reset or a
+        # ``configure_circuit_breaker_service()`` swap, since the policy
+        # itself is cached for the process by ``protect()``. A pinned config
+        # is an opt-out of the shared configuration, so its evidence gets a
+        # private instance.
+        self._cb_service: CircuitBreakerService | None = cb_service
+        if cb_service is None and config is not None:
+            self._cb_service = CircuitBreakerService(config=config)
         self._failure_exceptions = failure_exceptions
         self._ignore_exceptions = ignore_exceptions
         self._hooks = hooks if hooks is not None else []
@@ -132,21 +159,6 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
         # recording path is skipped entirely — the rate renders "not measured"
         # rather than a wrong number.
         self._outcome_key = resolve_outcome_key(service_name)
-
-    @staticmethod
-    def _create_default_service(
-        config: CircuitBreakerConfig | None = None,
-    ) -> CircuitBreakerService:
-        """
-        Create the default CircuitBreakerService.
-
-        The layered-first resolution now lives on
-        ``CircuitBreakerService.repository`` itself, so the traffic path and
-        every operator-facing consumer resolve through one place instead of
-        two — which is what kept an operator's manual pin out of the view
-        admission reads.
-        """
-        return CircuitBreakerService(config=config)
 
     @property
     def name(self) -> str:
@@ -160,8 +172,16 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
 
     @property
     def cb_service(self) -> CircuitBreakerService:
-        """Internal CircuitBreakerService instance."""
-        return self._cb_service
+        """The CircuitBreakerService this policy records on.
+
+        The injected or config-pinned private instance when the policy was
+        built with one; otherwise the process-shared service, resolved on
+        every access so a swap or reset of that singleton is observed by the
+        next protected call.
+        """
+        if self._cb_service is not None:
+            return self._cb_service
+        return convenience.get_circuit_breaker_service()
 
     def _is_failure(self, error: Exception) -> bool:
         """
@@ -197,8 +217,15 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
                     error=e,
                 )
 
-    def _admit(self) -> tuple[str, PolicyResult[T] | None, Any]:
+    def _admit(
+        self, service: CircuitBreakerService
+    ) -> tuple[str, PolicyResult[T] | None, Any]:
         """Resolve the Circuit Breaker admission verdict WITHOUT running func.
+
+        ``service`` is the breaker service the caller resolved for this call;
+        the recording helpers take the same object, so one call is admitted
+        and recorded on one instance even if the shared singleton is swapped
+        in between.
 
         Returns ``(verdict, reject_result, hint_state)``:
 
@@ -216,7 +243,7 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
         difference between the two variants is ``func()`` vs ``await func()``.
         """
         # Run directly when CB is disabled
-        if not self._cb_service.is_enabled:
+        if not service.is_enabled:
             return "direct", None, None
 
         # Hook: execution start
@@ -232,7 +259,7 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
         # once, and never reject or record; the business exception still
         # propagates. The active path keeps its single-fetch admission below.
         if not get_execution_mode().should_execute:
-            peek = self._cb_service.get_or_create_state(self._service_name)
+            peek = service.get_or_create_state(self._service_name)
             would_reject = peek.state == CircuitState.OPEN
             intervention_suppressed(
                 service_name=self._service_name,
@@ -250,7 +277,7 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
         # ``should_allow_with_state`` already loaded, eliminating the second
         # ``get_or_create_state`` call that the former ``get_state`` lookup
         # incurred on every reject.
-        decision = self._cb_service.should_allow_with_state(self._service_name)
+        decision = service.should_allow_with_state(self._service_name)
 
         if not decision.allowed:
             reject_result: PolicyResult[T] = PolicyResult(
@@ -298,6 +325,7 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
         outcome: Any,
         retry_after: float | None,
         scope: OutboundObservationScope | None,
+        service: CircuitBreakerService,
     ) -> None:
         """Fan a 429 out to the cascade and the coordinator, each once.
 
@@ -312,9 +340,18 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
         breaker's ignore list; at this frame the ``_is_failure`` gate above has
         already answered for a raised exception, so the check is a no-op here
         and load-bearing only for the inner stages that share the scope.
+
+        The cascade half is recorded on ``service`` — the instance this call
+        was admitted and recorded on — so the trip reads the window that holds
+        this breaker's evidence.
         """
         if scope is None:
-            observe_429(self._service_name, retry_after, notify_coordinator=True)
+            observe_429(
+                self._service_name,
+                retry_after,
+                notify_coordinator=True,
+                service=service,
+            )
             return
 
         if not scope.was_classified(outcome):
@@ -325,15 +362,17 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
                 retry_after,
                 record_cascade=False,
                 notify_coordinator=True,
+                service=service,
             )
 
     def _on_success(
         self,
         value: T,
         hint_state: Any,
-        scope: OutboundObservationScope | None = None,
+        scope: OutboundObservationScope | None,
+        service: CircuitBreakerService,
     ) -> PolicyResult[T]:
-        """Record the returned outcome and fire the success hook.
+        """Record the returned outcome on ``service`` and fire the success hook.
 
         "Returned" is not "succeeded": a client that hands its HTTP answer back
         instead of raising reports a 429 or a 5xx as an ordinary return value.
@@ -350,7 +389,7 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
         is_failure_status = status is not None and status in failure_status_codes()
 
         if is_failure_status or is_rate_limited:
-            self._cb_service.record_failure(
+            service.record_failure(
                 self._service_name,
                 error_context={
                     "error": f"HTTP {status}",
@@ -360,14 +399,14 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
             )
             record_call_outcome(self._outcome_key, failure=True)
         else:
-            self._cb_service.record_success(
+            service.record_success(
                 self._service_name,
                 hint_state=hint_state,
             )
             record_call_outcome(self._outcome_key, failure=False)
 
         if is_rate_limited:
-            self._observe_rate_limit(value, retry_after, scope)
+            self._observe_rate_limit(value, retry_after, scope, service)
 
         success_result = PolicyResult(
             value=value,
@@ -382,9 +421,10 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
         self,
         error: Exception,
         hint_state: Any,
-        scope: OutboundObservationScope | None = None,
+        scope: OutboundObservationScope | None,
+        service: CircuitBreakerService,
     ) -> None:
-        """Record a failure (after the ``_is_failure`` gate) and fire the failure hook.
+        """Record a failure on ``service`` (behind ``_is_failure``) and fire the hook.
 
         The caller re-raises ``error`` so an upper Policy (Retry, etc.) can
         handle it. ``asyncio.CancelledError`` never reaches here: it is a
@@ -399,7 +439,7 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
         self._count_call_request(scope, made_a_call=not _is_rate_limit_deferral(error))
 
         if self._is_failure(error):
-            self._cb_service.record_failure(
+            service.record_failure(
                 self._service_name,
                 error_context={"error": str(error), "type": type(error).__name__},
                 hint_state=hint_state,
@@ -413,7 +453,7 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
             # rate-limit exception type ignores it everywhere.
             is_rate_limited, retry_after = detect_rate_limit(error)
             if is_rate_limited:
-                self._observe_rate_limit(error, retry_after, scope)
+                self._observe_rate_limit(error, retry_after, scope, service)
         # Hook: execution failure (Audit + EventBus)
         self._invoke_hooks("on_failure", self._service_name, error, 1)
 
@@ -435,8 +475,13 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
 
         On rejection due to CB OPEN, no exception is thrown; a PolicyResult is returned instead.
         Exceptions raised during function execution are re-raised so an upper Policy (Retry, etc.) can handle them.
+
+        The breaker service is resolved once, here, and handed to every
+        helper: admission and recording of one call land on one instance,
+        even if the process-shared service is swapped between the two.
         """
-        verdict, reject_result, hint_state = self._admit()
+        service = self.cb_service
+        verdict, reject_result, hint_state = self._admit(service)
         if verdict == "reject":
             return reject_result  # type: ignore[return-value]
         if verdict == "direct":
@@ -446,12 +491,12 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
         # BaseException) keeps KeyboardInterrupt/SystemExit propagating uncounted.
         # The observation scope is opened only here: a rejected or observe-only
         # verdict runs no dependency call this stage owns, so it counts nothing.
-        token, scope = open_scope(self._service_name, self._is_failure)
+        token, scope = open_scope(self._service_name, self._is_failure, service)
         try:
             value = func(*args, **kwargs)
-            return self._on_success(value, hint_state, scope)
+            return self._on_success(value, hint_state, scope, service)
         except Exception as e:
-            self._on_failure(e, hint_state, scope)
+            self._on_failure(e, hint_state, scope, service)
             raise  # propagate so an upper Policy (Retry, etc.) can handle it
         finally:
             close_scope(token)
@@ -522,29 +567,34 @@ class AsyncCircuitBreakerPolicy:
         cooldown, which writes the shared store and publishes on the event
         bus — neither may run on the loop. Every other outcome keeps the
         inline in-memory path, so the success hot path pays no hop. The scope
-        is passed explicitly and mutated in place, so the thread writes the
-        same record this frame opened.
+        and the breaker service are passed explicitly — the scope mutated in
+        place, the service the one this frame resolved — so the thread writes
+        the same record this frame opened, on the same instance, without
+        resolving a runtime of its own.
         """
         inner = self._inner
-        verdict, reject_result, hint_state = inner._admit()
+        service = inner.cb_service
+        verdict, reject_result, hint_state = inner._admit(service)
         if verdict == "reject":
             return reject_result  # type: ignore[return-value]
         if verdict == "direct":
             return inner._direct_result(await func(*args, **kwargs))
 
-        token, scope = open_scope(inner.service_name, inner._is_failure)
+        token, scope = open_scope(inner.service_name, inner._is_failure, service)
         try:
             value = await func(*args, **kwargs)
             if _looks_rate_limited(value):
                 return await asyncio.to_thread(
-                    inner._on_success, value, hint_state, scope
+                    inner._on_success, value, hint_state, scope, service
                 )
-            return inner._on_success(value, hint_state, scope)
+            return inner._on_success(value, hint_state, scope, service)
         except Exception as e:
             if _looks_rate_limited(e):
-                await asyncio.to_thread(inner._on_failure, e, hint_state, scope)
+                await asyncio.to_thread(
+                    inner._on_failure, e, hint_state, scope, service
+                )
             else:
-                inner._on_failure(e, hint_state, scope)
+                inner._on_failure(e, hint_state, scope, service)
             raise  # propagate so an upper Policy (Retry, etc.) can handle it
         finally:
             close_scope(token)
@@ -569,6 +619,11 @@ def circuit_breaker(
     The wrapper returns a ``PolicyResult`` (not the unwrapped value), matching
     the sync convention; ``wrapper.policy`` exposes the underlying sync
     ``CircuitBreakerPolicy`` (its ``.cb_service`` reachable) for both variants.
+
+    With neither ``cb_service`` nor ``config`` the decorated function records
+    on the process-shared breaker service, alongside ``protect()`` and every
+    other default-built breaker; either argument gives the site a private
+    service whose evidence is its own.
 
     Usage::
 

@@ -26,9 +26,12 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from contextvars import ContextVar, Token
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
+
+if TYPE_CHECKING:
+    from .service import CircuitBreakerService
 
 __all__ = [
     "OutboundObservationScope",
@@ -69,6 +72,11 @@ class OutboundObservationScope:
             predicate, so an exception type the caller told the breaker to
             ignore is ignored at every depth that sees it — not only at the
             frame that catches it. ``None`` means every outcome counts.
+        service: The breaker service the opening stage records this call on.
+            The cascade half of every 429 seen under this scope lands there,
+            so a breaker built on a pinned config or an injected service trips
+            on the window that holds its own evidence. ``None`` routes the
+            cascade to the process-shared service.
     """
 
     __slots__ = (
@@ -78,12 +86,14 @@ class OutboundObservationScope:
         "coordination_claimed",
         "counts_exception",
         "rate_limited",
+        "service",
     )
 
     def __init__(
         self,
         breaker_key: str,
         counts_exception: Callable[[Exception], bool] | None = None,
+        service: CircuitBreakerService | None = None,
     ) -> None:
         self.breaker_key = breaker_key
         self.attempts = 0
@@ -91,6 +101,7 @@ class OutboundObservationScope:
         self.coordination_claimed = False
         self.classified: list[Any] = []
         self.counts_exception = counts_exception
+        self.service = service
 
     def note_attempt(self) -> None:
         """Count one dependency call and write its request to the tracker.
@@ -116,7 +127,12 @@ class OutboundObservationScope:
         if not self.counts(subject):
             return
         self.rate_limited += 1
-        observe_429(self.breaker_key, retry_after, notify_coordinator=False)
+        observe_429(
+            self.breaker_key,
+            retry_after,
+            notify_coordinator=False,
+            service=self.service,
+        )
 
     def counts(self, subject: Any) -> bool:
         """Whether the opening breaker counts ``subject`` against itself.
@@ -145,14 +161,19 @@ class OutboundObservationScope:
 def open_scope(
     breaker_key: str,
     counts_exception: Callable[[Exception], bool] | None = None,
+    service: CircuitBreakerService | None = None,
 ) -> tuple[Token, OutboundObservationScope]:
     """Publish a fresh scope for ``breaker_key`` and return its reset token.
 
     A nested protected call gets its own scope; resetting the token restores
     the outer one untouched. ``counts_exception`` is the opening breaker's
     failure predicate, carried so inner stages apply the same ignore list.
+    ``service`` is the breaker service that stage records on, carried so the
+    cascade half of a 429 any inner stage reports trips the same breaker —
+    its own cascade thresholds, its own window read and cleared. With no
+    service the cascade lands on the process-shared one.
     """
-    scope = OutboundObservationScope(breaker_key, counts_exception)
+    scope = OutboundObservationScope(breaker_key, counts_exception, service)
     return _current_scope.set(scope), scope
 
 
@@ -172,6 +193,7 @@ def observe_429(
     *,
     record_cascade: bool = True,
     notify_coordinator: bool = False,
+    service: CircuitBreakerService | None = None,
 ) -> None:
     """Fan one observed 429 out to the cascade counter and the coordinator.
 
@@ -185,9 +207,13 @@ def observe_429(
         record_cascade: False when an inner stage already counted this outcome.
         notify_coordinator: True only when no stage claimed coordination for
             this call.
+        service: The breaker service the cascade half is recorded on — the one
+            the opening breaker stage records the call on. ``None`` (a caller
+            with no breaker stage of its own) records on the process-shared
+            service.
     """
     if record_cascade:
-        _record_cascade_observation(key)
+        _record_cascade_observation(key, service)
     if notify_coordinator:
         _notify_cooldown(key, retry_after)
 
@@ -207,17 +233,24 @@ def _record_request(key: str) -> None:
         )
 
 
-def _record_cascade_observation(key: str) -> None:
+def _record_cascade_observation(
+    key: str, service: CircuitBreakerService | None
+) -> None:
     """Record the 429 against the breaker's cascade detector. Fail-open.
 
     ``record_rate_limit_response`` is the single writer of the tracker's 429
     counter: every observation site reaches it through here, so no 429 can be
-    counted twice by two writers disagreeing about who owns it.
+    counted twice by two writers disagreeing about who owns it. The write goes
+    to ``service`` — the instance whose window holds the call's evidence — and
+    to the process-shared service only when the caller named none.
     """
     try:
-        from .convenience import get_circuit_breaker_service
+        if service is None:
+            from .convenience import get_circuit_breaker_service
 
-        get_circuit_breaker_service().record_rate_limit_response(key)
+            service = get_circuit_breaker_service()
+
+        service.record_rate_limit_response(key)
     except Exception as error:
         logger.warning(
             "circuit_breaker.rate_limit_observation_failed",

@@ -72,8 +72,15 @@ _TIMEOUT_UNSET: Any = object()
 #
 # protect()'s public surface exposes only ``circuit_breaker: bool`` (no per-call
 # CB tuning kwargs), so ``CircuitBreakerPolicy(service_name=name)`` is fully
-# determined by ``name``. Caching it removes per-call object allocation and the
-# per-call ProviderRegistry lookup inside ``_create_default_service``.
+# determined by ``name``. Caching it removes the per-call policy construction
+# and the per-name ``resolve_outcome_key`` projection (its lazy import and
+# collision check), which the constructor pays once per protected name.
+#
+# What the cache does NOT hold: a breaker service. A default-built policy
+# resolves the runtime singleton ``get_circuit_breaker_service()`` on every
+# protected call, so caching the policy shares no rate evidence between names
+# beyond what the singleton already shares, and pins no service across a
+# runtime reset or a ``configure_circuit_breaker_service()`` swap.
 #
 # Reset chain: ``reset_protect_caches()`` clears the cache and the recorder
 # state. ``reset_protect_settings()`` (settings/protect.py) calls it via lazy

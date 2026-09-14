@@ -172,7 +172,10 @@ _MOCK_CREATION_BUDGETS: dict[str, int] = {
     # three probability cases now call the framework-free predicate directly,
     # and the two method-propagation cases patch the helper's level seams
     # instead of building a RateController state chain by hand.
-    "oss": 4317,
+    # breaker-service binding: -1 — the policy's default-service factory went
+    # away with its spec-less repository double; the binding forms assert
+    # identity against the runtime singleton instead.
+    "oss": 4316,
     "pro": 1800,
     "dormant": 401,
 }

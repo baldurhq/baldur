@@ -933,8 +933,9 @@ class TestObservationScopePropagationBehavior:
             backoff=ConstantBackoff(delay=0.0),
             rate_limit_coordinator=coordinator,
         )
+        breaker = self._admitting_breaker()
         composer: AsyncPolicyComposer = AsyncPolicyComposer()
-        composer.add(AsyncCircuitBreakerPolicy(self._admitting_breaker()))
+        composer.add(AsyncCircuitBreakerPolicy(breaker))
         composer.add(AsyncTimeoutPolicy(timeout_seconds=5.0))
         composer.add(retry)
         seen: dict = {}
@@ -947,11 +948,11 @@ class TestObservationScopePropagationBehavior:
             raise errors[-1]
 
         tracker = MagicMock(spec=RateLimitTracker)
-        cascade_service = MagicMock(spec=CircuitBreakerService)
+        shared_service = MagicMock(spec=CircuitBreakerService)
         breaker_hop = ToThreadSpy()
         with (
             patch(_TRACKER, return_value=tracker),
-            patch(_CB_SERVICE, return_value=cascade_service),
+            patch(_CB_SERVICE, return_value=shared_service),
             patch(_BREAKER_TO_THREAD, new=breaker_hop),
             patch.object(
                 RateLimitCoordinator, "get_instance", autospec=True
@@ -972,8 +973,11 @@ class TestObservationScopePropagationBehavior:
         # The breaker frame recorded the final 429 on a worker thread ...
         assert breaker_hop.hopped("_on_failure") is True
         # ... and, reading the same scope there, counted no third 429 and
-        # installed no cooldown of its own.
-        assert cascade_service.record_rate_limit_response.call_count == 2
+        # installed no cooldown of its own. Both cascade notes land on the
+        # breaker's own service, which the scope carries; the shared one is
+        # never asked.
+        assert breaker.cb_service.record_rate_limit_response.call_count == 2
+        shared_service.record_rate_limit_response.assert_not_called()
         assert coordinator.aon_rate_limited.await_count == 2
         singleton.assert_not_called()
         assert tracker.record_request.call_count == 2

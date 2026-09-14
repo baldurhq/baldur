@@ -1,28 +1,34 @@
 """
-CircuitBreakerPolicy 훅 통합 + _should_open_circuit window cap + Protocol 상속 테스트 (#227).
+CircuitBreakerPolicy hook integration + _should_open_circuit window cap + Protocol inheritance (#227).
 
-테스트 대상:
-- policy.py: _invoke_hooks(), hooks 파라미터, _create_default_service(), ResiliencePolicy[T] 상속
-- service.py: _should_open_circuit() — sliding_window_size cap 로직
+Test targets:
+- policy.py: _invoke_hooks(), the hooks parameter, the breaker-service binding,
+  ResiliencePolicy[T] inheritance
+- service.py: _should_open_circuit() — the sliding_window_size cap
 
-코드 근거:
-- CircuitBreakerPolicy._invoke_hooks(): Fail-Open으로 모든 훅 호출
-- execute(): on_execute(시작), on_reject(CB OPEN 거부), on_success(성공), on_failure(실패) 시점 훅 호출
-- CircuitBreakerPolicy(ResiliencePolicy[T]): 명시적 Protocol 상속 → isinstance() 통과
-- hooks 파라미터: None이면 빈 리스트(transition-only, #494). 외부 사용자는 `hooks=[…]`로 주입 가능
-- _create_default_service(): ProviderRegistry "layered" 시도 → 실패 시 기본값 fallback
-- _should_open_circuit(): sliding_window_size > 0이고 total_calls > window_size면 cap 적용
-  count-based threshold는 failure_count 원본 사용
+Source basis:
+- CircuitBreakerPolicy._invoke_hooks(): every hook is invoked fail-open
+- execute(): hooks fire at on_execute (start), on_reject (CB OPEN), on_success,
+  on_failure
+- CircuitBreakerPolicy(ResiliencePolicy[T]): explicit Protocol inheritance →
+  isinstance() passes
+- hooks parameter: None means an empty list (transition-only, #494); external
+  authors inject ``hooks=[…]``
+- breaker-service binding: neither ``cb_service`` nor ``config`` → the
+  process-shared service, resolved per access; either one → a private instance
+- _should_open_circuit(): with sliding_window_size > 0 and total_calls >
+  window_size the cap applies; the count-based threshold reads the raw
+  failure_count
 
-UNIT_TEST_GUIDELINES.md 준수:
-- 계약 검증(Contract): Protocol 상속, hooks 기본값
-- 동작 검증(Behavior): 소스 참조, Mock 호출 순서 검증
-- conftest.py 배치: 1개 파일 전용 fixture → 파일 내부 (§5.1)
+UNIT_TEST_GUIDELINES.md compliance:
+- Contract: Protocol inheritance, hooks default
+- Behavior: source-referenced, mock call-order assertions
+- conftest placement: single-file fixtures live in the file (§5.1)
 """
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -51,13 +57,13 @@ def _reject_decision(state_str: str = "open") -> CircuitBreakerDecision:
 
 
 # =============================================================================
-# Fixtures — 1개 파일 전용이므로 파일 내부 배치 (§5.1)
+# Fixtures — used by this file only, so they live here (§5.1)
 # =============================================================================
 
 
 @pytest.fixture
 def mock_cb_service():
-    """CircuitBreakerService Mock — 기본 동작: enabled + allow.
+    """CircuitBreakerService mock — default behaviour: enabled + allow.
 
     Post-#485 D2: ``CircuitBreakerPolicy.execute`` calls
     ``should_allow_with_state`` (companion API). The default mock returns a
@@ -78,7 +84,7 @@ def mock_cb_service():
 
 @pytest.fixture
 def mock_hook():
-    """범용 Mock Hook — 모든 메서드를 가진 MagicMock."""
+    """A generic mock hook — a MagicMock carrying every hook method."""
     hook = MagicMock()
     hook.on_execute = MagicMock()
     hook.on_success = MagicMock()
@@ -90,7 +96,7 @@ def mock_hook():
 
 @pytest.fixture
 def policy_with_mock_hook(mock_cb_service, mock_hook):
-    """mock_hook이 주입된 CircuitBreakerPolicy."""
+    """A CircuitBreakerPolicy with ``mock_hook`` injected."""
     return CircuitBreakerPolicy(
         service_name="test_api",
         cb_service=mock_cb_service,
@@ -99,15 +105,15 @@ def policy_with_mock_hook(mock_cb_service, mock_hook):
 
 
 # =============================================================================
-# ResiliencePolicy[T] Protocol 상속 계약 검증 (Contract)
+# ResiliencePolicy[T] Protocol inheritance (Contract)
 # =============================================================================
 
 
 class TestCircuitBreakerPolicyProtocolContract:
-    """CircuitBreakerPolicy의 ResiliencePolicy[T] Protocol 상속 검증 — policy.py L37."""
+    """CircuitBreakerPolicy explicitly inherits the ResiliencePolicy[T] Protocol."""
 
     def test_isinstance_resilience_policy(self, mock_cb_service):
-        """CircuitBreakerPolicy 인스턴스는 ResiliencePolicy isinstance 검사를 통과한다."""
+        """A CircuitBreakerPolicy instance passes the ResiliencePolicy isinstance check."""
         policy = CircuitBreakerPolicy(
             service_name="test",
             cb_service=mock_cb_service,
@@ -115,7 +121,7 @@ class TestCircuitBreakerPolicyProtocolContract:
         assert isinstance(policy, ResiliencePolicy)
 
     def test_has_name_property(self, mock_cb_service):
-        """ResiliencePolicy Protocol 요구: name property 존재."""
+        """ResiliencePolicy Protocol requirement: a ``name`` property exists."""
         policy = CircuitBreakerPolicy(
             service_name="test",
             cb_service=mock_cb_service,
@@ -124,7 +130,7 @@ class TestCircuitBreakerPolicyProtocolContract:
         assert isinstance(policy.name, str)
 
     def test_has_execute_method(self, mock_cb_service):
-        """ResiliencePolicy Protocol 요구: execute method 존재."""
+        """ResiliencePolicy Protocol requirement: an ``execute`` method exists."""
         policy = CircuitBreakerPolicy(
             service_name="test",
             cb_service=mock_cb_service,
@@ -133,21 +139,21 @@ class TestCircuitBreakerPolicyProtocolContract:
         assert callable(policy.execute)
 
     def test_mro_includes_resilience_policy(self):
-        """CircuitBreakerPolicy MRO에 ResiliencePolicy가 포함된다."""
+        """ResiliencePolicy appears in CircuitBreakerPolicy's MRO."""
         mro_names = [cls.__name__ for cls in CircuitBreakerPolicy.__mro__]
         assert "ResiliencePolicy" in mro_names
 
 
 # =============================================================================
-# hooks 파라미터 계약 검증 (Contract)
+# hooks parameter (Contract)
 # =============================================================================
 
 
 class TestCircuitBreakerPolicyHooksParamContract:
-    """hooks 파라미터 기본값 및 주입 계약 검증."""
+    """The hooks parameter's default and injection contract."""
 
     def test_default_hooks_is_empty(self, mock_cb_service):
-        """hooks=None → 빈 리스트 (transition-only, #494)."""
+        """hooks=None → an empty list (transition-only, #494)."""
         policy = CircuitBreakerPolicy(
             service_name="test",
             cb_service=mock_cb_service,
@@ -158,7 +164,7 @@ class TestCircuitBreakerPolicyHooksParamContract:
         assert policy._hooks == []
 
     def test_custom_hooks_override_defaults(self, mock_cb_service):
-        """hooks=[custom] → _hooks가 커스텀 훅으로 설정된다."""
+        """hooks=[custom] → ``_hooks`` holds the custom hook."""
         custom_hook = MagicMock()
         policy = CircuitBreakerPolicy(
             service_name="test",
@@ -168,7 +174,7 @@ class TestCircuitBreakerPolicyHooksParamContract:
         assert policy._hooks == [custom_hook]
 
     def test_empty_hooks_list_accepted(self, mock_cb_service):
-        """hooks=[] → 빈 리스트가 설정된다 (훅 없음)."""
+        """hooks=[] → an empty list is set (no hooks)."""
         policy = CircuitBreakerPolicy(
             service_name="test",
             cb_service=mock_cb_service,
@@ -178,15 +184,15 @@ class TestCircuitBreakerPolicyHooksParamContract:
 
 
 # =============================================================================
-# _invoke_hooks 동작 검증 (Behavior)
+# _invoke_hooks (Behavior)
 # =============================================================================
 
 
 class TestInvokeHooksBehavior:
-    """_invoke_hooks() Fail-Open 동작 검증."""
+    """_invoke_hooks() is fail-open."""
 
     def test_calls_hook_method_with_args(self, mock_cb_service):
-        """_invoke_hooks()는 지정된 메서드를 올바른 인자로 호출한다."""
+        """_invoke_hooks() calls the named method with the given arguments."""
         hook = MagicMock()
         policy = CircuitBreakerPolicy(
             service_name="test",
@@ -197,7 +203,7 @@ class TestInvokeHooksBehavior:
         hook.on_execute.assert_called_once_with("test_service", 1)
 
     def test_calls_all_hooks(self, mock_cb_service):
-        """여러 훅이 있으면 모두 호출한다."""
+        """Every hook is called when several are registered."""
         hook1 = MagicMock()
         hook2 = MagicMock()
         policy = CircuitBreakerPolicy(
@@ -210,7 +216,7 @@ class TestInvokeHooksBehavior:
         hook2.on_reject.assert_called_once_with("svc", "reason")
 
     def test_fail_open_swallows_hook_exception(self, mock_cb_service):
-        """hooks.py Fail-Open: 훅 예외가 _invoke_hooks()를 중단시키지 않는다."""
+        """Fail-open: a hook exception does not abort _invoke_hooks()."""
         hook = MagicMock()
         hook.on_execute.side_effect = RuntimeError("hook crashed")
         policy = CircuitBreakerPolicy(
@@ -218,11 +224,11 @@ class TestInvokeHooksBehavior:
             cb_service=mock_cb_service,
             hooks=[hook],
         )
-        # 예외가 전파되지 않아야 함
+        # The exception must not propagate
         policy._invoke_hooks("on_execute", "svc", 1)
 
     def test_subsequent_hooks_called_after_first_fails(self, mock_cb_service):
-        """첫 번째 훅이 실패해도 후속 훅은 정상 호출된다."""
+        """A failing first hook does not stop the hooks after it."""
         hook1 = MagicMock()
         hook1.on_reject.side_effect = RuntimeError("hook1 failed")
         hook2 = MagicMock()
@@ -232,11 +238,11 @@ class TestInvokeHooksBehavior:
             hooks=[hook1, hook2],
         )
         policy._invoke_hooks("on_reject", "svc", "reason")
-        # hook1 실패 후에도 hook2가 호출된다
+        # hook2 is still called after hook1 failed
         hook2.on_reject.assert_called_once_with("svc", "reason")
 
     def test_empty_hooks_no_error(self, mock_cb_service):
-        """hooks=[] 일 때 _invoke_hooks()는 에러 없이 반환한다."""
+        """With hooks=[] _invoke_hooks() returns without error."""
         policy = CircuitBreakerPolicy(
             service_name="test",
             cb_service=mock_cb_service,
@@ -246,20 +252,20 @@ class TestInvokeHooksBehavior:
 
 
 # =============================================================================
-# execute() 훅 호출 순서 동작 검증 (Behavior)
+# execute() hook call points (Behavior)
 # =============================================================================
 
 
 class TestPolicyExecuteHooksIntegrationBehavior:
-    """execute()에서 훅이 올바른 시점에 호출되는지 검증."""
+    """execute() fires each hook at the right point."""
 
     def test_on_execute_called_when_cb_enabled(self, policy_with_mock_hook, mock_hook):
-        """CB enabled 시 on_execute가 호출된다."""
+        """on_execute fires when the CB is enabled."""
         policy_with_mock_hook.execute(lambda: "ok")
         mock_hook.on_execute.assert_called_once_with("test_api", 1)
 
     def test_on_execute_not_called_when_cb_disabled(self, mock_hook):
-        """CB disabled 시 on_execute가 호출되지 않는다 (early return)."""
+        """on_execute does not fire when the CB is disabled (early return)."""
         disabled_service = MagicMock()
         disabled_service.is_enabled = False
         policy = CircuitBreakerPolicy(
@@ -271,7 +277,7 @@ class TestPolicyExecuteHooksIntegrationBehavior:
         mock_hook.on_execute.assert_not_called()
 
     def test_on_reject_called_when_should_allow_false(self, mock_cb_service, mock_hook):
-        """should_allow() False 시 on_reject가 호출된다."""
+        """on_reject fires when should_allow() is False."""
         mock_cb_service.should_allow.return_value = False
         mock_cb_service.should_allow_with_state.return_value = _reject_decision()
         policy = CircuitBreakerPolicy(
@@ -285,16 +291,16 @@ class TestPolicyExecuteHooksIntegrationBehavior:
     def test_on_success_called_on_successful_execution(
         self, policy_with_mock_hook, mock_hook
     ):
-        """성공 시 on_success가 호출된다."""
+        """on_success fires on success."""
         policy_with_mock_hook.execute(lambda: "result")
         assert mock_hook.on_success.call_count == 1
         call_args = mock_hook.on_success.call_args
         assert call_args[0][0] == "test_api"
-        # 두 번째 인자는 PolicyResult
+        # The second argument is the PolicyResult
         assert isinstance(call_args[0][1], PolicyResult)
 
     def test_on_failure_called_on_exception(self, policy_with_mock_hook, mock_hook):
-        """실패 시 on_failure가 호출된다."""
+        """on_failure fires on failure."""
         with pytest.raises(ValueError):
             policy_with_mock_hook.execute(
                 lambda: (_ for _ in ()).throw(ValueError("fail"))
@@ -306,7 +312,7 @@ class TestPolicyExecuteHooksIntegrationBehavior:
         assert call_args[0][2] == 1  # attempt
 
     def test_on_success_not_called_on_rejection(self, mock_cb_service, mock_hook):
-        """거부 시 on_success는 호출되지 않는다."""
+        """on_success does not fire on a rejection."""
         mock_cb_service.should_allow.return_value = False
         mock_cb_service.should_allow_with_state.return_value = _reject_decision()
         policy = CircuitBreakerPolicy(
@@ -318,7 +324,7 @@ class TestPolicyExecuteHooksIntegrationBehavior:
         mock_hook.on_success.assert_not_called()
 
     def test_on_failure_not_called_on_rejection(self, mock_cb_service, mock_hook):
-        """거부 시 on_failure는 호출되지 않는다."""
+        """on_failure does not fire on a rejection."""
         mock_cb_service.should_allow.return_value = False
         mock_cb_service.should_allow_with_state.return_value = _reject_decision()
         policy = CircuitBreakerPolicy(
@@ -330,7 +336,7 @@ class TestPolicyExecuteHooksIntegrationBehavior:
         mock_hook.on_failure.assert_not_called()
 
     def test_hook_failure_does_not_affect_execution_result(self, mock_cb_service):
-        """훅 예외가 execute() 결과에 영향을 주지 않는다 (Fail-Open)."""
+        """A hook exception does not affect the execute() result (fail-open)."""
         failing_hook = MagicMock()
         failing_hook.on_execute.side_effect = RuntimeError("hook crash")
         failing_hook.on_success.side_effect = RuntimeError("hook crash")
@@ -344,7 +350,7 @@ class TestPolicyExecuteHooksIntegrationBehavior:
         assert result.outcome == PolicyOutcome.SUCCESS
 
     def test_hook_failure_on_reject_does_not_affect_result(self, mock_cb_service):
-        """on_reject 훅 실패가 거부 결과에 영향을 주지 않는다."""
+        """A failing on_reject hook does not affect the rejection result."""
         mock_cb_service.should_allow.return_value = False
         mock_cb_service.should_allow_with_state.return_value = _reject_decision()
         failing_hook = MagicMock()
@@ -361,67 +367,64 @@ class TestPolicyExecuteHooksIntegrationBehavior:
 
 
 # =============================================================================
-# _create_default_service 동작 검증 (Behavior)
+# Breaker-service binding (Behavior)
 # =============================================================================
 
 
-class TestCreateDefaultServiceBehavior:
-    """_create_default_service() 동작 검증."""
+class TestCircuitBreakerPolicyServiceBindingBehavior:
+    """Which CircuitBreakerService a policy records on, by constructor form.
 
-    def test_create_default_service_returns_circuit_breaker_service(self):
-        """_create_default_service()는 CircuitBreakerService를 반환한다."""
+    The default form binds the process-shared service, so every reader of
+    that service's rate evidence sees the traffic the policy admitted; either
+    ``cb_service`` or ``config`` opts the policy out into a private instance
+    whose evidence stays with it.
+    """
+
+    def test_the_default_form_resolves_the_process_shared_service(self):
+        """Neither ``cb_service`` nor ``config`` → the runtime singleton, by identity."""
+        from baldur.services.circuit_breaker.convenience import (
+            get_circuit_breaker_service,
+        )
+
+        policy = CircuitBreakerPolicy(service_name="test_api")
+
+        assert policy.cb_service is get_circuit_breaker_service()
+
+    def test_an_injected_service_is_bound_as_given(self, mock_cb_service):
+        """``cb_service=`` → that object, not the singleton."""
+        from baldur.services.circuit_breaker.convenience import (
+            get_circuit_breaker_service,
+        )
+
+        policy = CircuitBreakerPolicy(
+            service_name="test_api", cb_service=mock_cb_service
+        )
+
+        assert policy.cb_service is mock_cb_service
+        assert policy.cb_service is not get_circuit_breaker_service()
+
+    def test_a_pinned_config_builds_a_private_service_carrying_it(self):
+        """``config=`` without ``cb_service`` → a private instance on that config."""
+        from baldur.services.circuit_breaker.convenience import (
+            get_circuit_breaker_service,
+        )
         from baldur.services.circuit_breaker.service import CircuitBreakerService
 
-        with patch("baldur.factory.ProviderRegistry") as mock_registry:
-            mock_registry.get_circuit_breaker_repo.side_effect = ValueError(
-                "not registered"
-            )
-            service = CircuitBreakerPolicy._create_default_service()
-            assert isinstance(service, CircuitBreakerService)
-
-    def test_create_default_service_resolves_the_layered_view(self):
-        """The default policy service resolves the layered repository.
-
-        The resolution itself now lives on ``CircuitBreakerService.repository``
-        so the traffic path and the operator-facing consumers share one view;
-        the policy must not carry a second, competing one. Asserting on the
-        requested *name* is what makes this non-vacuous — a name-blind mock
-        would satisfy any resolution order.
-        """
-        mock_repo = MagicMock()
-        with patch("baldur.factory.ProviderRegistry") as mock_registry:
-            mock_registry.get_circuit_breaker_repo.return_value = mock_repo
-            service = CircuitBreakerPolicy._create_default_service()
-            assert service.repository is mock_repo
-            mock_registry.get_circuit_breaker_repo.assert_called_once_with(
-                name="layered"
-            )
-
-    def test_create_default_service_fallback_on_value_error(self):
-        """'layered' 미등록(ValueError) 시 repository=None으로 fallback한다."""
-        from baldur.services.circuit_breaker.service import CircuitBreakerService
-
-        with patch("baldur.factory.ProviderRegistry") as mock_registry:
-            mock_registry.get_circuit_breaker_repo.side_effect = ValueError("not found")
-            service = CircuitBreakerPolicy._create_default_service()
-            assert isinstance(service, CircuitBreakerService)
-
-    def test_create_default_service_fallback_on_import_error(self):
-        """ProviderRegistry import 실패(ImportError) 시 repository=None으로 fallback한다."""
-        from baldur.services.circuit_breaker.service import CircuitBreakerService
-
-        with patch.dict("sys.modules", {"baldur.factory": None}):
-            # ImportError는 try/except에서 잡히므로 정상 동작
-            service = CircuitBreakerPolicy._create_default_service()
-            assert isinstance(service, CircuitBreakerService)
-
-    def test_create_default_service_passes_config(self):
-        """config 파라미터가 CircuitBreakerService에 전달된다."""
         config = CircuitBreakerConfig(failure_threshold=10)
-        with patch("baldur.factory.ProviderRegistry") as mock_registry:
-            mock_registry.get_circuit_breaker_repo.side_effect = ValueError("nope")
-            service = CircuitBreakerPolicy._create_default_service(config=config)
-            assert service.config.failure_threshold == config.failure_threshold
+        policy = CircuitBreakerPolicy(service_name="test_api", config=config)
+
+        assert isinstance(policy.cb_service, CircuitBreakerService)
+        assert policy.cb_service is not get_circuit_breaker_service()
+        assert policy.cb_service.config.failure_threshold == 10
+
+    def test_an_injected_service_outranks_a_pinned_config(self, mock_cb_service):
+        """Both given → ``cb_service`` wins and the config builds nothing."""
+        config = CircuitBreakerConfig(failure_threshold=10)
+        policy = CircuitBreakerPolicy(
+            service_name="test_api", cb_service=mock_cb_service, config=config
+        )
+
+        assert policy.cb_service is mock_cb_service
 
 
 # =============================================================================

@@ -10,6 +10,11 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+### Fixed
+
+- Breakers built by `protect()` and `@circuit_breaker` now record on the process-shared service.
+- A 429-cascade trip on a `protect()` breaker now reports the window counts of the calls it saw.
+
 ## [1.13.1] - 2026-09-14
 
 ### Fixed

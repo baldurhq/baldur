@@ -1,25 +1,25 @@
 """
-CircuitBreakerPolicy 단위 테스트 (#227).
+CircuitBreakerPolicy unit tests (#227).
 
-테스트 대상:
-- services/circuit_breaker/policy.py (CircuitBreakerPolicy, circuit_breaker 데코레이터)
+Test targets:
+- services/circuit_breaker/policy.py (CircuitBreakerPolicy, the circuit_breaker decorator)
 - services/circuit_breaker/exceptions.py (CircuitBreakerOpenError)
 
-코드 근거 기반 검증:
-- policy.py L80-82: name == "circuit_breaker"
-- policy.py L118-123: CB disabled → 바로 실행, SUCCESS
-- policy.py L126-134: should_allow() == False → REJECTED + CircuitBreakerOpenError
-- policy.py L137-142: 성공 → record_success() → SUCCESS
-- policy.py L143-150: 실패 → _is_failure() 판단 → record_failure() → 예외 재전파
-- policy.py L96-103: ignore_exceptions → record_failure() 미호출
-- policy.py L68-78: failure_exceptions 필터링
-- policy.py L158-186: @circuit_breaker() 데코레이터
-- exceptions.py L10-20: CircuitBreakerOpenError 속성
+Source basis:
+- ``name`` == "circuit_breaker"
+- CB disabled → the function runs directly, SUCCESS
+- should_allow() == False → REJECTED + CircuitBreakerOpenError
+- success → record_success() → SUCCESS
+- failure → _is_failure() decides → record_failure() → the exception re-raises
+- ignore_exceptions → record_failure() is not called
+- failure_exceptions filtering
+- the @circuit_breaker() decorator
+- CircuitBreakerOpenError attributes
 
-UNIT_TEST_GUIDELINES.md 준수:
-- 계약 검증(Contract): 하드코딩 기대값 (name, outcome, executed_policies)
-- 동작 검증(Behavior): 소스 참조 (config, 상수)
-- conftest.py 배치: 1개 파일 전용 fixture → 파일 내부
+UNIT_TEST_GUIDELINES.md compliance:
+- Contract: hardcoded expectations (name, outcome, executed_policies)
+- Behavior: source-referenced (config, constants)
+- conftest placement: single-file fixtures live in the file
 """
 
 from __future__ import annotations
@@ -55,13 +55,13 @@ def _reject_decision(state_str: str = "open") -> CircuitBreakerDecision:
 
 
 # =============================================================================
-# Fixtures — 1개 파일 전용이므로 파일 내부 배치 (§5.1)
+# Fixtures — used by this file only, so they live here (§5.1)
 # =============================================================================
 
 
 @pytest.fixture
 def mock_cb_service():
-    """CircuitBreakerService Mock — 기본 동작: enabled + allow.
+    """CircuitBreakerService mock — default behaviour: enabled + allow.
 
     Post-#485 D2: ``CircuitBreakerPolicy.execute`` calls
     ``should_allow_with_state`` (companion API) instead of the old
@@ -87,7 +87,7 @@ def mock_cb_service():
 
 @pytest.fixture
 def policy(mock_cb_service):
-    """기본 CircuitBreakerPolicy 인스턴스."""
+    """The default CircuitBreakerPolicy instance."""
     return CircuitBreakerPolicy(
         service_name="test_api",
         cb_service=mock_cb_service,
@@ -96,41 +96,41 @@ def policy(mock_cb_service):
 
 @pytest.fixture
 def disabled_cb_service():
-    """CB 비활성화 상태 Mock."""
+    """A mock service with the CB disabled."""
     service = MagicMock()
     service.is_enabled = False
     return service
 
 
 # =============================================================================
-# 계약 검증 (Contract)
+# Contract
 # =============================================================================
 
 
 class TestCircuitBreakerPolicyContract:
-    """CircuitBreakerPolicy 고정 식별자 및 결과 구조 계약 검증."""
+    """CircuitBreakerPolicy's fixed identifiers and result-shape contract."""
 
     def test_name_is_circuit_breaker(self, policy):
-        """policy.py L80-82: name property는 'circuit_breaker'이다."""
+        """The ``name`` property is 'circuit_breaker'."""
         assert policy.name == "circuit_breaker"
 
     def test_service_name_property(self, policy):
-        """policy.py L84-87: service_name property는 생성자에 전달한 값이다."""
+        """The ``service_name`` property is the constructor argument."""
         assert policy.service_name == "test_api"
 
     def test_cb_service_property(self, policy, mock_cb_service):
-        """policy.py L89-92: cb_service property는 주입된 서비스 인스턴스이다."""
+        """The ``cb_service`` property is the injected service instance."""
         assert policy.cb_service is mock_cb_service
 
     def test_success_result_has_circuit_breaker_in_executed_policies(self, policy):
-        """성공 결과의 executed_policies에 'circuit_breaker'가 포함된다."""
+        """A success result's executed_policies contains 'circuit_breaker'."""
         result = policy.execute(lambda: "ok")
         assert "circuit_breaker" in result.executed_policies
 
     def test_rejected_result_has_circuit_breaker_in_executed_policies(
         self, mock_cb_service
     ):
-        """거부 결과의 executed_policies에 'circuit_breaker'가 포함된다."""
+        """A rejection result's executed_policies contains 'circuit_breaker'."""
         mock_cb_service.should_allow.return_value = False
         mock_cb_service.should_allow_with_state.return_value = _reject_decision()
         policy = CircuitBreakerPolicy(
@@ -142,7 +142,7 @@ class TestCircuitBreakerPolicyContract:
     def test_disabled_result_has_circuit_breaker_in_executed_policies(
         self, disabled_cb_service
     ):
-        """비활성화 결과의 executed_policies에 'circuit_breaker'가 포함된다."""
+        """A disabled-path result's executed_policies contains 'circuit_breaker'."""
         policy = CircuitBreakerPolicy(
             service_name="test_api", cb_service=disabled_cb_service
         )
@@ -150,12 +150,12 @@ class TestCircuitBreakerPolicyContract:
         assert "circuit_breaker" in result.executed_policies
 
     def test_success_outcome_is_success(self, policy):
-        """성공 시 outcome은 PolicyOutcome.SUCCESS이다."""
+        """On success the outcome is PolicyOutcome.SUCCESS."""
         result = policy.execute(lambda: 42)
         assert result.outcome == PolicyOutcome.SUCCESS
 
     def test_rejected_outcome_is_rejected(self, mock_cb_service):
-        """거부 시 outcome은 PolicyOutcome.REJECTED이다."""
+        """On rejection the outcome is PolicyOutcome.REJECTED."""
         mock_cb_service.should_allow.return_value = False
         mock_cb_service.should_allow_with_state.return_value = _reject_decision()
         policy = CircuitBreakerPolicy(
@@ -165,7 +165,7 @@ class TestCircuitBreakerPolicyContract:
         assert result.outcome == PolicyOutcome.REJECTED
 
     def test_default_failure_exceptions(self):
-        """policy.py L73: failure_exceptions 기본값은 (Exception,)이다."""
+        """failure_exceptions defaults to (Exception,)."""
         policy = CircuitBreakerPolicy(
             service_name="test",
             cb_service=MagicMock(
@@ -175,7 +175,7 @@ class TestCircuitBreakerPolicyContract:
         assert policy._failure_exceptions == (Exception,)
 
     def test_default_ignore_exceptions(self):
-        """policy.py L74: ignore_exceptions 기본값은 빈 튜플이다."""
+        """ignore_exceptions defaults to an empty tuple."""
         policy = CircuitBreakerPolicy(
             service_name="test",
             cb_service=MagicMock(
@@ -186,15 +186,15 @@ class TestCircuitBreakerPolicyContract:
 
 
 # =============================================================================
-# CB 비활성화 동작 검증 (Behavior)
+# CB disabled (Behavior)
 # =============================================================================
 
 
 class TestCircuitBreakerPolicyDisabledBehavior:
-    """CB 비활성화 시 동작 검증 — policy.py L118-123."""
+    """Behaviour with the CB disabled."""
 
     def test_disabled_cb_executes_function_directly(self, disabled_cb_service):
-        """CB disabled → 함수를 바로 실행한다."""
+        """CB disabled → the function runs directly."""
         policy = CircuitBreakerPolicy(
             service_name="test_api", cb_service=disabled_cb_service
         )
@@ -202,7 +202,7 @@ class TestCircuitBreakerPolicyDisabledBehavior:
         assert result.value == "direct_result"
 
     def test_disabled_cb_returns_success(self, disabled_cb_service):
-        """CB disabled → outcome은 SUCCESS이다."""
+        """CB disabled → the outcome is SUCCESS."""
         policy = CircuitBreakerPolicy(
             service_name="test_api", cb_service=disabled_cb_service
         )
@@ -211,7 +211,7 @@ class TestCircuitBreakerPolicyDisabledBehavior:
         assert result.success is True
 
     def test_disabled_cb_does_not_call_should_allow(self, disabled_cb_service):
-        """CB disabled → should_allow()를 호출하지 않는다."""
+        """CB disabled → should_allow() is not called."""
         policy = CircuitBreakerPolicy(
             service_name="test_api", cb_service=disabled_cb_service
         )
@@ -219,7 +219,7 @@ class TestCircuitBreakerPolicyDisabledBehavior:
         disabled_cb_service.should_allow.assert_not_called()
 
     def test_disabled_cb_does_not_call_record_success(self, disabled_cb_service):
-        """CB disabled → record_success()를 호출하지 않는다."""
+        """CB disabled → record_success() is not called."""
         policy = CircuitBreakerPolicy(
             service_name="test_api", cb_service=disabled_cb_service
         )
@@ -227,7 +227,7 @@ class TestCircuitBreakerPolicyDisabledBehavior:
         disabled_cb_service.record_success.assert_not_called()
 
     def test_disabled_cb_passes_args_and_kwargs(self, disabled_cb_service):
-        """CB disabled → args, kwargs가 함수에 전달된다."""
+        """CB disabled → args and kwargs reach the function."""
         policy = CircuitBreakerPolicy(
             service_name="test_api", cb_service=disabled_cb_service
         )
@@ -240,15 +240,15 @@ class TestCircuitBreakerPolicyDisabledBehavior:
 
 
 # =============================================================================
-# CB OPEN — 거부 동작 검증 (Behavior)
+# CB OPEN — rejection (Behavior)
 # =============================================================================
 
 
 class TestCircuitBreakerPolicyRejectedBehavior:
-    """CB OPEN 상태에서 거부 동작 검증 — policy.py L126-134."""
+    """Rejection behaviour while the CB is OPEN."""
 
     def test_rejected_when_should_allow_false(self, mock_cb_service):
-        """should_allow() == False → REJECTED 반환."""
+        """should_allow() == False → REJECTED is returned."""
         mock_cb_service.should_allow.return_value = False
         mock_cb_service.should_allow_with_state.return_value = _reject_decision()
         policy = CircuitBreakerPolicy(
@@ -258,7 +258,7 @@ class TestCircuitBreakerPolicyRejectedBehavior:
         assert result.rejected is True
 
     def test_rejected_error_is_circuit_breaker_open_error(self, mock_cb_service):
-        """거부 시 error는 CircuitBreakerOpenError 인스턴스이다."""
+        """On rejection ``error`` is a CircuitBreakerOpenError."""
         mock_cb_service.should_allow.return_value = False
         mock_cb_service.should_allow_with_state.return_value = _reject_decision()
         policy = CircuitBreakerPolicy(
@@ -268,7 +268,7 @@ class TestCircuitBreakerPolicyRejectedBehavior:
         assert isinstance(result.error, CircuitBreakerOpenError)
 
     def test_rejected_error_has_service_name(self, mock_cb_service):
-        """거부 시 error.service_name은 policy의 service_name과 동일하다."""
+        """On rejection ``error.service_name`` equals the policy's service_name."""
         mock_cb_service.should_allow.return_value = False
         mock_cb_service.should_allow_with_state.return_value = _reject_decision()
         policy = CircuitBreakerPolicy(
@@ -278,7 +278,7 @@ class TestCircuitBreakerPolicyRejectedBehavior:
         assert result.error.service_name == "payment_api"
 
     def test_rejected_metadata_contains_service_name(self, mock_cb_service):
-        """거부 시 metadata에 service_name이 포함된다 — policy.py L131."""
+        """On rejection the metadata carries service_name."""
         mock_cb_service.should_allow.return_value = False
         mock_cb_service.should_allow_with_state.return_value = _reject_decision()
         mock_cb_service.get_state.return_value = "open"
@@ -289,7 +289,7 @@ class TestCircuitBreakerPolicyRejectedBehavior:
         assert result.metadata["service_name"] == "test_api"
 
     def test_rejected_metadata_contains_state(self, mock_cb_service):
-        """거부 시 metadata에 state가 포함된다 — policy.py L132."""
+        """On rejection the metadata carries the state."""
         mock_cb_service.should_allow.return_value = False
         mock_cb_service.should_allow_with_state.return_value = _reject_decision()
         mock_cb_service.get_state.return_value = "open"
@@ -300,7 +300,7 @@ class TestCircuitBreakerPolicyRejectedBehavior:
         assert result.metadata["state"] == "open"
 
     def test_rejected_does_not_execute_function(self, mock_cb_service):
-        """거부 시 func은 실행되지 않는다."""
+        """On rejection ``func`` does not run."""
         mock_cb_service.should_allow.return_value = False
         mock_cb_service.should_allow_with_state.return_value = _reject_decision()
         policy = CircuitBreakerPolicy(
@@ -311,7 +311,7 @@ class TestCircuitBreakerPolicyRejectedBehavior:
         func.assert_not_called()
 
     def test_rejected_value_is_none(self, mock_cb_service):
-        """거부 시 value는 None이다."""
+        """On rejection ``value`` is None."""
         mock_cb_service.should_allow.return_value = False
         mock_cb_service.should_allow_with_state.return_value = _reject_decision()
         policy = CircuitBreakerPolicy(
@@ -322,20 +322,20 @@ class TestCircuitBreakerPolicyRejectedBehavior:
 
 
 # =============================================================================
-# 성공 경로 동작 검증 (Behavior)
+# Success path (Behavior)
 # =============================================================================
 
 
 class TestCircuitBreakerPolicySuccessBehavior:
-    """성공 경로 동작 검증 — policy.py L137-142."""
+    """The success path."""
 
     def test_success_returns_function_value(self, policy):
-        """성공 시 func의 반환값이 result.value에 담긴다."""
+        """On success ``func``'s return value lands in result.value."""
         result = policy.execute(lambda: "success_value")
         assert result.value == "success_value"
 
     def test_success_calls_record_success(self, policy, mock_cb_service):
-        """성공 시 record_success(service_name, hint_state=...)를 호출한다 (490 D4)."""
+        """On success record_success(service_name, hint_state=...) is called (490 D4)."""
         policy.execute(lambda: "ok")
         decision = mock_cb_service.should_allow_with_state.return_value
         mock_cb_service.record_success.assert_called_once_with(
@@ -343,19 +343,19 @@ class TestCircuitBreakerPolicySuccessBehavior:
         )
 
     def test_success_does_not_call_record_failure(self, policy, mock_cb_service):
-        """성공 시 record_failure()를 호출하지 않는다."""
+        """On success record_failure() is not called."""
         policy.execute(lambda: "ok")
         mock_cb_service.record_failure.assert_not_called()
 
     def test_success_calls_should_allow_with_service_name(
         self, policy, mock_cb_service
     ):
-        """should_allow_with_state()에 service_name을 전달한다 (#485 D2)."""
+        """should_allow_with_state() receives the service_name (#485 D2)."""
         policy.execute(lambda: "ok")
         mock_cb_service.should_allow_with_state.assert_called_once_with("test_api")
 
     def test_success_passes_args_to_function(self, policy):
-        """args가 함수에 정확히 전달된다."""
+        """args reach the function exactly."""
 
         def add(a, b):
             return a + b
@@ -364,7 +364,7 @@ class TestCircuitBreakerPolicySuccessBehavior:
         assert result.value == 10
 
     def test_success_passes_kwargs_to_function(self, policy):
-        """kwargs가 함수에 정확히 전달된다."""
+        """kwargs reach the function exactly."""
 
         def greet(name, prefix="Hello"):
             return f"{prefix}, {name}"
@@ -373,28 +373,28 @@ class TestCircuitBreakerPolicySuccessBehavior:
         assert result.value == "Hi, world"
 
     def test_success_result_is_success_property_true(self, policy):
-        """성공 result의 .success property는 True이다."""
+        """A success result's ``.success`` property is True."""
         result = policy.execute(lambda: "ok")
         assert result.success is True
 
     def test_success_result_rejected_property_false(self, policy):
-        """성공 result의 .rejected property는 False이다."""
+        """A success result's ``.rejected`` property is False."""
         result = policy.execute(lambda: "ok")
         assert result.rejected is False
 
 
 # =============================================================================
-# 실패 경로 동작 검증 (Behavior)
+# Failure path (Behavior)
 # =============================================================================
 
 
 class TestCircuitBreakerPolicyFailureBehavior:
-    """실패 경로 동작 검증 — policy.py L143-155."""
+    """The failure path."""
 
     def test_failure_calls_record_failure_with_error_context(
         self, policy, mock_cb_service
     ):
-        """실패 시 record_failure(service_name, error_context=..., hint_state=...) 호출 (490 D4)."""
+        """On failure record_failure(service_name, error_context=..., hint_state=...) is called (490 D4)."""
         with pytest.raises(ValueError):
             policy.execute(self._raise_value_error)
         decision = mock_cb_service.should_allow_with_state.return_value
@@ -405,25 +405,25 @@ class TestCircuitBreakerPolicyFailureBehavior:
         )
 
     def test_failure_reraises_exception(self, policy):
-        """실패 시 예외를 상위로 재전파한다 — policy.py L155: raise."""
+        """On failure the exception re-raises to the caller."""
         with pytest.raises(ValueError, match="bad value"):
             policy.execute(self._raise_value_error)
 
     def test_failure_does_not_call_record_success(self, policy, mock_cb_service):
-        """실패 시 record_success()를 호출하지 않는다."""
+        """On failure record_success() is not called."""
         with pytest.raises(ValueError):
             policy.execute(self._raise_value_error)
         mock_cb_service.record_success.assert_not_called()
 
     def test_failure_error_context_type_field(self, policy, mock_cb_service):
-        """error_context의 type 필드는 예외 클래스명이다."""
+        """error_context's ``type`` field is the exception class name."""
         with pytest.raises(RuntimeError):
             policy.execute(self._raise_runtime_error)
         call_args = mock_cb_service.record_failure.call_args
         assert call_args[1]["error_context"]["type"] == "RuntimeError"
 
     def test_failure_error_context_error_field(self, policy, mock_cb_service):
-        """error_context의 error 필드는 str(e)이다."""
+        """error_context's ``error`` field is str(e)."""
         with pytest.raises(RuntimeError):
             policy.execute(self._raise_runtime_error)
         call_args = mock_cb_service.record_failure.call_args
@@ -439,15 +439,15 @@ class TestCircuitBreakerPolicyFailureBehavior:
 
 
 # =============================================================================
-# 예외 필터링 동작 검증 (Behavior) — _is_failure()
+# Exception filtering (Behavior) — _is_failure()
 # =============================================================================
 
 
 class TestCircuitBreakerPolicyExceptionFilterBehavior:
-    """예외 필터링 동작 검증 — policy.py L96-103, §7.2."""
+    """Exception filtering — §7.2."""
 
     def test_ignore_exceptions_skips_record_failure(self, mock_cb_service):
-        """ignore_exceptions에 해당하는 예외는 record_failure()를 호출하지 않는다."""
+        """An exception matching ignore_exceptions does not call record_failure()."""
         policy = CircuitBreakerPolicy(
             service_name="test_api",
             cb_service=mock_cb_service,
@@ -458,7 +458,7 @@ class TestCircuitBreakerPolicyExceptionFilterBehavior:
         mock_cb_service.record_failure.assert_not_called()
 
     def test_ignore_exceptions_still_reraises(self, mock_cb_service):
-        """ignore_exceptions에 해당해도 예외는 상위로 재전파된다."""
+        """An ignored exception still re-raises to the caller."""
         policy = CircuitBreakerPolicy(
             service_name="test_api",
             cb_service=mock_cb_service,
@@ -468,19 +468,19 @@ class TestCircuitBreakerPolicyExceptionFilterBehavior:
             policy.execute(lambda: (_ for _ in ()).throw(ValueError("ignored")))
 
     def test_failure_exceptions_only_counts_specified_types(self, mock_cb_service):
-        """failure_exceptions=(ValueError,) → ValueError만 record_failure 호출."""
+        """failure_exceptions=(ValueError,) → only ValueError calls record_failure."""
         policy = CircuitBreakerPolicy(
             service_name="test_api",
             cb_service=mock_cb_service,
             failure_exceptions=(ValueError,),
         )
-        # ValueError → record_failure 호출
+        # ValueError → record_failure is called
         with pytest.raises(ValueError):
             policy.execute(lambda: (_ for _ in ()).throw(ValueError("counted")))
         assert mock_cb_service.record_failure.call_count == 1
 
     def test_failure_exceptions_ignores_non_matching_types(self, mock_cb_service):
-        """failure_exceptions=(ValueError,) → RuntimeError는 record_failure 미호출."""
+        """failure_exceptions=(ValueError,) → RuntimeError does not call record_failure."""
         policy = CircuitBreakerPolicy(
             service_name="test_api",
             cb_service=mock_cb_service,
@@ -491,7 +491,7 @@ class TestCircuitBreakerPolicyExceptionFilterBehavior:
         mock_cb_service.record_failure.assert_not_called()
 
     def test_ignore_takes_precedence_over_failure(self, mock_cb_service):
-        """ignore_exceptions이 failure_exceptions보다 우선한다 — policy.py L100-101."""
+        """ignore_exceptions outranks failure_exceptions."""
         policy = CircuitBreakerPolicy(
             service_name="test_api",
             cb_service=mock_cb_service,
@@ -503,18 +503,18 @@ class TestCircuitBreakerPolicyExceptionFilterBehavior:
         mock_cb_service.record_failure.assert_not_called()
 
     def test_is_failure_with_subclass(self, mock_cb_service):
-        """failure_exceptions의 서브클래스도 실패로 카운팅된다."""
+        """A subclass of a failure_exceptions entry counts as a failure too."""
         policy = CircuitBreakerPolicy(
             service_name="test_api",
             cb_service=mock_cb_service,
             failure_exceptions=(OSError,),
         )
-        with pytest.raises(ConnectionError):  # ConnectionError는 OSError의 서브클래스
+        with pytest.raises(ConnectionError):  # ConnectionError subclasses OSError
             policy.execute(lambda: (_ for _ in ()).throw(ConnectionError("subclass")))
         assert mock_cb_service.record_failure.call_count == 1
 
     def test_is_failure_method_directly(self):
-        """_is_failure() 메서드 직접 검증."""
+        """_is_failure() checked directly."""
         policy = CircuitBreakerPolicy(
             service_name="test",
             cb_service=MagicMock(),
@@ -528,57 +528,57 @@ class TestCircuitBreakerPolicyExceptionFilterBehavior:
 
 
 # =============================================================================
-# PolicyContext 전달 동작 검증 (Behavior)
+# PolicyContext pass-through (Behavior)
 # =============================================================================
 
 
 class TestCircuitBreakerPolicyContextBehavior:
-    """PolicyContext 전달 동작 검증."""
+    """PolicyContext pass-through."""
 
     def test_execute_accepts_context_parameter(self, policy):
-        """execute()에 context 파라미터를 전달할 수 있다."""
+        """execute() accepts a ``context`` parameter."""
         ctx = PolicyContext(order_id="order-123", trace_id="trace-abc")
         result = policy.execute(lambda: "with_context", context=ctx)
         assert result.value == "with_context"
         assert result.outcome == PolicyOutcome.SUCCESS
 
     def test_execute_works_without_context(self, policy):
-        """context=None (기본값)으로도 정상 동작한다."""
+        """context=None (the default) works too."""
         result = policy.execute(lambda: "no_context")
         assert result.value == "no_context"
         assert result.outcome == PolicyOutcome.SUCCESS
 
 
 # =============================================================================
-# CircuitBreakerOpenError 계약 검증 (Contract)
+# CircuitBreakerOpenError (Contract)
 # =============================================================================
 
 
 class TestCircuitBreakerOpenErrorContract:
-    """CircuitBreakerOpenError 예외 계약 검증 — exceptions.py."""
+    """The CircuitBreakerOpenError exception contract — exceptions.py."""
 
     def test_service_name_attribute(self):
-        """exceptions.py L18: service_name 속성이 설정된다."""
+        """The ``service_name`` attribute is set."""
         error = CircuitBreakerOpenError("payment_api")
         assert error.service_name == "payment_api"
 
     def test_default_message_format(self):
-        """exceptions.py L19: 기본 메시지 형식."""
+        """The default message format."""
         error = CircuitBreakerOpenError("payment_api")
         assert str(error) == "Circuit breaker 'payment_api' is OPEN"
 
     def test_custom_message(self):
-        """exceptions.py L18: 사용자 정의 메시지."""
+        """A caller-supplied message."""
         error = CircuitBreakerOpenError("api", message="custom msg")
         assert str(error) == "custom msg"
 
     def test_inherits_from_exception(self):
-        """exceptions.py L10: Exception을 상속한다."""
+        """It inherits Exception."""
         error = CircuitBreakerOpenError("test")
         assert isinstance(error, Exception)
 
     def test_is_not_base_exception(self):
-        """Exception 상속 — BaseException이 아닌 일반 Exception 계열."""
+        """Exception lineage — an ordinary Exception, not a bare BaseException."""
         from baldur.core.exceptions import BaldurError, CircuitBreakerError
 
         error = CircuitBreakerOpenError("test")
@@ -588,15 +588,15 @@ class TestCircuitBreakerOpenErrorContract:
 
 
 # =============================================================================
-# circuit_breaker 데코레이터 동작 검증 (Behavior)
+# circuit_breaker decorator (Behavior)
 # =============================================================================
 
 
 class TestCircuitBreakerDecoratorBehavior:
-    """@circuit_breaker() 데코레이터 동작 검증 — policy.py L158-186."""
+    """The @circuit_breaker() decorator."""
 
     def test_decorator_wraps_function_with_policy(self):
-        """데코레이터 적용 시 wrapper에 .policy 속성이 부착된다."""
+        """Decorating attaches a ``.policy`` attribute to the wrapper."""
         mock_service = MagicMock()
         mock_service.is_enabled = True
         mock_service.should_allow.return_value = True
@@ -610,7 +610,7 @@ class TestCircuitBreakerDecoratorBehavior:
         assert isinstance(my_func.policy, CircuitBreakerPolicy)
 
     def test_decorator_preserves_function_name(self):
-        """데코레이터는 원래 함수 이름을 보존한다 (@wraps)."""
+        """The decorator preserves the original function name (@wraps)."""
         mock_service = MagicMock()
         mock_service.is_enabled = True
         mock_service.should_allow.return_value = True
@@ -624,7 +624,7 @@ class TestCircuitBreakerDecoratorBehavior:
         assert original_function.__doc__ == "Original docstring."
 
     def test_decorator_uses_qualname_when_service_name_none(self):
-        """service_name=None → func.__qualname__을 기본값으로 사용한다."""
+        """service_name=None → func.__qualname__ is the default."""
         mock_service = MagicMock()
         mock_service.is_enabled = True
         mock_service.should_allow.return_value = True
@@ -634,7 +634,7 @@ class TestCircuitBreakerDecoratorBehavior:
         def my_special_func():
             return "ok"
 
-        # __qualname__은 테스트 클래스 내 정의이므로 클래스명.함수명 형태
+        # Defined inside the test class, so __qualname__ is ClassName.function
         expected_qualname = (
             my_special_func.__wrapped__.__qualname__
             if hasattr(my_special_func, "__wrapped__")
@@ -643,7 +643,7 @@ class TestCircuitBreakerDecoratorBehavior:
         assert my_special_func.policy.service_name == expected_qualname
 
     def test_decorator_returns_policy_result(self):
-        """데코레이터 적용 함수 호출 시 PolicyResult를 반환한다."""
+        """Calling a decorated function returns a PolicyResult."""
         mock_service = MagicMock()
         mock_service.is_enabled = True
         mock_service.should_allow.return_value = True
@@ -659,7 +659,7 @@ class TestCircuitBreakerDecoratorBehavior:
         assert result.outcome == PolicyOutcome.SUCCESS
 
     def test_decorator_explicit_service_name(self):
-        """명시적 service_name이 Policy에 전달된다."""
+        """An explicit service_name reaches the policy."""
         mock_service = MagicMock()
         mock_service.is_enabled = True
         mock_service.should_allow.return_value = True
@@ -672,7 +672,7 @@ class TestCircuitBreakerDecoratorBehavior:
         assert pay.policy.service_name == "payment_api"
 
     def test_decorator_passes_failure_exceptions(self):
-        """failure_exceptions가 Policy에 전달된다."""
+        """failure_exceptions reaches the policy."""
         mock_service = MagicMock()
         mock_service.is_enabled = True
 
@@ -687,7 +687,7 @@ class TestCircuitBreakerDecoratorBehavior:
         assert func.policy._failure_exceptions == (ValueError, TypeError)
 
     def test_decorator_passes_ignore_exceptions(self):
-        """ignore_exceptions가 Policy에 전달된다."""
+        """ignore_exceptions reaches the policy."""
         mock_service = MagicMock()
         mock_service.is_enabled = True
 
@@ -702,7 +702,7 @@ class TestCircuitBreakerDecoratorBehavior:
         assert func.policy._ignore_exceptions == (KeyError,)
 
     def test_decorator_rejected_when_cb_open(self):
-        """CB OPEN 시 데코레이터 함수도 REJECTED를 반환한다."""
+        """With the CB OPEN the decorated function returns REJECTED too."""
         mock_service = MagicMock()
         mock_service.is_enabled = True
         mock_service.should_allow.return_value = False
@@ -726,7 +726,11 @@ class TestCircuitBreakerDecoratorBehavior:
 class TestCircuitBreakerHelperExtractionBehavior:
     """The extracted ``_admit`` / ``_direct_result`` / ``_on_success`` /
     ``_on_failure`` helpers preserve the sync state machine (behavior-preserving
-    R1 refactor) and are the single source of truth the async wrapper reuses."""
+    R1 refactor) and are the single source of truth the async wrapper reuses.
+
+    The helpers take the breaker service ``execute`` resolved once for the
+    call; these direct calls hand them the policy's own binding.
+    """
 
     def test_admit_returns_direct_verdict_when_disabled(self, disabled_cb_service):
         """CB disabled → ``_admit`` verdict is 'direct' (run once, never record)."""
@@ -735,7 +739,7 @@ class TestCircuitBreakerHelperExtractionBehavior:
             cb_service=disabled_cb_service,
         )
 
-        verdict, reject_result, hint_state = policy._admit()
+        verdict, reject_result, hint_state = policy._admit(policy.cb_service)
 
         assert verdict == "direct"
         assert reject_result is None
@@ -747,7 +751,7 @@ class TestCircuitBreakerHelperExtractionBehavior:
         """Admitted → verdict 'run' and hint_state is the decision's state object."""
         decision = mock_cb_service.should_allow_with_state.return_value
 
-        verdict, reject_result, hint_state = policy._admit()
+        verdict, reject_result, hint_state = policy._admit(policy.cb_service)
 
         assert verdict == "run"
         assert reject_result is None
@@ -762,7 +766,7 @@ class TestCircuitBreakerHelperExtractionBehavior:
             cb_service=mock_cb_service,
         )
 
-        verdict, reject_result, hint_state = policy._admit()
+        verdict, reject_result, hint_state = policy._admit(policy.cb_service)
 
         assert verdict == "reject"
         assert reject_result.outcome == PolicyOutcome.REJECTED
@@ -785,7 +789,9 @@ class TestCircuitBreakerHelperExtractionBehavior:
         """``_on_success`` forwards the hint_state to ``record_success``."""
         sentinel = object()
 
-        result = policy._on_success("value", sentinel)
+        result = policy._on_success(
+            "value", sentinel, scope=None, service=policy.cb_service
+        )
 
         assert result.outcome == PolicyOutcome.SUCCESS
         mock_cb_service.record_success.assert_called_once_with(
@@ -797,7 +803,7 @@ class TestCircuitBreakerHelperExtractionBehavior:
         sentinel = object()
         error = RuntimeError("boom")
 
-        policy._on_failure(error, sentinel)
+        policy._on_failure(error, sentinel, scope=None, service=policy.cb_service)
 
         mock_cb_service.record_failure.assert_called_once()
         assert mock_cb_service.record_failure.call_args.kwargs["hint_state"] is sentinel
@@ -810,7 +816,9 @@ class TestCircuitBreakerHelperExtractionBehavior:
             ignore_exceptions=(KeyError,),
         )
 
-        policy._on_failure(KeyError("ignored"), None)
+        policy._on_failure(
+            KeyError("ignored"), None, scope=None, service=policy.cb_service
+        )
 
         mock_cb_service.record_failure.assert_not_called()
 

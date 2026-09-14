@@ -658,7 +658,6 @@ class TestAsyncRetryObservationIgnoreListBehavior:
     """A 429 type the breaker ignores is ignored at every depth that sees it."""
 
     def test_an_ignored_429_exception_feeds_no_cascade(self, observation):
-        _, cascade = observation
         breaker = _admitting_async_breaker(ignore_exceptions=(_IgnoredRateLimitError,))
         retry = _policy(max_attempts=2)
 
@@ -670,13 +669,17 @@ class TestAsyncRetryObservationIgnoreListBehavior:
 
         asyncio.run(breaker.execute(inner))
 
-        cascade.record_rate_limit_response.assert_not_called()
+        breaker.cb_service.record_rate_limit_response.assert_not_called()
 
     def test_the_same_storm_feeds_the_cascade_without_the_ignore_list(
         self, observation
     ):
-        """Negative half: the dial is what withholds it, not the composition."""
-        _, cascade = observation
+        """Negative half: the dial is what withholds it, not the composition.
+
+        The cascade lands on the breaker's own service — the scope carries
+        it — so the shared service the singleton getter returns stays clean.
+        """
+        _, shared_service = observation
         breaker = _admitting_async_breaker()
         retry = _policy(max_attempts=2)
 
@@ -688,7 +691,8 @@ class TestAsyncRetryObservationIgnoreListBehavior:
 
         asyncio.run(breaker.execute(inner))
 
-        assert cascade.record_rate_limit_response.call_count == 2
+        assert breaker.cb_service.record_rate_limit_response.call_count == 2
+        shared_service.record_rate_limit_response.assert_not_called()
 
 
 # =============================================================================
