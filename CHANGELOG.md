@@ -10,6 +10,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+## [1.13.2] - 2026-09-15
+
 ### Fixed
 
 - Breakers built by `protect()` and `@circuit_breaker` now record on the process-shared service.
