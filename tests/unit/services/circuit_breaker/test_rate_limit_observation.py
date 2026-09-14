@@ -16,6 +16,7 @@ from contextvars import copy_context
 from unittest.mock import MagicMock, patch
 
 import pytest
+from structlog.testing import capture_logs
 
 from baldur.services.circuit_breaker.rate_limit_observation import (
     OutboundObservationScope,
@@ -423,11 +424,20 @@ class TestObserve429FanOutBehavior:
             "breaker service down"
         )
 
-        observe_429("payment", 30.0, notify_coordinator=True, service=own_service)
+        with capture_logs() as logs:
+            observe_429("payment", 30.0, notify_coordinator=True, service=own_service)
 
         own_service.record_rate_limit_response.assert_called_once_with("payment")
         cb_service.record_rate_limit_response.assert_not_called()
         coordinator.on_rate_limited.assert_called_once()
+        swallowed = [
+            log
+            for log in logs
+            if log["event"] == "circuit_breaker.rate_limit_observation_failed"
+        ]
+        assert len(swallowed) == 1
+        assert swallowed[0]["log_level"] == "warning"
+        assert swallowed[0]["half"] == "cascade"
 
     def test_record_cascade_false_skips_the_cascade_half(self, cb_service, coordinator):
         """An outcome an inner stage already counted is not counted again here."""

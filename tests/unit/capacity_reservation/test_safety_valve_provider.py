@@ -163,7 +163,7 @@ def _drive_protected(name: str, pattern: str) -> None:
             protect(name, lambda: "ok", circuit_breaker=True, retry=False, timeout=None)
 
 
-class TestSafetyValveProviderReadsProtectedTraffic:
+class TestSafetyValveProviderReadsProtectedTrafficBehavior:
     """The error-rate read sees the calls ``protect()`` admitted.
 
     Before the default-built breaker recorded on the shared service, a
