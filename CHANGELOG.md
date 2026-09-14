@@ -10,6 +10,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+## [1.13.1] - 2026-09-14
+
 ### Fixed
 
 - The shipped demo no longer ends at `lost -2`: charges the open breaker rejected count too.
