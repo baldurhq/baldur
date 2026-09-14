@@ -11,7 +11,8 @@ What it shows:
    and DLQ capture composed by one decorator.
 2. The fake payment gateway goes down. Every failed charge is captured with
    its arguments; after enough failures the circuit breaker opens and starts
-   rejecting instantly instead of piling onto the dying dependency.
+   rejecting instantly instead of piling onto the dying dependency. A charge
+   the open breaker rejects never ran, and it is captured too.
 3. The gateway comes back. The breaker probes, closes, and the CLOSED event
    automatically replays every captured charge through the registered replay
    handler. The summary at the end is computed from what actually happened.
@@ -30,6 +31,7 @@ import logging
 import os
 import sys
 import time
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -126,6 +128,50 @@ def _setup_eager_celery() -> bool:
     return True
 
 
+@dataclass
+class _Tally:
+    """What the demo counts, kept apart from how it observes the framework.
+
+    A charge is *parked* when it failed on the way out — either it exhausted
+    its retries against the dead gateway, or the OPEN breaker rejected it
+    before it ran. Both are captured to the DLQ and both must come back for
+    "zero lost" to hold, so ``lost`` is measured against every parked order,
+    not against the retry-exhausted ones alone.
+    """
+
+    ok: int = 0
+    failed: int = 0
+    rejected: int = 0
+    parked_orders: set[int] = field(default_factory=set)
+
+    def record_ok(self) -> None:
+        self.ok += 1
+
+    def record_failed(self, order: int) -> None:
+        self.failed += 1
+        self.parked_orders.add(order)
+
+    def record_rejected(self, order: int) -> None:
+        self.rejected += 1
+        self.parked_orders.add(order)
+
+    @property
+    def parked(self) -> int:
+        return len(self.parked_orders)
+
+    def span(self) -> str:
+        if not self.parked_orders:
+            return "none"
+        return f"#{min(self.parked_orders)}-{max(self.parked_orders)}"
+
+    def replayed(self, charged_orders: list[int]) -> list[int]:
+        """Parked orders that were charged again, in charge order."""
+        return sorted(o for o in charged_orders if o in self.parked_orders)
+
+    def lost(self, replayed_ok: int) -> int:
+        return self.parked - replayed_ok
+
+
 class _Demo:
     """One demo run: protected app, replay wiring, observation taps, phases."""
 
@@ -139,8 +185,7 @@ class _Demo:
         self.gateway_up = True
         self.charged_orders: list[int] = []
         self.order = 100
-        self.ok = self.failed = self.rejected = 0
-        self.first_order_down = 0
+        self.tally = _Tally()
         self.captured = 0
         self.replayed_ok = self.replayed_total = 0
 
@@ -202,14 +247,13 @@ class _Demo:
         for _ in range(3):
             self.order += 1
             self.charge(order_id=self.order)
-            self.ok += 1
+            self.tally.record_ok()
             self.charge_line(f"{GREEN}✔ charged{R}")
             time.sleep(0.4)
 
     def outage(self) -> None:
         _say(f"\n  {RED}✖ payment gateway goes DOWN{R}")
         self.gateway_up = False
-        self.first_order_down = self.order + 1
         for _ in range(7):
             self.order += 1
             self._one_outage_charge()
@@ -219,11 +263,11 @@ class _Demo:
         t0 = time.perf_counter()
         try:
             self.charge(order_id=self.order)
-            self.ok += 1
+            self.tally.record_ok()
             self.charge_line(f"{GREEN}✔ charged{R}")
         except GatewayDownError:
-            self.failed += 1
-            if self.failed == 1:
+            self.tally.record_failed(self.order)
+            if self.tally.failed == 1:
                 note = "← capturing"
             elif self.cb_state() == "open":
                 note = "← breaker OPEN"
@@ -232,34 +276,35 @@ class _Demo:
             self.charge_line(
                 f"{RED}✖ GatewayDownError{R} {DIM}(retried){R}", extra=note
             )
-        except Exception:  # CircuitBreakerOpenError — fail fast
-            self.rejected += 1
+        except Exception:  # CircuitBreakerOpenError — fail fast, captured too
+            self.tally.record_rejected(self.order)
             ms = (time.perf_counter() - t0) * 1000
             self.charge_line(
                 f"{YELLOW}⚡ rejected in {ms:.1f}ms{R}",
-                extra="← shields the gateway" if self.rejected == 1 else "",
+                extra="← shields the gateway" if self.tally.rejected == 1 else "",
             )
 
     def capture_tally(self) -> None:
-        # Capture is async-durable: entries hit a local durable buffer on the
-        # request path and become store-visible when the outbox flushes. Say
-        # exactly what the store shows; the replay tally at the end is the
-        # authoritative proof of what was captured.
+        # Capture is async: entries leave the request path through the outbox
+        # and become store-visible when it flushes. Say exactly what the store
+        # shows; the replay tally at the end is the authoritative proof of
+        # what was captured.
+        expected = self.tally.parked
         deadline = time.monotonic() + _OUTBOX_FLUSH_WAIT_S
         self.captured = self.dlq_pending()
-        while self.captured < self.failed and time.monotonic() < deadline:
+        while self.captured < expected and time.monotonic() < deadline:
             time.sleep(0.5)
             self.captured = self.dlq_pending()
-        span = f"#{self.first_order_down}-{self.first_order_down + self.failed - 1}"
-        if self.captured == self.failed:
+        if self.captured == expected:
             _say(
-                f"  {MAGENTA}◆ {self.captured} failed charges captured to the DLQ{R}"
-                f" {DIM}({span}, with their arguments){R}"
+                f"  {MAGENTA}◆ {self.captured} charges captured with their arguments{R}"
+                f" {DIM}({self.tally.span()}: {self.tally.failed} failed,"
+                f" {self.tally.rejected} rejected){R}"
             )
         else:
             _say(
-                f"  {MAGENTA}◆ DLQ capture: {self.captured}/{self.failed}"
-                f" store-visible so far{R} {DIM}(async-durable — see replay tally){R}"
+                f"  {MAGENTA}◆ DLQ capture: {self.captured}/{expected}"
+                f" store-visible so far{R} {DIM}(async — see replay tally){R}"
             )
 
     def recovery(self) -> None:
@@ -273,7 +318,7 @@ class _Demo:
             self.order += 1
             try:
                 self.charge(order_id=self.order)
-                self.ok += 1
+                self.tally.record_ok()
                 state = self.cb_state()
                 self.charge_line(
                     f"{GREEN}✔ charged{R}",
@@ -282,7 +327,9 @@ class _Demo:
                 if state == "closed":
                     return
             except Exception as exc:
-                self.rejected += 1
+                # A HALF_OPEN breaker admits one probe; the rest are rejected
+                # and captured, so they are parked work like any other.
+                self.tally.record_rejected(self.order)
                 self.charge_line(
                     f"{YELLOW}⚡ rejected{R} {DIM}({type(exc).__name__}){R}"
                 )
@@ -298,29 +345,33 @@ class _Demo:
         batches = self.replay_batches
         self.replayed_ok = sum(int(b.get("success_count", 0)) for b in batches)
         self.replayed_total = sum(int(b.get("total", 0)) for b in batches)
-        lo, hi = self.first_order_down, self.first_order_down + self.failed
-        replayed_orders = sorted(o for o in self.charged_orders if lo <= o < hi)
+        replayed_orders = self.tally.replayed(self.charged_orders)
+        span = (
+            f"#{replayed_orders[0]}-{replayed_orders[-1]}"
+            if replayed_orders
+            else "none"
+        )
         _say(
             f"  {MAGENTA}⟳ auto-replay on circuit close: {BOLD}{self.replayed_ok}/"
             f"{self.replayed_total}{R}{MAGENTA} charges re-executed{R}"
-            f" {DIM}(#{replayed_orders[0]}-{replayed_orders[-1]},"
-            f" dlq {self.dlq_pending()}){R}"
+            f" {DIM}({span}, dlq {self.dlq_pending()}){R}"
         )
 
     def summary(self) -> int:
-        lost = self.failed - self.replayed_ok
+        lost = self.tally.lost(self.replayed_ok)
         # The replay batch read its entries from the store, so its total is
         # first-hand evidence of capture even when the earlier count lagged.
         captured = max(self.captured, self.replayed_total)
         _say()
         _say(f"  {DIM}{'─' * 58}{R}")
         _say(
-            f"  charges OK {BOLD}{self.ok}{R}  ·  failed {BOLD}{self.failed}{R}"
+            f"  OK {BOLD}{self.tally.ok}{R}  ·  failed {BOLD}{self.tally.failed}{R}"
+            f"  ·  rejected {BOLD}{self.tally.rejected}{R}"
             f"  ·  captured {BOLD}{captured}{R}"
-            f"  ·  auto-replayed {BOLD}{self.replayed_ok}/{self.replayed_total}{R}"
+            f"  ·  replayed {BOLD}{self.replayed_ok}/{self.replayed_total}{R}"
             f"  ·  lost {BOLD}{lost}{R}"
         )
-        if lost == 0 and self.failed > 0 and self.dlq_pending() == 0:
+        if lost == 0 and self.tally.parked > 0 and self.dlq_pending() == 0:
             _say(f"  {BOLD}Every failed charge came back on its own. Zero lost.{R}")
         _say()
         return 0 if lost == 0 else 2
