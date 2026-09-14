@@ -12,6 +12,22 @@ snapshot of the failing call's arguments so it can be replayed, so it is
 [opt-in per call](../concepts/foundations/dlq-replay.md#why-capture-is-opt-in-per-call)
 with `dlq=True` — the quickstarts show the flag in place.
 
+## See it work first
+
+Before wiring anything into your app, watch the whole loop run in one
+process — no Redis, no database, no broker:
+
+```bash
+pip install "baldur-framework[celery]"
+python -m baldur.scripts.demo_self_healing
+```
+
+A fake payment gateway dies mid-traffic. Every charge that fails is captured
+with its arguments, the circuit breaker opens and rejects the rest instantly
+(those are captured too), and when the gateway comes back the breaker closes
+and every captured charge is replayed. The summary line at the end is computed
+from what actually happened, so it is also a smoke test of your install.
+
 ## Pick your framework
 
 - [Django](django.md)

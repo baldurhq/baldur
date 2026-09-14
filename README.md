@@ -9,24 +9,27 @@
 
 **English** | [한국어](README.ko.md)
 
-**Baldur** is a self-healing reliability layer for Python applications. It puts
-circuit breaker, retry, and fallback behind a single decorator, so a flaky
-downstream stops cascading into your service — and it ships the operational
-surface you need to actually run that in production: health checks, Prometheus
-and OpenTelemetry metrics, graceful shutdown, and a built-in web console. The
-core is framework-agnostic, with first-class adapters for Django, FastAPI,
+**Baldur** keeps the Python calls that fail while a dependency is down, and
+replays them when it comes back. Wrap a call in one decorator: if the payment
+gateway dies mid-traffic, every charge that fails is captured with its
+arguments, a circuit breaker stops your service from piling onto the dying
+dependency, and the moment the gateway recovers the captured charges are
+replayed. Nothing is silently lost. Around that loop it ships what you need to
+run it in production — health checks, Prometheus and OpenTelemetry metrics,
+graceful shutdown, a built-in web console — with adapters for Django, FastAPI,
 Flask, and Celery.
 
-![Terminal demo: the payment gateway becomes unreachable mid-traffic — five charges fail on the way out and are captured, the breaker trips, and on recovery Baldur replays all five. Zero lost.](https://raw.githubusercontent.com/baldurhq/baldur/main/.github/assets/demo-self-healing.gif)
+![Terminal demo: the payment gateway becomes unreachable mid-traffic — five charges fail after their retries and the breaker trips, two more are rejected on the spot, all seven are captured, and on recovery Baldur replays all seven. Zero lost.](https://raw.githubusercontent.com/baldurhq/baldur/main/.github/assets/demo-self-healing.gif)
 
 *Real run of the shipped demo: the gateway goes unreachable mid-traffic — an
-infrastructure failure, not a declined card — so five charges fail and are
-captured with their arguments, the circuit breaker opens and shields the dying
-dependency, and the moment it closes again Baldur replays all five for real.
-Zero lost. (Replay is for work that failed on the way out, never for a business
-rejection, and never for a checkout the customer already walked away from —
-[where that line sits](docs/concepts/foundations/dlq-replay.md).) Reproduce it
-yourself:*
+infrastructure failure, not a declined card — so five charges fail after their
+retries and are captured with their arguments, the circuit breaker opens and
+shields the dying dependency (the two charges it rejects never run, and are
+captured too), and the moment it closes again Baldur replays all seven for
+real. Zero lost. (Replay is for work that failed on the way out, never for a
+business rejection, and never for a checkout the customer already walked away
+from — [where that line sits](docs/concepts/foundations/dlq-replay.md).)
+Reproduce it yourself:*
 
 ```bash
 pip install "baldur-framework[celery]"
@@ -40,11 +43,16 @@ the Prometheus/OpenTelemetry metrics.)*
 
 ## Why Baldur?
 
-- **One decorator, whole pipeline.** `@baldur.protected("name")` composes a
-  circuit breaker, a wall-clock budget, fallback, idempotency, and dead-letter
-  capture into one ordered pipeline — the parts your HTTP client or vendor SDK
-  leaves to you. Retry composes in too, for calls that don't retry themselves;
-  where your SDK already retries, keep it and let Baldur surround it.
+- **The call that failed for good is not gone.** `dlq=True` captures it with
+  its arguments; the breaker's recovery replays it, through a handler you
+  register and only for the failure types you opt in. Retry is a policy;
+  capture-and-replay-on-recovery is the part no retry library gives you.
+- **Around that loop, one decorator composes the whole pipeline.**
+  `@baldur.protected("name")` orders a circuit breaker, a wall-clock budget,
+  fallback, idempotency, and dead-letter capture into one pipeline — the parts
+  your HTTP client or vendor SDK leaves to you. Retry composes in too, for
+  calls that don't retry themselves; where your SDK already retries, keep it
+  and let Baldur surround it.
 - **Zero-config start, production path built in.** Out of the box everything
   runs on an in-memory backend — no Redis, no env vars, no Docker. When you
   move to multiple workers, add Redis and the same code shares state across
@@ -77,17 +85,27 @@ pip install baldur-framework[prometheus]     # Prometheus metrics
 import baldur
 
 
+@baldur.protected("charge-customer", dlq=True)
+def charge(order_id: str, amount_cents: int) -> dict:
+    # Circuit breaker by default; dlq=True parks the call if it fails for
+    # good, with its arguments, and replays it once the gateway recovers.
+    # Zero configuration runs on an in-memory backend — no Redis, no env
+    # vars, no Docker.
+    return payment_gateway.charge(order_id, amount_cents)
+```
+
+When the gateway dies, the breaker opens and your service answers fast instead
+of stacking up timeouts; the charges that failed on the way out wait in the
+dead-letter queue and come back when it closes. The same decorator protects any
+dependency — your database, a model provider mid-incident:
+
+```python
 @baldur.protected("llm-summarize")
 def summarize(doc_id: str) -> str:
-    # Wrapped in a circuit breaker by default. With zero configuration this
-    # runs on an in-memory backend — no Redis, no env vars, no Docker.
     return llm_api.summarize(doc_id)
 ```
 
-When a dependency starts failing — your payment gateway, your database, a model
-provider mid-incident — the breaker opens and your service answers fast instead
-of stacking up timeouts. Need more than the default? Compose the pipeline
-declaratively:
+Need more than the default? Compose the pipeline declaratively:
 
 ```python
 @baldur.protected(

@@ -77,9 +77,10 @@ of its dotted name — `myproject.tasks.sync_products` becomes domain
 matters.
 The circuit-breaker, dead-letter, metrics, and forensic-capture hooks each toggle
 independently (`cb_enabled` / `dlq_enabled` / `metrics_enabled` /
-`forensics_enabled`), all on by default. Durable failure capture and replay ship
-in the OSS core; PRO adds the operate-at-scale surface on top (batch replay from
-the console, adaptive pacing, a durable outbox, archive/purge).
+`forensics_enabled`), all on by default. Failure capture and replay ship in the
+OSS core — the queue lives in process memory by default and in Redis once one
+is configured; PRO adds the operate-at-scale surface on top (batch replay from
+the console, adaptive pacing, a disk-durable outbox, archive/purge).
 
 ## 4. Run Baldur's scheduled maintenance on your beat
 
