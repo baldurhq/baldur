@@ -16,6 +16,8 @@ Source basis:
   authors inject ``hooks=[…]``
 - breaker-service binding: neither ``cb_service`` nor ``config`` → the
   process-shared service, resolved per access; either one → a private instance
+- once-per-call resolution: ``execute()`` reads the shared service once at
+  entry and hands it to admission and recording alike
 - _should_open_circuit(): with sliding_window_size > 0 and total_calls >
   window_size the cap applies; the count-based threshold reads the raw
   failure_count
@@ -28,10 +30,11 @@ UNIT_TEST_GUIDELINES.md compliance:
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from baldur.interfaces.repositories import CircuitBreakerStateData
 from baldur.interfaces.resilience_policy import (
     PolicyOutcome,
     PolicyResult,
@@ -45,7 +48,14 @@ from baldur.services.circuit_breaker.exceptions import CircuitBreakerOpenError
 from baldur.services.circuit_breaker.policy import (
     CircuitBreakerPolicy,
 )
+from baldur.services.circuit_breaker.service import CircuitBreakerService
 from baldur.services.event_bus import EventType
+
+# The module attribute a default-built policy reads on every access; the
+# with-form patch is the singleton-function idiom (§6.5.2).
+_GET_CB_SERVICE = (
+    "baldur.services.circuit_breaker.convenience.get_circuit_breaker_service"
+)
 
 
 def _reject_decision(state_str: str = "open") -> CircuitBreakerDecision:
@@ -425,6 +435,149 @@ class TestCircuitBreakerPolicyServiceBindingBehavior:
         )
 
         assert policy.cb_service is mock_cb_service
+
+    @pytest.mark.parametrize(
+        ("build", "follows_swap"),
+        [
+            (lambda: CircuitBreakerPolicy(service_name="test_api"), True),
+            (
+                lambda: CircuitBreakerPolicy(
+                    service_name="test_api",
+                    cb_service=MagicMock(spec=CircuitBreakerService),
+                ),
+                False,
+            ),
+            (
+                lambda: CircuitBreakerPolicy(
+                    service_name="test_api",
+                    config=CircuitBreakerConfig(failure_threshold=10),
+                ),
+                False,
+            ),
+        ],
+        ids=["default_form", "injected_service", "pinned_config"],
+    )
+    def test_a_singleton_swap_between_two_accesses_is_seen_only_by_the_default_form(
+        self, build, follows_swap
+    ):
+        """``configure_circuit_breaker_service()`` reaches a default-built policy.
+
+        The default form holds no reference, so the swap is observed on the
+        next access; the injected and pinned forms keep the private instance
+        they were built with — no two configurations can ever share one deque.
+        """
+        from baldur.services.circuit_breaker.convenience import (
+            configure_circuit_breaker_service,
+        )
+
+        policy = build()
+        before = policy.cb_service
+        swapped = CircuitBreakerService()
+
+        configure_circuit_breaker_service(swapped)
+
+        assert (policy.cb_service is swapped) is follows_swap
+        assert (policy.cb_service is before) is (not follows_swap)
+
+    def test_a_singleton_reset_between_two_accesses_rebinds_the_default_form(self):
+        """``reset_circuit_breaker_service()`` drops the instance the last access saw.
+
+        A held reference would survive the reset and re-open the partition
+        between ``protect()``'s cached policy and every other reader of the
+        fresh singleton.
+        """
+        from baldur.services.circuit_breaker.convenience import (
+            get_circuit_breaker_service,
+            reset_circuit_breaker_service,
+        )
+
+        policy = CircuitBreakerPolicy(service_name="test_api")
+        before = policy.cb_service
+
+        reset_circuit_breaker_service()
+
+        after = policy.cb_service
+        assert after is not before
+        assert after is get_circuit_breaker_service()
+
+
+# =============================================================================
+# Once-per-call service resolution (Behavior)
+# =============================================================================
+
+
+def _admitting_service() -> MagicMock:
+    """A spec'd breaker service that admits every call in CLOSED."""
+    service = MagicMock(spec=CircuitBreakerService)
+    service.is_enabled = True
+    service.should_allow_with_state.return_value = CircuitBreakerDecision(
+        allowed=True,
+        state=CircuitBreakerStateData(service_name="test_api", state="closed"),
+    )
+    return service
+
+
+def _raise(error: Exception):
+    """A callable that raises ``error`` when the policy runs it."""
+
+    def _call():
+        raise error
+
+    return _call
+
+
+class TestCircuitBreakerPolicyServiceResolutionBehavior:
+    """The shared service is resolved once at ``execute()`` entry.
+
+    Admission and recording of one call must land on one instance: a swap
+    of the singleton between the two would admit on the old service and
+    record on the new one, splitting the call's evidence across both.
+    """
+
+    def test_a_failing_call_resolves_the_singleton_exactly_once(self):
+        """One resolve per call — the recording helpers never re-read the getter."""
+        first = _admitting_service()
+        second = _admitting_service()
+        policy = CircuitBreakerPolicy(service_name="test_api")
+
+        with (
+            patch(_GET_CB_SERVICE, side_effect=[first, second]) as getter,
+            pytest.raises(RuntimeError),
+        ):
+            policy.execute(_raise(RuntimeError("downstream down")))
+
+        assert getter.call_count == 1
+        first.should_allow_with_state.assert_called_once_with("test_api")
+        first.record_failure.assert_called_once()
+        second.should_allow_with_state.assert_not_called()
+        second.record_failure.assert_not_called()
+
+    def test_a_succeeding_call_records_on_the_service_it_was_admitted_on(self):
+        """The success half takes the same object the admission read."""
+        first = _admitting_service()
+        second = _admitting_service()
+        policy = CircuitBreakerPolicy(service_name="test_api")
+
+        with patch(_GET_CB_SERVICE, side_effect=[first, second]) as getter:
+            result = policy.execute(lambda: "ok")
+
+        assert result.outcome == PolicyOutcome.SUCCESS
+        assert getter.call_count == 1
+        first.record_success.assert_called_once()
+        second.record_success.assert_not_called()
+
+    def test_each_call_resolves_the_singleton_afresh(self):
+        """Once per call, not once per policy: the second call sees the swap."""
+        first = _admitting_service()
+        second = _admitting_service()
+        policy = CircuitBreakerPolicy(service_name="test_api")
+
+        with patch(_GET_CB_SERVICE, side_effect=[first, second]):
+            policy.execute(lambda: "ok")
+            policy.execute(lambda: "ok")
+
+        first.record_success.assert_called_once()
+        second.record_success.assert_called_once()
 
 
 # =============================================================================

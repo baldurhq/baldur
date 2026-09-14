@@ -14,6 +14,8 @@ Verification techniques applied:
   three manual-control paths)
 - Negative assertion: the aggregate failure rate is a rate, not a near-binary
   signal
+- Shared evidence: every ``protect()`` name records on the runtime singleton,
+  so its aggregate is the process mean; a pinned-config policy stays private
 """
 
 from __future__ import annotations
@@ -27,7 +29,14 @@ from baldur.adapters.memory.circuit_breaker import (
     InMemoryCircuitBreakerStateRepository,
 )
 from baldur.interfaces.repositories import CircuitBreakerStateData
+from baldur.protect_facade import protect
 from baldur.services.circuit_breaker.config import CircuitBreakerConfig
+from baldur.services.circuit_breaker.convenience import (
+    configure_circuit_breaker_service,
+    get_circuit_breaker_service,
+    reset_circuit_breaker_service,
+)
+from baldur.services.circuit_breaker.policy import CircuitBreakerPolicy
 from baldur.services.circuit_breaker.service import CircuitBreakerService
 
 SERVICE = "payment-gateway"
@@ -585,3 +594,104 @@ class TestTripEvidenceConsistencyBehavior:
         cb_snapshot = captured["circuit_breaker"]
         assert cb_snapshot["window_total_calls"] == 11
         assert cb_snapshot["failure_rate_percent"] == pytest.approx(7 / 11 * 100)
+
+
+# =============================================================================
+# Behavior — one aggregate across every protect()-driven name
+# =============================================================================
+
+
+@pytest.fixture
+def shared_service() -> CircuitBreakerService:
+    """The runtime singleton, pinned to an in-memory repository for the test.
+
+    ``protect()``'s default-built breaker resolves this instance on every
+    call, so the traffic it admits is what the singleton's aggregate reads.
+    The configure/reset pair is the production swap surface, not a patch.
+    """
+    service = _service(_config())
+    configure_circuit_breaker_service(service)
+    yield service
+    reset_circuit_breaker_service()
+
+
+def _raise_downstream() -> None:
+    raise RuntimeError("downstream down")
+
+
+def _drive_protected(name: str, pattern: str) -> None:
+    """Replay ``pattern`` through ``protect(name, …)``: ``f`` raises, ``s`` returns.
+
+    The breaker stage alone — no retry, no timeout — so one call is one
+    recorded outcome on the breaker's service.
+    """
+    for outcome in pattern:
+        if outcome == "f":
+            with pytest.raises(RuntimeError):
+                protect(
+                    name,
+                    _raise_downstream,
+                    circuit_breaker=True,
+                    retry=False,
+                    timeout=None,
+                )
+        else:
+            protect(name, lambda: "ok", circuit_breaker=True, retry=False, timeout=None)
+
+
+class TestAggregateAcrossProtectedNamesBehavior:
+    """Two ``protect()`` names in one process contribute to one mean.
+
+    A default-built breaker used to construct a private service, so the
+    evidence it admitted sat where no reader could reach it: the singleton's
+    aggregate read ``0.0`` for a process whose traffic all ran through
+    ``protect()``. Both names below stay under every trip trigger — a trip
+    clears the tripped name's window and would remove it from the mean.
+    """
+
+    # Consecutive failures never reach ``failure_threshold`` (5) and each
+    # name's call count stays under ``minimum_calls`` (10), so the rate
+    # trigger is never evaluated either.
+    _FIRST = "fssss"
+    _SECOND = "fsfss"
+
+    def test_two_protected_names_share_one_aggregate(self, shared_service):
+        """The singleton's mean is ``failures / calls`` over both names."""
+        _drive_protected("aggregate-first", self._FIRST)
+        _drive_protected("aggregate-second", self._SECOND)
+
+        pattern = self._FIRST + self._SECOND
+        assert shared_service.get_aggregate_failure_rate() == pytest.approx(
+            pattern.count("f") / len(pattern)
+        )
+
+    def test_each_protected_name_records_its_window_on_the_singleton(
+        self, shared_service
+    ):
+        """Cross-check: the per-name pairs the mean is built from live here."""
+        _drive_protected("aggregate-first", self._FIRST)
+        _drive_protected("aggregate-second", self._SECOND)
+
+        assert shared_service.get_window_evidence("aggregate-first") == (
+            self._FIRST.count("f"),
+            len(self._FIRST),
+        )
+        assert shared_service.get_window_evidence("aggregate-second") == (
+            self._SECOND.count("f"),
+            len(self._SECOND),
+        )
+        assert get_circuit_breaker_service() is shared_service
+
+    def test_a_pinned_config_policy_leaves_the_singleton_aggregate_at_zero(
+        self, shared_service
+    ):
+        """Negative arm: ``config=`` opts the policy out of the shared evidence."""
+        policy = CircuitBreakerPolicy(service_name="aggregate-pinned", config=_config())
+
+        with pytest.raises(RuntimeError):
+            policy.execute(_raise_downstream)
+        policy.execute(lambda: "ok")
+
+        assert policy.cb_service is not shared_service
+        assert policy.cb_service.get_aggregate_failure_rate() == pytest.approx(0.5)
+        assert shared_service.get_aggregate_failure_rate() == 0.0

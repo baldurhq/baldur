@@ -17,6 +17,12 @@ A unit test of any one stage can assert its own calls but not the ratio, so
 429" and "a deferral is counted by neither" are asserted here, over the real
 ``PolicyComposer`` chain.
 
+The last group drives ``protect()`` itself against the runtime singleton: the
+cached default-built breaker, the process-shared ``CircuitBreakerService``,
+and the cascade path share one outcome window, and the trip both reads and
+clears it — so the OPEN event's ``window_*`` pair being the pair the breaker
+wrote is only visible with all three composed.
+
 Mock-based — no infra. The repository is the real in-memory implementation and
 the tracker is the real in-process one, so the counter semantics under test are
 the shipped ones. Only the coordinator (a network client) and the audit write
@@ -34,8 +40,13 @@ from baldur.adapters.memory.circuit_breaker import (
 )
 from baldur.core.backoff import ConstantBackoff
 from baldur.interfaces.resilience_policy import PolicyOutcome
+from baldur.protect_facade import protect
 from baldur.resilience.policies.composer import PolicyComposer
 from baldur.services.circuit_breaker.config import CircuitBreakerConfig
+from baldur.services.circuit_breaker.convenience import (
+    configure_circuit_breaker_service,
+    reset_circuit_breaker_service,
+)
 from baldur.services.circuit_breaker.policy import CircuitBreakerPolicy
 from baldur.services.circuit_breaker.rate_limit_tracker import (
     RateLimitTracker,
@@ -451,3 +462,141 @@ class TestShippedDefaultTriggerBandBehavior:
 
         assert result.outcome == PolicyOutcome.REJECTED
         assert chain.cascade_counts() == (5, 5)
+
+
+# =============================================================================
+# The evidence a protect()-driven cascade trip carries
+# =============================================================================
+
+PROTECTED = "payment-api-protected"
+
+
+class _ProtectedDrive:
+    """``protect(name, …)`` against the runtime singleton, events captured.
+
+    The singleton is installed through the production swap surface rather
+    than a patch of the getter: ``protect()``'s cached breaker resolves it on
+    every call, and the cascade half of every 429 that breaker sees lands on
+    the same instance, so the trip reads the window this breaker wrote. The
+    audit write and the burn-rate multiplier are stood in for, as above.
+    """
+
+    def __init__(self) -> None:
+        self.repository = InMemoryCircuitBreakerStateRepository()
+        self.service = CircuitBreakerService(
+            config=CircuitBreakerConfig(enabled=True), repository=self.repository
+        )
+        self.events: list[tuple[object, dict]] = []
+        configure_circuit_breaker_service(self.service)
+
+    def _capture(self, event_type, data=None, **kwargs):
+        self.events.append((event_type, data or kwargs.get("data") or {}))
+
+    def call(self, func):
+        with (
+            patch.object(self.service, "_log_circuit_open_audit"),
+            patch.object(self.service, "_apply_burn_rate_multiplier"),
+            patch.object(self.service, "_emit_event", side_effect=self._capture),
+        ):
+            return protect(
+                PROTECTED, func, circuit_breaker=True, retry=False, timeout=None
+            )
+
+    def opened(self) -> list[dict]:
+        """The data of every OPEN this drive emitted, in order."""
+        return [
+            data
+            for event_type, data in self.events
+            if event_type == EventType.CIRCUIT_BREAKER_OPENED
+        ]
+
+    def state(self) -> str:
+        return self.repository.get_or_create(PROTECTED).state
+
+
+@pytest.fixture
+def protected_drive():
+    drive = _ProtectedDrive()
+    yield drive
+    reset_circuit_breaker_service()
+
+
+class TestProtectDrivenCascadeEvidenceBehavior:
+    """The OPEN a ``protect()`` storm emits describes the calls that breaker saw.
+
+    Validates:
+    - the cascade trips the breaker ``protect()`` records on, at shipped thresholds
+    - the emitted ``window_*`` pair is the breaker's own evidence, not ``(0, 0)``
+    - the trip consumed that evidence: the window is cleared afterwards
+    """
+
+    # One returned 429 in every four: under the count trigger (1 < 5
+    # consecutive) and the rate trigger (25 % < 50 %), so the cascade is the
+    # only trigger that can fire; it reaches its floor of ten 429s at call 40.
+    _PATTERN = "SSSF" * 10
+
+    def _drive_storm(self, drive: _ProtectedDrive) -> None:
+        for outcome in self._PATTERN:
+            if outcome == "F":
+                drive.call(_throttled_response)
+            else:
+                drive.call(lambda: "ok")
+
+    def test_the_opened_event_carries_the_calls_the_breaker_admitted(
+        self, protected_drive
+    ):
+        """
+        Purpose:
+            Show the cascade trip reads the window ``protect()``'s breaker wrote
+            — the shared singleton's — rather than an instance no call reached.
+        Expected:
+            - exactly one OPEN, labelled as the cascade's own trigger
+            - ``window_total_calls`` is the storm's length and
+              ``window_failure_count`` its 429s (10 of 40), neither zero
+        """
+        self._drive_storm(protected_drive)
+
+        opened = protected_drive.opened()
+        assert len(opened) == 1
+        assert opened[0]["trigger"] == "rate_limit_cascade"
+        assert opened[0]["window_total_calls"] == len(self._PATTERN)
+        assert opened[0]["window_failure_count"] == self._PATTERN.count("F")
+        assert opened[0]["window_total_calls"] != 0
+
+    def test_the_trip_clears_the_window_it_read(self, protected_drive):
+        """
+        Purpose:
+            The evidence the trip decided on is consumed by the trip: the next
+            CLOSED period starts without it, on the same instance.
+        Expected:
+            - the breaker is OPEN in the shared repository
+            - the singleton's window for the name reads ``(0, 0)`` afterwards
+        """
+        self._drive_storm(protected_drive)
+
+        assert protected_drive.state() == "open"
+        assert protected_drive.service.get_window_evidence(PROTECTED) == (0, 0)
+
+    def test_the_storm_stays_below_the_other_two_triggers_until_the_floor(
+        self, protected_drive
+    ):
+        """
+        Purpose:
+            Negative half of the band: one call short of the cascade floor,
+            neither the count nor the rate trigger has opened the breaker.
+        Expected:
+            - no OPEN after 39 calls; the breaker is still CLOSED
+            - the window holds the 39 calls and their 9 returned 429s
+        """
+        short = self._PATTERN[:-1]
+        for outcome in short:
+            protected_drive.call(
+                _throttled_response if outcome == "F" else lambda: "ok"
+            )
+
+        assert protected_drive.opened() == []
+        assert protected_drive.state() == "closed"
+        assert protected_drive.service.get_window_evidence(PROTECTED) == (
+            short.count("F"),
+            len(short),
+        )

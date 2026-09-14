@@ -52,9 +52,8 @@ def _response(**attributes):
     return type("FakeResponse", (), attributes)()
 
 
-@pytest.fixture
-def cb_service():
-    """The breaker service the policy records against — admits every call."""
+def _admitting_service() -> MagicMock:
+    """A spec'd breaker service that admits every call in CLOSED."""
     service = MagicMock(spec=CircuitBreakerService)
     service.is_enabled = True
     service.should_allow_with_state.return_value = CircuitBreakerDecision(
@@ -62,6 +61,12 @@ def cb_service():
         state=CircuitBreakerStateData(service_name="payment_api", state="closed"),
     )
     return service
+
+
+@pytest.fixture
+def cb_service():
+    """The breaker service the policy records against — admits every call."""
+    return _admitting_service()
 
 
 @pytest.fixture
@@ -620,6 +625,9 @@ class TestAsyncBreakerRateLimitedOffloadBehavior:
 
         assert isinstance(error, ThrottledError)
         assert spy.count("_on_failure") == 1
+        # The hop carries the entry-resolved service positionally, so the
+        # worker thread never resolves a runtime of its own.
+        assert spy.call_args[0][-1] is policy.cb_service
         cb_service.record_failure.assert_called_once()
         cb_service.record_rate_limit_response.assert_called_once_with("payment_api")
         shared_service.record_rate_limit_response.assert_not_called()
@@ -637,9 +645,42 @@ class TestAsyncBreakerRateLimitedOffloadBehavior:
 
         assert error is None
         assert spy.count("_on_success") == 1
+        assert spy.call_args[0][-1] is policy.cb_service
         cb_service.record_failure.assert_called_once()
         cb_service.record_rate_limit_response.assert_called_once_with("payment_api")
         shared_service.record_rate_limit_response.assert_not_called()
+
+    def test_a_default_form_policy_under_a_mid_call_swap_records_on_the_first_service(
+        self, observation
+    ):
+        """The service resolved at entry is the one the hopped recording lands on.
+
+        A default-built policy holds no reference; had the worker thread
+        resolved the singleton again, a swap landing between admission and
+        recording would admit the call on one service and record it on another.
+        """
+        _, _, coordinator = observation
+        first = _admitting_service()
+        second = _admitting_service()
+        policy = CircuitBreakerPolicy(service_name="payment_api")
+
+        async def throttled():
+            raise ThrottledError()
+
+        # A second resolve would hand out ``second``; a third would raise.
+        with patch(_CB_SERVICE, side_effect=[first, second]) as getter:
+            spy, error = self._run(policy, throttled)
+
+        assert isinstance(error, ThrottledError)
+        assert getter.call_count == 1
+        assert spy.call_args[0][-1] is first
+        first.should_allow_with_state.assert_called_once_with("payment_api")
+        first.record_failure.assert_called_once()
+        first.record_rate_limit_response.assert_called_once_with("payment_api")
+        second.should_allow_with_state.assert_not_called()
+        second.record_failure.assert_not_called()
+        second.record_rate_limit_response.assert_not_called()
+        coordinator.on_rate_limited.assert_called_once()
 
     def test_a_plain_failure_is_recorded_inline(self, policy, cb_service, observation):
         """No hop for an outcome that installs no cooldown."""

@@ -3,9 +3,10 @@ Outbound 429 observation — the per-call scope and the fan-out.
 
 Test target: services/circuit_breaker/rate_limit_observation.py
 - OutboundObservationScope bookkeeping (attempts, 429s, identity marks,
-  claim, and the opening breaker's ignore-list filter)
+  claim, the opening breaker's ignore-list filter and the service it records on)
 - open_scope / close_scope / current_scope lifecycle and context visibility
-- observe_429() fan-out: two independent, independently fail-open halves
+- observe_429() fan-out: two independent, independently fail-open halves; the
+  cascade half lands on the named service, or on the shared one when none is
 """
 
 from __future__ import annotations
@@ -63,6 +64,23 @@ def coordinator():
 
 
 # =============================================================================
+# Contract Tests — OutboundObservationScope shape
+# =============================================================================
+
+
+class TestOutboundObservationScopeContract:
+    """The record's slot set and the default of the service it carries."""
+
+    def test_the_scope_reserves_a_slot_for_the_recording_service(self):
+        """``service`` is a declared slot, not an attribute grown at runtime."""
+        assert "service" in OutboundObservationScope.__slots__
+
+    def test_a_scope_opened_without_a_service_carries_none(self):
+        """``None`` is the default — the cascade then lands on the shared service."""
+        assert OutboundObservationScope("payment").service is None
+
+
+# =============================================================================
 # Behavior Tests — OutboundObservationScope bookkeeping
 # =============================================================================
 
@@ -79,6 +97,24 @@ class TestOutboundObservationScopeBehavior:
         assert scope.rate_limited == 0
         assert scope.coordination_claimed is False
         assert scope.classified == []
+
+    def test_note_429_records_the_cascade_on_the_service_the_scope_carries(
+        self, cb_service
+    ):
+        """A scope opened for a private breaker trips that breaker, not the shared one.
+
+        The opening stage's service is where the call's evidence lives; a
+        cascade recorded on the shared service would read a window for a name
+        it never saw and clear it while the private one kept stale evidence.
+        """
+        own_service = MagicMock(spec=CircuitBreakerService)
+        scope = OutboundObservationScope("payment", service=own_service)
+
+        scope.note_429(retry_after=30.0)
+
+        assert scope.rate_limited == 1
+        own_service.record_rate_limit_response.assert_called_once_with("payment")
+        cb_service.record_rate_limit_response.assert_not_called()
 
     def test_note_attempt_counts_the_call_and_writes_the_denominator(self, tracker):
         """One attempt is one request on the cascade rate's denominator.
@@ -231,6 +267,23 @@ class TestObservationScopeLifecycleBehavior:
 
         assert current_scope() is None
 
+    def test_open_scope_publishes_the_service_to_the_inner_stages(self, cb_service):
+        """An inner stage's ``note_429`` off the ContextVar lands on the opener's service.
+
+        The retry ladder never sees the breaker; it reads the scope. A service
+        stored on the returned object but not on the published one would send
+        every inner-stage 429 to the shared service instead.
+        """
+        own_service = MagicMock(spec=CircuitBreakerService)
+        token, _ = open_scope("payment", service=own_service)
+        try:
+            current_scope().note_429(30.0)
+        finally:
+            close_scope(token)
+
+        own_service.record_rate_limit_response.assert_called_once_with("payment")
+        cb_service.record_rate_limit_response.assert_not_called()
+
     def test_a_nested_scope_restores_the_outer_one_untouched(self):
         """A nested protected call gets its own record and never steals the outer.
 
@@ -332,6 +385,49 @@ class TestObserve429FanOutBehavior:
 
         cb_service.record_rate_limit_response.assert_called_once_with("payment")
         coordinator.on_rate_limited.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "service_given",
+        [True, False],
+        ids=["named_service", "no_service"],
+    )
+    def test_the_cascade_half_lands_on_the_named_service_or_else_the_shared_one(
+        self, cb_service, service_given
+    ):
+        """``service=`` routes the cascade; ``None`` keeps the bare caller's singleton.
+
+        The two destinations are exclusive: a write that reached both would
+        count one 429 twice, and a write that reached neither would leave a
+        private breaker's storm invisible.
+        """
+        own_service = MagicMock(spec=CircuitBreakerService)
+        target, untouched = (
+            (own_service, cb_service) if service_given else (cb_service, own_service)
+        )
+
+        observe_429("payment", 30.0, service=own_service if service_given else None)
+
+        target.record_rate_limit_response.assert_called_once_with("payment")
+        untouched.record_rate_limit_response.assert_not_called()
+
+    def test_a_fault_on_the_named_service_still_lets_the_cooldown_be_installed(
+        self, cb_service, coordinator
+    ):
+        """Fail-open holds for the named service exactly as for the shared one.
+
+        The fault is installed on the service the call names, so the swallow
+        under test is the one guarding a private breaker's cascade write.
+        """
+        own_service = MagicMock(spec=CircuitBreakerService)
+        own_service.record_rate_limit_response.side_effect = RuntimeError(
+            "breaker service down"
+        )
+
+        observe_429("payment", 30.0, notify_coordinator=True, service=own_service)
+
+        own_service.record_rate_limit_response.assert_called_once_with("payment")
+        cb_service.record_rate_limit_response.assert_not_called()
+        coordinator.on_rate_limited.assert_called_once()
 
     def test_record_cascade_false_skips_the_cascade_half(self, cb_service, coordinator):
         """An outcome an inner stage already counted is not counted again here."""

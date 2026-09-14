@@ -12,7 +12,10 @@ logs the would-be transition instead of applying it.
 
 Test targets:
     - services.capacity_reservation.safety_valve_provider.
-      SystemMetricsSafetyValveProvider: fraction conversion, fail-safe raises.
+      SystemMetricsSafetyValveProvider: fraction conversion, fail-safe raises,
+      and the error-rate read reflecting traffic admitted through ``protect()``
+      (a default-built breaker records on the process-shared service the
+      provider reads).
     - services.capacity_reservation.pre_warmer.PreWarmer.check_safety_valve /
       emergency_override: threshold breach detection, dry_run guard, CRITICAL
       transition delivery.
@@ -24,10 +27,19 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from baldur.adapters.memory.circuit_breaker import (
+    InMemoryCircuitBreakerStateRepository,
+)
+from baldur.protect_facade import protect
 from baldur.services.capacity_reservation.pre_warmer import PreWarmer
 from baldur.services.capacity_reservation.safety_valve_provider import (
     SystemMetricsSafetyValveProvider,
 )
+from baldur.services.circuit_breaker.convenience import (
+    configure_circuit_breaker_service,
+    reset_circuit_breaker_service,
+)
+from baldur.services.circuit_breaker.service import CircuitBreakerService
 from baldur.settings.capacity_reservation import CapacityReservationSettings
 
 
@@ -115,6 +127,93 @@ class TestSafetyValveProviderBehavior:
             return_value=cb_service,
         ):
             assert SystemMetricsSafetyValveProvider().get_error_rate() == 0.25
+
+
+@pytest.fixture
+def shared_breaker_service() -> CircuitBreakerService:
+    """The runtime singleton at shipped thresholds over an in-memory repository.
+
+    No ``config=``: the instance reads the process-shared configuration, so
+    the trip triggers in force are the shipped ones. ``protect()``'s
+    default-built breaker resolves this instance per call.
+    """
+    service = CircuitBreakerService(repository=InMemoryCircuitBreakerStateRepository())
+    configure_circuit_breaker_service(service)
+    yield service
+    reset_circuit_breaker_service()
+
+
+def _raise_downstream() -> None:
+    raise RuntimeError("downstream down")
+
+
+def _drive_protected(name: str, pattern: str) -> None:
+    """Replay ``pattern`` through ``protect(name, …)``: ``f`` raises, ``s`` returns."""
+    for outcome in pattern:
+        if outcome == "f":
+            with pytest.raises(RuntimeError):
+                protect(
+                    name,
+                    _raise_downstream,
+                    circuit_breaker=True,
+                    retry=False,
+                    timeout=None,
+                )
+        else:
+            protect(name, lambda: "ok", circuit_breaker=True, retry=False, timeout=None)
+
+
+class TestSafetyValveProviderReadsProtectedTraffic:
+    """The error-rate read sees the calls ``protect()`` admitted.
+
+    Before the default-built breaker recorded on the shared service, a
+    process whose traffic all ran through ``protect()`` read ``0.0`` here
+    and the valve could never fire on error rate.
+    """
+
+    def test_error_rate_reflects_failures_admitted_through_protect(
+        self, shared_breaker_service
+    ):
+        """One failure in ten calls reads 0.1 — no trigger fires on the way.
+
+        Boundary: 1 consecutive failure is under the count threshold (5) and
+        a 10 % rate is under the rate threshold (50 %) at the minimum sample
+        (10), so no trip clears the window the read is taken from.
+        """
+        pattern = "f" + "s" * 9
+        config = shared_breaker_service.config
+        assert len(pattern) >= config.minimum_calls
+        assert pattern.count("f") < config.failure_threshold
+        assert pattern.count("f") / len(pattern) * 100 < config.failure_rate_threshold
+
+        _drive_protected("valve-read", pattern)
+
+        assert SystemMetricsSafetyValveProvider().get_error_rate() == pytest.approx(
+            pattern.count("f") / len(pattern)
+        )
+
+    def test_error_rate_reads_zero_after_a_trip_on_the_only_protected_name(
+        self, shared_breaker_service
+    ):
+        """CLOSED → OPEN clears the tripped name's window: the read is 0.0, not 1.0.
+
+        The documented convention — a window with no evidence reads the same
+        as no traffic at all — pinned rather than left to drift.
+        """
+        with (
+            patch.object(shared_breaker_service, "_log_circuit_open_audit"),
+            patch.object(shared_breaker_service, "_apply_burn_rate_multiplier"),
+        ):
+            _drive_protected(
+                "valve-trip", "f" * shared_breaker_service.config.failure_threshold
+            )
+
+        assert (
+            shared_breaker_service.repository.get_or_create("valve-trip").state
+            == "open"
+        )
+        assert shared_breaker_service.get_window_evidence("valve-trip") == (0, 0)
+        assert SystemMetricsSafetyValveProvider().get_error_rate() == 0.0
 
 
 class TestSafetyValveWiringBehavior:
