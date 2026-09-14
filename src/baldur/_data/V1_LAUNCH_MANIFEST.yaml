@@ -69,7 +69,7 @@ entries:
   - {module: "chaos.py", class: "ChaosSettings", field: "enabled", default: false, tier: "Core", env_var: "BALDUR_CHAOS_ENABLED"}
   - {module: "circuit_breaker.py", class: "CircuitBreakerSettings", field: "enabled", default: true, tier: "Core", env_var: "BALDUR_CB_ENABLED"}
   - {module: "circuit_breaker.py", class: "CircuitBreakerSettings", field: "cluster_state_propagation_enabled", default: false, tier: "v1.0", env_var: "BALDUR_CB_CLUSTER_STATE_PROPAGATION_ENABLED"}
-  - {module: "circuit_breaker.py", class: "CircuitBreakerSettings", field: "self_ddos_protection_enabled", default: true, tier: "Core", env_var: "BALDUR_CB_SELF_DDOS_PROTECTION_ENABLED"}
+  - {module: "circuit_breaker.py", class: "CircuitBreakerSettings", field: "self_ddos_protection_enabled", default: false, tier: "Core", env_var: "BALDUR_CB_SELF_DDOS_PROTECTION_ENABLED"}
   - {module: "config_shadow.py", class: "ConfigShadowSettings", field: "gate_enabled", default: true, tier: "Core", env_var: "BALDUR_CONFIG_SHADOW_GATE_ENABLED"}
   - {module: "config_shadow.py", class: "ConfigShadowSettings", field: "live_evaluation_enabled", default: false, tier: "Core", env_var: "BALDUR_CONFIG_SHADOW_LIVE_EVALUATION_ENABLED"}
   - {module: "daemon_worker.py", class: "DaemonWorkerSettings", field: "respawn_enabled", default: false, tier: "Core", env_var: "BALDUR_DAEMON_WORKER_RESPAWN_ENABLED"}

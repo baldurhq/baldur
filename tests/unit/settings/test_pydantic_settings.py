@@ -46,7 +46,7 @@ class TestCircuitBreakerSettings:
         assert settings.rate_limit_cascade_window_seconds == 60
 
         # Self-DDoS protection (lines 29-33)
-        assert settings.self_ddos_protection_enabled is True
+        assert settings.self_ddos_protection_enabled is False
         assert settings.self_ddos_rps_limit == 200
         assert settings.self_ddos_window_seconds == 10
         assert settings.self_ddos_backoff_multiplier == 2.0

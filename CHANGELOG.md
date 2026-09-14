@@ -10,6 +10,10 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+### Changed
+
+- Self-DDoS protection is off by default (`BALDUR_CB_SELF_DDOS_PROTECTION_ENABLED`).
+
 ## [1.13.2] - 2026-09-15
 
 ### Fixed

@@ -101,7 +101,7 @@ class TestCircuitBreakerConfig:
         from baldur.services.circuit_breaker.config import CircuitBreakerConfig
 
         config = CircuitBreakerConfig()
-        assert config.self_ddos_protection_enabled is True
+        assert config.self_ddos_protection_enabled is False
         assert config.self_ddos_rps_limit == 200
         assert config.self_ddos_window_seconds == 10
         assert config.self_ddos_backoff_multiplier == 2.0

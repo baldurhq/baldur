@@ -177,7 +177,7 @@ class TestCircuitBreakerConfig:
 
         config = CircuitBreakerConfig()
 
-        assert config.self_ddos_protection_enabled is True
+        assert config.self_ddos_protection_enabled is False
         assert config.self_ddos_rps_limit == 200
 
 

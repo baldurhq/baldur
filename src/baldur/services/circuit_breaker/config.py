@@ -109,7 +109,7 @@ class CircuitBreakerConfig:
     )
 
     # Self-DDoS protection settings
-    self_ddos_protection_enabled: bool = True
+    self_ddos_protection_enabled: bool = False
     self_ddos_rps_limit: int = 200  # Per-service RPS cap for DDoS detection
     self_ddos_window_seconds: int = 10  # Time window for self-DDoS detection
     self_ddos_backoff_multiplier: float = 2.0  # Exponential backoff multiplier
@@ -184,7 +184,7 @@ class CircuitBreakerConfig:
                     "rate_limit_cascade_minimum_calls", 20
                 ),
                 self_ddos_protection_enabled=runtime_config.get(
-                    "self_ddos_protection_enabled", True
+                    "self_ddos_protection_enabled", False
                 ),
                 self_ddos_rps_limit=runtime_config.get("self_ddos_rps_limit", 200),
                 self_ddos_window_seconds=runtime_config.get(

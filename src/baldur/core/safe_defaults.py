@@ -40,7 +40,7 @@ SAFE_DEFAULTS: dict[str, dict[str, Any]] = {
         "rate_limit_cascade_window_seconds": 60,
         "rate_limit_cascade_rate": 10.0,
         "rate_limit_cascade_minimum_calls": 20,
-        "self_ddos_protection_enabled": True,
+        "self_ddos_protection_enabled": False,  # matches the settings Field default
         "self_ddos_rps_limit": 200,
         "self_ddos_window_seconds": 10,
         "self_ddos_backoff_multiplier": 2.0,

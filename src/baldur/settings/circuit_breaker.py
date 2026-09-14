@@ -166,8 +166,12 @@ class CircuitBreakerSettings(BaseSettings):
     # Validation rules from core/safe_defaults.py lines 233-236
     # ==========================================================================
     self_ddos_protection_enabled: bool = Field(
-        default=True,
-        description="Enable self-DDoS protection",
+        default=False,
+        description=(
+            "Enable self-DDoS protection. Off by default: the check runs only "
+            "inside should_allow_with_ddos_protection(), which no built-in "
+            "path calls, so a default of True advertised a guard that never ran."
+        ),
     )
     self_ddos_rps_limit: HugeCount = Field(
         default=200,
