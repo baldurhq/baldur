@@ -10,6 +10,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+## [1.13.0] - 2026-09-14
+
 ### Added
 
 - `aprotect()` and the async `@retry` branch now share the outbound 429 cooldown across workers.
