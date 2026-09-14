@@ -199,14 +199,20 @@ class BridgeCallbackContext:
         self.rate_limit_signal = False
 
 
-def _coordinates(ctx: BridgeCallbackContext) -> bool:
-    """Whether this context drives the shared coordinator at all.
+def _coordination(
+    ctx: BridgeCallbackContext,
+) -> tuple[RateLimitCoordinator, str] | None:
+    """The coordinator and key this context drives, or ``None`` when it drives none.
 
     An empty-string key is not an identity (the same rule the native retry
     stage applies to ``rate_limit_key``): coordinating on it would share one
-    cooldown record across unrelated downstreams.
+    cooldown record across unrelated downstreams. Returning the pair, rather
+    than a verdict, is what lets every call site use both without re-deriving
+    the rule.
     """
-    return ctx.rate_limit_coordinator is not None and bool(ctx.rate_limit_key)
+    if ctx.rate_limit_coordinator is None or not ctx.rate_limit_key:
+        return None
+    return ctx.rate_limit_coordinator, ctx.rate_limit_key
 
 
 # =============================================================================
@@ -258,13 +264,12 @@ def observe_bridge_outcome(ctx: BridgeCallbackContext, outcome: Any) -> bool:
         if ctx.scope is not None:
             ctx.scope.note_429(retry_after, outcome)
 
-        if not _coordinates(ctx):
+        coordination = _coordination(ctx)
+        if coordination is None:
             return True
+        coordinator, key = coordination
 
-        cooldown = ctx.rate_limit_coordinator.on_rate_limited(  # type: ignore[union-attr]
-            key=ctx.rate_limit_key,  # type: ignore[arg-type]
-            retry_after=retry_after,
-        )
+        cooldown = coordinator.on_rate_limited(key=key, retry_after=retry_after)
     except Exception as e:
         logger.warning(
             "bridge.tenacity_rate_limit_cooldown_notify_failed",
@@ -300,7 +305,7 @@ def _admit_attempt(ctx: BridgeCallbackContext, retry_state: Any) -> None:
     record_retry_attempt_started(ctx.domain, attempt_number)
 
 
-def _apply_wait_result(ctx: BridgeCallbackContext, result: Any) -> None:
+def _apply_wait_result(ctx: BridgeCallbackContext, key: str, result: Any) -> None:
     """Act on a cooldown wait's result: abort on a deferral, note a signal.
 
     The deferral is NOT a coordinator fault: it is read off the returned
@@ -309,17 +314,14 @@ def _apply_wait_result(ctx: BridgeCallbackContext, result: Any) -> None:
     if result is None:
         return
     if result.deferred:
-        raise _CooldownDeferredAbort(
-            key=ctx.rate_limit_key,  # type: ignore[arg-type]
-            not_before=result.not_before,
-        )
+        raise _CooldownDeferredAbort(key=key, not_before=result.not_before)
     if result.waited or result.was_rate_limited:
         ctx.rate_limit_signal = True
     if result.waited:
         logger.debug(
             "bridge.tenacity_rate_limit_cooldown_waited",
             wait_time=result.wait_time,
-            key=ctx.rate_limit_key,
+            key=key,
         )
 
 
@@ -364,17 +366,19 @@ def make_before_callback(
     def _before(retry_state: Any) -> None:
         _admit_attempt(ctx, retry_state)
 
-        if _coordinates(ctx):
+        coordination = _coordination(ctx)
+        if coordination is not None:
+            coordinator, key = coordination
             # Fail-open on a coordinator fault — a coordinator that is down must
             # not break the user's tenacity loop.
             try:
-                result = ctx.rate_limit_coordinator.wait_if_needed(  # type: ignore[union-attr]
-                    ctx.rate_limit_key, max_wait=ctx.rate_limit_max_wait
+                result = coordinator.wait_if_needed(
+                    key, max_wait=ctx.rate_limit_max_wait
                 )
             except Exception as e:
                 _log_wait_failed(ctx, e)
                 result = None
-            _apply_wait_result(ctx, result)
+            _apply_wait_result(ctx, key, result)
 
         _note_attempt(ctx)
 
@@ -398,17 +402,19 @@ def make_async_before_callback(
     async def _before(retry_state: Any) -> None:
         _admit_attempt(ctx, retry_state)
 
-        if _coordinates(ctx):
+        coordination = _coordination(ctx)
+        if coordination is not None:
+            coordinator, key = coordination
             try:
-                result = await ctx.rate_limit_coordinator.await_if_needed(  # type: ignore[union-attr]
-                    ctx.rate_limit_key, max_wait=ctx.rate_limit_max_wait
+                result = await coordinator.await_if_needed(
+                    key, max_wait=ctx.rate_limit_max_wait
                 )
             except asyncio.CancelledError:
                 raise
             except Exception as e:
                 _log_wait_failed(ctx, e)
                 result = None
-            _apply_wait_result(ctx, result)
+            _apply_wait_result(ctx, key, result)
 
         _note_attempt(ctx)
 

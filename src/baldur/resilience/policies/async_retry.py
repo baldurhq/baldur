@@ -574,7 +574,7 @@ class AsyncRetryPolicy:
                 # call was never made, and ``not_before`` is what a
                 # requeue-capable caller acts on.
                 if isinstance(e, self._non_retryable):
-                    if inner_deferral:
+                    if isinstance(e, RateLimitDeferredError):
                         reason = "rate_limit_deferred"
                         not_before = e.not_before
                     else:

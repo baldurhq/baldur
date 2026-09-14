@@ -764,23 +764,40 @@ class TestAsyncRetryCoordinatorFaultBehavior:
         assert len(failed) == 1
 
     def test_cancellation_inside_the_wait_propagates_untouched(self):
-        """A cancelled request is cancelled; the wait's wrap never swallows it."""
+        """A cancelled request is cancelled; the wait's wrap never swallows it.
+
+        The cooldown sits inside the coordinator's default wait bound, so the
+        stage sleeps it rather than refusing it, and the cancel is delivered
+        only once that sleep has been entered — a cooldown past the bound is
+        deferred before any wait exists, and a fixed pre-cancel delay would
+        race the loop's thread hops instead of landing in the wait.
+        """
         storage = InMemoryRateLimitStorage()
-        storage.set_cooldown("payment", time.time() + 300.0)
+        storage.set_cooldown("payment", time.time() + 30.0)
+        func, calls = _counting()
         policy = AsyncRetryPolicy(
             max_retries=0,
             domain="payment",
             rate_limit_coordinator=_real_coordinator(storage),
         )
+        real_sleep = asyncio.sleep
 
         async def scenario():
-            task = asyncio.create_task(policy.execute(_ok))
-            await asyncio.sleep(0.01)
-            task.cancel()
-            await task
+            entered_wait = asyncio.Event()
+
+            async def sleep_and_signal(seconds, *args, **kwargs):
+                entered_wait.set()
+                await real_sleep(seconds, *args, **kwargs)
+
+            with patch(_COORDINATOR_SLEEP, new=sleep_and_signal):
+                task = asyncio.create_task(policy.execute(func))
+                await entered_wait.wait()
+                task.cancel()
+                await task
 
         with pytest.raises(asyncio.CancelledError):
             asyncio.run(scenario())
+        assert calls["n"] == 0
 
 
 # =============================================================================

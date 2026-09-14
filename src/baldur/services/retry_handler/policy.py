@@ -346,7 +346,7 @@ class RetryPolicy(ResiliencePolicy[T]):
                     # as a generic non-retryable stop: the call was never
                     # made, and ``not_before`` is what a requeue-capable
                     # caller acts on.
-                    if inner_deferral:
+                    if isinstance(e, RateLimitDeferredError):
                         reason = "rate_limit_deferred"
                         not_before = e.not_before
                     else:

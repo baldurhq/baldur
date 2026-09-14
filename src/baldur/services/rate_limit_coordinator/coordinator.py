@@ -913,14 +913,17 @@ class RateLimitCoordinator:
 
         def decorator(func: Callable[..., T]) -> Callable[..., T]:
             if asyncio.iscoroutinefunction(func):
-
+                # ``T`` is the coroutine the ``async def`` returns, so the
+                # awaitable wrapper cannot be typed as ``Callable[..., T]``
+                # without a second coroutine layer; same seam every async
+                # decorator in the package carries.
                 @functools.wraps(func)
-                async def async_wrapper(*args: Any, **kwargs: Any) -> T:
+                async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
                     return await self._arun_decorated(
                         func, key, is_429, get_retry_after, max_wait, args, kwargs
                     )
 
-                return async_wrapper
+                return async_wrapper  # type: ignore[return-value]
 
             @functools.wraps(func)
             def wrapper(*args: Any, **kwargs: Any) -> T:
