@@ -383,17 +383,21 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
                     error=str(e),
                 )
 
+        # The epoch is captured *before* the row is read: a success recorded
+        # against this decision appends read-free only while nothing has
+        # happened to the name since this read, and a failure that lands
+        # between the two reads moves the epoch past the hint.
+        window_epoch = self._outcome_window.epoch_of(service_name)
         state = self.get_or_create_state(service_name)
-        self._outcome_window.observe_state(service_name, state.state)
+        self._outcome_window.observe_state(
+            service_name, state.state, as_of=window_epoch
+        )
 
         if state.state == CircuitState.CLOSED:
-            # The epoch is captured with the hint: a success recorded against
-            # this decision appends read-free only while nothing has happened
-            # to the name since this read.
             return CircuitBreakerDecision(
                 allowed=True,
                 state=state,
-                window_epoch=self._outcome_window.epoch_of(service_name),
+                window_epoch=window_epoch,
             )
 
         # Not CLOSED and not yet eligible for a trial call: short-circuit
@@ -470,7 +474,11 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
             if is_dataclass(state) and not isinstance(state, type):
                 state = replace(state, state=new_state)
         self._outcome_window.observe_state(service_name, state.state)
-        if not allowed:
+        # A refusal the store answered with a CLOSED row is the reject-path
+        # convergence of a stale local row (a peer closed the name), not a
+        # call turned away because the dependency is cut off: it is not
+        # evidence, and must not open the fresh CLOSED period with a failure.
+        if not allowed and state.state != CircuitState.CLOSED.value:
             self.record_rejection(service_name, state)
         return CircuitBreakerDecision(allowed=allowed, state=state)
 
@@ -846,10 +854,13 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
           process's own rows or (``fleet=True``) in the shared store, counts
           at least the failures that tripped it: its window is lifted to
           ``max(failure_count, failure_threshold)`` failed calls when it holds
-          fewer. A no-op for the process that tripped the name; it lifts only
-          a window that lacks the tripping evidence — a row that arrived by
-          boot hydration, drift repair or a peer's transition. The weight is
-          an approximation: the shared store carries no call totals, so a
+          fewer. A no-op for a window that already holds at least that many
+          failures — the process that tripped the name on the consecutive
+          count; it lifts a window that lacks the tripping evidence — a row
+          that arrived by boot hydration, drift repair or a peer's transition
+          — and, by the same approximation, a window whose rate trigger fired
+          on fewer than ``failure_threshold`` failures. The weight is an
+          approximation: the shared store carries no call totals, so a
           dependency another worker cut off counts as a handful of failed
           calls however busy it was there.
 
@@ -887,12 +898,16 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
                 process's own view is then the cluster view and the evidence
                 carries ``fleet_read=False``.
         """
+        epochs_before = self._outcome_window.epochs_snapshot()
         local_rows = {row.service_name: row for row in self.repository.get_all_states()}
         # Every fresh row this walk holds is observed, so a name with no
         # traffic in this process still has its window cleared within one
-        # aggregate read of a peer's close reaching its L1 row.
+        # aggregate read of a peer's close reaching its L1 row. A row that a
+        # transition overtook while the walk was reading is not observed.
         for name, row in local_rows.items():
-            self._outcome_window.observe_state(name, row.state)
+            self._outcome_window.observe_state(
+                name, row.state, as_of=epochs_before.get(name, 0)
+            )
 
         cluster_rows: dict[str, CircuitBreakerStateData] = {}
         fleet_read = False
@@ -1024,8 +1039,9 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
         # protected call was in flight, and acting on it would write over the
         # operator's row (state clobbered, pin fields preserved) and then admit
         # every later request for the rest of the pin's lifetime.
+        read_epoch = self._outcome_window.epoch_of(service_name)
         state = self.get_or_create_state(service_name)
-        self._outcome_window.observe_state(service_name, state.state)
+        self._outcome_window.observe_state(service_name, state.state, as_of=read_epoch)
 
         # Skip while a manual override is in force. Read through the predicate,
         # not the raw flag: once the override's lifetime has passed, automatic
@@ -1631,8 +1647,9 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
         # Past the fast path every branch below either runs the pin check or
         # writes state, so the decision is always made on freshly-read state —
         # never on a hint that may predate an operator's manual pin.
+        read_epoch = self._outcome_window.epoch_of(service_name)
         state = self.get_or_create_state(service_name)
-        self._outcome_window.observe_state(service_name, state.state)
+        self._outcome_window.observe_state(service_name, state.state, as_of=read_epoch)
 
         # Skip while a manual override is in force (see record_failure).
         if is_manual_pin_active(state):
@@ -1675,9 +1692,17 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
             self._outcome_window.observe_state(service_name, attempt.state.state)
 
         elif state.state == "closed":
-            self._outcome_window.record_success(
+            # The fresh read can go stale before this append — a trip can
+            # commit in between — so the append is guarded by the epoch the
+            # read was taken at: a name that moved since is no longer CLOSED
+            # at record time and gets no success entry. A failure write in
+            # flight is no reason to withhold it (the reset below is this
+            # path's own).
+            self._outcome_window.record_success_if_epoch(
                 service_name,
                 effective_config.sliding_window_size,
+                read_epoch,
+                require_no_write_in_flight=False,
             )
             # 775 D1/D2: the write's only semantic is the consecutive-failure
             # reset, so it is skipped when there is no count to reset. Every

@@ -502,7 +502,7 @@ class TestRecordFailureHintStateBehavior:
             assert repo.record_failure.call_count == 1
 
 
-class TestRecordSuccessFastPathConversionRatio:
+class TestRecordSuccessFastPathConversionRatioBehavior:
     """490 D4 testability gate — N=1000 steady-state CLOSED record_success
     calls with a fresh-CLOSED-fc=0 hint produce zero repository calls.
 

@@ -283,7 +283,7 @@ class TestCircuitBreakerCountTripBehavior:
 # =============================================================================
 
 
-class TestRecordSuccessHotPathBudget:
+class TestRecordSuccessHotPathBudgetBehavior:
     """A steady-state CLOSED success must not reach the repository.
 
     The naive fix for the denominator was a repository write per success, which

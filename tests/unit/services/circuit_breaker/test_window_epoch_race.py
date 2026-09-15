@@ -167,6 +167,111 @@ class TestRecordSuccessEpochRaceBehavior:
         # Then
         assert repo.get_by_service_name(SERVICE).failure_count == 0
 
+    def test_failure_completing_between_the_hints_two_reads_still_resets(
+        self, service, repo
+    ):
+        """Interleave 3 (793 /verify, refuter C5): the hint's state and epoch
+        are two reads. A whole failure — write, marker release, window bump —
+        landing between them must not produce a hint that reads ``fc == 0``
+        with an epoch that already reflects the failure.
+        """
+        # Given: the admission's first read sees a clean row; a full failure
+        # lands before its second read.
+        repo.get_or_create(SERVICE)
+        window = service._outcome_window
+        original_epoch_of = window.epoch_of
+        landed: list[bool] = []
+
+        def _failure_then_epoch(service_name: str) -> int:
+            if not landed:
+                landed.append(True)
+                service.record_failure(SERVICE)
+            return original_epoch_of(service_name)
+
+        with patch.object(window, "epoch_of", side_effect=_failure_then_epoch):
+            hint = _admit(service)
+        assert landed == [True]
+        assert repo.get_by_service_name(SERVICE).failure_count == 1
+
+        # When: the success hinted by that admission records.
+        _record_hinted_success(service, hint)
+
+        # Then: the reset the failure owes landed — never a stored 1.
+        assert repo.get_by_service_name(SERVICE).failure_count == 0
+
+    def test_slow_path_success_racing_a_trip_is_not_appended(self, service, repo):
+        """793 /verify, refuter C6: the slow path's fresh read can go stale too.
+
+        The success reads a CLOSED row carrying failures (slow path), a trip
+        commits before its append, and the success must not enter the window
+        of a name that is OPEN at record time.
+        """
+        # Given: four failures, and a fifth that trips right after the
+        # success's fresh read.
+        repo.get_or_create(SERVICE)
+        for _ in range(FAILURE_THRESHOLD - 1):
+            service.record_failure(SERVICE)
+        original_read = repo.get_or_create
+        tripped: list[bool] = []
+
+        def _read_then_trip(service_name: str):
+            row = original_read(service_name)
+            if not tripped:
+                tripped.append(True)
+                service.record_failure(SERVICE)
+            return row
+
+        # When
+        with patch.object(repo, "get_or_create", side_effect=_read_then_trip):
+            service.record_success(SERVICE)
+
+        # Then: the trip stands and the window holds only the trip's evidence.
+        assert tripped == [True]
+        assert (
+            repo.get_by_service_name(SERVICE).state
+            == CircuitBreakerStateEnum.OPEN.value
+        )
+        assert service.get_window_evidence(SERVICE) == (
+            FAILURE_THRESHOLD,
+            FAILURE_THRESHOLD,
+        )
+
+    def test_slow_path_success_whose_trip_lands_after_the_observe_is_not_appended(
+        self, service, repo
+    ):
+        """The refuter's own interleave: the trip commits between the slow
+        path's observation of the fresh row and its append."""
+        repo.get_or_create(SERVICE)
+        for _ in range(FAILURE_THRESHOLD - 1):
+            service.record_failure(SERVICE)
+        tripped: list[bool] = []
+        import baldur.services.circuit_breaker.service as service_module
+
+        real_pin_check = service_module.is_manual_pin_active
+
+        def _trip_then_pin_check(state):
+            # The slow path's pin check sits between its observe and its
+            # append; the fifth failure trips the name right there.
+            if not tripped and state.state == CircuitBreakerStateEnum.CLOSED.value:
+                tripped.append(True)
+                service.record_failure(SERVICE)
+            return real_pin_check(state)
+
+        with patch.object(
+            service_module, "is_manual_pin_active", side_effect=_trip_then_pin_check
+        ):
+            service.record_success(SERVICE)
+
+        assert tripped == [True]
+        assert (
+            repo.get_by_service_name(SERVICE).state
+            == CircuitBreakerStateEnum.OPEN.value
+        )
+        assert service.get_window_evidence(SERVICE) == (
+            FAILURE_THRESHOLD,
+            FAILURE_THRESHOLD,
+        )
+
     def test_fresh_hint_after_a_landed_failure_still_takes_the_slow_path(
         self, service, repo
     ):

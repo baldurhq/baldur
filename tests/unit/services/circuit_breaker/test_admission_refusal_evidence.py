@@ -247,3 +247,51 @@ class TestAdmissionRefusalEvidenceBehavior:
         service.record_rejection(SERVICE, row)
 
         assert service.get_window_evidence(SERVICE) == (1, 1)
+
+
+class TestRefusalOnAClosedStoreAnswerBehavior:
+    """A refusal the store answered with CLOSED is convergence, not evidence.
+
+    Regression (793 /verify, refuter C20): this process holds a stale OPEN
+    row past ``recovery_timeout`` while a peer has already closed the name in
+    the store. The atomic acquire answers ``no_op`` with the store's CLOSED
+    row; the admission is refused once (the reject-path convergence) and the
+    fresh CLOSED period must not open with that refusal as its first failure.
+    """
+
+    def test_no_op_acquire_on_a_closed_row_records_no_rejection(self, service, repo):
+        # Given: a stale OPEN row past its timeout; the store closes it between
+        # the admission read and the acquire.
+        _open_past_timeout(repo)
+        service._outcome_window.observe_state(
+            SERVICE, CircuitBreakerStateEnum.OPEN.value
+        )
+        service._outcome_window.record_rejection(SERVICE, WINDOW_SIZE)
+        original_acquire = repo.try_acquire_half_open_slot
+
+        def _peer_closes_then_acquire(**kwargs):
+            _hydrate(repo, CircuitBreakerStateEnum.CLOSED.value)
+            return original_acquire(**kwargs)
+
+        # When
+        with patch.object(
+            repo, "try_acquire_half_open_slot", side_effect=_peer_closes_then_acquire
+        ):
+            decision = service.should_allow_with_state(SERVICE)
+
+        # Then: refused once (convergence), the window cleared on the observed
+        # CLOSED, and the refusal is not the new period's first failure.
+        assert decision.allowed is False
+        assert decision.state.state == CircuitBreakerStateEnum.CLOSED.value
+        assert service.get_window_evidence(SERVICE) == (0, 0)
+
+    def test_half_open_full_refusal_is_still_recorded(self, service, repo):
+        """Control: a refusal on a row still HALF_OPEN is dependency evidence."""
+        _half_open(repo)
+        service.should_allow_with_state(SERVICE)  # takes the single trial slot
+
+        decision = service.should_allow_with_state(SERVICE)
+
+        assert decision.allowed is False
+        assert decision.state.state == CircuitBreakerStateEnum.HALF_OPEN.value
+        assert service.get_window_evidence(SERVICE) == (1, 1)

@@ -175,6 +175,53 @@ class TestOutcomeWindowObserveStateBehavior:
         assert window.read(SERVICE) == (1, 2)
         assert window.epoch_of(SERVICE) == epoch_before
 
+    # ------------------------------------------------------ stale reads (as_of)
+
+    def test_stale_closed_observation_is_dropped_when_the_epoch_moved(self, window):
+        """793 /verify: a row read before a trip must not clear the trip's evidence.
+
+        The reader captured the epoch, read a CLOSED row, and a trip was
+        observed in between (epoch moved); its late CLOSED observation is
+        dropped — no clear, no bump, the last-seen state stays OPEN.
+        """
+        window.observe_state(SERVICE, "closed")
+        _seed(window, SERVICE, failures=5, successes=0)
+        as_of = window.epoch_of(SERVICE)
+        window.observe_state(SERVICE, "open")  # the trip's own observation
+        epoch_after_trip = window.epoch_of(SERVICE)
+
+        cleared = window.observe_state(SERVICE, "closed", as_of=as_of)
+
+        assert cleared is False
+        assert window.read(SERVICE) == (5, 5)
+        assert window.epoch_of(SERVICE) == epoch_after_trip
+        # The name is still seen as OPEN: the next real close clears once.
+        assert window.observe_state(SERVICE, "closed") is True
+
+    def test_observation_with_a_current_as_of_is_applied(self, window):
+        """Control: an ``as_of`` that still matches records the observation."""
+        window.observe_state(SERVICE, "open")
+        _seed(window, SERVICE, failures=2, successes=0)
+        as_of = window.epoch_of(SERVICE)
+
+        cleared = window.observe_state(SERVICE, "closed", as_of=as_of)
+
+        assert cleared is True
+        assert window.read(SERVICE) == (0, 0)
+
+    def test_epochs_snapshot_carries_every_tracked_name(self, window):
+        window.record_failure(SERVICE, WINDOW_SIZE)
+        window.observe_state("peer", "open")
+        window.observe_state("peer", "closed")
+
+        snapshot = window.epochs_snapshot()
+
+        assert snapshot == {
+            SERVICE: window.epoch_of(SERVICE),
+            "peer": window.epoch_of("peer"),
+        }
+        assert snapshot.get("never-seen", 0) == 0
+
 
 # =============================================================================
 # Behavior — the epoch, the in-flight marker, and the hinted append

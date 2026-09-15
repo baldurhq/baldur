@@ -95,17 +95,31 @@ class OutcomeWindow:
             self._resolve(service_name, window_size).append(SUCCESS_OUTCOME)
 
     def record_success_if_epoch(
-        self, service_name: str, window_size: int, hint_epoch: int
+        self,
+        service_name: str,
+        window_size: int,
+        hint_epoch: int,
+        *,
+        require_no_write_in_flight: bool = True,
     ) -> bool:
-        """Append a success only if nothing happened to the name since the hint.
+        """Append a success only if nothing happened to the name since ``hint_epoch``.
 
         The read-free fast path's append: under one lock hold, the success is
         recorded iff no failure write is in flight for the name and the epoch
         still equals ``hint_epoch``. ``False`` means the caller must fall
         through to its fresh-read path exactly as a stale hint does.
+
+        The slow path uses the same append with
+        ``require_no_write_in_flight=False``: it performs the consecutive-count
+        reset itself, so a failure write in flight is no reason to withhold the
+        entry — but a transition that landed after its fresh read (the epoch
+        moved) is, because the name may no longer be CLOSED.
         """
         with self._lock:
-            if self._writes_in_flight.get(service_name, 0) != 0:
+            if (
+                require_no_write_in_flight
+                and self._writes_in_flight.get(service_name, 0) != 0
+            ):
                 return False
             if self._epochs.get(service_name, 0) != hint_epoch:
                 return False
@@ -155,7 +169,9 @@ class OutcomeWindow:
         with self._lock:
             self._epochs[service_name] = self._epochs.get(service_name, 0) + 1
 
-    def observe_state(self, service_name: str, state: str) -> bool:
+    def observe_state(
+        self, service_name: str, state: str, *, as_of: int | None = None
+    ) -> bool:
         """Record the state this process just saw for ``service_name``.
 
         Called wherever the service holds a fresh row. On a change into CLOSED
@@ -164,6 +180,14 @@ class OutcomeWindow:
         recorded while the name was cut off, whoever performed the close. Any
         other change moves the epoch only. The first observation of a name
         records its state without clearing.
+
+        ``as_of`` is the epoch the caller read *before* it fetched the row it
+        is reporting. A row read from the repository can be stale by the time
+        it is observed — a trip can commit between the read and this call —
+        and observing a stale CLOSED row would clear the evidence that trip
+        just kept. When the epoch has moved since ``as_of``, the observation is
+        dropped: whatever moved it observed the fresher row itself. The result
+        of an atomic repository operation is reported without ``as_of``.
 
         The steady state — the same state as last time — is decided on one
         dict read without the lock, so the CLOSED admission path pays no lock
@@ -175,6 +199,8 @@ class OutcomeWindow:
         if self._last_seen.get(service_name) == state:
             return False
         with self._lock:
+            if as_of is not None and self._epochs.get(service_name, 0) != as_of:
+                return False
             previous = self._last_seen.get(service_name)
             if previous == state:
                 return False
@@ -207,6 +233,11 @@ class OutcomeWindow:
     def epoch_of(self, service_name: str) -> int:
         """The current epoch for ``service_name`` — one GIL-atomic dict read."""
         return self._epochs.get(service_name, 0)
+
+    def epochs_snapshot(self) -> dict[str, int]:
+        """Every tracked name's epoch, under the lock, for a bulk read's ``as_of``."""
+        with self._lock:
+            return dict(self._epochs)
 
     def read(self, service_name: str) -> tuple[int, int]:
         """Return ``(failures, total)`` observed for ``service_name``.

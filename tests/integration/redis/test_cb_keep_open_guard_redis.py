@@ -14,7 +14,9 @@ mirror over that backend writes nothing either.
 
 Test categories:
     A. The Lua state check against real Redis.
-    B. The degraded backend: no WAL record for the guarded CLOSED write.
+    B. The degraded backend: no WAL record for the guarded CLOSED write —
+       whether the backend was degraded before the mirror or degrades on the
+       mirror's own create-if-absent read (the blip lands inside the mirror).
     C. Layered routing: a second worker's CLOSED mirror leaves a peer's OPEN
        row in place for boot hydration to read.
 
@@ -32,6 +34,7 @@ from baldur.adapters.memory.layered_repository import (
     LayeredCircuitBreakerStateRepository,
     reset_layered_repository_executor,
 )
+from baldur.adapters.memory.layered_repository.base import LayeredRepositoryBase
 from baldur.adapters.redis.circuit_breaker import RedisCircuitBreakerStateRepository
 from baldur.adapters.resilient.backend import ResilientStorageBackend
 from baldur.interfaces.repositories import (
@@ -68,11 +71,18 @@ def _reset_redis_unavailable_flag():
 @pytest.fixture
 def wal_backed_repository(redis_url, redis_client, tmp_path):
     """A Redis repository whose backend keeps a WAL in a per-test directory."""
+    # ``auto_recovery=False``: every test here leaves its backend degraded
+    # with WAL records for the shared ``cb:payment-api`` key, and the
+    # cooldown-gated recovery daemon a degraded backend otherwise spawns
+    # would replay them into Redis during a *later* test — a CLOSED / 0 row
+    # landing on top of that test's OPEN trip. Recovery is driven explicitly
+    # (``check_and_recover``) by the test that asserts on it.
     settings = ResilientStorageSettings(
         redis_url=redis_url,
         key_prefix="test:baldur:",
         use_dynamic_prefix=False,
         allow_memory_only=True,
+        auto_recovery=False,
         wal_dir=str(tmp_path / "wal"),
     )
     backend = ResilientStorageBackend(settings=settings)
@@ -85,6 +95,20 @@ def wal_backed_repository(redis_url, redis_client, tmp_path):
 def _wal_entries(repo) -> int:
     wal = repo._backend._wal
     return wal.get_stats().total_entries if wal is not None else 0
+
+
+def _drain_mirrors() -> None:
+    """Let every queued mirror run to completion, then drop the executor.
+
+    ``reset_layered_repository_executor`` cancels queued futures, so a test
+    that called it right after ``update_state`` could pass with the mirror
+    never having run. The assertions in section C are about the mirror's
+    decline, so the mirror must have run.
+    """
+    executor = LayeredRepositoryBase._executor
+    if executor is not None:
+        executor.shutdown(wait=True)
+        LayeredRepositoryBase._executor = None
 
 
 # =============================================================================
@@ -255,6 +279,62 @@ class TestKeepOpenDegradedBackendWal:
         assert result is True
         assert _wal_entries(repo) == entries_before + 1
 
+    def test_blip_inside_the_mirrors_own_read_creates_no_row_and_no_wal_record(
+        self, wal_backed_repository, redis_test_client
+    ):
+        """
+        Purpose:
+            The degraded switch happens *during* the mirror's create-if-absent
+            read, not before the mirror. Regression (793 /verify): the mirror's
+            unguarded ``get_or_create`` then wrote a default CLOSED row into
+            memory and the WAL — a fresh worker hydrated CLOSED from the
+            degraded store, and the WAL replayed CLOSED over the peer's OPEN
+            once Redis was back.
+        Expected:
+            - the mirror reports skipped (``None``) and the backend is degraded
+              afterwards (the blip was real, and it was the mirror's read)
+            - no memory row, no new WAL entry
+            - the store row is OPEN before recovery and still OPEN after the
+              WAL replay
+        """
+        store = wal_backed_repository
+        backend = store._backend
+        worker = LayeredCircuitBreakerStateRepository(
+            l2_repo=store, adapter_type="redis"
+        )
+        worker._get_timeout_seconds = lambda: 5.0
+        worker._l1.get_or_create(SVC)
+        store.trip_to_open(SVC, 5)
+        assert redis_test_client.hget(_cb_key(store), "state") == OPEN
+        entries_before = _wal_entries(store)
+        raw = backend._redis.raw_client
+        original_hgetall = raw.hgetall
+        reads: list[str] = []
+
+        def _blip_once(key):
+            reads.append(key)
+            if len(reads) == 1:
+                raise ConnectionError("redis blip")
+            return original_hgetall(key)
+
+        worker._l1.update_state(SVC, state=CLOSED, failure_count=0)
+        try:
+            with patch.object(raw, "hgetall", side_effect=_blip_once):
+                outcome = worker._repair_row_to_l2_inline(SVC)
+        finally:
+            reset_layered_repository_executor()
+
+        assert outcome is None
+        assert len(reads) == 1
+        assert backend.is_degraded is True
+        assert backend._memory.get(f"cb:{SVC}") is None
+        assert _wal_entries(store) == entries_before
+        assert redis_test_client.hget(_cb_key(store), "state") == OPEN
+
+        assert backend.check_and_recover() is True
+        assert redis_test_client.hget(_cb_key(store), "state") == OPEN
+        assert redis_test_client.hget(_cb_key(store), "failure_count") == "5"
+
 
 # =============================================================================
 # C. Layered routing
@@ -296,9 +376,10 @@ class TestKeepOpenLayeredMirror:
         opened_at = redis_test_client.hget(_cb_key(store), "opened_at")
         assert opened_at
 
-        # This worker's consecutive-count reset mirrors its CLOSED snapshot.
+        # This worker's consecutive-count reset mirrors its CLOSED snapshot;
+        # the mirror is drained, not cancelled, so the decline is what is asserted.
         worker.update_state(SVC, state=CLOSED, failure_count=0, keep_open=True)
-        reset_layered_repository_executor()
+        _drain_mirrors()
 
         assert redis_test_client.hget(_cb_key(store), "state") == OPEN
         assert redis_test_client.hget(_cb_key(store), "opened_at") == opened_at
@@ -312,7 +393,7 @@ class TestKeepOpenLayeredMirror:
         layered_cb_repo._l1.get_or_create(SVC)
         store.trip_to_open(SVC, 5)
         layered_cb_repo.update_state(SVC, state=CLOSED, failure_count=0, keep_open=True)
-        reset_layered_repository_executor()
+        _drain_mirrors()
 
         fresh_worker = LayeredCircuitBreakerStateRepository(
             l2_repo=store, adapter_type="redis"

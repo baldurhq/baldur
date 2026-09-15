@@ -102,7 +102,7 @@ class TestL2SyncQuarantineGuard:
         assert inline.submit_count == 1
 
 
-class TestL2SyncSingleSubmit:
+class TestL2SyncSingleSubmitBehavior:
     """D4 -- one executor submit per async sync (no submit-within-submit)."""
 
     def test_sync_to_l2_async_submits_exactly_once(self, repo):
@@ -122,6 +122,9 @@ class TestL2SyncSingleSubmit:
         repo._l1.record_failure("svc")
         repo._l1.record_failure("svc")
         state = repo._l1.get_by_service_name("svc")
+        # The store holds no row for the name and its backend is live, so the
+        # guarded CLOSED mirror creates it before the update.
+        mock_l2_repo.get_by_service_name.return_value = None
         inline = _InlineExecutor()
 
         # When
@@ -156,8 +159,8 @@ class TestL2SyncErrorRouting:
     def test_l2_get_or_create_exception_advances_consecutive_failures(
         self, repo, mock_l2_repo
     ):
-        # Given: the first L2 call fails
-        mock_l2_repo.get_or_create.side_effect = Exception("L2 down")
+        # Given: the first L2 call fails -- the guarded mirror's row read
+        mock_l2_repo.get_by_service_name.side_effect = Exception("L2 down")
         inline = _InlineExecutor()
 
         # When
@@ -196,8 +199,8 @@ class TestL2SyncQuarantineWiring:
     def test_three_async_failures_quarantine_then_guard_blocks_submit(
         self, repo, mock_l2_repo
     ):
-        # Given: every async L2 write fails
-        mock_l2_repo.get_or_create.side_effect = Exception("L2 down")
+        # Given: every async L2 write fails at the mirror's first call (its row read)
+        mock_l2_repo.get_by_service_name.side_effect = Exception("L2 down")
         inline = _InlineExecutor()
 
         with patch.object(repo, "_get_executor", return_value=inline):

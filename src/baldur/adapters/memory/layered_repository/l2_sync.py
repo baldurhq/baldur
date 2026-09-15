@@ -142,6 +142,38 @@ class L2SyncMixin:
         )
         return True
 
+    def _ensure_l2_row_for_mirror(
+        self,
+        service_name: str,
+        state: CircuitBreakerStateData,
+        keep_open: bool,
+    ) -> bool:
+        """Make sure the L2 row a mirror refreshes exists, without creating a
+        default CLOSED row on a read the local fallback answered.
+
+        The mirror opens with a create-if-absent, and the create's own read is
+        the ``hgetall`` that switches a resilient backend to degraded on a
+        blip. On that read the fallback answers "no row" for a name the store
+        holds OPEN, and an unconditional ``get_or_create`` would then write a
+        default CLOSED row into memory and the WAL — the row a peer hydrates
+        while the store is degraded, and the record the WAL replays over the
+        peer's trip once Redis is back. So under the keep-open rule a CLOSED
+        snapshot reads first, and creates only when the absence was the
+        store's own answer. Returns False when the mirror must stand down.
+        """
+        l2 = self._l2
+        if l2 is None:
+            return False
+        if not keep_open or state.state != "closed":
+            l2.get_or_create(service_name)
+            return True
+        if l2.get_by_service_name(service_name) is not None:
+            return True
+        if self._mirror_skipped_on_degraded_backend(service_name, state, keep_open):
+            return False
+        l2.get_or_create(service_name)
+        return True
+
     def _sync_to_l2_with_timeout(
         self,
         service_name: str,
@@ -168,8 +200,9 @@ class L2SyncMixin:
         timeout = self._get_timeout_seconds()
         start_time = time.perf_counter()
 
-        def _do_sync():
-            self._l2.get_or_create(service_name)
+        def _do_sync() -> bool:
+            if not self._ensure_l2_row_for_mirror(service_name, state, keep_open):
+                return False
             self._l2.update_state(
                 service_name=service_name,
                 state=state.state,
@@ -180,11 +213,13 @@ class L2SyncMixin:
                 skip_if_pinned=skip_if_pinned,
                 keep_open=keep_open,
             )
+            return True
 
         try:
             executor = self._get_executor()
             future = executor.submit(_do_sync)
-            future.result(timeout=timeout)
+            if not future.result(timeout=timeout):
+                return None
 
             elapsed_ms = (time.perf_counter() - start_time) * 1000
             self._handle_l2_success(elapsed_ms)
@@ -247,7 +282,8 @@ class L2SyncMixin:
 
         start_time = time.perf_counter()
         try:
-            self._l2.get_or_create(service_name)
+            if not self._ensure_l2_row_for_mirror(service_name, state, keep_open):
+                return None
             self._l2.update_state(
                 service_name=service_name,
                 state=state.state,

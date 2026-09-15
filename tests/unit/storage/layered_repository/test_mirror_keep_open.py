@@ -13,6 +13,10 @@ Verification techniques applied:
 - Contract: the directives each lane forwards to ``update_state``
 - Degraded: a CLOSED snapshot returns ``None`` with ``get_or_create`` never
   called; an OPEN snapshot still mirrors
+- Degraded during the mirror's own read: the create-if-absent read answers
+  "no row" while flipping the backend to degraded (a real resilient backend on a
+  failed ``hgetall``) -> no default row is created, the mirror stands down; a
+  genuinely absent row on a live backend is still created
 """
 
 from __future__ import annotations
@@ -201,3 +205,83 @@ class TestMirrorKeepOpenBehavior:
 
         assert result is True
         assert mock_l2_repo.update_state.call_args.kwargs["keep_open"] is True
+
+    # ------------------------------------------ degraded during the mirror's read
+
+    @staticmethod
+    def _read_that_degrades(mock_l2_repo):
+        """Give the mock L2 a live backend whose first guard read blips.
+
+        ``get_by_service_name`` answers ``None`` and flips the backend to
+        degraded as its side effect — what a resilient backend does on a failed
+        ``hgetall``: the fallback answers "no row" for a name the store holds.
+        """
+        backend = MagicMock(spec=ResilientStorageBackend)
+        backend.is_degraded = False
+        mock_l2_repo._backend = backend
+
+        def _blip(service_name):
+            backend.is_degraded = True
+            return None
+
+        mock_l2_repo.get_by_service_name.side_effect = _blip
+        return backend
+
+    def test_closed_snapshot_whose_guard_read_degrades_the_backend_is_skipped_inline(
+        self, repo, mock_l2_repo
+    ):
+        """The blip lands inside the mirror: no default CLOSED row is created.
+
+        Regression (793 /verify): the unguarded ``get_or_create`` wrote a
+        default CLOSED row into memory and the WAL on exactly this read, so a
+        peer hydrated CLOSED from the degraded store and the WAL replayed CLOSED
+        over the store's OPEN once Redis was back.
+        """
+        backend = self._read_that_degrades(mock_l2_repo)
+
+        result = repo._sync_to_l2_inline(SVC, _row(CLOSED), keep_open=True)
+
+        assert result is None
+        assert backend.is_degraded is True
+        mock_l2_repo.get_or_create.assert_not_called()
+        mock_l2_repo.update_state.assert_not_called()
+
+    def test_closed_snapshot_whose_guard_read_degrades_the_backend_is_skipped_with_timeout(
+        self, repo, mock_l2_repo
+    ):
+        self._read_that_degrades(mock_l2_repo)
+
+        result = repo._sync_to_l2_with_timeout(SVC, _row(CLOSED), keep_open=True)
+
+        assert result is None
+        mock_l2_repo.get_or_create.assert_not_called()
+        mock_l2_repo.update_state.assert_not_called()
+
+    def test_absent_row_on_a_live_backend_is_still_created_under_the_guard(
+        self, repo, mock_l2_repo
+    ):
+        """Control: an absence the store itself answered is a real new name."""
+        backend = MagicMock(spec=ResilientStorageBackend)
+        backend.is_degraded = False
+        mock_l2_repo._backend = backend
+        mock_l2_repo.get_by_service_name.return_value = None
+
+        with patch.object(repo, "_handle_l2_success"):
+            result = repo._sync_to_l2_inline(SVC, _row(CLOSED), keep_open=True)
+
+        assert result is True
+        mock_l2_repo.get_or_create.assert_called_once_with(SVC)
+        assert mock_l2_repo.update_state.call_args.kwargs["keep_open"] is True
+
+    def test_open_snapshot_creates_without_the_guard_read(self, repo, mock_l2_repo):
+        """Control: only the guarded CLOSED mirror reads before it creates."""
+        mock_l2_repo.get_by_service_name.return_value = None
+
+        with patch.object(repo, "_handle_l2_success"):
+            result = repo._sync_to_l2_inline(
+                SVC, _row(OPEN, failure_count=5), keep_open=True
+            )
+
+        assert result is True
+        mock_l2_repo.get_by_service_name.assert_not_called()
+        mock_l2_repo.get_or_create.assert_called_once_with(SVC)
