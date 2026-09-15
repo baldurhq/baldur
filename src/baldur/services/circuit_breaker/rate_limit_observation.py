@@ -114,10 +114,13 @@ class OutboundObservationScope:
         _record_request(self.breaker_key)
 
     def note_429(self, retry_after: float | None = None, subject: Any = None) -> None:
-        """Record one observed 429 against the cascade (no coordinator notify).
+        """Count one observed 429 against the cascade (no coordinator notify).
 
         The stage calling this carries its own coordinator decision — it is
-        the cascade half of :func:`observe_429` under another name.
+        the cascade half of :func:`observe_429` under another name. An inner
+        stage counts, never decides: the cascade is evaluated once by the
+        breaker that opened this scope, after it has recorded the whole call,
+        so a trip's evidence pair holds the tripping call.
 
         ``subject`` is the outcome that carried the 429, when the caller holds
         it. A raised exception the opening breaker does not count is dropped
@@ -131,6 +134,7 @@ class OutboundObservationScope:
             self.breaker_key,
             retry_after,
             notify_coordinator=False,
+            evaluate_cascade=False,
             service=self.service,
         )
 
@@ -192,6 +196,7 @@ def observe_429(
     retry_after: float | None = None,
     *,
     record_cascade: bool = True,
+    evaluate_cascade: bool = True,
     notify_coordinator: bool = False,
     service: CircuitBreakerService | None = None,
 ) -> None:
@@ -205,6 +210,10 @@ def observe_429(
         key: The protected name the 429 is filed under.
         retry_after: Provider-stated wait, when the answer carried one.
         record_cascade: False when an inner stage already counted this outcome.
+        evaluate_cascade: False when the caller is an inner stage that only
+            counts — the breaker that opened the scope evaluates the cascade
+            once, after recording the call. True (the default) observes and
+            evaluates in one step, for a caller with no breaker stage.
         notify_coordinator: True only when no stage claimed coordination for
             this call.
         service: The breaker service the cascade half is recorded on — the one
@@ -213,7 +222,7 @@ def observe_429(
             service.
     """
     if record_cascade:
-        _record_cascade_observation(key, service)
+        _record_cascade_observation(key, service, evaluate=evaluate_cascade)
     if notify_coordinator:
         _notify_cooldown(key, retry_after)
 
@@ -234,15 +243,18 @@ def _record_request(key: str) -> None:
 
 
 def _record_cascade_observation(
-    key: str, service: CircuitBreakerService | None
+    key: str, service: CircuitBreakerService | None, *, evaluate: bool = True
 ) -> None:
     """Record the 429 against the breaker's cascade detector. Fail-open.
 
-    ``record_rate_limit_response`` is the single writer of the tracker's 429
-    counter: every observation site reaches it through here, so no 429 can be
-    counted twice by two writers disagreeing about who owns it. The write goes
-    to ``service`` — the instance whose window holds the call's evidence — and
-    to the process-shared service only when the caller named none.
+    ``record_rate_limit_observation`` is the single writer of the tracker's
+    429 counter: every observation site reaches it through here, so no 429 can
+    be counted twice by two writers disagreeing about who owns it. The write
+    goes to ``service`` — the instance whose window holds the call's evidence
+    — and to the process-shared service only when the caller named none. With
+    ``evaluate`` the cascade is decided in the same step
+    (``record_rate_limit_response``); without it the decision is left to the
+    breaker stage that owns the call.
     """
     try:
         if service is None:
@@ -250,7 +262,10 @@ def _record_cascade_observation(
 
             service = get_circuit_breaker_service()
 
-        service.record_rate_limit_response(key)
+        if evaluate:
+            service.record_rate_limit_response(key)
+        else:
+            service.record_rate_limit_observation(key)
     except Exception as error:
         logger.warning(
             "circuit_breaker.rate_limit_observation_failed",

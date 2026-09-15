@@ -43,6 +43,7 @@ def mock_config():
     cfg.success_threshold = 2
     cfg.failure_threshold = 5
     cfg.half_open_max_calls = 10
+    cfg.sliding_window_size = 100
     return cfg
 
 

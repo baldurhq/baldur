@@ -412,8 +412,9 @@ class TestRecordSuccessHintStateBehavior:
         if hint is not None and hint.service_name == "svc":
             repo.get_or_create.return_value = hint
 
-        # When: record_success() is invoked with the parametrized hint.
-        service.record_success("svc", hint_state=hint)
+        # When: record_success() is invoked with the parametrized hint and the
+        # epoch admission would have captured (a fresh window reads 0).
+        service.record_success("svc", hint_state=hint, hint_epoch=0)
 
         # Then: side-effect signature varies by case (see id).
         case_id = (
@@ -519,9 +520,9 @@ class TestRecordSuccessFastPathConversionRatio:
             failure_count=0,
         )
 
-        # When: 1000 record_success calls with the steady-state hint.
+        # When: 1000 record_success calls with the steady-state hint and its epoch.
         for _ in range(1000):
-            service.record_success("svc", hint_state=hint)
+            service.record_success("svc", hint_state=hint, hint_epoch=0)
 
         # Then: every method on the repo went untouched — full no-op fast path.
         assert repo.get_or_create.call_count == 0

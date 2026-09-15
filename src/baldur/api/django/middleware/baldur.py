@@ -226,6 +226,11 @@ class BaldurMiddleware:
             and self._is_dlq_eligible(request)
             and not self._preemptive_intervention_suppressed(request)
         ):
+            # This exit never reaches the breaker's admission path, so the
+            # refusal is recorded here: a request turned away because a
+            # dependency is cut off is a call that did not succeed, and the
+            # system-wide rate must see the inbound share of them too.
+            self._record_cb_rejection(request)
             error_context = {
                 "error_type": "CIRCUIT_BREAKER_OPEN",
                 "error_message": "Circuit breaker is OPEN - request queued for later retry",
@@ -510,57 +515,92 @@ class BaldurMiddleware:
         2. Domain-specific CB — affects only requests for that domain.
         3. pool_circuit_breaker — pool exhaustion; affects all requests.
         """
+        return self._refusing_cb_row(request) is not None or self._is_pool_cb_open()
+
+    def _refusing_cb_row(self, request: HttpRequest | None = None) -> Any | None:
+        """The breaker row that turns this request away, or ``None``.
+
+        The database CB is checked first (a shared resource, open for every
+        request), then the request's domain CB. The whole row is read rather
+        than the state string so the refusal can be recorded against it with
+        the operator's pin visible — a request refused on an operator's Block
+        is not evidence about the dependency.
+        """
         try:
-            if self._cb_service and self._cb_service.is_enabled:
-                # Database CB is a shared resource: open state affects all requests
-                db_state = self._cb_service.get_state(self.CB_DATABASE_DOMAIN)
-                if db_state and db_state.lower() in ("open", "half_open"):
-                    logger.debug(
-                        "baldur_middleware.cb_service",
-                        state=db_state,
-                        cb_service_name=self.CB_DATABASE_DOMAIN,
-                    )
-                    return True
+            if not (self._cb_service and self._cb_service.is_enabled):
+                return None
 
-                # Domain-specific CB: open state affects only that domain's requests
-                if request:
-                    domain = self._infer_domain(request.path)
-                    if domain != self.CB_DATABASE_DOMAIN:
-                        domain_state = self._cb_service.get_state(domain)
-                        if domain_state and domain_state.lower() in (
-                            "open",
-                            "half_open",
-                        ):
-                            logger.debug(
-                                "baldur_middleware.cb_service",
-                                state=domain_state,
-                                cb_service_name=domain,
-                            )
-                            return True
-
-            try:
-                from baldur.api.django.pool_circuit_breaker import (
-                    pool_circuit_breaker,
+            db_row = self._cb_service.get_or_create_state(self.CB_DATABASE_DOMAIN)
+            if self._row_refuses(db_row):
+                logger.debug(
+                    "baldur_middleware.cb_service",
+                    state=db_row.state,
+                    cb_service_name=self.CB_DATABASE_DOMAIN,
                 )
+                return db_row
 
-                pool_state = pool_circuit_breaker.state
-                if pool_state in ("open", "half_open"):
-                    logger.debug(
-                        "baldur_middleware.poolcb",
-                        pool_state=pool_state,
-                    )
-                    return True
-            except Exception:
-                pass
-
-            return False
+            if request:
+                domain = self._infer_domain(request.path)
+                if domain != self.CB_DATABASE_DOMAIN:
+                    domain_row = self._cb_service.get_or_create_state(domain)
+                    if self._row_refuses(domain_row):
+                        logger.debug(
+                            "baldur_middleware.cb_service",
+                            state=domain_row.state,
+                            cb_service_name=domain,
+                        )
+                        return domain_row
+            return None
 
         except Exception as e:
             logger.warning(
                 "baldur_middleware.cb_state_check_failed",
                 error=e,
             )
-            return False
+            return None
+
+    @staticmethod
+    def _row_refuses(row: Any) -> bool:
+        """Whether a breaker row is in a state that turns requests away."""
+        state = getattr(row, "state", None)
+        return bool(state) and str(state).lower() in ("open", "half_open")
+
+    @staticmethod
+    def _is_pool_cb_open() -> bool:
+        """Whether the connection-pool breaker is open or half-open."""
+        try:
+            from baldur.api.django.pool_circuit_breaker import (
+                pool_circuit_breaker,
+            )
+
+            pool_state = pool_circuit_breaker.state
+            if pool_state in ("open", "half_open"):
+                logger.debug(
+                    "baldur_middleware.poolcb",
+                    pool_state=pool_state,
+                )
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _record_cb_rejection(self, request: HttpRequest | None) -> None:
+        """Record this refused request against the breaker that turned it away.
+
+        Re-resolves the refusing row on the refusal path only — a cold path,
+        one L1 lookup — so the boolean check above stays the single seam. A
+        row that closed in between records nothing (the conservative
+        direction). Fail-open: recording is evidence, never a gate.
+        """
+        try:
+            row = self._refusing_cb_row(request)
+            if row is not None and self._cb_service and self._cb_service.is_enabled:
+                self._cb_service.record_rejection(row.service_name, row)
+        except Exception as e:
+            logger.debug(
+                "baldur_middleware.cb_rejection_record_failed",
+                error=e,
+            )
 
     def _record_cb_failure(
         self,

@@ -5,9 +5,11 @@ rate. Nothing measured one: the field was a literal. This module is the
 producer, and the three primitives already in the tree each answer a different
 question:
 
-- ``OutcomeWindow`` (this package) holds *count*-based, CLOSED-only evidence and
-  is cleared on every breaker transition — it exists to decide a trip, and it
-  reads empty at the exact moment an operator asks what just happened.
+- ``OutcomeWindow`` (this package) holds *count*-based evidence for the trip
+  decision and the system-wide rate — admitted CLOSED calls by their result,
+  refused calls as failures — and is cleared when the breaker closes, so a
+  CLOSED period's evidence is gone at the exact moment an operator asks what
+  just happened.
 - ``SlidingWindowCounter`` (``core.rate_limiting``) stores an exact timestamp
   per event, which is O(events): at 500 RPS over 300 s that is 150 000 floats
   per service per worker.

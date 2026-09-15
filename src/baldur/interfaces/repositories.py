@@ -1192,6 +1192,7 @@ class CircuitBreakerStateRepository(ABC):
         reset_half_open_count: bool = False,
         clear_opened_at: bool = False,
         skip_if_pinned: bool = False,
+        keep_open: bool = False,
     ) -> bool:
         """Update circuit breaker state.
 
@@ -1222,6 +1223,16 @@ class CircuitBreakerStateRepository(ABC):
                 the operator's decision. A declined write is a success for the
                 caller: the store answered healthily and the write was elided by
                 contract.
+            keep_open: If True, decline the write — in the same critical
+                section as the pin guard — when the *stored* row is ``open``
+                or ``half_open``. The automatic transition machinery owns
+                non-CLOSED rows: a snapshot mirror or a consecutive-count reset
+                may create or refresh a CLOSED row but never close one, so a
+                trip committed between a writer's read and its write is never
+                erased, in process or across workers. A close reaches the
+                store only through the close primitives or an operator's own
+                write, which pass ``False``. Declined writes return ``True``
+                exactly as ``skip_if_pinned`` does.
 
         Returns:
             True on success

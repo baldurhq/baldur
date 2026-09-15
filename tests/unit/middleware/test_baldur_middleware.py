@@ -26,6 +26,7 @@ from structlog.testing import capture_logs
 
 from baldur.api.django.middleware.baldur import BaldurMiddleware
 from baldur.api.django.throttle_adapter import LOCAL_THROTTLE_REQUEST_ATTR
+from baldur.interfaces.repositories import CircuitBreakerStateData
 from baldur.models.dlq import DLQEntryResult
 from baldur.services.circuit_breaker.service import CircuitBreakerService
 from baldur.settings.middleware import (
@@ -876,10 +877,21 @@ class TestBaldurMiddlewareIsCbOpenBehavior:
     """_is_cb_open(request) checks database CB (shared), domain CB, and pool CB."""
 
     def _make_cb_service(self, state_map: dict[str, str]) -> MagicMock:
-        """Build a CircuitBreakerService mock with per-domain state."""
+        """Build a CircuitBreakerService mock with per-domain rows.
+
+        The middleware reads the whole row (``get_or_create_state``), not the
+        state string, so a refusal can be recorded against it with the
+        operator's pin visible.
+        """
         mock_cb = MagicMock(spec=CircuitBreakerService)
         mock_cb.is_enabled = True
-        mock_cb.get_state.side_effect = lambda name: state_map.get(name, "closed")
+        mock_cb.get_or_create_state.side_effect = lambda name: MagicMock(
+            spec=CircuitBreakerStateData,
+            service_name=name,
+            state=state_map.get(name, "closed"),
+            manually_controlled=False,
+            manual_override_expires_at=None,
+        )
         return mock_cb
 
     def test_database_cb_open_returns_true_regardless_of_request_path(self):
@@ -949,8 +961,8 @@ class TestBaldurMiddlewareIsCbOpenBehavior:
             mock_pool.state = "closed"
             result = mw._is_cb_open(FakeRequest(path="/internal/db/query/"))
 
-        # get_state should have been called exactly once (for database, not again for database)
-        assert mock_cb.get_state.call_count == 1
+        # The row read runs exactly once (for database, not again for database)
+        assert mock_cb.get_or_create_state.call_count == 1
         assert result is False
 
     def test_all_cbs_closed_returns_false(self):

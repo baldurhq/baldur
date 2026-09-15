@@ -600,22 +600,19 @@ class TestCriticalTaskRoutesContract:
     def test_execute_recovery_step_routed(self):
         """execute_recovery_step routes to baldur.critical."""
         assert (
-            _CRITICAL_TASK_ROUTES["baldur.celery_tasks.execute_recovery_step"]
-            == "baldur.critical"
+            _CRITICAL_TASK_ROUTES["baldur.execute_recovery_step"] == "baldur.critical"
         )
 
     def test_check_recovery_trigger_routed(self):
         """check_recovery_trigger routes to baldur.critical."""
         assert (
-            _CRITICAL_TASK_ROUTES["baldur.celery_tasks.check_recovery_trigger"]
-            == "baldur.critical"
+            _CRITICAL_TASK_ROUTES["baldur.check_recovery_trigger"] == "baldur.critical"
         )
 
     def test_monitor_recovery_health_routed(self):
         """monitor_recovery_health routes to baldur.critical."""
         assert (
-            _CRITICAL_TASK_ROUTES["baldur.celery_tasks.monitor_recovery_health"]
-            == "baldur.critical"
+            _CRITICAL_TASK_ROUTES["baldur.monitor_recovery_health"] == "baldur.critical"
         )
 
     def test_check_circuit_breaker_recovery_routed(self):

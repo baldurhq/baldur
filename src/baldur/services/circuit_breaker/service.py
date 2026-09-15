@@ -31,12 +31,17 @@ from baldur.services.event_bus.emitter import EventEmitterMixin
 from baldur.utils.time import utc_now
 
 from .config import (
+    AggregateFailureEvidence,
     CircuitBreakerConfig,
     CircuitBreakerDecision,
     CircuitBreakerFallbackResult,
     CircuitBreakerResult,
     CircuitState,
     current_circuit_breaker_config,
+)
+from .exceptions import (
+    UNREACHED_DEFAULT_STORE_REASON,
+    CircuitBreakerStateUnavailableError,
 )
 from .freeze_mode import should_allow_cb_state_change
 from .manual_control import (
@@ -55,6 +60,9 @@ if TYPE_CHECKING:
     )
 
 logger = structlog.get_logger()
+
+# Row states in which a name counts as a tripped dependency for the aggregate.
+_NON_CLOSED_STATES = frozenset({CircuitState.OPEN.value, CircuitState.HALF_OPEN.value})
 
 
 class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMixin):
@@ -376,15 +384,25 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
                 )
 
         state = self.get_or_create_state(service_name)
+        self._outcome_window.observe_state(service_name, state.state)
 
         if state.state == CircuitState.CLOSED:
-            return CircuitBreakerDecision(allowed=True, state=state)
+            # The epoch is captured with the hint: a success recorded against
+            # this decision appends read-free only while nothing has happened
+            # to the name since this read.
+            return CircuitBreakerDecision(
+                allowed=True,
+                state=state,
+                window_epoch=self._outcome_window.epoch_of(service_name),
+            )
 
         # Not CLOSED and not yet eligible for a trial call: short-circuit
-        # reject.
+        # reject. The refusal is evidence — a call the breaker turned away
+        # because the dependency is cut off did not succeed.
         reason = self._admission_refusal_reason(service_name, state, effective_config)
         if reason is not None:
             self._record_blocked_metric(service_name, reason)
+            self.record_rejection(service_name, state)
             return CircuitBreakerDecision(allowed=False, state=state)
 
         # OPEN with elapsed timeout, OR already HALF_OPEN — atomic acquire.
@@ -451,7 +469,38 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
 
             if is_dataclass(state) and not isinstance(state, type):
                 state = replace(state, state=new_state)
+        self._outcome_window.observe_state(service_name, state.state)
+        if not allowed:
+            self.record_rejection(service_name, state)
         return CircuitBreakerDecision(allowed=allowed, state=state)
+
+    def record_rejection(
+        self, service_name: str, state: CircuitBreakerStateData
+    ) -> None:
+        """Record a call the breaker refused because of its own state.
+
+        A refusal is evidence that the dependency is still cut off: it is
+        appended to the outcome window as a failed call, so a tripped
+        dependency keeps counting against the system-wide rate for its whole
+        open or half-open period instead of vanishing from it. Called from the
+        admission path's refusal exits and from the inbound middleware's own
+        refusal; never for a downstream-checker refusal, which is a verdict
+        about a different name.
+
+        A row under an operator's override in force records nothing: a Block
+        or an Allow is the operator's decision about traffic, not an
+        observation about the dependency.
+
+        Args:
+            service_name: Name of the external service
+            state: The row the refusal was decided on
+        """
+        if is_manual_pin_active(state):
+            return
+        self._outcome_window.record_rejection(
+            service_name,
+            self.get_effective_config(service_name).sliding_window_size,
+        )
 
     def _admission_refusal_reason(
         self,
@@ -765,10 +814,13 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
     def get_window_evidence(self, service_name: str) -> tuple[int, int]:
         """Return ``(failures, total)`` recorded in this worker's outcome window.
 
-        The evidence the failure-rate trigger decides on: outcomes observed
-        while the circuit was CLOSED, bounded by ``sliding_window_size`` and
-        cleared at every observed state transition. ``(0, 0)`` means no
-        evidence, which is not the same as a 0% failure rate.
+        The evidence the failure-rate trigger decides on while the circuit is
+        CLOSED: the outcome of every admitted CLOSED call, plus — once the
+        circuit has tripped — every call it refused, recorded as a failure.
+        Bounded by ``sliding_window_size``; cleared when the circuit closes
+        (whoever closed it) or an operator forces a transition, so each
+        CLOSED period starts without evidence from the last one. ``(0, 0)``
+        means no evidence, which is not the same as a 0% failure rate.
 
         Args:
             service_name: Name of the external service
@@ -778,18 +830,32 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
         """
         return self._outcome_window.read(service_name)
 
-    def get_aggregate_failure_rate(self) -> float:
-        """Return the system-wide circuit-breaker failure fraction (0.0-1.0).
+    def get_aggregate_failure_evidence(
+        self, *, fleet: bool = True
+    ) -> AggregateFailureEvidence:
+        """Measure the system-wide circuit-breaker failure rate and its basis.
 
-        Aggregates the recorded call outcomes across every tracked service as
-        ``sum(window_failures) / sum(window_total)``, returning ``0.0`` when no
-        calls have been observed on any circuit.
+        The share of protected calls that did not succeed, across every
+        tracked name, with a tripped dependency counting for its whole open
+        and half-open period. Two terms:
 
-        This is a system-wide **mean** error fraction, not a fixed-time-window
-        or per-service rate: a single failing service among many healthy ones
-        is averaged below threshold, while a broad multi-service failure raises
-        the mean. That makes it suited to a system-wide stability gate, where
-        each individual service is still protected by its own circuit breaker.
+        - **In process** — each name's outcome window: admitted CLOSED calls
+          by their result, and every call this process refused while the name
+          was open or half-open, as a failure.
+        - **Non-CLOSED floor** — every name that is open or half-open, in this
+          process's own rows or (``fleet=True``) in the shared store, counts
+          at least the failures that tripped it: its window is lifted to
+          ``max(failure_count, failure_threshold)`` failed calls when it holds
+          fewer. A no-op for the process that tripped the name; it lifts only
+          a window that lacks the tripping evidence — a row that arrived by
+          boot hydration, drift repair or a peer's transition. The weight is
+          an approximation: the shared store carries no call totals, so a
+          dependency another worker cut off counts as a handful of failed
+          calls however busy it was there.
+
+        A row under an operator's override in force is excluded from the
+        floor: a Block is the operator's decision about traffic, not an
+        observation about the dependency.
 
         Evidence comes from **this service object's** outcome windows. The
         process-shared instance — the runtime singleton
@@ -800,19 +866,130 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
         config or an explicitly injected service keeps its own instance, and
         its outcomes are read from that instance alone.
 
-        ``0.0`` is also what an empty window reads: a process that has
-        admitted no CLOSED call since its breakers' last transitions (every
-        transition clears the transitioned name's window). The per-service
-        read ``get_window_evidence()`` keeps that case distinguishable — its
-        ``(0, 0)`` means no evidence, not a 0% rate.
+        The fleet read dials the shared store, so it belongs on scheduled and
+        operator-driven paths only; a per-request decision passes
+        ``fleet=False`` and reads this process's rows alone.
+
+        Args:
+            fleet: Read the open set from the shared store (``True``) or from
+                this process's own rows only (``False``).
+
+        Returns:
+            The evidence; ``rate`` is ``failures / total_calls``, ``0.0`` over
+            zero calls — an observed zero, carried with its ``total_calls`` so
+            a consumer can render "no protected calls observed" instead of a
+            healthy rate.
+
+        Raises:
+            CircuitBreakerStateUnavailableError: ``fleet=True`` and the shared
+                store cannot be read (degraded, quarantined, timed out, or a
+                partial scan). A store nobody named is not a failure: the
+                process's own view is then the cluster view and the evidence
+                carries ``fleet_read=False``.
+        """
+        local_rows = {row.service_name: row for row in self.repository.get_all_states()}
+        # Every fresh row this walk holds is observed, so a name with no
+        # traffic in this process still has its window cleared within one
+        # aggregate read of a peer's close reaching its L1 row.
+        for name, row in local_rows.items():
+            self._outcome_window.observe_state(name, row.state)
+
+        cluster_rows: dict[str, CircuitBreakerStateData] = {}
+        fleet_read = False
+        if fleet:
+            try:
+                cluster_rows = {
+                    row.service_name: row
+                    for row in self.repository.get_cluster_states()
+                }
+                fleet_read = True
+            except CircuitBreakerStateUnavailableError as e:
+                if e.reason != UNREACHED_DEFAULT_STORE_REASON:
+                    raise
+                # Nobody named a shared store: this process's view is the
+                # cluster, exactly as the in-memory adapter's default reads.
+
+        per_name = self._outcome_window.read_each()
+        failures = 0
+        total_calls = 0
+        open_circuits = 0
+        for name in set(per_name) | set(local_rows) | set(cluster_rows):
+            window_failures, window_total = per_name.get(name, (0, 0))
+            tripped_row = self._tripped_row(
+                local_rows.get(name), cluster_rows.get(name)
+            )
+            if tripped_row is not None:
+                floor = max(
+                    tripped_row.failure_count,
+                    self.get_effective_config(name).failure_threshold,
+                )
+                lifted = max(window_failures, floor)
+                window_total += lifted - window_failures
+                window_failures = lifted
+                open_circuits += 1
+            failures += window_failures
+            total_calls += window_total
+
+        return AggregateFailureEvidence(
+            failures=failures,
+            total_calls=total_calls,
+            open_circuits=open_circuits,
+            fleet_read=fleet_read,
+        )
+
+    @staticmethod
+    def _tripped_row(
+        local_row: CircuitBreakerStateData | None,
+        cluster_row: CircuitBreakerStateData | None,
+    ) -> CircuitBreakerStateData | None:
+        """The row that makes a name count as tripped, or ``None``.
+
+        This process's own row decides when it is open or half-open (its
+        ``failure_count`` is what this process knows about the trip); the
+        shared store's row decides otherwise, so a trip a peer committed that
+        this process has not hydrated still counts. A row under an operator's
+        override in force is not a trip.
+        """
+        for row in (local_row, cluster_row):
+            if row is None or row.state not in _NON_CLOSED_STATES:
+                continue
+            if is_manual_pin_active(row):
+                return None
+            return row
+        return None
+
+    def get_aggregate_failure_rate(self, *, fleet: bool = True) -> float:
+        """Return the system-wide circuit-breaker failure fraction (0.0-1.0).
+
+        The rate of :meth:`get_aggregate_failure_evidence`: the share of
+        protected calls that did not succeed, where refused calls count and a
+        tripped breaker counts until it closes — at least the failures that
+        tripped it, in every process that holds it open or half-open. See that
+        method for the two terms, the exclusions and the fleet read's cost.
+
+        This is a system-wide **mean** error fraction, not a fixed-time-window
+        or per-service rate: a single failing service among many healthy ones
+        is averaged below threshold, while a broad multi-service failure raises
+        the mean. That makes it suited to a system-wide stability gate, where
+        each individual service is still protected by its own circuit breaker.
+
+        ``0.0`` is what zero observed calls read as well as a healthy reading;
+        a consumer that must tell the two apart reads the evidence and its
+        ``total_calls``.
+
+        Args:
+            fleet: Read the open set from the shared store (``True``) or from
+                this process's own rows only (``False``).
 
         Returns:
             Failure fraction in the range 0.0-1.0.
+
+        Raises:
+            CircuitBreakerStateUnavailableError: ``fleet=True`` and the shared
+                store cannot be read; a consumer treats the rate as unmeasured
+                rather than as ``0.0``.
         """
-        total_failures, total_calls = self._outcome_window.read_all()
-        if total_calls == 0:
-            return 0.0
-        return total_failures / total_calls
+        return self.get_aggregate_failure_evidence(fleet=fleet).rate
 
     # =========================================================================
     # Failure/Success Recording (for automatic mode)
@@ -848,6 +1025,7 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
         # operator's row (state clobbered, pin fields preserved) and then admit
         # every later request for the rest of the pin's lifetime.
         state = self.get_or_create_state(service_name)
+        self._outcome_window.observe_state(service_name, state.state)
 
         # Skip while a manual override is in force. Read through the predicate,
         # not the raw flag: once the override's lifetime has passed, automatic
@@ -884,6 +1062,7 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
             # multi-worker duplicate-emit race (#498 F11). Gating only the EB
             # emit would leave the metrics/audit residue 498 deferred.
             attempt = self.repository.record_failure_with_open_check(service_name)
+            self._outcome_window.observe_state(service_name, attempt.state.state)
 
             if attempt.did_open:
                 logger.warning(
@@ -924,8 +1103,17 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
                 )
             return
 
-        # Use repository to record failure (handles atomic update)
-        updated_state = self.repository.record_failure(service_name)
+        # Use repository to record failure (handles atomic update). The write
+        # is bracketed by the window's in-flight marker, and the epoch moves
+        # after it lands: a success hinted before this write and recorded
+        # while it is in flight, or after it, then takes its slow path instead
+        # of appending read-free and skipping the consecutive-count reset.
+        self._outcome_window.begin_write(service_name)
+        try:
+            updated_state = self.repository.record_failure(service_name)
+        finally:
+            self._outcome_window.end_write(service_name)
+        self._outcome_window.observe_state(service_name, updated_state.state)
 
         effective_config = self.get_effective_config(service_name)
 
@@ -1028,17 +1216,14 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
             service_name, updated_state.failure_count
         )
 
-        # Outcomes observed before the trip say nothing about the rate after it
-        # — the next CLOSED period starts without evidence. This clear is
-        # unconditional: the window evidence was consumed by this worker's own
-        # decision regardless of who won the cluster write.
-        self._outcome_window.clear(service_name)
-
         if attempt.state.state == CIRCUIT_BREAKER_PINNED_TOKEN:
-            # An operator's override swallowed a real failure burst. The
-            # local-pin skip in ``record_failure`` only covers calls made after
-            # the pinned row reached this worker, so without this line the first
-            # burst under a peer's override is invisible.
+            # The trip did not happen: an operator's override swallowed a real
+            # failure burst. The evidence is dropped — the operator's decision
+            # is not health evidence — and the local-pin skip in
+            # ``record_failure`` only covers calls made after the pinned row
+            # reached this worker, so without this line the first burst under
+            # a peer's override is invisible.
+            self._outcome_window.clear(service_name)
             logger.warning(
                 "circuit_breaker.trip_blocked",
                 service_name=service_name,
@@ -1049,6 +1234,13 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
                 ),
             )
             return attempt
+
+        # The window is deliberately NOT cleared here: a breaker that opened,
+        # or lost the race to a peer that opened it, keeps the evidence that
+        # tripped it and then accumulates its refusals, so the dependency
+        # counts as failing for its whole OPEN period. The observed re-entry
+        # into CLOSED is what clears it.
+        self._outcome_window.observe_state(service_name, attempt.state.state)
 
         if not attempt.did_open:
             return attempt
@@ -1377,6 +1569,7 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
         self,
         service_name: str,
         hint_state: CircuitBreakerStateData | None = None,
+        hint_epoch: int | None = None,
     ) -> None:
         """
         Record a success for a service.
@@ -1397,6 +1590,14 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
                 read the slow path performs, since a hint taken at admission
                 time can predate an operator's manual pin and the slow path
                 writes state. Stale hints fall through to the slow path.
+            hint_epoch: The outcome window's epoch the hint was taken at
+                (``CircuitBreakerDecision.window_epoch``). The fast path is
+                taken only while it still matches and no failure write is in
+                flight for the name: a failure, a transition or a clear that
+                landed between admission and this record moves the epoch, so
+                a success is never appended against a name that is no longer
+                CLOSED and the consecutive-count reset is never skipped on a
+                count that has since climbed. Without it the slow path runs.
         """
         if not self.is_enabled:
             return
@@ -1408,28 +1609,30 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
 
         # 490 D4 fast path: steady-state CLOSED + zero failures means
         # update_state(failure_count=0) would be a no-op. Skip all repository
-        # I/O. Stale hints (state has drifted to OPEN/HALF_OPEN since the
-        # hint was taken) fall through; a missed reset is corrected by the
-        # next record_*'s slow path.
+        # I/O. The append is conditional on the window's epoch: a hint that
+        # matched at admission but not at record time (a failure write in
+        # flight or landed, a transition observed, a clear) falls through
+        # exactly like a stale hint does.
         if (
             hint_state is not None
+            and hint_epoch is not None
             and hint_state.service_name == service_name
             and hint_state.state == CircuitState.CLOSED
             and not is_manual_pin_active(hint_state)
             and hint_state.failure_count == 0
-        ):
-            # The success still counts toward the rate denominator — that is a
-            # memory-local append, so the fast path stays free of repository I/O.
-            self._outcome_window.record_success(
+            and self._outcome_window.record_success_if_epoch(
                 service_name,
                 effective_config.sliding_window_size,
+                hint_epoch,
             )
+        ):
             return
 
         # Past the fast path every branch below either runs the pin check or
         # writes state, so the decision is always made on freshly-read state —
         # never on a hint that may predate an operator's manual pin.
         state = self.get_or_create_state(service_name)
+        self._outcome_window.observe_state(service_name, state.state)
 
         # Skip while a manual override is in force (see record_failure).
         if is_manual_pin_active(state):
@@ -1465,6 +1668,11 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
                 service_name, effective_config.success_threshold
             )
             circuit_closed = attempt.did_close
+            # The one clear on a close, for the closer and the race-loser
+            # alike: observing the row back in CLOSED opens a fresh evidence
+            # period. A second, ``did_close``-gated clear would wipe an
+            # outcome a call admitted after the close had already appended.
+            self._outcome_window.observe_state(service_name, attempt.state.state)
 
         elif state.state == "closed":
             self._outcome_window.record_success(
@@ -1481,19 +1689,19 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
             # a two-round-trip L2 mirror on every healthy success, and that
             # mirror writes this worker's whole row over a peer worker's.
             # `state` is the fresh read taken above, so the decision cannot be
-            # stale the way a caller-supplied hint can.
+            # stale the way a caller-supplied hint can — but a trip can still
+            # commit between that read and this write, so the write declines
+            # (``keep_open``) when the stored row is no longer CLOSED: a
+            # success never erases a trip.
             if state.failure_count != 0:
                 self.repository.update_state(
                     service_name=service_name,
                     state="closed",
                     failure_count=0,
+                    keep_open=True,
                 )
 
         if circuit_closed:
-            # Recovery starts a fresh CLOSED period; outcomes from before the
-            # trip are not evidence about it.
-            self._outcome_window.clear(service_name)
-
             logger.info(
                 "circuit_breaker.circuit_auto_closed_successes",
                 service_name=service_name,

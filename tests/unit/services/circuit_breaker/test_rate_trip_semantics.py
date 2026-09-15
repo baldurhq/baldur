@@ -302,11 +302,12 @@ class TestRecordSuccessHotPathBudget:
         )
 
     def test_fast_path_success_performs_zero_repository_calls(self):
-        """With a clean CLOSED hint, no repository method is invoked."""
+        """With a clean CLOSED hint and a matching epoch, no repository method is invoked."""
         repository = _CountingRepository(InMemoryCircuitBreakerStateRepository())
         service = _service(_config(), repository)
 
-        service.record_success(SERVICE, hint_state=self._clean_hint())
+        # A fresh window's epoch is 0; the hint carries the epoch admission saw.
+        service.record_success(SERVICE, hint_state=self._clean_hint(), hint_epoch=0)
 
         assert repository.calls == []
 
@@ -320,7 +321,7 @@ class TestRecordSuccessHotPathBudget:
         service = _service(_config(), repository)
 
         for _ in range(20):
-            service.record_success(SERVICE, hint_state=self._clean_hint())
+            service.record_success(SERVICE, hint_state=self._clean_hint(), hint_epoch=0)
 
         assert service.get_window_evidence(SERVICE) == (0, 20)
         assert repository.calls == []
@@ -347,11 +348,12 @@ class TestRecordSuccessHotPathBudget:
 
 
 class TestOutcomeWindowLifecycleBehavior:
-    """Every observed state transition starts a fresh CLOSED period.
+    """A close or an operator's transition starts a fresh CLOSED period.
 
-    Outcomes recorded before a trip or a recovery say nothing about the rate
-    after it; carrying them over would let stale evidence re-trip a breaker the
-    operator just closed.
+    Outcomes recorded before a recovery say nothing about the rate after it;
+    carrying them over would let stale evidence re-trip a breaker the operator
+    just closed. A trip is different: the breaker keeps the evidence that
+    tripped it, so the dependency keeps counting as failing while it is open.
     """
 
     @staticmethod
@@ -362,14 +364,19 @@ class TestOutcomeWindowLifecycleBehavior:
             return_value=True,
         )
 
-    def test_auto_trip_clears_the_window(self):
-        """The CLOSED -> OPEN trip drops the evidence it decided on."""
+    def test_auto_trip_keeps_the_evidence_it_decided_on(self):
+        """The CLOSED -> OPEN trip keeps the failures that tripped it.
+
+        Negative half of the old contract: the post-trip read is never
+        ``(0, 0)`` — that reading is what let a tripped dependency vanish
+        from the system-wide rate for its whole OPEN period.
+        """
         service = _service(_config(failure_threshold=5))
 
         _drive(service, "fffff")
 
         assert service.get_state(SERVICE) == "open"
-        assert service.get_window_evidence(SERVICE) == (0, 0)
+        assert service.get_window_evidence(SERVICE) == (5, 5)
 
     def test_half_open_recovery_close_clears_the_window(self):
         """A recovery back to CLOSED starts without pre-trip evidence."""
@@ -442,8 +449,8 @@ class TestOutcomeWindowLifecycleBehavior:
         assert result.success is True
         assert service.get_window_evidence(SERVICE) == (0, 0)
 
-    def test_clear_is_scoped_to_the_transitioning_service(self):
-        """A trip on one service leaves every peer's evidence intact."""
+    def test_a_trip_on_one_service_leaves_every_peer_untouched(self):
+        """A trip on one service neither clears nor pollutes a peer's evidence."""
         service = _service(_config(failure_threshold=5))
         _drive(service, "fffff")
         with (
@@ -453,7 +460,7 @@ class TestOutcomeWindowLifecycleBehavior:
             for _ in range(4):
                 service.record_success("peer-service")
 
-        assert service.get_window_evidence(SERVICE) == (0, 0)
+        assert service.get_window_evidence(SERVICE) == (5, 5)
         assert service.get_window_evidence("peer-service") == (0, 4)
 
 

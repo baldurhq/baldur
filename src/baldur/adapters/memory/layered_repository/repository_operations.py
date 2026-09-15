@@ -92,7 +92,8 @@ class RepositoryOperationsMixin:
             service_name: str,
             state: CircuitBreakerStateData,
             skip_if_pinned: bool = False,
-        ) -> bool: ...
+            keep_open: bool = False,
+        ) -> bool | None: ...
         def _sync_pin_to_l2(
             self,
             service_name: str,
@@ -180,12 +181,15 @@ class RepositoryOperationsMixin:
         reset_half_open_count: bool = False,
         clear_opened_at: bool = False,
         skip_if_pinned: bool = False,
+        keep_open: bool = False,
     ) -> bool:
         """Update L1, then asynchronously synchronize to L2 (476 D9 reset flag forwarded).
 
-        Both write directives are forwarded to L1; the mirror derives its own
-        ``clear_opened_at`` from the row it reads and always passes the pin
-        guard, so neither needs to be threaded through the async hand-off.
+        All three write directives are forwarded to L1; the mirror derives its
+        own ``clear_opened_at`` from the row it reads and always passes both
+        store-side guards (it is a snapshot writer, which may refresh a CLOSED
+        row but never close one), so none needs to be threaded through the
+        async hand-off.
         """
         result = self._l1.update_state(
             service_name=service_name,
@@ -198,6 +202,7 @@ class RepositoryOperationsMixin:
             reset_half_open_count=reset_half_open_count,
             clear_opened_at=clear_opened_at,
             skip_if_pinned=skip_if_pinned,
+            keep_open=keep_open,
         )
 
         if result:
@@ -712,10 +717,24 @@ class RepositoryOperationsMixin:
            ``update_state(state='closed', reset_half_open_count=True)``.
            For ``state=='half_open'`` (non-close increment), writeback the
            new ``success_count`` to L1 without resetting counters.
-        4. On L2 timeout / exception / unhealthy / None: record degraded-
-           mode metric, delegate to ``_l1.record_success_with_close_check``
-           and async-sync the resulting snapshot to L2 -- relaxed contract,
-           identical to the prior single-process behavior.
+        4. On a transient L2 failure or timeout while L2 is still healthy, or
+           when L2 answers with a state that is neither HALF_OPEN nor CLOSED
+           (the stale-L2 guard): record the degraded-mode metric and return
+           the L1 row with ``did_close=False`` **without closing on L1**. A
+           close the store did not decide is not performed locally while the
+           store is merely unreachable: nothing would mirror it while L2 is
+           failing, and drift reconciliation runs only on the quarantine
+           edge, so a local close at blip time would leave this worker
+           CLOSED against the store's OPEN until a restart. The trial success
+           is not credited; the next trial re-earns it, and the next
+           admission's L2-first acquire re-syncs L1 to the store's row.
+        5. Only when L2 is quarantined (``_l2_healthy`` False, on entry or as
+           the consequence of this very failure) or when no store was ever
+           named: delegate to ``_l1.record_success_with_close_check`` and
+           async-sync the resulting snapshot to L2. The process is in L1-only
+           mode by design there, and the quarantine->healthy edge schedules
+           the drift pass whose L2-wins rule reverts the row to the store's
+           OPEN for the store's own HALF_OPEN cycle.
         """
         if self._l2 and self._l2_healthy:
             timeout = self._get_timeout_seconds()
@@ -735,37 +754,60 @@ class RepositoryOperationsMixin:
                 returned_state = attempt.state.state
                 if returned_state not in {"half_open", "closed"}:
                     # Stale-L2 guard: L2 disagrees with caller's HALF_OPEN
-                    # expectation. Do NOT writeback to L1; fall back to L1's
-                    # atomic close path.
+                    # expectation. Do NOT writeback to L1, and do NOT close
+                    # on L1 either -- the store never saw HALF_OPEN, so a
+                    # local close would be a close the store did not decide.
                     self._record_close_check_degraded_mode(service_name)
-                    return self._l1_fallback_close_check(
-                        service_name, success_threshold
-                    )
+                    return self._uncredited_close_attempt(service_name)
 
                 self._writeback_close_check_to_l1(service_name, attempt)
                 return attempt
 
             except UnconfiguredStoreError:
                 # 774 D2: a decline, not a failure — ahead of `except
-                # Exception` so it never reaches the quarantine counter.
+                # Exception` so it never reaches the quarantine counter. No
+                # store was named, so the process memory IS the store.
                 pass
             except FuturesTimeoutError:
                 self._handle_l2_timeout("record_success_with_close_check", service_name)
+                if self._l2_healthy:
+                    self._record_close_check_degraded_mode(service_name)
+                    return self._uncredited_close_attempt(service_name)
             except Exception as e:
                 self._handle_l2_error(
                     "record_success_with_close_check", service_name, e
                 )
+                if self._l2_healthy:
+                    self._record_close_check_degraded_mode(service_name)
+                    return self._uncredited_close_attempt(service_name)
 
-        # L2 unavailable / failed -- fall back to L1.
+        # L2 quarantined / never named -- L1 is the authority by design.
         self._record_close_check_degraded_mode(service_name)
         return self._l1_fallback_close_check(service_name, success_threshold)
+
+    def _uncredited_close_attempt(
+        self, service_name: str
+    ) -> CircuitBreakerCloseAttempt:
+        """The ``did_close=False`` answer for a close the store could not decide.
+
+        Carries the L1 row unchanged so the caller sees the state it is still
+        in; no counter moves, no window write, no mirror.
+        """
+        return CircuitBreakerCloseAttempt(
+            state=self._l1.get_or_create(service_name),
+            did_close=False,
+        )
 
     def _l1_fallback_close_check(
         self,
         service_name: str,
         success_threshold: int,
     ) -> CircuitBreakerCloseAttempt:
-        """L1-authoritative fallback for record_success_with_close_check (498 D6 step 6)."""
+        """L1-authoritative fallback for record_success_with_close_check (498 D6 step 6).
+
+        Reached only while L2 is quarantined or was never named; see the
+        caller's step 5.
+        """
         attempt = self._l1.record_success_with_close_check(
             service_name, success_threshold
         )
@@ -1225,6 +1267,11 @@ class RepositoryOperationsMixin:
         between the two writes sees the new state without the pin (an ordinary
         OPEN — the safe direction), where the reverse order would expose a pin
         attached to the state it replaced.
+
+        Neither store-side guard is passed: this is the operator's own write
+        (force_open / force_close / reset / pin), which outranks a pin and is
+        the one CLOSED write allowed to move a stored OPEN row, and its
+        counters must reach the store.
 
         Synchronous rather than fire-and-forget because the operator's response
         is read back once this returns; the expiry it reports and the expiry

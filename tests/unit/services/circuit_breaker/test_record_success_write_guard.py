@@ -184,10 +184,13 @@ class TestRecordSuccessExitBehavior:
 
         service.record_success(SERVICE)
 
+        # ``keep_open`` is the reset's state precondition: the store declines
+        # it when the row is no longer CLOSED, so a success never erases a trip.
         repo.update_state.assert_called_once_with(
             service_name=SERVICE,
             state=CircuitBreakerStateEnum.CLOSED.value,
             failure_count=0,
+            keep_open=True,
         )
 
     def test_record_success_exit_e4_forwards_the_configured_success_threshold(
@@ -358,17 +361,15 @@ class TestTripInterleavedWithSuccessBehavior:
             == CircuitBreakerStateEnum.OPEN.value
         )
 
-    def test_trip_interleaved_with_success_nonzero_count_snapshot_erases_it(
+    def test_trip_interleaved_with_success_nonzero_count_snapshot_leaves_it_standing(
         self, real_service, real_repo
     ):
-        """The residue: the surviving write still has no state precondition.
+        """The other half of the window: the reset write carries a state precondition.
 
-        Pinned deliberately. ``update_state`` is called with ``state="closed"``
-        and no precondition, so a snapshot carrying failures overwrites a trip
-        committed in between — the half of the window this guard does not
-        reach. Fixing it means a state-preserving reset at the repository
-        contract, which is a separate change; if that lands, this test is the
-        one that should go red.
+        A snapshot carrying failures used to overwrite a trip committed in
+        between — the likely interleave at trip time. The reset now passes
+        ``keep_open``, so the store declines it against an OPEN row and the
+        trip stands with its ``opened_at``.
         """
         # Given: a CLOSED row that does have a count to reset.
         real_repo.get_or_create(SERVICE)
@@ -379,11 +380,12 @@ class TestTripInterleavedWithSuccessBehavior:
         # When
         real_service.record_success(SERVICE)
 
-        # Then: the trip was overwritten by the reset write.
+        # Then: the interleave happened, and the trip survived the reset write.
         assert fired == [True]
         stored = real_repo.get_by_service_name(SERVICE)
-        assert stored.state == CircuitBreakerStateEnum.CLOSED.value
-        assert stored.failure_count == 0
+        assert stored.state == CircuitBreakerStateEnum.OPEN.value
+        assert stored.opened_at is not None
+        assert stored.failure_count == 5
 
 
 # =============================================================================

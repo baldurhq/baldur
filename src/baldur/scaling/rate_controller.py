@@ -49,6 +49,37 @@ PRIORITY_WATERMARKS: dict[str, float] = {
 }
 
 
+def _process_local_metrics_checker() -> dict[str, float | None]:
+    """Read the recovery-gate metrics without leaving this process.
+
+    CPU comes from the background ``SystemMetricsCache`` exactly as the gate's
+    live checker reads it — and raises the same way when the cache is not
+    running or its sample is stale, so the gate's fail-closed branch holds.
+    The error rate is the process-only aggregate (``fleet=False``): this
+    process's outcome windows and its own open or half-open rows, never a
+    read of the shared store.
+    """
+    from baldur.services.circuit_breaker import get_circuit_breaker_service
+    from baldur.services.system_metrics_cache import get_system_metrics_cache
+
+    cache = get_system_metrics_cache()
+    if not cache.is_running():
+        raise RuntimeError("System metrics unavailable: cache not running")
+
+    metrics = cache.get_metrics()
+    if metrics.source == "stale":
+        raise RuntimeError(
+            "System metrics unavailable: sample stale (age > max_age_seconds)"
+        )
+
+    evidence = get_circuit_breaker_service().get_aggregate_failure_evidence(fleet=False)
+    return {
+        "cpu_percent": metrics.cpu_percent,
+        "error_rate": evidence.rate,
+        "error_rate_calls": evidence.total_calls,
+    }
+
+
 @dataclass
 class RateControllerState:
     """Current Rate Controller state."""
@@ -307,6 +338,12 @@ class RateController:
         Uses the same criteria as RecoveryGate (CPU < 80%, error_rate < 5%) to
         prevent Relief from increasing traffic while overloaded.
 
+        The gate is built on a process-only metrics checker: relief is a
+        per-request throttling decision, so it must never dial the shared
+        breaker store, and it stays measured while the cluster read is
+        unavailable. A breaker this process holds open — tripped here or
+        hydrated from the store — still counts.
+
         Returns:
             True to allow Relief, False to block it
         """
@@ -315,7 +352,7 @@ class RateController:
                 RecoveryGate,
             )
 
-            gate = RecoveryGate()
+            gate = RecoveryGate(metrics_checker=_process_local_metrics_checker)
             allowed, reason = gate.check_recovery_allowed()
             if not allowed:
                 logger.info(

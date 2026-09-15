@@ -335,11 +335,13 @@ class TestCircuitBreakerPolicySuccessBehavior:
         assert result.value == "success_value"
 
     def test_success_calls_record_success(self, policy, mock_cb_service):
-        """On success record_success(service_name, hint_state=...) is called (490 D4)."""
+        """On success record_success(service_name, hint_state=, hint_epoch=) is called (490 D4)."""
         policy.execute(lambda: "ok")
         decision = mock_cb_service.should_allow_with_state.return_value
         mock_cb_service.record_success.assert_called_once_with(
-            "test_api", hint_state=decision.state
+            "test_api",
+            hint_state=decision.state,
+            hint_epoch=decision.window_epoch,
         )
 
     def test_success_does_not_call_record_failure(self, policy, mock_cb_service):
@@ -745,18 +747,21 @@ class TestCircuitBreakerHelperExtractionBehavior:
         assert reject_result is None
         assert hint_state is None
 
-    def test_admit_returns_run_verdict_with_hint_state_when_allowed(
+    def test_admit_returns_run_verdict_with_the_decision_when_allowed(
         self, policy, mock_cb_service
     ):
-        """Admitted → verdict 'run' and hint_state is the decision's state object."""
+        """Admitted → verdict 'run' and the third element is the whole decision."""
         decision = mock_cb_service.should_allow_with_state.return_value
 
-        verdict, reject_result, hint_state = policy._admit(policy.cb_service)
+        verdict, reject_result, admitted = policy._admit(policy.cb_service)
 
         assert verdict == "run"
         assert reject_result is None
-        # 490 D4: the loaded state is threaded through so record_* skips a refetch.
-        assert hint_state is decision.state
+        # 490 D4: the loaded state is threaded through so record_* skips a
+        # refetch; the decision also carries the window epoch the fast path
+        # is guarded by, so the whole object travels.
+        assert admitted is decision
+        assert admitted.state is decision.state
 
     def test_admit_returns_reject_verdict_when_open(self, mock_cb_service):
         """CB OPEN → verdict 'reject' with a REJECTED CircuitBreakerOpenError result."""
@@ -785,28 +790,35 @@ class TestCircuitBreakerHelperExtractionBehavior:
         mock_cb_service.record_success.assert_not_called()
         mock_cb_service.record_failure.assert_not_called()
 
-    def test_on_success_records_with_hint_state(self, policy, mock_cb_service):
-        """``_on_success`` forwards the hint_state to ``record_success``."""
-        sentinel = object()
+    def test_on_success_records_with_the_decisions_hint_and_epoch(
+        self, policy, mock_cb_service
+    ):
+        """``_on_success`` forwards the decision's state and epoch to ``record_success``."""
+        decision = MagicMock(spec=CircuitBreakerDecision)
 
         result = policy._on_success(
-            "value", sentinel, scope=None, service=policy.cb_service
+            "value", decision, scope=None, service=policy.cb_service
         )
 
         assert result.outcome == PolicyOutcome.SUCCESS
         mock_cb_service.record_success.assert_called_once_with(
-            "test_api", hint_state=sentinel
+            "test_api",
+            hint_state=decision.state,
+            hint_epoch=decision.window_epoch,
         )
 
     def test_on_failure_records_when_counted_as_failure(self, policy, mock_cb_service):
         """``_on_failure`` records a counted failure (default failure_exceptions)."""
-        sentinel = object()
+        decision = MagicMock(spec=CircuitBreakerDecision)
         error = RuntimeError("boom")
 
-        policy._on_failure(error, sentinel, scope=None, service=policy.cb_service)
+        policy._on_failure(error, decision, scope=None, service=policy.cb_service)
 
         mock_cb_service.record_failure.assert_called_once()
-        assert mock_cb_service.record_failure.call_args.kwargs["hint_state"] is sentinel
+        assert (
+            mock_cb_service.record_failure.call_args.kwargs["hint_state"]
+            is decision.state
+        )
 
     def test_on_failure_skips_record_for_ignored_exception(self, mock_cb_service):
         """``_on_failure`` skips ``record_failure`` for an ignored exception type."""

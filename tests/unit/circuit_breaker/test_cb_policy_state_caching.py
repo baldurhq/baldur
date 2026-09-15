@@ -259,6 +259,8 @@ class TestCBPolicyStateCachingBehavior:
         assert result.value == "ok"
         cb_service.should_allow_with_state.assert_called_once_with("payment_api")
         cb_service.record_success.assert_called_once_with(
-            "payment_api", hint_state=decision.state
+            "payment_api",
+            hint_state=decision.state,
+            hint_epoch=decision.window_epoch,
         )
         cb_service.record_failure.assert_not_called()

@@ -195,9 +195,13 @@ class TestCircuitBreakerPolicyReturnedResponseBehavior:
 
         assert cb_service.record_failure.called is records_failure
         assert cb_service.record_success.called is not records_failure
-        assert cb_service.record_rate_limit_response.called is feeds_cascade
+        # The breaker stage counts the 429 as it is seen and decides the
+        # cascade once, after the record — both on the service it admitted on.
+        assert cb_service.record_rate_limit_observation.called is feeds_cascade
+        assert cb_service.evaluate_rate_limit_cascade.called is feeds_cascade
         assert coordinator.on_rate_limited.called is feeds_cascade
-        shared_service.record_rate_limit_response.assert_not_called()
+        shared_service.record_rate_limit_observation.assert_not_called()
+        shared_service.evaluate_rate_limit_cascade.assert_not_called()
 
     def test_a_status_in_both_sets_records_a_failure_and_feeds_the_cascade(
         self, policy, cb_service, observation
@@ -223,8 +227,9 @@ class TestCircuitBreakerPolicyReturnedResponseBehavior:
             reset_middleware_settings()
 
         cb_service.record_failure.assert_called_once()
-        cb_service.record_rate_limit_response.assert_called_once_with("payment_api")
-        shared_service.record_rate_limit_response.assert_not_called()
+        cb_service.record_rate_limit_observation.assert_called_once_with("payment_api")
+        cb_service.evaluate_rate_limit_cascade.assert_called_once_with("payment_api")
+        shared_service.record_rate_limit_observation.assert_not_called()
 
     def test_the_returned_value_is_handed_back_untouched(self, policy, observation):
         """The classification is an observation; the caller still gets its answer."""
@@ -340,8 +345,8 @@ class TestCircuitBreakerPolicyRaisedOutcomeBehavior:
             policy.execute(_raise(ThrottledError()))
 
         cb_service.record_failure.assert_called_once()
-        cb_service.record_rate_limit_response.assert_called_once_with("payment_api")
-        shared_service.record_rate_limit_response.assert_not_called()
+        cb_service.record_rate_limit_observation.assert_called_once_with("payment_api")
+        shared_service.record_rate_limit_observation.assert_not_called()
         coordinator.on_rate_limited.assert_called_once()
 
     def test_an_ignored_429_type_feeds_no_cascade(self, cb_service, observation):
@@ -362,7 +367,7 @@ class TestCircuitBreakerPolicyRaisedOutcomeBehavior:
             policy.execute(_raise(ThrottledError()))
 
         cb_service.record_failure.assert_not_called()
-        cb_service.record_rate_limit_response.assert_not_called()
+        cb_service.record_rate_limit_observation.assert_not_called()
         coordinator.on_rate_limited.assert_not_called()
 
     def test_an_outcome_an_inner_stage_already_classified_feeds_no_second_cascade(
@@ -384,7 +389,7 @@ class TestCircuitBreakerPolicyRaisedOutcomeBehavior:
         with pytest.raises(ThrottledError):
             policy.execute(raise_after_marking)
 
-        cb_service.record_rate_limit_response.assert_not_called()
+        cb_service.record_rate_limit_observation.assert_not_called()
         coordinator.on_rate_limited.assert_called_once()
 
     def test_a_claimed_call_gets_no_cooldown_from_the_breaker_stage(
@@ -405,7 +410,7 @@ class TestCircuitBreakerPolicyRaisedOutcomeBehavior:
         with pytest.raises(ThrottledError):
             policy.execute(raise_after_claiming)
 
-        cb_service.record_rate_limit_response.assert_called_once()
+        cb_service.record_rate_limit_observation.assert_called_once()
         coordinator.on_rate_limited.assert_not_called()
 
     def test_an_inner_stage_that_counted_attempts_owns_the_denominator(
@@ -551,8 +556,8 @@ class TestCircuitBreakerPolicyScopeBehavior:
 
         call_payment_api()
 
-        cb_service.record_rate_limit_response.assert_called_once_with("payment_api")
-        shared_service.record_rate_limit_response.assert_not_called()
+        cb_service.record_rate_limit_observation.assert_called_once_with("payment_api")
+        shared_service.record_rate_limit_observation.assert_not_called()
 
     def test_the_decorator_observes_a_returned_429_on_an_async_function(
         self, cb_service, observation
@@ -566,8 +571,8 @@ class TestCircuitBreakerPolicyScopeBehavior:
 
         asyncio.run(call_payment_api())
 
-        cb_service.record_rate_limit_response.assert_called_once_with("payment_api")
-        shared_service.record_rate_limit_response.assert_not_called()
+        cb_service.record_rate_limit_observation.assert_called_once_with("payment_api")
+        shared_service.record_rate_limit_observation.assert_not_called()
 
 
 # =============================================================================
@@ -629,8 +634,8 @@ class TestAsyncBreakerRateLimitedOffloadBehavior:
         # worker thread never resolves a runtime of its own.
         assert spy.call_args[0][-1] is policy.cb_service
         cb_service.record_failure.assert_called_once()
-        cb_service.record_rate_limit_response.assert_called_once_with("payment_api")
-        shared_service.record_rate_limit_response.assert_not_called()
+        cb_service.record_rate_limit_observation.assert_called_once_with("payment_api")
+        shared_service.record_rate_limit_observation.assert_not_called()
         coordinator.on_rate_limited.assert_called_once()
 
     def test_a_returned_429_is_recorded_on_a_worker_thread(
@@ -647,8 +652,8 @@ class TestAsyncBreakerRateLimitedOffloadBehavior:
         assert spy.count("_on_success") == 1
         assert spy.call_args[0][-1] is policy.cb_service
         cb_service.record_failure.assert_called_once()
-        cb_service.record_rate_limit_response.assert_called_once_with("payment_api")
-        shared_service.record_rate_limit_response.assert_not_called()
+        cb_service.record_rate_limit_observation.assert_called_once_with("payment_api")
+        shared_service.record_rate_limit_observation.assert_not_called()
 
     def test_a_default_form_policy_under_a_mid_call_swap_records_on_the_first_service(
         self, observation
@@ -676,10 +681,10 @@ class TestAsyncBreakerRateLimitedOffloadBehavior:
         assert spy.call_args[0][-1] is first
         first.should_allow_with_state.assert_called_once_with("payment_api")
         first.record_failure.assert_called_once()
-        first.record_rate_limit_response.assert_called_once_with("payment_api")
+        first.record_rate_limit_observation.assert_called_once_with("payment_api")
         second.should_allow_with_state.assert_not_called()
         second.record_failure.assert_not_called()
-        second.record_rate_limit_response.assert_not_called()
+        second.record_rate_limit_observation.assert_not_called()
         coordinator.on_rate_limited.assert_called_once()
 
     def test_a_plain_failure_is_recorded_inline(self, policy, cb_service, observation):
@@ -747,7 +752,7 @@ class TestAsyncBreakerRateLimitedOffloadBehavior:
         assert isinstance(async_error, _HTTPError)
         assert not isinstance(async_error, RuntimeError)
         assert cb_service.record_failure.call_count == 2
-        assert cb_service.record_rate_limit_response.call_count == 2
+        assert cb_service.record_rate_limit_observation.call_count == 2
         # Both frames reached the coordinator with the header degraded to None.
         assert coordinator.on_rate_limited.call_count == 2
         for recorded in coordinator.on_rate_limited.call_args_list:

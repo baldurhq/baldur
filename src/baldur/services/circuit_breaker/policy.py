@@ -68,6 +68,16 @@ def _is_rate_limit_deferral(error: BaseException) -> bool:
     return isinstance(error, RateLimitDeferredError)
 
 
+def _hint_state(decision: Any) -> Any:
+    """The admission-time state the record paths use as their fast-path hint."""
+    return None if decision is None else decision.state
+
+
+def _hint_epoch(decision: Any) -> int | None:
+    """The outcome-window epoch the admission-time hint was taken at."""
+    return None if decision is None else decision.window_epoch
+
+
 def _looks_rate_limited(outcome: Any) -> bool:
     """Pre-classify an outcome for the async frame's offload decision. Fail-open.
 
@@ -227,17 +237,19 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
         and recorded on one instance even if the shared singleton is swapped
         in between.
 
-        Returns ``(verdict, reject_result, hint_state)``:
+        Returns ``(verdict, reject_result, decision)``:
 
         - ``("direct", None, None)`` — CB disabled or observe-only: run func
           once and wrap in a direct SUCCESS result; never record.
         - ``("reject", reject_result, None)`` — CB OPEN: return ``reject_result``
           (a REJECTED PolicyResult carrying ``CircuitBreakerOpenError``); do not
           run func.
-        - ``("run", None, hint_state)`` — admitted: run func, then call
-          :meth:`_on_success` / :meth:`_on_failure` with ``hint_state`` (the
-          state object ``should_allow_with_state`` already loaded, which
-          unlocks ``record_success``'s read-free steady-state fast path).
+        - ``("run", None, decision)`` — admitted: run func, then call
+          :meth:`_on_success` / :meth:`_on_failure` with the whole
+          ``CircuitBreakerDecision`` ``should_allow_with_state`` returned: its
+          ``state`` is the hint that unlocks ``record_success``'s read-free
+          steady-state fast path, and its ``window_epoch`` is what keeps that
+          path honest when something happened to the name in between.
 
         Shared verbatim by the sync ``execute`` and the async wrapper — the only
         difference between the two variants is ``func()`` vs ``await func()``.
@@ -293,11 +305,12 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
             self._invoke_hooks("on_reject", self._service_name, "circuit_open")
             return "reject", reject_result, None
 
-        # Return decision.state as hint_state so ``record_success`` can take its
-        # read-free steady-state fast path: the CLOSED steady-state path then
-        # does zero repository acquires. The hint is a fast-path gate only —
-        # neither record path treats it as a substitute for a fresh read.
-        return "run", None, decision.state
+        # Return the decision so ``record_success`` can take its read-free
+        # steady-state fast path on ``decision.state`` — the CLOSED steady-state
+        # path then does zero repository acquires — guarded by
+        # ``decision.window_epoch``. The hint is a fast-path gate only: neither
+        # record path treats it as a substitute for a fresh read.
+        return "run", None, decision
 
     def _direct_result(self, value: T) -> PolicyResult[T]:
         """Build the SUCCESS result for the disabled / observe-only paths (no record)."""
@@ -368,7 +381,7 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
     def _on_success(
         self,
         value: T,
-        hint_state: Any,
+        decision: Any,
         scope: OutboundObservationScope | None,
         service: CircuitBreakerService,
     ) -> PolicyResult[T]:
@@ -395,18 +408,20 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
                     "error": f"HTTP {status}",
                     "type": "response_status",
                 },
-                hint_state=hint_state,
+                hint_state=_hint_state(decision),
             )
             record_call_outcome(self._outcome_key, failure=True)
         else:
             service.record_success(
                 self._service_name,
-                hint_state=hint_state,
+                hint_state=_hint_state(decision),
+                hint_epoch=_hint_epoch(decision),
             )
             record_call_outcome(self._outcome_key, failure=False)
 
         if is_rate_limited:
             self._observe_rate_limit(value, retry_after, scope, service)
+        self._evaluate_cascade_after_record(scope, service)
 
         success_result = PolicyResult(
             value=value,
@@ -420,7 +435,7 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
     def _on_failure(
         self,
         error: Exception,
-        hint_state: Any,
+        decision: Any,
         scope: OutboundObservationScope | None,
         service: CircuitBreakerService,
     ) -> None:
@@ -442,7 +457,7 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
             service.record_failure(
                 self._service_name,
                 error_context={"error": str(error), "type": type(error).__name__},
-                hint_state=hint_state,
+                hint_state=_hint_state(decision),
             )
             # Behind the same gate as the breaker's own count: an admission
             # whose exception the breaker was configured to ignore is in
@@ -454,8 +469,36 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
             is_rate_limited, retry_after = detect_rate_limit(error)
             if is_rate_limited:
                 self._observe_rate_limit(error, retry_after, scope, service)
+        self._evaluate_cascade_after_record(scope, service)
         # Hook: execution failure (Audit + EventBus)
         self._invoke_hooks("on_failure", self._service_name, error, 1)
+
+    def _evaluate_cascade_after_record(
+        self,
+        scope: OutboundObservationScope | None,
+        service: CircuitBreakerService,
+    ) -> None:
+        """Decide the 429 cascade once, after this call's outcome is recorded.
+
+        An inner retry stage only *counts* the 429s it sees; the breaker that
+        opened the scope decides, here, once per call — whatever the final
+        outcome was, so a call whose 429 attempts ended in a 5xx is evaluated
+        too. Deciding after the record means the evidence pair a cascade trip
+        carries into its OPEN event and audit row holds the tripping call. The
+        no-scope path (a caller with no breaker stage of its own) evaluates
+        inside ``observe_429`` and never reaches here with a scope.
+        """
+        if scope is None or scope.rate_limited == 0:
+            return
+        try:
+            service.evaluate_rate_limit_cascade(self._service_name)
+        except Exception as error:
+            logger.warning(
+                "circuit_breaker.rate_limit_observation_failed",
+                half="cascade",
+                service_name=self._service_name,
+                error=str(error),
+            )
 
     def execute(
         self,
@@ -481,7 +524,7 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
         even if the process-shared service is swapped between the two.
         """
         service = self.cb_service
-        verdict, reject_result, hint_state = self._admit(service)
+        verdict, reject_result, decision = self._admit(service)
         if verdict == "reject":
             return reject_result  # type: ignore[return-value]
         if verdict == "direct":
@@ -494,9 +537,9 @@ class CircuitBreakerPolicy(ResiliencePolicy[T]):
         token, scope = open_scope(self._service_name, self._is_failure, service)
         try:
             value = func(*args, **kwargs)
-            return self._on_success(value, hint_state, scope, service)
+            return self._on_success(value, decision, scope, service)
         except Exception as e:
-            self._on_failure(e, hint_state, scope, service)
+            self._on_failure(e, decision, scope, service)
             raise  # propagate so an upper Policy (Retry, etc.) can handle it
         finally:
             close_scope(token)
@@ -574,7 +617,7 @@ class AsyncCircuitBreakerPolicy:
         """
         inner = self._inner
         service = inner.cb_service
-        verdict, reject_result, hint_state = inner._admit(service)
+        verdict, reject_result, decision = inner._admit(service)
         if verdict == "reject":
             return reject_result  # type: ignore[return-value]
         if verdict == "direct":
@@ -585,16 +628,14 @@ class AsyncCircuitBreakerPolicy:
             value = await func(*args, **kwargs)
             if _looks_rate_limited(value):
                 return await asyncio.to_thread(
-                    inner._on_success, value, hint_state, scope, service
+                    inner._on_success, value, decision, scope, service
                 )
-            return inner._on_success(value, hint_state, scope, service)
+            return inner._on_success(value, decision, scope, service)
         except Exception as e:
             if _looks_rate_limited(e):
-                await asyncio.to_thread(
-                    inner._on_failure, e, hint_state, scope, service
-                )
+                await asyncio.to_thread(inner._on_failure, e, decision, scope, service)
             else:
-                inner._on_failure(e, hint_state, scope, service)
+                inner._on_failure(e, decision, scope, service)
             raise  # propagate so an upper Policy (Retry, etc.) can handle it
         finally:
             close_scope(token)

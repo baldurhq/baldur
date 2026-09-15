@@ -169,10 +169,13 @@ class TestTripSideEffectGatingBehavior:
         assert "window_failure_count" in data
         assert "window_total_calls" in data
 
-    def test_outcome_window_clears_even_for_a_race_loser(self):
-        # Unconditional by design: the window evidence was consumed by this
-        # worker's own decision, whoever won the cluster write. Leaving it
-        # would let the same calls re-decide the next trip.
+    def test_outcome_window_survives_the_trip_for_a_race_loser_too(self):
+        # A breaker that lost the race to a peer that opened it keeps the
+        # evidence that tripped it, exactly like the winner: the dependency
+        # counts as failing for its whole OPEN period, and the observed
+        # re-entry into CLOSED is what clears the window. The trip predicate
+        # reads the window only for a CLOSED row, so the kept entries never
+        # re-decide a trip.
         service, _repo = _service_over_stubbed_repo(_attempt("open", did_open=False))
 
         with (
@@ -181,7 +184,7 @@ class TestTripSideEffectGatingBehavior:
         ):
             service.record_failure(SERVICE)
 
-        assert service.get_window_evidence(SERVICE) == (0, 0)
+        assert service.get_window_evidence(SERVICE) == (1, 1)
 
 
 # =============================================================================

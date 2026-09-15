@@ -58,6 +58,7 @@ class L2SyncMixin:
             intended_state: str = "",
         ) -> None: ...
         def _load_from_l2_with_timeout(self) -> None: ...
+        def _l2_backend_is_degraded(self) -> bool: ...
 
     def _submit_l2_write(self, write: Callable[[], Any]) -> None:
         """Run one L2 write on the shared executor, bounded by the adapter timeout.
@@ -114,22 +115,55 @@ class L2SyncMixin:
             )
             return False
 
+    def _mirror_skipped_on_degraded_backend(
+        self,
+        service_name: str,
+        state: CircuitBreakerStateData,
+        keep_open: bool,
+    ) -> bool:
+        """Should a snapshot mirror stand down instead of touching L2?
+
+        The store-side keep-open guard cannot be evaluated while the L2 backend
+        answers from its local fallback, and the mirror opens with an unguarded
+        ``get_or_create`` that would write a default CLOSED row into memory and
+        the WAL before the guarded update ever runs. So a CLOSED snapshot under
+        the keep-open rule is skipped outright on a degraded backend. What is
+        lost is a counter refresh on a CLOSED store row; the next write for the
+        name repairs it. An OPEN / HALF_OPEN snapshot still mirrors: it can
+        only make the store more restrictive.
+        """
+        if not keep_open or state.state != "closed":
+            return False
+        if not self._l2_backend_is_degraded():
+            return False
+        logger.debug(
+            "layered_repo.mirror_skipped_degraded_backend",
+            service_name=service_name,
+        )
+        return True
+
     def _sync_to_l2_with_timeout(
         self,
         service_name: str,
         state: CircuitBreakerStateData,
         skip_if_pinned: bool = False,
-    ) -> bool:
+        keep_open: bool = False,
+    ) -> bool | None:
         """Synchronize to L2 (timeout applied).
 
-        ``skip_if_pinned`` is the store-side half of pin neutrality, passed by
-        the repair lanes and left off by the manual-control write-through,
+        ``skip_if_pinned`` is the store-side half of pin neutrality and
+        ``keep_open`` the store-side half of the trip-precedence rule (a
+        snapshot may refresh a CLOSED row but never close one); both are passed
+        by the repair lanes and left off by the manual-control write-through,
         which is the operator's own write and must never be declined. See
         ``_sync_to_l2_inline`` for why the OPEN-era timestamp needs an explicit
-        clear directive.
+        clear directive. Returns ``None`` when the mirror was skipped rather
+        than attempted (a CLOSED snapshot on a degraded backend).
         """
         if not self._l2:
             return False
+        if self._mirror_skipped_on_degraded_backend(service_name, state, keep_open):
+            return None
 
         timeout = self._get_timeout_seconds()
         start_time = time.perf_counter()
@@ -144,6 +178,7 @@ class L2SyncMixin:
                 opened_at=state.opened_at,
                 clear_opened_at=state.opened_at is None,
                 skip_if_pinned=skip_if_pinned,
+                keep_open=keep_open,
             )
 
         try:
@@ -173,7 +208,8 @@ class L2SyncMixin:
         service_name: str,
         state: CircuitBreakerStateData,
         skip_if_pinned: bool = False,
-    ) -> bool:
+        keep_open: bool = False,
+    ) -> bool | None:
         """Mirror one state snapshot to L2 on the calling thread.
 
         The write body shared by every caller that already owns an executor
@@ -194,14 +230,20 @@ class L2SyncMixin:
         freshness gate reads the *local* row, so a worker that never hydrated a
         peer's override has nothing to skip on and would write plain state over
         an operator's decision; passing the directive moves the test into the
-        write itself. Repair lanes pass it; the manual-control write-through,
-        which is the operator's own write, does not.
+        write itself. ``keep_open`` does the same for a peer's trip: this
+        worker's L1 genuinely is CLOSED, so only the store can tell that the
+        row it is about to overwrite is a peer's automatic OPEN. Repair lanes
+        pass both; the manual-control write-through, which is the operator's
+        own write, passes neither. Returns ``None`` when the mirror was skipped
+        rather than attempted (a CLOSED snapshot on a degraded backend).
 
         Every failure routes to ``_handle_l2_error`` so quarantine accounting
         stays correct; nothing propagates to the caller.
         """
         if not self._l2:
             return False
+        if self._mirror_skipped_on_degraded_backend(service_name, state, keep_open):
+            return None
 
         start_time = time.perf_counter()
         try:
@@ -214,6 +256,7 @@ class L2SyncMixin:
                 opened_at=state.opened_at,
                 clear_opened_at=state.opened_at is None,
                 skip_if_pinned=skip_if_pinned,
+                keep_open=keep_open,
             )
             elapsed_ms = (time.perf_counter() - start_time) * 1000
             self._handle_l2_success(elapsed_ms)
@@ -364,7 +407,9 @@ class L2SyncMixin:
         row = self._resolve_repair_row(service_name)
         if row is None:
             return None
-        return self._sync_to_l2_inline(service_name, row, skip_if_pinned=True)
+        return self._sync_to_l2_inline(
+            service_name, row, skip_if_pinned=True, keep_open=True
+        )
 
     def _repair_row_to_l2(self, service_name: str) -> bool | None:
         """Mirror one L1 row to L2 for repair — unless the row is pinned.
@@ -375,13 +420,16 @@ class L2SyncMixin:
         ``_resolve_repair_row``.
 
         Returns True when the mirror ran and succeeded, False when it ran and
-        failed, and ``None`` when nothing was attempted (row gone or pinned) —
-        a skip is not a failure and must not be reported as one.
+        failed, and ``None`` when nothing was attempted (row gone, pinned, or a
+        CLOSED snapshot on a degraded backend) — a skip is not a failure and
+        must not be reported as one.
         """
         row = self._resolve_repair_row(service_name)
         if row is None:
             return None
-        return self._sync_to_l2_with_timeout(service_name, row, skip_if_pinned=True)
+        return self._sync_to_l2_with_timeout(
+            service_name, row, skip_if_pinned=True, keep_open=True
+        )
 
     def force_sync_from_l2(self) -> bool:
         """Force synchronization from L2 (administrative purpose)."""

@@ -280,9 +280,21 @@ class PreWarmer:
     # ─── Safety Valve ─────────────────────────────────────────────────────────
 
     def check_safety_valve(self) -> bool:
-        """True when a hard limit is exceeded. Called by the scheduler each cycle."""
+        """True when a hard limit is exceeded. Called by the scheduler each cycle.
+
+        An error rate the shared breaker store cannot supply is not a healthy
+        reading: the valve stands down (no override) at WARNING, the same
+        fail-safe direction its CPU half takes on an unreadable sample.
+        """
         if self._metrics_provider is None:
             return False
+        # Function-level import: the breaker package is not an import-time
+        # dependency of this module, and the class is needed only to name the
+        # typed branch below.
+        from baldur.services.circuit_breaker.exceptions import (
+            CircuitBreakerStateUnavailableError,
+        )
+
         try:
             cpu = self._metrics_provider.get_cpu_usage()
             error_rate = self._metrics_provider.get_error_rate()
@@ -290,6 +302,12 @@ class PreWarmer:
                 cpu > self._settings.safety_valve_cpu_threshold
                 or error_rate > self._settings.safety_valve_error_rate_threshold
             )
+        except CircuitBreakerStateUnavailableError as exc:
+            logger.warning(
+                "capacity_reservation.safety_valve_check_failed",
+                reason=exc.reason,
+            )
+            return False
         except Exception as exc:
             logger.exception(
                 "capacity_reservation.safety_valve_check_error",

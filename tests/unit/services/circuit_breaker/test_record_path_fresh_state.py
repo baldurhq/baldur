@@ -157,8 +157,12 @@ class TestStaleHintPinImmunityBehavior:
 
             setattr(repo, name, _tracked)
 
-        # When
-        service.record_success(SERVICE, hint_state=hint)
+        # When: the hint carries the epoch admission would have captured.
+        service.record_success(
+            SERVICE,
+            hint_state=hint,
+            hint_epoch=service._outcome_window.epoch_of(SERVICE),
+        )
 
         # Then: not one repository method was called.
         assert touched == []

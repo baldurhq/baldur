@@ -22,6 +22,7 @@ from baldur.interfaces.repositories import (
     resolve_manual_override_expiry,
 )
 from baldur.services.circuit_breaker.exceptions import (
+    UNREACHED_DEFAULT_STORE_REASON,
     CircuitBreakerStateUnavailableError,
 )
 from baldur.utils.serialization import fast_loads
@@ -310,44 +311,65 @@ return {0, state, '', ''}
 )
 
 
-# Conditional whole-row state write for the record-path mirror (773 D2).
-# Same field set as the plain ``update_state`` HSET, but the write is elided
-# when the *stored* row carries an override still in force -- a worker that
-# never hydrated a peer's pin has no local row to skip on, and its mirror
-# would otherwise write plain state over the operator's decision.
+# Conditional whole-row state write for the record-path mirror (773 D2) and
+# the consecutive-count reset. Same field set as the plain ``update_state``
+# HSET, but the write is elided inside the script when either guard the
+# caller requested holds against the *stored* row:
+#
+# - pin guard: the row carries an override still in force -- a worker that
+#   never hydrated a peer's pin has no local row to skip on, and its mirror
+#   would otherwise write plain state over the operator's decision;
+# - keep-open guard: the row is ``open`` or ``half_open`` -- a trip a peer (or
+#   a concurrent thread) committed after this writer took its snapshot, which
+#   only a close primitive or an operator may move.
 #
 # KEYS[1] = full hash key for the CB
 # ARGV[1] = now_iso (updated_at, and the pin-expiry comparand)
-# ARGV[2] = field/value pairs, flattened, as a single msgpack-free varargs
-#           tail starting at index 2.
+# ARGV[2] = '1' to apply the pin guard, '0' to skip it
+# ARGV[3] = '1' to apply the keep-open guard, '0' to skip it
+# ARGV[4] = field/value pairs, flattened, as a single msgpack-free varargs
+#           tail starting at index 4.
 #
-# Returns 1 when the row was written, 0 when the pin declined it. A declined
+# Returns 1 when the row was written, 0 when a guard declined it. A declined
 # write is a success for the caller: the store answered and elided by contract.
 _LUA_UPDATE_STATE_SKIP_IF_PINNED = (
     _LUA_PIN_ACTIVE_HELPER
     + """
 local key = KEYS[1]
 local now_iso = ARGV[1]
+local guard_pin = ARGV[2] == '1'
+local guard_keep_open = ARGV[3] == '1'
 
 local fields = redis.call('HMGET', key,
-    'manually_controlled', 'manual_override_expires_at')
+    'manually_controlled', 'manual_override_expires_at', 'state')
 local mc = fields[1]
 local expires_at = fields[2]
+local stored_state = fields[3]
 if expires_at == false or expires_at == nil then
     expires_at = ''
 end
 
-if pin_active(mc, expires_at, now_iso) then
+if guard_pin and pin_active(mc, expires_at, now_iso) then
+    return 0
+end
+
+if guard_keep_open and (stored_state == 'open' or stored_state == 'half_open') then
     return 0
 end
 
 local updates = {}
-for i = 2, #ARGV do
+for i = 4, #ARGV do
     updates[#updates + 1] = ARGV[i]
 end
 redis.call('HSET', key, unpack(updates))
 return 1
 """
+)
+
+# Stored states the keep-open guard refuses to move (mirrors the Lua above and
+# the in-memory adapter's own guard).
+_NON_CLOSED_STATES = frozenset(
+    {CircuitBreakerStateEnum.OPEN.value, CircuitBreakerStateEnum.HALF_OPEN.value}
 )
 
 
@@ -490,6 +512,7 @@ class RedisCircuitBreakerStateRepository(
         reset_half_open_count: bool = False,
         clear_opened_at: bool = False,
         skip_if_pinned: bool = False,
+        keep_open: bool = False,
     ) -> bool:
         """
         Update circuit breaker state.
@@ -514,6 +537,14 @@ class RedisCircuitBreakerStateRepository(
                 backend has no live Redis client (degraded mode writes to the
                 memory + WAL path, where the "store" is process-local and the
                 check-then-write gap costs nothing).
+            keep_open: If True, the same conditional script (and the same
+                fallback) declines the write when the stored row is ``open``
+                or ``half_open``. A CLOSED write under this guard is declined
+                outright while the backend is degraded: the guard read would
+                answer from process memory, and the WAL would later replay a
+                CLOSED row over a peer's trip. A guarded ``open`` /
+                ``half_open`` write still takes the WAL — it can only make the
+                store more restrictive.
 
         Returns:
             True on success
@@ -549,8 +580,14 @@ class RedisCircuitBreakerStateRepository(
         elif half_open_request_count is not None:
             updates["half_open_request_count"] = str(half_open_request_count)
 
-        if skip_if_pinned:
-            return self._write_unless_pinned(service_name, updates, now.isoformat())
+        if skip_if_pinned or keep_open:
+            return self._write_unless_pinned(
+                service_name,
+                updates,
+                now.isoformat(),
+                skip_if_pinned=skip_if_pinned,
+                keep_open=keep_open,
+            )
 
         return self._backend.hset(self._make_key(service_name), updates)
 
@@ -559,12 +596,16 @@ class RedisCircuitBreakerStateRepository(
         service_name: str,
         updates: dict[str, str],
         now_iso: str,
+        *,
+        skip_if_pinned: bool = True,
+        keep_open: bool = False,
     ) -> bool:
-        """Apply ``updates`` unless the stored row carries an override in force.
+        """Apply ``updates`` unless a requested guard holds against the stored row.
 
-        The store-side half of pin neutrality. On a live Redis the check and
-        the write are one script invocation, so an override taken between them
-        cannot be overwritten.
+        The store-side half of pin neutrality, and of the keep-open rule that
+        stops a snapshot writer from erasing a trip. On a live Redis the check
+        and the write are one script invocation, so an override or a trip
+        taken between them cannot be overwritten.
 
         Every other route falls back to a read-check-write through the backend:
         no client was ever built, the dial was declined because it would have
@@ -576,9 +617,20 @@ class RedisCircuitBreakerStateRepository(
         the row is process-local memory + WAL, so the store-side guard and the
         local re-check below are the same check and the gap costs nothing.
 
+        The one route that neither checks nor writes: a ``keep_open`` CLOSED
+        write while the backend is degraded and a Redis *was* named. The guard
+        read would answer from process memory (``{}`` or a default CLOSED row),
+        and the write would become a WAL record that replays CLOSED over a
+        peer's OPEN once Redis is back. Such a write is declined, never
+        deferred; it is re-checked after the guard read because a failed
+        ``hgetall`` is itself what switches the backend to degraded.
+
         Returns True in both the written and the declined case — the caller
         asked for a write it authorized the store to elide.
         """
+        if self._declines_closed_write_on_degraded_backend(keep_open, updates):
+            return True
+
         # 774 D1/D2: the store-side guard is skipped rather than dialed when
         # the address came from the shipped default and has never answered.
         # This path owns its fallback outright — the read-check-write below
@@ -602,6 +654,8 @@ class RedisCircuitBreakerStateRepository(
                     1,
                     full_key,
                     now_iso,
+                    "1" if skip_if_pinned else "0",
+                    "1" if keep_open else "0",
                     *flattened,
                 )
                 return True
@@ -627,10 +681,58 @@ class RedisCircuitBreakerStateRepository(
                         error=e,
                     )
 
+        return self._guarded_read_check_write(
+            service_name, updates, skip_if_pinned=skip_if_pinned, keep_open=keep_open
+        )
+
+    def _guarded_read_check_write(
+        self,
+        service_name: str,
+        updates: dict[str, str],
+        *,
+        skip_if_pinned: bool,
+        keep_open: bool,
+    ) -> bool:
+        """The fallback for the guarded write: read the row, check, write.
+
+        Both guards are applied against the row the backend answers with. On
+        the unreached-default route that row is the process-local store, so
+        the check-then-write gap costs nothing; everywhere else the degraded
+        decline runs before and after the read, because the guard read itself
+        is the ``hgetall`` that flips the backend to degraded on a blip.
+        """
+        if self._declines_closed_write_on_degraded_backend(keep_open, updates):
+            return True
+
         existing = self.get_state(service_name)
-        if existing is not None and existing.is_pin_active():
+        if existing is not None:
+            if skip_if_pinned and existing.is_pin_active():
+                return True
+            if keep_open and existing.state in _NON_CLOSED_STATES:
+                return True
+
+        if self._declines_closed_write_on_degraded_backend(keep_open, updates):
             return True
         return self._backend.hset(self._make_key(service_name), updates)
+
+    def _declines_closed_write_on_degraded_backend(
+        self, keep_open: bool, updates: dict[str, str]
+    ) -> bool:
+        """Is this a keep-open CLOSED write the degraded store cannot verify?
+
+        True only for the combination that can erase a peer's trip through the
+        WAL: the keep-open guard was requested, the row being written is
+        CLOSED, a Redis was named (on the unreached-default route the process
+        memory *is* the store and the local read-check-write stays exact), and
+        the backend is currently answering from its local fallback.
+        """
+        if not keep_open:
+            return False
+        if updates.get("state") != CircuitBreakerStateEnum.CLOSED.value:
+            return False
+        if self._declining_unreached_default():
+            return False
+        return bool(getattr(self._backend, "is_degraded", False))
 
     def _writing_to_unconfigured_default(self) -> bool:
         """Is this write dialing a Redis address nobody named?
@@ -874,7 +976,7 @@ class RedisCircuitBreakerStateRepository(
 
         if self._declining_unreached_default():
             raise CircuitBreakerStateUnavailableError(
-                operation, "unreached_default_store"
+                operation, UNREACHED_DEFAULT_STORE_REASON
             )
 
         if self._backend.is_degraded and not self._backend.ensure_redis():

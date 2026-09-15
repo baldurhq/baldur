@@ -877,6 +877,10 @@ class ManualControlMixin:
                 reason=new_reason,
                 expires_at=new_expires_at,
             )
+            # The one operator write that changes the row without clearing
+            # the window: move the epoch so a success admitted against the
+            # pre-extension row falls to the slow path and its pin check.
+            self._outcome_window.bump(service_name)
 
             logger.info(
                 "circuit_breaker.extended_manual_override_minutes",

@@ -192,28 +192,43 @@ class TestSafetyValveProviderReadsProtectedTrafficBehavior:
             pattern.count("f") / len(pattern)
         )
 
-    def test_error_rate_reads_zero_after_a_trip_on_the_only_protected_name(
+    def test_error_rate_holds_after_a_trip_on_the_only_protected_name(
         self, shared_breaker_service
     ):
-        """CLOSED → OPEN clears the tripped name's window: the read is 0.0, not 1.0.
+        """CLOSED → OPEN keeps the tripping evidence, then counts every refusal.
 
-        The documented convention — a window with no evidence reads the same
-        as no traffic at all — pinned rather than left to drift.
+        The old convention — the trip cleared the window and the read fell to
+        ``0.0`` while the dependency was down — is the reading that let the
+        valve stand down exactly while its only protected name was cut off.
+        Negative half: the post-trip read is never ``0.0``.
         """
+        threshold = shared_breaker_service.config.failure_threshold
         with (
             patch.object(shared_breaker_service, "_log_circuit_open_audit"),
             patch.object(shared_breaker_service, "_apply_burn_rate_multiplier"),
         ):
-            _drive_protected(
-                "valve-trip", "f" * shared_breaker_service.config.failure_threshold
-            )
+            _drive_protected("valve-trip", "f" * threshold)
 
         assert (
             shared_breaker_service.repository.get_or_create("valve-trip").state
             == "open"
         )
-        assert shared_breaker_service.get_window_evidence("valve-trip") == (0, 0)
-        assert SystemMetricsSafetyValveProvider().get_error_rate() == 0.0
+        assert shared_breaker_service.get_window_evidence("valve-trip") == (
+            threshold,
+            threshold,
+        )
+        assert SystemMetricsSafetyValveProvider().get_error_rate() == 1.0
+
+        # Refused calls while OPEN count as failures too: three admission
+        # attempts the breaker turns away raise the window by three failures.
+        for _ in range(3):
+            assert shared_breaker_service.should_allow("valve-trip") is False
+
+        assert shared_breaker_service.get_window_evidence("valve-trip") == (
+            threshold + 3,
+            threshold + 3,
+        )
+        assert SystemMetricsSafetyValveProvider().get_error_rate() == 1.0
 
 
 class TestSafetyValveWiringBehavior:

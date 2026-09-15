@@ -211,10 +211,14 @@ def get_baldur_queues(
 # Task Routes (321, Q3/Q6)
 # =============================================================================
 
+# Keys are the tasks' registered names. Informational for the recovery lane:
+# a task's own ``queue=`` attribute and a beat entry's ``options.queue``
+# override ``task_routes`` in Celery's router, and the recovery tasks declare
+# ``baldur.critical`` on both, so the route here restates what they carry.
 _CRITICAL_TASK_ROUTES = {
-    "baldur.celery_tasks.execute_recovery_step": "baldur.critical",
-    "baldur.celery_tasks.check_recovery_trigger": "baldur.critical",
-    "baldur.celery_tasks.monitor_recovery_health": "baldur.critical",
+    "baldur.execute_recovery_step": "baldur.critical",
+    "baldur.check_recovery_trigger": "baldur.critical",
+    "baldur.monitor_recovery_health": "baldur.critical",
     "baldur.celery_tasks.check_circuit_breaker_recovery": "baldur.critical",
 }
 
@@ -354,6 +358,16 @@ _SCHEDULE_MODULES = [
         "get_config_apply_beat_schedule",
         "config apply (pending DELAYED/GRACEFUL)",
     ),
+    # Recovery coordination lane: trigger check, health monitor, stale-approval
+    # sweep and session cleanup. Private-path entry — skipped at DEBUG on an
+    # install without the PRO wheel. @shared_task self-registers on this
+    # importlib load, so the lane's tasks resolve wherever it is composed.
+    (
+        "recovery",
+        "baldur_pro.services.coordination.recovery_tasks",
+        "get_recovery_beat_schedule",
+        "recovery coordination lane (PRO)",
+    ),
 ]
 
 # Module-path prefixes of the private distributions. A lane rooted at one of
@@ -420,6 +434,7 @@ def get_baldur_beat_schedule(
     include_postmortem: bool = True,
     include_dlq_maintenance: bool = True,
     include_config_apply: bool = True,
+    include_recovery: bool = True,
     include_legacy: bool = True,
 ) -> dict[str, Any]:
     """Get consolidated Celery Beat schedule for all baldur tasks.
@@ -446,6 +461,11 @@ def get_baldur_beat_schedule(
             eviction / resolved-cleanup / compressed-cleanup entries require an
             installed PRO wheel. ``False`` drops the lane entirely.
         include_config_apply: Include config-apply tasks (pending DELAYED/GRACEFUL)
+        include_recovery: Compose the recovery coordination lane (PRO): the
+            recovery trigger check, the mid-recovery health monitor, the
+            stale-approval sweep and session cleanup. Composed only where the
+            PRO distribution is installed; ``False`` keeps automatic staged
+            recovery off the schedule entirely.
         include_legacy: Include legacy tasks from adapters/celery/tasks.py
 
     Returns:
@@ -480,6 +500,7 @@ def get_baldur_beat_schedule(
         "postmortem": include_postmortem,
         "dlq_maintenance": include_dlq_maintenance,
         "config_apply": include_config_apply,
+        "recovery": include_recovery,
     }
 
     schedule: dict[str, Any] = {}
@@ -539,6 +560,7 @@ def configure_baldur_celery(
     include_postmortem: bool = True,
     include_dlq_maintenance: bool = True,
     include_config_apply: bool = True,
+    include_recovery: bool = True,
     include_legacy: bool = True,
     queue_prefix: str = "",
     queue_type: str = "quorum",
@@ -579,6 +601,7 @@ def configure_baldur_celery(
         include_postmortem=include_postmortem,
         include_dlq_maintenance=include_dlq_maintenance,
         include_config_apply=include_config_apply,
+        include_recovery=include_recovery,
         include_legacy=include_legacy,
     )
 

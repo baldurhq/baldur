@@ -140,6 +140,7 @@ class TestL2SyncSingleSubmit:
             opened_at=state.opened_at,
             clear_opened_at=state.opened_at is None,
             skip_if_pinned=True,
+            keep_open=True,
         )
         assert repo._metrics["l2_sync_success_count"] == 1
 

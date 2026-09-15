@@ -10,9 +10,23 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+### Added
+
+- `get_aggregate_failure_evidence()` returns the calls the system-wide rate was measured over.
+- The recovery coordination lane is composed by default (`include_recovery=False` opts out).
+
 ### Changed
 
 - Self-DDoS protection is off by default (`BALDUR_CB_SELF_DDOS_PROTECTION_ENABLED`).
+- The system-wide failure rate counts refused calls, and a tripped breaker until it closes.
+- `get_aggregate_failure_rate()` raises when the shared breaker store cannot be read.
+- A 429-cascade trip under `protect(retry=True)` is decided after the call, with its evidence.
+
+### Fixed
+
+- A success recorded during a concurrent trip no longer erases the trip (`keep_open`).
+- A worker's CLOSED mirror no longer overwrites a peer's OPEN row in the shared store.
+- A hinted success no longer skips the consecutive-failure reset after an interleaved failure.
 
 ## [1.13.2] - 2026-09-15
 

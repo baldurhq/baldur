@@ -102,11 +102,14 @@ class TestOutboundObservationScopeBehavior:
     def test_note_429_records_the_cascade_on_the_service_the_scope_carries(
         self, cb_service
     ):
-        """A scope opened for a private breaker trips that breaker, not the shared one.
+        """A scope opened for a private breaker counts on that breaker, not the shared one.
 
         The opening stage's service is where the call's evidence lives; a
-        cascade recorded on the shared service would read a window for a name
-        it never saw and clear it while the private one kept stale evidence.
+        cascade observed on the shared service would read a window for a name
+        it never saw while the private one kept stale evidence. An inner
+        stage counts only — the cascade is evaluated once by the opening
+        breaker after it records the call, so the observation half alone runs
+        here.
         """
         own_service = MagicMock(spec=CircuitBreakerService)
         scope = OutboundObservationScope("payment", service=own_service)
@@ -114,8 +117,10 @@ class TestOutboundObservationScopeBehavior:
         scope.note_429(retry_after=30.0)
 
         assert scope.rate_limited == 1
-        own_service.record_rate_limit_response.assert_called_once_with("payment")
-        cb_service.record_rate_limit_response.assert_not_called()
+        own_service.record_rate_limit_observation.assert_called_once_with("payment")
+        own_service.record_rate_limit_response.assert_not_called()
+        own_service.evaluate_rate_limit_cascade.assert_not_called()
+        cb_service.record_rate_limit_observation.assert_not_called()
 
     def test_note_attempt_counts_the_call_and_writes_the_denominator(self, tracker):
         """One attempt is one request on the cascade rate's denominator.
@@ -155,7 +160,7 @@ class TestOutboundObservationScopeBehavior:
         scope.note_429(retry_after=30.0)
 
         assert scope.rate_limited == 1
-        cb_service.record_rate_limit_response.assert_called_once_with("payment")
+        cb_service.record_rate_limit_observation.assert_called_once_with("payment")
         coordinator.on_rate_limited.assert_not_called()
 
     def test_note_429_writes_no_request_of_its_own(self, cb_service, tracker):
@@ -282,8 +287,8 @@ class TestObservationScopeLifecycleBehavior:
         finally:
             close_scope(token)
 
-        own_service.record_rate_limit_response.assert_called_once_with("payment")
-        cb_service.record_rate_limit_response.assert_not_called()
+        own_service.record_rate_limit_observation.assert_called_once_with("payment")
+        cb_service.record_rate_limit_observation.assert_not_called()
 
     def test_a_nested_scope_restores_the_outer_one_untouched(self):
         """A nested protected call gets its own record and never steals the outer.
@@ -563,7 +568,7 @@ class TestObservationScopeIgnoreListBehavior:
 
         scope.note_429(30.0, _IgnoredClientError("429 too many requests"))
 
-        cb_service.record_rate_limit_response.assert_not_called()
+        cb_service.record_rate_limit_observation.assert_not_called()
         assert scope.rate_limited == 0
 
     def test_a_counted_exception_records_the_cascade(self, cb_service):
@@ -572,7 +577,7 @@ class TestObservationScopeIgnoreListBehavior:
 
         scope.note_429(30.0, RuntimeError("429 too many requests"))
 
-        cb_service.record_rate_limit_response.assert_called_once_with("payment")
+        cb_service.record_rate_limit_observation.assert_called_once_with("payment")
         assert scope.rate_limited == 1
 
     def test_a_returned_response_is_never_filtered(self, cb_service):
@@ -581,7 +586,7 @@ class TestObservationScopeIgnoreListBehavior:
 
         scope.note_429(None, type("FakeResponse", (), {"status_code": 429})())
 
-        cb_service.record_rate_limit_response.assert_called_once_with("payment")
+        cb_service.record_rate_limit_observation.assert_called_once_with("payment")
 
     def test_a_subjectless_note_is_never_filtered(self, cb_service):
         """A caller without the outcome in hand keeps the pre-filter behaviour."""
@@ -589,14 +594,14 @@ class TestObservationScopeIgnoreListBehavior:
 
         scope.note_429(None)
 
-        cb_service.record_rate_limit_response.assert_called_once_with("payment")
+        cb_service.record_rate_limit_observation.assert_called_once_with("payment")
 
     def test_a_scope_without_a_predicate_counts_every_exception(self, cb_service):
         scope = OutboundObservationScope("payment")
 
         scope.note_429(None, _IgnoredClientError("429 too many requests"))
 
-        cb_service.record_rate_limit_response.assert_called_once_with("payment")
+        cb_service.record_rate_limit_observation.assert_called_once_with("payment")
 
     def test_open_scope_publishes_the_predicate_to_the_inner_stages(self):
         """The predicate reaches the stages that read the scope off the ContextVar."""

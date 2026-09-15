@@ -419,7 +419,7 @@ class TestTripSurvivesConcurrentMirrorBehavior:
         written_states: list[str] = []
         state_lock = threading.Lock()
 
-        def _held_inline(service_name, state, skip_if_pinned=False):
+        def _held_inline(service_name, state, skip_if_pinned=False, keep_open=False):
             """Hold the first mirror write between its read and its write.
 
             That is the exact interleaving the fix targets: the row was
@@ -430,7 +430,9 @@ class TestTripSurvivesConcurrentMirrorBehavior:
                 assert release_write.wait(timeout=10)
             with state_lock:
                 written_states.append(state.state)
-            return original_inline(service_name, state, skip_if_pinned=skip_if_pinned)
+            return original_inline(
+                service_name, state, skip_if_pinned=skip_if_pinned, keep_open=keep_open
+            )
 
         executor = ThreadPoolExecutor(max_workers=2)
         try:

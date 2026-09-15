@@ -78,6 +78,28 @@ class ProtectionMixin:
         If a rate limit cascade is detected (too many 429s in a short window),
         the circuit breaker will automatically open to prevent self-DDoS.
 
+        Observe-and-evaluate in one call, for a caller with no breaker stage
+        of its own. A breaker stage composed over a retry stage splits the
+        two: every attempt's 429 is *observed* (``record_rate_limit_observation``)
+        as it happens, and the cascade is *evaluated* once
+        (``evaluate_rate_limit_cascade``) after the breaker has classified and
+        recorded the whole call — so the evidence pair a cascade trip carries
+        holds the tripping call, never one short of it.
+
+        Args:
+            service_name: Name of the external service
+
+        Returns:
+            CircuitBreakerResult if circuit was opened, None otherwise
+        """
+        if not self.is_enabled:
+            return None
+        self.record_rate_limit_observation(service_name)
+        return self.evaluate_rate_limit_cascade(service_name)
+
+    def record_rate_limit_observation(self, service_name: str) -> None:
+        """Count one observed 429 against the cascade detector, without deciding.
+
         This is the single writer of the tracker's 429 counter: every
         observation site reaches it through here, so no downstream answer is
         counted twice by two writers disagreeing about who owns it. The
@@ -86,6 +108,28 @@ class ProtectionMixin:
         made would otherwise have it counted twice, capping the rate at 50%
         in a pure storm and putting the top half of the setting's range out of
         reach.
+
+        The tracker is not cleared on a breaker transition: its evidence is
+        time-bounded by the cascade window, and a 429 storm inside that window
+        is still a storm after a close.
+
+        Args:
+            service_name: Name of the external service
+        """
+        if not self.is_enabled:
+            return
+        get_rate_limit_tracker().record_rate_limit(service_name)
+
+    def evaluate_rate_limit_cascade(
+        self, service_name: str
+    ) -> CircuitBreakerResult | None:
+        """Decide whether the observed 429s amount to a cascade, and trip if so.
+
+        Reads the tracker's counts over the cascade window and, when the
+        hybrid condition holds, takes the automatic trip primitive behind the
+        pin, observe-only and freeze gates. Called once per protected call by
+        the breaker stage after it has recorded the call's outcome, or
+        directly by ``record_rate_limit_response``.
 
         Args:
             service_name: Name of the external service
@@ -104,7 +148,6 @@ class ProtectionMixin:
         cfg = self.get_effective_config(service_name)
 
         tracker = get_rate_limit_tracker()
-        tracker.record_rate_limit(service_name)
 
         # Hybrid cascade condition: absolute floor AND minimum sample AND rate threshold
         window = cfg.rate_limit_cascade_window_seconds

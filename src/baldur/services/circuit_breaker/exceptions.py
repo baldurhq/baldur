@@ -9,6 +9,11 @@ from __future__ import annotations
 from baldur.core.exceptions import CircuitBreakerError
 from baldur.interfaces.resilience_policy import PolicyRejectedException
 
+# The one ``CircuitBreakerStateUnavailableError`` reason that is not a failure:
+# nobody named a shared store, so the process's own view is the cluster view.
+# Raised by the Redis adapter's cluster read; read by the aggregate consumer.
+UNREACHED_DEFAULT_STORE_REASON = "unreached_default_store"
+
 
 class CircuitBreakerOpenError(PolicyRejectedException, CircuitBreakerError):
     """Raised when a request is rejected because the Circuit Breaker is OPEN.

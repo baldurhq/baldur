@@ -38,6 +38,7 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 __all__ = [
+    "AggregateFailureEvidence",
     "CircuitState",
     "CircuitBreakerConfig",
     "CircuitBreakerDecision",
@@ -570,10 +571,58 @@ class CircuitBreakerDecision:
 
     ``frozen=True, slots=True`` keeps allocation cost identical to a tuple
     while preserving named-attribute access at call sites.
+
+    ``window_epoch`` is the outcome window's epoch for the name at the moment
+    a CLOSED admission was taken. A success recorded with this hint takes the
+    read-free fast path only while the epoch still matches — a failure write,
+    a clear or an observed transition in between moves it, and the success
+    then takes the slow path's fresh read instead of being appended to a name
+    that may no longer be CLOSED.
     """
 
     allowed: bool
     state: CircuitBreakerStateData
+    window_epoch: int = 0
+
+
+# =============================================================================
+# Aggregate Evidence
+# =============================================================================
+
+
+@dataclass(frozen=True, slots=True)
+class AggregateFailureEvidence:
+    """What the system-wide circuit-breaker failure rate was measured over.
+
+    Returned by ``CircuitBreakerService.get_aggregate_failure_evidence``. The
+    rate alone cannot say whether ``0.0`` is a healthy reading or an empty
+    one, so the evidence carries its denominator: a consumer renders "no
+    protected calls observed" when ``total_calls`` is zero instead of
+    treating the rate as a measurement.
+
+    Attributes:
+        failures: Calls that did not succeed — failed CLOSED calls, calls the
+            breaker refused while open or half-open, and the floor applied for
+            a tripped dependency whose evidence this process does not hold.
+        total_calls: Every call counted, successes included.
+        open_circuits: Names counted as open or half-open in this reading.
+        fleet_read: True when the open set came from the shared store, so the
+            reading covers breakers tripped in other workers; False for a
+            process-only reading, or when no shared store was ever named and
+            this process's view is the cluster.
+    """
+
+    failures: int
+    total_calls: int
+    open_circuits: int
+    fleet_read: bool
+
+    @property
+    def rate(self) -> float:
+        """Failure fraction 0.0-1.0; ``0.0`` over zero calls is an observed zero."""
+        if self.total_calls == 0:
+            return 0.0
+        return self.failures / self.total_calls
 
 
 # =============================================================================

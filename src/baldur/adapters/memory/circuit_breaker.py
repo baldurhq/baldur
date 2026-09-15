@@ -46,6 +46,12 @@ from baldur.interfaces.repositories import (
 
 logger = structlog.get_logger()
 
+# Row states the automatic transition machinery owns: a ``keep_open`` write
+# never moves a row out of them.
+_NON_CLOSED_STATES = frozenset(
+    {CircuitBreakerStateEnum.OPEN.value, CircuitBreakerStateEnum.HALF_OPEN.value}
+)
+
 
 def _pin_is_active(state: CircuitBreakerStateData) -> bool:
     """Whether the manual override on this row is still in force.
@@ -215,12 +221,14 @@ class InMemoryCircuitBreakerStateRepository(CircuitBreakerStateRepository):
         reset_half_open_count: bool = False,
         clear_opened_at: bool = False,
         skip_if_pinned: bool = False,
+        keep_open: bool = False,
     ) -> bool:
         """Update circuit breaker state.
 
-        ``clear_opened_at`` and ``skip_if_pinned`` are both evaluated inside the
-        single lock hold that performs the write, so neither can be decided
-        against a row an operator replaced in between.
+        ``clear_opened_at``, ``skip_if_pinned`` and ``keep_open`` are all
+        evaluated inside the single lock hold that performs the write, so none
+        can be decided against a row an operator or a concurrent trip replaced
+        in between.
         """
         with self._lock:
             entry = self._storage.get(service_name)
@@ -229,6 +237,12 @@ class InMemoryCircuitBreakerStateRepository(CircuitBreakerStateRepository):
             if skip_if_pinned and _pin_is_active(entry):
                 # Declined by contract, not failed: the caller counts this as a
                 # successful write it was asked to elide.
+                return True
+            if keep_open and entry.state in _NON_CLOSED_STATES:
+                # The stored row is a trip (or a trial) this writer's snapshot
+                # predates; the automatic machinery owns it and only a close
+                # primitive or an operator may move it. Declined, same as the
+                # pin guard.
                 return True
 
             if reset_half_open_count:

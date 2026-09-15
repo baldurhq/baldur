@@ -83,6 +83,7 @@ class TestInlineSyncBehavior:
             opened_at=None,
             clear_opened_at=True,
             skip_if_pinned=False,
+            keep_open=False,
         )
         mock_success.assert_called_once()
 

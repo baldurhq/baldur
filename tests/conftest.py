@@ -1372,6 +1372,49 @@ def _recovery_gate_metrics_bypass(request):
         yield
 
 
+@pytest.fixture(autouse=True)
+def _recovery_step_dispatch_bypass(request):
+    """Neutralise the recovery coordinator's Celery step dispatch for unit tests.
+
+    Every started recovery session dispatches its first step through the
+    coordinator's step dispatcher, whose default publishes to the Celery
+    broker. Unit tests build real coordinators and start real sessions with
+    no broker running, so the default would spend Celery's whole publish
+    retry on a refused connection for every session a test starts and then
+    mark the session ``step_dispatch_failed``.
+
+    Patch the module-level default dispatcher (the coordinator resolves it
+    at dispatch time, so coordinators built earlier are covered too) with a
+    no-op. Tests that inject their own ``step_dispatcher`` bypass it
+    entirely, and tests that patch the task's ``.delay`` / ``.apply_async``
+    see nothing here because the default dispatcher is what calls those.
+
+    Opt-out: @pytest.mark.recovery_dispatch_live, for a test that drives the
+    real Celery publish (against a throwaway app or a running broker).
+
+    No-op when baldur_pro is absent (OSS-only checkout).
+    """
+    if "recovery_dispatch_live" in {m.name for m in request.node.iter_markers()}:
+        yield
+        return
+
+    try:
+        from baldur_pro.services.coordination.recovery_coordinator import (
+            coordinator as _coordinator_module,
+        )
+    except ImportError:
+        yield
+        return
+
+    from unittest.mock import patch
+
+    def _no_dispatch(session_id: str, namespace: str, countdown: int) -> None:
+        return None
+
+    with patch.object(_coordinator_module, "dispatch_step_via_celery", _no_dispatch):
+        yield
+
+
 # =============================================================================
 # Logging State Isolation (session + function scope)
 # =============================================================================
