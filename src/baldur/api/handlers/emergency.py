@@ -225,12 +225,20 @@ def emergency_release(ctx: RequestContext) -> ResponseContext:
             force=force,
         )
     except RecoveryNotAllowedError as e:
+        # getattr with defaults: an older PRO exception carries neither field.
         return ResponseContext.json(
             {
                 "success": False,
                 "error": "recovery_blocked",
                 "message": str(e),
-                "hint": "Use force=true to override the recovery gate.",
+                "check_reason": getattr(e, "check_reason", ""),
+                "open_breakers": list(getattr(e, "open_breakers", ())),
+                "hint": (
+                    "The gate refused for the reason above. Fix the cause and "
+                    "retry, start a gradual recovery "
+                    "(POST /emergency/gradual-recovery/) to step down as the "
+                    "metrics allow, or pass force=true to bypass every check."
+                ),
             },
             status_code=409,
         )

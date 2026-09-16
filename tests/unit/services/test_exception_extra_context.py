@@ -145,7 +145,7 @@ class TestEmergencyStateErrorExtraContextContract:
 
 
 class TestRecoveryNotAllowedErrorExtraContextContract:
-    """RecoveryNotAllowedError.extra_context() returns check_reason."""
+    """RecoveryNotAllowedError.extra_context() returns check_reason and open_breakers."""
 
     @pytest.fixture(autouse=True)
     def _require_pro(self):
@@ -163,7 +163,7 @@ class TestRecoveryNotAllowedErrorExtraContextContract:
         )
         ctx = err.extra_context()
 
-        assert ctx == {"check_reason": "error rate too high"}
+        assert ctx == {"check_reason": "error rate too high", "open_breakers": []}
 
     def test_extra_context_defaults_to_empty_string(self):
         """extra_context returns empty check_reason when not provided."""
@@ -172,7 +172,7 @@ class TestRecoveryNotAllowedErrorExtraContextContract:
         )
 
         err = RecoveryNotAllowedError("test")
-        assert err.extra_context() == {"check_reason": ""}
+        assert err.extra_context() == {"check_reason": "", "open_breakers": []}
 
     def test_inherits_from_emergency_mode_error(self):
         """RecoveryNotAllowedError inherits from EmergencyModeError."""

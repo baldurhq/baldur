@@ -60,7 +60,8 @@ class RecoveryGateConfig(SerializableMixin):
     """Metric re-check cadence during recovery (seconds)."""
 
     auto_rollback_on_failure: bool = True
-    """Whether to roll back automatically when recovery fails."""
+    """Whether a failed mid-walk metrics check stops the gradual recovery and
+    holds the current level. The name is historical: no level is restored."""
 
     @classmethod
     def from_settings(cls) -> RecoveryGateConfig:

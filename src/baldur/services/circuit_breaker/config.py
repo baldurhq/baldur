@@ -600,6 +600,13 @@ class AggregateFailureEvidence:
     protected calls observed" when ``total_calls`` is zero instead of
     treating the rate as a measurement.
 
+    The evidence also carries the **tripped share**: the part of the totals
+    that names with a non-CLOSED breaker contributed. While an emergency
+    level holds breakers open, those names cannot recover and their refusals
+    cannot stop, so a consumer deciding the one step that lifts the hold
+    compares ``measurable_rate`` — the rate over the names the hold does not
+    cover — and names the rest.
+
     Attributes:
         failures: Calls that did not succeed — failed CLOSED calls, calls the
             breaker refused while open or half-open, and the floor applied for
@@ -610,12 +617,23 @@ class AggregateFailureEvidence:
             reading covers breakers tripped in other workers; False for a
             process-only reading, or when no shared store was ever named and
             this process's view is the cluster.
+        tripped_failures: The part of ``failures`` that tripped names
+            contributed — each such name's window after its floor was applied.
+        tripped_calls: The part of ``total_calls`` those names contributed.
+        tripped_names: The tripped names, sorted: every name counted as open
+            or half-open, plus a name whose row in this process is open or
+            half-open under no operator override even where the shared store
+            already reads it pinned — this process still refuses on its own
+            row.
     """
 
     failures: int
     total_calls: int
     open_circuits: int
     fleet_read: bool
+    tripped_failures: int = 0
+    tripped_calls: int = 0
+    tripped_names: tuple[str, ...] = ()
 
     @property
     def rate(self) -> float:
@@ -623,6 +641,24 @@ class AggregateFailureEvidence:
         if self.total_calls == 0:
             return 0.0
         return self.failures / self.total_calls
+
+    @property
+    def measurable_calls(self) -> int:
+        """Calls counted on names no tripped breaker holds."""
+        return self.total_calls - self.tripped_calls
+
+    @property
+    def measurable_rate(self) -> float | None:
+        """Failure fraction over the names no tripped breaker holds.
+
+        ``None`` over zero measurable calls: unlike ``rate``, whose ``0.0``
+        travels with ``total_calls``, this value is read where a pass on no
+        evidence would lift a hold, so an empty reading is not a number.
+        """
+        measurable = self.measurable_calls
+        if measurable == 0:
+            return None
+        return (self.failures - self.tripped_failures) / measurable
 
 
 # =============================================================================

@@ -864,9 +864,20 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
           dependency another worker cut off counts as a handful of failed
           calls however busy it was there.
 
-        A row under an operator's override in force is excluded from the
-        floor: a Block is the operator's decision about traffic, not an
-        observation about the dependency.
+        A name under an operator's override in force — on this process's row
+        or on the shared store's — is excluded from the floor: a Block is the
+        operator's decision about traffic, not an observation about the
+        dependency, and the shared store is where a force lands first. The
+        pin drops the floor only; the name's window stays counted.
+
+        The evidence also carries the **tripped share** — ``tripped_failures``
+        / ``tripped_calls`` / ``tripped_names``: the part of the totals that
+        the floored names contributed, plus any name whose row in this
+        process is open or half-open under no override of its own (this
+        process refuses on that row whatever the shared store's pin says).
+        A consumer deciding the one emergency step that lets held breakers
+        probe again compares ``measurable_rate``, the rate without that
+        share, and names what it left out.
 
         Evidence comes from **this service object's** outcome windows. The
         process-shared instance — the runtime singleton
@@ -928,11 +939,13 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
         failures = 0
         total_calls = 0
         open_circuits = 0
+        tripped_failures = 0
+        tripped_calls = 0
+        tripped_names: list[str] = []
         for name in set(per_name) | set(local_rows) | set(cluster_rows):
             window_failures, window_total = per_name.get(name, (0, 0))
-            tripped_row = self._tripped_row(
-                local_rows.get(name), cluster_rows.get(name)
-            )
+            local_row = local_rows.get(name)
+            tripped_row = self._tripped_row(local_row, cluster_rows.get(name))
             if tripped_row is not None:
                 floor = max(
                     tripped_row.failure_count,
@@ -942,6 +955,14 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
                 window_total += lifted - window_failures
                 window_failures = lifted
                 open_circuits += 1
+            # The tripped share covers the floored set and every name this
+            # process refuses on its own row: admission answers on the L1 row
+            # before any shared-store read, so a peer's pin the mirror has not
+            # heard of changes nothing about the refusals recorded here.
+            if tripped_row is not None or self._held_on_own_row(local_row):
+                tripped_failures += window_failures
+                tripped_calls += window_total
+                tripped_names.append(name)
             failures += window_failures
             total_calls += window_total
 
@@ -950,6 +971,9 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
             total_calls=total_calls,
             open_circuits=open_circuits,
             fleet_read=fleet_read,
+            tripped_failures=tripped_failures,
+            tripped_calls=tripped_calls,
+            tripped_names=tuple(sorted(tripped_names)),
         )
 
     @staticmethod
@@ -962,16 +986,31 @@ class CircuitBreakerService(EventEmitterMixin, ProtectionMixin, ManualControlMix
         This process's own row decides when it is open or half-open (its
         ``failure_count`` is what this process knows about the trip); the
         shared store's row decides otherwise, so a trip a peer committed that
-        this process has not hydrated still counts. A row under an operator's
-        override in force is not a trip.
+        this process has not hydrated still counts. A name under an
+        operator's override in force on either row is not a trip: a force
+        lands in the shared store before every worker's mirror has seen it,
+        and a mirror that has not heard of it is not evidence.
         """
-        for row in (local_row, cluster_row):
-            if row is None or row.state not in _NON_CLOSED_STATES:
-                continue
-            if is_manual_pin_active(row):
-                return None
-            return row
+        rows = [row for row in (local_row, cluster_row) if row is not None]
+        if any(is_manual_pin_active(row) for row in rows):
+            return None
+        for row in rows:
+            if row.state in _NON_CLOSED_STATES:
+                return row
         return None
+
+    @staticmethod
+    def _held_on_own_row(local_row: CircuitBreakerStateData | None) -> bool:
+        """Whether this process refuses the name on its own non-CLOSED row.
+
+        An override in force on that row is the operator's decision, not a
+        hold — the row refuses as a Block and records nothing.
+        """
+        return (
+            local_row is not None
+            and local_row.state in _NON_CLOSED_STATES
+            and not is_manual_pin_active(local_row)
+        )
 
     def get_aggregate_failure_rate(self, *, fleet: bool = True) -> float:
         """Return the system-wide circuit-breaker failure fraction (0.0-1.0).

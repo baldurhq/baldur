@@ -795,7 +795,10 @@
               help: "Recorded in the audit trail." },
             { key: "force", label: "Force release", type: "checkbox",
               caption: "Bypass the recovery gate",
-              help: "If recovery rules block the release, force it through. Use with care." }
+              help: "Bypasses every recovery check. Read the refusal first: at LEVEL_3 a "
+                + "breaker the level holds open cannot recover until the level drops — "
+                + "start a Gradual recovery below (its first step lifts the hold) or "
+                + "force-close that breaker from the Circuit Breakers panel." }
           ] },
         { label: "Gradual recovery", path: "/emergency/gradual-recovery",
           method: "POST", risk: "admin",
@@ -803,7 +806,9 @@
             { key: "target_level", label: "Target level", type: "select",
               default: "NORMAL",
               help: "Ramp traffic back up toward this level in stages instead of "
-                + "all at once (requires an active emergency).",
+                + "all at once (requires an active emergency). From LEVEL_3 this is "
+                + "the gated way down: the first step, to LEVEL_2, lets held breakers "
+                + "probe again.",
               options: [
                 { value: "NORMAL", label: "NORMAL — full recovery (all traffic restored)" },
                 { value: "LEVEL_1", label: "LEVEL_1 — partial: standard restored, non-essential stays blocked" },

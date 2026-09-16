@@ -13,6 +13,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 ### Added
 
 - `get_aggregate_failure_evidence()` returns the calls the system-wide rate was measured over.
+- `AggregateFailureEvidence` carries the tripped share and the names of open breakers.
 - The recovery coordination lane is composed by default (`include_recovery=False` opts out).
 
 ### Changed
@@ -27,6 +28,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 - A success recorded during a concurrent trip no longer erases the trip (`keep_open`).
 - A worker's CLOSED mirror no longer overwrites a peer's OPEN row in the shared store.
 - A hinted success no longer skips the consecutive-failure reset after an interleaved failure.
+- A refused emergency release names the open breakers and the gated exit instead of steering to `force=true`.
+- A breaker pinned in the shared store is excluded from the system-wide rate even where a worker's mirror still reads OPEN.
 
 ## [1.13.2] - 2026-09-15
 

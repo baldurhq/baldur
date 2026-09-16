@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 __all__ = [
+    "FREEZE_LEVEL",
     "FreezeModeManager",
     "FreezeReason",
     "get_freeze_mode_manager",
