@@ -16,7 +16,6 @@ exists to prevent.
 from __future__ import annotations
 
 import time
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -27,6 +26,8 @@ from baldur.core.execution_mode import (
     clear_execution_mode_override,
     set_execution_mode,
 )
+from baldur.interfaces.repositories import CircuitBreakerStateData
+from baldur.services.circuit_breaker.config import CircuitBreakerDecision
 from baldur.services.circuit_breaker.policy import CircuitBreakerPolicy
 from baldur.services.circuit_breaker.rate_limit_observation import (
     close_scope,
@@ -219,7 +220,7 @@ class TestRetryObservationScopeBehavior:
         _policy(max_attempts=3).execute(throttled_then_ok)
 
         assert scope.rate_limited == 2
-        assert cascade_service.record_rate_limit_response.call_count == 2
+        assert cascade_service.record_rate_limit_observation.call_count == 2
 
     def test_a_call_with_no_scope_counts_nothing_and_does_not_raise(self, observation):
         """A bare ``@retry`` has no breaker to trip, so it creates no record."""
@@ -229,7 +230,7 @@ class TestRetryObservationScopeBehavior:
 
         assert result.value == "ok"
         tracker.record_request.assert_not_called()
-        cascade_service.record_rate_limit_response.assert_not_called()
+        cascade_service.record_rate_limit_observation.assert_not_called()
 
 
 # =============================================================================
@@ -274,7 +275,7 @@ class TestRetryResultBorne429Behavior:
 
         assert scope.rate_limited == expected_observations
         assert (
-            cascade_service.record_rate_limit_response.call_count
+            cascade_service.record_rate_limit_observation.call_count
             == expected_observations
         )
 
@@ -371,7 +372,7 @@ class TestRetryExhaustionMarkBehavior:
         ).execute(lambda: _response(429))
 
         assert scope.rate_limited == 2
-        assert cascade_service.record_rate_limit_response.call_count == 2
+        assert cascade_service.record_rate_limit_observation.call_count == 2
 
 
 # =============================================================================
@@ -387,8 +388,9 @@ def _admitting_breaker(**policy_kwargs) -> CircuitBreakerPolicy:
     """A breaker stage that admits every call, wrapping a stubbed service."""
     cb = MagicMock(spec=CircuitBreakerService)
     cb.is_enabled = True
-    cb.should_allow_with_state.return_value = SimpleNamespace(
-        allowed=True, state=SimpleNamespace(state="closed")
+    cb.should_allow_with_state.return_value = CircuitBreakerDecision(
+        allowed=True,
+        state=CircuitBreakerStateData(service_name="payment", state="closed"),
     )
     return CircuitBreakerPolicy(service_name="payment", cb_service=cb, **policy_kwargs)
 
@@ -412,7 +414,7 @@ class TestRetryObservationIgnoreListBehavior:
 
         breaker.execute(lambda: retry.execute(raise_429))
 
-        breaker.cb_service.record_rate_limit_response.assert_not_called()
+        breaker.cb_service.record_rate_limit_observation.assert_not_called()
 
     def test_the_same_storm_feeds_the_cascade_without_the_ignore_list(
         self, observation
@@ -431,8 +433,12 @@ class TestRetryObservationIgnoreListBehavior:
 
         breaker.execute(lambda: retry.execute(raise_429))
 
-        assert breaker.cb_service.record_rate_limit_response.call_count == 2
-        shared_service.record_rate_limit_response.assert_not_called()
+        assert breaker.cb_service.record_rate_limit_observation.call_count == 2
+        breaker.cb_service.evaluate_rate_limit_cascade.assert_called_once_with(
+            "payment"
+        )
+        shared_service.record_rate_limit_observation.assert_not_called()
+        shared_service.evaluate_rate_limit_cascade.assert_not_called()
 
     def test_the_ignored_attempts_still_count_as_requests(self, observation):
         """The denominator is unfiltered: the breaker frame counts them too."""

@@ -2169,10 +2169,13 @@ class TestRateLimitAwareDecoratorRaised429Behavior:
         cb_service.record_failure.assert_called_once()
         # The cascade half is the decorator's too: the mark it leaves stops the
         # breaker frame noting the 429, so nobody else can count it. It lands
-        # on the breaker's own service, which the scope carries.
+        # on the breaker's own service, which the scope carries; the breaker
+        # that opened the scope decides the cascade once, after the record.
         assert seen["scope"].rate_limited == 1
-        cb_service.record_rate_limit_response.assert_called_once_with("k")
-        shared_service.record_rate_limit_response.assert_not_called()
+        cb_service.record_rate_limit_observation.assert_called_once_with("k")
+        cb_service.evaluate_rate_limit_cascade.assert_called_once_with("k")
+        shared_service.record_rate_limit_observation.assert_not_called()
+        shared_service.evaluate_rate_limit_cascade.assert_not_called()
 
     @_DECORATED_SURFACES
     def test_a_returning_client_under_a_breaker_frame_feeds_the_cascade_once(
@@ -2232,8 +2235,10 @@ class TestRateLimitAwareDecoratorRaised429Behavior:
         singleton.assert_not_called()
         assert seen["scope"].rate_limited == 1
         assert seen["scope"].rate_limited != 0
-        cb_service.record_rate_limit_response.assert_called_once_with("k")
-        shared_service.record_rate_limit_response.assert_not_called()
+        cb_service.record_rate_limit_observation.assert_called_once_with("k")
+        cb_service.evaluate_rate_limit_cascade.assert_called_once_with("k")
+        shared_service.record_rate_limit_observation.assert_not_called()
+        shared_service.evaluate_rate_limit_cascade.assert_not_called()
 
 
 class TestRateLimitAwareAsyncDecoratorCascadeNoteBehavior:
@@ -2258,7 +2263,7 @@ class TestRateLimitAwareAsyncDecoratorCascadeNoteBehavior:
     def test_the_cascade_note_runs_off_the_loop_thread(
         self, coordinator_no_jitter_no_debounce, shape
     ):
-        """``record_rate_limit_response`` is reached from a thread that is not the loop's."""
+        """``record_rate_limit_observation`` is reached from a thread that is not the loop's."""
         from baldur.services.circuit_breaker.rate_limit_observation import (
             close_scope,
             open_scope,
@@ -2268,7 +2273,7 @@ class TestRateLimitAwareAsyncDecoratorCascadeNoteBehavior:
 
         cascade_service = MagicMock(spec=CircuitBreakerService)
         seen_threads: list[threading.Thread] = []
-        cascade_service.record_rate_limit_response.side_effect = lambda *_a, **_k: (
+        cascade_service.record_rate_limit_observation.side_effect = lambda *_a, **_k: (
             seen_threads.append(threading.current_thread())
         )
         error = Exception("429 too many requests")

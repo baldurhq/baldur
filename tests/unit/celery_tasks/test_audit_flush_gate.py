@@ -122,6 +122,7 @@ class TestDrainGateEarlyExit:
                 include_dlq_maintenance=False,
                 include_config_apply=False,
                 include_legacy=False,
+                include_recovery=False,
                 # include_audit_flush=None resolves from the gate (OFF)
             )
 

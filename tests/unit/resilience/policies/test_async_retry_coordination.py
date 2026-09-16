@@ -974,10 +974,15 @@ class TestObservationScopePropagationBehavior:
         assert breaker_hop.hopped("_on_failure") is True
         # ... and, reading the same scope there, counted no third 429 and
         # installed no cooldown of its own. Both cascade notes land on the
-        # breaker's own service, which the scope carries; the shared one is
-        # never asked.
-        assert breaker.cb_service.record_rate_limit_response.call_count == 2
-        shared_service.record_rate_limit_response.assert_not_called()
+        # breaker's own service, which the scope carries, and that breaker
+        # decides the cascade once after the record; the shared one is never
+        # asked.
+        assert breaker.cb_service.record_rate_limit_observation.call_count == 2
+        breaker.cb_service.evaluate_rate_limit_cascade.assert_called_once_with(
+            "payment"
+        )
+        shared_service.record_rate_limit_observation.assert_not_called()
+        shared_service.evaluate_rate_limit_cascade.assert_not_called()
         assert coordinator.aon_rate_limited.await_count == 2
         singleton.assert_not_called()
         assert tracker.record_request.call_count == 2

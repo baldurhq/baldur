@@ -592,7 +592,7 @@ class TestBridgeAfterCallbackBehavior:
         )
 
         assert scope.rate_limited == 1
-        cascade_service.record_rate_limit_response.assert_called_once_with("payment")
+        cascade_service.record_rate_limit_observation.assert_called_once_with("payment")
 
     def test_an_ordinary_failure_is_marked_but_counts_no_429(
         self, bridge_scope, make_retry_state
@@ -607,7 +607,7 @@ class TestBridgeAfterCallbackBehavior:
 
         assert scope.was_classified(error) is True
         assert scope.rate_limited == 0
-        cascade_service.record_rate_limit_response.assert_not_called()
+        cascade_service.record_rate_limit_observation.assert_not_called()
 
     def test_an_outcome_less_state_is_a_noop(self, make_retry_state):
         """tenacity can hand over a state with no outcome; nothing is stashed."""
@@ -644,7 +644,7 @@ class TestBridgeOutcomeObservationBehavior:
         )
 
         assert scope.rate_limited == 1
-        cascade_service.record_rate_limit_response.assert_called_once_with("payment")
+        cascade_service.record_rate_limit_observation.assert_called_once_with("payment")
 
     def test_the_mark_is_applied_before_detection_can_fail(self, bridge_scope):
         """Detection reads caller-supplied attributes, so it can raise.
@@ -674,7 +674,7 @@ class TestBridgeOutcomeObservationBehavior:
             Exception("429 too many requests"),
         )
 
-        cascade_service.record_rate_limit_response.assert_called_once()
+        cascade_service.record_rate_limit_observation.assert_called_once()
 
     def test_the_retry_after_reaches_the_coordinator(self, bridge_scope):
         """A provider's stated wait survives the hop into the cooldown."""
@@ -940,7 +940,7 @@ class TestAsyncBridgeCallbacksBehavior:
         coordinator.on_rate_limited.assert_called_once()
         assert coordinator.on_rate_limited.call_args.kwargs["key"] == "payment"
         assert scope.rate_limited == 1
-        cascade_service.record_rate_limit_response.assert_called_once_with("payment")
+        cascade_service.record_rate_limit_observation.assert_called_once_with("payment")
         assert ctx.rate_limit_signal is True
         assert ctx.last_attempt == 1
 
@@ -984,7 +984,7 @@ class TestAsyncBridgeCallbacksBehavior:
 
         coordinator.on_rate_limited.assert_not_called()
         assert scope.rate_limited == 1
-        cascade_service.record_rate_limit_response.assert_called_once_with("payment")
+        cascade_service.record_rate_limit_observation.assert_called_once_with("payment")
 
     def test_after_with_no_outcome_hops_nothing(self, make_retry_state):
         from tests.factories.rate_limit_doubles import ToThreadSpy

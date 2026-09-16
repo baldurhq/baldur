@@ -235,7 +235,7 @@ class TestAsyncRetryObservationScopeBehavior:
         _run(_policy(max_attempts=3), throttled_then_ok)
 
         assert scope.rate_limited == 2
-        assert cascade_service.record_rate_limit_response.call_count == 2
+        assert cascade_service.record_rate_limit_observation.call_count == 2
 
     def test_a_call_with_no_scope_counts_nothing_and_does_not_raise(self, observation):
         """A bare async ``@retry`` has no breaker to trip, so it creates no record."""
@@ -245,7 +245,7 @@ class TestAsyncRetryObservationScopeBehavior:
 
         assert result.value == "ok"
         tracker.record_request.assert_not_called()
-        cascade_service.record_rate_limit_response.assert_not_called()
+        cascade_service.record_rate_limit_observation.assert_not_called()
 
     def test_the_breaker_frame_writes_no_second_request_for_a_counted_attempt(
         self, observation
@@ -322,7 +322,7 @@ class TestAsyncRetryOutbound429ObservationBehavior:
 
         assert scope.rate_limited == expected_observations
         assert (
-            cascade_service.record_rate_limit_response.call_count
+            cascade_service.record_rate_limit_observation.call_count
             == expected_observations
         )
         assert coordinator.aon_rate_limited.await_count == expected_observations
@@ -630,7 +630,7 @@ class TestAsyncRetryExhaustionMarkBehavior:
         )
 
         assert scope.rate_limited == 2
-        assert cascade_service.record_rate_limit_response.call_count == 2
+        assert cascade_service.record_rate_limit_observation.call_count == 2
 
 
 # =============================================================================
@@ -669,7 +669,7 @@ class TestAsyncRetryObservationIgnoreListBehavior:
 
         asyncio.run(breaker.execute(inner))
 
-        breaker.cb_service.record_rate_limit_response.assert_not_called()
+        breaker.cb_service.record_rate_limit_observation.assert_not_called()
 
     def test_the_same_storm_feeds_the_cascade_without_the_ignore_list(
         self, observation
@@ -691,8 +691,12 @@ class TestAsyncRetryObservationIgnoreListBehavior:
 
         asyncio.run(breaker.execute(inner))
 
-        assert breaker.cb_service.record_rate_limit_response.call_count == 2
-        shared_service.record_rate_limit_response.assert_not_called()
+        assert breaker.cb_service.record_rate_limit_observation.call_count == 2
+        breaker.cb_service.evaluate_rate_limit_cascade.assert_called_once_with(
+            "payment"
+        )
+        shared_service.record_rate_limit_observation.assert_not_called()
+        shared_service.evaluate_rate_limit_cascade.assert_not_called()
 
 
 # =============================================================================
@@ -713,10 +717,10 @@ class TestAsyncRetryCascadeNoteLeavesTheLoopBehavior:
         "shape", ["raised", "returned"], ids=["raised_429", "returned_429"]
     )
     def test_the_cascade_note_runs_off_the_loop_thread(self, observation, shape):
-        """``record_rate_limit_response`` is reached from a thread that is not the loop's."""
+        """``record_rate_limit_observation`` is reached from a thread that is not the loop's."""
         _tracker, cascade_service = observation
         seen_threads: list[threading.Thread] = []
-        cascade_service.record_rate_limit_response.side_effect = lambda *_a, **_k: (
+        cascade_service.record_rate_limit_observation.side_effect = lambda *_a, **_k: (
             seen_threads.append(threading.current_thread())
         )
         coordinator = _injected_coordinator()

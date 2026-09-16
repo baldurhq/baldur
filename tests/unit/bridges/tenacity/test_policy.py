@@ -855,7 +855,7 @@ class TestBridgeFinalOutcomeBehavior:
 
         assert result.outcome == PolicyOutcome.SUCCESS
         assert scope.rate_limited == 1
-        cascade_service.record_rate_limit_response.assert_called_once_with("payment")
+        cascade_service.record_rate_limit_observation.assert_called_once_with("payment")
 
     def test_a_declined_exception_is_classified_at_the_execute_level(
         self, policy_scope
@@ -897,7 +897,7 @@ class TestBridgeFinalOutcomeBehavior:
         policy.execute(_fail_429)
 
         assert scope.rate_limited == 3
-        assert cascade_service.record_rate_limit_response.call_count == 3
+        assert cascade_service.record_rate_limit_observation.call_count == 3
 
     def test_an_outcome_after_already_marked_is_not_classified_again(
         self, policy_scope
@@ -926,7 +926,7 @@ class TestBridgeFinalOutcomeBehavior:
         policy._classify_unseen_final_outcome(raised, ctx, object())
 
         assert scope.rate_limited == 1
-        assert cascade_service.record_rate_limit_response.call_count == 1
+        assert cascade_service.record_rate_limit_observation.call_count == 1
 
     def test_a_keyed_bridge_installs_the_cooldown_for_a_declined_429(
         self, policy_scope
@@ -958,7 +958,7 @@ class TestBridgeFinalOutcomeBehavior:
         assert scope.coordination_claimed is True
         assert coordinator.on_rate_limited.call_count == 1
         assert coordinator.on_rate_limited.call_args.kwargs["key"] == "payment"
-        assert cascade_service.record_rate_limit_response.call_count == 1
+        assert cascade_service.record_rate_limit_observation.call_count == 1
 
     def test_an_unset_last_attempt_errs_toward_classifying(self, policy_scope):
         """The comparison defaults to "not yet seen", never to silently dropping it.
