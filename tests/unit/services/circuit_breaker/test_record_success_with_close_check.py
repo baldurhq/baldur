@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import dataclasses
 import threading
-from unittest.mock import MagicMock, Mock
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
@@ -379,7 +379,7 @@ class TestLayeredRepoCloseCheckDelegation:
         assert attempt.did_close is True
         assert attempt.state.state == CircuitBreakerStateEnum.CLOSED.value
 
-    def test_sync_to_l2_is_nudged_after_the_close(self):
+    def test_close_is_written_through_after_the_close(self):
         from baldur.adapters.memory.layered_repository import (
             LayeredCircuitBreakerStateRepository,
         )
@@ -388,22 +388,52 @@ class TestLayeredRepoCloseCheckDelegation:
         repo = LayeredCircuitBreakerStateRepository()
         service_name = "svc"
         _open_then_half_open(repo._l1, service_name)
-        repo._sync_to_l2_async = MagicMock()
 
         # When.
-        attempt = repo.record_success_with_close_check(
-            service_name, success_threshold=1
-        )
+        with (
+            patch.object(repo, "_sync_close_to_l2_async", autospec=True) as close,
+            patch.object(repo, "_sync_to_l2_async", autospec=True) as snapshot,
+        ):
+            attempt = repo.record_success_with_close_check(
+                service_name, success_threshold=1
+            )
 
-        # Then: the mirror is nudged for this service, and the row it will
-        # read already carries the close -- the mirror fresh-reads when its
-        # task runs, so what matters is that the nudge follows the transition.
-        repo._sync_to_l2_async.assert_called_once_with(service_name)
+        # Then: the close write-through is nudged for this service -- not the
+        # snapshot mirror, which never closes a stored row -- and the row it
+        # will read already carries the close: the write-through fresh-reads
+        # when its task runs, so what matters is that the nudge follows the
+        # transition.
+        close.assert_called_once_with(service_name)
+        snapshot.assert_not_called()
         assert attempt.state.state == CircuitBreakerStateEnum.CLOSED.value
         assert (
             repo._l1.get_by_service_name(service_name).state
             == CircuitBreakerStateEnum.CLOSED.value
         )
+
+    def test_non_closing_success_nudges_the_snapshot_mirror(self):
+        from baldur.adapters.memory.layered_repository import (
+            LayeredCircuitBreakerStateRepository,
+        )
+
+        # Given: L1 in HALF_OPEN, threshold=2 leaves the first success short.
+        repo = LayeredCircuitBreakerStateRepository()
+        service_name = "svc"
+        _open_then_half_open(repo._l1, service_name)
+
+        # When.
+        with (
+            patch.object(repo, "_sync_close_to_l2_async", autospec=True) as close,
+            patch.object(repo, "_sync_to_l2_async", autospec=True) as snapshot,
+        ):
+            attempt = repo.record_success_with_close_check(
+                service_name, success_threshold=2
+            )
+
+        # Then: a mid-trial success is a snapshot, not a close.
+        assert attempt.did_close is False
+        snapshot.assert_called_once_with(service_name)
+        close.assert_not_called()
 
 
 # =============================================================================

@@ -17,10 +17,16 @@ Verification techniques applied:
   "no row" while flipping the backend to degraded (a real resilient backend on a
   failed ``hgetall``) -> no default row is created, the mirror stands down; a
   genuinely absent row on a live backend is still created
+- L1-decided close: a HALF_OPEN -> CLOSED decided on L1 while L2 is
+  quarantined is written through as an unguarded close (the snapshot mirror
+  would stand down and leave the fallback / WAL at the trip's OPEN); a
+  non-closing success still takes the guarded snapshot; a trip that lands
+  before the write runs leaves the store to the snapshot mirror
 """
 
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -62,6 +68,19 @@ def _row(state: str, failure_count: int = 0) -> CircuitBreakerStateData:
     return CircuitBreakerStateData(
         service_name=SVC, state=state, failure_count=failure_count
     )
+
+
+def _inline_executor() -> MagicMock:
+    """An executor that runs the submitted callable on the calling thread."""
+
+    def _submit(fn, *args, **kwargs):
+        future: Future = Future()
+        future.set_result(fn(*args, **kwargs))
+        return future
+
+    executor = MagicMock(spec=ThreadPoolExecutor)
+    executor.submit.side_effect = _submit
+    return executor
 
 
 class TestMirrorKeepOpenBehavior:
@@ -285,3 +304,73 @@ class TestMirrorKeepOpenBehavior:
         assert result is True
         mock_l2_repo.get_by_service_name.assert_not_called()
         mock_l2_repo.get_or_create.assert_called_once_with(SVC)
+
+
+class TestL1DecidedCloseWriteThroughBehavior:
+    """A close decided on L1 while L2 is quarantined reaches the store as a close."""
+
+    HALF_OPEN = CircuitBreakerStateEnum.HALF_OPEN.value
+
+    def _quarantined_half_open(self, repo, mock_l2_repo) -> None:
+        _degrade_l2(mock_l2_repo)
+        repo._l2_healthy = False
+        repo._l1.hydrate_snapshot(_row(self.HALF_OPEN, failure_count=5))
+
+    def test_l1_decided_close_is_written_through_unguarded(self, repo, mock_l2_repo):
+        """The guarded snapshot would stand down on the degraded backend and
+        leave the fallback at the trip's OPEN; the close goes through as a close."""
+        self._quarantined_half_open(repo, mock_l2_repo)
+
+        with (
+            patch.object(repo, "_get_executor", return_value=_inline_executor()),
+            patch.object(repo, "_record_close_check_degraded_mode"),
+            patch.object(repo, "_handle_l2_success"),
+        ):
+            attempt = repo.record_success_with_close_check(SVC, 1)
+
+        assert attempt.did_close is True
+        mock_l2_repo.update_state.assert_called_once()
+        kwargs = mock_l2_repo.update_state.call_args.kwargs
+        assert kwargs["state"] == CLOSED
+        assert kwargs["keep_open"] is False
+        assert kwargs["skip_if_pinned"] is True
+
+    def test_non_closing_success_still_takes_the_guarded_snapshot(
+        self, repo, mock_l2_repo
+    ):
+        """Control: only the close is written through; a mid-trial success
+        stays a snapshot, which stands down on the degraded backend."""
+        self._quarantined_half_open(repo, mock_l2_repo)
+
+        with (
+            patch.object(repo, "_get_executor", return_value=_inline_executor()),
+            patch.object(repo, "_record_close_check_degraded_mode"),
+        ):
+            attempt = repo.record_success_with_close_check(SVC, 2)
+
+        assert attempt.did_close is False
+        mock_l2_repo.update_state.assert_not_called()
+
+    def test_trip_landing_before_the_write_leaves_the_store_alone(
+        self, repo, mock_l2_repo
+    ):
+        """The write-through reads fresh: a row no longer CLOSED is the
+        snapshot mirror's to carry, never overwritten with a stale close."""
+        self._quarantined_half_open(repo, mock_l2_repo)
+        submitted: list = []
+        executor = MagicMock(spec=ThreadPoolExecutor)
+        executor.submit.side_effect = lambda fn, *a, **k: submitted.append(fn)
+
+        with (
+            patch.object(repo, "_get_executor", return_value=executor),
+            patch.object(repo, "_record_close_check_degraded_mode"),
+        ):
+            attempt = repo.record_success_with_close_check(SVC, 1)
+        assert attempt.did_close is True
+        # A trip lands on L1 before the queued write runs.
+        repo._l1.hydrate_snapshot(_row(OPEN, failure_count=5))
+
+        for fn in submitted:
+            fn()
+
+        mock_l2_repo.update_state.assert_not_called()

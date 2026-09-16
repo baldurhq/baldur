@@ -175,7 +175,9 @@ _MOCK_CREATION_BUDGETS: dict[str, int] = {
     # breaker-service binding: -1 — the policy's default-service factory went
     # away with its spec-less repository double; the binding forms assert
     # identity against the runtime singleton instead.
-    "oss": 4316,
+    # close write-through delegation: -1 — the close-check test's spec-less
+    # mirror double became autospec patches of the two mirror methods.
+    "oss": 4315,
     "pro": 1800,
     "dormant": 401,
 }

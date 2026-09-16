@@ -50,7 +50,8 @@ class DriftOperationsMixin:
             service_name: str,
             state: CircuitBreakerStateData,
             skip_if_pinned: bool = False,
-        ) -> bool: ...
+            keep_open: bool = False,
+        ) -> bool | None: ...
         def _repair_row_to_l2(self, service_name: str) -> bool | None: ...
         def _log_drift_reconciliation_audit(
             self,

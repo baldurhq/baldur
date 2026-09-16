@@ -192,7 +192,8 @@ class L2SyncMixin:
         clear directive. Returns ``None`` when the mirror was skipped rather
         than attempted (a CLOSED snapshot on a degraded backend).
         """
-        if not self._l2:
+        l2 = self._l2
+        if not l2:
             return False
         if self._mirror_skipped_on_degraded_backend(service_name, state, keep_open):
             return None
@@ -203,7 +204,7 @@ class L2SyncMixin:
         def _do_sync() -> bool:
             if not self._ensure_l2_row_for_mirror(service_name, state, keep_open):
                 return False
-            self._l2.update_state(
+            l2.update_state(
                 service_name=service_name,
                 state=state.state,
                 failure_count=state.failure_count,
@@ -345,6 +346,39 @@ class L2SyncMixin:
         except Exception as e:
             with self._mirror_lock:
                 self._mirror_in_flight.discard(service_name)
+            logger.warning(
+                "layered_repo.submit_sync_task_failed",
+                error=e,
+            )
+
+    def _sync_close_to_l2_async(self, service_name: str) -> None:
+        """Write through a HALF_OPEN -> CLOSED that L1 decided while L2 was quarantined.
+
+        The record-path mirror is a snapshot writer under the keep-open guard:
+        it may refresh a CLOSED store row but never close one, and it stands
+        down outright on a degraded backend. A close decided on L1 — the
+        process is in L1-only mode by design there — would therefore never
+        reach the backend's fallback or its WAL, leaving both at the trip's
+        OPEN: the next load from that backend (the replay lane's affirmation,
+        an operator's resync) hydrates the OPEN back over the close this
+        process just made, and on recovery the WAL replays the OPEN into the
+        store. So the close is written as a close, unguarded like an
+        operator's write, from a fresh read and only while the row is still
+        CLOSED — a trip that landed in between is the snapshot mirror's to
+        carry.
+        """
+
+        def _write() -> None:
+            row = self._resolve_repair_row(service_name)
+            if row is None or row.state != "closed":
+                return
+            self._sync_to_l2_inline(
+                service_name, row, skip_if_pinned=True, keep_open=False
+            )
+
+        try:
+            self._get_executor().submit(_write)
+        except Exception as e:
             logger.warning(
                 "layered_repo.submit_sync_task_failed",
                 error=e,

@@ -87,6 +87,7 @@ class RepositoryOperationsMixin:
         def _get_executor(self) -> ThreadPoolExecutor: ...
         def _repair_row_to_l2_inline(self, service_name: str) -> bool | None: ...
         def _sync_to_l2_async(self, service_name: str) -> None: ...
+        def _sync_close_to_l2_async(self, service_name: str) -> None: ...
         def _sync_to_l2_with_timeout(
             self,
             service_name: str,
@@ -730,11 +731,16 @@ class RepositoryOperationsMixin:
            admission's L2-first acquire re-syncs L1 to the store's row.
         5. Only when L2 is quarantined (``_l2_healthy`` False, on entry or as
            the consequence of this very failure) or when no store was ever
-           named: delegate to ``_l1.record_success_with_close_check`` and
-           async-sync the resulting snapshot to L2. The process is in L1-only
-           mode by design there, and the quarantine->healthy edge schedules
-           the drift pass whose L2-wins rule reverts the row to the store's
-           OPEN for the store's own HALF_OPEN cycle.
+           named: delegate to ``_l1.record_success_with_close_check``. A
+           close is written through to L2 as a close
+           (``_sync_close_to_l2_async`` — the snapshot mirror is a keep-open
+           writer that never closes a stored row and stands down on a
+           degraded backend, so the fallback and the WAL would otherwise
+           keep the trip's OPEN and hand it back on the next load); a
+           non-closing success async-syncs the snapshot. The process is in
+           L1-only mode by design there, and the quarantine->healthy edge
+           schedules the drift pass whose L2-wins rule reverts the row to
+           the store's OPEN for the store's own HALF_OPEN cycle.
         """
         if self._l2 and self._l2_healthy:
             timeout = self._get_timeout_seconds()
@@ -811,7 +817,13 @@ class RepositoryOperationsMixin:
         attempt = self._l1.record_success_with_close_check(
             service_name, success_threshold
         )
-        self._sync_to_l2_async(service_name)
+        if attempt.did_close:
+            # The snapshot mirror never closes a stored row and stands down
+            # on a degraded backend, so the close this process decided goes
+            # through as a close or it never leaves L1.
+            self._sync_close_to_l2_async(service_name)
+        else:
+            self._sync_to_l2_async(service_name)
         return attempt
 
     def _writeback_close_check_to_l1(
