@@ -221,6 +221,50 @@ class TestEmergencyReleaseBehavior:
         assert resp.status_code == 409
         assert resp.body["error"] == "recovery_blocked"
         assert "hint" in resp.body
+        # A bare exception carries neither field: the body still has both.
+        assert resp.body["check_reason"] == ""
+        assert resp.body["open_breakers"] == []
+
+    def test_409_body_names_the_open_breakers_and_the_gated_exit(self):
+        """The refusal's own sentence and names reach the caller verbatim.
+
+        Negative: the old steer to ``force=true`` as the only way out is gone
+        — the hint names the gradual recovery beside the force.
+        """
+        from baldur_pro.services.emergency_mode.exceptions import (
+            RecoveryNotAllowedError,
+        )
+        from baldur_pro.services.emergency_mode.manager import (
+            GracefulDegradationManager,
+        )
+
+        check_reason = "Error rate too high: 0.210 > 0.05; open: db, cache"
+        manager = MagicMock(spec=GracefulDegradationManager)
+        manager.get_state.return_value = _mock_state("LEVEL_3", is_active=True)
+        manager.deactivate.side_effect = RecoveryNotAllowedError(
+            f"Recovery not allowed: {check_reason}",
+            check_reason=check_reason,
+            open_breakers=("db", "cache"),
+        )
+        with patch(
+            "baldur_pro.services.emergency_mode.get_emergency_manager",
+            return_value=manager,
+        ):
+            resp = emergency_release(
+                _make_ctx(
+                    method="POST",
+                    json_body={"reason": "manual"},
+                    user=SimpleNamespace(username="ops"),
+                )
+            )
+
+        assert resp.status_code == 409
+        assert resp.body["check_reason"] == check_reason
+        assert resp.body["open_breakers"] == ["db", "cache"]
+        assert isinstance(resp.body["open_breakers"], list)
+        assert "gradual recovery" in resp.body["hint"]
+        assert "force=true" in resp.body["hint"]
+        assert "Use force=true to override the recovery gate." not in resp.body["hint"]
 
     def test_force_flag_forwarded_to_manager(self):
         manager = MagicMock()

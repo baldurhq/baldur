@@ -21,6 +21,14 @@ Verification techniques applied:
 - State transition: the aggregate walk clears a name whose L1 row went CLOSED
   with no local traffic
 - Error path: ``get_aggregate_failure_rate`` propagates, never ``0.0``
+- Contract: the tripped share's defaults and ``measurable_rate`` at its
+  boundaries — ``None`` over zero measurable calls, unlike ``rate``
+- Equivalence over row shapes for the tripped share: a floored name is held
+  with its window after the lift; a name this process holds open on its own
+  row is held even where the shared store already reads it pinned; a pin on
+  either row drops the floor only, never the window
+- State partition of ``_tripped_row`` / ``_held_on_own_row``: which row makes
+  a name count, and when an override on either row makes it count as none
 """
 
 from __future__ import annotations
@@ -155,6 +163,76 @@ class TestAggregateFailureEvidenceContract:
 
         assert not hasattr(evidence, "__dict__")
 
+    def test_tripped_share_defaults_to_nothing_held(self):
+        """A reader built on the four original fields sees an empty share."""
+        evidence = AggregateFailureEvidence(
+            failures=3, total_calls=10, open_circuits=0, fleet_read=True
+        )
+
+        assert (
+            evidence.tripped_failures,
+            evidence.tripped_calls,
+            evidence.tripped_names,
+        ) == (0, 0, ())
+        assert evidence.measurable_calls == 10
+        assert evidence.measurable_rate == pytest.approx(0.3)
+
+    @pytest.mark.parametrize(
+        ("failures", "total_calls", "tripped_failures", "tripped_calls", "expected"),
+        [
+            (0, 0, 0, 0, None),
+            (5, 5, 5, 5, None),
+            (10, 20, 8, 8, 2 / 12),
+            (8, 20, 8, 8, 0.0),
+            (3, 10, 0, 0, 0.3),
+        ],
+        ids=[
+            "nothing_observed",
+            "every_call_held",
+            "held_share_removed",
+            "only_the_held_share_failed",
+            "nothing_held",
+        ],
+    )
+    def test_measurable_rate_is_the_rate_without_the_tripped_share(
+        self, failures, total_calls, tripped_failures, tripped_calls, expected
+    ):
+        """Boundary: ``None`` over zero measurable calls, the fraction otherwise."""
+        evidence = AggregateFailureEvidence(
+            failures=failures,
+            total_calls=total_calls,
+            open_circuits=1,
+            fleet_read=True,
+            tripped_failures=tripped_failures,
+            tripped_calls=tripped_calls,
+        )
+
+        if expected is None:
+            assert evidence.measurable_rate is None
+        else:
+            assert evidence.measurable_rate == pytest.approx(expected)
+        assert evidence.measurable_calls == total_calls - tripped_calls
+
+    def test_measurable_rate_over_zero_calls_is_none_where_rate_is_zero(self):
+        """Negative: the two properties disagree exactly on the empty reading.
+
+        ``rate`` keeps its observed ``0.0`` (a consumer renders it with
+        ``total_calls``); ``measurable_rate`` is read where a pass on no
+        evidence would lift a hold, so the empty reading is not a number.
+        """
+        evidence = AggregateFailureEvidence(
+            failures=FAILURE_THRESHOLD,
+            total_calls=FAILURE_THRESHOLD,
+            open_circuits=1,
+            fleet_read=True,
+            tripped_failures=FAILURE_THRESHOLD,
+            tripped_calls=FAILURE_THRESHOLD,
+            tripped_names=(LOCAL,),
+        )
+
+        assert evidence.rate == 1.0
+        assert evidence.measurable_rate is None
+
 
 # =============================================================================
 # Behavior — the aggregate read
@@ -187,6 +265,8 @@ class TestAggregateFailureEvidenceBehavior:
         assert (evidence.failures, evidence.total_calls) == (2, 20)
         assert evidence.open_circuits == 0
         assert evidence.rate == pytest.approx(0.1)
+        assert evidence.tripped_names == ()
+        assert evidence.measurable_rate == pytest.approx(evidence.rate)
 
     @pytest.mark.parametrize(
         "state",
@@ -230,6 +310,13 @@ class TestAggregateFailureEvidenceBehavior:
         assert evidence.open_circuits == 1
         assert evidence.rate == 1.0
         assert evidence.fleet_read is fleet
+        # The floored name is held: its lifted window is the whole share.
+        assert evidence.tripped_names == (LOCAL,)
+        assert (evidence.tripped_failures, evidence.tripped_calls) == (
+            expected_floor,
+            expected_floor,
+        )
+        assert evidence.measurable_rate is None
 
     @pytest.mark.parametrize(
         ("refusals", "expected_failures"),
@@ -442,6 +529,7 @@ class TestAggregateFailureEvidenceBehavior:
 
         assert evidence.open_circuits == 0
         assert evidence.failures == 0
+        assert evidence.tripped_names == ()
 
     def test_lapsed_pin_on_an_open_row_is_a_trip_again(self):
         """Control for the exclusion: a pin past its expiry no longer excludes."""
@@ -460,6 +548,257 @@ class TestAggregateFailureEvidenceBehavior:
 
         assert evidence.open_circuits == 1
         assert evidence.failures == FAILURE_THRESHOLD
+        assert evidence.tripped_names == (LOCAL,)
+
+    def test_tripped_share_is_the_held_windows_and_leaves_the_rest_measurable(self):
+        """Equivalence: a held name's refusals move to the share; the rate is unchanged.
+
+        Negative: ``failures`` / ``total_calls`` / ``open_circuits`` read
+        exactly as they did before the share existed — the share is carved
+        out of the totals, not added to them.
+        """
+        repo = _StubCBRepo()
+        service = _service(repo)
+        repo.hydrate_snapshot(_row(LOCAL, CircuitBreakerStateEnum.OPEN.value))
+        held_row = repo.get_by_service_name(LOCAL)
+        for _ in range(FAILURE_THRESHOLD + 2):
+            service.record_rejection(LOCAL, held_row)
+        repo.get_or_create(PEER)
+        _seed_window(service, PEER, failures=1, successes=9)
+
+        evidence = service.get_aggregate_failure_evidence()
+
+        assert (evidence.failures, evidence.total_calls) == (FAILURE_THRESHOLD + 3, 17)
+        assert evidence.open_circuits == 1
+        assert (evidence.tripped_failures, evidence.tripped_calls) == (
+            FAILURE_THRESHOLD + 2,
+            FAILURE_THRESHOLD + 2,
+        )
+        assert evidence.tripped_names == (LOCAL,)
+        assert evidence.measurable_calls == 10
+        assert evidence.measurable_rate == pytest.approx(0.1)
+
+    def test_peer_open_cluster_row_is_held_at_its_floor(self):
+        """A trip a peer committed is held with the floor as its whole window."""
+        repo = _StubCBRepo(
+            cluster_rows=[
+                _row(PEER, CircuitBreakerStateEnum.OPEN.value, failure_count=8)
+            ]
+        )
+        service = _service(repo)
+        repo.get_or_create(LOCAL)
+        _seed_window(service, LOCAL, failures=2, successes=8)
+
+        evidence = service.get_aggregate_failure_evidence()
+
+        assert (evidence.tripped_failures, evidence.tripped_calls) == (8, 8)
+        assert evidence.tripped_names == (PEER,)
+        assert evidence.measurable_rate == pytest.approx(0.2)
+
+    def test_tripped_names_are_sorted(self):
+        """Two held names read in one order whatever the set iteration gave."""
+        repo = _StubCBRepo(
+            cluster_rows=[_row("zeta", CircuitBreakerStateEnum.OPEN.value)]
+        )
+        service = _service(repo)
+        repo.hydrate_snapshot(_row("alpha", CircuitBreakerStateEnum.HALF_OPEN.value))
+
+        evidence = service.get_aggregate_failure_evidence()
+
+        assert evidence.tripped_names == ("alpha", "zeta")
+        assert evidence.open_circuits == 2
+
+    def test_pinned_closed_cluster_row_drops_the_floor_but_the_stale_local_open_row_is_still_held(
+        self,
+    ):
+        """A force-close landed on another worker; this mirror still reads OPEN.
+
+        The pin drops the floor only: the refusals this process recorded on
+        its stale row stay in ``rate`` (negative: the window is not dropped)
+        and, because this process still refuses on that row, the name is
+        held — in ``tripped_names`` with its window in the share.
+        """
+        repo = _StubCBRepo(
+            cluster_rows=[
+                _row(
+                    LOCAL,
+                    CircuitBreakerStateEnum.CLOSED.value,
+                    manually_controlled=True,
+                    manual_override_expires_at=utc_now() + timedelta(minutes=10),
+                )
+            ]
+        )
+        service = _service(repo)
+        repo.hydrate_snapshot(
+            _row(LOCAL, CircuitBreakerStateEnum.OPEN.value, failure_count=3)
+        )
+        stale_row = repo.get_by_service_name(LOCAL)
+        for _ in range(2):
+            service.record_rejection(LOCAL, stale_row)
+        repo.get_or_create(PEER)
+        _seed_window(service, PEER, failures=0, successes=10)
+
+        evidence = service.get_aggregate_failure_evidence()
+
+        assert evidence.open_circuits == 0
+        assert (evidence.failures, evidence.total_calls) == (2, 12)
+        assert (evidence.tripped_failures, evidence.tripped_calls) == (2, 2)
+        assert evidence.tripped_names == (LOCAL,)
+        assert evidence.measurable_rate == pytest.approx(0.0)
+        assert evidence.measurable_calls == 10
+
+    def test_pinned_open_cluster_row_drops_the_floor_of_the_local_open_row_too(self):
+        """An operator's Block in the shared store is not a trip on this mirror either."""
+        repo = _StubCBRepo(
+            cluster_rows=[
+                _row(
+                    LOCAL,
+                    CircuitBreakerStateEnum.OPEN.value,
+                    failure_count=9,
+                    manually_controlled=True,
+                    manual_override_expires_at=utc_now() + timedelta(minutes=10),
+                )
+            ]
+        )
+        service = _service(repo)
+        repo.hydrate_snapshot(
+            _row(LOCAL, CircuitBreakerStateEnum.OPEN.value, failure_count=6)
+        )
+
+        evidence = service.get_aggregate_failure_evidence()
+
+        assert evidence.open_circuits == 0
+        assert (evidence.failures, evidence.total_calls) == (0, 0)
+        assert evidence.tripped_names == (LOCAL,)
+
+    def test_lapsed_pin_on_the_cluster_row_no_longer_drops_the_local_floor(self):
+        """Control for the either-row pin rule: an expired shared-store pin counts by state again."""
+        repo = _StubCBRepo(
+            cluster_rows=[
+                _row(
+                    LOCAL,
+                    CircuitBreakerStateEnum.CLOSED.value,
+                    manually_controlled=True,
+                    manual_override_expires_at=utc_now() - timedelta(seconds=1),
+                )
+            ]
+        )
+        service = _service(repo)
+        repo.hydrate_snapshot(
+            _row(LOCAL, CircuitBreakerStateEnum.OPEN.value, failure_count=6)
+        )
+
+        evidence = service.get_aggregate_failure_evidence()
+
+        assert evidence.open_circuits == 1
+        assert evidence.failures == 6
+        assert evidence.tripped_names == (LOCAL,)
+
+
+# =============================================================================
+# Behavior — which row makes a name count
+# =============================================================================
+
+
+def _pinned(name: str, state: str, *, lapsed: bool = False, **overrides):
+    delta = timedelta(seconds=-1) if lapsed else timedelta(minutes=10)
+    return _row(
+        name,
+        state,
+        manually_controlled=True,
+        manual_override_expires_at=utc_now() + delta,
+        **overrides,
+    )
+
+
+_OPEN = CircuitBreakerStateEnum.OPEN.value
+_HALF_OPEN = CircuitBreakerStateEnum.HALF_OPEN.value
+_CLOSED = CircuitBreakerStateEnum.CLOSED.value
+
+
+class TestTrippedRowPartitionBehavior:
+    """``_tripped_row`` and ``_held_on_own_row``: pure reads over the two rows."""
+
+    @pytest.mark.parametrize(
+        ("local_row", "cluster_row", "expected"),
+        [
+            pytest.param(None, None, None, id="no_rows"),
+            pytest.param(
+                _row(LOCAL, _CLOSED), _row(LOCAL, _CLOSED), None, id="both_closed"
+            ),
+            pytest.param(_row(LOCAL, _OPEN, 6), None, "local", id="local_open_alone"),
+            pytest.param(
+                _row(LOCAL, _OPEN, 6),
+                _row(LOCAL, _OPEN, 9),
+                "local",
+                id="local_open_wins",
+            ),
+            pytest.param(
+                _row(LOCAL, _CLOSED),
+                _row(LOCAL, _HALF_OPEN, 9),
+                "cluster",
+                id="cluster_decides",
+            ),
+            pytest.param(
+                _row(LOCAL, _OPEN, 6),
+                _pinned(LOCAL, _CLOSED),
+                None,
+                id="cluster_pin_drops_local",
+            ),
+            pytest.param(
+                _pinned(LOCAL, _CLOSED),
+                _row(LOCAL, _OPEN, 9),
+                None,
+                id="local_pin_drops_cluster",
+            ),
+            pytest.param(
+                _pinned(LOCAL, _OPEN, failure_count=6), None, None, id="local_block"
+            ),
+            pytest.param(
+                _pinned(LOCAL, _OPEN, lapsed=True, failure_count=6),
+                None,
+                "local",
+                id="lapsed_local_pin_counts",
+            ),
+            pytest.param(
+                _row(LOCAL, _OPEN, 6),
+                _pinned(LOCAL, _CLOSED, lapsed=True),
+                "local",
+                id="lapsed_cluster_pin_counts",
+            ),
+        ],
+    )
+    def test_tripped_row_picks_the_first_non_closed_row_unless_either_is_pinned(
+        self, local_row, cluster_row, expected
+    ):
+        """State partition: an override in force on either row is not a trip."""
+        row = CircuitBreakerService._tripped_row(local_row, cluster_row)
+
+        if expected is None:
+            assert row is None
+        else:
+            assert row is (local_row if expected == "local" else cluster_row)
+
+    @pytest.mark.parametrize(
+        ("local_row", "expected"),
+        [
+            pytest.param(None, False, id="no_row"),
+            pytest.param(_row(LOCAL, _CLOSED), False, id="closed"),
+            pytest.param(_row(LOCAL, _OPEN, 6), True, id="open"),
+            pytest.param(_row(LOCAL, _HALF_OPEN, 6), True, id="half_open"),
+            pytest.param(_pinned(LOCAL, _OPEN, failure_count=6), False, id="block"),
+            pytest.param(
+                _pinned(LOCAL, _OPEN, lapsed=True, failure_count=6),
+                True,
+                id="lapsed_block",
+            ),
+        ],
+    )
+    def test_held_on_own_row_is_a_non_closed_row_under_no_override(
+        self, local_row, expected
+    ):
+        """This process refuses on its own row unless the operator pinned it."""
+        assert CircuitBreakerService._held_on_own_row(local_row) is expected
 
     def test_aggregate_walk_clears_a_name_whose_l1_row_went_closed(self):
         """State transition: a peer's close reaching L1 clears the window here.

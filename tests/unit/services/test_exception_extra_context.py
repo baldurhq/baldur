@@ -174,6 +174,24 @@ class TestRecoveryNotAllowedErrorExtraContextContract:
         err = RecoveryNotAllowedError("test")
         assert err.extra_context() == {"check_reason": "", "open_breakers": []}
 
+    def test_extra_context_renders_the_open_breakers_as_a_list(self):
+        """A non-empty ``open_breakers`` tuple rides the context as a JSON-safe list."""
+        from baldur_pro.services.emergency_mode.exceptions import (
+            RecoveryNotAllowedError,
+        )
+
+        err = RecoveryNotAllowedError(
+            "Recovery not allowed: open: cache, db",
+            check_reason="open: cache, db",
+            open_breakers=("cache", "db"),
+        )
+
+        assert err.open_breakers == ("cache", "db")
+        assert err.extra_context() == {
+            "check_reason": "open: cache, db",
+            "open_breakers": ["cache", "db"],
+        }
+
     def test_inherits_from_emergency_mode_error(self):
         """RecoveryNotAllowedError inherits from EmergencyModeError."""
         from baldur_pro.services.emergency_mode.exceptions import (

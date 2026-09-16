@@ -154,6 +154,21 @@ def _emitted_types(service: CircuitBreakerService) -> list[Any]:
 
 
 # =============================================================================
+# Freeze Mode -- the exported level
+# =============================================================================
+
+
+class TestFreezeLevelExportContract:
+    """One definition of "the level that holds breakers", importable by name."""
+
+    def test_freeze_level_is_exported_and_is_level_3(self):
+        from baldur.services.circuit_breaker import freeze_mode
+
+        assert "FREEZE_LEVEL" in freeze_mode.__all__
+        assert freeze_mode.FREEZE_LEVEL is EmergencyLevel.LEVEL_3
+
+
+# =============================================================================
 # Freeze Mode -- lockdown detection
 # =============================================================================
 
