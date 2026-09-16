@@ -563,19 +563,25 @@ class TestProtectDrivenCascadeEvidenceBehavior:
         assert opened[0]["window_failure_count"] == self._PATTERN.count("F")
         assert opened[0]["window_total_calls"] != 0
 
-    def test_the_trip_clears_the_window_it_read(self, protected_drive):
+    def test_the_trip_keeps_the_window_it_read(self, protected_drive):
         """
         Purpose:
-            The evidence the trip decided on is consumed by the trip: the next
-            CLOSED period starts without it, on the same instance.
+            The evidence the trip decided on stays with the name for as long
+            as it is open: the system-wide rate floors a tripped name at the
+            failures that tripped it, and the window is cleared only when the
+            name is observed back in CLOSED.
         Expected:
             - the breaker is OPEN in the shared repository
-            - the singleton's window for the name reads ``(0, 0)`` afterwards
+            - the singleton's window for the name still reads the storm's
+              failure / total pair afterwards
         """
         self._drive_storm(protected_drive)
 
         assert protected_drive.state() == "open"
-        assert protected_drive.service.get_window_evidence(PROTECTED) == (0, 0)
+        assert protected_drive.service.get_window_evidence(PROTECTED) == (
+            self._PATTERN.count("F"),
+            len(self._PATTERN),
+        )
 
     def test_the_storm_stays_below_the_other_two_triggers_until_the_floor(
         self, protected_drive

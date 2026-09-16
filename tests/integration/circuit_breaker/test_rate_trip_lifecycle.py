@@ -136,21 +136,27 @@ def _journal_entry(payload: dict, timestamp: datetime) -> JournalEntry:
 
 
 class TestRateTripLifecycleIntegration:
-    """The trip writes the repository and clears the window as one step."""
+    """The trip writes the repository and keeps the window it decided on."""
 
-    def test_rate_trip_opens_the_repository_state_and_empties_the_window(self):
-        """Both halves of the trip land: state OPEN, window cleared.
+    def test_rate_trip_opens_the_repository_state_and_keeps_the_window(self):
+        """Both halves of the trip land: state OPEN, window retained.
 
-        A trip that opened the repository but left the window populated would
-        re-trip the breaker on its first post-recovery failure, because the
-        stale evidence still reads above the threshold.
+        The evidence stays with the name for as long as it is open — the
+        system-wide rate floors a tripped name at the failures that tripped
+        it — and is cleared when the name is observed back in CLOSED, so the
+        next CLOSED period starts without it rather than re-tripping on its
+        first failure.
         """
         breaker = _LiveBreaker(_config(failure_threshold=1000))
 
         breaker.drive(_interleave(total=40, failures=24))
+        payload = breaker.opened_payload()
 
         assert breaker.repository.get_by_service_name(SERVICE).state == "open"
-        assert breaker.service.get_window_evidence(SERVICE) == (0, 0)
+        assert breaker.service.get_window_evidence(SERVICE) == (
+            payload["window_failure_count"],
+            payload["window_total_calls"],
+        )
 
     def test_opened_event_carries_the_denominators_the_decision_used(self):
         """The emitted payload reports the exact evidence, for replay.
