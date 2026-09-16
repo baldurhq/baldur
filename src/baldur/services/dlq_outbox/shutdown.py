@@ -8,10 +8,12 @@ it holds the coordinator's drain open while the writer can still empty the
 buffer through the real DLQ path, and hands the remainder to the teardown, which
 spills it to the local fallback tier.
 
-Not a substitute for the adapters' own exit hooks. The coordinator drain runs
-only on a signalled exit; a worker recycle (``max_requests``,
-``maxtasksperchild``) never initiates one, and there each adapter's exit hook
-calls the same idempotent teardown directly.
+Not a substitute for the other exit paths. The coordinator drain runs only on
+a signalled exit; a worker recycle (``max_requests``, ``maxtasksperchild``)
+never initiates one, and there each adapter's exit hook calls the same
+idempotent teardown directly; a polite exit (the script returning,
+``sys.exit()``) runs neither, and there the atexit hook the outbox registers
+when it starts does.
 """
 
 from __future__ import annotations

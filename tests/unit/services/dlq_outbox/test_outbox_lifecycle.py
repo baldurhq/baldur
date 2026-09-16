@@ -456,8 +456,9 @@ class TestGetOutboxLazyBuildBehavior:
 # The process teardown — ``stop_outbox_for_shutdown``
 #
 # Every exit path calls this unconditionally: the coordinator's handler on a
-# signalled exit, and each adapter's exit hook on a recycle exit, which has no
-# coordinator window at all. The tests below drive it against an outbox whose
+# signalled exit, each adapter's exit hook on a recycle exit, which has no
+# coordinator window at all, and the atexit hook on a polite exit (see
+# test_exit_teardown.py). The tests below drive it against an outbox whose
 # writer thread was never started, so the rescue is a pure function of the ring
 # contents and the injected callbacks — the budget arithmetic is asserted
 # against a controlled clock rather than by waiting.

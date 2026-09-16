@@ -19,6 +19,7 @@ thread.
 
 from __future__ import annotations
 
+import atexit
 import os
 import threading
 import time
@@ -149,6 +150,16 @@ _teardown_started: bool = False
 # report an exit hook logs — "ran nothing" would report zeros over a real drain.
 _shutdown_gate = threading.Lock()
 _shutdown_result: OutboxShutdownResult | None = None
+
+# The third exit path. A signalled stop drains through the coordinator's handler
+# and a worker recycle through the adapter's exit hook, but a polite exit — the
+# script returning, ``sys.exit()`` — runs neither, and the drainer is a daemon
+# thread the interpreter kills with the buffer still in it. The atexit hook is
+# registered once per process, the first time an outbox starts here, and calls
+# the same idempotent teardown; after either other path has run it, it returns
+# the cached result and does nothing.
+_exit_teardown_registered: bool = False
+_exit_teardown_lock = threading.Lock()
 
 # Floors carved out of the teardown budget. The dump is the safety net — it is
 # what turns "lost" into "on disk" — so the optimistic flush phase ahead of it
@@ -402,6 +413,7 @@ def get_outbox() -> Outbox:
         _outbox = Outbox.from_settings()
         _outbox.start()
         _outbox_origin_pid = os.getpid()
+        _register_exit_teardown()
         return _outbox
 
 
@@ -428,6 +440,7 @@ def setup_dlq_outbox() -> bool:
         _outbox = Outbox.from_settings()
         _outbox.start()
         _outbox_origin_pid = os.getpid()
+        _register_exit_teardown()
         _wire_worker_lifecycle_subscribers()
         logger.info("dlq_outbox.setup_completed")
         return True
@@ -539,9 +552,11 @@ def stop_outbox_for_shutdown(timeout: float | None = None) -> OutboxShutdownResu
     """Tear the process outbox down once, and report what happened to its entries.
 
     The single idempotent teardown every exit path calls unconditionally: the
-    shutdown coordinator's handler on a signalled exit, and each adapter's exit
-    hook on a recycle exit, which has no coordinator window at all. Repeat calls
-    block on the gate and return the first caller's cached result.
+    shutdown coordinator's handler on a signalled exit, each adapter's exit
+    hook on a recycle exit, which has no coordinator window at all, and the
+    atexit hook on a polite exit (a script returning, ``sys.exit()``), which
+    has neither. Repeat calls block on the gate and return the first caller's
+    cached result.
 
     Args:
         timeout: Total teardown budget in seconds. ``None`` reads
@@ -657,6 +672,54 @@ def stop_outbox_for_shutdown(timeout: float | None = None) -> OutboxShutdownResu
             duplicated=max(0, accounted - pending_at_entry),
         )
         return _shutdown_result
+
+
+def _register_exit_teardown() -> None:
+    """Register ``_teardown_at_exit`` once per process."""
+    global _exit_teardown_registered
+    with _exit_teardown_lock:
+        if _exit_teardown_registered:
+            return
+        atexit.register(_teardown_at_exit)
+        _exit_teardown_registered = True
+
+
+def _teardown_at_exit() -> None:
+    """atexit hook: run the process teardown on a polite exit.
+
+    Skipped in a fork child that inherited the singleton and never re-owned it
+    (``_outbox_origin_pid`` still names the parent): its buffer is a copy of the
+    parent's, and dumping it would write the parent's pending entries a second
+    time. A child that did re-own it tears down its own buffer like any other
+    process. When a signalled exit or a recycle hook has already run the
+    teardown, this returns its cached result without logging a second report.
+    """
+    outbox = _outbox
+    if outbox is not None and _outbox_origin_pid != os.getpid():
+        logger.debug(
+            "dlq_outbox.exit_teardown_skipped_inherited",
+            origin_pid=_outbox_origin_pid,
+        )
+        return
+    already_run = _shutdown_result is not None
+    try:
+        result = stop_outbox_for_shutdown()
+    except Exception as exc:
+        logger.warning("dlq_outbox.exit_teardown_failed", error=exc)
+        return
+    if already_run:
+        return
+    logger.info(
+        "dlq_outbox.shutdown_teardown_completed",
+        exit_path="atexit",
+        pending_at_entry=result.pending_at_entry,
+        dispatched=result.dispatched,
+        soft_failed=result.soft_failed,
+        failed=result.failed,
+        emergency_dumped=result.emergency_dumped,
+        residual=result.residual,
+        duplicated=result.duplicated,
+    )
 
 
 def flush_and_wait(timeout: float = 5.0) -> int:

@@ -15,7 +15,9 @@ Public API:
   (also wires DAEMON_WORKER_DIED / RESPAWNED EventBus subscribers per
   impl 489 D8)
 - ``stop_outbox_for_shutdown()`` — the single idempotent process teardown,
-  returning an ``OutboxShutdownResult`` with the terminal entry counts
+  returning an ``OutboxShutdownResult`` with the terminal entry counts; run by
+  the coordinator on a signalled exit, by the adapter hooks on a recycle, and
+  by an atexit hook on a polite exit
 - ``DLQOutboxShutdownHandler`` — the outbox's seat at the graceful-shutdown
   table, registered by ``baldur.init()``
 """

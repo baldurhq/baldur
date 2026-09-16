@@ -10,6 +10,10 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+### Fixed
+
+- Dead letters buffered by the outbox are written out when a process exits normally, not only on a signal or a worker recycle.
+
 ## [1.14.0] - 2026-09-16
 
 ### Added
