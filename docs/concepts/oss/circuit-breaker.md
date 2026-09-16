@@ -207,7 +207,9 @@ flipping on their own add load and noise at exactly the moment you want the syst
 The hold is on Baldur's *automatic* decisions only. Your forces work unchanged during Level 3: force
 a breaker closed once you know its dependency is back, or open to take it out of rotation, and the
 change lands as it would at any other time. **Force-close is your exit for one dependency while the
-lockdown lasts.** One interaction with force lifetimes is worth knowing: a forced-open breaker whose
+lockdown lasts** — in the worker that receives it, as with any force (above); the exit for the level itself is
+Emergency Mode's gradual recovery: its first step down lets every held breaker probe again. One
+interaction with force lifetimes is worth knowing: a forced-open breaker whose
 lifetime lapses during Level 3 stays open until the level drops, because lifting the force is itself
 an automatic step toward HALF_OPEN. Force it closed if that dependency needs traffic before then.
 
