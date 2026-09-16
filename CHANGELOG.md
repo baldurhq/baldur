@@ -10,6 +10,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+## [1.14.0] - 2026-09-16
+
 ### Added
 
 - `get_aggregate_failure_evidence()` returns the calls the system-wide rate was measured over.
@@ -25,18 +27,14 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ### Fixed
 
+- Breakers built by `protect()` and `@circuit_breaker` now record on the process-shared service.
+- A 429-cascade trip on a `protect()` breaker now reports the window counts of the calls it saw.
 - A success recorded during a concurrent trip no longer erases the trip (`keep_open`).
 - A worker's CLOSED mirror no longer overwrites a peer's OPEN row in the shared store.
 - A hinted success no longer skips the consecutive-failure reset after an interleaved failure.
-- A refused emergency release names the open breakers and the gated exit instead of steering to `force=true`.
-- A breaker pinned in the shared store is excluded from the system-wide rate even where a worker's mirror still reads OPEN.
-
-## [1.13.2] - 2026-09-15
-
-### Fixed
-
-- Breakers built by `protect()` and `@circuit_breaker` now record on the process-shared service.
-- A 429-cascade trip on a `protect()` breaker now reports the window counts of the calls it saw.
+- A refused emergency release names the open breakers and the gated exit, not `force=true`.
+- A breaker pinned in the shared store is excluded from the system-wide rate on every worker.
+- A breaker closed while the shared store was unreachable no longer re-opens on the next store read.
 
 ## [1.13.1] - 2026-09-14
 
