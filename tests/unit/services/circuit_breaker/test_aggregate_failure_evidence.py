@@ -568,7 +568,10 @@ class TestAggregateFailureEvidenceBehavior:
 
         evidence = service.get_aggregate_failure_evidence()
 
-        assert (evidence.failures, evidence.total_calls) == (FAILURE_THRESHOLD + 3, 17)
+        assert (evidence.failures, evidence.total_calls) == (
+            FAILURE_THRESHOLD + 3,
+            FAILURE_THRESHOLD + 12,
+        )
         assert evidence.open_circuits == 1
         assert (evidence.tripped_failures, evidence.tripped_calls) == (
             FAILURE_THRESHOLD + 2,
