@@ -143,6 +143,44 @@ See [Composing with @baldur.protected](concepts/foundations/composition.md).
 
 ---
 
+## What if the dependency did the work but the response never came back?
+
+Then Baldur cannot tell. A card that was charged before the connection
+dropped and a card that was never charged look the same from the caller's
+side: a timeout. No client-side library can tell the two apart; the repeat
+is safe only if the *dependency* can recognize it. Every retry system shares
+this limit; Temporal and Step Functions require idempotent tasks for the same
+reason.
+
+What Baldur does about it:
+
+- **Its own dedup is caller-side and does not cover this window.** When a
+  guarded call raises, the idempotency key is released so a retry can run,
+  which is right for a clean failure and wrong for "work done, response
+  lost." Baldur's dedup blocks double-clicks, concurrent workers, and
+  duplicate webhooks; the in-doubt window is closed only by the dependency.
+- **Derive the provider's idempotency key from the business identifier**
+  (the order ID), never from a per-attempt random value. A replay then sends
+  the same key the original attempt did, and providers that accept keys
+  (Stripe, Adyen, PayPal, Toss Payments) return the original response
+  instead of charging again.
+- **The captured entry keeps the arguments.** A failed call lands in the
+  DLQ with its primitive arguments and entity ID, so the replay handler has
+  something to be idempotent *with*. A log line does not.
+- **When the dependency has no key**, do not map that failure type into
+  automatic replay. Have the replay handler reconcile first: query the
+  dependency for the outcome and report success without re-running when the
+  work is already done. If the dependency cannot answer that question
+  either, the entry belongs in front of a human, not in an automatic sweep.
+
+Money-equivalent truth belongs in a database uniqueness constraint or a
+transactional outbox, not in a cache-backed ledger, Baldur's included. See
+the "honest boundary" in [Idempotency](concepts/oss/idempotency.md) and
+"What belongs in automatic replay" in
+[DLQ + Replay](concepts/foundations/dlq-replay.md).
+
+---
+
 ## How much does it cost?
 
 The open-source core is **free forever** under the Apache License 2.0.
