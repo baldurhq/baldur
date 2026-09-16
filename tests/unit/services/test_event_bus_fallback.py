@@ -233,7 +233,7 @@ class TestPublishToKafkaFallbackBehavior:
     """_publish_to_kafka_fallback() behavior tests."""
 
     def test_falls_through_to_wal_quietly_when_kafka_not_installed(self) -> None:
-        """No Kafka adapter installed -> quiet log + WAL write, no exception.
+        """No Kafka adapter installed -> WAL write, no log, no exception.
 
         An install that never opted into Kafka must not have every critical
         event report a Kafka misconfiguration; the WAL is the real safety net.
@@ -254,11 +254,10 @@ class TestPublishToKafkaFallbackBehavior:
 
         mock_wal.assert_called_once_with(event)
 
-    def test_kafka_not_installed_logs_quietly_instead_of_at_exception_level(
-        self,
-    ) -> None:
-        """The absence of a never-installed optional adapter is DEBUG, not an
-        exception.
+    def test_kafka_not_installed_logs_nothing(self) -> None:
+        """The absence of the Kafka adapter is not logged at any level: it is
+        not part of the core and not offered as an extra, so there is nothing
+        an operator could act on.
 
         publish() logs ``redis_event_bus.kafka_fallback_failed`` at exception
         level whenever this method raises. While it raised AdapterError on the
@@ -282,9 +281,8 @@ class TestPublishToKafkaFallbackBehavior:
                 with patch.object(bus, "_write_to_wal"):
                     bus._publish_to_kafka_fallback(event)
 
-        mock_logger.debug.assert_called_once_with(
-            "redis_event_bus.kafka_fallback_not_installed"
-        )
+        mock_logger.debug.assert_not_called()
+        mock_logger.info.assert_not_called()
         mock_logger.exception.assert_not_called()
         mock_logger.warning.assert_not_called()
 

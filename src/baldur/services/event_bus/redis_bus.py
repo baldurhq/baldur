@@ -639,8 +639,10 @@ class RedisEventBus:
         creating ad-hoc producers per event. The singleton handles connection
         pooling, async delivery callbacks, and WAL-backed error recovery.
 
-        An installation without the Kafka producer adapter never opted into
-        Kafka at all, so its absence is logged quietly and the event goes
+        The Kafka producer adapter is not part of the open-source core and is
+        not offered as an extra, so an installation without it never opted
+        into Kafka at all: its absence is not logged (even a DEBUG line would
+        read as something the operator could install) and the event goes
         straight to the WAL. A producer that IS installed but fails keeps the
         loud path — that one is a real misconfiguration.
         """
@@ -648,7 +650,6 @@ class RedisEventBus:
         try:
             from baldur_dormant.adapters.kafka.producer import get_kafka_producer
         except ImportError:
-            logger.debug("redis_event_bus.kafka_fallback_not_installed")
             self._write_to_wal(event)
             return
 

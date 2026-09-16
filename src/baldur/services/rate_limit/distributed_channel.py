@@ -5,6 +5,11 @@ Propagates 429 events across the entire cluster via Kafka.
 When a single pod receives a 429 response from an external API, every other
 pod also holds back requests to that API (collective defense).
 
+The Kafka adapter is not part of the open-source core and is not offered as
+an extra. An install without it never opted into cluster propagation, so the
+channel is a silent no-op there: nothing is logged, every broadcast returns
+False, and subscribe / start return without doing anything.
+
 Features:
     - Cluster-wide 429 event propagation over Kafka
     - Ordering guaranteed by partition key (same API key -> same partition)
@@ -82,6 +87,9 @@ class DistributedRateLimitChannel:
             kafka_bus: Kafka EventBus (created with defaults if None)
         """
         self._kafka_bus: KafkaEventBus | None = kafka_bus
+        # Set once the Kafka adapter import has failed: a missing package does
+        # not appear for the life of the process, so the import is not retried.
+        self._kafka_unavailable = False
         self._handlers: list[Callable[[dict[str, Any]], None]] = []
         self._running = False
         self._lock = threading.Lock()
@@ -103,24 +111,23 @@ class DistributedRateLimitChannel:
                 cls._instance.stop()
             cls._instance = None
 
-    def _ensure_kafka_bus(self) -> KafkaEventBus:
-        """Lazy-init the Kafka EventBus from baldur_dormant."""
-        if self._kafka_bus is None:
-            # 528 D10-v2: KafkaEventBus relocated to baldur_dormant.
+    def _ensure_kafka_bus(self) -> KafkaEventBus | None:
+        """Lazy-init the Kafka EventBus; ``None`` when the adapter is absent.
+
+        The adapter is not part of the open-source core, so its absence is the
+        normal state of a stock install and nothing to report — not even at
+        DEBUG, which would read as something the operator could install.
+        """
+        if self._kafka_bus is None and not self._kafka_unavailable:
             try:
                 from baldur_dormant.adapters.kafka.event_bus import (
                     KafkaEventBus as _KafkaEventBus,
                 )
+            except ImportError:
+                self._kafka_unavailable = True
+                return None
 
-                self._kafka_bus = _KafkaEventBus()
-            except ImportError as e:
-                logger.exception(
-                    "distributed_rate_limit_channel.kafka_unavailable",
-                    error=e,
-                )
-                raise RuntimeError(
-                    "Kafka adapter not available; install baldur-pro[kafka]"
-                ) from e
+            self._kafka_bus = _KafkaEventBus()
 
         return self._kafka_bus
 
@@ -147,9 +154,11 @@ class DistributedRateLimitChannel:
         Returns:
             Whether the send to the internal buffer succeeded
         """
-        try:
-            kafka_bus = self._ensure_kafka_bus()
+        kafka_bus = self._ensure_kafka_bus()
+        if kafka_bus is None:
+            return False
 
+        try:
             event = {
                 "event_type": "RATE_LIMIT_429",
                 "key": key,
@@ -205,8 +214,10 @@ class DistributedRateLimitChannel:
             )
 
         # Set up the Kafka subscription if it is not configured yet
+        kafka_bus = self._ensure_kafka_bus()
+        if kafka_bus is None:
+            return
         try:
-            kafka_bus = self._ensure_kafka_bus()
             kafka_bus.subscribe(RATE_LIMIT_TOPIC, self._dispatch_to_handlers)
         except Exception as e:
             logger.warning(
@@ -248,8 +259,10 @@ class DistributedRateLimitChannel:
             logger.warning("distributed_rate_limit_channel.already_running")
             return
 
+        kafka_bus = self._ensure_kafka_bus()
+        if kafka_bus is None:
+            return
         try:
-            kafka_bus = self._ensure_kafka_bus()
             kafka_bus.start()
             self._running = True
             logger.info("distributed_channel.started")

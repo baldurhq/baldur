@@ -1,19 +1,21 @@
 """
-DistributedRateLimitChannel 단위 테스트.
+DistributedRateLimitChannel unit tests.
 
-테스트 대상:
-- Kafka broadcast 429 메시지 발행
-- subscribe 핸들러 등록
-- broadcast 실패 처리
-- _dispatch_to_handlers 핸들러 전달
-- start/stop 상태 관리
-- handler_count 속성
+Covered:
+- publishing a 429 broadcast to Kafka
+- subscribe handler registration
+- broadcast failure handling
+- _dispatch_to_handlers delivery to handlers
+- start/stop running state
+- the handler_count property
+- the quiet no-op posture of an install without the Kafka adapter
 """
 
 from __future__ import annotations
 
+import sys
 import time
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -32,7 +34,7 @@ def mock_kafka_bus():
 
 @pytest.fixture
 def channel(mock_kafka_bus):
-    """DistributedRateLimitChannel 인스턴스."""
+    """A DistributedRateLimitChannel over a mock bus."""
     from baldur.services.rate_limit.distributed_channel import (
         DistributedRateLimitChannel,
     )
@@ -41,15 +43,15 @@ def channel(mock_kafka_bus):
 
 
 # =============================================================================
-# Kafka broadcast 테스트
+# Kafka broadcast
 # =============================================================================
 
 
 class TestDistributedRateLimitChannel:
-    """DistributedRateLimitChannel 기본 단위 테스트."""
+    """Basic DistributedRateLimitChannel behaviour."""
 
     def test_broadcast_rate_limit_429_publishes_to_kafka(self, channel, mock_kafka_bus):
-        """broadcast_rate_limit_429()이 Kafka에 메시지 발행."""
+        """broadcast_rate_limit_429() publishes the event to Kafka."""
         from baldur.services.rate_limit.distributed_channel import RATE_LIMIT_TOPIC
 
         success = channel.broadcast_rate_limit_429(
@@ -69,7 +71,7 @@ class TestDistributedRateLimitChannel:
         assert call_kwargs["event"]["consecutive_429s"] == 3
 
     def test_subscribe_registers_handler(self, channel, mock_kafka_bus):
-        """subscribe_rate_limit_429()이 핸들러 등록."""
+        """subscribe_rate_limit_429() registers the handler."""
         handler_called: list = []
 
         def test_handler(event_data):
@@ -82,15 +84,15 @@ class TestDistributedRateLimitChannel:
 
 
 # =============================================================================
-# broadcast 실패 처리 테스트
+# Broadcast failure handling
 # =============================================================================
 
 
 class TestDistributedRateLimitChannelBroadcastFailure:
-    """DistributedRateLimitChannel broadcast 실패 처리 테스트."""
+    """Broadcast failures on an installed bus are reported and swallowed."""
 
     def test_broadcast_returns_false_on_publish_failure(self, channel, mock_kafka_bus):
-        """Kafka publish 실패 시 False 반환."""
+        """A Kafka publish that reports failure returns False."""
         mock_kafka_bus.publish.return_value = False
 
         result = channel.broadcast_rate_limit_429(
@@ -103,7 +105,7 @@ class TestDistributedRateLimitChannelBroadcastFailure:
         assert result is False
 
     def test_broadcast_returns_false_on_exception(self, channel, mock_kafka_bus):
-        """Kafka publish 예외 시 False 반환."""
+        """A Kafka publish that raises returns False."""
         mock_kafka_bus.publish.side_effect = RuntimeError("kafka down")
 
         result = channel.broadcast_rate_limit_429(
@@ -117,15 +119,15 @@ class TestDistributedRateLimitChannelBroadcastFailure:
 
 
 # =============================================================================
-# _dispatch_to_handlers 핸들러 전달 테스트
+# _dispatch_to_handlers delivery
 # =============================================================================
 
 
 class TestDistributedRateLimitChannelDispatch:
-    """_dispatch_to_handlers 핸들러 전달 테스트."""
+    """_dispatch_to_handlers delivers to every registered handler."""
 
     def test_dispatch_calls_all_handlers(self, channel):
-        """모든 등록된 핸들러에 이벤트 전달."""
+        """Every registered handler receives the event."""
         results: list[tuple[str, dict]] = []
 
         channel._handlers = [
@@ -144,7 +146,7 @@ class TestDistributedRateLimitChannelDispatch:
         assert results[1][0] == "b"
 
     def test_dispatch_survives_handler_exception(self, channel):
-        """핸들러 예외 시에도 다른 핸들러 계속 실행."""
+        """A raising handler does not stop the others."""
         results: list = []
 
         def failing_handler(data):
@@ -163,27 +165,27 @@ class TestDistributedRateLimitChannelDispatch:
 
 
 # =============================================================================
-# start/stop 상태 관리 테스트
+# start/stop running state
 # =============================================================================
 
 
 class TestDistributedRateLimitChannelStartStop:
-    """start/stop 상태 관리 테스트."""
+    """start/stop running state."""
 
     def test_start_sets_running(self, channel, mock_kafka_bus):
-        """start() 호출 시 running 상태."""
+        """start() marks the channel running."""
         channel.start()
         assert channel.is_running is True
         mock_kafka_bus.start.assert_called_once()
 
     def test_stop_clears_running(self, channel):
-        """stop() 호출 시 running 해제."""
+        """stop() clears the running state."""
         channel.start()
         channel.stop()
         assert channel.is_running is False
 
     def test_handler_count_property(self, channel):
-        """handler_count 속성 확인."""
+        """handler_count reflects the registered handlers."""
         assert channel.handler_count == 0
 
         channel._handlers.append(lambda d: None)
@@ -191,15 +193,15 @@ class TestDistributedRateLimitChannelStartStop:
 
 
 # =============================================================================
-# 317: _on_broadcast_delivery 콜백 테스트
+# 317: the _on_broadcast_delivery callback
 # =============================================================================
 
 
 class TestOnBroadcastDeliveryBehavior:
-    """317: _on_broadcast_delivery Kafka 전송 결과 콜백 동작 검증."""
+    """317: the Kafka delivery-report callback never raises."""
 
     def test_successful_delivery_does_not_raise(self):
-        """전송 성공 리포트 시 예외 없이 처리."""
+        """A successful delivery report is handled without raising."""
         from baldur.services.rate_limit.distributed_channel import (
             DistributedRateLimitChannel,
         )
@@ -211,7 +213,7 @@ class TestOnBroadcastDeliveryBehavior:
         DistributedRateLimitChannel._on_broadcast_delivery(report)
 
     def test_failed_delivery_does_not_raise(self):
-        """전송 실패 리포트 시 예외 없이 처리 (Fire-and-Forget)."""
+        """A failed delivery report is handled without raising (fire-and-forget)."""
         from baldur.services.rate_limit.distributed_channel import (
             DistributedRateLimitChannel,
         )
@@ -224,15 +226,15 @@ class TestOnBroadcastDeliveryBehavior:
 
 
 # =============================================================================
-# 317: broadcast with on_delivery 콜백 전달 테스트
+# 317: broadcast passes the on_delivery callback
 # =============================================================================
 
 
 class TestBroadcastPassesDeliveryCallbackBehavior:
-    """317: broadcast_rate_limit_429이 on_delivery 콜백을 Kafka에 전달하는지 검증."""
+    """317: broadcast_rate_limit_429 hands on_delivery to Kafka."""
 
     def test_broadcast_passes_on_delivery_callback(self, channel, mock_kafka_bus):
-        """broadcast 호출 시 on_delivery=_on_broadcast_delivery가 전달된다."""
+        """The publish call carries on_delivery=_on_broadcast_delivery."""
         from baldur.services.rate_limit.distributed_channel import (
             DistributedRateLimitChannel,
         )
@@ -249,3 +251,82 @@ class TestBroadcastPassesDeliveryCallbackBehavior:
             call_kwargs["on_delivery"]
             is DistributedRateLimitChannel._on_broadcast_delivery
         )
+
+
+# =============================================================================
+# An install without the Kafka adapter
+#
+# The adapter is not part of the open-source core and is not offered as an
+# extra, so on a stock install every 429 the coordinator handles reaches this
+# channel with nothing to publish to. Observed on a dogfood cron job: nine 429s
+# in two minutes produced eighteen ERROR lines with tracebacks telling an OSS
+# user to install a package that is not on offer. The absence is the normal
+# state, not an error, and not something to log: a silent no-op.
+# =============================================================================
+
+
+@pytest.fixture
+def no_kafka_adapter():
+    """Make the Kafka adapter import fail, whatever this environment installs."""
+    with patch.dict(sys.modules, {"baldur_dormant.adapters.kafka.event_bus": None}):
+        yield
+
+
+class TestChannelWithoutKafkaAdapterBehavior:
+    """The channel on an install that never opted into cluster propagation."""
+
+    def _channel(self):
+        from baldur.services.rate_limit.distributed_channel import (
+            DistributedRateLimitChannel,
+        )
+
+        return DistributedRateLimitChannel()
+
+    def _broadcast(self, channel) -> bool:
+        return channel.broadcast_rate_limit_429(
+            key="reddit",
+            consecutive_429s=1,
+            cooldown_until=1000.0,
+            calculated_delay=5.0,
+        )
+
+    def test_broadcast_returns_false_and_logs_nothing(self, no_kafka_adapter):
+        from baldur.services.rate_limit import distributed_channel as module
+
+        channel = self._channel()
+
+        with patch.object(module, "logger") as logger:
+            assert self._broadcast(channel) is False
+            assert self._broadcast(channel) is False
+            assert self._broadcast(channel) is False
+
+        logger.exception.assert_not_called()
+        logger.error.assert_not_called()
+        logger.warning.assert_not_called()
+        logger.info.assert_not_called()
+        logger.debug.assert_not_called()
+
+    def test_the_import_is_not_retried_once_it_has_failed(self, no_kafka_adapter):
+        channel = self._channel()
+        assert self._broadcast(channel) is False
+        assert channel._kafka_unavailable is True
+
+        # Were the import retried, this environment could now resolve it; the
+        # latch keeps the channel a no-op for the life of the process instead.
+        sys.modules.pop("baldur_dormant.adapters.kafka.event_bus", None)
+        assert self._broadcast(channel) is False
+        assert channel._kafka_bus is None
+
+    def test_subscribe_and_start_stay_quiet_without_the_adapter(self, no_kafka_adapter):
+        from baldur.services.rate_limit import distributed_channel as module
+
+        channel = self._channel()
+
+        with patch.object(module, "logger") as logger:
+            channel.subscribe_rate_limit_429(lambda event: None)
+            channel.start()
+
+        assert channel.handler_count == 1
+        assert channel._running is False
+        logger.exception.assert_not_called()
+        logger.warning.assert_not_called()

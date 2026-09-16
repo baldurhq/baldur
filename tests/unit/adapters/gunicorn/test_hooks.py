@@ -1062,9 +1062,10 @@ class TestResetKafkaAfterForkBehavior:
 class TestResetKafkaWithoutTheProducerPackageBehavior:
     """The stock-install branch: the producer adapter ships separately."""
 
-    def test_missing_producer_package_is_a_logged_no_op(self, monkeypatch):
+    def test_missing_producer_package_is_a_silent_no_op(self, monkeypatch):
         """Blocking the import at ``sys.modules`` reproduces an open-source
-        install, where this branch is the only one that ever runs."""
+        install, where this branch is the only one that ever runs. The adapter
+        is not on offer there, so not even a DEBUG line is warranted."""
         from baldur.adapters.gunicorn.hooks import _reset_kafka_after_fork
 
         # A None entry makes ``import`` raise ImportError for that exact name.
@@ -1074,13 +1075,7 @@ class TestResetKafkaWithoutTheProducerPackageBehavior:
         with capture_logs() as cap_logs:
             _reset_kafka_after_fork(_worker_with_preload(True))
 
-        matching = [
-            e
-            for e in cap_logs
-            if e.get("event") == "worker.postfork_kafka_skipped_no_dormant"
-        ]
-        assert len(matching) == 1
-        assert matching[0]["log_level"] == "debug"
+        assert [e for e in cap_logs if "kafka" in e.get("event", "")] == []
 
 
 class TestWorkerExitOutboxTeardownBehavior:

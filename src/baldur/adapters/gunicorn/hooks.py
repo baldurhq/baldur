@@ -124,17 +124,14 @@ def _reset_kafka_after_fork(worker: Any) -> None:
     so nothing calls into the producer's background threads — they did not
     survive ``fork()`` and a call into them would deadlock.
 
-    That producer adapter is distributed separately from the open-source
-    core, so this is a no-op on a stock install.
+    That producer adapter is not part of the open-source core and is not
+    offered as an extra, so this is a silent no-op on a stock install — its
+    absence is nothing an operator could act on.
     """
     try:
         from baldur_dormant.adapters.kafka.config import get_kafka_settings
         from baldur_dormant.adapters.kafka.producer import reset_kafka_producer
     except ImportError:
-        logger.debug(
-            "worker.postfork_kafka_skipped_no_dormant",
-            worker_id=worker.pid,
-        )
         return
 
     settings = get_kafka_settings()

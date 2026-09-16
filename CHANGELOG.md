@@ -13,6 +13,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 ### Fixed
 
 - Dead letters buffered by the outbox are written out when a process exits normally, not only on a signal or a worker recycle.
+- A 429 no longer logs two errors with tracebacks on an install without the Kafka adapter; the absent adapter is not logged anywhere.
 
 ## [1.14.0] - 2026-09-16
 
