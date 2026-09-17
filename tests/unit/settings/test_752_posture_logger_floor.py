@@ -15,7 +15,10 @@ line passed its own tests.
 
 from __future__ import annotations
 
+import io
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import pytest
 
@@ -57,6 +60,23 @@ def operator_log_level(monkeypatch):
             monkeypatch.setenv("BALDUR_LOG_LEVEL", level)
 
     return _set
+
+
+@contextmanager
+def host_configured_root(level: int) -> Iterator[logging.Logger]:
+    """A root logger an application configured: one handler of its own at
+    ``level``. Installed inside the test body because pytest adds its own
+    capture handlers at the start of the call phase."""
+    root = logging.getLogger()
+    saved_handlers = root.handlers
+    saved_level = root.level
+    root.handlers = [logging.StreamHandler(io.StringIO())]
+    root.setLevel(level)
+    try:
+        yield root
+    finally:
+        root.handlers = saved_handlers
+        root.setLevel(saved_level)
 
 
 class TestPostureLoggerFloorContract:
@@ -118,3 +138,34 @@ class TestPostureLoggerFloorContract:
         reset_structlog_config()
 
         assert logging.getLogger(POSTURE_LOGGER_NAME).level == logging.NOTSET
+
+
+class TestPostureFloorInsideAConfiguredHost:
+    """The floor is a write to baldur's own logger, so a host that configured
+    its logging at WARNING still gets the one posture line — and its root
+    level is never touched, floor or no floor."""
+
+    def test_the_floor_applies_and_the_host_root_level_is_untouched(
+        self, operator_log_level
+    ):
+        operator_log_level(None)
+
+        with host_configured_root(logging.ERROR) as root:
+            configure_structlog()
+
+            assert root.level == logging.ERROR
+            assert logging.getLogger(POSTURE_LOGGER_NAME).level == logging.INFO
+            assert logging.getLogger(POSTURE_LOGGER_NAME).isEnabledFor(logging.INFO)
+
+    def test_an_operator_level_skips_the_floor_and_leaves_the_host_root_alone(
+        self, operator_log_level
+    ):
+        operator_log_level("ERROR")
+
+        with host_configured_root(logging.INFO) as root:
+            configure_structlog()
+
+            assert root.level == logging.INFO
+            posture = logging.getLogger(POSTURE_LOGGER_NAME)
+            assert posture.level == logging.NOTSET, "the floor must not be applied"
+            assert posture.isEnabledFor(logging.INFO) is False

@@ -1030,9 +1030,11 @@ def _finalize_value(result: PolicyResult[T]) -> T:
 def _protect_prelude() -> bool:
     """Run the shared entry-point prelude; report whether protection is on.
 
-    Every public protect entry point begins the same way: configure logging,
-    read the enable flag, and — when protection is on — announce the runtime
-    posture once per process. Owning that sequence here is what keeps a
+    Every public protect entry point begins the same way: configure logging
+    (baldur's own handler and root level only when nothing else has configured
+    the root — basicConfig semantics — plus structlog's pipeline), read the
+    enable flag, and — when protection is on — announce the runtime posture
+    once per process. Owning that sequence here is what keeps a
     fifth entry point from silently skipping a step, which is exactly how
     two of the four came to miss the announcement.
 

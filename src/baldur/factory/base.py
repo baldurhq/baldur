@@ -28,6 +28,26 @@ RegistrySnapshot = dict[str, Any]
 
 __all__ = ["GenericProviderRegistry", "RegistrySnapshot"]
 
+# The registry module registers the tree's built-in adapters while it is being
+# imported. Those registrations are static facts, not events, and they happen
+# before any entry point has configured logging — where structlog's default
+# prints every level to stdout — so the load-time sweep runs with the
+# per-registration line switched off. Runtime registrations (a PRO hook, an
+# application's own provider) keep announcing themselves.
+_announce_registrations = True
+
+
+@contextmanager
+def _unannounced_registrations() -> Generator[None, None, None]:
+    """Switch the per-registration DEBUG line off for the block."""
+    global _announce_registrations
+    previous = _announce_registrations
+    _announce_registrations = False
+    try:
+        yield
+    finally:
+        _announce_registrations = previous
+
 
 class GenericProviderRegistry(Generic[T]):
     """Type-safe generic registry for a single adapter type.
@@ -100,11 +120,12 @@ class GenericProviderRegistry(Generic[T]):
         self._providers[name] = provider
         if self._default is None:
             self._default = name
-        logger.debug(
-            "registry.provider_registered",
-            adapter_type=self._adapter_type,
-            name=name,
-        )
+        if _announce_registrations:
+            logger.debug(
+                "registry.provider_registered",
+                adapter_type=self._adapter_type,
+                name=name,
+            )
 
     def get(self, name: str | None = None) -> T:
         """Get or create a provider instance (DCL pattern).

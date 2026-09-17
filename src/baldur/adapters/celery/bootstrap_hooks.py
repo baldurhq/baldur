@@ -513,7 +513,16 @@ def connect_celery_bootstrap_receivers() -> None:
     The stop side rides this same function rather than a separate arming path,
     so there is no reachable state where a worker's start side is armed and its
     stop side is not.
+
+    Configures logging first: this is a public entry point a Celery app module
+    can reach before any ``baldur.init()``, and nothing baldur emits may go
+    through structlog's unconfigured default (idempotent; a host that
+    configured logging keeps it).
     """
+    from baldur.observability.structlog_config import configure_structlog
+
+    configure_structlog()
+
     worker_init.connect(_on_worker_init, dispatch_uid=_WORKER_INIT_DISPATCH_UID)
     worker_process_init.connect(
         _on_worker_process_init,

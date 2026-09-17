@@ -5,10 +5,18 @@ Configures structlog as a wrapper around stdlib logging so the existing
 infrastructure is preserved as-is:
 - OTEL LoggingInstrumentor: intercepts the stdlib LogRecord beneath structlog
   and ships it to Loki
-- IncidentLogHandler: a stdlib logging.Handler subclass, so it works unchanged
 - LoggingSettings: stdlib logger level configuration preserved as-is
-- Django/Celery internal logging: passes through the structlog pipeline via
-  foreign_pre_chain
+- Host records on the zero-config path: a stdlib record that reaches baldur's
+  own root handler is rendered through foreign_pre_chain
+
+Library/host boundary: baldur writes to the process root logger only with
+``logging.basicConfig`` semantics — the handler and the root level are
+installed when the root has no handler at configure time, and an application
+that configured its own logging (``basicConfig``, a ``dictConfig`` / framework
+``LOGGING`` with a ``root`` entry) keeps it. ``BALDUR_LOG_LEVEL`` governs
+baldur's own loggers (``baldur``, ``baldur_pro``) when set; when unset they
+inherit the application's level. A baldur event that reaches a host handler
+renders as ``event key=value ...`` (see ``_HostReadableEventDict``).
 
 Renderer per environment:
 - structured_json=True  (production):  JSONRenderer  -> Loki/Datadog parse the
@@ -38,6 +46,7 @@ import threading
 from typing import Any, cast
 
 import structlog
+from structlog.processors import KeyValueRenderer
 
 from baldur.observability.log_processors import (
     event_name_validator,
@@ -100,6 +109,102 @@ _configure_lock = threading.Lock()
 # ``baldur.startup_report`` is invisible on a default run today.
 POSTURE_LOGGER_NAME = "baldur.posture"
 _POSTURE_FLOOR_LEVEL = logging.INFO
+
+# The level BALDUR_LOG_LEVEL falls back to when unset or unrecognised.
+_DEFAULT_LOG_LEVEL_NAME = "WARNING"
+
+# The loggers BALDUR_LOG_LEVEL governs when it is set. Everything baldur emits
+# lives under one of these; the eight component families in
+# _COMPONENT_LOGGER_MAP are pinned afterwards and keep precedence.
+_BALDUR_LOGGER_NAMESPACES: tuple[str, ...] = ("baldur", "baldur_pro")
+
+# Fields a host formatter prints from the LogRecord itself, so the readable
+# rendering of a baldur event leaves them out rather than printing them twice.
+_HOST_FORMATTER_OWNED_FIELDS = frozenset({"level", "logger", "timestamp"})
+
+_HOST_KEY_VALUE_RENDERER = KeyValueRenderer()
+
+
+class _BaldurStreamHandler(logging.StreamHandler):
+    """The root handler baldur installs on the zero-config path.
+
+    A marker subclass with no behaviour of its own: ``reset_structlog_config``
+    and tests identify baldur's handler by ``isinstance`` rather than by the
+    formatter it carries, so a host's own ``ProcessorFormatter`` handler is
+    never mistaken for it.
+    """
+
+
+class _HostReadableEventDict(dict):
+    """The event dict handed to stdlib as ``LogRecord.msg``.
+
+    baldur's own ``ProcessorFormatter`` still receives the Mapping (it copies
+    ``record.msg`` and renders JSON or console from it, byte-identical to a
+    plain dict). A host handler with a plain ``logging.Formatter`` prints
+    ``str(record.msg)`` through ``LogRecord.getMessage``, and for a plain dict
+    that is a Python dict repr. This subclass renders ``event key=value ...``
+    instead, with the fields the host formatter prints itself dropped and any
+    rendered stack or exception appended on new lines.
+
+    The rendered exception is left out when the record carries ``exc_info``
+    itself — structlog proxies ``.exception()`` to ``Logger.exception``, which
+    attaches it — because the host formatter appends that traceback on its
+    own and would otherwise print it twice. Other handlers on the root
+    (Sentry, OTEL) keep reading ``exc_info`` from the record as before.
+
+    A flat ``extra`` mapping is not an option: baldur's log calls use
+    ``name=``, ``message=``, ``args=`` and other ``LogRecord`` attribute names
+    as fields, and stdlib raises ``KeyError`` for an ``extra`` key that
+    collides with one.
+    """
+
+    __slots__ = ("_traceback_on_record",)
+
+    def __init__(
+        self, event_dict: dict[str, Any], *, traceback_on_record: bool = False
+    ) -> None:
+        super().__init__(event_dict)
+        self._traceback_on_record = traceback_on_record
+
+    def __str__(self) -> str:
+        fields = {
+            key: value
+            for key, value in self.items()
+            if key not in _HOST_FORMATTER_OWNED_FIELDS
+        }
+        event = fields.pop("event", "")
+        exception = fields.pop("exception", None)
+        stack = fields.pop("stack", None)
+        rendered = str(event)
+        if fields:
+            pairs = _HOST_KEY_VALUE_RENDERER(None, "", fields)
+            rendered = f"{rendered} {pairs}"
+        if stack:
+            rendered = f"{rendered}\n{stack}"
+        if exception and not self._traceback_on_record:
+            rendered = f"{rendered}\n{exception}"
+        return rendered
+
+
+# The structlog method structlog.stdlib.BoundLogger proxies to
+# logging.Logger.exception, which attaches exc_info to the record itself.
+_STDLIB_EXCEPTION_METHOD = "exception"
+
+
+def _wrap_for_host_and_formatter(
+    logger: logging.Logger, name: str, event_dict: dict[str, Any]
+) -> tuple[tuple[_HostReadableEventDict], dict[str, dict[str, Any]]]:
+    """Last processor: ``ProcessorFormatter.wrap_for_formatter`` with a
+    host-readable event dict.
+
+    Same contract as structlog's own — the event dict becomes the record's
+    ``msg`` and the logger / method name travel in ``extra`` — except that the
+    ``msg`` renders readably through any host formatter.
+    """
+    readable = _HostReadableEventDict(
+        event_dict, traceback_on_record=name == _STDLIB_EXCEPTION_METHOD
+    )
+    return (readable,), {"extra": {"_logger": logger, "_name": name}}
 
 
 class _StructlogState:
@@ -164,7 +269,7 @@ def configure_structlog() -> None:
         structlog.configure(
             processors=[
                 *shared_processors,
-                structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+                cast(structlog.types.Processor, _wrap_for_host_and_formatter),
             ],
             logger_factory=structlog.stdlib.LoggerFactory(),
             wrapper_class=structlog.stdlib.BoundLogger,
@@ -180,9 +285,21 @@ def configure_structlog() -> None:
         # when an extra= key collides with a canonical field
         # (level/logger/timestamp), the downstream structural processor
         # overwrites it so the canonical value always wins.
+        #
+        # Structural processors only: a host record that reaches baldur's own
+        # handler on the zero-config path is written once, so the stateful
+        # processors that can drop or reject an event (the event-name
+        # validator, the rate limiter, the sampler) run for baldur's own
+        # records only — they already ran once, in BoundLogger.
         foreign_pre_chain: list[structlog.types.Processor] = [
             structlog.stdlib.ExtraAdder(),
-            *shared_processors,
+            structlog.contextvars.merge_contextvars,
+            structlog.stdlib.add_log_level,
+            structlog.stdlib.add_logger_name,
+            structlog.processors.TimeStamper(fmt="iso"),
+            cast(structlog.types.Processor, _inject_otel_trace_context),
+            structlog.processors.StackInfoRenderer(),
+            structlog.processors.format_exc_info,
         ]
         formatter = structlog.stdlib.ProcessorFormatter(
             processors=[
@@ -192,16 +309,15 @@ def configure_structlog() -> None:
             foreign_pre_chain=foreign_pre_chain,
         )
 
-        root_logger = logging.getLogger()
-        # Avoid duplicate handlers: replace only handlers carrying the
-        # structlog formatter
-        root_logger.handlers = [
-            h
-            for h in root_logger.handlers
-            if not isinstance(
-                getattr(h, "formatter", None), structlog.stdlib.ProcessorFormatter
-            )
-        ]
+        # BALDUR_LOG_LEVEL: presence is the operator's explicit level intent;
+        # an unrecognised value falls back to the default, as it always has.
+        _level_name = os.environ.get("BALDUR_LOG_LEVEL")
+        _explicit_level = _level_name is not None
+        _log_level = getattr(
+            logging, (_level_name or _DEFAULT_LOG_LEVEL_NAME).upper(), None
+        )
+        if not isinstance(_log_level, int):
+            _log_level = logging.WARNING
 
         # In the test environment, NullHandler blocks console output entirely.
         # StreamHandler(sys.stdout) grabs the original stdout reference at
@@ -209,22 +325,30 @@ def configure_structlog() -> None:
         # the only workable answer under test. pytest's caplog uses its own
         # LogCaptureHandler, so it is unaffected.
         _test_level_name = os.environ.get("BALDUR_TEST_LOG_LEVEL")
-        handler: logging.Handler
         if _test_level_name:
-            handler = logging.NullHandler()
+            root_logger = logging.getLogger()
             _effective_level = getattr(
                 logging, _test_level_name.upper(), logging.WARNING
             )
             root_logger.setLevel(_effective_level)
+            root_logger.addHandler(logging.NullHandler())
         else:
-            handler = logging.StreamHandler(sys.stdout)
+            # The zero-config path IS logging.basicConfig with a JSON handler:
+            # the handler and the root level are installed only when the root
+            # has no handler, and the call is a no-op for an application that
+            # configured its own logging — its level, handlers, format and
+            # stream stay, and baldur's events reach them by propagation.
+            handler = _BaldurStreamHandler(sys.stdout)
             handler.setFormatter(formatter)
-            _log_level_name = os.environ.get("BALDUR_LOG_LEVEL", "WARNING").upper()
-            _log_level = getattr(logging, _log_level_name, None)
-            if _log_level is None:
-                _log_level = logging.WARNING
-            root_logger.setLevel(_log_level)
-        root_logger.addHandler(handler)
+            logging.basicConfig(handlers=[handler], level=_log_level)
+
+        # A set BALDUR_LOG_LEVEL is the level of baldur's own loggers in both
+        # cases — the documented diagnostic switch keeps working inside a
+        # configured host. Unset, they stay NOTSET and inherit the host's root
+        # level, as any library's loggers do.
+        if _explicit_level:
+            for namespace in _BALDUR_LOGGER_NAMESPACES:
+                logging.getLogger(namespace).setLevel(_log_level)
 
         # =====================================================================
         # Apply the per-component log levels (see _apply_component_log_levels).
@@ -232,16 +356,19 @@ def configure_structlog() -> None:
         # loggers via setLevel(), making them controllable by environment
         # variable alone:
         #   BALDUR_LOGGING_SETTINGS_CIRCUIT_BREAKER_LOG_LEVEL=WARNING
+        # Runs after the namespace write above, so the families keep
+        # precedence over BALDUR_LOG_LEVEL.
         # =====================================================================
         _apply_component_log_levels(settings)
 
         # Floor the posture logger at INFO so the one-line startup summary
-        # survives the default WARNING root level. Keyed on the operator not
-        # having expressed a level intent — the same explicit-set convention
-        # the Redis posture predicate uses — so BALDUR_LOG_LEVEL=ERROR
-        # silences this line like anything else, and an operator who names
-        # the logger in their own config wins by writing it later.
-        if "BALDUR_LOG_LEVEL" not in os.environ:
+        # survives a WARNING root level. Keyed on the operator not having
+        # expressed a level intent — the same explicit-set convention the
+        # Redis posture predicate uses — so BALDUR_LOG_LEVEL=ERROR silences
+        # this line like anything else, and an operator who names the logger
+        # in their own config wins by writing it later. A write to baldur's
+        # own logger, so it applies inside a configured host as well.
+        if not _explicit_level:
             logging.getLogger(POSTURE_LOGGER_NAME).setLevel(_POSTURE_FLOOR_LEVEL)
 
         state.configured = True
@@ -250,21 +377,21 @@ def configure_structlog() -> None:
 def reset_structlog_config() -> None:
     """Reset the structlog configuration in tests.
 
-    Clears the configured flag and also removes the ProcessorFormatter handlers
-    registered on the root logger, so the next configure_structlog() call
-    rebuilds everything from the new configuration values. Restores the
-    posture logger to NOTSET so its INFO floor cannot leak across tests.
+    Clears the configured flag and removes the handler baldur installed on the
+    root logger (identified by its class, never by its formatter — a host's own
+    ``ProcessorFormatter`` handler is not baldur's), so the next
+    configure_structlog() call rebuilds everything from the new configuration
+    values. Restores baldur's own loggers and the posture logger to NOTSET so
+    neither a ``BALDUR_LOG_LEVEL`` write nor the INFO floor leaks across tests.
     """
     _structlog_state().configured = False
     logging.getLogger(POSTURE_LOGGER_NAME).setLevel(logging.NOTSET)
+    for namespace in _BALDUR_LOGGER_NAMESPACES:
+        logging.getLogger(namespace).setLevel(logging.NOTSET)
 
     root = logging.getLogger()
     root.handlers = [
-        h
-        for h in root.handlers
-        if not isinstance(
-            getattr(h, "formatter", None), structlog.stdlib.ProcessorFormatter
-        )
+        h for h in root.handlers if not isinstance(h, _BaldurStreamHandler)
     ]
 
 

@@ -521,7 +521,13 @@ count is capped (500 by default, evicted oldest-first). Gauges that should never
 clamped at `0`.
 
 **Adjusting log levels.**
-The global level is `BALDUR_LOG_LEVEL`. Four event families have their own runtime override:
+`BALDUR_LOG_LEVEL` is the level of Baldur's own loggers. When your application has a root
+handler (`logging.basicConfig`, a `root` entry in `dictConfig` / Django `LOGGING`), Baldur's
+events go through your handlers in your format — at your level unless `BALDUR_LOG_LEVEL` is
+set, which then wins over a `baldur` entry in your own config. When nothing configured logging,
+Baldur installs a stdout JSON handler and the variable is the root level too (the same rule as
+`logging.basicConfig`). Four event families have their own runtime override, which keeps
+precedence over `BALDUR_LOG_LEVEL` either way:
 
 ```bash
 BALDUR_LOG_LEVEL=INFO
@@ -530,6 +536,17 @@ BALDUR_EVENT_LOGGING_CB_LOG_LEVEL=WARNING
 BALDUR_EVENT_LOGGING_REPLAY_LOG_LEVEL=INFO
 BALDUR_EVENT_LOGGING_SLA_LOG_LEVEL=WARNING
 ```
+
+Ordering follows the standard library. Configure logging before `baldur.init()` (a `dictConfig`
+with a `root` entry after it replaces Baldur's handler, which is fine; a `logging.basicConfig`
+after it does nothing, as it does after any handler — configure first, or pass `force=True`).
+A `dictConfig` after `init()` that keeps the stdlib default `disable_existing_loggers=True`
+disables every already-created logger it does not name, Baldur's included, as it does for any
+library — name `baldur` or set the flag to `False`. If your handlers sit on named loggers only
+and you see Baldur's JSON copy of their records, add a root handler (`logging.basicConfig`) or
+set `propagate = False` on those loggers: the copy is what any root handler does to a
+propagating named logger. If your application configures structlog itself, do so after
+`baldur.init()`.
 
 Event names follow `{component}.{entity}_{action}`, and the level is implied by the suffix:
 `_failed` / `_blocked` / `_timeout` / `_exhausted` are at least `WARNING`, `_error` is `ERROR`,

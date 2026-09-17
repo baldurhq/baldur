@@ -118,12 +118,20 @@ walks through the single-host-lock vs. distributed-beat decision.
 
 ## See Baldur's events
 
-Baldur logs to stdout automatically. Raise the log level to watch circuit
-breaker and retry events as your tasks run:
+The worker behaves as a plain Celery worker: its `-l` level, handlers and
+stdout redirection apply, and Baldur's events go through Celery's handler in
+Celery's format. Set `BALDUR_LOG_LEVEL=INFO` to watch circuit breaker and
+retry events as your tasks run:
 
 ```bash
 export BALDUR_LOG_LEVEL=INFO   # circuit opened/closed, retries, ...
 ```
+
+A few JSON lines from `baldur.init()` precede Celery's logging setup at boot
+— Baldur initialises at `worker_init`, before Celery configures the worker's
+logging. To keep Baldur's JSON handler on the worker instead, set
+`worker_hijack_root_logger = False` on the app or connect your own
+`setup_logging` receiver.
 
 ## Going to production
 

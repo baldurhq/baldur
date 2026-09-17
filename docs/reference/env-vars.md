@@ -287,14 +287,28 @@ BALDUR_HEALTH_CHECK_READINESS_TIMEOUT_FAIL_DIRECTION=not_ready
 
 ## Event logging (runtime level adjustment)
 
-The global log level is read from `BALDUR_LOG_LEVEL` (default `WARNING`;
-standard Python `logging` level names, e.g. `DEBUG`, `INFO`). It is a direct
-environment read applied once when logging is configured — set it before the
-process starts. `BALDUR_LOG_LEVEL=DEBUG` is the diagnostic switch the
-troubleshooting page relies on (e.g. to surface the `protect.composer_built`
-zone-composition event).
+`BALDUR_LOG_LEVEL` is the level of Baldur's own loggers (`baldur`,
+`baldur_pro`; standard Python `logging` level names, e.g. `DEBUG`, `INFO`).
+It is a direct environment read applied once when logging is configured — set
+it before the process starts. `BALDUR_LOG_LEVEL=DEBUG` is the diagnostic
+switch the troubleshooting page relies on (e.g. to surface the
+`protect.composer_built` zone-composition event).
 
-The four event families below have their own runtime-adjustable overrides:
+Where Baldur's events go depends on whether your application configured
+logging — the same rule as `logging.basicConfig`:
+
+- **No root handler** (nothing configured logging): Baldur installs a stdout
+  JSON handler on the root logger and sets the root level from
+  `BALDUR_LOG_LEVEL` (default `WARNING`).
+- **A root handler exists** (`logging.basicConfig`, a `root` entry in
+  `dictConfig` / Django `LOGGING`, a Celery worker's own setup): your level,
+  handlers, format and stream are left as they are, and Baldur's events go
+  through your handlers in your format — at your level when
+  `BALDUR_LOG_LEVEL` is unset, at the level it names when set (it wins over a
+  `baldur` entry in your own logging config).
+
+The four event families below have their own runtime-adjustable overrides,
+and they keep precedence over `BALDUR_LOG_LEVEL` in both cases:
 
 ```bash
 BALDUR_EVENT_LOGGING_DLQ_LOG_LEVEL=INFO

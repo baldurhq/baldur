@@ -211,13 +211,15 @@ def init(
     """
     global _init_done, _init_in_progress
 
-    # Install the log-level filter before the first step can emit anything.
-    # Until this runs, structlog's pre-configure default prints every level
-    # to stdout, so init() greets a zero-config process with its entire DEBUG
-    # stream. Not a new side effect: the same global configuration already
-    # happens on the first protect() call in any process that protects
-    # anything — this only makes it happen earlier. Idempotent and
-    # lock-guarded, so a repeat init() or an already-configured host wins.
+    # Configure logging before the first step can emit anything: installs
+    # baldur's stdout JSON handler and root level when nothing else has
+    # (basicConfig semantics — an application that configured its own logging
+    # keeps it), and configures structlog's pipeline. Until this runs,
+    # structlog's pre-configure default prints every level to stdout, so
+    # init() would greet a zero-config process with its entire DEBUG stream.
+    # Not a new side effect: the same global configuration already happens on
+    # the first protect() call in any process that protects anything — this
+    # only makes it happen earlier. Idempotent and lock-guarded.
     from baldur.observability.structlog_config import configure_structlog
 
     configure_structlog()

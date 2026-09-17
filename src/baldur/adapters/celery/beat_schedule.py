@@ -582,6 +582,14 @@ def configure_baldur_celery(
         enable_dlx: Whether to enable DLX bindings on critical queues.
     """
     global _celery_configured
+
+    # A public entry point an app module reaches before any baldur.init():
+    # configure logging first so no line here goes through structlog's
+    # unconfigured default (idempotent; a configured host keeps its own).
+    from baldur.observability.structlog_config import configure_structlog
+
+    configure_structlog()
+
     if _celery_configured:
         logger.warning("beat_schedule.celery_already_configured")
         return

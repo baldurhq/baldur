@@ -65,12 +65,18 @@ logs `admin.autostart_failed` and your app keeps serving without the console.
 
 ### See Baldur's events
 
-Baldur logs to stdout automatically. Raise the log level to watch circuit
-breaker and rate-limit events as you exercise the endpoint:
+Baldur logs to stdout when your app has no root handler; when it has one
+(`logging.basicConfig`, a `root` entry in `LOGGING`), Baldur's events go
+through your handlers in your format. Set `BALDUR_LOG_LEVEL=INFO` to watch
+circuit breaker and rate-limit events as you exercise the endpoint:
 
 ```bash
 export BALDUR_LOG_LEVEL=INFO   # circuit opened/closed, rate-limit blocks, ...
 ```
+
+Call `init_flask(app)` before the first use of `app.logger`: Flask attaches
+its own handler to `app.logger` only when nothing up the tree would show the
+record, so in this order the app's records are written once.
 
 ### Verify without a browser
 

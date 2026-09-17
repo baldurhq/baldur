@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from baldur.factory.base import GenericProviderRegistry
+from baldur.factory.base import GenericProviderRegistry, _unannounced_registrations
 
 if TYPE_CHECKING:
     from baldur.coordination.base import LeaderElector
@@ -1203,64 +1203,68 @@ ProviderRegistry.rate_limit_storage.set_default("memory")
 # ML Strategy slots stay empty at module load (599 D9) — statistical
 # defaults + slot defaults are registered by register_dormant_services().
 
-# Run auto-registration on module import
-_auto_register_adapters()
+# Run auto-registration on module import. Load-time registrations are
+# unannounced: nothing baldur emits may go through structlog's unconfigured
+# default, and importing this module is not an entry point that configures
+# logging first.
+with _unannounced_registrations():
+    _auto_register_adapters()
 
-# 516 D2 — OSS NoOp defaults for the OSS->PRO boundary registries. Imported
-# AFTER ``_auto_register_adapters()`` so the chained interfaces-package init
-# runs in the same order as it did pre-516 (eager imports here would relocate
-# ``baldur.interfaces.__init__`` ahead of the discover_* pass and cause
-# partial re-entry into in-progress ``baldur.adapters.django`` initialization
-# — see the apps_ready_lifecycle regression that surfaced from the original
-# pre-discover placement). PRO overrides via ``ProviderRegistry.X.register(
-# "pro", ...) + set_default("pro")`` at import time when baldur_pro is
-# installed.
-from baldur.interfaces.governance import (  # noqa: E402
-    NoOpGovernanceChecker,
-)
-from baldur.interfaces.pool_monitor import (  # noqa: E402
-    NoOpPoolStatsProvider,
-)
+    # 516 D2 — OSS NoOp defaults for the OSS->PRO boundary registries. Imported
+    # AFTER ``_auto_register_adapters()`` so the chained interfaces-package init
+    # runs in the same order as it did pre-516 (eager imports here would relocate
+    # ``baldur.interfaces.__init__`` ahead of the discover_* pass and cause
+    # partial re-entry into in-progress ``baldur.adapters.django`` initialization
+    # — see the apps_ready_lifecycle regression that surfaced from the original
+    # pre-discover placement). PRO overrides via ``ProviderRegistry.X.register(
+    # "pro", ...) + set_default("pro")`` at import time when baldur_pro is
+    # installed.
+    from baldur.interfaces.governance import (  # noqa: E402
+        NoOpGovernanceChecker,
+    )
+    from baldur.interfaces.pool_monitor import (  # noqa: E402
+        NoOpPoolStatsProvider,
+    )
 
-ProviderRegistry.pool_monitor.register("oss-noop", NoOpPoolStatsProvider)
-ProviderRegistry.pool_monitor.set_default("oss-noop")
-ProviderRegistry.governance.register("oss-noop", NoOpGovernanceChecker)
-ProviderRegistry.governance.set_default("oss-noop")
-# shutdown_integrations has no NoOp default — empty registry means "no
-# extra handlers to register", which is the correct OSS behavior.
-# startup_integrations is the same shape (615 D1) — empty registry means "no
-# extra starters to run"; the PRO package populates it under ACTIVE entitlement.
+    ProviderRegistry.pool_monitor.register("oss-noop", NoOpPoolStatsProvider)
+    ProviderRegistry.pool_monitor.set_default("oss-noop")
+    ProviderRegistry.governance.register("oss-noop", NoOpGovernanceChecker)
+    ProviderRegistry.governance.set_default("oss-noop")
+    # shutdown_integrations has no NoOp default — empty registry means "no
+    # extra handlers to register", which is the correct OSS behavior.
+    # startup_integrations is the same shape (615 D1) — empty registry means "no
+    # extra starters to run"; the PRO package populates it under ACTIVE entitlement.
 
-# 528 D10-v2 — OSS NoOp defaults for the Dormant boundary slots. Registered
-# at the same load-time phase as the 516 boundary NoOps. baldur_dormant.
-# register_dormant_services() overwrites these defaults with the concrete
-# K8s/Kafka/WORM/DynamoDB adapters when the wheel is installed.
-from baldur.audit.export import NoOpS3Exporter  # noqa: E402
-from baldur.coordination.noop_elector import NoOpLeaderElector  # noqa: E402
-from baldur.interfaces.audit_adapter import (  # noqa: E402
-    NoOpKafkaAuditAdapter,
-    NoOpWormAdapter,
-)
-from baldur.interfaces.event_bus import NoOpKafkaEventBus  # noqa: E402
-from baldur.meta.recovery_adapter import NoOpRecoveryAdapter  # noqa: E402
+    # 528 D10-v2 — OSS NoOp defaults for the Dormant boundary slots. Registered
+    # at the same load-time phase as the 516 boundary NoOps. baldur_dormant.
+    # register_dormant_services() overwrites these defaults with the concrete
+    # K8s/Kafka/WORM/DynamoDB adapters when the wheel is installed.
+    from baldur.audit.export import NoOpS3Exporter  # noqa: E402
+    from baldur.coordination.noop_elector import NoOpLeaderElector  # noqa: E402
+    from baldur.interfaces.audit_adapter import (  # noqa: E402
+        NoOpKafkaAuditAdapter,
+        NoOpWormAdapter,
+    )
+    from baldur.interfaces.event_bus import NoOpKafkaEventBus  # noqa: E402
+    from baldur.meta.recovery_adapter import NoOpRecoveryAdapter  # noqa: E402
 
-ProviderRegistry.leader_elector.register("oss-noop", NoOpLeaderElector)
-ProviderRegistry.leader_elector.set_default("oss-noop")
-ProviderRegistry.audit_kafka_adapter.register("oss-noop", NoOpKafkaAuditAdapter)
-ProviderRegistry.audit_kafka_adapter.set_default("oss-noop")
-ProviderRegistry.audit_worm_adapter.register("oss-noop", NoOpWormAdapter)
-ProviderRegistry.audit_worm_adapter.set_default("oss-noop")
-ProviderRegistry.audit_s3_exporter.register("oss-noop", NoOpS3Exporter)
-ProviderRegistry.audit_s3_exporter.set_default("oss-noop")
-ProviderRegistry.kafka_eventbus.register("oss-noop", NoOpKafkaEventBus)
-ProviderRegistry.kafka_eventbus.set_default("oss-noop")
-# quorum_witness has no OSS default — the whole multiregion package
-# (including the in-memory witness) relocated to baldur_dormant (599 D5);
-# register_dormant_services() registers the "memory" default, and all slot
-# consumers are multiregion-internal, so an empty slot on a clean OSS
-# install is unreachable.
-ProviderRegistry.recovery_adapter.register("oss-noop", NoOpRecoveryAdapter)
-ProviderRegistry.recovery_adapter.set_default("oss-noop")
+    ProviderRegistry.leader_elector.register("oss-noop", NoOpLeaderElector)
+    ProviderRegistry.leader_elector.set_default("oss-noop")
+    ProviderRegistry.audit_kafka_adapter.register("oss-noop", NoOpKafkaAuditAdapter)
+    ProviderRegistry.audit_kafka_adapter.set_default("oss-noop")
+    ProviderRegistry.audit_worm_adapter.register("oss-noop", NoOpWormAdapter)
+    ProviderRegistry.audit_worm_adapter.set_default("oss-noop")
+    ProviderRegistry.audit_s3_exporter.register("oss-noop", NoOpS3Exporter)
+    ProviderRegistry.audit_s3_exporter.set_default("oss-noop")
+    ProviderRegistry.kafka_eventbus.register("oss-noop", NoOpKafkaEventBus)
+    ProviderRegistry.kafka_eventbus.set_default("oss-noop")
+    # quorum_witness has no OSS default — the whole multiregion package
+    # (including the in-memory witness) relocated to baldur_dormant (599 D5);
+    # register_dormant_services() registers the "memory" default, and all slot
+    # consumers are multiregion-internal, so an empty slot on a clean OSS
+    # install is unreachable.
+    ProviderRegistry.recovery_adapter.register("oss-noop", NoOpRecoveryAdapter)
+    ProviderRegistry.recovery_adapter.set_default("oss-noop")
 
 
 # =============================================================================

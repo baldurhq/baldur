@@ -47,10 +47,6 @@ from baldur.adapters.celery.signal_config import (
     get_signal_hooks_settings,
     reset_signal_hooks_settings,
 )
-from baldur.adapters.celery.signal_handlers import (
-    connect_setup_logging_handler,
-    disconnect_setup_logging_handler,
-)
 
 __all__ = [
     "SignalHooksSettings",
@@ -168,6 +164,16 @@ def setup_baldur_signals(
             },
         )
     """
+    # This runs at Celery app-module import, before any worker signal reaches
+    # baldur.init(): configure first so that no line below — nor anything a
+    # later import-time caller emits — goes through structlog's unconfigured
+    # default, which prints every level to stdout regardless of
+    # BALDUR_LOG_LEVEL. Idempotent, and a host that configured logging keeps
+    # its configuration (basicConfig semantics).
+    from baldur.observability.structlog_config import configure_structlog
+
+    configure_structlog()
+
     with _setup_lock:
         global _signals_connected
         global _failure_handler, _success_handler, _retry_handler
@@ -225,9 +231,6 @@ def setup_baldur_signals(
         task_prerun.connect(_trace_handler.on_prerun)
         task_postrun.connect(_trace_handler.on_postrun)
 
-        # Block Celery worker boot from overriding configure_structlog()
-        connect_setup_logging_handler()
-
         # Arm the worker-lifecycle receivers that call baldur.init().
         # Connecting them here is what makes this call the whole of a Celery
         # deployment's setup: without it the worker records task health on
@@ -272,7 +275,6 @@ def disconnect_baldur_signals() -> None:
                 task_prerun.disconnect(_trace_handler.on_prerun)
                 task_postrun.disconnect(_trace_handler.on_postrun)
 
-            disconnect_setup_logging_handler()
             disconnect_celery_bootstrap_receivers()
 
             _failure_handler = None
