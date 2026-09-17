@@ -186,8 +186,10 @@ class L2SyncMixin:
         ``skip_if_pinned`` is the store-side half of pin neutrality and
         ``keep_open`` the store-side half of the trip-precedence rule (a
         snapshot may refresh a CLOSED row but never close one); both are passed
-        by the repair lanes and left off by the manual-control write-through,
-        which is the operator's own write and must never be declined. See
+        by the repair lanes, left off by the manual-control write-through,
+        which is the operator's own write and must never be declined, and
+        split by the close write-through, which is pin-neutral but exists to
+        close the row. See
         ``_sync_to_l2_inline`` for why the OPEN-era timestamp needs an explicit
         clear directive. Returns ``None`` when the mirror was skipped rather
         than attempted (a CLOSED snapshot on a degraded backend).
@@ -351,7 +353,7 @@ class L2SyncMixin:
                 error=e,
             )
 
-    def _sync_close_to_l2_async(self, service_name: str) -> None:
+    def _sync_close_to_l2(self, service_name: str) -> bool | None:
         """Write through a HALF_OPEN -> CLOSED that L1 decided while L2 was quarantined.
 
         The record-path mirror is a snapshot writer under the keep-open guard:
@@ -366,23 +368,25 @@ class L2SyncMixin:
         operator's write, from a fresh read and only while the row is still
         CLOSED — a trip that landed in between is the snapshot mirror's to
         carry.
+
+        Written before the close attempt returns, on the timeout-bounded lane
+        every other request-thread L2 write uses. The handlers of the CLOSED
+        event the caller publishes next re-read the backend — the replay
+        lane's affirmation loads L2 over L1 before it reads the row — so a
+        write still queued on the executor loses that race: the trip's OPEN
+        hydrates back over the close, the queued write then fresh-reads an
+        OPEN row and writes nothing, and every later close repeats it. A
+        degraded backend answers from memory and its WAL, so the wait is the
+        one the healthy branch already pays for its store-side close-check.
+        Returns what the write reported, or ``None`` when there was nothing
+        to write (row gone, pinned, or no longer CLOSED).
         """
-
-        def _write() -> None:
-            row = self._resolve_repair_row(service_name)
-            if row is None or row.state != "closed":
-                return
-            self._sync_to_l2_inline(
-                service_name, row, skip_if_pinned=True, keep_open=False
-            )
-
-        try:
-            self._get_executor().submit(_write)
-        except Exception as e:
-            logger.warning(
-                "layered_repo.submit_sync_task_failed",
-                error=e,
-            )
+        row = self._resolve_repair_row(service_name)
+        if row is None or row.state != "closed":
+            return None
+        return self._sync_to_l2_with_timeout(
+            service_name, row, skip_if_pinned=True, keep_open=False
+        )
 
     def _run_mirror_task(self, service_name: str) -> None:
         """Fresh-read and mirror one service until no newer write is pending.

@@ -19,6 +19,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 ### Fixed
 
 - A dead letter's first replay metric carries its own domain, not the fallback label.
+- A breaker closed while the store was unreachable no longer re-opens as its replay starts.
 - Importing `baldur.factory` before logging is configured no longer prints registrations to stdout.
 - Lines Baldur emits before its logging is configured no longer print unfiltered to stdout.
 

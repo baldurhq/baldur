@@ -21,7 +21,10 @@ Verification techniques applied:
   quarantined is written through as an unguarded close (the snapshot mirror
   would stand down and leave the fallback / WAL at the trip's OPEN); a
   non-closing success still takes the guarded snapshot; a trip that lands
-  before the write runs leaves the store to the snapshot mirror
+  before the write-through's fresh read leaves the store to the snapshot
+  mirror. The write is awaited before the close attempt returns; the
+  ordering pin lives with the close-check tests
+  (``TestFallbackCloseWriteThroughOrderingBehavior``)
 """
 
 from __future__ import annotations
@@ -357,20 +360,19 @@ class TestL1DecidedCloseWriteThroughBehavior:
         """The write-through reads fresh: a row no longer CLOSED is the
         snapshot mirror's to carry, never overwritten with a stale close."""
         self._quarantined_half_open(repo, mock_l2_repo)
-        submitted: list = []
-        executor = MagicMock(spec=ThreadPoolExecutor)
-        executor.submit.side_effect = lambda fn, *a, **k: submitted.append(fn)
+        write_through = repo._sync_close_to_l2
+
+        def trip_then_write(service_name: str):
+            # A trip lands on L1 between the close and the fresh read.
+            repo._l1.hydrate_snapshot(_row(OPEN, failure_count=5))
+            return write_through(service_name)
 
         with (
-            patch.object(repo, "_get_executor", return_value=executor),
+            patch.object(repo, "_get_executor", return_value=_inline_executor()),
+            patch.object(repo, "_sync_close_to_l2", side_effect=trip_then_write),
             patch.object(repo, "_record_close_check_degraded_mode"),
         ):
             attempt = repo.record_success_with_close_check(SVC, 1)
+
         assert attempt.did_close is True
-        # A trip lands on L1 before the queued write runs.
-        repo._l1.hydrate_snapshot(_row(OPEN, failure_count=5))
-
-        for fn in submitted:
-            fn()
-
         mock_l2_repo.update_state.assert_not_called()

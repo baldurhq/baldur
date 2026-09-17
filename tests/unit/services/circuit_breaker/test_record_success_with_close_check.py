@@ -10,6 +10,10 @@ Covers:
   record_success + update_state (race-unsafe default for non-InMemory).
 - TestLayeredRepoCloseCheckDelegation: layered repo forwards to L1 and
   syncs the resulting state to L2.
+- TestFallbackCloseWriteThroughOrderingBehavior: the L1-decided close is
+  in the store when the attempt returns, so the CLOSED event's handlers
+  (the replay lane loads L2 over L1 first) cannot hydrate the trip's OPEN
+  back over it.
 - TestRecordSuccessRaceBarrier: multi-threaded race test (N∈{2,4,8,16}).
 - TestRecordSuccessRaceDeterministic: manual lock-ordering — stale-view
   caller sees did_close=False even after Thread A closes the circuit.
@@ -391,18 +395,17 @@ class TestLayeredRepoCloseCheckDelegation:
 
         # When.
         with (
-            patch.object(repo, "_sync_close_to_l2_async", autospec=True) as close,
+            patch.object(repo, "_sync_close_to_l2", autospec=True) as close,
             patch.object(repo, "_sync_to_l2_async", autospec=True) as snapshot,
         ):
             attempt = repo.record_success_with_close_check(
                 service_name, success_threshold=1
             )
 
-        # Then: the close write-through is nudged for this service -- not the
+        # Then: the close write-through runs for this service -- not the
         # snapshot mirror, which never closes a stored row -- and the row it
-        # will read already carries the close: the write-through fresh-reads
-        # when its task runs, so what matters is that the nudge follows the
-        # transition.
+        # fresh-reads already carries the close, so what matters is that the
+        # write follows the transition.
         close.assert_called_once_with(service_name)
         snapshot.assert_not_called()
         assert attempt.state.state == CircuitBreakerStateEnum.CLOSED.value
@@ -423,7 +426,7 @@ class TestLayeredRepoCloseCheckDelegation:
 
         # When.
         with (
-            patch.object(repo, "_sync_close_to_l2_async", autospec=True) as close,
+            patch.object(repo, "_sync_close_to_l2", autospec=True) as close,
             patch.object(repo, "_sync_to_l2_async", autospec=True) as snapshot,
         ):
             attempt = repo.record_success_with_close_check(
@@ -434,6 +437,139 @@ class TestLayeredRepoCloseCheckDelegation:
         assert attempt.did_close is False
         snapshot.assert_called_once_with(service_name)
         close.assert_not_called()
+
+
+# =============================================================================
+# Fallback close write-through ordering
+# =============================================================================
+
+
+def _trip_automatically(
+    repo: InMemoryCircuitBreakerStateRepository, service_name: str
+) -> None:
+    """Trip CLOSED -> OPEN the way failures do, leaving no operator pin.
+
+    ``atomic_force_open`` is the operator's Block and pins the row; the
+    write-through under test is pin-neutral and would rightly skip it.
+    """
+    repo.get_or_create(service_name)
+    assert repo.trip_to_open(service_name, failure_count=5).did_open is True
+
+
+def _layered_over_memory_l2():
+    """Layered repo whose L2 is a plain in-memory store, quarantined.
+
+    The in-memory L2 stands in for the degraded backend's fallback: the
+    trip's OPEN row is what a store that stood down during the trip still
+    holds. L1 carries the same trip and has admitted its trial call.
+    ``_l2_healthy`` False routes the close-check to the L1 fallback branch,
+    the path a zero-config or Redis-quarantined process takes.
+    """
+    from baldur.adapters.memory.layered_repository import (
+        LayeredCircuitBreakerStateRepository,
+    )
+
+    l2 = InMemoryCircuitBreakerStateRepository()
+    repo = LayeredCircuitBreakerStateRepository(l2_repo=l2, adapter_type="memory")
+    service_name = "svc"
+    _trip_automatically(l2, service_name)
+    _trip_automatically(repo._l1, service_name)
+    allowed, _prev, new = repo._l1.try_acquire_half_open_slot(
+        service_name, limit=10, stuck_timeout_seconds=60
+    )
+    assert allowed is True
+    assert new == CircuitBreakerStateEnum.HALF_OPEN.value
+    repo._l2_healthy = False
+    return repo, l2, service_name
+
+
+class _LazyFuture:
+    """Runs its callable the first time someone waits on it."""
+
+    def __init__(self, fn, args, kwargs):
+        self._fn, self._args, self._kwargs = fn, args, kwargs
+        self._done = False
+        self._value = None
+
+    def result(self, timeout=None):
+        if not self._done:
+            self._value = self._fn(*self._args, **self._kwargs)
+            self._done = True
+        return self._value
+
+    def done(self) -> bool:
+        return self._done
+
+    def cancel(self) -> bool:
+        return not self._done
+
+
+class _LazyExecutor:
+    """Executor stub whose work runs only when its future is awaited.
+
+    A write the caller waits for lands before the caller continues; a write
+    left on the queue never lands. That is the property under test, stated
+    as an executor — no threads, no sleeps, no timing margin to get wrong.
+    """
+
+    def submit(self, fn, *args, **kwargs):
+        return _LazyFuture(fn, args, kwargs)
+
+
+class TestFallbackCloseWriteThroughOrderingBehavior:
+    """The close is in the store before the attempt returns.
+
+    The CLOSED event published on return is handled by the replay lane,
+    whose affirmation loads L2 over L1 before reading the row. A close that
+    reached the store only after that load would be undone by it: the trip's
+    OPEN hydrates back over L1, the replay is refused as ``circuit_reopened``,
+    and the breaker flaps. So the write-through is awaited, on the same
+    timeout-bounded lane as the healthy branch's store-side close-check.
+    """
+
+    def test_store_row_is_closed_when_the_attempt_returns(self):
+        repo, l2, service_name = _layered_over_memory_l2()
+
+        with patch.object(repo, "_get_executor", return_value=_LazyExecutor()):
+            attempt = repo.record_success_with_close_check(
+                service_name, success_threshold=1
+            )
+
+        assert attempt.did_close is True
+        assert (
+            l2.get_by_service_name(service_name).state
+            == CircuitBreakerStateEnum.CLOSED.value
+        )
+
+    def test_load_from_l2_after_the_close_keeps_l1_closed(self):
+        """The replay lane's affirmation shape: load L2 over L1, then read L1.
+
+        The load body runs on the calling thread here, as it does on one of
+        the production pool's workers; the lazy executor never runs a write
+        the close did not wait for, which is what the pool's parallel workers
+        make possible.
+        """
+        repo, _l2, service_name = _layered_over_memory_l2()
+
+        with patch.object(repo, "_get_executor", return_value=_LazyExecutor()):
+            repo.record_success_with_close_check(service_name, success_threshold=1)
+            repo._load_from_l2()
+
+        assert (
+            repo._l1.get_by_service_name(service_name).state
+            == CircuitBreakerStateEnum.CLOSED.value
+        )
+
+    def test_write_through_is_unguarded_and_pin_neutral(self):
+        """A close must close the stored row (no keep-open), never a pinned one."""
+        repo, _l2, service_name = _layered_over_memory_l2()
+
+        with patch.object(repo, "_sync_to_l2_with_timeout", autospec=True) as write:
+            repo.record_success_with_close_check(service_name, success_threshold=1)
+
+        write.assert_called_once()
+        _, kwargs = write.call_args
+        assert kwargs == {"skip_if_pinned": True, "keep_open": False}
 
 
 # =============================================================================
