@@ -79,11 +79,13 @@ def _child_environment() -> dict[str, str]:
     return env
 
 
-def _run_child(script: str) -> tuple[str, str]:
+def _run_child(script: str, extra_env: dict[str, str] | None = None) -> tuple[str, str]:
+    env = _child_environment()
+    env.update(extra_env or {})
     completed = subprocess.run(
         [sys.executable, "-c", script],
         capture_output=True,
-        env=_child_environment(),
+        env=env,
         timeout=_CHILD_TIMEOUT_SECONDS,
         check=False,
     )
@@ -234,6 +236,65 @@ class TestADjangoProjectWithARootEntry:
         _, stderr = run
         assert f"HOST WARNING baldur.probe {_PROBE_EVENT} key='v'" in stderr
         assert "{'event'" not in stderr
+
+    def test_nothing_reaches_stdout_before_init(self, run):
+        """``ready()`` emits (session signals, Celery autodiscover) before it
+        reaches ``init()``; those lines go through the user's handler, never
+        through structlog's default printer to stdout."""
+        stdout, _ = run
+        assert [
+            line for line in stdout.splitlines() if not line.startswith(_REPORT_PREFIX)
+        ] == []
+
+
+class TestASettingsWarningRaisedWhileSettingsLoad:
+    """Case (e): a settings cross-validation warning is raised inside the
+    settings constructor, which ``init()`` runs before the full logging
+    pipeline exists. It is a stdlib record — through the host's handler in
+    the host's format, or through ``logging.lastResort`` on the zero-config
+    path — and never a line from structlog's default printer on stdout."""
+
+    # retry.max_delay above five times the breaker's recovery window is the
+    # MEDIUM conflict the settings cross-validation warns about.
+    _CONFLICT_ENV = {"BALDUR_RETRY_MAX_DELAY": "600"}
+    _CONFLICT_EVENT = "settings.conflict_detected"
+
+    _CONFIGURED_HOST = (
+        "import logging, sys\n"
+        f"logging.basicConfig(level=logging.WARNING, stream=sys.stderr, format='{_HOST_FORMAT}')\n"
+        "import baldur\n"
+        "baldur.init()\n"
+    )
+    _ZERO_CONFIG = "import baldur\nbaldur.init()\n"
+
+    @pytest.fixture(scope="class")
+    def configured_run(self):
+        return _run_child(self._CONFIGURED_HOST, extra_env=self._CONFLICT_ENV)
+
+    @pytest.fixture(scope="class")
+    def zero_config_run(self):
+        return _run_child(self._ZERO_CONFIG, extra_env=self._CONFLICT_ENV)
+
+    def test_the_warning_reaches_the_hosts_handler_once_in_its_format(
+        self, configured_run
+    ):
+        stdout, stderr = configured_run
+        assert stderr.count(self._CONFLICT_EVENT) == 1
+        assert (
+            f"WARNING baldur.settings.cross_validation {self._CONFLICT_EVENT}" in stderr
+        )
+        assert stdout == ""
+
+    def test_on_the_zero_config_path_it_is_the_last_resort_line_on_stderr(
+        self, zero_config_run
+    ):
+        """No handler exists yet when the settings load, so stdlib's
+        ``lastResort`` writes the message once to stderr; stdout carries no
+        default-printer line (baldur's own JSON handler arrives afterwards)."""
+        stdout, stderr = zero_config_run
+        assert stderr.count(self._CONFLICT_EVENT) == 1
+        assert self._CONFLICT_EVENT not in stdout
+        assert "[warning  ]" not in stdout
 
 
 class TestAFlaskAppInTheQuickstartOrder:

@@ -304,8 +304,11 @@ logging — the same rule as `logging.basicConfig`:
   `dictConfig` / Django `LOGGING`, a Celery worker's own setup): your level,
   handlers, format and stream are left as they are, and Baldur's events go
   through your handlers in your format — at your level when
-  `BALDUR_LOG_LEVEL` is unset, at the level it names when set (it wins over a
-  `baldur` entry in your own logging config).
+  `BALDUR_LOG_LEVEL` is unset, at the level it names when set. If your own
+  logging config also names a `baldur` logger, the last writer wins: on the
+  quickstart wirings Baldur configures after your setup, so the variable
+  wins; if you call `configure_baldur()` from a Django settings module,
+  Django applies your `LOGGING` after that call, so your `baldur` entry wins.
 
 The four event families below have their own runtime-adjustable overrides,
 and they keep precedence over `BALDUR_LOG_LEVEL` in both cases:

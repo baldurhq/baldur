@@ -23,6 +23,7 @@ from contextlib import contextmanager
 import pytest
 
 from baldur.observability.structlog_config import (
+    _POSTURE_FLOOR_LEVEL,
     POSTURE_LOGGER_NAME,
     configure_structlog,
     reset_structlog_config,
@@ -140,7 +141,7 @@ class TestPostureLoggerFloorContract:
         assert logging.getLogger(POSTURE_LOGGER_NAME).level == logging.NOTSET
 
 
-class TestPostureFloorInsideAConfiguredHost:
+class TestPostureFloorInsideAConfiguredHostBehavior:
     """The floor is a write to baldur's own logger, so a host that configured
     its logging at WARNING still gets the one posture line — and its root
     level is never touched, floor or no floor."""
@@ -154,8 +155,9 @@ class TestPostureFloorInsideAConfiguredHost:
             configure_structlog()
 
             assert root.level == logging.ERROR
-            assert logging.getLogger(POSTURE_LOGGER_NAME).level == logging.INFO
-            assert logging.getLogger(POSTURE_LOGGER_NAME).isEnabledFor(logging.INFO)
+            posture = logging.getLogger(POSTURE_LOGGER_NAME)
+            assert posture.level == _POSTURE_FLOOR_LEVEL
+            assert posture.isEnabledFor(_POSTURE_FLOOR_LEVEL) is True
 
     def test_an_operator_level_skips_the_floor_and_leaves_the_host_root_alone(
         self, operator_log_level

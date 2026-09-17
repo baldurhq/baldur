@@ -89,6 +89,14 @@ class BaldurConfig(AppConfig):
         env vars can change on every restart, not just during migrations.
         This aligns with 12-Factor App principles and Spring Boot patterns.
         """
+        # Django's configure_logging has run by now, so this sees the host's
+        # LOGGING; configure first so that no line below — the session-signal
+        # and autodiscover lines precede init() — goes through structlog's
+        # unconfigured default, which prints every level to stdout.
+        from baldur.observability.structlog_config import configure_structlog
+
+        configure_structlog()
+
         # Connect post_migrate signal for RBAC group creation
         # sender=self ensures it only runs when this app's migrations complete
         RBACInitializer.connect_post_migrate(self)

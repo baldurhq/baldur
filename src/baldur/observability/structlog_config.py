@@ -16,7 +16,12 @@ that configured its own logging (``basicConfig``, a ``dictConfig`` / framework
 ``LOGGING`` with a ``root`` entry) keeps it. ``BALDUR_LOG_LEVEL`` governs
 baldur's own loggers (``baldur``, ``baldur_pro``) when set; when unset they
 inherit the application's level. A baldur event that reaches a host handler
-renders as ``event key=value ...`` (see ``_HostReadableEventDict``).
+renders as ``event key=value ...`` (see ``_HostReadableEventDict``). Nothing
+baldur emits goes through structlog's unconfigured default printer: the
+structural half of the pipeline is routed to stdlib before the settings are
+read (``route_structlog_to_stdlib``), so a line raised while the settings
+object is being built becomes a stdlib record instead of an unfiltered
+stdout line.
 
 Renderer per environment:
 - structured_json=True  (production):  JSONRenderer  -> Loki/Datadog parse the
@@ -225,6 +230,42 @@ def _structlog_state() -> _StructlogState:
     return state
 
 
+def route_structlog_to_stdlib() -> None:
+    """Route structlog through stdlib logging before the settings are read.
+
+    Until ``configure_structlog()`` has run, structlog's default configuration
+    prints every level to stdout regardless of any level setting. This
+    installs the processors that read nothing — not the validator, rate
+    limiter or sampler (``LoggingSettings``), and not the OTEL trace-context
+    injector (its first call initialises OTEL from the observability
+    settings) — plus the host-readable wrapper, so it can run before, and
+    while, the settings object is being built without constructing a second
+    one; and with no logger caching, so a record emitted in that window (a
+    settings cross-validation warning raised inside the settings constructor,
+    the CLI's own config-resolution lines) becomes a stdlib record: dropped
+    by the root level, or written once by the host's handler or
+    ``logging.lastResort``. ``configure_structlog()`` replaces it with the
+    full pipeline on first entry; once that has happened this is a no-op, so
+    a caller can never downgrade a configured process.
+    """
+    if _structlog_state().configured:
+        return
+    structlog.configure(
+        processors=[
+            structlog.contextvars.merge_contextvars,
+            structlog.stdlib.add_log_level,
+            structlog.stdlib.add_logger_name,
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.processors.StackInfoRenderer(),
+            structlog.processors.format_exc_info,
+            cast(structlog.types.Processor, _wrap_for_host_and_formatter),
+        ],
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        wrapper_class=structlog.stdlib.BoundLogger,
+        cache_logger_on_first_use=False,
+    )
+
+
 def configure_structlog() -> None:
     """Initialize the global structlog configuration.
 
@@ -239,6 +280,11 @@ def configure_structlog() -> None:
     with _configure_lock:
         if state.configured:
             return
+        # Reading the settings can itself emit (cross-validation warnings run
+        # inside the settings constructor); route those through stdlib first
+        # so they never reach structlog's default printer.
+        route_structlog_to_stdlib()
+
         from baldur.settings.logging_settings import get_logging_settings
 
         settings = get_logging_settings()
@@ -317,7 +363,7 @@ def configure_structlog() -> None:
             logging, (_level_name or _DEFAULT_LOG_LEVEL_NAME).upper(), None
         )
         if not isinstance(_log_level, int):
-            _log_level = logging.WARNING
+            _log_level = getattr(logging, _DEFAULT_LOG_LEVEL_NAME)
 
         # In the test environment, NullHandler blocks console output entirely.
         # StreamHandler(sys.stdout) grabs the original stdout reference at

@@ -17,6 +17,7 @@ from baldur.cli._config import (
     load_dotenv_if_requested,
     resolve_config,
 )
+from baldur.observability.structlog_config import route_structlog_to_stdlib
 
 app = typer.Typer(
     name="baldur",
@@ -51,6 +52,13 @@ def _root(
     Subcommands call :func:`baldur.cli._bootstrap.ensure_init` when they need
     ``baldur.init()`` to have run (most do; ``check-config`` does not).
     """
+    # The config-resolution lines below are emitted before init() can
+    # configure logging, and the settings must not be read yet (the TOML and
+    # .env values land in the environment here). Route structlog through
+    # stdlib first, so those lines never print through structlog's
+    # unconfigured default; init() installs the full pipeline afterwards.
+    route_structlog_to_stdlib()
+
     resolution = resolve_config(config)
     apply_config_to_env(resolution)
     load_dotenv_if_requested(env_file)

@@ -11,6 +11,10 @@ Under test:
 - _inject_otel_trace_context(): injects trace_id/span_id into the event_dict
   when an OTEL context is active, and returns the event_dict unchanged when
   there is none or the import fails.
+- route_structlog_to_stdlib(): before the settings are readable, structlog
+  routes through stdlib with the processors that read nothing, so a line
+  raised while ``configure_structlog()`` builds the settings is a stdlib
+  record and never structlog's default printer's.
 
 pytest adds its capture handlers to the root logger at the start of the call
 phase — after fixture setup — so ``basicConfig`` semantics see every
@@ -35,23 +39,30 @@ import pytest
 import structlog
 
 from baldur.observability.structlog_config import (
+    _COMPONENT_LOGGER_MAP,
+    _DEFAULT_LOG_LEVEL_NAME,
     POSTURE_LOGGER_NAME,
     _BaldurStreamHandler,
     _HostReadableEventDict,
+    _inject_otel_trace_context,
     _wrap_for_host_and_formatter,
     configure_structlog,
     reset_structlog_config,
+    route_structlog_to_stdlib,
 )
+
+# The level an unset or unrecognised BALDUR_LOG_LEVEL falls back to.
+_DEFAULT_LEVEL = getattr(logging, _DEFAULT_LOG_LEVEL_NAME)
 
 # The six BALDUR_LOG_LEVEL shapes the contract names: unset, three valid
 # names, a lower-case name, and an unrecognised value.
 _LOG_LEVEL_CASES: list[tuple[str | None, int]] = [
-    (None, logging.WARNING),
+    (None, _DEFAULT_LEVEL),
     ("DEBUG", logging.DEBUG),
     ("INFO", logging.INFO),
     ("WARNING", logging.WARNING),
     ("error", logging.ERROR),
-    ("INVALID_LEVEL", logging.WARNING),
+    ("INVALID_LEVEL", _DEFAULT_LEVEL),
 ]
 
 # =============================================================================
@@ -157,6 +168,23 @@ def _baldur_formatter() -> structlog.stdlib.ProcessorFormatter:
     return formatter
 
 
+@contextmanager
+def recording_structlog_configure() -> Iterator[list[list[Any]]]:
+    """Record the processor list of every ``structlog.configure`` call while
+    still applying it. ``configure_structlog()`` makes two calls — the
+    pre-settings stdlib routing, then the full pipeline — so a pin on the
+    final pipeline reads the last entry."""
+    calls: list[list[Any]] = []
+    original_configure = structlog.configure
+
+    def capture_configure(**kwargs: Any) -> None:
+        calls.append(list(kwargs.get("processors", [])))
+        original_configure(**kwargs)
+
+    with patch("structlog.configure", side_effect=capture_configure):
+        yield calls
+
+
 def _host_processor_formatter_handler() -> logging.StreamHandler:
     handler = logging.StreamHandler(io.StringIO())
     handler.setFormatter(
@@ -212,17 +240,10 @@ class TestStructlogConfigContract:
         """
         monkeypatch.setenv("BALDUR_LOGGING_SETTINGS_STRUCTURED_JSON", "true")
 
-        captured: list[Any] = []
-        original_configure = structlog.configure
-
-        def capture_configure(**kwargs: Any) -> None:
-            captured.extend(kwargs.get("processors", []))
-            original_configure(**kwargs)
-
-        with patch("structlog.configure", side_effect=capture_configure):
+        with recording_structlog_configure() as calls:
             configure_structlog()
 
-        shared_count = len(captured) - 1
+        shared_count = len(calls[-1]) - 1
         assert shared_count == 10
 
     def test_last_processor_is_the_host_readable_wrapper(self, monkeypatch):
@@ -230,34 +251,20 @@ class TestStructlogConfigContract:
         never through structlog's own ``wrap_for_formatter`` (a plain dict)."""
         monkeypatch.setenv("BALDUR_LOGGING_SETTINGS_STRUCTURED_JSON", "true")
 
-        captured: list[Any] = []
-        original_configure = structlog.configure
-
-        def capture_configure(**kwargs: Any) -> None:
-            captured.extend(kwargs.get("processors", []))
-            original_configure(**kwargs)
-
-        with patch("structlog.configure", side_effect=capture_configure):
+        with recording_structlog_configure() as calls:
             configure_structlog()
 
-        assert captured[-1] is _wrap_for_host_and_formatter
+        assert calls[-1][-1] is _wrap_for_host_and_formatter
 
     def test_event_name_validator_positioned_after_add_logger_name(self, monkeypatch):
         """Pipeline position contract: add_logger_name -> event_name_validator
         -> rate_limit_processor."""
         monkeypatch.setenv("BALDUR_LOGGING_SETTINGS_STRUCTURED_JSON", "true")
 
-        captured: list[Any] = []
-        original_configure = structlog.configure
-
-        def capture_configure(**kwargs: Any) -> None:
-            captured.extend(kwargs.get("processors", []))
-            original_configure(**kwargs)
-
-        with patch("structlog.configure", side_effect=capture_configure):
+        with recording_structlog_configure() as calls:
             configure_structlog()
 
-        shared = captured[:-1]
+        shared = calls[-1][:-1]
 
         from baldur.observability.log_processors import event_name_validator
 
@@ -266,6 +273,118 @@ class TestStructlogConfigContract:
         add_logger_name_idx = shared.index(structlog.stdlib.add_logger_name)
         validator_idx = shared.index(event_name_validator)
         assert validator_idx == add_logger_name_idx + 1
+
+    def test_the_pre_settings_pipeline_carries_no_settings_reader(self):
+        """The routing installed before the settings are readable: stdlib
+        factory, no caching, the host-readable wrapper last, and none of
+        the processors that read settings — the validator, rate limiter
+        and sampler read ``LoggingSettings``; the OTEL injector's first
+        call initialises OTEL from the observability settings."""
+        from baldur.observability.log_processors import (
+            event_name_validator,
+            rate_limit_processor,
+            sampling_processor,
+        )
+
+        route_structlog_to_stdlib()
+        config = structlog.get_config()
+
+        assert isinstance(config["logger_factory"], structlog.stdlib.LoggerFactory)
+        assert config["wrapper_class"] is structlog.stdlib.BoundLogger
+        assert config["cache_logger_on_first_use"] is False
+        processors = config["processors"]
+        assert processors[-1] is _wrap_for_host_and_formatter
+        assert structlog.stdlib.add_log_level in processors
+        for reader in (
+            event_name_validator,
+            rate_limit_processor,
+            sampling_processor,
+            _inject_otel_trace_context,
+        ):
+            assert reader not in processors
+
+
+# =============================================================================
+# Behavior: the pre-settings window routes through stdlib
+# =============================================================================
+
+
+class TestRouteStructlogToStdlibBehavior:
+    """A line emitted before the settings are readable is a stdlib record —
+    dropped by the root level or written by the host's handler — never a
+    line from structlog's default printer."""
+
+    @contextmanager
+    def _default_printer(self) -> Iterator[io.StringIO]:
+        """structlog's pre-configuration shape, pointed at a sink: a
+        PrintLogger that writes every level, no filtering."""
+        sink = io.StringIO()
+        structlog.configure(
+            processors=[structlog.dev.ConsoleRenderer(colors=False)],
+            logger_factory=structlog.PrintLoggerFactory(file=sink),
+            wrapper_class=structlog.BoundLogger,
+            cache_logger_on_first_use=False,
+        )
+        yield sink
+
+    def test_an_emission_before_configuration_reaches_the_hosts_handler(
+        self, operator_log_level
+    ):
+        operator_log_level(None)
+
+        with self._default_printer() as printer, configured_root() as sentinel:
+            route_structlog_to_stdlib()
+            structlog.get_logger("baldur.probe").warning(
+                "probe.early_event_emitted", key="v"
+            )
+            host_output = sentinel.stream.getvalue()
+
+        assert "WARNING baldur.probe probe.early_event_emitted key='v'" in host_output
+        assert "probe.early_event_emitted" not in printer.getvalue()
+
+    def test_configure_structlog_routes_before_it_reads_the_settings(
+        self, operator_log_level
+    ):
+        """A settings cross-validation warning is raised inside the settings
+        constructor, which ``configure_structlog()`` runs before the full
+        pipeline exists; it must land on the host's handler, not on the
+        default printer."""
+        from baldur.settings import logging_settings as settings_module
+
+        operator_log_level(None)
+        real_read = settings_module.get_logging_settings
+
+        def emitting_read() -> Any:
+            structlog.get_logger("baldur.probe").warning(
+                "probe.settings_window_emitted", key="v"
+            )
+            return real_read()
+
+        with (
+            self._default_printer() as printer,
+            configured_root() as sentinel,
+            patch.object(settings_module, "get_logging_settings", emitting_read),
+        ):
+            configure_structlog()
+            host_output = sentinel.stream.getvalue()
+
+        assert (
+            "WARNING baldur.probe probe.settings_window_emitted key='v'" in host_output
+        )
+        assert "probe.settings_window_emitted" not in printer.getvalue()
+
+    def test_is_a_no_op_once_configured(self, operator_log_level):
+        """A caller that routes after the full pipeline is in place (the CLI
+        callback in a process something else initialised) changes nothing."""
+        operator_log_level(None)
+        with zero_config_root():
+            configure_structlog()
+        full_pipeline = structlog.get_config()["processors"]
+
+        route_structlog_to_stdlib()
+
+        assert structlog.get_config()["processors"] is full_pipeline
+        assert structlog.get_config()["cache_logger_on_first_use"] is True
 
 
 # =============================================================================
@@ -600,16 +719,24 @@ class TestZeroConfigRootBehavior:
         assert logging.getLogger("baldur_pro").level == expected_namespace
 
     def test_the_component_families_keep_precedence(self, operator_log_level):
-        """BALDUR_LOG_LEVEL=ERROR does not silence a family that documents
-        INFO: the family write runs after the namespace write."""
+        """BALDUR_LOG_LEVEL=ERROR does not silence a family whose documented
+        level is below it: the family write runs after the namespace write."""
+        from baldur.settings.logging_settings import get_logging_settings
+
         operator_log_level("ERROR")
+        family_name = _COMPONENT_LOGGER_MAP["circuit_breaker_log_level"][0]
+        family_level = getattr(
+            logging, get_logging_settings().circuit_breaker_log_level.upper()
+        )
+        assert family_level < logging.ERROR, "the case needs a family below ERROR"
 
         with zero_config_root():
             configure_structlog()
 
         assert logging.getLogger("baldur").level == logging.ERROR
-        family = logging.getLogger("baldur.services.circuit_breaker")
-        assert family.isEnabledFor(logging.INFO) is True
+        family = logging.getLogger(family_name)
+        assert family.getEffectiveLevel() == family_level
+        assert family.isEnabledFor(family_level) is True
 
 
 # =============================================================================
@@ -775,24 +902,44 @@ class TestHostReadableEventDictBehavior:
         assert type(copied) is dict
         assert copied == {"event": "a.b_c", "k": 1}
 
-    def test_the_wrapper_marks_only_the_exception_method(self):
-        probe_logger = logging.getLogger("x")
-        args_exc, kwargs = _wrap_for_host_and_formatter(
-            probe_logger, "exception", {"event": "a.b_c"}
-        )
-        args_err, _ = _wrap_for_host_and_formatter(
-            probe_logger, "error", {"event": "a.b_c"}
-        )
-
-        assert kwargs == {"extra": {"_logger": probe_logger, "_name": "exception"}}
-        assert args_exc[0]._traceback_on_record is True
-        assert args_err[0]._traceback_on_record is False
-
-    def test_a_logged_exception_prints_its_traceback_once_through_a_host_handler(
-        self, operator_log_level
+    @pytest.mark.parametrize(
+        ("method_name", "traceback_on_record"),
+        [("exception", True), ("error", False), ("warning", False)],
+        ids=["exception", "error", "warning"],
+    )
+    def test_the_wrapper_marks_only_the_exception_method(
+        self, method_name, traceback_on_record
     ):
-        """Through a plain ``logging.Formatter``, ``.exception()`` and
-        ``exc_info=True`` each print exactly one traceback."""
+        """Only ``.exception()`` — the method stdlib attaches ``exc_info``
+        for — leaves the rendered traceback to the record."""
+        probe_logger = logging.getLogger("x")
+
+        args, kwargs = _wrap_for_host_and_formatter(
+            probe_logger, method_name, {"event": "a.b_c"}
+        )
+
+        assert kwargs == {"extra": {"_logger": probe_logger, "_name": method_name}}
+        assert isinstance(args[0], _HostReadableEventDict)
+        assert args[0]._traceback_on_record is traceback_on_record
+
+    @pytest.mark.parametrize(
+        ("method_name", "kwargs", "expected_line"),
+        [
+            ("exception", {}, "ERROR baldur.probe probe.call_failed key='v'"),
+            (
+                "warning",
+                {"exc_info": True},
+                "WARNING baldur.probe probe.call_failed key='v'",
+            ),
+        ],
+        ids=["exception_method", "exc_info_kwarg"],
+    )
+    def test_a_logged_exception_prints_its_traceback_once_through_a_host_handler(
+        self, operator_log_level, method_name, kwargs, expected_line
+    ):
+        """Through a plain ``logging.Formatter``, each shape prints its
+        traceback exactly once: ``.exception()`` leaves it to the record,
+        ``exc_info=True`` (consumed by structlog) has it appended."""
         operator_log_level(None)
 
         with configured_root() as sentinel:
@@ -801,14 +948,12 @@ class TestHostReadableEventDictBehavior:
             try:
                 raise ValueError("boom")
             except ValueError:
-                probe.exception("probe.call_failed", key="v")
-                probe.warning("probe.rollback_failed", exc_info=True)
+                getattr(probe, method_name)("probe.call_failed", key="v", **kwargs)
             output = sentinel.stream.getvalue()
 
-        assert "ERROR baldur.probe probe.call_failed key='v'" in output
-        assert "WARNING baldur.probe probe.rollback_failed" in output
-        assert output.count("Traceback (most recent call last)") == 2
-        assert output.count("ValueError: boom") == 2
+        assert expected_line in output
+        assert output.count("Traceback (most recent call last)") == 1
+        assert output.count("ValueError: boom") == 1
 
     def test_baldur_json_line_is_unchanged_by_the_readable_msg(
         self, monkeypatch, operator_log_level

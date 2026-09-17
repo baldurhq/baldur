@@ -47,8 +47,13 @@ def _child_environment() -> dict[str, str]:
 
 
 def _run_child(script: str) -> str:
+    stdout, stderr = _run_child_streams([sys.executable, "-c", script])
+    return stdout + stderr
+
+
+def _run_child_streams(argv: list[str]) -> tuple[str, str]:
     completed = subprocess.run(
-        [sys.executable, "-c", script],
+        argv,
         capture_output=True,
         env=_child_environment(),
         timeout=_CHILD_TIMEOUT_SECONDS,
@@ -56,9 +61,10 @@ def _run_child(script: str) -> str:
     )
     # Decode explicitly: text=True picks the console codepage on Windows and
     # can silently yield an empty stream on a decode failure.
-    output = (completed.stdout + completed.stderr).decode("utf-8", errors="replace")
-    assert completed.returncode == 0, output
-    return output
+    stdout = completed.stdout.decode("utf-8", errors="replace")
+    stderr = completed.stderr.decode("utf-8", errors="replace")
+    assert completed.returncode == 0, stdout + stderr
+    return stdout, stderr
 
 
 # One child imports the whole set: the packages that cannot import bare (a
@@ -129,3 +135,37 @@ class TestCeleryConnectorConfiguresFirst:
         )
 
         assert _run_child(script) == ""
+
+
+class TestCliCallbackRoutesEarlyLinesToStdlib:
+    """The CLI resolves its config file before any subcommand can run
+    ``init()``, and the settings must not be read until the file's values are
+    in the environment — so the callback routes structlog through stdlib
+    first. A config-resolution warning is then stdlib's ``lastResort`` line on
+    stderr, and the subcommand's stdout carries no default-printer line."""
+
+    _IGNORED_KEY_EVENT = "cli.config_top_level_baldur_key_ignored"
+
+    def test_a_config_warning_lands_on_stderr_not_on_the_commands_stdout(
+        self, tmp_path
+    ):
+        pytest.importorskip("typer")
+        config = tmp_path / "baldur.toml"
+        # A top-level scalar under [baldur] has no owning settings class: the
+        # resolver warns and skips it — the line under test.
+        config.write_text('[baldur]\nlog_level = "INFO"\n', encoding="utf-8")
+
+        stdout, stderr = _run_child_streams(
+            [
+                sys.executable,
+                "-m",
+                "baldur.cli",
+                "--config",
+                str(config),
+                "check-config",
+            ]
+        )
+
+        assert self._IGNORED_KEY_EVENT in stderr
+        assert self._IGNORED_KEY_EVENT not in stdout
+        assert "[warning  ]" not in stdout

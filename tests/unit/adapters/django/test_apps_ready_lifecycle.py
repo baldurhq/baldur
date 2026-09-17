@@ -42,9 +42,11 @@ Verification techniques (UNIT_TEST_GUIDELINES §8):
 
 from __future__ import annotations
 
+import importlib.util
 from unittest.mock import patch
 
 import pytest
+from structlog.testing import capture_logs
 
 from baldur.adapters.django.apps import BaldurConfig
 from baldur.api.admin.auth import AdminAuthRequiredError
@@ -219,6 +221,45 @@ class TestReadySecretsPropagationContract:
 # =============================================================================
 # Behavior — best-effort call sites swallow exceptions
 # =============================================================================
+
+
+class TestReadyConfiguresLoggingFirstBehavior:
+    """``ready()`` emits before it reaches ``init()`` (the session-signal and
+    Celery-autodiscover lines), and Django's ``configure_logging`` has already
+    run, so it configures logging as its first act — nothing it emits may go
+    through structlog's unconfigured default, which prints every level to
+    stdout.
+
+    The probe is the count of structlog events already captured at the moment
+    ``configure_structlog()`` is called; the function is patched at its home
+    module (``ready()`` imports it at call time) so the real configuration
+    never replaces ``capture_logs``' own processors.
+    """
+
+    def test_ready_configures_logging_before_it_emits_anything(
+        self, app_config, silent_inputs
+    ):
+        events_seen_at_configure: list[int] = []
+
+        with capture_logs() as cap_logs:
+
+            def observe() -> None:
+                events_seen_at_configure.append(len(cap_logs))
+
+            with patch(
+                "baldur.observability.structlog_config.configure_structlog",
+                side_effect=observe,
+            ):
+                app_config.ready()
+
+        assert events_seen_at_configure == [0]
+        if importlib.util.find_spec("celery") is not None:
+            # The autodiscover line is one of the emissions the configure
+            # call has to precede; with Celery installed it always fires.
+            assert any(
+                entry["event"] == "baldur.celery_tasks_autodiscovered_baldur"
+                for entry in cap_logs
+            )
 
 
 class TestReadyBestEffortBehavior:
