@@ -9,58 +9,53 @@
 
 [English](README.md) | **한국어**
 
-**Baldur**는 의존성이 죽어 있는 동안 실패한 Python 호출을 보관해 두었다가,
-의존성이 돌아오면 다시 실행합니다. 호출 하나를 데코레이터 하나로 감싸면, 트래픽이
-흐르는 중에 결제 게이트웨이가 죽었을 때 실패한 결제가 전부 호출 인자와 함께
-포착되고, 서킷 브레이커가 죽어가는 의존성 위로 요청이 쌓이는 것을 막으며,
-게이트웨이가 복구되는 순간 포착된 결제가 재실행됩니다. 조용히 유실되는 것은
-없습니다. 그 루프 둘레에 프로덕션에서 운영하는 데 필요한 것들 — 헬스 체크,
-Prometheus 및 OpenTelemetry 메트릭, 우아한 종료(graceful shutdown), 내장 웹
-콘솔 — 과 Django, FastAPI, Flask, Celery용 어댑터가 함께 들어 있습니다.
+**여러분이 기대고 있는 외부 API가 한 시간 동안 죽으면, 여러분의 앱에는 무슨 일이 생기나요?**
+
+요청은 타임아웃까지 매달려 있고, 워커는 전부 차 버리고, 그 한 시간 동안 실패한
+작업은 사라집니다. OpenAI든, 결제 제공자든, 이메일 서비스든 — Baldur는 이 세
+가지를 데코레이터 하나로 해결합니다. 온콜 담당자가 따로 없는 Python 서비스를
+위해서요.
+
+```python
+import baldur
+
+
+@baldur.protected("summarize", dlq=True, timeout=60.0)
+def summarize(doc_id: str) -> str:
+    return llm_api.summarize(doc_id)
+```
+
+트래픽이 흐르는 중에 제공자가 죽거나 — 그냥 느려지기만 해도:
+
+- **앱은 계속 응답합니다.** 60초 상한에서 매달린 호출이 실패로 바뀌고, 서킷
+  브레이커가 열리며, 호출은 즉시 실패합니다 — 느려진 제공자 하나가 워커 전체를
+  끌고 내려가지 않습니다. 그 제공자가 필요 없는 엔드포인트는 계속 동작합니다.
+- **실패한 작업은 사라지지 않고 보관됩니다.** 끝내 실패한 호출은 전부 인자와
+  함께 포착되어 내장 콘솔에 목록으로 남습니다.
+- **그리고 돌아옵니다.** 작은 재실행 핸들러로 하나를 어떻게 다시 실행하는지
+  알려주면, 보관된 작업을 콘솔에서 클릭 한 번으로 재실행하거나, 제공자가
+  복구되는 순간 자동으로 재실행합니다 — 옵트인이며, Celery 워커가 필요합니다.
+
+Redis도, Docker도, 설정도 없이 시작합니다. 멀티 프로세스로 가기 전까지는
+인메모리로 동작합니다. Django, FastAPI, Flask, Celery 어댑터가 들어 있습니다.
 
 ![터미널 데모: 트래픽이 흐르는 중에 결제 게이트웨이가 응답 불능이 됩니다 — 결제 5건이 재시도 끝에 실패하고 브레이커가 열리며, 2건은 그 자리에서 거절되고, 7건이 전부 포착되어 복구 시점에 Baldur가 7건을 전부 재실행합니다. 유실 0건.](https://raw.githubusercontent.com/baldurhq/baldur/main/.github/assets/demo-self-healing.gif)
 
-*함께 배포되는 데모의 실제 실행 화면입니다. 트래픽이 흐르는 중에 게이트웨이가
-응답 불능이 됩니다 — 카드 거절이 아니라 인프라 장애입니다. 결제 5건이 재시도 끝에
-실패하면서 호출 인자와 함께 포착되고, 서킷 브레이커가 열려 죽어가는 의존성을
-막아주며(브레이커가 거절한 2건은 실행조차 되지 않았고, 이것도 포착됩니다),
-브레이커가 다시 닫히는 순간 Baldur가 7건을 실제로 재실행합니다. 유실 0건.
-(재실행은 나가는 길에 실패한 작업을 위한 것이지, 비즈니스 상의 거절이나 고객이
-이미 떠나버린 결제를 위한 것이 아닙니다 —
-[그 경계가 어디인지](docs/concepts/foundations/dlq-replay.md).) 직접 재현해 보세요:*
+*함께 배포되는 데모의 의존성은 결제 게이트웨이입니다. 트래픽이 흐르는 중에
+게이트웨이가 응답 불능이 되고, 결제 7건이 인자와 함께 포착되며, 복구 시점에 7건이
+전부 재실행됩니다. 유실 0건. 어떤 호출이든 같은 루프입니다 — 실제 실행 화면이고,
+브레이커 상태와 DLQ 집계는 프레임워크에서 실시간으로 읽어온 값입니다. 직접 재현해
+보세요:*
 
 ```bash
 pip install "baldur-framework[celery]"
 python -m baldur.scripts.demo_self_healing
 ```
 
-*(녹화 화면의 브레이커 상태와 DLQ 집계는 실행 중인 프레임워크에서 실시간으로
-읽어온 값입니다. 여러분의 서비스에서는 같은 내용이 Baldur의 구조화 로그 이벤트,
-내장 웹 콘솔의 실시간 브레이커 상태, 그리고 Prometheus/OpenTelemetry 메트릭으로
-드러납니다.)*
-
-## 왜 Baldur인가?
-
-- **끝내 실패한 호출이 사라지지 않습니다.** `dlq=True`가 호출을 인자와 함께
-  포착하고, 브레이커가 복구되는 순간 여러분이 등록한 핸들러를 통해, 여러분이
-  옵트인한 실패 유형에 한해 재실행합니다. 재시도는 정책이고, 복구 시점의
-  포착·재실행은 어떤 재시도 라이브러리도 주지 않는 부분입니다.
-- **그 루프 둘레에, 데코레이터 하나가 파이프라인 전체를 조합합니다.**
-  `@baldur.protected("name")`이 서킷 브레이커, 전체 대기 시간 예산, 폴백,
-  멱등성, 데드레터 포착을 순서가 정해진 하나의 파이프라인으로 묶습니다 — HTTP
-  클라이언트나 벤더 SDK가 여러분 몫으로 남겨두는 부분들입니다. 스스로 재시도하지
-  않는 호출을 위해 재시도도 함께 조합할 수 있고, SDK가 이미 재시도한다면 그건
-  그대로 두고 Baldur가 그 바깥을 감쌉니다.
-- **설정 없이 시작, 프로덕션 경로는 내장.** 기본 상태에서는 모든 것이 인메모리
-  백엔드 위에서 동작합니다 — Redis도, 환경 변수도, Docker도 필요 없습니다. 워커가
-  여러 개로 늘어나면 Redis를 추가하기만 하면 같은 코드가 전체 플릿에서 상태를
-  공유합니다. 호출부는 전혀 바뀌지 않습니다.
-- **가져다 쓰는 데서 끝나지 않고, 운영합니다.** 내장 웹 콘솔이 모든 브레이커의
-  실시간 상태를 보여주고 런타임 on/off 제어를 제공합니다. 헬스 체크는 로드
-  밸런서에 사실을 알려주고, 메트릭은 기본으로 나옵니다.
-- **프레임워크에 자연스럽게.** Django, FastAPI, Flask, Celery 어댑터가 시작
-  시점에 캐시·메트릭·라이프사이클 훅을 배선하므로, 보호 기능이 프레임워크의
-  관용구를 우회하지 않고 그 안에서 동작합니다.
+**SDK의 재시도를 이미 쓰고 있나요?** 그대로 두세요. Baldur는 재시도를 대체하지
+않습니다 — 재시도가 못 하는 것을 더합니다. 장애 하나에 모든 요청이 재시도 비용을
+치르지 않게 하는 브레이커, 호출자가 기다리는 시간의 단일 상한, 폴백, 그리고 어떤
+재시도 라이브러리도 주지 않는 포착·재실행.
 
 ## 설치
 
@@ -77,37 +72,29 @@ pip install baldur-framework[redis]          # Redis 기반 공유 상태
 pip install baldur-framework[prometheus]     # Prometheus 메트릭
 ```
 
-## 간단한 예제
+## 같은 데코레이터, 어떤 의존성이든
+
+결제 게이트웨이, 데이터베이스, 이메일 제공자 — 호출부는 전혀 바뀌지 않습니다.
 
 ```python
-import baldur
-
-
 @baldur.protected("charge-customer", dlq=True)
 def charge(order_id: str, amount_cents: int) -> dict:
     # 기본적으로 서킷 브레이커로 감싸집니다. dlq=True는 끝내 실패한 호출을
     # 인자와 함께 보관해 두었다가 게이트웨이가 복구되면 재실행합니다.
-    # 설정을 전혀 하지 않아도 인메모리 백엔드 위에서 동작합니다 —
-    # Redis도, 환경 변수도, Docker도 필요 없습니다.
     return payment_gateway.charge(order_id, amount_cents)
 ```
 
 게이트웨이가 죽으면 브레이커가 열리고, 서비스는 타임아웃을 쌓아 올리는 대신 즉시
 응답합니다. 나가는 길에 실패한 결제는 데드레터 큐에서 기다리다가 브레이커가
-닫히면 돌아옵니다. 같은 데코레이터가 어떤 의존성이든 보호합니다 — 데이터베이스,
-장애 중인 모델 제공자:
-
-```python
-@baldur.protected("llm-summarize")
-def summarize(doc_id: str) -> str:
-    return llm_api.summarize(doc_id)
-```
+닫히면 돌아옵니다. (재실행은 나가는 길에 실패한 작업을 위한 것이지, 비즈니스
+상의 거절이나 고객이 이미 떠나버린 결제를 위한 것이 아닙니다 —
+[그 경계가 어디인지](docs/concepts/foundations/dlq-replay.md).)
 
 기본값 이상이 필요하다면 파이프라인을 선언적으로 조합하면 됩니다.
 
 ```python
 @baldur.protected(
-    "llm-summarize",
+    "summarize",
     timeout=30.0,                            # 호출자가 기다리는 시간의 단일 상한
     fallback=lambda: last_good_summary(),    # OPEN 상태일 때의 우아한 응답
     idempotency_key="doc_id",                # 재전달된 작업도 한 번만 처리
@@ -154,24 +141,6 @@ Django 앱(데모 하네스가 트래픽을 넣는 상황을 녹화)이 21초 �
 
 ![터미널 데모: Django 앱이 21초간의 Redis 장애 내내 200 응답을 유지합니다](https://raw.githubusercontent.com/baldurhq/baldur/main/.github/assets/redis-dies-app-survives.gif)
 
-## Baldur PRO
-
-PRO는 동일한 API 위에 지속성과 플릿 단위 운영을 위한 기계 장치를 더합니다 —
-코어의 어떤 것도 라이선스가 바뀌거나 대체되지 않습니다. 주요 항목:
-[대규모 DLQ](docs/concepts/foundations/dlq-replay.md)(콘솔에서의 일괄 재실행,
-성공률 기반 속도 조절, 디스크에 지속되는 아웃박스, 아카이브/삭제 보존 정책),
-해시 체인 [감사 추적](docs/concepts/pro/audit.md),
-[통합 알림](docs/concepts/pro/unified-notification.md),
-[비상 모드](docs/concepts/pro/emergency-mode.md),
-[벌크헤드 스레드 풀 격리](docs/concepts/foundations/bulkhead.md),
-[적응형 스로틀링](docs/concepts/pro/throttle.md),
-[카나리 복구](docs/concepts/pro/canary-recovery.md),
-[거버넌스 게이트](docs/concepts/pro/governance.md), 그리고 Baldur 자신을 감시하는
-[메타 워치독](docs/concepts/pro/meta-watchdog.md).
-
-전체 [OSS vs PRO 기능 비교표](docs/concepts/oss-vs-pro.md)와
-[가격](https://baldur.sh/pricing/)을 확인해 보세요.
-
 ## 문서
 
 전체 문서는 **<https://baldur.sh>** 에 있습니다.
@@ -207,6 +176,23 @@ AI 코딩 어시스턴트(Claude Code, Cursor, Copilot, Codex)로 개발하고 �
 
 전체 매트릭스와 Python × Django 테스트 그리드, 버전 지원 정책은
 [호환성](docs/compatibility.md)을 참고하세요.
+
+## 플릿 규모로 운영하시나요?
+
+Baldur PRO는 동일한 API 위에 플릿 단위 운영을 위한 기계 장치를 더합니다 — 코어의
+어떤 것도 라이선스가 바뀌거나 대체되지 않습니다.
+[대규모 DLQ](docs/concepts/foundations/dlq-replay.md)(콘솔에서의 일괄 재실행,
+성공률 기반 속도 조절, 디스크에 지속되는 아웃박스, 아카이브/삭제 보존 정책),
+해시 체인 [감사 추적](docs/concepts/pro/audit.md),
+[통합 알림](docs/concepts/pro/unified-notification.md),
+[비상 모드](docs/concepts/pro/emergency-mode.md),
+[벌크헤드 스레드 풀 격리](docs/concepts/foundations/bulkhead.md),
+[적응형 스로틀링](docs/concepts/pro/throttle.md),
+[카나리 복구](docs/concepts/pro/canary-recovery.md),
+[거버넌스 게이트](docs/concepts/pro/governance.md), 그리고 Baldur 자신을 감시하는
+[메타 워치독](docs/concepts/pro/meta-watchdog.md). 전체
+[OSS vs PRO 기능 비교표](docs/concepts/oss-vs-pro.md)와
+[가격](https://baldur.sh/pricing/)을 확인해 보세요.
 
 ## 얼리 액세스
 

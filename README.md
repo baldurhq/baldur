@@ -9,60 +9,53 @@
 
 **English** | [한국어](README.ko.md)
 
-**Baldur** keeps the Python calls that fail while a dependency is down, and
-replays them when it comes back. Wrap a call in one decorator: if the payment
-gateway dies mid-traffic, every charge that fails is captured with its
-arguments, a circuit breaker stops your service from piling onto the dying
-dependency, and the moment the gateway recovers the captured charges are
-replayed. Nothing is silently lost. Around that loop it ships what you need to
-run it in production — health checks, Prometheus and OpenTelemetry metrics,
-graceful shutdown, a built-in web console — with adapters for Django, FastAPI,
-Flask, and Celery.
+**An API you depend on goes down for an hour. What happens to your app?**
+
+Requests hang until they time out, every worker fills up, and the jobs that
+failed in that hour are gone. Whether it's OpenAI, your payment provider, or
+your email service — Baldur fixes all three with one decorator, for Python
+services that don't have anyone on call.
+
+```python
+import baldur
+
+
+@baldur.protected("summarize", dlq=True, timeout=60.0)
+def summarize(doc_id: str) -> str:
+    return llm_api.summarize(doc_id)
+```
+
+When the provider dies — or just gets slow — mid-traffic:
+
+- **Your app keeps answering.** A hang becomes a failure at the 60-second
+  bound, the circuit breaker opens, and calls fail fast — so a slow provider
+  doesn't take every worker down with it. The endpoints that don't need it
+  keep working.
+- **Failed jobs are kept, not lost.** Every call that failed for good is
+  captured with its arguments and listed in the built-in console.
+- **They come back.** A small replay handler tells Baldur how to re-run one;
+  replay the parked jobs from the console with a click, or automatically when
+  the provider recovers — opt-in, with a Celery worker.
+
+No Redis, no Docker, no config to start: it runs in-memory until you go
+multi-process. Django, FastAPI, Flask, and Celery adapters included.
 
 ![Terminal demo: the payment gateway becomes unreachable mid-traffic — five charges fail after their retries and the breaker trips, two more are rejected on the spot, all seven are captured, and on recovery Baldur replays all seven. Zero lost.](https://raw.githubusercontent.com/baldurhq/baldur/main/.github/assets/demo-self-healing.gif)
 
-*Real run of the shipped demo: the gateway goes unreachable mid-traffic — an
-infrastructure failure, not a declined card — so five charges fail after their
-retries and are captured with their arguments, the circuit breaker opens and
-shields the dying dependency (the two charges it rejects never run, and are
-captured too), and the moment it closes again Baldur replays all seven for
-real. Zero lost. (Replay is for work that failed on the way out, never for a
-business rejection, and never for a checkout the customer already walked away
-from — [where that line sits](docs/concepts/foundations/dlq-replay.md).)
-Reproduce it yourself:*
+*The shipped demo's dependency is a payment gateway: it goes unreachable
+mid-traffic, seven charges are captured with their arguments, and all seven are
+replayed on recovery. Zero lost. Same loop for any call — a real run, with the
+breaker states and DLQ tallies read live from the framework. Run it yourself:*
 
 ```bash
 pip install "baldur-framework[celery]"
 python -m baldur.scripts.demo_self_healing
 ```
 
-*(The breaker states and DLQ tallies in the recording are read live from the
-running framework. In your own service the same story surfaces as Baldur's
-structured log events, live breaker state in the built-in web console, and
-the Prometheus/OpenTelemetry metrics.)*
-
-## Why Baldur?
-
-- **The call that failed for good is not gone.** `dlq=True` captures it with
-  its arguments; the breaker's recovery replays it, through a handler you
-  register and only for the failure types you opt in. Retry is a policy;
-  capture-and-replay-on-recovery is the part no retry library gives you.
-- **Around that loop, one decorator composes the whole pipeline.**
-  `@baldur.protected("name")` orders a circuit breaker, a wall-clock budget,
-  fallback, idempotency, and dead-letter capture into one pipeline — the parts
-  your HTTP client or vendor SDK leaves to you. Retry composes in too, for
-  calls that don't retry themselves; where your SDK already retries, keep it
-  and let Baldur surround it.
-- **Zero-config start, production path built in.** Out of the box everything
-  runs on an in-memory backend — no Redis, no env vars, no Docker. When you
-  move to multiple workers, add Redis and the same code shares state across
-  the fleet. Call sites never change.
-- **Operate it, don't just import it.** A built-in web console shows every
-  breaker's live state and gives you runtime on/off controls; health checks
-  tell your load balancer the truth; metrics come standard.
-- **Framework-native.** Django, FastAPI, Flask, and Celery adapters wire the
-  cache, metrics, and lifecycle hooks at startup, so protection works with
-  your framework's idioms rather than around them.
+**Already using your SDK's retries?** Keep them. Baldur doesn't replace retry —
+it adds what retry can't: a breaker so one incident doesn't cost every request
+its retries, one wall-clock bound on what the caller waits, a fallback, and the
+capture-and-replay no retry library gives you.
 
 ## Install
 
@@ -79,37 +72,31 @@ pip install baldur-framework[redis]          # Redis-backed shared state
 pip install baldur-framework[prometheus]     # Prometheus metrics
 ```
 
-## Quick example
+## The same decorator, any dependency
+
+A payment gateway, your database, an email provider — the call site never
+changes:
 
 ```python
-import baldur
-
-
 @baldur.protected("charge-customer", dlq=True)
 def charge(order_id: str, amount_cents: int) -> dict:
     # Circuit breaker by default; dlq=True parks the call if it fails for
     # good, with its arguments, and replays it once the gateway recovers.
-    # Zero configuration runs on an in-memory backend — no Redis, no env
-    # vars, no Docker.
     return payment_gateway.charge(order_id, amount_cents)
 ```
 
 When the gateway dies, the breaker opens and your service answers fast instead
 of stacking up timeouts; the charges that failed on the way out wait in the
-dead-letter queue and come back when it closes. The same decorator protects any
-dependency — your database, a model provider mid-incident:
-
-```python
-@baldur.protected("llm-summarize")
-def summarize(doc_id: str) -> str:
-    return llm_api.summarize(doc_id)
-```
+dead-letter queue and come back when it closes. (Replay is for work that failed
+on the way out — never for a business rejection, and never for a checkout the
+customer already walked away from:
+[where that line sits](docs/concepts/foundations/dlq-replay.md).)
 
 Need more than the default? Compose the pipeline declaratively:
 
 ```python
 @baldur.protected(
-    "llm-summarize",
+    "summarize",
     timeout=30.0,                            # one bound on what the caller waits
     fallback=lambda: last_good_summary(),    # graceful answer while OPEN
     idempotency_key="doc_id",                # a redelivered job pays once
@@ -156,24 +143,6 @@ and the Redis tier resyncs itself on recovery:
 
 ![Terminal demo: a Django app keeps serving 200s through a 21-second Redis outage](https://raw.githubusercontent.com/baldurhq/baldur/main/.github/assets/redis-dies-app-survives.gif)
 
-## Baldur PRO
-
-PRO adds the durable, fleet-level machinery on top of the same API — nothing in
-the core gets relicensed or replaced. Highlights:
-[DLQ at scale](docs/concepts/foundations/dlq-replay.md) (batch replay from the
-console, success-rate-driven pacing, a disk-durable outbox, and archive/purge
-retention), hash-chained [audit trail](docs/concepts/pro/audit.md),
-[unified notifications](docs/concepts/pro/unified-notification.md),
-[emergency mode](docs/concepts/pro/emergency-mode.md),
-[bulkhead thread-pool isolation](docs/concepts/foundations/bulkhead.md),
-[adaptive throttling](docs/concepts/pro/throttle.md),
-[canary recovery](docs/concepts/pro/canary-recovery.md),
-[governance gates](docs/concepts/pro/governance.md), and a
-[meta-watchdog](docs/concepts/pro/meta-watchdog.md) that watches Baldur itself.
-
-See the full [OSS vs PRO capability matrix](docs/concepts/oss-vs-pro.md) and
-[pricing](https://baldur.sh/pricing/).
-
 ## Documentation
 
 Full documentation lives at **<https://baldur.sh>**.
@@ -211,6 +180,23 @@ hand-rolling a circuit breaker. See
 
 See [Compatibility](docs/compatibility.md) for the full matrix, the
 Python × Django test grid, and the version support policy.
+
+## Running this across a fleet?
+
+Baldur PRO adds the fleet-level machinery on top of the same API — nothing in
+the core gets relicensed or replaced:
+[DLQ at scale](docs/concepts/foundations/dlq-replay.md) (batch replay from the
+console, success-rate-driven pacing, a disk-durable outbox, and archive/purge
+retention), a hash-chained [audit trail](docs/concepts/pro/audit.md),
+[unified notifications](docs/concepts/pro/unified-notification.md),
+[emergency mode](docs/concepts/pro/emergency-mode.md),
+[bulkhead thread-pool isolation](docs/concepts/foundations/bulkhead.md),
+[adaptive throttling](docs/concepts/pro/throttle.md),
+[canary recovery](docs/concepts/pro/canary-recovery.md),
+[governance gates](docs/concepts/pro/governance.md), and a
+[meta-watchdog](docs/concepts/pro/meta-watchdog.md) that watches Baldur itself.
+See the full [OSS vs PRO capability matrix](docs/concepts/oss-vs-pro.md) and
+[pricing](https://baldur.sh/pricing/).
 
 ## Early access
 
