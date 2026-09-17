@@ -9,7 +9,7 @@ build-backend = "hatchling.build"
 [project]
 name = "baldur-framework"
 dynamic = ["version"]
-description = "Baldur Reliability Layer for Python Applications"
+description = "Keeps the Python calls that fail while a dependency is down and re-runs them when it recovers. Circuit breaker, retry and dead-letter replay in one decorator."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.11"
