@@ -10,6 +10,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+## [1.15.1] - 2026-09-18
+
 ### Fixed
 
 - A second handler subscribed to an event no longer vanishes when it shares a name with the first.
