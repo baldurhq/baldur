@@ -51,9 +51,10 @@ answers `503` under load shedding.
 Dead-letter capture ships in the OSS core: a failed operation is recorded with
 the context needed to replay it, size limits plus the overflow strategy bound
 the queue, and the non-blocking outbox keeps capture off the request hot path.
-On every exit path — a signalled stop or a worker recycle — the outbox is torn
-down under one budget so buffered entries reach the store or the local fallback
-instead of dying with the process. On the `protect(dlq=True)` / `@dlq_protect`
+On every exit path — a signalled stop, a worker recycle, or a plain interpreter
+exit (a script returning, `sys.exit()`) — the outbox is torn down under one
+budget so buffered entries reach the store or the local fallback instead of
+dying with the process. On the `protect(dlq=True)` / `@dlq_protect`
 chain, capture has two triggers: the final failure after retries are exhausted,
 and a call an already-open circuit rejected, so that work is replayed on recovery
 instead of dropped. The second trigger is on by default and has its own switch;

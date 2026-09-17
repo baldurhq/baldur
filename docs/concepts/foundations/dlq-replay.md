@@ -137,7 +137,9 @@ and an event when its drop rate crosses a threshold, so you learn the outbox is 
 discovering it after the fact.
 
 An in-memory buffer would normally die with its process. Baldur therefore tears the outbox down on
-every exit path (a signalled stop, a gunicorn or Celery worker recycle) under one time budget,
+every exit path (a signalled stop, a gunicorn or Celery worker recycle, and a plain interpreter exit —
+a script that returns or calls `sys.exit()`, via an `atexit` hook the outbox registers when it starts)
+under one time budget,
 `BALDUR_DLQ_OUTBOX_JOIN_TIMEOUT_SECONDS` (5 seconds by default): buffered entries are flushed to the
 store, the writer is joined, and whatever is still unwritten at that point is spilled to the local
 on-disk fallback. Keep that budget **below the process watchdog that will kill the worker anyway**
