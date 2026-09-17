@@ -10,6 +10,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+## [1.15.0] - 2026-09-18
+
 ### Changed
 
 - An application's logging configuration is left alone; Baldur's events go through its handlers.
