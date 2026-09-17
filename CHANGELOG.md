@@ -12,14 +12,14 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ### Changed
 
-- Adding Baldur no longer changes an application's logging: a configured root logger keeps its level, handlers and format, and Baldur's events go through them readably; a process that configured nothing still gets Baldur's stdout JSON handler.
-- `BALDUR_LOG_LEVEL` sets the level of Baldur's own loggers, and the root level only when nothing configured logging; the component-family levels keep precedence over it as before.
-- A Celery worker behaves as a plain Celery worker again: its `-l` level, handlers and stdout redirection apply.
+- An application's logging configuration is left alone; Baldur's events go through its handlers.
+- `BALDUR_LOG_LEVEL` sets Baldur's own loggers, and the root only when nothing configured logging.
+- A Celery worker's own `-l` level, handlers and stdout redirection apply again.
 
 ### Fixed
 
-- A dead letter replayed before the replaying process has made any protected call in its domain now carries that domain on its first replay metric, not the fallback label.
-- Importing `baldur.factory` (or an adapter package that does) before logging is configured no longer prints the built-in adapter registrations to stdout.
+- A dead letter's first replay metric carries its own domain, not the fallback label.
+- Importing `baldur.factory` before logging is configured no longer prints registrations to stdout.
 
 ## [1.14.1] - 2026-09-17
 

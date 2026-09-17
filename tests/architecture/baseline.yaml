@@ -342,7 +342,7 @@ dormant_import_boundary_count: 7
 # reclaimed. Give a new entry an ISO `YYYY-MM-DD` target_remove_by instead of
 # raising this number. Per-repo value: the two baselines are independently
 # scrubbed copies with no auto-sync (G41/G67 precedent).
-dateless_baseline_budget: 249
+dateless_baseline_budget: 248
 
 # G19 — tests/ may not module-level-import baldur_pro / baldur_dormant
 # without a `pytest.importorskip("baldur_pro")` (or "baldur_dormant") call

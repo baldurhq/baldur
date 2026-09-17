@@ -706,6 +706,113 @@ class TestBootstrapReceiverRegistrationContract:
             disconnect_baldur_signals()
 
 
+@pytest.fixture(
+    params=[
+        "setup_baldur_signals",
+        "connect_celery_bootstrap_receivers",
+        "configure_baldur_celery",
+    ]
+)
+def celery_entry_point(request, receivers_disconnected, celery_app_stub):
+    """One of the three entry points a Celery app module reaches before
+    ``worker_init``, as a zero-argument call with its own teardown.
+
+    Every one of them is reached at app-module import, before any worker
+    signal has run ``baldur.init()``, so each configures logging itself.
+    """
+    if request.param == "setup_baldur_signals":
+        from baldur.adapters.celery.signal_hooks import (
+            disconnect_baldur_signals,
+            setup_baldur_signals,
+        )
+
+        try:
+            yield setup_baldur_signals
+        finally:
+            disconnect_baldur_signals()
+    elif request.param == "connect_celery_bootstrap_receivers":
+        yield connect_celery_bootstrap_receivers
+    else:
+        from baldur.adapters.celery.beat_schedule import (
+            _reset_celery_configured,
+            configure_baldur_celery,
+        )
+
+        with patch(
+            "baldur.adapters.celery.beat_schedule.register_all_tasks_with_celery",
+            autospec=True,
+        ):
+            try:
+                yield lambda: configure_baldur_celery(celery_app_stub)
+            finally:
+                _reset_celery_configured()
+
+
+class TestEntryPointsConfigureLoggingFirstBehavior:
+    """Nothing an entry point emits goes through structlog's unconfigured default.
+
+    The probe is the count of structlog events already captured at the moment
+    ``configure_structlog()`` is called: zero means the call came before any
+    line the entry point (or anything it imports) emits. The function is
+    patched at its home module — the entry points import it at call time — so
+    the real configuration never replaces ``capture_logs``' own processors.
+    """
+
+    def test_entry_point_configures_logging_before_it_emits_anything(
+        self, celery_entry_point
+    ):
+        """On a first call the configure call precedes every emitted event."""
+        events_seen_at_configure: list[int] = []
+
+        with capture_logs() as cap_logs:
+
+            def observe() -> None:
+                events_seen_at_configure.append(len(cap_logs))
+
+            with patch(
+                "baldur.observability.structlog_config.configure_structlog",
+                side_effect=observe,
+            ):
+                celery_entry_point()
+
+        assert events_seen_at_configure
+        assert events_seen_at_configure[0] == 0
+
+    @pytest.mark.parametrize(
+        "celery_entry_point",
+        ["setup_baldur_signals", "configure_baldur_celery"],
+        indirect=True,
+    )
+    def test_entry_point_configures_logging_above_its_idempotency_guard(
+        self, celery_entry_point
+    ):
+        """A repeat call still configures first, then warns and returns.
+
+        The already-connected / already-configured warning is the line that
+        would otherwise reach the unconfigured printer, so the configure call
+        sits above the guard; the guard returns before the receivers' own
+        configure call, hence exactly one.
+        """
+        # Given — the entry point already did its work once
+        celery_entry_point()
+        events_seen_at_configure: list[int] = []
+
+        # When
+        with capture_logs() as cap_logs:
+
+            def observe() -> None:
+                events_seen_at_configure.append(len(cap_logs))
+
+            with patch(
+                "baldur.observability.structlog_config.configure_structlog",
+                side_effect=observe,
+            ):
+                celery_entry_point()
+
+        # Then
+        assert events_seen_at_configure == [0]
+
+
 class TestCelerySignalDispatchContract:
     """Pin the celery dispatch behavior the fail-loud channel rests on.
 
