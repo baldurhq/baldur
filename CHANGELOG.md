@@ -10,6 +10,10 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+### Fixed
+
+- A dead letter replayed before the replaying process has made any protected call in its domain now carries that domain on its first replay metric, not the fallback label.
+
 ## [1.14.1] - 2026-09-17
 
 ### Fixed

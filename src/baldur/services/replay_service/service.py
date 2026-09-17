@@ -378,6 +378,7 @@ class ReplayService(EventEmitterMixin):
         """
 
         from baldur.metrics.event_handlers import ReplayEventHandler
+        from baldur.metrics.registry import register_domain
         from baldur.services.event_bus import EventType
 
         config_max = self.config["max_replay_attempts"]
@@ -517,6 +518,14 @@ class ReplayService(EventEmitterMixin):
         )
 
         handler = get_replay_handler(failed_op_data.domain)
+
+        # Declaration site, read-side twin of ``store_failure``: the stored
+        # domain was declared when the entry was captured, but the registry is
+        # per process, and a replay that runs before this process has made a
+        # single protected call in that domain (a cron job replaying first,
+        # then sweeping) would otherwise see its first ``replay.started``
+        # collapse to the fallback label. Bare call: the registry never raises.
+        register_domain(failed_op_data.domain)
 
         ReplayEventHandler.on_replay_started(failed_op_data.domain, replay_type)
         start_time = time.monotonic()

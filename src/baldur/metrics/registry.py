@@ -603,10 +603,12 @@ def register_domain(domain: object, *, max_domains: int | None = None) -> bool:
     Register a domain so its metric label survives instead of collapsing.
 
     Called from the surfaces where application code *declares* a domain
-    (``protect()``'s retry stage, ``@domain_tag``, the DLQ store entry point,
-    the Celery domain-consuming sites), never from runtime data reaching a
-    recorder — auto-admitting recorder input would let an external client squat
-    the cap.
+    (``protect()``'s retry stage, ``@domain_tag``, the DLQ store entry point
+    and its read-side twin in replay execution, the Celery domain-consuming
+    sites), never from runtime data reaching a recorder — auto-admitting
+    recorder input would let an external client squat the cap. A replayed
+    entry's domain re-declares in the replaying process what the capturing
+    process declared at store time; the registry itself is per process.
 
     Total: never raises. Sites call it bare, without a local try/except, which
     matters because at least one of them runs inside an ``except`` block ahead
