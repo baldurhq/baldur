@@ -332,11 +332,18 @@ class TestCollectSampleBehavior:
         assert sample.cpu_seconds == pytest.approx(1.75)
 
     def test_collect_sample_thread_count_comes_from_the_process_not_the_name_list(self):
-        """The two are never interchangeable: names cover threading-created threads only."""
-        sample = mf.collect_sample(_stub_process(num_threads=42), "settled", 1.0)
+        """The two are never interchangeable: names cover threading-created threads only.
 
-        assert sample.num_threads == 42
-        assert len(sample.thread_names) != 42
+        Pinned by varying the process reading alone: the count follows it,
+        the name list does not move — never by comparing the name list to
+        the host's live thread count, which one CI runner matched exactly.
+        """
+        forty_two = mf.collect_sample(_stub_process(num_threads=42), "settled", 1.0)
+        seven = mf.collect_sample(_stub_process(num_threads=7), "settled", 1.0)
+
+        assert (forty_two.num_threads, seven.num_threads) == (42, 7)
+        assert forty_two.thread_names == seven.thread_names
+        assert threading.current_thread().name in forty_two.thread_names
 
     def test_collect_sample_thread_names_are_sorted(self):
         """Unsorted, the report's thread list reorders between runs for no reason.

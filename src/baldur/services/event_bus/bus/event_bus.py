@@ -427,6 +427,11 @@ class BaldurEventBus:
                 replay, post-mortem). Keep the default True for handlers
                 that write ``event.data`` consumed by later handlers.
 
+        Subscribing the same handler to the same event type twice keeps the
+        one subscription and returns it. Handlers are told apart by the
+        callable itself, never by its name: two lambdas, or two functions
+        that happen to share a bare ``__name__``, are two subscriptions.
+
         Returns:
             EventSubscription: Subscription info
         """
@@ -444,11 +449,11 @@ class BaldurEventBus:
             if event_type not in self._subscriptions:
                 self._subscriptions[event_type] = []
 
-            # Prevent duplicate subscriptions
+            # Prevent duplicate subscriptions of the same handler. The name
+            # is for reporting only: every lambda answers to ``<lambda>``,
+            # so keying on it silently dropped a caller's second handler.
             existing = [
-                s
-                for s in self._subscriptions[event_type]
-                if s.handler_name == handler_name
+                s for s in self._subscriptions[event_type] if s.handler == handler
             ]
             if not existing:
                 self._subscriptions[event_type].append(subscription)
@@ -496,9 +501,7 @@ class BaldurEventBus:
 
             original_count = len(self._subscriptions[event_type])
             self._subscriptions[event_type] = [
-                s
-                for s in self._subscriptions[event_type]
-                if s.handler_name != handler_name
+                s for s in self._subscriptions[event_type] if s.handler != handler
             ]
 
             removed = original_count > len(self._subscriptions[event_type])
