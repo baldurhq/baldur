@@ -3,7 +3,7 @@
 # pypa/gh-action-pypi-publish's bundled twine rejects as invalid. Keep the
 # backend below 1.32 until the publish action understands metadata 2.5, then
 # drop this ceiling together with the action bump.
-requires = ["hatchling<1.32"]
+requires = ["hatchling<1.33"]
 build-backend = "hatchling.build"
 
 [project]
@@ -44,14 +44,14 @@ classifiers = [
     "Topic :: System :: Distributed Computing",
 ]
 dependencies = [
-    "pydantic>=2.6.0",
-    "pydantic-settings>=2.2.0",
-    "psutil>=5.9.0",
-    "PyYAML>=6.0",
-    "requests>=2.33.0",
-    "structlog>=24.1.0",
-    "typer>=0.12",
-    "sqlparse>=0.5.4",  # security: pinned over Django transitive (GHSA-27jp-wm6q-gp25)
+    "pydantic>=2.13.5",
+    "pydantic-settings>=2.15.0",
+    "psutil>=7.2.2",
+    "PyYAML>=6.0.3",
+    "requests>=2.34.2",
+    "structlog>=26.1.0",
+    "typer>=0.27.2",
+    "sqlparse>=0.6.0",  # security: pinned over Django transitive (GHSA-27jp-wm6q-gp25)
 ]
 
 [project.scripts]
@@ -59,28 +59,28 @@ baldur = "baldur.cli:app"
 
 [project.optional-dependencies]
 django = [
-    "django>=4.2",
-    "djangorestframework>=3.14",
-    "django-db-connection-pool>=1.2.0",
-    "django-redis>=5.4",
-    "djangorestframework-simplejwt>=5.3",
+    "django>=5.2.17",
+    "djangorestframework>=3.18.1",
+    "django-db-connection-pool>=1.2.6",
+    "django-redis>=7.0.0",
+    "djangorestframework-simplejwt>=5.5.1",
 ]
 fastapi = [
-    "fastapi>=0.100",
-    "starlette>=0.27",
+    "fastapi>=0.141.1",
+    "starlette>=1.6.0",
     # ASGI server — the getting-started quickstart documents `uvicorn app:app`
     # as the run command, so the extra ships it for a self-contained install
     # (parity with Django's runserver / Flask's built-in dev server). `[standard]`
     # pulls watchfiles so the documented `--reload` flag works.
-    "uvicorn[standard]>=0.23",
+    "uvicorn[standard]>=0.53.0",
     # TestClient backing — Starlette's `TestClient` is built on httpx, and the
     # getting-started quickstart smoke test (531 D5) exercises it. httpx was
     # demoted from core deps once cell-health Prometheus probes moved to the
     # stdlib `safe_urlopen` helper, so it now lives where it is actually needed.
-    "httpx>=0.24.0",
+    "httpx>=0.28.1",
 ]
 flask = [
-    "flask>=2.3",
+    "flask>=3.1.3",
 ]
 # `cryptography` backs Fernet-encrypted audit masking (with a graceful plaintext
 # fallback when absent) and PRO entitlement signature verification. This is NOT
@@ -88,70 +88,70 @@ flask = [
 # BALDUR_FORENSIC_*), which is pure-Python and needs no extra — hence the
 # accurate `crypto` name rather than the misleading former `forensic`.
 crypto = [
-    "cryptography>=46.0.7",
+    "cryptography>=50.0.1",
 ]
 celery = [
-    "celery>=5.3",
-    "redis>=4.2",
+    "celery>=5.6.3",
+    "redis>=8.1.0",
 ]
 prometheus = [
-    "prometheus-client>=0.17",
+    "prometheus-client>=0.26.0",
 ]
 opentelemetry = [
-    "opentelemetry-api>=1.20.0",
-    "opentelemetry-sdk>=1.20.0",
-    "opentelemetry-exporter-otlp>=1.20.0",
-    "opentelemetry-exporter-prometheus>=0.41b0",
-    "opentelemetry-instrumentation-celery>=0.41b0",
-    "opentelemetry-instrumentation-django>=0.41b0",
-    "opentelemetry-instrumentation-logging>=0.41b0",
-    "opentelemetry-instrumentation-requests>=0.41b0",
+    "opentelemetry-api>=1.44.0",
+    "opentelemetry-sdk>=1.44.0",
+    "opentelemetry-exporter-otlp>=1.44.0",
+    "opentelemetry-exporter-prometheus>=0.65b0",
+    "opentelemetry-instrumentation-celery>=0.65b0",
+    "opentelemetry-instrumentation-django>=0.65b0",
+    "opentelemetry-instrumentation-logging>=0.65b0",
+    "opentelemetry-instrumentation-requests>=0.65b0",
 ]
 openapi = [
-    "drf-spectacular>=0.27",
+    "drf-spectacular>=0.30.0",
 ]
 fast-json = [
-    "orjson>=3.9.0",
+    "orjson>=3.12.0",
 ]
 caching = [
-    "cachetools>=5.0.0",
+    "cachetools>=7.1.8",
     "pymemcache>=4.0",
 ]
 tenacity = [
-    "tenacity>=8.3.0",
+    "tenacity>=9.1.4",
 ]
 disk-buffer = [
-    "lmdb>=1.4.0",
+    "lmdb>=2.3.0",
 ]
 arq = [
-    "arq>=0.26",
-    "redis>=4.2",
-    "croniter>=2.0",
+    "arq>=0.28.0",
+    "redis>=8.1.0",
+    "croniter>=6.2.4",
 ]
 async-queue = [
-    "arq>=0.26",
-    "redis>=4.2",
-    "croniter>=2.0",
+    "arq>=0.28.0",
+    "redis>=8.1.0",
+    "croniter>=6.2.4",
 ]
 rq = [
-    "rq>=1.16",
-    "rq-scheduler>=0.13",
+    "rq>=2.12.0",
+    "rq-scheduler>=0.14.0",
 ]
 postgres = [
-    "psycopg2-binary>=2.9",
-    "django>=4.2",
+    "psycopg2-binary>=2.9.13",
+    "django>=5.2.17",
 ]
 chaos = [
-    "croniter>=1.3",
+    "croniter>=6.2.4",
 ]
 export = [
-    "pyarrow>=14.0",
+    "pyarrow>=25.0.1",
 ]
 databases = [
-    "sqlalchemy>=2.0",
+    "sqlalchemy>=2.0.52",
 ]
 redis = [
-    "redis>=4.2",
+    "redis>=8.1.0",
 ]
 # Documentation host (531 D3) — MkDocs Material + GitHub Pages. ``mkdocstrings``
 # is included now so Wave 7B's API reference layers on without a second extras
@@ -163,9 +163,9 @@ redis = [
 # it now would fail ``mkdocs build --strict`` (no posts dir) and conflicts with
 # 531 D3's fail-closed allowlist, which publishes only index + getting-started.
 docs = [
-    "mkdocs-material[recommended]>=9.5",
-    "mkdocstrings[python]>=0.24",
-    "mkdocs-llmstxt>=0.1",
+    "mkdocs-material[recommended]>=9.7.7",
+    "mkdocstrings[python]>=1.0.6",
+    "mkdocs-llmstxt>=0.5.0",
 ]
 # Dormant-tier extras (kubernetes/kafka/aws/ml-*/dormant) live in
 # ``pyproject-pro.toml`` per doc 528 D4. Public OSS install surface
@@ -179,39 +179,39 @@ all = [
 # suite requires, and the lane auto-skips without it. Setup is two commands:
 #   pip install -e ".[test-e2e]" && playwright install --with-deps chromium
 test-e2e = [
-    "playwright>=1.60",
+    "playwright>=1.62.0",
 ]
 
 dev = [
     "baldur-framework[all]",
-    "pytest>=7.0",
-    "pytest-cov>=4.0",
-    "pytest-django>=4.5",
-    "pytest-asyncio>=0.21",
-    "pytest-benchmark>=4.0",
-    "freezegun>=1.2",
-    "factory-boy>=3.3",
-    "pytest-mock>=3.10",
-    "pytest-timeout>=2.2",
-    "pytest-xdist>=3.5",
-    "pytest-rerunfailures>=14.0",
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+    "pytest-django>=4.14.0",
+    "pytest-asyncio>=1.4.0",
+    "pytest-benchmark>=5.3.0",
+    "freezegun>=1.5.5",
+    "factory-boy>=3.3.3",
+    "pytest-mock>=3.15.1",
+    "pytest-timeout>=2.4.0",
+    "pytest-xdist>=3.8.0",
+    "pytest-rerunfailures>=16.6.1",
     # Property-based testing — generates adversarial inputs for correctness
     # invariants (e.g. idempotency key injectivity) that example tests miss.
-    "hypothesis>=6.0",
-    "locust>=2.0",
-    "toxiproxy-python>=0.1",
-    "black>=26.3.1",
-    "isort>=5.12",
-    "mypy>=1.0",
-    "ruff>=0.1",
-    "pre-commit>=4.0",
+    "hypothesis>=6.168.0",
+    "locust>=2.46.5",
+    "toxiproxy-python>=0.1.1",
+    "black>=26.5.1",
+    "isort>=9.0.1",
+    "mypy>=2.3.1",
+    "ruff>=0.16.7",
+    "pre-commit>=4.6.2",
     # Security scanning — wired in .github/workflows/security.yml
-    "bandit>=1.7",
-    "pip-audit>=2.7",
-    "pip-licenses>=5.0",
+    "bandit>=1.9.4",
+    "pip-audit>=2.10.1",
+    "pip-licenses>=5.5.5",
     # Type stubs (P5 / doc 526) — surface real signature mismatches that
     # ignore_missing_imports was hiding.
-    "django-stubs[compatible-mypy]>=6.0",
+    "django-stubs[compatible-mypy]>=6.1.1",
     "types-requests",
     "types-PyYAML",
     "types-cachetools",
