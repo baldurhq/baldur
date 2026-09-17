@@ -94,6 +94,7 @@ plugins:
           - why-i-built-baldur.md: "The question that started the project, what the existing libraries did not answer, and four decisions behind it."
           - 99-circuit-breakers.md: "A survey of 99 hand-written circuit breakers in public Python code: what they get wrong and why nobody notices."
           - llm-rate-limits.md: "Why per-process exponential backoff does not slow a fleet down when an LLM API returns 429, and what a shared cooldown changes."
+          - celery-max-retries.md: "What Celery keeps of a task that failed after max_retries (almost nothing), and how to capture those tasks and replay them once the dependency is back."
           - getting-started/index.md: "Install Baldur and protect your first call."
           - getting-started/django.md: "Wire Baldur into a Django project."
           - getting-started/fastapi.md: "Wire Baldur into a FastAPI app."
@@ -181,6 +182,7 @@ exclude_docs: |
   !/why-i-built-baldur.md
   !/99-circuit-breakers.md
   !/llm-rate-limits.md
+  !/celery-max-retries.md
   !/troubleshooting.md
   !/faq.md
   !/compatibility.md
@@ -224,6 +226,7 @@ nav:
   - Why I built Baldur: why-i-built-baldur.md
   - "I read 99 hand-written circuit breakers": 99-circuit-breakers.md
   - "LLM API rate limits": llm-rate-limits.md
+  - "Celery tasks lost after max_retries": celery-max-retries.md
   - Comparison:
       - tenacity: comparison/tenacity.md
   - Pricing: pricing.md
