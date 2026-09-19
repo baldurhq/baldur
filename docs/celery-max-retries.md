@@ -49,6 +49,17 @@ has no answer to "the dependency is down; hold this and run it later."
 - **`acks_late` and `task_reject_on_worker_lost`.** These protect a task whose
   *worker* died mid-run. A task that raised is acknowledged either way.
 - **The result backend.** A record that it failed, not a copy you can re-run.
+- **A transactional outbox.** Write the task's name and arguments to a table
+  in the same transaction as the business data and publish from that table,
+  and the task is published if and only if the data committed — the fix for a
+  `.delay()` that ran before the commit, or never ran because the broker was
+  down at that moment. The contract ends at the broker. Once the message is
+  out, a task that raises after `max_retries` is acknowledged exactly as
+  above, and the outbox has already done its part. To cover this failure the
+  row would have to stay open until the task *succeeds* — at which point the
+  table is a job queue, with a poller, row locking across workers, a rule for
+  the row that never succeeds, and the same open question of when the
+  provider is back.
 - **Building it yourself.** An `on_failure` hook that writes the task name,
   args and kwargs to a table; a management command that re-enqueues them; and
   some way of deciding that the provider is back, so the replay does not run
