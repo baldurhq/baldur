@@ -9,6 +9,8 @@
 
 **English** | [한국어](README.ko.md)
 
+> **This project is complete.** What was built, what the numbers said, and what survived: [retrospective (Korean)](POSTMORTEM.ko.md).
+
 **An API you depend on goes down for an hour. What happens to your app?**
 
 Requests hang until they time out, every worker fills up, and the jobs that
