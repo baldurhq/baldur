@@ -25,6 +25,9 @@ def summarize(doc_id: str) -> str:
     return llm_api.summarize(doc_id)
 ```
 
+Redis도, Docker도, 설정도 없이 시작합니다. 저 데코레이터는 멀티 프로세스로 가기
+전까지 인메모리로 동작합니다.
+
 트래픽이 흐르는 중에 제공자가 죽거나 — 그냥 느려지기만 해도:
 
 - **앱은 계속 응답합니다.** 60초 상한에서 매달린 호출이 실패로 바뀌고, 서킷
@@ -36,16 +39,17 @@ def summarize(doc_id: str) -> str:
   알려주면, 보관된 작업을 콘솔에서 클릭 한 번으로 재실행하거나, 제공자가
   복구되는 순간 자동으로 재실행합니다 — 옵트인이며, Celery 워커가 필요합니다.
 
-Redis도, Docker도, 설정도 없이 시작합니다. 멀티 프로세스로 가기 전까지는
-인메모리로 동작합니다. Django, FastAPI, Flask, Celery 어댑터가 들어 있습니다.
+Django, FastAPI, Flask, Celery 어댑터가 들어 있습니다.
 
 ![터미널 데모: 트래픽이 흐르는 중에 결제 게이트웨이가 응답 불능이 됩니다 — 결제 5건이 재시도 끝에 실패하고 브레이커가 열리며, 2건은 그 자리에서 거절되고, 7건이 전부 포착되어 복구 시점에 Baldur가 7건을 전부 재실행합니다. 유실 0건.](https://raw.githubusercontent.com/baldurhq/baldur/main/.github/assets/demo-self-healing.gif)
 
 *함께 배포되는 데모의 의존성은 결제 게이트웨이입니다. 트래픽이 흐르는 중에
 게이트웨이가 응답 불능이 되고, 결제 7건이 인자와 함께 포착되며, 복구 시점에 7건이
 전부 재실행됩니다. 유실 0건. 어떤 호출이든 같은 루프입니다 — 실제 실행 화면이고,
-브레이커 상태와 DLQ 집계는 프레임워크에서 실시간으로 읽어온 값입니다. 직접 재현해
-보세요:*
+브레이커 상태와 DLQ 집계는 프레임워크에서 실시간으로 읽어온 값입니다. 데코레이터
+자체는 `pip install baldur-framework`가 전부입니다. 데모는 프로세스 안의 대역
+워커를 위해 `celery` extra를 추가할 뿐, 여전히 프로세스 하나에 Redis도 브로커도
+없습니다. 직접 재현해 보세요:*
 
 ```bash
 pip install "baldur-framework[celery]"

@@ -25,6 +25,9 @@ def summarize(doc_id: str) -> str:
     return llm_api.summarize(doc_id)
 ```
 
+No Redis, no Docker, no config to start: that decorator runs in-memory until
+you go multi-process.
+
 When the provider dies — or just gets slow — mid-traffic:
 
 - **Your app keeps answering.** A hang becomes a failure at the 60-second
@@ -37,15 +40,17 @@ When the provider dies — or just gets slow — mid-traffic:
   replay the parked jobs from the console with a click, or automatically when
   the provider recovers — opt-in, with a Celery worker.
 
-No Redis, no Docker, no config to start: it runs in-memory until you go
-multi-process. Django, FastAPI, Flask, and Celery adapters included.
+Django, FastAPI, Flask, and Celery adapters included.
 
 ![Terminal demo: the payment gateway becomes unreachable mid-traffic — five charges fail after their retries and the breaker trips, two more are rejected on the spot, all seven are captured, and on recovery Baldur replays all seven. Zero lost.](https://raw.githubusercontent.com/baldurhq/baldur/main/.github/assets/demo-self-healing.gif)
 
 *The shipped demo's dependency is a payment gateway: it goes unreachable
 mid-traffic, seven charges are captured with their arguments, and all seven are
 replayed on recovery. Zero lost. Same loop for any call — a real run, with the
-breaker states and DLQ tallies read live from the framework. Run it yourself:*
+breaker states and DLQ tallies read live from the framework. The decorator
+itself is `pip install baldur-framework` and nothing else; the demo adds the
+`celery` extra for its in-process stand-in worker — still one process, no
+Redis, no broker. Run it yourself:*
 
 ```bash
 pip install "baldur-framework[celery]"
