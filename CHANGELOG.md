@@ -10,6 +10,8 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 ## [Unreleased]
 
+## [1.16.0] - 2026-09-28
+
 ### Added
 
 - The self-healing demo takes `--outage-charges N` and replays the whole backlog of a larger outage.
