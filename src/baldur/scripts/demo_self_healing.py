@@ -17,6 +17,11 @@ What it shows:
    automatically replays every captured charge through the registered replay
    handler. The summary at the end is computed from what actually happened.
 
+Make the outage bigger to watch a backlog drain. A recovery replays in passes
+of 100 entries by default, and the tally waits for every pass::
+
+    python -m baldur.scripts.demo_self_healing --outage-charges 500
+
 The replay wiring this demo performs — an eager Celery app, a replay handler
 for its domain, and the failure-type routing map — is the same wiring a real
 deployment does; only the eager Celery app stands in for a real worker.
@@ -27,6 +32,7 @@ events instead of the quiet demo narrative alone.
 
 from __future__ import annotations
 
+import argparse
 import logging
 import os
 import sys
@@ -62,8 +68,20 @@ _DEMO_ENV = {
 }
 
 _DOMAIN = "demo.charge"
+# Both waits end early once their work is done, and otherwise end only after
+# this long without progress, so a large outage never outruns them.
 _OUTBOX_FLUSH_WAIT_S = 8.0  # capture is async-durable; store visibility follows
 _REPLAY_WAIT_S = 10.0
+
+# The outage: this many charges hit the dead gateway. The first few are
+# narrated one line each at a readable pace; the rest of a larger outage run
+# back to back and are summed in one line. The ceiling stays well inside the
+# 10,000 entries one recovery drains on the default replay settings, so a
+# charge still parked at the end means lost, not "past the drain budget".
+_DEFAULT_OUTAGE_CHARGES = 7
+_NARRATED_OUTAGE_CHARGES = 7
+_MAX_OUTAGE_CHARGES = 5000
+_OUTAGE_PACE_S = 0.4
 
 _USE_COLOR = sys.stdout.isatty() or bool(os.environ.get("FORCE_COLOR"))
 
@@ -172,6 +190,59 @@ class _Tally:
         return self.parked - replayed_ok
 
 
+def _batch_totals(batches: list[dict]) -> tuple[int, int]:
+    """``(re-executed ok, attempted)`` summed over every replay pass seen."""
+    ok = sum(int(b.get("success_count", 0)) for b in batches)
+    total = sum(int(b.get("total", 0)) for b in batches)
+    return ok, total
+
+
+def _replay_drained(batches: list[dict], expected: int) -> bool:
+    """Have the replay passes seen so far attempted every parked charge?
+
+    A recovery replays its backlog in passes, one batch event each, and the
+    passes keep arriving after the first one lands. Summing the first batch
+    alone reported a 500-charge outage as ``400/400 ... lost 100`` while the
+    last pass was still running.
+    """
+    return bool(batches) and _batch_totals(batches)[1] >= expected
+
+
+def _outage_charges(value: str) -> int:
+    """argparse type for ``--outage-charges``: 1 to the demo's ceiling."""
+    try:
+        charges = int(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(f"not a whole number: {value!r}") from e
+    if not 1 <= charges <= _MAX_OUTAGE_CHARGES:
+        raise argparse.ArgumentTypeError(
+            f"must be between 1 and {_MAX_OUTAGE_CHARGES}, got {charges}"
+        )
+    return charges
+
+
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="python -m baldur.scripts.demo_self_healing",
+        description=(
+            "Kill a fake payment gateway mid-traffic and watch every failed "
+            "charge come back on its own."
+        ),
+    )
+    parser.add_argument(
+        "--outage-charges",
+        type=_outage_charges,
+        default=_DEFAULT_OUTAGE_CHARGES,
+        metavar="N",
+        help=(
+            "charges attempted while the gateway is down, 1 to "
+            f"{_MAX_OUTAGE_CHARGES} (default: %(default)s); a few hundred "
+            "shows the backlog replaying in passes"
+        ),
+    )
+    return parser.parse_args(argv)
+
+
 class _Demo:
     """One demo run: protected app, replay wiring, observation taps, phases."""
 
@@ -251,22 +322,46 @@ class _Demo:
             self.charge_line(f"{GREEN}✔ charged{R}")
             time.sleep(0.4)
 
-    def outage(self) -> None:
+    def outage(self, charges: int) -> None:
         _say(f"\n  {RED}✖ payment gateway goes DOWN{R}")
         self.gateway_up = False
-        for _ in range(7):
+        narrated = min(charges, _NARRATED_OUTAGE_CHARGES)
+        for _ in range(narrated):
             self.order += 1
             self._one_outage_charge()
-            time.sleep(0.4)
+            time.sleep(_OUTAGE_PACE_S)
+        if charges > narrated:
+            self._outage_burst(charges - narrated)
 
-    def _one_outage_charge(self) -> None:
+    def _outage_burst(self, charges: int) -> None:
+        """The rest of a large outage: back-to-back charges, summed in one line."""
+        failed, rejected = self.tally.failed, self.tally.rejected
+        t0 = time.perf_counter()
+        for _ in range(charges):
+            self.order += 1
+            self._one_outage_charge(narrate=False)
+        elapsed = time.perf_counter() - t0
+        burst_rejected = self.tally.rejected - rejected
+        burst_failed = self.tally.failed - failed
+        line = (
+            f"  {DIM}… {charges} more charges in {elapsed:.1f}s:{R}"
+            f" {YELLOW}⚡ {burst_rejected} rejected{R}"
+        )
+        if burst_failed:
+            line += f"{DIM},{R} {RED}✖ {burst_failed} failed{R} {DIM}(retried){R}"
+        _say(line)
+
+    def _one_outage_charge(self, *, narrate: bool = True) -> None:
         t0 = time.perf_counter()
         try:
             self.charge(order_id=self.order)
             self.tally.record_ok()
-            self.charge_line(f"{GREEN}✔ charged{R}")
+            if narrate:
+                self.charge_line(f"{GREEN}✔ charged{R}")
         except GatewayDownError:
             self.tally.record_failed(self.order)
+            if not narrate:
+                return
             if self.tally.failed == 1:
                 note = "← capturing"
             elif self.cb_state() == "open":
@@ -278,6 +373,8 @@ class _Demo:
             )
         except Exception:  # CircuitBreakerOpenError — fail fast, captured too
             self.tally.record_rejected(self.order)
+            if not narrate:
+                return
             ms = (time.perf_counter() - t0) * 1000
             self.charge_line(
                 f"{YELLOW}⚡ rejected in {ms:.1f}ms{R}",
@@ -290,11 +387,17 @@ class _Demo:
         # shows; the replay tally at the end is the authoritative proof of
         # what was captured.
         expected = self.tally.parked
-        deadline = time.monotonic() + _OUTBOX_FLUSH_WAIT_S
         self.captured = self.dlq_pending()
-        while self.captured < expected and time.monotonic() < deadline:
+        last_move = time.monotonic()
+        while (
+            self.captured < expected
+            and time.monotonic() - last_move < _OUTBOX_FLUSH_WAIT_S
+        ):
             time.sleep(0.5)
-            self.captured = self.dlq_pending()
+            visible = self.dlq_pending()
+            if visible != self.captured:
+                self.captured = visible
+                last_move = time.monotonic()
         if self.captured == expected:
             _say(
                 f"  {MAGENTA}◆ {self.captured} charges captured with their arguments{R}"
@@ -336,25 +439,36 @@ class _Demo:
             time.sleep(0.7)
 
     def replay_tally(self) -> None:
-        deadline = time.monotonic() + _REPLAY_WAIT_S
-        while not self.replay_batches and time.monotonic() < deadline:
+        # The replay runs off the CLOSED event, one pass per batch event, and
+        # later passes land after the first. Wait until the passes have
+        # attempted every parked charge, or until they stop arriving.
+        expected = self.tally.parked
+        seen = 0
+        last_move = time.monotonic()
+        while time.monotonic() - last_move < _REPLAY_WAIT_S:
+            batches = list(self.replay_batches)
+            if len(batches) != seen:
+                seen = len(batches)
+                last_move = time.monotonic()
+            if _replay_drained(batches, expected):
+                break
             time.sleep(0.3)
-        if not self.replay_batches:
+        batches = list(self.replay_batches)
+        if not batches:
             _say(f"  {RED}⟳ replay batch not observed within {_REPLAY_WAIT_S:.0f}s{R}")
             return
-        batches = self.replay_batches
-        self.replayed_ok = sum(int(b.get("success_count", 0)) for b in batches)
-        self.replayed_total = sum(int(b.get("total", 0)) for b in batches)
+        self.replayed_ok, self.replayed_total = _batch_totals(batches)
         replayed_orders = self.tally.replayed(self.charged_orders)
         span = (
             f"#{replayed_orders[0]}-{replayed_orders[-1]}"
             if replayed_orders
             else "none"
         )
+        passes = f", {len(batches)} passes" if len(batches) > 1 else ""
         _say(
             f"  {MAGENTA}⟳ auto-replay on circuit close: {BOLD}{self.replayed_ok}/"
             f"{self.replayed_total}{R}{MAGENTA} charges re-executed{R}"
-            f" {DIM}({span}, dlq {self.dlq_pending()}){R}"
+            f" {DIM}({span}{passes}, dlq {self.dlq_pending()}){R}"
         )
 
     def summary(self) -> int:
@@ -406,7 +520,8 @@ def _make_replay_handler(charge):
     return DemoChargeReplayHandler()
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
     for key, value in _DEMO_ENV.items():
         os.environ.setdefault(key, value)
 
@@ -428,7 +543,7 @@ def main() -> int:
     demo = _Demo()
     demo.banner()
     demo.baseline()
-    demo.outage()
+    demo.outage(args.outage_charges)
     demo.capture_tally()
     demo.recovery()
     demo.replay_tally()
