@@ -40,6 +40,8 @@ pytest.importorskip("baldur_pro")
 pytestmark = pytest.mark.requires_pro
 
 
+import asyncio
+import threading
 import time
 from collections.abc import Iterator
 
@@ -47,7 +49,8 @@ import pytest
 
 from baldur.adapters.memory import InMemoryFailedOperationRepository
 from baldur.audit.ring_buffer import RingBuffer
-from baldur.protect_facade import protect
+from baldur.core.exceptions import TimeoutPolicyError
+from baldur.protect_facade import protect, protected
 from baldur.services.dlq_outbox import outbox as outbox_module
 from baldur.services.dlq_outbox.outbox import Outbox
 from baldur.services.dlq_outbox.worker import DLQOutboxWorker
@@ -241,3 +244,129 @@ class TestProtectDlqRepositoryE2E:
         # the worker a drain window to prove no stray entry appears.
         _wait_for_repo_count(in_memory_dlq_repo, 1, timeout=0.3)
         assert in_memory_dlq_repo.count_all() == 0
+
+
+# =============================================================================
+# E2E — no retry stage: the single attempt's failure or timeout is persisted
+# =============================================================================
+
+
+class TestProtectUnretriedDlqRepositoryE2E:
+    """``dlq=True`` without ``retry=`` — the README profile.
+
+    Validates:
+    - the composer's verdict and the sink's read of it share one terminal, so
+      the entry reaches the repository through the outbox
+    - the entry is filed under the protect name, not the ``"default"`` bucket
+    - the call-site arguments travel with it, and ``max_attempts`` says the
+      call ran once
+    """
+
+    def test_repository_receives_entry_for_a_failed_call(
+        self,
+        in_memory_dlq_repo: InMemoryFailedOperationRepository,
+        started_outbox: Outbox,
+    ):
+        """
+        Purpose:
+            Verify a raising call on the no-retry profile is persisted.
+        Expected:
+            - exactly one entry, under the protect name
+            - failure_type MAX_RETRIES_RUNTIMEERROR with the error message
+            - request_data from the call site; metadata max_attempts == 1
+        """
+
+        @protected(
+            "e2e_unretried_summarize", dlq=True, circuit_breaker=False, timeout=None
+        )
+        def summarize(doc_id: str) -> str:
+            raise RuntimeError("upstream 500")
+
+        with pytest.raises(RuntimeError):
+            summarize("doc-7")
+
+        _wait_for_repo_count(in_memory_dlq_repo, 1)
+
+        assert in_memory_dlq_repo.count_all() == 1
+        pending = in_memory_dlq_repo.get_pending_by_domain(
+            "e2e_unretried_summarize", limit=10
+        )
+        assert len(pending) == 1
+        entry = pending[0]
+        assert entry.failure_type == "MAX_RETRIES_RUNTIMEERROR"
+        assert entry.error_message == "upstream 500"
+        assert entry.request_data == {"doc_id": "doc-7"}
+        assert (entry.metadata or {}).get("max_attempts") == 1
+
+    def test_repository_receives_entry_for_a_call_cut_off_by_the_bound(
+        self,
+        in_memory_dlq_repo: InMemoryFailedOperationRepository,
+        started_outbox: Outbox,
+    ):
+        """
+        Purpose:
+            Verify a call the wall-clock bound cut off is persisted — the
+            TIMEOUT terminal reaches the sink on the no-retry profile.
+        Expected:
+            - exactly one entry, under the protect name
+            - failure_type MAX_RETRIES_TIMEOUTPOLICYERROR
+            - request_data from the call site
+        """
+        release = threading.Event()
+
+        @protected("e2e_unretried_slow", dlq=True, circuit_breaker=False, timeout=0.05)
+        def slow(doc_id: str) -> str:
+            release.wait(timeout=5.0)
+            return "late"
+
+        try:
+            with pytest.raises(TimeoutPolicyError):
+                slow("doc-9")
+        finally:
+            release.set()
+
+        _wait_for_repo_count(in_memory_dlq_repo, 1)
+
+        assert in_memory_dlq_repo.count_all() == 1
+        pending = in_memory_dlq_repo.get_pending_by_domain(
+            "e2e_unretried_slow", limit=10
+        )
+        assert len(pending) == 1
+        assert pending[0].failure_type == "MAX_RETRIES_TIMEOUTPOLICYERROR"
+        assert pending[0].request_data == {"doc_id": "doc-9"}
+
+    def test_repository_receives_entry_for_a_failed_async_call(
+        self,
+        in_memory_dlq_repo: InMemoryFailedOperationRepository,
+        started_outbox: Outbox,
+    ):
+        """
+        Purpose:
+            Verify the async twin persists too: its sink runs off the event
+            loop and hands the entry to the same outbox.
+        Expected:
+            - exactly one entry, under the protect name
+            - failure_type MAX_RETRIES_RUNTIMEERROR, request_data from the call site
+        """
+
+        @protected(
+            "e2e_unretried_asummarize",
+            dlq=True,
+            circuit_breaker=False,
+            timeout=None,
+        )
+        async def asummarize(doc_id: str) -> str:
+            raise RuntimeError("upstream 500")
+
+        with pytest.raises(RuntimeError):
+            asyncio.run(asummarize("doc-7"))
+
+        _wait_for_repo_count(in_memory_dlq_repo, 1)
+
+        assert in_memory_dlq_repo.count_all() == 1
+        pending = in_memory_dlq_repo.get_pending_by_domain(
+            "e2e_unretried_asummarize", limit=10
+        )
+        assert len(pending) == 1
+        assert pending[0].failure_type == "MAX_RETRIES_RUNTIMEERROR"
+        assert pending[0].request_data == {"doc_id": "doc-7"}

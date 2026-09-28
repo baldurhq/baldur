@@ -1,14 +1,14 @@
 """
-PolicyComposer / AsyncPolicyComposer / compose / compose_async 단위 테스트 (#231).
+Unit tests for PolicyComposer / AsyncPolicyComposer / compose / compose_async (#231).
 
-테스트 대상:
+Targets:
 - resilience/policies/composer.py
   (PolicyComposer, AsyncPolicyComposer, compose, compose_async, _FallbackApplied)
 
-UNIT_TEST_GUIDELINES.md 준수:
-- 계약 검증(Contract): 하드코딩 기대값 (_FallbackApplied 구조, 초기 상태)
-- 동작 검증(Behavior): 소스 참조 (PolicyOutcome, PolicyResult 등)
-- conftest.py 배치: 1개 파일 전용 fixture → 파일 내부 (§5.1)
+UNIT_TEST_GUIDELINES.md compliance:
+- Contract verification: hardcoded expected values (_FallbackApplied structure, initial state)
+- Behavior verification: source references (PolicyOutcome, PolicyResult, etc.)
+- conftest.py placement: single-file fixtures stay inside the file (§5.1)
 """
 
 from __future__ import annotations
@@ -32,6 +32,7 @@ from baldur.interfaces.resilience_policy import (
 from baldur.resilience.policies.composer import (
     AsyncPolicyComposer,
     PolicyComposer,
+    _arm_unretried_failure,
     _classify_exception_outcome,
     _FallbackApplied,
     _is_open_circuit_rejection,
@@ -44,12 +45,12 @@ from baldur.services.bulkhead.exceptions import BulkheadFullError
 from baldur.services.circuit_breaker.exceptions import CircuitBreakerOpenError
 
 # =============================================================================
-# Mock 구현체 — Protocol 준수
+# Mock implementations — Protocol-compliant
 # =============================================================================
 
 
 class MockPolicy:
-    """ResiliencePolicy Protocol 준수 Mock — 함수를 그대로 실행."""
+    """ResiliencePolicy Protocol-compliant mock — runs the function as-is."""
 
     def __init__(self, name: str = "mock_policy") -> None:
         self._name = name
@@ -75,7 +76,7 @@ class MockPolicy:
 
 
 class MockRejectingPolicy:
-    """요청을 거부하는 Policy — REJECTED 반환."""
+    """Policy that rejects the request — returns REJECTED."""
 
     def __init__(self, name: str = "rejecting_policy") -> None:
         self._name = name
@@ -99,7 +100,7 @@ class MockRejectingPolicy:
 
 
 class MockAsyncPolicy:
-    """AsyncResiliencePolicy Protocol 준수 Mock."""
+    """AsyncResiliencePolicy Protocol-compliant mock."""
 
     def __init__(self, name: str = "async_mock_policy") -> None:
         self._name = name
@@ -125,7 +126,7 @@ class MockAsyncPolicy:
 
 
 class MockGuard:
-    """PolicyGuard Protocol 준수 Mock."""
+    """PolicyGuard Protocol-compliant mock."""
 
     def __init__(
         self,
@@ -148,7 +149,7 @@ class MockGuard:
 
 
 class MockFailingGuard:
-    """check()에서 예외를 던지는 Guard — Fail-Open 테스트용."""
+    """Guard whose check() raises — for fail-open tests."""
 
     @property
     def name(self) -> str:
@@ -184,7 +185,7 @@ class MockMetadataGuard:
 
 
 class MockHook:
-    """PolicyHook Protocol 준수 Mock — 호출 기록."""
+    """PolicyHook Protocol-compliant mock — records calls."""
 
     def __init__(self) -> None:
         self.success_calls: list[tuple[str, PolicyResult]] = []
@@ -210,7 +211,7 @@ class MockHook:
 
 
 class MockFailingHook:
-    """on_success/on_failure/on_reject에서 예외를 던지는 Hook — Fail-Open 테스트."""
+    """Hook that raises from on_success/on_failure/on_reject — fail-open tests."""
 
     def on_execute(self, policy_name: str, attempt: int, **kwargs) -> None:
         raise RuntimeError("Hook error")
@@ -231,7 +232,7 @@ class MockFailingHook:
 
 
 class MockSink:
-    """FailureSink Protocol 준수 Mock — 호출 기록."""
+    """FailureSink Protocol-compliant mock — records calls."""
 
     def __init__(self, sink_id: str | None = "sink-123") -> None:
         self._sink_id = sink_id
@@ -248,7 +249,7 @@ class MockSink:
 
 
 class MockFailingSink:
-    """handle_failure에서 예외를 던지는 Sink — Fail-Open 테스트."""
+    """Sink that raises from handle_failure — fail-open tests."""
 
     def handle_failure(
         self,
@@ -266,23 +267,23 @@ class MockFailingSink:
 
 @pytest.fixture
 def composer():
-    """빈 PolicyComposer 인스턴스."""
+    """Empty PolicyComposer instance."""
     return PolicyComposer()
 
 
 @pytest.fixture
 def async_composer():
-    """빈 AsyncPolicyComposer 인스턴스."""
+    """Empty AsyncPolicyComposer instance."""
     return AsyncPolicyComposer()
 
 
 # =============================================================================
-# 계약 검증 — _FallbackApplied 내부 시그널
+# Contract verification — _FallbackApplied internal signal
 # =============================================================================
 
 
 class TestFallbackAppliedContract:
-    """_FallbackApplied 내부 시그널 예외 계약 검증."""
+    """Contract verification of the _FallbackApplied internal signal exception."""
 
     def test_is_base_exception_subclass(self):
         """_FallbackApplied is a BaseException subclass (not Exception)."""
@@ -290,13 +291,13 @@ class TestFallbackAppliedContract:
         assert not issubclass(_FallbackApplied, Exception)
 
     def test_has_result_attribute(self):
-        """_FallbackApplied 인스턴스는 result 속성을 가진다."""
+        """A _FallbackApplied instance carries a result attribute."""
         result = PolicyResult(value="test", outcome=PolicyOutcome.SUCCESS_WITH_FALLBACK)
         exc = _FallbackApplied(result)
         assert exc.result is result
 
     def test_message(self):
-        """_FallbackApplied 기본 메시지는 'Fallback applied'이다."""
+        """_FallbackApplied's default message is 'Fallback applied'."""
         result = PolicyResult(value=None)
         exc = _FallbackApplied(result)
         assert str(exc) == "Fallback applied"
@@ -315,72 +316,72 @@ class TestFallbackAppliedContract:
 
 
 # =============================================================================
-# 계약 검증 — PolicyComposer 초기 상태
+# Contract verification — PolicyComposer initial state
 # =============================================================================
 
 
 class TestPolicyComposerInitContract:
-    """PolicyComposer 초기 상태 계약 검증."""
+    """Contract verification of the PolicyComposer initial state."""
 
     def test_policies_empty(self, composer):
-        """초기 _policies 리스트는 비어있다."""
+        """The initial _policies list is empty."""
         assert composer._policies == []
 
     def test_guards_empty(self, composer):
-        """초기 _guards 리스트는 비어있다."""
+        """The initial _guards list is empty."""
         assert composer._guards == []
 
     def test_hooks_empty(self, composer):
-        """초기 _hooks 리스트는 비어있다."""
+        """The initial _hooks list is empty."""
         assert composer._hooks == []
 
     def test_sinks_empty(self, composer):
-        """초기 _sinks 리스트는 비어있다."""
+        """The initial _sinks list is empty."""
         assert composer._sinks == []
 
 
 class TestAsyncPolicyComposerInitContract:
-    """AsyncPolicyComposer 초기 상태 계약 검증."""
+    """Contract verification of the AsyncPolicyComposer initial state."""
 
     def test_policies_empty(self, async_composer):
-        """초기 _policies 리스트는 비어있다."""
+        """The initial _policies list is empty."""
         assert async_composer._policies == []
 
     def test_guards_empty(self, async_composer):
-        """초기 _guards 리스트는 비어있다."""
+        """The initial _guards list is empty."""
         assert async_composer._guards == []
 
     def test_hooks_empty(self, async_composer):
-        """초기 _hooks 리스트는 비어있다."""
+        """The initial _hooks list is empty."""
         assert async_composer._hooks == []
 
     def test_sinks_empty(self, async_composer):
-        """초기 _sinks 리스트는 비어있다."""
+        """The initial _sinks list is empty."""
         assert async_composer._sinks == []
 
 
 # =============================================================================
-# 동작 검증 — Builder API
+# Behavior verification — Builder API
 # =============================================================================
 
 
 class TestPolicyComposerBuilderBehavior:
-    """PolicyComposer Builder API 동작 검증."""
+    """PolicyComposer Builder API behavior verification."""
 
     def test_add_returns_self(self, composer):
-        """add()는 self를 반환하여 체이닝을 지원한다."""
+        """add() returns self to support chaining."""
         policy = MockPolicy()
         result = composer.add(policy)
         assert result is composer
 
     def test_add_appends_policy(self, composer):
-        """add()는 _policies에 Policy를 추가한다."""
+        """add() appends the Policy to _policies."""
         policy = MockPolicy()
         composer.add(policy)
         assert composer._policies == [policy]
 
     def test_add_multiple_policies_preserves_order(self, composer):
-        """add()는 추가 순서를 보존한다."""
+        """add() preserves insertion order."""
         p1 = MockPolicy("p1")
         p2 = MockPolicy("p2")
         p3 = MockPolicy("p3")
@@ -388,106 +389,106 @@ class TestPolicyComposerBuilderBehavior:
         assert composer._policies == [p1, p2, p3]
 
     def test_add_async_policy_structural_match(self, composer):
-        """@runtime_checkable Protocol은 구조적 매칭이므로 async policy도 추가된다.
+        """A @runtime_checkable Protocol matches structurally, so an async policy is added too.
 
-        ResiliencePolicy와 AsyncResiliencePolicy 모두 name+execute 속성만 검사.
-        isinstance 조건: AsyncResiliencePolicy AND NOT ResiliencePolicy 이지만,
-        구조적으로 동일한 시그니처이므로 guard가 발동되지 않는다.
-        타입 안전성은 Mypy 정적 분석에서 담당한다.
+        ResiliencePolicy and AsyncResiliencePolicy both check only the name+execute attributes.
+        The isinstance condition is AsyncResiliencePolicy AND NOT ResiliencePolicy, but
+        the signatures are structurally identical, so the guard does not fire.
+        Type safety is left to Mypy static analysis.
         """
         async_policy = MockAsyncPolicy()
-        # 구조적 매칭으로 두 Protocol 모두 만족 → guard 비발동 → 추가됨
+        # Structural matching satisfies both Protocols → guard does not fire → added
         composer.add(async_policy)
         assert async_policy in composer._policies
 
     def test_add_guard_returns_self(self, composer):
-        """add_guard()는 self를 반환한다."""
+        """add_guard() returns self."""
         guard = MockGuard()
         result = composer.add_guard(guard)
         assert result is composer
 
     def test_add_guard_appends_guard(self, composer):
-        """add_guard()는 _guards에 Guard를 추가한다."""
+        """add_guard() appends the Guard to _guards."""
         guard = MockGuard()
         composer.add_guard(guard)
         assert composer._guards == [guard]
 
     def test_add_hook_returns_self(self, composer):
-        """add_hook()는 self를 반환한다."""
+        """add_hook() returns self."""
         hook = MockHook()
         result = composer.add_hook(hook)
         assert result is composer
 
     def test_add_hook_appends_hook(self, composer):
-        """add_hook()는 _hooks에 Hook을 추가한다."""
+        """add_hook() appends the Hook to _hooks."""
         hook = MockHook()
         composer.add_hook(hook)
         assert composer._hooks == [hook]
 
     def test_add_sink_returns_self(self, composer):
-        """add_sink()는 self를 반환한다."""
+        """add_sink() returns self."""
         sink = MockSink()
         result = composer.add_sink(sink)
         assert result is composer
 
     def test_add_sink_appends_sink(self, composer):
-        """add_sink()는 _sinks에 Sink를 추가한다."""
+        """add_sink() appends the Sink to _sinks."""
         sink = MockSink()
         composer.add_sink(sink)
         assert composer._sinks == [sink]
 
 
 class TestAsyncPolicyComposerBuilderBehavior:
-    """AsyncPolicyComposer Builder API 동작 검증."""
+    """AsyncPolicyComposer Builder API behavior verification."""
 
     def test_add_returns_self(self, async_composer):
-        """add()는 self를 반환한다."""
+        """add() returns self."""
         policy = MockAsyncPolicy()
         result = async_composer.add(policy)
         assert result is async_composer
 
     def test_add_appends_policy(self, async_composer):
-        """add()는 _policies에 Policy를 추가한다."""
+        """add() appends the Policy to _policies."""
         policy = MockAsyncPolicy()
         async_composer.add(policy)
         assert async_composer._policies == [policy]
 
     def test_add_guard_returns_self(self, async_composer):
-        """add_guard()는 self를 반환한다."""
+        """add_guard() returns self."""
         guard = MockGuard()
         result = async_composer.add_guard(guard)
         assert result is async_composer
 
     def test_add_hook_returns_self(self, async_composer):
-        """add_hook()는 self를 반환한다."""
+        """add_hook() returns self."""
         hook = MockHook()
         result = async_composer.add_hook(hook)
         assert result is async_composer
 
     def test_add_sink_returns_self(self, async_composer):
-        """add_sink()는 self를 반환한다."""
+        """add_sink() returns self."""
         sink = MockSink()
         result = async_composer.add_sink(sink)
         assert result is async_composer
 
 
 # =============================================================================
-# 동작 검증 — execute(): Policy 없음
+# Behavior verification — execute(): no Policy
 # =============================================================================
 
 
 class TestComposerExecuteNoPolicyBehavior:
-    """Policy 없이 execute() 동작 검증."""
+    """execute() behavior verification without any Policy."""
 
     def test_success_without_policies(self, composer):
-        """Policy 없이 func 성공 시 SUCCESS outcome."""
+        """With no Policy, a succeeding func yields the SUCCESS outcome."""
         result = composer.execute(lambda: 42)
         assert result.success is True
         assert result.value == 42
         assert result.outcome == PolicyOutcome.SUCCESS
 
     def test_failure_without_policies(self, composer):
-        """Policy 없이 func 실패 시 FAILURE outcome."""
+        """With no Policy, a failing func yields the FAILURE outcome."""
         err = ValueError("test error")
 
         def failing():
@@ -500,15 +501,15 @@ class TestComposerExecuteNoPolicyBehavior:
 
 
 # =============================================================================
-# 동작 검증 — execute(): Guard 검증
+# Behavior verification — execute(): Guard checks
 # =============================================================================
 
 
 class TestComposerGuardBehavior:
-    """Guard 검증 동작 테스트."""
+    """Guard check behavior tests."""
 
     def test_guard_allowed(self, composer):
-        """Guard가 허용하면 func이 실행된다."""
+        """func runs when the Guard allows."""
         guard = MockGuard(allowed=True)
         composer.add_guard(guard)
         result = composer.execute(lambda: "ok")
@@ -517,7 +518,7 @@ class TestComposerGuardBehavior:
         assert guard.check_count == 1
 
     def test_guard_rejected(self, composer):
-        """Guard가 거부하면 REJECTED outcome이며 func은 실행되지 않는다."""
+        """When the Guard denies, the outcome is REJECTED and func does not run."""
         guard = MockGuard(allowed=False, reason="budget exhausted")
         func_called = False
 
@@ -535,14 +536,14 @@ class TestComposerGuardBehavior:
         assert func_called is False
 
     def test_guard_fail_open(self, composer):
-        """Guard에서 예외 발생 시 Fail-Open으로 통과한다."""
+        """An exception inside the Guard passes through fail-open."""
         composer.add_guard(MockFailingGuard())
         result = composer.execute(lambda: "ok")
         assert result.success is True
         assert result.value == "ok"
 
     def test_multiple_guards_short_circuit(self, composer):
-        """첫 번째 Guard가 거부하면 두 번째 Guard는 호출되지 않는다."""
+        """When the first Guard denies, the second Guard is not called."""
         guard1 = MockGuard(allowed=False, reason="blocked", guard_name="g1")
         guard2 = MockGuard(allowed=True, guard_name="g2")
         composer.add_guard(guard1).add_guard(guard2)
@@ -553,7 +554,7 @@ class TestComposerGuardBehavior:
         assert guard2.check_count == 0
 
     def test_guard_receives_context(self, composer):
-        """Guard.check()에 context가 전달된다."""
+        """The context is passed to Guard.check()."""
         received_context = []
 
         class ContextCapturingGuard:
@@ -574,7 +575,7 @@ class TestComposerGuardBehavior:
 
 
 # =============================================================================
-# 동작 검증 — execute(): Guard reject metadata propagation (#567 D2)
+# Behavior verification — execute(): Guard reject metadata propagation (#567 D2)
 # =============================================================================
 
 
@@ -630,7 +631,7 @@ class TestComposerRejectMetadataBehavior:
 
 
 # =============================================================================
-# 동작 검증 — execute(): guard fail-open WARN, sync↔async parity (#567 D7)
+# Behavior verification — execute(): guard fail-open WARN, sync↔async parity (#567 D7)
 # =============================================================================
 
 
@@ -676,15 +677,15 @@ class TestComposerGuardFailOpenLogBehavior:
 
 
 # =============================================================================
-# 동작 검증 — execute(): Policy 체인
+# Behavior verification — execute(): Policy chain
 # =============================================================================
 
 
 class TestComposerPolicyChainBehavior:
-    """Policy 체인 실행 동작 검증."""
+    """Policy chain execution behavior verification."""
 
     def test_single_policy_wraps_func(self, composer):
-        """단일 Policy가 func을 래핑하여 실행한다."""
+        """A single Policy wraps and runs func."""
         policy = MockPolicy("p1")
         composer.add(policy)
         result = composer.execute(lambda: "value")
@@ -694,7 +695,7 @@ class TestComposerPolicyChainBehavior:
         assert policy.execute_count == 1
 
     def test_multiple_policies_nesting_order(self, composer):
-        """Policy 추가 순서가 바깥→안쪽 실행 순서 (첫 번째가 가장 바깥)."""
+        """Policy add order is outer→inner execution order (the first one is outermost)."""
         execution_order = []
 
         class OrderTrackingPolicy:
@@ -729,7 +730,7 @@ class TestComposerPolicyChainBehavior:
         ]
 
     def test_policy_failure_propagates(self, composer):
-        """Policy 내부에서 func 실패 시 error가 상위로 전파된다."""
+        """A func failure inside a Policy propagates the error upward."""
         err = RuntimeError("func failed")
 
         def failing():
@@ -743,7 +744,7 @@ class TestComposerPolicyChainBehavior:
         assert result.error is err
 
     def test_rejecting_policy_returns_rejected(self, composer):
-        """Policy가 REJECTED를 반환하면 PolicyRejectedException → REJECTED outcome."""
+        """A Policy returning REJECTED → PolicyRejectedException → REJECTED outcome."""
         composer.add(MockRejectingPolicy())
         result = composer.execute(lambda: "ok")
 
@@ -751,7 +752,7 @@ class TestComposerPolicyChainBehavior:
         assert isinstance(result.error, PolicyRejectedException)
 
     def test_executed_policies_tracked(self, composer):
-        """실행된 Policy 이름이 executed_policies에 기록된다."""
+        """Executed Policy names are recorded in executed_policies."""
         composer.add(MockPolicy("retry"))
         composer.add(MockPolicy("circuit_breaker"))
         result = composer.execute(lambda: "ok")
@@ -760,7 +761,7 @@ class TestComposerPolicyChainBehavior:
         assert "circuit_breaker" in result.executed_policies
 
     def test_context_passed_to_policy(self, composer):
-        """Policy.execute()에 context가 전달된다."""
+        """The context is passed to Policy.execute()."""
         received_contexts = []
 
         class ContextCapturingPolicy:
@@ -782,15 +783,15 @@ class TestComposerPolicyChainBehavior:
 
 
 # =============================================================================
-# 동작 검증 — execute(): FallbackPolicy 체인 내 특별 처리
+# Behavior verification — execute(): FallbackPolicy special handling in the chain
 # =============================================================================
 
 
 class TestComposerFallbackChainBehavior:
-    """Composer 내 FallbackPolicy 특별 처리 동작 검증."""
+    """Behavior verification of FallbackPolicy special handling inside the Composer."""
 
     def test_fallback_applied_signal_produces_success_with_fallback(self, composer):
-        """FallbackPolicy가 체인 내에서 _FallbackApplied로 SUCCESS_WITH_FALLBACK을 전파한다."""
+        """FallbackPolicy propagates SUCCESS_WITH_FALLBACK through _FallbackApplied in the chain."""
         from baldur.resilience.policies.fallback import FallbackPolicy
 
         fallback = FallbackPolicy(default_value="fallback_value")
@@ -803,7 +804,7 @@ class TestComposerFallbackChainBehavior:
         assert result.value == "fallback_value"
 
     def test_fallback_not_triggered_on_success(self, composer):
-        """func 성공 시 FallbackPolicy는 트리거되지 않는다."""
+        """FallbackPolicy is not triggered when func succeeds."""
         from baldur.resilience.policies.fallback import FallbackPolicy
 
         fallback = FallbackPolicy(default_value="fallback_value")
@@ -814,10 +815,10 @@ class TestComposerFallbackChainBehavior:
         assert result.value == "original_value"
 
     def test_fallback_with_predicate_not_matching(self, composer):
-        """predicate가 False를 반환하면 Fallback이 적용되지 않는다."""
+        """Fallback is not applied when the predicate returns False."""
         from baldur.resilience.policies.fallback import FallbackPolicy
 
-        # predicate: 항상 False → Fallback 비활성화
+        # predicate: always False → Fallback disabled
         fallback = FallbackPolicy(
             default_value="fallback_value",
             predicate=lambda r: False,
@@ -831,7 +832,7 @@ class TestComposerFallbackChainBehavior:
         assert isinstance(result.error, ValueError)
 
     def test_policy_before_fallback_in_chain(self, composer):
-        """일반 Policy + FallbackPolicy 조합: Policy 실패 시 Fallback이 적용된다."""
+        """Regular Policy + FallbackPolicy: Fallback applies when the Policy fails."""
         from baldur.resilience.policies.fallback import FallbackPolicy
 
         composer.add(MockPolicy("wrapper"))
@@ -843,15 +844,15 @@ class TestComposerFallbackChainBehavior:
 
 
 # =============================================================================
-# 동작 검증 — execute(): Hook 호출
+# Behavior verification — execute(): Hook invocation
 # =============================================================================
 
 
 class TestComposerHookBehavior:
-    """Hook 호출 동작 검증."""
+    """Hook invocation behavior verification."""
 
     def test_on_success_called(self, composer):
-        """성공 시 Hook.on_success가 호출된다."""
+        """Hook.on_success is called on success."""
         hook = MockHook()
         composer.add_hook(hook)
         composer.execute(lambda: "ok")
@@ -860,7 +861,7 @@ class TestComposerHookBehavior:
         assert hook.success_calls[0][0] == "composer"
 
     def test_on_failure_called(self, composer):
-        """실패 시 Hook.on_failure가 호출된다."""
+        """Hook.on_failure is called on failure."""
         hook = MockHook()
         composer.add_hook(hook)
         composer.execute(lambda: (_ for _ in ()).throw(RuntimeError("fail")))
@@ -869,7 +870,7 @@ class TestComposerHookBehavior:
         assert hook.failure_calls[0][0] == "composer"
 
     def test_on_reject_called(self, composer):
-        """Guard 거부 시 Hook.on_reject가 호출된다."""
+        """Hook.on_reject is called when a Guard denies."""
         hook = MockHook()
         guard = MockGuard(allowed=False, reason="blocked", guard_name="test_guard")
         composer.add_guard(guard).add_hook(hook)
@@ -879,27 +880,27 @@ class TestComposerHookBehavior:
         assert hook.reject_calls[0] == ("test_guard", "blocked")
 
     def test_hook_fail_open_on_success(self, composer):
-        """Hook.on_success가 예외를 던져도 결과에 영향 없다 (Fail-Open)."""
+        """Hook.on_success raising does not affect the result (fail-open)."""
         composer.add_hook(MockFailingHook())
         result = composer.execute(lambda: "ok")
         assert result.success is True
         assert result.value == "ok"
 
     def test_hook_fail_open_on_failure(self, composer):
-        """Hook.on_failure가 예외를 던져도 결과에 영향 없다 (Fail-Open)."""
+        """Hook.on_failure raising does not affect the result (fail-open)."""
         composer.add_hook(MockFailingHook())
         result = composer.execute(lambda: (_ for _ in ()).throw(RuntimeError("fail")))
         assert result.outcome == PolicyOutcome.FAILURE
 
     def test_hook_fail_open_on_reject(self, composer):
-        """Hook.on_reject가 예외를 던져도 결과에 영향 없다 (Fail-Open)."""
+        """Hook.on_reject raising does not affect the result (fail-open)."""
         composer.add_guard(MockGuard(allowed=False, reason="x"))
         composer.add_hook(MockFailingHook())
         result = composer.execute(lambda: "ok")
         assert result.outcome == PolicyOutcome.REJECTED
 
     def test_multiple_hooks_all_called(self, composer):
-        """여러 Hook이 모두 호출된다."""
+        """Every registered Hook is called."""
         hook1 = MockHook()
         hook2 = MockHook()
         composer.add_hook(hook1).add_hook(hook2)
@@ -909,7 +910,7 @@ class TestComposerHookBehavior:
         assert len(hook2.success_calls) == 1
 
     def test_total_duration_ms_set(self, composer):
-        """execute() 후 result.total_duration_ms가 0 이상 값으로 설정된다."""
+        """After execute(), result.total_duration_ms is set to a value >= 0."""
         import time
 
         hook = MockHook()
@@ -924,15 +925,15 @@ class TestComposerHookBehavior:
 
 
 # =============================================================================
-# 동작 검증 — execute(): Sink 처리
+# Behavior verification — execute(): Sink handling
 # =============================================================================
 
 
 class TestComposerSinkBehavior:
-    """Sink 처리 동작 검증."""
+    """Sink handling behavior verification."""
 
     def test_sink_called_on_failure(self, composer):
-        """FAILURE 시 Sink.handle_failure가 호출된다."""
+        """Sink.handle_failure is called on FAILURE."""
         sink = MockSink(sink_id="dlq-001")
         composer.add_sink(sink)
         err = RuntimeError("fail")
@@ -943,7 +944,7 @@ class TestComposerSinkBehavior:
         assert result.metadata["sink_id"] == "dlq-001"
 
     def test_sink_not_called_on_success(self, composer):
-        """SUCCESS 시 Sink는 호출되지 않는다."""
+        """The Sink is not called on SUCCESS."""
         sink = MockSink()
         composer.add_sink(sink)
         composer.execute(lambda: "ok")
@@ -951,7 +952,7 @@ class TestComposerSinkBehavior:
         assert len(sink.calls) == 0
 
     def test_sink_not_called_on_rejected(self, composer):
-        """REJECTED 시 Sink는 호출되지 않는다."""
+        """The Sink is not called on REJECTED."""
         sink = MockSink()
         composer.add_guard(MockGuard(allowed=False, reason="blocked"))
         composer.add_sink(sink)
@@ -960,7 +961,7 @@ class TestComposerSinkBehavior:
         assert len(sink.calls) == 0
 
     def test_sink_receives_context(self, composer):
-        """Sink에 context가 전달된다."""
+        """The context is passed to the Sink."""
         sink = MockSink()
         ctx = PolicyContext(order_id="ORD-456")
         composer.add_sink(sink)
@@ -972,20 +973,20 @@ class TestComposerSinkBehavior:
         assert sink.calls[0][1] is ctx
 
     def test_sink_fail_open(self, composer):
-        """Sink 예외 시에도 결과가 반환된다 (Fail-Open)."""
+        """The result is still returned when the Sink raises (fail-open)."""
         composer.add_sink(MockFailingSink())
         result = composer.execute(lambda: (_ for _ in ()).throw(RuntimeError("fail")))
         assert result.outcome == PolicyOutcome.FAILURE
 
     def test_sink_id_none_not_stored(self, composer):
-        """Sink가 None을 반환하면 metadata에 sink_id가 추가되지 않는다."""
+        """When the Sink returns None, no sink_id is added to metadata."""
         sink = MockSink(sink_id=None)
         composer.add_sink(sink)
         composer.execute(lambda: (_ for _ in ()).throw(RuntimeError("fail")))
         assert "sink_id" not in sink.calls[0][2].metadata
 
     def test_multiple_sinks_all_called(self, composer):
-        """여러 Sink가 모두 호출된다."""
+        """Every registered Sink is called."""
         sink1 = MockSink(sink_id="s1")
         sink2 = MockSink(sink_id="s2")
         composer.add_sink(sink1).add_sink(sink2)
@@ -996,71 +997,71 @@ class TestComposerSinkBehavior:
 
 
 # =============================================================================
-# 동작 검증 — compose() 편의 함수
+# Behavior verification — compose() convenience function
 # =============================================================================
 
 
 class TestComposeFunctionBehavior:
-    """compose() 편의 함수 동작 검증."""
+    """compose() convenience function behavior verification."""
 
     def test_compose_returns_policy_composer(self):
-        """compose()는 PolicyComposer 인스턴스를 반환한다."""
+        """compose() returns a PolicyComposer instance."""
         result = compose(MockPolicy("p1"))
         assert isinstance(result, PolicyComposer)
 
     def test_compose_adds_policies_in_order(self):
-        """compose()는 인자 순서대로 Policy를 추가한다."""
+        """compose() adds Policies in argument order."""
         p1 = MockPolicy("p1")
         p2 = MockPolicy("p2")
         result = compose(p1, p2)
         assert result._policies == [p1, p2]
 
     def test_compose_no_policies(self):
-        """인자 없이 compose() 호출 시 빈 PolicyComposer를 반환한다."""
+        """compose() with no arguments returns an empty PolicyComposer."""
         result = compose()
         assert isinstance(result, PolicyComposer)
         assert result._policies == []
 
     def test_compose_chaining_with_guard(self):
-        """compose().add_guard() 체이닝이 동작한다."""
+        """compose().add_guard() chaining works."""
         guard = MockGuard(allowed=False, reason="blocked")
         result = compose(MockPolicy()).add_guard(guard).execute(lambda: "ok")
         assert result.outcome == PolicyOutcome.REJECTED
 
 
 class TestComposeAsyncFunctionBehavior:
-    """compose_async() 편의 함수 동작 검증."""
+    """compose_async() convenience function behavior verification."""
 
     def test_compose_async_returns_async_composer(self):
-        """compose_async()는 AsyncPolicyComposer 인스턴스를 반환한다."""
+        """compose_async() returns an AsyncPolicyComposer instance."""
         result = compose_async(MockAsyncPolicy("p1"))
         assert isinstance(result, AsyncPolicyComposer)
 
     def test_compose_async_adds_policies_in_order(self):
-        """compose_async()는 인자 순서대로 Policy를 추가한다."""
+        """compose_async() adds Policies in argument order."""
         p1 = MockAsyncPolicy("p1")
         p2 = MockAsyncPolicy("p2")
         result = compose_async(p1, p2)
         assert result._policies == [p1, p2]
 
     def test_compose_async_no_policies(self):
-        """인자 없이 compose_async() 호출 시 빈 AsyncPolicyComposer를 반환한다."""
+        """compose_async() with no arguments returns an empty AsyncPolicyComposer."""
         result = compose_async()
         assert isinstance(result, AsyncPolicyComposer)
         assert result._policies == []
 
 
 # =============================================================================
-# 동작 검증 — AsyncPolicyComposer.execute()
+# Behavior verification — AsyncPolicyComposer.execute()
 # =============================================================================
 
 
 class TestAsyncComposerExecuteBehavior:
-    """AsyncPolicyComposer.execute() 동작 검증."""
+    """AsyncPolicyComposer.execute() behavior verification."""
 
     @pytest.mark.asyncio
     async def test_success_without_policies(self, async_composer):
-        """Policy 없이 async func 성공 시 SUCCESS outcome."""
+        """With no Policy, a succeeding async func yields the SUCCESS outcome."""
 
         async def func():
             return 42
@@ -1072,7 +1073,7 @@ class TestAsyncComposerExecuteBehavior:
 
     @pytest.mark.asyncio
     async def test_failure_without_policies(self, async_composer):
-        """Policy 없이 async func 실패 시 FAILURE outcome."""
+        """With no Policy, a failing async func yields the FAILURE outcome."""
         err = ValueError("async error")
 
         async def failing():
@@ -1085,7 +1086,7 @@ class TestAsyncComposerExecuteBehavior:
 
     @pytest.mark.asyncio
     async def test_guard_rejection(self, async_composer):
-        """Guard 거부 시 REJECTED outcome."""
+        """A Guard denial yields the REJECTED outcome."""
         guard = MockGuard(allowed=False, reason="denied")
         async_composer.add_guard(guard)
 
@@ -1098,7 +1099,7 @@ class TestAsyncComposerExecuteBehavior:
 
     @pytest.mark.asyncio
     async def test_guard_fail_open(self, async_composer):
-        """Guard 예외 시 Fail-Open."""
+        """A Guard exception passes through fail-open."""
         async_composer.add_guard(MockFailingGuard())
 
         async def func():
@@ -1109,7 +1110,7 @@ class TestAsyncComposerExecuteBehavior:
 
     @pytest.mark.asyncio
     async def test_single_async_policy(self, async_composer):
-        """단일 AsyncPolicy가 func을 래핑하여 실행한다."""
+        """A single AsyncPolicy wraps and runs func."""
         policy = MockAsyncPolicy("async_p")
         async_composer.add(policy)
 
@@ -1123,7 +1124,7 @@ class TestAsyncComposerExecuteBehavior:
 
     @pytest.mark.asyncio
     async def test_hook_on_success(self, async_composer):
-        """성공 시 Hook.on_success가 호출된다."""
+        """Hook.on_success is called on success."""
         hook = MockHook()
         async_composer.add_hook(hook)
 
@@ -1135,7 +1136,7 @@ class TestAsyncComposerExecuteBehavior:
 
     @pytest.mark.asyncio
     async def test_hook_on_failure(self, async_composer):
-        """실패 시 Hook.on_failure가 호출된다."""
+        """Hook.on_failure is called on failure."""
         hook = MockHook()
         async_composer.add_hook(hook)
 
@@ -1147,7 +1148,7 @@ class TestAsyncComposerExecuteBehavior:
 
     @pytest.mark.asyncio
     async def test_sink_called_on_failure(self, async_composer):
-        """FAILURE 시 Sink가 호출된다."""
+        """The Sink is called on FAILURE."""
         sink = MockSink(sink_id="async-sink-001")
         async_composer.add_sink(sink)
 
@@ -1160,7 +1161,7 @@ class TestAsyncComposerExecuteBehavior:
 
     @pytest.mark.asyncio
     async def test_sink_not_called_on_success(self, async_composer):
-        """SUCCESS 시 Sink는 호출되지 않는다."""
+        """The Sink is not called on SUCCESS."""
         sink = MockSink()
         async_composer.add_sink(sink)
 
@@ -1172,7 +1173,7 @@ class TestAsyncComposerExecuteBehavior:
 
     @pytest.mark.asyncio
     async def test_total_duration_ms_set(self, async_composer):
-        """execute() 후 total_duration_ms가 0 이상 값으로 설정된다."""
+        """After execute(), total_duration_ms is set to a value >= 0."""
 
         async def func():
             await asyncio.sleep(0.02)
@@ -1183,7 +1184,7 @@ class TestAsyncComposerExecuteBehavior:
 
     @pytest.mark.asyncio
     async def test_context_propagated(self, async_composer):
-        """context가 Guard/Sink에 전달된다."""
+        """The context is passed to the Guard and the Sink."""
         received_contexts = []
 
         class ContextCapturingGuard:
@@ -1207,7 +1208,7 @@ class TestAsyncComposerExecuteBehavior:
 
     @pytest.mark.asyncio
     async def test_executed_policies_tracked(self, async_composer):
-        """실행된 Policy 이름이 executed_policies에 기록된다."""
+        """Executed Policy names are recorded in executed_policies."""
         async_composer.add(MockAsyncPolicy("async_retry"))
         async_composer.add(MockAsyncPolicy("async_cb"))
 
@@ -1220,16 +1221,16 @@ class TestAsyncComposerExecuteBehavior:
 
 
 # =============================================================================
-# 동작 검증 — AsyncPolicyComposer: AsyncFallbackPolicy 체인 내 특별 처리
+# Behavior verification — AsyncPolicyComposer: AsyncFallbackPolicy special handling in the chain
 # =============================================================================
 
 
 class TestAsyncComposerFallbackChainBehavior:
-    """AsyncPolicyComposer 내 AsyncFallbackPolicy 특별 처리 동작 검증."""
+    """Behavior verification of AsyncFallbackPolicy special handling inside AsyncPolicyComposer."""
 
     @pytest.mark.asyncio
     async def test_async_fallback_applied_on_failure(self, async_composer):
-        """AsyncFallbackPolicy가 체인 내에서 _FallbackApplied로 SUCCESS_WITH_FALLBACK을 전파한다."""
+        """AsyncFallbackPolicy propagates SUCCESS_WITH_FALLBACK through _FallbackApplied in the chain."""
         from baldur.resilience.policies.fallback import AsyncFallbackPolicy
 
         fallback = AsyncFallbackPolicy(default_value="async_fallback")
@@ -1244,7 +1245,7 @@ class TestAsyncComposerFallbackChainBehavior:
 
     @pytest.mark.asyncio
     async def test_async_fallback_not_triggered_on_success(self, async_composer):
-        """func 성공 시 AsyncFallbackPolicy는 트리거되지 않는다."""
+        """AsyncFallbackPolicy is not triggered when func succeeds."""
         from baldur.resilience.policies.fallback import AsyncFallbackPolicy
 
         fallback = AsyncFallbackPolicy(default_value="fallback")
@@ -1625,20 +1626,23 @@ def _throwing(exc: BaseException) -> Callable[[], Any]:
 class TestSinkTerminalRoutingBehavior:
     """``_terminal_reaches_sinks`` / ``_is_open_circuit_rejection`` decision table.
 
-    The arming flag is the boundary: an open-circuit rejection is the ONLY
-    non-FAILURE terminal that crosses it, and it crosses only when armed.
+    Each arming flag is the boundary for one terminal only: an open-circuit
+    rejection crosses on open-circuit arming, a TIMEOUT crosses on
+    unretried-failure arming, and neither flag widens the other's terminal.
     """
 
     @pytest.mark.parametrize(
-        ("outcome", "error", "armed", "expected"),
+        ("outcome", "error", "armed_oc", "armed_unretried", "expected"),
         [
             # FAILURE is the historical sink terminal — arming is irrelevant.
-            (PolicyOutcome.FAILURE, RuntimeError("boom"), False, True),
-            (PolicyOutcome.FAILURE, RuntimeError("boom"), True, True),
-            # The boundary: same terminal, arming off then on.
+            (PolicyOutcome.FAILURE, RuntimeError("boom"), False, False, True),
+            (PolicyOutcome.FAILURE, RuntimeError("boom"), True, False, True),
+            (PolicyOutcome.FAILURE, RuntimeError("boom"), False, True, True),
+            # The open-circuit boundary: same terminal, arming off then on.
             (
                 PolicyOutcome.REJECTED,
                 CircuitBreakerOpenError("payment_api"),
+                False,
                 False,
                 False,
             ),
@@ -1646,33 +1650,68 @@ class TestSinkTerminalRoutingBehavior:
                 PolicyOutcome.REJECTED,
                 CircuitBreakerOpenError("payment_api"),
                 True,
+                False,
                 True,
+            ),
+            # Unretried arming does not widen rejection capture.
+            (
+                PolicyOutcome.REJECTED,
+                CircuitBreakerOpenError("payment_api"),
+                False,
+                True,
+                False,
             ),
             # Guard veto — REJECTED with no error at all.
-            (PolicyOutcome.REJECTED, None, True, False),
+            (PolicyOutcome.REJECTED, None, True, False, False),
             # Other rejection shapes keep the original "never reaches a sink".
             (
                 PolicyOutcome.REJECTED,
                 BulkheadFullError("payment_api", 2, 2),
                 True,
                 False,
+                False,
             ),
-            (PolicyOutcome.REJECTED, PolicyRejectedException("blocked"), True, False),
-            (PolicyOutcome.TIMEOUT, TimeoutPolicyError(5.0), True, False),
-            (PolicyOutcome.SUCCESS_WITH_FALLBACK, None, True, False),
-            (PolicyOutcome.SUCCESS, None, True, False),
+            (
+                PolicyOutcome.REJECTED,
+                PolicyRejectedException("blocked"),
+                True,
+                False,
+                False,
+            ),
+            # The TIMEOUT boundary: the retry-present shape (open-circuit armed
+            # only) stays out; the unretried-armed shape crosses.
+            (PolicyOutcome.TIMEOUT, TimeoutPolicyError(5.0), True, False, False),
+            (PolicyOutcome.TIMEOUT, TimeoutPolicyError(5.0), False, True, True),
+            # A served fallback answered the caller — no flag routes it.
+            (PolicyOutcome.SUCCESS_WITH_FALLBACK, None, True, True, False),
+            (PolicyOutcome.SUCCESS, None, True, False, False),
+        ],
+        ids=[
+            "failure_unarmed",
+            "failure_oc_armed",
+            "failure_unretried_armed",
+            "open_circuit_unarmed",
+            "open_circuit_oc_armed",
+            "open_circuit_not_widened_by_unretried_arming",
+            "guard_veto",
+            "bulkhead_full",
+            "policy_rejected",
+            "timeout_retry_present_shape",
+            "timeout_unretried_armed",
+            "served_fallback_fully_armed",
+            "success",
         ],
     )
     def test_terminal_routing_depends_on_outcome_error_and_arming(
-        self, outcome, error, armed, expected
+        self, outcome, error, armed_oc, armed_unretried, expected
     ):
         result = PolicyResult(value=None, outcome=outcome, error=error)
 
         assert (
             _terminal_reaches_sinks(
                 result,
-                captures_open_circuit_rejections=armed,
-                captures_unretried_failures=False,
+                captures_open_circuit_rejections=armed_oc,
+                captures_unretried_failures=armed_unretried,
             )
             is expected
         )
@@ -1695,6 +1734,91 @@ class TestSinkTerminalRoutingBehavior:
         result = PolicyResult(value=None, outcome=outcome, error=error)
 
         assert _is_open_circuit_rejection(result) is expected
+
+
+class TestArmUnretriedFailureContract:
+    """``_arm_unretried_failure`` writes the retry stage's exhaustion verdict,
+    sized for a call that ran once — the spec values are the entry's shape."""
+
+    @pytest.mark.parametrize(
+        ("outcome", "error"),
+        [
+            (PolicyOutcome.FAILURE, RuntimeError("upstream 500")),
+            (PolicyOutcome.TIMEOUT, TimeoutPolicyError(5.0)),
+        ],
+        ids=["failure", "timeout"],
+    )
+    def test_unmarked_final_failure_gains_the_single_attempt_verdict(
+        self, outcome, error
+    ):
+        result = PolicyResult(value=None, outcome=outcome, error=error)
+
+        _arm_unretried_failure(result, "summarize")
+
+        assert result.metadata == {
+            "should_dlq": True,
+            "domain": "summarize",
+            "max_attempts": 1,
+            "retry_history": [],
+            "reason": "max_attempts",
+        }
+
+    def test_arming_keeps_the_keys_a_stage_already_merged(self):
+        """The verdict joins the timeout stage's own keys; it replaces nothing."""
+        result = PolicyResult(
+            value=None,
+            outcome=PolicyOutcome.TIMEOUT,
+            error=TimeoutPolicyError(5.0),
+            metadata={"timeout_seconds": 5.0},
+        )
+
+        _arm_unretried_failure(result, "summarize")
+
+        assert result.metadata == {
+            "timeout_seconds": 5.0,
+            "should_dlq": True,
+            "domain": "summarize",
+            "max_attempts": 1,
+            "retry_history": [],
+            "reason": "max_attempts",
+        }
+
+    @pytest.mark.parametrize("verdict", [False, True], ids=["declined", "accepted"])
+    def test_a_verdict_a_stage_wrote_is_left_as_written(self, verdict):
+        """A present ``should_dlq`` means a stage decided — its domain and
+        attempt count win too, so an explicit ``enable_dlq=False`` survives."""
+        stage_metadata = {
+            "should_dlq": verdict,
+            "domain": "retry_domain",
+            "max_attempts": 3,
+        }
+        result = PolicyResult(
+            value=None,
+            outcome=PolicyOutcome.FAILURE,
+            error=RuntimeError("boom"),
+            metadata=dict(stage_metadata),
+        )
+
+        _arm_unretried_failure(result, "summarize")
+
+        assert result.metadata == stage_metadata
+
+    @pytest.mark.parametrize(
+        ("outcome", "error"),
+        [
+            (PolicyOutcome.REJECTED, CircuitBreakerOpenError("payment_api")),
+            (PolicyOutcome.REJECTED, None),
+            (PolicyOutcome.SUCCESS, None),
+            (PolicyOutcome.SUCCESS_WITH_FALLBACK, None),
+        ],
+        ids=["open_circuit_rejection", "guard_veto", "success", "served_fallback"],
+    )
+    def test_other_outcomes_are_left_untouched(self, outcome, error):
+        result = PolicyResult(value=None, outcome=outcome, error=error)
+
+        _arm_unretried_failure(result, "summarize")
+
+        assert result.metadata == {}
 
 
 class TestComposerRejectionCaptureBehavior:
@@ -1905,3 +2029,240 @@ class TestAsyncComposerRejectionCaptureBehavior:
         self, async_composer
     ):
         assert async_composer.capture_open_circuit_rejections() is async_composer
+
+
+# =============================================================================
+# Behavior — unretried-failure capture: the composer writes the store verdict
+# =============================================================================
+
+
+class _VerdictStage:
+    """A stage that decides the store verdict itself, as a retry stage does
+    when its attempts run out: it runs the call once and, on failure, reports
+    its own ``should_dlq`` and ``domain``."""
+
+    def __init__(self, *, should_dlq: bool, domain: str = "retry_domain") -> None:
+        self._metadata = {"should_dlq": should_dlq, "domain": domain}
+
+    @property
+    def name(self) -> str:
+        return "retry"
+
+    def execute(
+        self,
+        func: Callable[..., Any],
+        *args: Any,
+        context: PolicyContext | None = None,
+        **kwargs: Any,
+    ) -> PolicyResult:
+        try:
+            return PolicyResult(
+                value=func(*args, **kwargs), outcome=PolicyOutcome.SUCCESS
+            )
+        except Exception as e:
+            return PolicyResult(
+                value=None,
+                outcome=PolicyOutcome.FAILURE,
+                error=e,
+                metadata=dict(self._metadata),
+            )
+
+
+class _AsyncVerdictStage(_VerdictStage):
+    """Async twin of ``_VerdictStage``."""
+
+    async def execute(  # type: ignore[override]
+        self,
+        func: Callable[..., Any],
+        *args: Any,
+        context: PolicyContext | None = None,
+        **kwargs: Any,
+    ) -> PolicyResult:
+        try:
+            return PolicyResult(
+                value=await func(*args, **kwargs), outcome=PolicyOutcome.SUCCESS
+            )
+        except Exception as e:
+            return PolicyResult(
+                value=None,
+                outcome=PolicyOutcome.FAILURE,
+                error=e,
+                metadata=dict(self._metadata),
+            )
+
+
+class TestComposerUnretriedCaptureBehavior:
+    """``PolicyComposer.execute`` marks an unretried final failure for storage
+    under the armed domain and delivers it — the TIMEOUT terminal included."""
+
+    def test_armed_composer_delivers_failure_marked_for_its_domain(self, composer):
+        # Given an armed composer with no stage — the empty-chain terminal
+        sink = MockSink()
+        composer.add_sink(sink).capture_unretried_failures("summarize")
+
+        # When the call raises
+        result = composer.execute(_throwing(RuntimeError("upstream 500")))
+
+        # Then the sink received that terminal, carrying the verdict
+        assert result.outcome == PolicyOutcome.FAILURE
+        assert len(sink.calls) == 1
+        assert sink.calls[0][2] is result
+        assert result.metadata["should_dlq"] is True
+        assert result.metadata["domain"] == "summarize"
+
+    def test_armed_composer_delivers_timeout_terminal(self, composer):
+        # A stage in the chain routes the raise through the classifying
+        # terminal; an empty chain reports every raise as FAILURE.
+        sink = MockSink()
+        composer.add(MockPolicy("wrapper")).add_sink(sink)
+        composer.capture_unretried_failures("summarize")
+
+        result = composer.execute(_throwing(TimeoutPolicyError(5.0)))
+
+        assert result.outcome == PolicyOutcome.TIMEOUT
+        assert len(sink.calls) == 1
+        assert isinstance(sink.calls[0][0], TimeoutPolicyError)
+        assert sink.calls[0][2].metadata["should_dlq"] is True
+        assert sink.calls[0][2].metadata["domain"] == "summarize"
+
+    def test_unarmed_composer_delivers_failure_without_a_verdict(self, composer):
+        """Negative half: without arming nothing writes the verdict, so the DLQ
+        sink would drop this terminal."""
+        sink = MockSink()
+        composer.add_sink(sink)
+
+        composer.execute(_throwing(RuntimeError("upstream 500")))
+
+        assert len(sink.calls) == 1
+        assert "should_dlq" not in sink.calls[0][2].metadata
+
+    def test_armed_composer_keeps_a_stage_verdict_that_declines(self, composer):
+        sink = MockSink()
+        composer.add(_VerdictStage(should_dlq=False)).add_sink(sink)
+        composer.capture_unretried_failures("summarize")
+
+        composer.execute(_throwing(RuntimeError("upstream 500")))
+
+        delivered = sink.calls[0][2]
+        assert delivered.metadata["should_dlq"] is False
+        assert delivered.metadata["domain"] == "retry_domain"
+
+    def test_armed_composer_skips_served_fallback(self, composer):
+        """A served fallback answered the caller, so nothing is marked or parked."""
+        from baldur.resilience.policies.fallback import FallbackPolicy
+
+        sink = MockSink()
+        composer.add(FallbackPolicy(default_value="degraded")).add_sink(sink)
+        composer.capture_unretried_failures("summarize")
+
+        result = composer.execute(_throwing(RuntimeError("upstream 500")))
+
+        assert result.outcome == PolicyOutcome.SUCCESS_WITH_FALLBACK
+        assert sink.calls == []
+        assert "should_dlq" not in result.metadata
+
+    def test_fully_armed_composer_leaves_open_circuit_rejection_unmarked(
+        self, composer
+    ):
+        """The facade arms both captures; the rejection keeps its own store
+        path and gains no final-failure verdict."""
+        sink = MockSink()
+        composer.add(_CircuitOpenPolicy()).add_sink(sink)
+        composer.capture_open_circuit_rejections()
+        composer.capture_unretried_failures("summarize")
+
+        result = composer.execute(lambda: "never runs")
+
+        assert result.outcome == PolicyOutcome.REJECTED
+        assert len(sink.calls) == 1
+        assert "should_dlq" not in result.metadata
+
+    def test_capture_unretried_failures_returns_self_for_chaining(self, composer):
+        assert composer.capture_unretried_failures("summarize") is composer
+
+
+class TestAsyncComposerUnretriedCaptureBehavior:
+    """``AsyncPolicyComposer`` marks and delivers the same terminals through its
+    normalized sink channel (sync/async parity)."""
+
+    def test_armed_async_composer_delivers_failure_marked_for_its_domain(
+        self, async_composer
+    ):
+        async def _fails() -> str:
+            raise RuntimeError("upstream 500")
+
+        sink = MockSink()
+        async_composer.add_sink(sink).capture_unretried_failures("asummarize")
+
+        result = asyncio.run(async_composer.execute(_fails))
+
+        assert result.outcome == PolicyOutcome.FAILURE
+        assert len(sink.calls) == 1
+        assert result.metadata["should_dlq"] is True
+        assert result.metadata["domain"] == "asummarize"
+
+    def test_armed_async_composer_delivers_timeout_terminal(self, async_composer):
+        async def _times_out() -> str:
+            raise TimeoutPolicyError(5.0)
+
+        sink = MockSink()
+        async_composer.add(MockAsyncPolicy("wrapper")).add_sink(sink)
+        async_composer.capture_unretried_failures("asummarize")
+
+        result = asyncio.run(async_composer.execute(_times_out))
+
+        assert result.outcome == PolicyOutcome.TIMEOUT
+        assert len(sink.calls) == 1
+        assert sink.calls[0][2].metadata["should_dlq"] is True
+        assert sink.calls[0][2].metadata["domain"] == "asummarize"
+
+    def test_unarmed_async_composer_delivers_failure_without_a_verdict(
+        self, async_composer
+    ):
+        async def _fails() -> str:
+            raise RuntimeError("upstream 500")
+
+        sink = MockSink()
+        async_composer.add_sink(sink)
+
+        asyncio.run(async_composer.execute(_fails))
+
+        assert len(sink.calls) == 1
+        assert "should_dlq" not in sink.calls[0][2].metadata
+
+    def test_armed_async_composer_keeps_a_stage_verdict_that_declines(
+        self, async_composer
+    ):
+        async def _fails() -> str:
+            raise RuntimeError("upstream 500")
+
+        sink = MockSink()
+        async_composer.add(_AsyncVerdictStage(should_dlq=False)).add_sink(sink)
+        async_composer.capture_unretried_failures("asummarize")
+
+        asyncio.run(async_composer.execute(_fails))
+
+        delivered = sink.calls[0][2]
+        assert delivered.metadata["should_dlq"] is False
+        assert delivered.metadata["domain"] == "retry_domain"
+
+    def test_armed_async_composer_skips_served_fallback(self, async_composer):
+        from baldur.resilience.policies.fallback import AsyncFallbackPolicy
+
+        async def _fails() -> str:
+            raise RuntimeError("upstream 500")
+
+        sink = MockSink()
+        async_composer.add(AsyncFallbackPolicy(default_value="degraded"))
+        async_composer.add_sink(sink).capture_unretried_failures("asummarize")
+
+        result = asyncio.run(async_composer.execute(_fails))
+
+        assert result.outcome == PolicyOutcome.SUCCESS_WITH_FALLBACK
+        assert sink.calls == []
+        assert "should_dlq" not in result.metadata
+
+    def test_capture_unretried_failures_returns_self_for_chaining(self, async_composer):
+        assert async_composer.capture_unretried_failures("asummarize") is (
+            async_composer
+        )

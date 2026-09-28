@@ -1,8 +1,8 @@
 """
-DLQSink(Dead Letter Queue Sink) 단위 테스트.
+Unit tests for DLQSink (Dead Letter Queue Sink).
 
-테스트 대상: services/retry_handler/sinks.py
-- DLQSink: should_dlq 플래그 기반 DLQ 저장, Fail-Open
+Target: services/retry_handler/sinks.py
+- DLQSink: DLQ store gated on the should_dlq flag, fail-open
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from structlog.testing import capture_logs
 
+from baldur.core.exceptions import TimeoutPolicyError
 from baldur.interfaces.resilience_policy import (
     PolicyContext,
     PolicyOutcome,
@@ -32,25 +33,25 @@ from tests.factories import dry_run_active
 
 
 # =============================================================================
-# DLQSink — 계약 검증
+# DLQSink — contract verification
 # =============================================================================
 
 
 class TestDLQSinkContract:
-    """DLQSink 구조 및 기본값 검증."""
+    """DLQSink structure and default verification."""
 
     def test_has_handle_failure_method(self):
-        """DLQSink는 handle_failure 메서드를 가진다."""
+        """DLQSink has a handle_failure method."""
         assert hasattr(DLQSink(), "handle_failure")
 
 
 # =============================================================================
-# DLQSink — 동작 검증
+# DLQSink — behavior verification
 # =============================================================================
 
 
 class TestDLQSinkBehavior:
-    """DLQSink 동작 검증. should_dlq 플래그 및 Fail-Open 원칙."""
+    """DLQSink behavior verification: the should_dlq flag and the fail-open principle."""
 
     def _make_result(self, should_dlq: bool = True) -> PolicyResult:
         return PolicyResult(
@@ -71,14 +72,14 @@ class TestDLQSinkBehavior:
         )
 
     def test_skips_when_should_dlq_false(self):
-        """should_dlq=False이면 _store_to_dlq를 호출하지 않는다."""
+        """should_dlq=False does not call _store_to_dlq."""
         sink = DLQSink()
         result = self._make_result(should_dlq=False)
         ret = sink.handle_failure(Exception("err"), self._make_context(), result)
         assert ret is None
 
     def test_skips_when_should_dlq_key_missing(self):
-        """should_dlq 키가 없으면 _store_to_dlq를 호출하지 않는다."""
+        """A missing should_dlq key does not call _store_to_dlq."""
         sink = DLQSink()
         result = PolicyResult(
             outcome=PolicyOutcome.FAILURE,
@@ -90,7 +91,7 @@ class TestDLQSinkBehavior:
 
     @patch("baldur.services.retry_handler.sinks.store_to_dlq")
     def test_stores_when_should_dlq_true(self, mock_store):
-        """should_dlq=True이면 store_to_dlq를 호출한다."""
+        """should_dlq=True calls store_to_dlq."""
         mock_store.return_value = MagicMock(success=True, dlq_id="dlq-123")
         sink = DLQSink()
         result = self._make_result(should_dlq=True)
@@ -102,7 +103,7 @@ class TestDLQSinkBehavior:
         assert ret == "dlq-123"
 
     def test_handles_store_failure_gracefully(self):
-        """store_to_dlq 호출 실패 시 예외가 전파되지 않는다 (Fail-Open)."""
+        """A failing store_to_dlq call does not propagate an exception (fail-open)."""
         sink = DLQSink()
         result = self._make_result(should_dlq=True)
         with patch(
@@ -113,7 +114,7 @@ class TestDLQSinkBehavior:
             assert ret is None
 
     def test_handles_import_error_gracefully(self):
-        """store_to_dlq import 실패 시 예외가 전파되지 않는다 (Fail-Open)."""
+        """A store_to_dlq import failure does not propagate an exception (fail-open)."""
         sink = DLQSink()
         result = self._make_result(should_dlq=True)
         with patch(
@@ -124,7 +125,7 @@ class TestDLQSinkBehavior:
             assert ret is None
 
     def test_context_none_is_safe(self):
-        """context=None이어도 에러 없이 동작한다."""
+        """context=None works without error."""
         sink = DLQSink()
         result = self._make_result(should_dlq=True)
         with patch(
@@ -134,30 +135,66 @@ class TestDLQSinkBehavior:
             ret = sink.handle_failure(Exception("err"), None, result)
             assert ret == "dlq-456"
 
+    def test_timeout_terminal_with_a_verdict_stores_under_its_domain(self):
+        """A TIMEOUT terminal carrying a verdict takes the final-failure branch —
+        the branch a composer armed for unretried failures relies on."""
+        # Given the terminal an armed composer builds when the bound cuts a call
+        error = TimeoutPolicyError(5.0)
+        result = PolicyResult(
+            outcome=PolicyOutcome.TIMEOUT,
+            error=error,
+            total_attempts=1,
+            metadata={
+                "timeout_seconds": 5.0,
+                "should_dlq": True,
+                "domain": "summarize",
+                "max_attempts": 1,
+                "retry_history": [],
+                "reason": "max_attempts",
+            },
+        )
+
+        # When the sink handles it
+        with patch(
+            "baldur.services.retry_handler.sinks.store_to_dlq",
+            autospec=True,
+            return_value=DLQEntryResult.created("dlq-t1"),
+        ) as mock_store:
+            ret = DLQSink().handle_failure(error, None, result)
+
+        # Then one entry is stored under that domain, named for the timeout
+        assert ret == "dlq-t1"
+        kwargs = mock_store.call_args.kwargs
+        assert kwargs["domain"] == "summarize"
+        assert kwargs["failure_type"] == "MAX_RETRIES_TIMEOUTPOLICYERROR"
+        assert kwargs["metadata"]["max_attempts"] == 1
+        assert kwargs["metadata"]["retry_history"] == []
+
 
 # =============================================================================
-# DLQSink — Skip vs Error 구분 가능성 (Cat 1.9, 시나리오 plan §328)
+# DLQSink — skip vs error distinguishability (Cat 1.9, scenario plan §328)
 # =============================================================================
 #
-# 검증 기준 (plan §328 row 1.9): "DLQ sink distinguishes 'not stored (skip)'
-# from 'store failed (error)'." 반환값(str | None)만으로는 세 종착지(skip /
-# stored / failed / exception)가 구분되지 않으므로 — Protocol 반환 타입을
-# 바꾸는 광범위한 변경 없이는 caller-side 구분이 불가하다 — 현재 구현이
-# 이미 제공하는 *로그 레벨* 가시성을 회귀 게이트로 고정한다:
+# Criterion (plan §328 row 1.9): "DLQ sink distinguishes 'not stored (skip)'
+# from 'store failed (error)'." The return value (str | None) alone cannot tell the
+# terminals (skip / stored / failed / exception) apart — caller-side distinction is
+# impossible without a sweeping change to the Protocol return type — so this pins
+# the *log-level* visibility the current implementation already provides as a
+# regression gate:
 #
-#   - skip:      `dlq_sink.create_dlq_entry_failed` 가 emit 되지 않는다
-#                (silent — store_to_dlq 자체가 호출되지 않음)
+#   - skip:      `dlq_sink.create_dlq_entry_failed` is not emitted
+#                (silent — store_to_dlq itself is never called)
 #   - stored:    `dlq_sink.created_dlq_entry` (info) emit
 #   - failed:    `dlq_sink.create_dlq_entry_failed` (error) emit, kwarg=result
 #   - exception: `dlq_sink.create_dlq_entry_failed` (error) emit, kwarg=dlq_error
 #
-# Protocol-level distinguishability(반환 타입 변경)는 이 테스트의 범위를
-# 벗어남 — composer.py 호출부 + ThrottleDLQSink 가 아닌 FailureSink 구현체
-# 추가 시 확장 검토 (out-of-scope follow-up).
+# Protocol-level distinguishability (a return-type change) is outside this test's
+# scope — revisit when a FailureSink implementation other than the composer.py call
+# site + ThrottleDLQSink is added (out-of-scope follow-up).
 
 
 class TestDLQSinkLogDistinguishability:
-    """DLQSink가 skip / failure 경로를 로그 가시성으로 구분함을 검증."""
+    """DLQSink distinguishes the skip / failure paths through log visibility."""
 
     def _make_result(self, should_dlq: bool = True) -> PolicyResult:
         return PolicyResult(
