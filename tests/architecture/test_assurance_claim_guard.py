@@ -32,8 +32,8 @@ from tests.architecture._helpers import (
     verified_by_ref,
 )
 from tests.architecture.conftest import (
-    DEFAULT_SRC_ROOTS,
     parse_ast,
+    src_root_params,
     symbol_of,
     walk_src,
 )
@@ -56,11 +56,12 @@ def _span_ref(raw_lines: list[str], node: ast.AST) -> str | None:
 class TestAssuranceClaimGuard:
     """575 D1 — every strong-guarantee docstring keyword links a resolvable test."""
 
-    def test_strong_guarantee_docstrings_link_a_real_test(self):
+    @pytest.mark.parametrize("root", src_root_params())
+    def test_strong_guarantee_docstrings_link_a_real_test(self, root):
         """Each claim carries `# verified-by: <ref>` and `<ref>` resolves under tests/."""
         test_defs = collect_test_def_names()
         raw: list[tuple] = []
-        for path in walk_src(DEFAULT_SRC_ROOTS):
+        for path in walk_src((root,)):
             tree = parse_ast(path)
             if tree is None:
                 continue

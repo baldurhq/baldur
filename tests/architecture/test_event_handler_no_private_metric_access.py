@@ -32,10 +32,13 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from tests.architecture._helpers import DEFAULT_SRC_ROOTS, PROJECT_ROOT
+import pytest
+
+from tests.architecture._helpers import PROJECT_ROOT
 from tests.architecture.conftest import (
     collect_violations,
     parse_ast,
+    src_root_params,
     symbol_of,
     walk_src,
 )
@@ -127,9 +130,10 @@ class TestEventHandlerNoPrivateMetricAccess:
     """645 D6 / G45 — recorder private internals are not a cross-backend contract;
     consumers must route through recorder public methods."""
 
-    def test_no_private_recorder_access_outside_owners(self):
+    @pytest.mark.parametrize("root", src_root_params())
+    def test_no_private_recorder_access_outside_owners(self, root):
         raw: list[tuple[Path, int | None, str | None, str | None]] = []
-        for path in walk_src(DEFAULT_SRC_ROOTS):
+        for path in walk_src((root,)):
             if _is_owner(path):
                 continue
             for offender_path, line, symbol, extra in _scan(path):

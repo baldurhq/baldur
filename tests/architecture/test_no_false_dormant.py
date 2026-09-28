@@ -52,6 +52,7 @@ import pytest
 
 from tests.architecture._helpers import (
     CATALOG_PATH,
+    CATALOG_SRC_ROOTS,
     PROJECT_ROOT,
     parse_catalog_entries,
     resolve_module_locations,
@@ -69,14 +70,20 @@ _SRC_DIR = PROJECT_ROOT / "src"
 # Import-target resolution (pure helpers — unit-tested below).
 # ---------------------------------------------------------------------------
 def file_package(path: Path) -> str:
-    """Dotted package of the file's directory, root-anchored at ``src/``.
+    """Dotted package of the file's directory, anchored at its root package's parent.
 
     ``src/baldur/services/foo/bar.py`` → ``baldur.services.foo``; an
     ``__init__.py`` maps to its own directory's dotted path. The first component
-    is the root package (``baldur`` / ``baldur_pro`` / ``baldur_dormant``).
+    is the root package (``baldur`` / ``baldur_pro`` / ``baldur_dormant``). The
+    root is looked up in ``CATALOG_SRC_ROOTS``, so an installed OSS core outside
+    this checkout anchors the same way as an in-tree one.
     """
-    rel = path.resolve().relative_to(_SRC_DIR)
-    return ".".join(rel.parent.parts)
+    resolved = path.resolve()
+    for root in CATALOG_SRC_ROOTS.values():
+        root = root.resolve()
+        if resolved == root or root in resolved.parents:
+            return ".".join(resolved.relative_to(root.parent).parent.parts)
+    return ".".join(resolved.relative_to(_SRC_DIR).parent.parts)
 
 
 def _is_type_checking_test(test: ast.expr) -> bool:
@@ -215,7 +222,10 @@ class TestNoFalseDormant:
 
         raw: list[tuple[Path, int | None, str | None, str | None]] = []
         scanned = 0
-        for path in walk_src():  # baldur + baldur_pro
+        # Walk the roots the catalog resolves against: G36 runs only where the
+        # private catalog exists, and there the OSS core is an installed sibling,
+        # not ``src/baldur`` — walking the default roots read no OSS file.
+        for path in walk_src(CATALOG_SRC_ROOTS.values()):
             if not _is_under(path, sold_paths):
                 continue
             tree = parse_ast(path)
@@ -265,7 +275,7 @@ class TestNoFalseDormant:
         prefixes = {e.title: _parked_prefixes(e) for e in parked}
 
         raw: list[tuple[Path, int | None, str | None, str | None]] = []
-        for path in walk_src():
+        for path in walk_src(CATALOG_SRC_ROOTS.values()):
             if not _is_under(path, sold_paths):
                 continue
             tree = parse_ast(path)
