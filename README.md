@@ -9,7 +9,7 @@
 
 **English** | [한국어](README.ko.md)
 
-> **This project is complete.** What was built, what the numbers said, and what survived: [retrospective (Korean)](POSTMORTEM.ko.md).
+> **Early access — feedback wanted.** Trying Baldur on a real service? If anything gets in your way — installing, the docs, behavior you didn't expect — tell us in [Discussions](https://github.com/baldurhq/baldur/discussions) or [open an issue](https://github.com/baldurhq/baldur/issues/new/choose).
 
 **An API you depend on goes down for an hour. What happens to your app?**
 
@@ -213,6 +213,9 @@ releases may still ship breaking changes, always with a changelog entry. It is
 looking for a small number of teams already running a Python service in
 production to work with directly. If that is you, the details and how to reach
 me are in [Discussions](https://github.com/baldurhq/baldur/discussions).
+
+How the project got here — including why it was nearly shelved in September
+2026: [retrospective (Korean)](POSTMORTEM.ko.md).
 
 ## License
 

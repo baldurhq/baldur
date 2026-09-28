@@ -9,7 +9,7 @@
 
 [English](README.md) | **한국어**
 
-> **이 프로젝트는 완료되었습니다.** 무엇을 만들었고, 숫자가 무엇을 말했고, 무엇이 남았는지: [회고](POSTMORTEM.ko.md).
+> **초기 사용자 피드백을 받고 있습니다.** 실제 서비스에 붙여 보다가 설치·문서·예상과 다른 동작 등 막히는 곳이 있으면 [Discussions](https://github.com/baldurhq/baldur/discussions)나 [이슈](https://github.com/baldurhq/baldur/issues/new/choose)로 알려 주세요.
 
 **여러분이 기대고 있는 외부 API가 한 시간 동안 죽으면, 여러분의 앱에는 무슨 일이 생기나요?**
 
@@ -208,6 +208,9 @@ Baldur는 얼리 액세스 단계입니다. API는 안정적이고 코어는 Sen
 갑니다. 지금은 이미 Python 서비스를 프로덕션에서 운영 중인 소수의 팀과 직접 협업할
 상대를 찾고 있습니다. 해당되신다면 자세한 내용과 연락 방법이
 [Discussions](https://github.com/baldurhq/baldur/discussions)에 있습니다.
+
+여기까지 온 과정과 2026년 9월에 접을 뻔했던 이유는 [회고](POSTMORTEM.ko.md)에
+있습니다.
 
 ## 라이선스
 
