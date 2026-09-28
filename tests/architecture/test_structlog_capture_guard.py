@@ -12,7 +12,7 @@ runtime ``configured`` flag via ``_apply_canonical_test_structlog_config()``
 (prevents *new* freezes) and runs ``_unfreeze_module_loggers`` (584) to *un*-freeze
 any ``baldur*`` proxy frozen earlier in the worker's life.
 
-This gate keeps that centralization from rotting. It has three halves:
+This gate keeps that centralization from rotting. It has four parts:
 
 * **(a) No re-scattered guard.** Zero ``<module>.logger = structlog.get_logger()``
   rebinds remain anywhere under ``tests/`` — a module-logger reassignment has no
@@ -30,6 +30,12 @@ This gate keeps that centralization from rotting. It has three halves:
   uncapturable (578's exact residual), assert ``capture_logs`` is empty, run the
   un-freeze, then assert capture intercepts again. G34(b) only proves a *fresh*
   proxy is capturable — trivially true and silent about un-freezing.
+* **(d) In force when the test body starts.** (b) calls the helper directly, so
+  it stays green even when a later autouse fixture undoes the helper's work
+  before the test runs — which the light-tier runtime reset did, by clearing
+  the singleton that holds ``configured``. This part reads the state from inside
+  a test body, and runs the production ``configure_structlog()`` there (what an
+  unmocked ``protect()`` does) to prove it no longer displaces ``capture_logs``.
 
 Rule registry:
 ``ARCHITECTURE.md#g34-structlog-capture-guard``
@@ -182,6 +188,28 @@ class TestCanonicalStructlogConfigHelper:
         with capture_logs() as cap_logs:
             logger.info("g34.capture_probe")
         assert any(entry["event"] == "g34.capture_probe" for entry in cap_logs)
+
+
+class TestContainmentInForceAtTestBodyStart:
+    """G34(d) — the autouse chain leaves the containment standing for the test."""
+
+    def test_canonical_config_holds_when_the_test_body_starts(self):
+        from baldur.observability.structlog_config import _structlog_state
+
+        assert _structlog_state().configured is True
+        assert structlog.get_config()["cache_logger_on_first_use"] is False
+
+    def test_production_configure_in_a_test_body_leaves_capture_working(self):
+        """An unmocked ``protect()`` runs ``configure_structlog()`` first; with
+        the containment in force that call is a no-op, so the capture stands."""
+        from baldur.observability.structlog_config import configure_structlog
+
+        logger = structlog.get_logger("g34.body_probe")
+        with capture_logs() as cap_logs:
+            configure_structlog()
+            logger.info("g34.body_probe_event")
+
+        assert [entry["event"] for entry in cap_logs] == ["g34.body_probe_event"]
 
 
 # =============================================================================

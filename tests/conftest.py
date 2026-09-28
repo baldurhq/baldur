@@ -1506,10 +1506,16 @@ def _ensure_baldur_propagates():
 
 
 @pytest.fixture(autouse=True)
-def _restore_canonical_structlog_config():
+def _restore_canonical_structlog_config(auto_reset_all_state):
     """Hold the canonical (cache=False, configured=True) structlog config at
     every test boundary — the suite-wide containment for the ``capture_logs``
     xdist flake (578 D2).
+
+    Depends on ``auto_reset_all_state`` so its setup runs AFTER the light-tier
+    reset: that reset clears the runtime singletons, and the ``configured`` flag
+    lives in one of them (``structlog_state``). Autouse fixtures otherwise run in
+    name order, which put this setup first and let the reset drop the flag again
+    before every test body.
 
     The flake is a *freeze*: production ``configure_structlog()`` sets
     ``cache_logger_on_first_use=True``, and once a module-level
@@ -1536,8 +1542,10 @@ def _restore_canonical_structlog_config():
       what poisoned it earlier. Un-freeze is setup-only: it repairs the *prior*
       freeze, so a teardown un-freeze would run after this test's assertions and
       be redone by the next setup — strictly redundant.
-    - **Teardown** runs LAST (root-conftest autouse finalizes in reverse setup
-      order, after the poison file's own teardown) so the next test starts clean.
+    - **Teardown** runs after the poison file's own teardown (root-conftest
+      autouse finalizes in reverse setup order) and restores the global structlog
+      config; the light-tier teardown that follows drops ``configured`` again,
+      which the next test's setup re-asserts.
 
     Subsumes the former per-file ``capture_ready_*`` rebind and
     ``_structlog_reset*`` guards. See ``project_xdist_capture_logs_flake``.
