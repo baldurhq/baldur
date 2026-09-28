@@ -7,7 +7,7 @@
 [![Docs](https://img.shields.io/badge/docs-baldur.sh-1f6feb.svg)](https://baldur.sh)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13522/badge)](https://www.bestpractices.dev/projects/13522)
 
-[English](README.md) | **한국어**
+[English](https://github.com/baldurhq/baldur/blob/main/README.md) | **한국어**
 
 > **초기 사용자 피드백을 받고 있습니다.** 실제 서비스에 붙여 보다가 설치·문서·예상과 다른 동작 등 막히는 곳이 있으면 [Discussions](https://github.com/baldurhq/baldur/discussions)나 [이슈](https://github.com/baldurhq/baldur/issues/new/choose)로 알려 주세요.
 
@@ -36,7 +36,9 @@ Redis도, Docker도, 설정도 없이 시작합니다. 저 데코레이터는 �
   브레이커가 열리며, 호출은 즉시 실패합니다 — 느려진 제공자 하나가 워커 전체를
   끌고 내려가지 않습니다. 그 제공자가 필요 없는 엔드포인트는 계속 동작합니다.
 - **실패한 작업은 사라지지 않고 보관됩니다.** 끝내 실패한 호출은 전부 인자와
-  함께 포착되어 내장 콘솔에 목록으로 남습니다.
+  함께 포착되어 내장 콘솔(`http://127.0.0.1:9090/`)에 목록으로 남습니다.
+  프레임워크 없이 쓰는 파이썬 프로세스에서는 시작할 때 `baldur.init()`을 한 번
+  호출해야 콘솔이 뜹니다. Django·FastAPI·Flask 연동은 이 호출을 알아서 해 줍니다.
 - **그리고 돌아옵니다.** 작은 재실행 핸들러로 하나를 어떻게 다시 실행하는지
   알려주면, 보관된 작업을 콘솔에서 클릭 한 번으로 재실행하거나, 제공자가
   복구되는 순간 자동으로 재실행합니다 — 옵트인이며, Celery 워커가 필요합니다.
@@ -94,7 +96,7 @@ def charge(order_id: str, amount_cents: int) -> dict:
 응답합니다. 나가는 길에 실패한 결제는 데드레터 큐에서 기다리다가 브레이커가
 닫히면 돌아옵니다. (재실행은 나가는 길에 실패한 작업을 위한 것이지, 비즈니스
 상의 거절이나 고객이 이미 떠나버린 결제를 위한 것이 아닙니다 —
-[그 경계가 어디인지](docs/concepts/foundations/dlq-replay.md).)
+[그 경계가 어디인지](https://baldur.sh/concepts/foundations/dlq-replay/).)
 
 기본값 이상이 필요하다면 파이프라인을 선언적으로 조합하면 됩니다.
 
@@ -127,18 +129,18 @@ boto3에는 적응형 모드가 있습니다 — 그리고 범용 래퍼보다 �
 
 | 기능 | 무엇을 해주는가 |
 |------|-----------------|
-| [서킷 브레이커](docs/concepts/oss/circuit-breaker.md) | 연쇄 장애를 차단하고, 복구 시 제한된 수의 half-open 탐침을 보냅니다 |
-| [백오프 재시도](docs/concepts/oss/retry.md) | 지터가 적용된 지수 백오프와 상한이 있는 시도 횟수 |
-| [폴백 및 조합](docs/concepts/foundations/composition.md) | 모든 복원력 패턴을 순서가 정해진 하나의 파이프라인으로 |
-| [멱등성](docs/concepts/oss/idempotency.md) | 동시에 들어온 중복 호출에서도 부수 효과는 정확히 한 번만 실행됩니다 |
-| [벌크헤드 격리](docs/concepts/foundations/bulkhead.md) | 의존성마다 고정된 동시성 몫을 할당해, 느린 의존성 하나가 전체 워커를 고갈시키지 못하게 합니다 |
-| [데드레터 큐 + 재실행](docs/concepts/foundations/dlq-replay.md) | 끝내 실패한 호출을 문맥과 함께 포착해 두었다가, 의존성이 복구되면 재실행합니다 |
-| [헬스 체크](docs/concepts/oss/health-check.md) | 실제 의존성 상태를 반영하는 liveness/readiness |
-| [우아한 종료](docs/concepts/oss/graceful-shutdown.md) | 재시작과 배포 시 처리 중이던 작업을 깔끔하게 비웁니다 |
-| [메트릭](docs/concepts/oss/metrics.md) | Prometheus와 OpenTelemetry, 기본으로 방출 |
-| [시스템 제어](docs/concepts/oss/system-control.md) | Baldur 자동화에 대한 즉시 킬 스위치와 드라이런 모드 — 재배포 불필요 |
-| [웹 콘솔](docs/concepts/foundations/web-console.md) | 내장 운영 콘솔: 실시간 브레이커 상태, 제어, 복구 |
-| [사전 계산 캐시](docs/concepts/oss/precomputed-cache.md) | 헬스/상태 엔드포인트가 예열된 캐시에서 응답하므로, 끊임없는 프로빙도 비용이 낮게 유지됩니다 |
+| [서킷 브레이커](https://baldur.sh/concepts/oss/circuit-breaker/) | 연쇄 장애를 차단하고, 복구 시 제한된 수의 half-open 탐침을 보냅니다 |
+| [백오프 재시도](https://baldur.sh/concepts/oss/retry/) | 지터가 적용된 지수 백오프와 상한이 있는 시도 횟수 |
+| [폴백 및 조합](https://baldur.sh/concepts/foundations/composition/) | 모든 복원력 패턴을 순서가 정해진 하나의 파이프라인으로 |
+| [멱등성](https://baldur.sh/concepts/oss/idempotency/) | 동시에 들어온 중복 호출에서도 부수 효과는 정확히 한 번만 실행됩니다 |
+| [벌크헤드 격리](https://baldur.sh/concepts/foundations/bulkhead/) | 의존성마다 고정된 동시성 몫을 할당해, 느린 의존성 하나가 전체 워커를 고갈시키지 못하게 합니다 |
+| [데드레터 큐 + 재실행](https://baldur.sh/concepts/foundations/dlq-replay/) | 끝내 실패한 호출을 문맥과 함께 포착해 두었다가, 의존성이 복구되면 재실행합니다 |
+| [헬스 체크](https://baldur.sh/concepts/oss/health-check/) | 실제 의존성 상태를 반영하는 liveness/readiness |
+| [우아한 종료](https://baldur.sh/concepts/oss/graceful-shutdown/) | 재시작과 배포 시 처리 중이던 작업을 깔끔하게 비웁니다 |
+| [메트릭](https://baldur.sh/concepts/oss/metrics/) | Prometheus와 OpenTelemetry, 기본으로 방출 |
+| [시스템 제어](https://baldur.sh/concepts/oss/system-control/) | Baldur 자동화에 대한 즉시 킬 스위치와 드라이런 모드 — 재배포 불필요 |
+| [웹 콘솔](https://baldur.sh/concepts/foundations/web-console/) | 내장 운영 콘솔: 실시간 브레이커 상태, 제어, 복구 |
+| [사전 계산 캐시](https://baldur.sh/concepts/oss/precomputed-cache/) | 헬스/상태 엔드포인트가 예열된 캐시에서 응답하므로, 끊임없는 프로빙도 비용이 낮게 유지됩니다 |
 
 읽기 경로도 같은 방식으로 스스로 회복합니다. 아래는 실제 HTTP 트래픽을 받고 있는
 Django 앱(데모 하네스가 트래픽을 넣는 상황을 녹화)이 21초 동안 Redis로 가는
@@ -151,15 +153,15 @@ Django 앱(데모 하네스가 트래픽을 넣는 상황을 녹화)이 21초 �
 
 전체 문서는 **<https://baldur.sh>** 에 있습니다.
 
-- [What is Baldur?](docs/what-is-baldur.md) — 어떤 문제를 어떻게 푸는지
-- 시작하기: [Django](docs/getting-started/django.md) ·
-  [FastAPI](docs/getting-started/fastapi.md) ·
-  [Flask](docs/getting-started/flask.md) ·
-  [Celery](docs/getting-started/celery.md)
+- [What is Baldur?](https://baldur.sh/what-is-baldur/) — 어떤 문제를 어떻게 푸는지
+- 시작하기: [Django](https://baldur.sh/getting-started/django/) ·
+  [FastAPI](https://baldur.sh/getting-started/fastapi/) ·
+  [Flask](https://baldur.sh/getting-started/flask/) ·
+  [Celery](https://baldur.sh/getting-started/celery/)
 - [개념 가이드](https://baldur.sh) — 기능당 한 페이지, 이 README 전반에서 링크
 - [API 레퍼런스](https://baldur.sh/reference/)
-- [문제 해결](docs/troubleshooting.md)
-- [호환성](docs/compatibility.md)
+- [문제 해결](https://baldur.sh/troubleshooting/)
+- [호환성](https://baldur.sh/compatibility/)
 
 ## AI 어시스턴트와 함께 쓰기
 
@@ -167,7 +169,7 @@ AI 코딩 어시스턴트(Claude Code, Cursor, Copilot, Codex)로 개발하고 �
 저장소에서 `baldur init-ai`를 실행하면 `AGENTS.md`(Cursor·Copilot·Codex가 읽습니다)와
 그것을 임포트하는 Claude Code용 `CLAUDE.md`가 생성됩니다. 이 둘이 함께 어시스턴트에게
 서킷 브레이커를 직접 구현하는 대신 `@baldur.protected("name")`을 쓰도록 가르칩니다.
-[AI 어시스턴트와 함께 쓰기](docs/getting-started/ai-assistants.md)를 참고하세요.
+[AI 어시스턴트와 함께 쓰기](https://baldur.sh/getting-started/ai-assistants/)를 참고하세요.
 
 ## 호환성
 
@@ -181,23 +183,23 @@ AI 코딩 어시스턴트(Claude Code, Cursor, Copilot, Codex)로 개발하고 �
 | Redis 서버 | — | 7.x |
 
 전체 매트릭스와 Python × Django 테스트 그리드, 버전 지원 정책은
-[호환성](docs/compatibility.md)을 참고하세요.
+[호환성](https://baldur.sh/compatibility/)을 참고하세요.
 
 ## 플릿 규모로 운영하시나요?
 
 Baldur PRO는 동일한 API 위에 플릿 단위 운영을 위한 기계 장치를 더합니다 — 코어의
 어떤 것도 라이선스가 바뀌거나 대체되지 않습니다.
-[대규모 DLQ](docs/concepts/foundations/dlq-replay.md)(콘솔에서의 일괄 재실행,
+[대규모 DLQ](https://baldur.sh/concepts/foundations/dlq-replay/)(콘솔에서의 일괄 재실행,
 성공률 기반 속도 조절, 디스크에 지속되는 아웃박스, 아카이브/삭제 보존 정책),
-해시 체인 [감사 추적](docs/concepts/pro/audit.md),
-[통합 알림](docs/concepts/pro/unified-notification.md),
-[비상 모드](docs/concepts/pro/emergency-mode.md),
-[벌크헤드 스레드 풀 격리](docs/concepts/foundations/bulkhead.md),
-[적응형 스로틀링](docs/concepts/pro/throttle.md),
-[카나리 복구](docs/concepts/pro/canary-recovery.md),
-[거버넌스 게이트](docs/concepts/pro/governance.md), 그리고 Baldur 자신을 감시하는
-[메타 워치독](docs/concepts/pro/meta-watchdog.md). 전체
-[OSS vs PRO 기능 비교표](docs/concepts/oss-vs-pro.md)와
+해시 체인 [감사 추적](https://baldur.sh/concepts/pro/audit/),
+[통합 알림](https://baldur.sh/concepts/pro/unified-notification/),
+[비상 모드](https://baldur.sh/concepts/pro/emergency-mode/),
+[벌크헤드 스레드 풀 격리](https://baldur.sh/concepts/foundations/bulkhead/),
+[적응형 스로틀링](https://baldur.sh/concepts/pro/throttle/),
+[카나리 복구](https://baldur.sh/concepts/pro/canary-recovery/),
+[거버넌스 게이트](https://baldur.sh/concepts/pro/governance/), 그리고 Baldur 자신을 감시하는
+[메타 워치독](https://baldur.sh/concepts/pro/meta-watchdog/). 전체
+[OSS vs PRO 기능 비교표](https://baldur.sh/concepts/oss-vs-pro/)와
 [가격](https://baldur.sh/pricing/)을 확인해 보세요.
 
 ## 얼리 액세스
@@ -209,22 +211,22 @@ Baldur는 얼리 액세스 단계입니다. API는 안정적이고 코어는 Sen
 상대를 찾고 있습니다. 해당되신다면 자세한 내용과 연락 방법이
 [Discussions](https://github.com/baldurhq/baldur/discussions)에 있습니다.
 
-여기까지 온 과정과 2026년 9월에 접을 뻔했던 이유는 [회고](POSTMORTEM.ko.md)에
+여기까지 온 과정과 2026년 9월에 접을 뻔했던 이유는 [회고](https://github.com/baldurhq/baldur/blob/main/POSTMORTEM.ko.md)에
 있습니다.
 
 ## 라이선스
 
-Baldur는 Apache License 2.0으로 배포됩니다 — [LICENSE](LICENSE)와
-[NOTICE](NOTICE)를 참고하세요.
+Baldur는 Apache License 2.0으로 배포됩니다 — [LICENSE](https://github.com/baldurhq/baldur/blob/main/LICENSE)와
+[NOTICE](https://github.com/baldurhq/baldur/blob/main/NOTICE)를 참고하세요.
 
 ## 기여하기
 
 Apache License 2.0 아래에서의 기여를 환영합니다. 풀 리퀘스트는 사인오프 기반
 [DCO](https://developercertificate.org/) 흐름으로 받습니다 — 전체 모델은
-[CONTRIBUTING.md](CONTRIBUTING.md)를 참고하세요.
+[CONTRIBUTING.md](https://github.com/baldurhq/baldur/blob/main/CONTRIBUTING.md)를 참고하세요.
 
 - **아이디어, 또는 만드신 것 자랑** →
   [Discussions](https://github.com/baldurhq/baldur/discussions).
 - **버그 / 기능 요청 / 문서** → 이슈나 풀 리퀘스트를 열어 주세요.
-- **보안** → [SECURITY.md](SECURITY.md)를 참고하세요 (취약점은 공개 이슈로 올리지 말아 주세요).
+- **보안** → [SECURITY.md](https://github.com/baldurhq/baldur/blob/main/SECURITY.md)를 참고하세요 (취약점은 공개 이슈로 올리지 말아 주세요).
 - **사용 문의 / 상용** → `support@baldur.sh`.

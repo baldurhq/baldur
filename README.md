@@ -7,7 +7,7 @@
 [![Docs](https://img.shields.io/badge/docs-baldur.sh-1f6feb.svg)](https://baldur.sh)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13522/badge)](https://www.bestpractices.dev/projects/13522)
 
-**English** | [한국어](README.ko.md)
+**English** | [한국어](https://github.com/baldurhq/baldur/blob/main/README.ko.md)
 
 > **Early access — feedback wanted.** Trying Baldur on a real service? If anything gets in your way — installing, the docs, behavior you didn't expect — tell us in [Discussions](https://github.com/baldurhq/baldur/discussions) or [open an issue](https://github.com/baldurhq/baldur/issues/new/choose).
 
@@ -37,7 +37,10 @@ When the provider dies — or just gets slow — mid-traffic:
   doesn't take every worker down with it. The endpoints that don't need it
   keep working.
 - **Failed jobs are kept, not lost.** Every call that failed for good is
-  captured with its arguments and listed in the built-in console.
+  captured with its arguments and listed in the built-in console at
+  `http://127.0.0.1:9090/`. In a plain Python process, call `baldur.init()`
+  once at startup to start the console; the Django, FastAPI, and Flask
+  integrations do that for you.
 - **They come back.** A small replay handler tells Baldur how to re-run one;
   replay the parked jobs from the console with a click, or automatically when
   the provider recovers — opt-in, with a Celery worker.
@@ -97,7 +100,7 @@ of stacking up timeouts; the charges that failed on the way out wait in the
 dead-letter queue and come back when it closes. (Replay is for work that failed
 on the way out — never for a business rejection, and never for a checkout the
 customer already walked away from:
-[where that line sits](docs/concepts/foundations/dlq-replay.md).)
+[where that line sits](https://baldur.sh/concepts/foundations/dlq-replay/).)
 
 Need more than the default? Compose the pipeline declaratively:
 
@@ -130,18 +133,18 @@ coroutine functions.
 
 | Capability | What it gives you |
 |------------|-------------------|
-| [Circuit breaker](docs/concepts/oss/circuit-breaker.md) | Stops cascading failure; bounded half-open probes on recovery |
-| [Retry with backoff](docs/concepts/oss/retry.md) | Exponential backoff with jitter and bounded attempts |
-| [Fallback & composition](docs/concepts/foundations/composition.md) | One ordered pipeline for all resilience patterns |
-| [Idempotency](docs/concepts/oss/idempotency.md) | Concurrent duplicate calls execute the side effect exactly once |
-| [Bulkhead isolation](docs/concepts/foundations/bulkhead.md) | Each dependency gets a fixed slice of concurrency, so one slow dependency can't drain every worker |
-| [Dead-letter queue + replay](docs/concepts/foundations/dlq-replay.md) | A call that fails for good is captured with its context and replayed once the dependency recovers |
-| [Health checks](docs/concepts/oss/health-check.md) | Liveness/readiness that reflect real dependency state |
-| [Graceful shutdown](docs/concepts/oss/graceful-shutdown.md) | Drain in-flight work cleanly on restart and deploy |
-| [Metrics](docs/concepts/oss/metrics.md) | Prometheus and OpenTelemetry, emitted by default |
-| [System control](docs/concepts/oss/system-control.md) | Instant kill switch and dry-run mode for Baldur's automation — no redeploy |
-| [Web console](docs/concepts/foundations/web-console.md) | Built-in operations console: live breaker state, controls, recovery |
-| [Precomputed cache](docs/concepts/oss/precomputed-cache.md) | Health/status endpoints answer from a warm cache, so constant probing stays cheap |
+| [Circuit breaker](https://baldur.sh/concepts/oss/circuit-breaker/) | Stops cascading failure; bounded half-open probes on recovery |
+| [Retry with backoff](https://baldur.sh/concepts/oss/retry/) | Exponential backoff with jitter and bounded attempts |
+| [Fallback & composition](https://baldur.sh/concepts/foundations/composition/) | One ordered pipeline for all resilience patterns |
+| [Idempotency](https://baldur.sh/concepts/oss/idempotency/) | Concurrent duplicate calls execute the side effect exactly once |
+| [Bulkhead isolation](https://baldur.sh/concepts/foundations/bulkhead/) | Each dependency gets a fixed slice of concurrency, so one slow dependency can't drain every worker |
+| [Dead-letter queue + replay](https://baldur.sh/concepts/foundations/dlq-replay/) | A call that fails for good is captured with its context and replayed once the dependency recovers |
+| [Health checks](https://baldur.sh/concepts/oss/health-check/) | Liveness/readiness that reflect real dependency state |
+| [Graceful shutdown](https://baldur.sh/concepts/oss/graceful-shutdown/) | Drain in-flight work cleanly on restart and deploy |
+| [Metrics](https://baldur.sh/concepts/oss/metrics/) | Prometheus and OpenTelemetry, emitted by default |
+| [System control](https://baldur.sh/concepts/oss/system-control/) | Instant kill switch and dry-run mode for Baldur's automation — no redeploy |
+| [Web console](https://baldur.sh/concepts/foundations/web-console/) | Built-in operations console: live breaker state, controls, recovery |
+| [Precomputed cache](https://baldur.sh/concepts/oss/precomputed-cache/) | Health/status endpoints answer from a warm cache, so constant probing stays cheap |
 
 The read path heals the same way. Here a Django app under live HTTP traffic
 (recorded from a demo harness driving it) loses its network path to Redis for
@@ -154,16 +157,16 @@ and the Redis tier resyncs itself on recovery:
 
 Full documentation lives at **<https://baldur.sh>**.
 
-- [What is Baldur?](docs/what-is-baldur.md) — the problem it solves and how
-- Getting started: [Django](docs/getting-started/django.md) ·
-  [FastAPI](docs/getting-started/fastapi.md) ·
-  [Flask](docs/getting-started/flask.md) ·
-  [Celery](docs/getting-started/celery.md)
+- [What is Baldur?](https://baldur.sh/what-is-baldur/) — the problem it solves and how
+- Getting started: [Django](https://baldur.sh/getting-started/django/) ·
+  [FastAPI](https://baldur.sh/getting-started/fastapi/) ·
+  [Flask](https://baldur.sh/getting-started/flask/) ·
+  [Celery](https://baldur.sh/getting-started/celery/)
 - [Concept guides](https://baldur.sh) — one page per capability, linked
   throughout this README
 - [API reference](https://baldur.sh/reference/)
-- [Troubleshooting](docs/troubleshooting.md)
-- [Compatibility](docs/compatibility.md)
+- [Troubleshooting](https://baldur.sh/troubleshooting/)
+- [Compatibility](https://baldur.sh/compatibility/)
 
 ## Using Baldur with AI assistants
 
@@ -172,7 +175,7 @@ Building with an AI coding assistant (Claude Code, Cursor, Copilot, Codex)? Run
 and Codex) plus a `CLAUDE.md` that imports it for Claude Code — together they
 teach the assistant to reach for `@baldur.protected("name")` instead of
 hand-rolling a circuit breaker. See
-[Using Baldur with AI assistants](docs/getting-started/ai-assistants.md).
+[Using Baldur with AI assistants](https://baldur.sh/getting-started/ai-assistants/).
 
 ## Compatibility
 
@@ -185,24 +188,24 @@ hand-rolling a circuit breaker. See
 | Celery | 5.3 | 5.4 |
 | Redis server | — | 7.x |
 
-See [Compatibility](docs/compatibility.md) for the full matrix, the
+See [Compatibility](https://baldur.sh/compatibility/) for the full matrix, the
 Python × Django test grid, and the version support policy.
 
 ## Running this across a fleet?
 
 Baldur PRO adds the fleet-level machinery on top of the same API — nothing in
 the core gets relicensed or replaced:
-[DLQ at scale](docs/concepts/foundations/dlq-replay.md) (batch replay from the
+[DLQ at scale](https://baldur.sh/concepts/foundations/dlq-replay/) (batch replay from the
 console, success-rate-driven pacing, a disk-durable outbox, and archive/purge
-retention), a hash-chained [audit trail](docs/concepts/pro/audit.md),
-[unified notifications](docs/concepts/pro/unified-notification.md),
-[emergency mode](docs/concepts/pro/emergency-mode.md),
-[bulkhead thread-pool isolation](docs/concepts/foundations/bulkhead.md),
-[adaptive throttling](docs/concepts/pro/throttle.md),
-[canary recovery](docs/concepts/pro/canary-recovery.md),
-[governance gates](docs/concepts/pro/governance.md), and a
-[meta-watchdog](docs/concepts/pro/meta-watchdog.md) that watches Baldur itself.
-See the full [OSS vs PRO capability matrix](docs/concepts/oss-vs-pro.md) and
+retention), a hash-chained [audit trail](https://baldur.sh/concepts/pro/audit/),
+[unified notifications](https://baldur.sh/concepts/pro/unified-notification/),
+[emergency mode](https://baldur.sh/concepts/pro/emergency-mode/),
+[bulkhead thread-pool isolation](https://baldur.sh/concepts/foundations/bulkhead/),
+[adaptive throttling](https://baldur.sh/concepts/pro/throttle/),
+[canary recovery](https://baldur.sh/concepts/pro/canary-recovery/),
+[governance gates](https://baldur.sh/concepts/pro/governance/), and a
+[meta-watchdog](https://baldur.sh/concepts/pro/meta-watchdog/) that watches Baldur itself.
+See the full [OSS vs PRO capability matrix](https://baldur.sh/concepts/oss-vs-pro/) and
 [pricing](https://baldur.sh/pricing/).
 
 ## Early access
@@ -215,21 +218,21 @@ production to work with directly. If that is you, the details and how to reach
 me are in [Discussions](https://github.com/baldurhq/baldur/discussions).
 
 How the project got here — including why it was nearly shelved in September
-2026: [retrospective (Korean)](POSTMORTEM.ko.md).
+2026: [retrospective (Korean)](https://github.com/baldurhq/baldur/blob/main/POSTMORTEM.ko.md).
 
 ## License
 
-Baldur is released under the Apache License 2.0 — see [LICENSE](LICENSE) and
-[NOTICE](NOTICE).
+Baldur is released under the Apache License 2.0 — see [LICENSE](https://github.com/baldurhq/baldur/blob/main/LICENSE) and
+[NOTICE](https://github.com/baldurhq/baldur/blob/main/NOTICE).
 
 ## Contributing
 
 Contributions are welcome under the Apache License 2.0. Pull requests are
 accepted through a sign-off-based [DCO](https://developercertificate.org/) flow —
-see [CONTRIBUTING.md](CONTRIBUTING.md) for the full model.
+see [CONTRIBUTING.md](https://github.com/baldurhq/baldur/blob/main/CONTRIBUTING.md) for the full model.
 
 - **Ideas, or showing what you built** →
   [Discussions](https://github.com/baldurhq/baldur/discussions).
 - **Bugs / feature requests / docs** → open an issue or a pull request.
-- **Security** → see [SECURITY.md](SECURITY.md) (no public issues for vulnerabilities).
+- **Security** → see [SECURITY.md](https://github.com/baldurhq/baldur/blob/main/SECURITY.md) (no public issues for vulnerabilities).
 - **Usage questions / commercial** → `support@baldur.sh`.
