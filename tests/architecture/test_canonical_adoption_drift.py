@@ -1,4 +1,4 @@
-"""G55/G56/G57/G73 — canonical-module adoption may not re-drift (OSS halves).
+"""G55/G56/G57/G73/G88 — canonical-module adoption may not re-drift (OSS halves).
 
 A recurring audit signature: a canonical implementation exists (exponential
 backoff, client-IP extraction, the UTC time source), later code re-implemented
@@ -32,24 +32,37 @@ Detected idioms:
    positional argument is the constant ``"baldur_pro"`` / ``"baldur_dormant"``.
    Tier-resolved composition must key off one predicate, and tier simulation in
    tests must have one patch point; a re-inlined probe forks both.
+5. **G88 — bare lock construction** (canonical:
+   ``baldur.core.process_utils.fork_safe_lock`` / ``fork_safe_rlock``): a
+   reference to ``threading.Lock`` / ``threading.RLock`` in a value position —
+   the constructor call, or the callable passed as a value
+   (``default_factory=threading.Lock``) — through any alias of the
+   ``threading`` module or of a ``from threading import Lock / RLock`` name. A
+   lock built outside the factory is not repaired in a fork child, so a parent
+   thread holding it at the fork instant leaves the child blocked forever on
+   its first acquisition.
 
 By construction the scanners do NOT flag: docstrings and comments (invisible
 to the AST scan — markdown bold like ``**counter's**`` never parses as a
 power, and prose mentions of a header or module name are not code
 constants), non-attempt exponent math (``std ** 2``), growth-with-cap on
 non-delay state (an adaptive rate multiplier), HTTP-style header names
-(``"X-Forwarded-For"``), ``django.utils.timezone`` imports, and a private
-module path merely *named* as data (a registry slot-factory target).
+(``"X-Forwarded-For"``), ``django.utils.timezone`` imports, a private
+module path merely *named* as data (a registry slot-factory target), and a lock
+type used as an annotation (``_lock: threading.Lock = fork_safe_lock()``,
+``-> threading.RLock``) or another module's ``Lock`` (``asyncio.Lock()``,
+``multiprocessing.Lock()``).
 
 ENFORCED-EMPTY: there is no baseline budget. A new inline backoff triad,
-forwarded-header read, parallel now-module reference, or re-inlined tier probe
-is migrated to compose the canonical, never baselined.
+forwarded-header read, parallel now-module reference, re-inlined tier probe, or
+bare lock is migrated to compose the canonical, never baselined.
 
 Architectural fitness function rule registry:
 ``ARCHITECTURE.md#g55-backoff-primitive-drift`` /
 ``ARCHITECTURE.md#g56-client-ip-extraction-drift`` /
 ``ARCHITECTURE.md#g57-time-source-drift`` /
-``ARCHITECTURE.md#g73-pro-probe-drift``
+``ARCHITECTURE.md#g73-pro-probe-drift`` /
+``ARCHITECTURE.md#g88-fork-safe-lock-drift``
 """
 
 from __future__ import annotations
@@ -83,6 +96,12 @@ _FORWARDED_HEADER_LITERALS = frozenset({"HTTP_X_FORWARDED_FOR", "HTTP_X_REAL_IP"
 _TIER_PROBE_ALLOWED_ORIGIN = "utils/tier.py"
 
 _PRIVATE_DISTRIBUTIONS = frozenset({"baldur_pro", "baldur_dormant"})
+
+# The one module allowed to construct a raw threading lock (it registers each
+# one for the fork-child repair).
+_LOCK_FACTORY_ALLOWED_ORIGIN = "core/process_utils.py"
+
+_THREADING_LOCK_NAMES = frozenset({"Lock", "RLock"})
 
 
 # ---------------------------------------------------------------------------
@@ -318,6 +337,90 @@ def scan_pro_probe_source(
     return sorted(hits)
 
 
+def _annotation_node_ids(tree: ast.AST) -> set[int]:
+    """Return the ids of every node inside an annotation subtree.
+
+    Annotations name the lock *type* of a slot the factory fills
+    (``_lock: threading.Lock = fork_safe_lock()``, ``-> threading.RLock``); they
+    construct nothing and stay after a conversion, so they are not value
+    positions. String annotations sit inside the same subtrees.
+    """
+    roots: list[ast.AST] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AnnAssign):
+            roots.append(node.annotation)
+        elif isinstance(node, ast.arg) and node.annotation is not None:
+            roots.append(node.annotation)
+        elif (
+            isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+            and node.returns is not None
+        ):
+            roots.append(node.returns)
+    return {id(n) for root in roots for n in ast.walk(root)}
+
+
+def scan_bare_lock_source(
+    source: str, filename: str = "<planted>"
+) -> list[tuple[int, str]]:
+    """Return ``(lineno, kind)`` bare ``threading.Lock`` / ``RLock`` references.
+
+    Tracks every alias the module binds — ``import threading [as t]`` and
+    ``from threading import Lock | RLock [as L]`` — and flags a load of the
+    lock callable through one of them anywhere outside an annotation: the
+    constructor call (``kind`` ends in ``-call``) and the callable handed on as
+    a value, such as a dataclass ``default_factory`` (``-value``).
+    """
+    try:
+        tree = ast.parse(source, filename=filename)
+    except SyntaxError:
+        return []
+    threading_aliases: set[str] = set()
+    lock_aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "threading":
+                    threading_aliases.add(alias.asname or "threading")
+        elif (
+            isinstance(node, ast.ImportFrom)
+            and node.module == "threading"
+            and node.level == 0
+        ):
+            for alias in node.names:
+                if alias.name in _THREADING_LOCK_NAMES:
+                    lock_aliases[alias.asname or alias.name] = alias.name
+    if not threading_aliases and not lock_aliases:
+        return []
+    skipped = _annotation_node_ids(tree)
+    call_funcs = {
+        id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)
+    }
+    hits: set[tuple[int, str]] = set()
+    for node in ast.walk(tree):
+        if id(node) in skipped:
+            continue
+        name = None
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.ctx, ast.Load)
+            and isinstance(node.value, ast.Name)
+            and node.value.id in threading_aliases
+            and node.attr in _THREADING_LOCK_NAMES
+        ):
+            name = node.attr
+        elif (
+            isinstance(node, ast.Name)
+            and isinstance(node.ctx, ast.Load)
+            and node.id in lock_aliases
+        ):
+            name = lock_aliases[node.id]
+        if name is None:
+            continue
+        shape = "call" if id(node) in call_funcs else "value"
+        hits.add((node.lineno, f"threading-{name}-{shape}"))
+    return sorted(hits)
+
+
 def scan_tree(
     root: Path,
     scan: Callable[[str, str], list[tuple[int, str]]],
@@ -410,6 +513,21 @@ class TestProProbeAdoptionDrift:
             "baldur.utils.tier.is_pro_installed instead of re-inlining "
             "find_spec — tier composition must key off one predicate, and "
             "tests must have one patch point for tier simulation.\n" + _format(hits)
+        )
+
+
+class TestForkSafeLockAdoptionDrift:
+    """G88 — no bare ``threading.Lock`` / ``RLock`` outside the lock factory."""
+
+    def test_no_bare_lock_outside_canonical(self):
+        hits = scan_tree(_SRC_ROOT, scan_bare_lock_source, _LOCK_FACTORY_ALLOWED_ORIGIN)
+        assert not hits, (
+            f"G88: {len(hits)} bare threading.Lock / threading.RLock "
+            f"reference(s) outside {_LOCK_FACTORY_ALLOWED_ORIGIN}. Construct "
+            "the lock with baldur.core.process_utils.fork_safe_lock() / "
+            "fork_safe_rlock() — a lock built elsewhere is not repaired in a "
+            "fork child, which then blocks forever on it if a parent thread "
+            "held it at the fork instant.\n" + _format(hits)
         )
 
 
@@ -727,6 +845,103 @@ class TestG73Scanner:
         assert scan_pro_probe_source("def f(:\n") == []
 
 
+class TestG88Scanner:
+    """`scan_bare_lock_source` flags lock constructions outside the factory."""
+
+    @pytest.mark.parametrize(
+        ("source", "expected", "note"),
+        [
+            pytest.param(
+                "import threading\n_lock = threading.Lock()\n",
+                1,
+                "module-level Lock constructor call",
+                id="lock-call",
+            ),
+            pytest.param(
+                "import threading\n"
+                "class C:\n"
+                "    def __init__(self):\n"
+                "        self._lock = threading.RLock()\n",
+                1,
+                "RLock constructor call in __init__",
+                id="rlock-call",
+            ),
+            pytest.param(
+                "import threading as _threading\n_lock = _threading.Lock()\n",
+                1,
+                "an aliased threading module is the same constructor",
+                id="aliased-module",
+            ),
+            pytest.param(
+                "from threading import Lock\n_lock = Lock()\n",
+                1,
+                "a from-import of Lock is the same constructor",
+                id="from-import",
+            ),
+            pytest.param(
+                "from threading import RLock as _R\n_lock = _R()\n",
+                1,
+                "an aliased from-import of RLock is the same constructor",
+                id="aliased-from-import",
+            ),
+            pytest.param(
+                "import threading\n"
+                "from dataclasses import dataclass, field\n"
+                "@dataclass\n"
+                "class C:\n"
+                "    lock: object = field(default_factory=threading.Lock)\n",
+                1,
+                "the callable handed on as a value constructs a lock later",
+                id="default-factory-value",
+            ),
+            pytest.param(
+                "import threading\n"
+                "from baldur.core.process_utils import fork_safe_lock\n"
+                "_lock: threading.Lock = fork_safe_lock()\n",
+                0,
+                "the factory call is allowed; the annotation names a type",
+                id="neg-annotated-factory",
+            ),
+            pytest.param(
+                "import threading\ndef f() -> threading.RLock:\n    ...\n",
+                0,
+                "a return annotation constructs nothing",
+                id="neg-return-annotation",
+            ),
+            pytest.param(
+                "import threading\ndef f(lock: threading.Lock) -> None:\n    ...\n",
+                0,
+                "an argument annotation constructs nothing",
+                id="neg-arg-annotation",
+            ),
+            pytest.param(
+                "import asyncio\nimport multiprocessing\n"
+                "a = asyncio.Lock()\nb = multiprocessing.Lock()\n",
+                0,
+                "other modules' Lock types are out of scope",
+                id="neg-other-modules",
+            ),
+            pytest.param(
+                'import threading\ndef f():\n    """Guarded by threading.Lock()."""\n',
+                0,
+                "docstring prose is not a call",
+                id="neg-docstring-mention",
+            ),
+            pytest.param(
+                "import threading\nt = threading.Thread(target=print)\n",
+                0,
+                "other threading callables are out of scope",
+                id="neg-other-threading-callable",
+            ),
+        ],
+    )
+    def test_scan_flags_expected(self, source: str, expected: int, note: str):
+        assert len(scan_bare_lock_source(source)) == expected, note
+
+    def test_unparseable_source_returns_empty(self):
+        assert scan_bare_lock_source("def f(:\n") == []
+
+
 class TestScanTree:
     """`scan_tree` honors the allowed-origin skip for every scanner."""
 
@@ -743,14 +958,17 @@ class TestScanTree:
 __all__ = [
     "TestBackoffAdoptionDrift",
     "TestClientIpAdoptionDrift",
+    "TestForkSafeLockAdoptionDrift",
     "TestG55Scanner",
     "TestG56Scanner",
     "TestG57Scanner",
     "TestG73Scanner",
+    "TestG88Scanner",
     "TestProProbeAdoptionDrift",
     "TestScanTree",
     "TestTimeSourceAdoptionDrift",
     "scan_backoff_source",
+    "scan_bare_lock_source",
     "scan_client_ip_source",
     "scan_pro_probe_source",
     "scan_timezone_source",

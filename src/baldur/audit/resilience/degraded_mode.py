@@ -6,12 +6,12 @@ Manages degraded mode operation when primary backends fail.
 
 from __future__ import annotations
 
-import threading
 from datetime import datetime
 from typing import Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock, fork_safe_rlock
 from baldur.utils.time import utc_now
 
 from .circuit_breaker import CircuitBreakerRegistry
@@ -36,7 +36,7 @@ class DegradedModeManager:
     """
 
     _instance: DegradedModeManager | None = None
-    _lock = threading.Lock()
+    _lock = fork_safe_lock()
 
     def __init__(self):
         self._degraded = False
@@ -44,7 +44,7 @@ class DegradedModeManager:
         self._degraded_reason: str | None = None
         self._auto_recovery_enabled = True
         self._check_interval_seconds = 60
-        self._manager_lock = threading.RLock()
+        self._manager_lock = fork_safe_rlock()
 
         self._metrics = AuditMetrics.get_instance()
         self._syslog = SyslogFallback.get_instance()

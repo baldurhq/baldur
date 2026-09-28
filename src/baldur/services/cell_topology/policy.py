@@ -22,7 +22,6 @@ Dependencies:
 
 from __future__ import annotations
 
-import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -31,6 +30,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.services.event_bus.bus.event_types import EventType
 from baldur.services.event_bus.emitter import EventEmitterMixin
 from baldur.utils.time import utc_now
@@ -747,7 +747,7 @@ class CellEvacuationPolicy(EventEmitterMixin):
 # =============================================================================
 
 _policy: CellEvacuationPolicy | None = None
-_policy_lock = threading.Lock()
+_policy_lock = fork_safe_lock()
 
 
 def get_cell_evacuation_policy() -> CellEvacuationPolicy:

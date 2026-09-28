@@ -14,11 +14,11 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
-import threading
 from collections.abc import Callable
 from typing import Any, TypeVar
 
 from baldur.core.exceptions import RateLimitExceeded
+from baldur.core.process_utils import fork_safe_lock
 from baldur.services.rate_limit.sliding_window import SlidingWindowLimiter
 
 __all__ = ["rate_limit"]
@@ -31,7 +31,7 @@ T = TypeVar("T")
 # Sharing one SlidingWindowLimiter across distinct windows is unsafe because
 # _cleanup_expired prunes ALL keys using the current call's window.
 _LIMITERS: dict[int, SlidingWindowLimiter] = {}
-_LIMITERS_LOCK = threading.Lock()
+_LIMITERS_LOCK = fork_safe_lock()
 
 
 def _get_limiter(window_seconds: int) -> SlidingWindowLimiter:

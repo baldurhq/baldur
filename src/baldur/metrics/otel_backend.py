@@ -31,12 +31,12 @@ ensuring MetricsBackend Protocol compatibility.
 
 from __future__ import annotations
 
-import threading
 from contextlib import contextmanager
 from datetime import datetime
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.metrics.safe_gauge import clamp_percentage
 from baldur.utils.domain_validation import FALLBACK_DOMAIN
 from baldur.utils.time import utc_now
@@ -48,7 +48,7 @@ class _GaugeStore:
     """Thread-safe value store for ObservableGauge callbacks."""
 
     def __init__(self):
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
         self._values: dict[tuple, float] = {}
 
     def set(self, value: float, attributes: dict | None = None) -> None:

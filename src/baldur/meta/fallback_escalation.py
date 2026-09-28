@@ -13,13 +13,13 @@ Capabilities:
 from __future__ import annotations
 
 import os
-import threading
 from pathlib import Path
 from typing import Any
 
 import structlog
 
 from baldur.core.file_utils import safe_unlink
+from baldur.core.process_utils import fork_safe_rlock
 from baldur.utils.serialization import fast_dumps_str, fast_loads
 from baldur.utils.time import utc_now
 
@@ -77,7 +77,7 @@ class FallbackEscalationHandler:
         """
         self._log_path = Path(log_path) if log_path else DEFAULT_ESCALATION_LOG_PATH
         self._lock = (
-            threading.RLock()
+            fork_safe_rlock()
         )  # reentrant: drain_to_file calls _write_to_file while holding it
         self._memory_buffer: list[dict[str, Any]] = []
         self._max_buffer_size = max_buffer_size

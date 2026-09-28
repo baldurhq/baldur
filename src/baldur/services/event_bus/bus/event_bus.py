@@ -14,6 +14,7 @@ from typing import Any, Literal
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock, fork_safe_rlock
 from baldur.core.shutdown_coordinator import ShutdownHandler, TrackedRequest
 
 from .event_types import EventPriority, EventType
@@ -70,20 +71,20 @@ class BaldurEventBus:
     # attribute lookup gives subclasses their own slot per #479's
     # subclass-safety contract.
     _executor: ThreadPoolExecutor | None = None
-    _executor_lock = threading.Lock()
+    _executor_lock = fork_safe_lock()
     # Process that built _executor. An inherited pool is non-None and looks
     # healthy, so the fork check has to be a pid comparison — see _get_executor.
     _executor_pid: int | None = None
 
     def __init__(self) -> None:
         self._subscriptions: dict[EventType, list[EventSubscription]] = {}
-        self._subscription_lock = threading.RLock()
+        self._subscription_lock = fork_safe_rlock()
         self._max_history = self._load_max_history()
         self._event_history: deque[dict[str, Any]] = deque(maxlen=self._max_history)
         self._handler_timeout = self._load_handler_timeout()
         self._dispatch_mode = self._load_dispatch_mode()
         self._timeout_count = 0
-        self._history_lock = threading.Lock()
+        self._history_lock = fork_safe_lock()
         self._enabled = True
         self._handlers_registered = False
 
@@ -150,7 +151,7 @@ class BaldurEventBus:
             # held across a pool construction plus a settings load, wide enough
             # for a fork to inherit it owned by a thread that no longer exists,
             # and acquiring that would hang the first dispatch.
-            cls._executor_lock = threading.Lock()
+            cls._executor_lock = fork_safe_lock()
             cls._executor = None
             cls._executor_pid = os.getpid()
         # Every read below goes through the local, and the local is what is

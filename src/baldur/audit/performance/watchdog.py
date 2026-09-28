@@ -10,6 +10,8 @@ from typing import Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_rlock
+
 logger = structlog.get_logger()
 
 
@@ -64,7 +66,7 @@ class PendingSequenceWatchdog:
 
         # Track local pending sequences
         self._local_pending: dict[int, float] = {}  # seq -> monotonic_time
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
 
         # Background thread
         self._thread: threading.Thread | None = None

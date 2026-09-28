@@ -19,6 +19,7 @@ from typing import Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_rlock
 from baldur.utils.time import utc_now
 
 logger = structlog.get_logger()
@@ -77,7 +78,7 @@ class WatchdogStateStore:
         self._local_failures: dict[str, int] = {}  # fallback storage
         self._local_cooldowns: dict[str, float] = {}
         self._local_last_loop: datetime | None = None
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
         # Detached liveness-write state: at most one Redis write is in flight,
         # and the caller never waits for it.
         self._liveness_write_in_flight = False

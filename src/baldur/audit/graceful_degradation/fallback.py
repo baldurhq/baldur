@@ -8,13 +8,13 @@ Contains:
 from __future__ import annotations
 
 import os
-import threading
 from datetime import timedelta
 from typing import Any
 
 import structlog
 
 from baldur.audit.graceful_degradation.enums import FallbackConfig
+from baldur.core.process_utils import fork_safe_rlock
 from baldur.utils.serialization import fast_dumps_str, fast_loads
 from baldur.utils.time import utc_now
 
@@ -66,7 +66,7 @@ class HashChainFallbackChain:
         self._redis_primary = redis_primary
         self._redis_replica = redis_replica
         self._config = config or FallbackConfig()
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
 
         # Local fallback state
         self._local_sequence = 0

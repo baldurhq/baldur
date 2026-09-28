@@ -19,6 +19,7 @@ from typing import IO, Any, Literal, TypedDict
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_rlock
 from baldur.utils.serialization import fast_dumps_str, fast_loads
 
 logger = structlog.get_logger()
@@ -58,7 +59,7 @@ class JSONLWriter:
     ):
         self._path = Path(file_path)
         self._handle: IO | None = None
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
         self._fsync = fsync
         self._max_size = max_size_bytes
         self._current_size: int = 0

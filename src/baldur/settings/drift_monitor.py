@@ -21,9 +21,10 @@ from __future__ import annotations
 
 import hashlib
 import os
-import threading
 
 import structlog
+
+from baldur.core.process_utils import fork_safe_lock
 
 logger = structlog.get_logger()
 
@@ -76,7 +77,7 @@ class ConfigDriftMonitor:
     """
 
     _instance: ConfigDriftMonitor | None = None
-    _lock = threading.Lock()
+    _lock = fork_safe_lock()
 
     def __new__(cls) -> ConfigDriftMonitor:
         """Singleton pattern."""
@@ -91,7 +92,7 @@ class ConfigDriftMonitor:
     def _init(self) -> None:
         """Initialize internal state."""
         self._env_hashes: dict[str, str] = {}
-        self._hash_lock = threading.Lock()
+        self._hash_lock = fork_safe_lock()
         self._cache_functions: dict[str, callable] = {}
 
     def register_cache_function(self, config_type: str, func: callable) -> None:

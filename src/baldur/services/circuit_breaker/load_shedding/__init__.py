@@ -17,7 +17,7 @@ Usage:
 
 from __future__ import annotations
 
-import threading
+from baldur.core.process_utils import fork_safe_lock
 
 # ============================================================
 # Dashboard
@@ -62,11 +62,11 @@ from .shedding_models import (
 # ============================================================
 
 _manager: LoadSheddingManager | None = None
-_manager_lock = threading.Lock()
+_manager_lock = fork_safe_lock()
 _middleware: LoadSheddingMiddleware | None = None
-_middleware_lock = threading.Lock()
+_middleware_lock = fork_safe_lock()
 _dashboard: LoadSheddingDashboard | None = None
-_dashboard_lock = threading.Lock()
+_dashboard_lock = fork_safe_lock()
 
 
 def get_load_shedding_manager() -> LoadSheddingManager:

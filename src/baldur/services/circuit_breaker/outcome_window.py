@@ -21,9 +21,10 @@ breaker would not perform.
 
 from __future__ import annotations
 
-import threading
 from collections import deque
 from typing import TYPE_CHECKING
+
+from baldur.core.process_utils import fork_safe_lock
 
 if TYPE_CHECKING:
     from .config import CircuitBreakerConfig
@@ -81,7 +82,7 @@ class OutcomeWindow:
     """
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
         self._windows: dict[str, deque[int]] = {}
         self._epochs: dict[str, int] = {}
         self._writes_in_flight: dict[str, int] = {}

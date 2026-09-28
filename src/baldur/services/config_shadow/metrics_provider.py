@@ -9,9 +9,10 @@ time range, so it defines its own provider contract here.
 
 from __future__ import annotations
 
-import threading
 from datetime import datetime
 from typing import Protocol, runtime_checkable
+
+from baldur.core.process_utils import fork_safe_lock
 
 __all__ = [
     "MockTimeSeriesProvider",
@@ -232,7 +233,7 @@ class MockTimeSeriesProvider:
 
 _metrics_provider: TimeSeriesMetricsProvider | None = None
 _metrics_provider_registered = False
-_metrics_provider_lock = threading.Lock()
+_metrics_provider_lock = fork_safe_lock()
 
 
 def get_metrics_provider() -> TimeSeriesMetricsProvider:

@@ -8,10 +8,11 @@ once the system recovers.
 
 from __future__ import annotations
 
-import threading
 from collections.abc import Callable
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
+
+from baldur.core.process_utils import fork_safe_lock, fork_safe_rlock
 
 if TYPE_CHECKING:
     from baldur.audit.resilience.buffer_protocol import AuditBufferProtocol
@@ -50,7 +51,7 @@ class InMemoryAuditBuffer:
     """
 
     _instance: InMemoryAuditBuffer | None = None
-    _lock = threading.Lock()
+    _lock = fork_safe_lock()
 
     # Legacy constants for backward compatibility
     MAX_ENTRIES = 10_000
@@ -70,7 +71,7 @@ class InMemoryAuditBuffer:
                 ResilientRecorderSettings)
         """
         self._buffer: list[dict[str, Any]] = []
-        self._buffer_lock = threading.RLock()
+        self._buffer_lock = fork_safe_rlock()
         self._last_flush_attempt: datetime | None = None
         self._flush_failures: int = 0
         self._total_dropped: int = 0

@@ -24,6 +24,7 @@ from typing import Any
 import structlog
 
 from baldur.core.exceptions import BaldurError
+from baldur.core.process_utils import fork_safe_lock
 from baldur.utils.time import utc_now
 
 try:
@@ -225,7 +226,7 @@ class RequestTracker:
         )
 
         self._requests: dict[str, TrackedRequest] = {}
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
         self._max_age = (
             max_request_age_seconds
             if max_request_age_seconds is not None
@@ -380,13 +381,13 @@ class GracefulShutdownCoordinator:
         self._phase = ShutdownPhase.RUNNING
         self._shutdown_started_at: datetime | None = None
         self._shutdown_thread: threading.Thread | None = None
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
 
         # Signal-lifecycle state. _signal_once is the non-blocking
         # test-and-set the installed handlers dispatch on (first vs
         # subsequent delivery); _exit_signum is armed by the first
         # defer-exit delivery and consumed by the drain thread.
-        self._signal_once = threading.Lock()
+        self._signal_once = fork_safe_lock()
         self._exit_signum: int | None = None
 
         # Stats

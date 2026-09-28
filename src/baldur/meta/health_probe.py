@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock, fork_safe_rlock
 from baldur.interfaces.repositories import CircuitBreakerStateEnum
 from baldur.meta.config import MetaWatchdogSettings, get_meta_watchdog_settings
 from baldur.utils.time import utc_now
@@ -950,7 +951,7 @@ class HealthProbeManager:
         """
         self._settings = settings or get_meta_watchdog_settings()
         self._probes = probes if probes is not None else self._create_default_probes()
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
         self._last_results: dict[str, ProbeResult] = {}
         self._running = False
         self._worker: threading.Thread | None = None
@@ -1255,7 +1256,7 @@ class HealthProbeManager:
         with self._lock:
             lock = self._single_flight_locks.get(component_name)
             if lock is None:
-                lock = threading.Lock()
+                lock = fork_safe_lock()
                 self._single_flight_locks[component_name] = lock
             return lock
 

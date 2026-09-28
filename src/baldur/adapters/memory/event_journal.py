@@ -7,10 +7,9 @@ Follows the InMemoryCircuitBreakerStateRepository (adapters/memory/circuit_break
 
 from __future__ import annotations
 
-import threading
-
 import structlog
 
+from baldur.core.process_utils import fork_safe_rlock
 from baldur.interfaces.event_journal import (
     EventJournalRepository,
     JournalEntry,
@@ -30,7 +29,7 @@ class InMemoryEventJournalRepository(EventJournalRepository):
         max_query_limit: int = 10000,
     ):
         self._entries: list[JournalEntry] = []
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
         self._next_sequence = 1
         self._max_entries = max_entries
         self._max_query_limit = max_query_limit

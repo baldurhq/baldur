@@ -11,10 +11,11 @@ Usage:
 
 from __future__ import annotations
 
-import threading
 from typing import TYPE_CHECKING, Any
 
 import structlog
+
+from baldur.core.process_utils import fork_safe_lock
 
 if TYPE_CHECKING:
     from baldur.adapters.celery.handlers.actor_context_handler import (
@@ -63,7 +64,7 @@ logger = structlog.get_logger()
 # Module state
 # ---------------------------------------------------------------------------
 _signals_connected: bool = False
-_setup_lock = threading.Lock()
+_setup_lock = fork_safe_lock()
 
 # Handler instances (created on setup, cleared on disconnect)
 _failure_handler: FailureHandler | None = None

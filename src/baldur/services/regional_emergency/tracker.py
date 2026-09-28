@@ -22,13 +22,13 @@ Code reference:
 
 from __future__ import annotations
 
-import threading
 import time
 from datetime import timedelta
 from typing import Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock, fork_safe_rlock
 from baldur.models.emergency import EmergencyLevel, EmergencyScope, ScopedEmergencyState
 from baldur.services.event_bus.emitter import EventEmitterMixin
 from baldur.utils.jitter import calculate_jitter
@@ -142,7 +142,7 @@ class NamespacedEmergencyTracker(EventEmitterMixin):
         self._backend = backend
         self._atomic_query = atomic_query
         self._audit_trail = audit_trail
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
         self._subscribed = False
 
         # Local cache (reduces network round trips)
@@ -692,7 +692,7 @@ class NamespacedEmergencyTracker(EventEmitterMixin):
 # =============================================================================
 
 _namespaced_tracker: NamespacedEmergencyTracker | None = None
-_tracker_lock = threading.Lock()
+_tracker_lock = fork_safe_lock()
 
 
 def get_namespaced_emergency_tracker() -> NamespacedEmergencyTracker:

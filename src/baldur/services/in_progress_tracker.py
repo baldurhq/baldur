@@ -11,10 +11,11 @@ Usage:
 
 from __future__ import annotations
 
-import threading
 from collections import defaultdict
 
 import structlog
+
+from baldur.core.process_utils import fork_safe_lock
 
 logger = structlog.get_logger()
 
@@ -40,7 +41,7 @@ class InProgressTracker:
         if self._initialized:
             return
         self._initialized = True
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
         self._counters: dict[str, int] = defaultdict(int)
 
     def count_in_progress(self, config_type: str) -> int:

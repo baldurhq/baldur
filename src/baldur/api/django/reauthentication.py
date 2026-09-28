@@ -14,7 +14,6 @@ Key Features:
 
 from __future__ import annotations
 
-import threading
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -24,6 +23,7 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.utils.time import utc_now
 
 if TYPE_CHECKING:
@@ -292,7 +292,7 @@ class SessionBasedReauthProvider(ReauthenticationProvider):
 
 
 _provider_instance: ReauthenticationProvider | None = None
-_provider_instance_lock = threading.Lock()
+_provider_instance_lock = fork_safe_lock()
 
 
 def get_reauthentication_provider() -> ReauthenticationProvider:

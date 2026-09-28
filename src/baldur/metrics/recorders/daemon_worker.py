@@ -32,12 +32,13 @@ Per impl 489 D2 + D8.
 
 from __future__ import annotations
 
-import threading
+import os
 import time
 from typing import cast
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.meta.daemon_worker import DaemonWorkerHandle
 
 logger = structlog.get_logger()
@@ -67,7 +68,7 @@ except ImportError:
 # Reads inside ``collect()`` snapshot the dict via ``list(...)`` so a
 # concurrent register/unregister does not mutate the iterator mid-collection.
 _handle_registry: dict[str, DaemonWorkerHandle] = {}
-_registry_lock = threading.Lock()
+_registry_lock = fork_safe_lock()
 
 # Collector singleton — registered with prometheus REGISTRY exactly once
 # per process. Tracked as a module-level slot so reset_metrics() / repeat
@@ -147,10 +148,32 @@ def unregister_daemon_worker(name: str) -> None:
         _handle_registry.pop(name, None)
 
 
+def _runs_only_in_another_process(handle: DaemonWorkerHandle) -> bool:
+    """Return True for a parent-only worker's handle seen from a fork child.
+
+    Such a worker's thread exists only in the process that constructed the
+    handle, so a forked process that inherited the entry must neither report
+    it nor respawn it. Compared with ``is True`` so a test double that answers
+    every attribute is never mistaken for a flagged handle.
+    """
+    if getattr(handle, "fork_source_only", False) is not True:
+        return False
+    return getattr(handle, "owner_pid", None) != os.getpid()
+
+
 def get_registered_daemon_workers() -> dict[str, DaemonWorkerHandle]:
-    """Snapshot the handle registry for diagnostics or test assertions."""
+    """Snapshot the handle registry for diagnostics or test assertions.
+
+    Leaves out a ``fork_source_only`` handle in every process but the one that
+    constructed it: a fork child inherits the entry, never the thread.
+    """
     with _registry_lock:
-        return dict(_handle_registry)
+        snapshot = list(_handle_registry.items())
+    return {
+        name: handle
+        for name, handle in snapshot
+        if not _runs_only_in_another_process(handle)
+    }
 
 
 def record_daemon_worker_restart(name: str) -> None:
@@ -192,6 +215,8 @@ class _DaemonWorkerCollector:
 
         now = time.monotonic()
         for name, handle in snapshot:
+            if _runs_only_in_another_process(handle):
+                continue
             try:
                 alive = 1.0 if handle.thread.is_alive() else 0.0
             except Exception:

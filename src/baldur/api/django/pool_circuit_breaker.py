@@ -31,6 +31,7 @@ import structlog
 from django.db import connections
 from django.http import JsonResponse
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.interfaces.repositories import CircuitBreakerStateEnum
 
 # Drift Detection metrics
@@ -57,7 +58,7 @@ class PoolCircuitBreaker:
 
     # Singleton instance
     _instance = None
-    _lock = threading.Lock()
+    _lock = fork_safe_lock()
 
     # State constants (canonical CircuitBreakerStateEnum values)
     CLOSED = CircuitBreakerStateEnum.CLOSED.value  # Normal
@@ -78,7 +79,7 @@ class PoolCircuitBreaker:
 
         self._initialized = True
         self._state: str = self.CLOSED
-        self._state_lock = threading.Lock()
+        self._state_lock = fork_safe_lock()
 
         # Settings resolved through the BALDUR_POOL_CB_ Pydantic settings layer.
         # Range validation (incl. the cache-interval bounds) is enforced at
@@ -106,7 +107,7 @@ class PoolCircuitBreaker:
             "_is_stale": True,  # v6.2.1: stale initially
         }
         # Lock for cache refresh (separate from request handling)
-        self._cache_lock = threading.Lock()
+        self._cache_lock = fork_safe_lock()
         self._background_thread = None
         self._stop_background = threading.Event()
         self._handle = None  # DaemonWorkerHandle (impl 489 D9)

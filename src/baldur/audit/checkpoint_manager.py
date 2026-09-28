@@ -31,7 +31,6 @@ import json
 import os
 import sys
 import tempfile
-import threading
 import time
 import warnings
 from dataclasses import dataclass
@@ -40,6 +39,7 @@ from typing import BinaryIO
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_rlock
 from baldur.core.serializable import SerializableMixin
 
 logger = structlog.get_logger()
@@ -131,7 +131,7 @@ class CheckpointManager:
 
         self._path = Path(checkpoint_path)
         self._sync_on_write = sync_on_write
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
 
         # Permission check and fallback
         if not self._verify_write_permission():

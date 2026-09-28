@@ -25,12 +25,12 @@ Usage:
 
 from __future__ import annotations
 
-import threading
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.utils.time import utc_now
 
 if TYPE_CHECKING:
@@ -56,9 +56,7 @@ class BaldurRecoveryLogger:
     def _lazy_init(self) -> None:
         """Lazy initialization."""
         if self._lock is None:
-            import threading
-
-            self._lock = threading.Lock()
+            self._lock = fork_safe_lock()
 
         if self._audit_logger is None:
             try:
@@ -272,7 +270,7 @@ class BaldurRecoveryLogger:
 
 # Singleton instance
 _recovery_logger: BaldurRecoveryLogger | None = None
-_recovery_logger_lock = threading.Lock()
+_recovery_logger_lock = fork_safe_lock()
 
 
 def get_recovery_logger() -> BaldurRecoveryLogger:

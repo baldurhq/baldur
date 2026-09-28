@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from baldur.core.backoff import ExponentialBackoff
+from baldur.core.process_utils import fork_safe_lock
 
 from .global_state import GlobalThrottleStateManager
 from .models import (
@@ -555,10 +556,9 @@ class ThrottleAwareBackoffCalculator:
 # Singleton
 # =============================================================================
 
-import threading
 
 _calculator: ThrottleAwareBackoffCalculator | None = None
-_calculator_lock = threading.Lock()
+_calculator_lock = fork_safe_lock()
 
 
 def get_backoff_calculator(

@@ -19,10 +19,10 @@ Delegates the window arithmetic to the shared
 from __future__ import annotations
 
 import logging
-import threading
 import time
 from dataclasses import dataclass
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.core.rate_limiting import SlidingWindowCounter
 
 __all__ = ["RateLimitState", "SlidingWindowLimiter"]
@@ -51,7 +51,7 @@ class SlidingWindowLimiter:
     def __init__(self, cleanup_interval: float = 60.0) -> None:
         self._cleanup_interval = cleanup_interval
         self._counter = SlidingWindowCounter(cleanup_interval=cleanup_interval)
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
         self._last_seen_window: int | None = None
 
     def check(

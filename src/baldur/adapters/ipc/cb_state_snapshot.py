@@ -47,6 +47,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.core.serializable import SerializableMixin
 
 if TYPE_CHECKING:
@@ -220,7 +221,7 @@ class CBStateSnapshot:
         self._file: BufferedRandom | None = None
         self._running = False
         self._update_thread: threading.Thread | None = None
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
         self._handle: DaemonWorkerHandle | None = None  # impl 489 D9
 
         # Statistics

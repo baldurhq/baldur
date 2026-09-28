@@ -7,12 +7,12 @@ RateController bottleneck.
 
 from __future__ import annotations
 
-import threading
 import time
 from collections.abc import Callable
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.scaling.config import (
     BackpressureSettings,
     get_backpressure_settings,
@@ -56,7 +56,7 @@ class CachedQueueSizeProvider:
 
         self._cached_value = 0
         self._last_fetch_time = 0.0
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
 
     def __call__(self) -> int:
         """

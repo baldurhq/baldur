@@ -22,12 +22,12 @@ back to a plain text field in the alert instead of a button.
 from __future__ import annotations
 
 import os
-import threading
 from dataclasses import dataclass
 from urllib.parse import urlencode
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.core.serializable import SerializableMixin
 from baldur.utils.url import absolutize_against_site_url
 
@@ -259,7 +259,7 @@ class ActionableAlertUrlBuilder:
 # =============================================================================
 
 _instance: ActionableAlertUrlBuilder | None = None
-_instance_lock = threading.Lock()
+_instance_lock = fork_safe_lock()
 
 
 def get_actionable_alert_url_builder() -> ActionableAlertUrlBuilder:

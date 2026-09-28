@@ -42,10 +42,11 @@ Design constraints that are load-bearing rather than stylistic:
 from __future__ import annotations
 
 import array
-import threading
 from collections.abc import Callable
 
 import structlog
+
+from baldur.core.process_utils import fork_safe_lock
 
 logger = structlog.get_logger()
 
@@ -148,7 +149,7 @@ class TimeBucketedOutcomeWindow:
         self._clock = clock
         self._cap_provider = cap_provider or _default_cap_provider
 
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
         self._keys: dict[str, _BucketRing] = {}
         self._cap = _MAX_OUTCOME_KEYS
         self._cap_epoch_warned = False
@@ -398,7 +399,7 @@ class TimeBucketedOutcomeWindow:
 # =============================================================================
 
 _window: TimeBucketedOutcomeWindow | None = None
-_window_lock = threading.Lock()
+_window_lock = fork_safe_lock()
 
 
 def get_call_outcome_window() -> TimeBucketedOutcomeWindow:

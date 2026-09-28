@@ -25,10 +25,9 @@ Usage:
 
 from __future__ import annotations
 
-import threading
-
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.utils.time import utc_now
 
 __all__ = [
@@ -78,7 +77,7 @@ class EventLoggingConfig:
 
     # Singleton instance
     _instance: EventLoggingConfig | None = None
-    _lock = threading.Lock()
+    _lock = fork_safe_lock()
 
     def __new__(cls) -> EventLoggingConfig:
         """Singleton pattern for global configuration."""
@@ -92,7 +91,7 @@ class EventLoggingConfig:
 
     def _init_defaults(self) -> None:
         """Initialize default values from environment or hardcoded defaults."""
-        self._runtime_lock = threading.Lock()
+        self._runtime_lock = fork_safe_lock()
 
         # Runtime-configurable values (API level)
         self._runtime_config: dict = {}

@@ -18,8 +18,7 @@ through a handler-layer chain (registry-first, OSS fallback), never the slot.
 
 from __future__ import annotations
 
-import threading
-
+from baldur.core.process_utils import fork_safe_lock
 from baldur.services.dlq_capture import DLQCaptureService
 from baldur.services.dlq_read.entry_operations import EntryOperationsMixin
 from baldur.services.dlq_read.list_operations import ListOperationsMixin
@@ -59,7 +58,7 @@ class DLQReadService(
 
 
 _read_service: DLQReadService | None = None
-_read_service_lock = threading.Lock()
+_read_service_lock = fork_safe_lock()
 
 
 def get_dlq_read_service() -> DLQReadService:

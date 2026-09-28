@@ -21,12 +21,12 @@ Configuration:
 
 from __future__ import annotations
 
-import threading
 from dataclasses import dataclass
 
 import structlog
 
 from baldur.audit.helpers import log_system_control_audit
+from baldur.core.process_utils import fork_safe_lock
 from baldur.core.serializable import SerializableMixin
 from baldur.core.state_backend import StateBackend, get_state_backend
 from baldur.services.event_bus.bus.event_types import EventPriority, EventType
@@ -128,7 +128,7 @@ class SystemControlManager(EventEmitterMixin):
     """
 
     _instance: SystemControlManager | None = None
-    _lock = threading.Lock()
+    _lock = fork_safe_lock()
 
     # EventEmitterMixin: event source identifier
     _event_source = "system_control"
@@ -145,11 +145,11 @@ class SystemControlManager(EventEmitterMixin):
         if self._initialized:
             return
 
-        self._state_lock = threading.Lock()
+        self._state_lock = fork_safe_lock()
         # Outer lock spanning refresh -> mutate -> save -> emit in
         # enable()/disable(), so same-process emission order equals commit
         # order. Readers (is_enabled/get_state) never take it.
-        self._flip_lock = threading.Lock()
+        self._flip_lock = fork_safe_lock()
         # Set when a state write to the backend failed; the local state is
         # then newer than the shared backend until a retry succeeds.
         # Annotated: this ``__init__`` carries no return type, so a bare

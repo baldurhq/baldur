@@ -7,11 +7,11 @@ Thread-safe in-memory storage for DLQ (Dead Letter Queue) entries.
 from __future__ import annotations
 
 import heapq
-import threading
 from datetime import datetime, timedelta
 from typing import Any
 
 from baldur.adapters.memory.base import _now
+from baldur.core.process_utils import fork_safe_rlock
 from baldur.dlq.helpers import compress_entries
 from baldur.interfaces.repositories import (
     DLQCompressedEntry,
@@ -74,7 +74,7 @@ class InMemoryFailedOperationRepository(FailedOperationRepository):
         # per-lookup int() conversion is scattered across the id-keyed methods.
         self._storage: dict[str, FailedOperationData] = {}
         self._next_id = 1
-        self._lock = threading.RLock()  # RLock for reentrant calls
+        self._lock = fork_safe_rlock()  # RLock for reentrant calls
 
         # Secondary indexes: ID sets by status, domain, and (status, domain)
         self._index_by_status: dict[str, set[str]] = {}

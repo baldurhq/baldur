@@ -8,13 +8,13 @@ provides unified status, and triggers recovery when possible.
 from __future__ import annotations
 
 import os
-import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock, fork_safe_rlock
 from baldur.utils.serialization import fast_dumps_str
 from baldur.utils.time import utc_now
 
@@ -49,7 +49,7 @@ class HashChainDegradationManager:
     """
 
     _instance: HashChainDegradationManager | None = None
-    _lock = threading.Lock()
+    _lock = fork_safe_lock()
 
     def __new__(cls, *args, **kwargs) -> HashChainDegradationManager:
         """Singleton pattern."""
@@ -80,7 +80,7 @@ class HashChainDegradationManager:
         self._redis = redis_client
         self._key_prefix = key_prefix
         self._wal_dir = Path(wal_dir) if wal_dir else Path("logs/audit/wal")
-        self._state_lock = threading.RLock()
+        self._state_lock = fork_safe_rlock()
 
         # Current state
         self._level = (

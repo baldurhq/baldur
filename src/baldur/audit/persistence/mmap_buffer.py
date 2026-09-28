@@ -25,13 +25,13 @@ import mmap
 import os
 import struct
 import sys
-import threading
 from pathlib import Path
 from typing import Any
 
 import structlog
 
 from baldur.core.exceptions import AuditError
+from baldur.core.process_utils import fork_safe_rlock
 from baldur.utils.serialization import fast_dumps, fast_loads
 
 logger = structlog.get_logger()
@@ -83,7 +83,7 @@ class MmapBuffer:
 
         self._file_path = Path(file_path)
         self._size_bytes = size_mb * 1024 * 1024
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
         self._mmap: mmap.mmap | None = None
         self._file: Any = None
         self._total_added: int = 0

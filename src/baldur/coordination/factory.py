@@ -10,7 +10,6 @@ kubernetes (``baldur_dormant.coordination.kubernetes_elector`` per doc
 
 from __future__ import annotations
 
-import threading
 from typing import Any
 
 import structlog
@@ -21,11 +20,12 @@ from baldur.coordination.config import (
     get_leader_election_settings,
 )
 from baldur.coordination.noop_elector import NoOpLeaderElector
+from baldur.core.process_utils import fork_safe_lock
 
 logger = structlog.get_logger()
 
 _electors: dict[str, LeaderElector] = {}
-_lock = threading.Lock()
+_lock = fork_safe_lock()
 
 
 def get_leader_elector(

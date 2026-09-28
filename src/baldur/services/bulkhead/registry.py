@@ -19,12 +19,12 @@ Usage:
 
 from __future__ import annotations
 
-import threading
 from typing import TYPE_CHECKING, cast
 
 import structlog
 
 from baldur.core.connection_health import ConnectionType
+from baldur.core.process_utils import fork_safe_lock
 from baldur.services.bulkhead.async_semaphore import AsyncSemaphoreBulkhead
 from baldur.services.bulkhead.base import Bulkhead, BulkheadState
 from baldur.services.bulkhead.exceptions import BulkheadNotFoundError
@@ -74,7 +74,7 @@ class BulkheadRegistry:
         self._settings = settings or get_bulkhead_settings()
         self._bulkheads: dict[str, Bulkhead] = {}
         self._async_bulkheads: dict[str, AsyncSemaphoreBulkhead] = {}
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
 
         # Register default bulkheads based on ConnectionType
         self._register_default_bulkheads()
@@ -405,7 +405,7 @@ class BulkheadRegistry:
 # =============================================================================
 
 _registry: BulkheadRegistry | None = None
-_registry_lock = threading.Lock()
+_registry_lock = fork_safe_lock()
 
 
 def get_bulkhead_registry() -> BulkheadRegistry:

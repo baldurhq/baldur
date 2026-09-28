@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import atexit
 import os
-import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -30,7 +29,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from baldur.audit.ring_buffer import RingBuffer, RingBufferStats
-from baldur.core.process_utils import fork_repaired
+from baldur.core.process_utils import fork_repaired, fork_safe_lock
 from baldur.services.dlq_outbox.worker import DLQOutboxWorker, DropWindow
 from baldur.settings.backpressure import BackpressureStrategy
 
@@ -119,19 +118,19 @@ class OutboxShutdownResult:
 # Module-level singleton state. The lifecycle is owned by ``baldur.init()``
 # (D7) and by ``reset_dlq_outbox`` for test isolation (D8).
 _outbox: Outbox | None = None
-_outbox_lock = threading.Lock()
+_outbox_lock = fork_safe_lock()
 
 # PID that built the singleton above. A mismatch means this process inherited
 # the outbox across ``fork()`` and must re-own it before using it.
 _outbox_origin_pid: int | None = None
-_outbox_repair_gate = threading.Lock()
+_outbox_repair_gate = fork_safe_lock()
 
 # Producer-side fail-open flag. Toggled by EventBus subscribers wired in
 # ``setup_dlq_outbox()`` (impl 489 D8): the cross-shape ``DaemonWorkerProbe``
 # emits ``DAEMON_WORKER_DIED`` on dead-thread detection (sets True) and
 # ``DAEMON_WORKER_RESPAWNED`` on successful auto-restart (sets False).
 _worker_dead: bool = False
-_worker_dead_lock = threading.Lock()
+_worker_dead_lock = fork_safe_lock()
 _worker_dead_coercions: int = 0
 _DLQ_OUTBOX_WORKER_NAME = "DLQOutboxWorker"
 # Set by the process teardown alongside ``_worker_dead`` and never cleared for
@@ -148,7 +147,7 @@ _teardown_started: bool = False
 # ``reset_dlq_outbox()`` behind the whole drain. A second caller blocks here and
 # receives the first caller's cached result, because that result is the terminal
 # report an exit hook logs — "ran nothing" would report zeros over a real drain.
-_shutdown_gate = threading.Lock()
+_shutdown_gate = fork_safe_lock()
 _shutdown_result: OutboxShutdownResult | None = None
 
 # The third exit path. A signalled stop drains through the coordinator's handler
@@ -159,7 +158,7 @@ _shutdown_result: OutboxShutdownResult | None = None
 # the same idempotent teardown; after either other path has run it, it returns
 # the cached result and does nothing.
 _exit_teardown_registered: bool = False
-_exit_teardown_lock = threading.Lock()
+_exit_teardown_lock = fork_safe_lock()
 
 # Floors carved out of the teardown budget. The dump is the safety net — it is
 # what turns "lost" into "on disk" — so the optimistic flush phase ahead of it
@@ -380,8 +379,8 @@ def _repair_if_forked() -> None:
         if inherited_pid is None or inherited_pid == os.getpid():
             return  # another thread finished the repair first
 
-        _outbox_lock = threading.Lock()
-        _worker_dead_lock = threading.Lock()
+        _outbox_lock = fork_safe_lock()
+        _worker_dead_lock = fork_safe_lock()
         _worker_dead = False
         _worker_dead_coercions = 0
         _teardown_started = False

@@ -40,7 +40,7 @@ import structlog
 
 from baldur.core.backoff import ExponentialBackoff
 from baldur.core.exceptions import ConfigurationError
-from baldur.core.process_utils import fork_repaired
+from baldur.core.process_utils import fork_repaired, fork_safe_lock, fork_safe_rlock
 from baldur.interfaces.audit_adapter import AuditEntry
 
 if TYPE_CHECKING:
@@ -186,7 +186,7 @@ class AuditSyncWorker:
     """
 
     _instance: AuditSyncWorker | None = None
-    _instance_lock = threading.Lock()
+    _instance_lock = fork_safe_lock()
 
     def __init__(
         self,
@@ -214,7 +214,7 @@ class AuditSyncWorker:
         self._checkpoint_strategy: CheckpointStorageStrategy | None = None
 
         self._stats = SyncStats()
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._running = False
@@ -246,7 +246,7 @@ class AuditSyncWorker:
         # Fork ownership: an instance constructed here is born owned, so the
         # repair no-ops until this object is inherited through fork().
         self._origin_pid: int = os.getpid()
-        self._repair_gate = threading.Lock()
+        self._repair_gate = fork_safe_lock()
 
         logger.info(
             "audit_sync_worker.initialized",
@@ -314,7 +314,7 @@ class AuditSyncWorker:
                 return  # another thread finished the repair first
 
             # Renew the lock BEFORE anything acquires it.
-            self._lock = threading.RLock()
+            self._lock = fork_safe_rlock()
             self._stop_event = threading.Event()
             self._thread = None
 

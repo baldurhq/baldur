@@ -27,7 +27,6 @@ Version: 1.0.0
 from __future__ import annotations
 
 import os
-import threading
 import time
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -35,6 +34,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from baldur.core.exceptions import ConfigurationError
+from baldur.core.process_utils import fork_safe_lock
 from baldur.utils.time import ensure_aware, from_iso_string
 
 if TYPE_CHECKING:
@@ -45,7 +45,7 @@ logger = structlog.get_logger()
 # 450 Phase 4: lifecycle / shutdown guards live on a runtime-scoped state
 # object so resetting the active ``BaldurRuntime`` (or swapping it for a test
 # fixture) drops the flags atomically.
-_lifecycle_lock = threading.Lock()
+_lifecycle_lock = fork_safe_lock()
 
 
 class _AuditLifecycleState:
@@ -365,7 +365,7 @@ def _start_sync_worker() -> None:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-_audit_shutdown_lock = threading.Lock()
+_audit_shutdown_lock = fork_safe_lock()
 
 # Stage budgets consumed by the flush below. Named because the ceiling on
 # waiting for a *concurrent* flush is derived from them: only the sync-worker

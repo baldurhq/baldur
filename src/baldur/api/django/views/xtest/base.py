@@ -20,7 +20,6 @@ Regional Scope:
 
 import os
 import re
-import threading
 import uuid
 from typing import Any
 
@@ -39,6 +38,7 @@ from baldur.audit.helpers import (
     log_xtest_injection_audit,
     log_xtest_operation_audit,
 )
+from baldur.core.process_utils import fork_safe_lock
 from baldur.core.test_mode_context import TestModeContext
 
 logger = structlog.get_logger()
@@ -779,7 +779,7 @@ def collect_system_snapshot() -> dict[str, Any]:  # noqa: C901, PLR0912
 # In-Memory Event Storage + Redis Persistence
 # =============================================================================
 
-_healing_events_lock = threading.Lock()
+_healing_events_lock = fork_safe_lock()
 _healing_events: list[dict[str, Any]] = []
 _max_events = 500
 

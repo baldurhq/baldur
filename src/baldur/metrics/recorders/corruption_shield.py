@@ -12,10 +12,9 @@ Metrics (2):
 
 from __future__ import annotations
 
-import threading
-
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.metrics.recorders.base import BaseMetricRecorder
 from baldur.metrics.registry import get_or_create_counter
 
@@ -47,7 +46,7 @@ class CorruptionShieldMetricRecorder(BaseMetricRecorder):
             "l2_violations": 0,
             "l3_violations": 0,
         }
-        self._stats_lock = threading.Lock()
+        self._stats_lock = fork_safe_lock()
 
     def record_validation(self, is_valid: bool, blocked: bool) -> None:
         """Record a validation result — updates both Prometheus and internal stats."""

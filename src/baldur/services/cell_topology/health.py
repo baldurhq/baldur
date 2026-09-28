@@ -17,7 +17,6 @@ Dependencies:
 from __future__ import annotations
 
 import json
-import threading
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -25,6 +24,7 @@ from urllib.parse import urlencode
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock, fork_safe_rlock
 from baldur.utils.http import safe_urlopen
 
 if TYPE_CHECKING:
@@ -89,7 +89,7 @@ class CellHealthAggregator:
         from baldur.settings.cell_topology import get_cell_topology_settings
 
         self._settings = settings or get_cell_topology_settings()
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
         self._snapshots: dict[str, CellHealthSnapshot] = {}
 
         # Prometheus API endpoint (precedence: settings -> ctor arg -> default)
@@ -560,7 +560,7 @@ class CellHealthAggregator:
 # =============================================================================
 
 _aggregator: CellHealthAggregator | None = None
-_aggregator_lock = threading.Lock()
+_aggregator_lock = fork_safe_lock()
 
 
 def get_cell_health_aggregator() -> CellHealthAggregator:

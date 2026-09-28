@@ -4,7 +4,6 @@ Performance Manager (Unified Access).
 Provides unified management for all performance optimization components.
 """
 
-import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -20,6 +19,7 @@ from baldur.audit.performance.batch_writer import (
 from baldur.audit.performance.lua_atomic import LuaAtomicHashChain
 from baldur.audit.performance.sampling import SamplingVerifier
 from baldur.audit.performance.watchdog import PendingSequenceWatchdog
+from baldur.core.process_utils import fork_safe_rlock
 
 logger = structlog.get_logger()
 
@@ -57,7 +57,7 @@ class HashChainPerformanceManager:
         self._redis = redis_client
         self._log_dir = Path(log_dir) if log_dir else Path("logs/audit")
         self._key_prefix = key_prefix
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
 
         # Lazy-initialized components
         self._lua_chain: LuaAtomicHashChain | None = None

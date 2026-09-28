@@ -15,6 +15,7 @@ from typing import Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.utils.time import utc_now
 
 from .constants import (
@@ -49,7 +50,7 @@ class PrecomputedCacheWorker:
     def __init__(self):
         self._timer: threading.Timer | None = None
         self._running = False
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
         self._compute_functions: dict[str, Callable[[], dict[str, Any]]] = {}
         self._last_refresh_at: datetime | None = None
         self._started_at: datetime | None = None

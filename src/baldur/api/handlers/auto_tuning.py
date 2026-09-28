@@ -22,13 +22,13 @@ Endpoints:
 
 from __future__ import annotations
 
-import threading
 from datetime import datetime
 
 import structlog
 
 from baldur.api.handlers._common import resolve_actor
 from baldur.audit.helpers import log_system_control_audit
+from baldur.core.process_utils import fork_safe_lock
 from baldur.interfaces.web_framework import RequestContext, ResponseContext
 
 logger = structlog.get_logger()
@@ -48,7 +48,7 @@ __all__ = [
 ]
 
 _service_instance = None
-_service_lock = threading.Lock()
+_service_lock = fork_safe_lock()
 
 
 def _get_auto_tuning_service():

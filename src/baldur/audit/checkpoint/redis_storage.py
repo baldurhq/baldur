@@ -8,7 +8,6 @@ Version: 1.0.0
 
 from __future__ import annotations
 
-import threading
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -20,6 +19,7 @@ from baldur.audit.checkpoint.strategy import (
     CheckpointStorageStrategy,
     UnifiedCheckpointData,
 )
+from baldur.core.process_utils import fork_safe_lock
 from baldur.utils.serialization import fast_dumps_str, fast_loads
 
 if TYPE_CHECKING:
@@ -83,7 +83,7 @@ class RedisCheckpointStorage(CheckpointStorageStrategy):
         self._lock_timeout_seconds = lock_timeout_seconds
         self._enable_notification = enable_notification
         self._pending: dict[str, UnifiedCheckpointData] = {}
-        self._local_lock = threading.Lock()
+        self._local_lock = fork_safe_lock()
 
     def _get_key(self, namespace: str) -> str:
         """Generate Redis key."""

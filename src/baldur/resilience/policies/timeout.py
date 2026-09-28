@@ -20,13 +20,13 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
-import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any, TypeVar
 
 from baldur.core.exceptions import TimeoutPolicyError
+from baldur.core.process_utils import fork_safe_lock
 from baldur.interfaces.resilience_policy import (
     PolicyContext,
     PolicyOutcome,
@@ -62,7 +62,7 @@ class TimeoutPolicy:
 
     # Process-shared executor (DCL singleton — see _get_executor).
     _executor: ThreadPoolExecutor | None = None
-    _executor_lock = threading.Lock()
+    _executor_lock = fork_safe_lock()
 
     def __init__(self, timeout_seconds: float):
         if timeout_seconds <= 0:

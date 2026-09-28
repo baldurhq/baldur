@@ -15,12 +15,12 @@ there is no cross-worker or cross-host sharing. Construct one per use site (like
 
 from __future__ import annotations
 
-import threading
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Generic, TypeVar
 
+from baldur.core.process_utils import fork_safe_rlock
 from baldur.core.serializable import SerializableMixin
 from baldur.utils.time import utc_now
 
@@ -104,7 +104,7 @@ class StaleCacheStore:
         # entries - so popitem(last=False) IS oldest-entry eviction.
         self._cache: OrderedDict[str, StaleCacheEntry] = OrderedDict()
         self._max_entries = max_entries
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
         self._stats = {
             "hits": 0,
             "misses": 0,

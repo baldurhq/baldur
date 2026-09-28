@@ -10,11 +10,11 @@ Race conditions: eliminated at the source
 
 from __future__ import annotations
 
-import threading
 from typing import Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.utils.serialization import fast_loads
 
 logger = structlog.get_logger()
@@ -431,7 +431,7 @@ class AtomicStateQuery:
 # =============================================================================
 
 _atomic_query: AtomicStateQuery | None = None
-_atomic_query_lock = threading.Lock()
+_atomic_query_lock = fork_safe_lock()
 
 
 def get_atomic_state_query() -> AtomicStateQuery:

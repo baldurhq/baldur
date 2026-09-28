@@ -24,12 +24,12 @@ Performance Note:
 
 from __future__ import annotations
 
-import threading
 import time
 from collections.abc import Callable
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.interfaces.rate_limit_storage import (
     RateLimitState,
     RateLimitStorageInterface,
@@ -76,7 +76,7 @@ class DatabaseRateLimitStorage(RateLimitStorageInterface):
                 never serve a request and reports itself unavailable.
         """
         self._repository_factory = repository_factory
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
         self._available: bool | None = None
 
     @property

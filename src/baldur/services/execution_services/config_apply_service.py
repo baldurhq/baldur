@@ -6,11 +6,11 @@ Service layer for deferred config changes and graceful config application.
 
 from __future__ import annotations
 
-import threading
 from typing import Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.factory.registry import ProviderRegistry
 
 logger = structlog.get_logger()
@@ -324,7 +324,7 @@ class ConfigApplyService:
 
 
 _config_apply_service_instance: ConfigApplyService | None = None
-_config_apply_service_instance_lock = threading.Lock()
+_config_apply_service_instance_lock = fork_safe_lock()
 
 
 def get_config_apply_service() -> ConfigApplyService:

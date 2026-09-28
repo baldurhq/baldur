@@ -13,7 +13,6 @@ Provides zero-data-loss and integrity guarantees for distributed hash chain:
 """
 
 import os
-import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -22,6 +21,7 @@ from typing import Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.settings.hash_chain import get_hash_chain_settings
 from baldur.utils.serialization import fast_dumps_str, fast_loads
 from baldur.utils.time import utc_now
@@ -148,7 +148,7 @@ class MonotonicTimestamp:
         """Initialize monotonic timestamp generator."""
         self._last_timestamp: datetime | None = None
         self._monotonic_offset: float = 0.0
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
 
     def now(self) -> str:
         """
@@ -755,7 +755,7 @@ class IntegrityAuditTrail:
             if max_redis_entries is not None
             else _get_integrity_trail_max_entries()
         )
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
 
         if self._log_dir:
             self._log_dir.mkdir(parents=True, exist_ok=True)

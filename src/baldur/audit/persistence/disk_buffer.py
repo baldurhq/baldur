@@ -17,7 +17,6 @@ from __future__ import annotations
 import os
 import shutil
 import struct
-import threading
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -42,6 +41,7 @@ from baldur.audit.persistence.disk_buffer_shutdown import (
 )
 from baldur.audit.persistence.disk_space_monitor import DiskSpaceMonitor
 from baldur.audit.persistence.group_commit import GroupCommitWriter
+from baldur.core.process_utils import fork_safe_lock, fork_safe_rlock
 from baldur.utils.fs import resolve_writable_dir
 from baldur.utils.serialization import fast_dumps_str, fast_loads
 from baldur.utils.time import utc_now
@@ -124,7 +124,7 @@ class DiskPersistentBuffer:
         """
         self._settings = settings or get_disk_buffer_settings()
         self._db_name = db_name or self._generate_db_name()
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
 
         # State
         self._state = BufferState.UNINITIALIZED
@@ -884,7 +884,7 @@ class DiskPersistentBuffer:
 # -----------------------------------------------------------------
 
 _buffer: DiskPersistentBuffer | None = None
-_buffer_lock = threading.Lock()
+_buffer_lock = fork_safe_lock()
 
 
 def get_disk_buffer() -> DiskPersistentBuffer:

@@ -16,13 +16,13 @@ Write path: L1 always, L2 fire-and-forget.
 
 from __future__ import annotations
 
-import threading
 import time
 from collections import defaultdict
 from typing import TYPE_CHECKING
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.core.rate_limiting import SlidingWindowCounter
 
 if TYPE_CHECKING:
@@ -49,7 +49,7 @@ _L2_TTL_PADDING_SECONDS = 60
 # so the diagnostic costs one WARNING per service per process rather than one
 # per 429.
 _retention_exceeded_warned: set[str] = set()
-_retention_exceeded_warned_lock = threading.Lock()
+_retention_exceeded_warned_lock = fork_safe_lock()
 
 
 class MemoryRateLimitTracker:
@@ -77,7 +77,7 @@ class MemoryRateLimitTracker:
                 (``max(cascade_window, self_ddos_window,
                 _MIN_L2_RETENTION_SECONDS)``) so L1 and L2 retain identically.
         """
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
         self._retention_seconds = retention_seconds
         self._rate_limit_counter: SlidingWindowCounter | None = None
         self._request_counter: SlidingWindowCounter | None = None
@@ -213,7 +213,7 @@ class RateLimitTracker:
         self._redis: RedisRateLimitBackend | None = None
         self._redis_initialized = False
         self._next_redis_probe = 0.0
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
 
     def _ensure_redis(self) -> bool:
         """Lazy Redis init with 30s retry cooldown."""
@@ -364,7 +364,7 @@ class RateLimitTracker:
 # =============================================================================
 
 _rate_limit_tracker: RateLimitTracker | None = None
-_rate_limit_tracker_lock = threading.Lock()
+_rate_limit_tracker_lock = fork_safe_lock()
 
 
 def get_rate_limit_tracker() -> RateLimitTracker:

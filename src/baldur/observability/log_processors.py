@@ -32,11 +32,12 @@ from __future__ import annotations
 
 import random
 import re
-import threading
 import time
 from typing import Any
 
 import structlog
+
+from baldur.core.process_utils import fork_safe_lock
 
 # =============================================================================
 # Event name validation processor (Q5)
@@ -135,7 +136,7 @@ def event_name_validator(
 # {(logger_name, event): {"count": int, "window_start": float,
 #                         "suppressed": int}}
 _rate_limit_state: dict[tuple[str, str], dict[str, Any]] = {}
-_rate_limit_lock = threading.Lock()
+_rate_limit_lock = fork_safe_lock()
 
 # Levels that are never suppressed (error/failure logs always pass through)
 _NEVER_SUPPRESS_LEVELS = frozenset({"error", "critical"})

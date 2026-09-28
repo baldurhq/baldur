@@ -19,6 +19,7 @@ from typing import Any, Generic, TypeVar
 import structlog
 
 from baldur.core.exceptions import AdapterNotFoundError
+from baldur.core.process_utils import fork_safe_lock
 
 logger = structlog.get_logger()
 
@@ -71,7 +72,7 @@ class GenericProviderRegistry(Generic[T]):
         self._adapter_type = adapter_type
         self._interface = interface
         self._auto_discover = auto_discover
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
         # Per-thread flag set while get() invokes a provider factory under
         # self._lock. Lets a re-entrant same-slot get() fail loud instead of
         # deadlocking on the non-reentrant lock (see get()).

@@ -17,12 +17,12 @@ Features:
 
 from __future__ import annotations
 
-import threading
 from datetime import UTC, datetime
 from typing import Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.utils.serialization import fast_dumps_str, fast_loads
 
 logger = structlog.get_logger()
@@ -37,7 +37,7 @@ EVENTS_TTL_DAYS = 7
 EVENTS_TTL_SECONDS = EVENTS_TTL_DAYS * 24 * 60 * 60  # 604800 seconds
 
 # In-Memory fallback (used when Redis fails)
-_events_memory_lock = threading.Lock()
+_events_memory_lock = fork_safe_lock()
 _events_memory: list[dict[str, Any]] = []
 _max_events_memory = 500
 

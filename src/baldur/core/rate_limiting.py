@@ -24,10 +24,11 @@ Status: Internal
 from __future__ import annotations
 
 import bisect
-import threading
 import time
 from collections import defaultdict
 from collections.abc import Callable
+
+from baldur.core.process_utils import fork_safe_lock
 
 __all__ = ["CooldownGate", "SlidingWindowCounter", "TokenBucket"]
 
@@ -68,7 +69,7 @@ class SlidingWindowCounter:
         clock: Callable[[], float] | None = None,
     ) -> None:
         self._events: dict[str, list[float]] = defaultdict(list)
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
         # None => wall-clock ``time.time`` resolved at call time, so the default
         # preserves the historical inlined ``time.time()`` behavior exactly
         # (including test patchability). Inject a callable to opt into e.g.
@@ -241,7 +242,7 @@ class TokenBucket:
         self._tokens = self._capacity
         self._clock = clock
         self._last_update = self._now()
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
 
     def _now(self) -> float:
         """Return the current time from the injected clock or wall clock."""
@@ -336,7 +337,7 @@ class CooldownGate:
     def __init__(self, *, clock: Callable[[], float] | None = None) -> None:
         # key -> (reserved_ts, window_seconds_at_reserve)
         self._entries: dict[str, tuple[float, float]] = {}
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
         # None => wall-clock ``time.time`` resolved at call time (patchable in
         # tests); inject a callable to opt into a deterministic clock.
         self._clock = clock

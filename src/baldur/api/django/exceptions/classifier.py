@@ -17,10 +17,11 @@ Classification criteria:
 
 from __future__ import annotations
 
-import threading
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
+
+from baldur.core.process_utils import fork_safe_lock
 
 from .codes import ErrorCode, get_default_message, is_retryable
 
@@ -558,7 +559,7 @@ class ExceptionClassifier:
 
 # Singleton instance
 _classifier: ExceptionClassifier | None = None
-_classifier_lock = threading.Lock()
+_classifier_lock = fork_safe_lock()
 
 
 def get_exception_classifier() -> ExceptionClassifier:

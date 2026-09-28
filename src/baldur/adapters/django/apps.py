@@ -49,6 +49,7 @@ from baldur.adapters.django.startup import (
     RBACInitializer,
     create_baldur_groups,
 )
+from baldur.core.process_utils import fork_safe_lock
 
 if TYPE_CHECKING:
     pass
@@ -72,7 +73,7 @@ class BaldurConfig(AppConfig):
 
     # 317: Correlation Engine Analysis Loop
     _correlation_loop_started: bool = False
-    _correlation_loop_lock: threading.Lock = threading.Lock()
+    _correlation_loop_lock: threading.Lock = fork_safe_lock()
 
     def ready(self):
         """

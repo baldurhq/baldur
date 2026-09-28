@@ -7,11 +7,11 @@ When RegEx evaluation is slow or failing, bypass tiering and use static fallback
 
 from __future__ import annotations
 
-import threading
 import time
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.interfaces.repositories import CircuitBreakerStateEnum
 
 logger = structlog.get_logger()
@@ -34,7 +34,7 @@ class TieringCircuitBreaker:
     HALF_OPEN_DELAY_SEC = 30  # 30s before trying again
 
     _instance: TieringCircuitBreaker | None = None
-    _lock = threading.Lock()
+    _lock = fork_safe_lock()
 
     def __new__(cls) -> TieringCircuitBreaker:
         if cls._instance is None:
@@ -51,7 +51,7 @@ class TieringCircuitBreaker:
         self._failure_count = 0
         self._slow_count = 0
         self._last_failure_time: float | None = None
-        self._state_lock = threading.Lock()
+        self._state_lock = fork_safe_lock()
 
     @property
     def is_open(self) -> bool:

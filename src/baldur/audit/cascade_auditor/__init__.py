@@ -38,7 +38,6 @@ Usage:
 
 from __future__ import annotations
 
-import threading
 from typing import Any
 
 import structlog
@@ -53,6 +52,7 @@ from baldur.audit.cascade_auditor._wal_recovery import (
     LOCAL_CASCADE_WAL_PATH,
     WALRecoveryMixin,
 )
+from baldur.core.process_utils import fork_safe_rlock
 from baldur.settings.cascade_retention import get_cascade_retention_settings
 
 logger = structlog.get_logger()
@@ -102,7 +102,7 @@ class CascadeEventAuditor(
             enable_load_shedding: Whether Load Shedding is enabled
             max_index_size: Max index size (default from CascadeRetentionSettings)
         """
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
         self._enable_load_shedding = enable_load_shedding
         self._load_shedding = None  # Lazy init
         self._max_index_size = (

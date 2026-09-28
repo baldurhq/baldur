@@ -25,6 +25,7 @@ from datetime import datetime
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.services.bulkhead.base import (
     Bulkhead,
     BulkheadState,
@@ -67,7 +68,7 @@ class SemaphoreBulkhead(Bulkhead):
         self._name = name
         self._max_concurrent = max_concurrent
         self._semaphore = threading.BoundedSemaphore(max_concurrent)
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
 
         # Statistics
         self._active_count = 0

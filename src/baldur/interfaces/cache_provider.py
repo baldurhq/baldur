@@ -26,6 +26,7 @@ from typing import Any
 import structlog
 
 from baldur.core.exceptions import BaldurError
+from baldur.core.process_utils import fork_safe_lock
 from baldur.core.singleflight import Singleflight
 from baldur.utils.jitter import calculate_jitter
 
@@ -38,7 +39,7 @@ _SINGLEFLIGHT_POLL_INTERVAL_SECONDS = 0.1
 
 # Guards lazy attachment of the per-adapter-instance miss funnel
 # (CacheProviderInterface has no __init__ to extend).
-_singleflight_attach_lock = threading.Lock()
+_singleflight_attach_lock = fork_safe_lock()
 
 
 def generate_lock_owner_id() -> str:

@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from baldur.core.backoff import ExponentialBackoff
+from baldur.core.process_utils import fork_safe_lock
 from baldur.meta.daemon_worker import DaemonWorkerHandle
 from baldur.metrics.recorders.daemon_worker import (
     register_daemon_worker,
@@ -146,7 +147,7 @@ class DLQOutboxWorker:
         # fully-resolved batch, and would dump neither. ``_batch_lock`` makes
         # the pop and the publication one step against ``stop()``, which takes
         # the same lock around its ring drain and its ``_pending_batch`` read.
-        self._batch_lock = threading.Lock()
+        self._batch_lock = fork_safe_lock()
         self._pending_batch: list[tuple[float, dict[str, Any]]] = []
         self._pending_index = 0
         # Mutual exclusion between the two spawn paths — the fork-repair
@@ -154,7 +155,7 @@ class DLQOutboxWorker:
         # reaches ``_spawn_thread`` through the handle's ``restart_callback``.
         # Without it both can observe the dead inherited thread and start one
         # writer each, and two drainers on one buffer write every entry twice.
-        self._spawn_lock = threading.Lock()
+        self._spawn_lock = fork_safe_lock()
 
         # Resilience state (D11.2)
         self._consecutive_failures = 0
@@ -358,9 +359,9 @@ class DLQOutboxWorker:
         if live_thread is not None and not live_thread.is_alive():
             live_thread = None
 
-        self._spawn_lock = threading.Lock()
+        self._spawn_lock = fork_safe_lock()
         self._stop_event = threading.Event()
-        self._batch_lock = threading.Lock()
+        self._batch_lock = fork_safe_lock()
         if live_thread is None:
             self._thread = None
 

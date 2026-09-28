@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import os
 import sys
-import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -34,6 +33,7 @@ from typing import Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.utils.time import utc_now
 
 logger = structlog.get_logger()
@@ -105,7 +105,7 @@ class SelfAuditLogger:
     """
 
     _instance: SelfAuditLogger | None = None
-    _lock = threading.Lock()
+    _lock = fork_safe_lock()
 
     # Events considered failures
     FAILURE_EVENTS = frozenset(
@@ -131,7 +131,7 @@ class SelfAuditLogger:
         self._stats = SelfAuditStats()
         self._recent_events: list[dict[str, Any]] = []
         self._max_recent_events = self._get_max_recent_events()
-        self._stats_lock = threading.Lock()
+        self._stats_lock = fork_safe_lock()
 
     @staticmethod
     def _get_max_recent_events() -> int:

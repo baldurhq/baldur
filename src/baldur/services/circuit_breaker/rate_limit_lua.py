@@ -10,15 +10,16 @@ Reuses LuaScriptRegistry for evalsha + NOSCRIPT recovery.
 from __future__ import annotations
 
 import os
-import threading
 import time
 from typing import Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
+
 logger = structlog.get_logger()
 
-_counter_lock = threading.Lock()
+_counter_lock = fork_safe_lock()
 _counter = 0
 
 

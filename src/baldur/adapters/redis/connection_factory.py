@@ -17,6 +17,8 @@ from urllib.parse import urlparse
 
 import structlog
 
+from baldur.core.process_utils import register_fork_safe_lock
+
 if TYPE_CHECKING:
     from baldur.settings.redis import RedisSettings
 
@@ -29,11 +31,19 @@ logger = structlog.get_logger()
 _PROBE_CONNECT_ATTEMPTS = 2
 
 
+# redis-py's private ``ConnectionPool`` locks: ``_lock`` guards the connection
+# lists on every command, ``_fork_lock`` serializes the pool's own post-fork
+# reset. Present 4.2 through 8.x; read with getattr so a rename degrades to
+# no repair instead of an error.
+_POOL_LOCK_ATTRS = ("_lock", "_fork_lock")
+
+
 __all__ = [
     "RedisConnectionFactory",
     "mask_redis_url",
     "get_redis_connection_factory",
     "configure_redis_connection_factory",
+    "register_redis_pool_fork_locks",
     "reset_redis_connection_factory",
 ]
 
@@ -55,6 +65,38 @@ def mask_redis_url(url: str) -> str:
     if parsed.password:
         return url.replace(parsed.password, "***")
     return url
+
+
+def _register_pool_locks(pool: Any) -> None:
+    for attr in _POOL_LOCK_ATTRS:
+        register_fork_safe_lock(getattr(pool, attr, None))
+
+
+def register_redis_pool_fork_locks(client: Any) -> None:
+    """Have a fork child receive this client's connection-pool locks unlocked.
+
+    redis-py rebuilds a pool's connections in a fork child on its first
+    command, but it does not renew the pool's own lock: a parent thread inside
+    a command at the fork instant leaves it held, and every command in the
+    child then blocks forever. Registering the locks for the fork repair frees
+    them in the child, and redis-py's own reset takes over from there.
+
+    A Sentinel client's first command in a child also asks the Sentinel nodes
+    for the master's address, through each node client's own pool, so those
+    pools' locks are registered too; the node list is fixed when the client is
+    built. Never raises — a client of another shape is left as it is.
+    """
+    try:
+        pool = getattr(client, "connection_pool", None)
+        if pool is None:
+            return
+        _register_pool_locks(pool)
+        manager = getattr(pool, "sentinel_manager", None)
+        for node_client in getattr(manager, "sentinels", None) or ():
+            _register_pool_locks(getattr(node_client, "connection_pool", None))
+    except Exception:
+        # The pool keeps redis-py's own fork handling — what it had without this.
+        return
 
 
 class RedisConnectionFactory:
@@ -165,11 +207,14 @@ class RedisConnectionFactory:
             self._inject_auth(url, common_kwargs)
 
         try:
-            if url.startswith("redis+sentinel://"):
-                return self._create_sentinel(url, common_kwargs)
             if url.startswith("redis+cluster://"):
+                # A cluster client builds a pool per node lazily, after this
+                # returns, so there are no pool locks to register here.
                 return self._create_cluster(url, common_kwargs)
-            return self._create_standalone(url, common_kwargs)
+            if url.startswith("redis+sentinel://"):
+                client = self._create_sentinel(url, common_kwargs)
+            else:
+                client = self._create_standalone(url, common_kwargs)
         except Exception as e:
             if unconfigured_probe:
                 logger.debug(
@@ -185,6 +230,8 @@ class RedisConnectionFactory:
                     error_type=type(e).__name__,
                 )
             raise
+        register_redis_pool_fork_locks(client)
+        return client
 
     def probe(self, url: str, **kwargs: Any) -> None:
         """Decide whether ``url`` is reachable, on a bounded connect budget.

@@ -17,7 +17,6 @@ Code basis:
 
 from __future__ import annotations
 
-import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -25,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from baldur.audit.helpers import log_region_isolation_audit
+from baldur.core.process_utils import fork_safe_lock
 from baldur.core.serializable import SerializableMixin
 from baldur.utils.serialization import fast_dumps_str, fast_loads
 from baldur.utils.time import utc_now
@@ -438,7 +438,7 @@ class RegionalIsolationGate:
 # =============================================================================
 
 _gate: RegionalIsolationGate | None = None
-_gate_lock = threading.Lock()
+_gate_lock = fork_safe_lock()
 
 
 def get_regional_isolation_gate() -> RegionalIsolationGate:

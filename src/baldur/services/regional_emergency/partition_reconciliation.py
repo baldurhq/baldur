@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.core.serializable import SerializableMixin
 from baldur.utils.time import utc_now
 
@@ -178,7 +179,7 @@ class PartitionReconciliationService:
         self._tiered_redis = tiered_redis
         self._heartbeat_interval = heartbeat_interval
         self._partition_threshold = partition_threshold
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
 
         # State
         self._last_global_heartbeat: datetime | None = None
@@ -620,7 +621,7 @@ class PartitionReconciliationService:
 # =============================================================================
 
 _reconciliation_service: PartitionReconciliationService | None = None
-_service_lock = threading.Lock()
+_service_lock = fork_safe_lock()
 
 
 def get_partition_reconciliation_service() -> PartitionReconciliationService:

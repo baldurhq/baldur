@@ -6,8 +6,7 @@ Testing adapter for PoolStatsProvider ABC.
 
 from __future__ import annotations
 
-import threading
-
+from baldur.core.process_utils import fork_safe_lock
 from baldur.interfaces.pool_monitor import PoolStats, PoolStatsProvider
 
 
@@ -26,7 +25,7 @@ class InMemoryPoolStatsProvider(PoolStatsProvider):
         available_connections: int = 10,
         waiting_requests: int = 0,
     ):
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
         self._stats = PoolStats(
             pool_name=pool_name,
             max_connections=max_connections,

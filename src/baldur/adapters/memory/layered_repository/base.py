@@ -11,6 +11,7 @@ caller thread.
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -24,6 +25,7 @@ from baldur.adapters.memory.drift_reconciliation import (
     get_drift_reconciler,
 )
 from baldur.adapters.memory.shadow_logger import get_shadow_logger
+from baldur.core.process_utils import fork_safe_lock
 from baldur.core.rate_limiting import CooldownGate
 from baldur.interfaces.repositories import (
     CircuitBreakerStateRepository,
@@ -37,6 +39,21 @@ logger = structlog.get_logger()
 # L2 warmup (executor thread + connection pool + ResilientStorageBackend
 # wrapper + Lua eval RTT) at LayeredRepository construction time.
 _WARMUP_SENTINEL_SERVICE_NAME = "__baldur_init_warmup__"
+
+# Instance attribute stamped on each pool ``_get_executor`` builds: the pid of
+# the process the pool's worker threads belong to.
+_POOL_OWNER_PID_ATTR = "_baldur_owner_pid"
+
+
+def _pool_owned_elsewhere(pool: ThreadPoolExecutor) -> bool:
+    """Return True if ``pool`` was built by another process (a fork parent).
+
+    The owner counts only as an ``int`` in the pool object's own ``__dict__``:
+    a pool assigned from outside records none, and a test double that answers
+    every attribute lookup must not read as foreign.
+    """
+    owner = getattr(pool, "__dict__", {}).get(_POOL_OWNER_PID_ATTR)
+    return isinstance(owner, int) and owner != os.getpid()
 
 
 def _default_metrics() -> dict[str, float]:
@@ -76,13 +93,13 @@ class LayeredRepositoryBase:
 
     # ThreadPoolExecutor for async L2 operations with timeout
     _executor: ThreadPoolExecutor | None = None
-    _executor_lock = threading.Lock()
+    _executor_lock = fork_safe_lock()
 
     # 479 D2: process-wide L2 warmup state. Once-per-process gate via
     # double-checked locking on _warmup_done. Mirrors the existing
     # _executor / _executor_lock ClassVar pattern.
     _warmup_done: bool = False
-    _warmup_lock = threading.Lock()
+    _warmup_lock = fork_safe_lock()
 
     @classmethod
     def _get_executor(cls) -> ThreadPoolExecutor:
@@ -93,10 +110,28 @@ class LayeredRepositoryBase:
         per-subclass attributes that shadow the Base when written, breaking
         ``reset_layered_repository_executor()`` (which only clears Base).
         Mirrors the ``_warmup_done`` ClassVar pattern below.
+
+        Fork-safe. A ``ThreadPoolExecutor`` does not survive ``fork()``: the
+        child inherits the pool's ``Thread`` objects (all dead) together with
+        the idle-worker permits they were counted against, so a submit spawns
+        nothing and the work never runs. Each pool this method builds records
+        the pid that built it before it is published; a pool owned by another
+        process is dropped under the lock and a fresh one built. The dropped
+        pool is never ``shutdown()`` — its shutdown lock and wake-up sentinel
+        belong to threads that do not exist here. A pool assigned directly to
+        the attribute (tests) records no owner and is returned as is.
         """
-        if LayeredRepositoryBase._executor is None:
+        executor = LayeredRepositoryBase._executor
+        if executor is not None and _pool_owned_elsewhere(executor):
             with LayeredRepositoryBase._executor_lock:
-                if LayeredRepositoryBase._executor is None:
+                executor = LayeredRepositoryBase._executor
+                if executor is not None and _pool_owned_elsewhere(executor):
+                    LayeredRepositoryBase._executor = None
+                    executor = None
+        if executor is None:
+            with LayeredRepositoryBase._executor_lock:
+                executor = LayeredRepositoryBase._executor
+                if executor is None:
                     # 478 D3: pool size driven by L2StorageSettings env var
                     # BALDUR_L2_STORAGE_EXECUTOR_MAX_WORKERS (default 16).
                     # Lazy-imported here to avoid a settings import at base.py
@@ -109,10 +144,14 @@ class LayeredRepositoryBase:
                         max_workers = get_l2_storage_settings().executor_max_workers
                     except Exception:
                         max_workers = 16
-                    LayeredRepositoryBase._executor = ThreadPoolExecutor(
+                    executor = ThreadPoolExecutor(
                         max_workers=max_workers, thread_name_prefix="l2_sync"
                     )
-        return LayeredRepositoryBase._executor
+                    vars(executor)[_POOL_OWNER_PID_ATTR] = os.getpid()
+                    LayeredRepositoryBase._executor = executor
+        # The local, never a re-read of the attribute: a peer thread may drop
+        # or rebuild the pool at any point after this caller's decision.
+        return executor
 
     def __init__(
         self,
@@ -152,7 +191,7 @@ class LayeredRepositoryBase:
         # release and admin readers snapshot-then-release — so an accidental
         # nested acquire should surface as an immediate deadlock in test
         # rather than silently nesting (mirrors the _metrics_lock choice).
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
         self._l2_healthy = True
         self._l2_last_error_time: datetime | None = None
         self._l2_consecutive_failures = 0
@@ -165,7 +204,7 @@ class LayeredRepositoryBase:
         # quarantine-state self._lock (above) so the two critical sections stay
         # disjoint and never-nested, avoiding any lock-ordering surface.
         self._metrics = _default_metrics()
-        self._metrics_lock = threading.Lock()
+        self._metrics_lock = fork_safe_lock()
 
         # 773 D2: per-service coalescing for the record-path L2 mirror. At most
         # one mirror task per service is in flight; a submit arriving while one
@@ -173,7 +212,7 @@ class LayeredRepositoryBase:
         # running task re-reads and re-writes before it exits. The lock is held
         # only across flag flips, never across I/O, and is disjoint from the
         # quarantine and metrics critical sections.
-        self._mirror_lock = threading.Lock()
+        self._mirror_lock = fork_safe_lock()
         self._mirror_in_flight: set[str] = set()
         self._mirror_dirty: set[str] = set()
 

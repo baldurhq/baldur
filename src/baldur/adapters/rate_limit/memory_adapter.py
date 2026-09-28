@@ -18,11 +18,11 @@ Features:
 
 from __future__ import annotations
 
-import threading
 import time
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock, fork_safe_rlock
 from baldur.interfaces.rate_limit_storage import (
     RateLimitState,
     RateLimitStorageInterface,
@@ -51,7 +51,7 @@ class InMemoryRateLimitStorage(RateLimitStorageInterface):
     """
 
     _instance: InMemoryRateLimitStorage | None = None
-    _instance_lock = threading.Lock()
+    _instance_lock = fork_safe_lock()
 
     def __init__(self, cleanup_interval: int | None = None) -> None:
         """Initialize in-memory storage.
@@ -62,7 +62,7 @@ class InMemoryRateLimitStorage(RateLimitStorageInterface):
                 ``RateLimitSettings.memory_cleanup_interval_ops``.
         """
         self._data: dict[str, dict] = {}
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
         self._cleanup_counter = 0
         if cleanup_interval is None:
             from baldur.settings.rate_limit import get_rate_limit_settings

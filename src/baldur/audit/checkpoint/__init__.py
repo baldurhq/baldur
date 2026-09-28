@@ -30,7 +30,6 @@ Version: 1.0.0
 from __future__ import annotations
 
 import os
-import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -57,6 +56,7 @@ from baldur.audit.checkpoint.strategy import (
     get_load_failures_counter,
     get_save_failures_counter,
 )
+from baldur.core.process_utils import fork_safe_lock
 
 if TYPE_CHECKING:
     import redis
@@ -116,7 +116,7 @@ class CheckpointStrategyRegistry:
     _strategies: dict[str, type[CheckpointStorageStrategy]] = {}
     _instances: dict[str, CheckpointStorageStrategy] = {}
     _default: str = "file"
-    _lock = threading.Lock()
+    _lock = fork_safe_lock()
 
     @classmethod
     def register(

@@ -41,6 +41,7 @@ import structlog
 
 from baldur.audit.checkpoint.file_lock import lock_file, unlock_file
 from baldur.coordination.base import LeaderElector, LeaderInfo, LeadershipState
+from baldur.core.process_utils import fork_safe_lock
 from baldur.utils.time import utc_now
 
 logger = structlog.get_logger()
@@ -113,7 +114,7 @@ class LocalFileLeaderElector(LeaderElector):
         self._lock_path = Path(lock_path) if lock_path else None
         self._retry_interval = retry_interval_seconds
 
-        self._state_lock = threading.Lock()
+        self._state_lock = fork_safe_lock()
         self._lock_handle = None  # type: ignore[var-annotated]
         self._is_leader = False
         self._fencing_token = 0

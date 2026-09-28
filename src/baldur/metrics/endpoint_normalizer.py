@@ -8,10 +8,11 @@ Uses Django URL resolver first, falls back to regex-based normalization.
 from __future__ import annotations
 
 import re
-import threading
 from collections import OrderedDict
 
 import structlog
+
+from baldur.core.process_utils import fork_safe_lock
 
 logger = structlog.get_logger()
 
@@ -67,11 +68,11 @@ class EndpointNormalizer:
         # path -> normalized cache (LRU, O(1) return)
         self._cache: OrderedDict[str, str] = OrderedDict()
         self._cache_size = cache_size
-        self._cache_lock = threading.Lock()
+        self._cache_lock = fork_safe_lock()
 
         # Distinct endpoint tracking (LRU, thread-safe)
         self._seen_endpoints: OrderedDict[str, None] = OrderedDict()
-        self._seen_lock = threading.Lock()
+        self._seen_lock = fork_safe_lock()
 
         # Custom patterns applied first
         self._patterns: list[tuple[re.Pattern, str]] = []
@@ -169,7 +170,7 @@ class EndpointNormalizer:
 # ---------------------------------------------------------------------------
 
 _normalizer: EndpointNormalizer | None = None
-_normalizer_lock = threading.Lock()
+_normalizer_lock = fork_safe_lock()
 
 
 def get_endpoint_normalizer() -> EndpointNormalizer:

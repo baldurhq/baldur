@@ -7,12 +7,12 @@ Redis instance and allowing recovery time.
 
 from __future__ import annotations
 
-import threading
 from typing import TYPE_CHECKING, Any
 
 import structlog
 
 from baldur.audit.resilience.circuit_breaker import CircuitBreakerBase
+from baldur.core.process_utils import fork_safe_rlock
 
 from .enums import CircuitState, HashChainCircuitBreakerConfig
 
@@ -71,7 +71,7 @@ class HashChainCircuitBreaker(CircuitBreakerBase):
         self._config = cfg
         self._degradation_manager = degradation_manager
         # DR-5: Sync-only lock
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
 
         # Half-open request limiting
         self._half_open_requests = 0

@@ -11,10 +11,10 @@ Dependencies:
 from __future__ import annotations
 
 import hashlib
-import threading
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock, fork_safe_rlock
 from baldur.services.cell_topology.models import (
     CellInfo,
     CellState,
@@ -58,7 +58,7 @@ class CellRegistry(EventEmitterMixin):
         from baldur.settings.cell_topology import get_cell_topology_settings
 
         self._settings = settings or get_cell_topology_settings()
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
         self._cells: dict[str, CellInfo] = {}
         self._hash_ring: list[tuple[int, str]] = []
 
@@ -564,7 +564,7 @@ class CellRegistry(EventEmitterMixin):
 # =============================================================================
 
 _registry: CellRegistry | None = None
-_registry_lock = threading.Lock()
+_registry_lock = fork_safe_lock()
 
 
 def get_cell_registry() -> CellRegistry:

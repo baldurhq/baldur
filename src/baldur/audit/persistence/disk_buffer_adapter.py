@@ -6,11 +6,11 @@ code can migrate to disk-backed persistence transparently.
 
 from __future__ import annotations
 
-import threading
 from collections.abc import Callable
 from typing import Any
 
 from baldur.audit.persistence.disk_buffer_models import BufferEntry
+from baldur.core.process_utils import fork_safe_lock
 
 __all__ = [
     "DiskBufferAdapter",
@@ -35,7 +35,7 @@ class DiskBufferAdapter:
     """
 
     _instance: DiskBufferAdapter | None = None
-    _lock = threading.Lock()
+    _lock = fork_safe_lock()
 
     def __init__(self, disk_buffer: Any | None = None) -> None:
         """Initialise the adapter.

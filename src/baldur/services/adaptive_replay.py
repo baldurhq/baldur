@@ -13,11 +13,12 @@ Algorithm:
 
 from __future__ import annotations
 
-import threading
 import time
 from dataclasses import dataclass
 
 import structlog
+
+from baldur.core.process_utils import fork_safe_lock, fork_safe_rlock
 
 logger = structlog.get_logger()
 
@@ -79,7 +80,7 @@ class AdaptiveReplayManager:
 
     _instance: AdaptiveReplayManager | None = None
     _initialized: bool = False
-    _lock = threading.Lock()
+    _lock = fork_safe_lock()
 
     def __new__(cls) -> AdaptiveReplayManager:
         """Thread-safe singleton creation."""
@@ -110,7 +111,7 @@ class AdaptiveReplayManager:
             self._current_items = self._config.initial_items
             self._success_streak = 0
             self._history: list[BatchHistoryEntry] = []
-            self._state_lock = threading.RLock()
+            self._state_lock = fork_safe_rlock()
             self._initialized = True
 
             logger.info(

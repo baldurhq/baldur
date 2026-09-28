@@ -12,7 +12,6 @@ Note: This module has been refactored for better maintainability:
 
 from __future__ import annotations
 
-import threading
 from datetime import datetime
 
 import structlog
@@ -34,6 +33,7 @@ from baldur.adapters.memory.shadow_logger import (
     ShadowLogger,
     get_shadow_logger,
 )
+from baldur.core.process_utils import fork_safe_rlock
 from baldur.interfaces.repositories import (
     CircuitBreakerCloseAttempt,
     CircuitBreakerOpenAttempt,
@@ -80,7 +80,7 @@ class InMemoryCircuitBreakerStateRepository(CircuitBreakerStateRepository):
     def __init__(self) -> None:
         self._storage: dict[str, CircuitBreakerStateData] = {}
         self._next_id = 1
-        self._lock = threading.RLock()  # RLock for reentrant calls
+        self._lock = fork_safe_rlock()  # RLock for reentrant calls
 
         # 476: marker for the most recent try_acquire_half_open_slot result.
         # Read by LayeredCircuitBreakerStateRepository to emit the stuck-recovery

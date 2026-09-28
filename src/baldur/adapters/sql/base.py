@@ -34,6 +34,7 @@ from typing import Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.settings.sql import SQLDialect, get_sql_settings
 from baldur.utils.time import utc_now
 
@@ -430,7 +431,7 @@ class SchemaVersionManager:
     # Cache which (dsn_id, repo_name, version) pairs have already been
     # applied in this process — keeps repo construction cheap.
     _applied: set[tuple[int, str, int]] = set()
-    _applied_lock = threading.Lock()
+    _applied_lock = fork_safe_lock()
 
     def __init__(
         self,

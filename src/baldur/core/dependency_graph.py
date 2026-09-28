@@ -12,10 +12,11 @@ Consumers:
 
 from __future__ import annotations
 
-import threading
 from dataclasses import dataclass, field
 
 import structlog
+
+from baldur.core.process_utils import fork_safe_lock
 
 logger = structlog.get_logger()
 
@@ -57,7 +58,7 @@ class ServiceDependencyGraph:
         # multi-step traversal can never interleave with a registration
         # (public lock-wrapping methods never call other public
         # lock-wrapping methods on this instance).
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
 
     def register_service(
         self,

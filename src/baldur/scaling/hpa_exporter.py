@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.scaling.config import (
     BackpressureLevel,
     BackpressureSettings,
@@ -96,7 +97,7 @@ class HPAMetricsExporter:
 
         self._running = False
         self._worker: threading.Thread | None = None
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
         self._stop_event = threading.Event()
         self._handle: DaemonWorkerHandle | None = None  # impl 489 D9
 

@@ -10,11 +10,11 @@ statistical observability.
 
 from __future__ import annotations
 
-import threading
 from typing import TYPE_CHECKING
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.interfaces.resilience_policy import PolicyResult
 from baldur.resilience.policies.hooks.audit import AuditHook
 
@@ -45,7 +45,7 @@ class SampledAuditHook(AuditHook):
         self._sample_rate = sample_rate
         self._interval = max(1, int(1 / sample_rate)) if sample_rate > 0.0 else 0
         self._counter = 0
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
 
     @property
     def sample_rate(self) -> float:

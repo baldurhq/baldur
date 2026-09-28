@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_rlock
 from baldur.settings.runtime_feedback import get_runtime_feedback_settings
 from baldur.utils.time import utc_now
 
@@ -139,7 +140,7 @@ class RuntimeFeedbackLoop:
 
         # State management
         self._state = FeedbackLoopState.STOPPED
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
         self._running = False
         self._stop_event = threading.Event()  # event for fast shutdown
         self._thread: threading.Thread | None = None

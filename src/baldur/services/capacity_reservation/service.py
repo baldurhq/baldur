@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.services.capacity_reservation.event_calendar import (
     EventCalendar,
     EventStatus,
@@ -40,7 +41,7 @@ class CapacityReservationService:
 
     _instance: CapacityReservationService | None = None
     _initialized: bool = False
-    _singleton_lock = threading.Lock()
+    _singleton_lock = fork_safe_lock()
 
     def __new__(cls) -> CapacityReservationService:
         with cls._singleton_lock:

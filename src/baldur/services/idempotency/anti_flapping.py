@@ -8,15 +8,15 @@ Canonical location: ``baldur.services.idempotency.anti_flapping``
 
 from __future__ import annotations
 
-import threading
 import time
 from collections import defaultdict
-from threading import Lock
 from typing import (
     Any,  # noqa: F401  # used in type annotation under `from __future__ import annotations`
 )
 
 import structlog
+
+from baldur.core.process_utils import fork_safe_lock
 
 logger = structlog.get_logger()
 
@@ -62,7 +62,7 @@ class AntiFlappingWindow:
         # Memory-based local window (fallback)
         # key -> [(timestamp, value), ...]
         self._windows: dict[str, list[tuple[float, float]]] = defaultdict(list)
-        self._lock = Lock()
+        self._lock = fork_safe_lock()
 
         # Initialize the Redis client
         self._redis_client: Any | None = None
@@ -252,7 +252,7 @@ class AntiFlappingWindow:
 
 # Global Anti-Flapping window
 _anti_flapping_window: AntiFlappingWindow | None = None
-_anti_flapping_window_lock = threading.Lock()
+_anti_flapping_window_lock = fork_safe_lock()
 
 
 def get_anti_flapping_window() -> AntiFlappingWindow:

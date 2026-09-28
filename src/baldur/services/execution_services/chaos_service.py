@@ -16,11 +16,11 @@ Features:
 
 from __future__ import annotations
 
-import threading
 from typing import Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.factory.registry import ProviderRegistry
 
 from .models import (
@@ -410,7 +410,7 @@ class ChaosExecutionService:
 
 
 _chaos_execution_service_instance: ChaosExecutionService | None = None
-_chaos_execution_service_instance_lock = threading.Lock()
+_chaos_execution_service_instance_lock = fork_safe_lock()
 
 
 def get_chaos_execution_service() -> ChaosExecutionService:

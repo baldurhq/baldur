@@ -8,7 +8,6 @@ Recovery uses the "Most Restrictive Wins" strategy for safety-first behavior.
 from __future__ import annotations
 
 import random
-import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -17,6 +16,7 @@ from typing import Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock, fork_safe_rlock
 from baldur.utils.time import utc_now
 
 logger = structlog.get_logger()
@@ -99,7 +99,7 @@ class DriftReconciler:
         self._max_jitter = max_jitter_seconds
         self._on_reconciled = on_reconciled
         self._reconciliation_history: list[DriftReconciliationRecord] = []
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
         self._max_history = 1000
 
     def get_jitter(self) -> float:
@@ -320,7 +320,7 @@ class DriftReconciler:
 # =============================================================================
 
 _drift_reconciler: DriftReconciler | None = None
-_drift_reconciler_lock = threading.Lock()
+_drift_reconciler_lock = fork_safe_lock()
 
 
 def get_drift_reconciler() -> DriftReconciler:

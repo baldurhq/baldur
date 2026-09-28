@@ -23,11 +23,11 @@ Usage example:
 
 from __future__ import annotations
 
-import threading
 from typing import Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.services.circuit_breaker.models import ServiceConfig
 from baldur.utils.time import utc_now
 
@@ -442,7 +442,7 @@ class ServiceConfigManager:
 
 
 _manager: ServiceConfigManager | None = None
-_manager_lock = threading.Lock()
+_manager_lock = fork_safe_lock()
 
 
 def get_service_config_manager() -> ServiceConfigManager:

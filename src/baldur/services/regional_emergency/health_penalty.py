@@ -21,12 +21,12 @@ Code reference:
 
 from __future__ import annotations
 
-import threading
 from dataclasses import dataclass, field
 from typing import Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.core.serializable import SerializableMixin
 from baldur.models.emergency import EmergencyScope
 from baldur.utils.time import utc_now
@@ -130,7 +130,7 @@ class EmergencyHealthPenalty:
             global_penalty: Global STRICT penalty (loaded from settings if None)
         """
         self._tracker = tracker
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
 
         # Load penalty values from settings (at instance creation time)
         try:
@@ -357,7 +357,7 @@ class EmergencyHealthPenalty:
 # =============================================================================
 
 _health_penalty: EmergencyHealthPenalty | None = None
-_health_penalty_lock = threading.Lock()
+_health_penalty_lock = fork_safe_lock()
 
 
 def get_emergency_health_penalty() -> EmergencyHealthPenalty:

@@ -20,7 +20,6 @@ Version: 6.5.0 - Drift Detection metrics moved to MetricsAwareCacheAdapter
 from __future__ import annotations
 
 import fnmatch
-import threading
 import time
 import weakref
 from dataclasses import dataclass
@@ -29,6 +28,7 @@ from typing import Any, ClassVar  # noqa: F401
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.interfaces.cache_provider import (
     CacheProviderInterface,
     DistributedLock,
@@ -72,7 +72,7 @@ class InMemoryLock(DistributedLock):
 
     # Class-level lock registry
     _locks: dict[str, InMemoryLock] = {}
-    _registry_lock = threading.Lock()
+    _registry_lock = fork_safe_lock()
 
     def __init__(
         self,
@@ -98,7 +98,7 @@ class InMemoryLock(DistributedLock):
         self._timeout = timeout
         self._blocking_timeout = blocking_timeout
         self._owner_id = generate_lock_owner_id()
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
         self._acquired = False
         self._expires_at: float | None = None
 
@@ -272,7 +272,7 @@ class InMemoryCacheAdapter(CacheProviderInterface):
         self._key_prefix = key_prefix
         self._cache_name = cache_name
         self._store: dict[str, CacheEntry] = {}
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
         self._healthy = True
         InMemoryCacheAdapter._instances.add(self)
 

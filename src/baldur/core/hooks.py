@@ -34,13 +34,13 @@ Enterprise audit compliance: every bypass decision is recorded in the log.
 
 from __future__ import annotations
 
-import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.utils.time import utc_now
 
 if TYPE_CHECKING:
@@ -129,7 +129,7 @@ class BypassRegistry:
     """
 
     _hooks: list[HookInfo] = []
-    _lock = threading.Lock()
+    _lock = fork_safe_lock()
     _audit_logger: Any | None = None
     _initialized: bool = False
 

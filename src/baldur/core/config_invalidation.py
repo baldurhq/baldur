@@ -34,12 +34,13 @@ Usage:
 
 from __future__ import annotations
 
-import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 
 import structlog
+
+from baldur.core.process_utils import fork_safe_lock
 
 logger = structlog.get_logger()
 
@@ -62,7 +63,7 @@ InvalidationTarget = Callable[[], object]
 
 _targets: dict[str, list[InvalidationTarget]] = {}
 _armed: dict[str, int | None] = {}
-_registry_lock = threading.Lock()
+_registry_lock = fork_safe_lock()
 
 
 # =============================================================================

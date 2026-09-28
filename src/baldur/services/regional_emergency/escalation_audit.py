@@ -20,13 +20,13 @@ Code reference:
 from __future__ import annotations
 
 import logging
-import threading
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock, fork_safe_rlock
 from baldur.core.serializable import SerializableMixin
 from baldur.utils.time import utc_now
 
@@ -189,7 +189,7 @@ class EscalationAuditTrail:
         Args:
             max_buffer_size: Max memory buffer size (loaded from Settings if None)
         """
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
         self._memory_buffer: list[EscalationAuditEntry] = []
         self._max_buffer_size = (
             max_buffer_size
@@ -558,7 +558,7 @@ class EscalationAuditTrail:
 # =============================================================================
 
 _audit_trail: EscalationAuditTrail | None = None
-_audit_trail_lock = threading.Lock()
+_audit_trail_lock = fork_safe_lock()
 
 
 def get_escalation_audit_trail() -> EscalationAuditTrail:

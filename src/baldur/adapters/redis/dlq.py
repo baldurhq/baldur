@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.interfaces.repositories import (
     DLQCompressedEntry,
     FailedOperationData,
@@ -1133,10 +1134,9 @@ class RedisDLQRepository(
 
 
 # Singleton
-import threading
 
 _redis_dlq_repo: RedisDLQRepository | None = None
-_redis_dlq_repo_lock = threading.Lock()
+_redis_dlq_repo_lock = fork_safe_lock()
 
 
 def get_redis_dlq_repo(

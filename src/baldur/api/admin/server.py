@@ -32,6 +32,7 @@ from baldur.api.admin.auth import (
     emit_transport_warning,
 )
 from baldur.api.admin.registry import AdminRegistry, get_admin_registry
+from baldur.core.process_utils import fork_safe_lock
 from baldur.interfaces.web_framework import (
     HttpMethod,
     PermissionLevel,
@@ -491,7 +492,7 @@ class AdminServer:
         self.registry = registry or get_admin_registry()
         self._httpd: _AdminHTTPServer | None = None
         self._thread: threading.Thread | None = None
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
         self._started = False
 
     @property
@@ -611,7 +612,7 @@ class _AdminShutdownHandler:
 
 
 _admin_server: AdminServer | None = None
-_admin_server_lock = threading.Lock()
+_admin_server_lock = fork_safe_lock()
 
 
 def get_admin_server() -> AdminServer | None:

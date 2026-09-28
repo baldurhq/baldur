@@ -14,11 +14,12 @@ from __future__ import annotations
 
 import contextvars
 import os
-import threading
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import structlog
+
+from baldur.core.process_utils import fork_safe_lock, fork_safe_rlock
 
 if TYPE_CHECKING:
     from pydantic_settings import BaseSettings
@@ -68,7 +69,7 @@ class BaldurRuntime:
     _UNSET: Any = object()
 
     def __init__(self) -> None:
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
         self._settings: dict[type, Any] = {}
         self._singletons: dict[str, Any] = {}
         # Eager-read of BALDUR_TEST_MODE at runtime construction time (453 D5a).
@@ -195,7 +196,7 @@ _runtime_var: contextvars.ContextVar[BaldurRuntime | None] = contextvars.Context
 # into per-test isolation by calling :func:`set_runtime` (the ContextVar
 # override takes precedence over this default).
 _default_runtime: BaldurRuntime | None = None
-_default_runtime_lock = threading.Lock()
+_default_runtime_lock = fork_safe_lock()
 
 
 def current_runtime() -> BaldurRuntime | None:

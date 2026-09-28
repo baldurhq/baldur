@@ -11,11 +11,11 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from threading import Lock
 from typing import Any, Protocol, runtime_checkable
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.services.capacity_reservation.event_calendar import (
     EffectiveMultipliers,
     EventCalendar,
@@ -105,7 +105,7 @@ class PreWarmer:
         self._recovery_gate = recovery_gate
         self._state_backend = state_backend
         self._settings = settings or get_capacity_reservation_settings()
-        self._lock = Lock()
+        self._lock = fork_safe_lock()
         self._global_baseline: dict[str, Any] | None = None
         self._safety_valve_activated_at: float | None = None
         self._current_multipliers: EffectiveMultipliers | None = None

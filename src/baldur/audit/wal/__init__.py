@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import os
 import struct
-import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -44,7 +43,7 @@ from baldur.audit.wal._reader import WALReaderMixin
 from baldur.audit.wal._serialization import compute_checksum, verify_checksum
 from baldur.audit.wal._writer import WALWriterMixin
 from baldur.core.file_utils import safe_unlink
-from baldur.core.process_utils import fork_repaired
+from baldur.core.process_utils import fork_repaired, fork_safe_lock, fork_safe_rlock
 from baldur.utils.fs import ResolvedDir, resolve_writable_dir
 
 logger = structlog.get_logger()
@@ -119,13 +118,13 @@ class WriteAheadLog(
         self._current_handle: Any | None = None
         self._sequence = 0
         self._state = WALState.ACTIVE
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
 
         # Fork ownership. An instance constructed in a child is born owned, so
         # the repair below no-ops; an instance inherited through fork() is
         # re-owned lazily at the first public entry point.
         self._origin_pid = os.getpid()
-        self._repair_gate = threading.Lock()
+        self._repair_gate = fork_safe_lock()
 
         # Statistics
         self._total_entries = 0
@@ -233,7 +232,7 @@ class WriteAheadLog(
             if os.getpid() == inherited_pid:
                 return  # another thread finished the repair first
 
-            self._lock = threading.RLock()
+            self._lock = fork_safe_rlock()
 
             handle = self._current_handle
             self._current_handle = None

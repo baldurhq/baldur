@@ -11,11 +11,11 @@ Audit Integration (via log_blast_radius_audit in baldur.audit.helpers):
 from __future__ import annotations
 
 import uuid
-from threading import Lock
 
 import structlog
 
 from baldur.audit.helpers import log_blast_radius_audit
+from baldur.core.process_utils import fork_safe_lock
 
 from .models import (
     BlastRadiusLevel,
@@ -35,7 +35,7 @@ class BlastRadiusService:
     """
 
     _instance: BlastRadiusService | None = None
-    _lock = Lock()
+    _lock = fork_safe_lock()
 
     def __new__(cls) -> BlastRadiusService:
         """Singleton pattern"""

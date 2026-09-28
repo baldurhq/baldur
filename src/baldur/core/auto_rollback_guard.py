@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_rlock
 from baldur.settings.auto_rollback import get_auto_rollback_settings
 from baldur.utils.time import utc_now  # CLAUDE.md time handling rule
 
@@ -193,7 +194,7 @@ class AutoRollbackGuard:
 
         # State management
         self._state = GuardState.INACTIVE
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
         self._running = False
         self._stop_event = threading.Event()  # event for fast shutdown
         self._thread: threading.Thread | None = None

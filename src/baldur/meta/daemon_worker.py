@@ -12,6 +12,7 @@ Per impl 489 D4.
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from collections.abc import Callable
@@ -34,6 +35,17 @@ class DaemonWorkerHandle:
     guard on the worker class; the standard public ``start()`` methods
     early-return on the running flag and would silently no-op when used as
     a restart callback.
+
+    ``fork_source_only`` is set by a component that, by design, runs only in
+    the process that ran ``baldur.init()`` and never in a process forked from
+    it, and that no forked process uses — the leader scheduler, which stays in
+    a pre-fork server's master. A forked process inherits the registry entry
+    but not the thread, so without the flag its probe would report the worker
+    dead, and a respawn would start the parent's loop in the child. The
+    registry readers skip a flagged handle in every process except the one
+    that constructed it (``owner_pid``). A component a forked process does use
+    leaves the flag unset: if its thread is not running there, that is a real
+    death and is reported as one.
     """
 
     thread: threading.Thread
@@ -49,6 +61,10 @@ class DaemonWorkerHandle:
     is_stopping: bool = False
     _iteration_duration_observer: Callable[[float], None] | None = field(
         default=None, repr=False
+    )
+    fork_source_only: bool = False
+    owner_pid: int = field(
+        default_factory=os.getpid, init=False, repr=False, compare=False
     )
 
     def __post_init__(self) -> None:

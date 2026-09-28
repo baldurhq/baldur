@@ -43,11 +43,12 @@ Reference:
 from __future__ import annotations
 
 import hashlib
-import threading
 import time
 from typing import TYPE_CHECKING, Any
 
 import structlog
+
+from baldur.core.process_utils import fork_safe_lock
 
 if TYPE_CHECKING:
     from baldur.interfaces.config_history_store import ConfigHistoryStore
@@ -414,7 +415,7 @@ class ConfigHistoryService:
 
 # Singleton instance
 _config_history_service: ConfigHistoryService | None = None
-_config_history_service_lock = threading.Lock()
+_config_history_service_lock = fork_safe_lock()
 
 
 def get_config_history_service() -> ConfigHistoryService:

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import os
 import tempfile
-import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -24,6 +23,7 @@ from baldur.audit.checkpoint.strategy import (
     UnifiedCheckpointData,
 )
 from baldur.core.exceptions import ConfigurationError
+from baldur.core.process_utils import fork_safe_lock
 from baldur.utils.serialization import fast_dumps_str, fast_loads
 
 if TYPE_CHECKING:
@@ -80,7 +80,7 @@ class KafkaRedisCheckpointStorage(CheckpointStorageStrategy):
         self._default_topic = default_topic
         self._enable_file_backup = enable_file_backup
         self._enable_notification = enable_notification
-        self._local_lock = threading.Lock()
+        self._local_lock = fork_safe_lock()
 
         # File backup storage (for Redis failure recovery)
         self._file_backup: FileCheckpointStorage | None = None

@@ -6,10 +6,10 @@ Thread-safe using threading.Lock.
 
 from __future__ import annotations
 
-import threading
 import time
 from typing import Any
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.interfaces.cross_cluster_store import CrossClusterStore
 
 __all__ = ["InMemoryCrossClusterStore"]
@@ -19,7 +19,7 @@ class InMemoryCrossClusterStore(CrossClusterStore):
     """In-memory cross-cluster state store."""
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
         self._requests: dict[
             str, tuple[dict[str, Any], float]
         ] = {}  # id -> (data, expires_at)

@@ -11,13 +11,13 @@ Extracted from api/django/rate_limit.py as part of 358 rate_limit package split.
 from __future__ import annotations
 
 import random
-import threading
 import time
 from enum import Enum
 
 import structlog
 
 from baldur.api.django.rate_limit.config import _get_metrics, _get_setting
+from baldur.core.process_utils import fork_safe_lock
 
 logger = structlog.get_logger()
 
@@ -52,7 +52,7 @@ class RedisHealthChecker:
         self._recovery_time: float | None = None
         self._redis_client = None
         self._health_ping_client = None
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
 
     @property
     def ping_interval(self) -> int:
@@ -150,7 +150,14 @@ class RedisHealthChecker:
 
             import redis
 
+            from baldur.adapters.redis.connection_factory import (
+                register_redis_pool_fork_locks,
+            )
+
             self._health_ping_client = redis.StrictRedis(**conn_kwargs)
+            # Built outside the factory, so its pool locks are registered for
+            # the fork repair here.
+            register_redis_pool_fork_locks(self._health_ping_client)
             return self._health_ping_client
         except Exception:
             # Fall back to main client if dedicated client creation fails

@@ -19,7 +19,6 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
-import threading
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -28,6 +27,7 @@ from typing import Any, Generic, Literal, TypeVar
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.core.types import ALLOWED_PRIMITIVE_TYPES, is_primitive_annotation
 from baldur.interfaces.resilience_policy import (
     PolicyContext,
@@ -88,7 +88,7 @@ _TIMEOUT_UNSET: Any = object()
 # =============================================================================
 
 _cb_policy_cache: dict[str, CircuitBreakerPolicy] = {}
-_cb_policy_lock = threading.Lock()
+_cb_policy_lock = fork_safe_lock()
 
 # Profile discriminator for the composer cache key (#499 D2). The Literal
 # alias gives static-type safety against typos at the cache lookup +

@@ -8,7 +8,6 @@ Version: 1.0.0
 
 from __future__ import annotations
 
-import threading
 from typing import Any
 
 import structlog
@@ -18,6 +17,7 @@ from baldur.audit.checkpoint.strategy import (
     CheckpointStorageStrategy,
     UnifiedCheckpointData,
 )
+from baldur.core.process_utils import fork_safe_lock
 
 __all__ = [
     "CompositeCheckpointStorage",
@@ -61,7 +61,7 @@ class CompositeCheckpointStorage(CheckpointStorageStrategy):
         self._primary = primary
         self._secondary = secondary
         self._enable_memory_fallback = enable_memory_fallback
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
 
         # Memory Buffer (last resort)
         self._memory_buffer: dict[str, UnifiedCheckpointData] = {}

@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.settings.introspection import register_direct_read_env_vars
 
 if TYPE_CHECKING:
@@ -138,7 +139,7 @@ class _RegistryWiring(NamedTuple):
 
 # Module-level idempotency state.
 _init_done: bool = False
-_init_lock: threading.Lock = threading.Lock()
+_init_lock: threading.Lock = fork_safe_lock()
 
 # What the posture line tells an operator running on memory. The metrics
 # counterpart is the install hint the metrics registry already owns.
@@ -152,7 +153,7 @@ _MEMORY_STORAGE_HINT = (
 # threads making their first protected call at once would otherwise both
 # emit "exactly once".
 _posture_emitted: bool = False
-_posture_lock: threading.Lock = threading.Lock()
+_posture_lock: threading.Lock = fork_safe_lock()
 
 # 463 D15 — known legacy aliases of "production" that previously satisfied
 # the four divergent in-tree precedents. Hard-failing them at startup
@@ -182,7 +183,7 @@ _init_in_progress: bool = False
 # invocation (Django init() per worker + post_worker_init) schedules the seed
 # timer at most once per serving process.
 _cb_state_seed_done: bool = False
-_cb_state_seed_lock: threading.Lock = threading.Lock()
+_cb_state_seed_lock: threading.Lock = fork_safe_lock()
 
 
 def init(
@@ -1245,7 +1246,7 @@ def _schedule_gunicorn_hooks_check() -> None:
 
 _celery_deferral_timer: threading.Timer | None = None
 _celery_deferral_warning_fired: bool = False
-_celery_posture_lock: threading.Lock = threading.Lock()
+_celery_posture_lock: threading.Lock = fork_safe_lock()
 
 # What the most recent ``start_background_workers()`` did in this process:
 # None until it has run, then True when the fork-source predicate suppressed

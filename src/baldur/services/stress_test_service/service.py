@@ -20,6 +20,8 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
+
 from .models import (
     BurstFailureResult,
     LockContentionResult,
@@ -70,7 +72,7 @@ class StressTestService:
             repository: PgAdminProvider instance (registry default if omitted)
         """
         if StressTestService._held_connections_lock is None:
-            StressTestService._held_connections_lock = threading.Lock()
+            StressTestService._held_connections_lock = fork_safe_lock()
 
         if repository is None:
             from baldur.factory import ProviderRegistry

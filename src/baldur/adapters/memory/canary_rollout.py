@@ -7,11 +7,11 @@ Includes config lock simulation with timeout tracking.
 
 from __future__ import annotations
 
-import threading
 import time
 from datetime import timedelta
 from typing import Any
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.interfaces.canary_rollout_store import CanaryRolloutStore
 
 __all__ = ["InMemoryCanaryRolloutStore"]
@@ -23,7 +23,7 @@ class InMemoryCanaryRolloutStore(CanaryRolloutStore):
     """In-memory canary rollout store with config lock support."""
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
         self._rollouts: dict[
             str, tuple[dict[str, Any], float]
         ] = {}  # id -> (data, expires_at)

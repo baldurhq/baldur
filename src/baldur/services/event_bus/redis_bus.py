@@ -38,6 +38,7 @@ from uuid import uuid4
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_rlock
 from baldur.core.shutdown_coordinator import ShutdownHandler
 from baldur.services.event_bus.bus import (
     BaldurEvent,
@@ -214,7 +215,7 @@ class RedisEventBus:
         self._pubsub: Any | None = None
         self._listener_thread: threading.Thread | None = None
         self._running = False
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
         self._subscribed_redis_channels: set[str] = set()
         self._handle: DaemonWorkerHandle | None = None  # impl 489 D9
         # Mirrors the local bus's own idempotence flag so
@@ -302,7 +303,7 @@ class RedisEventBus:
         # Gated on a pid stamp rather than on elapsed time: a temporal predicate
         # cannot tell an orphaned lock from a legitimately held one.
         if self._lock_pid != os.getpid():
-            self._lock = threading.RLock()
+            self._lock = fork_safe_rlock()
             self._lock_pid = os.getpid()
 
         with self._lock:

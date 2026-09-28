@@ -15,7 +15,6 @@ Audit:
 
 from __future__ import annotations
 
-import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -26,6 +25,7 @@ import structlog
 
 from baldur.audit.helpers import log_config_apply_audit
 from baldur.core.apply_strategy import ApplyOptions, ApplyStrategy
+from baldur.core.process_utils import fork_safe_lock, fork_safe_rlock
 from baldur.core.serializable import SerializableMixin
 from baldur.core.state_backend import ListCapableBackend, get_state_backend
 from baldur.settings.audit import get_audit_settings
@@ -73,7 +73,7 @@ class PendingConfigChange(SerializableMixin):
 
 # Singleton
 _pending_config_service: PendingConfigService | None = None
-_service_lock = threading.Lock()
+_service_lock = fork_safe_lock()
 
 
 class PendingConfigService:
@@ -99,7 +99,7 @@ class PendingConfigService:
 
     def __init__(self):
         """Initialize PendingConfigService."""
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
         self._backend = get_state_backend()
         self._pending: dict[str, PendingConfigChange] = {}
         self._settings = get_audit_settings()

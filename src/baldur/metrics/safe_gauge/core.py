@@ -22,12 +22,13 @@ Memory Management (LRU Cache):
 
 from __future__ import annotations
 
-import threading
 from collections import OrderedDict
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
 import structlog
+
+from baldur.core.process_utils import fork_safe_lock
 
 from .noop import NoOpGaugeChild
 from .sync import SyncInfo
@@ -90,7 +91,7 @@ class SafeGaugeChild:
         """
         self._gauge_child = gauge_child
         self._label_values = label_values
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
         # Shadow counter for clamping logic
         # Starts at 0, may drift from actual Prometheus value
         # Reconciler will sync periodically
@@ -331,7 +332,7 @@ class SafeGauge:
             else _get_max_label_combinations()
         )
         self._on_eviction = on_eviction
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
         self._eviction_count = 0
 
     def labels(self, **kwargs) -> SafeGaugeChild:

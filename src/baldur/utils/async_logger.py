@@ -27,7 +27,7 @@ from typing import Any
 import structlog
 
 from baldur.core.backoff import ExponentialBackoff
-from baldur.core.process_utils import fork_repaired
+from baldur.core.process_utils import fork_repaired, fork_safe_lock, fork_safe_rlock
 from baldur.core.rate_limiting import CooldownGate, SlidingWindowCounter
 from baldur.settings.batch import get_batch_settings
 
@@ -167,7 +167,7 @@ class AsyncHealingLogger:
     _running: bool = False
     _worker_thread: threading.Thread | None = None
     _flush_callback: Callable[[list[dict]], None] | None = None
-    _lock = threading.RLock()
+    _lock = fork_safe_rlock()
     _settings_cache: Any | None = None
     _handle: Any | None = None  # DaemonWorkerHandle (impl 489 D9)
 
@@ -175,7 +175,7 @@ class AsyncHealingLogger:
     # that never started the pipeline — every unit-test process included — can
     # never trip the repair.
     _origin_pid: int | None = None
-    _repair_gate = threading.Lock()
+    _repair_gate = fork_safe_lock()
 
     # CRITICAL event thread pool
     _critical_executor: ThreadPoolExecutor | None = None
@@ -187,7 +187,7 @@ class AsyncHealingLogger:
 
     # Performance 2: atomic counter (used instead of qsize())
     _queue_count: int = 0
-    _queue_count_lock = threading.Lock()
+    _queue_count_lock = fork_safe_lock()
 
     # flush() ↔ _worker() cooperation: full flush including the worker's local batch
     _flush_requested = threading.Event()
@@ -285,8 +285,8 @@ class AsyncHealingLogger:
                 return  # another thread finished the repair first
 
             # Renew both class locks BEFORE anything acquires them.
-            cls._lock = threading.RLock()
-            cls._queue_count_lock = threading.Lock()
+            cls._lock = fork_safe_rlock()
+            cls._queue_count_lock = fork_safe_lock()
 
             cls._priority_queue = queue.PriorityQueue()
             cls._queue = queue.Queue(maxsize=cls._max_queue_size)

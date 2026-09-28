@@ -9,12 +9,12 @@ Contains:
 from __future__ import annotations
 
 import os
-import threading
 from dataclasses import dataclass
 from typing import Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_rlock
 from baldur.utils.time import utc_now
 
 logger = structlog.get_logger()
@@ -71,7 +71,7 @@ class DegradedEntryMarker:
         """
         self._redis = redis_client
         self._key_prefix = key_prefix
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
 
         # Local tracking (backup if Redis unavailable)
         self._local_degraded: dict[int, DegradedEntryInfo] = {}

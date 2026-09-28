@@ -9,8 +9,7 @@ Extracted from api/django/rate_limit.py as part of 358 rate_limit package split.
 
 from __future__ import annotations
 
-import threading
-
+from baldur.core.process_utils import fork_safe_lock
 from baldur.utils.time import utc_now
 
 __all__ = ["RateLimitEventHistory"]
@@ -24,7 +23,7 @@ class RateLimitEventHistory:
     """
 
     def __init__(self, max_events: int = 500):
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
         self._events: list[dict] = []
         self._max_events = max_events
 

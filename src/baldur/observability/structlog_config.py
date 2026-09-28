@@ -53,6 +53,7 @@ from typing import Any, cast
 import structlog
 from structlog.processors import KeyValueRenderer
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.observability.log_processors import (
     event_name_validator,
     rate_limit_processor,
@@ -105,7 +106,7 @@ _COMPONENT_LOGGER_MAP: dict[str, list[str]] = {
 }
 
 
-_configure_lock = threading.Lock()
+_configure_lock = fork_safe_lock()
 
 # The startup posture announcement's own logger name. It needs one because
 # the root level defaults to WARNING and _COMPONENT_LOGGER_MAP carries no

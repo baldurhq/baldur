@@ -32,13 +32,13 @@ Celery Beat:
 
 from __future__ import annotations
 
-import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.utils.time import utc_now
 
 if TYPE_CHECKING:
@@ -87,7 +87,7 @@ _SERVICE_UNREGISTERED_HINT = (
 # refuses to spend a WARNING on. Same shape as the outbound-429 coordination
 # diagnostic in services/retry_handler/policy.py.
 _service_unregistered_warned: set[str] = set()
-_service_unregistered_warned_lock = threading.Lock()
+_service_unregistered_warned_lock = fork_safe_lock()
 
 
 # =============================================================================

@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.core.serializable import SerializableMixin
 from baldur.core.ttl_cache import TTLCacheBase
 from baldur.utils.singleton import make_singleton_factory
@@ -222,7 +223,7 @@ class HealthCheckService:
         # any request thread on an uncached health endpoint, and an unlocked
         # check-then-act lets both observe False and both warn.
         self._enabled_but_unregistered_warned = False
-        self._enabled_but_unregistered_lock = threading.Lock()
+        self._enabled_but_unregistered_lock = fork_safe_lock()
 
         # PRO-wheel presence, resolved on first use and kept for the life of
         # the instance. The probe is a static packaging fact by its own
@@ -243,7 +244,7 @@ class HealthCheckService:
         # check-then-act split lets two concurrent rounds both observe "nothing
         # outstanding" and both spawn, orphaning a thread nobody re-checks.
         self._outstanding_probes: dict[str, Future[DatabaseCheck]] = {}
-        self._outstanding_lock = threading.Lock()
+        self._outstanding_lock = fork_safe_lock()
 
     def _get_circuit_breaker_count(self) -> int:
         """

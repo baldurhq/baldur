@@ -9,11 +9,11 @@ Note: static configuration defaults live in safe_defaults.py.
 """
 
 import os
-import threading
 from typing import Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_rlock
 from baldur.settings.introspection import register_direct_read_env_vars
 
 __all__ = ["DegradedModeHandler"]
@@ -42,7 +42,7 @@ class DegradedModeHandler:
         # BALDUR_CB_FAILURE_THRESHOLD=5
     """
 
-    _lock = threading.RLock()
+    _lock = fork_safe_rlock()
     _degraded_warned = False
     _is_degraded = False
     _degraded_reason: str = ""

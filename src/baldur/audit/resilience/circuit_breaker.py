@@ -13,7 +13,6 @@ Import order note:
 
 from __future__ import annotations
 
-import threading
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -23,6 +22,7 @@ from typing import Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock, fork_safe_rlock
 from baldur.utils.time import utc_now
 
 logger = structlog.get_logger()
@@ -314,7 +314,7 @@ class CircuitBreaker(CircuitBreakerBase):
         )
         self.config = cfg
         # DR-5: Sync-only lock
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
 
         # Backward-compatible snapshot for last_state_change
         self._last_state_change = utc_now()
@@ -385,11 +385,11 @@ class CircuitBreakerRegistry:
     """Registry for managing multiple circuit breakers."""
 
     _instance: CircuitBreakerRegistry | None = None
-    _lock = threading.Lock()
+    _lock = fork_safe_lock()
 
     def __init__(self):
         self._breakers: dict[str, CircuitBreaker] = {}
-        self._registry_lock = threading.RLock()
+        self._registry_lock = fork_safe_rlock()
 
     @classmethod
     def get_instance(cls) -> CircuitBreakerRegistry:

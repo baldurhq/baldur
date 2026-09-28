@@ -5,9 +5,9 @@ Thread-safe. Suitable for testing and non-Django environments.
 
 from __future__ import annotations
 
-import threading
 from datetime import datetime
 
+from baldur.core.process_utils import fork_safe_rlock
 from baldur.interfaces.repositories import RecoverySessionArchiveRepository
 from baldur.models.recovery_session import RecoverySessionData
 
@@ -22,7 +22,7 @@ class InMemoryRecoverySessionArchiveRepository(RecoverySessionArchiveRepository)
 
     def __init__(self) -> None:
         self._storage: dict[str, RecoverySessionData] = {}  # session_id -> data
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
 
     def save(self, data: RecoverySessionData) -> bool:
         """Persist a recovery session record (overwrite on duplicate)."""

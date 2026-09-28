@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import os
-import threading
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -30,6 +29,7 @@ from baldur.audit.helpers import (
 )
 from baldur.audit.masking import mask_sensitive_fields
 from baldur.core.exceptions import DomainValidationError
+from baldur.core.process_utils import fork_safe_lock
 from baldur.decorators.domain_tag import get_current_domain
 from baldur.metrics.event_handlers import DLQMetricEventHandler
 from baldur.metrics.prometheus import get_metrics
@@ -600,7 +600,7 @@ class DLQCaptureService:
     # Local Fallback (Zero Data Loss)
     # =========================================================================
 
-    _fallback_lock = threading.Lock()
+    _fallback_lock = fork_safe_lock()
 
     def _write_to_local_fallback(
         self,
@@ -821,7 +821,7 @@ class DLQCaptureService:
 
 
 _capture_service: DLQCaptureService | None = None
-_capture_service_lock = threading.Lock()
+_capture_service_lock = fork_safe_lock()
 
 
 def get_dlq_capture_service() -> DLQCaptureService:

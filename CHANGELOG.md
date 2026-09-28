@@ -14,6 +14,7 @@ notes are published separately at <https://baldur.sh/concepts/pro/release-notes/
 
 - A `dlq=True` call that fails or times out without `retry=` is now parked in the dead-letter queue.
 - A dead-letter entry is no longer dropped when the call's `user_id` is not an integer.
+- A forked worker no longer inherits Baldur, Redis-pool or log-stream locks its parent held.
 
 ## [1.16.0] - 2026-09-28
 

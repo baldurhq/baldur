@@ -29,10 +29,11 @@ Per impl 487 D11/D12.
 
 from __future__ import annotations
 
-import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import structlog
+
+from baldur.core.process_utils import fork_safe_lock
 
 logger = structlog.get_logger()
 
@@ -59,7 +60,7 @@ except ImportError:
 # ``collect()`` snapshot the dict via ``list(...)`` so a concurrent
 # register/unregister does not mutate the iterator mid-collection.
 _executor_registry: dict[str, ThreadPoolExecutor] = {}
-_registry_lock = threading.Lock()
+_registry_lock = fork_safe_lock()
 
 # Collector singleton — registered with prometheus REGISTRY exactly once
 # per process. Tracked as a module-level slot so reset_metrics() / repeat

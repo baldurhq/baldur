@@ -23,10 +23,11 @@ the two stages share one dedup record — two copies would warn once per key
 
 from __future__ import annotations
 
-import threading
 from typing import TYPE_CHECKING
 
 import structlog
+
+from baldur.core.process_utils import fork_safe_lock
 
 from .rate_limit_detection import UNIDENTIFIED_COORDINATION_KEY
 
@@ -44,7 +45,7 @@ logger = structlog.get_logger()
 # Coordination keys already warned about, so the unidentified-domain diagnostic
 # costs one WARNING line per key per process rather than one per call.
 _unidentified_key_warned: set[str] = set()
-_unidentified_key_warned_lock = threading.Lock()
+_unidentified_key_warned_lock = fork_safe_lock()
 
 
 def coordination_key(rate_limit_key: str | None, domain: str) -> str:

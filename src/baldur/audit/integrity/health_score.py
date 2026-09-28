@@ -15,7 +15,6 @@ Purpose:
 
 from __future__ import annotations
 
-import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -23,6 +22,7 @@ from typing import Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.settings.audit_integrity import get_audit_integrity_settings
 from baldur.utils.time import utc_now
 
@@ -143,7 +143,7 @@ class IntegrityHealthScore:
             critical_threshold: Critical score threshold (default from AuditIntegritySettings)
         """
         self._redis = redis_client
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
 
         # Health thresholds from settings
         self._healthy_threshold = (

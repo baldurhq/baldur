@@ -19,6 +19,8 @@ from typing import Any, Literal, cast
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
+
 logger = structlog.get_logger()
 
 try:
@@ -389,12 +391,12 @@ _registered_domains: set[str] = {
 # already collapses to the fallback.
 _MAX_UNREGISTERED_LOGGED_DOMAINS = 256
 _unregistered_seen: OrderedDict[str, None] = OrderedDict()
-_unregistered_seen_lock = threading.Lock()
+_unregistered_seen_lock = fork_safe_lock()
 
 # Guards the registration miss path (membership re-check, cap read, add) and
 # every piece of registry-owned memo state. The membership fast path in
 # ``register_domain`` and the lookup in ``resolve_domain_label`` stay lock-free.
-_registry_lock = threading.Lock()
+_registry_lock = fork_safe_lock()
 
 # Domains that must never occupy a registry slot, in canonical form. Shared
 # with the DLQ store's canonicalization retry so both channels skip-list the
@@ -419,7 +421,7 @@ _refused_seen: OrderedDict[str, None] = OrderedDict()
 # (warned or not — see _note_projection_lossiness). Its own lock, because the
 # check runs on the lock-free membership hit as well as under _registry_lock.
 _lossy_projection_seen: OrderedDict[str, None] = OrderedDict()
-_lossy_projection_lock = threading.Lock()
+_lossy_projection_lock = fork_safe_lock()
 
 # True once the registry has reported that it is full. Cleared by a successful
 # add (i.e. the cap was raised) and by reset_registered_domains(), so the

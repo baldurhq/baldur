@@ -6,10 +6,10 @@ Thread-safe using threading.Lock.
 
 from __future__ import annotations
 
-import threading
 import time
 from typing import Any
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.interfaces.chaos_experiment_store import ChaosExperimentStore
 
 __all__ = ["InMemoryChaosExperimentStore"]
@@ -19,7 +19,7 @@ class InMemoryChaosExperimentStore(ChaosExperimentStore):
     """In-memory chaos experiment store."""
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
         self._experiments: dict[
             str, tuple[dict[str, Any], float]
         ] = {}  # id -> (data, expires_at)

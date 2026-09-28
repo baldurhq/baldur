@@ -17,10 +17,10 @@ Values are overridable via SafetyBoundsSettings environment variables:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from threading import RLock
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_rlock
 from baldur.settings.safety_bounds import get_safety_bounds_settings
 
 logger = structlog.get_logger()
@@ -125,7 +125,7 @@ class SafetyBounds:
             custom_bounds: Custom bound configuration
             strict_mode: True rejects unknown parameters
         """
-        self._lock = RLock()
+        self._lock = fork_safe_rlock()
         self.strict_mode = strict_mode
 
         # Copy the defaults (loaded from settings)

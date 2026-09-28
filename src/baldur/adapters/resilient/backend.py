@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 import structlog
 
 from baldur.core.exceptions import ConfigurationError
+from baldur.core.process_utils import fork_safe_lock, fork_safe_rlock
 
 if TYPE_CHECKING:
     from baldur.settings.resilient_storage import ResilientStorageSettings
@@ -196,7 +197,7 @@ class ResilientStorageBackend:
         self._mode = ResilientStorageMode.DEGRADED
         # Monotonic count of REDIS -> degraded transitions. See ``degrade_count``.
         self._degrade_count = 0
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
 
         # Redis client
         self._redis: Any | None = None
@@ -214,7 +215,7 @@ class ResilientStorageBackend:
         # dispatcher in flight. The lock is released by the daemon
         # thread's ``finally`` clause. Read paths are kept off this
         # lock entirely; ``self._lock`` (RLock) covers mode/state.
-        self._recovery_lock = threading.Lock()
+        self._recovery_lock = fork_safe_lock()
 
         # WAL for disk-based recovery queue
         self._wal: Any | None = None

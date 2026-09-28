@@ -10,13 +10,13 @@ Version: 6.4.0 - Added Drift Detection metrics
 
 from __future__ import annotations
 
-import threading
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock, fork_safe_rlock
 from baldur.utils.time import utc_now
 
 # Drift Detection metrics
@@ -74,7 +74,7 @@ class ShadowLogger:
     def __new__(cls) -> ShadowLogger:
         """Singleton pattern."""
         if cls._instance is None:
-            cls._lock_class = threading.Lock()
+            cls._lock_class = fork_safe_lock()
             with cls._lock_class:
                 if cls._instance is None:
                     instance = super().__new__(cls)
@@ -90,7 +90,7 @@ class ShadowLogger:
     def _init(self) -> None:
         """Initialize shadow logger."""
         self._failure_log: list[L2SyncFailureRecord] = []
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
         self._max_entries = 1000  # Default; can be changed at runtime
 
     def set_max_entries(self, max_entries: int) -> None:

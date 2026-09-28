@@ -44,7 +44,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from baldur.core.process_utils import fork_repaired
+from baldur.core.process_utils import fork_repaired, fork_safe_lock
 
 from .helpers import _emit_rate_limit_event
 
@@ -100,11 +100,11 @@ class _AnnouncerState:
     )
 
     def __init__(self, records: dict[str, float] | None = None) -> None:
-        self.lock = threading.Lock()
+        self.lock = fork_safe_lock()
         # Separate from ``lock`` on purpose: the spawn registers a daemon worker
         # and reads settings, and serializing that behind the lock every record
         # write takes would put the registry's lock underneath this one.
-        self.spawn_lock = threading.Lock()
+        self.spawn_lock = fork_safe_lock()
         self.wake = threading.Event()
         self.thread: threading.Thread | None = None
         self.records: dict[str, float] = dict(records) if records else {}

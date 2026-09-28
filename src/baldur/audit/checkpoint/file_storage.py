@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -25,6 +24,7 @@ from baldur.audit.checkpoint.strategy import (
     get_load_failures_counter,
     get_save_failures_counter,
 )
+from baldur.core.process_utils import fork_safe_rlock
 from baldur.utils.fs import ResolvedDir, resolve_writable_dir
 from baldur.utils.time import utc_now
 
@@ -88,7 +88,7 @@ class FileCheckpointStorage(CheckpointStorageStrategy):
         )
         self._base_path = self._resolved_dir.path
         self._sync_on_write = sync_on_write
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
 
     @property
     def base_path(self) -> Path:

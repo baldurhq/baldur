@@ -8,13 +8,13 @@ Canonical location: ``baldur.services.idempotency.service``
 
 from __future__ import annotations
 
-import threading
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.core.time_provider import get_time_provider
 
 from .models import IdempotencyKey, IdempotencyResult
@@ -473,7 +473,7 @@ class IdempotencyService:
 
 # Singleton instance
 _service: IdempotencyService | None = None
-_service_lock = threading.Lock()
+_service_lock = fork_safe_lock()
 
 
 def get_idempotency_service() -> IdempotencyService:

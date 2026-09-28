@@ -39,7 +39,6 @@ Integration flow:
 
 from __future__ import annotations
 
-import threading
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
@@ -51,6 +50,7 @@ from baldur.core.dependency_graph import (  # noqa: F401
     ServiceDependencyGraph,
     ServiceDependencyNode,
 )
+from baldur.core.process_utils import fork_safe_lock
 from baldur.models.blast_radius import BlastRadiusLevel
 from baldur.utils.time import utc_now
 
@@ -490,7 +490,7 @@ class BlastRadiusConfig:
 
 
 _integration: BlastRadiusIntegration | None = None
-_integration_lock = threading.Lock()
+_integration_lock = fork_safe_lock()
 
 
 def get_blast_radius_integration() -> BlastRadiusIntegration:

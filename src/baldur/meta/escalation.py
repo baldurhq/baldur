@@ -15,7 +15,6 @@ Channels by level:
 
 from __future__ import annotations
 
-import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -24,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_rlock
 from baldur.interfaces.messaging_common import OFF_HOST_DELIVERY_CHANNELS
 from baldur.interfaces.notification import (
     NotificationChannel,
@@ -188,7 +188,7 @@ class EscalationManager:
         self._settings = settings or get_meta_watchdog_settings()
         if settings is not None:
             self._warn_on_ignored_transport_config(settings)
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
         self._last_escalation: dict[str, float] = {}
 
     @staticmethod

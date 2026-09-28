@@ -70,6 +70,9 @@ build when it is broken.
 - **Time** — use `utils.time.utc_now()`, never `datetime.now()` /
   `datetime.utcnow()` directly.
 - **Acyclic imports** — the first-party import-time graph must have no cycles.
+- **Fork-safe locks** — every `threading.Lock` / `threading.RLock` is built with
+  `core.process_utils.fork_safe_lock()` / `fork_safe_rlock()`, which a forked
+  worker receives unlocked even if a parent thread held it at the fork.
 - **Metric and event names** — Prometheus metric names are `baldur_`-prefixed;
   string-literal event names follow `{component}.{entity}_{action}`.
 - **No `print()`** in library code — use structured logging.

@@ -5,7 +5,6 @@ Provides batched file writing with reduced fsync overhead.
 """
 
 import os
-import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +12,7 @@ from typing import Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_rlock
 from baldur.utils.serialization import fast_dumps_str
 
 logger = structlog.get_logger()
@@ -63,7 +63,7 @@ class BatchFlushWriter:
         self._file_path = Path(file_path)
         self._config = config or BatchFlushConfig()
         self._buffer: list[str] = []
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
         self._last_flush = time.monotonic()
         self._file_handle: Any = None  # lazy-opened TextIOWrapper
         self._entries_written = 0

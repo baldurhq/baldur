@@ -4,13 +4,13 @@ Pre-computed Cache Service - Multi-Tier Cache Access with Drift Detection.
 
 from __future__ import annotations
 
-import threading
 import time
 from collections.abc import Callable
 from typing import Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.core.singleflight import Singleflight
 
 from .constants import (
@@ -39,7 +39,7 @@ _l3_singleflight: Singleflight[str] = Singleflight()
 
 # Drift tracking stats per cache key
 _drift_stats: dict[str, dict[str, int]] = {}
-_drift_stats_lock = threading.Lock()
+_drift_stats_lock = fork_safe_lock()
 
 
 def _get_drift_stats(cache_key: str) -> dict[str, int]:

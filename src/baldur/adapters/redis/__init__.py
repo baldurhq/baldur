@@ -11,7 +11,6 @@ Uses ResilientStorageBackend for zero data loss guarantees.
 
 from __future__ import annotations
 
-import threading
 import time
 from typing import Any
 
@@ -22,6 +21,7 @@ from baldur.adapters.redis.circuit_breaker import (
 )
 from baldur.adapters.redis.dlq import RedisDLQRepository
 from baldur.adapters.redis.event_journal import RedisEventJournalRepository
+from baldur.core.process_utils import fork_safe_lock
 
 logger = structlog.get_logger()
 
@@ -37,7 +37,7 @@ logger = structlog.get_logger()
 # write through :func:`_redis_state` directly; no module-level mirror remains.
 # ---------------------------------------------------------------------------
 _REDIS_RETRY_INTERVAL: float = 30.0
-_redis_client_lock = threading.Lock()
+_redis_client_lock = fork_safe_lock()
 
 
 class _RedisClientState:

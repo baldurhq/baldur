@@ -12,12 +12,13 @@ Design principles:
 from __future__ import annotations
 
 import hashlib
-import threading
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import structlog
+
+from baldur.core.process_utils import fork_safe_lock
 
 if TYPE_CHECKING:
     from baldur.core.cluster_identity import ClusterIdentity
@@ -515,7 +516,7 @@ class CrossClusterAuditLinker:
 # =============================================================================
 
 _linker: CrossClusterAuditLinker | None = None
-_linker_lock = threading.Lock()
+_linker_lock = fork_safe_lock()
 
 
 def get_cross_cluster_audit_linker() -> CrossClusterAuditLinker:

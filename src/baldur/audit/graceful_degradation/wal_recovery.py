@@ -9,13 +9,13 @@ Contains:
 from __future__ import annotations
 
 import os
-import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_rlock
 from baldur.utils.time import utc_now
 
 logger = structlog.get_logger()
@@ -72,7 +72,7 @@ class HashChainWALRecovery:  # verified-by: test_recover_uncommitted_entries
         self._wal_dir = Path(wal_dir)
         self._redis = redis_client
         self._key_prefix = key_prefix
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
 
         # WAL file management (writer created lazily per date)
         self._writer = None

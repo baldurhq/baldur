@@ -18,7 +18,6 @@ Design Philosophy:
 
 from __future__ import annotations
 
-import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -26,6 +25,8 @@ from enum import Enum
 from typing import Any
 
 import structlog
+
+from baldur.core.process_utils import fork_safe_lock
 
 logger = structlog.get_logger()
 
@@ -155,7 +156,7 @@ class MetricReliabilityManager:
         self._thresholds = thresholds or ReliabilityThresholds()
         self._safe_defaults_provider = safe_defaults_provider
         self._states: dict[str, MetricReliabilityState] = {}
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
         self._global_mode = OperatingMode.NORMAL
         self._mode_listeners: list[Callable[[str, OperatingMode], None]] = []
 

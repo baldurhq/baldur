@@ -9,7 +9,6 @@ Contains:
 from __future__ import annotations
 
 import os
-import threading
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -21,6 +20,7 @@ from baldur.audit.integrity.models import (
 )
 from baldur.audit.integrity.verifier import HashChainVerifier
 from baldur.core.exceptions import HashChainSequenceRefusedError
+from baldur.core.process_utils import fork_safe_rlock
 from baldur.utils.time import utc_now
 
 if TYPE_CHECKING:
@@ -208,7 +208,7 @@ class RedisHashChainManager:
         self._lock_timeout_seconds = lock_timeout_seconds
         self._lock_blocking_timeout = lock_blocking_timeout
         self._ledger = ledger
-        self._local_lock = threading.RLock()
+        self._local_lock = fork_safe_rlock()
 
         # Last posture this manager published. ``None`` until the first write,
         # which therefore always publishes — that is what turns a

@@ -41,6 +41,7 @@ from typing import cast
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.utils.time import utc_now
 
 logger = structlog.get_logger()
@@ -103,7 +104,7 @@ _WORKER_CACHE_KEY = "state"
 # concurrent polls share a single broker call. The sequence advances only when
 # a waiter abandons an attempt at its deadline; a cache reset leaves a live
 # attempt joinable.
-_worker_cache_lock = threading.Lock()
+_worker_cache_lock = fork_safe_lock()
 _worker_cache: dict[str, tuple[float, str]] = {}
 _probe_inflight: Future[str] | None = None
 _probe_thread: threading.Thread | None = None
@@ -112,7 +113,7 @@ _last_logged_worker_state: str | None = None
 _probe_state_pid: int | None = None
 
 # In-process dispatch ledger — the observed-past evidence behind ``last_dispatch``.
-_dispatch_lock = threading.Lock()
+_dispatch_lock = fork_safe_lock()
 _dispatch_record: DispatchRecord | None = None
 
 

@@ -14,11 +14,11 @@ Metrics (4):
 
 from __future__ import annotations
 
-import threading
 from collections import OrderedDict
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.metrics.recorders.base import BaseMetricRecorder
 from baldur.metrics.registry import (
     get_or_create_counter,
@@ -63,7 +63,7 @@ class CanaryMetricRecorder(BaseMetricRecorder):
         )
 
         self._seen_stages: OrderedDict[str, None] = OrderedDict()
-        self._stage_lock = threading.Lock()
+        self._stage_lock = fork_safe_lock()
 
     def _guard_stage_name(self, stage_name: str) -> str:
         """Apply cardinality guard for stage_name label.

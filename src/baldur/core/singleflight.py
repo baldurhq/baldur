@@ -25,6 +25,8 @@ from collections.abc import Callable, Hashable
 from concurrent.futures import Future
 from typing import Generic, TypeVar
 
+from baldur.core.process_utils import fork_safe_lock
+
 V = TypeVar("V")
 
 __all__ = ["Singleflight"]
@@ -48,7 +50,7 @@ class Singleflight(Generic[V]):
     # verified-by: tests/unit/core/test_singleflight.py
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
         self._inflight: dict[Hashable, Future[V]] = {}
         # Keys the CURRENT thread is computing as winner - used to
         # fast-fail re-entrant calls instead of self-deadlocking on

@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.utils.time import utc_now
 
 if TYPE_CHECKING:
@@ -68,10 +69,9 @@ class HealthBridgeMiddleware:
         self.get_response = get_response
 
         # Lazy init lock (import threading here to avoid circular import)
-        import threading
 
         if HealthBridgeMiddleware._snapshot_lock is None:
-            HealthBridgeMiddleware._snapshot_lock = threading.Lock()
+            HealthBridgeMiddleware._snapshot_lock = fork_safe_lock()
 
     def __call__(self, request: HttpRequest) -> HttpResponse:
         """Process request/response."""

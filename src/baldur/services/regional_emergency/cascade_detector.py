@@ -22,13 +22,13 @@ Code reference:
 
 from __future__ import annotations
 
-import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.core.serializable import SerializableMixin
 from baldur.models.emergency import EmergencyLevel, EmergencyScope
 from baldur.utils.time import utc_now
@@ -155,7 +155,7 @@ class RegionalCascadeDetector:
             else _get_cascade_window_minutes()
         )
         self._auto_escalate = auto_escalate
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
 
         # Cascade event history (in-memory buffer)
         self._cascade_history: list[CascadeDetectionEvent] = []
@@ -403,7 +403,7 @@ class RegionalCascadeDetector:
 # =============================================================================
 
 _cascade_detector: RegionalCascadeDetector | None = None
-_detector_lock = threading.Lock()
+_detector_lock = fork_safe_lock()
 
 
 def get_cascade_detector() -> RegionalCascadeDetector:

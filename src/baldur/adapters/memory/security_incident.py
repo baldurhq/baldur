@@ -6,11 +6,11 @@ Thread-safe in-memory storage for security incidents.
 
 from __future__ import annotations
 
-import threading
 from datetime import datetime, timedelta
 from typing import Any
 
 from baldur.adapters.memory.base import _now
+from baldur.core.process_utils import fork_safe_rlock
 from baldur.interfaces.repositories import (
     SecurityIncidentData,
     SecurityIncidentRepository,
@@ -28,7 +28,7 @@ class InMemorySecurityIncidentRepository(SecurityIncidentRepository):
     def __init__(self):
         self._storage: dict[int, SecurityIncidentData] = {}
         self._next_id = 1
-        self._lock = threading.RLock()  # RLock for reentrant calls
+        self._lock = fork_safe_rlock()  # RLock for reentrant calls
 
     def create(
         self,

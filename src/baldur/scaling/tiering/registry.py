@@ -7,13 +7,13 @@ Handles tier definitions, mappings, and overrides with fallback chain.
 
 from __future__ import annotations
 
-import threading
 import time
 from collections import OrderedDict
 from typing import Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock, fork_safe_rlock
 from baldur.utils.time import utc_now
 
 from .circuit_breaker import get_tiering_circuit_breaker
@@ -39,7 +39,7 @@ class TierRegistry:
     """
 
     _instance: TierRegistry | None = None
-    _lock = threading.Lock()
+    _lock = fork_safe_lock()
     #: Set once the absent-configuration fallback has been reported, so a
     #: static condition is stated once instead of on every request.
     _config_missing_reported: bool = False
@@ -64,7 +64,7 @@ class TierRegistry:
         self._mappings: list[TierMapping] = []
         self._overrides: list[TierOverride] = []
         self._validator: TierConfigValidator = TierConfigValidator()
-        self._data_lock = threading.RLock()
+        self._data_lock = fork_safe_rlock()
 
         # Before Mutation Snapshot: store the previous state for rollback (up to 10)
         self._previous_configs: list[dict[str, Any]] = []

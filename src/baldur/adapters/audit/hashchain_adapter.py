@@ -22,7 +22,6 @@ Reference: 416
 from __future__ import annotations
 
 import re
-import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -44,6 +43,7 @@ from baldur.audit.masking import (
     mask_sensitive_fields,
 )
 from baldur.audit.trace import get_trace_id, get_trace_id_full
+from baldur.core.process_utils import fork_safe_rlock
 from baldur.interfaces.audit_adapter import (
     AuditAction,
     AuditEntry,
@@ -144,7 +144,7 @@ class HashChainFileAuditLogAdapter(AuditLogAdapter):
         self._mask_ip = mask_ip_addresses
         self._sensitive_fields = sensitive_fields or list(_DEFAULT_SENSITIVE_FIELDS)
 
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
         self._current_file: Path | None = None
         self._file_handle: Any = None
         self._last_anchor_date: str | None = None

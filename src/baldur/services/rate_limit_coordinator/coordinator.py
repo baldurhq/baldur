@@ -49,7 +49,6 @@ from __future__ import annotations
 
 import asyncio
 import functools
-import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -60,6 +59,7 @@ import structlog
 
 from baldur.adapters.rate_limit import get_rate_limit_storage
 from baldur.core.backoff import ExponentialBackoff
+from baldur.core.process_utils import fork_safe_lock
 from baldur.core.rate_limiting import CooldownGate
 from baldur.interfaces.rate_limit_storage import (
     RateLimitState,
@@ -242,7 +242,7 @@ class RateLimitCoordinator:
     """
 
     _instance: RateLimitCoordinator | None = None
-    _instance_lock = threading.Lock()
+    _instance_lock = fork_safe_lock()
 
     def __init__(
         self,
@@ -262,7 +262,7 @@ class RateLimitCoordinator:
         """
         self._storage = storage or get_rate_limit_storage()
         self._config = config or RateLimitCoordinatorConfig.from_settings()
-        self._local_lock = threading.Lock()
+        self._local_lock = fork_safe_lock()
 
         # EventBus debouncing gate (prevents duplicate event emission per key;
         # the shared gate also bounds the map that previously grew per key).
@@ -270,7 +270,7 @@ class RateLimitCoordinator:
 
         # Canary state tracking (scout mode for the first request after cooldown)
         self._canary_in_progress: dict[str, bool] = {}
-        self._canary_lock = threading.Lock()
+        self._canary_lock = fork_safe_lock()
 
         # Cooldown-end announcement. The announcer holds one record per key —
         # the effective expiry this process last learned — and verifies it

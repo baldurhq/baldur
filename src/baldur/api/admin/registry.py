@@ -12,12 +12,12 @@ each module there defines a single ``_register_<domain>_routes`` function.
 from __future__ import annotations
 
 import re
-import threading
 from dataclasses import dataclass, field
 from urllib.parse import unquote
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_rlock
 from baldur.interfaces.web_framework import (
     HandlerFunc,
     HttpMethod,
@@ -106,7 +106,7 @@ class AdminRegistry:
 
     def __init__(self) -> None:
         self._routes: list[AdminRoute] = []
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
 
     def register(self, route: AdminRoute) -> None:
         """Register a route. Later registrations for the same (method, path)

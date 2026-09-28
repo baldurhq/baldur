@@ -24,6 +24,7 @@ from baldur.coordination.factory import get_leader_elector
 from baldur.coordination.shutdown_integration import (
     register_for_graceful_shutdown,
 )
+from baldur.core.process_utils import fork_safe_lock
 from baldur.services.event_bus.bus.event_types import EventType
 from baldur.services.event_bus.emitter import EventEmitterMixin
 
@@ -327,7 +328,7 @@ class DLQConsumerCoordinator(EventEmitterMixin):
 
 
 _coordinator_cache: dict[str, DLQConsumerCoordinator] = {}
-_coordinator_lock = threading.Lock()
+_coordinator_lock = fork_safe_lock()
 
 
 def get_dlq_consumer_coordinator(

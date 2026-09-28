@@ -23,7 +23,6 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -32,6 +31,7 @@ from typing import Any
 import structlog
 
 from baldur.core.file_utils import safe_unlink
+from baldur.core.process_utils import fork_safe_lock
 from baldur.core.serializable import SerializableMixin
 
 logger = structlog.get_logger()
@@ -150,7 +150,7 @@ class MetricSnapshotStorage:
         self._max_age = (
             max_age_seconds if max_age_seconds is not None else _get_snapshot_max_age()
         )
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
         self._snapshot: MetricSnapshot | None = None
         self._dirty = False
 

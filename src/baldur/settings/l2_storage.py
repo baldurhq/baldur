@@ -17,11 +17,10 @@ Environment Variables:
 
 from __future__ import annotations
 
-import threading
-
 from pydantic import Field
 from pydantic_settings import BaseSettings
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.settings.base import make_settings_config
 from baldur.settings.field_types import (
     STANDARD_POOL_SIZE,
@@ -204,7 +203,7 @@ class L2StorageRuntimeConfig:
     """
 
     _instance: L2StorageRuntimeConfig | None = None
-    _lock = threading.Lock()
+    _lock = fork_safe_lock()
 
     def __new__(cls) -> L2StorageRuntimeConfig:
         """Singleton pattern for global configuration."""
@@ -218,7 +217,7 @@ class L2StorageRuntimeConfig:
 
     def _init_defaults(self) -> None:
         """Initialize default values from environment or hardcoded defaults."""
-        self._runtime_lock = threading.Lock()
+        self._runtime_lock = fork_safe_lock()
         self._runtime_config: dict = {}
         self._last_updated: dict = {}
 

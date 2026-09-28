@@ -23,6 +23,8 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
+
 if TYPE_CHECKING:
     from baldur.meta.daemon_worker import DaemonWorkerHandle
     from baldur.services.cell_topology.policy import CellEvacuationPolicy
@@ -234,7 +236,7 @@ class CellTopologyService:
 # =============================================================================
 
 _service: CellTopologyService | None = None
-_service_lock = threading.Lock()
+_service_lock = fork_safe_lock()
 
 
 def get_cell_topology_service() -> CellTopologyService:

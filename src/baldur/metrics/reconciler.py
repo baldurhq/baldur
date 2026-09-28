@@ -17,6 +17,7 @@ from baldur.adapters.metrics.base import (
     MetricSourceAdapter,
 )
 from baldur.adapters.metrics.factory import get_metric_adapter
+from baldur.core.process_utils import fork_safe_lock
 from baldur.metrics.safe_gauge import clamp_non_negative, clamp_percentage
 from baldur.utils.jitter import with_jitter
 from baldur.utils.time import utc_now
@@ -238,10 +239,9 @@ class MetricReconciler:
 
 
 # Singleton instance
-import threading
 
 _reconciler_instance: MetricReconciler | None = None
-_reconciler_lock = threading.Lock()
+_reconciler_lock = fork_safe_lock()
 
 
 def get_reconciler(

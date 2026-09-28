@@ -19,6 +19,7 @@ from typing import Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.utils.time import utc_now
 
 logger = structlog.get_logger()
@@ -74,7 +75,7 @@ class SystemMetricsCache:
         self._max_age_seconds = max_age_seconds
         self._timer: threading.Timer | None = None
         self._running = False
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
         self._cached = CachedMetrics()
         self._last_refresh: float = 0.0
 

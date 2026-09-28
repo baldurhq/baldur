@@ -15,13 +15,14 @@ Examples:
 
 from __future__ import annotations
 
-import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
 import structlog
+
+from baldur.core.process_utils import fork_safe_rlock
 
 logger = structlog.get_logger()
 
@@ -205,7 +206,7 @@ class StuckDetector:
 
         self._windows: dict[str, MetricWindow] = {}
         self._first_sample_time: dict[str, float] = {}
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
 
     def record(
         self,

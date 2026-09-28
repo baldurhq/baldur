@@ -32,11 +32,11 @@ process-local flag would have frozen exactly one worker.
 
 from __future__ import annotations
 
-import threading
 from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.models.emergency import EmergencyLevel
 from baldur.services.circuit_breaker.models import FreezeModeState
 
@@ -75,7 +75,7 @@ class FreezeReason:
 # =============================================================================
 
 _pro_installed: bool | None = None
-_pro_installed_lock = threading.Lock()
+_pro_installed_lock = fork_safe_lock()
 
 
 def _pro_distribution_present() -> bool:
@@ -256,7 +256,7 @@ class FreezeModeManager:
 
 
 _manager_instance: FreezeModeManager | None = None
-_manager_instance_lock = threading.Lock()
+_manager_instance_lock = fork_safe_lock()
 
 
 def get_freeze_mode_manager() -> FreezeModeManager:

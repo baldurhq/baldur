@@ -6,9 +6,8 @@ Testing adapter for PoolRecoveryHandler ABC.
 
 from __future__ import annotations
 
-import threading
-
 from baldur.core.pool_watchdog import PoolRecoveryHandler
+from baldur.core.process_utils import fork_safe_lock
 
 
 class InMemoryPoolRecoveryHandler(PoolRecoveryHandler):
@@ -19,7 +18,7 @@ class InMemoryPoolRecoveryHandler(PoolRecoveryHandler):
     """
 
     def __init__(self):
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
         self._actions: list[dict] = []
         self._close_result = True
         self._expand_result = True

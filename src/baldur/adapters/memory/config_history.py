@@ -6,9 +6,9 @@ Thread-safe using threading.Lock. Suitable for testing and standalone usage.
 
 from __future__ import annotations
 
-import threading
 from typing import Any
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.interfaces.config_history_store import ConfigHistoryStore
 
 __all__ = ["InMemoryConfigHistoryStore"]
@@ -18,7 +18,7 @@ class InMemoryConfigHistoryStore(ConfigHistoryStore):
     """In-memory config history store with threading.Lock atomicity."""
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
         self._versions: dict[str, int] = {}  # config_type -> current version
         self._history: dict[str, list[dict[str, Any]]] = {}  # config_type -> [data]
         self._current: dict[str, dict[str, Any]] = {}  # config_type -> data

@@ -33,6 +33,7 @@ from baldur.coordination.factory import get_leader_elector
 from baldur.coordination.shutdown_integration import (
     register_for_graceful_shutdown,
 )
+from baldur.core.process_utils import fork_safe_lock
 from baldur.utils.time import utc_now
 
 if TYPE_CHECKING:
@@ -351,10 +352,15 @@ class LeaderScheduler:
             self._scheduler_thread is not None
         )  # populated by _spawn_scheduler_thread
         if self._handle is None:
+            # The leader loop runs only in the process that started it — a
+            # pre-fork server's master — and a forked worker never runs jobs,
+            # so a forked process must neither report this worker nor respawn
+            # it (a respawn there would start a second leader loop).
             self._handle = DaemonWorkerHandle(
                 thread=self._scheduler_thread,
                 tick_interval_seconds=self._tick_interval,
                 restart_callback=self._spawn_scheduler_thread,
+                fork_source_only=True,
             )
             register_daemon_worker(f"Scheduler-{self._resource_name}", self._handle)
         else:
@@ -474,7 +480,7 @@ class LeaderScheduler:
 
 # Singleton instance cache
 _scheduler_cache: dict[str, LeaderScheduler] = {}
-_scheduler_lock = threading.Lock()
+_scheduler_lock = fork_safe_lock()
 
 
 def get_leader_scheduler(

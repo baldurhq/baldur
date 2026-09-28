@@ -15,7 +15,6 @@ Design Philosophy:
 from __future__ import annotations
 
 import os
-import threading
 import time
 from collections.abc import Callable, Iterator
 from datetime import datetime
@@ -26,6 +25,7 @@ import structlog
 
 from baldur.audit.config import AuditConfig
 from baldur.audit.integrity import HashChainManager, HashChainVerifier
+from baldur.core.process_utils import fork_safe_lock, fork_safe_rlock
 from baldur.interfaces.audit_adapter import (
     AuditAction,
     AuditEntry,
@@ -135,7 +135,7 @@ class ContinuousAuditRecorder:
 
         # Hash chain manager
         self._hash_manager = HashChainManager(state_file=state_file)
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
 
         # WAL initialization (optional)
         self._wal_enabled = wal_enabled
@@ -945,7 +945,7 @@ class ContinuousAuditRecorder:
 # =============================================================================
 
 _recorder_instance: ContinuousAuditRecorder | None = None
-_recorder_lock = threading.Lock()
+_recorder_lock = fork_safe_lock()
 
 
 def get_continuous_audit_recorder() -> ContinuousAuditRecorder:

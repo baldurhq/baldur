@@ -28,6 +28,8 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
+
 if TYPE_CHECKING:
     from baldur.meta.daemon_worker import DaemonWorkerHandle
 
@@ -222,7 +224,7 @@ class DomainGaugeUpdater:
 # =============================================================================
 
 _updater: DomainGaugeUpdater | None = None
-_updater_lock = threading.Lock()
+_updater_lock = fork_safe_lock()
 
 
 def get_domain_gauge_updater(

@@ -10,11 +10,11 @@ from __future__ import annotations
 
 import os
 import sys
-import threading
 from typing import Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.utils.time import utc_now
 
 logger = structlog.get_logger()
@@ -46,7 +46,7 @@ class SyslogFallback:
     )
 
     _instance: SyslogFallback | None = None
-    _lock = threading.Lock()
+    _lock = fork_safe_lock()
 
     def __init__(self):
         self._syslog_available = False

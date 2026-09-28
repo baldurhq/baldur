@@ -20,7 +20,6 @@ from __future__ import annotations
 import fnmatch
 import json
 import os
-import threading
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Generic, TypeVar
@@ -29,6 +28,7 @@ from urllib.parse import quote, unquote
 import structlog
 
 from baldur.core.file_utils import safe_unlink
+from baldur.core.process_utils import fork_safe_lock
 from baldur.utils.serialization import fast_dumps_str, fast_loads
 
 logger = structlog.get_logger()
@@ -149,7 +149,7 @@ class FileStateBackend(StateBackend[dict[str, Any]]):
     def __init__(self, directory: str | Path):
         self._directory = Path(directory)
         self._directory.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
         self._recover_orphan_tmp_files()
         logger.info(
             "state_backend.file_backend_initialized",
@@ -366,7 +366,7 @@ class RedisStateBackend(StateBackend[dict[str, Any]]):
         self._scan_batch_size = scan_batch_size
         self._max_scan_keys = max_scan_keys
         self._client: Any = None
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
         self._initialize_client()
 
     def _initialize_client(self) -> None:
@@ -598,7 +598,7 @@ class MemoryStateBackend(StateBackend[dict[str, Any]]):
     def __init__(self):
         # Heterogeneous: dict[str, Any] for state values + list[Any] for ListCapableBackend
         self._store: dict[str, Any] = {}
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
         logger.info("state_backend.memory_backend_initialized_testing")
 
     def get(

@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import random
-import threading
 import time
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Generic, TypeVar
 
+from baldur.core.process_utils import fork_safe_rlock
 from baldur.core.singleflight import Singleflight
 
 K = TypeVar("K")
@@ -66,7 +66,7 @@ class TTLCacheBase(Generic[K, V]):
         self._jitter_range = jitter_range
         self._max_size = max_size
         self._cache: OrderedDict[K, _CacheEntry[V]] = OrderedDict()
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
         self._stats = CacheStats()
         self._singleflight: Singleflight[V | None] = Singleflight()
 

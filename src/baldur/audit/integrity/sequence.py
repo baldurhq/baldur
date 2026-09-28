@@ -10,11 +10,11 @@ Configuration:
 
 from __future__ import annotations
 
-import threading
 from typing import Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_rlock
 from baldur.settings.audit_integrity import get_audit_integrity_settings
 
 logger = structlog.get_logger()
@@ -92,7 +92,7 @@ class PendingSequenceManager:
             if orphan_ttl_seconds is not None
             else _get_orphan_ttl_seconds()
         )
-        self._local_lock = threading.RLock()
+        self._local_lock = fork_safe_rlock()
 
     def _get_pending_key(self, sequence: int) -> str:
         """Build Redis key for PENDING state."""

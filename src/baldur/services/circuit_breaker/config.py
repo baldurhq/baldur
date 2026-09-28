@@ -14,11 +14,12 @@ every default-config instance at once.
 
 from __future__ import annotations
 
-import threading
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import structlog
+
+from baldur.core.process_utils import fork_safe_lock
 
 # =============================================================================
 # Circuit Breaker State Enum
@@ -284,7 +285,7 @@ class CircuitBreakerConfig:
 # costs one WARNING per (field, stored, applied) triple per process rather than
 # one per config build.
 _clamp_warned: set[tuple[str, Any, Any]] = set()
-_clamp_warned_lock = threading.Lock()
+_clamp_warned_lock = fork_safe_lock()
 
 
 def _declared_bounds() -> dict[str, tuple[Any, Any, Any]]:
@@ -408,7 +409,7 @@ _current_config: CircuitBreakerConfig | None = None
 #: built. ``None`` means the build carried no ordering — see
 #: :func:`_source_install_generation`.
 _current_config_generation: int | None = None
-_current_config_lock = threading.Lock()
+_current_config_lock = fork_safe_lock()
 
 
 def _source_install_generation() -> int | None:

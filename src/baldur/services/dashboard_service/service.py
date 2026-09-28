@@ -19,12 +19,12 @@ Configuration:
 
 from __future__ import annotations
 
-import threading
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.interfaces.statistics import (
     RecentActivity,
     StatusCounts,
@@ -456,7 +456,7 @@ class DashboardService:
 # =============================================================================
 
 _dashboard_service: DashboardService | None = None
-_dashboard_service_lock = threading.Lock()
+_dashboard_service_lock = fork_safe_lock()
 
 
 def get_dashboard_service(

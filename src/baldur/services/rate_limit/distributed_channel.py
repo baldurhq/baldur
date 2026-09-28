@@ -39,11 +39,12 @@ Usage:
 
 from __future__ import annotations
 
-import threading
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import structlog
+
+from baldur.core.process_utils import fork_safe_lock
 
 if TYPE_CHECKING:
     # 528 D10-v2: type hints reference the OSS-side Protocols so this
@@ -77,7 +78,7 @@ class DistributedRateLimitChannel:
     """
 
     _instance: DistributedRateLimitChannel | None = None
-    _instance_lock = threading.Lock()
+    _instance_lock = fork_safe_lock()
 
     def __init__(self, kafka_bus: KafkaEventBus | None = None):
         """
@@ -92,7 +93,7 @@ class DistributedRateLimitChannel:
         self._kafka_unavailable = False
         self._handlers: list[Callable[[dict[str, Any]], None]] = []
         self._running = False
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
 
     @classmethod
     def get_instance(cls) -> DistributedRateLimitChannel:

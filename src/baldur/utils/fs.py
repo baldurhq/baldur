@@ -37,7 +37,6 @@ import os
 import stat
 import sys
 import tempfile
-import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,6 +44,7 @@ from pathlib import Path
 import structlog
 
 from baldur.core.exceptions import ConfigurationError
+from baldur.core.process_utils import fork_safe_lock
 
 __all__ = [
     "ResolvedDir",
@@ -103,7 +103,7 @@ class ResolvedDir:
 # Resolution registry. Guarded by ``_registry_lock`` - the cached-entry
 # lookup, the purpose-collision check and the one-time-warning dedup are all
 # read-then-write, so concurrent resolves would otherwise double-emit.
-_registry_lock = threading.Lock()
+_registry_lock = fork_safe_lock()
 _resolutions: dict[str, dict[str, str]] = {}
 _resolved_dirs: dict[str, ResolvedDir] = {}
 _purpose_preferred: dict[str, str] = {}

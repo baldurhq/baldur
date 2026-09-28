@@ -19,13 +19,13 @@ from __future__ import annotations
 
 import math
 import random
-import threading
 import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.interfaces.rate_limit_storage import (
     RateLimitState,
     RateLimitStorageInterface,
@@ -315,10 +315,10 @@ class RedisRateLimitStorage(RateLimitStorageInterface):
         )
         # Serializes the mode transitions, the delegate clear, and the fallback
         # writes' mode re-check. Never held across a network call.
-        self._sync_lock = threading.Lock()
+        self._sync_lock = fork_safe_lock()
         # Collapses concurrent recovery attempts to one, including the ungated
         # one arriving through is_available() on the registry-cached instance.
-        self._exit_attempt_lock = threading.Lock()
+        self._exit_attempt_lock = fork_safe_lock()
         # Monotonic clock on purpose: the default wall clock can step backwards
         # (an NTP correction, a resumed snapshot, a late container sync), which
         # would shut the gate for the size of the step and strand the process in

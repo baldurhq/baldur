@@ -34,13 +34,13 @@ Operation flow (tick):
 
 from __future__ import annotations
 
-import threading
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import structlog
 
 from baldur.audit.helpers import log_panic_threshold_audit
+from baldur.core.process_utils import fork_safe_lock
 from baldur.models.emergency import EmergencyLevel
 from baldur.services.circuit_breaker.exceptions import (
     CircuitBreakerStateUnavailableError,
@@ -569,7 +569,7 @@ def _parse_deactivated_at(state: Any) -> datetime | None:
 
 
 _monitor_instance: PanicThresholdMonitor | None = None
-_monitor_instance_lock = threading.Lock()
+_monitor_instance_lock = fork_safe_lock()
 
 
 def get_panic_threshold_monitor() -> PanicThresholdMonitor:

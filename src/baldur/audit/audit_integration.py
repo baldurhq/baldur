@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.interfaces.audit_adapter import AuditEntry
 
 if TYPE_CHECKING:
@@ -141,7 +142,7 @@ class AsyncLoggerAdapter:
         # Thread control
         self._running = False
         self._worker_thread: threading.Thread | None = None
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
         self._handle: Any | None = None  # DaemonWorkerHandle (impl 489 D9)
 
         # Statistics
@@ -647,7 +648,7 @@ class IntegratedAuditRecorder:
 
         # Observer list
         self._observers: list[AuditEventObserver] = []
-        self._observers_lock = threading.Lock()
+        self._observers_lock = fork_safe_lock()
 
         # AsyncLogger adapter (optional)
         self._async_logger: AsyncLoggerAdapter | None = None

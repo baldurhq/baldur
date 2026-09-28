@@ -11,11 +11,12 @@ Provides coordinated access to all Phase 4 graceful degradation components:
 
 from __future__ import annotations
 
-import threading
 from pathlib import Path
 from typing import Any
 
 import structlog
+
+from baldur.core.process_utils import fork_safe_rlock
 
 from .circuit_breaker import HashChainCircuitBreaker
 from .degradation_manager import HashChainDegradationManager
@@ -85,7 +86,7 @@ class HashChainGracefulDegradationManager:
             if local_fallback_path
             else Path("logs/audit/fallback/degraded_entries.jsonl")
         )
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
         self._initialized = False
 
         # Components (lazy initialized)

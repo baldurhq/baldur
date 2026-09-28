@@ -33,6 +33,8 @@ from typing import Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
+
 logger = structlog.get_logger()
 
 
@@ -51,7 +53,7 @@ _BRIDGE_EXPLICIT_MARKER = "__baldur_bridge_explicit__"
 _INSTRUMENT_DOMAIN = "tenacity_instrument"
 
 _instrumented: bool = False
-_instrument_lock: threading.Lock = threading.Lock()
+_instrument_lock: threading.Lock = fork_safe_lock()
 _original_init: Callable[..., None] | None = None
 
 

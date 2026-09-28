@@ -32,18 +32,33 @@ The second thing the process model decides is where background daemon threads
 may be started. ``is_fork_source_process()`` answers it for both supported
 pre-fork servers — the gunicorn master and a Celery worker main process on a
 forking pool — so the starters carry one predicate rather than one per server.
+
+The third is what a fork child inherits from the threads it does not have.
+``fork()`` copies memory but keeps only the forking thread, so a lock another
+parent thread held at that instant arrives held with no thread left to release
+it. Every ``threading.Lock`` / ``threading.RLock`` Baldur constructs comes from
+``fork_safe_lock()`` / ``fork_safe_rlock()``, which register it for an
+``os.register_at_fork`` child step that re-initializes it; the same hook waits
+out a log record another thread is writing through a ``logging.StreamHandler``,
+whose stream keeps a lock of its own that CPython does not repair.
 """
 
 from __future__ import annotations
 
 import functools
+import logging
 import os
 import sys
+import threading
+import time
+import weakref
 from collections.abc import Callable
 from typing import Any, TypeVar, overload
 
 __all__ = [
     "fork_repaired",
+    "fork_safe_lock",
+    "fork_safe_rlock",
     "is_celery_worker_main",
     "is_celery_worker_process",
     "is_celery_worker_serving",
@@ -54,9 +69,30 @@ __all__ = [
     "mark_celery_worker_main",
     "mark_celery_worker_serving",
     "pid_alive",
+    "register_fork_safe_lock",
 ]
 
 _F = TypeVar("_F", bound=Callable[..., Any])
+
+# How long a fork waits, in total, for log records other threads are writing
+# through stream handlers. A write normally finishes in microseconds; the bound
+# only matters when a stream is blocked (a full output pipe), and after it the
+# fork proceeds exactly as it would without the wait.
+_FORK_LOG_HANDLER_WAIT_SECONDS = 1.0
+
+# The C lock types the fork repair can re-initialize. Built from the
+# constructors themselves so a lock handed in from outside (a redis-py pool's)
+# is accepted by type, and a test double that answers every attribute is not.
+_REPAIRABLE_LOCK_TYPES = (type(threading.Lock()), type(threading.RLock()))
+
+# Every lock registered for the child repair. Weak, so registration never keeps
+# a lock alive, and taken without a lock of its own: a registration lock would
+# itself be a lock a fork can inherit held. The add is one C-level set insert,
+# and the fork happens while the forking thread holds the GIL.
+_fork_safe_locks: weakref.WeakSet[Any] = weakref.WeakSet()
+
+# Per forking thread, one frame per fork in progress (see _ForkLogHold).
+_fork_log_holds = threading.local()
 
 # Env-var marker for "this process serves work", mirroring the
 # ``GUNICORN_WORKER=1`` precedent. An env var rather than a module global
@@ -197,6 +233,239 @@ def fork_repaired(
     if method is not None:
         return _decorate(method)
     return _decorate
+
+
+def fork_safe_lock() -> threading.Lock:
+    """Return a new ``threading.Lock`` that a fork child receives unlocked.
+
+    The object returned is the plain C lock — no wrapper, so acquiring it costs
+    exactly what acquiring any lock costs. It is registered for a step that runs
+    in the child right after ``fork()``: a thread that held the lock in the
+    parent does not exist in the child, so the child gets the lock back free
+    instead of blocking forever on its first acquisition. Construct every
+    Baldur lock through this factory; a fitness gate fails on a bare
+    ``threading.Lock()``.
+
+    The repair takes the data the lock guards as the parent's thread left it,
+    so a section that builds something under the lock should publish the result
+    as its last step — an unfinished build then leaves an empty slot the child
+    fills itself.
+
+    Constraint on callers: a plain lock records no owner, so the repair cannot
+    tell the forking thread's own hold from a dead thread's. Code that holds a
+    lock from this factory, calls ``os.fork()`` and then continues in the child
+    to its ``release()`` gets ``RuntimeError`` there — the child's copy was
+    already freed. Use ``fork_safe_rlock()`` for a lock held across a fork; an
+    RLock the forking thread owns is left as it is.
+
+    Only POSIX has ``fork()``; elsewhere the lock is returned unregistered.
+    """
+    lock = threading.Lock()
+    register_fork_safe_lock(lock)
+    return lock
+
+
+def fork_safe_rlock() -> threading.RLock:
+    """Return a new ``threading.RLock`` that a fork child receives unlocked.
+
+    Same contract as ``fork_safe_lock()``, except that an RLock owned by the
+    thread that calls ``fork()`` is not touched — that thread survives into the
+    child and releases it itself.
+    """
+    lock = threading.RLock()
+    register_fork_safe_lock(lock)
+    return lock
+
+
+def register_fork_safe_lock(lock: object) -> None:
+    """Register a lock this code did not construct for the fork repair.
+
+    For locks a library creates on Baldur's behalf and does not repair after a
+    fork — the connection-pool locks of a redis-py client Baldur built are the
+    case. Anything that is not a C ``Lock`` / ``RLock`` with an at-fork
+    re-initializer (a renamed attribute read as ``None``, a test double, any
+    lock on a platform without ``fork()``) is ignored, which leaves that object
+    exactly as it would be without this call.
+    """
+    if not isinstance(lock, _REPAIRABLE_LOCK_TYPES):
+        return
+    if not hasattr(lock, "_at_fork_reinit"):
+        return
+    try:
+        _fork_safe_locks.add(lock)
+    except TypeError:
+        # Not weak-referenceable on this interpreter; stays unrepaired.
+        return
+
+
+def _reinit_fork_safe_locks() -> None:
+    """Free every registered lock in a fork child.
+
+    Runs in the child before any other code, with the forking thread as the
+    only thread. An RLock that thread owns is skipped — it will release it.
+    Each lock is repaired on its own: CPython reports a raising at-fork
+    callback and moves on, which would leave every lock after it held.
+    """
+    try:
+        locks = list(_fork_safe_locks)
+    except Exception:
+        return
+    for lock in locks:
+        try:
+            is_owned = getattr(lock, "_is_owned", None)
+            if is_owned is not None and is_owned():
+                continue
+            lock._at_fork_reinit()
+        except Exception:
+            # The lock stays as inherited — what it was without the repair.
+            continue
+
+
+class _ForkLogHold:
+    """The locks one fork's before-step took, for its matching after-step."""
+
+    __slots__ = ("handler_locks", "module_lock")
+
+    def __init__(self) -> None:
+        self.module_lock: Any = None
+        self.handler_locks: list[Any] = []
+
+
+def _push_fork_log_hold() -> _ForkLogHold:
+    stack = getattr(_fork_log_holds, "stack", None)
+    if stack is None:
+        stack = []
+        _fork_log_holds.stack = stack
+    hold = _ForkLogHold()
+    stack.append(hold)
+    return hold
+
+
+def _pop_fork_log_hold() -> _ForkLogHold | None:
+    stack = getattr(_fork_log_holds, "stack", None)
+    if not stack:
+        return None
+    hold: _ForkLogHold = stack.pop()
+    return hold
+
+
+def _hold_stream_handler_locks() -> None:
+    """Before ``fork()``: let in-progress stream-handler writes finish first.
+
+    A buffered stream (``sys.stdout``, a log file) has an internal lock that
+    CPython does not re-initialize in a fork child. A parent thread inside
+    ``StreamHandler.emit`` at the fork instant holds it, and the child then
+    blocks forever on its first log line. Holding each stream handler's own
+    lock across the fork means no parent thread is inside such a write when the
+    child is created.
+
+    Logging's module lock is taken first, with no deadline — the order
+    ``logging.config`` itself takes them in (module lock, then each handler),
+    and the same wait logging's own before-fork step makes. Handler locks are
+    then taken against one shared deadline; a handler whose write does not
+    finish in time is skipped, which leaves it as it would be without this
+    step. Only stream handlers are held: they are the ones that write, and the
+    stdlib never chains one into another, while holding a handler that forwards
+    to another can deadlock against a thread inside the forwarding.
+
+    Each fork pushes its own frame on a per-thread stack, so two threads
+    forking at once, or a fork started by a signal handler inside this step,
+    never release each other's locks. Never raises.
+    """
+    try:
+        hold = _push_fork_log_hold()
+    except Exception:
+        return
+    try:
+        module_lock = getattr(logging, "_lock", None)
+        if module_lock is not None:
+            module_lock.acquire()
+            hold.module_lock = module_lock
+    except Exception:
+        pass
+    try:
+        handler_refs = list(getattr(logging, "_handlerList", ()))
+    except Exception:
+        return
+    deadline = time.monotonic() + _FORK_LOG_HANDLER_WAIT_SECONDS
+    for handler_ref in handler_refs:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            handler = handler_ref()
+            if not isinstance(handler, logging.StreamHandler):
+                continue
+            lock = handler.lock
+            if lock is not None and lock.acquire(timeout=remaining):
+                hold.handler_locks.append(lock)
+        except Exception:
+            continue
+
+
+def _release_stream_handler_locks() -> None:
+    """After ``fork()`` in the parent — CPython also runs it when fork fails."""
+    try:
+        hold = _pop_fork_log_hold()
+    except Exception:
+        return
+    if hold is None:
+        return
+    for lock in reversed(hold.handler_locks):
+        try:
+            lock.release()
+        except Exception:
+            continue
+    if hold.module_lock is not None:
+        try:
+            hold.module_lock.release()
+        except Exception:
+            pass
+
+
+def _repair_after_fork_in_child() -> None:
+    """After ``fork()`` in the child: free every lock the child inherited held.
+
+    Logging's own child step runs before this one and has re-initialized its
+    module lock and the handler locks it tracks, so the module-lock hold is not
+    released here — releasing a re-initialized RLock raises. The held handler
+    locks are re-initialized once more to cover a handler whose lock was not
+    created through ``Handler.createLock``.
+    """
+    _reinit_fork_safe_locks()
+    try:
+        hold = _pop_fork_log_hold()
+    except Exception:
+        return
+    if hold is None:
+        return
+    for lock in hold.handler_locks:
+        try:
+            lock._at_fork_reinit()
+        except Exception:
+            continue
+
+
+def _install_fork_hook() -> None:
+    """Register the fork steps, once, at import; a no-op without ``fork()``.
+
+    ``logging`` is imported above, so its own at-fork hook is registered
+    before this one. Child and parent steps run in registration order and
+    before-steps in reverse: logging's child step re-initializes its locks
+    before this module's runs, and this module's before-step runs ahead of
+    logging's and takes the module lock first.
+    """
+    register_at_fork = getattr(os, "register_at_fork", None)
+    if register_at_fork is None:
+        return
+    register_at_fork(
+        before=_hold_stream_handler_locks,
+        after_in_parent=_release_stream_handler_locks,
+        after_in_child=_repair_after_fork_in_child,
+    )
+
+
+_install_fork_hook()
 
 
 def is_gunicorn_worker() -> bool:

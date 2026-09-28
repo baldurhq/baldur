@@ -32,7 +32,6 @@ Usage:
 
 from __future__ import annotations
 
-import threading
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -46,6 +45,7 @@ from baldur.audit.cascade_event import (
     CascadeEventPriority,
     get_priority_for_trigger,
 )
+from baldur.core.process_utils import fork_safe_lock, fork_safe_rlock
 from baldur.core.rate_limiting import SlidingWindowCounter
 from baldur.utils.time import utc_now
 
@@ -129,7 +129,7 @@ class CascadeLoadShedding:
         """
         self.config = config or get_audit_backpressure_config()
         self._metrics = LoadSheddingMetrics()
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
 
         # Rate limiting — a single-key sliding window with write-side retention
         # so memory stays bounded by the rate window.
@@ -358,7 +358,7 @@ class CascadeLoadShedding:
 
 
 _load_shedding: CascadeLoadShedding | None = None
-_shedding_lock = threading.Lock()
+_shedding_lock = fork_safe_lock()
 
 
 def get_cascade_load_shedding() -> CascadeLoadShedding:

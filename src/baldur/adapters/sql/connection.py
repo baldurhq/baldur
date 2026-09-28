@@ -25,13 +25,13 @@ production deployment surfaces in logs.
 from __future__ import annotations
 
 import sqlite3
-import threading
 from collections.abc import Callable
 from typing import Any
 from urllib.parse import unquote, urlparse
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.settings.sql import SQLDialect, infer_dialect, resolve_dsn
 
 __all__ = ["build_connection_factory"]
@@ -40,7 +40,7 @@ logger = structlog.get_logger()
 
 # One-shot warning gate. Module-level + lock so concurrent callers in
 # multi-threaded startup paths emit exactly one record.
-_warned_lock = threading.Lock()
+_warned_lock = fork_safe_lock()
 _warned: bool = False
 
 

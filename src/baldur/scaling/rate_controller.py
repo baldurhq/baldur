@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_rlock
 from baldur.core.rate_limiting import TokenBucket
 from baldur.scaling.config import (
     BackpressureLevel,
@@ -160,7 +161,7 @@ class RateController:
         self._queue_size_provider = queue_size_provider or (lambda: 0)
         self._metrics = metrics
 
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
         self._current_rate = self._settings.max_rate_per_second
         self._level = BackpressureLevel.NONE
         self._token_bucket = TokenBucket(self._current_rate)

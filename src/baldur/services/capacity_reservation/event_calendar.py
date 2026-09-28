@@ -13,11 +13,11 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import Enum
-from threading import Lock
 from typing import Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.core.serializable import SerializableMixin
 from baldur.settings.capacity_reservation import (
     CapacityReservationSettings,
@@ -119,7 +119,7 @@ class EventCalendar:
         cache_ttl_seconds: int = 30,
     ) -> None:
         self._events: dict[str, ScheduledEvent] = {}
-        self._lock = Lock()
+        self._lock = fork_safe_lock()
         self._state_backend = state_backend
         self._settings = settings or get_capacity_reservation_settings()
         self._cache_ttl_seconds = cache_ttl_seconds

@@ -13,11 +13,11 @@ Usage:
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
-from threading import Lock
 from typing import Generic, TypeVar
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.settings.backpressure import BackpressureStrategy
 
 logger = structlog.get_logger()
@@ -102,7 +102,7 @@ class RingBuffer(Generic[T]):
         self._capacity = capacity
         self._strategy = strategy
         self._buffer: deque = deque(maxlen=capacity)
-        self._lock = Lock()
+        self._lock = fork_safe_lock()
         self._total_enqueued = 0
         self._total_dropped = 0
 
@@ -243,7 +243,7 @@ class RingBuffer(Generic[T]):
         repairs. Callers reach it from their own fork-repair path, which is
         single-threaded in a fresh child by construction.
         """
-        self._lock = Lock()
+        self._lock = fork_safe_lock()
         self._buffer = deque(maxlen=self._capacity)
         self._total_enqueued = 0
         self._total_dropped = 0

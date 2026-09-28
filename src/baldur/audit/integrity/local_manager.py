@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import os
-import threading
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
@@ -30,6 +29,7 @@ from baldur.audit.integrity.models import (
 )
 from baldur.core.exceptions import HashChainSequenceRefusedError
 from baldur.core.file_utils import safe_unlink
+from baldur.core.process_utils import fork_safe_rlock
 from baldur.utils.serialization import fast_loads
 from baldur.utils.time import utc_now
 
@@ -97,7 +97,7 @@ class HashChainManager:
                 recovery inert, which is what every construction site that
                 does not own a ledger wants.
         """
-        self._lock = threading.RLock()
+        self._lock = fork_safe_rlock()
         self._use_file_lock = use_file_lock
         self._sequence = 0
         self._previous_hash = self.GENESIS_HASH

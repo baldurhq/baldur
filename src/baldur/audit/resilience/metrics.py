@@ -10,12 +10,12 @@ Tracks:
 
 from __future__ import annotations
 
-import threading
 from datetime import datetime
 from typing import Any
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock, fork_safe_rlock
 from baldur.utils.time import utc_now
 
 logger = structlog.get_logger()
@@ -38,10 +38,10 @@ class AuditMetrics:
     """
 
     _instance: AuditMetrics | None = None
-    _lock = threading.Lock()
+    _lock = fork_safe_lock()
 
     def __init__(self):
-        self._metrics_lock = threading.RLock()
+        self._metrics_lock = fork_safe_rlock()
 
         # Counters
         self._write_total: dict[str, dict[str, int]] = {}  # {backend: {status: count}}

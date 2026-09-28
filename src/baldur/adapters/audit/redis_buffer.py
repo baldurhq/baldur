@@ -20,7 +20,6 @@ import logging
 import os
 import signal
 import socket
-import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -28,6 +27,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import structlog
 
+from baldur.core.process_utils import fork_safe_lock
 from baldur.utils.serialization import fast_dumps_str, fast_loads
 from baldur.utils.time import utc_now
 
@@ -52,7 +52,7 @@ _SAFETY_LTRIM_THRESHOLD = int(os.environ.get("BALDUR_SAFETY_LTRIM", "100000"))
 # BALDUR_AUDIT_BUFFER_REDIS_ENABLED gets a loud signal instead of silent TTL
 # expiry. A module flag (test-resettable) keeps it one-shot.
 _drain_disabled_warning_emitted = False
-_drain_disabled_warning_lock = threading.Lock()
+_drain_disabled_warning_lock = fork_safe_lock()
 
 
 def _reset_drain_disabled_warning() -> None:
@@ -158,11 +158,11 @@ class RedisAuditBuffer:
 
         # Failure tracking (CB Advanced Protection pattern)
         self._consecutive_failures = 0
-        self._lock = threading.Lock()
+        self._lock = fork_safe_lock()
 
         # Fallback buffer (temporary storage while Redis is down)
         self._fallback_buffer: list[dict[str, Any]] = []
-        self._fallback_lock = threading.Lock()
+        self._fallback_lock = fork_safe_lock()
         self._max_fallback = int(os.environ.get("BALDUR_REDIS_MAX_FALLBACK", "10000"))
 
         # Worker identifier (Processing Queue pattern)
@@ -1047,7 +1047,7 @@ def create_redis_audit_buffer(
 # =============================================================================
 
 _REDIS_AUDIT_BUFFER_RETRY_INTERVAL: float = 30.0
-_redis_audit_buffer_lock = threading.Lock()
+_redis_audit_buffer_lock = fork_safe_lock()
 
 
 class _RedisAuditBufferState:

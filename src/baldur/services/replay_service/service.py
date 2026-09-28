@@ -19,7 +19,6 @@ Provides DLQ replay functionality.
 
 from __future__ import annotations
 
-import threading
 import time
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -29,6 +28,7 @@ import structlog
 
 from baldur.audit.helpers import log_dlq_replay_audit, log_dlq_replay_blocked_audit
 from baldur.audit.trace import extract_origin_trace
+from baldur.core.process_utils import fork_safe_lock
 from baldur.interfaces.repositories import ResolutionTrigger, encode_replay_cursor
 from baldur.models.dlq import OPEN_CIRCUIT_FAILURE_TYPE, POLICY_CHAIN_CAPTURE_SOURCE
 from baldur.services.event_bus.emitter import EventEmitterMixin
@@ -1881,7 +1881,7 @@ class ReplayService(EventEmitterMixin):
 
 
 _replay_service: ReplayService | None = None
-_replay_service_lock = threading.Lock()
+_replay_service_lock = fork_safe_lock()
 
 
 def get_replay_service() -> ReplayService:
