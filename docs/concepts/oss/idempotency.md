@@ -8,7 +8,7 @@ description: >-
 
 # Idempotency for Python services
 
-> Makes "this must never happen twice" operations safe — a card charge, an email, a shipment — by remembering which requests have already run and blocking the repeats, even when a client retry, a double-click, or a duplicate webhook fires the same request again.
+> Makes "this must never happen twice" operations safe (a card charge, an email, a shipment) by remembering which requests have already run and blocking the repeats, even when a client retry, a double-click, or a duplicate webhook fires the same request again.
 
 ## What is it?
 
@@ -37,7 +37,7 @@ blocked instead of executed again.
   check-then-act window for a duplicate to slip through.
 - **No hand-rolled dedup.** The homegrown "look it up, then insert" check is exactly the racy
   pattern that fails under concurrency. Baldur replaces it with an atomic claim plus an explicit,
-  catchable "already processed" error.
+  catchable duplicate error.
 - **A failure doesn't poison the key.** If a call raises, its key is released so a later call can
   run the operation, and if several race for it, exactly one wins. The flip side: a call that
   raised *after* its side effect took hold (the charge went through, then the response timed out)
@@ -51,11 +51,15 @@ You attach a key to the operation on whichever surface fits:
 - **Composed with the rest of the pipeline.** Pass `idempotency_key=` to the `@baldur.protected`
   facade (or its call forms `protect` / `aprotect`). A string names a field on the call's context
   (e.g. `"order_id"`); a callable builds a composite key. The key is checked once when the call
-  starts, before the circuit breaker and retry run, and marked once the whole call has finished,
-  so the retry attempts in between are not deduplicated. A call the `fallback=` rescued counts as
-  finished: its key is marked completed, and a genuine repeat is then blocked for the memory window
-  even though the work never ran. On work that must eventually happen, leave the fallback off, or
-  give it an error parameter and re-raise, which releases the key.
+  starts, before the circuit breaker and retry run, and marked once the call hands you its result
+  or its error, so the retry attempts in between are not deduplicated. A call the `fallback=`
+  rescued counts as finished: its key is marked completed, and a genuine repeat is then blocked for
+  the memory window even though the work never ran. On work that must eventually happen, leave the
+  fallback off, or give it an error parameter and re-raise, which releases the key. A sync call
+  that `timeout=` cuts off hands you its error before your function has stopped: the sync path
+  cannot kill the function's thread, so the key is released while the work may still be running,
+  and a repeat that arrives then runs alongside it. The async path cancels the timed-out work
+  instead.
 - **Standalone decorator.** `@idempotent` wraps any sync or `async` function. Name the parameters
   that identify the request (`key_args=["order_id"]`) or supply a `key_fn=` for a custom key, and
   pick a domain to namespace it.
@@ -83,16 +87,17 @@ stateDiagram-v2
 | What you observe | When it happens |
 |------------------|-----------------|
 | The call runs normally | the key's first arrival, or a later arrival after a call that raised |
-| The duplicate is blocked with an "already processed" error | the same key arrives again after a successful run, within the memory window |
-| The duplicate is blocked with an "another process is executing" error | the same key arrives while the first call is still running |
-| The call is blocked with a "check unavailable" error | the dedup store could not be reached, under the default fail-closed posture |
+| The duplicate is blocked: `IdempotencyDuplicateError` with `decision` `"SKIP"` | the same key arrives again after a successful run, within the memory window |
+| The duplicate is blocked: `IdempotencyDuplicateError` with `decision` `"ABORT"` | the same key arrives while the first call is still running (on a sync call cut off by `timeout=`, only until the timeout fires) |
+| The call is blocked: `IdempotencyUnavailableError` | the dedup store could not be reached, under the default fail-closed posture |
 
 Where the guarantee holds, and where it stops:
 
 - **Blocked means a clear error, not a silent skip.** A duplicate raises
-  `IdempotencyDuplicateError` (the same error type on the facade and the decorator alike),
-  telling you whether the original already completed or is still in flight. Baldur does *not* replay the original call's
-  response — catch the error and treat it as "this work already happened."
+  `IdempotencyDuplicateError` (the same error type on the facade and the decorator alike), and
+  its `decision` tells you whether the original already completed (`"SKIP"`) or is still in
+  flight (`"ABORT"`). Baldur does *not* replay the original call's response — catch the error and
+  treat it as "this work already happened."
 - **Fail-closed by default.** Supplying a key is a "must not duplicate" signal, so if the dedup
   store can't be checked (say, a momentary network blip), the call is blocked with
   `IdempotencyUnavailableError` rather than risking a duplicate side effect. If availability
@@ -130,11 +135,14 @@ Where the guarantee holds, and where it stops:
   duplicate running concurrently once the claim goes stale. The programmatic check/mark API remembers for its own configurable TTL.
 - **Keys are namespaced by operation.** On the decorator and the programmatic API, a domain
   (`external_service`, `event`, `async_task`, and friends) keeps the same order ID in two domains
-  from colliding, and within a domain `@idempotent` keys include the decorated function's
+  from colliding, and within a domain a `key_args=` key includes the decorated function's
   module-qualified name, so two different functions sharing `key_args=["order_id"]` and the same
   order ID each get their own verdict: charging order 1 never blocks shipping order 1. The facade
   has no domain; its field-name form prefixes the protected name instead (`charge-customer` plus
-  the order ID), which keeps two protected operations apart the same way. On the decorator, when
+  the order ID), which keeps two protected operations apart the same way. A custom key gets
+  neither: a `key_fn=` result is used as-is behind the domain, and a callable `idempotency_key=`
+  result is used as-is, so two operations whose custom keys can come out equal block each other
+  unless the key itself names the operation. On the decorator, when
   two entry points really are one logical operation (an HTTP handler and a worker guarding the
   same charge), give both the same explicit `operation=` label. One caveat follows from the
   default being derived from the function's name: renaming or moving the function resets that
@@ -150,7 +158,7 @@ The most common knobs an operator sets. The full list lives in the API reference
 | `BALDUR_IDEMPOTENCY_ENABLED` | `true` | Master switch — when `false`, every surface passes calls through with no dedup check |
 | `BALDUR_IDEMPOTENCY_GATE_MEMORY_TTL_SECONDS` | `1800` | Default memory window (in seconds) on the decorator and facade surfaces — how long a completed operation keeps blocking duplicates when no per-call `ttl` is given |
 | `BALDUR_IDEMPOTENCY_DEFAULT_CACHE_TTL` | `60` | How long (in seconds) the programmatic check/mark API remembers a processed operation |
-| `BALDUR_REDIS_URL` | unset | Points the seen-keys ledger at a shared Redis, so a duplicate key is blocked across all workers and hosts; unset, the ledger stays in process memory and production `init()` refuses to start |
+| `BALDUR_REDIS_URL` | `redis://localhost:6379/0` | Points the seen-keys ledger at a shared Redis, so a duplicate key is blocked across all workers and hosts; leave it unset and the ledger stays in process memory (the default address is not dialed for it) and production `init()` refuses to start |
 
 ## See also
 
